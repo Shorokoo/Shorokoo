@@ -1,0 +1,19 @@
+# Normalize line endings to LF for all text files
+* text=auto eol=lf
+
+# Binary files - no line ending conversion
+*.dll binary
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.ico binary
+*.exe binary
+*.bin binary
+
+# Model checkpoints and tensor archives are large binaries that are NOT stored in
+# git (they were formerly git-lfs). Developers download them manually into
+# tests/test-data/ (see tests/test-data/README.md), where they are git-ignored.
+# Mark the formats binary so any stray file is never line-ending-munged.
+*.safetensors binary
+*.zsafetensor binary
+*.zsrk binary

@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The 'Shorokoo' meta-package: deps-only (ships no assembly of its own).
+       Pulls in the runtime (Shorokoo.Core) and the [Module] source generator
+       (Shorokoo.CodeGen) so a consumer adds just this package + one backend.
+       Published as "Shorokoo". -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+
+    <IsPackable>true</IsPackable>
+    <ShorokooPackageName>Shorokoo</ShorokooPackageName>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <!-- Deps-only package legitimately has no lib/ for its TFM. -->
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
+    <Description>Define, train, and run neural networks in pure C#. Meta-package that brings the Shorokoo runtime (Shorokoo.Core), ready-made layers (Shorokoo.Modules), and the [Module] source generator (Shorokoo.CodeGen). Add exactly one backend: Shorokoo.LinuxCPU, Shorokoo.LinuxGPU, Shorokoo.WinCPU, or Shorokoo.WinGPU.</Description>
+    <PackageTags>machine-learning;deep-learning;neural-network;tensor;autodiff;onnx;training;ai</PackageTags>
+  </PropertyGroup>
+
+  <!-- These become the meta's package dependencies. Core and Modules flow as
+       normal runtime deps. By default a project-reference dependency is packed with
+       exclude="Build,Analyzers"; for CodeGen we override PrivateAssets=none so the
+       [Module] analyzer assets flow transitively to consumers of the meta. -->
+  <ItemGroup>
+    <ProjectReference Include="..\Shorokoo\Shorokoo.csproj" />
+    <ProjectReference Include="..\Shorokoo.Modules\Shorokoo.Modules.csproj" />
+    <ProjectReference Include="..\Shorokoo.CodeGen\Shorokoo.CodeGen.csproj"
+                      PrivateAssets="none" IncludeAssets="all" />
+  </ItemGroup>
+
+</Project>

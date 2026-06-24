@@ -1,0 +1,17 @@
+# Model checkpoints and tensor archives under tests/test-data are downloaded
+# manually by developers (see README.md) and must never be committed. They used
+# to be git-lfs golden weights; they are now external, opt-in downloads consumed
+# by the Purpose=Manual tests.
+*.safetensors
+*.zsafetensor
+*.pth
+*.pt
+*.onnx
+
+# Sample images downloaded by the preprocessing scripts (e.g. make-sample-input.py).
+*.jpg
+*.jpeg
+*.png
+
+# Keep the directory scaffolding (.gitkeep) and small text sidecars tracked.
+!.gitkeep

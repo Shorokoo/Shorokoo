@@ -1,0 +1,15 @@
+global using Xunit;
+global using Shorokoo;
+global using Shorokoo.Core;
+global using Shorokoo.Graph;
+global using Shorokoo.Core.Nodes;
+global using Shorokoo.Core.Nodes.AutoDiff;
+global using Shorokoo.Core.Nodes.NodeDefinitions;
+global using Shorokoo.Core.Nodes.OnnxNodes;
+global using Shorokoo.Core.Training;
+global using Shorokoo.Core.Utils;
+global using Shorokoo.Modules;
+global using Shorokoo.Onnx;
+global using Shorokoo.Tests.Modules;
+global using Shorokoo.Tests.Utils;
+global using static Shorokoo.Globals;

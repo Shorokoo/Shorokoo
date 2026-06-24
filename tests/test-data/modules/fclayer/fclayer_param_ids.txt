@@ -1,0 +1,2 @@
+[1,1]:[1,1]:TrainableParam#0.FCLayer#0.InitSimple#0]
+[1,2]:[1,2]:TrainableParam#0.FCLayer#0.InitSimple#1]

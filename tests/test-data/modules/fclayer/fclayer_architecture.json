@@ -1,0 +1,2273 @@
+{
+  "IrVersion": 10,
+  "OpsetImports": [
+    {
+      "Domain": "",
+      "Version": 21
+    },
+    {
+      "Domain": "Functions",
+      "Version": 1
+    }
+  ],
+  "ProducerName": "OnnxNet",
+  "ProducerVersion": "0.0.1",
+  "Domain": "",
+  "ModelVersion": 0,
+  "DocString": "",
+  "Graph": {
+    "Nodes": [
+      {
+        "Inputs": [],
+        "Outputs": [
+          "N2_T0"
+        ],
+        "Name": "N2",
+        "OpType": "Constant",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "value",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 4,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": {
+              "Dims": [
+                2
+              ],
+              "data_type": 7,
+              "segment": null,
+              "FloatDatas": null,
+              "Int32Datas": null,
+              "StringDatas": [],
+              "Int64Datas": null,
+              "Name": "",
+              "DocString": "",
+              "RawData": null,
+              "ExternalDatas": [],
+              "data_location": 0,
+              "DoubleDatas": null,
+              "Uint64Datas": null,
+              "MetadataProps": [
+                {
+                  "Key": "IsTrainable",
+                  "Value": "true"
+                }
+              ]
+            },
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [],
+        "Outputs": [
+          "N3_T0"
+        ],
+        "Name": "N3",
+        "OpType": "Constant",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "value",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 4,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": {
+              "Dims": [
+                2
+              ],
+              "data_type": 7,
+              "segment": null,
+              "FloatDatas": null,
+              "Int32Datas": null,
+              "StringDatas": [],
+              "Int64Datas": null,
+              "Name": "",
+              "DocString": "",
+              "RawData": null,
+              "ExternalDatas": [],
+              "data_location": 0,
+              "DoubleDatas": null,
+              "Uint64Datas": null,
+              "MetadataProps": [
+                {
+                  "Key": "IsTrainable",
+                  "Value": "true"
+                }
+              ]
+            },
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N3_T0"
+        ],
+        "Outputs": [
+          "N4_T0"
+        ],
+        "Name": "N4",
+        "OpType": "fn_1",
+        "Domain": "Functions",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "shrk_local_model_id",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 7,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": [
+              1,
+              1
+            ],
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          },
+          {
+            "Name": "shrk_dtype",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 2,
+            "F": 0,
+            "I": 1,
+            "S": null,
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          },
+          {
+            "Name": "shrk_shape",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 7,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": [
+              5,
+              5
+            ],
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          },
+          {
+            "Name": "shrk_is_trainable",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 2,
+            "F": 0,
+            "I": 1,
+            "S": null,
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          },
+          {
+            "Name": "shrk_function_name",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 3,
+            "F": 0,
+            "I": 0,
+            "S": "Zm5fMQ==",
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          },
+          {
+            "Name": "shrk_domain_name",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 3,
+            "F": 0,
+            "I": 0,
+            "S": "RnVuY3Rpb25z",
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": [
+          {
+            "Key": "IdentifierTemplate",
+            "Value": "[1,1]:TrainableParam#0.FCLayer#0.InitSimple#0"
+          }
+        ]
+      },
+      {
+        "Inputs": [],
+        "Outputs": [
+          "N5_T0"
+        ],
+        "Name": "N5",
+        "OpType": "Constant",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "value",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 4,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": {
+              "Dims": [
+                1
+              ],
+              "data_type": 7,
+              "segment": null,
+              "FloatDatas": null,
+              "Int32Datas": null,
+              "StringDatas": [],
+              "Int64Datas": null,
+              "Name": "",
+              "DocString": "",
+              "RawData": null,
+              "ExternalDatas": [],
+              "data_location": 0,
+              "DoubleDatas": null,
+              "Uint64Datas": null,
+              "MetadataProps": [
+                {
+                  "Key": "IsTrainable",
+                  "Value": "true"
+                }
+              ]
+            },
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N5_T0"
+        ],
+        "Outputs": [
+          "N6_T0"
+        ],
+        "Name": "N6",
+        "OpType": "fn_1",
+        "Domain": "Functions",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "shrk_local_model_id",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 7,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": [
+              1,
+              2
+            ],
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          },
+          {
+            "Name": "shrk_dtype",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 2,
+            "F": 0,
+            "I": 1,
+            "S": null,
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          },
+          {
+            "Name": "shrk_shape",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 7,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": [
+              5
+            ],
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          },
+          {
+            "Name": "shrk_is_trainable",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 2,
+            "F": 0,
+            "I": 1,
+            "S": null,
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          },
+          {
+            "Name": "shrk_function_name",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 3,
+            "F": 0,
+            "I": 0,
+            "S": "Zm5fMQ==",
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          },
+          {
+            "Name": "shrk_domain_name",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 3,
+            "F": 0,
+            "I": 0,
+            "S": "RnVuY3Rpb25z",
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": [
+          {
+            "Key": "IdentifierTemplate",
+            "Value": "[1,2]:TrainableParam#0.FCLayer#0.InitSimple#1"
+          }
+        ]
+      },
+      {
+        "Inputs": [],
+        "Outputs": [
+          "N7_T0"
+        ],
+        "Name": "N7",
+        "OpType": "Constant",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "value",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 4,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": {
+              "Dims": [
+                0
+              ],
+              "data_type": 1,
+              "segment": null,
+              "FloatDatas": null,
+              "Int32Datas": null,
+              "StringDatas": [],
+              "Int64Datas": null,
+              "Name": "",
+              "DocString": "",
+              "RawData": null,
+              "ExternalDatas": [],
+              "data_location": 0,
+              "DoubleDatas": null,
+              "Uint64Datas": null,
+              "MetadataProps": [
+                {
+                  "Key": "IsTrainable",
+                  "Value": "true"
+                }
+              ]
+            },
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N7_T0",
+          "N7_T0",
+          "N7_T0",
+          "N7_T0",
+          "N4_T0",
+          "N6_T0"
+        ],
+        "Outputs": [
+          "N8_T0"
+        ],
+        "Name": "N8",
+        "OpType": "SequenceConstruct",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [],
+        "Outputs": [
+          "N9_T0"
+        ],
+        "Name": "N9",
+        "OpType": "Constant",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "value",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 4,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": {
+              "Dims": null,
+              "data_type": 7,
+              "segment": null,
+              "FloatDatas": null,
+              "Int32Datas": null,
+              "StringDatas": [],
+              "Int64Datas": null,
+              "Name": "",
+              "DocString": "",
+              "RawData": null,
+              "ExternalDatas": [],
+              "data_location": 0,
+              "DoubleDatas": null,
+              "Uint64Datas": null,
+              "MetadataProps": [
+                {
+                  "Key": "IsTrainable",
+                  "Value": "true"
+                }
+              ]
+            },
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [],
+        "Outputs": [
+          "N10_T0"
+        ],
+        "Name": "N10",
+        "OpType": "Constant",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "value",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 4,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": {
+              "Dims": [
+                1
+              ],
+              "data_type": 7,
+              "segment": null,
+              "FloatDatas": null,
+              "Int32Datas": null,
+              "StringDatas": [],
+              "Int64Datas": null,
+              "Name": "",
+              "DocString": "",
+              "RawData": null,
+              "ExternalDatas": [],
+              "data_location": 0,
+              "DoubleDatas": null,
+              "Uint64Datas": null,
+              "MetadataProps": [
+                {
+                  "Key": "IsTrainable",
+                  "Value": "true"
+                }
+              ]
+            },
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [],
+        "Outputs": [
+          "N11_T0"
+        ],
+        "Name": "N11",
+        "OpType": "Constant",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "value",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 4,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": {
+              "Dims": null,
+              "data_type": 7,
+              "segment": null,
+              "FloatDatas": null,
+              "Int32Datas": null,
+              "StringDatas": [],
+              "Int64Datas": null,
+              "Name": "",
+              "DocString": "",
+              "RawData": null,
+              "ExternalDatas": [],
+              "data_location": 0,
+              "DoubleDatas": null,
+              "Uint64Datas": null,
+              "MetadataProps": [
+                {
+                  "Key": "IsTrainable",
+                  "Value": "true"
+                }
+              ]
+            },
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [],
+        "Outputs": [
+          "N12_T0"
+        ],
+        "Name": "N12",
+        "OpType": "Constant",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "value",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 4,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": {
+              "Dims": [
+                1
+              ],
+              "data_type": 7,
+              "segment": null,
+              "FloatDatas": null,
+              "Int32Datas": null,
+              "StringDatas": [],
+              "Int64Datas": null,
+              "Name": "",
+              "DocString": "",
+              "RawData": null,
+              "ExternalDatas": [],
+              "data_location": 0,
+              "DoubleDatas": null,
+              "Uint64Datas": null,
+              "MetadataProps": [
+                {
+                  "Key": "IsTrainable",
+                  "Value": "true"
+                }
+              ]
+            },
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [],
+        "Outputs": [
+          "N13_T0"
+        ],
+        "Name": "N13",
+        "OpType": "Constant",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "value",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 4,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": {
+              "Dims": [
+                2
+              ],
+              "data_type": 7,
+              "segment": null,
+              "FloatDatas": null,
+              "Int32Datas": null,
+              "StringDatas": [],
+              "Int64Datas": null,
+              "Name": "",
+              "DocString": "",
+              "RawData": null,
+              "ExternalDatas": [],
+              "data_location": 0,
+              "DoubleDatas": null,
+              "Uint64Datas": null,
+              "MetadataProps": [
+                {
+                  "Key": "IsTrainable",
+                  "Value": "true"
+                }
+              ]
+            },
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [],
+        "Outputs": [
+          "N14_T0"
+        ],
+        "Name": "N14",
+        "OpType": "Constant",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "value",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 4,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": {
+              "Dims": [
+                2
+              ],
+              "data_type": 7,
+              "segment": null,
+              "FloatDatas": null,
+              "Int32Datas": null,
+              "StringDatas": [],
+              "Int64Datas": null,
+              "Name": "",
+              "DocString": "",
+              "RawData": null,
+              "ExternalDatas": [],
+              "data_location": 0,
+              "DoubleDatas": null,
+              "Uint64Datas": null,
+              "MetadataProps": [
+                {
+                  "Key": "IsTrainable",
+                  "Value": "true"
+                }
+              ]
+            },
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [],
+        "Outputs": [
+          "N15_T0"
+        ],
+        "Name": "N15",
+        "OpType": "Constant",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "value",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 4,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": {
+              "Dims": [
+                1
+              ],
+              "data_type": 7,
+              "segment": null,
+              "FloatDatas": null,
+              "Int32Datas": null,
+              "StringDatas": [],
+              "Int64Datas": null,
+              "Name": "",
+              "DocString": "",
+              "RawData": null,
+              "ExternalDatas": [],
+              "data_location": 0,
+              "DoubleDatas": null,
+              "Uint64Datas": null,
+              "MetadataProps": [
+                {
+                  "Key": "IsTrainable",
+                  "Value": "true"
+                }
+              ]
+            },
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N15_T0",
+          ""
+        ],
+        "Outputs": [
+          "N16_T0"
+        ],
+        "Name": "N16",
+        "OpType": "ReduceProd",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "keepdims",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 2,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          },
+          {
+            "Name": "noop_with_empty_axes",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 2,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N16_T0"
+        ],
+        "Outputs": [
+          "N17_T0"
+        ],
+        "Name": "N17",
+        "OpType": "Identity",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [],
+        "Outputs": [
+          "N18_T0"
+        ],
+        "Name": "N18",
+        "OpType": "Constant",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "value",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 4,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": {
+              "Dims": [
+                1
+              ],
+              "data_type": 7,
+              "segment": null,
+              "FloatDatas": null,
+              "Int32Datas": null,
+              "StringDatas": [],
+              "Int64Datas": null,
+              "Name": "",
+              "DocString": "",
+              "RawData": null,
+              "ExternalDatas": [],
+              "data_location": 0,
+              "DoubleDatas": null,
+              "Uint64Datas": null,
+              "MetadataProps": [
+                {
+                  "Key": "IsTrainable",
+                  "Value": "true"
+                }
+              ]
+            },
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N18_T0",
+          ""
+        ],
+        "Outputs": [
+          "N19_T0"
+        ],
+        "Name": "N19",
+        "OpType": "ReduceProd",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "keepdims",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 2,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          },
+          {
+            "Name": "noop_with_empty_axes",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 2,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N19_T0"
+        ],
+        "Outputs": [
+          "N20_T0"
+        ],
+        "Name": "N20",
+        "OpType": "Identity",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N17_T0",
+          "N20_T0"
+        ],
+        "Outputs": [
+          "N21_T0"
+        ],
+        "Name": "N21",
+        "OpType": "Sub",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [],
+        "Outputs": [
+          "N22_T0"
+        ],
+        "Name": "N22",
+        "OpType": "Constant",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "value",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 4,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": {
+              "Dims": [
+                1
+              ],
+              "data_type": 7,
+              "segment": null,
+              "FloatDatas": null,
+              "Int32Datas": null,
+              "StringDatas": [],
+              "Int64Datas": null,
+              "Name": "",
+              "DocString": "",
+              "RawData": null,
+              "ExternalDatas": [],
+              "data_location": 0,
+              "DoubleDatas": null,
+              "Uint64Datas": null,
+              "MetadataProps": [
+                {
+                  "Key": "IsTrainable",
+                  "Value": "true"
+                }
+              ]
+            },
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N21_T0",
+          "N10_T0"
+        ],
+        "Outputs": [
+          "N23_T0"
+        ],
+        "Name": "N23",
+        "OpType": "Unsqueeze",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N23_T0"
+        ],
+        "Outputs": [
+          "N24_T0"
+        ],
+        "Name": "N24",
+        "OpType": "Identity",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N22_T0",
+          "N24_T0"
+        ],
+        "Outputs": [
+          "N25_T0"
+        ],
+        "Name": "N25",
+        "OpType": "Concat",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "axis",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 2,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N13_T0",
+          "N25_T0",
+          "N9_T0",
+          ""
+        ],
+        "Outputs": [
+          "N26_T0"
+        ],
+        "Name": "N26",
+        "OpType": "Pad",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "mode",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 3,
+            "F": 0,
+            "I": 0,
+            "S": "Y29uc3RhbnQ=",
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N26_T0",
+          "N2_T0"
+        ],
+        "Outputs": [
+          "N27_T0"
+        ],
+        "Name": "N27",
+        "OpType": "Mul",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N27_T0",
+          ""
+        ],
+        "Outputs": [
+          "N28_T0"
+        ],
+        "Name": "N28",
+        "OpType": "ReduceSum",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "keepdims",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 2,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          },
+          {
+            "Name": "noop_with_empty_axes",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 2,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N28_T0"
+        ],
+        "Outputs": [
+          "N29_T0"
+        ],
+        "Name": "N29",
+        "OpType": "Identity",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N8_T0",
+          "N29_T0"
+        ],
+        "Outputs": [
+          "N30_T0"
+        ],
+        "Name": "N30",
+        "OpType": "SequenceAt",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [],
+        "Outputs": [
+          "N31_T0"
+        ],
+        "Name": "N31",
+        "OpType": "Constant",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "value",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 4,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": {
+              "Dims": [
+                1
+              ],
+              "data_type": 7,
+              "segment": null,
+              "FloatDatas": null,
+              "Int32Datas": null,
+              "StringDatas": [],
+              "Int64Datas": null,
+              "Name": "",
+              "DocString": "",
+              "RawData": null,
+              "ExternalDatas": [],
+              "data_location": 0,
+              "DoubleDatas": null,
+              "Uint64Datas": null,
+              "MetadataProps": [
+                {
+                  "Key": "IsTrainable",
+                  "Value": "true"
+                }
+              ]
+            },
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N31_T0",
+          ""
+        ],
+        "Outputs": [
+          "N32_T0"
+        ],
+        "Name": "N32",
+        "OpType": "ReduceProd",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "keepdims",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 2,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          },
+          {
+            "Name": "noop_with_empty_axes",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 2,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N32_T0"
+        ],
+        "Outputs": [
+          "N33_T0"
+        ],
+        "Name": "N33",
+        "OpType": "Identity",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [],
+        "Outputs": [
+          "N34_T0"
+        ],
+        "Name": "N34",
+        "OpType": "Constant",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "value",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 4,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": {
+              "Dims": [
+                1
+              ],
+              "data_type": 7,
+              "segment": null,
+              "FloatDatas": null,
+              "Int32Datas": null,
+              "StringDatas": [],
+              "Int64Datas": null,
+              "Name": "",
+              "DocString": "",
+              "RawData": null,
+              "ExternalDatas": [],
+              "data_location": 0,
+              "DoubleDatas": null,
+              "Uint64Datas": null,
+              "MetadataProps": [
+                {
+                  "Key": "IsTrainable",
+                  "Value": "true"
+                }
+              ]
+            },
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N34_T0",
+          ""
+        ],
+        "Outputs": [
+          "N35_T0"
+        ],
+        "Name": "N35",
+        "OpType": "ReduceProd",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "keepdims",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 2,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          },
+          {
+            "Name": "noop_with_empty_axes",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 2,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N35_T0"
+        ],
+        "Outputs": [
+          "N36_T0"
+        ],
+        "Name": "N36",
+        "OpType": "Identity",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N33_T0",
+          "N36_T0"
+        ],
+        "Outputs": [
+          "N37_T0"
+        ],
+        "Name": "N37",
+        "OpType": "Sub",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [],
+        "Outputs": [
+          "N38_T0"
+        ],
+        "Name": "N38",
+        "OpType": "Constant",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "value",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 4,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": {
+              "Dims": [
+                1
+              ],
+              "data_type": 7,
+              "segment": null,
+              "FloatDatas": null,
+              "Int32Datas": null,
+              "StringDatas": [],
+              "Int64Datas": null,
+              "Name": "",
+              "DocString": "",
+              "RawData": null,
+              "ExternalDatas": [],
+              "data_location": 0,
+              "DoubleDatas": null,
+              "Uint64Datas": null,
+              "MetadataProps": [
+                {
+                  "Key": "IsTrainable",
+                  "Value": "true"
+                }
+              ]
+            },
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N37_T0",
+          "N12_T0"
+        ],
+        "Outputs": [
+          "N39_T0"
+        ],
+        "Name": "N39",
+        "OpType": "Unsqueeze",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N39_T0"
+        ],
+        "Outputs": [
+          "N40_T0"
+        ],
+        "Name": "N40",
+        "OpType": "Identity",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N38_T0",
+          "N40_T0"
+        ],
+        "Outputs": [
+          "N41_T0"
+        ],
+        "Name": "N41",
+        "OpType": "Concat",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "axis",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 2,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N14_T0",
+          "N41_T0",
+          "N11_T0",
+          ""
+        ],
+        "Outputs": [
+          "N42_T0"
+        ],
+        "Name": "N42",
+        "OpType": "Pad",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "mode",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 3,
+            "F": 0,
+            "I": 0,
+            "S": "Y29uc3RhbnQ=",
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N42_T0",
+          "N2_T0"
+        ],
+        "Outputs": [
+          "N43_T0"
+        ],
+        "Name": "N43",
+        "OpType": "Mul",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N43_T0",
+          ""
+        ],
+        "Outputs": [
+          "N44_T0"
+        ],
+        "Name": "N44",
+        "OpType": "ReduceSum",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "keepdims",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 2,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          },
+          {
+            "Name": "noop_with_empty_axes",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 2,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": null,
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N44_T0"
+        ],
+        "Outputs": [
+          "N45_T0"
+        ],
+        "Name": "N45",
+        "OpType": "Identity",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N8_T0",
+          "N45_T0"
+        ],
+        "Outputs": [
+          "N46_T0"
+        ],
+        "Name": "N46",
+        "OpType": "SequenceAt",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N46_T0"
+        ],
+        "Outputs": [
+          "N47_T0"
+        ],
+        "Name": "N47",
+        "OpType": "Identity",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N30_T0"
+        ],
+        "Outputs": [
+          "N48_T0"
+        ],
+        "Name": "N48",
+        "OpType": "Transpose",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [
+          {
+            "Name": "perm",
+            "RefAttrName": "",
+            "DocString": "",
+            "Type": 7,
+            "F": 0,
+            "I": 0,
+            "S": null,
+            "T": null,
+            "G": null,
+            "SparseTensor": null,
+            "Tp": null,
+            "Floats": null,
+            "Ints": [
+              1,
+              0
+            ],
+            "Strings": [],
+            "Tensors": [],
+            "Graphs": [],
+            "SparseTensors": [],
+            "TypeProtos": []
+          }
+        ],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N1_T0",
+          "N48_T0"
+        ],
+        "Outputs": [
+          "N49_T0"
+        ],
+        "Name": "N49",
+        "OpType": "MatMul",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [],
+        "DocString": "",
+        "MetadataProps": []
+      },
+      {
+        "Inputs": [
+          "N49_T0",
+          "N47_T0"
+        ],
+        "Outputs": [
+          "N50_T0"
+        ],
+        "Name": "N50",
+        "OpType": "Add",
+        "Domain": "",
+        "Overload": "",
+        "Attributes": [],
+        "DocString": "",
+        "MetadataProps": []
+      }
+    ],
+    "Name": "",
+    "Initializers": [],
+    "SparseInitializers": [],
+    "DocString": "",
+    "Inputs": [
+      {
+        "Name": "N1_T0",
+        "Type": {
+          "TensorType": {
+            "ElemType": 1,
+            "Shape": {
+              "Dims": [
+                {
+                  "DimValue": 0,
+                  "DimParam": "N1_T0_dim0",
+                  "Denotation": ""
+                }
+              ]
+            }
+          },
+          "SequenceType": null,
+          "MapType": null,
+          "OptionalType": null,
+          "SparseTensorType": null,
+          "Denotation": ""
+        },
+        "DocString": "",
+        "MetadataProps": [
+          {
+            "Key": "InputType",
+            "Value": "ReadyInput"
+          }
+        ]
+      }
+    ],
+    "Outputs": [
+      {
+        "Name": "N50_T0",
+        "Type": {
+          "TensorType": {
+            "ElemType": 1,
+            "Shape": null
+          },
+          "SequenceType": null,
+          "MapType": null,
+          "OptionalType": null,
+          "SparseTensorType": null,
+          "Denotation": ""
+        },
+        "DocString": "",
+        "MetadataProps": []
+      }
+    ],
+    "ValueInfoes": [],
+    "QuantizationAnnotations": [],
+    "MetadataProps": []
+  },
+  "MetadataProps": [],
+  "TrainingInfoes": [],
+  "Functions": [
+    {
+      "Name": "fn_1",
+      "Inputs": [
+        "shape"
+      ],
+      "Outputs": [
+        "N52_T0"
+      ],
+      "Attributes": [],
+      "AttributeProtoes": [],
+      "Nodes": [
+        {
+          "Inputs": [
+            "shape"
+          ],
+          "Outputs": [
+            "N52_T0"
+          ],
+          "Name": "N52",
+          "OpType": "ConstantOfShape",
+          "Domain": "",
+          "Overload": "",
+          "Attributes": [
+            {
+              "Name": "value",
+              "RefAttrName": "",
+              "DocString": "",
+              "Type": 4,
+              "F": 0,
+              "I": 0,
+              "S": null,
+              "T": {
+                "Dims": [
+                  1
+                ],
+                "data_type": 1,
+                "segment": null,
+                "FloatDatas": null,
+                "Int32Datas": null,
+                "StringDatas": [],
+                "Int64Datas": null,
+                "Name": "",
+                "DocString": "",
+                "RawData": null,
+                "ExternalDatas": [],
+                "data_location": 0,
+                "DoubleDatas": null,
+                "Uint64Datas": null,
+                "MetadataProps": [
+                  {
+                    "Key": "IsTrainable",
+                    "Value": "true"
+                  }
+                ]
+              },
+              "G": null,
+              "SparseTensor": null,
+              "Tp": null,
+              "Floats": null,
+              "Ints": null,
+              "Strings": [],
+              "Tensors": [],
+              "Graphs": [],
+              "SparseTensors": [],
+              "TypeProtos": []
+            }
+          ],
+          "DocString": "",
+          "MetadataProps": []
+        }
+      ],
+      "DocString": "",
+      "OpsetImports": [
+        {
+          "Domain": "",
+          "Version": 21
+        },
+        {
+          "Domain": "Functions",
+          "Version": 1
+        }
+      ],
+      "Domain": "Functions",
+      "Overload": "",
+      "ValueInfoes": [
+        {
+          "Name": "shape",
+          "Type": {
+            "TensorType": {
+              "ElemType": 7,
+              "Shape": {
+                "Dims": [
+                  {
+                    "DimValue": 0,
+                    "DimParam": "shape_dim0",
+                    "Denotation": ""
+                  }
+                ]
+              }
+            },
+            "SequenceType": null,
+            "MapType": null,
+            "OptionalType": null,
+            "SparseTensorType": null,
+            "Denotation": ""
+          },
+          "DocString": "",
+          "MetadataProps": [
+            {
+              "Key": "InputType",
+              "Value": "ReadyInput"
+            }
+          ]
+        },
+        {
+          "Name": "N52_T0",
+          "Type": {
+            "TensorType": {
+              "ElemType": 1,
+              "Shape": null
+            },
+            "SequenceType": null,
+            "MapType": null,
+            "OptionalType": null,
+            "SparseTensorType": null,
+            "Denotation": ""
+          },
+          "DocString": "",
+          "MetadataProps": []
+        }
+      ],
+      "MetadataProps": [
+        {
+          "Key": "ComponentType",
+          "Value": "TrainableParamInitializer"
+        },
+        {
+          "Key": "ModuleFriendlyName",
+          "Value": "InitSimple"
+        }
+      ]
+    }
+  ]
+}

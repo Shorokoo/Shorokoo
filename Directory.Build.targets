@@ -1,0 +1,39 @@
+<Project>
+
+  <!-- Imported after each project file, so per-project IsPackable is visible here. -->
+
+  <!-- Symbol packages, but only for packages that ship a lib/ with .pdbs to
+       match. Packages with no build output (the CodeGen analyzer and the
+       deps-only meta-package set <IncludeBuildOutput>false</IncludeBuildOutput>)
+       must NOT produce a .snupkg: nuget.org rejects a symbols package with no
+       .pdb (HTTP 400), which aborts the release push mid-way. -->
+  <PropertyGroup Condition="'$(IsPackable)' == 'true' and '$(IncludeBuildOutput)' != 'false'">
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <!-- Every package ships a readme. Packable projects keep a README.md next to
+       their csproj. -->
+  <PropertyGroup Condition="'$(IsPackable)' == 'true'">
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(IsPackable)' == 'true'">
+    <None Include="$(MSBuildProjectDirectory)/README.md" Pack="true" PackagePath="/" Visible="false" />
+  </ItemGroup>
+
+  <!-- Versioning: packable projects derive their version from the git tag via
+       MinVer (tag prefix is set in Directory.Build.props), overriding the static
+       <Version>. -->
+  <ItemGroup Condition="'$(IsPackable)' == 'true'">
+    <PackageReference Include="MinVer" Version="6.0.0" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- Package ids. The package name defaults to the project name; projects whose
+       package id differs set <ShorokooPackageName> in their csproj
+       (src/Shorokoo -> Shorokoo.Core; src/Shorokoo.Meta -> Shorokoo). -->
+  <PropertyGroup Condition="'$(IsPackable)' == 'true'">
+    <ShorokooPackageName Condition="'$(ShorokooPackageName)' == ''">$(MSBuildProjectName)</ShorokooPackageName>
+    <PackageId>$(ShorokooPackageName)</PackageId>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,129 @@
+# Shorokoo release pipeline.
+#
+# Manually launched (workflow_dispatch) with a version, e.g. 0.1.0-preview.1.
+# A run tags the commit v<version> (MinVer derives the package version from the
+# tag), builds + tests, packs the shipping projects, publishes them to nuget.org
+# via Trusted Publishing (OIDC), pushes the tag, and creates a GitHub Release.
+# There is NO push trigger: nothing publishes unless you launch this workflow.
+#
+# The nuget.org Trusted Publishing policy is bound to this file by name
+# (release.yml) -> keep the filename stable.
+
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "SemVer version to release, e.g. 0.1.0-preview.1 (no leading v)"
+        required: true
+        type: string
+
+permissions:
+  id-token: write       # OIDC token for NuGet Trusted Publishing
+  contents: write       # push the tag + create the GitHub Release
+  packages: write       # mirror the packages to GitHub Packages
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # MinVer needs full history + tags
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      # Tag locally so MinVer stamps <version> into the packages. The tag is
+      # pushed only after a successful publish (below), so a failed run leaves no
+      # tag behind.
+      - name: Create tag (local)
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "v${{ inputs.version }}"
+
+      - name: Build & test
+        run: >
+          dotnet test tests/Shorokoo.Tests/Shorokoo.Tests.csproj
+          --filter "Purpose=Coverage"
+          -c Release --logger "console;verbosity=minimal"
+
+      - name: Pack
+        run: dotnet pack Shorokoo.sln -c Release -o artifacts/nupkgs
+
+      # OIDC -> short-lived nuget.org API key (~1h). No stored API key.
+      - name: NuGet login (Trusted Publishing)
+        id: login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
+      # Push each package individually: a glob push aborts the whole queue on
+      # the first rejected file, which half-publishes the release (immutable
+      # versions make that expensive — it burned 0.1.2/0.1.3). Attempt every
+      # package, then fail the job if any push failed. --skip-duplicate keeps
+      # re-runs of the same version safe.
+      - name: Push to nuget.org
+        run: |
+          failed=0
+          for pkg in artifacts/nupkgs/*.nupkg; do
+            echo "Pushing $pkg"
+            dotnet nuget push "$pkg" \
+              --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" \
+              --source https://api.nuget.org/v3/index.json \
+              --skip-duplicate || { echo "::error::Push failed for $pkg"; failed=1; }
+          done
+          exit "$failed"
+
+      # Don't mirror/tag/release until nuget.org lists every package at the new
+      # version (validation/indexing usually takes a few minutes). A partial
+      # publish fails here, loudly, naming what's missing.
+      - name: Verify all packages are live on nuget.org
+        run: |
+          version="${{ inputs.version }}"
+          for pkg in artifacts/nupkgs/*."$version".nupkg; do
+            id=$(basename "$pkg" ".$version.nupkg")
+            idLower=$(echo "$id" | tr '[:upper:]' '[:lower:]')
+            url="https://api.nuget.org/v3-flatcontainer/$idLower/index.json"
+            ok=""
+            for attempt in $(seq 1 30); do
+              if curl -fsSL "$url" | grep -qF "\"$version\""; then ok=1; break; fi
+              echo "$id $version not indexed yet (attempt $attempt/30); retrying in 30s"
+              sleep 30
+            done
+            [ -n "$ok" ] || { echo "::error::$id $version never appeared on nuget.org"; exit 1; }
+            echo "$id $version is live"
+          done
+
+      # The packages are verified live on the canonical feed: tag now, so no
+      # later (best-effort) step can leave a published version untagged again.
+      - name: Push tag
+        run: git push origin "v${{ inputs.version }}"
+
+      # Mirror to GitHub Packages so the packages also show in the repo's sidebar.
+      # Uses the built-in GITHUB_TOKEN (no secret needed). --no-symbols because
+      # GitHub Packages doesn't accept .snupkg the way nuget.org does. nuget.org
+      # remains the canonical source; this is a convenience mirror — best-effort
+      # (continue-on-error), it must never block the tag/Release.
+      - name: Push to GitHub Packages
+        continue-on-error: true
+        run: >
+          dotnet nuget push "artifacts/nupkgs/*.nupkg"
+          --api-key ${{ secrets.GITHUB_TOKEN }}
+          --source https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
+          --skip-duplicate
+          --no-symbols
+
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          case "${{ inputs.version }}" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "v${{ inputs.version }}" $prerelease \
+            --title "v${{ inputs.version }}" \
+            --generate-notes \
+            artifacts/nupkgs/*.nupkg

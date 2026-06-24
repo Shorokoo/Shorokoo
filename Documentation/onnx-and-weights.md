@@ -1,0 +1,143 @@
+# ONNX export/import and weights
+
+Related: [inference.md](inference.md) · [core-types.md](core-types.md)
+
+## Facts
+
+- A model is a `FastComputationGraph` (from `MyModule.ComputationGraph` or built
+  directly). It can be converted to an ONNX `ModelProto`, or saved in Shorokoo's own
+  `.srk`/`.zsrk` format.
+- There is no one-call `graph.ToOnnxFile(path)`. Build the `ModelProto`, then
+  serialize it yourself with protobuf.
+- Pretrained weights are loaded from `.safetensors` (and compressed `.zsafetensor`).
+
+## Export to ONNX
+
+```csharp
+using System.IO;
+using Shorokoo.Core.Factory;      // FastOnnxModelBuilder
+using Shorokoo.Core.Factory.IR;   // ModelProto
+
+ModelProto model = FastOnnxModelBuilder.BuildOnnxModel(graph);  // graph: FastComputationGraph
+using var stream = File.Create("model.onnx");
+ProtoBuf.Serializer.Serialize(stream, model);   // ProtoBuf = protobuf-net (a transitive dependency)
+```
+
+`ModelProto` is the protobuf type in `Shorokoo.Core.Factory.IR`; it is serialized with
+protobuf-net's `ProtoBuf.Serializer` (the `ProtoBuf` namespace ships via protobuf-net,
+which the library already depends on).
+
+`BuildOnnxModel(FastComputationGraph fastGraph, OpSetVersion opset = OPS_21,
+IR_VERSION irVersion = IR_10, bool prepForOnnx = false)` clones the graph (no
+mutation), lowers it for ONNX, and emits nodes, subgraphs, and functions.
+The default `OPS_21` is the export **baseline**: if the graph (including
+function bodies) contains operators introduced after opset 21 (e.g.
+`Attention`, opset 23), the model's `opset_import` is raised automatically
+just far enough to cover them. Models up to opset 26 execute on the bundled
+ONNX Runtime 1.26 — see [limitations.md](limitations.md) for the stamping
+policy.
+
+## Import from ONNX
+
+```csharp
+using Shorokoo.Onnx;   // OnnxModelImporter
+
+FastComputationGraph g1 = OnnxModelImporter.FromOnnxModelToFastGraph("model.onnx");
+FastComputationGraph g2 = OnnxModelImporter.FromOnnxModelToFastGraph(byteArray);
+FastComputationGraph g3 = OnnxModelImporter.FromOnnxModelToFastGraph(stream);
+```
+
+## Save/load Shorokoo graph format (`.srk` / `.zsrk`)
+
+With `CompressedFormatUtils`:
+
+```csharp
+string path = CompressedFormatUtils.SaveFastGraphToFile("model.zsrk", graph);     // compressed
+FastComputationGraph g = CompressedFormatUtils.LoadFastGraphFromFile("model.zsrk");
+byte[] bytes = CompressedFormatUtils.SaveFastGraphToBinary(graph, compressed: true);
+```
+
+`.zsrk` = Zstandard-compressed; `.srk` = uncompressed. Extension is auto-selected from
+the `compressed` flag.
+
+## Load pretrained weights (SafeTensors)
+
+With `SafeTensorLoader`:
+
+```csharp
+ModelParamList weights = SafeTensorLoader.LoadModelParamSet("weights.safetensors");
+Dictionary<string, TensorData> byName = SafeTensorLoader.LoadTensorDictionary("weights.safetensors");
+TensorData single = SafeTensorLoader.LoadSingleTensor("bias.safetensors");
+List<SafeTensor> all = SafeTensorLoader.LoadSafeTensors("weights.safetensors");
+```
+
+Save:
+
+```csharp
+SafeTensorLoader.SaveSafeTensors("out.safetensors", listOfSafeTensors);
+```
+
+Compressed (`.zsafetensor`) variants live in `CompressedFormatUtils`:
+`SaveCompressedSafeTensors`, `LoadCompressedSafeTensors`,
+`SaveCompressedModelParamSet`, `LoadCompressedModelParamSet`.
+
+## Bind loaded weights into a model (for inference)
+
+Loading a file gives you a `ModelParamList`; it does not yet change any model. A
+model's `ComputationGraph` starts with weights from its `[TrainableParamInitializer]`s.
+To run with loaded weights, bind them into a concrete graph with `ToConcreteModel`
+(extension methods in namespace `Shorokoo.Graph`), then execute that graph:
+
+```csharp
+using Shorokoo;
+using Shorokoo.Graph;          // ToConcreteArchitecture, ToConcreteModel, InitializeTrainableParams
+using static Shorokoo.Globals;
+
+ModelParamList weights = SafeTensorLoader.LoadModelParamSet("weights.safetensors");
+
+// Lower the module graph to a concrete architecture first. This inlines sub-modules so the
+// trainable parameters are visible at the top level; pass sample inputs as shape hints.
+var input = TensorData([1L, 3L, 224L, 224L], myPixelFloatArray);
+FastComputationGraph arch = MyModel.ComputationGraph.ToConcreteArchitecture(
+    MyModel.ComputationGraph.FromOrderedInputs([input]));
+
+// Bind by parameter name into a concrete (weight-filled) graph:
+FastComputationGraph concrete = arch.ToConcreteModel(weights);
+
+// Run it. Execute takes IData[] inputs (TensorData implements IData) and returns
+// NamedModelParam[]; read each output via ToTensorData().AccessMemory().
+var outputs = new ComputeContext().Execute(concrete, input);
+ReadOnlySpan<float> values = outputs[0].ToTensorData<float32>().AccessMemory();
+```
+
+Notes:
+- The full lowering pipeline is **`Specialize` → `ToConcreteArchitecture` →
+  `ToConcreteModel`**. The optional first step, `Specialize`, bakes a partial set
+  of named inputs (typically `[Hyper]`s) into constants and drops them from the
+  input list; skip it when the model has no inputs to hardcode. See
+  [inference.md](inference.md#the-lowering-pipeline).
+- `ToConcreteModel`, `InitializeTrainableParams`, and `GetConcreteModelParamInfos` require a
+  concrete architecture graph from `ToConcreteArchitecture`. Called on a raw `MyModel.ComputationGraph`
+  whose sub-modules are not inlined, they throw, because the trainable parameters are still nested
+  inside sub-functions.
+- `ToConcreteModel()` with no argument fills defaults (equivalent to
+  `arch.ToConcreteModel(arch.InitializeTrainableParams())`).
+- Binding is **by name**. The default uses Shorokoo's naming scheme; weights exported
+  from PyTorch/timm usually need name remapping (use the `ToConcreteModel(weights,
+  namingScheme)` overload) before they bind. Unmatched names are silently dropped.
+  Two DSLs build the remapping scheme: the
+  [ModelId format DSL](param-naming-format-dsl.md) (`ModelIdNamingScheme`) and the
+  [pattern DSL](param-naming-pattern-dsl.md) (`SimplePatternNamingScheme`).
+
+A `SafeTensor` exposes `.Name`, `.Data` (`TensorData`), `.DataType` (e.g. `"F32"`,
+`"I64"`), `.Shape`, and `.Metadata`. Use `SafeTensorLoader.DTypeToSafeTensorDType` to
+map a `DType` to a SafeTensor dtype string.
+
+## Notes / known limitations
+
+- Parameter names from external frameworks (PyTorch/timm) may need remapping to match
+  this framework's trainable-parameter names before they bind.
+
+## Anti-patterns
+
+- Do not expect a single export-to-file helper; build the `ModelProto`, then serialize.

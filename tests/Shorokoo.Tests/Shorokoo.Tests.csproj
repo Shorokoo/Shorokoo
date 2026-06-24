@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <PlatformTarget>x64</PlatformTarget>
+    <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Benchmarks/perf-baseline.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.6.0" />
+    <PackageReference Include="xunit" Version="2.4.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.4.5">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="coverlet.collector" Version="6.0.0">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+
+  <!--
+    Shorokoo no longer depends on ONNX Runtime directly. The platform-specific
+    inference provider is supplied by referencing exactly one Shorokoo.{Platform}
+    project: Shorokoo.WinCPU, Shorokoo.WinGPU, or Shorokoo.LinuxCPU. Each ships
+    its own ORT NuGet (with native libs) into bin; on first inference,
+    InferenceBackend auto-discovers that DLL in the output folder (tests don't set
+    it explicitly, so the discovery fallback is exercised).
+
+    On this Linux sandbox we reference Shorokoo.LinuxCPU. On a Windows dev box
+    swap the ProjectReference for Shorokoo.WinCPU or Shorokoo.WinGPU.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Backend\OnnxRuntime\Shorokoo.LinuxCPU\Shorokoo.LinuxCPU.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Shorokoo\Shorokoo.csproj" />
+    <ProjectReference Include="..\..\src\Shorokoo.Modules\Shorokoo.Modules.csproj" />
+    <ProjectReference Include="..\..\src\Shorokoo.CodeGen\Shorokoo.CodeGen.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\samples\RetinaNet\RetinaNet.csproj" />
+  </ItemGroup>
+
+</Project>

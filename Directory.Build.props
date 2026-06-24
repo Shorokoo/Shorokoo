@@ -1,0 +1,30 @@
+<Project>
+
+  <!-- Shared build + NuGet metadata for every project in the repository.
+       Packable projects opt in with <IsPackable>true</IsPackable> and provide
+       their own PackageId-specific Description / PackageTags / readme. -->
+
+  <PropertyGroup>
+    <Authors>Eric Louchez</Authors>
+    <Copyright>Copyright (c) 2026 Eric Louchez</Copyright>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/Shorokoo/Shorokoo</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Shorokoo/Shorokoo</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+
+    <!-- Fallback version for non-packable projects. Packable projects override
+         this via MinVer (see Directory.Build.targets), which derives the version
+         from the git tag using the prefix below. -->
+    <Version>0.1.0</Version>
+    <MinVerTagPrefix>v</MinVerTagPrefix>
+
+    <!-- Packing is opt-in per project. -->
+    <IsPackable>false</IsPackable>
+
+    <!-- Source debugging: .NET 10 SDK has SourceLink built in for git repos. -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <DebugType>portable</DebugType>
+  </PropertyGroup>
+
+</Project>

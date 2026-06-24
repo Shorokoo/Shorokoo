@@ -1,0 +1,13 @@
+# Scoped to the Shorokoo test project (inherits the repository-root .editorconfig).
+#
+# Disable the xUnit analyzer warnings project-wide. The xUnit analyzers emit
+# diagnostics under exactly three categories — Assertions (e.g. xUnit2013
+# "use Assert.Single to check for a one-element collection"), Usage, and
+# Extensibility. These are test-authoring style suggestions rather than product
+# behavior, so they are silenced here instead of reworked. Diagnostic IDs cannot
+# be wildcarded, so the categories are disabled directly; the setting is confined
+# to this project, leaving analyzers in the product projects unaffected.
+[*.cs]
+dotnet_analyzer_diagnostic.category-Assertions.severity = none
+dotnet_analyzer_diagnostic.category-Usage.severity = none
+dotnet_analyzer_diagnostic.category-Extensibility.severity = none

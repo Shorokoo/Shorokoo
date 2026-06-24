@@ -1,0 +1,8 @@
+{
+  "Scenario": "linear [4,2]->[4,1], Adam, L2Loss, LinuxCPU, net10.0",
+  "SlowdownFactor": 2.0,
+  "ConcretizeMs": 7.7842,
+  "FromScratchMs": 430.9063,
+  "CompileMs": 189.7962,
+  "TrainStepsPerSecond": 4644.027548371417
+}

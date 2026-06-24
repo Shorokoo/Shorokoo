@@ -1,0 +1,63 @@
+.vs/
+venv/
+venvs/
+myenv/
+Repositories/
+Data/
+obj/
+bin/
+Debug/
+x64/
+tools/OnnxCppRuntime/x64/
+.pytest_cache/
+__pycache__/
+*.gz
+.~*
+/tools/OnnxCppRuntime/x64/Debug/OnnxCppRuntime.ilk
+/tools/OnnxCppRuntime/x64/Debug/OnnxCppRuntime.obj
+/tools/OnnxCppRuntime/x64/Debug/vc143.idb
+/tools/OnnxCppRuntime/x64/Debug/vc143.pdb
+/x64/Debug/OnnxCppRuntime.exe
+/x64/Debug/OnnxCppRuntime.pdb
+TooBig/
+packages/
+.nuget/
+
+# Generated files from source generators
+**/generated/
+
+# Downloaded model files (can be large)
+*.onnx
+*.pth
+*.safetensors
+# But allow WIP integration-resnet-quality safetensors (needed for testing)
+!wip/20251201-integration-resnet-quality/**/*.safetensors
+# Allow test-data safetensors (permanent test data)
+!tests/test-data/**/*.safetensors
+
+# Processed test data (can be regenerated)
+wip/20251201-integration-resnet-quality/*/ProcessedImages/
+wip/20251201-integration-resnet-quality/*/Results/
+
+# Test results
+TestResults/
+*.trx
+
+# Scripting
+*cripting.dll
+
+# Generated test data (local validation only - not checked into git)
+**/generated-data/
+
+# DataGen-generated compressed architecture artifacts (regenerated locally; not checked in)
+tests/test-data/models/retinanet-resnet50/retinanet_resnet50_nonorm_1cls_architecture.zsrk
+tests/test-data/models/retinanet-resnet50/retinanet_resnet50_nonorm_91cls_architecture.zsrk
+tests/test-data/modules/fclayer/fclayer_architecture.zsrk
+
+# PyTorch.DataGen virtual environments
+tools/DataGen/PyTorch.DataGen/**/.venv/
+# Release artifacts
+artifacts/
+
+# Claude Code agent worktrees (transient)
+.claude/worktrees/

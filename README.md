@@ -101,10 +101,6 @@ The full documentation index — which page covers what — lives in
 
 ## Installation
 
-> **Preview status — dev releases only.** Shorokoo currently publishes **dev
-> releases**: preview versions of the `Shorokoo.*` packages below. Expect APIs to
-> evolve before the first stable release.
-
 Shorokoo ships as NuGet packages. Install the meta-package plus **one** backend for
 your platform:
 

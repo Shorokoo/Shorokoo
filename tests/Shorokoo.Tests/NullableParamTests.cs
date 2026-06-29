@@ -18,7 +18,7 @@ namespace Shorokoo.Tests;
 [Trait("Purpose", "Coverage")]
 public class NullableParamTests
 {
-    private static System.Collections.Immutable.ImmutableArray<IVariable> InputsOf(FastComputationGraph graph)
+    private static System.Collections.Immutable.ImmutableArray<Variable> InputsOf(FastComputationGraph graph)
         => FastComputationGraphConverter.BuildNodes(graph).inputs;
 
     private static byte[] Bytes(params float[] values) => TensorData([(long)values.Length], values).AccessRawMemory().ToArray();
@@ -93,14 +93,15 @@ public class NullableParamTests
     public void GeneratedSurface_ExposesOmittableNullableParameters()
     {
         // An OptionalTensor<T> input is exposed to callers as Tensor<T>? with a `= null` default,
-        // so it can be omitted or passed null.
+        // so it can be omitted or passed null. Tensor<T> is now a value-struct handle, so Tensor<T>?
+        // is Nullable<Tensor<T>>.
         var biasParam = typeof(NullableBiasLayer).GetMethod("Call")!.GetParameters().Single(p => p.Name == "bias");
-        Assert.Equal(typeof(Tensor<float32>), biasParam.ParameterType);
+        Assert.Equal(typeof(Tensor<float32>?), biasParam.ParameterType);
         Assert.True(biasParam.HasDefaultValue);
 
         // A [Hyper(default)] scalar is exposed on Model() as a nullable, omittable parameter.
         var factorParam = typeof(DefaultedHyperLayer).GetMethod("Model")!.GetParameters().Single(p => p.Name == "factor");
-        Assert.Equal(typeof(Scalar<float32>), factorParam.ParameterType);
+        Assert.Equal(typeof(Scalar<float32>?), factorParam.ParameterType);
         Assert.True(factorParam.HasDefaultValue);
     }
 
@@ -230,5 +231,36 @@ public class NullableParamTests
         var ex = Assert.Throws<InvalidTensorOperationException>(() =>
             ComputeContext.Default.Execute(concrete, x, OptionalTensorData.None(DType.Float32)));
         Assert.Contains("QuickExecutionEngine", ex.Message);
+    }
+
+    // ───────────────────────── value-struct handle (OptionalTensor) ─────────────────────────
+    // OptionalTensor<T> is now a value-type handle wrapping a Variable; these
+    // pin the conversion web, graph-identity preservation across conversion, and default materialisation.
+
+    [Fact]
+    public void OptionalTensorHandle_IsValueType()
+        => Assert.True(typeof(OptionalTensor<float32>).IsValueType);
+
+    /// <summary>Unwrapping the handle to its immutable and re-wrapping returns the same graph value
+    /// (same <see cref="IValue.Key"/>); boxing the handle as <see cref="IValue"/> keeps that identity.</summary>
+    [Fact]
+    public void OptionalTensorHandle_WrapUnwrap_PreservesGraphIdentity()
+    {
+        OptionalTensor<float32> handle = OptionalTensor<float32>(Vector(1f, 2f, 3f));
+        Variable imm = handle;   // unwrap (implicit)
+        OptionalTensor<float32> rewrapped = imm;                       // wrap (implicit)
+        Assert.Equal(imm.Key, ((IValue)rewrapped).Key);
+        Assert.Equal(imm.Key, ((IValue)handle).Key);                // boxing keeps Key
+    }
+
+    /// <summary>A defaulted handle (<c>inner == null</c>) reports as an optional and lazily
+    /// materialises an absent optional graph value on first member access.</summary>
+    [Fact]
+    public void OptionalTensorHandle_Default_MaterialisesAbsentOptional()
+    {
+        OptionalTensor<float32> defaulted = default;
+        var asVar = (IValue)defaulted;
+        Assert.Equal(DataStructure.Optional, asVar.Structure());
+        Assert.NotNull(asVar.OwningNode);                              // forces default materialisation
     }
 }

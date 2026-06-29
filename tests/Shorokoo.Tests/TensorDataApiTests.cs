@@ -7,7 +7,7 @@ namespace Shorokoo.Tests;
 /// <see cref="TensorDataSequence"/>/<see cref="OnnxTensorDataSequence{T}"/> (Create/Empty,
 /// indexers, typed + untyped enumeration), the <see cref="NamedModelParam"/> hierarchy
 /// (FromIData dispatch and the supported/unsupported conversion matrix), <see cref="Shape"/>
-/// (constructors, conversions, equality, ToString), and the <see cref="OnnxEngine.Eval(IVariable)"/>
+/// (constructors, conversions, equality, ToString), and the <see cref="OnnxEngine.Eval(IValue)"/>
 /// convenience entry points. Plain xunit facts — no graph lowering is needed for these.
 /// </summary>
 [Trait("Domain", "Core")]
@@ -272,7 +272,7 @@ public class TensorDataApiCoverageTests
         Assert.Equal(5f, single.As<float32>().AccessMemory()[0]);
 
         // Array overload.
-        var pair = OnnxEngine.Eval([(IVariable)sum, product]);
+        var pair = OnnxEngine.Eval([(Variable)sum, product]);
         Assert.Equal(2, pair.Length);
         Assert.Equal(8f, pair[1].As<float32>().AccessMemory()[0]);
 

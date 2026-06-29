@@ -24,18 +24,18 @@ namespace Shorokoo.Core
     /// </summary>
     internal class TensorStructProxy : DispatchProxy, ITensorStructProxy
     {
-        private IVariable? _backingTensorStruct;
+        private Variable? _backingTensorStruct;
         private TensorStructDef? _definition;
-        private Dictionary<string, IVariable>? _fieldCache;
+        private Dictionary<string, Variable>? _fieldCache;
 
         /// <summary>
-        /// Gets the backing TensorStruct IVariable that this proxy wraps. Typically an
-        /// <see cref="ITensorStruct"/> but may be a plain <see cref="IVariable"/> when the
+        /// Gets the backing TensorStruct Variable that this proxy wraps. Typically an
+        /// <see cref="Variable"/> but may be a plain <see cref="Variable"/> when the
         /// proxy was built from the result of a struct-typed graph op (e.g. SequenceAt over
-        /// a struct sequence) whose IVariable instance carries struct-shaped data but is
-        /// not declared as ITensorStruct in the type system.
+        /// a struct sequence) whose Variable instance carries struct-shaped data but is
+        /// not declared as Variable in the type system.
         /// </summary>
-        public IVariable BackingTensorStruct => _backingTensorStruct
+        public Variable BackingTensorStruct => _backingTensorStruct
             ?? throw new InvalidOperationException("TensorStructProxy has not been initialized. Call Initialize() first.");
 
         /// <summary>
@@ -48,11 +48,11 @@ namespace Shorokoo.Core
         /// Initializes the proxy with the backing TensorStruct and definition.
         /// Must be called after DispatchProxy.Create() since the constructor is parameterless.
         /// </summary>
-        internal void Initialize(IVariable backingTensorStruct, TensorStructDef definition)
+        internal void Initialize(Variable backingTensorStruct, TensorStructDef definition)
         {
             _backingTensorStruct = backingTensorStruct ?? throw new ArgumentNullException(nameof(backingTensorStruct));
             _definition = definition ?? throw new ArgumentNullException(nameof(definition));
-            _fieldCache = new Dictionary<string, IVariable>();
+            _fieldCache = new Dictionary<string, Variable>();
         }
 
         /// <summary>
@@ -68,12 +68,16 @@ namespace Shorokoo.Core
             if (targetMethod.Name.StartsWith("get_") && (args == null || args.Length == 0))
             {
                 var fieldName = targetMethod.Name.Substring(4);
-                return GetOrCreateFieldVariable(fieldName, targetMethod.ReturnType);
+                // The property return type is a value-struct IValue; convert the field's Variable to it
+                // so the DispatchProxy can assign it. This must be driven by the declared return type, not
+                // the value's natural handle (which may differ for a generic-standin or more general
+                // declared type).
+                return GetOrCreateFieldVariable(fieldName).ToValue(targetMethod.ReturnType);
             }
 
-            // IModuleParam.ToVariable support — convert to the backing IVariable
+            // IValue.ToVariable support — convert to the backing Variable
             // This shouldn't normally be called on the proxy, but handle it for safety
-            if (targetMethod.Name == "ToVariable" && targetMethod.DeclaringType == typeof(IModuleParam))
+            if (targetMethod.Name == "ToVariable" && targetMethod.DeclaringType == typeof(IValue))
             {
                 return _backingTensorStruct;
             }
@@ -84,10 +88,10 @@ namespace Shorokoo.Core
         }
 
         /// <summary>
-        /// Gets or creates the IVariable for a field, using TensorStructGetField to create
+        /// Gets or creates the Variable for a field, using TensorStructGetField to create
         /// graph operations for field access.
         /// </summary>
-        private IVariable GetOrCreateFieldVariable(string fieldName, Type returnType)
+        private Variable GetOrCreateFieldVariable(string fieldName)
         {
             if (_fieldCache!.TryGetValue(fieldName, out var cached))
                 return cached;
@@ -125,9 +129,9 @@ namespace Shorokoo.Core
     internal interface ITensorStructProxy
     {
         /// <summary>
-        /// Gets the backing TensorStruct IVariable that this proxy wraps.
+        /// Gets the backing TensorStruct Variable that this proxy wraps.
         /// </summary>
-        IVariable BackingTensorStruct { get; }
+        Variable BackingTensorStruct { get; }
 
         /// <summary>
         /// Gets the struct definition.
@@ -149,7 +153,7 @@ namespace Shorokoo.Core
         /// <param name="backingTensorStruct">The TensorStruct variable to wrap</param>
         /// <param name="definition">The TensorStructDef describing the struct</param>
         /// <returns>An object implementing the interface with property access wired to graph operations</returns>
-        public static object Create(Type interfaceType, IVariable backingTensorStruct, TensorStructDef definition)
+        public static object Create(Type interfaceType, Variable backingTensorStruct, TensorStructDef definition)
         {
             if (!interfaceType.IsInterface)
                 throw new ArgumentException(

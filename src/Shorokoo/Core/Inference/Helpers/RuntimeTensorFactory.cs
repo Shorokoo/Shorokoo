@@ -21,7 +21,7 @@ internal static class RuntimeTensorFactory
     /// Creates a runtime tensor with known shape and dtype, attaching the reference variable
     /// when provided. Rank and MaxRank are derived from the shape.
     /// </summary>
-    public static RuntimeTensor Create(DType dtype, Shape? shape, IVariable? reference = null)
+    public static RuntimeTensor Create(DType dtype, Shape? shape, Variable? reference = null)
     {
         return new RuntimeTensor
         {

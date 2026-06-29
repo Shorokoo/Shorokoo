@@ -403,7 +403,7 @@ namespace Shorokoo
         /// <summary>Output tensors contain invalid variables</summary>
         public const string VG015 = "VG015";
         
-        /// <summary>Tensor casting to ITensor not implemented</summary>
+        /// <summary>Tensor casting to Variable not implemented</summary>
         public const string VG016 = "VG016";
         
         /// <summary>Tensor not found in graph canonical tensors</summary>
@@ -481,7 +481,7 @@ namespace Shorokoo
         
         #endregion
 
-        #region Core Error Codes (CR001-CR010)
+        #region Core Error Codes (CR001-CR013)
         
         /// <summary>Invalid IModuleParam type</summary>
         public const string CR001 = "CR001";
@@ -503,6 +503,15 @@ namespace Shorokoo
         
         /// <summary>ComputeContext execution failed with inner exception</summary>
         public const string CR007 = "CR007";
+
+        /// <summary>Variable→handle conversion: structural kind (tensor/optional/sequence/struct) mismatch</summary>
+        public const string CR011 = "CR011";
+
+        /// <summary>Variable→handle conversion: element dtype mismatch (use Cast&lt;T&gt;() to convert the dtype)</summary>
+        public const string CR012 = "CR012";
+
+        /// <summary>Variable→handle conversion: tensor rank mismatch (scalar/vector handle over a wrongly-ranked node)</summary>
+        public const string CR013 = "CR013";
 
         #endregion
 

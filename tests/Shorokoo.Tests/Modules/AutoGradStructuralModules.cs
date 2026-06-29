@@ -711,7 +711,7 @@ namespace Shorokoo.Tests.Modules
 
             var zeros = (Tensor<float32>)OnnxOp.Expand(Scalar(0f), Vector(2L));
             var threes = (Tensor<float32>)OnnxOp.Expand(Scalar(3f), Vector(2L));
-            var expected = (Tensor<float32>)OnnxOp.Concat([(IVariable)zeros, threes], axis: 0);
+            var expected = (Tensor<float32>)OnnxOp.Concat([zeros, threes], axis: 0);
             var diff = (grad - expected).Abs();
             return diff.Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-4f);
         }

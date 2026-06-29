@@ -15,17 +15,17 @@ namespace Shorokoo.Core.Nodes.AutoDiff
 {
     internal class AutoDiffEngine
     {
-        public static IVariable AccumulateGradients(IVariable a, IVariable b)
+        public static Variable AccumulateGradients(Variable a, Variable b)
         {
-            if (a is ITensor tensorA)
+            if (a.Structure() == DataStructure.Tensor)
             {
-                Debug.Assert(b is ITensor);
+                Debug.Assert(b.Structure() == DataStructure.Tensor);
                 return OnnxOp.Add(a, b);
             }
-            else if (a is ITensorSequence seqenceA)
+            else if (a.Structure() == DataStructure.Sequence)
             {
                 var sequenceResult = OnnxOp.SequenceEmpty(a.Type);
-                foreach (var ctx in LoopAPI.Iterate(OnnxOp.SequenceLength(a).As<int64>().Scalar()))
+                foreach (var ctx in LoopAPI.Iterate(((Tensor<int64>)OnnxOp.SequenceLength(a)).Scalar()))
                 {
                     var elementA = OnnxOp.SequenceAt(a, ctx.IterationIndex);
                     var elementB = OnnxOp.SequenceAt(b, ctx.IterationIndex);
@@ -35,9 +35,9 @@ namespace Shorokoo.Core.Nodes.AutoDiff
 
                 return sequenceResult;
             }
-            else if (a is IOptionalTensor optionalA)
+            else if (a.Structure() == DataStructure.Optional)
             {
-                var isNotNull = OnnxOp.OptionalHasElement(a).As<bit>().Scalar();
+                var isNotNull = ((Tensor<bit>)OnnxOp.OptionalHasElement(a)).Scalar();
                 var sum = OnnxOp.Add(OnnxOp.OptionalGetElement(a), OnnxOp.OptionalGetElement(b));
                 return Shorokoo.Core.Nodes.Ops.IfElse(isNotNull, sum, OnnxOp.Optional(null, DataStructure.Tensor, a.Type));
             }

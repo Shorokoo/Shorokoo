@@ -24,7 +24,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         //   dL/dI = null (int64 indices, not differentiable)
         //   dL/doutput_shape = null (int64, not differentiable)
 
-        internal static IVariable?[] MaxUnpoolGradient(IVariable?[] inputs, IVariable?[] outputGrads, OnnxCSharpAttributes attributes)
+        internal static Variable?[] MaxUnpoolGradient(Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
         {
             var x = inputs[0]!;        // X: pooled tensor [N, C, H_pool, W_pool, ...]
             var indices = inputs[1]!;  // I: indices [N, C, H_pool, W_pool, ...]

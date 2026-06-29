@@ -58,7 +58,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         //   Given the complexity and the op being deprecated, we implement a functional
         //   gradient that recomputes forward and uses equality masking to find max positions.
 
-        internal static IVariable?[] MaxRoiPoolGradient(IVariable?[] inputs, IVariable?[] outputGrads, OnnxCSharpAttributes attributes)
+        internal static Variable?[] MaxRoiPoolGradient(Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
         {
             var x = inputs[0]!;                  // [N, C, H, W]
             var rois = inputs[1]!;               // [num_rois, 5] — (batch_id, x1, y1, x2, y2)

@@ -29,17 +29,48 @@ namespace Shorokoo
     {
     }
 
-    /// <summary>
-    /// A rank-1 symbolic tensor of element type <typeparamref name="T"/>.
-    /// Operations mirror <see cref="Tensor{T}"/> but statically preserve the rank-1 typing; instances can
-    /// also be built from C# collection expressions.
-    /// </summary>
     [CollectionBuilder(typeof(Shorokoo.Core.TensorCollectionBuilder), nameof(Shorokoo.Core.TensorCollectionBuilder.CreateVector))]
-    public partial class Vector<T> : Tensor<T>, IVector, IEnumerable<VectorExpressionHelper<T>>
-        where T : IVarType
+    public partial struct Vector<T> : IVector, System.Collections.Generic.IEnumerable<VectorExpressionHelper<T>> where T : IVarType
     {
-        /// <summary>Shape inferred at graph-build time, as a constant <c>int64</c> vector (null when unknown).</summary>
-        public override Vector<int64>? InfShape => base.InfShape;
+        private Variable? inner;
+        // The backing graph node, materialising the established default (per dtype/rank) for a defaulted handle.
+        internal Variable Immutable => inner ?? InternalGlobals.DefaultVariable(typeof(Vector<T>));
+
+        private static readonly DType? expectedDType = OnnxUtils.GetDType(typeof(T));
+        public static implicit operator Vector<T>(Variable imm)
+        {
+            IValue.RequireKind(imm, DataStructure.Tensor);
+            IValue.RequireDType(imm, expectedDType);
+            return new Vector<T> { inner = IValue.RequireRank(imm, 1) };
+        }
+        public static implicit operator Variable(Vector<T> h) => h.Immutable;
+        public static implicit operator Tensor<T>(Vector<T> h) => h.Immutable;
+
+        // Convert to the backing graph node, materialising the established default for a defaulted handle.
+        Variable IValue.ToVariable() => Immutable;
+
+        // ITensor contract — forward to the backing Variable.
+        public int? Rank => Immutable.Rank;
+        public Vector<int64> DShape => Immutable.DShape;
+        public Vector<int64> TShape => Immutable.TShape;
+        public Scalar<int64> TRank => Immutable.TRank;
+        public Vector<T> Vec() => (Vector<T>)Immutable;     // already rank-1; validates
+        public Scalar<T> Scalar() => (Scalar<T>)Immutable;  // throws: a rank-1 vector is not a scalar
+        IVector ITensor.Vec() => Vec();
+        IScalar ITensor.Scalar() => Scalar();
+        Tensor<V> ITensor.Cast<V>(bool saturate) => Immutable.Cast<V>(saturate);
+
+        public Node OwningNode => Immutable.OwningNode;
+        public DType Type => Immutable.Type;
+        public Function? ModuleFn => Immutable.ModuleFn;
+        public TensorKey Key => Immutable.Key;
+        public string UniqueName => Immutable.UniqueName;
+        public bool IsValid { get => Immutable.IsValid; set => Immutable.IsValid = value; }
+#pragma warning disable CS0618
+        string? IValue.FriendlyName => ((IValue)Immutable).FriendlyName;
+#pragma warning restore CS0618
+        public override bool Equals(object? obj) => obj is Vector<T> t && Equals(inner, t.inner);
+        public override int GetHashCode() => inner?.GetHashCode() ?? 0;
 
         #region Unit and Empty vectors
 
@@ -82,7 +113,7 @@ namespace Shorokoo
                 }
 
                 Debug.Assert(Vector<T>.unit is not null);
-                return Vector<T>.unit;
+                return Vector<T>.unit!.Value;
             }
         }
 
@@ -122,33 +153,23 @@ namespace Shorokoo
                 }
 
                 Debug.Assert(Vector<T>.empty is not null);
-                return Vector<T>.empty;
+                return Vector<T>.empty!.Value;
             }
         }
 
         #endregion
-
-        #region Constructors
-
-        internal Vector(Func<Vector<int64>>? shapeFn, DType dtype, Node owningNode, Function? moduleFn, string? name = null) : base(shapeFn, dtype, owningNode, moduleFn, name, rank: 1)
-        {
-        }
-
-        #endregion
-
         #region Collection Expression Helpers
 
         IEnumerator IEnumerable.GetEnumerator() => this.GetEnumerator();
 
         /// <summary>Supports C# collection-expression composition by yielding a single helper that wraps this vector.</summary>
-        public new IEnumerator<VectorExpressionHelper<T>> GetEnumerator()
+        public IEnumerator<VectorExpressionHelper<T>> GetEnumerator()
         {
             var asList = new List<VectorExpressionHelper<T>> { new VectorExpressionHelper<T>(this) };
             return ((IEnumerable<VectorExpressionHelper<T>>)asList).GetEnumerator();
         }
 
         #endregion
-
         #region Operator Overloads
 
         /// <summary>Element-wise addition.</summary>
@@ -267,23 +288,22 @@ namespace Shorokoo
 
 
         #endregion
-
         #region Onnx Operators
 
         /// <summary>Splits into <paramref name="numOutputs"/> equal parts.</summary>
         public Vector<T>[] Split(int numOutputs)
-            => base.Split(numOutputs).Select(x => x.Vec()).ToArray();
+            => ((Tensor<T>)this).Split(numOutputs).Select(x => x.Vec()).ToArray();
 
         /// <summary>Splits into parts of the given sizes.</summary>
         public Vector<T>[] Split(long[] split)
-            => base.Split(split).Select(x => x.Vec()).ToArray();
+            => ((Tensor<T>)this).Split(split).Select(x => x.Vec()).ToArray();
 
         /// <summary>Splits into <paramref name="numOutputs"/> parts of the sizes given by <paramref name="split"/>.</summary>
         public Vector<T>[] Split(Vector<int64> split, long numOutputs)
-            => base.Split(split, axis: 0L, numOutputs: numOutputs).Select(x => x.Vec()).ToArray();
+            => ((Tensor<T>)this).Split(split, axis: 0L, numOutputs: numOutputs).Select(x => x.Vec()).ToArray();
 
         /// <summary>Resizes to the target <paramref name="sizes"/> (ONNX Resize).</summary>
-        public new Vector<T> Resize(Vector<int64> sizes,
+        public Vector<T> Resize(Vector<int64> sizes,
             KeepAspectRatioPolicy? aspectRatio = null,
             bool? antiaAlias = null,
             long[]? axes = null,
@@ -292,10 +312,10 @@ namespace Shorokoo
             NearestMode? nearestMode = null,
             float? cubicCoefficient = null,
             bool? excludeOutside = null)
-            => base.Resize(sizes, aspectRatio, antiaAlias, axes, transformMode, mode, nearestMode, cubicCoefficient, excludeOutside).Vec();
+            => ((Tensor<T>)this).Resize(sizes, aspectRatio, antiaAlias, axes, transformMode, mode, nearestMode, cubicCoefficient, excludeOutside).Vec();
 
         /// <summary>Resizes by the given per-axis scale factors (ONNX Resize).</summary>
-        public new Vector<T> Rescale(Vector<float32> scales,
+        public Vector<T> Rescale(Vector<float32> scales,
             bool? antiaAlias = null,
             long[]? axes = null,
             CoordinateTransformationMode? transformMode = null,
@@ -303,304 +323,295 @@ namespace Shorokoo
             NearestMode? nearestMode = null,
             float? cubicCoefficient = null,
             bool? excludeOutside = null)
-            => base.Rescale(scales, antiaAlias, axes, transformMode, mode, nearestMode, cubicCoefficient, excludeOutside).Vec();
+            => ((Tensor<T>)this).Rescale(scales, antiaAlias, axes, transformMode, mode, nearestMode, cubicCoefficient, excludeOutside).Vec();
 
         /// <summary>Removes the single dimension, yielding a scalar.</summary>
         public Scalar<T> Squeeze()
-            => base.Squeeze().Scalar();
+            => ((Tensor<T>)this).Squeeze().Scalar();
 
         /// <summary>Slices by start/end indices with optional steps (ONNX Slice).</summary>
         public Vector<T> Slice(Vector<int64> start, Vector<int64> end, Vector<int64>? steps = null)
-            => base.Slice(start, end, null, steps).Vec();
+            => ((Tensor<T>)this).Slice(start, end, null, steps).Vec();
 
         /// <summary>Softmax normalization over the vector.</summary>
         public Vector<T> Softmax()
-            => base.Softmax().Vec();
+            => ((Tensor<T>)this).Softmax().Vec();
 
         /// <summary>One-hot encoding of the maximum along <paramref name="axis"/> (ONNX Hardmax).</summary>
-        public new Vector<T> Hardmax(long? axis = null)
-            => base.Hardmax(axis).Vec();
+        public Vector<T> Hardmax(long? axis = null)
+            => ((Tensor<T>)this).Hardmax(axis).Vec();
 
         /// <summary>Element-wise hard sigmoid.</summary>
-        public new Vector<T> HardSigmoid(float? alpha = null, float? beta = null)
-            => base.HardSigmoid(alpha, beta).Vec();
+        public Vector<T> HardSigmoid(float? alpha = null, float? beta = null)
+            => ((Tensor<T>)this).HardSigmoid(alpha, beta).Vec();
 
         /// <summary>Element-wise hard swish.</summary>
-        public new Vector<T> HardSwish()
-            => base.HardSwish().Vec();
+        public Vector<T> HardSwish()
+            => ((Tensor<T>)this).HardSwish().Vec();
 
         /// <summary>Element-wise infinity test, yielding a bit vector.</summary>
-        public new Vector<bit> IsInf(bool detectNegative = true, bool detectPositive = true)
-            => base.IsInf(detectNegative, detectPositive).Vec();
+        public Vector<bit> IsInf(bool detectNegative = true, bool detectPositive = true)
+            => ((Tensor<T>)this).IsInf(detectNegative, detectPositive).Vec();
 
         /// <summary>Element-wise NaN test, yielding a bit vector.</summary>
-        public new Vector<bit> IsNaN()
-            => base.IsNaN().Vec();
+        public Vector<bit> IsNaN()
+            => ((Tensor<T>)this).IsNaN().Vec();
 
         /// <summary>Log-softmax along <paramref name="axis"/>.</summary>
-        public new Vector<T> LogSoftmax(long? axis = null)
-            => base.LogSoftmax(axis).Vec();
+        public Vector<T> LogSoftmax(long? axis = null)
+            => ((Tensor<T>)this).LogSoftmax(axis).Vec();
 
         /// <summary>Normalizes to zero mean and unit variance over <paramref name="axes"/>.</summary>
-        public new Vector<T> MeanVarianceNormalization(long[]? axes = null)
-            => base.MeanVarianceNormalization(axes).Vec();
+        public Vector<T> MeanVarianceNormalization(long[]? axes = null)
+            => ((Tensor<T>)this).MeanVarianceNormalization(axes).Vec();
 
         /// <summary>Element-wise Mish activation.</summary>
-        public new Vector<T> Mish()
-            => base.Mish().Vec();
+        public Vector<T> Mish()
+            => ((Tensor<T>)this).Mish().Vec();
 
         /// <summary>Element-wise rounding to the nearest integer (half to even).</summary>
-        public new Vector<T> Round()
-            => base.Round().Vec();
+        public Vector<T> Round()
+            => ((Tensor<T>)this).Round().Vec();
 
         /// <summary>Element-wise shrink thresholding (ONNX Shrink).</summary>
-        public new Vector<T> Shrink(float? bias = null, float? lambd = null)
-            => base.Shrink(bias, lambd).Vec();
+        public Vector<T> Shrink(float? bias = null, float? lambd = null)
+            => ((Tensor<T>)this).Shrink(bias, lambd).Vec();
 
         /// <summary>Element-wise softplus.</summary>
-        public new Vector<T> Softplus()
-            => base.Softplus().Vec();
+        public Vector<T> Softplus()
+            => ((Tensor<T>)this).Softplus().Vec();
 
         /// <summary>Element-wise softsign.</summary>
-        public new Vector<T> Softsign()
-            => base.Softsign().Vec();
+        public Vector<T> Softsign()
+            => ((Tensor<T>)this).Softsign().Vec();
 
         /// <summary>Element-wise thresholded ReLU.</summary>
-        public new Vector<T> ThresholdedRelu(float? alpha = null)
-            => base.ThresholdedRelu(alpha).Vec();
+        public Vector<T> ThresholdedRelu(float? alpha = null)
+            => ((Tensor<T>)this).ThresholdedRelu(alpha).Vec();
 
         /// <summary>Slices using scalar start/end indices with an optional step.</summary>
         public Vector<T> Slice(Scalar<int64> start, Scalar<int64> end, Scalar<int64>? steps = null)
-            => base.Slice(start.Unsqueeze(), end.Unsqueeze(), null, steps?.Unsqueeze()).Vec();
+            => ((Tensor<T>)this).Slice(start.Unsqueeze(), end.Unsqueeze(), null, steps?.Unsqueeze()).Vec();
 
         /// <summary>Gathers slices using multi-dimensional indices (ONNX GatherND).</summary>
         public Vector<T> GatherND(Vector<int64> indices, long? batchDims)
-            => base.GatherND(indices,batchDims).Vec();
+            => ((Tensor<T>)this).GatherND(indices,batchDims).Vec();
 
         /// <summary>Casts the element type to <typeparamref name="V"/>, preserving rank 1.</summary>
-        public new Vector<V> Cast<V>(bool saturate = true) where V : IVarType
-            => base.Cast<V>(saturate).Vec();
+        public Vector<V> Cast<V>(bool saturate = true) where V : IVarType
+            => ((Tensor<T>)this).Cast<V>(saturate).Vec();
 
         /// <summary>Reduces the whole vector to a scalar (e.g. sum, mean, max).</summary>
         public Scalar<T> Reduce(ReduceKind reduceKind)
-            => base.Reduce(reduceKind, null, keepDims: false).Scalar();
+            => ((Tensor<T>)this).Reduce(reduceKind, null, keepDims: false).Scalar();
 
         /// <summary>Reduces the whole vector, keeping the result as a length-1 vector.</summary>
         public Vector<T> ReduceKeepDims(ReduceKind reduceKind)
-            => base.Reduce(reduceKind, null, keepDims: true).Vec();
+            => ((Tensor<T>)this).Reduce(reduceKind, null, keepDims: true).Vec();
 
         /// <summary>Tiles the vector by repeating it the given number of times.</summary>
         public Vector<T> Tile(Vector<int64> repeats)
-            => base.Tile(repeats).Vec();
+            => ((Tensor<T>)this).Tile(repeats).Vec();
 
         /// <summary>Element-wise minimum of this vector and <paramref name="others"/>.</summary>
-        public new Vector<T> Min(params Tensor<T>[] others)
-            => base.Min(others).Vec();
+        public Vector<T> Min(params Tensor<T>[] others)
+            => ((Tensor<T>)this).Min(others).Vec();
 
         /// <summary>Element-wise maximum of this vector and <paramref name="others"/>.</summary>
-        public new Vector<T> Max(params Tensor<T>[] others)
-            => base.Max(others).Vec();
+        public Vector<T> Max(params Tensor<T>[] others)
+            => ((Tensor<T>)this).Max(others).Vec();
 
         /// <summary>Element-wise floor.</summary>
-        public new Vector<T> Floor()
-            => base.Floor().Vec();
+        public Vector<T> Floor()
+            => ((Tensor<T>)this).Floor().Vec();
 
         /// <summary>Element-wise absolute value.</summary>
-        public new Vector<T> Abs()
-            => base.Abs().Vec();
+        public Vector<T> Abs()
+            => ((Tensor<T>)this).Abs().Vec();
 
         /// <summary>Element-wise reciprocal.</summary>
-        public new Vector<T> Reciprocal()
-            => base.Reciprocal().Vec();
+        public Vector<T> Reciprocal()
+            => ((Tensor<T>)this).Reciprocal().Vec();
 
         /// <summary>Element-wise error function.</summary>
-        public new Vector<T> Erf()
-            => base.Erf().Vec();
+        public Vector<T> Erf()
+            => ((Tensor<T>)this).Erf().Vec();
 
         /// <summary>Element-wise arccosine.</summary>
-        public new Vector<T> Acos()
-            => base.Acos().Vec();
+        public Vector<T> Acos()
+            => ((Tensor<T>)this).Acos().Vec();
 
         /// <summary>Element-wise inverse hyperbolic cosine.</summary>
-        public new Vector<T> Acosh()
-            => base.Acosh().Vec();
+        public Vector<T> Acosh()
+            => ((Tensor<T>)this).Acosh().Vec();
 
         /// <summary>Element-wise arcsine.</summary>
-        public new Vector<T> Asin()
-            => base.Asin().Vec();
+        public Vector<T> Asin()
+            => ((Tensor<T>)this).Asin().Vec();
 
         /// <summary>Element-wise inverse hyperbolic sine.</summary>
-        public new Vector<T> Asinh()
-            => base.Asinh().Vec();
+        public Vector<T> Asinh()
+            => ((Tensor<T>)this).Asinh().Vec();
 
         /// <summary>Element-wise arctangent.</summary>
-        public new Vector<T> Atan()
-            => base.Atan().Vec();
+        public Vector<T> Atan()
+            => ((Tensor<T>)this).Atan().Vec();
 
         /// <summary>Element-wise inverse hyperbolic tangent.</summary>
-        public new Vector<T> Atanh()
-            => base.Atanh().Vec();
+        public Vector<T> Atanh()
+            => ((Tensor<T>)this).Atanh().Vec();
 
         /// <summary>Index of the maximum element, as a scalar.</summary>
         public Scalar<int64> ArgMaxReduce(bool selectLastIndex = false)
-            => base.ArgMax(0, false, selectLastIndex).Scalar();
+            => ((Tensor<T>)this).ArgMax(0, false, selectLastIndex).Scalar();
 
         /// <summary>Index of the maximum element, as a length-1 vector.</summary>
         public Vector<int64> ArgMaxKeepdims(bool selectLastIndex = false)
-            => base.ArgMax(0, true, selectLastIndex).Vec();
+            => ((Tensor<T>)this).ArgMax(0, true, selectLastIndex).Vec();
 
         /// <summary>Index of the minimum element, as a scalar.</summary>
         public Scalar<int64> ArgMinReduce(bool selectLastIndex = false)
-            => base.ArgMin(0, false, selectLastIndex).Scalar();
+            => ((Tensor<T>)this).ArgMin(0, false, selectLastIndex).Scalar();
 
         /// <summary>Index of the minimum element, as a length-1 vector.</summary>
         public Vector<int64> ArgMinKeepdims(bool selectLastIndex = false)
-            => base.ArgMin(0, true, selectLastIndex).Vec();
+            => ((Tensor<T>)this).ArgMin(0, true, selectLastIndex).Vec();
 
         /// <summary>Average pooling with the given kernel shape (ONNX AveragePool).</summary>
-        public new Vector<T> AveragePool(long[] kernelShape, RoundMode roundMode = RoundMode.Floor, bool countIncludePad = false, long[]? dilations = null, long[]? pads = null, long[]? strides = null)
-            => base.AveragePool(kernelShape, roundMode, countIncludePad, dilations, pads, strides).Vec();
+        public Vector<T> AveragePool(long[] kernelShape, RoundMode roundMode = RoundMode.Floor, bool countIncludePad = false, long[]? dilations = null, long[]? pads = null, long[]? strides = null)
+            => ((Tensor<T>)this).AveragePool(kernelShape, roundMode, countIncludePad, dilations, pads, strides).Vec();
 
         /// <summary>Batch normalization using the given scale, bias, mean, and variance (ONNX BatchNormalization).</summary>
-        public new Vector<T> BatchNormalization<T1, T2>(Vector<T1> scale, Vector<T1> bias, Vector<T2> mean, Vector<T2> variance, float epsilon = 1e-05f, float momentum = 0.9f, bool trainingMode = false)
+        public Vector<T> BatchNormalization<T1, T2>(Vector<T1> scale, Vector<T1> bias, Vector<T2> mean, Vector<T2> variance, float epsilon = 1e-05f, float momentum = 0.9f, bool trainingMode = false)
                 where T1 : FloatLike where T2 : FloatLike
-            => base.BatchNormalization(scale, bias, mean, variance, epsilon, momentum, trainingMode).Vec();
+            => ((Tensor<T>)this).BatchNormalization(scale, bias, mean, variance, epsilon, momentum, trainingMode).Vec();
 
         /// <summary>Element-wise Bernoulli sampling, treating each element as a probability.</summary>
-        public new Vector<T> Bernoulli(float? seed = null)
-            => base.Bernoulli(seed).Vec();
+        public Vector<T> Bernoulli(float? seed = null)
+            => ((Tensor<T>)this).Bernoulli(seed).Vec();
 
         /// <summary>Element-wise Bernoulli sampling, treating each element as a probability, with result element type <typeparamref name="V"/>.</summary>
-        public new Vector<V> Bernoulli<V>(float? seed = null) where V : CommonLike
-            => base.Bernoulli<V>(seed).Vec();
+        public Vector<V> Bernoulli<V>(float? seed = null) where V : CommonLike
+            => ((Tensor<T>)this).Bernoulli<V>(seed).Vec();
 
         /// <summary>Element-wise CELU activation.</summary>
-        public new Vector<T> Celu(float alpha = 1.0f)
-            => base.Celu(alpha).Vec();
+        public Vector<T> Celu(float alpha = 1.0f)
+            => ((Tensor<T>)this).Celu(alpha).Vec();
 
         /// <summary>Element-wise ceiling.</summary>
-        public new Vector<T> Ceiling()
-            => base.Ceiling().Vec();
+        public Vector<T> Ceiling()
+            => ((Tensor<T>)this).Ceiling().Vec();
 
         /// <summary>Element-wise cosine.</summary>
-        public new Vector<T> Cos()
-            => base.Cos().Vec();
+        public Vector<T> Cos()
+            => ((Tensor<T>)this).Cos().Vec();
 
         /// <summary>Element-wise hyperbolic cosine.</summary>
-        public new Vector<T> Cosh()
-            => base.Cosh().Vec();
+        public Vector<T> Cosh()
+            => ((Tensor<T>)this).Cosh().Vec();
 
         /// <summary>Element-wise sine.</summary>
-        public new Vector<T> Sin()
-            => base.Sin().Vec();
+        public Vector<T> Sin()
+            => ((Tensor<T>)this).Sin().Vec();
 
         /// <summary>Element-wise hyperbolic sine.</summary>
-        public new Vector<T> Sinh()
-            => base.Sinh().Vec();
+        public Vector<T> Sinh()
+            => ((Tensor<T>)this).Sinh().Vec();
 
         /// <summary>Element-wise tangent.</summary>
-        public new Vector<T> Tan()
-            => base.Tan().Vec();
+        public Vector<T> Tan()
+            => ((Tensor<T>)this).Tan().Vec();
 
         /// <summary>Element-wise hyperbolic tangent.</summary>
-        public new Vector<T> Tanh()
-            => base.Tanh().Vec();
+        public Vector<T> Tanh()
+            => ((Tensor<T>)this).Tanh().Vec();
 
         /// <summary>Element-wise power.</summary>
-        public new Vector<T> Pow<T1>(Tensor<T1> power) where T1 : IVarType
-            => base.Pow(power).Vec();
+        public Vector<T> Pow<T1>(Tensor<T1> power) where T1 : IVarType
+            => ((Tensor<T>)this).Pow(power).Vec();
 
         /// <summary>Element-wise natural logarithm.</summary>
-        public new Vector<T> Ln()
-            => base.Ln().Vec();
+        public Vector<T> Ln()
+            => ((Tensor<T>)this).Ln().Vec();
 
         /// <summary>Element-wise square root.</summary>
-        public new Vector<T> Sqrt()
-            => base.Sqrt().Vec();
+        public Vector<T> Sqrt()
+            => ((Tensor<T>)this).Sqrt().Vec();
 
         /// <summary>Element-wise sign.</summary>
-        public new Vector<T> Sign()
-            => base.Sign().Vec();
+        public Vector<T> Sign()
+            => ((Tensor<T>)this).Sign().Vec();
 
         /// <summary>Concatenates this vector with <paramref name="others"/>.</summary>
         public Vector<T> Concat(params Vector<T>[] others)
-            =>  ((Tensor<T>)OnnxOp.Concat([this, .. others], 0)).Vec();
+            // The Variable→Vector<T> operator validates the rank-1 result.
+            => OnnxOp.Concat([this, .. others], 0);
 
         /// <summary>Pads with <paramref name="padLeft"/> elements before and <paramref name="padRight"/> elements after the vector.</summary>
         public Vector<T> Pad(PadMode mode, Scalar<int64> padLeft, Scalar<int64> padRight, Scalar<T> val)
-            => base.Pad(mode, pads: (Vector<int64>)[padLeft, padRight], val: val, axes: null).Vec();
+            => ((Tensor<T>)this).Pad(mode, pads: (Vector<int64>)[padLeft, padRight], val: val, axes: null).Vec();
 
         /// <summary>Pads using begin (<paramref name="outerPads"/>) and end (<paramref name="innerPads"/>) pad counts.</summary>
         public Vector<T> Pad(PadMode mode, Vector<int64> outerPads, Vector<int64> innerPads, Scalar<T> val)
-            => base.Pad(mode, outerPads, innerPads, val, axes: null).Vec();
+            => ((Tensor<T>)this).Pad(mode, outerPads, innerPads, val, axes: null).Vec();
 
         /// <summary>Pads using begin (<paramref name="outerPads"/>) and end (<paramref name="innerPads"/>) pad counts.</summary>
-        public new Vector<T> Pad(PadMode mode, Vector<int64> outerPads, Vector<int64> innerPads, Scalar<T>? val = null, Vector<int64>? axes = null)
-            => base.Pad(mode, outerPads, innerPads, val, axes).Vec();
+        public Vector<T> Pad(PadMode mode, Vector<int64> outerPads, Vector<int64> innerPads, Scalar<T>? val = null, Vector<int64>? axes = null)
+            => ((Tensor<T>)this).Pad(mode, outerPads, innerPads, val, axes).Vec();
 
         /// <summary>Pads using an ONNX-style pads vector (begin counts, then end counts).</summary>
         public Vector<T> Pad(PadMode mode, Vector<int64> pads, Scalar<T> val)
-            => base.Pad(mode, pads, val, axes: null).Vec();
+            => ((Tensor<T>)this).Pad(mode, pads, val, axes: null).Vec();
         /// <summary>Pads using an ONNX-style pads vector (begin counts, then end counts).</summary>
-        public new Vector<T> Pad(PadMode mode, Vector<int64> pads, Scalar<T>? val = null, Vector<int64>? axes = null)
-            => base.Pad(mode, pads, val, axes).Vec();
+        public Vector<T> Pad(PadMode mode, Vector<int64> pads, Scalar<T>? val = null, Vector<int64>? axes = null)
+            => ((Tensor<T>)this).Pad(mode, pads, val, axes).Vec();
 
         /// <summary>Element-wise ELU activation.</summary>
-        public new Vector<T> Elu(float alpha = 1.0f)
-            => base.Elu(alpha).Vec();
+        public Vector<T> Elu(float alpha = 1.0f)
+            => ((Tensor<T>)this).Elu(alpha).Vec();
 
         /// <summary>Element-wise GELU activation.</summary>
-        public new Vector<T> Gelu(GeluApproximate approximate = GeluApproximate.None)
-            => base.Gelu(approximate).Vec();
+        public Vector<T> Gelu(GeluApproximate approximate = GeluApproximate.None)
+            => ((Tensor<T>)this).Gelu(approximate).Vec();
 
         /// <summary>Element-wise leaky ReLU activation.</summary>
-        public new Vector<T> LeakyRelu(float alpha = 0.01f)
-            => base.LeakyRelu(alpha).Vec();
+        public Vector<T> LeakyRelu(float alpha = 0.01f)
+            => ((Tensor<T>)this).LeakyRelu(alpha).Vec();
 
         /// <summary>Element-wise ReLU activation.</summary>
-        public new Vector<T> Relu()
-            => base.Relu().Vec();
+        public Vector<T> Relu()
+            => ((Tensor<T>)this).Relu().Vec();
 
         /// <summary>Element-wise SELU activation.</summary>
-        public new Vector<T> Selu(float alpha = 1.67326319217681884765625f, float gamma = 1.0507010221481323242187f)
-            => base.Selu(alpha, gamma).Vec();
+        public Vector<T> Selu(float alpha = 1.67326319217681884765625f, float gamma = 1.0507010221481323242187f)
+            => ((Tensor<T>)this).Selu(alpha, gamma).Vec();
 
         /// <summary>Element-wise sigmoid.</summary>
-        public new Vector<T> Sigmoid()
-            => base.Sigmoid().Vec();
+        public Vector<T> Sigmoid()
+            => ((Tensor<T>)this).Sigmoid().Vec();
 
         /// <summary>Top <paramref name="k"/> values and their indices.</summary>
-        public new (Vector<T> topK, Vector<int64> indices) TopK(long k, long axis = -1, bool largest = true, bool sorted = true)
+        public (Vector<T> topK, Vector<int64> indices) TopK(long k, long axis = -1, bool largest = true, bool sorted = true)
         {
-            var results = base.TopK(k, axis, largest, sorted);
+            var results = ((Tensor<T>)this).TopK(k, axis, largest, sorted);
             return (results.topK.Vec(), results.indices.Vec());
         }
 
         /// <summary>Writes <paramref name="values"/> at <paramref name="indices"/> into a copy of this vector (ONNX ScatterND).</summary>
-        public new Vector<T> ScatterND(Tensor<int64> indices, Tensor<T> values, ScatterNDReduction? reduceMode = ScatterNDReduction.None)
-            => base.ScatterND(indices, values, reduceMode).Vec();
+        public Vector<T> ScatterND(Tensor<int64> indices, Tensor<T> values, ScatterNDReduction? reduceMode = ScatterNDReduction.None)
+            => ((Tensor<T>)this).ScatterND(indices, values, reduceMode).Vec();
 
         /// <summary>Element-wise clamping to [min, max].</summary>
-        public new Vector<T> Clip(Scalar<T> min, Scalar<T> max)
-            => base.Clip(min, max).Vec();
+        public Vector<T> Clip(Scalar<T> min, Scalar<T> max)
+            => ((Tensor<T>)this).Clip(min, max).Vec();
 
         /// <summary>Selects elements where <paramref name="condition"/> is true.</summary>
-        public new Vector<T> Compress(Vector<bit> condition, long axis)
-            => (Vector<T>)OnnxOp.Compress(this, condition, axis);
+        public Vector<T> Compress(Vector<bit> condition, long axis)
+            => OnnxOp.Compress(this, condition, axis);
 
         /// <summary>Element-wise exponential.</summary>
-        public new Vector<T> Exp()
-            => base.Exp().Vec();
-
-        #endregion
-
-        #region Equal and HashCode
-
-        /// <summary>Reference equality; element-wise comparison is provided by the equality operators.</summary>
-        public override bool Equals(object? obj) => base.Equals(obj);
-
-        /// <summary>Identity-based hash code, consistent with reference equality.</summary>
-        public override int GetHashCode() => base.GetHashCode();
+        public Vector<T> Exp()
+            => ((Tensor<T>)this).Exp().Vec();
 
         #endregion
     }

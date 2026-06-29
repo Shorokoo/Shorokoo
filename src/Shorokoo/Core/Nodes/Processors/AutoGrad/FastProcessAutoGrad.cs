@@ -22,8 +22,8 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
     /// Fast-native autograd lowering. For each <c>AUTO_GRAD</c> node in the graph, walks the
     /// forward subgraph from <c>loss</c> back to the AUTO_GRAD parameter inputs in reverse
     /// topological order, calling each forward node's <c>[AutoDiff]</c> gradient method in
-    /// IVariable land with fresh stand-in inputs (one per slot per call), then splices the
-    /// resulting gradient IVariable subgraph back into the host Fast graph and rewires
+    /// Variable land with fresh stand-in inputs (one per slot per call), then splices the
+    /// resulting gradient Variable subgraph back into the host Fast graph and rewires
     /// consumers of the AUTO_GRAD outputs to point at the new gradient keys.
     ///
     /// <para>
@@ -31,7 +31,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
     /// <list type="bullet">
     ///   <item>Loss dtype is float32 (hardcoded; revisit when needed).</item>
     ///   <item>Per-tensor dtype is stripped during Fast conversion, so dtype mismatches
-    ///         between the all-float32 IVariable gradient subgraph and the host Fast graph
+    ///         between the all-float32 Variable gradient subgraph and the host Fast graph
     ///         wash out at the splice boundary.</item>
     ///   <item>Functions are pre-inlined. <c>IF</c> pairs are differentiable via the
     ///         <c>IF_CLOSE</c> gradient; dynamic <c>LOOP</c> control flow has no backward
@@ -135,25 +135,25 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             var tensorInfo = FastTensorInfoProcessor.BuildTensorInfoLookup(graph);
 
             // 2. Walk in reverse topo order, calling per-node gradient methods.
-            var gradByKey = new Dictionary<FastTensorKey, IVariable>();
-            var freshInputBacking = new Dictionary<IVariable, FastTensorKey>(ReferenceEqualityComparer.Instance);
+            var gradByKey = new Dictionary<FastTensorKey, Variable>();
+            var freshInputBacking = new Dictionary<Variable, FastTensorKey>(ReferenceEqualityComparer.Instance);
 
             // Initialize loss gradient: a Scalar<float32> = 1.0. We hardcode float32 here;
             // see class doc for the rationale.
-            gradByKey[lossKey] = Globals.Scalar(1.0f);
+            gradByKey[lossKey] = (Variable)Globals.Scalar(1.0f);
 
             for (int i = topoOrder.Count - 1; i >= 0; i--)
             {
                 ProcessNode(topoOrder[i], gradByKey, freshInputBacking, gradOpsMap, nodesByKey, tensorInfo);
             }
 
-            // 3. Splice gradient IVariable subgraphs into a temporary list. We maintain a
-            //    single IVariable→FastTensorKey map across all splices so that shared
+            // 3. Splice gradient Variable subgraphs into a temporary list. We maintain a
+            //    single Variable→FastTensorKey map across all splices so that shared
             //    sub-expressions between different params' gradients only emit one FastNode
             //    (otherwise two splices would produce duplicate FastNodeKeys via FromCgKey
-            //    for the same IVariable Node).
-            // 3. Lower the gradient IVariable subgraph via the standard FastComputationGraph
-            //    constructor, with externalInputKeys mapping each fresh stand-in IVariable to
+            //    for the same Variable Node).
+            // 3. Lower the gradient Variable subgraph via the standard FastComputationGraph
+            //    constructor, with externalInputKeys mapping each fresh stand-in Variable to
             //    the host-graph FastTensorKey it represents. The constructor sorts by
             //    OrderingHintNumber, drops the stand-in MODEL_TENSOR_INPUT nodes, and emits
             //    body FastNodes that already reference host keys directly.
@@ -227,7 +227,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             FastNode lossProducer,
             HashSet<FastTensorKey> paramKeySet,
             Dictionary<FastTensorKey, FastNode> producerByOutput,
-            Dictionary<string, Func<IVariable?[], IVariable?[], OnnxCSharpAttributes, IVariable?[]>> gradOpsMap,
+            Dictionary<string, Func<Variable?[], Variable?[], OnnxCSharpAttributes, Variable?[]>> gradOpsMap,
             HashSet<FastNodeKey> paramDependent)
         {
             var reachable = new HashSet<FastNodeKey>();
@@ -297,14 +297,14 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
 
         private static void ProcessNode(
             FastNode node,
-            Dictionary<FastTensorKey, IVariable> gradByKey,
-            Dictionary<IVariable, FastTensorKey> freshInputBacking,
-            Dictionary<string, Func<IVariable?[], IVariable?[], OnnxCSharpAttributes, IVariable?[]>> gradOpsMap,
+            Dictionary<FastTensorKey, Variable> gradByKey,
+            Dictionary<Variable, FastTensorKey> freshInputBacking,
+            Dictionary<string, Func<Variable?[], Variable?[], OnnxCSharpAttributes, Variable?[]>> gradOpsMap,
             Dictionary<FastNodeKey, FastNode> nodesByKey,
             Dictionary<FastTensorKey, FastTensorInfo> tensorInfo)
         {
             var outputs = node.Outputs;
-            var outputGrads = new IVariable?[outputs.Count];
+            var outputGrads = new Variable?[outputs.Count];
             for (int i = 0; i < outputs.Count; i++)
             {
                 if (outputs[i] is FastTensorKey k && gradByKey.TryGetValue(k, out var g))
@@ -335,8 +335,8 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
                           + "[AutoDiff] gradient for the op or detach it from the loss path.");
             }
 
-            // Build fresh stand-in IVariables for each input slot. We pick the dtype from the
-            // gradient method's parameter type when it's a concrete IVariable subtype (e.g.
+            // Build fresh stand-in IValues for each input slot. We pick the dtype from the
+            // gradient method's parameter type when it's a concrete Variable subtype (e.g.
             // Tensor<int64> for shape/axes/indices); generic Tensor<T> parameters default to
             // float32, in line with the loss-grad-is-float32 assumption.
             //
@@ -370,14 +370,14 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
                 withMask.Add((FastTensorKey)node.Outputs[1]!);
                 inputs = withMask;
             }
-            var inputIVariables = new IVariable?[inputs.Count];
+            var inputIValues = new Variable?[inputs.Count];
             gradientMethodInfos.TryGetValue(node.OpCode, out var methodInfo);
             var methodParams = methodInfo?.GetParameters();
             for (int i = 0; i < inputs.Count; i++)
             {
                 if (inputs[i] is not FastTensorKey k)
                 {
-                    inputIVariables[i] = null;
+                    inputIValues[i] = null;
                     continue;
                 }
                 var (slotDtype, slotRank) = ResolveSlotDtype(methodParams, i);
@@ -387,14 +387,14 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
                 if (slotRank is null && tensorInfo.TryGetValue(k, out var info))
                     slotRank = info.Rank;
                 var fresh = InternalOp.RuntimeInput(slotDtype, rank: slotRank);
-                inputIVariables[i] = fresh;
+                inputIValues[i] = fresh;
                 freshInputBacking[fresh] = k;
             }
 
-            IVariable?[] inputGrads;
+            Variable?[] inputGrads;
             try
             {
-                inputGrads = gradOp(inputIVariables, outputGrads, node.Attributes);
+                inputGrads = gradOp(inputIValues, outputGrads, node.Attributes);
             }
             catch (AutoDiffNotSupportedException)
             {
@@ -414,10 +414,13 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
                 if (inputs[i] is not FastTensorKey k) continue;
                 if (inputGrads[i] is null) continue;
 
+                // Gradient ops already return graph nodes.
+                var grad = inputGrads[i]!;
+
                 if (gradByKey.TryGetValue(k, out var existing))
-                    gradByKey[k] = AutoDiffEngine.AccumulateGradients(existing, inputGrads[i]!);
+                    gradByKey[k] = AutoDiffEngine.AccumulateGradients(existing, grad);
                 else
-                    gradByKey[k] = inputGrads[i]!;
+                    gradByKey[k] = grad;
             }
         }
 
@@ -427,7 +430,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
 
         private static FastTensorKey SpliceZerosLike(List<FastNode> newNodes, FastTensorKey paramKey)
         {
-            // We can build a Sub(p, p) FastNode directly without going through IVariable land,
+            // We can build a Sub(p, p) FastNode directly without going through Variable land,
             // since both inputs share the same FastTensorKey.
             var fastNode = new FastNode
             {
@@ -527,12 +530,12 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         }
 
         /// <summary>
-        /// Returns the dtype and rank to use for the stand-in IVariable at slot
+        /// Returns the dtype and rank to use for the stand-in Variable at slot
         /// <paramref name="slotIdx"/>. When the gradient method's parameter at that index is a
         /// concrete <c>Scalar&lt;TConcrete&gt;</c>, <c>Vector&lt;TConcrete&gt;</c>, or
         /// <c>Tensor&lt;TConcrete&gt;</c>, returns <c>TConcrete</c>'s dtype and the
         /// matching rank (0 for Scalar, 1 for Vector, null for Tensor) so
-        /// <see cref="Node.MakeOutput"/> picks the same concrete IVariable subtype the gradient
+        /// <see cref="Node.MakeOutput"/> picks the same concrete Variable subtype the gradient
         /// method declares — otherwise the eventual reflection invoke fails with a cast error.
         /// Defaults to (<see cref="DType.Float32"/>, null) when the parameter is generic or
         /// untyped.
@@ -541,7 +544,9 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         {
             if (methodParams is null || slotIdx >= methodParams.Length) return (DType.Float32, null);
 
-            var paramType = methodParams[slotIdx].ParameterType;
+            // A value-struct handle parameter may be declared nullable (`Tensor<T>?` == Nullable<Tensor<T>>);
+            // unwrap it to recover the underlying handle type.
+            var paramType = Nullable.GetUnderlyingType(methodParams[slotIdx].ParameterType) ?? methodParams[slotIdx].ParameterType;
             if (paramType.ContainsGenericParameters) return (DType.Float32, null);
 
             if (paramType.IsGenericType)

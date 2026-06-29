@@ -60,7 +60,7 @@ internal abstract class QuickOp
     /// Shared tail used by every <see cref="Execute"/> override: delegates to
     /// <see cref="ComputeWithLoopBack"/> and enforces the per-output data-size limit. Each op
     /// is expected to emit <see cref="IRuntimeTensor"/> results with their dtype already
-    /// populated (no ReferenceTensor wiring — FastNode has no IVariable objects).
+    /// populated (no ReferenceTensor wiring — FastNode has no Variable objects).
     /// </summary>
     protected (IRuntimeTensor[] results, bool loopBack) RunCompute(
         IRuntimeTensor?[] inputs,

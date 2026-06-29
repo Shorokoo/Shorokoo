@@ -44,7 +44,7 @@ internal sealed record class RuntimeTensor : IRuntimeTensor
     public int? MaxRank { get; init; }
 
     /// <inheritdoc />
-    public IVariable? ReferenceTensor { get; init; }
+    public Variable? ReferenceTensor { get; init; }
 
     /// <summary>Data for float-like dtypes. Null if unknown or too large.</summary>
     public ImmutableArray<float>? FloatData { get; init; }

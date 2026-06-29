@@ -103,9 +103,8 @@ namespace Shorokoo.Tests.Modules
             return mismatch < Scalar(1L);
         }
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Resize with NEGATIVE axes (spec opset 18+: counted from the back) — QEE-only:
@@ -136,9 +135,8 @@ namespace Shorokoo.Tests.Modules
             return mismatch < Scalar(1L);
         }
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Upsample (deprecated — exported to ORT via the LowerUpsampleToResize
@@ -175,9 +173,8 @@ namespace Shorokoo.Tests.Modules
             return mismatch < Scalar(1L);
         }
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>AffineGrid 3-D (theta [N,3,4], size [N,C,D,H,W] → grid [N,D,H,W,3]) and the
@@ -202,9 +199,8 @@ namespace Shorokoo.Tests.Modules
             return mismatch < Scalar(1L);
         }
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>RoiAlign shape audit: output is [num_rois, C, output_height, output_width]
@@ -230,9 +226,8 @@ namespace Shorokoo.Tests.Modules
             return mismatch < Scalar(1L);
         }
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>NonMaxSuppression against real ORT execution: the [n,3] output shape with
@@ -263,9 +258,8 @@ namespace Shorokoo.Tests.Modules
             return mismatch < Scalar(1L);
         }
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>NonMaxSuppression with the max_output_boxes_per_class input ABSENT — the
@@ -333,9 +327,8 @@ namespace Shorokoo.Tests.Modules
         private static Scalar<float32> Sum(Tensor<float32> t)
             => t.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Random-generator family shape/dtype audit (values are nondeterministic and
@@ -384,9 +377,8 @@ namespace Shorokoo.Tests.Modules
             return (mismatch < Scalar(1L)) & eyeValuesOk;
         }
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Seeded determinism (ORT-only — QEE never computes random values): two
@@ -446,9 +438,8 @@ namespace Shorokoo.Tests.Modules
             return (shapeMismatch < Scalar(1L)) & valuesOk;
         }
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Constant value_string / value_strings branches — output inspected directly
@@ -498,9 +489,8 @@ namespace Shorokoo.Tests.Modules
             return mismatch < Scalar(1L);
         }
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>GRU shape audit (ORT-validated): forward with linear_before_reset and
@@ -528,9 +518,8 @@ namespace Shorokoo.Tests.Modules
             return mismatch < Scalar(1L);
         }
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>QEE-only recurrent variants that ORT's CPU kernels reject: hidden_size
@@ -585,9 +574,8 @@ namespace Shorokoo.Tests.Modules
             return mismatch < Scalar(1L);
         }
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>LSTM shape audit: forward with every optional input wired (B,
@@ -623,9 +611,8 @@ namespace Shorokoo.Tests.Modules
             return mismatch < Scalar(1L);
         }
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
 }

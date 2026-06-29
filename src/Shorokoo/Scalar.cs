@@ -26,13 +26,47 @@ namespace Shorokoo
     {
     }
 
-    /// <summary>
-    /// A rank-0 symbolic tensor holding a single element of type <typeparamref name="T"/>.
-    /// Operations mirror <see cref="Tensor{T}"/> but statically preserve the scalar rank in their return types.
-    /// </summary>
-    public class Scalar<T> : Tensor<T>, IScalar
-        where T : IVarType
+    public partial struct Scalar<T> : IScalar where T : IVarType
     {
+        private Variable? inner;
+        // The backing graph node, materialising the established default (per dtype/rank) for a defaulted handle.
+        internal Variable Immutable => inner ?? InternalGlobals.DefaultVariable(typeof(Scalar<T>));
+
+        private static readonly DType? expectedDType = OnnxUtils.GetDType(typeof(T));
+        public static implicit operator Scalar<T>(Variable imm)
+        {
+            IValue.RequireKind(imm, DataStructure.Tensor);
+            IValue.RequireDType(imm, expectedDType);
+            return new Scalar<T> { inner = IValue.RequireRank(imm, 0) };
+        }
+        public static implicit operator Variable(Scalar<T> h) => h.Immutable;
+        public static implicit operator Tensor<T>(Scalar<T> h) => h.Immutable;
+
+        // Convert to the backing graph node, materialising the established default for a defaulted handle.
+        Variable IValue.ToVariable() => Immutable;
+
+        // ITensor contract — forward to the backing Variable.
+        public int? Rank => Immutable.Rank;
+        public Vector<int64> DShape => Immutable.DShape;
+        public Vector<int64> TShape => Immutable.TShape;
+        public Scalar<int64> TRank => Immutable.TRank;
+        public Vector<T> Vec() => (Vector<T>)Immutable;     // throws: a rank-0 scalar is not a vector
+        IVector ITensor.Vec() => Vec();
+        IScalar ITensor.Scalar() => (Scalar<T>)Immutable;   // a Scalar<T> has no public Scalar(); already rank-0
+        Tensor<V> ITensor.Cast<V>(bool saturate) => Immutable.Cast<V>(saturate);
+
+        public Node OwningNode => Immutable.OwningNode;
+        public DType Type => Immutable.Type;
+        public Function? ModuleFn => Immutable.ModuleFn;
+        public TensorKey Key => Immutable.Key;
+        public string UniqueName => Immutable.UniqueName;
+        public bool IsValid { get => Immutable.IsValid; set => Immutable.IsValid = value; }
+#pragma warning disable CS0618
+        string? IValue.FriendlyName => ((IValue)Immutable).FriendlyName;
+#pragma warning restore CS0618
+        public override bool Equals(object? obj) => obj is Scalar<T> t && Equals(inner, t.inner);
+        public override int GetHashCode() => inner?.GetHashCode() ?? 0;
+
         private static Scalar<T>? unit; 
         /// <summary>A cached constant scalar of value 1 (true for bit).</summary>
         public static Scalar<T> Unit
@@ -64,21 +98,12 @@ namespace Shorokoo
                 }
 
                 Debug.Assert(Shorokoo.Scalar<T>.unit is not null);
-                return Shorokoo.Scalar<T>.unit;
+                return Shorokoo.Scalar<T>.unit!.Value;
             }
         }
 
-        /// <summary>The inferred shape of a scalar: the empty shape vector.</summary>
-        public override Vector<int64> InfShape => Vector<int64>.Empty;
-
-        internal Scalar(Node owningNode, DType dtype, Function? moduleFn, string? name = null) : base(() => Vector<int64>.Empty, dtype, owningNode, moduleFn, name, rank: 0)
-        {
-        }
-
-        /// <summary>Wraps a primitive constant value as a scalar.</summary>
         public static implicit operator Scalar<T>(PrimitiveParam param)
             => Globals.Scalar<T>(param.ParamVal);
-
         #region Primitive value conversions
 
         // A bare primitive cannot reach Scalar<T> through the PrimitiveParam conversion above:
@@ -118,15 +143,6 @@ namespace Shorokoo
         public static implicit operator Scalar<T>(BFloat16 value) => Globals.Scalar<T>(value);
 
         #endregion
-
-        /// <summary>Reference equality; element-wise comparison is provided by the equality operators.</summary>
-        public override bool Equals(object? obj)
-             => base.Equals(obj);
-
-        /// <summary>Identity-based hash code, consistent with reference equality.</summary>
-        public override int GetHashCode()
-            => base.GetHashCode();
-
         #region ONNX Operators
 
         /// <summary>Scalar addition.</summary>
@@ -202,196 +218,196 @@ namespace Shorokoo
             => ((Tensor<T>)left != (Tensor<T>)right).Scalar();
 
         /// <summary>Casts the element type to <typeparamref name="V"/>, preserving rank 0.</summary>
-        public new Scalar<V> Cast<V>(bool saturate = true) where V : IVarType
-            => base.Cast<V>(saturate).Scalar();
+        public Scalar<V> Cast<V>(bool saturate = true) where V : IVarType
+            => ((Tensor<T>)this).Cast<V>(saturate).Scalar();
 
         /// <summary>Minimum of this scalar and <paramref name="others"/>.</summary>
         public Scalar<T> Min(params Scalar<T>[] others)
-            => base.Min(others).Scalar();
+            => ((Tensor<T>)this).Min([.. others.Select(o => (Tensor<T>)o)]).Scalar();
 
         /// <summary>Maximum of this scalar and <paramref name="others"/>.</summary>
         public Scalar<T> Max(params Scalar<T>[] others)
-            => base.Max(others).Scalar();
+            => ((Tensor<T>)this).Max([.. others.Select(o => (Tensor<T>)o)]).Scalar();
 
         /// <summary>Scalar floor.</summary>
-        public new Scalar<T> Floor()
-            => base.Floor().Scalar();
+        public Scalar<T> Floor()
+            => ((Tensor<T>)this).Floor().Scalar();
 
         /// <summary>Scalar absolute value.</summary>
-        public new Scalar<T> Abs()
-            => base.Abs().Scalar();
+        public Scalar<T> Abs()
+            => ((Tensor<T>)this).Abs().Scalar();
 
         /// <summary>Scalar arccosine.</summary>
-        public new Scalar<T> Acos()
-            => base.Acos().Scalar();
+        public Scalar<T> Acos()
+            => ((Tensor<T>)this).Acos().Scalar();
 
         /// <summary>Scalar inverse hyperbolic cosine.</summary>
-        public new Scalar<T> Acosh()
-            => base.Acosh().Scalar();
+        public Scalar<T> Acosh()
+            => ((Tensor<T>)this).Acosh().Scalar();
 
         /// <summary>Scalar arcsine.</summary>
-        public new Scalar<T> Asin()
-            => base.Asin().Scalar();
+        public Scalar<T> Asin()
+            => ((Tensor<T>)this).Asin().Scalar();
 
         /// <summary>Scalar inverse hyperbolic sine.</summary>
-        public new Scalar<T> Asinh()
-            => base.Asinh().Scalar();
+        public Scalar<T> Asinh()
+            => ((Tensor<T>)this).Asinh().Scalar();
 
         /// <summary>Scalar arctangent.</summary>
-        public new Scalar<T> Atan()
-            => base.Atan().Scalar();
+        public Scalar<T> Atan()
+            => ((Tensor<T>)this).Atan().Scalar();
 
         /// <summary>Scalar inverse hyperbolic tangent.</summary>
-        public new Scalar<T> Atanh()
-            => base.Atanh().Scalar();
+        public Scalar<T> Atanh()
+            => ((Tensor<T>)this).Atanh().Scalar();
 
         /// <summary>Bernoulli sample, treating this scalar as a probability.</summary>
-        public new Scalar<T> Bernoulli(float? seed = null)
-            => base.Bernoulli(seed).Scalar();
+        public Scalar<T> Bernoulli(float? seed = null)
+            => ((Tensor<T>)this).Bernoulli(seed).Scalar();
 
         /// <summary>Bernoulli sample, treating this scalar as a probability, with result element type <typeparamref name="V"/>.</summary>
-        public new Scalar<V> Bernoulli<V>(float? seed = null) where V : CommonLike
-            => base.Bernoulli<V>(seed).Scalar();
+        public Scalar<V> Bernoulli<V>(float? seed = null) where V : CommonLike
+            => ((Tensor<T>)this).Bernoulli<V>(seed).Scalar();
 
         /// <summary>Scalar CELU activation.</summary>
-        public new Scalar<T> Celu(float alpha = 1.0f)
-            => base.Celu(alpha).Scalar();
+        public Scalar<T> Celu(float alpha = 1.0f)
+            => ((Tensor<T>)this).Celu(alpha).Scalar();
 
         /// <summary>Scalar ceiling.</summary>
-        public new Scalar<T> Ceiling()
-            => base.Ceiling().Scalar();
+        public Scalar<T> Ceiling()
+            => ((Tensor<T>)this).Ceiling().Scalar();
 
         /// <summary>Scalar cosine.</summary>
-        public new Scalar<T> Cos()
-            => base.Cos().Scalar();
+        public Scalar<T> Cos()
+            => ((Tensor<T>)this).Cos().Scalar();
 
         /// <summary>Scalar hyperbolic cosine.</summary>
-        public new Scalar<T> Cosh()
-            => base.Cosh().Scalar();
+        public Scalar<T> Cosh()
+            => ((Tensor<T>)this).Cosh().Scalar();
 
         /// <summary>Scalar sine.</summary>
-        public new Scalar<T> Sin()
-            => base.Sin().Scalar();
+        public Scalar<T> Sin()
+            => ((Tensor<T>)this).Sin().Scalar();
 
         /// <summary>Scalar hyperbolic sine.</summary>
-        public new Scalar<T> Sinh()
-            => base.Sinh().Scalar();
+        public Scalar<T> Sinh()
+            => ((Tensor<T>)this).Sinh().Scalar();
 
         /// <summary>Scalar tangent.</summary>
-        public new Scalar<T> Tan()
-            => base.Tan().Scalar();
+        public Scalar<T> Tan()
+            => ((Tensor<T>)this).Tan().Scalar();
 
         /// <summary>Scalar hyperbolic tangent.</summary>
-        public new Scalar<T> Tanh()
-            => base.Tanh().Scalar();
+        public Scalar<T> Tanh()
+            => ((Tensor<T>)this).Tanh().Scalar();
 
         /// <summary>Scalar power.</summary>
         public Scalar<T> Pow<T1>(Scalar<T1> power) where T1 : IVarType
-            => base.Pow(power).Scalar();
+            => ((Tensor<T>)this).Pow<T1>(power).Scalar();
 
         /// <summary>Scalar natural logarithm.</summary>
-        public new Scalar<T> Ln()
-            => base.Ln().Scalar();
+        public Scalar<T> Ln()
+            => ((Tensor<T>)this).Ln().Scalar();
 
         /// <summary>Scalar square root.</summary>
-        public new Scalar<T> Sqrt()
-            => base.Sqrt().Scalar();
+        public Scalar<T> Sqrt()
+            => ((Tensor<T>)this).Sqrt().Scalar();
 
         /// <summary>Scalar reciprocal.</summary>
-        public new Scalar<T> Reciprocal()
-            => base.Reciprocal().Scalar();
+        public Scalar<T> Reciprocal()
+            => ((Tensor<T>)this).Reciprocal().Scalar();
 
         /// <summary>Scalar error function.</summary>
-        public new Scalar<T> Erf()
-            => base.Erf().Scalar();
+        public Scalar<T> Erf()
+            => ((Tensor<T>)this).Erf().Scalar();
 
         /// <summary>Scalar sign.</summary>
-        public new Scalar<T> Sign()
-            => base.Sign().Scalar();
+        public Scalar<T> Sign()
+            => ((Tensor<T>)this).Sign().Scalar();
 
         /// <summary>Scalar ELU activation.</summary>
-        public new Scalar<T> Elu(float alpha = 1.0f)
-            => base.Elu(alpha).Scalar();
+        public Scalar<T> Elu(float alpha = 1.0f)
+            => ((Tensor<T>)this).Elu(alpha).Scalar();
 
         /// <summary>Scalar GELU activation.</summary>
-        public new Scalar<T> Gelu(GeluApproximate approximate = GeluApproximate.None)
-            => base.Gelu(approximate).Scalar();
+        public Scalar<T> Gelu(GeluApproximate approximate = GeluApproximate.None)
+            => ((Tensor<T>)this).Gelu(approximate).Scalar();
 
         /// <summary>Scalar leaky ReLU activation.</summary>
-        public new Scalar<T> LeakyRelu(float alpha = 0.01f)
-            => base.LeakyRelu(alpha).Scalar();
+        public Scalar<T> LeakyRelu(float alpha = 0.01f)
+            => ((Tensor<T>)this).LeakyRelu(alpha).Scalar();
 
         /// <summary>Scalar ReLU activation.</summary>
-        public new Scalar<T> Relu()
-            => base.Relu().Scalar();
+        public Scalar<T> Relu()
+            => ((Tensor<T>)this).Relu().Scalar();
 
         /// <summary>Scalar SELU activation.</summary>
-        public new Scalar<T> Selu(float alpha = 1.67326319217681884765625f, float gamma = 1.0507010221481323242187f)
-            => base.Selu(alpha, gamma).Scalar();
+        public Scalar<T> Selu(float alpha = 1.67326319217681884765625f, float gamma = 1.0507010221481323242187f)
+            => ((Tensor<T>)this).Selu(alpha, gamma).Scalar();
 
         /// <summary>Scalar sigmoid.</summary>
-        public new Scalar<T> Sigmoid()
-            => base.Sigmoid().Scalar();
+        public Scalar<T> Sigmoid()
+            => ((Tensor<T>)this).Sigmoid().Scalar();
 
         /// <summary>Scalar hard sigmoid.</summary>
-        public new Scalar<T> HardSigmoid(float? alpha = null, float? beta = null)
-            => base.HardSigmoid(alpha, beta).Scalar();
+        public Scalar<T> HardSigmoid(float? alpha = null, float? beta = null)
+            => ((Tensor<T>)this).HardSigmoid(alpha, beta).Scalar();
 
         /// <summary>Scalar hard swish.</summary>
-        public new Scalar<T> HardSwish()
-            => base.HardSwish().Scalar();
+        public Scalar<T> HardSwish()
+            => ((Tensor<T>)this).HardSwish().Scalar();
 
         /// <summary>Tests whether the value is infinite, yielding a bit scalar.</summary>
-        public new Scalar<bit> IsInf(bool detectNegative = true, bool detectPositive = true)
-            => base.IsInf(detectNegative, detectPositive).Scalar();
+        public Scalar<bit> IsInf(bool detectNegative = true, bool detectPositive = true)
+            => ((Tensor<T>)this).IsInf(detectNegative, detectPositive).Scalar();
 
         /// <summary>Tests whether the value is NaN, yielding a bit scalar.</summary>
-        public new Scalar<bit> IsNaN()
-            => base.IsNaN().Scalar();
+        public Scalar<bit> IsNaN()
+            => ((Tensor<T>)this).IsNaN().Scalar();
 
         /// <summary>Scalar Mish activation.</summary>
-        public new Scalar<T> Mish()
-            => base.Mish().Scalar();
+        public Scalar<T> Mish()
+            => ((Tensor<T>)this).Mish().Scalar();
 
         /// <summary>Rounds to the nearest integer (half to even).</summary>
-        public new Scalar<T> Round()
-            => base.Round().Scalar();
+        public Scalar<T> Round()
+            => ((Tensor<T>)this).Round().Scalar();
 
         /// <summary>Scalar shrink thresholding (ONNX Shrink).</summary>
-        public new Scalar<T> Shrink(float? bias = null, float? lambd = null)
-            => base.Shrink(bias, lambd).Scalar();
+        public Scalar<T> Shrink(float? bias = null, float? lambd = null)
+            => ((Tensor<T>)this).Shrink(bias, lambd).Scalar();
 
         /// <summary>Scalar softplus.</summary>
-        public new Scalar<T> Softplus()
-            => base.Softplus().Scalar();
+        public Scalar<T> Softplus()
+            => ((Tensor<T>)this).Softplus().Scalar();
 
         /// <summary>Scalar softsign.</summary>
-        public new Scalar<T> Softsign()
-            => base.Softsign().Scalar();
+        public Scalar<T> Softsign()
+            => ((Tensor<T>)this).Softsign().Scalar();
 
         /// <summary>Scalar thresholded ReLU.</summary>
-        public new Scalar<T> ThresholdedRelu(float? alpha = null)
-            => base.ThresholdedRelu(alpha).Scalar();
+        public Scalar<T> ThresholdedRelu(float? alpha = null)
+            => ((Tensor<T>)this).ThresholdedRelu(alpha).Scalar();
 
         /// <summary>Clamps the value to [min, max].</summary>
-        public new Scalar<T> Clip(Scalar<T> min, Scalar<T> max)
-            => base.Clip(min, max).Scalar();
+        public Scalar<T> Clip(Scalar<T> min, Scalar<T> max)
+            => ((Tensor<T>)this).Clip(min, max).Scalar();
 
         /// <summary>Scalar exponential.</summary>
-        public new Scalar<T> Exp()
-            => base.Exp().Scalar();
+        public Scalar<T> Exp()
+            => ((Tensor<T>)this).Exp().Scalar();
 
         /// <summary>Promotes this scalar to a rank-1 vector of length 1.</summary>
-        public new Vector<T> Unsqueeze()
-            => base.Unsqueeze().Vec();
+        public Vector<T> Unsqueeze()
+            => ((Tensor<T>)this).Unsqueeze().Vec();
 
         /// <summary>Promotes this scalar to a rank-1 vector of length 1; <paramref name="axis"/> must be 0 or -1.</summary>
         // Unsqueezing a rank-0 scalar at its single axis (0 / -1) is always rank-1, so narrow the
         // return to Vector<T> (mirrors the parameterless Unsqueeze() above). Lets the result bind
         // directly to APIs that require a Vector<int64> — e.g. a Reduce/Reshape axes argument —
         // without a manual .Vec().
-        public new Vector<T> Unsqueeze(long axis)
-            => base.Unsqueeze(axis).Vec();
+        public Vector<T> Unsqueeze(long axis)
+            => ((Tensor<T>)this).Unsqueeze(axis).Vec();
 
         #region primitive param support
 
@@ -471,8 +487,6 @@ namespace Shorokoo
         #endregion
 
         #endregion
-
-
         #region Onxx Cast Operators
 
         //public static explicit operator Scalar<int>(Scalar<T> tensor) => tensor.Cast<int>();
@@ -486,6 +500,6 @@ namespace Shorokoo
         //public static explicit operator Scalar<double>(Scalar<T> tensor) => tensor.Cast<double>();
         //public static explicit operator Scalar<bit>(Scalar<T> tensor) => tensor.Cast<bool>();
 
-        #endregion    
+        #endregion
     }
 }

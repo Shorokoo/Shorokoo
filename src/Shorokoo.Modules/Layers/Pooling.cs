@@ -26,7 +26,7 @@ namespace Shorokoo.Modules.Layers;
 /// broadcasts to every spatial axis; <c>padding</c> may also be
 /// <c>2*spatialRank</c> ONNX <c>[begin₁…beginₙ, end₁…endₙ]</c>). Scalar-square
 /// convenience overloads broadcast one scalar per knob (rank from
-/// <c>x.Rank() - 2</c>, which must be known at build time), and the
+/// <c>x.Rank - 2</c>, which must be known at build time), and the
 /// <c>*1d/2d/3d</c> aliases assert the rank. In every form <c>stride</c> defaults
 /// to <c>kernelSize</c> (the PyTorch convention). The historical scalar
 /// <see cref="MaxPool2d{T}(Tensor{T}, long, long?, long, long, bool)"/> /
@@ -108,7 +108,7 @@ public static class Pooling
 
     /// <summary>
     /// Square/cubic max-pool convenience overload: one scalar per geometry knob,
-    /// broadcast to every spatial axis (rank from <c>x.Rank() - 2</c>, which must
+    /// broadcast to every spatial axis (rank from <c>x.Rank - 2</c>, which must
     /// be known at graph-build time). <paramref name="stride"/> defaults to
     /// <paramref name="kernelSize"/>. See the per-axis
     /// <see cref="MaxPool{T}(Tensor{T}, long[], long[], long[], long[], bool, AutoPad)"/>.
@@ -220,7 +220,7 @@ public static class Pooling
 
     /// <summary>
     /// Square/cubic average-pool convenience overload: one scalar per geometry
-    /// knob, broadcast to every spatial axis (rank from <c>x.Rank() - 2</c>, which
+    /// knob, broadcast to every spatial axis (rank from <c>x.Rank - 2</c>, which
     /// must be known at graph-build time). <paramref name="stride"/> defaults to
     /// <paramref name="kernelSize"/>. See the per-axis
     /// <see cref="AvgPool{T}(Tensor{T}, long[], long[], long[], long[], bool, bool, AutoPad)"/>.
@@ -347,7 +347,7 @@ public static class Pooling
 
     /// <summary>
     /// Square/cubic Lᵖ-pool convenience overload: one scalar per geometry knob,
-    /// broadcast to every spatial axis (rank from <c>x.Rank() - 2</c>, which must
+    /// broadcast to every spatial axis (rank from <c>x.Rank - 2</c>, which must
     /// be known at graph-build time). <paramref name="stride"/> defaults to
     /// <paramref name="kernelSize"/>. See the per-axis
     /// <see cref="LpPool{T}(Tensor{T}, long[], long[], long[], long[], long, bool, AutoPad)"/>.
@@ -430,7 +430,7 @@ public static class Pooling
     /// <summary>
     /// Max pooling that also returns the flat spatial indices of the selected
     /// elements (the ONNX MaxPool 2nd output), for feeding a later
-    /// <see cref="MaxUnpool{T}(Tensor{T}, Tensor{int64}, long[], long[], long[], Vector{int64})"/>.
+    /// <c>MaxUnpool</c>.
     /// The spatial rank is inferred as <c>kernelSize.Length</c>;
     /// <paramref name="stride"/> defaults to <paramref name="kernelSize"/>.
     /// </summary>
@@ -444,7 +444,7 @@ public static class Pooling
     /// <remarks>
     /// The companion indices-returning pool omits the <c>dilations</c> and
     /// <c>storage_order</c> attributes (kernel/pads/strides only) — sufficient for
-    /// the <see cref="MaxUnpool{T}(Tensor{T}, Tensor{int64}, long[], long[], long[], Vector{int64})"/>
+    /// the <c>MaxUnpool</c>
     /// round-trip, whose geometry is kernel/pads/strides.
     /// </remarks>
     public static (Tensor<T> values, Tensor<int64> indices) MaxPoolWithIndices<T>(
@@ -467,7 +467,7 @@ public static class Pooling
     /// <summary>
     /// Square/cubic <see cref="MaxPoolWithIndices{T}(Tensor{T}, long[], long[], long[], bool, AutoPad)"/>
     /// convenience overload: one scalar per geometry knob, broadcast to every
-    /// spatial axis (rank from <c>x.Rank() - 2</c>, which must be known at
+    /// spatial axis (rank from <c>x.Rank - 2</c>, which must be known at
     /// graph-build time). <paramref name="stride"/> defaults to
     /// <paramref name="kernelSize"/>.
     /// </summary>
@@ -556,7 +556,7 @@ public static class Pooling
             outputShape: outputShape);
     }
 
-    /// <summary>1-D <see cref="MaxUnpool{T}(Tensor{T}, Tensor{int64}, long[], long[], long[], Vector{int64})"/>. <paramref name="kernelSize"/> must have length 1.</summary>
+    /// <summary>1-D <c>MaxUnpool</c>. <paramref name="kernelSize"/> must have length 1.</summary>
     public static Tensor<T> MaxUnpool1d<T>(
         Tensor<T> values, Tensor<int64> indices, long[] kernelSize,
         long[]? stride = null, long[]? padding = null,
@@ -567,7 +567,7 @@ public static class Pooling
         return MaxUnpool(values, indices, kernelSize, stride, padding, outputShape);
     }
 
-    /// <summary>2-D <see cref="MaxUnpool{T}(Tensor{T}, Tensor{int64}, long[], long[], long[], Vector{int64})"/>. <paramref name="kernelSize"/> must have length 2.</summary>
+    /// <summary>2-D <c>MaxUnpool</c>. <paramref name="kernelSize"/> must have length 2.</summary>
     public static Tensor<T> MaxUnpool2d<T>(
         Tensor<T> values, Tensor<int64> indices, long[] kernelSize,
         long[]? stride = null, long[]? padding = null,
@@ -578,7 +578,7 @@ public static class Pooling
         return MaxUnpool(values, indices, kernelSize, stride, padding, outputShape);
     }
 
-    /// <summary>3-D <see cref="MaxUnpool{T}(Tensor{T}, Tensor{int64}, long[], long[], long[], Vector{int64})"/>. <paramref name="kernelSize"/> must have length 3.</summary>
+    /// <summary>3-D <c>MaxUnpool</c>. <paramref name="kernelSize"/> must have length 3.</summary>
     public static Tensor<T> MaxUnpool3d<T>(
         Tensor<T> values, Tensor<int64> indices, long[] kernelSize,
         long[]? stride = null, long[]? padding = null,

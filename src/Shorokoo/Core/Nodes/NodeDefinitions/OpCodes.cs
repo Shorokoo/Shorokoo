@@ -91,7 +91,7 @@ internal static class InternalOpCodes
     public const string SHRK_RANDOM_NORMAL = "shrk_RandomNormal";
 
     /// <summary>
-    /// Creates a TensorStruct from multiple input IVariables.
+    /// Creates a TensorStruct from multiple input IValues.
     /// </summary>
     public const string TENSOR_STRUCT_CREATE = "shrk_TENSOR_STRUCT_CREATE";
 

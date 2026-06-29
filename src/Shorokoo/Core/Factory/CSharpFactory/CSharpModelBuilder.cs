@@ -48,7 +48,7 @@ namespace Shorokoo.Core.Factory.CSharpFactory
         /// <summary>
         /// Gets a sanitized variable name from a tensor's UniqueName.
         /// </summary>
-        private static string GetSanitizedVariableName(IVariable tensor)
+        private static string GetSanitizedVariableName(Variable tensor)
         {
             return SanitizeVariableName(tensor.UniqueName);
         }
@@ -83,15 +83,15 @@ namespace Shorokoo.Core.Factory.CSharpFactory
             }
         }
 
-        public static string GetTypeDefString(IVariable IVariable)
-            => GetTypeDefString(IVariable, IVariable.Rank());
+        public static string GetTypeDefString(Variable Variable)
+            => GetTypeDefString(Variable, Variable.Rank);
 
-        public static string GetTypeDefString(IVariable variable, int? rank)
+        public static string GetTypeDefString(Variable variable, int? rank)
         {
             // Handle TensorStruct types
-            if (variable is ITensorStruct tensorStruct)
+            if (variable.Structure() == DataStructure.TensorStruct)
             {
-                var def = tensorStruct.Definition;
+                var def = variable.Definition;
                 var structTypeName = def?.TypeName;
                 if (structTypeName != null && !structTypeName.Contains('.'))
                 {
@@ -110,17 +110,17 @@ namespace Shorokoo.Core.Factory.CSharpFactory
                 return $"Scalar<{typeName}>";
             else if (rank == 1)
                 return $"Vector<{typeName}>";
-            else if (variable is ITensor)
+            else if (variable.Structure() == DataStructure.Tensor)
                 return $"Tensor<{typeName}>";
             else
-                return $"IVariable<{typeName}>";
+                return $"IValue<{typeName}>";
         }
 
         public static string GetModuleAwareTypeDefString(Function targetFunction, bool asModel)
         {
             if (asModel)
             {
-                var paramList = string.Join(", ", targetFunction.NonHyperparamInputs.Select(x => GetModuleAwareTypeDefString(x, x.Rank())));
+                var paramList = string.Join(", ", targetFunction.NonHyperparamInputs.Select(x => GetModuleAwareTypeDefString(x, x.Rank)));
                 if (targetFunction.NonHyperparamInputs.Length > 0)
                     paramList += ", ";
 
@@ -133,8 +133,8 @@ namespace Shorokoo.Core.Factory.CSharpFactory
             }
             else
             {
-                var hyperParamList = string.Join(", ", targetFunction.HyperparamInputs.Select(x => GetModuleAwareTypeDefString(x, x.Rank())));
-                var nonHyperParamList = string.Join(", ", targetFunction.NonHyperparamInputs.Select(x => GetModuleAwareTypeDefString(x, x.Rank())));
+                var hyperParamList = string.Join(", ", targetFunction.HyperparamInputs.Select(x => GetModuleAwareTypeDefString(x, x.Rank)));
+                var nonHyperParamList = string.Join(", ", targetFunction.NonHyperparamInputs.Select(x => GetModuleAwareTypeDefString(x, x.Rank)));
                 var outputsList = string.Join(", ", targetFunction.Outputs.Zip(targetFunction.OutputRankOverrides).Select(x => GetModuleAwareTypeDefString(x.First, x.Second)));
 
                 if (targetFunction.HyperparamInputs.Length > 1)
@@ -153,17 +153,19 @@ namespace Shorokoo.Core.Factory.CSharpFactory
             }
         }
 
-        public static string GetModuleAwareTypeDefString(IVariable variable, int? rankOverride)
+        public static string GetModuleAwareTypeDefString(Variable variable, int? rankOverride)
         {
-            if (variable is Scalar<IModelVarType> modelVariable)
+            // Model/module params are scalar nodes distinguished by runtime DType (formerly the generic
+            // Variable<IModelVarType> / Variable<IModuleVarType>).
+            if (variable is Variable modelVariable && modelVariable.Type == DType.Model)
                 return GetModuleAwareTypeDefString(modelVariable.ModuleFn.AssertNotNull(), asModel: true);
-            else if(variable is Scalar<IModuleVarType> moduleVariable)
+            else if(variable is Variable moduleVariable && moduleVariable.Type == DType.Module)
                 return GetModuleAwareTypeDefString(moduleVariable.ModuleFn.AssertNotNull(), asModel: false);
 
             return GetTypeDefString(variable, rankOverride);
         }
 
-        public static string GetModuleAwareTypeDefString(IVariable tensor)
+        public static string GetModuleAwareTypeDefString(Variable tensor)
         {
             if (tensor.DType == DType.Model)
                 return GetModuleAwareTypeDefString(tensor.ModuleFn.AssertNotNull(), asModel: true);
@@ -184,7 +186,7 @@ namespace Shorokoo.Core.Factory.CSharpFactory
             {
                 MetadataReference.CreateFromFile(typeof(object).Assembly.Location),
                 MetadataReference.CreateFromFile(typeof(Enumerable).Assembly.Location),
-                MetadataReference.CreateFromFile(typeof(Shorokoo.IVariable).Assembly.Location),
+                MetadataReference.CreateFromFile(typeof(Shorokoo.Core.Variable).Assembly.Location),
                 MetadataReference.CreateFromFile(typeof(Float16).Assembly.Location),
                 MetadataReference.CreateFromFile(typeof(System.Collections.Immutable.ImmutableArray).Assembly.Location),
                 MetadataReference.CreateFromFile(Path.Combine(Path.GetDirectoryName(typeof(object).Assembly.Location)!, "System.Runtime.dll")), // Add System.Runtime
@@ -291,18 +293,18 @@ public static class " + modelName + @"
 
         public string BuildMethodCode(FastComputationGraph fastGraph, string methodName, ImmutableDictionary<Function, string> functionNames, Function? targetFunction)
         {
-            // Rebuild the Node/IVariable view of the graph without paying for a full
+            // Rebuild the Node/Variable view of the graph without paying for a full
             // ComputationGraph wrapper (validation, topo-sort, function discovery, etc.).
-            // The codegen below is structured around Node identity and IVariable metadata,
+            // The codegen below is structured around Node identity and Variable metadata,
             // which the converter produces directly.
             var (topologicalOrderNodes, graphInputs, graphOutputs, _) = FastComputationGraphConverter.BuildNodes(fastGraph);
 
-            var variableNames = new Dictionary<IVariable, string>();
+            var variableNames = new Dictionary<Variable, string>();
             var nodeCodeGenerators = new Dictionary<Node, NodeGenerationInfo>();
             var inlinedNodes = new List<Node>();
 
             // Build a mapping from each tensor to its consuming (child) nodes. This is expensive, so we compute it once.
-            var tensorChildNodes = new Dictionary<IVariable, List<Node>>();
+            var tensorChildNodes = new Dictionary<Variable, List<Node>>();
             foreach (var n in topologicalOrderNodes)
             {
                 foreach (var inputTensor in n.Inputs.Append(n.IsCloseNode ? n.ConnectingTensor : null).NotNulls())
@@ -360,7 +362,7 @@ public static class " + modelName + @"
                 returnLine = "return (" + string.Join(", ", graphOutputs.Select(x => $"{GetSanitizedVariableName(x)}")) + ");";
             }
 
-            // Build reverse mapping from variable name to IVariable for type resolution
+            // Build reverse mapping from variable name to Variable for type resolution
             // Collect all code lines with scope depths. Variables that the
             // standard pipeline produces are always either pre-declared at the
             // outer scope (loop carry-overs, scan outputs) or used only within
@@ -411,7 +413,7 @@ public static class " + modelName + @"
                     var moduleTypeString = GetModuleAwareTypeDefString(targetFunction, asModel: false);
                     var modelTypeString = GetModuleAwareTypeDefString(targetFunction, asModel: true);
 
-                    var hyperParamTypes = targetFunction.HyperparamInputs.Select(x => GetModuleAwareTypeDefString(x, x.Rank())).ToList();
+                    var hyperParamTypes = targetFunction.HyperparamInputs.Select(x => GetModuleAwareTypeDefString(x, x.Rank)).ToList();
                     var hyperParamNames = hyperParamTypes.Select((x, i) => $"h{i}").ToList();
 
                     var hyperparamsDeclarationString =string.Join(", ", hyperParamTypes.Zip(hyperParamNames).Select(x => $"{x.First} {x.Second}"));
@@ -434,7 +436,7 @@ public static class " + modelName + @"
                 {
                     //         public static Shorokoo.float32> alpha)
                     //             => (Shorokoo.Tensor<Shorokoo.float32>)Globals.CallTrainableParamInitializer(customTrainableParamInitializer, shape, alpha);
-                    var paramTypes = targetFunction.Inputs.Select(x => GetModuleAwareTypeDefString(x, x.Rank()));
+                    var paramTypes = targetFunction.Inputs.Select(x => GetModuleAwareTypeDefString(x, x.Rank));
                     var paramNames = paramTypes.Select((x, i) => $"p{i}");
                     var paramsDeclarationString = string.Join(", ", paramTypes.Zip(paramNames).Select(x => $"{x.First} {x.Second}"));
                     var paramsRefString = string.Join(", ", paramNames);
@@ -449,7 +451,7 @@ public static class " + modelName + @"
                 }
                 else if (targetFunction.FunctionType == FunctionType.StateParamInitializer)
                 {
-                    var paramTypes = targetFunction.Inputs.Select(x => GetModuleAwareTypeDefString(x, x.Rank()));
+                    var paramTypes = targetFunction.Inputs.Select(x => GetModuleAwareTypeDefString(x, x.Rank));
                     var paramNames = paramTypes.Select((x, i) => $"p{i}");
                     var paramsDeclarationString = string.Join(", ", paramTypes.Zip(paramNames).Select(x => $"{x.First} {x.Second}"));
                     var paramsRefString = string.Join(", ", paramNames);
@@ -467,7 +469,7 @@ public static class " + modelName + @"
             return fullScript;
         }
 
-        private (NodeGenerationInfo nodeGenerator, Dictionary<IVariable, string> newVariables) MakeNode(Node node, ImmutableDictionary<Node, NodeGenerationInfo> nodeCodeGenerators, ImmutableDictionary<IVariable, string> currentNames, ImmutableDictionary<Function, string> functionNames, Dictionary<IVariable, List<Node>> tensorChildNodes)
+        private (NodeGenerationInfo nodeGenerator, Dictionary<Variable, string> newVariables) MakeNode(Node node, ImmutableDictionary<Node, NodeGenerationInfo> nodeCodeGenerators, ImmutableDictionary<Variable, string> currentNames, ImmutableDictionary<Function, string> functionNames, Dictionary<Variable, List<Node>> tensorChildNodes)
         {
             if (node.IsGraphNode)
             {
@@ -531,7 +533,7 @@ public static class " + modelName + @"
             ImmutableList<Node> inlineNodes = node.IsModelInput ? [node] : [];
 
             var inlineExpressionForNode = mostInLinesCode;
-            var newVariables = new Dictionary<IVariable, string>();
+            var newVariables = new Dictionary<Variable, string>();
             NodeGenerationInfo nodeGenerator;
             if (nodeDef.OutputDefs.Count == 1)
             {
@@ -603,9 +605,9 @@ public static class " + modelName + @"
         }
 
         private
-            (NodeGenerationInfo nodeGenerator, Dictionary<IVariable, string> newVariables)?
+            (NodeGenerationInfo nodeGenerator, Dictionary<Variable, string> newVariables)?
             MakeConstantNode
-            (Node node, ImmutableDictionary<Node, NodeGenerationInfo> currentNodeGenerators, ImmutableDictionary<IVariable, string> currentNames)
+            (Node node, ImmutableDictionary<Node, NodeGenerationInfo> currentNodeGenerators, ImmutableDictionary<Variable, string> currentNames)
         {
             var attributes = node.Attributes;
             if (attributes.IsDefaultValue(AttrValue))
@@ -700,11 +702,11 @@ public static class " + modelName + @"
 
             // Don't inline constant nodes to keep the generated code simple
             var nodeGenerator = new NodeGenerationInfo(node.NodeDef, node, null, [codeLine], []);
-            var newVariables = new Dictionary<IVariable, string> { [outputTensor] = outputTensorName };
+            var newVariables = new Dictionary<Variable, string> { [outputTensor] = outputTensorName };
             return (nodeGenerator, newVariables);
         }
 
-        private (NodeGenerationInfo nodeGenerator, Dictionary<IVariable, string> newVariables) MakeLoopNode(Node node, ImmutableDictionary<Node, NodeGenerationInfo> currentNodeGenerators, ImmutableDictionary<IVariable, string> currentNames, Dictionary<IVariable, List<Node>> tensorChildNodes)
+        private (NodeGenerationInfo nodeGenerator, Dictionary<Variable, string> newVariables) MakeLoopNode(Node node, ImmutableDictionary<Node, NodeGenerationInfo> currentNodeGenerators, ImmutableDictionary<Variable, string> currentNames, Dictionary<Variable, List<Node>> tensorChildNodes)
         {
             if (node.IsGraphOpenNode)
             {
@@ -716,7 +718,7 @@ public static class " + modelName + @"
 
                 List<CodeLine> lines = new List<CodeLine>();
                 List<Node> inlinedVariables = new();
-                var newVariableNames = new Dictionary<IVariable, string>();
+                var newVariableNames = new Dictionary<Variable, string>();
 
                 var allNames = currentNames.Values.ToHashSet();
                 var ctxName = "ctx";
@@ -743,18 +745,18 @@ public static class " + modelName + @"
                     var initializerVariableCodeGenerator = currentNodeGenerators[initializerVariable.ParentNode.AssertNotNull()];
                     var initializerVariableCode = currentNames[initializerVariable];
 
-                    if (outputLoopVariable.Rank() is not null &&
+                    if (outputLoopVariable.Rank is not null &&
                         initializerVariableCodeGenerator.Node.Outputs.Length == 1 && initializerVariableCodeGenerator.Node.Outputs[0]!.Structure() == DataStructure.Tensor &&
-                        initializerVariableCodeGenerator.Node.Outputs[0]!.Rank() is null)
+                        initializerVariableCodeGenerator.Node.Outputs[0]!.Rank is null)
                     {
-                        if (outputLoopVariable.Rank() == 0)
+                        if (outputLoopVariable.Rank == 0)
                             initializerVariableCode = $"({initializerVariableCode}).Scalar()";
-                        else if (outputLoopVariable.Rank() == 1)
+                        else if (outputLoopVariable.Rank == 1)
                             initializerVariableCode = $"({initializerVariableCode}).Vec()";
                     }
-                    else if (outputLoopVariable.Rank() is null &&
+                    else if (outputLoopVariable.Rank is null &&
                         initializerVariableCodeGenerator.Node.Outputs.Length == 1 && initializerVariableCodeGenerator.Node.Outputs[0]!.Structure() == DataStructure.Tensor &&
-                        initializerVariableCodeGenerator.Node.Outputs[0]!.Rank() is not null)
+                        initializerVariableCodeGenerator.Node.Outputs[0]!.Rank is not null)
                     {
                         initializerVariableCode = $"((Tensor<{outputLoopVariable.DType.AssertNotNull().ToIVarType().Name}>)({initializerVariableCode}))";
                     }
@@ -778,7 +780,7 @@ public static class " + modelName + @"
                     var scannedVariableName = GetSanitizedVariableName(scannedVariable);
 
                     var ivartypeName = scannedVariable.DType.AssertNotNull().ToIVarType().Name;
-                    var rank = scannedVariable.Rank();
+                    var rank = scannedVariable.Rank;
                     var rankName = rank == 0 ? "Scalar" : rank == 1 ? "Vector" : "Tensor";
 
                     lines.Add(new CodeLine(0, $"{rankName}<{ivartypeName}> {scannedVariableName} = null!;"));
@@ -870,9 +872,9 @@ public static class " + modelName + @"
             }
         }
 
-        private (NodeGenerationInfo nodeGenerator, Dictionary<IVariable, string> newVariables) MakeIfNode(Node node, ImmutableDictionary<Node, NodeGenerationInfo> nodeCodeGenerators, ImmutableDictionary<IVariable, string> currentNames, Dictionary<IVariable, List<Node>> tensorChildNodes)
+        private (NodeGenerationInfo nodeGenerator, Dictionary<Variable, string> newVariables) MakeIfNode(Node node, ImmutableDictionary<Node, NodeGenerationInfo> nodeCodeGenerators, ImmutableDictionary<Variable, string> currentNames, Dictionary<Variable, List<Node>> tensorChildNodes)
         {
-            var newVariables = new Dictionary<IVariable, string>();
+            var newVariables = new Dictionary<Variable, string>();
             if (node.IsGraphOpenNode)
             {
                 // The graph open node produces no code.
@@ -911,7 +913,7 @@ public static class " + modelName + @"
 
                     for (var i = 0; i < numItems; i++)
                     {
-                        var outTypeDef = GetTypeDefString(outVariables[i]!, outVariables[i]!.Rank());
+                        var outTypeDef = GetTypeDefString(outVariables[i]!, outVariables[i]!.Rank);
                         lines.Add(new CodeLine(0, $"var {outNames[i]} = ({outTypeDef}){arrayResultName}[{i}];"));
                         newVariables[outVariables[i]!] = outNames[i];
                     }
@@ -933,10 +935,12 @@ public static class " + modelName + @"
             }
         }
 
-        private (NodeGenerationInfo nodeGenerator, Dictionary<IVariable, string> newVariables) MakeCreateModuleNode(Node node, ImmutableDictionary<Node, NodeGenerationInfo> nodeCodeGenerators, ImmutableDictionary<IVariable, string> currentNames, ImmutableDictionary<Function, string> functionNames)
+        private (NodeGenerationInfo nodeGenerator, Dictionary<Variable, string> newVariables) MakeCreateModuleNode(Node node, ImmutableDictionary<Node, NodeGenerationInfo> nodeCodeGenerators, ImmutableDictionary<Variable, string> currentNames, ImmutableDictionary<Function, string> functionNames)
         {
             Debug.Assert(node.OpName == InternalOpCodes.CREATE_MODULE);
-            var moduleVariable = (node.Outputs[0] as Scalar<IModuleVarType>).AssertNotNull();
+            // Node outputs are Immutable* graph values; convert to the value-struct handle (an
+            // `as Scalar<…>?` would be null since the runtime object is the immutable, not the struct).
+            var moduleVariable = node.Outputs[0].AssertNotNull().ToValue<Scalar<IModuleVarType>>();
 
             var targetFunction = moduleVariable.ModuleFn.AssertNotNull();
 
@@ -944,20 +948,20 @@ public static class " + modelName + @"
 
             // No code lines required, the module is a globally available static property.
             var nodeCodeGenerator = new NodeGenerationInfo(node.NodeDef, node, null, [], []);
-            return (nodeCodeGenerator, new Dictionary<IVariable, string> { [node.Outputs[0].AssertNotNull()] = $"{functionName}Module" });
+            return (nodeCodeGenerator, new Dictionary<Variable, string> { [node.Outputs[0].AssertNotNull()] = $"{functionName}Module" });
         }
 
-        private (NodeGenerationInfo nodeGenerator, Dictionary<IVariable, string> newVariables) MakeInputNode(Node node, ImmutableDictionary<Node, NodeGenerationInfo> nodeCodeGenerators, ImmutableDictionary<IVariable, string> currentNames)
+        private (NodeGenerationInfo nodeGenerator, Dictionary<Variable, string> newVariables) MakeInputNode(Node node, ImmutableDictionary<Node, NodeGenerationInfo> nodeCodeGenerators, ImmutableDictionary<Variable, string> currentNames)
         {
             Debug.Assert(node.OpName == InternalOpCodes.MODEL_TENSOR_INPUT ||
                          node.OpName == InternalOpCodes.MODEL_OPTIONAL_INPUT ||
                          node.OpName == InternalOpCodes.MODEL_SEQUENCE_INPUT ||
                          node.OpName == InternalOpCodes.MODEL_TENSORSTRUCT_INPUT);
             var nodeCodeGenerator = new NodeGenerationInfo(node.NodeDef, node, null, [], []);
-            return (nodeCodeGenerator, new Dictionary<IVariable, string> { [node.Outputs[0].AssertNotNull()] = GetSanitizedVariableName(node.Outputs[0]!) });
+            return (nodeCodeGenerator, new Dictionary<Variable, string> { [node.Outputs[0].AssertNotNull()] = GetSanitizedVariableName(node.Outputs[0]!) });
         }
 
-        private (NodeGenerationInfo nodeGenerator, Dictionary<IVariable, string> newVariables) MakeTensorStructGetFieldNode(Node node, ImmutableDictionary<Node, NodeGenerationInfo> nodeCodeGenerators, ImmutableDictionary<IVariable, string> currentNames)
+        private (NodeGenerationInfo nodeGenerator, Dictionary<Variable, string> newVariables) MakeTensorStructGetFieldNode(Node node, ImmutableDictionary<Node, NodeGenerationInfo> nodeCodeGenerators, ImmutableDictionary<Variable, string> currentNames)
         {
             Debug.Assert(node.OpName == InternalOpCodes.TENSOR_STRUCT_GETFIELD);
 
@@ -973,9 +977,9 @@ public static class " + modelName + @"
             // the runtime `.GetField<T>(name)` method on them would throw.
             var outputVariable = node.Outputs[0].AssertNotNull();
             var fieldDType = outputVariable.Type;
-            var fieldRank = outputVariable.Rank() ?? 0;
+            var fieldRank = outputVariable.Rank ?? 0;
             var fieldStructure = outputVariable.Structure();
-            var fieldCastTypeDef = GetTypeDefString(outputVariable, outputVariable.Rank());
+            var fieldCastTypeDef = GetTypeDefString(outputVariable, outputVariable.Rank);
             var inlineExpression =
                 $"({fieldCastTypeDef})Shorokoo.Core.Nodes.NodeDefinitions.InternalOp.TensorStructGetField(" +
                 $"{structInputName}, \"{fieldName}\", " +
@@ -988,10 +992,10 @@ public static class " + modelName + @"
 
             // Don't inline for simplicity
             var nodeCodeGenerator = new NodeGenerationInfo(node.NodeDef, node, null, [codeLine], []);
-            return (nodeCodeGenerator, new Dictionary<IVariable, string> { [outputTensor] = outputTensorName });
+            return (nodeCodeGenerator, new Dictionary<Variable, string> { [outputTensor] = outputTensorName });
         }
 
-        private (NodeGenerationInfo nodeGenerator, Dictionary<IVariable, string> newVariables) MakeTensorStructCreateNode(Node node, ImmutableDictionary<Node, NodeGenerationInfo> nodeCodeGenerators, ImmutableDictionary<IVariable, string> currentNames)
+        private (NodeGenerationInfo nodeGenerator, Dictionary<Variable, string> newVariables) MakeTensorStructCreateNode(Node node, ImmutableDictionary<Node, NodeGenerationInfo> nodeCodeGenerators, ImmutableDictionary<Variable, string> currentNames)
         {
             Debug.Assert(node.OpName == InternalOpCodes.TENSOR_STRUCT_CREATE);
 
@@ -1000,10 +1004,10 @@ public static class " + modelName + @"
             var structTypeName = structDef.TypeName;
 
             // Positional field references in TensorStructDef order — InternalOp.TensorStructCreate
-            // takes an ordered IVariable[] (no field-name labels) and the inputs to the graph node
+            // takes an ordered Variable[] (no field-name labels) and the inputs to the graph node
             // are already in that order.
             var fieldRefs = node.Inputs.Select(input => currentNames[input!]).ToList();
-            var fieldsArrayLiteral = $"new Shorokoo.IVariable[] {{ {string.Join(", ", fieldRefs)} }}";
+            var fieldsArrayLiteral = $"new Shorokoo.Core.Variable[] {{ {string.Join(", ", fieldRefs)} }}";
 
             // Build the dtype expression. Prefer the static struct-type path
             // (StructDefExtractor.ExtractFromType<T>) when we have a simple, unqualified IStruct
@@ -1036,13 +1040,13 @@ public static class " + modelName + @"
 
             // TensorStruct creation is typically not inlined due to complexity
             var nodeCodeGenerator = new NodeGenerationInfo(node.NodeDef, node, null, [codeLine], []);
-            return (nodeCodeGenerator, new Dictionary<IVariable, string> { [outputTensor] = outputTensorName });
+            return (nodeCodeGenerator, new Dictionary<Variable, string> { [outputTensor] = outputTensorName });
         }
 
-        private string MakeSetHyperparamsNodeCodeTemplate(Node node, ImmutableDictionary<Node, NodeGenerationInfo> nodeCodeGenerators, ImmutableDictionary<IVariable, string> currentNames, ImmutableDictionary<Function, string> functionNames)
+        private string MakeSetHyperparamsNodeCodeTemplate(Node node, ImmutableDictionary<Node, NodeGenerationInfo> nodeCodeGenerators, ImmutableDictionary<Variable, string> currentNames, ImmutableDictionary<Function, string> functionNames)
         {
             Debug.Assert(node.OpName == InternalOpCodes.MODULE_SET_HYPERPARAMS);
-            var moduleVariable = (node.Inputs[0] as Scalar<IModuleVarType>).AssertNotNull();
+            var moduleVariable = node.Inputs[0].AssertNotNull().ToValue<Scalar<IModuleVarType>>();
             var targetFunction = moduleVariable.ModuleFn.AssertNotNull();
             var hyperparamInputs = targetFunction.HyperparamInputs;
 
@@ -1075,10 +1079,10 @@ public static class " + modelName + @"
             }
         }
 
-        private string MakeModelInvokeNodeCodeTemplate(Node node, ImmutableDictionary<Node, NodeGenerationInfo> nodeCodeGenerators, ImmutableDictionary<IVariable, string> currentNames, ImmutableDictionary<Function, string> functionNames)
+        private string MakeModelInvokeNodeCodeTemplate(Node node, ImmutableDictionary<Node, NodeGenerationInfo> nodeCodeGenerators, ImmutableDictionary<Variable, string> currentNames, ImmutableDictionary<Function, string> functionNames)
         {
             Debug.Assert(node.OpName == InternalOpCodes.MODEL_INVOKE);
-            var modelVariable = (node.Inputs[0] as Scalar<IModelVarType>).AssertNotNull();
+            var modelVariable = node.Inputs[0].AssertNotNull().ToValue<Scalar<IModelVarType>>();
             var targetFunction = modelVariable.ModuleFn.AssertNotNull();
             var modelInputs = targetFunction.NonHyperparamInputs;
             var paramsList = string.Join("", modelInputs.Select((x, i) => $"{{{i + 2}:param}}"));
@@ -1090,7 +1094,7 @@ public static class " + modelName + @"
             return $"{{1:this}}.Call({paramsList})";
         }
 
-        private string MakeCustomCodeTemplate(Node node, ImmutableDictionary<Node, string> inlineInputs, ImmutableDictionary<IVariable, string> currentNames)
+        private string MakeCustomCodeTemplate(Node node, ImmutableDictionary<Node, string> inlineInputs, ImmutableDictionary<Variable, string> currentNames)
         {
             var outputTensors = node.Outputs;
             var nodeDef = node.NodeDef;
@@ -1123,7 +1127,7 @@ public static class " + modelName + @"
             return methodCore + methodParams;
         }
 
-        private string MakeCallFunctionCodeTemplate(Node node, ImmutableDictionary<Node, NodeGenerationInfo> nodeCodeGenerators, ImmutableDictionary<IVariable, string> currentNames, ImmutableDictionary<Function, string> functionNames)
+        private string MakeCallFunctionCodeTemplate(Node node, ImmutableDictionary<Node, NodeGenerationInfo> nodeCodeGenerators, ImmutableDictionary<Variable, string> currentNames, ImmutableDictionary<Function, string> functionNames)
         {
             var methodName = functionNames[(node.TargetFunction).AssertNotNull()];
             var offset =  node.OpName == InternalOpCodes.TRAINABLE_PARAM_REF ? 2
@@ -1167,7 +1171,7 @@ public static class " + modelName + @"
                 "Failed to infer DType for node definition type definition");
         }
 
-        private string MakeNodeWithInlines(Node node, ImmutableDictionary<Node, string> inlineInputs, ImmutableDictionary<IVariable, string> currentNames, string? codeTemplateOverride)
+        private string MakeNodeWithInlines(Node node, ImmutableDictionary<Node, string> inlineInputs, ImmutableDictionary<Variable, string> currentNames, string? codeTemplateOverride)
         {
             var nodeDef = node.NodeDef;
             var codeTemplate = codeTemplateOverride ?? node.NodeDef.CodeTemplate ?? MakeCustomCodeTemplate(node, inlineInputs, currentNames);
@@ -1357,15 +1361,15 @@ public static class " + modelName + @"
 
                     if (keyword == "torank")
                     {
-                        if (output is not ITensor tensor)
+                        if (output is not { Kind: DataStructure.Tensor } tensor)
                         {
                             result = result.Replace(fullPlaceholder, "");
                         }
                         else
                         {
-                            // Use IVariable.Rank (output.Rank) which has more context than ITensor.Rank (tensor.Rank)
-                            // Also check the node's InternalAttrRank attribute as a fallback for Identity nodes
-                            var rank = output.Rank() ?? tensor.Rank;
+                            // tensor.Rank is the statically known rank; fall back to the node's
+                            // InternalAttrRank attribute for Identity nodes that don't carry one.
+                            var rank = tensor.Rank;
                             if (rank is null && attributes.IsAttributeDefined(InternalAttrRank) && !attributes.IsDefaultValue(InternalAttrRank))
                             {
                                 rank = (int?)attributes.GetLongVal(InternalAttrRank);
@@ -1387,7 +1391,7 @@ public static class " + modelName + @"
                     }
                     else if (keyword == "fromvar")
                     {
-                        if (output is not ITensor tensor)
+                        if (output is not { Kind: DataStructure.Tensor } tensor)
                             result = result.Replace(fullPlaceholder, "");
                         else
                         {
@@ -1455,7 +1459,7 @@ public static class " + modelName + @"
             // low_op: low priority operator, always surround in brackets when inlining inside a high_op operator. e.g. (a + b) * c.
             // high_op: high priority operator, only surround in brackets when inlining as the right hand side of any other operator. e.g. a * (b / c)
             // param: a parameter in a function:
-            //   - when null (as determined from IVariable.IsNull property), use "null, ", or just "null" if last parameter.
+            //   - when null (as determined from Variable.IsNull property), use "null, ", or just "null" if last parameter.
             //   - when not inlined and not null, use the Name from it's VariableGenerationInfo
             //   - when inlined and not null use, use the CSharpExpression from it's VariableGenerationInfo
             //
@@ -1495,7 +1499,7 @@ public static class " + modelName + @"
         /// </summary>
         /// <param name="sequenceTensor">The sequence tensor to trace back from.</param>
         /// <returns>The inferred element rank, or null if it cannot be determined.</returns>
-        private static int? InferSequenceElementRankFromTensor(IVariable sequenceTensor)
+        private static int? InferSequenceElementRankFromTensor(Variable sequenceTensor)
         {
             if (sequenceTensor is null)
                 return null;
@@ -1515,7 +1519,7 @@ public static class " + modelName + @"
                 var elementInput = parentNode.Inputs[1];
                 if (elementInput is not null)
                 {
-                    var elementRank = elementInput.Rank();
+                    var elementRank = elementInput.Rank;
                     if (elementRank is not null)
                         return elementRank;
                 }
@@ -1538,7 +1542,7 @@ public static class " + modelName + @"
                 {
                     if (input is not null)
                     {
-                        var elementRank = input.Rank();
+                        var elementRank = input.Rank;
                         if (elementRank is not null)
                             return elementRank;
                     }

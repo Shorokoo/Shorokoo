@@ -10,7 +10,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training
     /// Builds a <see cref="TensorStructDef"/> from a sequence of
     /// <see cref="FastDiscoveredParamInfo"/> records. Each parameter becomes a field whose
     /// dtype, rank, and structure are taken straight from the captured Fast-side info — no
-    /// <see cref="IVariable"/> reflection (and therefore no CG round-trip) is needed.
+    /// <see cref="Variable"/> reflection (and therefore no CG round-trip) is needed.
     /// </summary>
     internal static class FastBuildTrainableParamStructDefProcessor
     {

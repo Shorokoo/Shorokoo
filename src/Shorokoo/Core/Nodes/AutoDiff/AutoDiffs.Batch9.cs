@@ -37,7 +37,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // Guarded (AD003): bidirectional, custom activations, clip, layout=1,
         //           wired sequence_lens.
 
-        internal static IVariable?[] GruGradient(IVariable?[] inputs, IVariable?[] outputGrads, OnnxCSharpAttributes attributes)
+        internal static Variable?[] GruGradient(Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
         {
             var x = inputs[0]!;          // [T, B, I]
             var w = inputs[1]!;          // [D, 3H, I]  (D = num_directions = 1)
@@ -70,8 +70,8 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 if (dY is not null) dY = ReverseTimeAxis(dY);
             }
 
-            // Sequence length as a runtime IVariable (no host-side execution).
-            var seqLen = OnnxOp.Gather(OnnxOp.Shape(x), Scalar(0L), axis: 0).As<int64>().Scalar();
+            // Sequence length as a runtime Variable (no host-side execution).
+            var seqLen = ((Tensor<int64>)OnnxOp.Gather(OnnxOp.Shape(x), Scalar(0L), axis: 0)).Scalar();
 
             var H = hiddenSize;
             var one = OnnxOp.Cast(Scalar(1.0f), saturate: null, to: x.Type);
@@ -94,8 +94,8 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             var Rh = rParts[2];
 
             // Split biases if present: B = [Wbz, Wbr, Wbh, Rbz, Rbr, Rbh], each [H]
-            IVariable? Wbz = null, Wbr = null, Wbh = null, Rbz = null, Rbr = null, Rbh = null;
-            IVariable? bSq = null;
+            Variable? Wbz = null, Wbr = null, Wbh = null, Rbz = null, Rbr = null, Rbh = null;
+            Variable? bSq = null;
             if (b is not null)
             {
                 bSq = OnnxOp.Squeeze(b, Vector(0L));  // [6H]
@@ -106,7 +106,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             }
 
             // Initial hidden state: [B, H]
-            IVariable h0;
+            Variable h0;
             if (initialH is not null)
             {
                 h0 = OnnxOp.Squeeze(initialH, Vector(0L));  // [B, H]
@@ -151,8 +151,8 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 if (Rbr is not null) preR = OnnxOp.Add(preR, Rbr);
                 var rt = OnnxOp.Sigmoid(preR);
 
-                IVariable preH;
-                IVariable? recH = null;
+                Variable preH;
+                Variable? recH = null;
                 if (linearBeforeReset)
                 {
                     recH = OnnxOp.MatMul(hPrev, RhT);
@@ -191,7 +191,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 : OnnxOp.Sub(h0, h0);               // [B, H] zeros (matches h0 dtype/shape)
             var dWacc = OnnxOp.Sub(wSq, wSq);       // [3H, I] zeros
             var dRacc = OnnxOp.Sub(rSq, rSq);       // [3H, H] zeros
-            IVariable? dBacc = b is not null ? OnnxOp.Sub(bSq!, bSq!) : null;  // [6H] zeros or null
+            Variable? dBacc = b is not null ? OnnxOp.Sub(bSq!, bSq!) : null;  // [6H] zeros or null
             // dXSeq is built by SequenceInsert at position 0 each iteration so that the
             // final order is forward time (iteration i contributes to t = T-1-i).
             var dXSeq = OnnxOp.SequenceEmpty(x.Type);
@@ -207,7 +207,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 var ht = OnnxOp.SequenceAt(htSeq, tRev);
 
                 // dHt = dY[t] (if any) + dHNext (always defined; seeded with dYhSq or zeros)
-                IVariable dHt;
+                Variable dHt;
                 if (dY is not null)
                 {
                     var dYt = OnnxOp.Squeeze(OnnxOp.Gather(dY, tRev, axis: 0), Vector(0L));  // [B, H]
@@ -227,8 +227,8 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 var dPreH = OnnxOp.Mul(dHtilde, OnnxOp.Sub(one, OnnxOp.Mul(ht, ht)));
 
                 // Gate gradients through ht computation
-                IVariable drFromH;
-                IVariable dHPrevFromH;
+                Variable drFromH;
+                Variable dHPrevFromH;
                 if (linearBeforeReset)
                 {
                     var recHCurrent = OnnxOp.SequenceAt(recHSeq!, tRev);
@@ -270,7 +270,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 dWacc = OnnxOp.Add(dWacc, dW_t);
 
                 // Recurrent weight gradients
-                IVariable dRh_t;
+                Variable dRh_t;
                 if (linearBeforeReset)
                 {
                     var dRecH = OnnxOp.Mul(dPreH, rt);
@@ -294,7 +294,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                     var dPreRSum = OnnxOp.ReduceSum(dPreR, Vector(0L), keepdims: false, noopWithEmptyAxes: null);
                     var dPreHSum = OnnxOp.ReduceSum(dPreH, Vector(0L), keepdims: false, noopWithEmptyAxes: null);
 
-                    IVariable dRbhSum;
+                    Variable dRbhSum;
                     if (linearBeforeReset)
                     {
                         var dRecH = OnnxOp.Mul(dPreH, rt);

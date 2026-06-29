@@ -46,7 +46,7 @@ namespace Shorokoo.Core.Nodes.OnnxNodes
     // 
     //     public Function TargetFunction { get; private set; }
     // 
-    //     public FunctionNode(Function function, NodeDefinition nodeDef, OnnxCSharpAttributes? attributes, ImmutableDictionary<string, IVariable?[]> inputs, ImmutableDictionary<string, OutputTensorInfo[]> outputs, string? stackTrace) :
+    //     public FunctionNode(Function function, NodeDefinition nodeDef, OnnxCSharpAttributes? attributes, ImmutableDictionary<string, Variable?[]> inputs, ImmutableDictionary<string, OutputTensorInfo[]> outputs, string? stackTrace) :
     //             base(nodeDef, attributes, inputs, outputs, stackTrace, function)
     //     {
     //         this.TargetFunction = function;
@@ -58,7 +58,7 @@ namespace Shorokoo.Core.Nodes.OnnxNodes
     //    public Shorokoo.Framework.BaseBestModule? TargetModule { get; private set; }
     //    public Function TargetFunction { get; private set; }
     //
-    //    public ModuleNode(Shorokoo.Framework.BaseBestModule? module, OnnxFunction targetFunction, NodeDefinition nodeDef, OnnxCSharpAttributes? attributes, ImmutableDictionary<string, IVariable?[]> inputs, ImmutableDictionary<string, OutputTensorInfo[]> outputs, string? stackTrace) :
+    //    public ModuleNode(Shorokoo.Framework.BaseBestModule? module, OnnxFunction targetFunction, NodeDefinition nodeDef, OnnxCSharpAttributes? attributes, ImmutableDictionary<string, Variable?[]> inputs, ImmutableDictionary<string, OutputTensorInfo[]> outputs, string? stackTrace) :
     //            base(nodeDef, attributes, inputs, outputs, stackTrace)
     //    {
     //        this.TargetModule = module;

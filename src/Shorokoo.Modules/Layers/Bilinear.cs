@@ -47,7 +47,7 @@ public partial class Bilinear
         var a = RecurrentUniform.Init([outFeatures, in1Features, in2Features], in1Features);
 
         // Bilinear form per batch row n, per output channel k.
-        var yf = (Tensor<float32>)OnnxOp.Einsum(new IVariable[] { x1f, a, x2f }, "ni,kij,nj->nk");   // [n, out]
+        var yf = (Tensor<float32>)OnnxOp.Einsum([x1f, a, x2f], "ni,kij,nj->nk");   // [n, out]
 
         var b = RecurrentUniform.Init([outFeatures], in1Features).Vec();           // [out] — NOT Zeros
         yf = useBias.IfElse(yf + b, yf);

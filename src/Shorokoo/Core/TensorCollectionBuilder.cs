@@ -22,6 +22,8 @@ namespace Shorokoo.Core
         }
 
         public static implicit operator TensorExpressionHelper<T>(Tensor<T> element) { return new TensorExpressionHelper<T>(element, isEnumerated: false); }
+        public static implicit operator TensorExpressionHelper<T>(Scalar<T> element) { return new TensorExpressionHelper<T>(element, isEnumerated: false); }
+        public static implicit operator TensorExpressionHelper<T>(Vector<T> element) { return new TensorExpressionHelper<T>(element, isEnumerated: false); }
     }
 
     public class VectorExpressionHelper<T>
@@ -37,10 +39,9 @@ namespace Shorokoo.Core
 
         internal VectorExpressionHelper(Vector<T> vector)
         {
-            if (vector is Scalar<T> scalar)
-                this.scalar = scalar;
-            else
-                this.vector = vector;
+            // A Vector<T> is always rank-1 (the Variable→Vector conversion enforces it), so it is
+            // stored as the vector arm directly.
+            this.vector = vector;
         }
 
         public static implicit operator VectorExpressionHelper<T>(Scalar<T> scalar) 
@@ -79,8 +80,8 @@ namespace Shorokoo.Core
                 throw new InvalidTensorOperationException(ErrorCodes.FW008, "CreateVector", "null elements in collection", 
                     "Cannot make vectors that contain null elements");
 
-            var toConcat = elements.ToArray().Select(x => x.scalar is not null ? x.scalar.Unsqueeze() : x.vector).AssertNotNulls().ToArray();
-            return toConcat[0].Concat(toConcat.Skip(1).ToArray());
+            var toConcat = elements.ToArray().Select(x => x.scalar is not null ? (Tensor<T>)x.scalar.Value.Unsqueeze() : (Tensor<T>)x.vector!.Value).ToArray();
+            return toConcat[0].Concat(0L, toConcat.Skip(1).ToArray()).Vec();
         }
 
         public static Tensor<T> CreateTensor<T>(ReadOnlySpan<VectorExpressionHelper<T>> elements)

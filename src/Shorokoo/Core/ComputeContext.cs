@@ -168,7 +168,7 @@ namespace Shorokoo.Runtime
         /// Evaluates the given output variables by building and executing a zero-input graph,
         /// returning their concrete tensor data.
         /// </summary>
-        public TensorData[] Eval(IVariable[] outputs)
+        public TensorData[] Eval(Variable[] outputs)
         {
             var graph = new FastComputationGraph([], [.. outputs]);
             var results = this.Execute(graph).Select(x => x.ToTensorData()).ToArray();
@@ -176,15 +176,15 @@ namespace Shorokoo.Runtime
             return results;
         }
 
-        /// <summary>Params convenience over <see cref="Eval(IVariable[])"/> for two or more outputs.</summary>
-        public TensorData[] Eval(IVariable output1, IVariable output2, params IVariable[] outputs)
+        /// <summary>Params convenience over <see cref="Eval(Variable[])"/> for two or more outputs.</summary>
+        public TensorData[] Eval(Variable output1, Variable output2, params Variable[] outputs)
         {
             var allOutputs = new[] { output1, output2 }.Concat(outputs).ToArray();
             return Eval(allOutputs);
         }
 
         /// <summary>Evaluates a single output variable.</summary>
-        public TensorData Eval(IVariable output)
+        public TensorData Eval(Variable output)
         {
             var allOutputs = new[] { output };
             return Eval(allOutputs)[0];
@@ -194,7 +194,7 @@ namespace Shorokoo.Runtime
         public TensorData<T> Eval<T>(Tensor<T> output)
             where T : IVarType
         {
-            return (TensorData<T>)Eval((IVariable)output);
+            return (TensorData<T>)Eval((Variable)output);
         }
 
         /// <summary>Executes a graph that takes no inputs.</summary>
@@ -374,7 +374,7 @@ namespace Shorokoo.Runtime
             /// <summary>Lifts the tensor data into a tensor variable.</summary>
             public Tensor<T> Get<T>(TensorData<T> tensorData) where T : IVarType
             {
-                return (Tensor<T>)Globals.Tensor(tensorData);
+                return (Variable)Globals.Tensor(tensorData);
             }
         }
 
@@ -437,16 +437,16 @@ namespace Shorokoo.Runtime
     /// </summary>
     public class EvalFrom
     {
-        private ITensor[] inputs;
+        private Variable[] inputs;
 
         /// <summary>Captures the graph inputs to evaluate from.</summary>
-        public EvalFrom(ITensor[] inputs)
+        public EvalFrom(Variable[] inputs)
         {
             this.inputs = inputs;
         }
 
         /// <summary>Selects the output tensors to evaluate.</summary>
-        public EvalTo To(ITensor[] outputs)
+        public EvalTo To(Variable[] outputs)
         {
             return new EvalTo(this.inputs, outputs);
         }
@@ -458,11 +458,11 @@ namespace Shorokoo.Runtime
     /// </summary>
     public class EvalTo
     {
-        private ITensor[] inputs;
-        private ITensor[] outputs;
+        private Variable[] inputs;
+        private Variable[] outputs;
 
         /// <summary>Captures the inputs and outputs of the subgraph to execute.</summary>
-        public EvalTo(ITensor[] inputs, ITensor[] outputs)
+        public EvalTo(Variable[] inputs, Variable[] outputs)
         {
             this.inputs = inputs;
             this.outputs = outputs;
@@ -490,7 +490,7 @@ namespace Shorokoo.Runtime
         }
 
         /// <summary>Starts a fluent eager evaluation: <c>inputs.Eval(outputs).With(data)</c>.</summary>
-        public static EvalTo Eval(this IEnumerable<ITensor> inputTensors, params ITensor[] outputTensors)
+        public static EvalTo Eval(this IEnumerable<Variable> inputTensors, params Variable[] outputTensors)
         {
             return new EvalFrom(inputTensors.ToArray()).To(outputTensors);
         }

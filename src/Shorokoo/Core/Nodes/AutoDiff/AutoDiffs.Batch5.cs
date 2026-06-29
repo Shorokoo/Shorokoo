@@ -12,7 +12,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // ===== Gemm =====
 
         [AutoDiff(GEMM)]
-        public static IVariable?[] Gemm<T>(
+        public static Variable?[] Gemm<T>(
             Tensor<T> a, Tensor<T> b, Tensor<T>? c,
             Tensor<T> grad, float? alpha, float? beta, long? transA, long? transB)
             where T : IVarType
@@ -36,11 +36,11 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 // A was transposed: Y = alpha * A^T @ B' + beta*C
                 // dL/dA^T = alpha * grad @ B'^T, so dL/dA = (dL/dA^T)^T = alpha * B' @ grad^T
                 if (effectiveTransB != 0)
-                    gradA = alphaConst * (Tensor<T>)OnnxOp.MatMul(
+                    gradA = alphaConst * OnnxOp.MatMul(
                         OnnxOp.Transpose(b, perm: [1, 0]),
                         OnnxOp.Transpose(grad, perm: [1, 0]));
                 else
-                    gradA = alphaConst * (Tensor<T>)OnnxOp.MatMul(
+                    gradA = alphaConst * OnnxOp.MatMul(
                         b,
                         OnnxOp.Transpose(grad, perm: [1, 0]));
             }
@@ -48,9 +48,9 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             {
                 // A was not transposed: dL/dA = alpha * grad @ B'^T
                 if (effectiveTransB != 0)
-                    gradA = alphaConst * (Tensor<T>)OnnxOp.MatMul(grad, b);
+                    gradA = alphaConst * OnnxOp.MatMul(grad, b);
                 else
-                    gradA = alphaConst * (Tensor<T>)OnnxOp.MatMul(
+                    gradA = alphaConst * OnnxOp.MatMul(
                         grad,
                         OnnxOp.Transpose(b, perm: [1, 0]));
             }
@@ -61,11 +61,11 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             {
                 // B was transposed: dL/dB^T = alpha * A'^T @ grad, dL/dB = (dL/dB^T)^T
                 if (effectiveTransA != 0)
-                    gradB = alphaConst * (Tensor<T>)OnnxOp.MatMul(
+                    gradB = alphaConst * OnnxOp.MatMul(
                         OnnxOp.Transpose(grad, perm: [1, 0]),
                         OnnxOp.Transpose(a, perm: [1, 0]));
                 else
-                    gradB = alphaConst * (Tensor<T>)OnnxOp.MatMul(
+                    gradB = alphaConst * OnnxOp.MatMul(
                         OnnxOp.Transpose(grad, perm: [1, 0]),
                         a);
             }
@@ -73,19 +73,19 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             {
                 // B was not transposed: dL/dB = alpha * A'^T @ grad
                 if (effectiveTransA != 0)
-                    gradB = alphaConst * (Tensor<T>)OnnxOp.MatMul(a, grad);
+                    gradB = alphaConst * OnnxOp.MatMul(a, grad);
                 else
-                    gradB = alphaConst * (Tensor<T>)OnnxOp.MatMul(
+                    gradB = alphaConst * OnnxOp.MatMul(
                         OnnxOp.Transpose(a, perm: [1, 0]),
                         grad);
             }
 
             // Compute gradient w.r.t. C
-            IVariable? gradC = null;
+            Variable? gradC = null;
             if (c is not null)
             {
                 var betaConst = TypedConst(effectiveBeta, (Tensor<T>)grad);
-                gradC = ReverseBroadcast(betaConst * grad, c.DShape);
+                gradC = ReverseBroadcast(betaConst * grad, c.Value.DShape);
             }
 
             return [gradA, gradB, gradC];
@@ -94,7 +94,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // ===== InstanceNormalization =====
 
         [AutoDiff(INSTANCE_NORMALIZATION)]
-        public static IVariable?[] InstanceNormalization<T>(
+        public static Variable?[] InstanceNormalization<T>(
             Tensor<T> x, Tensor<T> scale, Tensor<T> bias,
             Tensor<T> grad, float? epsilon) where T : IVarType
         {
@@ -106,44 +106,44 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // Get input shape components
             var xShape = x.DShape;                                                    // [N, C, ...]
             var xRank = OnnxOp.Shape(xShape);                                         // [1] containing rank
-            var cVec = (Tensor<int64>)OnnxOp.Slice(xShape, Vector(1L), Vector(2L));   // [C]
+            Tensor<int64> cVec = OnnxOp.Slice(xShape, Vector(1L), Vector(2L));   // [C]
 
             // Compute reduction axes for spatial dims: [2, 3, ..., rank-1]
             var xRankScalar = OnnxOp.Squeeze(xRank, Vector(0L));
             var spatialAxes = OnnxOp.Range(Scalar(2L), xRankScalar, Scalar(1L));
 
             // Compute mean and variance per instance per channel
-            var mean = (Tensor<T>)OnnxOp.ReduceMean(x, spatialAxes, keepdims: true);
+            Tensor<T> mean = OnnxOp.ReduceMean(x, spatialAxes, keepdims: true);
             var xCentered = x - mean;
-            var variance = (Tensor<T>)OnnxOp.ReduceMean(xCentered * xCentered, spatialAxes, keepdims: true);
-            var invStd = (Tensor<T>)OnnxOp.Reciprocal((Tensor<T>)OnnxOp.Sqrt(variance + epsConst));
+            Tensor<T> variance = OnnxOp.ReduceMean(xCentered * xCentered, spatialAxes, keepdims: true);
+            Tensor<T> invStd = OnnxOp.Reciprocal(OnnxOp.Sqrt(variance + epsConst));
 
             // Normalized values
             var xHat = xCentered * invStd;
 
             // Build broadcast shape [1, C, 1, 1, ...] for scale/bias
-            var onesShape = (Tensor<int64>)OnnxOp.Expand(Scalar(1L), xRank);
-            var scatterIdx = (Tensor<int64>)OnnxOp.Reshape(Vector(1L), Vector(1L, 1L), allowZero: false);
-            var broadcastShape = (Tensor<int64>)OnnxOp.ScatterND(onesShape, scatterIdx, cVec);
-            var scaleBC = (Tensor<T>)OnnxOp.Reshape(scale, broadcastShape, allowZero: false);
+            Tensor<int64> onesShape = OnnxOp.Expand(Scalar(1L), xRank);
+            Tensor<int64> scatterIdx = OnnxOp.Reshape(Vector(1L), Vector(1L, 1L), allowZero: false);
+            Tensor<int64> broadcastShape = OnnxOp.ScatterND(onesShape, scatterIdx, cVec);
+            Tensor<T> scaleBC = OnnxOp.Reshape(scale, broadcastShape, allowZero: false);
 
             // Build reduce axes for dscale/dbias: [0, 2, 3, ..., rank-1] (all except channel dim 1)
             var allAxes = OnnxOp.Range(Scalar(0L), xRankScalar, Scalar(1L));
-            var axis0 = (Tensor<int64>)OnnxOp.Slice(allAxes, Vector(0L), Vector(1L));
-            var axesSuffix = (Tensor<int64>)OnnxOp.Slice(allAxes, Vector(2L), xRank);
-            var channelReduceAxes = (Tensor<int64>)OnnxOp.Concat([axis0, axesSuffix], axis: 0);
+            Tensor<int64> axis0 = OnnxOp.Slice(allAxes, Vector(0L), Vector(1L));
+            Tensor<int64> axesSuffix = OnnxOp.Slice(allAxes, Vector(2L), xRank);
+            Tensor<int64> channelReduceAxes = OnnxOp.Concat([axis0, axesSuffix], axis: 0);
 
             // dscale = sum(grad * x_hat, axes=[0, 2, 3, ...]) → [C]
-            var gradScale = (Tensor<T>)OnnxOp.ReduceSum(grad * xHat, channelReduceAxes, keepdims: false);
+            Tensor<T> gradScale = OnnxOp.ReduceSum(grad * xHat, channelReduceAxes, keepdims: false);
 
             // dbias = sum(grad, axes=[0, 2, 3, ...]) → [C]
-            var gradBias = (Tensor<T>)OnnxOp.ReduceSum(grad, channelReduceAxes, keepdims: false);
+            Tensor<T> gradBias = OnnxOp.ReduceSum(grad, channelReduceAxes, keepdims: false);
 
             // dx: use instance normalization backward formula
             // dx = invStd * (grad_scaled - mean(grad_scaled) - x_centered * mean(grad_scaled * x_centered) * invStd²)
             var gradScaled = grad * scaleBC;
-            var meanGrad = (Tensor<T>)OnnxOp.ReduceMean(gradScaled, spatialAxes, keepdims: true);
-            var meanGradXc = (Tensor<T>)OnnxOp.ReduceMean(gradScaled * xCentered, spatialAxes, keepdims: true);
+            Tensor<T> meanGrad = OnnxOp.ReduceMean(gradScaled, spatialAxes, keepdims: true);
+            Tensor<T> meanGradXc = OnnxOp.ReduceMean(gradScaled * xCentered, spatialAxes, keepdims: true);
             var gradX = invStd * (gradScaled - meanGrad - xCentered * meanGradXc * invStd * invStd);
 
             return [gradX, gradScale, gradBias];
@@ -152,7 +152,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // ===== SpaceToDepth =====
 
         [AutoDiff(SPACE_TO_DEPTH)]
-        public static IVariable?[] SpaceToDepth<T>(
+        public static Variable?[] SpaceToDepth<T>(
             Tensor<T> input, Tensor<T> grad, long? blocksize)
             where T : IVarType
         {
@@ -163,24 +163,24 @@ namespace Shorokoo.Core.Nodes.AutoDiff
 
             // Get grad shape components: [N, C*r², H/r, W/r]
             var gradShape = grad.DShape;
-            var nVec = (Tensor<int64>)OnnxOp.Slice(gradShape, Vector(0L), Vector(1L));
-            var cr2Vec = (Tensor<int64>)OnnxOp.Slice(gradShape, Vector(1L), Vector(2L));
-            var hrVec = (Tensor<int64>)OnnxOp.Slice(gradShape, Vector(2L), Vector(3L));
-            var wrVec = (Tensor<int64>)OnnxOp.Slice(gradShape, Vector(3L), Vector(4L));
+            Tensor<int64> nVec = OnnxOp.Slice(gradShape, Vector(0L), Vector(1L));
+            Tensor<int64> cr2Vec = OnnxOp.Slice(gradShape, Vector(1L), Vector(2L));
+            Tensor<int64> hrVec = OnnxOp.Slice(gradShape, Vector(2L), Vector(3L));
+            Tensor<int64> wrVec = OnnxOp.Slice(gradShape, Vector(3L), Vector(4L));
             var rVec = Vector(r);
             var r2Vec = Vector(r * r);
             var cVec = cr2Vec / r2Vec;
 
             // Step 1: Reshape grad [N, C*r², H/r, W/r] → [N, r, r, C, H/r, W/r] (DCR mode)
-            var intermediateShape = (Tensor<int64>)OnnxOp.Concat(
+            Tensor<int64> intermediateShape = OnnxOp.Concat(
                 [nVec, rVec, rVec, cVec, hrVec, wrVec], axis: 0);
-            var reshaped = (Tensor<T>)OnnxOp.Reshape(grad, intermediateShape, allowZero: false);
+            Tensor<T> reshaped = OnnxOp.Reshape(grad, intermediateShape, allowZero: false);
 
             // Step 2: Transpose [N, r, r, C, H/r, W/r] → [N, C, H/r, r, W/r, r]
-            var transposed = (Tensor<T>)OnnxOp.Transpose(reshaped, perm: [0, 3, 4, 1, 5, 2]);
+            Tensor<T> transposed = OnnxOp.Transpose(reshaped, perm: [0, 3, 4, 1, 5, 2]);
 
             // Step 3: Reshape to original input shape [N, C, H, W]
-            var result = (Tensor<T>)OnnxOp.Reshape(transposed, originalShape, allowZero: false);
+            Tensor<T> result = OnnxOp.Reshape(transposed, originalShape, allowZero: false);
 
             return [result];
         }
@@ -188,7 +188,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // ===== Trilu =====
 
         [AutoDiff(TRILU)]
-        public static IVariable?[] Trilu<T1>(
+        public static Variable?[] Trilu<T1>(
             Tensor<T1> input, Tensor<int64>? k, Tensor<T1> grad, long? upper)
             where T1 : IVarType
         {
@@ -196,7 +196,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // Gradient: apply the same triangular mask to the upstream gradient
             var effectiveUpper = upper ?? 1;
 
-            IVariable gradResult;
+            Variable gradResult;
             if (k is not null)
                 gradResult = OnnxOp.Trilu(grad, k, upper: effectiveUpper);
             else
@@ -208,7 +208,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // ===== LpNormalization =====
 
         [AutoDiff(LP_NORMALIZATION)]
-        public static IVariable?[] LpNormalization<T>(
+        public static Variable?[] LpNormalization<T>(
             Tensor<T> input, Tensor<T> grad, long? axis, long? p)
             where T : IVarType
         {
@@ -225,11 +225,11 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             if (effectiveP == 2)
             {
                 // L2 normalization gradient
-                var norm = (Tensor<T>)OnnxOp.ReduceL2(input, axesTensor, keepdims: true);
+                Tensor<T> norm = OnnxOp.ReduceL2(input, axesTensor, keepdims: true);
                 var epsConst = TypedConst(1e-12f, input);
-                var safeNorm = (Tensor<T>)OnnxOp.Max(norm, epsConst);
+                Tensor<T> safeNorm = OnnxOp.Max(norm, epsConst);
                 var y = input / safeNorm;
-                var dotProduct = (Tensor<T>)OnnxOp.ReduceSum(grad * y, axesTensor, keepdims: true);
+                Tensor<T> dotProduct = OnnxOp.ReduceSum(grad * y, axesTensor, keepdims: true);
                 var gradInput = (grad - y * dotProduct) / safeNorm;
                 return [gradInput];
             }
@@ -238,12 +238,12 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 // L1 normalization gradient
                 // y = x / ||x||_1, so dy_j/dx_i = (δ_ij - sign(x_i) * y_j) / ||x||_1
                 // dL/dx_i = sum_j(dL/dy_j * dy_j/dx_i) = (dL/dy_i - sign(x_i) * sum(dL/dy * y)) / ||x||_1
-                var norm = (Tensor<T>)OnnxOp.ReduceL1(input, axesTensor, keepdims: true);
+                Tensor<T> norm = OnnxOp.ReduceL1(input, axesTensor, keepdims: true);
                 var epsConst = TypedConst(1e-12f, input);
-                var safeNorm = (Tensor<T>)OnnxOp.Max(norm, epsConst);
-                var signX = (Tensor<T>)OnnxOp.Sign(input);
+                Tensor<T> safeNorm = OnnxOp.Max(norm, epsConst);
+                Tensor<T> signX = OnnxOp.Sign(input);
                 var y = input / safeNorm;
-                var dotGradY = (Tensor<T>)OnnxOp.ReduceSum(grad * y, axesTensor, keepdims: true);
+                Tensor<T> dotGradY = OnnxOp.ReduceSum(grad * y, axesTensor, keepdims: true);
                 var gradInput = (grad - signX * dotGradY) / safeNorm;
                 return [gradInput];
             }
@@ -251,7 +251,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
 
         // ===== Conv (variadic registration) =====
 
-        internal static IVariable?[] ConvGradient(IVariable?[] inputs, IVariable?[] outputGrads, OnnxCSharpAttributes attributes)
+        internal static Variable?[] ConvGradient(Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
         {
             // Conv(x, w, b) → y
             // dx = ConvTranspose(grad, w) with matching parameters
@@ -307,7 +307,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // concatenate the per-group [Cout/g, Cin/g, KH', KW'] pieces along the output-
             // channel axis — matching w's grouped [Cout, Cin/g, KH, KW] layout. See
             // GroupedConvWeightGradient.
-            IVariable? gradW = GroupedConvWeightGradient(
+            Variable? gradW = GroupedConvWeightGradient(
                 image: x, kernel: grad, group: group,
                 strides: strides, dilations: dilations, pads: pads);
 
@@ -321,7 +321,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             }
 
             // db = ReduceSum(grad, axes=[0, 2, 3, ...]) → [outChannels]
-            IVariable? gradB = null;
+            Variable? gradB = null;
             if (b is not null)
             {
                 var gradShape = OnnxOp.Shape(grad);
@@ -339,7 +339,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
 
         // ===== ConvTranspose (variadic registration) =====
 
-        internal static IVariable?[] ConvTransposeGradient(IVariable?[] inputs, IVariable?[] outputGrads, OnnxCSharpAttributes attributes)
+        internal static Variable?[] ConvTransposeGradient(Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
         {
             // ConvTranspose(x, w, b) → y, with w laid out [Cin, Cout/group, KH, KW] and
             //   y[n, co, j] = Σ_{ci, i, k : i·stride + k·dilation − pad_begin = j} x[n, ci, i] · w[ci, co, k]
@@ -384,7 +384,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // the trick per channel group and concatenate the per-group [Cin/g, Cout/g, …]
             // pieces along axis 0 — matching w's grouped [Cin, Cout/g, KH, KW] layout. See
             // GroupedConvWeightGradient (image/kernel roles swapped vs. Conv's call).
-            IVariable? gradW = GroupedConvWeightGradient(
+            Variable? gradW = GroupedConvWeightGradient(
                 image: grad, kernel: x, group: group,
                 strides: strides, dilations: dilations, pads: pads);
 
@@ -396,7 +396,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             }
 
             // db = ReduceSum(grad, axes=[0, 2, 3, ...])
-            IVariable? gradB = null;
+            Variable? gradB = null;
             if (b is not null)
             {
                 var gradShape = OnnxOp.Shape(grad);
@@ -423,8 +423,8 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // (after the trailing [1,0,2,3] transpose; KH'/KW' may overrun the true kernel size —
         // callers slice down to w's shape). 2-D only, mirroring the dx implementations.
 
-        private static IVariable ConvWeightGradientViaSwappedRoles(
-            IVariable image, IVariable kernel, long[] strides, long[] dilations, long[]? pads)
+        private static Variable ConvWeightGradientViaSwappedRoles(
+            Variable image, Variable kernel, long[] strides, long[] dilations, long[]? pads)
         {
             var imageT = OnnxOp.Transpose(image, [1L, 0L, 2L, 3L]);
             var kernelT = OnnxOp.Transpose(kernel, [1L, 0L, 2L, 3L]);
@@ -442,8 +442,8 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // ConvTranspose ([Cin, Cout/g, …]) alike. Note: for large group counts (e.g.
         // depthwise convs over many channels) this emits 'group' Conv nodes.
 
-        private static IVariable GroupedConvWeightGradient(
-            IVariable image, IVariable kernel, long group,
+        private static Variable GroupedConvWeightGradient(
+            Variable image, Variable kernel, long group,
             long[] strides, long[] dilations, long[]? pads)
         {
             if (group <= 1L)
@@ -456,7 +456,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 OnnxOp.Slice(OnnxOp.Shape(kernel), Globals.Vector(1L), Globals.Vector(2L)),
                 Globals.Vector(group));
 
-            var parts = new IVariable[group];
+            var parts = new Variable[group];
             for (long g = 0; g < group; g++)
             {
                 var imageG = OnnxOp.Slice(image,
@@ -511,7 +511,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // are not preserved on the node. ceil_mode doesn't affect this gradient — the
         // window count is taken from grad's actual shape.
 
-        internal static IVariable?[] AveragePoolGradient(IVariable?[] inputs, IVariable?[] outputGrads, OnnxCSharpAttributes attributes)
+        internal static Variable?[] AveragePoolGradient(Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
         {
             var x = inputs[0]!;
             var grad = outputGrads[0]!;
@@ -590,31 +590,32 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // We can't pass these to Col2Im's static `pads` attribute, so instead we
             // inflate Col2Im's dynamic `image_shape` input to absorb them and Slice the
             // result down to x's spatial shape at the end.
-            IVariable[]? padBeginVars = null;
-            IVariable? paddedImageShape = null;
+            Variable[]? padBeginVars = null;
+            Variable? paddedImageShape = null;
             if (isSameMode)
             {
                 var xShapeSame = OnnxOp.Shape(x);
                 var gradShapeSame = OnnxOp.Shape(grad);
-                padBeginVars = new IVariable[nDims];
-                var imageShapeParts = new IVariable[nDims];
+                padBeginVars = new Variable[nDims];
+                var imageShapeParts = new Variable[nDims];
 
                 for (int d = 0; d < nDims; d++)
                 {
                     var idx = Globals.Scalar(2L + d);
-                    var outDim = (Tensor<int64>)OnnxOp.Gather(gradShapeSame, idx, axis: 0);
-                    var inDim = (Tensor<int64>)OnnxOp.Gather(xShapeSame, idx, axis: 0);
+                    Tensor<int64> outDim = OnnxOp.Gather(gradShapeSame, idx, axis: 0);
+                    Tensor<int64> inDim = OnnxOp.Gather(xShapeSame, idx, axis: 0);
                     var padTotalCandidate = (outDim - Globals.Scalar(1L)) * Globals.Scalar(strides[d])
                                           + Globals.Scalar((kernelShape[d] - 1) * dilations[d])
                                           + Globals.Scalar(1L) - inDim;
-                    var padTotal = (Tensor<int64>)OnnxOp.Max(
-                        (Tensor<int64>)(IVariable)Globals.Scalar(0L),
+                    Tensor<int64> padTotal = OnnxOp.Max(
+                        (Variable)Globals.Scalar(0L),
                         padTotalCandidate);
 
                     Tensor<int64> padBegin = sameLower
                         ? (padTotal + Globals.Scalar(1L)) / Globals.Scalar(2L)
                         : padTotal / Globals.Scalar(2L);
-                    padBeginVars[d] = padBegin;
+                    // Store the Immutable* graph value so later reads can downcast it.
+                    padBeginVars[d] = (Variable)padBegin;
 
                     imageShapeParts[d] = OnnxOp.Reshape(
                         inDim + padTotal,
@@ -629,7 +630,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // varies (windows near the edges touch padded zeros that aren't counted),
             // so we use the same AvgPool(ones, count_include_pad=true) trick — passing
             // the original auto_pad/pads so the divisor tensor has the right shape.
-            IVariable scaledGrad;
+            Variable scaledGrad;
             if (countIncludePad || (!hasPads && !isSameMode))
             {
                 // Constant divisor kernel_size everywhere.
@@ -688,7 +689,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             //             the dynamic padding), pads attr = zeros. We then Slice off the
             //             padding edges to recover x's exact spatial extent.
             var blockShape = Globals.Vector(kernelShape);
-            IVariable imageShape;
+            Variable imageShape;
             long[] col2imPads;
             if (isSameMode)
             {
@@ -710,13 +711,13 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // (padded - pad_end) because the latter is a plain Sub we already have. But
             // start + x_size is simpler — compute that.
             var xShapeFinal = OnnxOp.Shape(x);
-            var startsParts = new IVariable[nDims];
-            var endsParts = new IVariable[nDims];
+            var startsParts = new Variable[nDims];
+            var endsParts = new Variable[nDims];
             var axesArray = new long[nDims];
             for (int d = 0; d < nDims; d++)
             {
-                var xSizeD = (Tensor<int64>)OnnxOp.Gather(xShapeFinal, Globals.Scalar(2L + d), axis: 0);
-                var pb = (Tensor<int64>)padBeginVars![d];
+                Tensor<int64> xSizeD = OnnxOp.Gather(xShapeFinal, Globals.Scalar(2L + d), axis: 0);
+                Tensor<int64> pb = (Variable)padBeginVars![d];
                 startsParts[d] = OnnxOp.Reshape(pb, Globals.Vector(1L), allowZero: false);
                 endsParts[d] = OnnxOp.Reshape(pb + xSizeD, Globals.Vector(1L), allowZero: false);
                 axesArray[d] = 2L + d;
@@ -742,7 +743,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // storage_order=1 (column-major within each spatial slice) would need an index
         // remap and is not supported.
 
-        internal static IVariable?[] MaxPoolGradient(IVariable?[] inputs, IVariable?[] outputGrads, OnnxCSharpAttributes attributes)
+        internal static Variable?[] MaxPoolGradient(Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
         {
             var x = inputs[0]!;
             // grad of y. May be null when only the forward Indices output was consumed

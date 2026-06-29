@@ -524,7 +524,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         {
                             [OnnxOpAttributeNames.ShrkAttrHyperparamIndex] = (long)i,
                             [OnnxOpAttributeNames.ShrkAttrDtype] = hyperparam.DType,
-                            [OnnxOpAttributeNames.ShrkAttrRank] = (int?)hyperparam.Rank()
+                            [OnnxOpAttributeNames.ShrkAttrRank] = (int?)hyperparam.Rank
                         };
 
                         var hyperparamNode = FastNodeCreationHelpers.CreateFastNode(

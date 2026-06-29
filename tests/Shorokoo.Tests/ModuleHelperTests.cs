@@ -32,13 +32,30 @@ public class ModuleHelperCoverageTests
         // ──────────────────────────────────────────────────────────────────
         // DefaultVariable — one branch per supported variable shape + unsupported throw
         // ──────────────────────────────────────────────────────────────────
-        Assert.IsAssignableFrom<ITensor>(ModuleHelper.DefaultVariable(typeof(Tensor<float32>)));
-        Assert.IsAssignableFrom<IOptionalTensor>(ModuleHelper.DefaultVariable(typeof(OptionalTensor<float32>)));
-        Assert.IsAssignableFrom<ITensorSequence>(ModuleHelper.DefaultVariable(typeof(TensorSequence<float32>)));
+        // DefaultVariable returns the graph-side Variable node; its structural kind is the
+        // distinguishing feature now that the node is non-generic and not a handle.
+        Assert.Equal(DataStructure.Tensor, InternalGlobals.DefaultVariable(typeof(Tensor<float32>)).Structure());
+        Assert.Equal(DataStructure.Optional, InternalGlobals.DefaultVariable(typeof(OptionalTensor<float32>)).Structure());
+        Assert.Equal(DataStructure.Sequence, InternalGlobals.DefaultVariable(typeof(TensorSequence<float32>)).Structure());
         // ITensorStruct branch (lines 170-181): pass a concrete TensorStruct type.
-        Assert.IsAssignableFrom<ITensorStruct>(
-            ModuleHelper.DefaultVariable(typeof(TensorStruct<GenericPairStruct>)));
-        Assert.Throws<UnsupportedDTypeException>(() => ModuleHelper.DefaultVariable(typeof(int)));
+        Assert.Equal(DataStructure.TensorStruct,
+            InternalGlobals.DefaultVariable(typeof(TensorStruct<GenericPairStruct>)).Structure());
+        Assert.Throws<UnsupportedDTypeException>(() => InternalGlobals.DefaultVariable(typeof(int)));
+
+        // ──────────────────────────────────────────────────────────────────
+        // Variable is the internal graph node type — modules must declare their inputs/outputs with
+        // value handles (Tensor<T>, …), never Variable. Rejected at every signature chokepoint.
+        // ──────────────────────────────────────────────────────────────────
+        Assert.Throws<InvalidTensorOperationException>(() => ModuleHelper.RejectVariableParam(typeof(Variable)));
+        ModuleHelper.RejectVariableParam(typeof(Scalar<float32>));   // a value handle is accepted (no throw)
+        // …including Variable nested in a tuple slot or array element.
+        Assert.Throws<InvalidTensorOperationException>(() => ModuleHelper.RejectVariableParam(typeof((Variable, Scalar<float32>))));
+        Assert.Throws<InvalidTensorOperationException>(() => ModuleHelper.RejectVariableParam(typeof(Variable[])));
+        ModuleHelper.RejectVariableParam(typeof((Scalar<float32>, Tensor<float32>)));   // tuple of handles is accepted
+        Assert.Throws<InvalidTensorOperationException>(() => InternalGlobals.DefaultVariable(typeof(Variable)));
+        Assert.Throws<InvalidTensorOperationException>(() => ModuleHelper.ModuleParamInputBasedOn(typeof(Variable), InputType.ReadyInput, "x"));
+        Assert.Throws<InvalidTensorOperationException>(() => ModuleHelper.CreateFunctionSignature([], [typeof(Variable)], [typeof(Scalar<float32>)]));
+        Assert.Throws<InvalidTensorOperationException>(() => ModuleHelper.CreateFunctionSignature([], [typeof(Scalar<float32>)], [typeof(Variable)]));
 
         // ──────────────────────────────────────────────────────────────────
         // ToSignatureStringWithOverride — each variable-type arm
@@ -53,7 +70,7 @@ public class ModuleHelperCoverageTests
         Assert.Equal("float32?", ModuleHelper.ToSignatureStringWithOverride(opt, -1));
 
         var seq = OnnxOp.SequenceEmpty(DType.Float32);
-        Assert.Contains("float32/seq", ModuleHelper.ToSignatureStringWithOverride((ITensorSequence)seq, -1));
+        Assert.Contains("float32/seq", ModuleHelper.ToSignatureStringWithOverride(seq, -1));
 
         // ITensorStruct arm (lines 128-132).
         var structFields = new[]
@@ -67,26 +84,27 @@ public class ModuleHelperCoverageTests
         Assert.Contains("struct:CovHelperStruct",
             ModuleHelper.ToSignatureStringWithOverride(tensorStruct, null));
 
-        // IModel arm (line 111) + Scalar<IModelVarType> arm (line 117).
+        // Model node arm (DType.Model) — reached via the explicit IModuleParam→Variable boundary.
         var hypersModel = HypersLayer.Model(Scalar(1.0f), Scalar(0.0f));
-        Assert.StartsWith("[", ModuleHelper.ToSignatureStringWithOverride(hypersModel, null));
+        Assert.StartsWith("[", ModuleHelper.ToSignatureStringWithOverride(((IModuleParam)hypersModel).ToVariable(), null));
 
-        // IModule arm (line 114) + Scalar<IModuleVarType> arm (line 120).
+        // Module node arm (DType.Module).
         var hypersModule = new HypersLayerModule();
-        Assert.StartsWith("[", ModuleHelper.ToSignatureStringWithOverride(hypersModule, null));
+        Assert.StartsWith("[", ModuleHelper.ToSignatureStringWithOverride(((IModuleParam)hypersModule).ToVariable(), null));
 
+        // A param that is neither a handle, model, nor module cannot cross the boundary.
         Assert.Throws<InvalidTensorOperationException>(
-            () => ModuleHelper.ToSignatureStringWithOverride(new NonVariableModuleParam(), null));
+            () => ((IModuleParam)new NonVariableModuleParam()).ToVariable());
 
         // ──────────────────────────────────────────────────────────────────
         // Format — every return-value-type arm
         // ──────────────────────────────────────────────────────────────────
         var v = InputScalar<float32>("v");
         Assert.Throws<InvalidTensorOperationException>(() => ModuleHelper.Format(null));
-        Assert.Single(ModuleHelper.Format(new IVariable[] { v }));
+        Assert.Single(ModuleHelper.Format((IValue[])[v]));
         Assert.Single(ModuleHelper.Format(v));
         // IModuleParam[] arm (line 408-409).
-        Assert.Single(ModuleHelper.Format(new IModuleParam[] { v }));
+        Assert.Single(ModuleHelper.Format((IModuleParam[])[v]));
         Assert.Equal(2, ModuleHelper.Format((v, v)).Length);
 
         // IStruct record arm (lines 423-440).
@@ -104,23 +122,23 @@ public class ModuleHelperCoverageTests
         Assert.Throws<InvalidTensorOperationException>(() => ModuleHelper.Format(42));
 
         // ──────────────────────────────────────────────────────────────────
-        // Reformat<T> — array, ValueTuple, IVariable, throw branches
+        // Reformat<T> — array, ValueTuple, IValue, throw branches
         // ──────────────────────────────────────────────────────────────────
         var a = InputScalar<float32>("a");
         var b = InputScalar<float32>("b");
-        Assert.NotNull(ModuleHelper.Reformat<Scalar<float32>>(new IVariable[] { a }));
+        Assert.NotNull(ModuleHelper.Reformat<Scalar<float32>>((Variable[])[ a ]));
 
-        var tuple = ModuleHelper.Reformat<(Scalar<float32>, Scalar<float32>)>(new IVariable[] { a, b });
+        var tuple = ModuleHelper.Reformat<(Scalar<float32>, Scalar<float32>)>((Variable[])[ a, b ]);
         Assert.NotNull(tuple.Item1);
         Assert.NotNull(tuple.Item2);
 
-        var array = ModuleHelper.Reformat<Scalar<float32>[]>(new IVariable[] { a, b });
+        var array = ModuleHelper.Reformat<Scalar<float32>[]>((Variable[])[ a, b ]);
         Assert.Equal(2, array.Length);
 
         Assert.Throws<UnsupportedDTypeException>(
-            () => ModuleHelper.Reformat<List<IVariable>>(new IVariable[] { a }));
+            () => ModuleHelper.Reformat<List<IValue>>((Variable[])[ a ]));
         Assert.Throws<InvalidTensorOperationException>(
-            () => ModuleHelper.Reformat<(Scalar<float32>, Scalar<float32>)>(new IVariable[] { a }));
+            () => ModuleHelper.Reformat<(Scalar<float32>, Scalar<float32>)>((Variable[])[ a ]));
 
         // ──────────────────────────────────────────────────────────────────
         // InfosFromTouts — each per-element-type arm + tuple / non-tuple split
@@ -235,7 +253,6 @@ public class ModuleHelperCoverageTests
 
     private class NonVariableModuleParam : IModuleParam
     {
-        public IVariable ToVariable() => throw new NotImplementedException();
     }
 
     private static Tensor<float32> DoubleTensor(Tensor<float32> x) => x + x;

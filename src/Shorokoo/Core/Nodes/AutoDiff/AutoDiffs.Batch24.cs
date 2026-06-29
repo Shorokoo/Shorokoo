@@ -28,7 +28,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         //
         // Supported: avg mode, sampling_ratio >= 1 (fixed). Default half_pixel coords.
 
-        internal static IVariable?[] RoiAlignGradient(IVariable?[] inputs, IVariable?[] outputGrads, OnnxCSharpAttributes attributes)
+        internal static Variable?[] RoiAlignGradient(Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
         {
             var x = inputs[0]!;                  // [N, C, H, W]
             var rois = inputs[1]!;               // [num_rois, 4]  (x1, y1, x2, y2)
@@ -276,13 +276,13 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 Vector(totalSamples)
             ], axis: 0);
 
-            IVariable ExpandIdx(IVariable idx2d)
+            Variable ExpandIdx(Variable idx2d)
             {
                 var idx3d = OnnxOp.Reshape(idx2d, idx_3d_shape, allowZero: false);
                 return OnnxOp.Expand(idx3d, dY_flat_shape);                        // [num_rois, C, totalSamples]
             }
 
-            IVariable ExpandWeight(IVariable w2d)
+            Variable ExpandWeight(Variable w2d)
             {
                 var w3d = OnnxOp.Reshape(w2d, idx_3d_shape, allowZero: false);
                 return OnnxOp.Expand(w3d, dY_flat_shape);                          // [num_rois, C, totalSamples]
@@ -298,7 +298,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 OnnxOp.Cast(Scalar(0.0f), saturate: null, to: floatType), zeros_shape);
 
             // Scatter each corner's contribution
-            IVariable ScatterCorner(IVariable weight2d, IVariable flatIdx2d)
+            Variable ScatterCorner(Variable weight2d, Variable flatIdx2d)
             {
                 var w_exp = ExpandWeight(weight2d);                                // [num_rois, C, totalSamples]
                 var idx_exp = ExpandIdx(flatIdx2d);                                // [num_rois, C, totalSamples]

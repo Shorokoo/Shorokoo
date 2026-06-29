@@ -232,9 +232,6 @@ public partial class VectorOnnxOpsModel
         foreach (var _vh in v) { }
         foreach (var _vh in (System.Collections.IEnumerable)v) { }
 
-        // InfShape override (line 29).
-        _ = v.InfShape;
-
         return input * Scalar(1.0f);
     }
 }
@@ -415,7 +412,6 @@ public partial class ScalarOperatorsModel
         // returns Vector<T> (not Tensor<T>), so this fails to compile if the override regresses.
         Vector<float32> unsqueezedAxis = s1.Unsqueeze(0L);
         _ = unsqueezedAxis;
-        _ = s1.InfShape;
 
         // Scalar.Equals/GetHashCode (Scalar.cs:71-75).
         _ = s1.Equals((object?)s2);

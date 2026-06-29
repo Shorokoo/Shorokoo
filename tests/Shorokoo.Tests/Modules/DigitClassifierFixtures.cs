@@ -49,8 +49,8 @@ public partial class SoftmaxL2Loss
     {
         var diff = predictions - targets;
         var squared = diff * diff;
-        var perSample = (Tensor<float32>)OnnxOp.ReduceSum((ITensor)squared, Vector(1L), keepdims: false, noopWithEmptyAxes: null);
-        var batchMean = (Tensor<float32>)OnnxOp.ReduceMean((ITensor)perSample, Vector(0L), keepdims: false);
+        var perSample = (Tensor<float32>)OnnxOp.ReduceSum((Variable)squared, Vector(1L), keepdims: false, noopWithEmptyAxes: null);
+        var batchMean = (Tensor<float32>)OnnxOp.ReduceMean((Variable)perSample, Vector(0L), keepdims: false);
         return batchMean.Scalar();
     }
 }

@@ -59,9 +59,8 @@ namespace Shorokoo.Tests.Modules
         private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
             => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>ArgMax / ArgMin (axis incl. negative, keepdims, select_last_index ties,
@@ -103,9 +102,8 @@ namespace Shorokoo.Tests.Modules
         private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
             => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Reshape (0-dims, -1, allowzero on an empty tensor), Flatten (negative axis,
@@ -166,9 +164,8 @@ namespace Shorokoo.Tests.Modules
         private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
             => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Slice (negative steps — full reverse via huge-negative end, start clamped
@@ -226,9 +223,8 @@ namespace Shorokoo.Tests.Modules
             => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
                 .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>ScatterElements (reduction none/add/mul/min/max, negative indices, axis 1),
@@ -290,9 +286,8 @@ namespace Shorokoo.Tests.Modules
             => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
                 .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Split (num_outputs with UNEVEN last chunk [3,3,1], explicit split input,
@@ -356,9 +351,8 @@ namespace Shorokoo.Tests.Modules
         private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
             => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>OneHot (default axis −1, axis 0 and negative axis −2, custom off/on
@@ -373,19 +367,19 @@ namespace Shorokoo.Tests.Modules
             var idx3 = Vector(0L, 2L, 1L);
             var t9 = Vector(1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f).Reshape(Vector(3L, 3L));
             var oh = NN.OneHot(idx, Scalar(4L), Vector(0f, 1f));
-            var nz1 = NN.NonZero(Vector(5f, 0f, 7f));
+            var nz1 = NN.NonZero(Vector(5f, 0f, 7f).Tensor());
             var nz2 = NN.NonZero(Vector(0f, 3f, 0f, 2f).Reshape(Vector(2L, 2L)));
             var mismatch =
                 ShapeMismatch(oh, Vector(4L, 4L)) +
                 // 1 → row 1 on; 3 → row 3 on; −2 → +4 = 2 on; 5 outside [−4, 3] → all-off.
                 FloatMismatch(Flat(oh),
                     Vector(0f, 1f, 0f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 0f)) +
-                FloatMismatch(Flat(NN.OneHot(idx3, Scalar(3L), Vector(7f, 9f), 0)),
+                FloatMismatch(Flat(NN.OneHot(idx3.Tensor(), Scalar(3L), Vector(7f, 9f), 0)),
                     Vector(9f, 7f, 7f, 7f, 7f, 9f, 7f, 9f, 7f)) +
                 // axis −2 on output rank 2 ≡ axis 0.
-                FloatMismatch(Flat(NN.OneHot(idx3, Scalar(3L), Vector(7f, 9f), -2)),
+                FloatMismatch(Flat(NN.OneHot(idx3.Tensor(), Scalar(3L), Vector(7f, 9f), -2)),
                     Vector(9f, 7f, 7f, 7f, 7f, 9f, 7f, 9f, 7f)) +
-                IntMismatch(FlatI(NN.OneHot(idx3, Scalar(3L), Vector(0L, 1L))),
+                IntMismatch(FlatI(NN.OneHot(idx3.Tensor(), Scalar(3L), Vector(0L, 1L))),
                     Vector(1L, 0L, 0L, 0L, 0L, 1L, 0L, 1L, 0L)) +
                 FloatMismatch(Flat((Tensor<float32>)OnnxOp.Trilu(t9)),
                     Vector(1f, 2f, 3f, 0f, 5f, 6f, 0f, 0f, 9f)) +
@@ -414,8 +408,7 @@ namespace Shorokoo.Tests.Modules
         private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
             => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 }

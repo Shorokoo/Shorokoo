@@ -90,9 +90,8 @@ namespace Shorokoo.Tests.Modules
             => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
                 .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Softmax (DEFAULT axis −1 since opset 13, explicit axis 0), LogSoftmax
@@ -128,9 +127,8 @@ namespace Shorokoo.Tests.Modules
             => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
                 .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>SoftmaxCrossEntropyLoss (reduction="none" → loss has the LABELS' shape;
@@ -186,9 +184,8 @@ namespace Shorokoo.Tests.Modules
         private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
             => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>MatMul numpy semantics with VALUES: 2-D×2-D, the 1-D edge cases
@@ -267,9 +264,8 @@ namespace Shorokoo.Tests.Modules
         private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
             => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Einsum equation parsing (shape-only in QEE): explicit matmul
@@ -289,12 +285,12 @@ namespace Shorokoo.Tests.Modules
                 2f, 1f, 0f, 0f, 1f, 0f, 1f, 0f, 1f).Reshape(Vector(2L, 3L, 3L));
             var d22 = Vector(3f, 1f, 1f, 2f).Reshape(Vector(2L, 2L));
 
-            var eMatMul = (Tensor<float32>)OnnxOp.Einsum(new IVariable[] { x, k34 }, "ij,jk->ik");
-            var eTrans = (Tensor<float32>)OnnxOp.Einsum(new IVariable[] { x }, "ij->ji");
-            var eReduce = (Tensor<float32>)OnnxOp.Einsum(new IVariable[] { x }, "ij->i");
-            var eDiag = (Tensor<float32>)OnnxOp.Einsum(new IVariable[] { sq33 }, "ii->i");
-            var eImplicit = (Tensor<float32>)OnnxOp.Einsum(new IVariable[] { x, k34 }, "ij,jk");
-            var eBatch = (Tensor<float32>)OnnxOp.Einsum(new IVariable[] { b223, b232 }, "bij,bjk->bik");
+            var eMatMul = (Tensor<float32>)OnnxOp.Einsum((Variable[])[ x, k34 ], "ij,jk->ik");
+            var eTrans = (Tensor<float32>)OnnxOp.Einsum((Variable[])[ x ], "ij->ji");
+            var eReduce = (Tensor<float32>)OnnxOp.Einsum((Variable[])[ x ], "ij->i");
+            var eDiag = (Tensor<float32>)OnnxOp.Einsum((Variable[])[ sq33 ], "ii->i");
+            var eImplicit = (Tensor<float32>)OnnxOp.Einsum((Variable[])[ x, k34 ], "ij,jk");
+            var eBatch = (Tensor<float32>)OnnxOp.Einsum((Variable[])[ b223, b232 ], "bij,bjk->bik");
             var detBatch = NN.DeterminantMatrix(d233);
             var detSingle = NN.DeterminantMatrix(d22);
 
@@ -313,9 +309,8 @@ namespace Shorokoo.Tests.Modules
         private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
             => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Quantization VALUES: QuantizeLinear per-tensor int8 (round-half-even:
@@ -330,7 +325,7 @@ namespace Shorokoo.Tests.Modules
         {
             var qt = (Tensor<int8>)OnnxOp.QuantizeLinear(q, Scalar(0.5f), Scalar((sbyte)1));
             var qa = (Tensor<int8>)OnnxOp.QuantizeLinear(q,
-                Vector(0.5f, 0.25f), Vector((sbyte)0, (sbyte)10), axis: 0);
+                Vector(0.5f, 0.25f).Tensor(), Vector((sbyte)0, (sbyte)10), axis: 0);
             var qs = (Tensor<int8>)OnnxOp.QuantizeLinear(
                 Vector(100f, -100f), Scalar(0.5f), Scalar((sbyte)0));
             // No zero point: output dtype comes from the output_dtype attribute (uint8),
@@ -339,8 +334,8 @@ namespace Shorokoo.Tests.Modules
 
             var xq = Vector((sbyte)10, (sbyte)-20, (sbyte)30, (sbyte)40).Reshape(Vector(2L, 2L));
             var dqAxis = NN.DequantizeLinear(xq,
-                Vector(0.5f, 0.25f), Vector((sbyte)0, (sbyte)20), axis: 0);
-            var dqTensor = NN.DequantizeLinear(xq, Scalar(0.1f), null);
+                Vector(0.5f, 0.25f).Tensor(), Vector((sbyte)0, (sbyte)20), axis: 0);
+            var dqTensor = NN.DequantizeLinear(xq, Scalar(0.1f).Tensor(), null);
 
             var (dy, dScale, dZp) = NN.DynamicQuantizeLinear(Vector(0f, 2f, -3f, 5f));
 
@@ -372,8 +367,7 @@ namespace Shorokoo.Tests.Modules
         private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
             => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 }

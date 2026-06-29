@@ -12,7 +12,7 @@ using Shorokoo.Core.Nodes.Processors.AutoGrad;
 namespace Shorokoo.Core.Nodes.Processors.Fast
 {
     /// <summary>
-    /// Fast-side counterparts to the IVariable factory helpers in <see cref="InternalOp"/>.
+    /// Fast-side counterparts to the Variable factory helpers in <see cref="InternalOp"/>.
     /// Each method produces a single <see cref="FastNode"/> with its required attributes
     /// pre-populated and a fresh <see cref="FastNodeKey"/>; callers append the returned node
     /// to their graph's node list and use the node's output <see cref="FastTensorKey"/>(s)
@@ -120,8 +120,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <summary>
         /// Mirrors <see cref="InternalOp.AutoGrad"/>. Produces an AUTO_GRAD node whose inputs
         /// are <c>[loss, ...inputs]</c> and which yields one output per element of
-        /// <paramref name="inputKeys"/> (parallel to the inputs, matching the IVariable variant
-        /// which returns <c>IVariable?[]</c> of the same length).
+        /// <paramref name="inputKeys"/> (parallel to the inputs, matching the Variable variant
+        /// which returns <c>Variable?[]</c> of the same length).
         /// </summary>
         public static FastNode AutoGrad(FastTensorKey lossKey, IReadOnlyList<FastTensorKey> inputKeys)
         {

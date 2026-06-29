@@ -30,7 +30,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         //   dL/d(size) = null (int64, not differentiable)
 
         [AutoDiff(AFFINE_GRID)]
-        public static IVariable?[] AffineGrid<T>(
+        public static Variable?[] AffineGrid<T>(
             Tensor<T> theta, Tensor<int64> size, Tensor<T> grad,
             bool? align_corners)
             where T : IVarType

@@ -24,7 +24,7 @@ namespace Shorokoo.Core.Factory
     /// <see cref="FastComputationGraph"/>. Runs the standard pre-passes, then
     /// walks the graph emitting protos. Every step works against
     /// <see cref="FastNode"/>/<see cref="FastNodeKey"/>/<see cref="FastTensorKey"/>
-    /// — never an <see cref="IVariable"/>.
+    /// — never an <see cref="Variable"/>.
     ///
     /// <para>
     /// All five pre-passes have Fast-side implementations, so the main pipeline

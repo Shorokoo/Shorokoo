@@ -248,7 +248,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("structInput", "TStruct")
                 .Output("fieldOutput", "TField", rank: "R"),
 
-            // TENSOR_STRUCT_CREATE: Creates a TensorStruct from multiple input IVariables.
+            // TENSOR_STRUCT_CREATE: Creates a TensorStruct from multiple input IValues.
             // Inputs: Variadic list of field values (order matches TensorStructDef)
             // Output: The created TensorStruct
             Op(TENSOR_STRUCT_CREATE)

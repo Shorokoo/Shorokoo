@@ -2975,7 +2975,7 @@ public partial class NNStaticWrapperWindowEyeDetCheck
         var hann = NN.HannWindow<float32>(Scalar(5L));
         var det = NN.DeterminantMatrix(sq);
         var eye = NN.EyeLike<float32>(sq);
-        var eyeShifted = NN.EyeLike<int64>((ITensor)sq, k: 1);
+        var eyeShifted = NN.EyeLike<int64>((Variable)sq, k: 1);
         var cat = NN.Concat(new[] { sq, sq }, axis: 0);
         return (blackman, blackman32, hamming, hann, det, eye, eyeShifted, cat);
     }
@@ -3494,7 +3494,7 @@ internal static class RnnRefHelpers
 
         var w = RecurrentUniform.Init([d, h, inSize], h);   // [D, H, in]
         var r = RecurrentUniform.Init([d, h, h], h);        // [D, H, H]
-        Tensor<float32>? b = bias ? PackedBias(d, h) : null;
+        Tensor<float32>? b = bias ? PackedBias(d, h) : (Tensor<float32>?)null;
 
         var (yVar, yhVar) = OnnxOp.Rnn(x, w, r, b, null, null,
             null, null, activations, null, onnxDir, hiddenSize, false);
@@ -3807,7 +3807,7 @@ internal static class LstmRefHelpers
 
         var w = RecurrentUniform.Init([d, fourH, inSize], h);   // [D, 4H, in]
         var r = RecurrentUniform.Init([d, fourH, h], h);        // [D, 4H, H]
-        Tensor<float32>? b = bias ? PackedBias(d, fourH, h) : null;
+        Tensor<float32>? b = bias ? PackedBias(d, fourH, h) : (Tensor<float32>?)null;
 
         var (yVar, yhVar, ycVar) = OnnxOp.Lstm(x, w, r, b, null, null, null, null,
             null, null, null, null, onnxDir, hiddenSize, false, false);
@@ -4143,7 +4143,7 @@ internal static class GruRefHelpers
 
         var w = RecurrentUniform.Init([d, threeH, inSize], h);   // [D, 3H, in]
         var r = RecurrentUniform.Init([d, threeH, h], h);        // [D, 3H, H]
-        Tensor<float32>? b = bias ? PackedBias(d, threeH, h) : null;
+        Tensor<float32>? b = bias ? PackedBias(d, threeH, h) : (Tensor<float32>?)null;
 
         var (yVar, yhVar) = OnnxOp.Gru(x, w, r, b, null, null,
             null, null, null, null, onnxDir, hiddenSize, false, linearBeforeReset);
@@ -4483,7 +4483,7 @@ internal static class CellRefHelpers
         Scalar<int64> inSize = x.DimTensor(-1);
         var w = RecurrentUniform.Init([Scalar(1L), hs, inSize], hs);   // [1, H, in]
         var r = RecurrentUniform.Init([Scalar(1L), hs, hs], hs);       // [1, H, H]
-        Tensor<float32>? b = bias ? PackedBias(hs, hs) : null;
+        Tensor<float32>? b = bias ? PackedBias(hs, hs) : (Tensor<float32>?)null;
 
         var (_, yhVar) = OnnxOp.Rnn(x.Unsqueeze(0L), w, r, b, null, h.Unsqueeze(0L),
             null, null, activations, null, RNNDirection.Forward, hiddenSize, false);
@@ -4500,7 +4500,7 @@ internal static class CellRefHelpers
         Scalar<int64> inSize = x.DimTensor(-1);
         var w = RecurrentUniform.Init([Scalar(1L), fourH, inSize], hs);   // [1, 4H, in]
         var r = RecurrentUniform.Init([Scalar(1L), fourH, hs], hs);       // [1, 4H, H]
-        Tensor<float32>? b = bias ? PackedBias(fourH, hs) : null;
+        Tensor<float32>? b = bias ? PackedBias(fourH, hs) : (Tensor<float32>?)null;
 
         var (_, yhVar, ycVar) = OnnxOp.Lstm(x.Unsqueeze(0L), w, r, b, null, h.Unsqueeze(0L), c.Unsqueeze(0L),
             null, null, null, null, null, LSTMDirection.Forward, hiddenSize, false, false);
@@ -4519,7 +4519,7 @@ internal static class CellRefHelpers
         Scalar<int64> inSize = x.DimTensor(-1);
         var w = RecurrentUniform.Init([Scalar(1L), threeH, inSize], hs);   // [1, 3H, in]
         var r = RecurrentUniform.Init([Scalar(1L), threeH, hs], hs);       // [1, 3H, H]
-        Tensor<float32>? b = bias ? PackedBias(threeH, hs) : null;
+        Tensor<float32>? b = bias ? PackedBias(threeH, hs) : (Tensor<float32>?)null;
 
         var (_, yhVar) = OnnxOp.Gru(x.Unsqueeze(0L), w, r, b, null, h.Unsqueeze(0L),
             null, null, null, null, GRUDirection.Forward, hiddenSize, false, linearBeforeReset);

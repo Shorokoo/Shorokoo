@@ -29,7 +29,7 @@ public interface IRuntimeTensor
     /// <summary>
     /// The tensor object from the computation graph that this runtime tensor corresponds to.
     /// </summary>
-    IVariable? ReferenceTensor { get; init; }
+    Variable? ReferenceTensor { get; init; }
 
     /// <summary>
     /// Iteration indices of the enclosing loops at the time this tensor was produced (outermost

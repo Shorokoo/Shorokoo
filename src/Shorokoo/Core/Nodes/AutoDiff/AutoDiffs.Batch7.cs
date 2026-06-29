@@ -24,7 +24,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         //   5. Apply checkerboard sign (-1)^(i+j) and multiply by upstream gradient
         //   6. Reshape back to original input shape
 
-        internal static IVariable?[] DetGradient(IVariable?[] inputs, IVariable?[] outputGrads, OnnxCSharpAttributes attributes)
+        internal static Variable?[] DetGradient(Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
         {
             var x = inputs[0]!;           // [..., M, M]
             var grad = outputGrads[0]!;   // [...]

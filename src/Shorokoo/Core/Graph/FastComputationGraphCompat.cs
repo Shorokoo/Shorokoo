@@ -19,17 +19,17 @@ namespace Shorokoo.Graph
     /// New code should prefer the direct FastCG API (<see cref="FastComputationGraph.Inputs"/>,
     /// <see cref="FastComputationGraph.Outputs"/>, <see cref="FastComputationGraphConverter.BuildNodes"/>,
     /// <see cref="FastComputationGraphConverter.FunctionsPostOrder"/>). Each property re-builds
-    /// the IVariable / Node view on every access.
+    /// the Variable / Node view on every access.
     /// </summary>
     public partial class FastComputationGraph
     {
         public ImmutableArray<Node> TopologicalOrderNodes
             => FastComputationGraphConverter.BuildNodes(this).nodesInTopoOrder;
 
-        public ImmutableArray<IVariable> InputTensors
+        public ImmutableArray<Variable> InputTensors
             => FastComputationGraphConverter.BuildNodes(this).inputs;
 
-        public ImmutableArray<IVariable> OutputTensors
+        public ImmutableArray<Variable> OutputTensors
             => FastComputationGraphConverter.BuildNodes(this).outputs;
 
         public ImmutableArray<Function> FunctionsPostOrlder
@@ -53,25 +53,25 @@ namespace Shorokoo.Graph
 
         /// <summary>
         /// .Length alias on a <c>List&lt;FastTensorKey&gt;</c> for legacy callers that
-        /// used to read .Length on the IVariable[] form of Inputs/Outputs.
+        /// used to read .Length on the Variable[] form of Inputs/Outputs.
         /// </summary>
         public static int Length(this System.Collections.Generic.List<FastTensorKey> list) => list.Count;
 
-        public static ImmutableArray<IVariable> GetHyperparamInputs(this FastComputationGraph graph)
+        public static ImmutableArray<Variable> GetHyperparamInputs(this FastComputationGraph graph)
             => graph.InputTensors
                 .Where(x => x.OwningNode.Attributes.GetEnumVal<InputType>(OnnxOpAttributeNames.ShrkAttrInputType) == InputType.Hyperparam)
                 .ToImmutableArray();
 
-        public static ImmutableArray<IVariable> GetNonHyperparamInputs(this FastComputationGraph graph)
+        public static ImmutableArray<Variable> GetNonHyperparamInputs(this FastComputationGraph graph)
             => graph.InputTensors
                 .Where(x => x.OwningNode.Attributes.GetEnumVal<InputType>(OnnxOpAttributeNames.ShrkAttrInputType) != InputType.Hyperparam)
                 .ToImmutableArray();
 
         /// <summary>
         /// Tensors emitted by <see cref="FastComputationGraph.Nodes"/> in topological order
-        /// (one IVariable per output slot). Mirrors the deleted CG property.
+        /// (one Variable per output slot). Mirrors the deleted CG property.
         /// </summary>
-        public static ImmutableArray<IVariable> TopologicalOrderTensors(this FastComputationGraph graph)
+        public static ImmutableArray<Variable> TopologicalOrderTensors(this FastComputationGraph graph)
             => FastComputationGraphConverter.BuildNodes(graph).nodesInTopoOrder
                 .SelectMany(n => n.Outputs)
                 .NotNulls()

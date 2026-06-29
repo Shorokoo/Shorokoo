@@ -23,13 +23,13 @@ namespace Shorokoo.Core
         /// Each pair represents (original state, updated state) registered via StateUpdate.
         /// </summary>
         [ThreadStatic]
-        private static List<(IVariable original, IVariable updated)>? _stateUpdatePairs;
+        private static List<(Variable original, Variable updated)>? _stateUpdatePairs;
 
         /// <summary>
         /// Gets the current state update pairs collection, creating it if necessary.
         /// </summary>
-        private static List<(IVariable original, IVariable updated)> StateUpdatePairs
-            => _stateUpdatePairs ??= new List<(IVariable original, IVariable updated)>();
+        private static List<(Variable original, Variable updated)> StateUpdatePairs
+            => _stateUpdatePairs ??= new List<(Variable original, Variable updated)>();
 
         /// <summary>
         /// Registers a state update relationship between an original state tensor and its updated value.
@@ -38,7 +38,7 @@ namespace Shorokoo.Core
         /// <param name="original">The original state tensor from a state initializer</param>
         /// <param name="updated">The computed updated value for the state</param>
         /// <returns>The linked updated state tensor (output of STATE_UPDATE_LINK node)</returns>
-        internal static IVariable RegisterStateUpdate(IVariable original, IVariable updated)
+        internal static Variable RegisterStateUpdate(Variable original, Variable updated)
         {
             
             // Create the STATE_UPDATE_LINK node to track the relationship in the graph
@@ -55,10 +55,10 @@ namespace Shorokoo.Core
         /// Called after the module's Inline method returns to wrap outputs with WithStateDeps.
         /// </summary>
         /// <returns>Array of updated state tensors (the linked versions)</returns>
-        internal static IVariable[] GetAndClearStateUpdates()
+        internal static Variable[] GetAndClearStateUpdates()
         {
             if (_stateUpdatePairs == null || _stateUpdatePairs.Count == 0)
-                return Array.Empty<IVariable>();
+                return Array.Empty<Variable>();
 
             var updates = _stateUpdatePairs.Select(p => p.updated).ToArray();
             _stateUpdatePairs.Clear();
@@ -72,51 +72,32 @@ namespace Shorokoo.Core
         internal static bool HasPendingStateUpdates
             => _stateUpdatePairs != null && _stateUpdatePairs.Count > 0;
 
-        internal static ITensor Tensor(Func<Vector<int64>>? shapeFn, DType dtype, Node owningNode, Function? moduleFn, string? name = null, int? rank = null)
-            => (ITensor)OnnxUtils.CallGeneric(dtype.ToIVarType(), typeof(InternalGlobals), nameof(CreateTensorWithShapeFn), [shapeFn, dtype, owningNode, moduleFn, name, rank]);
+        // Every kind is now the single non-generic Variable, built directly from the runtime DType +
+        // kind + rank — no per-output CallGeneric/MakeGenericType reflection round-trip.
+        internal static Variable Tensor(Func<Vector<int64>>? shapeFn, DType dtype, Node owningNode, Function? moduleFn, string? name = null, int? rank = null)
+            => new Variable(dtype, owningNode, moduleFn, name, DataStructure.Tensor, rank: rank, shapeFn: shapeFn);
 
-        private static Tensor<T> CreateTensorWithShapeFn<T>(Func<Vector<int64>>? shapeFn, DType dtype, Node owningNode, Function? moduleFn, string? name, int? rank) where T : IVarType
-            => new Tensor<T>(shapeFn, dtype, owningNode, moduleFn, name, rank: rank);
+        internal static Variable Vector(Func<Vector<int64>>? shapeFn, DType dtype, Node owningNode, Function? moduleFn, string? name = null)
+            => new Variable(dtype, owningNode, moduleFn, name, DataStructure.Tensor, rank: 1, shapeFn: shapeFn);
 
-        internal static ITensor Vector(Func<Vector<int64>>? shapeFn, DType dtype, Node owningNode, Function? moduleFn, string? name = null)
-            => (ITensor)OnnxUtils.CallGeneric(dtype.ToIVarType(), typeof(InternalGlobals), nameof(CreateVectorWithShapeFn), [shapeFn, dtype, owningNode, moduleFn, name]);
-
-        private static Vector<T> CreateVectorWithShapeFn<T>(Func<Vector<int64>>? shapeFn, DType dtype, Node owningNode, Function? moduleFn, string? name) where T : IVarType
-            => new Vector<T>(shapeFn, dtype, owningNode, moduleFn, name);
-
-        internal static IScalar Scalar(DType dtype, Node? owningNode, Function? moduleFn = null, string? name = null)
-            => (IScalar)OnnxUtils.CallGeneric(dtype.ToIVarType(), typeof(InternalGlobals), nameof(CreateScalar), [owningNode, dtype, moduleFn, name]);
-
-        private static Scalar<T> CreateScalar<T>(Node owningNode, DType dtype, Function? moduleFn, string? name = null) where T : IVarType
-            => new Scalar<T>(owningNode, dtype, moduleFn, name);
+        internal static Variable Scalar(DType dtype, Node? owningNode, Function? moduleFn = null, string? name = null)
+            => new Variable(dtype, owningNode!, moduleFn, name, DataStructure.Tensor, rank: 0);
 
         private static Scalar<T> CreateScalarValForObj<T>(object val) where T : IVarType
             => Shorokoo.Globals.Scalar<T>(val);
 
-        internal static TensorSequence<T> TensorSequence<T>(Node owningNode, DType dtype, Function? moduleFn, string? name) where T : IVarType
-            => new TensorSequence<T>(dtype, owningNode, moduleFn, name);
+        internal static Variable TensorSequence(DType dtype, Node owningNode, Function? moduleFn, string? name = null)
+            => new Variable(dtype, owningNode, moduleFn, name, DataStructure.Sequence);
 
-        internal static ITensorSequence TensorSequence(DType dtype, Node owningNode, Function? moduleFn, string? name = null)
-            => (ITensorSequence)OnnxUtils.CallGeneric(dtype.ToIVarType(), typeof(InternalGlobals), nameof(CreateTensorSequence), [owningNode, dtype, moduleFn, name]);
+        internal static Variable OptionalTensor(DType dtype, Node owningNode, Function? moduleFn, string? name = null)
+            => new Variable(dtype, owningNode, moduleFn, name, DataStructure.Optional);
 
-        private static TensorSequence<T> CreateTensorSequence<T>(Node owningNode, DType dtype, Function? moduleFn, string? name) where T : IVarType
-            => TensorSequence<T>(owningNode, dtype, moduleFn, name);
-
-        internal static OptionalTensor<T> OptionalTensor<T>(Node owningNode, DType dtype, Function? moduleFn, string? name = null) where T : IVarType
-            => new OptionalTensor<T>(dtype, owningNode, moduleFn, name);
-
-        internal static IOptionalTensor OptionalTensor(DType dtype, Node owningNode, Function? moduleFn, string? name = null)
-            => (IOptionalTensor)OnnxUtils.CallGeneric(dtype.ToIVarType(), typeof(InternalGlobals), nameof(CreateOptionalTensor), [owningNode, dtype, moduleFn, name]);
-
-        internal static IVector EmptyVector(DType type) => (IVector)Shorokoo.Core.Nodes.NodeDefinitions.OnnxOp.Constant(Globals.TensorData(type));
-
-        private static OptionalTensor<T> CreateOptionalTensor<T>(Node owningNode, DType dtype, Function? moduleFn, string? name = null) where T : IVarType
-            => OptionalTensor<T>(owningNode, dtype, moduleFn, name);
+        internal static Variable EmptyVector(DType type) => (Variable)Shorokoo.Core.Nodes.NodeDefinitions.OnnxOp.Constant(Globals.TensorData(type));
 
         /// <summary>
         /// Creates a TensorStruct for a given DType (which must be a TensorStruct type).
         /// </summary>
-        internal static ITensorStruct TensorStruct(DType type, Node owningNode, Function? moduleFn, string? name = null)
+        internal static Variable TensorStruct(DType type, Node owningNode, Function? moduleFn, string? name = null)
         {
             if (!type.IsTensorStructType)
                 throw new InvalidOperationException($"DType {type} is not a TensorStruct type");
@@ -125,15 +106,56 @@ namespace Shorokoo.Core
             if (structDef == null)
                 throw new InvalidOperationException($"TensorStruct DType {type} has no associated TensorStructDef");
 
-            // Use DTypeStruct for dynamically typed TensorStruct
-            return new TensorStruct<DTypeStruct>(type, owningNode, moduleFn, name, structDef);
+            // The struct node is the single non-generic Variable; the field layout lives in the runtime TensorStructDef.
+            return new Variable(type, owningNode, moduleFn, name, DataStructure.TensorStruct, structDef: structDef);
         }
 
         /// <summary>
-        /// Creates a TensorStruct with a specific IStruct type.
+        /// Creates a TensorStruct with a specific IStruct type. The element type parameter is kept for
+        /// caller convenience but the node itself is non-generic (its layout is the runtime definition).
         /// </summary>
-        internal static TensorStruct<T> TensorStruct<T>(DType type, Node owningNode, Function? moduleFn, string? name, TensorStructDef definition) where T : IStruct
-            => new TensorStruct<T>(type, owningNode, moduleFn, name, definition);
+        internal static Variable TensorStruct<T>(DType type, Node owningNode, Function? moduleFn, string? name, TensorStructDef definition) where T : IStruct
+            => new Variable(type, owningNode, moduleFn, name, DataStructure.TensorStruct, structDef: definition);
+
+        /// <summary>
+        /// The established default <see cref="Variable"/> for a value-handle type: a zero scalar (rank 0),
+        /// a zero-length vector (rank 1 / unknown), default-filled struct fields, or an absent optional /
+        /// empty sequence. Used to materialise a defaulted/absent handle.
+        /// </summary>
+        internal static Variable DefaultVariable(Type type)
+        {
+            ModuleHelper.RejectVariableParam(type);
+            if (type.IsAssignableTo(typeof(ITensorStruct)))
+            {
+                var (structDef, structDType) = StructDefExtractor.ExtractFromTensorStructType(type, "default value creation");
+
+                // Create default tensor variables for each field (empty tensors).
+                var fieldVars = structDef.Fields.Select(f =>
+                {
+                    long[] shape = f.Rank.HasValue && f.Rank.Value == 0 ? [] : [0];
+                    return Globals.DefaultTensor(f.ElementType, shape);
+                }).ToArray();
+
+                return InternalOp.TensorStructCreate(structDType, fieldVars);
+            }
+
+            if (type.IsAssignableTo(typeof(ITensor)))
+            {
+                var dtype = OnnxUtils.GetDType(type.GenericTypeArguments[0]).AssertNotNull();
+                // A scalar (rank 0) defaults to a zero scalar; a vector / general tensor (rank >= 1 or
+                // unknown) to a zero-length vector.
+                long[] shape = type.IsAssignableTo(typeof(IScalar)) ? [] : [0];
+                return Globals.DefaultTensor(dtype, shape);
+            }
+
+            if (type.IsAssignableTo(typeof(IOptionalTensor)))
+                return Globals.OptionalTensor(OnnxUtils.GetDType(type.GenericTypeArguments[0]).AssertNotNull()); // Empty optional tensor.
+
+            if (type.IsAssignableTo(typeof(ITensorSequence)))
+                return Globals.TensorSequence(OnnxUtils.GetDType(type.GenericTypeArguments[0]).AssertNotNull()); // Empty sequence.
+
+            throw new UnsupportedDTypeException(ErrorCodes.FW002, type.Name, "DefaultVariable", $"Unsupported type for default value creation. Supported types: Tensor<T>, OptionalTensor<T>, TensorSequence<T>, TensorStruct<T>. Received: {type.Name}");
+        }
 
         internal static OnnxTensorData<bit> OnnxTensorData(Shape shape, params bool[] data) => new OnnxTensorData<bit>(shape, OnnxUtils.CreateTensorValue<bool>(shape, data));
         internal static OnnxTensorData<int8> OnnxTensorData(Shape shape, params sbyte[] data) => new OnnxTensorData<int8>(shape, OnnxUtils.CreateTensorValue<sbyte>(shape, data));
@@ -149,7 +171,7 @@ namespace Shorokoo.Core
         internal static OnnxTensorData<float32> OnnxTensorData(Shape shape, params float[] data) => new OnnxTensorData<float32>(shape, OnnxUtils.CreateTensorValue<float>(shape, data));
         internal static OnnxTensorData<float64> OnnxTensorData(Shape shape, params double[] data) => new OnnxTensorData<float64>(shape, OnnxUtils.CreateTensorValue<double>(shape, data));
 
-        internal static T IdentityOp<T>(T var) where T : IVariable
-            => (T)OnnxOp.Identity(var, var.Rank());
+        internal static T IdentityOp<T>(T var) where T : Variable
+            => (T)OnnxOp.Identity(var, var.Rank);
     }
 }

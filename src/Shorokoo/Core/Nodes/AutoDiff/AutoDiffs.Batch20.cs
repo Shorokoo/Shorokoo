@@ -39,7 +39,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         //   dL/d(dft_length) = null (int64, not differentiable)
         //   dL/d(axis) = null (int64, not differentiable)
 
-        internal static IVariable?[] DftGradient(IVariable?[] inputs, IVariable?[] outputGrads, OnnxCSharpAttributes attributes)
+        internal static Variable?[] DftGradient(Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
         {
             var x = inputs[0]!;                                          // input tensor [..., N, 1 or 2]
             var dftLength = inputs.Length > 1 ? inputs[1] : null;        // optional dft_length (int64 scalar)
@@ -62,7 +62,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
 
             // Determine N (the DFT length) for scaling and onesided zero-padding.
             // N is the size of the input along the transform axis.
-            IVariable nScalar;
+            Variable nScalar;
             if (dftLength is not null)
             {
                 // dft_length input is a scalar — use it directly
@@ -98,7 +98,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // Cast N to the gradient's float type for multiplication
             var nFloat = OnnxOp.Cast(nScalar, saturate: null, to: grad.Type);
 
-            IVariable scaled;
+            Variable scaled;
             if (!inverse)
             {
                 // Forward DFT: dX = N · IDFT(dY)

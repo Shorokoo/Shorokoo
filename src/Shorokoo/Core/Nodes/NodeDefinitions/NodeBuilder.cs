@@ -449,13 +449,13 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             }
         }
 
-        public required ImmutableDictionary<string, IVariable?[]> FullInputs { get; init; }
+        public required ImmutableDictionary<string, Variable?[]> FullInputs { get; init; }
 
         public string? StackTrace { get; init; }
 
 
 
-        private static IVariable?[] getInputsForInputDef(NodeDefInputDef inputDef, IVariable?[] allInputs, NodeDefInputDef[] allInputDefs, ImmutableDictionary<string, int?> inferredVariadicCounts)
+        private static Variable?[] getInputsForInputDef(NodeDefInputDef inputDef, Variable?[] allInputs, NodeDefInputDef[] allInputDefs, ImmutableDictionary<string, int?> inferredVariadicCounts)
         {
             var curInputIndex = 0;
             if (allInputDefs.Length == 2 && allInputDefs.All(x => x.VariadicCountDef is not null))
@@ -505,7 +505,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
 
         #region Infer variadic counts
 
-        private static int? identifyInferredVariadicCounts(NodeDefVariadicCountDef variadicDef, NodeDefAttributeDef attributeDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, IVariable?[] inputs)
+        private static int? identifyInferredVariadicCounts(NodeDefVariadicCountDef variadicDef, NodeDefAttributeDef attributeDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, Variable?[] inputs)
         {
             if (attributeDef.VariadicCount == variadicDef)
             {
@@ -538,7 +538,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             return null;
         }
 
-        private static int? identifyInferredVariadicCounts(NodeDefVariadicCountDef variadicDef, NodeDefInputDef inputDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, IVariable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts)
+        private static int? identifyInferredVariadicCounts(NodeDefVariadicCountDef variadicDef, NodeDefInputDef inputDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, Variable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts)
         {
             if (inputDef.VariadicCountDef == variadicDef)
             {
@@ -549,7 +549,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             return null;
         }
 
-        private static int[] identifyInferredVariadicCounts(NodeDefVariadicCountDef variadicDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, IVariable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts, int? knownNumOutputs)
+        private static int[] identifyInferredVariadicCounts(NodeDefVariadicCountDef variadicDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, Variable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts, int? knownNumOutputs)
         {
             var identifiedCounts = new List<int?>();
             if (nodeDef.OutputDefs.Any(x => x.VariadicCountDef == variadicDef) && 
@@ -567,7 +567,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             return identifiedCounts.NotNulls().ToArray();
         }
 
-        private static ImmutableDictionary<string, int?> identifyInferredVariadicCounts(NodeDefinition nodeDef, OnnxCSharpAttributes attributes, IVariable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts, int? knownNumOutputs)
+        private static ImmutableDictionary<string, int?> identifyInferredVariadicCounts(NodeDefinition nodeDef, OnnxCSharpAttributes attributes, Variable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts, int? knownNumOutputs)
         {
             foreach (var variadicDef in nodeDef.VariadicDefs.Values)
             {
@@ -589,7 +589,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
 
         #region Infer types
 
-        private static VariableTypeInfo[]? identifyInferredTypes(NodeDefTypeDef variadicDef, NodeDefAttributeDef attributeDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, IVariable?[] inputs)
+        private static VariableTypeInfo[]? identifyInferredTypes(NodeDefTypeDef variadicDef, NodeDefAttributeDef attributeDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, Variable?[] inputs)
         {
             var attributeName = attributeDef.AttributeName;
 
@@ -630,7 +630,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             return null;
         }
 
-        private static VariableTypeInfo[]? identifyInferredTypes(NodeDefTypeDef typeDef, NodeDefInputDef inputDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, IVariable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts)
+        private static VariableTypeInfo[]? identifyInferredTypes(NodeDefTypeDef typeDef, NodeDefInputDef inputDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, Variable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts)
         {
             if (inputDef.TypeDef == typeDef)
             {
@@ -647,7 +647,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             return null;
         }
 
-        private static VariableTypeInfo[][] identifyInferredTypes(NodeDefTypeDef typeDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, IVariable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts)
+        private static VariableTypeInfo[][] identifyInferredTypes(NodeDefTypeDef typeDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, Variable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts)
         {
             var identifiedTypes = new List<VariableTypeInfo[]?>();
             foreach (var attributeDef in nodeDef.AttributeDefs)
@@ -659,7 +659,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             return identifiedTypes.NotNulls().ToArray();
         }
 
-        private static ImmutableDictionary<string, VariableTypeInfo[]?> identifyInferredTypes(NodeDefinition nodeDef, OnnxCSharpAttributes attributes, IVariable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts)
+        private static ImmutableDictionary<string, VariableTypeInfo[]?> identifyInferredTypes(NodeDefinition nodeDef, OnnxCSharpAttributes attributes, Variable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts)
         {
             var inferredTypes = ImmutableDictionary<string, VariableTypeInfo[]?>.Empty;
 
@@ -691,7 +691,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
 
         #region Infer ranks
 
-        private int?[]? identifyInferredRank(NodeDefRankDef rankDef, NodeDefAttributeDef attributeDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, IVariable?[] inputs)
+        private int?[]? identifyInferredRank(NodeDefRankDef rankDef, NodeDefAttributeDef attributeDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, Variable?[] inputs)
         {
             if (attributeDef.TensorRank == rankDef)
             {
@@ -740,7 +740,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             return null;
         }
 
-        private int?[]? identifyInferredRank(NodeDefRankDef rankDef, NodeDefInputDef inputDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, IVariable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts)
+        private int?[]? identifyInferredRank(NodeDefRankDef rankDef, NodeDefInputDef inputDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, Variable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts)
         {
             if (inputDef.RankDef == rankDef)
             {
@@ -751,13 +751,13 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 Debug.Assert(inputsForDef.All(x => x is not null),
                     $"Some inputs are null when they should not be for input definition '{inputDef.ParamName}'");
 
-                return inputsForDef.Select(x => x.AssertNotNull().Rank()).ToArray();
+                return inputsForDef.Select(x => x.AssertNotNull().Rank).ToArray();
             }
 
             return null;
         }
 
-        private int?[][] identifyInferredRank(NodeDefRankDef rankDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, IVariable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts)
+        private int?[][] identifyInferredRank(NodeDefRankDef rankDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, Variable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts)
         {
             var identifiedCounts = new List<int?[]?>();
             foreach (var attributeDef in nodeDef.AttributeDefs)
@@ -769,7 +769,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             return identifiedCounts.NotNulls().ToArray();
         }
 
-        private ImmutableDictionary<string, int?[]?> identifyInferredRanks(NodeDefinition nodeDef, OnnxCSharpAttributes attributes, IVariable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts)
+        private ImmutableDictionary<string, int?[]?> identifyInferredRanks(NodeDefinition nodeDef, OnnxCSharpAttributes attributes, Variable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts)
         {
             var inferredRanks = ImmutableDictionary<string, int?[]?>.Empty;
 
@@ -818,7 +818,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
 
         #region Infer structures
 
-        private DataStructure[]? identifyInferredStructure(NodeDefStructureDef rankDef, NodeDefAttributeDef attributeDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, IVariable?[] inputs)
+        private DataStructure[]? identifyInferredStructure(NodeDefStructureDef rankDef, NodeDefAttributeDef attributeDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, Variable?[] inputs)
         {
             if (attributeDef.Structure == rankDef)
             {
@@ -846,7 +846,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             return null;
         }
 
-        private DataStructure[]? identifyInferredStructure(NodeDefStructureDef rankDef, NodeDefInputDef inputDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, IVariable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts)
+        private DataStructure[]? identifyInferredStructure(NodeDefStructureDef rankDef, NodeDefInputDef inputDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, Variable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts)
         {
             if (inputDef.StructureDef == rankDef)
             {
@@ -863,7 +863,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             return null;
         }
 
-        private DataStructure[][] identifyInferredStructure(NodeDefStructureDef structureDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, IVariable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts)
+        private DataStructure[][] identifyInferredStructure(NodeDefStructureDef structureDef, NodeDefinition nodeDef, OnnxCSharpAttributes attributes, Variable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts)
         {
             var identifiedCounts = new List<DataStructure[]?>();
             foreach (var attributeDef in nodeDef.AttributeDefs)
@@ -875,7 +875,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             return identifiedCounts.NotNulls().ToArray();
         }
 
-        private ImmutableDictionary<string, DataStructure[]?> identifyInferredStructures(NodeDefinition nodeDef, OnnxCSharpAttributes attributes, IVariable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts)
+        private ImmutableDictionary<string, DataStructure[]?> identifyInferredStructures(NodeDefinition nodeDef, OnnxCSharpAttributes attributes, Variable?[] inputs, ImmutableDictionary<string, int?> inferredVariadicCounts)
         {
             var inferredStructures = ImmutableDictionary<string, DataStructure[]?>.Empty;
 
@@ -1023,21 +1023,21 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
 
             return retval.ToImmutableDictionary();
         }
-        public virtual IVariable?[] DeduceInputsWithNulls(IVariable?[] currentInputs)
+        public virtual Variable?[] DeduceInputsWithNulls(Variable?[] currentInputs)
         {
             var inputDefs = this.NodeDef.InputDefs;
             var minNumInputs = inputDefs.TakeWhile(x => x.VariadicCountDef is null).Count();
             var numNewTrailingNulls = minNumInputs - currentInputs.Length;
 
             if (numNewTrailingNulls > 0)
-                return [..currentInputs, ..Enumerable.Repeat<IVariable?>(null, numNewTrailingNulls)];
+                return [..currentInputs, ..Enumerable.Repeat<Variable?>(null, numNewTrailingNulls)];
 
             return currentInputs;
         }
 
-        public virtual ImmutableDictionary<string, IVariable?[]> DeduceFullInputsWithNulls()
+        public virtual ImmutableDictionary<string, Variable?[]> DeduceFullInputsWithNulls()
         {
-            var retval = new Dictionary<string, IVariable?[]>();
+            var retval = new Dictionary<string, Variable?[]>();
             var graphAttributeNames = new string[] { "" };
             if (this.NodeDef.IsCloseNode)
                 graphAttributeNames = this.CSharpAttributes.AttributeDefs
@@ -1064,80 +1064,81 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
 
     public static class NodeBuilder
     {
-        public static IVariable BuildNodeSingleOut(string opCode, IVariable?[] inputs, (string attributeName, object? attributeValue)[] attrs, string? identifierTemplateString = null, string[]? outputNames = null, Function? targetFunction = null, Node? openNode = null)
+        public static Variable BuildNodeSingleOut(string opCode, Variable?[] inputs, (string attributeName, object? attributeValue)[] attrs, string? identifierTemplateString = null, string[]? outputNames = null, Function? targetFunction = null, Node? openNode = null)
              => BuildNodeMultiOut(opCode, inputs, attrs, identifierTemplateString, outputNames, targetFunction, openNode)[0].AssertNotNull();
 
-        public static IVariable[] BuildNodeMultiOut(string opCode, IVariable?[] inputs, (string attributeName, object? attributeValue)[] attrs, string? identifierTemplateString = null, string?[]? outputNames = null, Function? targetFunction = null, Node? openNode = null)
+        public static Variable[] BuildNodeMultiOut(string opCode, Variable?[] inputs, (string attributeName, object? attributeValue)[] attrs, string? identifierTemplateString = null, string?[]? outputNames = null, Function? targetFunction = null, Node? openNode = null)
             => BuildNodeFullOut(opCode, inputs, attrs, identifierTemplateString, outputNames, targetFunction, openNode)[""].NotNulls().ToArray();
 
-        public static T CallCustomOperator<T>(string opCode, IVariable?[] inputs, object?[] attributeNameAndValues) where T : IVariable
+        public static T CallCustomOperator<T>(string opCode, Variable?[] inputs, object?[] attributeNameAndValues) where T : IValue
         {
             List<(string attributeName, object? attributeValue)> attrs = new List<(string attributeName, object? attributeValue)>();
             for (int i = 0; i < attributeNameAndValues.Length; i += 2)
                 attrs.Add(((string)attributeNameAndValues[i].NotNull(), attributeNameAndValues[i + 1]));
 
-            return (T)BuildNodeSingleOut(opCode, inputs, attrs.ToArray());
+            return BuildNodeSingleOut(opCode, inputs, attrs.ToArray()).ToValue<T>();
         }
 
-        public static (T1, T2) CallCustomOperator<T1, T2>(string opCode, IVariable?[] inputs, object?[] attributeNameAndValues)
-            where T1 : IVariable
-            where T2 : IVariable
-        {
-            List<(string attributeName, object? attributeValue)> attrs = new List<(string attributeName, object? attributeValue)>();
-            for (int i = 0; i < attributeNameAndValues.Length; i += 2)
-                attrs.Add(((string)attributeNameAndValues[i].NotNull(), attributeNameAndValues[i + 1]));
-
-            var retvals = BuildNodeMultiOut(opCode, inputs, attrs.ToArray());
-            return ((T1)(retvals[0].AssertNotNull()), (T2)(retvals[1].AssertNotNull()));
-        }
-
-        public static (T1, T2, T3) CallCustomOperator<T1, T2, T3>(string opCode, IVariable?[] inputs, object?[] attributeNameAndValues)
-            where T1 : IVariable
-            where T2 : IVariable
-            where T3 : IVariable
+        public static (T1, T2) CallCustomOperator<T1, T2>(string opCode, Variable?[] inputs, object?[] attributeNameAndValues)
+            where T1 : IValue
+            where T2 : IValue
         {
             List<(string attributeName, object? attributeValue)> attrs = new List<(string attributeName, object? attributeValue)>();
             for (int i = 0; i < attributeNameAndValues.Length; i += 2)
                 attrs.Add(((string)attributeNameAndValues[i].NotNull(), attributeNameAndValues[i + 1]));
 
             var retvals = BuildNodeMultiOut(opCode, inputs, attrs.ToArray());
-            return ((T1)(retvals[0].AssertNotNull()), (T2)(retvals[1].AssertNotNull()), (T3)(retvals[2].AssertNotNull()));
+            return (retvals[0].AssertNotNull().ToValue<T1>(), retvals[1].AssertNotNull().ToValue<T2>());
         }
 
-        public static (T1, T2, T3, T4) CallCustomOperator<T1, T2, T3, T4>(string opCode, IVariable?[] inputs, object?[] attributeNameAndValues)
-            where T1 : IVariable
-            where T2 : IVariable
-            where T3 : IVariable
-            where T4 : IVariable
+        public static (T1, T2, T3) CallCustomOperator<T1, T2, T3>(string opCode, Variable?[] inputs, object?[] attributeNameAndValues)
+            where T1 : IValue
+            where T2 : IValue
+            where T3 : IValue
         {
             List<(string attributeName, object? attributeValue)> attrs = new List<(string attributeName, object? attributeValue)>();
             for (int i = 0; i < attributeNameAndValues.Length; i += 2)
                 attrs.Add(((string)attributeNameAndValues[i].NotNull(), attributeNameAndValues[i + 1]));
 
             var retvals = BuildNodeMultiOut(opCode, inputs, attrs.ToArray());
-            return ((T1)(retvals[0].AssertNotNull()), (T2)(retvals[1].AssertNotNull()), (T3)(retvals[2].AssertNotNull()), (T4)(retvals[3].AssertNotNull()));
+            return (retvals[0].AssertNotNull().ToValue<T1>(), retvals[1].AssertNotNull().ToValue<T2>(), retvals[2].AssertNotNull().ToValue<T3>());
         }
 
-        public static T[] CallCustomOperatorArrayOut<T>(string opCode, IVariable?[] inputs, object?[] attributeNameAndValues)
-            where T : IVariable
+        public static (T1, T2, T3, T4) CallCustomOperator<T1, T2, T3, T4>(string opCode, Variable?[] inputs, object?[] attributeNameAndValues)
+            where T1 : IValue
+            where T2 : IValue
+            where T3 : IValue
+            where T4 : IValue
         {
             List<(string attributeName, object? attributeValue)> attrs = new List<(string attributeName, object? attributeValue)>();
             for (int i = 0; i < attributeNameAndValues.Length; i += 2)
                 attrs.Add(((string)attributeNameAndValues[i].NotNull(), attributeNameAndValues[i + 1]));
 
             var retvals = BuildNodeMultiOut(opCode, inputs, attrs.ToArray());
-            return retvals.Cast<T>().ToArray();
+            return (retvals[0].AssertNotNull().ToValue<T1>(), retvals[1].AssertNotNull().ToValue<T2>(), retvals[2].AssertNotNull().ToValue<T3>(), retvals[3].AssertNotNull().ToValue<T4>());
         }
 
-        public static ImmutableDictionary<string, IVariable?[]> BuildNodeFullOut(string opCode, IVariable?[] inputs, (string attributeName, object? attributeValue)[] attrs, string? identifierTemplateString = null, string?[]? outputNames = null, Function? targetFunction = null, Node? openNode = null)
+        public static T[] CallCustomOperatorArrayOut<T>(string opCode, Variable?[] inputs, object?[] attributeNameAndValues)
+            where T : IValue
+        {
+            List<(string attributeName, object? attributeValue)> attrs = new List<(string attributeName, object? attributeValue)>();
+            for (int i = 0; i < attributeNameAndValues.Length; i += 2)
+                attrs.Add(((string)attributeNameAndValues[i].NotNull(), attributeNameAndValues[i + 1]));
+
+            var retvals = BuildNodeMultiOut(opCode, inputs, attrs.ToArray());
+            return retvals.Select(v => v.ToValue<T>()).ToArray();
+        }
+
+        public static ImmutableDictionary<string, Variable?[]> BuildNodeFullOut(string opCode, Variable?[] inputs, (string attributeName, object? attributeValue)[] attrs, string? identifierTemplateString = null, string?[]? outputNames = null, Function? targetFunction = null, Node? openNode = null)
             => BuildNode(opCode, inputs, attrs, identifierTemplateString, outputNames, targetFunction, openNode).FullOutputs;
 
-        public static Node BuildNode(string opCode, IVariable?[] inputs, (string attributeName, object? attributeValue)[] attrs, string? identifierTemplateString = null, string?[]? outputNames = null, Function? targetFunction = null, Node? openNode = null)
+        public static Node BuildNode(string opCode, Variable?[] inputs, (string attributeName, object? attributeValue)[] attrs, string? identifierTemplateString = null, string?[]? outputNames = null, Function? targetFunction = null, Node? openNode = null)
         {
             var nodeDefResolver = Definitions.NodeDefinitions[opCode];
             var csharpAttributeVals = attrs.ToDictionary(x => x.attributeName, x => x.attributeValue);
-            
-            var fullInputs = new Dictionary<string, IVariable?[]>();
+
+            var fullInputs = new Dictionary<string, Variable?[]>();
+            // Inputs are graph nodes (Variable?[]); the graph identifies tensors by node reference.
             fullInputs[""] = inputs;
 
             if (nodeDefResolver.IsCloseNode)
@@ -1147,7 +1148,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                     Debug.Assert(csharpAttributeVals[graphDef.AttributeName] is not null,
                         $"Graph attribute '{graphDef.AttributeName}' is null when it should contain variables");
 
-                    fullInputs[graphDef.AttributeName] = (IVariable?[])csharpAttributeVals[graphDef.AttributeName]!;
+                    fullInputs[graphDef.AttributeName] = (Variable?[])csharpAttributeVals[graphDef.AttributeName]!;
                     csharpAttributeVals[graphDef.AttributeName] = new BestGraphAttribute { GraphAttributeName = graphDef.AttributeName };
                 }
             }
@@ -1157,7 +1158,8 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             return BuildNode(opCode, fullInputs, attributes, identifierTemplateString, outputNames, targetFunction, openNode);
         }
 
-        public static Node BuildNode(string opCode, Dictionary<string, IVariable?[]> fullInputs, OnnxProtoAttributes attributes, string? identifierTemplateString = null, string?[]? outputNames = null, Function? function = null, Node? openNode = null)
+
+        public static Node BuildNode(string opCode, Dictionary<string, Variable?[]> fullInputs, OnnxProtoAttributes attributes, string? identifierTemplateString = null, string?[]? outputNames = null, Function? function = null, Node? openNode = null)
         {
             var nodeDefResolver = Definitions.NodeDefinitions[opCode];
             var nodeDef = nodeDefResolver.Resolve(attributes);

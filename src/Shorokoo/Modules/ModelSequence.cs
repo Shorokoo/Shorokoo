@@ -36,7 +36,7 @@ namespace Shorokoo.Modules
 
         internal ModelSequence(Scalar<IModelVarType>[] models, Function targetFunction)
         {
-            this.modelSequenceVariable = TensorSequence<IModelVarType>.Create(models, targetFunction);
+            this.modelSequenceVariable = TensorSequence<IModelVarType>.Create([.. models.Select(m => (Tensor<IModelVarType>)m)], targetFunction);
             this.targetFunction = targetFunction;
         }
 
@@ -75,7 +75,11 @@ namespace Shorokoo.Modules
             {
                 var modelVariable = base.modelSequenceVariable[index].Scalar();
                 var type = typeof(T);
-                return (T)type.GetConstructor([typeof(Scalar<IModelVarType>)]).AssertNotNull().Invoke([modelVariable]);
+                // The generated model constructor takes Scalar<IModelVarType>. That type is statically
+                // known here, so convert from Variable to IValue with the implicit operator directly;
+                // reflective Invoke can't apply that conversion itself, it only receives the result.
+                var ctor = type.GetConstructor([typeof(Scalar<IModelVarType>)]).AssertNotNull();
+                return (T)ctor.Invoke([(Scalar<IModelVarType>)(Variable)modelVariable]);
             }
         }
 

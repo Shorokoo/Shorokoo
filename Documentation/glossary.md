@@ -2,7 +2,7 @@
 
 | Term | Meaning | Where |
 |---|---|---|
-| `IVariable` | Base interface for any graph value (`Tensor<T>`, `Scalar<T>`, `Vector<T>`, sequences, optionals). | `core-types.md` |
+| `IValue` | Base interface for any graph value (`Tensor<T>`, `Scalar<T>`, `Vector<T>`, sequences, optionals). | `core-types.md` |
 | `Tensor<T>` / `Scalar<T>` / `Vector<T>` | Symbolic graph values of rank N / 0 / 1, generic over dtype marker `T`. | `core-types.md` |
 | dtype marker (`float32`, `int64`, `bit`, …) | The generic type argument naming a tensor's element type. | `core-types.md` |
 | `DType` | Runtime dtype descriptor (`DType.Float32`, …). | `core-types.md` |

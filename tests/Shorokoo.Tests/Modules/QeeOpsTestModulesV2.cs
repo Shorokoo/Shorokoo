@@ -145,7 +145,7 @@ namespace Shorokoo.Tests.Modules
         {
             var det = (Tensor<float32>)OnnxOp.Det(mat);
             // Einsum with explicit output: "ij,ji->" computes the trace of A·B.
-            var trace = (Tensor<float32>)OnnxOp.Einsum(new IVariable[] { mat, mat }, equation: "ij,ji->");
+            var trace = (Tensor<float32>)OnnxOp.Einsum((Variable[])[ mat, mat ], equation: "ij,ji->");
             return (det, trace);
         }
     }
@@ -156,7 +156,7 @@ namespace Shorokoo.Tests.Modules
     {
         public static Tensor<float32> Inline(Tensor<float32> a, Tensor<float32> b)
             // Implicit-output: labels that appear once are summed out in alphabetical order.
-            => (Tensor<float32>)OnnxOp.Einsum(new IVariable[] { a, b }, equation: "ij,jk");
+            => (Tensor<float32>)OnnxOp.Einsum((Variable[])[ a, b ], equation: "ij,jk");
     }
 
     /// <summary>Unique with explicit axis (returns 4 outputs).</summary>

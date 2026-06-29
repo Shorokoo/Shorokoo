@@ -100,7 +100,7 @@ public class CodegenFreeModuleTests
     }
 
     /// <summary>Wraps a constant-fed module output into a no-input graph, concretizes, executes.</summary>
-    private static byte[][] ExecuteOutputs(params IVariable[] outputs)
+    private static byte[][] ExecuteOutputs(params Variable[] outputs)
         => ExecuteConcretized(new FastComputationGraph([], [.. outputs]));
 
     // ─────────────────────────────────── tests ───────────────────────────────────

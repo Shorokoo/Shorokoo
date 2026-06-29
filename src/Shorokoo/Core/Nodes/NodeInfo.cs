@@ -33,7 +33,7 @@ namespace Shorokoo.Core.Nodes
 
         public string? IdentifierTemplateString { get; private set; }
 
-        public NodeInfo(IVariable?[] inputs, IVariable?[] outputs, OnnxProtoAttributes attributes, string? identifierTemplateString, string? stackTrace, OpSetVersion version, string opCode, string domain = "")
+        public NodeInfo(Variable?[] inputs, Variable?[] outputs, OnnxProtoAttributes attributes, string? identifierTemplateString, string? stackTrace, OpSetVersion version, string opCode, string domain = "")
         {
             this.Inputs = inputs.Select(x => x?.UniqueName ?? "").ToArray();
             this.Outputs = outputs.Select(x => x?.UniqueName ?? "").ToArray();

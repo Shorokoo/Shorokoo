@@ -36,7 +36,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // Guarded (AD003): bidirectional, custom activations, clip, layout=1,
         //           wired sequence_lens, peephole weights, input_forget=1.
 
-        internal static IVariable?[] LstmGradient(IVariable?[] inputs, IVariable?[] outputGrads, OnnxCSharpAttributes attributes)
+        internal static Variable?[] LstmGradient(Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
         {
             var x = inputs[0]!;          // [T, B, I]
             var w = inputs[1]!;          // [D, 4H, I]  (D = num_directions = 1)
@@ -90,8 +90,8 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 if (dY is not null) dY = ReverseTimeAxis(dY);
             }
 
-            // Sequence length as a runtime IVariable (no host-side execution).
-            var seqLen = OnnxOp.Gather(OnnxOp.Shape(x), Scalar(0L), axis: 0).As<int64>().Scalar();
+            // Sequence length as a runtime Variable (no host-side execution).
+            var seqLen = ((Tensor<int64>)OnnxOp.Gather(OnnxOp.Shape(x), Scalar(0L), axis: 0)).Scalar();
 
             var H = hiddenSize;
             var one = OnnxOp.Cast(Scalar(1.0f), saturate: null, to: x.Type);
@@ -116,9 +116,9 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             var Rc = rParts[3];
 
             // Split biases if present: B = [Wbi, Wbo, Wbf, Wbc, Rbi, Rbo, Rbf, Rbc], each [H]
-            IVariable? Wbi = null, Wbo = null, Wbf = null, Wbc = null;
-            IVariable? Rbi = null, Rbo = null, Rbf = null, Rbc = null;
-            IVariable? bSq = null;
+            Variable? Wbi = null, Wbo = null, Wbf = null, Wbc = null;
+            Variable? Rbi = null, Rbo = null, Rbf = null, Rbc = null;
+            Variable? bSq = null;
             if (b is not null)
             {
                 bSq = OnnxOp.Squeeze(b, Vector(0L));  // [8H]
@@ -129,7 +129,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             }
 
             // Initial hidden state: [B, H]
-            IVariable h0;
+            Variable h0;
             if (initialH is not null)
             {
                 h0 = OnnxOp.Squeeze(initialH, Vector(0L));  // [B, H]
@@ -142,7 +142,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             }
 
             // Initial cell state: [B, H]
-            IVariable c0;
+            Variable c0;
             if (initialC is not null)
             {
                 c0 = OnnxOp.Squeeze(initialC, Vector(0L));  // [B, H]
@@ -232,7 +232,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 : OnnxOp.Sub(c0, c0);               // [B, H] zeros
             var dWacc = OnnxOp.Sub(wSq, wSq);       // [4H, I] zeros
             var dRacc = OnnxOp.Sub(rSq, rSq);       // [4H, H] zeros
-            IVariable? dBacc = b is not null ? OnnxOp.Sub(bSq!, bSq!) : null;  // [8H] zeros or null
+            Variable? dBacc = b is not null ? OnnxOp.Sub(bSq!, bSq!) : null;  // [8H] zeros or null
             var dXSeq = OnnxOp.SequenceEmpty(x.Type);
 
             foreach (var ctx in LoopAPI.Iterate(seqLen))
@@ -249,7 +249,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 var tCt = OnnxOp.SequenceAt(tCtSeq, tRev);
 
                 // dHt = dY[t] (if any) + dHNext (always defined; seeded with dYhSq or zeros)
-                IVariable dHt;
+                Variable dHt;
                 if (dY is not null)
                 {
                     var dYt = OnnxOp.Squeeze(OnnxOp.Gather(dY, tRev, axis: 0), Vector(0L));  // [B, H]

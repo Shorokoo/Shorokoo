@@ -7,7 +7,11 @@ Related: [defining-models.md](defining-models.md) · [inference.md](inference.md
 - Three graph-value shapes, all generic over a dtype marker `T : IVarType`:
   - `Scalar<T>` — rank 0.
   - `Vector<T>` — rank 1 (also used for dynamic shapes, e.g. `Vector<int64>`).
-  - `Tensor<T>` — rank N. `Scalar<T>` and `Vector<T>` derive from `Tensor<T>`.
+  - `Tensor<T>` — rank N. `Scalar<T>`, `Vector<T>`, and `Tensor<T>` are distinct
+    value-struct handles, all implementing the common `IValue` interface.
+- `IValue` — the base interface for any graph value (`Tensor<T>`, `Scalar<T>`,
+  `Vector<T>`, and the sequence / optional / struct handles). User-facing code holds
+  `IValue` handles; the framework converts them to the internal graph node as needed.
 - Dtype marker types (used as the generic argument): `bit` (boolean), `int8`,
   `int16`, `int32`, `int64`, `uint8`, `uint16`, `uint32`, `uint64`, `float16`,
   `bfloat16`, `float32`, `float64`. Example: `Tensor<float32>`, `Scalar<int64>`,

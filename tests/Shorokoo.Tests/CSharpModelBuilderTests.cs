@@ -104,7 +104,7 @@ public class CSharpModelBuilderCoverageTests
 
     private static FastComputationGraph BuildConstantBranchesGraph()
     {
-        var outputs = new IVariable[]
+        var outputs = new Variable[]
         {
             Scalar(1.5),                                // float64 scalar
             Scalar((short)2),                           // int16 scalar (<4 cast path)
@@ -165,7 +165,7 @@ public class CSharpModelBuilderCoverageTests
 
         return ToFastGraph(new FastComputationGraph(
             [rankedElem, unrankedElem],
-            ImmutableArray.Create<IVariable>(atInsert, atErase, atIdentity)));
+            ImmutableArray.Create<Variable>(atInsert, atErase, atIdentity)));
     }
 
     private static FastComputationGraph BuildScanLoopGraph()
@@ -186,7 +186,7 @@ public class CSharpModelBuilderCoverageTests
 
     // ────────────────────────────────────────────────────────────────────────
     // Static-method branches: GetTypeDefString. Drives the ITensorStruct arms
-    // (simple TypeName + fully-qualified/null TypeName) and the IVariable<T>
+    // (simple TypeName + fully-qualified/null TypeName) and the IValue<T>
     // fallback. None of these arms is reached by BuildFullGraph alone because
     // codegen for ITensorStruct inputs/outputs doesn't pass through this
     // overload when those inputs flow as parameters to user code; we exercise
@@ -220,7 +220,7 @@ public class CSharpModelBuilderCoverageTests
         Assert.Equal("TensorStruct<DTypeStruct>",
             CSharpModelBuilder.GetTypeDefString(dottedStruct, null));
 
-        // IVariable<T> fallback: not ITensorStruct, not ITensor → an
+        // IValue<T> fallback: not ITensorStruct, not ITensor → an
         // ITensorSequence reaches the final else at line 112.
         var sequence = OnnxOp.SequenceEmpty(DType.Float32);
         var typeDef = CSharpModelBuilder.GetTypeDefString(sequence, null);
@@ -253,7 +253,7 @@ public class CSharpModelBuilderCoverageTests
 
     // ────────────────────────────────────────────────────────────────────────
     // MakeIfNode: numItems > 8 path (lines 1061-1068). Build an If-Else with
-    // 9 outputs using the IVariable[] overload so the array-result codegen
+    // 9 outputs using the IValue[] overload so the array-result codegen
     // (var ifResult = Ops.IfElse(c, [t...], [f...]);) fires.
     // ────────────────────────────────────────────────────────────────────────
 
@@ -261,13 +261,13 @@ public class CSharpModelBuilderCoverageTests
     public void TestIfElseManyOutputs()
     {
         var cond = InputScalar<bit>("cond");
-        var t = new IVariable[]
+        var t = new IValue[]
         {
             Scalar(1.0f),  Scalar(2.0f),  Scalar(3.0f),
             Scalar(4.0f),  Scalar(5.0f),  Scalar(6.0f),
             Scalar(7.0f),  Scalar(8.0f),  Scalar(9.0f),
         };
-        var f = new IVariable[]
+        var f = new IValue[]
         {
             Scalar(10.0f), Scalar(20.0f), Scalar(30.0f),
             Scalar(40.0f), Scalar(50.0f), Scalar(60.0f),
@@ -347,7 +347,7 @@ public class CSharpModelBuilderCoverageTests
             finalIdx = ctx.IterationIndex;
             ctx.Break(ctx.IterationIndex >= Scalar(0L));
         }
-        var graph = new FastComputationGraph([], ImmutableArray.Create<IVariable>(scanned!, finalIdx!));
+        var graph = new FastComputationGraph([], ImmutableArray.Create<Variable>(scanned!, finalIdx!));
         var code = new CSharpModelBuilder().BuildFullGraph(ToFastGraph(graph), "CovTest");
         // finalIdx is declared inside the foreach but consumed by the return
         // expression at outer scope; codegen must emit a forward declaration.
@@ -410,16 +410,16 @@ public class CSharpModelBuilderCoverageTests
     {
         // value_floats attribute → AttributeType.Floats with :params}
         var floats = NodeBuilder.CallCustomOperator<Vector<float32>>(
-            OpCodes.CONSTANT, new IVariable[] { },
+            OpCodes.CONSTANT, [],
             new object?[] { OnnxOpAttributeNames.AttrValueFloats, new float[] { 1.0f, 2.0f, 3.0f } });
 
         // value_ints attribute → AttributeType.Longs with :params}
         var ints = NodeBuilder.CallCustomOperator<Vector<int64>>(
-            OpCodes.CONSTANT, new IVariable[] { },
+            OpCodes.CONSTANT, [],
             new object?[] { OnnxOpAttributeNames.AttrValueInts, new long[] { 10L, 20L, 30L } });
 
         var graph = new FastComputationGraph(
-            [], ImmutableArray.Create<IVariable>(floats, ints));
+            [], ImmutableArray.Create<Variable>(floats, ints));
         var code = new CSharpModelBuilder().BuildFullGraph(ToFastGraph(graph), "CovTest");
         Assert.Contains("Vector(", code);
     }

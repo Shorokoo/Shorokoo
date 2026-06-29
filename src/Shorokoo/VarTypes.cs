@@ -11,14 +11,17 @@ using Shorokoo.Core.Utils;
 using Shorokoo.Onnx;
 using System;
 using System.Collections;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Reflection;
 using System.Reflection.Metadata;
 using System.Runtime.CompilerServices;
 using static Shorokoo.Core.Nodes.Ops;
 using static Shorokoo.Core.Nodes.AutoDiff.Ops;
-using static RandN.Distributions.Uniform;
 using Shorokoo.Core.Nodes.NodeDefinitions;
+using System.Collections.Immutable;
+using System.Linq;
 
 #pragma warning disable CS8981
 
@@ -115,89 +118,7 @@ namespace Shorokoo
     /// </summary>
     public interface DTypeStruct : IStruct;
 
-    public interface IVariable<out T> : IVariable where T : IVarType;
-    public abstract class Variable<T> : IVariable<T> where T : IVarType
-    {
-        public Node OwningNode { get; private set; }
-
-        public DType Type { get; private set; }
-
-        public Function? ModuleFn { get; private set; }
-
-        public bool IsValid { get; set; } = true;
-
-        /// <summary>
-        /// A globally unique identifier for this tensor, composed of the parent node's key and the output index.
-        /// Set by the Node constructor after creating outputs.
-        /// </summary>
-        public TensorKey Key { get; private set; }
-
-        private string? uniqueName;
-
-        public Variable(DType type, Node owningNode, Function? moduleFn, string? name)
-        {
-            this.OwningNode = owningNode;
-            this.Type = type;
-            this.uniqueName = name;  // Store the provided name as uniqueName
-            this.ModuleFn = moduleFn;
-        }
-
-        /// <summary>
-        /// Sets the TensorKey for this variable. Called by the Node constructor after creating outputs.
-        /// </summary>
-        internal void SetKey(TensorKey key)
-        {
-            this.Key = key;
-        }
-
-        /// <summary>
-        /// Override this variable's UniqueName. Used by
-        /// <see cref="Shorokoo.Graph.FastComputationGraphConverter.ToComputationGraph"/>
-        /// to restore original graph-input/output names after a Fast↔CG roundtrip.
-        /// </summary>
-        internal void SetUniqueName(string? name)
-        {
-            this.uniqueName = name;
-        }
-
-        public Tensor<T> Tensor() => (Tensor<T>)this;
-        public Vector<T> Vec() => this.Tensor().Vec();
-        public Scalar<T> Scalar() => this.Tensor().Scalar();
-        public TensorSequence<T> Sequence() => (TensorSequence<T>)this;
-        public OptionalTensor<T> Optional() => (OptionalTensor<T>)this;
-
-        /// <summary>
-        /// The unique name for this tensor. Defaults to Key.ToString() but can be set to human-readable
-        /// names like "N1_T0" by processors during construction. Used for ONNX serialization.
-        /// </summary>
-        public string UniqueName => this.uniqueName ?? this.Key.ToString();
-
-        /// <summary>
-        /// Obsolete: Use UniqueName instead. DefaultName now redirects to UniqueName for backwards compatibility.
-        /// </summary>
-        [Obsolete("Use UniqueName instead. DefaultName is deprecated and will be removed in a future version.")]
-        public string DefaultName => this.UniqueName;
-
-        /// <summary>
-        /// Deprecated: FriendlyName is no longer used. Use UniqueName for ONNX names or Key for stable identifiers.
-        /// </summary>
-        [Obsolete("FriendlyName is deprecated. Use UniqueName for ONNX names or Key.ToString() for stable identifiers.")]
-        public string? FriendlyName => this.uniqueName;
-
-        Variable<V> IVariable.As<V>()
-        {
-            if (typeof(V) == typeof(T))
-                return (Variable<V>)(object)this;
-
-            throw new InvalidTensorOperationException(ErrorCodes.CR006, "As<V>", $"from {typeof(T).Name} to {typeof(V).Name}", 
-                $"Cannot cast Variable<{typeof(T).Name}> to Variable<{typeof(V).Name}> - types are not compatible");
-        }
-
-        public override string ToString()
-        {
-            return (this.uniqueName ?? "") + ": " + this.GetType().Name + "[" + (this.Tensor()?.Rank ?? -1) + "]";
-        }
-    }
+    public interface IValue<out T> : IValue where T : IVarType;
 }
 
 #pragma warning restore CS8981

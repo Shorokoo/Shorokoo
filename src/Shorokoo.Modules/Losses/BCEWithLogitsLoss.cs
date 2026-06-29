@@ -85,7 +85,7 @@ public partial class BCEWithLogitsLoss
             return x.Relu() - x * targets + softplus;
 
         // logWeight = 1 + (p_c − 1)·t  scales the softplus (log-sum-exp) term only.
-        var logWeight = Scalar(1f) + (posWeight - 1f) * targets;
+        var logWeight = Scalar(1f) + (posWeight.Value - 1f) * targets;
         return x.Relu() - x * targets + logWeight * softplus;
     }
 }

@@ -41,7 +41,7 @@ namespace Shorokoo.Core
         public BaseModel(InputType inputType)
         {
             var targetFunction = ModuleHelper.CreateFunctionSignature([], [], [typeof(Tout)]);
-            this.ModelVariable = (Scalar<IModelVarType>)InternalOp.ModuleTensorInput(DType.Model, rank: 0, inputType, targetFunction, null);
+            this.ModelVariable = InternalOp.ModuleTensorInput(DType.Model, rank: 0, inputType, targetFunction, null);
         }
 
         public BaseModel(Scalar<IModelVarType> modelVariable, DType[]? genericTypeArgs = null)
@@ -62,13 +62,13 @@ namespace Shorokoo.Core
     {
         Scalar<IModelVarType> IModel.ModelVariable => this.ModelVariable;
 
-        private Scalar<IModelVarType> ModelVariable { get; set; } = null!;
+        private Scalar<IModelVarType> ModelVariable { get; set; } = default!;
         internal DType[]? GenericTypeArgs { get; set; }
 
         public BaseModel(InputType inputType)
         {
             var targetFunction = ModuleHelper.CreateFunctionSignature([], [typeof(Tin)], [typeof(Tout)]);
-            this.ModelVariable = (Scalar<IModelVarType>)InternalOp.ModuleTensorInput(DType.Model, rank: 0, inputType, targetFunction, null);
+            this.ModelVariable = InternalOp.ModuleTensorInput(DType.Model, rank: 0, inputType, targetFunction, null);
         }
 
         public BaseModel(Scalar<IModelVarType> modelVariable, DType[]? genericTypeArgs = null)
@@ -93,7 +93,7 @@ namespace Shorokoo.Core
         public CallbackModule(InputType inputType)
         {
             var targetFunction = ModuleHelper.CreateFunctionSignature([], [], [typeof(TOutputs)]);
-            this.ModuleVariable = (Scalar<IModuleVarType>)InternalOp.ModuleTensorInput(DType.Module, 0, inputType, targetFunction, null);
+            this.ModuleVariable = InternalOp.ModuleTensorInput(DType.Module, 0, inputType, targetFunction, null);
         }
 
         public CallbackModule(Func<TOutputs> fnModule, Delegate? referenceMethod = null, string? name = null)
@@ -110,7 +110,7 @@ namespace Shorokoo.Core
         public T SetHyperparams<T>() where T : BaseModel<TOutputs>
         {
             Vector<int64> iterationIndices = [.. LoopAPI.IterationIndices];
-            var modelVariable = (Scalar<IModelVarType>)InternalOp.ModuleSetHyperparams(this.ModuleVariable, [], iterationIndices, localModelId: null, identifierTemplateString: null);
+            Scalar<IModelVarType> modelVariable = InternalOp.ModuleSetHyperparams(this.ModuleVariable, [], iterationIndices, localModelId: null, identifierTemplateString: null);
 
             var genericTypeArgs = ModuleHelper.ExtractGenericTypeArgsFromType(this.GetType());
 
@@ -128,12 +128,12 @@ namespace Shorokoo.Core
 
     public class CallbackModule<THyperparams, TOutputs> : IModule
     {
-        public Scalar<IModuleVarType> ModuleVariable { get; private set; } = null!;
+        public Scalar<IModuleVarType> ModuleVariable { get; private set; } = default!;
 
         public CallbackModule(InputType inputType)
         {
             var targetFunction = ModuleHelper.CreateFunctionSignature([typeof(THyperparams)], [], [typeof(TOutputs)]);
-            this.ModuleVariable = (Scalar<IModuleVarType>)InternalOp.ModuleTensorInput(DType.Module, 0, inputType, targetFunction, null);
+            this.ModuleVariable = InternalOp.ModuleTensorInput(DType.Module, 0, inputType, targetFunction, null);
         }
 
         public CallbackModule(Func<THyperparams, TOutputs>? fnModule, Delegate? referenceMethod = null, string? name = null)
@@ -151,7 +151,7 @@ namespace Shorokoo.Core
         {
             Vector<int64> iterationIndices = [.. LoopAPI.IterationIndices];
             var inputVariables = ModuleHelper.Format(hyperparams);
-            var modelVariable = (Scalar<IModelVarType>)InternalOp.ModuleSetHyperparams(this.ModuleVariable, inputVariables, iterationIndices, localModelId: null, identifierTemplateString: null);
+            Scalar<IModelVarType> modelVariable = InternalOp.ModuleSetHyperparams(this.ModuleVariable, inputVariables, iterationIndices, localModelId: null, identifierTemplateString: null);
 
             var genericTypeArgs = ModuleHelper.ExtractGenericTypeArgsFromType(this.GetType());
 
@@ -169,12 +169,12 @@ namespace Shorokoo.Core
 
     public class Module<TInputs, TOutputs> : IModule
     {
-        public Scalar<IModuleVarType> ModuleVariable { get; private set; } = null!;
+        public Scalar<IModuleVarType> ModuleVariable { get; private set; } = default!;
 
         public Module(InputType inputType)
         {
             var targetFunction = ModuleHelper.CreateFunctionSignature([], [typeof(TInputs)], [typeof(TOutputs)]);
-            this.ModuleVariable = (Scalar<IModuleVarType>)InternalOp.ModuleTensorInput(DType.Module, 0, inputType, targetFunction, null);
+            this.ModuleVariable = InternalOp.ModuleTensorInput(DType.Module, 0, inputType, targetFunction, null);
         }
 
         public Module(Func<TInputs, TOutputs>? fnModule, Delegate? referenceMethod = null, string? name = null)
@@ -191,7 +191,7 @@ namespace Shorokoo.Core
         public T SetHyperparams<T>() where T : BaseModel<TInputs, TOutputs>
         {
             Vector<int64> iterationIndices = [.. LoopAPI.IterationIndices];
-            var modelVariable = (Scalar<IModelVarType>)InternalOp.ModuleSetHyperparams(this.ModuleVariable, [], iterationIndices, localModelId: null, identifierTemplateString: null);
+            Scalar<IModelVarType> modelVariable = InternalOp.ModuleSetHyperparams(this.ModuleVariable, [], iterationIndices, localModelId: null, identifierTemplateString: null);
 
             var genericTypeArgs = ModuleHelper.ExtractGenericTypeArgsFromType(this.GetType());
 
@@ -209,12 +209,12 @@ namespace Shorokoo.Core
 
     public class Module<THyperparams, TInputs, TOutputs> : IModule
     {
-        public Scalar<IModuleVarType> ModuleVariable { get; private set; } = null!;
+        public Scalar<IModuleVarType> ModuleVariable { get; private set; } = default!;
 
         public Module(InputType inputType)
         {
             var targetFunction = ModuleHelper.CreateFunctionSignature([typeof(THyperparams)], [typeof(TInputs)], [typeof(TOutputs)]);
-            this.ModuleVariable = (Scalar<IModuleVarType>)InternalOp.ModuleTensorInput(DType.Module, 0, inputType, targetFunction, null);
+            this.ModuleVariable = InternalOp.ModuleTensorInput(DType.Module, 0, inputType, targetFunction, null);
         }
 
         public Module(Func<THyperparams, TInputs, TOutputs> fnModule, Delegate? referenceMethod = null, string? name = null)
@@ -232,7 +232,7 @@ namespace Shorokoo.Core
         {
             Vector<int64> iterationIndices = [.. LoopAPI.IterationIndices];
             var inputVariables = ModuleHelper.Format(hyperparams);
-            var modelVariable = (Scalar<IModelVarType>)InternalOp.ModuleSetHyperparams(this.ModuleVariable, inputVariables, iterationIndices, localModelId: null, identifierTemplateString: null);
+            Scalar<IModelVarType> modelVariable = InternalOp.ModuleSetHyperparams(this.ModuleVariable, inputVariables, iterationIndices, localModelId: null, identifierTemplateString: null);
 
             var genericTypeArgs = ModuleHelper.ExtractGenericTypeArgsFromType(this.GetType());
 

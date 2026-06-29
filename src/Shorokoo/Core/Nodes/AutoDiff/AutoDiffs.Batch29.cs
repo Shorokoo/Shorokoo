@@ -20,7 +20,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // dy/dx = alpha when 0 < alpha*x + beta < 1, else 0.
 
         [AutoDiff(HARD_SIGMOID)]
-        public static IVariable?[] HardSigmoid<T>(Tensor<T> x, Tensor<T> grad, float? alpha, float? beta) where T : IVarType
+        public static Variable?[] HardSigmoid<T>(Tensor<T> x, Tensor<T> grad, float? alpha, float? beta) where T : IVarType
         {
             var effAlpha = alpha ?? 0.2f;
             var effBeta = beta ?? 0.5f;
@@ -29,8 +29,8 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             var zero = TypedConst(0.0f, x);
             var one = TypedConst(1.0f, x);
             var t = alphaConst * x + betaConst;
-            var inRange = (Tensor<bit>)OnnxOp.And(OnnxOp.Greater(t, zero), OnnxOp.Less(t, one));
-            var slope = (Tensor<T>)OnnxOp.Where(inRange, alphaConst, zero);
+            Tensor<bit> inRange = OnnxOp.And(OnnxOp.Greater(t, zero), OnnxOp.Less(t, one));
+            Tensor<T> slope = OnnxOp.Where(inRange, alphaConst, zero);
             return [grad * slope];
         }
 
@@ -40,16 +40,16 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // dy/dx = s + x * ds/dx = s + (x/6) when -3 < x < 3, else s.
 
         [AutoDiff(HARD_SWISH)]
-        public static IVariable?[] HardSwish<T>(Tensor<T> x, Tensor<T> grad) where T : IVarType
+        public static Variable?[] HardSwish<T>(Tensor<T> x, Tensor<T> grad) where T : IVarType
         {
             var oneSixth = TypedConst(1.0f / 6.0f, x);
             var half = TypedConst(0.5f, x);
             var zero = TypedConst(0.0f, x);
             var one = TypedConst(1.0f, x);
             var t = oneSixth * x + half;
-            var s = (Tensor<T>)OnnxOp.Min((Tensor<T>)OnnxOp.Max(t, zero), one);
-            var inRange = (Tensor<bit>)OnnxOp.And(OnnxOp.Greater(t, zero), OnnxOp.Less(t, one));
-            var deriv = (Tensor<T>)OnnxOp.Where(inRange, s + x * oneSixth, s);
+            Tensor<T> s = OnnxOp.Min(OnnxOp.Max(t, zero), one);
+            Tensor<bit> inRange = OnnxOp.And(OnnxOp.Greater(t, zero), OnnxOp.Less(t, one));
+            Tensor<T> deriv = OnnxOp.Where(inRange, s + x * oneSixth, s);
             return [grad * deriv];
         }
 
@@ -59,12 +59,12 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // dy/dx = th + x * (1 - th^2) * sig.
 
         [AutoDiff(MISH)]
-        public static IVariable?[] Mish<T>(Tensor<T> x, Tensor<T> grad) where T : IVarType
+        public static Variable?[] Mish<T>(Tensor<T> x, Tensor<T> grad) where T : IVarType
         {
             var one = TypedConst(1.0f, x);
-            var sp = (Tensor<T>)OnnxOp.Softplus(x);
-            var th = (Tensor<T>)OnnxOp.Tanh(sp);
-            var sig = (Tensor<T>)OnnxOp.Sigmoid(x);
+            Tensor<T> sp = OnnxOp.Softplus(x);
+            Tensor<T> th = OnnxOp.Tanh(sp);
+            Tensor<T> sig = OnnxOp.Sigmoid(x);
             var deriv = th + x * (one - th * th) * sig;
             return [grad * deriv];
         }
@@ -74,9 +74,9 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // dy/dx = sigmoid(x).
 
         [AutoDiff(SOFTPLUS)]
-        public static IVariable?[] Softplus<T>(Tensor<T> x, Tensor<T> grad) where T : IVarType
+        public static Variable?[] Softplus<T>(Tensor<T> x, Tensor<T> grad) where T : IVarType
         {
-            var sig = (Tensor<T>)OnnxOp.Sigmoid(x);
+            Tensor<T> sig = OnnxOp.Sigmoid(x);
             return [grad * sig];
         }
 
@@ -85,10 +85,10 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // dy/dx = 1 / (1 + |x|)^2.
 
         [AutoDiff(SOFTSIGN)]
-        public static IVariable?[] Softsign<T>(Tensor<T> x, Tensor<T> grad) where T : IVarType
+        public static Variable?[] Softsign<T>(Tensor<T> x, Tensor<T> grad) where T : IVarType
         {
             var one = TypedConst(1.0f, x);
-            var denom = one + (Tensor<T>)OnnxOp.Abs(x);
+            var denom = one + OnnxOp.Abs(x);
             return [grad / (denom * denom)];
         }
 
@@ -97,14 +97,14 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // dy/dx = 1 if x > alpha else 0.
 
         [AutoDiff(THRESHOLDED_RELU)]
-        public static IVariable?[] ThresholdedRelu<T>(Tensor<T> x, Tensor<T> grad, float? alpha) where T : IVarType
+        public static Variable?[] ThresholdedRelu<T>(Tensor<T> x, Tensor<T> grad, float? alpha) where T : IVarType
         {
             var effAlpha = alpha ?? 1.0f;
             var alphaConst = TypedConst(effAlpha, x);
             var zero = TypedConst(0.0f, x);
             var one = TypedConst(1.0f, x);
             var mask = x > alphaConst;
-            var slope = (Tensor<T>)OnnxOp.Where(mask, one, zero);
+            Tensor<T> slope = OnnxOp.Where(mask, one, zero);
             return [grad * slope];
         }
 
@@ -114,15 +114,15 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // contributions vanish under differentiation.)
 
         [AutoDiff(SHRINK)]
-        public static IVariable?[] Shrink<T>(Tensor<T> x, Tensor<T> grad, float? bias, float? lambd) where T : IVarType
+        public static Variable?[] Shrink<T>(Tensor<T> x, Tensor<T> grad, float? bias, float? lambd) where T : IVarType
         {
             _ = bias; // |bias| only shifts the piecewise-constant offset; it has no gradient effect.
             var effLambd = lambd ?? 0.5f;
             var lambdConst = TypedConst(effLambd, x);
             var zero = TypedConst(0.0f, x);
             var one = TypedConst(1.0f, x);
-            var outside = (Tensor<T>)OnnxOp.Abs(x) > lambdConst;
-            var slope = (Tensor<T>)OnnxOp.Where(outside, one, zero);
+            Tensor<bit> outside = OnnxOp.Abs(x) > lambdConst;
+            Tensor<T> slope = OnnxOp.Where(outside, one, zero);
             return [grad * slope];
         }
 
@@ -132,7 +132,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // dx_j = grad_j - softmax(x)_j * sum_i(grad_i)
 
         [AutoDiff(LOG_SOFTMAX)]
-        public static IVariable?[] LogSoftmax<T>(Tensor<T> x, Tensor<T> grad, long? axis) where T : IVarType
+        public static Variable?[] LogSoftmax<T>(Tensor<T> x, Tensor<T> grad, long? axis) where T : IVarType
         {
             var effAxis = axis ?? -1;
             var sm = x.Softmax(effAxis);
@@ -146,13 +146,13 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // dy/dslope = 0 if x > 0 else x  (sum-reduced over broadcast dims for the slope gradient)
 
         [AutoDiff(P_RELU)]
-        public static IVariable?[] PRelu<T>(Tensor<T> x, Tensor<T> slope, Tensor<T> grad) where T : IVarType
+        public static Variable?[] PRelu<T>(Tensor<T> x, Tensor<T> slope, Tensor<T> grad) where T : IVarType
         {
             var zero = TypedConst(0.0f, x);
             var one = TypedConst(1.0f, x);
             var positive = x > zero;
-            var dxFactor = (Tensor<T>)OnnxOp.Where(positive, one, slope);
-            var dslopeFactor = (Tensor<T>)OnnxOp.Where(positive, zero, x);
+            Tensor<T> dxFactor = OnnxOp.Where(positive, one, slope);
+            Tensor<T> dslopeFactor = OnnxOp.Where(positive, zero, x);
             var dx = ReverseBroadcast(grad * dxFactor, x.DShape);
             var dslope = ReverseBroadcast(grad * dslopeFactor, slope.DShape);
             return [dx, dslope];
@@ -165,26 +165,26 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // unspecified, per the ONNX spec).
 
         [AutoDiff(MEAN_VARIANCE_NORMALIZATION)]
-        public static IVariable?[] MeanVarianceNormalization<T>(Tensor<T> x, Tensor<T> grad, long[]? axes) where T : IVarType
+        public static Variable?[] MeanVarianceNormalization<T>(Tensor<T> x, Tensor<T> grad, long[]? axes) where T : IVarType
         {
             // ONNX default axes are [0, 2, 3] (over batch and spatial dims of an NCHW tensor).
             var effectiveAxes = axes ?? new long[] { 0, 2, 3 };
             var axesVec = Vector(effectiveAxes);
             var eps = TypedConst(1e-9f, x);
 
-            var mean = (Tensor<T>)OnnxOp.ReduceMean(x, axesVec, keepdims: true);
+            Tensor<T> mean = OnnxOp.ReduceMean(x, axesVec, keepdims: true);
             var xCentered = x - mean;
-            var variance = (Tensor<T>)OnnxOp.ReduceMean(xCentered * xCentered, axesVec, keepdims: true);
-            var invStd = (Tensor<T>)OnnxOp.Reciprocal((Tensor<T>)OnnxOp.Sqrt(variance + eps));
+            Tensor<T> variance = OnnxOp.ReduceMean(xCentered * xCentered, axesVec, keepdims: true);
+            Tensor<T> invStd = OnnxOp.Reciprocal(OnnxOp.Sqrt(variance + eps));
 
             // N = product of the dim sizes over the reduction axes, in T's dtype.
             var xShape = x.DShape;
-            var axisSizes = (Tensor<int64>)OnnxOp.Gather(xShape, Vector(effectiveAxes), axis: 0);
-            var nLong = (Tensor<int64>)OnnxOp.ReduceProd(axisSizes, axes: Vector(0L), keepdims: false, noopWithEmptyAxes: false);
-            var n = (Tensor<T>)OnnxOp.Cast(nLong, saturate: null, to: x.Type);
+            Tensor<int64> axisSizes = OnnxOp.Gather(xShape, Vector(effectiveAxes), axis: 0);
+            Tensor<int64> nLong = OnnxOp.ReduceProd(axisSizes, axes: Vector(0L), keepdims: false, noopWithEmptyAxes: false);
+            Tensor<T> n = OnnxOp.Cast(nLong, saturate: null, to: x.Type);
 
-            var meanGrad = (Tensor<T>)OnnxOp.ReduceMean(grad, axesVec, keepdims: true);
-            var meanGradXc = (Tensor<T>)OnnxOp.ReduceMean(grad * xCentered, axesVec, keepdims: true);
+            Tensor<T> meanGrad = OnnxOp.ReduceMean(grad, axesVec, keepdims: true);
+            Tensor<T> meanGradXc = OnnxOp.ReduceMean(grad * xCentered, axesVec, keepdims: true);
             var dx = invStd * (grad - meanGrad - xCentered * meanGradXc * invStd * invStd);
             _ = n; // Reduce*Mean already divides by N; kept here only for parity with the textbook formula.
             return [dx];

@@ -26,7 +26,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         //   No axis: dL/dX_flat = Gather(dL/dY, inverse_indices, axis=0), then reshape to X's shape.
         //   With axis: dL/dX = Gather(dL/dY, inverse_indices, axis=axis).
 
-        internal static IVariable?[] UniqueGradient(IVariable?[] inputs, IVariable?[] outputGrads, OnnxCSharpAttributes attributes)
+        internal static Variable?[] UniqueGradient(Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
         {
             var x = inputs[0]!;
             var dY = outputGrads[0]!; // gradient of Y (unique values)

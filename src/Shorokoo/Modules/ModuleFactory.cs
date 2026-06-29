@@ -35,7 +35,7 @@ namespace Shorokoo.Modules
     /// captured locals would be baked invisibly into the graph and shared across closures.
     /// Inside the body, everything available to <c>[Module]</c> <c>Inline</c> methods works
     /// unchanged: <c>[TrainableParamInitializer]</c> classes /
-    /// <see cref="Globals.CallTrainableParamInitializer(Delegate, IVariable[])"/>,
+    /// <see cref="Globals.CallTrainableParamInitializer(Delegate, Variable[])"/>,
     /// <see cref="Globals.StateUpdate{T}(T, T)"/>, <c>LoopAPI.Iterate</c>, and calls into other
     /// modules.</para>
     /// </summary>
@@ -100,7 +100,7 @@ namespace Shorokoo.Modules
         // method, which is inputs-first / hyperparameters-last). For hyperparameters combined with
         // MULTIPLE runtime inputs, construct the Module<THypers, TInputs, TOutputs> base directly
         // with a wrapper lambda, e.g.
-        //   new Module<Scalar<float32>, (Tensor<float32>, Tensor<float32>), Tensor<float32>>(
+        //   new Module<Scalar<float32>, (Variable, Tensor<float32>), Tensor<float32>>(
         //       (h, ins) => Body(ins.Item1, ins.Item2, h), Body);
 
         /// <summary>

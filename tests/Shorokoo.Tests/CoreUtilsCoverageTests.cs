@@ -276,4 +276,82 @@ public class CoreUtilsCoverageTests
         Assert.Equal(gpu, InferenceBackend.SelectBackend([cpu, gpu], cudaAvailable: true)!.Value);
         Assert.Equal(cpu, InferenceBackend.SelectBackend([cpu, gpu], cudaAvailable: false)!.Value);
     }
+
+    [Fact]
+    public void TestVariableHandleConversionCoverage()
+    {
+        // A graph node carries the structural kind, runtime dtype and rank; wrapping it in a typed
+        // value handle (the implicit Variable->handle operators, via IValue.RequireKind/
+        // RequireDType/RequireRank) must enforce that all three are compatible.
+        Variable scalarNode = InputScalar<float32>("a");        // Tensor kind, rank 0, float32
+        Variable vectorNode = InputVector<float32>("b");        // Tensor kind, rank 1, float32
+        Variable rank2Node = InputTensor<float32>("c", rank: 2);
+        Variable seqNode = OnnxOp.SequenceEmpty(DType.Float32);
+        Variable optNode = OnnxOp.Optional(null, DataStructure.Tensor, DType.Float32);
+
+        // Valid conversions preserve structure + rank.
+        Assert.Equal(0, ((Variable)(Scalar<float32>)scalarNode).Rank);
+        Assert.Equal(1, ((Variable)(Vector<float32>)vectorNode).Rank);
+        Assert.Equal(2, ((Variable)(Tensor<float32>)rank2Node).Rank);
+        Assert.Equal(DataStructure.Sequence, ((Variable)(TensorSequence<float32>)seqNode).Structure());
+        Assert.Equal(DataStructure.Optional, ((Variable)(OptionalTensor<float32>)optNode).Structure());
+
+        // Structure must always match.
+        Assert.Throws<InvalidTensorOperationException>(() => (object)(Tensor<float32>)seqNode);
+        Assert.Throws<InvalidTensorOperationException>(() => (object)(TensorSequence<float32>)scalarNode);
+        Assert.Throws<InvalidTensorOperationException>(() => (object)(OptionalTensor<float32>)scalarNode);
+
+        // No implicit dtype reinterpretation (use Cast to convert).
+        Assert.Throws<InvalidTensorOperationException>(() => (object)(Tensor<float64>)scalarNode);
+        Assert.Throws<InvalidTensorOperationException>(() => (object)(Scalar<int64>)scalarNode);
+
+        // A known-mismatching rank is an error.
+        Assert.Throws<InvalidTensorOperationException>(() => (object)(Scalar<float32>)rank2Node);
+        Assert.Throws<InvalidTensorOperationException>(() => (object)(Vector<float32>)rank2Node);
+        Assert.Throws<InvalidTensorOperationException>(() => (object)(Scalar<float32>)vectorNode);
+
+        // An UNKNOWN-rank node is adapted to a fixed-rank handle with an Identity rank-conversion node.
+        Variable unranked = InputTensor<float32>("u"); Assert.Null(unranked.Rank);
+        var sFromNull = (Variable)(Scalar<float32>)unranked;
+        Assert.Equal(0, sFromNull.Rank); Assert.Equal(OpCodes.IDENTITY, sFromNull.OwningNode.OpCode);
+        Variable unranked2 = InputTensor<float32>("u2");
+        var vFromNull = (Variable)(Vector<float32>)unranked2;
+        Assert.Equal(1, vFromNull.Rank); Assert.Equal(OpCodes.IDENTITY, vFromNull.OwningNode.OpCode);
+
+        // Vec()/Scalar() reinterpret a tensor handle to a fixed-rank Vector/Scalar, validating rank
+        // exactly like the Variable->handle operators: a known mismatch is an error (you cannot coerce
+        // a rank-0 scalar into a vector, or a rank-1 vector into a scalar), a matching rank passes
+        // through, and an unknown rank is materialised with an Identity rank-conversion.
+        Assert.Throws<InvalidTensorOperationException>(() => (object)((Tensor<float32>)rank2Node).Vec());
+        Assert.Throws<InvalidTensorOperationException>(() => (object)((Tensor<float32>)rank2Node).Scalar());
+        Assert.Throws<InvalidTensorOperationException>(() => (object)((Scalar<float32>)scalarNode).Vec());
+        Assert.Throws<InvalidTensorOperationException>(() => (object)((Vector<float32>)vectorNode).Scalar());
+        Assert.Equal(1, ((Variable)((Tensor<float32>)vectorNode).Vec()).Rank);
+        Assert.Equal(0, ((Variable)((Tensor<float32>)scalarNode).Scalar()).Rank);
+        Variable unrankedVec = InputTensor<float32>("uv");
+        var vecAdapted = (Variable)((Tensor<float32>)unrankedVec).Vec();
+        Assert.Equal(1, vecAdapted.Rank); Assert.Equal(OpCodes.IDENTITY, vecAdapted.OwningNode.OpCode);
+
+        // Cast<V> is the explicit dtype CONVERSION (inserts a Cast node) — to change dtype you must Cast;
+        // there is no reinterpret.
+        Assert.Equal(DType.Float64, ((Variable)scalarNode.Cast<float64>()).Type);
+    }
+
+    [Fact]
+    public void TestTensorSequenceInsertAtInterfaceCoverage()
+    {
+        // ITensorSequence.InsertAt accepts any ITensor element. A Vector<T>/Scalar<T> is an ITensor
+        // but not a Tensor<T>, so the element must convert through its backing Variable (the validating
+        // Variable→Tensor<T> operator) — a direct (Tensor<T>)element unbox would throw
+        // InvalidCastException for these non-Tensor handle structs.
+        ITensorSequence seq = TensorSequence<float32>(InputTensor<float32>("e0", rank: 1));
+
+        ITensor vectorElem = InputVector<float32>("v");   // a Vector<float32> boxed as ITensor
+        ITensor scalarElem = InputScalar<float32>("s");   // a Scalar<float32> boxed as ITensor
+
+        var afterVec = seq.InsertAt(vectorElem, Scalar(0L));
+        var afterBoth = afterVec.InsertAt(scalarElem, Scalar(0L));
+
+        Assert.Equal(DataStructure.Sequence, afterBoth.Structure());
+    }
 }

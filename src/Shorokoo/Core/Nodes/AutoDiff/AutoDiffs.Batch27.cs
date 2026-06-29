@@ -24,22 +24,22 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         //
         //   The dispatch wrapper splits the flat inputs[] coming from the autograd
         //   engine into (cond, branchInputs):
-        //     cond                          = the IF_OPEN condition (Scalar<bit>)
+        //     cond                          = the IF_OPEN condition (Variable)
         //     branchInputs[0..n]            = else_branch tensors  (alphabetical: "else" < "then")
         //     branchInputs[n..2n]           = then_branch tensors
         //   where n = outputGrads.Length. The returned array has shape 1 + 2n,
         //   matching the engine's expected (cond, else..., then...) layout.
 
         [AutoDiff(IF_CLOSE)]
-        public static IVariable?[] IfCloseGradient(
+        public static Variable?[] IfCloseGradient(
             Scalar<bit> cond,
-            IVariable?[] branchInputs,
-            IVariable?[] outputGrads,
+            Variable?[] branchInputs,
+            Variable?[] outputGrads,
             OnnxCSharpAttributes attributes)
         {
             var numOutputs = outputGrads.Length;
 
-            var result = new IVariable?[1 + branchInputs.Length]; // 1 + 2*numOutputs
+            var result = new Variable?[1 + branchInputs.Length]; // 1 + 2*numOutputs
             result[0] = null; // condition is boolean, not differentiable
 
             for (int i = 0; i < numOutputs; i++)

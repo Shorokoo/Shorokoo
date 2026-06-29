@@ -82,7 +82,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // GraphOpenNodeKey, graph.Inputs, graph.Outputs) for FastNodeKeys
             // that don't correspond to any node in graph.Nodes. These are
             // "phantom" producers — typically zombie nodes (e.g.
-            // LOOP_INDEX_VARIABLE) whose IVariable outputs survive in
+            // LOOP_INDEX_VARIABLE) whose Variable outputs survive in
             // structural slots after the node itself is pruned out of
             // ComputationGraph.TopologicalOrderNodes. Each phantom key gets
             // its own fresh sequential id so every reference to it (e.g.

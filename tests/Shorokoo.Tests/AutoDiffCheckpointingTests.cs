@@ -33,14 +33,14 @@ public class AutoDiffCheckpointingCoverageTests
         var bias2 = InputVector<float32>("bias2");
 
         var mat = OnnxOp.MatMul(input, weights);
-        var activation = (IVariable)OnnxOp.Relu(mat);
+        var activation = OnnxOp.Relu(mat);
         var branch1 = OnnxOp.Add(activation, bias1);
         var branch2 = OnnxOp.Add(activation, bias2);
         var final = OnnxOp.Add(branch1, branch2);
 
         var graph = new FastComputationGraph(
-            ImmutableArray.Create<IVariable>(input, weights, bias1, bias2),
-            ImmutableArray.Create((IVariable)final));
+            ImmutableArray.Create<Variable>(input, weights, bias1, bias2),
+            ImmutableArray.Create((Variable)final));
 
         var inputData = Globals.TensorDataWithSmallVals(DType.Float32, [256, 256]);
         var weightsData = Globals.TensorDataWithSmallVals(DType.Float32, [256, 256]);

@@ -51,7 +51,7 @@ public partial class ScalarMultiplyAndClipModel
     {
         var weight = InitScalarWeight.Init(Vector(1L));
         var scaled = input * weight;
-        return (Tensor<float32>)OnnxOp.Clip((ITensor)scaled, (IScalar)Scalar(-1f), (IScalar)Scalar(1f));
+        return (Tensor<float32>)OnnxOp.Clip(scaled, Scalar(-1f), Scalar(1f));
     }
 }
 
@@ -87,7 +87,7 @@ public partial class ScalarMultiplyAndScatterModel
         var updates = (Tensor<float32>)OnnxOp.Slice(scaled, Vector(0L), Vector(1L));
         var indices = Vector(1L);
         return (Tensor<float32>)OnnxOp.ScatterElements(
-            (ITensor)scaled, (ITensor)indices, (ITensor)updates,
+            scaled, indices, updates,
             axis: 0, reduction: null);
     }
 }
@@ -1002,7 +1002,7 @@ public class TrainingRigCoverageTests
         // ExtractFastGraphFromDelegate rejects non-module delegates (lambda's
         // Method.Name is not "Inline").
         Func<Tensor<float32>, Tensor<float32>, Scalar<float32>> notAModule =
-            (pred, targ) => ((Tensor<float32>)OnnxOp.ReduceSum((ITensor)(pred - targ), keepdims: false)).Scalar();
+            (pred, targ) => ((Tensor<float32>)OnnxOp.ReduceSum(pred - targ, keepdims: false)).Scalar();
         Assert.Throws<ArgumentException>(() =>
             TrainingGraphBuilder.PrepareForTrainingAsFast(modelGraph, notAModule));
     }

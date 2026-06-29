@@ -17,7 +17,7 @@ namespace Shorokoo.Core.Factory
     /// <summary>
     /// Fast-CG counterpart of the legacy <c>Node.ForOpsetMany</c>. Decides
     /// the opcode/domain/attributes used when emitting an ONNX <c>NodeProto</c> for a
-    /// given <see cref="FastNode"/>. Pure: no <see cref="IVariable"/> access,
+    /// given <see cref="FastNode"/>. Pure: no <see cref="Variable"/> access,
     /// no tensor-info dictionary, no per-node side state — purely a function of the
     /// FastNode and its graph.
     ///

@@ -258,7 +258,7 @@ public static class Convolution
     /// <summary>
     /// Square/cubic convenience overload: one scalar per geometry knob, broadcast
     /// to every spatial axis. The spatial rank is taken from the input's
-    /// structural rank (<c>x.Rank() - 2</c>), which must be known at graph-build
+    /// structural rank (<c>x.Rank - 2</c>), which must be known at graph-build
     /// time; pass the per-axis <c>long[]</c> form (or the per-rank
     /// <see cref="Conv1d"/>/<see cref="Conv2d"/>/<see cref="Conv3d"/> aliases) when
     /// it is not. See the per-axis
@@ -289,11 +289,11 @@ public static class Convolution
     /// <summary>Spatial rank (<c>structuralRank - 2</c>) of an NC… input, required at build time for scalar broadcasting.</summary>
     internal static int SpatialRankOf<T>(Tensor<T> x) where T : IVarType
     {
-        int? rank = x.Rank();
+        int? rank = x.Rank;
         if (rank is null || rank.Value < 3)
             throw new ArgumentException(
                 "The scalar-kernel overload needs the input's spatial rank at graph-build time " +
-                "(x.Rank() - 2, with rank >= 3). Use the long[] kernelSize overload or a 1d/2d/3d alias instead.",
+                "(x.Rank - 2, with rank >= 3). Use the long[] kernelSize overload or a 1d/2d/3d alias instead.",
                 nameof(x));
         return rank.Value - 2;
     }
@@ -411,7 +411,7 @@ public static class Convolution
     /// <summary>
     /// Square/cubic convenience overload for transposed convolution: one scalar
     /// per geometry knob, broadcast to every spatial axis (rank from
-    /// <c>x.Rank() - 2</c>, which must be known at graph-build time). See the
+    /// <c>x.Rank - 2</c>, which must be known at graph-build time). See the
     /// per-axis
     /// <see cref="ConvTranspose(Tensor{float32}, long, long[], long[], long[], long[], long[], long, bool, long[], AutoPad)"/>
     /// for the full semantics.

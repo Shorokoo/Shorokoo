@@ -21,7 +21,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         //   Pass 1: scatter grad along H axis (axis=2) → intermediate [N,C,H_in,W_out]
         //   Pass 2: scatter intermediate along W axis (axis=3) → grad_x [N,C,H_in,W_in]
 
-        internal static IVariable?[] ResizeGradient(IVariable?[] inputs, IVariable?[] outputGrads, OnnxCSharpAttributes attributes)
+        internal static Variable?[] ResizeGradient(Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
         {
             var mode = attributes.GetAttributeObj("mode") as ResizeMode? ?? ResizeMode.Nearest;
             if (mode != ResizeMode.Nearest)
@@ -130,7 +130,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // Implemented via the same two-pass ScatterElements approach as ResizeGradient.
         // Return: gradient for x only; scales has no gradient (non-differentiable index math).
 
-        internal static IVariable?[] UpsampleGradient(IVariable?[] inputs, IVariable?[] outputGrads, OnnxCSharpAttributes attributes)
+        internal static Variable?[] UpsampleGradient(Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
         {
             var mode = attributes.GetAttributeObj("mode") as ResizeMode? ?? ResizeMode.Nearest;
             if (mode != ResizeMode.Nearest)
@@ -220,7 +220,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // where pool_k = bias + alpha/size * ChannelWindowSum(x^2)_k
 
         [AutoDiff(LRN)]
-        public static IVariable?[] Lrn<T>(
+        public static Variable?[] Lrn<T>(
             Tensor<T> x, Tensor<T> grad, float? alpha, float? beta, float? bias, long? size)
             where T : IVarType
         {
@@ -236,7 +236,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             var rightHalf = effectiveSize - 1 - leftHalf;
 
             // Get the number of channels dynamically
-            var cDim = (Tensor<int64>)OnnxOp.Slice(OnnxOp.Shape(x), Vector(1L), Vector(2L));
+            Tensor<int64> cDim = OnnxOp.Slice(OnnxOp.Shape(x), Vector(1L), Vector(2L));
 
             // Helper: Channel window sum (sliding window sum along channel axis 1)
             // Uses Pad + unrolled Slice-and-Add since size is a static attribute
@@ -244,16 +244,16 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             {
                 // Pad along channel dimension (axis 1) with zeros
                 var pads = Vector(leftHalf, rightHalf);
-                var padded = (Tensor<T>)OnnxOp.Pad(tensor, pads, null, axes: Vector(1L), mode: PadMode.Constant);
+                Tensor<T> padded = OnnxOp.Pad(tensor, pads, null, axes: Vector(1L), mode: PadMode.Constant);
 
                 // Unrolled slice-and-add across the window
                 // First slice establishes the accumulator
-                var result = (Tensor<T>)OnnxOp.Slice(padded, Vector(0L), cDim, Vector(1L));
+                Tensor<T> result = OnnxOp.Slice(padded, Vector(0L), cDim, Vector(1L));
                 for (long i = 1; i < effectiveSize; i++)
                 {
                     var start = Vector(i);
-                    var end = (Tensor<int64>)OnnxOp.Add(cDim, Vector(i));
-                    var sliced = (Tensor<T>)OnnxOp.Slice(padded, start, end, Vector(1L));
+                    Tensor<int64> end = OnnxOp.Add(cDim, Vector(i));
+                    Tensor<T> sliced = OnnxOp.Slice(padded, start, end, Vector(1L));
                     result = result + sliced;
                 }
 
@@ -269,12 +269,12 @@ namespace Shorokoo.Core.Nodes.AutoDiff
 
             // Step 2: term1 = grad * pool^(-beta)
             var negBeta = TypedConst(-effectiveBeta, x);
-            var poolNegBeta = (Tensor<T>)OnnxOp.Pow(pool, negBeta);
+            Tensor<T> poolNegBeta = OnnxOp.Pow(pool, negBeta);
             var term1 = grad * poolNegBeta;
 
             // Step 3: term2 = -2*alpha*beta/size * x * ChannelWindowSum(grad * x * pool^(-(beta+1)))
             var negBetaM1 = TypedConst(-(effectiveBeta + 1.0f), x);
-            var poolNegBetaM1 = (Tensor<T>)OnnxOp.Pow(pool, negBetaM1);
+            Tensor<T> poolNegBetaM1 = OnnxOp.Pow(pool, negBetaM1);
             var inner = grad * x * poolNegBetaM1;
             var windowSumInner = ChannelWindowSum(inner);
             var coeff = TypedConst(-2.0f * effectiveAlpha * effectiveBeta / (float)effectiveSize, x);

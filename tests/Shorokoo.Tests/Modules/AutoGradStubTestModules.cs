@@ -20,7 +20,7 @@ namespace Shorokoo.Tests.Modules
 
     /// <summary>Bitwise integer ops: not differentiable — gradient is zero at the integer input.
     /// Operates on rank-1 tensors so the BitwiseAnd/Or/Xor/Not results stay as Tensor (the
-    /// OnnxOp factories return rank-unspecified IVariable, so Scalar-target casts fail).</summary>
+    /// OnnxOp factories return rank-unspecified IValue, so Scalar-target casts fail).</summary>
     [Module]
     public partial class AutoGradBitwiseStubCheck
     {

@@ -13,6 +13,7 @@ using Shorokoo.Core.Nodes.AutoDiff;
 using Shorokoo.Core.Training;
 using Shorokoo.Modules;
 using static Shorokoo.Globals;
+using E = System.Linq.Expressions.Expression;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 
 namespace Shorokoo.Core
@@ -106,46 +107,39 @@ namespace Shorokoo.Core
         private static float? GetHyperDefaultValue(this ParameterInfo paramInfo)
             => paramInfo.GetCustomAttribute<HyperAttribute>() is { HasDefault: true } hyper ? hyper.DefaultValue : null;
 
-        internal static string ToSignatureString(IModuleParam moduleParam)
-            => ToSignatureStringWithOverride(moduleParam, (moduleParam as IVariable)?.Rank());
+        // The signature string is computed from the internal graph node; callers cross the module
+        // boundary explicitly with IModuleParam.ToVariable() before reaching here.
+        internal static string ToSignatureString(Variable variable)
+            => ToSignatureStringWithOverride(variable, variable.Rank);
 
-        internal static string ToSignatureStringWithOverride(IModuleParam moduleParam, int? rank)
+        internal static string ToSignatureStringWithOverride(Variable variable, int? rank)
         {
-            if (moduleParam is IModel model)
-                return $"[{model.ModelVariable.ModuleFn!.ModelSignatureString}]";
+            // Model/module params are scalar nodes distinguished by their runtime DType (formerly the
+            // generic ImmutableScalar<IModelVarType> / ImmutableScalar<IModuleVarType>).
+            if (variable.Type == DType.Model)
+                return $"[{variable.ModuleFn!.ModelSignatureString}]";
 
-            if (moduleParam is IModule module)
-                return $"[{module.ModuleVariable.ModuleFn!.ModuleSignatureString}]";
-
-            if (moduleParam is Scalar<IModelVarType> modelVariable)
-                return $"[{modelVariable.ModuleFn!.ModelSignatureString}]";
-
-            if (moduleParam is Scalar<IModuleVarType> moduleVariable)
-                return $"[{moduleVariable.ModuleFn!.ModuleSignatureString}]";
-
-            var variable = moduleParam as IVariable;
-            if (variable is null)
-                throw new InvalidTensorOperationException(ErrorCodes.FW002, "Module Parameter Processing", $"parameter type {moduleParam?.GetType().Name ?? "null"}", "Module parameter must be convertible to IVariable");
+            if (variable.Type == DType.Module)
+                return $"[{variable.ModuleFn!.ModuleSignatureString}]";
 
             var rankString = rank is null || rank == -1 ? "" : $"#{rank}";
 
-            if (moduleParam is ITensorStruct tensorStruct)
+            // Dispatch on the structural kind (a single Variable node satisfies every marker
+            // interface, so kind must come from Structure()/Kind rather than ordered `is` checks).
+            switch (variable.Structure())
             {
-                // TensorStruct signature format: "struct:{typeName}" where typeName is the IStruct interface name
-                var typeName = tensorStruct.Definition?.TypeName ?? "anonymous";
-                return $"struct:{typeName}";
+                case DataStructure.TensorStruct:
+                    // "struct:{typeName}" where typeName is the IStruct interface name.
+                    return $"struct:{variable.Definition?.TypeName ?? "anonymous"}";
+                case DataStructure.Tensor:
+                    return $"{variable.Type.ToString().ToLower()}{rankString}";
+                case DataStructure.Optional:
+                    return $"{variable.Type.ToString().ToLower()}?{rankString}";
+                case DataStructure.Sequence:
+                    return $"{variable.Type.ToString().ToLower()}/seq{rankString}";
             }
 
-            if (moduleParam is ITensor tensor)
-                return $"{tensor.Type.ToString().ToLower()}{rankString}";
-
-            if (moduleParam is IOptionalTensor optionalTensor)
-                return $"{optionalTensor.Type.ToString().ToLower()}?{rankString}";
-
-            if (moduleParam is ITensorSequence tensorSequence)
-                return $"{tensorSequence.Type.ToString().ToLower()}/seq{rankString}";
-
-            throw new InvalidTensorOperationException(ErrorCodes.FW002, "Module Parameter Type Processing", $"parameter type {variable.GetType().Name}", "Unsupported module parameter type - expected ITensor, IOptionalTensor, ITensorSequence, or ITensorStruct");
+            throw new InvalidTensorOperationException(ErrorCodes.FW002, "Module Parameter Type Processing", $"parameter type {variable.GetType().Name}", "Unsupported module parameter structure");
         }
 
         internal static (string moduleSignature, string modelSignature) CreateFunctionSignatureString(Type[] hyperparams, Type[] inputs, Type[] outputs)
@@ -157,7 +151,7 @@ namespace Shorokoo.Core
             return CreateFunctionSignatureString(hyperparamInputs, inputInputs, outputInputs, null);
         }
 
-        internal static (string moduleSignature, string modelSignature) CreateFunctionSignatureString(IVariable[] hyperparams, IVariable[] inputs, IVariable[] outputs, int?[]? outputOverrideRanks)
+        internal static (string moduleSignature, string modelSignature) CreateFunctionSignatureString(Variable[] hyperparams, Variable[] inputs, Variable[] outputs, int?[]? outputOverrideRanks)
         {
             var signatureHyperparamPart = string.Join(", ", hyperparams.Select(ToSignatureString));
             var signatureInputPart = string.Join(", ", inputs.Select(ToSignatureString));
@@ -169,42 +163,29 @@ namespace Shorokoo.Core
                 $"{signatureInputPart} > {signatureOutputPart}");
         }
 
-        internal static IVariable DefaultVariable(Type type)
+        /// <summary>
+        /// Reject the internal graph node type <see cref="Variable"/> in a module signature: modules
+        /// must declare their inputs and outputs with the user-facing value handles
+        /// (<see cref="Tensor{T}"/>, <see cref="Vector{T}"/>, <see cref="Scalar{T}"/>,
+        /// <see cref="OptionalTensor{T}"/>, <see cref="TensorSequence{T}"/>, <see cref="TensorStruct{T}"/>).
+        /// <see cref="Variable"/> is the graph's internal representation only — the framework converts
+        /// to and from it behind the module boundary, never across it.
+        /// </summary>
+        internal static void RejectVariableParam(Type type)
         {
-            if (type.IsAssignableTo(typeof(ITensorStruct)))
-            {
-                var (structDef, structDType) = StructDefExtractor.ExtractFromTensorStructType(type, "default value creation");
-                
-                // Create default tensor variables for each field (empty tensors)
-                var fieldVars = structDef.Fields.Select(f => {
-                    // Create empty tensor based on field's element type and rank
-                    var shape = f.Rank.HasValue && f.Rank.Value == 0 ? Array.Empty<long>() : new long[] { 0 };
-                    return DefaultTensor(f.ElementType, shape);
-                }).ToArray();
-                
-                return InternalOp.TensorStructCreate(structDType, fieldVars);
-            }
+            if (typeof(Variable).IsAssignableFrom(type))
+                throw new InvalidTensorOperationException(ErrorCodes.FW002, "module signature", type.Name,
+                    "the internal graph node type 'Variable' cannot be a module input or output; use a value handle " +
+                    "(Tensor<T>, Vector<T>, Scalar<T>, OptionalTensor<T>, TensorSequence<T>, TensorStruct<T>) instead");
 
-            if (type.IsAssignableTo(typeof(ITensor)))
-            {
-                var dtype = OnnxUtils.GetDType(type.GenericTypeArguments[0]);
-                return DefaultTensor(dtype.AssertNotNull(), [0]); // Empty vector.
-            }
-
-            if (type.IsAssignableTo(typeof(IOptionalTensor)))
-            {
-                var dtype = OnnxUtils.GetDType(type.GenericTypeArguments[0]);
-                return OptionalTensor(dtype.AssertNotNull()); // Empty optional tensor.
-            }
-
-            if (type.IsAssignableTo(typeof(ITensorSequence)))
-            {
-                var dtype = OnnxUtils.GetDType(type.GenericTypeArguments[0]);
-                return TensorSequence(dtype.AssertNotNull()); // Empty sequence
-            }
-
-            throw new UnsupportedDTypeException(ErrorCodes.FW002, type.Name, "CreateDefaultValue", $"Unsupported type for default value creation. Supported types: ITensor, IOptionalTensor, ITensorSequence, ITensorStruct. Received: {type.Name}");
+            // Walk into composite shapes so a Variable nested in a tuple ((Variable, Tensor<T>)) or an
+            // array (Variable[]) is rejected too — modules speak in value handles all the way down.
+            if (IsValueTuple(type))
+                foreach (var arg in type.GenericTypeArguments) RejectVariableParam(arg);
+            else if (type.IsArray)
+                RejectVariableParam(type.GetElementType().AssertNotNull());
         }
+
 
         internal static Function CreateFunctionSignature(Type[] hyperparams, Type[] inputs, Type[] outputs)
         {
@@ -217,7 +198,7 @@ namespace Shorokoo.Core
             var inputInputs = FlattenTuples(inputs).Select((x, i) => ModuleParamInputBasedOn(x, InputType.ReadyInput, $"h{i}").ToVariable()).ToArray();
 
             var outputTypes = FlattenTuples(outputs).ToList();
-            var outputVariables = outputTypes.Select((x) => DefaultVariable(x)).ToArray();
+            var outputVariables = outputTypes.Select((x) => InternalGlobals.DefaultVariable(x)).ToArray();
             var rankOverrides = outputTypes.Select((x) =>
                                 x.IsAssignableTo(typeof(IVector)) ? 1 :
                                 x.IsAssignableTo(typeof(IScalar)) ? 0 :
@@ -355,7 +336,65 @@ namespace Shorokoo.Core
             {
                 genericTypeArgs = ExtractGenericTypeArgsFromType(moduleType);
             }
-            return (Scalar<IModuleVarType>)InternalOp.CreateModule(targetFunction, genericTypeArgs);
+            return InternalOp.CreateModule(targetFunction, genericTypeArgs);
+        }
+
+        /// <summary>Creates the module input placeholder corresponding to a module method parameter type (model/module, tensor struct, sequence, optional, scalar, vector, or tensor).</summary>
+        /// <param name="type">The module method parameter's declared type, which selects the kind of input placeholder created.</param>
+        /// <param name="inputType">Whether the placeholder is a hyperparameter or a regular input.</param>
+        /// <param name="paramName">The parameter's name, used as the input node's default name (may be <see langword="null"/>).</param>
+        /// <param name="hyperDefaultValue">The <c>[Hyper(defaultValue)]</c> default, when the parameter declared one;
+        /// recorded as declarative metadata on a scalar hyperparameter input so it survives serialization.</param>
+        public static IModuleParam ModuleParamInputBasedOn(Type type, InputType inputType, string? paramName, float? hyperDefaultValue = null)
+        {
+            RejectVariableParam(type);
+
+            if (type.IsAssignableTo(typeof(IModel)))
+                return (IModel)type.GetConstructor([typeof(InputType)]).AssertNotNull().Invoke([inputType]);
+            else if (type.IsAssignableTo(typeof(IModule)))
+                return (IModule)type.GetConstructor([typeof(InputType)]).AssertNotNull().Invoke([inputType]);
+
+            // Check for ITensorStruct BEFORE extracting DType (TensorStruct<T> has IStruct as type arg, not a numeric type)
+            if (type.IsAssignableTo(typeof(ITensorStruct)))
+            {
+                var (_, structDType) = StructDefExtractor.ExtractFromTensorStructType(type, "module input creation");
+                return InternalOp.TensorStructInput(structDType, inputType, targetFunction: null, defaultName: paramName).ToValue();
+            }
+
+            // Check for IStruct types (interfaces like RealGenericPairStruct<U, V> or records like GenericPairRecord<U, V>).
+            // These define tensor struct field shapes — not TensorStruct<T> handles — and have no value handle
+            // of their own. The created node rides inside a TensorStruct<T> carrier (handed across the module
+            // boundary as an IModuleParam); InvokeAndFormat converts it back to the Variable and wraps that in a DispatchProxy
+            // (for interfaces) or constructs via the record constructor before passing to method.Invoke.
+            if (typeof(IStruct).IsAssignableFrom(type) && type != typeof(IStruct) && type != typeof(IVarType) && !typeof(IValue).IsAssignableFrom(type))
+            {
+                var structDef = StructDefExtractor.ExtractFromType(type);
+                var structDType = DType.GetOrCreateForTensorStruct(structDef);
+                return InternalOp.TensorStructInput(structDType, inputType, targetFunction: null, defaultName: paramName).ToValue();
+            }
+
+            var dtype = OnnxUtils.GetDType(type.GetGenericArguments()[0]);
+            if (dtype is null)
+                throw new InvalidTensorOperationException(ErrorCodes.GC007, "CreateComputeGraphInput", type.Name,
+                    "Unable to determine DType from generic argument type");
+
+            if (dtype == DType.Model || dtype == DType.Module)
+                throw new InvalidTensorOperationException(ErrorCodes.GC007, "CreateComputeGraphInput", dtype.ToString(),
+                    "Model and Module types are not supported as compute graph inputs");
+
+            if (type.IsAssignableTo(typeof(ITensorSequence)))
+                return InternalOp.ModuleSequenceInput(dtype, inputType, null, paramName).ToValue();
+            else if (type.IsAssignableTo(typeof(IOptionalTensor)))
+                return InternalOp.ModuleOptionalInput(dtype, inputType, null, paramName).ToValue();
+            else if (type.IsAssignableTo(typeof(IScalar)))
+                return InternalOp.ModuleTensorInput(dtype, rank: 0, inputType, null, paramName, hyperDefaultValue).ToValue();
+            else if (type.IsAssignableTo(typeof(IVector)))
+                return InternalOp.ModuleTensorInput(dtype, rank: 1, inputType, null, paramName).ToValue();
+            else if (type.IsAssignableTo(typeof(ITensor)))
+                return InternalOp.ModuleTensorInput(dtype, rank: null, inputType, null, paramName).ToValue();
+
+            throw new UnsupportedDTypeException(ErrorCodes.GC006, type.Name, "CreateComputeGraphInput",
+                $"Type '{type.FullName}' is not supported for compute graph input creation");
         }
 
         /// <summary>
@@ -369,11 +408,11 @@ namespace Shorokoo.Core
         /// Invokes a method with the given inputs and formats the outputs.
         /// Public helper for GraphBuilder to construct VirtualGraphs.
         /// For parameters typed as IStruct interfaces (not <see cref="TensorStruct{T}"/>), wraps
-        /// ITensorStruct inputs in DispatchProxy so property access creates graph operations.
+        /// Variable inputs in DispatchProxy so property access creates graph operations.
         /// <paramref name="target"/> is the invocation receiver: null for static methods, or the
         /// delegate's bound target for compiler-generated (non-capturing) lambda methods.
         /// </summary>
-        public static IVariable[] InvokeAndFormat(MethodInfo method, IModuleParam[] inputs, object? target = null)
+        public static Variable[] InvokeAndFormat(MethodInfo method, IModuleParam[] inputs, object? target = null)
         {
             var parameters = method.GetParameters();
             var invokeArgs = new object?[inputs.Length];
@@ -382,11 +421,11 @@ namespace Shorokoo.Core
             {
                 var paramType = parameters[i].ParameterType;
                 
-                if (typeof(IStruct).IsAssignableFrom(paramType) 
-                    && paramType != typeof(IStruct) 
+                if (typeof(IStruct).IsAssignableFrom(paramType)
+                    && paramType != typeof(IStruct)
                     && paramType != typeof(IVarType)
-                    && !typeof(IVariable).IsAssignableFrom(paramType)
-                    && inputs[i] is ITensorStruct tensorStruct)
+                    && !typeof(IValue).IsAssignableFrom(paramType)
+                    && inputs[i] is IValue structCarrier && structCarrier.ToVariable() is Variable tensorStruct)
                 {
                     if (paramType.IsInterface)
                     {
@@ -401,10 +440,13 @@ namespace Shorokoo.Core
                 }
                 else
                 {
+                    // inputs[i] already arrives as the value the body expects — an IValue handle, or an
+                    // IModel/IModule — because ModuleParamInputBasedOn converts the graph node before this
+                    // point. Nothing further to do; reflective Invoke boxes it.
                     invokeArgs[i] = inputs[i];
                 }
             }
-            
+
             // DoNotWrapExceptions: a module body that throws (e.g. StateUpdate rejecting a
             // non-state variable with instructions) must surface its own exception to the
             // author, not a TargetInvocationException wrapper.
@@ -417,10 +459,10 @@ namespace Shorokoo.Core
         }
 
         /// <summary>
-        /// Constructs a record/class instance implementing IStruct from an ITensorStruct,
+        /// Constructs a record/class instance implementing IStruct from a Variable,
         /// using TensorStructGetField operations to extract field values for the constructor.
         /// </summary>
-        private static object ConstructStructFromTensorStruct(Type structType, ITensorStruct tensorStruct)
+        private static object ConstructStructFromTensorStruct(Type structType, Variable tensorStruct)
         {
             var def = tensorStruct.Definition;
             var ctor = structType.GetConstructors()
@@ -446,12 +488,18 @@ namespace Shorokoo.Core
                         $"Cannot construct {structType.Name}: constructor parameter '{paramName}' does not match any field in TensorStructDef. " +
                         $"Available fields: {string.Join(", ", def.Fields.Select(f => f.Name))}");
 
+                // The record ctor parameters are value-struct IValues; convert the field's Variable to one
+                // so reflective Invoke can bind it (it does not apply the implicit conversion). This must
+                // be driven by the declared ctor-parameter type, not the value's natural handle: a field
+                // declared Tensor<U> (generic standin) or a general Tensor<T> over a low-rank value would
+                // not match the value's own rank-specific handle.
                 args[i] = InternalOp.TensorStructGetField(
-                    (IVariable)tensorStruct,
-                    fieldDef.Name,
-                    fieldDef.ElementType,
-                    fieldDef.Rank,
-                    fieldDef.Structure);
+                        tensorStruct,
+                        fieldDef.Name,
+                        fieldDef.ElementType,
+                        fieldDef.Rank,
+                        fieldDef.Structure)
+                    .ToValue(ctorParams[i].ParameterType);
             }
 
             return ctor.Invoke(args);
@@ -467,12 +515,12 @@ namespace Shorokoo.Core
             return genericDefinition.Namespace == "System" && genericDefinition.Name.StartsWith("ValueTuple`");
         }
 
-        internal static IVariable[] Format(object? retval)
+        internal static Variable[] Format(object? retval)
         {
             if (retval is null)
                 throw new InvalidTensorOperationException(ErrorCodes.FW002, "Method Invocation Result", "method return value", "Method invocation returned null when non-null result expected");
 
-            if (retval is IVariable[] vars)
+            if (retval is Variable[] vars)
                 return vars;
 
             if (retval is IModuleParam[] moduleParams)
@@ -481,29 +529,30 @@ namespace Shorokoo.Core
             if (retval is IModuleParam moduleParam)
                 return [moduleParam.ToVariable()];
 
-            // Handle TensorStructProxy (DispatchProxy wrapping an ITensorStruct).
+            // Handle TensorStructProxy (DispatchProxy wrapping a Variable).
             // When a module passes an IStruct interface object (created by DispatchProxy) to
-            // another module's Call method, extract the backing TensorStruct IVariable.
+            // another module's Call method, extract the backing TensorStruct Variable.
             if (retval is ITensorStructProxy proxy)
-                return [(IVariable)proxy.BackingTensorStruct];
+                return [(Variable)proxy.BackingTensorStruct];
 
             // Handle IStruct records/classes — extract field values and create a TensorStruct graph node.
             // When a module passes a record implementing IStruct to another module's Call method,
-            // we convert it to a TensorStruct by reading its property values (which are IVariable graph nodes).
+            // we convert it to a TensorStruct by reading its property values (which are Variable graph nodes).
             if (retval is IStruct)
             {
                 var structType = retval.GetType();
                 var def = StructDefExtractor.ExtractFromType(structType);
                 var dtype = DType.GetOrCreateForTensorStruct(def);
 
-                var fieldValues = new IVariable[def.Fields.Length];
+                var fieldValues = new Variable[def.Fields.Length];
                 for (int i = 0; i < def.Fields.Length; i++)
                 {
                     var prop = structType.GetProperty(def.Fields[i].Name);
                     if (prop == null)
                         throw new InvalidOperationException(
                             $"Property '{def.Fields[i].Name}' not found on type '{structType.Name}'");
-                    fieldValues[i] = (IVariable)prop.GetValue(retval)!;
+                    // The IStruct field is an IValue; convert it to its Variable.
+                    fieldValues[i] = ((IValue)prop.GetValue(retval)!).ToVariable();
                 }
 
                 return [InternalOp.TensorStructCreate(dtype, fieldValues)];
@@ -515,40 +564,102 @@ namespace Shorokoo.Core
             if (retval is ITuple tuple)
                 return tuple.Cast<IModuleParam>().Select(x => x.ToVariable()).ToArray();
 
-            throw new InvalidTensorOperationException(ErrorCodes.FW002, "Return Value Processing", $"return type {retval.GetType().Name}", "Unsupported return value type - expected IVariable[], IModuleParam[], IModuleParam, or ITuple");
+            throw new InvalidTensorOperationException(ErrorCodes.FW002, "Return Value Processing", $"return type {retval.GetType().Name}", "Unsupported return value type - expected Variable[], IModuleParam[], IModuleParam, or ITuple");
         }
 
-        internal static T Reformat<T>(IVariable[] vars)
+        internal static T Reformat<T>(Variable[] vars)
         {
-            var tType = typeof(T);
+            // ValueTuple outputs need exactly one graph output per slot — guard with a clear error rather
+            // than letting the compiled converter throw IndexOutOfRange on a mismatch.
+            if (ReformatImpl<T>.TupleArity is int n && vars.Length != n)
+                throw new InvalidTensorOperationException(ErrorCodes.FW002, "Type Reformat",
+                    $"variables count: {vars.Length}, type arguments: {n}", "Variable count must match generic type argument count");
+            return ReformatImpl<T>.Run(vars);
+        }
 
-            if (tType.IsAssignableTo(typeof(IVariable)))
-                return (T)vars[0];
+        // Variable → targetType via the handle's op_Implicit(Variable), lifting through Nullable&lt;&gt;
+        // for a nullable handle slot (e.g. a Tensor&lt;float32&gt;? tuple element). Building block for the
+        // compiled delegates in ReformatImpl&lt;T&gt;.
+        private static E NodeToHandle(E node, Type targetType)
+        {
+            var underlying = Nullable.GetUnderlyingType(targetType);
+            return underlying is null
+                ? E.Convert(node, targetType)
+                : E.Convert(E.Convert(node, underlying), targetType);
+        }
 
-            if (IsValueTuple<T>())
+        /// <summary>
+        /// Per-<typeparamref name="T"/> compiled converter from a module's raw graph outputs
+        /// (<see cref="Variable"/>[]) to its declared return type — a single value handle, a ValueTuple
+        /// of handles, or an array of handles. The delegate is built once (the static initializer of the
+        /// closed generic runs on first use) from an expression tree that emits the handles'
+        /// <c>op_Implicit(Variable)</c> directly, so every later call is a plain delegate invocation with
+        /// no per-call reflection.
+        /// </summary>
+        private static class ReformatImpl<T>
+        {
+            internal static readonly Func<Variable[], T> Run = Build();
+
+            /// <summary>The required graph-output count for a ValueTuple return type (one per slot), or
+            /// null when no fixed count applies (single handle / array).</summary>
+            internal static readonly int? TupleArity =
+                IsValueTuple<T>() ? typeof(T).GetConstructors().First().GetParameters().Length : null;
+
+            private static Func<Variable[], T> Build()
             {
-                if (vars.Length > 8)
-                    throw new UnsupportedDTypeException(ErrorCodes.FW002, "tuple type", "Reformat", $"Tuple types with more than 8 elements are not supported. Received: {vars.Length} elements");
+                var tType = typeof(T);
+                var vars = E.Parameter(typeof(Variable[]), "vars");
 
-                if (vars.Length != tType.GenericTypeArguments.Length)
-                    throw new InvalidTensorOperationException(ErrorCodes.FW002, "Type Reformat", $"variables count: {vars.Length}, type arguments: {tType.GenericTypeArguments.Length}", "Variable count must match generic type argument count");
+                // Single value handle: (T)vars[0].
+                if (tType.IsAssignableTo(typeof(IValue)))
+                    return E.Lambda<Func<Variable[], T>>(
+                        NodeToHandle(E.ArrayIndex(vars, E.Constant(0)), tType), vars).Compile();
 
-                var constructor = tType.GetConstructors().First();
-                return (T)constructor.Invoke(vars);
+                // ValueTuple of handles: new (T1,…,Tn)((T1)vars[0], …, (Tn)vars[n-1]).
+                if (IsValueTuple<T>())
+                {
+                    var ctor = tType.GetConstructors().First();
+                    var ctorParams = ctor.GetParameters();
+                    // C# represents tuples with more than 7 elements as ValueTuple`8 whose 8th slot
+                    // (TRest) is itself a ValueTuple; nested-tuple slots have no single graph output to
+                    // map onto. Reject with a clear message (deferred, matching the unsupported-type arm)
+                    // rather than emitting a broken NodeToHandle on the nested tuple.
+                    if (ctorParams.Any(p => IsValueTuple(p.ParameterType)))
+                        return _ => throw new UnsupportedDTypeException(ErrorCodes.FW002, tType.Name, "Reformat",
+                            $"ValueTuple return types with a nested ValueTuple slot (e.g. more than 7 elements) are not supported. Received: {tType.Name}");
+                    var args = ctorParams
+                        .Select((p, i) => NodeToHandle(E.ArrayIndex(vars, E.Constant(i)), p.ParameterType));
+                    return E.Lambda<Func<Variable[], T>>(E.New(ctor, args), vars).Compile();
+                }
+
+                // Array of handles: arr = new Elem[vars.Length]; for (i…) arr[i] = (Elem)vars[i].
+                if (tType.IsArray)
+                {
+                    var elemType = tType.GetElementType().AssertNotNull();
+                    var len = E.Variable(typeof(int), "len");
+                    var arr = E.Variable(elemType.MakeArrayType(), "arr");
+                    var i = E.Variable(typeof(int), "i");
+                    var done = E.Label("done");
+                    var body = E.Block(
+                        [len, arr, i],
+                        E.Assign(len, E.ArrayLength(vars)),
+                        E.Assign(arr, E.NewArrayBounds(elemType, len)),
+                        E.Assign(i, E.Constant(0)),
+                        E.Loop(
+                            E.IfThenElse(
+                                E.LessThan(i, len),
+                                E.Block(
+                                    E.Assign(E.ArrayAccess(arr, i), NodeToHandle(E.ArrayIndex(vars, i), elemType)),
+                                    E.PostIncrementAssign(i)),
+                                E.Break(done)),
+                            done),
+                        arr);
+                    return E.Lambda<Func<Variable[], T>>(body, vars).Compile();
+                }
+
+                return _ => throw new UnsupportedDTypeException(ErrorCodes.FW002, tType.Name, "Reformat",
+                    $"Unsupported target type for reformatting. Expected array, ValueTuple, or assignable to IValue. Received: {tType.Name}");
             }
-
-            if (tType.IsArray)
-            {
-                var elementType = tType.GetElementType().AssertNotNull();
-                var convertedArray = Array.CreateInstance(elementType, vars.Length);
-
-                for (int i = 0; i < vars.Length; i++)
-                    convertedArray.SetValue(vars[i], i);
-
-                return (T)(object)convertedArray;
-            }
-
-            throw new UnsupportedDTypeException(ErrorCodes.FW002, tType.Name, "Reformat", $"Unsupported target type for reformatting. Expected array, ValueTuple, or assignable to ITuple. Received: {tType.Name}");
         }
 
         internal static (DataStructure[] structures, DType[] varTypes, int[] ranks) InfosFromTouts<Touts>()
@@ -564,8 +675,8 @@ namespace Shorokoo.Core
             }
             else
             {
-                if (!tType.IsAssignableTo(typeof(IVariable)))
-                    throw new UnsupportedDTypeException(ErrorCodes.FW002, tType.Name, "InfosFromTouts", $"Type must be assignable to IVariable. Received: {tType.Name}");
+                if (!tType.IsAssignableTo(typeof(IValue)))
+                    throw new UnsupportedDTypeException(ErrorCodes.FW002, tType.Name, "InfosFromTouts", $"Type must be assignable to IValue. Received: {tType.Name}");
                 types = [tType];
             }
 
@@ -576,8 +687,11 @@ namespace Shorokoo.Core
             foreach (var typeForEach in types)
             {
                 var type = typeForEach;
-                if (type.IsAssignableFrom(typeof(IModel)))
-                    type = typeof(Scalar<IModelVarType>);
+                // A model-typed output (a model returning a model) isn't wired up end-to-end yet —
+                // surface it as not-implemented rather than remapping to a node type that falls through
+                // to the generic "unsupported type" error below.
+                if (type.IsAssignableTo(typeof(IModel)))
+                    throw new System.NotImplementedException("Model-typed outputs (a model returning a model) are not yet supported.");
 
                 if (type.IsAssignableTo(typeof(ITensorStruct)))
                 {
@@ -633,7 +747,7 @@ namespace Shorokoo.Core
                 else
                 {
                     throw new UnsupportedDTypeException(ErrorCodes.FW002, type.Name, "InfosFromTouts", 
-                        $"Unsupported type for InfosFromTouts. Supported types: ITensor, IOptionalTensor, ITensorSequence, ITensorStruct. Received: {type.Name}");
+                        $"Unsupported type for InfosFromTouts. Supported types: Tensor<T>, OptionalTensor<T>, TensorSequence<T>, TensorStruct<T>. Received: {type.Name}");
                 }
             }
 

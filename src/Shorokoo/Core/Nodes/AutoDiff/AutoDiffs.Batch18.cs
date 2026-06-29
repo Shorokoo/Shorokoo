@@ -23,7 +23,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // The scatter_back is implemented via ConvTranspose with a ones kernel,
         // the same approach used in AveragePool gradient but without the 1/kernel_size factor.
 
-        internal static IVariable?[] LpPoolGradient(IVariable?[] inputs, IVariable?[] outputGrads, OnnxCSharpAttributes attributes)
+        internal static Variable?[] LpPoolGradient(Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
         {
             var x = inputs[0]!;
             var grad = outputGrads[0]!;

@@ -31,7 +31,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         //         d(interp)/d(iy) = (1-wx)*(X[iy1,ix0]-X[iy0,ix0]) + wx*(X[iy1,ix1]-X[iy0,ix1])
         //   and scale_x = d(ix)/d(gx), scale_y = d(iy)/d(gy).
 
-        internal static IVariable?[] GridSampleGradient(IVariable?[] inputs, IVariable?[] outputGrads, OnnxCSharpAttributes attributes)
+        internal static Variable?[] GridSampleGradient(Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
         {
             var x = inputs[0]!;          // [N, C, H_in, W_in]
             var grid = inputs[1]!;       // [N, H_out, W_out, 2]
@@ -87,7 +87,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             var two_f  = OnnxOp.Cast(Scalar(2L), saturate: null, to: floatType);
 
             // --- Denormalize grid coordinates to pixel space ---
-            IVariable ix, iy, scale_x, scale_y;
+            Variable ix, iy, scale_x, scale_y;
             if (alignCorners)
             {
                 var wm1 = OnnxOp.Sub(W_f, one_f);   // W_in - 1
@@ -171,7 +171,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // Helper: scatter one corner's contribution
             // weight [N,Ho,Wo] → [N,1,Ho,Wo] → broadcast with dY [N,C,Ho,Wo]
             // → reshape [N,C,HW_out], scatter into zeros_flat
-            IVariable ScatterCorner(IVariable weight, IVariable flatIdx)
+            Variable ScatterCorner(Variable weight, Variable flatIdx)
             {
                 var w4d = OnnxOp.Unsqueeze(weight, Vector(1L));          // [N,1,Ho,Wo]
                 var wdY = OnnxOp.Mul(w4d, dY);                          // [N,C,Ho,Wo]
@@ -204,7 +204,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // Look up input values at 4 corners: X_flat [N,C,HW_in], gather [N,C,HW_out]
             var X_flat = OnnxOp.Reshape(x, flatXShape, allowZero: false);
 
-            IVariable LookupCorner(IVariable flatIdx, IVariable mask)
+            Variable LookupCorner(Variable flatIdx, Variable mask)
             {
                 var idx_flat = OnnxOp.Reshape(flatIdx,
                     OnnxOp.Concat([

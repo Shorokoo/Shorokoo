@@ -756,8 +756,8 @@ namespace Shorokoo.Tests.Modules
     {
         public static Tensor<float32> Inline(Tensor<float32> inputs)
         {
-            var m1 = SeqHypersLayer.Model(Globals.TensorSequence(Scalar(1.5f), Scalar(2.5f)));
-            var m2 = SeqHypersLayer.Model(Globals.TensorSequence(Scalar(3.5f)));
+            var m1 = SeqHypersLayer.Model(Globals.TensorSequence<float32>(Scalar(1.5f), Scalar(2.5f)));
+            var m2 = SeqHypersLayer.Model(Globals.TensorSequence<float32>(Scalar(3.5f)));
             var sequence = ModelSequence.Create(m1, m2);
             var x = sequence[Scalar(0L)].Call(inputs);
             x = sequence[Scalar(1L)].Call(x);

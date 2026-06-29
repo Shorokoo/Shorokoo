@@ -106,7 +106,7 @@ namespace Shorokoo
 
 
             if (slice.Indices is not null)
-                return tensor.GatherND(slice.Indices, batchDims: 0);
+                return tensor.GatherND(slice.Indices.Value, batchDims: 0);
 
             Debug.Assert(slice.ScalarStart is not null);
             Debug.Assert(slice.ScalarEnd is not null);
@@ -114,7 +114,7 @@ namespace Shorokoo
                 throw new InvalidTensorOperationException(ErrorCodes.CR006, "Vector Index", "step operation", 
                     "Step operations in vector indexing are not yet supported");
 
-            return tensor.Slice(slice.ScalarStart, slice.ScalarEnd, slice.ScalarStep);
+            return tensor.Slice(slice.ScalarStart!.Value, slice.ScalarEnd!.Value, slice.ScalarStep);
         }
 
         /// <summary>Returns a copy of the source vector with the indexed positions replaced by <paramref name="values"/>.</summary>
@@ -126,21 +126,21 @@ namespace Shorokoo
 
 
             if (slice.Indices is not null)
-                return gatherFrom.ScatterND(slice.Indices, values);
+                return gatherFrom.ScatterND(slice.Indices.Value, values);
 
             Debug.Assert(slice.ScalarStart is not null);
             Debug.Assert(slice.ScalarEnd is not null);
 
             if (slice.ScalarStep is null)
             {
-                var toUpdateTensor = values.Pad(PadMode.Constant, slice.ScalarStart, slice.ScalarEnd, Scalar<TT>(values.Type.DefaultVal));
-                var updateMask = VectorFill(values.TShape, true).Pad(PadMode.Constant, slice.ScalarStart.Unsqueeze(), slice.ScalarEnd.Unsqueeze());
+                var toUpdateTensor = values.Pad(PadMode.Constant, slice.ScalarStart!.Value, slice.ScalarEnd!.Value, Scalar<TT>(values.Type.DefaultVal));
+                var updateMask = VectorFill(values.TShape, true).Pad(PadMode.Constant, slice.ScalarStart!.Value.Unsqueeze(), slice.ScalarEnd!.Value.Unsqueeze());
                 return updateMask.Where(toUpdateTensor, gatherFrom);
             }
 
             var targetShape = gatherFrom.TShape;
 
-            var stepPattern = VectorFill(slice.ScalarStep, false);
+            var stepPattern = VectorFill(slice.ScalarStep!.Value, false);
             stepPattern = stepPattern[0].Set(true);
 
             var stepMask = stepPattern.Tile(values.TShape);
@@ -191,7 +191,7 @@ namespace Shorokoo
             => this.gatherFrom.ScatterND(index.Unsqueeze().Unsqueeze(), value.Unsqueeze());
     }
 
-    public partial class Vector<T>
+    public partial struct Vector<T>
     {
         /// <summary>Slices or gathers the vector (range, stepped range, or index list).</summary>
         public VectorIndexerResult<T> this[VectorIndexerParam index]

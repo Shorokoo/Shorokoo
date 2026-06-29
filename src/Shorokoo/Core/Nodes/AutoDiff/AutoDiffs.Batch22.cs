@@ -25,15 +25,15 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         //     inference, so the empty-Optional path never arrives here.
         //   - dOptional is null: FastProcessAutoGrad.ProcessNode skips single-output
         //     nodes whose only outputGrad is null before invoking the gradient method.
-        //   - dOptional is not IOptionalTensor: every gradient producing an Optional
+        //   - dOptional is not Variable: every gradient producing an Optional
         //     output (OptionalGetElementGradient, AccumulateGradients for
-        //     IOptionalTensor) preserves the Optional wrap.
+        //     Variable) preserves the Optional wrap.
 
-        internal static IVariable?[] OptionalGradient(IVariable?[] inputs, IVariable?[] outputGrads, OnnxCSharpAttributes attributes)
+        internal static Variable?[] OptionalGradient(Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
         {
             Debug.Assert(inputs.Length > 0 && inputs[0] is not null);
             var dOptional = outputGrads[0];
-            Debug.Assert(dOptional is IOptionalTensor);
+            Debug.Assert(dOptional?.Structure() == DataStructure.Optional);
 
             return [OnnxOp.OptionalGetElement(dOptional!)];
         }
@@ -45,7 +45,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // single-output nodes with a null outputGrad, so dTensor is always
         // non-null here.
 
-        internal static IVariable?[] OptionalGetElementGradient(IVariable?[] inputs, IVariable?[] outputGrads, OnnxCSharpAttributes attributes)
+        internal static Variable?[] OptionalGetElementGradient(Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
         {
             var dTensor = outputGrads[0];
             Debug.Assert(dTensor is not null);

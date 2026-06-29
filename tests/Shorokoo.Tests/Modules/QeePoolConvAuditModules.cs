@@ -55,9 +55,8 @@ namespace Shorokoo.Tests.Modules
             return mismatch < Scalar(1L);
         }
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>AveragePool shape audit: dilations (since opset 19), ceil_mode with
@@ -93,9 +92,8 @@ namespace Shorokoo.Tests.Modules
             return mismatch < Scalar(1L);
         }
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>LpPool (ceil_mode clamp + dilations) and the three global pools
@@ -127,9 +125,8 @@ namespace Shorokoo.Tests.Modules
             return mismatch < Scalar(1L);
         }
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Conv shape audit: group (output channels = W.shape[0]), dilations,
@@ -169,9 +166,8 @@ namespace Shorokoo.Tests.Modules
             return mismatch < Scalar(1L);
         }
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>ConvTranspose shape audit: output_padding + asymmetric-capable pads,
@@ -222,9 +218,8 @@ namespace Shorokoo.Tests.Modules
             return mismatch < Scalar(1L);
         }
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>ConvInteger (int32 output dtype) and QLinearConv (output dtype follows
@@ -262,9 +257,8 @@ namespace Shorokoo.Tests.Modules
             return mismatch < Scalar(1L);
         }
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>MaxRoiPool shape audit: output is [num_rois, C, *pooled_shape]. Inputs:
@@ -323,8 +317,7 @@ namespace Shorokoo.Tests.Modules
             return mismatch < Scalar(1L);
         }
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 }

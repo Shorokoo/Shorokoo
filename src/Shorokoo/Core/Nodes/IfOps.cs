@@ -16,10 +16,18 @@ namespace Shorokoo.Core.Nodes
 {
     public static partial class Ops
     {
-        public static A IfElse<A>(Scalar<bit> condition, A aWhenTrue, A aWhenFalse) where A : IVariable
+        public static A IfElse<A>(Scalar<bit> condition, A aWhenTrue, A aWhenFalse) where A : IValue
         {
-            var ifOpen = OnnxOp.IfOpen((Scalar<bit>)condition);
-            return (A)OnnxOp.IfClose([aWhenTrue], [aWhenFalse], ifOpen)[0];
+            var ifOpen = OnnxOp.IfOpen(condition);
+            return OnnxOp.IfClose([aWhenTrue.ToVariable()], [aWhenFalse.ToVariable()], ifOpen)[0].ToValue<A>();
+        }
+
+        // Graph-side overload: internal callers already hold non-generic Variable nodes (not user
+        // handles), so they bind here rather than the IValue-constrained generic above.
+        public static Variable IfElse(Scalar<bit> condition, Variable aWhenTrue, Variable aWhenFalse)
+        {
+            var ifOpen = OnnxOp.IfOpen(condition);
+            return OnnxOp.IfClose([aWhenTrue], [aWhenFalse], ifOpen)[0];
         }
 
         /// <summary>
@@ -29,133 +37,127 @@ namespace Shorokoo.Core.Nodes
         /// that is invalid off-branch — most importantly <c>OptionalGetElement</c> on an optional
         /// that may be absent (eagerly unwrapping an absent optional is a runtime error).
         /// </summary>
-        public static A IfElse<A>(Scalar<bit> condition, System.Func<A> whenTrue, System.Func<A> whenFalse) where A : IVariable
+        public static A IfElse<A>(Scalar<bit> condition, System.Func<A> whenTrue, System.Func<A> whenFalse) where A : IValue
         {
-            var ifOpen = OnnxOp.IfOpen((Scalar<bit>)condition);
+            var ifOpen = OnnxOp.IfOpen(condition);
             var t = whenTrue();
             var f = whenFalse();
-            return (A)OnnxOp.IfClose([t], [f], ifOpen)[0];
+            return OnnxOp.IfClose([t.ToVariable()], [f.ToVariable()], ifOpen)[0].ToValue<A>();
         }
 
         public static (A, B) IfElse<A, B>(Scalar<bit> condition, (A a, B b) whenTrue, (A a, B b) whenFalse)
-            where A : IVariable
-            where B : IVariable
+            where A : IValue
+            where B : IValue
         {
-            var ifOpen = OnnxOp.IfOpen((Scalar<bit>)condition);
-            var retval = OnnxOp.IfClose([whenTrue.a, whenTrue.b], [whenFalse.a, whenFalse.b], ifOpen);
+            var ifOpen = OnnxOp.IfOpen(condition);
+            var retval = OnnxOp.IfClose([whenTrue.a.ToVariable(), whenTrue.b.ToVariable()], [whenFalse.a.ToVariable(), whenFalse.b.ToVariable()], ifOpen);
 
-            return ((A)retval[0], (B)retval[1]);
+            return (retval[0].ToValue<A>(), retval[1].ToValue<B>());
         }
 
         public static (A, B, C) IfElse<A, B, C>(Scalar<bit> condition, (A a, B b, C c) whenTrue, (A a, B b, C c) whenFalse)
-            where A : IVariable
-            where B : IVariable
-            where C : IVariable
+            where A : IValue
+            where B : IValue
+            where C : IValue
         {
-            var ifOpen = OnnxOp.IfOpen((Scalar<bit>)condition);
-            var retval = OnnxOp.IfClose([whenTrue.a, whenTrue.b, whenTrue.c], [whenFalse.a, whenFalse.b, whenFalse.c], ifOpen);
+            var ifOpen = OnnxOp.IfOpen(condition);
+            var retval = OnnxOp.IfClose([whenTrue.a.ToVariable(), whenTrue.b.ToVariable(), whenTrue.c.ToVariable()], [whenFalse.a.ToVariable(), whenFalse.b.ToVariable(), whenFalse.c.ToVariable()], ifOpen);
 
-            return ((A)retval[0], (B)retval[1], (C)retval[2]);
+            return (retval[0].ToValue<A>(), retval[1].ToValue<B>(), retval[2].ToValue<C>());
         }
 
         public static (A, B, C, D) IfElse<A, B, C, D>(Scalar<bit> condition, (A a, B b, C c, D d) whenTrue, (A a, B b, C c, D d) whenFalse)
-            where A : IVariable
-            where B : IVariable
-            where C : IVariable
-            where D : IVariable
+            where A : IValue
+            where B : IValue
+            where C : IValue
+            where D : IValue
         {
-            var ifOpen = OnnxOp.IfOpen((Scalar<bit>)condition);
-            var retval = OnnxOp.IfClose([whenTrue.a, whenTrue.b, whenTrue.c, whenTrue.d], [whenFalse.a, whenFalse.b, whenFalse.c, whenFalse.d], ifOpen);
+            var ifOpen = OnnxOp.IfOpen(condition);
+            var retval = OnnxOp.IfClose([whenTrue.a.ToVariable(), whenTrue.b.ToVariable(), whenTrue.c.ToVariable(), whenTrue.d.ToVariable()], [whenFalse.a.ToVariable(), whenFalse.b.ToVariable(), whenFalse.c.ToVariable(), whenFalse.d.ToVariable()], ifOpen);
 
-            return ((A)retval[0], (B)retval[1], (C)retval[2], (D)retval[3]);
+            return (retval[0].ToValue<A>(), retval[1].ToValue<B>(), retval[2].ToValue<C>(), retval[3].ToValue<D>());
         }
 
         public static (A, B, C, D, E) IfElse<A, B, C, D, E>(Scalar<bit> condition, (A a, B b, C c, D d, E e) whenTrue, (A a, B b, C c, D d, E e) whenFalse)
-            where A : IVariable
-            where B : IVariable
-            where C : IVariable
-            where D : IVariable
-            where E : IVariable
+            where A : IValue
+            where B : IValue
+            where C : IValue
+            where D : IValue
+            where E : IValue
         {
-            var ifOpen = OnnxOp.IfOpen((Scalar<bit>)condition);
-            var retval = OnnxOp.IfClose([whenTrue.a, whenTrue.b, whenTrue.c, whenTrue.d, whenTrue.e], [whenFalse.a, whenFalse.b, whenFalse.c, whenFalse.d, whenFalse.e], ifOpen);
+            var ifOpen = OnnxOp.IfOpen(condition);
+            var retval = OnnxOp.IfClose([whenTrue.a.ToVariable(), whenTrue.b.ToVariable(), whenTrue.c.ToVariable(), whenTrue.d.ToVariable(), whenTrue.e.ToVariable()], [whenFalse.a.ToVariable(), whenFalse.b.ToVariable(), whenFalse.c.ToVariable(), whenFalse.d.ToVariable(), whenFalse.e.ToVariable()], ifOpen);
 
-            return ((A)retval[0], (B)retval[1], (C)retval[2], (D)retval[3], (E)retval[4]);
+            return (retval[0].ToValue<A>(), retval[1].ToValue<B>(), retval[2].ToValue<C>(), retval[3].ToValue<D>(), retval[4].ToValue<E>());
         }
 
         public static (A, B, C, D, E, F) IfElse<A, B, C, D, E, F>(Scalar<bit> condition, (A a, B b, C c, D d, E e, F f) whenTrue, (A a, B b, C c, D d, E e, F f) whenFalse)
-            where A : IVariable
-            where B : IVariable
-            where C : IVariable
-            where D : IVariable
-            where E : IVariable
-            where F : IVariable
+            where A : IValue
+            where B : IValue
+            where C : IValue
+            where D : IValue
+            where E : IValue
+            where F : IValue
         {
-            var ifOpen = OnnxOp.IfOpen((Scalar<bit>)condition);
-            var retval = OnnxOp.IfClose([whenTrue.a, whenTrue.b, whenTrue.c, whenTrue.d, whenTrue.e, whenTrue.f], [whenFalse.a, whenFalse.b, whenFalse.c, whenFalse.d, whenFalse.e, whenFalse.f], ifOpen);
+            var ifOpen = OnnxOp.IfOpen(condition);
+            var retval = OnnxOp.IfClose([whenTrue.a.ToVariable(), whenTrue.b.ToVariable(), whenTrue.c.ToVariable(), whenTrue.d.ToVariable(), whenTrue.e.ToVariable(), whenTrue.f.ToVariable()], [whenFalse.a.ToVariable(), whenFalse.b.ToVariable(), whenFalse.c.ToVariable(), whenFalse.d.ToVariable(), whenFalse.e.ToVariable(), whenFalse.f.ToVariable()], ifOpen);
 
-            return ((A)retval[0], (B)retval[1], (C)retval[2], (D)retval[3], (E)retval[4], (F)retval[5]);
+            return (retval[0].ToValue<A>(), retval[1].ToValue<B>(), retval[2].ToValue<C>(), retval[3].ToValue<D>(), retval[4].ToValue<E>(), retval[5].ToValue<F>());
         }
 
         public static (A, B, C, D, E, F, G) IfElse<A, B, C, D, E, F, G>(Scalar<bit> condition, (A a, B b, C c, D d, E e, F f, G g) whenTrue, (A a, B b, C c, D d, E e, F f, G g) whenFalse)
-            where A : IVariable
-            where B : IVariable
-            where C : IVariable
-            where D : IVariable
-            where E : IVariable
-            where F : IVariable
-            where G : IVariable
+            where A : IValue
+            where B : IValue
+            where C : IValue
+            where D : IValue
+            where E : IValue
+            where F : IValue
+            where G : IValue
         {
-            var ifOpen = OnnxOp.IfOpen((Scalar<bit>)condition);
-            var retval = OnnxOp.IfClose([whenTrue.a, whenTrue.b, whenTrue.c, whenTrue.d, whenTrue.e, whenTrue.f, whenTrue.g], [whenFalse.a, whenFalse.b, whenFalse.c, whenFalse.d, whenFalse.e, whenFalse.f, whenFalse.g], ifOpen);
+            var ifOpen = OnnxOp.IfOpen(condition);
+            var retval = OnnxOp.IfClose([whenTrue.a.ToVariable(), whenTrue.b.ToVariable(), whenTrue.c.ToVariable(), whenTrue.d.ToVariable(), whenTrue.e.ToVariable(), whenTrue.f.ToVariable(), whenTrue.g.ToVariable()], [whenFalse.a.ToVariable(), whenFalse.b.ToVariable(), whenFalse.c.ToVariable(), whenFalse.d.ToVariable(), whenFalse.e.ToVariable(), whenFalse.f.ToVariable(), whenFalse.g.ToVariable()], ifOpen);
 
-            return ((A)retval[0], (B)retval[1], (C)retval[2], (D)retval[3], (E)retval[4], (F)retval[5], (G)retval[6]);
+            return (retval[0].ToValue<A>(), retval[1].ToValue<B>(), retval[2].ToValue<C>(), retval[3].ToValue<D>(), retval[4].ToValue<E>(), retval[5].ToValue<F>(), retval[6].ToValue<G>());
         }
 
         public static (A, B, C, D, E, F, G, H) IfElse<A, B, C, D, E, F, G, H>(Scalar<bit> condition, (A a, B b, C c, D d, E e, F f, G g, H h) whenTrue, (A a, B b, C c, D d, E e, F f, G g, H h) whenFalse)
-            where A : IVariable
-            where B : IVariable
-            where C : IVariable
-            where D : IVariable
-            where E : IVariable
-            where F : IVariable
-            where G : IVariable
-            where H : IVariable
+            where A : IValue
+            where B : IValue
+            where C : IValue
+            where D : IValue
+            where E : IValue
+            where F : IValue
+            where G : IValue
+            where H : IValue
         {
-            var ifOpen = OnnxOp.IfOpen((Scalar<bit>)condition);
-            var retval = OnnxOp.IfClose([whenTrue.a, whenTrue.b, whenTrue.c, whenTrue.d, whenTrue.e, whenTrue.f, whenTrue.g, whenTrue.h], [whenFalse.a, whenFalse.b, whenFalse.c, whenFalse.d, whenFalse.e, whenFalse.f, whenFalse.g, whenFalse.h], ifOpen);
+            var ifOpen = OnnxOp.IfOpen(condition);
+            var retval = OnnxOp.IfClose([whenTrue.a.ToVariable(), whenTrue.b.ToVariable(), whenTrue.c.ToVariable(), whenTrue.d.ToVariable(), whenTrue.e.ToVariable(), whenTrue.f.ToVariable(), whenTrue.g.ToVariable(), whenTrue.h.ToVariable()], [whenFalse.a.ToVariable(), whenFalse.b.ToVariable(), whenFalse.c.ToVariable(), whenFalse.d.ToVariable(), whenFalse.e.ToVariable(), whenFalse.f.ToVariable(), whenFalse.g.ToVariable(), whenFalse.h.ToVariable()], ifOpen);
 
-            return ((A)retval[0], (B)retval[1], (C)retval[2], (D)retval[3], (E)retval[4], (F)retval[5], (G)retval[6], (H)retval[7]);
+            return (retval[0].ToValue<A>(), retval[1].ToValue<B>(), retval[2].ToValue<C>(), retval[3].ToValue<D>(), retval[4].ToValue<E>(), retval[5].ToValue<F>(), retval[6].ToValue<G>(), retval[7].ToValue<H>());
         }
 
-        public static ITensor[] IfElse(Scalar<bit> condition, ITensor[] whenTrue, ITensor[] whenFalse)
+        public static Variable[] IfElse(Scalar<bit> condition, IValue[] whenTrue, IValue[] whenFalse)
         {
-            var ifOpen = OnnxOp.IfOpen((Scalar<bit>)condition);
-            return (ITensor[])OnnxOp.IfClose(whenTrue, whenFalse, ifOpen);
-        }
-
-        public static IVariable[] IfElse(Scalar<bit> condition, IVariable[] whenTrue, IVariable[] whenFalse)
-        {
-            var ifOpen = OnnxOp.IfOpen((Scalar<bit>)condition);
-            return (IVariable[])OnnxOp.IfClose(whenTrue, whenFalse, ifOpen);
+            var ifOpen = OnnxOp.IfOpen(condition);
+            return OnnxOp.IfClose([.. whenTrue.Select(v => v.ToVariable())], [.. whenFalse.Select(v => v.ToVariable())], ifOpen);
         }
 
         public static Tensor<T> IfElse<T>(Scalar<bit> condition, Tensor<T>[] whenTrue, Tensor<T>[] whenFalse)
             where T : IVarType
         {
-            var ifOpen = OnnxOp.IfOpen((Scalar<bit>)condition);
-            var results = OnnxOp.IfClose(whenTrue, whenFalse, ifOpen);
+            var ifOpen = OnnxOp.IfOpen(condition);
+            var results = OnnxOp.IfClose([.. whenTrue.Select(t => t.ToVariable())], [.. whenFalse.Select(t => t.ToVariable())], ifOpen);
 
-            return (Tensor<T>)results[0];
+            return results[0];
         }
 
-        public static IVariable<T> IfElse<T>(Scalar<bit> condition, IVariable<T>[] whenTrue, IVariable<T>[] whenFalse)
+        public static IValue<T> IfElse<T>(Scalar<bit> condition, IValue<T>[] whenTrue, IValue<T>[] whenFalse)
             where T : IVarType
         {
-            var ifOpen = OnnxOp.IfOpen((Scalar<bit>)condition);
-            var results = OnnxOp.IfClose(whenTrue, whenFalse, ifOpen);
+            var ifOpen = OnnxOp.IfOpen(condition);
+            var results = OnnxOp.IfClose([.. whenTrue.Select(t => t.ToVariable())], [.. whenFalse.Select(t => t.ToVariable())], ifOpen);
 
-            return (IVariable<T>)results[0];
+            return (IValue<T>)results[0].ToValue();
         }
 
     }

@@ -18,7 +18,7 @@ namespace Shorokoo.Core.Factory
     /// Builds the leaf-level ONNX protos (<see cref="ValueInfoProto"/>,
     /// <see cref="TensorProto"/>, <see cref="NodeProto"/>) directly from
     /// <see cref="FastNode"/>/<see cref="FastNodeKey"/>/<see cref="FastTensorKey"/>
-    /// without ever consulting an <see cref="IVariable"/> or a tensor-info dictionary.
+    /// without ever consulting an <see cref="Variable"/> or a tensor-info dictionary.
     /// All ONNX names are derived from the Fast keys via
     /// <see cref="FastTensorKey.ToString"/> / <see cref="FastNodeKey.ToString"/>, which
     /// produce <c>"N{i}"</c> / <c>"N{i}_T{j}"</c> when the source CG was run through

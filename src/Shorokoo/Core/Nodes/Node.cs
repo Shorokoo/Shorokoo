@@ -135,14 +135,14 @@ namespace Shorokoo.Core.Nodes
 
         public string? FriendlyName { get; protected set; }
 
-        // public virtual ImmutableArray<IVariable?> Inputs => FullInputs.OrderBy(x => x.Key, comparer: StringComparer.Ordinal).SelectMany(x => x.Value).ToImmutableArray();
+        // public virtual ImmutableArray<Variable?> Inputs => FullInputs.OrderBy(x => x.Key, comparer: StringComparer.Ordinal).SelectMany(x => x.Value).ToImmutableArray();
 
-        private ImmutableArray<IVariable?>? inputs = null;
+        private ImmutableArray<Variable?>? inputs = null;
 
         /// <summary>
         /// All inputs to this node, except the connecting tensor of a close node.
         /// </summary>
-        public virtual ImmutableArray<IVariable?> Inputs
+        public virtual ImmutableArray<Variable?> Inputs
         {
             get
             {
@@ -157,33 +157,33 @@ namespace Shorokoo.Core.Nodes
         /// <summary>
         /// All inputs to this node, including the connecting tensor of a close node.
         /// </summary>
-        public virtual ImmutableArray<IVariable?> AllInputs => !this.IsCloseNode ? this.Inputs : this.Inputs.Insert(0, this.ConnectingTensor);
+        public virtual ImmutableArray<Variable?> AllInputs => !this.IsCloseNode ? this.Inputs : this.Inputs.Insert(0, this.ConnectingTensor);
 
-        public virtual IVariable?[] InputsWithConnectingTensor => this.IsCloseNode ? this.Inputs.Append(this.ConnectingTensor).ToArray() : this.Inputs.ToArray();
+        public virtual Variable?[] InputsWithConnectingTensor => this.IsCloseNode ? this.Inputs.Append(this.ConnectingTensor).ToArray() : this.Inputs.ToArray();
 
-        public virtual IVariable?[] Outputs => FullOutputs.OrderBy(x => x.Key, comparer: StringComparer.Ordinal).SelectMany(x => x.Value).ToArray();
+        public virtual Variable?[] Outputs => FullOutputs.OrderBy(x => x.Key, comparer: StringComparer.Ordinal).SelectMany(x => x.Value).ToArray();
 
 
         /// <summary>
         /// All outputs of this node, except the connecting tensor of an open node.
         /// </summary>
-        public virtual ImmutableArray<IVariable?> OutputsImmutable => Outputs.ToImmutableArray();
+        public virtual ImmutableArray<Variable?> OutputsImmutable => Outputs.ToImmutableArray();
 
         /// <summary>
         /// All outputs of this node, including the connecting tensor of an open node.
         /// </summary>
-        public virtual ImmutableArray<IVariable?> AllOutputs => !this.IsOpenNode ? this.OutputsImmutable : this.OutputsImmutable.Insert(0, this.ConnectingTensor);
+        public virtual ImmutableArray<Variable?> AllOutputs => !this.IsOpenNode ? this.OutputsImmutable : this.OutputsImmutable.Insert(0, this.ConnectingTensor);
 
-        public IVariable? ConnectingTensor;
+        public Variable? ConnectingTensor;
 
         /// <summary>
         /// Input variables classified by the attribute name of the graph attribute they correspond to.
         /// For input variables not associated with a graph (the typical case) the input variables are found in the empty string entry.
         /// REMINDER: The outputs of a graph attribute are found here as the inputs of the close node.
         /// </summary>
-        public virtual ImmutableDictionary<string, IVariable?[]> FullInputs { get; protected set; }
+        public virtual ImmutableDictionary<string, Variable?[]> FullInputs { get; protected set; }
 
-        public virtual ImmutableDictionary<string, ImmutableArray<IVariable?>> FullInputsImmutable
+        public virtual ImmutableDictionary<string, ImmutableArray<Variable?>> FullInputsImmutable
             => FullInputs.ToImmutableDictionary(x => x.Key, x => x.Value.ToImmutableArray());
 
         /// <summary>
@@ -191,13 +191,13 @@ namespace Shorokoo.Core.Nodes
         /// For output variables not associated with a graph (the typical case) the output variables are found in the empty string entry.
         /// REMINDER: The inputs of a graph attribute are found here as the outputs of the open node.
         /// </summary>
-        public virtual ImmutableDictionary<string, IVariable?[]> FullOutputs { get; protected set; }
-        public ImmutableDictionary<string, ImmutableArray<IVariable?>> FullOutputsImmutable
+        public virtual ImmutableDictionary<string, Variable?[]> FullOutputs { get; protected set; }
+        public ImmutableDictionary<string, ImmutableArray<Variable?>> FullOutputsImmutable
             => FullOutputs.ToImmutableDictionary(x => x.Key, x => x.Value.ToImmutableArray());
 
         public int NumTrailingNullInputs { get; protected set; } = 0;
 
-        public IVariable?[] InputsWithTrailingNulls => [.. Inputs, .. Enumerable.Repeat((Variable<AnyLike>?)null, this.NumTrailingNullInputs)];
+        public Variable?[] InputsWithTrailingNulls => [.. Inputs, .. Enumerable.Repeat((Variable?)null, this.NumTrailingNullInputs)];
 
         public string? StackTrace { get; protected set; }
 
@@ -235,7 +235,7 @@ namespace Shorokoo.Core.Nodes
 
         public bool IsWithStateDeps => this.OpCode == InternalOpCodes.WITH_STATE_DEPS;
 
-        public Node(NodeDefinition nodeDef, OnnxCSharpAttributes? attributes, ImmutableDictionary<string, IVariable?[]> inputs, ImmutableDictionary<string, OutputTensorInfo[]> outputs, string? stackTrace, string? defaultName, string? identifierTemplateString, Function? targetFunction = null, Node? openNode = null, NodeKey? existingKey = null, long? existingOrderingHint = null)
+        public Node(NodeDefinition nodeDef, OnnxCSharpAttributes? attributes, ImmutableDictionary<string, Variable?[]> inputs, ImmutableDictionary<string, OutputTensorInfo[]> outputs, string? stackTrace, string? defaultName, string? identifierTemplateString, Function? targetFunction = null, Node? openNode = null, NodeKey? existingKey = null, long? existingOrderingHint = null)
         {
 
             if (inputs.SelectMany(x => x.Value).NotNulls().Any(x => !x.IsValid))
@@ -263,7 +263,7 @@ namespace Shorokoo.Core.Nodes
 
             if (this.IsOpenNode)
             {
-                this.ConnectingTensor = new Tensor<invalid>(null, DType.Invalid, this, null, null, null);
+                this.ConnectingTensor = new Variable(DType.Invalid, this, null, null, DataStructure.Tensor);
             }
 
             if (this.IsCloseNode && this.GraphOpenNode is not null)
@@ -281,8 +281,8 @@ namespace Shorokoo.Core.Nodes
 
             var moduleFnOverride = targetFnIsModuleFn ? targetFunction : null;
             if (this.OpCode == InternalOpCodes.MODULE_SET_HYPERPARAMS)
-                moduleFnOverride = ((ITensor)this.Inputs[0]!).ModuleFn;
-            if (this.OpCode == OpCodes.SEQUENCE_AT && this.Inputs[0] is IVariable inputVar)
+                moduleFnOverride = ((Variable)this.Inputs[0]!).ModuleFn;
+            if (this.OpCode == OpCodes.SEQUENCE_AT && this.Inputs[0] is Variable inputVar)
                 moduleFnOverride = inputVar.ModuleFn;
 
             this.FullOutputs = outputs.ToImmutableDictionary(x => x.Key,
@@ -295,6 +295,7 @@ namespace Shorokoo.Core.Nodes
 
             // Loops do a lot of strange things that override the normal way nodes are constructed.
             (this.FullInputs, this.FullOutputs) = LoopAPI.ProcessNode(this);
+
             this.inputs = null;
 
             // Assign TensorKeys to all outputs after FullOutputs is finalized
@@ -326,7 +327,7 @@ namespace Shorokoo.Core.Nodes
             // Assign keys to connecting tensor first (uses index -1)
             if (this.IsOpenNode && this.ConnectingTensor != null)
             {
-                ((Variable<invalid>)this.ConnectingTensor).SetKey(TensorKey.ForConnectingTensor(this.Key));
+                ((Variable)this.ConnectingTensor).SetKey(TensorKey.ForConnectingTensor(this.Key));
             }
 
             // Assign keys to all outputs in order
@@ -337,33 +338,33 @@ namespace Shorokoo.Core.Nodes
                 {
                     if (output != null)
                     {
-                        // Get the base Variable<T> and set the key
-                        var variable = output as dynamic;
-                        variable.SetKey(new TensorKey(this.Key, outputIndex));
+                        // Set the key on the non-generic Variable base (previously a dynamic
+                        // dispatch, because the base used to be the generic ImmutableVariable<T>).
+                        ((Variable)output).SetKey(new TensorKey(this.Key, outputIndex));
                     }
                     outputIndex++;
                 }
             }
         }
 
-        public IVariable?[] TrimNulls(IVariable?[] inputs)
+        public Variable?[] TrimNulls(Variable?[] inputs)
             => inputs.Reverse().SkipWhile(x => x is null).Reverse().ToArray();
 
-        protected IVariable MakeOutput(DType type, Function? moduleFn, DataStructure structure, int? rank, string? name)
+        protected Variable MakeOutput(DType type, Function? moduleFn, DataStructure structure, int? rank, string? name)
         {
             switch(structure)
             {
                 case DataStructure.Tensor:
                     if (rank == 0)
-                        return Scalar(type, this, moduleFn, name);
+                        return InternalGlobals.Scalar(type, this, moduleFn, name);
                     else if (rank == 1)
-                        return Vector(null, type, this, moduleFn, name);
+                        return InternalGlobals.Vector(null, type, this, moduleFn, name);
                     else
-                        return Tensor(null, type, this, moduleFn, name, rank: rank);
+                        return InternalGlobals.Tensor(null, type, this, moduleFn, name, rank: rank);
                 case DataStructure.Sequence:
-                    return TensorSequence(type, this, moduleFn, name);
+                    return InternalGlobals.TensorSequence(type, this, moduleFn, name);
                 case DataStructure.Optional:
-                    return OptionalTensor(type, this, moduleFn, name);
+                    return InternalGlobals.OptionalTensor(type, this, moduleFn, name);
                 case DataStructure.TensorStruct:
                     return Shorokoo.Core.InternalGlobals.TensorStruct(type, this, moduleFn, name);
             }

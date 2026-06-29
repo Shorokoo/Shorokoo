@@ -377,7 +377,7 @@ namespace Shorokoo.Graph
             => graph.GetStateUpdateLinkNodes().Length;
 
         /// <summary>Returns each state update as an <c>(original, updated)</c> variable pair.</summary>
-        public static ImmutableArray<(IVariable original, IVariable updated)> GetStateUpdatePairs(this FastComputationGraph graph)
+        public static ImmutableArray<(Variable original, Variable updated)> GetStateUpdatePairs(this FastComputationGraph graph)
             => graph.GetStateUpdateLinkNodes()
                 .Select(node => (original: node.Inputs[0]!, updated: node.Inputs[1]!))
                 .ToImmutableArray();

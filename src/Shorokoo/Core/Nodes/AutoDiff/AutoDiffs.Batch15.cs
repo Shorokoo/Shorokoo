@@ -24,14 +24,14 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         //   dSequenceLens = null (int64, not differentiable)
 
         [AutoDiff(REVERSE_SEQUENCE)]
-        public static IVariable?[] ReverseSequence<T1, T2>(
+        public static Variable?[] ReverseSequence<T1, T2>(
             Tensor<T1> input, Tensor<T2> sequenceLens,
             Tensor<T1> grad,
             long? batch_axis, long? time_axis)
             where T1 : IVarType
             where T2 : IVarType
         {
-            var dInput = (Tensor<T1>)OnnxOp.ReverseSequence(grad, sequenceLens,
+            Tensor<T1> dInput = OnnxOp.ReverseSequence(grad, sequenceLens,
                 batchAxis: batch_axis, timeAxis: time_axis);
             return [dInput, null];
         }

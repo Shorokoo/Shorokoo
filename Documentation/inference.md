@@ -7,9 +7,9 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
 
 - `OnnxEngine.Eval(...)` is the simplest way to get values. It builds an ONNX model
   from the graph, runs it once via OnnxRuntime, and returns `TensorData`.
-  - `TensorData Eval(IVariable output)`
-  - `TensorData[] Eval(IVariable[] outputs)`
-  - `TensorData[] Eval(IVariable a, IVariable b, params IVariable[] more)`
+  - `TensorData Eval(IValue output)`
+  - `TensorData[] Eval(IValue[] outputs)`
+  - `TensorData[] Eval(IValue a, IValue b, params IValue[] more)`
   - `Eval` runs a graph of plain ops. A `[Module]` output may still carry an
     un-lowered module-invoke node; if `Eval` throws
     `No Op registered for ShrkCreateModule`, concretize it first — see

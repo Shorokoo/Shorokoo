@@ -70,7 +70,7 @@ namespace Shorokoo.Graph
     }
 
     /// <summary>
-    /// A globally unique identifier for a Tensor (IVariable).
+    /// A globally unique identifier for a Tensor (Variable).
     /// Composed of the parent node's NodeKey and the output index within that node.
     /// TensorKeys remain stable across graph transformations that preserve tensor identity.
     /// </summary>

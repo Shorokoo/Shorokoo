@@ -24,7 +24,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // CenterCropPad with the original input shape reverses the operation.
 
         [AutoDiff(CENTER_CROP_PAD)]
-        public static IVariable?[] CenterCropPad<T1, T2>(
+        public static Variable?[] CenterCropPad<T1, T2>(
             Tensor<T1> input, Tensor<T2> shape,
             Tensor<T1> grad,
             long[]? axes)
@@ -36,15 +36,15 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             if (axes is null)
             {
                 // No axes specified: shape covers all dimensions
-                var dInput = (Tensor<T1>)OnnxOp.CenterCropPad(grad, inputShape, axes: null);
+                Tensor<T1> dInput = OnnxOp.CenterCropPad(grad, inputShape, axes: null);
                 return [dInput, null];
             }
             else
             {
                 // Axes specified: extract only the sizes for those axes from the original shape
                 var axesTensor = Vector(axes);
-                var originalAxesSizes = (Tensor<int64>)OnnxOp.Gather(inputShape, axesTensor, axis: 0);
-                var dInput = (Tensor<T1>)OnnxOp.CenterCropPad(grad, originalAxesSizes, axes);
+                Tensor<int64> originalAxesSizes = OnnxOp.Gather(inputShape, axesTensor, axis: 0);
+                Tensor<T1> dInput = OnnxOp.CenterCropPad(grad, originalAxesSizes, axes);
                 return [dInput, null];
             }
         }

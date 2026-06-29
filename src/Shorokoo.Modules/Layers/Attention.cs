@@ -59,7 +59,7 @@ public static class Attention
         }
 
         if (additiveMask is not null)
-            scores = scores + additiveMask;
+            scores = scores + additiveMask.Value;
 
         return scores.Softmax(-1L).MatMul(value);
     }

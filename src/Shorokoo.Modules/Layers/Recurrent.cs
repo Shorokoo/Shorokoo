@@ -208,12 +208,12 @@ public static class Recurrent
             y = curX;
 
             // Collect Y_h, concatenating on the leading axis -> [D*numLayers, N, H].
-            hN = hN is null ? yhLayer : hN.Concat(0L, yhLayer);
+            hN = hN is null ? yhLayer : hN.Value.Concat(0L, yhLayer);
         }
 
         // y / hN are non-null: numLayers >= 1 guarantees at least one iteration.
-        var yOut = batchFirst ? y!.Transpose(1L, 0L, 2L) : y!;  // [N, L, D*H] when batchFirst
-        return (yOut, hN!);
+        var yOut = batchFirst ? y!.Value.Transpose(1L, 0L, 2L) : y!.Value;  // [N, L, D*H] when batchFirst
+        return (yOut, hN!.Value);
     }
 
     /// <summary>
@@ -372,13 +372,13 @@ public static class Recurrent
             y = curX;
 
             // Collect Y_h / Y_c, concatenating on the leading axis -> [D*numLayers, N, H].
-            hN = hN is null ? yhLayer : hN.Concat(0L, yhLayer);
-            cN = cN is null ? ycLayer : cN.Concat(0L, ycLayer);
+            hN = hN is null ? yhLayer : hN.Value.Concat(0L, yhLayer);
+            cN = cN is null ? ycLayer : cN.Value.Concat(0L, ycLayer);
         }
 
         // y / hN / cN are non-null: numLayers >= 1 guarantees at least one iteration.
-        var yOut = batchFirst ? y!.Transpose(1L, 0L, 2L) : y!;  // [N, L, D*H] when batchFirst
-        return (yOut, hN!, cN!);
+        var yOut = batchFirst ? y!.Value.Transpose(1L, 0L, 2L) : y!.Value;  // [N, L, D*H] when batchFirst
+        return (yOut, hN!.Value, cN!.Value);
     }
 
     /// <summary>
@@ -561,12 +561,12 @@ public static class Recurrent
             y = curX;
 
             // Collect Y_h, concatenating on the leading axis -> [D*numLayers, N, H].
-            hN = hN is null ? yhLayer : hN.Concat(0L, yhLayer);
+            hN = hN is null ? yhLayer : hN.Value.Concat(0L, yhLayer);
         }
 
         // y / hN are non-null: numLayers >= 1 guarantees at least one iteration.
-        var yOut = batchFirst ? y!.Transpose(1L, 0L, 2L) : y!;  // [N, L, D*H] when batchFirst
-        return (yOut, hN!);
+        var yOut = batchFirst ? y!.Value.Transpose(1L, 0L, 2L) : y!.Value;  // [N, L, D*H] when batchFirst
+        return (yOut, hN!.Value);
     }
 
     /// <summary>

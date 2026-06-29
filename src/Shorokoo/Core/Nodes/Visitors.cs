@@ -20,7 +20,7 @@ namespace Shorokoo.Core.Nodes
 {
     internal static class Visitors
     {
-        public static IEnumerable<Node> TopologicalOrder(IEnumerable<IVariable> inputs, IEnumerable<IVariable> outputs)
+        public static IEnumerable<Node> TopologicalOrder(IEnumerable<Variable> inputs, IEnumerable<Variable> outputs)
         {
             // A dedicated first-class traversal would be faster; this generic visitor is fast enough in practice.
             return Visitors.ReversePreOrder(inputs, outputs).Select(x => x.OwningNode).Distinct().Reverse();
@@ -38,14 +38,14 @@ namespace Shorokoo.Core.Nodes
         /// <param name="inputs"></param>
         /// <param name="outputs"></param>
         /// <returns></returns>
-        public static IEnumerable<IVariable> ReversePreOrder(IEnumerable<IVariable> inputs, IEnumerable<IVariable> outputs)
+        public static IEnumerable<Variable> ReversePreOrder(IEnumerable<Variable> inputs, IEnumerable<Variable> outputs)
         {
             var inputSet = inputs.ToHashSet();
-            var scheduledTensors = new HashSet<IVariable>();
-            Stack<IVariable> tensorStack = new Stack<IVariable>(outputs.Reverse());
+            var scheduledTensors = new HashSet<Variable>();
+            Stack<Variable> tensorStack = new Stack<Variable>(outputs.Reverse());
             while (tensorStack.Count > 0)
             {
-                IVariable tensor = tensorStack.Pop();
+                Variable tensor = tensorStack.Pop();
                 yield return tensor;
 
                 if (inputSet.Contains(tensor))

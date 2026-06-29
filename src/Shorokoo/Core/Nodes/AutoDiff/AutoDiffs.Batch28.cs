@@ -18,7 +18,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // Piecewise constant: gradient is zero everywhere.
 
         [AutoDiff(ROUND)]
-        public static IVariable?[] Round<T>(Tensor<T> x, Tensor<T> grad) where T : IVarType
+        public static Variable?[] Round<T>(Tensor<T> x, Tensor<T> grad) where T : IVarType
         {
             var zero = TypedConst(0.0f, x);
             return [zero * grad];
@@ -28,7 +28,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // One-hot output is piecewise constant; gradient is zero (PyTorch convention).
 
         [AutoDiff(HARDMAX)]
-        public static IVariable?[] Hardmax<T>(Tensor<T> x, Tensor<T> grad, long? axis) where T : IVarType
+        public static Variable?[] Hardmax<T>(Tensor<T> x, Tensor<T> grad, long? axis) where T : IVarType
         {
             var zero = TypedConst(0.0f, x);
             return [zero * grad];
@@ -39,7 +39,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // discrete-output equivalent of round).
 
         [AutoDiff(BERNOULLI)]
-        public static IVariable? Bernoulli<TIn, TOut>(Tensor<TIn> x, Tensor<TOut> grad, DType? dtype, float? seed)
+        public static Variable? Bernoulli<TIn, TOut>(Tensor<TIn> x, Tensor<TOut> grad, DType? dtype, float? seed)
             where TIn : IVarType
             where TOut : IVarType
         {
@@ -54,7 +54,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // template input.
 
         [AutoDiff(EYE_LIKE)]
-        public static IVariable? EyeLike<TIn, TOut>(Tensor<TIn> input, Tensor<TOut> grad, DType? dtype, long? k)
+        public static Variable? EyeLike<TIn, TOut>(Tensor<TIn> input, Tensor<TOut> grad, DType? dtype, long? k)
             where TIn : IVarType
             where TOut : IVarType
         {
@@ -65,13 +65,13 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // Integer outputs derived from the input's shape — non-differentiable.
 
         [AutoDiff(SHAPE)]
-        public static IVariable? Shape<TIn, TGrad>(Tensor<TIn> input, Tensor<TGrad> grad, long? end, long? start)
+        public static Variable? Shape<TIn, TGrad>(Tensor<TIn> input, Tensor<TGrad> grad, long? end, long? start)
             where TIn : IVarType
             where TGrad : IVarType
             => null;
 
         [AutoDiff(SIZE)]
-        public static IVariable? Size<TIn, TGrad>(Tensor<TIn> input, Tensor<TGrad> grad)
+        public static Variable? Size<TIn, TGrad>(Tensor<TIn> input, Tensor<TGrad> grad)
             where TIn : IVarType
             where TGrad : IVarType
             => null;
@@ -80,14 +80,14 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // Integer index range from non-differentiable scalar inputs.
 
         [AutoDiff(RANGE)]
-        public static IVariable?[] Range<T>(Tensor<T> start, Tensor<T> limit, Tensor<T> delta, Tensor<T> grad) where T : IVarType
+        public static Variable?[] Range<T>(Tensor<T> start, Tensor<T> limit, Tensor<T> delta, Tensor<T> grad) where T : IVarType
             => [null, null, null];
 
         // ===== NonZero =====
         // Index output: non-differentiable.
 
         [AutoDiff(NON_ZERO)]
-        public static IVariable? NonZero<TIn, TGrad>(Tensor<TIn> input, Tensor<TGrad> grad)
+        public static Variable? NonZero<TIn, TGrad>(Tensor<TIn> input, Tensor<TGrad> grad)
             where TIn : IVarType
             where TGrad : IVarType
             => null;
@@ -96,14 +96,14 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // Integer index outputs: non-differentiable.
 
         [AutoDiff(ARG_MAX)]
-        public static IVariable? ArgMax<TIn, TGrad>(Tensor<TIn> input, Tensor<TGrad> grad,
+        public static Variable? ArgMax<TIn, TGrad>(Tensor<TIn> input, Tensor<TGrad> grad,
             long? axis, bool? keepdims, bool? selectLastIndex)
             where TIn : IVarType
             where TGrad : IVarType
             => null;
 
         [AutoDiff(ARG_MIN)]
-        public static IVariable? ArgMin<TIn, TGrad>(Tensor<TIn> input, Tensor<TGrad> grad,
+        public static Variable? ArgMin<TIn, TGrad>(Tensor<TIn> input, Tensor<TGrad> grad,
             long? axis, bool? keepdims, bool? selectLastIndex)
             where TIn : IVarType
             where TGrad : IVarType
@@ -113,23 +113,23 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // Integer-only ops with no meaningful derivative.
 
         [AutoDiff(BITWISE_AND)]
-        public static IVariable?[] BitwiseAnd<T>(Tensor<T> a, Tensor<T> b, Tensor<T> grad) where T : IVarType
+        public static Variable?[] BitwiseAnd<T>(Tensor<T> a, Tensor<T> b, Tensor<T> grad) where T : IVarType
             => [null, null];
 
         [AutoDiff(BITWISE_OR)]
-        public static IVariable?[] BitwiseOr<T>(Tensor<T> a, Tensor<T> b, Tensor<T> grad) where T : IVarType
+        public static Variable?[] BitwiseOr<T>(Tensor<T> a, Tensor<T> b, Tensor<T> grad) where T : IVarType
             => [null, null];
 
         [AutoDiff(BITWISE_XOR)]
-        public static IVariable?[] BitwiseXor<T>(Tensor<T> a, Tensor<T> b, Tensor<T> grad) where T : IVarType
+        public static Variable?[] BitwiseXor<T>(Tensor<T> a, Tensor<T> b, Tensor<T> grad) where T : IVarType
             => [null, null];
 
         [AutoDiff(BITWISE_NOT)]
-        public static IVariable? BitwiseNot<T>(Tensor<T> a, Tensor<T> grad) where T : IVarType
+        public static Variable? BitwiseNot<T>(Tensor<T> a, Tensor<T> grad) where T : IVarType
             => null;
 
         [AutoDiff(BIT_SHIFT)]
-        public static IVariable?[] BitShift<T>(Tensor<T> a, Tensor<T> b, Tensor<T> grad,
+        public static Variable?[] BitShift<T>(Tensor<T> a, Tensor<T> b, Tensor<T> grad,
             BitShiftDirection? direction) where T : IVarType
             => [null, null];
 
@@ -139,46 +139,46 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // upstream without a CheckValue failure on Tensor<bit> coercion.
 
         [AutoDiff(AND)]
-        public static IVariable?[] And<TGrad>(Tensor<bit> a, Tensor<bit> b, Tensor<TGrad> grad) where TGrad : IVarType
+        public static Variable?[] And<TGrad>(Tensor<bit> a, Tensor<bit> b, Tensor<TGrad> grad) where TGrad : IVarType
             => [null, null];
 
         [AutoDiff(OR)]
-        public static IVariable?[] Or<TGrad>(Tensor<bit> a, Tensor<bit> b, Tensor<TGrad> grad) where TGrad : IVarType
+        public static Variable?[] Or<TGrad>(Tensor<bit> a, Tensor<bit> b, Tensor<TGrad> grad) where TGrad : IVarType
             => [null, null];
 
         [AutoDiff(XOR)]
-        public static IVariable?[] Xor<TGrad>(Tensor<bit> a, Tensor<bit> b, Tensor<TGrad> grad) where TGrad : IVarType
+        public static Variable?[] Xor<TGrad>(Tensor<bit> a, Tensor<bit> b, Tensor<TGrad> grad) where TGrad : IVarType
             => [null, null];
 
         [AutoDiff(NOT)]
-        public static IVariable? Not<TGrad>(Tensor<bit> a, Tensor<TGrad> grad) where TGrad : IVarType
+        public static Variable? Not<TGrad>(Tensor<bit> a, Tensor<TGrad> grad) where TGrad : IVarType
             => null;
 
         // ===== Comparison ops =====
         // Bool output, gradient does not propagate.
 
         [AutoDiff(EQUAL)]
-        public static IVariable?[] Equal<T, TGrad>(Tensor<T> a, Tensor<T> b, Tensor<TGrad> grad)
+        public static Variable?[] Equal<T, TGrad>(Tensor<T> a, Tensor<T> b, Tensor<TGrad> grad)
             where T : IVarType where TGrad : IVarType
             => [null, null];
 
         [AutoDiff(GREATER)]
-        public static IVariable?[] Greater<T, TGrad>(Tensor<T> a, Tensor<T> b, Tensor<TGrad> grad)
+        public static Variable?[] Greater<T, TGrad>(Tensor<T> a, Tensor<T> b, Tensor<TGrad> grad)
             where T : IVarType where TGrad : IVarType
             => [null, null];
 
         [AutoDiff(GREATER_OR_EQUAL)]
-        public static IVariable?[] GreaterOrEqual<T, TGrad>(Tensor<T> a, Tensor<T> b, Tensor<TGrad> grad)
+        public static Variable?[] GreaterOrEqual<T, TGrad>(Tensor<T> a, Tensor<T> b, Tensor<TGrad> grad)
             where T : IVarType where TGrad : IVarType
             => [null, null];
 
         [AutoDiff(LESS)]
-        public static IVariable?[] Less<T, TGrad>(Tensor<T> a, Tensor<T> b, Tensor<TGrad> grad)
+        public static Variable?[] Less<T, TGrad>(Tensor<T> a, Tensor<T> b, Tensor<TGrad> grad)
             where T : IVarType where TGrad : IVarType
             => [null, null];
 
         [AutoDiff(LESS_OR_EQUAL)]
-        public static IVariable?[] LessOrEqual<T, TGrad>(Tensor<T> a, Tensor<T> b, Tensor<TGrad> grad)
+        public static Variable?[] LessOrEqual<T, TGrad>(Tensor<T> a, Tensor<T> b, Tensor<TGrad> grad)
             where T : IVarType where TGrad : IVarType
             => [null, null];
 
@@ -186,12 +186,12 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // Boolean classifiers: non-differentiable.
 
         [AutoDiff(IS_INF)]
-        public static IVariable? IsInf<T, TGrad>(Tensor<T> input, Tensor<TGrad> grad)
+        public static Variable? IsInf<T, TGrad>(Tensor<T> input, Tensor<TGrad> grad)
             where T : IVarType where TGrad : IVarType
             => null;
 
         [AutoDiff(IS_NAN)]
-        public static IVariable? IsNaN<T, TGrad>(Tensor<T> input, Tensor<TGrad> grad)
+        public static Variable? IsNaN<T, TGrad>(Tensor<T> input, Tensor<TGrad> grad)
             where T : IVarType where TGrad : IVarType
             => null;
 
@@ -200,7 +200,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // through the standard reparameterization-free path.
 
         [AutoDiff(RANDOM_NORMAL_LIKE)]
-        public static IVariable? RandomNormalLike<TIn, TOut>(
+        public static Variable? RandomNormalLike<TIn, TOut>(
             Tensor<TIn> input, Tensor<TOut> grad,
             DType? dtype, float? mean, float? scale, float? seed)
             where TIn : IVarType
@@ -208,7 +208,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             => null;
 
         [AutoDiff(RANDOM_UNIFORM_LIKE)]
-        public static IVariable? RandomUniformLike<TIn, TOut>(
+        public static Variable? RandomUniformLike<TIn, TOut>(
             Tensor<TIn> input, Tensor<TOut> grad,
             DType? dtype, float? high, float? low, float? seed)
             where TIn : IVarType
@@ -224,7 +224,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // Discrete-sample output: non-differentiable w.r.t. logits in the standard path.
 
         [AutoDiff(MULTINOMIAL)]
-        public static IVariable? Multinomial<TIn, TOut>(
+        public static Variable? Multinomial<TIn, TOut>(
             Tensor<TIn> input, Tensor<TOut> grad,
             DType? dtype, float? seed)
             where TIn : IVarType
@@ -237,7 +237,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // typical use treats them as constants. We stop the gradient here.
 
         [AutoDiff(ONE_HOT)]
-        public static IVariable?[] OneHot<TIdx, TDepth, TVal>(
+        public static Variable?[] OneHot<TIdx, TDepth, TVal>(
             Tensor<TIdx> indices, Tensor<TDepth> depth, Tensor<TVal> values,
             Tensor<TVal> grad, long? axis)
             where TIdx : IVarType
@@ -249,7 +249,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // All-attribute window generator with one integer input (size) — non-diff.
 
         [AutoDiff(BLACKMAN_WINDOW)]
-        public static IVariable? BlackmanWindow<T>(
+        public static Variable? BlackmanWindow<T>(
             Tensor<int64> size, Tensor<T> grad, DType? outputDatatype, bool? periodic)
             where T : IVarType
             => null;

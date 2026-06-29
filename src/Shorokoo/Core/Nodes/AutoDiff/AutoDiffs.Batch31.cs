@@ -24,11 +24,11 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // dy/dx = s + alpha * x * s * (1 - s).
 
         [AutoDiff(SWISH)]
-        public static IVariable?[] Swish<T>(Tensor<T> x, Tensor<T> grad, float? alpha) where T : IVarType
+        public static Variable?[] Swish<T>(Tensor<T> x, Tensor<T> grad, float? alpha) where T : IVarType
         {
             var a = TypedConst(alpha ?? 1.0f, x);
             var one = TypedConst(1.0f, x);
-            var s = (Tensor<T>)OnnxOp.Sigmoid(a * x);
+            Tensor<T> s = OnnxOp.Sigmoid(a * x);
             var deriv = s + a * x * s * (one - s);
             return [grad * deriv];
         }
@@ -54,14 +54,14 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // training through CumProd.
 
         [AutoDiff(CUM_PROD)]
-        public static IVariable?[] CumProd<T1, T2>(Tensor<T1> x, Tensor<T2> axis, Tensor<T1> grad, bool? exclusive, bool? reverse)
+        public static Variable?[] CumProd<T1, T2>(Tensor<T1> x, Tensor<T2> axis, Tensor<T1> grad, bool? exclusive, bool? reverse)
             where T1 : IVarType
             where T2 : IVarType
         {
             var effectiveExclusive = exclusive ?? false;
             var effectiveReverse = reverse ?? false;
-            var y = (Tensor<T1>)OnnxOp.CumProd(x, axis, exclusive: effectiveExclusive, reverse: effectiveReverse);
-            var summed = (Tensor<T1>)OnnxOp.CumSum(grad * y, axis,
+            Tensor<T1> y = OnnxOp.CumProd(x, axis, exclusive: effectiveExclusive, reverse: effectiveReverse);
+            Tensor<T1> summed = OnnxOp.CumSum(grad * y, axis,
                 exclusive: effectiveExclusive, reverse: !effectiveReverse);
             return [summed / x, null];
         }
@@ -79,7 +79,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // the gradient form under the float32-only engine).
 
         [AutoDiff(RMS_NORMALIZATION)]
-        public static IVariable?[] RMSNormalization<T>(Tensor<T> x, Tensor<T> scale, Tensor<T> grad,
+        public static Variable?[] RMSNormalization<T>(Tensor<T> x, Tensor<T> scale, Tensor<T> grad,
             long? axis, float? epsilon, long? stashType) where T : IVarType
         {
             _ = stashType;
@@ -91,16 +91,16 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             var xShape = OnnxOp.Shape(x);
             var xRankScalar = OnnxOp.Squeeze(OnnxOp.Shape(xShape), Vector(0L));
             var effectiveAxisScalar = axisAttr >= 0
-                ? (IVariable)Scalar(axisAttr)
+                ? (Variable)Scalar(axisAttr)
                 : OnnxOp.Add(xRankScalar, Scalar(axisAttr));
             var reduceAxes = OnnxOp.Range(effectiveAxisScalar, xRankScalar, Scalar(1L));
 
-            var meanSq = (Tensor<T>)OnnxOp.ReduceMean(x * x, reduceAxes, keepdims: true);
-            var invRms = (Tensor<T>)OnnxOp.Reciprocal((Tensor<T>)OnnxOp.Sqrt(meanSq + epsConst));
+            Tensor<T> meanSq = OnnxOp.ReduceMean(x * x, reduceAxes, keepdims: true);
+            Tensor<T> invRms = OnnxOp.Reciprocal(OnnxOp.Sqrt(meanSq + epsConst));
             var xHat = x * invRms;
 
             var gradScaled = grad * scale;
-            var meanGradX = (Tensor<T>)OnnxOp.ReduceMean(gradScaled * x, reduceAxes, keepdims: true);
+            Tensor<T> meanGradX = OnnxOp.ReduceMean(gradScaled * x, reduceAxes, keepdims: true);
             var dx = invRms * (gradScaled - x * invRms * invRms * meanGradX);
 
             var dScale = ReverseBroadcast(grad * xHat, scale.DShape);
@@ -114,8 +114,8 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // present_* outputs) is not implemented. Throw AD003 instead of silently
         // returning null grads (DeformConv pattern).
 
-        internal static IVariable?[] AttentionGradient(
-            IVariable?[] inputs, IVariable?[] outputGrads, OnnxCSharpAttributes attributes)
+        internal static Variable?[] AttentionGradient(
+            Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
         {
             _ = inputs;
             _ = outputGrads;
@@ -136,8 +136,8 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // interleaved layout and partial rotary_embedding_dim slicing) is not
         // implemented; fail loudly instead of freezing upstream parameters.
 
-        internal static IVariable?[] RotaryEmbeddingGradient(
-            IVariable?[] inputs, IVariable?[] outputGrads, OnnxCSharpAttributes attributes)
+        internal static Variable?[] RotaryEmbeddingGradient(
+            Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
         {
             _ = inputs;
             _ = outputGrads;
@@ -158,8 +158,8 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // written window and to update inside it, per-batch via write_indices, for
         // both linear and circular modes) is not implemented; fail loudly.
 
-        internal static IVariable?[] TensorScatterGradient(
-            IVariable?[] inputs, IVariable?[] outputGrads, OnnxCSharpAttributes attributes)
+        internal static Variable?[] TensorScatterGradient(
+            Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
         {
             _ = inputs;
             _ = outputGrads;

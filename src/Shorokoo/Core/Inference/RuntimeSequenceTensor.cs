@@ -20,7 +20,7 @@ internal sealed record class RuntimeSequenceTensor : IRuntimeTensor
     public DType DType { get; init; } = DType.Invalid;
 
     /// <inheritdoc />
-    public IVariable? ReferenceTensor { get; init; }
+    public Variable? ReferenceTensor { get; init; }
 
     /// <inheritdoc />
     public ImmutableArray<long>? IterationIndices { get; init; }

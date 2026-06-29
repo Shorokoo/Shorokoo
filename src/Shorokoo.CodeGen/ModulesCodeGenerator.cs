@@ -965,9 +965,11 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                 }
                 else
                 {
-                    // For non-generic initializers, use the original cast-based approach
+                    // For non-generic initializers, wrap the Variable result into the value-struct
+                    // return type. A plain cast would unbox the interface to a struct and throw;
+                    // Variable.ToValue invokes the node→struct conversion instead.
                     sb.AppendLine($"        public static {outputTypeName} {methodName}{typeParamList}({inputNamedTypeList}){typeConstraints}")
-                      .AppendLine($"            => ({outputTypeName})Globals.CallTrainableParamInitializer({callArgList});");
+                      .AppendLine($"            => Globals.CallTrainableParamInitializer({callArgList}).ToValue<{outputTypeName}>();");
                 }
             }
         }

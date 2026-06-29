@@ -923,7 +923,7 @@ namespace Shorokoo.Core.Factory.IR
             var fastFnGraph = function.OriginalFastGraph;
             var fnOutputs = FastComputationGraphConverter.BuildNodes(fastFnGraph).outputs;
             var fnRankOverrides = fastFnGraph.OutputRankOverrides is null
-                ? fnOutputs.Select(x => (int?)x.Rank()).ToImmutableArray()
+                ? fnOutputs.Select(x => (int?)x.Rank).ToImmutableArray()
                 : fastFnGraph.OutputRankOverrides.ToImmutableArray();
 
             var attrs = OnnxCSharpAttributes.FromCSharpVals(

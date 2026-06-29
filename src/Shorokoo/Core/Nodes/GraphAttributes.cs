@@ -18,10 +18,10 @@ namespace Shorokoo.Core.Nodes
     {
         public string AttributeName { get; private set; }
         public string? DefaultName { get; private set; }
-        public IVariable[] InputTensors { get; private set; }
-        public IVariable?[] OutputTensors { get; internal set; }
+        public Variable[] InputTensors { get; private set; }
+        public Variable?[] OutputTensors { get; internal set; }
 
-        public GraphInfo(string attributeName, IVariable[] inputTensors, IVariable?[] outputTensors)
+        public GraphInfo(string attributeName, Variable[] inputTensors, Variable?[] outputTensors)
         {
             this.AttributeName = attributeName;
             this.InputTensors = inputTensors;

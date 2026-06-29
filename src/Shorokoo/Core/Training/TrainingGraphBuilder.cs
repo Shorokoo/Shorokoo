@@ -43,8 +43,8 @@ public static class TrainingGraphBuilder
     public static FastComputationGraph PrepareForTrainingAsFast<TOut, TLoss>(
         FastComputationGraph modelGraph,
         Func<TOut, TOut, TLoss> lossFunction)
-        where TOut : IVariable
-        where TLoss : IVariable
+        where TOut : IValue
+        where TLoss : IValue
     {
         if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
         if (lossFunction is null) throw new ArgumentNullException(nameof(lossFunction));

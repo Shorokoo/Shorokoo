@@ -23,7 +23,7 @@ internal static class TensorDataConverter
     /// always filled in; element data is filled in only when the element count is at most
     /// <paramref name="maxElements"/>.
     /// </summary>
-    public static RuntimeTensor ToRuntimeTensor(TensorData data, int maxElements, IVariable? reference = null)
+    public static RuntimeTensor ToRuntimeTensor(TensorData data, int maxElements, Variable? reference = null)
     {
         var dtype = data.DType;
         var shape = data.Shape;
@@ -133,7 +133,7 @@ internal static class TensorDataConverter
     /// — a present optional carries its value as a <see cref="RuntimeTensor"/>; an absent one carries
     /// just the element dtype with <c>HasValue == false</c>.
     /// </summary>
-    public static RuntimeOptionalTensor ToRuntimeOptional(OptionalTensorData data, int maxElements, IVariable? reference = null)
+    public static RuntimeOptionalTensor ToRuntimeOptional(OptionalTensorData data, int maxElements, Variable? reference = null)
         => new RuntimeOptionalTensor
         {
             DType = data.DType,
@@ -159,7 +159,7 @@ internal static class TensorDataConverter
     /// Converts an input <see cref="IData"/> (plain tensor or optional) into the matching
     /// <see cref="IRuntimeTensor"/> for the QuickExecutionEngine input store.
     /// </summary>
-    public static IRuntimeTensor ToRuntimeInput(IData data, int maxElements, IVariable? reference = null)
+    public static IRuntimeTensor ToRuntimeInput(IData data, int maxElements, Variable? reference = null)
         => data switch
         {
             OptionalTensorData opt => ToRuntimeOptional(opt, maxElements, reference),

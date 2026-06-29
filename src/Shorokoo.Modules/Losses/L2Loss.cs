@@ -28,7 +28,7 @@ public partial class L2Loss
         var diff = predictions - targets;
         var squared = (diff * diff).Reshape(Vector(-1L));
         var axes = Vector(0L);
-        var reduced = (Tensor<float32>)OnnxOp.ReduceMean((ITensor)squared, axes, keepdims: false);
+        var reduced = (Tensor<float32>)OnnxOp.ReduceMean((Variable)squared, axes, keepdims: false);
         return reduced.Scalar();
     }
 

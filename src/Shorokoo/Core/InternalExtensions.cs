@@ -13,7 +13,7 @@ namespace Shorokoo.Core
 {
     internal static class InternalExtensions
     {
-        public static void ThrowIsNumLike<T>(this Variable<T> toCheck) where T : IVarType
+        public static void ThrowIsNumLike<T>(this Tensor<T> toCheck) where T : IVarType
         {
             if (!typeof(NumLike).IsAssignableFrom(typeof(T)))
                 throw new InvalidTensorOperationException(ErrorCodes.FW008, "ThrowIsNumLike", typeof(T).Name, 

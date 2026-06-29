@@ -48,7 +48,7 @@ namespace Shorokoo.Tests.Modules
             var erLast = (TensorSequence<float32>)OnnxOp.SequenceErase(ins);       // [t1,t3]
             var erLastAt = (Tensor<float32>)OnnxOp.SequenceAt(erLast, p1);
 
-            var empty = Shorokoo.Core.TensorSequence<float32>.CreateEmpty();
+            var empty = Shorokoo.TensorSequence<float32>.CreateEmpty();
             var emptyIns = empty.InsertAt(t1, null);                               // append → [t1]
 
             var mismatch =
@@ -78,9 +78,8 @@ namespace Shorokoo.Tests.Modules
             => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
                 .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>SplitToSequence: default (no split → size-1 chunks, keepdims=1 keeps the
@@ -141,9 +140,8 @@ namespace Shorokoo.Tests.Modules
             => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
                 .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Spec conformance for the SplitToSequence keepdims/split interaction:
@@ -171,9 +169,8 @@ namespace Shorokoo.Tests.Modules
             => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
                 .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>ReverseSequence VALUES: batch_axis=0/time_axis=1 (the spec's "batchwise"
@@ -213,9 +210,8 @@ namespace Shorokoo.Tests.Modules
             => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
                 .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Optional family: Optional(x) → OptionalHasElement is concretely TRUE and
@@ -248,9 +244,8 @@ namespace Shorokoo.Tests.Modules
             => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
                 .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Window VALUES against the spec formulas (size is a runtime input so the
@@ -291,9 +286,8 @@ namespace Shorokoo.Tests.Modules
             => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
                 .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>DFT VALUES (real [1,4,1] input, default axis −2): forward complex output
@@ -339,9 +333,8 @@ namespace Shorokoo.Tests.Modules
             => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
                 .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>TfIdfVectorizer output extent = max(ngram_indexes) + 1 (= 5 here), NOT the
@@ -372,9 +365,8 @@ namespace Shorokoo.Tests.Modules
             return mismatch < Scalar(1L);
         }
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>@string-input ops (QeeOnly-strict: string runtime data never reaches QEE or
@@ -405,9 +397,8 @@ namespace Shorokoo.Tests.Modules
             return (mismatch < Scalar(1L), normStop, (Tensor<@string>)splitY);
         }
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Shorokoo-internal control-flow/lowering ops (QeeOnly-strict — ORT has no
@@ -465,8 +456,7 @@ namespace Shorokoo.Tests.Modules
         private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
             => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        private static Scalar<int64> ShapeMismatch<T>(Tensor<T> t, Vector<int64> expected)
-            where T : IVarType
-            => (t.ShapeTensor() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 }

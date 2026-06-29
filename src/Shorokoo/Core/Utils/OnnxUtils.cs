@@ -46,6 +46,10 @@ namespace Shorokoo.Core.Utils
                 return Enumerable.Repeat((byte)0, 4).ToArray();
             else if (type == DType.UInt64)
                 return Enumerable.Repeat((byte)0, 8).ToArray();
+            else if (type == DType.Int8)
+                return Enumerable.Repeat((byte)0, 1).ToArray();
+            else if (type == DType.UInt8)
+                return Enumerable.Repeat((byte)0, 1).ToArray();
             else if (type == DType.Int16)
                 return Enumerable.Repeat((byte)0, 2).ToArray();
             else if (type == DType.Int32)

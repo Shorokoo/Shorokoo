@@ -302,7 +302,7 @@ namespace Shorokoo.Core
             : (this.infShapeTensor ??= this.shapeInferer?.Invoke());
 
         public Vector<int64> TShape => this.DShape;
-        public Scalar<int64> TRank => TShape.TShape[0].T;
+        public Scalar<int64> TRank => TShape.TShape[0];
 
         /// <summary>Casts the element type to <typeparamref name="V"/>; returns this tensor unchanged when the types already match.</summary>
         public Tensor<V> Cast<V>(bool saturate = true) where V : IVarType

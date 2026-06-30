@@ -29,7 +29,7 @@ public partial class NNLinearMatchesManualMatMul
         var outFeatures = Scalar(4L);
         var y = Linear.Call(outFeatures, Scalar(true), x);
 
-        var inFeatures = x.TShape[1..^0].T.Reduce(ReduceKind.Prod).Scalar();
+        var inFeatures = x.TShape[1..^0].Reduce(ReduceKind.Prod).Scalar();
         var wRef = KaimingUniform.Init([outFeatures, inFeatures]);
         var yRef = x.Reshape([x.DimTensor(0), inFeatures]).MatMul(wRef.Transpose(1L, 0L));
 

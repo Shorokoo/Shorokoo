@@ -23,7 +23,7 @@ namespace Shorokoo.Tests.Modules
         public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> numOutFeatures, [Hyper] Scalar<int64> numIterations)
         {
             var x = input;
-            var numInFeatures = x.ShapeTensor()[-1L].T;
+            var numInFeatures = x.ShapeTensor()[-1L];
             var weights = InitSimple.Init([numInFeatures, numOutFeatures]);
             x = x.MatMul(weights);
 
@@ -42,7 +42,7 @@ namespace Shorokoo.Tests.Modules
     {
         public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> numOutFeatures)
         {
-            var numInFeatures = input.ShapeTensor()[-1L].T;
+            var numInFeatures = input.ShapeTensor()[-1L];
             var weights = InitSimple.Init([numOutFeatures, numInFeatures]);
             var bias = InitSimple.Init([numOutFeatures]).Vec();
 
@@ -629,7 +629,7 @@ namespace Shorokoo.Tests.Modules
     {
         public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> threshold)
         {
-            var lastDim = input.ShapeTensor()[-1L].T;
+            var lastDim = input.ShapeTensor()[-1L];
             var isLarge = lastDim > threshold;
 
             // Create both sets of trainable params (always, regardless of condition)
@@ -659,7 +659,7 @@ namespace Shorokoo.Tests.Modules
 
             foreach (var ctx in LoopAPI.Iterate(numIterations))
             {
-                var lastDim = x.ShapeTensor()[-1L].T;
+                var lastDim = x.ShapeTensor()[-1L];
                 var isLarge = lastDim > threshold;
 
                 var weightsLarge = InitSimple.Init(x.ShapeTensor());
@@ -687,11 +687,11 @@ namespace Shorokoo.Tests.Modules
         public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> threshold)
         {
             var x = input;
-            var numIterations = input.ShapeTensor()[-1L].T;
+            var numIterations = input.ShapeTensor()[-1L];
 
             foreach (var ctx in LoopAPI.Iterate(numIterations))
             {
-                var lastDim = x.ShapeTensor()[-1L].T;
+                var lastDim = x.ShapeTensor()[-1L];
                 var isLarge = lastDim > threshold;
 
                 var weightsLarge = InitSimple.Init(x.ShapeTensor());

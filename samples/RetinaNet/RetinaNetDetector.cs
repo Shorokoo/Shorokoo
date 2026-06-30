@@ -28,7 +28,7 @@ namespace RetinaNet.Models
     // Helper functions (non-module)
     public static class RetinaNetHelpers
     {
-        public static Scalar<int64> GetDim(Tensor<float32> x, Scalar<int64> axis) => x.ShapeTensor()[axis].T;
+        public static Scalar<int64> GetDim(Tensor<float32> x, Scalar<int64> axis) => x.ShapeTensor()[axis];
         public static Scalar<int64> ChannelsNCHW(Tensor<float32> x) => GetDim(x, Scalar(1L));
     }
     

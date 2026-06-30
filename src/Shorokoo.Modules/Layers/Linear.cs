@@ -28,7 +28,7 @@ public partial class Linear
         [Hyper] Scalar<bit> useBias)
     {
         var batchSize = x.DimTensor(0);
-        var inFeatures = x.TShape[1..^0].T.Reduce(ReduceKind.Prod).Scalar();
+        var inFeatures = x.TShape[1..^0].Reduce(ReduceKind.Prod).Scalar();
         var xFlat = x.Reshape([batchSize, inFeatures]);
 
         var w = KaimingUniform.Init([outFeatures, inFeatures]);

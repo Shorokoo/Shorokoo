@@ -33,7 +33,7 @@ namespace Shorokoo
 
         /// <summary>The size of dimension <paramref name="axis"/> as a symbolic scalar.</summary>
         public Scalar<int64> DimTensor(long axis)
-            => this.ShapeTensor()[axis].T;
+            => this.ShapeTensor()[axis];
 
         /// <summary>Gathers entries along <paramref name="axis"/> using the given indices (ONNX Gather).</summary>
         public Tensor<T> Gather(Tensor<int64> indices, long? axis)

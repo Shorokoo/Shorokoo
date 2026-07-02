@@ -136,7 +136,8 @@ namespace Shorokoo.Tests.Utils
             bool testOnnxRoundtrip = true,
             bool testCsRoundtrip = true,
             bool testQuickEngineExecution = true,
-            Dictionary<string, DType>? genericTypes = null)
+            Dictionary<string, DType>? genericTypes = null,
+            RngConfig? rngConfig = null)
         {
             var prop = typeof(TModule).GetProperty("ComputationGraph", BindingFlags.Public | BindingFlags.Static)
                 ?? throw new InvalidOperationException(
@@ -144,7 +145,7 @@ namespace Shorokoo.Tests.Utils
             var moduleGraph = (FastComputationGraph)prop.GetValue(null)!;
 
             return AdvancedTestGraph(moduleGraph, hyperparamInputs, runtimeInputs,
-                context, testOnnxRoundtrip, testCsRoundtrip, testQuickEngineExecution, genericTypes);
+                context, testOnnxRoundtrip, testCsRoundtrip, testQuickEngineExecution, genericTypes, rngConfig);
         }
 
         /// <summary>
@@ -160,7 +161,8 @@ namespace Shorokoo.Tests.Utils
             bool testOnnxRoundtrip = true,
             bool testCsRoundtrip = true,
             bool testQuickEngineExecution = true,
-            Dictionary<string, DType>? genericTypes = null)
+            Dictionary<string, DType>? genericTypes = null,
+            RngConfig? rngConfig = null)
         {
             // Generic-method modules build their ComputationGraph with IGenericType placeholder
             // DTypes + leading GENERIC_TYPE_INPUT inputs. Apply the caller-supplied type
@@ -179,7 +181,12 @@ namespace Shorokoo.Tests.Utils
             Array.Copy(runtimeInputs, 0, allInputs, hyperparamInputs.Length, runtimeInputs.Length);
 
             var concreteArch = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([.. allInputs]));
-            var concreteModel = concreteArch.ToConcreteModel();
+            // Tests are value-agnostic but many closed-form reference checks compare a layer's
+            // internal weight against a hand-built reference that re-runs the SAME initializer,
+            // which only matches when same-shape/same-initializer parameters are tied. Default the
+            // harness to shared-key init (deterministic via master seed 0, name-independent) so
+            // those references hold; real models keep per-parameter keying. A caller may override.
+            var concreteModel = concreteArch.ToConcreteModel(rngConfig ?? new RngConfig { SharedKey = true });
 
             return TestGraph(
                 concreteModel,
@@ -244,7 +251,9 @@ namespace Shorokoo.Tests.Utils
             var archData = CompressedFormatUtils.SaveFastGraphToBinary(concreteArch, compressed: true);
             concreteArch = CompressedFormatUtils.LoadFastGraphFromBinary(archData, isCompressed: true);
 
-            var concreteModel = concreteArch.ToConcreteModel();
+            // Shared-key init (see AdvancedTestGraph) so closed-form reference checks that re-run
+            // an initializer match a layer's internal weights; deterministic via master seed 0.
+            var concreteModel = concreteArch.ToConcreteModel(new RngConfig { SharedKey = true });
 
             return TestGraph(
                 concreteModel,

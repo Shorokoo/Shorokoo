@@ -52,6 +52,16 @@ public sealed class RngConfig
     /// <summary>The bit generator. Default <see cref="RngAlgorithm.Threefry2x32"/>.</summary>
     public RngAlgorithm Algorithm { get; init; } = RngAlgorithm.Threefry2x32;
 
+    /// <summary>
+    /// When <c>true</c>, every stream shares one key derived from <see cref="MasterSeed"/>
+    /// alone (name-independent), so two parameters of the same shape and distribution
+    /// receive identical values — the "tied" init that reproduces a layer's weights from a
+    /// hand-built reference. Off by default (per-parameter, name-derived keys). Useful for
+    /// closed-form reference tests and for debugging; not for real training, where distinct
+    /// parameters should differ.
+    /// </summary>
+    public bool SharedKey { get; init; }
+
     // Full-stream-name ("params/..", "runtime/..") -> seed. Insertion into a live config;
     // frozen in practice once bound.
     private readonly Dictionary<string, ulong> _overrides = new(StringComparer.Ordinal);
@@ -102,6 +112,8 @@ public sealed class RngConfig
     /// <summary>The 64-bit key material for a stream, before splitting into generator words.</summary>
     internal ulong ResolveKey64(RngCollection collection, string name)
     {
+        if (SharedKey)
+            return Fold(MasterSeed, CollectionPrefix(collection) + "/__shared__");
         string full = StreamName(collection, name);
         return _overrides.TryGetValue(full, out var seed) ? seed : Fold(MasterSeed, full);
     }

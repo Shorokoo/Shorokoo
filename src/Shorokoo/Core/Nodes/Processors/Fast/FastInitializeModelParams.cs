@@ -31,13 +31,22 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     {
         public static ImmutableDictionary<ModelId, TensorData> Process(
             FastComputationGraph graph,
-            ComputeContext? computeContext)
+            ComputeContext? computeContext,
+            RngConfig? rngConfig = null,
+            ConcreteModelParamInfos? paramInfos = null)
         {
             computeContext ??= ComputeContext.Default;
 
             var workGraph = graph.Clone();
 
             var functionInvokeAttrDefs = Definitions.NodeDefinitions[InternalOpCodes.FUNCTION_INVOKE].AttributeDefs;
+
+            // Per-parameter initialization RNG: map each parameter's ModelId to its
+            // canonical name + shape so a random initializer draws host noise keyed by
+            // that parameter's own stream (see FastInitRngNoise). Null config disables it.
+            var infoById = rngConfig is null || paramInfos is null
+                ? null
+                : paramInfos.ParamInfos.ToDictionary(x => x.ModelId);
 
             var collectedModelIds = new List<ModelId>();
             var collectedOutputKeys = new List<FastTensorKey>();
@@ -50,6 +59,22 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var rank = node.Attributes.GetLongVal(OnnxOpAttributeNames.ShrkAttrRank) ?? -1;
                 var modelIdVals = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId).AssertNotNull();
                 var modelId = new ModelId(modelIdVals);
+
+                // Replace the (shared) initializer with a per-parameter noise-injected clone
+                // before the node is rewritten to FUNCTION_INVOKE (which preserves TargetFunction).
+                if (infoById is not null && node.TargetFunction is { } initFn &&
+                    infoById.TryGetValue(modelId, out var info))
+                {
+                    long elementCount = 1;
+                    foreach (var d in info.Shape.Dims) elementCount *= d;
+                    if (elementCount > 0)
+                    {
+                        var injected = FastInitRngNoise.BuildNoiseInjected(
+                            initFn, info.ToShorokooIdString(), elementCount, rngConfig!);
+                        if (injected is not null)
+                            node.TargetFunction = injected;
+                    }
+                }
 
                 var newAttributes = OnnxCSharpAttributes.FromCSharpVals(
                     new Dictionary<string, object?>

@@ -228,6 +228,19 @@ namespace Shorokoo.Graph
         }
 
         /// <summary>
+        /// Binds default weights initialized under the given <see cref="RngConfig"/> — equivalent to
+        /// <c>graph.ToConcreteModel(graph.InitializeTrainableParams(rngConfig: rngConfig))</c>.
+        /// Each random initializer draws host noise keyed by its parameter's own stream, so
+        /// same-shape parameters get distinct values and initialization is reproducible and
+        /// backend-independent. Requires a concrete architecture from <see cref="ToConcreteArchitecture"/>.
+        /// </summary>
+        public static FastComputationGraph ToConcreteModel(this FastComputationGraph graph, RngConfig rngConfig)
+        {
+            var defaultTrainableParams = graph.InitializeTrainableParams(rngConfig: rngConfig);
+            return graph.ToConcreteModel(defaultTrainableParams);
+        }
+
+        /// <summary>
         /// Binds loaded trainable-parameter values into a concrete (weight-filled) graph, matching
         /// value names to graph parameters with the given framework's naming convention (default:
         /// Shorokoo's own scheme). For weights exported from another framework, use the overload that
@@ -315,19 +328,27 @@ namespace Shorokoo.Graph
         /// <param name="graph">The concrete architecture whose initializers to run.</param>
         /// <param name="namingScheme">Optional scheme for the returned parameter names; defaults to Shorokoo's.</param>
         /// <param name="computeContext">Optional context used to evaluate the initializers.</param>
+        /// <param name="rngConfig">
+        /// Optional RNG configuration. When supplied, each random initializer draws host-generated
+        /// noise keyed by its parameter's own stream (so same-shape parameters get distinct values,
+        /// reproducibly and backend-independently). When <c>null</c>, the legacy in-graph seeded
+        /// draw is used.
+        /// </param>
         /// <returns>The default trainable-parameter values, named.</returns>
         public static ModelParamList InitializeTrainableParams(
             this FastComputationGraph graph,
             ModuleParamSetNamingScheme? namingScheme = null,
-            ComputeContext? computeContext = null)
+            ComputeContext? computeContext = null,
+            RngConfig? rngConfig = null)
         {
             AssertConcreteArchitecture(graph, nameof(InitializeTrainableParams));
             computeContext ??= ComputeContext.Default;
+            rngConfig ??= RngConfig.Default;
 
             var paramNamingInfo = graph.GetConcreteModelParamInfos();
             namingScheme ??= ModuleParamSetNamingScheme.CreateShorokooNamingScheme(paramNamingInfo);
 
-            var initializedParams = FastInitializeModelParams.Process(graph, computeContext);
+            var initializedParams = FastInitializeModelParams.Process(graph, computeContext, rngConfig, paramNamingInfo);
             var trainableParams = initializedParams
                 .Select(x => new TensorDataModelParam(namingScheme.ToName(x.Key).AssertNotNull(), ModelParamType.TrainableParam, x.Value))
                 .ToArray();

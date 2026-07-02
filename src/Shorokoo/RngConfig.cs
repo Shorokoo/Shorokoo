@@ -126,6 +126,18 @@ public sealed class RngConfig
     }
 
     /// <summary>
+    /// A runtime stream's two 32-bit Threefry key words as <c>int64</c> values (each in
+    /// <c>[0, 2^32)</c>), for feeding <see cref="Shorokoo.Core.Rng.RuntimeRng"/>'s in-graph draws
+    /// (e.g. Dropout masks). Public counterpart to <see cref="ResolveKey"/> for the
+    /// <see cref="RngCollection.Runtime"/> collection.
+    /// </summary>
+    public (long k0, long k1) RuntimeKey(string streamName)
+    {
+        var (k0, k1) = ResolveKey(RngCollection.Runtime, streamName);
+        return (k0, k1);
+    }
+
+    /// <summary>
     /// Folds a stream name into the master seed: <c>masterSeed XOR (first 8 bytes of
     /// SHA-256(name))</c>. Deterministic and platform-independent (SHA-256 + XOR).
     /// </summary>

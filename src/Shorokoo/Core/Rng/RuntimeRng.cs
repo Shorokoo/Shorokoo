@@ -26,7 +26,7 @@ namespace Shorokoo.Core.Rng;
 /// <c>(key, drawBase, i)</c> replays exactly. The bit→float and Box–Muller conventions match
 /// <see cref="HostRng"/> (low 24 bits × 2⁻²⁴; radius = √(−2·ln(1−u₁))).</para>
 /// </summary>
-internal static class RuntimeRng
+public static class RuntimeRng
 {
     private static readonly int[] Rot = [13, 15, 26, 6, 17, 29, 16, 24];
     private const long Pow2_32 = 0x1_0000_0000L;

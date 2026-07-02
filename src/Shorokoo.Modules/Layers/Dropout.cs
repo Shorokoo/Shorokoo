@@ -2,12 +2,38 @@ using Shorokoo;
 using Shorokoo.Core;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Core.Nodes.OnnxNodes;
+using Shorokoo.Core.Rng;
 using Shorokoo.Graph;
 using Shorokoo.Modules;
 using Shorokoo.Onnx;
 using static Shorokoo.Globals;
 
 namespace Shorokoo.Modules.Layers;
+
+/// <summary>
+/// Builds Dropout keep/scale masks from the deterministic in-graph counter-based RNG
+/// (<see cref="RuntimeRng"/>) instead of the non-portable ONNX <c>Dropout</c> op, so the mask is
+/// reproducible on every execution provider and in the Quick Execution Engine (and needs no
+/// optimization-disable hack, since it does not constant-fold to a no-op). One draw per mask
+/// element; survivors scale to <c>1/(1−ratio)</c>, drops to 0; eval (<c>training = false</c>) is
+/// all-ones (identity).
+///
+/// <para>The <c>drawBase</c> (Threefry counter high word) is 0, so the mask is fixed across
+/// executions — inference stays stateless (no per-layer state forcing the training path). A
+/// per-step-varying <c>drawBase</c> is fed by the training rig's step channel where available.</para>
+/// </summary>
+internal static class DropoutMasking
+{
+    public static Tensor<float32> Mask(Vector<int64> maskShape, Scalar<float32> ratio, Scalar<bit> training)
+    {
+        var (k0, k1) = RngConfig.Default.RuntimeKey("dropout");
+        var u = RuntimeRng.Uniform(maskShape, Scalar(k0), Scalar(k1), Scalar(0L), Scalar(0f), Scalar(1f));
+
+        var keep = (u >= ratio).Cast<float32>();                        // 1 if kept (prob 1−ratio), else 0
+        var scaled = keep / (Scalar(1f) - ratio);                       // survivors → 1/(1−ratio)
+        return training.IfElse(scaled, TensorFill(maskShape, 1.0f));    // eval → all ones (identity)
+    }
+}
 
 /// <summary>
 /// Dropout layer wrapping the ONNX Dropout op, whose <c>ratio</c> and
@@ -26,8 +52,7 @@ public partial class Dropout
         [Hyper] Scalar<float32> ratio,
         [Hyper] Scalar<bit> training)
     {
-        var (y, _) = OnnxOp.Dropout(x, ratio, training, seed: 42L);
-        return (Tensor<float32>)y;
+        return x * DropoutMasking.Mask(x.ShapeTensor(), ratio, training);
     }
 }
 
@@ -67,13 +92,9 @@ public partial class SpatialDropout
         Vector<int64> maskShape = [n, c];
         maskShape = maskShape.Concat(VectorFill(rank - 2L, 1L));
 
-        // Dropout on a ones tensor of that shape: survivors -> 1/(1-ratio), drops -> 0,
-        // one draw per (sample, channel). Eval (training=false) => identity => all ones.
-        var ones = TensorFill(maskShape, 1.0f);
-        var (mask, _) = OnnxOp.Dropout(ones, ratio, training, seed: 42L);
-
-        // Broadcast the per-channel mask over the spatial dims and apply.
-        return x * (Tensor<float32>)mask;
+        // Mask of that shape (survivors -> 1/(1-ratio), drops -> 0), one draw per (sample,
+        // channel); eval (training=false) => identity => all ones. Broadcast over spatial dims.
+        return x * DropoutMasking.Mask(maskShape, ratio, training);
     }
 }
 
@@ -155,12 +176,11 @@ public partial class AlphaDropout
         Scalar<float32> a = (q + alphaP * alphaP * q * ratio).Sqrt().Reciprocal();
         Scalar<float32> b = -a * (ratio * alphaP);
 
-        // RAW 0/1 keep mask, elementwise (full input shape). OnnxOp.Dropout rescales
+        // RAW 0/1 keep mask, elementwise (full input shape). The in-graph mask rescales
         // survivors to 1/(1−p) and drops to 0; multiplying back by q recovers d ∈ {0,1}.
         // (Eval: r = 1 everywhere ⇒ d = q, unused — the training gate restores identity.)
-        var ones = TensorFill(x.ShapeTensor(), 1.0f);
-        var (r, _) = OnnxOp.Dropout(ones, ratio, training, seed: 42L);
-        Tensor<float32> d = (Tensor<float32>)r * q;
+        var r = DropoutMasking.Mask(x.ShapeTensor(), ratio, training);
+        Tensor<float32> d = r * q;
 
         // Kept → x, dropped → α'; then the affine renorm a·x' + b.
         Tensor<float32> xPrime = x * d + alphaP * (1f - d);
@@ -216,12 +236,11 @@ public partial class FeatureAlphaDropout
         maskShape = maskShape.Concat(VectorFill(rank - 2L, 1L));
 
         // RAW 0/1 keep mask, one draw per (sample, channel), broadcast over the spatial
-        // axes. OnnxOp.Dropout rescales survivors to 1/(1−p) and drops to 0; multiplying
+        // axes. The in-graph mask rescales survivors to 1/(1−p) and drops to 0; multiplying
         // back by q recovers d ∈ {0,1}. (Eval: r = 1 ⇒ d = q, unused — the gate restores
         // identity.)
-        var ones = TensorFill(maskShape, 1.0f);
-        var (r, _) = OnnxOp.Dropout(ones, ratio, training, seed: 42L);
-        Tensor<float32> d = (Tensor<float32>)r * q;
+        var r = DropoutMasking.Mask(maskShape, ratio, training);
+        Tensor<float32> d = r * q;
 
         // Kept → x, dropped → α'; then the affine renorm a·x' + b. The [N,C,1,…,1] mask d
         // broadcasts over the spatial axes in x·d exactly as a spatial-dropout mask does.

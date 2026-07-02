@@ -2839,7 +2839,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     var filteredId = idData.Where(x => x != -2).ToArray();
                     if (filteredId.Length == 0) continue;
                     var modelId = ModelId.FromLongVals(filteredId);
-                    if (result.ContainsKey(modelId)) continue;
 
                     var paramValues = ImmutableArray.CreateBuilder<TensorData>(initParamIterations.Count);
                     bool allAvailable = true;
@@ -2855,6 +2854,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         paramValues.Add(td);
                     }
                     if (!allAvailable) continue;
+
+                    // Prefer the richest definition for a given model id: a bare reference
+                    // (e.g. IModel.GetTrainableParam, which carries no initializer inputs) must not
+                    // clobber the real parameter definition that supplies the shape + initializer.
+                    if (result.TryGetValue(modelId, out var existing)
+                        && existing.TrainableParamInputParamValues.Length >= paramValues.Count)
+                        continue;
 
                     result[modelId] = new TrainableParamInfo
                     {

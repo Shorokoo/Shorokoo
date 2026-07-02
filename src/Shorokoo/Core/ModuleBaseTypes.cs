@@ -1,4 +1,5 @@
 using Shorokoo.Graph;
+using Shorokoo.Core.Graph;
 using Shorokoo.Core.Nodes.OnnxNodes;
 using Shorokoo.Core.Nodes.AutoDiff;
 using Shorokoo.Core.Nodes.NodeDefinitions;
@@ -24,6 +25,56 @@ namespace Shorokoo.Core
     public interface IModel : IModuleParam
     {
         Scalar<IModelVarType> ModelVariable { get; }
+    }
+
+    /// <summary>Model-level helpers usable on any concrete <see cref="IModel"/>.</summary>
+    public static class ModelExtensions
+    {
+        /// <summary>
+        /// References an existing trainable parameter of <paramref name="model"/> by its relative
+        /// <paramref name="relativeModelId"/> path, typed <typeparamref name="T"/> with the given
+        /// <paramref name="rank"/>. The path is the chain of relative ModelIds from this model down
+        /// to the parameter; parameters and sub-models are numbered from <c>1</c> in the order they
+        /// are created within a model's body. So <c>[1]</c> is the model's own first parameter, and
+        /// <c>[1, 1]</c> is the first parameter of the first sub-model it creates (had the model
+        /// created a parameter of its own before that sub-model, the sub-model would be <c>[2]</c>
+        /// and its first parameter <c>[2, 1]</c>). Unlike re-invoking an initializer, this points at
+        /// the *same* parameter the model uses, so a reference computation built from it matches the
+        /// model's own forward exactly — independent of how initialization is keyed. A low-level
+        /// escape hatch (you count ids by hand), for tests and tooling that need realized weights.
+        /// </summary>
+        public static Tensor<T> GetTrainableParam<T>(this IModel model, int[] relativeModelId, int rank)
+            where T : IVarType
+        {
+            Variable modelVar = model.ModelVariable;
+            // The module function lives on the upstream CREATE_MODULE node; the model variable
+            // itself is produced by MODULE_SET_HYPERPARAMS. Walk the producer chain to find it.
+            var producer = modelVar.OwningNode;
+            while (producer.TargetFunction is null && producer.Inputs.Length > 0
+                   && producer.Inputs[0] is Variable inp)
+                producer = inp.OwningNode;
+            var moduleFn = producer.TargetFunction
+                ?? throw new System.InvalidOperationException(
+                    "Model variable has no target function; cannot reference its trainable parameters.");
+            // The ref node must carry a trainable-param-initializer function (it is matched to the
+            // model's actual parameter by ModelId during lowering; the initializer is metadata).
+            var initializerFn = System.Linq.Enumerable.FirstOrDefault(
+                    moduleFn.ReferencedFunctions,
+                    f => f.FunctionType == Shorokoo.Core.Nodes.OnnxNodes.FunctionType.TrainableParamInitializer)
+                ?? throw new System.InvalidOperationException(
+                    "Model has no trainable-parameter initializers to reference.");
+            var template = ModelParamIdentifierTemplate
+                .LocalTrainableParam(new ModelId(relativeModelId), "ParamRef", 0, System.Collections.Immutable.ImmutableArray<int>.Empty)
+                .ToString();
+            var dtype = OnnxUtils.GetDType(typeof(T))
+                ?? throw new System.InvalidOperationException($"No DType for type {typeof(T).Name}.");
+            var v = InternalOp.TrainableParamModelRef(
+                modelVar, initializerParams: [], iterationIndices: null,
+                relativeModelId: relativeModelId, dtype: dtype,
+                rank: rank, initializerFn: initializerFn, isTrainable: true,
+                genericTypeArgs: null, identifierTemplateString: template);
+            return (Tensor<T>)v;
+        }
     }
 
     internal interface IModule : IModuleParam

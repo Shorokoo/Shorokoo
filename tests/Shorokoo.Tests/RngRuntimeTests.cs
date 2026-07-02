@@ -21,6 +21,16 @@ public partial class RtNormalDraw
         => RuntimeRng.StandardNormal(x.ShapeTensor(), Scalar(7L), Scalar(9L), Scalar(0L));
 }
 
+/// <summary>Emits a plain <c>Globals.RandomUniform</c> draw — routed through the SHRK_RANDOM
+/// lowering (<c>FastLowerRandomOps</c>), i.e. the in-graph counter-based path, not ONNX's
+/// RandomUniformLike.</summary>
+[Module]
+public partial class RtLoweredUniform
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => RandomUniform(x.ShapeTensor(), 0f, 1f);
+}
+
 /// <summary>
 /// Coverage for the in-graph counter-based runtime RNG (<see cref="RuntimeRng"/>): the ONNX-op
 /// Threefry subgraph must reproduce the host generator (<see cref="Threefry2x32"/>) bit-for-bit
@@ -64,6 +74,20 @@ public class RngRuntimeTests
         var vals = RunDraw<RtUniformDraw>(8, 8);
         Assert.All(vals, v => Assert.InRange(v, 0.0f, 0.99999997f));
         Assert.InRange(vals.Average(), 0.4f, 0.6f);
+    }
+
+    [Fact]
+    public void TestLoweredRandomUniformIsDeterministicAndInRange()
+    {
+        // A plain Globals.RandomUniform draw now lowers to the in-graph counter-based RNG, so
+        // it is bit-reproducible across executions (the old ONNX RandomUniformLike advanced its
+        // own state per Run and would differ). Two runs must be identical, in range, and spread.
+        var a = RunDraw<RtLoweredUniform>(8, 8);
+        var b = RunDraw<RtLoweredUniform>(8, 8);
+        Assert.Equal(64, a.Length);
+        Assert.Equal(a, b);                                        // deterministic / portable
+        Assert.All(a, v => Assert.InRange(v, 0.0f, 0.99999997f));
+        Assert.InRange(a.Average(), 0.3f, 0.7f);   // 64-sample mean; loose (the point is determinism + range)
     }
 
     [Fact]

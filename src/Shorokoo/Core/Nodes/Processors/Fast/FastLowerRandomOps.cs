@@ -1,85 +1,80 @@
 using Shorokoo.Graph;
 using Shorokoo.Core.Graph;
 using Shorokoo.Core.Nodes;
-using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Core.Nodes.OnnxNodes;
-using Shorokoo.Core.Nodes.AutoDiff;
 using Shorokoo.Core.Nodes.NodeDefinitions;
-using Shorokoo.Modules;
+using Shorokoo.Core.Rng;
 using Shorokoo.Core.Utils;
 using Shorokoo.Onnx;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using static Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames;
-using Shorokoo.Core.Nodes.Processors.AutoGrad;
 
 namespace Shorokoo.Core.Nodes.Processors.Fast
 {
     /// <summary>
-    /// Fast version of the random-op lowering pass. Replaces every
-    /// <c>SHRK_RANDOM_UNIFORM(shape)</c> with
-    /// <c>ConstantOfShape(shape, 0f) → RandomUniformLike(placeholder)</c> and every
-    /// <c>SHRK_RANDOM_NORMAL(shape)</c> with
-    /// <c>ConstantOfShape(shape, 0f) → RandomNormalLike(placeholder)</c>. Random ops can
-    /// appear both in the main graph and inside function bodies (e.g. TrainableParam
-    /// initializers that call <c>Globals.RandomNormal</c>); both are lowered.
+    /// Random-op lowering pass. Rewrites every runtime <c>SHRK_RANDOM_UNIFORM(shape)</c> /
+    /// <c>SHRK_RANDOM_NORMAL(shape)</c> into an in-graph counter-based draw
+    /// (<see cref="RuntimeRng"/>): the body of the captured <see cref="RuntimeRngFunctions"/>
+    /// function is spliced directly at the site, fed the draw shape plus constant Threefry key
+    /// words, the per-execution counter high word (<c>drawBase</c>), and the distribution
+    /// parameters (low/high or mean/scale). The result is ordinary integer/float math —
+    /// deterministic and identical on every execution provider and in the Quick Execution Engine,
+    /// and self-contained on ONNX export (unlike ONNX's <c>RandomUniformLike</c>).
+    ///
+    /// <para>Each site's key is derived from <see cref="RngConfig"/> and a per-site ordinal so
+    /// distinct draw sites decorrelate (fixing the shared-seed correlation of the old lowering).
+    /// The <c>drawBase</c> is currently a fixed 0; a per-execution counter is wired separately.</para>
     /// </summary>
     internal static class FastLowerRandomOps
     {
-        private static readonly TensorData ZeroScalar = new OnnxTensorData<float32>(
-            new Shape(1), OnnxUtils.CreateTensorValue(new long[] { 1 }, new[] { 0f }));
+        private sealed class Ordinal { public int Value; }
 
         public static void Process(FastComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
+            var ordinal = new Ordinal();
             var functionRemap = new Dictionary<Function, Function>();
-
-            ProcessGraph(graph, functionRemap);
+            ProcessGraph(graph, functionRemap, ordinal);
         }
 
-        private static void ProcessGraph(FastComputationGraph graph, Dictionary<Function, Function> functionRemap)
+        private static void ProcessGraph(
+            FastComputationGraph graph, Dictionary<Function, Function> functionRemap, Ordinal ordinal)
         {
-            // Lower every Function reachable from this graph (post-order: leaves first).
-            // Memoization on Function instance ensures shared Functions are lowered once.
+            // Lower every Function reachable from this graph first (memoized per Function instance).
+            foreach (var node in graph.Nodes)
+                if (node.TargetFunction is { } fn)
+                    LowerFunctionRecursive(fn, functionRemap, ordinal);
+
+            var newNodes = new List<FastNode>(graph.Nodes.Count);
+            var outputRemap = new Dictionary<FastTensorKey, FastTensorKey>();
+
             foreach (var node in graph.Nodes)
             {
-                if (node.TargetFunction is { } fn)
-                    LowerFunctionRecursive(fn, functionRemap);
+                bool isUniform = node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM;
+                bool isNormal = node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL;
+                if (!isUniform && !isNormal)
+                {
+                    newNodes.Add(node);
+                    continue;
+                }
+                SpliceRuntimeDraw(node, isUniform, newNodes, outputRemap, ordinal);
             }
 
-            // Lower main graph nodes by mutating SHRK_RANDOM_* in place and inserting a
-            // new ConstantOfShape predecessor.
-            var newNodes = new List<FastNode>(graph.Nodes.Count);
-            foreach (var node in graph.Nodes)
-            {
-                if (node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM)
-                {
-                    LowerToRandomUniformLike(node, newNodes);
-                }
-                else if (node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL)
-                {
-                    LowerToRandomNormalLike(node, newNodes);
-                }
-                newNodes.Add(node);
-            }
             graph.Nodes = newNodes;
 
-            // Remap TargetFunction references on all nodes.
+            ApplyOutputRemap(graph, outputRemap);
+
             if (functionRemap.Count > 0)
-            {
                 foreach (var node in graph.Nodes)
                     if (node.TargetFunction is { } fn && functionRemap.TryGetValue(fn, out var newFn))
                         node.TargetFunction = newFn;
-            }
         }
 
-        /// <summary>
-        /// Lowers a Function's body in post-order. If the body has no random ops (directly or
-        /// transitively via nested Functions), the original Function is reused.
-        /// </summary>
-        private static void LowerFunctionRecursive(Function fn, Dictionary<Function, Function> functionRemap)
+        private static void LowerFunctionRecursive(
+            Function fn, Dictionary<Function, Function> functionRemap, Ordinal ordinal)
         {
             if (functionRemap.ContainsKey(fn)) return;
 
@@ -87,19 +82,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                                    fn.ReferencedFunctions.Any(x => HasRandomOps(x.OriginalFastGraph));
             if (!bodyHasRandomOps)
             {
-                // Mark as visited (but not remapped) so we don't redo the check.
-                functionRemap[fn] = fn;
+                functionRemap[fn] = fn;   // visited, unchanged
                 return;
             }
 
-            // Clone the function's primary Fast body and lower in place,
-            // recursively lowering nested Functions.
             var bodyFast = fn.OriginalFastGraph.Clone();
-            ProcessGraph(bodyFast, functionRemap);
+            ProcessGraph(bodyFast, functionRemap, ordinal);
 
-            var newFn = new Function(bodyFast, fn.FunctionType,
+            functionRemap[fn] = new Function(bodyFast, fn.FunctionType,
                 defaultName: fn.DefaultName, friendlyName: fn.FriendlyName);
-            functionRemap[fn] = newFn;
         }
 
         private static bool HasRandomOps(FastComputationGraph graph) =>
@@ -107,73 +98,125 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
                 node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL);
 
-        private static void LowerToRandomUniformLike(FastNode node, List<FastNode> newNodes)
+        /// <summary>
+        /// Splices the <see cref="RuntimeRng"/> function body at a single <c>SHRK_RANDOM_*</c> site:
+        /// appends the constant key/drawBase/param inputs, clones + rekeys the function body, remaps
+        /// its six inputs to the site's inputs, and records the site output → body output remap so
+        /// downstream consumers pick up the drawn tensor.
+        /// </summary>
+        private static void SpliceRuntimeDraw(
+            FastNode node, bool isUniform, List<FastNode> newNodes,
+            Dictionary<FastTensorKey, FastTensorKey> outputRemap, Ordinal ordinal)
         {
-            // SHRK_RANDOM_UNIFORM(shape) → ConstantOfShape(shape, 0f) → RandomUniformLike(placeholder)
             var shapeInput = node.Inputs[0]
-                ?? throw new InvalidOperationException("SHRK_RANDOM_UNIFORM has null shape input.");
+                ?? throw new InvalidOperationException("SHRK_RANDOM_* has null shape input.");
 
-            var placeholderKey = AppendConstantOfShape(shapeInput, newNodes);
+            // Per-site key: distinct sites decorrelate. drawBase fixed 0 for now.
+            int site = ordinal.Value++;
+            var (k0, k1) = RngConfig.Default.ResolveKey(RngCollection.Runtime, "site" + site);
 
-            var dctAttrs = new Dictionary<string, object?>
+            float a = isUniform
+                ? node.Attributes.GetFloatVal(AttrLow) ?? 0.0f
+                : node.Attributes.GetFloatVal(AttrMean) ?? 0.0f;
+            float b = isUniform
+                ? node.Attributes.GetFloatVal(AttrHigh) ?? 1.0f
+                : node.Attributes.GetFloatVal(AttrScale) ?? 1.0f;
+
+            FastTensorKey?[] callerInputs =
+            [
+                shapeInput,
+                AppendScalarInt64((long)k0, newNodes),
+                AppendScalarInt64((long)k1, newNodes),
+                AppendScalarInt64(0L, newNodes),          // drawBase
+                AppendScalarFloat32(a, newNodes),
+                AppendScalarFloat32(b, newNodes),
+            ];
+
+            var fn = isUniform ? RuntimeRngFunctions.Uniform : RuntimeRngFunctions.Normal;
+            var sub = fn.GetFastFlattenedGraph().Clone();
+            FastProcessorHelper.RekeySubgraph(sub);
+
+            var inputRemap = new Dictionary<FastTensorKey, FastTensorKey>();
+            for (int i = 0; i < sub.Inputs.Count && i < callerInputs.Length; i++)
+                if (callerInputs[i] is FastTensorKey caller)
+                    inputRemap[sub.Inputs[i]] = caller;
+
+            foreach (var subNode in sub.Nodes)
             {
-                [AttrHigh] = node.Attributes.GetFloatVal(AttrHigh),
-                [AttrLow] = node.Attributes.GetFloatVal(AttrLow),
-                [AttrSeed] = node.Attributes.GetFloatVal(AttrSeed),
-            };
-            var attrDefs = Definitions.NodeDefinitions[OpCodes.RANDOM_UNIFORM_LIKE].AttributeDefs;
+                foreach (var kvp in subNode.FullInputs)
+                {
+                    var list = kvp.Value;
+                    for (int j = 0; j < list.Count; j++)
+                        if (list[j] is FastTensorKey key && inputRemap.TryGetValue(key, out var repl))
+                            list[j] = repl;
+                }
+                newNodes.Add(subNode);
+            }
 
-            node.OpCode = OpCodes.RANDOM_UNIFORM_LIKE;
-            node.Attributes = OnnxCSharpAttributes.FromCSharpVals(dctAttrs, attrDefs);
-            node.FullInputs = new Dictionary<string, List<FastTensorKey?>>
-            {
-                [""] = new List<FastTensorKey?> { placeholderKey }
-            };
+            // The SHRK node's output feeds downstream consumers; redirect it to the body's output.
+            var siteOutput = node.FullOutputs[""][0]!.Value;
+            outputRemap[siteOutput] = sub.Outputs[0];
+            // The SHRK node itself is dropped (not added to newNodes).
         }
 
-        private static void LowerToRandomNormalLike(FastNode node, List<FastNode> newNodes)
+        private static void ApplyOutputRemap(
+            FastComputationGraph graph, Dictionary<FastTensorKey, FastTensorKey> outputRemap)
         {
-            // SHRK_RANDOM_NORMAL(shape) → ConstantOfShape(shape, 0f) → RandomNormalLike(placeholder)
-            var shapeInput = node.Inputs[0]
-                ?? throw new InvalidOperationException("SHRK_RANDOM_NORMAL has null shape input.");
+            if (outputRemap.Count == 0) return;
 
-            var placeholderKey = AppendConstantOfShape(shapeInput, newNodes);
-
-            var dctAttrs = new Dictionary<string, object?>
+            // Resolve transitive chains (a→b→c ⇒ a→c).
+            foreach (var key in outputRemap.Keys.ToList())
             {
-                [AttrMean] = node.Attributes.GetFloatVal(AttrMean),
-                [AttrScale] = node.Attributes.GetFloatVal(AttrScale),
-                [AttrSeed] = node.Attributes.GetFloatVal(AttrSeed),
-            };
-            var attrDefs = Definitions.NodeDefinitions[OpCodes.RANDOM_NORMAL_LIKE].AttributeDefs;
+                var target = outputRemap[key];
+                while (outputRemap.TryGetValue(target, out var next)) target = next;
+                outputRemap[key] = target;
+            }
 
-            node.OpCode = OpCodes.RANDOM_NORMAL_LIKE;
-            node.Attributes = OnnxCSharpAttributes.FromCSharpVals(dctAttrs, attrDefs);
-            node.FullInputs = new Dictionary<string, List<FastTensorKey?>>
-            {
-                [""] = new List<FastTensorKey?> { placeholderKey }
-            };
+            foreach (var node in graph.Nodes)
+                foreach (var kvp in node.FullInputs)
+                {
+                    var list = kvp.Value;
+                    for (int j = 0; j < list.Count; j++)
+                        if (list[j] is FastTensorKey key && outputRemap.TryGetValue(key, out var repl))
+                            list[j] = repl;
+                }
+
+            for (int i = 0; i < graph.Outputs.Count; i++)
+                if (outputRemap.TryGetValue(graph.Outputs[i], out var repl))
+                    graph.Outputs[i] = repl;
         }
 
-        private static FastTensorKey AppendConstantOfShape(FastTensorKey shapeInput, List<FastNode> newNodes)
+        private static FastTensorKey AppendScalarInt64(long value, List<FastNode> newNodes)
         {
-            var nodeKey = FastNodeKey.New();
-            var outputKey = new FastTensorKey(nodeKey, 0);
-            var attrDefs = Definitions.NodeDefinitions[OpCodes.CONSTANT_OF_SHAPE].AttributeDefs;
-            var attrs = OnnxCSharpAttributes.FromCSharpVals(
-                new Dictionary<string, object?> { [AttrValue] = ZeroScalar },
-                attrDefs);
+            var data = new OnnxTensorData<int64>(
+                new Shape(Array.Empty<long>()),
+                OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), new[] { value }));
+            return AppendConstant(data, newNodes);
+        }
 
+        private static FastTensorKey AppendScalarFloat32(float value, List<FastNode> newNodes)
+        {
+            var data = new OnnxTensorData<float32>(
+                new Shape(Array.Empty<long>()),
+                OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), new[] { value }));
+            return AppendConstant(data, newNodes);
+        }
+
+        private static FastTensorKey AppendConstant(TensorData data, List<FastNode> newNodes)
+        {
+            var constAttrDefs = Definitions.NodeDefinitions[OpCodes.CONSTANT].AttributeDefs;
+            var key = FastNodeKey.New();
+            var outKey = new FastTensorKey(key, 0);
             newNodes.Add(new FastNode
             {
-                Key = nodeKey,
-                OpCode = OpCodes.CONSTANT_OF_SHAPE,
-                Attributes = attrs,
-                FullInputs = { [""] = new List<FastTensorKey?> { shapeInput } },
-                FullOutputs = { [""] = new List<FastTensorKey?> { outputKey } },
+                Key = key,
+                OpCode = OpCodes.CONSTANT,
+                Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                    new Dictionary<string, object?> { [AttrValue] = data }, constAttrDefs),
+                FullInputs = new Dictionary<string, List<FastTensorKey?>>(),
+                FullOutputs = { [""] = new List<FastTensorKey?> { outKey } },
             });
-
-            return outputKey;
+            return outKey;
         }
     }
 }

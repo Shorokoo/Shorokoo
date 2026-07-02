@@ -27,10 +27,11 @@ public partial class NNLinearMatchesManualMatMul
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
         var outFeatures = Scalar(4L);
-        var y = Linear.Call(outFeatures, Scalar(true), x);
+        var model = Linear.Model(outFeatures, Scalar(true));
+        var y = model.Call(x);
 
         var inFeatures = x.TShape[1..^0].Reduce(ReduceKind.Prod).Scalar();
-        var wRef = KaimingUniform.Init([outFeatures, inFeatures]);
+        var wRef = model.GetTrainableParam<float32>([1], rank: 2);   // the layer's OWN weight [out, in]
         var yRef = x.Reshape([x.DimTensor(0), inFeatures]).MatMul(wRef.Transpose(1L, 0L));
 
         var diff = (y - yRef).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
@@ -61,11 +62,12 @@ public partial class NNBilinearMatchesManualForm
         var in1 = Scalar(3L);
         var in2 = Scalar(4L);
         var outF = Scalar(2L);
-        var y = Bilinear.Call(in1, in2, outF, Scalar(true), x1, x2);           // [N, out]
+        var model = Bilinear.Model(in1, in2, outF, Scalar(true));
+        var y = model.Call(x1, x2);                                            // [N, out]
 
-        // Reference: SAME seeded weight/bias, contracted by hand (broadcast Mul + ReduceSum).
-        var a = RecurrentUniform.Init([outF, in1, in2], in1);                  // [out, in1, in2]
-        var b = RecurrentUniform.Init([outF], in1).Vec();                      // [out]
+        // Reference: the layer's OWN weight/bias, contracted by hand (broadcast Mul + ReduceSum).
+        var a = model.GetTrainableParam<float32>([1], rank: 3);               // [out, in1, in2]
+        var b = model.GetTrainableParam<float32>([2], rank: 1).Vec();         // [out]
         var x1e = x1.Unsqueeze(1L).Unsqueeze(3L);                              // [N,1,in1,1]
         var x2e = x2.Unsqueeze(1L).Unsqueeze(1L);                              // [N,1,1,in2]
         var ae = a.Unsqueeze(0L);                                              // [1,out,in1,in2]
@@ -89,27 +91,29 @@ public partial class NNBilinearUseBiasFalseAndDiff
         var in1 = Scalar(3L);
         var in2 = Scalar(4L);
         var outF = Scalar(2L);
-        var yTrue = Bilinear.Call(in1, in2, outF, Scalar(true), x1, x2);       // [N, out]
-        var yFalse = Bilinear.Call(in1, in2, outF, Scalar(false), x1, x2);     // [N, out]
-
-        // SAME seeded weight/bias, manual contraction (no bias) as the reference for the false case.
-        var a = RecurrentUniform.Init([outF, in1, in2], in1);
-        var b = RecurrentUniform.Init([outF], in1).Vec();                      // [out]
         var x1e = x1.Unsqueeze(1L).Unsqueeze(3L);
         var x2e = x2.Unsqueeze(1L).Unsqueeze(1L);
-        var prod = x1e * a.Unsqueeze(0L) * x2e;                                // [N,out,in1,in2]
         Vector<int64> ijAxes = [Scalar(2L), Scalar(3L)];
-        var yRefNoBias = prod.Reduce(ReduceKind.Sum, ijAxes, keepDims: false); // [N, out] (no bias)
 
-        // (a) useBias:false equals the no-bias reference.
-        var falsePen = (yFalse - yRefNoBias).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-        // (b) the true − false difference is exactly the bias b (broadcast over the batch).
-        var diffMinusBias = (yTrue - yFalse - b).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        // useBias:true — output equals the manual bilinear form PLUS the layer's own bias.
+        var modelT = Bilinear.Model(in1, in2, outF, Scalar(true));
+        var yTrue = modelT.Call(x1, x2);                                       // [N, out]
+        var aT = modelT.GetTrainableParam<float32>([1], rank: 3);
+        var bT = modelT.GetTrainableParam<float32>([2], rank: 1).Vec();        // [out]
+        var manualT = (x1e * aT.Unsqueeze(0L) * x2e).Reduce(ReduceKind.Sum, ijAxes, keepDims: false) + bT;
+        var truePen = (yTrue - manualT).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+
+        // useBias:false — output equals the manual bilinear form WITHOUT any bias (guards the IfElse arm).
+        var modelF = Bilinear.Model(in1, in2, outF, Scalar(false));
+        var yFalse = modelF.Call(x1, x2);                                      // [N, out]
+        var aF = modelF.GetTrainableParam<float32>([1], rank: 3);
+        var manualF = (x1e * aF.Unsqueeze(0L) * x2e).Reduce(ReduceKind.Sum, ijAxes, keepDims: false);
+        var falsePen = (yFalse - manualF).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
         var scale = Scalar(1f)
-            + yRefNoBias.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar()
-            + b.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-        return falsePen + diffMinusBias < Scalar(1e-3f) * scale;
+            + manualT.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar()
+            + manualF.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        return truePen + falsePen < Scalar(1e-3f) * scale;
     }
 }
 
@@ -124,7 +128,8 @@ public partial class NNBilinearBatchBroadcasts
         var in1 = Scalar(3L);
         var in2 = Scalar(4L);
         var outF = Scalar(2L);
-        var y = Bilinear.Call(in1, in2, outF, Scalar(true), x1, x2);           // [B, T, out]
+        var model = Bilinear.Model(in1, in2, outF, Scalar(true));
+        var y = model.Call(x1, x2);                                            // [B, T, out]
 
         // Shape assertion: y.shape == [2, 2, 2].
         var shape = y.ShapeTensor();
@@ -133,9 +138,9 @@ public partial class NNBilinearBatchBroadcasts
         Scalar<int64> d2 = shape[2];
         var shapeOk = (d0 == Scalar(2L)) & (d1 == Scalar(2L)) & (d2 == Scalar(2L));
 
-        // Per-row reference: SAME seeded weight/bias, broadcast over the two leading dims [B,T].
-        var a = RecurrentUniform.Init([outF, in1, in2], in1);
-        var b = RecurrentUniform.Init([outF], in1).Vec();                      // [out]
+        // Per-row reference: the layer's OWN weight/bias, broadcast over the two leading dims [B,T].
+        var a = model.GetTrainableParam<float32>([1], rank: 3);
+        var b = model.GetTrainableParam<float32>([2], rank: 1).Vec();         // [out]
         var x1e = x1.Unsqueeze(2L).Unsqueeze(4L);                             // [B,T,1,in1,1]
         var x2e = x2.Unsqueeze(2L).Unsqueeze(2L);                             // [B,T,1,1,in2]
         var ae = a.Unsqueeze(0L).Unsqueeze(0L);                               // [1,1,out,in1,in2]
@@ -170,10 +175,11 @@ public partial class NNConv2dMatchesStaticConv
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
         var outChannels = Scalar(3L);
-        var y = Conv2d.Call(outChannels, Scalar(3L), Scalar(2L), Scalar(1L), Scalar(1L), Scalar(1L), Scalar(true), x);
+        var model = Conv2d.Model(outChannels, Scalar(3L), Scalar(2L), Scalar(1L), Scalar(1L), Scalar(1L), Scalar(true));
+        var y = model.Call(x);
 
         Scalar<int64> inChannels = x.ShapeTensor()[1];
-        var wRef = KaimingUniform.Init([outChannels, inChannels, Scalar(3L), Scalar(3L)]);
+        var wRef = model.GetTrainableParam<float32>([1], rank: 4);   // the layer's OWN weight
         var yRef = NN.Conv(x, wRef, VectorFill(outChannels, 0f), AutoPad.NotSet,
             dilations: [1L, 1L], group: 1L, kernelShape: [3L, 3L], pads: [1L, 1L, 1L, 1L], strides: [2L, 2L]);
 
@@ -189,10 +195,11 @@ public partial class NNConv1dMatchesStaticConv
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
         var outChannels = Scalar(3L);
-        var y = Conv1d.Call(outChannels, Scalar(3L), Scalar(2L), Scalar(1L), Scalar(1L), Scalar(1L), Scalar(true), x);
+        var model = Conv1d.Model(outChannels, Scalar(3L), Scalar(2L), Scalar(1L), Scalar(1L), Scalar(1L), Scalar(true));
+        var y = model.Call(x);
 
         Scalar<int64> inChannels = x.ShapeTensor()[1];
-        var wRef = KaimingUniform.Init([outChannels, inChannels, Scalar(3L)]);
+        var wRef = model.GetTrainableParam<float32>([1], rank: 3);   // the layer's OWN weight
         var yRef = NN.Conv(x, wRef, VectorFill(outChannels, 0f), AutoPad.NotSet,
             dilations: [1L], group: 1L, kernelShape: [3L], pads: [1L, 1L], strides: [2L]);
 
@@ -208,10 +215,11 @@ public partial class NNConvTranspose2dMatchesStatic
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
         var outChannels = Scalar(3L);
-        var y = ConvTranspose2d.Call(outChannels, Scalar(2L), Scalar(true), x);
+        var model = ConvTranspose2d.Model(outChannels, Scalar(2L), Scalar(true));
+        var y = model.Call(x);
 
         Scalar<int64> inChannels = x.ShapeTensor()[1];
-        var wRef = KaimingUniform.Init([inChannels, outChannels, Scalar(2L), Scalar(2L)]);
+        var wRef = model.GetTrainableParam<float32>([1], rank: 4);   // the layer's OWN weight
         var yRef = NN.ConvTranspose(x, wRef, VectorFill(outChannels, 0f), AutoPad.NotSet,
             dilations: null, group: 1L, kernelShape: null,
             outputPadding: null, outputShape: null, pads: null, strides: null);

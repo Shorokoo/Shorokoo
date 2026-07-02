@@ -63,8 +63,12 @@ namespace Shorokoo.Core
                     f => f.FunctionType == Shorokoo.Core.Nodes.OnnxNodes.FunctionType.TrainableParamInitializer)
                 ?? throw new System.InvalidOperationException(
                     "Model has no trainable-parameter initializers to reference.");
+            // The reference's identifier name must be unique per parameter (distinct model ids
+            // must not collapse to one canonical name), so encode the id path into the name.
             var template = ModelParamIdentifierTemplate
-                .LocalTrainableParam(new ModelId(relativeModelId), "ParamRef", 0, System.Collections.Immutable.ImmutableArray<int>.Empty)
+                .LocalTrainableParam(new ModelId(relativeModelId),
+                    "ParamRef_" + string.Join("_", relativeModelId), 0,
+                    System.Collections.Immutable.ImmutableArray<int>.Empty)
                 .ToString();
             var dtype = OnnxUtils.GetDType(typeof(T))
                 ?? throw new System.InvalidOperationException($"No DType for type {typeof(T).Name}.");

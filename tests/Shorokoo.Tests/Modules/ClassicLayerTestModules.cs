@@ -25,10 +25,13 @@ public partial class NNConv3dMatchesStaticConv
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
         var outChannels = Scalar(3L);
-        var y = Conv3d.Call(outChannels, Scalar(3L), Scalar(2L), Scalar(1L), Scalar(1L), Scalar(1L), Scalar(true), x);
+        var model = Conv3d.Model(outChannels, Scalar(3L), Scalar(2L), Scalar(1L), Scalar(1L), Scalar(1L), Scalar(true));
+        var y = model.Call(x);
 
-        Scalar<int64> inChannels = x.ShapeTensor()[1];
-        var wRef = KaimingUniform.Init([outChannels, inChannels, Scalar(3L), Scalar(3L), Scalar(3L)]);
+        // Reference the layer's OWN realized weight [outC, inC, 3, 3, 3] (param [1]) so the check
+        // holds under per-parameter init RNG (a re-run KaimingUniform.Init would draw a different
+        // stream). Bias is Zeros-init, so the closed form uses a literal zero bias.
+        var wRef = model.GetTrainableParam<float32>([1], rank: 5);
         var yRef = NN.Conv(x, wRef, VectorFill(outChannels, 0f), AutoPad.NotSet,
             dilations: [1L, 1L, 1L], group: 1L, kernelShape: [3L, 3L, 3L],
             pads: [1L, 1L, 1L, 1L, 1L, 1L], strides: [2L, 2L, 2L]);

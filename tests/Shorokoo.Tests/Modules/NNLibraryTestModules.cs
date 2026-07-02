@@ -1492,9 +1492,10 @@ public partial class NNEmbeddingMatchesGather
     {
         var numEmbeddings = Scalar(5L);
         var dim = Scalar(4L);
-        var y = Embedding.Call(numEmbeddings, dim, Scalar(-1L), Scalar(0f), Scalar(2f), indices);
+        var model = Embedding.Model(numEmbeddings, dim, Scalar(-1L), Scalar(0f), Scalar(2f));
+        var y = model.Call(indices);
 
-        var wRef = Normal.Init([numEmbeddings, dim]);
+        var wRef = model.GetTrainableParam<float32>([1], rank: 2);   // the layer's OWN table [V, D]
         var yRef = wRef.Gather(indices, axis: 0);
 
         var diff = (y - yRef).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
@@ -1531,17 +1532,21 @@ public partial class NNEmbeddingPaddingIdxZeros
         var dim = Scalar(4L);
 
         // paddingIdx:2 on indices [0,1,2,2,3] -> rows at the two `2`s masked to zero.
-        var padded = Embedding.Call(numEmbeddings, dim, Scalar(2L), Scalar(0f), Scalar(2f), indices);
-        // off-sentinel: paddingIdx:-1 must be a no-op == plain Gather.
-        var offPad = Embedding.Call(numEmbeddings, dim, Scalar(-1L), Scalar(0f), Scalar(2f), indices);
+        // Each distinct call-site is its own model, so reference each against its OWN realized
+        // table (param [1]); under per-parameter init RNG two call-sites no longer share a weight.
+        var paddedModel = Embedding.Model(numEmbeddings, dim, Scalar(2L), Scalar(0f), Scalar(2f));
+        var padded = paddedModel.Call(indices);
+        var gatherPadded = paddedModel.GetTrainableParam<float32>([1], rank: 2).Gather(indices, axis: 0); // [5,4]
 
-        var wRef = Normal.Init([numEmbeddings, dim]);
-        var gatherRef = wRef.Gather(indices, axis: 0);                 // [5, 4] plain lookup
+        // off-sentinel: paddingIdx:-1 must be a no-op == plain Gather (of its own table).
+        var offModel = Embedding.Model(numEmbeddings, dim, Scalar(-1L), Scalar(0f), Scalar(2f));
+        var offPad = offModel.Call(indices);
+        var gatherOff = offModel.GetTrainableParam<float32>([1], rank: 2).Gather(indices, axis: 0);        // [5,4]
 
         // Build the expected pad mask in the reference: rows where indices == 2 -> 0.
         var isPad = (indices == Scalar(2L)).Unsqueeze(-1);             // [5, 1] bit
-        var zeros = gatherRef * Scalar(0f);
-        var expected = isPad.Where(zeros, gatherRef);                  // pad rows -> 0, else gather
+        var zeros = gatherPadded * Scalar(0f);
+        var expected = isPad.Where(zeros, gatherPadded);               // pad rows -> 0, else gather
 
         // (a) padded output matches the hand-masked reference exactly (covers
         //     both the all-zero pad rows AND the unchanged non-pad rows).
@@ -1549,7 +1554,7 @@ public partial class NNEmbeddingPaddingIdxZeros
         // (b) explicit check that the pad positions carry zero L2 mass (independent of (a)).
         var padMass = (isPad.Where(padded, zeros)).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
         // (c) off-sentinel is the plain Gather (no masking).
-        var offDiff = (offPad - gatherRef).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        var offDiff = (offPad - gatherOff).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
         return (padDiff + padMass + offDiff) < Scalar(1e-4f);
     }
@@ -1576,12 +1581,20 @@ public partial class NNEmbeddingMaxNormClampsL2
         var dim = Scalar(4L);
         var maxNorm = Scalar(0.5f);   // ≪ the ~2.0 row norms, so it binds every gathered row
 
-        var wRef = Normal.Init([numEmbeddings, dim]);
-        var gatherRef = wRef.Gather(indices, axis: 0);                 // [n, 4]
+        // Each distinct-cap call-site is its own model and references its OWN realized table
+        // (param [1]); under per-parameter init RNG the three call-sites no longer share a weight,
+        // so every sub-check compares an output against the gather of that same model's table.
+        var capModel = Embedding.Model(numEmbeddings, dim, Scalar(-1L), maxNorm, Scalar(2f));
+        var y = capModel.Call(indices);
+        var gatherRef = capModel.GetTrainableParam<float32>([1], rank: 2).Gather(indices, axis: 0); // [n, 4]
 
-        var y = Embedding.Call(numEmbeddings, dim, Scalar(-1L), maxNorm, Scalar(2f), indices);
-        var bigCap = Embedding.Call(numEmbeddings, dim, Scalar(-1L), Scalar(1000f), Scalar(2f), indices);
-        var off = Embedding.Call(numEmbeddings, dim, Scalar(-1L), Scalar(0f), Scalar(2f), indices);
+        var bigModel = Embedding.Model(numEmbeddings, dim, Scalar(-1L), Scalar(1000f), Scalar(2f));
+        var bigCap = bigModel.Call(indices);
+        var gatherBig = bigModel.GetTrainableParam<float32>([1], rank: 2).Gather(indices, axis: 0);
+
+        var offModel = Embedding.Model(numEmbeddings, dim, Scalar(-1L), Scalar(0f), Scalar(2f));
+        var off = offModel.Call(indices);
+        var gatherOff = offModel.GetTrainableParam<float32>([1], rank: 2).Gather(indices, axis: 0);
 
         // Hand-built shrink-only L2 clamp reference: out = gather * min(1, maxNorm/‖row‖₂).
         var rowL2 = gatherRef.Reduce(ReduceKind.L2, [Scalar(-1L)], keepDims: true);  // [n, 1]
@@ -1596,9 +1609,9 @@ public partial class NNEmbeddingMaxNormClampsL2
         var yOverNorm = yOverRow.Reduce(ReduceKind.L2, keepDims: false).Scalar();
         var capDiff = (yOverNorm - maxNorm).Abs();
 
-        // (c) under-cap is a no-op: huge cap AND off-sentinel both == plain Gather.
-        var bigDiff = (bigCap - gatherRef).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-        var offDiff = (off - gatherRef).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        // (c) under-cap is a no-op: huge cap AND off-sentinel both == plain Gather of their own table.
+        var bigDiff = (bigCap - gatherBig).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        var offDiff = (off - gatherOff).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
         return (diff + capDiff + bigDiff + offDiff) < Scalar(1e-3f);
     }

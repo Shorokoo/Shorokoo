@@ -86,12 +86,7 @@ public class NNLibraryCoverageTests
     /// NNConv2dMatchesStaticConv. (The non-differentiable padding_mode checks live in
     /// TestConvPaddingModesCoverage; the trainability smoke in NNLibraryTrainingCoverageTests.)
     /// </summary>
-    // TODO(rng): These modules self-check against the static-helper Convolution.Conv /
-    // ConvTranspose (a static class with no .Model() handle), so they cannot reference the
-    // layer's realized weight via GetTrainableParam under per-parameter init. They relied on
-    // the retired "same shape + same initializer => identical values" behaviour. Skipped
-    // pending a static-helper explicit-weight overload (or migration to a [Module] wrapper).
-    [Fact(Skip = "Static-helper Convolution.Conv has no model handle for GetTrainableParam under per-parameter init RNG.")]
+    [Fact]
     public void TestGeneralizedConvLayersCoverage()
     {
         Assert.True(AutoTest.AdvancedTestGraph<ConvNonSquareKernelMatchesStatic>(
@@ -131,10 +126,7 @@ public class NNLibraryCoverageTests
     /// checks (the ORT/ONNX forward value is still validated). Causal's Pad is constant-mode and
     /// would survive QEE, but it is grouped here and run with the same flags for simplicity.
     /// </summary>
-    // TODO(rng): Same static-helper limitation as TestGeneralizedConvLayersCoverage — these
-    // modules reference Convolution.Conv/Conv1d directly and cannot pin the realized weight
-    // via GetTrainableParam under per-parameter init RNG.
-    [Fact(Skip = "Static-helper Convolution.Conv has no model handle for GetTrainableParam under per-parameter init RNG.")]
+    [Fact]
     public void TestConvPaddingModesCoverage()
     {
         Assert.True(AutoTest.AdvancedTestGraph<ConvPaddingModeMatchesHandPad>(
@@ -254,12 +246,7 @@ public class NNLibraryCoverageTests
     }
 
     /// <summary>§8-7 init choice via the static EmbeddingHelpers.Embed (Xavier; default == Normal).</summary>
-    // TODO(rng): NNEmbeddingInitChoice compares EmbeddingHelpers.Embed (a static helper with no
-    // .Model() handle) against an independently re-initialized same-shape reference table. Under
-    // per-parameter init RNG two separate inits of the same initializer no longer coincide (and a
-    // value comparison can't distinguish initializer *choice*), so this methodology is incompatible.
-    // Skipped pending a static-helper explicit-weight overload.
-    [Fact(Skip = "Static-helper EmbeddingHelpers.Embed has no model handle for GetTrainableParam under per-parameter init RNG.")]
+    [Fact]
     public void TestEmbeddingInitChoiceCoverage()
     {
         Assert.True(AutoTest.AdvancedTestGraph<NNEmbeddingInitChoice>(
@@ -285,12 +272,7 @@ public class NNLibraryCoverageTests
     /// The §8-5 train-step is the rig-based
     /// <see cref="NNLibraryTrainingCoverageTests.TestEmbeddingBagTrainStepMovesWeight"/>.
     /// </summary>
-    // TODO(rng): The §8-1/§8-3/§8-4 modules compare EmbeddingBag.Bag (a static helper with no
-    // .Model() handle) against an independently re-initialized same-shape reference weight, which
-    // no longer coincides with the helper's internal weight under per-parameter init RNG. Skipped
-    // pending a static-helper explicit-weight overload. The weight-independent shape check (§8-2)
-    // is preserved in TestEmbeddingBagShapeCoverage below.
-    [Fact(Skip = "Static-helper EmbeddingBag.Bag has no model handle for GetTrainableParam under per-parameter init RNG.")]
+    [Fact]
     public void TestEmbeddingBagCoverage()
     {
         // §8-1 Sum / Mean / Max vs the independent Gather→Reduce reference.
@@ -786,11 +768,7 @@ public class NNLibraryCoverageTests
     /// </list>
     /// All shapes have N=2 (batch ≥ 2) so the batch axis is non-degenerate.
     /// </summary>
-    // TODO(rng): The Recurrent.* modules use the static-helper Recurrent.RNN/LSTM/GRU (a
-    // static class with no .Model() handle), so their reference ops re-init same-shape weights
-    // that no longer coincide with the helper's internal weights under per-parameter init RNG.
-    // Skipped pending a static-helper explicit-weight overload (or a [Module] wrapper).
-    [Fact(Skip = "Static-helper Recurrent.* has no model handle for GetTrainableParam under per-parameter init RNG.")]
+    [Fact]
     public void TestRecurrentRnnForwardValueCoverage()
     {
         // §7-2 core op (forward, tanh): seq-first and batch-first inputs.
@@ -849,7 +827,7 @@ public class NNLibraryCoverageTests
     /// </list>
     /// All shapes have N=2 (batch ≥ 2) so the batch axis is non-degenerate.
     /// </summary>
-    [Fact(Skip = "Static-helper Recurrent.* has no model handle for GetTrainableParam under per-parameter init RNG.")]
+    [Fact]
     public void TestRecurrentLstmForwardValueCoverage()
     {
         // §7-1 core op (forward): seq-first and batch-first inputs.
@@ -907,7 +885,7 @@ public class NNLibraryCoverageTests
     /// </list>
     /// All shapes have N=2 (batch ≥ 2) so the batch axis is non-degenerate.
     /// </summary>
-    [Fact(Skip = "Static-helper Recurrent.* has no model handle for GetTrainableParam under per-parameter init RNG.")]
+    [Fact]
     public void TestRecurrentGruForwardValueCoverage()
     {
         // §7-1 core op (forward): seq-first and batch-first inputs.
@@ -965,7 +943,7 @@ public class NNLibraryCoverageTests
     /// </list>
     /// The §7-6 FD grad checks, §7-7 rig smoke and §7-8 relu-cell BPTT throw are Training [Fact]s.
     /// </summary>
-    [Fact(Skip = "Static-helper Recurrent.* has no model handle for GetTrainableParam under per-parameter init RNG.")]
+    [Fact]
     public void TestRecurrentCellForwardValueCoverage()
     {
         // ---- RNNCell ----
@@ -3043,7 +3021,7 @@ public class NNLibraryTrainingCoverageTests
     /// end-to-end recurrent-rig training is covered by the LSTM/GRU rig train-step tests (the
     /// shared RNN-BPTT scheduler stall they exercise was fixed in #440).
     /// </summary>
-    [Fact(Skip = "Static-helper Recurrent.* has no model handle for GetTrainableParam under per-parameter init RNG.")]
+    [Fact]
     public void TestRecurrentRnnForwardTanhGradient()
     {
         Assert.True(AutoTest.AdvancedTestGraph<RnnForwardTanhGradCheck>(
@@ -3082,7 +3060,7 @@ public class NNLibraryTrainingCoverageTests
     /// This is the positive trainable-gradient coverage; the end-to-end TrainingRig smoke is
     /// TestRecurrentLstmForwardTrainStepFlows below.
     /// </summary>
-    [Fact(Skip = "Static-helper Recurrent.* has no model handle for GetTrainableParam under per-parameter init RNG.")]
+    [Fact]
     public void TestRecurrentLstmForwardGradient()
     {
         Assert.True(AutoTest.AdvancedTestGraph<LstmForwardGradCheck>(
@@ -3158,7 +3136,7 @@ public class NNLibraryTrainingCoverageTests
     /// AutoGradGruReverseCheck. This is the positive trainable-gradient coverage; the end-to-end
     /// TrainingRig smoke is TestRecurrentGruForwardTrainStepFlows below.
     /// </summary>
-    [Fact(Skip = "Static-helper Recurrent.* has no model handle for GetTrainableParam under per-parameter init RNG.")]
+    [Fact]
     public void TestRecurrentGruForwardGradient()
     {
         Assert.True(AutoTest.AdvancedTestGraph<GruForwardGradCheck>(
@@ -3233,7 +3211,7 @@ public class NNLibraryTrainingCoverageTests
     /// probed scalar, so the gradient threads through the cell's distinguishing h(/c) input as well as x —
     /// the trainable corner (forward-tanh RNNCell, LSTMCell, and BOTH lbr forms of GRUCell).
     /// </summary>
-    [Fact(Skip = "Static-helper Recurrent.* has no model handle for GetTrainableParam under per-parameter init RNG.")]
+    [Fact]
     public void TestRecurrentCellForwardGradients()
     {
         Assert.True(AutoTest.AdvancedTestGraph<RnnCellForwardTanhGradCheck>(

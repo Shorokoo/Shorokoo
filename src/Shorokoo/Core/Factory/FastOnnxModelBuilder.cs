@@ -606,6 +606,7 @@ namespace Shorokoo.Core.Factory
         private static void RunPrePasses(FastComputationGraph graph, bool prepForOnnx)
         {
             FastLowerAttributeTensorOps.Process(graph);
+            FastLowerStateUpdateLinksForInference.Process(graph);
             FastLowerRandomOps.Process(graph);
             FastAddIdentityForOuterScopeValues.Process(graph);
             if (prepForOnnx) FastPrepForOnnx.Process(graph);
@@ -627,6 +628,7 @@ namespace Shorokoo.Core.Factory
             FastComputationGraph graph, bool prepForOnnx)
         {
             FastLowerAttributeTensorOps.Process(graph);
+            FastLowerStateUpdateLinksForInference.Process(graph);
             FastLowerRandomOps.Process(graph);
             FastAddIdentityForOuterScopeValues.Process(graph);
             if (prepForOnnx) FastPrepForOnnx.Process(graph);

@@ -83,7 +83,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 : node.Attributes.GetFloatVal(AttrScale) ?? 1.0f;
 
             var keyKey = AppendKeyConstant(k0, k1, newNodes);
-            var drawBaseKey = AppendScalarInt64(0L, newNodes);
+            // drawBase: the site's own counter input when wired (e.g. Dropout's per-execution
+            // state counter, advancing per training step), else a constant 0.
+            var drawBaseKey = node.Inputs.Count > 1 && node.Inputs[1] is { } db
+                ? db
+                : AppendScalarInt64(0L, newNodes);
             var aKey = AppendScalarFloat32(a, newNodes);
             var bKey = AppendScalarFloat32(b, newNodes);
 

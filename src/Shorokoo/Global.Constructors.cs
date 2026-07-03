@@ -584,15 +584,15 @@ namespace Shorokoo
         /// Creates a tensor filled with random values from a uniform distribution in [low, high).
         /// Takes shape as a dynamic tensor input. Lowered to ONNX RandomUniformLike before execution.
         /// </summary>
-        public static Tensor<float32> RandomUniform(Vector<int64> shape, float low = 0.0f, float high = 1.0f, float? seed = null)
-            => InternalOp.RandomUniform(shape, high: high, low: low, seed: seed);
+        public static Tensor<float32> RandomUniform(Vector<int64> shape, float low = 0.0f, float high = 1.0f, float? seed = null, Scalar<int64>? drawBase = null)
+            => InternalOp.RandomUniform(shape, high: high, low: low, seed: seed, drawBase: drawBase?.ToVariable());
 
         /// <summary>
         /// Creates a tensor filled with random values from a normal distribution with given mean and scale (std dev).
         /// Takes shape as a dynamic tensor input. Lowered to ONNX RandomNormalLike before execution.
         /// </summary>
-        public static Tensor<float32> RandomNormal(Vector<int64> shape, float mean = 0.0f, float scale = 1.0f, float? seed = null)
-            => InternalOp.RandomNormal(shape, mean: mean, scale: scale, seed: seed);
+        public static Tensor<float32> RandomNormal(Vector<int64> shape, float mean = 0.0f, float scale = 1.0f, float? seed = null, Scalar<int64>? drawBase = null)
+            => InternalOp.RandomNormal(shape, mean: mean, scale: scale, seed: seed, drawBase: drawBase?.ToVariable());
 
         /// <summary>Creates TensorData of the given dtype from boxed values.</summary>
         public static TensorData TensorData(DType type, long[] dims, params object[] vals)

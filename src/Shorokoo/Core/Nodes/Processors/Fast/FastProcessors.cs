@@ -246,7 +246,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastApplyIdentifierTemplates
     {
-        public static void Process(FastComputationGraph graph, IReadOnlyList<FastNodeKey>? pinnedNodeKeys = null)
+        public static void Process(
+            FastComputationGraph graph,
+            IReadOnlyList<FastNodeKey>? pinnedNodeKeys = null,
+            IReadOnlyList<(int slot, FastNodeKey key)>? slotPinnedNodeKeys = null)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -255,7 +258,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             var tensorInfos = FastTensorInfoProcessor.BuildTensorInfoLookup(graph);
 
-            var idPickerEnumerator = FindNextSpot().GetEnumerator();
+            // Sparse pins reserve their slots: the top-level picker skips them, so unpinned
+            // consumers keep their positions relative to each other while pinned ones sit at
+            // exactly their named slots.
+            var reservedSlots = new HashSet<int>();
+            if (slotPinnedNodeKeys is { Count: > 0 })
+                foreach (var (slot, _) in slotPinnedNodeKeys)
+                    if (!reservedSlots.Add(slot))
+                        throw new InvalidOperationException(
+                            $"Rng.Pin (sparse): slot [{slot}] is pinned more than once.");
+
+            var idPickerEnumerator = FindNextSpot(reservedSlots).GetEnumerator();
             var loopModelIds = new Dictionary<FastTensorKey, (ModelId loopModelId, IEnumerator<int> loopContentsModelIdPicker)>();
             var loopDedupeIdsMap = new Dictionary<FastTensorKey, int>();
             var moduleNameDedupeIdMap = new Dictionary<string, int>();
@@ -281,32 +294,56 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     "be fully unassigned. Mixing (e.g. appending raw id-bearing nodes — Model()/Init()/" +
                     "Globals.Random* calls — onto an already-built graph) has no coherent numbering.");
 
-            // Rng.Pin: pinned nodes take the first id slots in pin order; everything else
-            // follows in node order. A pinned handle's OwningNode may sit behind Identity
-            // wrappers — walk back to the id-bearing producer.
+            // Rng.Pin: a pinned handle's OwningNode may sit behind Identity wrappers — walk
+            // back to the id-bearing producer. Failing to reach one is a build error (the
+            // pin would be silently inactive).
+            FastNode ResolvePinnedNode(FastNodeKey pinKey, string form)
+            {
+                var key = pinKey;
+                FastNode? candidate = null;
+                for (int hops = 0; hops < 16 && nodeByKey.TryGetValue(key, out candidate); hops++)
+                {
+                    if (candidate.Attributes.IsAttributeDefined(OnnxOpAttributeNames.ShrkAttrLocalModelId))
+                        break;
+                    if (candidate.OpCode == OpCodes.IDENTITY && candidate.Inputs[0] is { } up)
+                    { key = up.FastNodeKey; candidate = null; continue; }
+                    candidate = null;
+                    break;
+                }
+                return candidate ?? throw new InvalidOperationException(
+                    $"Rng.Pin ({form}): a pinned item does not lead to an id-bearing node " +
+                    "(a Model(...) result, an Init(...) parameter, or a Globals.Random* feed). " +
+                    "Graph inputs and derived values have no RNG stream to pin.");
+            }
+
+            // Positional pins: pinned nodes take the first (unreserved) id slots in pin
+            // order; everything else follows in node order.
             if (pinnedNodeKeys is { Count: > 0 })
             {
                 var pinnedNodes = new List<FastNode>();
                 foreach (var pinKey in pinnedNodeKeys)
                 {
-                    var key = pinKey;
-                    FastNode? candidate = null;
-                    for (int hops = 0; hops < 16 && nodeByKey.TryGetValue(key, out candidate); hops++)
-                    {
-                        if (candidate.Attributes.IsAttributeDefined(OnnxOpAttributeNames.ShrkAttrLocalModelId))
-                            break;
-                        if (candidate.OpCode == OpCodes.IDENTITY && candidate.Inputs[0] is { } up)
-                        { key = up.FastNodeKey; candidate = null; continue; }
-                        candidate = null;
-                        break;
-                    }
-                    if (candidate is not null && !pinnedNodes.Contains(candidate))
-                        pinnedNodes.Add(candidate);
+                    var pinnedNode = ResolvePinnedNode(pinKey, "positional");
+                    if (!pinnedNodes.Contains(pinnedNode))
+                        pinnedNodes.Add(pinnedNode);
                 }
-                if (pinnedNodes.Count > 0)
-                    orderedTargets = pinnedNodes
-                        .Concat(orderedTargets.Where(t => !pinnedNodes.Contains(t)))
-                        .ToList();
+                orderedTargets = pinnedNodes
+                    .Concat(orderedTargets.Where(t => !pinnedNodes.Contains(t)))
+                    .ToList();
+            }
+
+            // Sparse pins: each pinned node bypasses the picker and takes exactly its slot.
+            var explicitSlotByNode = new Dictionary<FastNode, int>();
+            if (slotPinnedNodeKeys is { Count: > 0 })
+            {
+                foreach (var (slot, pinKey) in slotPinnedNodeKeys)
+                {
+                    var pinnedNode = ResolvePinnedNode(pinKey, "sparse");
+                    if (explicitSlotByNode.TryGetValue(pinnedNode, out var prior) && prior != slot)
+                        throw new InvalidOperationException(
+                            $"Rng.Pin (sparse): the same item is pinned to slots [{prior}] and [{slot}].");
+                    explicitSlotByNode[pinnedNode] = slot;
+                }
             }
 
             foreach (var fastNode in orderedTargets)
@@ -326,7 +363,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     // from the enclosing scope's picker only if inside a loop that already
                     // has id-bearing content; otherwise the global picker (see
                     // FastApplyRngKeys for the in-loop keying limitation).
-                    var feedModelId = AllocateLoopModelIds([], idPickerEnumerator, loopModelIds);
+                    var feedModelId = explicitSlotByNode.TryGetValue(fastNode, out var feedSlot)
+                        ? new ModelId(feedSlot)
+                        : AllocateLoopModelIds([], idPickerEnumerator, loopModelIds);
                     var dctFeedAttributes = fastNode.Attributes.GetAttributeVals().ToDictionary();
                     dctFeedAttributes[OnnxOpAttributeNames.ShrkAttrLocalModelId] =
                         feedModelId.Vals.Select(x => (long)x).ToArray();
@@ -338,7 +377,20 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var toIdentifyKey = fastNode.Outputs[0]!.Value;
 
                 var loopIterationIndices = GetIterationIndices(fastNode, nodeByKey);
-                var modelIdToUse = AllocateLoopModelIds(loopIterationIndices, idPickerEnumerator, loopModelIds);
+                ModelId modelIdToUse;
+                if (explicitSlotByNode.TryGetValue(fastNode, out var explicitSlot))
+                {
+                    if (loopIterationIndices.Length > 0)
+                        throw new InvalidOperationException(
+                            "Rng.Pin (sparse): a loop-body consumer cannot take an explicit " +
+                            "top-level slot — loop items live under the loop's own id space. " +
+                            "Loop-body paths are a specified follow-up.");
+                    modelIdToUse = new ModelId(explicitSlot);
+                }
+                else
+                {
+                    modelIdToUse = AllocateLoopModelIds(loopIterationIndices, idPickerEnumerator, loopModelIds);
+                }
 
                 // Update model ID in attributes.
                 var dctRebuiltAttributes = fastNode.Attributes.GetAttributeVals().ToDictionary();
@@ -479,10 +531,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return new ModelId(parentLoopModelId, new ModelId(parentLoopModelIdPicker.Current));
         }
 
-        private static IEnumerable<int> FindNextSpot()
+        private static IEnumerable<int> FindNextSpot(IReadOnlySet<int>? reservedSlots = null)
         {
             for (int spot = 1; ; spot++)
-                yield return spot;
+                if (reservedSlots is null || !reservedSlots.Contains(spot))
+                    yield return spot;
         }
     }
 

@@ -150,7 +150,7 @@ namespace Shorokoo.Core
             {
                 Variable[] fnOutputs;
                 Variable[] stateUpdates;
-                object[] rngPins;
+                (object[] positional, (int[] path, object item)[] sparse) rngPins;
                 try
                 {
                     fnOutputs = ModuleHelper.InvokeAndFormat(methodInfo, fnInputs, invokeTarget);
@@ -214,9 +214,10 @@ namespace Shorokoo.Core
 
                 // Rng.Pin support: capture the Node -> FastNodeKey assignment so the pinned
                 // handles (recorded during the body trace) can be resolved to graph nodes and
-                // handed to the id-assignment pass, which gives them the first id slots in
-                // pin order (see Shorokoo.Rng.Pin).
-                var nodeKeyMap = rngPins.Length > 0 ? new Dictionary<Node, Shorokoo.Core.Graph.FastNodeKey>() : null;
+                // handed to the id-assignment pass — positional pins take the first id slots
+                // in pin order, sparse pins take exactly their named slots (see Shorokoo.Rng.Pin).
+                bool hasPins = rngPins.positional.Length > 0 || rngPins.sparse.Length > 0;
+                var nodeKeyMap = hasPins ? new Dictionary<Node, Shorokoo.Core.Graph.FastNodeKey>() : null;
                 var fastGraph = new FastComputationGraph(
                     [.. allInputs],
                     [.. fnOutputs],
@@ -236,25 +237,48 @@ namespace Shorokoo.Core
                 }
 
                 List<Shorokoo.Core.Graph.FastNodeKey>? pinnedKeys = null;
-                if (rngPins.Length > 0 && nodeKeyMap is not null)
+                List<(int slot, Shorokoo.Core.Graph.FastNodeKey key)>? slotPinnedKeys = null;
+                if (hasPins && nodeKeyMap is not null)
                 {
-                    pinnedKeys = new List<Shorokoo.Core.Graph.FastNodeKey>();
-                    foreach (var pin in rngPins)
+                    // An unresolvable pin is a build error, not a skip: an inactive pin the
+                    // author believes is active is exactly the silent re-keying Rng.Pin
+                    // exists to prevent.
+                    Shorokoo.Core.Graph.FastNodeKey ResolvePin(object pin, string form)
                     {
                         Variable pinVar = pin switch
                         {
                             IModel model => model.ModelVariable,
                             IValue value => value.ToVariable(),
                             _ => throw new ArgumentException(
-                                $"Rng.Pin: unsupported item type '{pin?.GetType().Name ?? "null"}' — " +
-                                "pass model objects (X.Model(...)) or initializer result tensors."),
+                                $"Rng.Pin ({form}): unsupported item type '{pin?.GetType().Name ?? "null"}' — " +
+                                "pass model objects (X.Model(...)), initializer result tensors, or " +
+                                "Globals.Random* feed tensors."),
                         };
-                        if (nodeKeyMap.TryGetValue(pinVar.OwningNode, out var pinKey))
-                            pinnedKeys.Add(pinKey);
+                        if (!nodeKeyMap.TryGetValue(pinVar.OwningNode, out var pinKey))
+                            throw new InvalidOperationException(
+                                $"Rng.Pin ({form}): pinned item of type '{pin.GetType().Name}' does not " +
+                                $"resolve to a node of module '{methodInfo.DeclaringType?.Name}''s graph " +
+                                "— it was created outside this Inline body (or on another thread). The " +
+                                "pin would be silently inactive, so the module build fails instead.");
+                        return pinKey;
+                    }
+
+                    if (rngPins.positional.Length > 0)
+                    {
+                        pinnedKeys = new List<Shorokoo.Core.Graph.FastNodeKey>();
+                        foreach (var pin in rngPins.positional)
+                            pinnedKeys.Add(ResolvePin(pin, "positional"));
+                    }
+                    if (rngPins.sparse.Length > 0)
+                    {
+                        slotPinnedKeys = new List<(int, Shorokoo.Core.Graph.FastNodeKey)>();
+                        foreach (var (path, item) in rngPins.sparse)
+                            slotPinnedKeys.Add((path[0], ResolvePin(item, "sparse")));
                     }
                 }
 
-                Shorokoo.Core.Nodes.Processors.Fast.FastApplyIdentifierTemplates.Process(fastGraph, pinnedKeys);
+                Shorokoo.Core.Nodes.Processors.Fast.FastApplyIdentifierTemplates.Process(
+                    fastGraph, pinnedKeys, slotPinnedKeys);
                 return fastGraph;
             }
             finally

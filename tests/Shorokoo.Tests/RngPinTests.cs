@@ -29,6 +29,31 @@ public partial class PinSwappedTwoLinears
     }
 }
 
+/// <summary>Sparse pin: only a is pinned, to slot [2]; b keeps the first free slot (1).</summary>
+[Module]
+public partial class PinSparseTwoLinears
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var a = Linear.Model(Scalar(2L), Scalar(false));   // creation order 1, pinned to slot 2
+        var b = Linear.Model(Scalar(3L), Scalar(false));   // creation order 2 -> first free slot 1
+        Rng.Pin(([2], a));
+        return a.Call(x).Concat(-1L, b.Call(x));
+    }
+}
+
+/// <summary>Pins the module INPUT — no id-bearing producer, so the module build must fail.</summary>
+[Module]
+public partial class PinUnresolvableInput
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var a = Linear.Model(Scalar(2L), Scalar(false));
+        Rng.Pin(x);
+        return a.Call(x);
+    }
+}
+
 /// <summary>
 /// Rng.Pin reshapes ModelId (hence RNG stream) assignment without touching the graph's
 /// dataflow: pinned items take the module-local id slots in pin order, so a pinned module's
@@ -72,5 +97,28 @@ public class RngPinTests
         // Dataflow untouched: both produce [1, 5] outputs and execute fine.
         Assert.Equal(5, baselineOut.Length);
         Assert.Equal(5, pinnedOut.Length);
+    }
+
+    [Fact]
+    public void TestSparsePinTakesExplicitSlotAndLeavesOthersAlone()
+    {
+        // Pin(([2], a)) puts a (out=2) at slot 2; unpinned b (out=3) fills the first FREE
+        // slot, 1 — a partial sparse pin does not shift unlisted consumers behind the
+        // pinned ones the way a partial positional pin would.
+        var (firstSlotOutFeatures, output) = Probe<PinSparseTwoLinears>();
+        Assert.Equal(3L, firstSlotOutFeatures);
+        Assert.Equal(5, output.Length);
+    }
+
+    [Fact]
+    public void TestUnresolvablePinFailsTheModuleBuild()
+    {
+        // Pinning something with no RNG stream (here: the module input) must fail the build
+        // loudly — a silently inactive pin is exactly the re-keying hazard Pin guards against.
+        var ex = Assert.ThrowsAny<Exception>(() =>
+            _ = typeof(PinUnresolvableInput).GetProperty("ComputationGraph")!.GetValue(null));
+        for (Exception? e = ex; e is not null; e = e.InnerException)
+            if (e.Message.Contains("Rng.Pin")) return;
+        Assert.Fail($"expected an Rng.Pin build error, got: {ex}");
     }
 }

@@ -30,16 +30,16 @@ public enum RngCollection
 /// The single configuration object for randomness. It carries the bit-generator
 /// <see cref="Algorithm"/>, the <see cref="MasterSeed"/>, and any per-stream seed
 /// overrides — and is bound at materialization / compile time (like hyperparameters),
-/// never baked into the model definition. A model's random sites store only stable
-/// <em>stream names</em>; this object turns a stream name into the concrete key that
-/// seeds the draw.
+/// never baked into the model definition.
 ///
-/// <para>Key derivation: <c>key(stream) = override(stream)</c> if one is set, else
-/// <c>Fold(MasterSeed, streamName)</c>, where <c>Fold</c> hashes the UTF-8 stream name
-/// (SHA-256) and folds it into the master seed. So changing <see cref="MasterSeed"/>
-/// re-randomizes everything; an <see cref="Override(string, ulong)"/> touches exactly
-/// one stream; and because keys derive from <em>names</em> rather than draw order,
-/// inserting or reordering unrelated sites does not disturb other streams.</para>
+/// <para>Key derivation: each stream's key is the collection's sub-master (init or
+/// runtime, both derived from <see cref="MasterSeed"/>) folded along the consumer's
+/// ModelId path — one Threefry bijection per path index. So changing
+/// <see cref="MasterSeed"/> re-randomizes everything coherently; an
+/// <see cref="Override(RngCollection, int[], ulong)"/> replaces exactly one stream's
+/// key; and because keys derive from graph <em>position</em> rather than draw order,
+/// inserting or reordering unrelated sites does not disturb other streams (and
+/// <c>Rng.Pin</c> can freeze positions against refactoring).</para>
 ///
 /// <para>Fully deterministic by default (<c>MasterSeed = 0</c>). Use
 /// <see cref="NonDeterministic"/> for a fresh random stream each run.</para>
@@ -62,9 +62,11 @@ public sealed class RngConfig
     /// </summary>
     public bool SharedKey { get; init; }
 
-    // Full-stream-name ("params/..", "runtime/..") -> seed. Insertion into a live config;
-    // frozen in practice once bound.
-    private readonly Dictionary<string, ulong> _overrides = new(StringComparer.Ordinal);
+    // (collection, ModelId path) -> seed. Insertion into a live config; frozen in
+    // practice once bound (re-stamp after changing it to make it take effect).
+    private readonly Dictionary<(RngCollection collection, string pathKey), ulong> _overrides = new();
+
+    private static string PathKey(IReadOnlyList<int> modelIdPath) => string.Join(",", modelIdPath);
 
     /// <summary>The default deterministic configuration (master seed 0, Threefry-2x32).</summary>
     public static RngConfig Default { get; } = new();
@@ -83,46 +85,36 @@ public sealed class RngConfig
 
     /// <summary>
     /// Pins a single stream to <paramref name="seed"/>, overriding the master-seed
-    /// derivation for that stream only. <paramref name="streamName"/> is the full name
-    /// including the collection prefix, e.g. <c>"params/backbone.block3.conv1.weight"</c>
-    /// or <c>"runtime/head.dropout#0"</c>. Returns <c>this</c> for chaining.
+    /// derivation for that stream only. The stream is addressed by its consumer's
+    /// absolute ModelId path (as shown by the stream report / parameter infos), e.g.
+    /// <c>Override(RngCollection.Params, [1, 1], 1234)</c> re-seeds the first
+    /// sub-module's first parameter and nothing else. The override replaces the fully
+    /// folded key, so it survives a <see cref="MasterSeed"/> change. Matching is exact
+    /// (leaf streams); returns <c>this</c> for chaining.
     /// </summary>
-    public RngConfig Override(string streamName, ulong seed)
+    public RngConfig Override(RngCollection collection, int[] modelIdPath, ulong seed)
     {
-        ArgumentNullException.ThrowIfNull(streamName);
-        _overrides[streamName] = seed;
+        ArgumentNullException.ThrowIfNull(modelIdPath);
+        if (modelIdPath.Length == 0)
+            throw new ArgumentException("ModelId path must be non-empty.", nameof(modelIdPath));
+        _overrides[(collection, PathKey(modelIdPath))] = seed;
         return this;
     }
 
-    /// <summary>The full stream name (with collection prefix) for a site.</summary>
-    public static string StreamName(RngCollection collection, string name)
-        => CollectionPrefix(collection) + "/" + name;
-
-    internal static string CollectionPrefix(RngCollection collection) => collection switch
-    {
-        RngCollection.Params => "params",
-        RngCollection.Runtime => "runtime",
-        _ => throw new ArgumentOutOfRangeException(nameof(collection)),
-    };
-
     /// <summary>Whether a stream has an explicit override.</summary>
-    public bool HasOverride(RngCollection collection, string name)
-        => _overrides.ContainsKey(StreamName(collection, name));
+    public bool HasOverride(RngCollection collection, int[] modelIdPath)
+        => _overrides.ContainsKey((collection, PathKey(modelIdPath ?? throw new ArgumentNullException(nameof(modelIdPath)))));
 
-    /// <summary>The 64-bit key material for a stream, before splitting into generator words.</summary>
-    internal ulong ResolveKey64(RngCollection collection, string name)
+    private bool TryGetOverride(RngCollection collection, IReadOnlyList<int> modelIdPath, out (uint k0, uint k1) key)
     {
-        if (SharedKey)
-            return Fold(MasterSeed, CollectionPrefix(collection) + "/__shared__");
-        string full = StreamName(collection, name);
-        return _overrides.TryGetValue(full, out var seed) ? seed : Fold(MasterSeed, full);
-    }
-
-    /// <summary>The stream's key as the two 32-bit words the generator consumes.</summary>
-    internal (uint k0, uint k1) ResolveKey(RngCollection collection, string name)
-    {
-        ulong key = ResolveKey64(collection, name);
-        return ((uint)(key & 0xFFFFFFFF), (uint)(key >> 32));
+        if (_overrides.Count > 0 &&
+            _overrides.TryGetValue((collection, PathKey(modelIdPath)), out var seed))
+        {
+            key = SplitWords(seed);
+            return true;
+        }
+        key = default;
+        return false;
     }
 
     /// <summary>
@@ -146,23 +138,31 @@ public sealed class RngConfig
         => Core.Rng.Threefry2x32.Bijection(unchecked((uint)index), 0u, key.k0, key.k1);
 
     /// <summary>
-    /// A trainable parameter's stream key: the init master folded along the parameter's
-    /// ModelId path (specific ids — loop slots carry real iteration values). SharedKey mode
-    /// skips the fold so same-shape params tie (test/debug only).
+    /// A trainable parameter's stream key: an explicit per-stream override when one is set,
+    /// else the init master folded along the parameter's ModelId path (specific ids — loop
+    /// slots carry real iteration values). SharedKey mode skips the fold so same-shape
+    /// params tie (test/debug only).
     /// </summary>
     internal (uint k0, uint k1) FoldInitKey(IEnumerable<int> modelIdVals)
     {
+        var vals = modelIdVals as IReadOnlyList<int> ?? new List<int>(modelIdVals);
+        if (TryGetOverride(RngCollection.Params, vals, out var overridden)) return overridden;
         var key = InitMasterKey;
         if (SharedKey) return key;
-        foreach (var v in modelIdVals) key = FoldKey(key, v);
+        foreach (var v in vals) key = FoldKey(key, v);
         return key;
     }
 
-    /// <summary>A runtime feed's stream key: the runtime master folded along the feed's ModelId path.</summary>
+    /// <summary>
+    /// A runtime feed's stream key: an explicit per-stream override when one is set, else
+    /// the runtime master folded along the feed's ModelId path.
+    /// </summary>
     internal (uint k0, uint k1) FoldRunKey(IEnumerable<int> modelIdVals)
     {
+        var vals = modelIdVals as IReadOnlyList<int> ?? new List<int>(modelIdVals);
+        if (TryGetOverride(RngCollection.Runtime, vals, out var overridden)) return overridden;
         var key = RunMasterKey;
-        foreach (var v in modelIdVals) key = FoldKey(key, v);
+        foreach (var v in vals) key = FoldKey(key, v);
         return key;
     }
 

@@ -435,6 +435,20 @@ namespace Shorokoo
                 names: null, rngConfig: null);
 
         /// <summary>
+        /// Positional-hyperparameter overload with an RNG configuration. The config precedes
+        /// the hyperparameter values because a <c>params</c> array must come last.
+        /// </summary>
+        public static TrainingRig FromScratch(
+            FastComputationGraph modelGraph,
+            FastComputationGraph lossGraph,
+            FastComputationGraph optimizerGraph,
+            NamedModelParam[] sampleInputs,
+            RngConfig? rngConfig,
+            params HyperValue[] hyperparameters)
+            => FromScratchCore(modelGraph, lossGraph, optimizerGraph, sampleInputs, hyperparameters,
+                names: null, rngConfig: rngConfig);
+
+        /// <summary>
         /// Convenience overload that accepts a <see cref="ModelParamList"/> for sample inputs,
         /// as returned by <c>model.FromOrderedInputs([…])</c>, so you can write
         /// <c>FromScratch(model, Losses.L2Loss, Optimizers.Adam, model.FromOrderedInputs([…]), hypers)</c>
@@ -467,6 +481,23 @@ namespace Shorokoo
             if (sampleInputs is null) throw new ArgumentNullException(nameof(sampleInputs));
             return FromScratch(modelGraph, lossGraph, optimizerGraph,
                 sampleInputs.ModelParams.ToArray(), hyperparameters);
+        }
+
+        /// <summary>
+        /// <see cref="ModelParamList"/> convenience overload with an RNG configuration and
+        /// positional hyperparameter values (the config precedes the <c>params</c> array).
+        /// </summary>
+        public static TrainingRig FromScratch(
+            FastComputationGraph modelGraph,
+            FastComputationGraph lossGraph,
+            FastComputationGraph optimizerGraph,
+            ModelParamList sampleInputs,
+            RngConfig? rngConfig,
+            params HyperValue[] hyperparameters)
+        {
+            if (sampleInputs is null) throw new ArgumentNullException(nameof(sampleInputs));
+            return FromScratch(modelGraph, lossGraph, optimizerGraph,
+                sampleInputs.ModelParams.ToArray(), rngConfig, hyperparameters);
         }
 
         private static TrainingRig FromScratchCore(

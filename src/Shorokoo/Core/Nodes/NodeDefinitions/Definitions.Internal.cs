@@ -271,6 +271,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeString(ShrkAttrRngAlgorithm)
                 .Input("shape", "T1", 1)
                 .Input("drawBase", "T1", 0)
+                .Input("iterationIndices", "T1", 1)
                 .Output("output", "T2", rank: "R"),
 
             // SHRK_RANDOM_NORMAL: Generates random normal values with dynamic shape input.
@@ -286,6 +287,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeString(ShrkAttrRngAlgorithm)
                 .Input("shape", "T1", 1)
                 .Input("drawBase", "T1", 0)
+                .Input("iterationIndices", "T1", 1)
                 .Output("output", "T2", rank: "R"),
 
             // SHRK_RNG_SPLIT: index-based RNG key split, child = Bijection(key, counter: index)

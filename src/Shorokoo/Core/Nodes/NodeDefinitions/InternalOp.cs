@@ -327,8 +327,8 @@ internal static partial class InternalOp
     /// Takes shape as a tensor input (dynamic shape support).
     /// Lowered to ONNX ConstantOfShape + RandomUniformLike before execution.
     /// </summary>
-    public static Variable RandomUniform(Variable shape, float? high = null, float? low = null, float? seed = null, Variable? drawBase = null)
-        => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_UNIFORM, [shape, drawBase], [
+    public static Variable RandomUniform(Variable shape, float? high = null, float? low = null, float? seed = null, Variable? drawBase = null, Variable? iterationIndices = null)
+        => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_UNIFORM, [shape, drawBase, iterationIndices], [
             (AttrHigh, high), (AttrLow, low), (AttrSeed, seed),
             (ShrkAttrLocalModelId, (long[])[])]);
 
@@ -337,8 +337,8 @@ internal static partial class InternalOp
     /// Takes shape as a tensor input (dynamic shape support).
     /// Lowered to ONNX ConstantOfShape + RandomNormalLike before execution.
     /// </summary>
-    public static Variable RandomNormal(Variable shape, float? mean = null, float? scale = null, float? seed = null, Variable? drawBase = null)
-        => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_NORMAL, [shape, drawBase], [
+    public static Variable RandomNormal(Variable shape, float? mean = null, float? scale = null, float? seed = null, Variable? drawBase = null, Variable? iterationIndices = null)
+        => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_NORMAL, [shape, drawBase, iterationIndices], [
             (AttrMean, mean), (AttrScale, scale), (AttrSeed, seed),
             (ShrkAttrLocalModelId, (long[])[])]);
 

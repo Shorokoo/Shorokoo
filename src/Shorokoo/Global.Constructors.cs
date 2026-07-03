@@ -585,14 +585,25 @@ namespace Shorokoo
         /// Takes shape as a dynamic tensor input. Lowered to ONNX RandomUniformLike before execution.
         /// </summary>
         public static Tensor<float32> RandomUniform(Vector<int64> shape, float low = 0.0f, float high = 1.0f, float? seed = null, Scalar<int64>? drawBase = null)
-            => InternalOp.RandomUniform(shape, high: high, low: low, seed: seed, drawBase: drawBase?.ToVariable());
+        {
+            // Capture the ambient loop context (exactly like trainable-param Init calls) so an
+            // in-loop feed's ModelId gets an iteration slot and its stream key can be split by
+            // the runtime iteration index (see FastApplyIdentifierTemplates / FastLowerRandomOps).
+            Vector<int64> iterationIndices = [.. LoopAPI.IterationIndices];
+            return InternalOp.RandomUniform(shape, high: high, low: low, seed: seed,
+                drawBase: drawBase?.ToVariable(), iterationIndices: iterationIndices);
+        }
 
         /// <summary>
         /// Creates a tensor filled with random values from a normal distribution with given mean and scale (std dev).
         /// Takes shape as a dynamic tensor input. Lowered to ONNX RandomNormalLike before execution.
         /// </summary>
         public static Tensor<float32> RandomNormal(Vector<int64> shape, float mean = 0.0f, float scale = 1.0f, float? seed = null, Scalar<int64>? drawBase = null)
-            => InternalOp.RandomNormal(shape, mean: mean, scale: scale, seed: seed, drawBase: drawBase?.ToVariable());
+        {
+            Vector<int64> iterationIndices = [.. LoopAPI.IterationIndices];
+            return InternalOp.RandomNormal(shape, mean: mean, scale: scale, seed: seed,
+                drawBase: drawBase?.ToVariable(), iterationIndices: iterationIndices);
+        }
 
         /// <summary>Creates TensorData of the given dtype from boxed values.</summary>
         public static TensorData TensorData(DType type, long[] dims, params object[] vals)

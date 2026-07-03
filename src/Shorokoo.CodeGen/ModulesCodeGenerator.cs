@@ -33,6 +33,14 @@ public class ModuleSourceGenerator : IIncrementalGenerator
         DiagnosticSeverity.Error,
         isEnabledByDefault: true);
 
+    private static readonly DiagnosticDescriptor RngPinAvailable = new(
+        id: "MSG004",
+        title: "RNG streams of this module can be pinned",
+        messageFormat: "Module '{0}' has RNG stream consumers capturable by Rng.Pin. To freeze their stream identities against refactoring, paste at the end of Inline: {1}.",
+        category: "SourceGeneration",
+        DiagnosticSeverity.Info,
+        isEnabledByDefault: true);
+
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
         // Add a simple marker to verify the generator is running
@@ -72,6 +80,20 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                 {
                     var generatedCode = GenerateCode(classInfo);
                     spc.AddSource($"{classInfo.ClassName}_V2Generated.cs", SourceText.From(generatedCode, Encoding.UTF8));
+
+                    // Rng.Pin discoverability: for straight-line Inline bodies whose random
+                    // consumers (X.Model(...) / X.Init(...) results) are all captured in
+                    // locals, surface the ready-to-paste pin statement as an Info diagnostic.
+                    if (!classInfo.IsNewStyleInitializer &&
+                        classInfo.Location?.SourceTree?.GetRoot().FindNode(classInfo.Location.SourceSpan)
+                            is ClassDeclarationSyntax classSyntax)
+                    {
+                        var pinSuggestion = TryBuildRngPinSuggestion(classSyntax);
+                        if (pinSuggestion is not null)
+                            spc.ReportDiagnostic(Diagnostic.Create(
+                                RngPinAvailable, classInfo.Location, classInfo.ClassName, pinSuggestion));
+                    }
+
                     
                     // Report warnings for ignored methods (bad format / explicitly ignored)
                     foreach (var fm in classInfo.FullModules)
@@ -97,6 +119,79 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                 }
             }
         });
+    }
+
+    /// <summary>
+    /// Builds the ready-to-paste <c>Rng.Pin(...)</c> statement for a module whose Inline body
+    /// is straight-line (no C# control flow) and whose RNG stream consumers are all captured
+    /// in local variables. Returns null (no diagnostic) when the body has control flow, an
+    /// existing Rng.Pin, uncaptured Model/Init calls, chained Model(...).Call(...), static
+    /// TypeName.Call shortcuts, or opaque static-helper calls that may create streams — a
+    /// wrong pin is worse than none, so anything not provably capturable refuses.
+    /// </summary>
+    private static string? TryBuildRngPinSuggestion(ClassDeclarationSyntax classDecl)
+    {
+        var inline = classDecl.Members.OfType<MethodDeclarationSyntax>()
+            .FirstOrDefault(m => m.Identifier.Text == "Inline" && m.Body is not null);
+        if (inline?.Body is null) return null;
+
+        var items = new List<string>();
+        var sanctioned = new HashSet<InvocationExpressionSyntax>();
+        foreach (var stmt in inline.Body.Statements)
+        {
+            switch (stmt)
+            {
+                case LocalDeclarationStatementSyntax decl:
+                    foreach (var v in decl.Declaration.Variables)
+                        if (v.Initializer?.Value is InvocationExpressionSyntax inv &&
+                            inv.Expression is MemberAccessExpressionSyntax ma &&
+                            (ma.Name.Identifier.Text == "Model" || ma.Name.Identifier.Text == "Init"))
+                        {
+                            items.Add(v.Identifier.Text);
+                            sanctioned.Add(inv);
+                        }
+                    break;
+                case ExpressionStatementSyntax:
+                case ReturnStatementSyntax:
+                    break;
+                default:
+                    return null;   // control flow / unsupported statement
+            }
+        }
+        if (items.Count == 0) return null;
+
+        foreach (var inv in inline.Body.DescendantNodes().OfType<InvocationExpressionSyntax>())
+        {
+            if (inv.Expression is not MemberAccessExpressionSyntax member) continue;
+            var name = member.Name.Identifier.Text;
+
+            // Already pinned: no suggestion needed.
+            if (name == "Pin" && member.Expression is IdentifierNameSyntax { Identifier.Text: "Rng" })
+                return null;
+
+            // Model/Init calls that are not local-capture initializers create streams the pin
+            // cannot reference.
+            if ((name == "Model" || name == "Init") && !sanctioned.Contains(inv))
+                return null;
+
+            if (name == "Call")
+            {
+                // Chained Model(...).Call(...) or static TypeName.Call shortcuts hide the model.
+                if (member.Expression is not IdentifierNameSyntax recv) return null;
+                if (!items.Contains(recv.Identifier.Text) && char.IsUpper(recv.Identifier.Text[0]))
+                    return null;
+            }
+            else if (name != "Model" && name != "Init" &&
+                     member.Expression is IdentifierNameSyntax staticRecv &&
+                     char.IsUpper(staticRecv.Identifier.Text[0]))
+            {
+                // Opaque static-helper call (Recurrent.RNN, Globals.RandomUniform, ...): may
+                // create streams that cannot be captured — refuse rather than mis-pin.
+                return null;
+            }
+        }
+
+        return "Rng.Pin(" + string.Join(", ", items) + ");";
     }
 
     // V2: Partial class with [Module] attribute (both static and non-static)

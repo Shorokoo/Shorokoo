@@ -246,7 +246,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastApplyIdentifierTemplates
     {
-        public static void Process(FastComputationGraph graph)
+        public static void Process(FastComputationGraph graph, IReadOnlyList<FastNodeKey>? pinnedNodeKeys = null)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -260,8 +260,59 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var loopDedupeIdsMap = new Dictionary<FastTensorKey, int>();
             var moduleNameDedupeIdMap = new Dictionary<string, int>();
 
-            foreach (var fastNode in graph.Nodes)
+            // Rng.Pin: pinned nodes take the first id slots in pin order; everything else
+            // follows in node order. A pinned handle's OwningNode may sit behind Identity
+            // wrappers — walk back to the id-bearing producer.
+            var orderedTargets = graph.Nodes
+                .Where(n => n.Attributes.IsAttributeDefined(OnnxOpAttributeNames.ShrkAttrLocalModelId))
+                .ToList();
+            if (pinnedNodeKeys is { Count: > 0 })
             {
+                var pinnedNodes = new List<FastNode>();
+                foreach (var pinKey in pinnedNodeKeys)
+                {
+                    var key = pinKey;
+                    FastNode? candidate = null;
+                    for (int hops = 0; hops < 16 && nodeByKey.TryGetValue(key, out candidate); hops++)
+                    {
+                        if (candidate.Attributes.IsAttributeDefined(OnnxOpAttributeNames.ShrkAttrLocalModelId))
+                            break;
+                        if (candidate.OpCode == OpCodes.IDENTITY && candidate.Inputs[0] is { } up)
+                        { key = up.FastNodeKey; candidate = null; continue; }
+                        candidate = null;
+                        break;
+                    }
+                    if (candidate is not null && !pinnedNodes.Contains(candidate))
+                        pinnedNodes.Add(candidate);
+                }
+                if (pinnedNodes.Count > 0)
+                    orderedTargets = pinnedNodes
+                        .Concat(orderedTargets.Where(t => !pinnedNodes.Contains(t)))
+                        .ToList();
+            }
+
+            // Id stability: nodes that already carry a non-empty ModelId (assigned at module
+            // body build — possibly under an Rng.Pin ordering) KEEP it; re-runs of this pass
+            // (e.g. at concretization) only fill gaps. Their top-level slots are reserved so
+            // fresh allocations never collide.
+            var preassigned = new HashSet<FastNode>(ReferenceEqualityComparer.Instance);
+            var reservedTopLevel = new HashSet<int>();
+            foreach (var t in orderedTargets)
+            {
+                var existing = t.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId);
+                if (existing is { Length: > 0 })
+                {
+                    preassigned.Add(t);
+                    reservedTopLevel.Add(existing[0]);
+                }
+            }
+            if (reservedTopLevel.Count > 0)
+                idPickerEnumerator = FindNextSpot().Where(v => !reservedTopLevel.Contains(v)).GetEnumerator();
+
+            foreach (var fastNode in orderedTargets)
+            {
+                if (preassigned.Contains(fastNode))
+                    continue;
                 if (!fastNode.Attributes.IsAttributeDefined(OnnxOpAttributeNames.ShrkAttrLocalModelId))
                     continue;
 

@@ -136,6 +136,7 @@ namespace Shorokoo.Core
             // This is important because state updates registered outside of a module graph context
             // should not affect subsequent module/initializer graph builds
             Shorokoo.Core.InternalGlobals.GetAndClearStateUpdates();
+            Shorokoo.Rng.GetAndClearPins();
 
             // Modules speak in value handles, not the internal graph node type. (Inputs are validated
             // per-parameter inside CreateInputParams.)
@@ -149,6 +150,7 @@ namespace Shorokoo.Core
             {
                 Variable[] fnOutputs;
                 Variable[] stateUpdates;
+                object[] rngPins;
                 try
                 {
                     fnOutputs = ModuleHelper.InvokeAndFormat(methodInfo, fnInputs, invokeTarget);
@@ -158,6 +160,7 @@ namespace Shorokoo.Core
                     // Always clear state updates, even if an exception occurred
                     // This prevents state leakage between module invocations
                     stateUpdates = Shorokoo.Core.InternalGlobals.GetAndClearStateUpdates();
+                    rngPins = Shorokoo.Rng.GetAndClearPins();
                 }
 
                 // Check for registered state updates and wrap outputs with WithStateDeps if any exist
@@ -209,9 +212,15 @@ namespace Shorokoo.Core
                 allInputs.AddRange(fnInputVars.Where(IsHyperparamInput));
                 allInputs.AddRange(fnInputVars.Where(v => !IsHyperparamInput(v)));
 
+                // Rng.Pin support: capture the Node -> FastNodeKey assignment so the pinned
+                // handles (recorded during the body trace) can be resolved to graph nodes and
+                // handed to the id-assignment pass, which gives them the first id slots in
+                // pin order (see Shorokoo.Rng.Pin).
+                var nodeKeyMap = rngPins.Length > 0 ? new Dictionary<Node, Shorokoo.Core.Graph.FastNodeKey>() : null;
                 var fastGraph = new FastComputationGraph(
                     [.. allInputs],
-                    [.. fnOutputs]);
+                    [.. fnOutputs],
+                    nodeKeyMapOut: nodeKeyMap);
 
                 if (originalGenericMethod?.IsGenericMethodDefinition == true)
                 {
@@ -226,7 +235,26 @@ namespace Shorokoo.Core
                         .Process(fastGraph, genericIndexToParamName);
                 }
 
-                Shorokoo.Core.Nodes.Processors.Fast.FastApplyIdentifierTemplates.Process(fastGraph);
+                List<Shorokoo.Core.Graph.FastNodeKey>? pinnedKeys = null;
+                if (rngPins.Length > 0 && nodeKeyMap is not null)
+                {
+                    pinnedKeys = new List<Shorokoo.Core.Graph.FastNodeKey>();
+                    foreach (var pin in rngPins)
+                    {
+                        Variable pinVar = pin switch
+                        {
+                            IModel model => model.ModelVariable,
+                            IValue value => value.ToVariable(),
+                            _ => throw new ArgumentException(
+                                $"Rng.Pin: unsupported item type '{pin?.GetType().Name ?? "null"}' — " +
+                                "pass model objects (X.Model(...)) or initializer result tensors."),
+                        };
+                        if (nodeKeyMap.TryGetValue(pinVar.OwningNode, out var pinKey))
+                            pinnedKeys.Add(pinKey);
+                    }
+                }
+
+                Shorokoo.Core.Nodes.Processors.Fast.FastApplyIdentifierTemplates.Process(fastGraph, pinnedKeys);
                 return fastGraph;
             }
             finally

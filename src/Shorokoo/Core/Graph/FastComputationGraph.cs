@@ -105,7 +105,8 @@ namespace Shorokoo.Graph
             ImmutableArray<Variable> inputs,
             ImmutableArray<Variable> outputs,
             ImmutableArray<int?>? outputRankOverrides = null,
-            IReadOnlyDictionary<Variable, FastTensorKey>? externalInputKeys = null)
+            IReadOnlyDictionary<Variable, FastTensorKey>? externalInputKeys = null,
+            Dictionary<Node, FastNodeKey>? nodeKeyMapOut = null)
         {
             Debug.Assert(inputs.All(x => x.OwningNode.IsModelInput));
 
@@ -120,7 +121,8 @@ namespace Shorokoo.Graph
             var ranks = outputRankOverrides?.ToArray() ?? outputs.Select(x => x.Rank).ToArray();
             FastComputationGraphConverter.PopulateFromNodes(
                 this, orderedNodes, inputs, outputs, ranks,
-                useSequentialIds: false, externalInputKeys: externalInputKeys);
+                useSequentialIds: false, externalInputKeys: externalInputKeys,
+                nodeKeyMapOut: nodeKeyMapOut);
             Debug.Assert(IsLinearOrderValid(), "IsLinearOrderValid()");
         }
 

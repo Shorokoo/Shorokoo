@@ -584,25 +584,28 @@ namespace Shorokoo
         /// Creates a tensor filled with random values from a uniform distribution in [low, high).
         /// Takes shape as a dynamic tensor input. Lowered to ONNX RandomUniformLike before execution.
         /// </summary>
-        public static Tensor<float32> RandomUniform(Vector<int64> shape, float low = 0.0f, float high = 1.0f, float? seed = null, Scalar<int64>? drawBase = null)
+        public static Tensor<float32> RandomUniform(Vector<int64> shape, float low = 0.0f, float high = 1.0f, float? seed = null)
         {
             // Capture the ambient loop context (exactly like trainable-param Init calls) so an
             // in-loop feed's ModelId gets an iteration slot and its stream key can be split by
             // the runtime iteration index (see FastApplyIdentifierTemplates / FastLowerRandomOps).
+            // The drawBase channel is NOT a caller concern: the RNG system wires its own
+            // model-global execution counter into every feed at concretization
+            // (FastInjectRngDrawCounter), giving per-step freshness under training for free.
             Vector<int64> iterationIndices = [.. LoopAPI.IterationIndices];
             return InternalOp.RandomUniform(shape, high: high, low: low, seed: seed,
-                drawBase: drawBase?.ToVariable(), iterationIndices: iterationIndices);
+                drawBase: null, iterationIndices: iterationIndices);
         }
 
         /// <summary>
         /// Creates a tensor filled with random values from a normal distribution with given mean and scale (std dev).
         /// Takes shape as a dynamic tensor input. Lowered to ONNX RandomNormalLike before execution.
         /// </summary>
-        public static Tensor<float32> RandomNormal(Vector<int64> shape, float mean = 0.0f, float scale = 1.0f, float? seed = null, Scalar<int64>? drawBase = null)
+        public static Tensor<float32> RandomNormal(Vector<int64> shape, float mean = 0.0f, float scale = 1.0f, float? seed = null)
         {
             Vector<int64> iterationIndices = [.. LoopAPI.IterationIndices];
             return InternalOp.RandomNormal(shape, mean: mean, scale: scale, seed: seed,
-                drawBase: drawBase?.ToVariable(), iterationIndices: iterationIndices);
+                drawBase: null, iterationIndices: iterationIndices);
         }
 
         /// <summary>Creates TensorData of the given dtype from boxed values.</summary>

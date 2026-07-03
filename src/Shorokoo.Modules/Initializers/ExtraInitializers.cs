@@ -37,7 +37,7 @@ public static partial class TruncatedNormal
 /// <c>low</c>/<c>high</c> are extra Inline parameters (the
 /// <see cref="Constant"/>/<see cref="RecurrentUniform"/> extra-param precedent),
 /// generating <c>UniformRange.Init(shape, low, high)</c>.
-/// <see cref="Globals.RandomUniform(Vector{int64}, float, float, float?, Scalar{int64}?)"/> takes
+/// <see cref="Globals.RandomUniform(Vector{int64}, float, float, float?)"/> takes
 /// LITERAL float bounds, so the range is built in-graph as the affine transform of a
 /// standard U(0,1) draw: u·(high − low) + low — the same fill-times-scalar shape
 /// <see cref="XavierUniform"/> uses, plus a shift. Expects <c>low ≤ high</c>.
@@ -58,7 +58,7 @@ public static partial class UniformRange
 /// <c>nn.init.normal_(t, mean, std)</c> and Keras's <c>RandomNormal(mean, stddev)</c>.
 /// Any rank. <c>mean</c>/<c>std</c> are extra Inline parameters,
 /// generating <c>NormalDist.Init(shape, mean, std)</c>.
-/// <see cref="Globals.RandomNormal(Vector{int64}, float, float, float?, Scalar{int64}?)"/> takes LITERAL
+/// <see cref="Globals.RandomNormal(Vector{int64}, float, float, float?)"/> takes LITERAL
 /// float mean/scale, so the distribution is built in-graph as the affine transform of a
 /// standard N(0,1) draw: z·std + mean — the same random-times-scalar shape
 /// <see cref="KaimingNormal"/> uses, plus a shift. Expects <c>std ≥ 0</c>.

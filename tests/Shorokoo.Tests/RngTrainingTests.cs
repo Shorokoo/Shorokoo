@@ -42,7 +42,8 @@ public class RngTrainingTests
         new[] { new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32) },
         "Target");
 
-    private static (float[] losses, TrainingRig rig) TrainLosses(RngConfig? rngConfig, int steps)
+    private static (float[] losses, TrainingRig rig, TrainingCheckpoint finalCheckpoint) TrainLosses(
+        RngConfig? rngConfig, int steps)
     {
         var sample = new NamedModelParam[]
         {
@@ -72,15 +73,22 @@ public class RngTrainingTests
             losses[i] = step.Loss;
             checkpoint = step.Checkpoint;
         }
-        return (losses, rig);
+        return (losses, rig, checkpoint);
     }
 
     [Fact]
     public void TestKeyedRigTrainsDeterministicallyAndRekeysUnderNewMaster()
     {
-        var (lossesA1, rigA) = TrainLosses(new RngConfig { MasterSeed = 5 }, steps: 3);
-        var (lossesA2, _) = TrainLosses(new RngConfig { MasterSeed = 5 }, steps: 3);
-        var (lossesB, _) = TrainLosses(new RngConfig { MasterSeed = 6 }, steps: 3);
+        var (lossesA1, rigA, finalA) = TrainLosses(new RngConfig { MasterSeed = 5 }, steps: 3);
+        var (lossesA2, _, _) = TrainLosses(new RngConfig { MasterSeed = 5 }, steps: 3);
+        var (lossesB, _, _) = TrainLosses(new RngConfig { MasterSeed = 6 }, steps: 3);
+
+        // The generator-managed drawBase: the injected RngExecutionCounter is ordinary model
+        // state riding the checkpoint, advanced +1 per step — after 3 steps it reads 3, so a
+        // resumed run at step 4 draws exactly what the uninterrupted run would.
+        var counterField = finalA.ModelState.Fields.Single(f => f.Key.Contains("RngExecutionCounter"));
+        var counterValue = ((TensorData<float32>)counterField.Value).AccessMemory()[0];
+        Assert.Equal(3f, counterValue);
 
         // The stamped feed rides through loss composition and autodiff into the
         // training-step graph — the stamp is visible on the step graph itself.

@@ -152,7 +152,15 @@ public class RngPinTests
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps]));
 
         var cfg = new RngConfig { MasterSeed = 3 };
-        var feed = Assert.Single(arch.GetRngStreamReport(cfg).Streams);
+        var report = arch.GetRngStreamReport(cfg);
+
+        // Two streams: the feed, plus the generator's injected drawBase counter state
+        // (RngExecutionCounter — a draw-free zero fill, but it occupies an id slot, so the
+        // inventory lists it).
+        Assert.Equal(2, report.Streams.Count);
+        Assert.Contains(report.Streams, s =>
+            s.Kind == RngStreamKind.ParamInit && s.Name!.Contains("RngExecutionCounter"));
+        var feed = report.Streams.Single(s => s.Kind == RngStreamKind.UniformFeed);
 
         // The loop-body feed sits at [1, -1, 1]; the reported key is the PREFIX key before
         // the iteration slot (per-iteration keys are split at runtime).

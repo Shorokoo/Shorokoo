@@ -19,37 +19,19 @@ namespace Shorokoo.Modules.Layers;
 /// per execution, non-reproducible). One draw per mask element; survivors scale to
 /// <c>1/(1−ratio)</c>, drops to 0; eval (<c>training = false</c>) is all-ones (identity).
 /// </summary>
-/// <summary>
-/// Per-execution draw counter for Dropout's RNG (module-owned state, initialized 0, advanced
-/// +1 per execution via <see cref="Globals.StateUpdate"/>). Supplies the keyed draw's
-/// <c>drawBase</c> (Threefry counter high word): under the training rig the state advances
-/// each step, so masks vary per step and a resumed run at step N draws exactly what the
-/// uninterrupted run would (the counter rides the checkpoint). In one-shot inference the
-/// state stays at its initial value (STATE_UPDATE_LINK lowers to the original value at ONNX
-/// export), so eval/inference remain deterministic and effectively stateless.
-/// </summary>
-[StateInitializer(Ownership = StateOwnership.ModuleOwned)]
-public static partial class RngDrawCounter
-{
-    // A [1] float32 buffer (module-owned state resolution derives its shape from the shape
-    // input, like BatchNorm's running stats); float32 exactly represents step counts well
-    // past any real run and is cast to the int64 drawBase at the draw site.
-    public static Tensor<float32> Inline(Vector<int64> shape) => Globals.TensorFill(shape, 0.0f);
-}
-
 internal static class DropoutMasking
 {
     public static Tensor<float32> Mask(Vector<int64> maskShape, Scalar<float32> ratio, Scalar<bit> training)
     {
-        // Per-execution draw counter -> drawBase, so keyed masks vary per training step.
-        var counter = RngDrawCounter.Init([Scalar(1L)]);
-        Globals.StateUpdate(counter, counter + Scalar(1.0f));
-        var drawBase = counter.Scalar().Cast<int64>();
-
+        // Per-step mask freshness needs nothing here: the RNG system owns the drawBase.
+        // Concretization injects one model-global execution counter (state, +1 per step
+        // under the training rig; frozen at 0 in one-shot inference) and wires it into
+        // every feed — see FastInjectRngDrawCounter.
+        //
         // Seed 42 is honored only by the unkeyed ONNX fallback (RandomUniformLike), keeping
         // that path deterministic per session — the pre-keyed-RNG behavior. The keyed path
         // derives its stream from the RngConfig masters and ignores this attribute.
-        var u = RandomUniform(maskShape, low: 0f, high: 1f, seed: 42f, drawBase: drawBase);
+        var u = RandomUniform(maskShape, low: 0f, high: 1f, seed: 42f);
 
         var keep = (u >= ratio).Cast<float32>();                        // 1 if kept (prob 1−ratio), else 0
         var scaled = keep / (Scalar(1f) - ratio);                       // survivors → 1/(1−ratio)

@@ -70,10 +70,15 @@ versioned set of functions (default `"Threefry2x32-BoxMuller.v1"`, kinds *split*
 model's randomness is therefore deterministic, portable across execution providers, and
 identifiable: you can point at the function in the ONNX file that produced any draw.
 
-Per-execution variation is carried by a separate **drawBase** counter, not by the key: a feed
-like Dropout threads a model-state counter (advanced once per training step through the
-checkpoint) into its draw, so masks differ per step while the stream key — and therefore
-resume-exactness — is untouched.
+Per-execution variation is carried by a separate **drawBase** counter, not by the key — and
+the RNG system manages it itself: concretization injects one model-global execution counter
+(`RngExecutionCounter`, ordinary model state, initialized 0 and advanced +1 per execution)
+and wires it into every feed. Modules never touch it — `Globals.RandomUniform` is all a
+consumer writes. Under the training rig the counter rides the checkpoint, so Dropout masks
+differ per step and a resumed run at step N draws exactly what the uninterrupted run would;
+in one-shot inference it is baked at 0, so inference stays deterministic and stateless. One
+counter serves all feeds because sites are already decorrelated by their stream keys; it
+costs the checkpoint a single scalar.
 
 ## Feeds inside loops
 

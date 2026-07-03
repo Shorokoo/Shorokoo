@@ -1,32 +1,31 @@
 using Shorokoo.Graph;
 using Shorokoo.Core.Graph;
 using Shorokoo.Core.Nodes;
-using Shorokoo.Core.Nodes.OnnxNodes;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Core.Rng;
-using Shorokoo.Core.Utils;
-using Shorokoo.Onnx;
 using System;
-using System.Collections.Generic;
-using System.Linq;
 using static Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames;
 
 namespace Shorokoo.Core.Nodes.Processors.Fast
 {
     /// <summary>
-    /// Binds an <see cref="RngConfig"/> to a concrete model's runtime random feeds: every
-    /// top-level <c>SHRK_RANDOM_UNIFORM/NORMAL</c> site (id-bearing since creation, its
-    /// ModelId made absolute by module inlining) is rewritten to the keyed
-    /// <c>SHRK_RNG_UNIFORM/NORMAL</c> draw whose stream key is the runtime master folded
-    /// host-side along the feed's ModelId path — the RNG key tree IS the ModelId tree, so
-    /// distinct feed sites decorrelate and a feed's key is reconstructible offline from its
-    /// ModelId alone. drawBase is a constant 0 (per-step channel not yet wired).
+    /// Binds an <see cref="RngConfig"/> to a graph's runtime random feeds by STAMPING, never
+    /// rewriting: every top-level <c>SHRK_RANDOM_UNIFORM/NORMAL</c> site (id-bearing since
+    /// creation, its ModelId made absolute by module inlining) gets a
+    /// <c>shrk_rng_explicit_key</c> attribute carrying its resolved stream key — the runtime
+    /// master folded host-side along the feed's ModelId path (the RNG key tree IS the ModelId
+    /// tree) — plus the config's algorithm name. Nothing else changes: no opcode, no inputs,
+    /// no new nodes, so the pass is idempotent and re-running it with a different config
+    /// re-binds the whole graph's randomness in place (works on a concrete architecture, a
+    /// concrete model, or a training-rig step graph alike — the shared stamp point is
+    /// concretization). Only the ONNX-prep lowering (<see cref="FastLowerRandomOps"/>) reads
+    /// the stamp and rewrites the feed to the keyed deterministic draw; an unstamped feed
+    /// falls back to the ONNX random ops.
     ///
-    /// <para>Feeds inside loops are left untouched (they fall through to the ONNX
-    /// random-op lowering): a loop body's node executes once per iteration with the same
-    /// key and drawBase, which under the keyed path would repeat the same values every
-    /// iteration; the ONNX fallback preserves fresh-per-iteration draws until per-iteration
-    /// key splitting is plumbed.</para>
+    /// <para>Feeds inside loops are left unstamped (ONNX fallback): a loop body's node
+    /// executes once per iteration with the same key and drawBase, which under the keyed path
+    /// would repeat the same values every iteration; the fallback preserves
+    /// fresh-per-iteration draws until per-iteration key splitting is plumbed.</para>
     /// </summary>
     internal static class FastApplyRngKeys
     {
@@ -35,9 +34,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (graph is null) throw new ArgumentNullException(nameof(graph));
             if (rngConfig is null) throw new ArgumentNullException(nameof(rngConfig));
 
-            var newNodes = new List<FastNode>(graph.Nodes.Count);
-            int loopDepth = 0;
+            string algorithmName = rngConfig.Algorithm switch
+            {
+                RngAlgorithm.Threefry2x32 => RngAlgorithms.Default,
+                _ => throw new ArgumentOutOfRangeException(
+                    nameof(rngConfig), rngConfig.Algorithm, "Unknown RNG algorithm."),
+            };
 
+            int loopDepth = 0;
             foreach (var node in graph.Nodes)
             {
                 if (node.OpCode == OpCodes.LOOP_OPEN) loopDepth++;
@@ -46,102 +50,21 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 bool isUniform = node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM;
                 bool isNormal = node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL;
                 if ((!isUniform && !isNormal) || loopDepth > 0)
-                {
-                    newNodes.Add(node);
                     continue;
-                }
 
                 var idVals = node.Attributes.GetIntsVal(ShrkAttrLocalModelId);
                 if (idVals is null || idVals.Length == 0)
                 {
                     // Not id-bearing (e.g. built by a path that bypasses id assignment):
-                    // leave for the ONNX fallback lowering.
-                    newNodes.Add(node);
+                    // leave unstamped for the ONNX fallback lowering.
                     continue;
                 }
 
-                RewriteToKeyedDraw(node, isUniform, idVals, rngConfig, newNodes);
-                newNodes.Add(node);
+                var (k0, k1) = rngConfig.FoldRunKey(idVals);
+                node.Attributes = node.Attributes.SetAttributes(
+                    (ShrkAttrRngExplicitKey, (long[])[k0, k1]),
+                    (ShrkAttrRngAlgorithm, algorithmName));
             }
-
-            graph.Nodes = newNodes;
-        }
-
-        private static void RewriteToKeyedDraw(
-            FastNode node, bool isUniform, int[] idVals, RngConfig rngConfig, List<FastNode> newNodes)
-        {
-            var shapeInput = node.Inputs[0]
-                ?? throw new InvalidOperationException("SHRK_RANDOM_* has null shape input.");
-
-            var (k0, k1) = rngConfig.FoldRunKey(idVals);
-
-            float a = isUniform
-                ? node.Attributes.GetFloatVal(AttrLow) ?? 0.0f
-                : node.Attributes.GetFloatVal(AttrMean) ?? 0.0f;
-            float b = isUniform
-                ? node.Attributes.GetFloatVal(AttrHigh) ?? 1.0f
-                : node.Attributes.GetFloatVal(AttrScale) ?? 1.0f;
-
-            var keyKey = AppendKeyConstant(k0, k1, newNodes);
-            // drawBase: the site's own counter input when wired (e.g. Dropout's per-execution
-            // state counter, advancing per training step), else a constant 0.
-            var drawBaseKey = node.Inputs.Count > 1 && node.Inputs[1] is { } db
-                ? db
-                : AppendScalarInt64(0L, newNodes);
-            var aKey = AppendScalarFloat32(a, newNodes);
-            var bKey = AppendScalarFloat32(b, newNodes);
-
-            var newOp = isUniform ? InternalOpCodes.SHRK_RNG_UNIFORM : InternalOpCodes.SHRK_RNG_NORMAL;
-            var attrDefs = Definitions.NodeDefinitions[newOp].AttributeDefs;
-            node.OpCode = newOp;
-            node.Attributes = OnnxCSharpAttributes.FromCSharpVals(
-                new Dictionary<string, object?> { [ShrkAttrRngAlgorithm] = RngAlgorithms.Default },
-                attrDefs);
-            node.FullInputs = new Dictionary<string, List<FastTensorKey?>>
-            {
-                [""] = new List<FastTensorKey?> { keyKey, drawBaseKey, shapeInput, aKey, bKey }
-            };
-        }
-
-        private static FastTensorKey AppendKeyConstant(uint k0, uint k1, List<FastNode> newNodes)
-        {
-            var data = new OnnxTensorData<int64>(
-                new Shape(2),
-                OnnxUtils.CreateTensorValue(new Shape(2), new long[] { k0, k1 }));
-            return AppendConstant(data, newNodes);
-        }
-
-        private static FastTensorKey AppendScalarInt64(long value, List<FastNode> newNodes)
-        {
-            var data = new OnnxTensorData<int64>(
-                new Shape(Array.Empty<long>()),
-                OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), new[] { value }));
-            return AppendConstant(data, newNodes);
-        }
-
-        private static FastTensorKey AppendScalarFloat32(float value, List<FastNode> newNodes)
-        {
-            var data = new OnnxTensorData<float32>(
-                new Shape(Array.Empty<long>()),
-                OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), new[] { value }));
-            return AppendConstant(data, newNodes);
-        }
-
-        private static FastTensorKey AppendConstant(TensorData data, List<FastNode> newNodes)
-        {
-            var constAttrDefs = Definitions.NodeDefinitions[OpCodes.CONSTANT].AttributeDefs;
-            var key = FastNodeKey.New();
-            var outKey = new FastTensorKey(key, 0);
-            newNodes.Add(new FastNode
-            {
-                Key = key,
-                OpCode = OpCodes.CONSTANT,
-                Attributes = OnnxCSharpAttributes.FromCSharpVals(
-                    new Dictionary<string, object?> { [AttrValue] = data }, constAttrDefs),
-                FullInputs = new Dictionary<string, List<FastTensorKey?>>(),
-                FullOutputs = { [""] = new List<FastTensorKey?> { outKey } },
-            });
-            return outKey;
         }
     }
 }

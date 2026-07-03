@@ -2,7 +2,8 @@
 
 Every random consumer in a module — a sub-model created by `X.Model(...)`, a trainable
 parameter created by an initializer `Init(...)` call, a runtime random feed — draws from its
-own RNG **stream**. A stream's key is derived from the consumer's ModelId: its position in
+own RNG **stream**. A stream's key is derived from the consumer's ModelId (see
+[Configuring randomness](rng-configuration.md)): its position in
 the module's id address space, assigned in creation order. That makes streams reproducible
 and decorrelated by default, but **positional**: inserting or reordering siblings inside a
 module body shifts the ModelIds of the consumers after the edit point, and their streams

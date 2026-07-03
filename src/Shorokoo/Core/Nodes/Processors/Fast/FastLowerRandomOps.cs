@@ -22,10 +22,18 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// calls tagged local FunctionProtos, so its randomness is deterministic, portable, and
     /// identifiable.</para>
     ///
-    /// <para><b>Unkeyed draws</b> (no config bound, or in-loop feeds the keying pass skips)
-    /// take the ONNX fallback: <c>ConstantOfShape + RandomUniformLike/RandomNormalLike</c> —
-    /// the pre-keyed-RNG behavior, non-reproducible by nature, with any user seed copied
-    /// through and none synthesized.</para>
+    /// <para><b>Stamped feeds</b> (<c>SHRK_RANDOM_*</c> carrying the
+    /// <c>shrk_rng_explicit_key</c> attribute <see cref="FastApplyRngKeys"/> stamps when an
+    /// <see cref="RngConfig"/> is bound) are rewritten HERE — and only here — into the keyed
+    /// draw: key/drawBase/bounds materialize as constants feeding the algorithm function
+    /// call. Deferring the rewrite to ONNX prep is what makes config binding cheap and
+    /// re-bindable: the pre-export graph keeps its structure, a re-stamp overrides a prior
+    /// stamp, and constant folding of the key chain happens on the export clone.</para>
+    ///
+    /// <para><b>Unstamped draws</b> (no config bound, or in-loop feeds the stamping pass
+    /// skips) take the ONNX fallback: <c>ConstantOfShape +
+    /// RandomUniformLike/RandomNormalLike</c> — the pre-keyed-RNG behavior, non-reproducible
+    /// by nature, with any user seed copied through and none synthesized.</para>
     /// </summary>
     internal static class FastLowerRandomOps
     {
@@ -65,7 +73,18 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     newNodes.Add(node);
                     continue;
                 }
-                // Unkeyed random op (no RngConfig bound, or an in-loop feed FastApplyRngKeys
+
+                if (node.Attributes.GetLongsVal(ShrkAttrRngExplicitKey) is { Length: 2 } stampedKey)
+                {
+                    // Config-stamped feed: materialize the stamped key (plus drawBase and
+                    // distribution bounds) as constants and call the algorithm function.
+                    RewriteStampedToKeyedDraw(node, isUniform, stampedKey, newNodes);
+                    LowerKeyedRngToFunctionCall(node);
+                    newNodes.Add(node);
+                    continue;
+                }
+
+                // Unstamped random op (no RngConfig bound, or an in-loop feed FastApplyRngKeys
                 // skipped): the ONNX fallback — ConstantOfShape + RandomUniformLike/NormalLike.
                 // Non-portable/non-reproducible by nature; documented as the no-config behavior.
                 LowerToOnnxRandomLike(node, isUniform, newNodes);
@@ -140,6 +159,88 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 invokeAttrDefs);
             node.IdentifierTemplate = null;
             node.TargetFunction = fn;
+        }
+
+        /// <summary>
+        /// Rewrites a stamped SHRK_RANDOM_* node in place to the SHRK_RNG_UNIFORM/NORMAL
+        /// form (inputs <c>[key, drawBase, shape, a, b]</c>): the stamped key becomes an
+        /// int64[2] constant, drawBase is the site's own counter input when wired (e.g.
+        /// Dropout's per-execution state counter) else a constant 0, and the distribution
+        /// bounds come off the node's attributes as f32 scalar constants.
+        /// </summary>
+        private static void RewriteStampedToKeyedDraw(
+            FastNode node, bool isUniform, long[] stampedKey, List<FastNode> newNodes)
+        {
+            var shapeInput = node.Inputs[0]
+                ?? throw new InvalidOperationException("SHRK_RANDOM_* has null shape input.");
+
+            float a = isUniform
+                ? node.Attributes.GetFloatVal(AttrLow) ?? 0.0f
+                : node.Attributes.GetFloatVal(AttrMean) ?? 0.0f;
+            float b = isUniform
+                ? node.Attributes.GetFloatVal(AttrHigh) ?? 1.0f
+                : node.Attributes.GetFloatVal(AttrScale) ?? 1.0f;
+            var algorithm = node.Attributes.GetStringVal(ShrkAttrRngAlgorithm)
+                ?? RngAlgorithms.Default;
+
+            var keyKey = AppendKeyConstant(stampedKey, newNodes);
+            var drawBaseKey = node.Inputs.Count > 1 && node.Inputs[1] is { } db
+                ? db
+                : AppendScalarInt64(0L, newNodes);
+            var aKey = AppendScalarFloat32(a, newNodes);
+            var bKey = AppendScalarFloat32(b, newNodes);
+
+            var newOp = isUniform ? InternalOpCodes.SHRK_RNG_UNIFORM : InternalOpCodes.SHRK_RNG_NORMAL;
+            var attrDefs = Definitions.NodeDefinitions[newOp].AttributeDefs;
+            node.OpCode = newOp;
+            node.Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                new Dictionary<string, object?> { [ShrkAttrRngAlgorithm] = algorithm },
+                attrDefs);
+            node.FullInputs = new Dictionary<string, List<FastTensorKey?>>
+            {
+                [""] = new List<FastTensorKey?> { keyKey, drawBaseKey, shapeInput, aKey, bKey }
+            };
+        }
+
+        private static FastTensorKey AppendKeyConstant(long[] keyWords, List<FastNode> newNodes)
+        {
+            var data = new OnnxTensorData<int64>(
+                new Shape(2),
+                OnnxUtils.CreateTensorValue(new Shape(2), keyWords));
+            return AppendConstant(data, newNodes);
+        }
+
+        private static FastTensorKey AppendScalarInt64(long value, List<FastNode> newNodes)
+        {
+            var data = new OnnxTensorData<int64>(
+                new Shape(Array.Empty<long>()),
+                OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), new[] { value }));
+            return AppendConstant(data, newNodes);
+        }
+
+        private static FastTensorKey AppendScalarFloat32(float value, List<FastNode> newNodes)
+        {
+            var data = new OnnxTensorData<float32>(
+                new Shape(Array.Empty<long>()),
+                OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), new[] { value }));
+            return AppendConstant(data, newNodes);
+        }
+
+        private static FastTensorKey AppendConstant(TensorData data, List<FastNode> newNodes)
+        {
+            var constAttrDefs = Definitions.NodeDefinitions[OpCodes.CONSTANT].AttributeDefs;
+            var key = FastNodeKey.New();
+            var outKey = new FastTensorKey(key, 0);
+            newNodes.Add(new FastNode
+            {
+                Key = key,
+                OpCode = OpCodes.CONSTANT,
+                Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                    new Dictionary<string, object?> { [AttrValue] = data }, constAttrDefs),
+                FullInputs = new Dictionary<string, List<FastTensorKey?>>(),
+                FullOutputs = { [""] = new List<FastTensorKey?> { outKey } },
+            });
+            return outKey;
         }
 
         private static readonly TensorData ZeroScalar = new OnnxTensorData<float32>(

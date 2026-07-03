@@ -266,6 +266,14 @@ public static class OnnxOpAttributeNames
 
     /// <summary>The named RNG algorithm ("Threefry2x32-BoxMuller.v1") a SHRK_RNG_* op draws with.</summary>
     public const string ShrkAttrRngAlgorithm = "shrk_rng_algorithm";
+
+    /// <summary>
+    /// The resolved stream key ([k0, k1] 32-bit words as two longs) an RngConfig stamped on a
+    /// SHRK_RANDOM_* feed. Pure metadata: stamping changes no graph structure, so a different
+    /// config can re-stamp at any time; the ONNX-prep lowering reads it to emit the keyed
+    /// deterministic draw (absent = ONNX random fallback).
+    /// </summary>
+    public const string ShrkAttrRngExplicitKey = "shrk_rng_explicit_key";
     public const string ShrkAttrRelativeModelId = "shrk_relative_model_id";
     public const string ShrkAttrInputType = "shrk_input_type";
     public const string ShrkAttrHyperparamIndex = "shrk_hyperparam_index";

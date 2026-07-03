@@ -238,12 +238,22 @@ namespace Shorokoo.Graph
         {
             var defaultTrainableParams = graph.InitializeTrainableParams(rngConfig: rngConfig);
             var concrete = graph.ToConcreteModel(defaultTrainableParams);
-            // Bind the config to the runtime feeds too: each top-level SHRK_RANDOM_* site is
-            // rewritten to the keyed deterministic draw whose stream key folds from the
-            // runtime master along the feed's ModelId path (see FastApplyRngKeys).
-            Shorokoo.Core.Nodes.Processors.Fast.FastApplyRngKeys.Process(concrete, rngConfig);
+            concrete.ApplyRngConfig(rngConfig);
             return concrete;
         }
+
+        /// <summary>
+        /// Binds <paramref name="rngConfig"/> to the graph's runtime random feeds by stamping
+        /// each feed's resolved stream key (the runtime master folded along the feed's ModelId
+        /// path) as an attribute on the feed node. Stamping changes no graph structure —
+        /// re-invoking with a different config re-binds all randomness in place, even on an
+        /// already-concrete model — and the stamped key only takes structural effect at ONNX
+        /// prep, where the feed lowers to the keyed deterministic draw (unstamped feeds lower
+        /// to the ONNX random-op fallback). Works on any graph whose ModelIds are absolute:
+        /// a concrete architecture, a concrete model, or a training-rig step graph.
+        /// </summary>
+        public static void ApplyRngConfig(this FastComputationGraph graph, RngConfig rngConfig)
+            => FastApplyRngKeys.Process(graph, rngConfig);
 
         /// <summary>
         /// Binds loaded trainable-parameter values into a concrete (weight-filled) graph, matching

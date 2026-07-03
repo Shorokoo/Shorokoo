@@ -267,6 +267,8 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeFloat(AttrLow)
                 .AttributeFloat(AttrSeed)
                 .AttributeLongs(ShrkAttrLocalModelId)
+                .AttributeLongs(ShrkAttrRngExplicitKey)
+                .AttributeString(ShrkAttrRngAlgorithm)
                 .Input("shape", "T1", 1)
                 .Input("drawBase", "T1", 0)
                 .Output("output", "T2", rank: "R"),
@@ -280,6 +282,8 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeFloat(AttrScale)
                 .AttributeFloat(AttrSeed)
                 .AttributeLongs(ShrkAttrLocalModelId)
+                .AttributeLongs(ShrkAttrRngExplicitKey)
+                .AttributeString(ShrkAttrRngAlgorithm)
                 .Input("shape", "T1", 1)
                 .Input("drawBase", "T1", 0)
                 .Output("output", "T2", rank: "R"),

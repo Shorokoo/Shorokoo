@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Core.Rng;
 using Shorokoo.Runtime;
 
@@ -88,6 +89,38 @@ public class RngRuntimeTests
         Assert.Equal(a, b);                                        // deterministic / portable
         Assert.All(a, v => Assert.InRange(v, 0.0f, 0.99999997f));
         Assert.InRange(a.Average(), 0.3f, 0.7f);   // 64-sample mean; loose (the point is determinism + range)
+    }
+
+    [Fact]
+    public void TestRngConfigRebindsByRestampingWithoutGraphChange()
+    {
+        // Binding an RngConfig stamps each feed's resolved stream key as an ATTRIBUTE on the
+        // SHRK_RANDOM node — no opcode, input, or node-count change — so a different master
+        // seed can be re-bound on the SAME already-concrete model, after the fact, by
+        // re-stamping. The structural rewrite to the keyed draw happens only on the clone
+        // taken at ONNX prep, never on this graph.
+        var g = (FastComputationGraph)typeof(RtLoweredUniform)
+            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input]))
+            .ToConcreteModel(new RngConfig { MasterSeed = 1 });
+
+        float[] Run() => ComputeContext.Default.Execute(concrete, input)[0]
+            .ToTensorData().As<float32>().AccessMemory().ToArray();
+
+        int nodeCount = concrete.Nodes.Count;
+        Assert.Contains(concrete.Nodes, n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
+        var underSeed1 = Run();
+
+        concrete.ApplyRngConfig(new RngConfig { MasterSeed = 2 });
+        Assert.Equal(nodeCount, concrete.Nodes.Count);   // stamping is structure-free
+        Assert.Contains(concrete.Nodes, n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
+        var underSeed2 = Run();
+        Assert.NotEqual(underSeed1, underSeed2);         // new master -> new stream
+
+        concrete.ApplyRngConfig(new RngConfig { MasterSeed = 1 });
+        var underSeed1Again = Run();
+        Assert.Equal(underSeed1, underSeed1Again);       // re-binding is exact, not approximate
     }
 
     [Fact]

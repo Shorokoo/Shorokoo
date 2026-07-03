@@ -340,6 +340,21 @@ internal static partial class InternalOp
         => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_NORMAL, [shape], [
             (AttrMean, mean), (AttrScale, scale), (AttrSeed, seed)]);
 
+    /// <summary>Index-based RNG key split under the named algorithm: child = Bijection(key, counter: index).</summary>
+    public static Variable RngSplit(Variable key, Variable index, string algorithm)
+        => NodeBuilder.BuildNodeSingleOut(SHRK_RNG_SPLIT, [key, index], [
+            (ShrkAttrRngAlgorithm, algorithm)]);
+
+    /// <summary>Keyed deterministic uniform draw U(low, high) of dynamic shape under the named algorithm.</summary>
+    public static Variable RngUniform(Variable key, Variable drawBase, Variable shape, Variable low, Variable high, string algorithm)
+        => NodeBuilder.BuildNodeSingleOut(SHRK_RNG_UNIFORM, [key, drawBase, shape, low, high], [
+            (ShrkAttrRngAlgorithm, algorithm)]);
+
+    /// <summary>Keyed deterministic normal draw N(mean, scale) of dynamic shape under the named algorithm.</summary>
+    public static Variable RngNormal(Variable key, Variable drawBase, Variable shape, Variable mean, Variable scale, string algorithm)
+        => NodeBuilder.BuildNodeSingleOut(SHRK_RNG_NORMAL, [key, drawBase, shape, mean, scale], [
+            (ShrkAttrRngAlgorithm, algorithm)]);
+
     /// <summary>
     /// Conv variant whose geometry (pads, strides, dilations, kernel_shape, group) is supplied
     /// as int64 tensor inputs rather than static attributes, so it can be computed in-graph.

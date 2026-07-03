@@ -53,6 +53,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             foreach (var node in graph.Nodes)
             {
+                if (node.OpCode == InternalOpCodes.SHRK_RNG_SPLIT ||
+                    node.OpCode == InternalOpCodes.SHRK_RNG_UNIFORM ||
+                    node.OpCode == InternalOpCodes.SHRK_RNG_NORMAL)
+                {
+                    LowerKeyedRngToFunctionCall(node);
+                    newNodes.Add(node);
+                    continue;
+                }
+
                 bool isUniform = node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM;
                 bool isNormal = node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL;
                 if (!isUniform && !isNormal)
@@ -96,7 +105,44 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         private static bool HasRandomOps(FastComputationGraph graph) =>
             graph.Nodes.Any(node =>
                 node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
-                node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL);
+                node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||
+                node.OpCode == InternalOpCodes.SHRK_RNG_SPLIT ||
+                node.OpCode == InternalOpCodes.SHRK_RNG_UNIFORM ||
+                node.OpCode == InternalOpCodes.SHRK_RNG_NORMAL);
+
+        /// <summary>
+        /// Rewrites a keyed SHRK_RNG_* node in place to a FUNCTION_INVOKE of the named
+        /// algorithm's function of the matching kind. The node inputs already match the
+        /// function's input order 1:1; RNG algorithm functions are never inlined and export
+        /// as ONNX local FunctionProtos, so the call survives to the ONNX model as a
+        /// Functions-domain call node (see FastOpsetResolver).
+        /// </summary>
+        private static void LowerKeyedRngToFunctionCall(FastNode node)
+        {
+            var algorithm = node.Attributes.GetStringVal(ShrkAttrRngAlgorithm)
+                ?? RngAlgorithms.Default;
+            var (kind, dtype, rank) = node.OpCode switch
+            {
+                InternalOpCodes.SHRK_RNG_SPLIT => (RngAlgorithms.KindSplit, DType.Int64, 1L),
+                InternalOpCodes.SHRK_RNG_UNIFORM => (RngAlgorithms.KindUniform, DType.Float32, -1L),
+                _ => (RngAlgorithms.KindNormal, DType.Float32, -1L),
+            };
+            var fn = RngAlgorithms.GetFunction(algorithm, kind);
+
+            var invokeAttrDefs = Definitions.NodeDefinitions[InternalOpCodes.FUNCTION_INVOKE].AttributeDefs;
+            node.OpCode = InternalOpCodes.FUNCTION_INVOKE;
+            node.Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                new Dictionary<string, object?>
+                {
+                    [ShrkAttrStructure] = new[] { DataStructure.Tensor },
+                    [ShrkAttrDtype] = new[] { dtype },
+                    [ShrkAttrRank] = new[] { rank },
+                    [ShrkAttrGenericTypeArgs] = null,
+                },
+                invokeAttrDefs);
+            node.IdentifierTemplate = null;
+            node.TargetFunction = fn;
+        }
 
         /// <summary>
         /// Splices the <see cref="RuntimeRng"/> function body at a single <c>SHRK_RANDOM_*</c> site:

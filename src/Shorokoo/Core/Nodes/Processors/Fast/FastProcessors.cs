@@ -460,6 +460,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     continue;
                 }
 
+                // RNG algorithm functions are deliberately NEVER inlined: they export as ONNX
+                // local FunctionProtos (tagged with algorithm/kind metadata) so a model's
+                // randomness stays identifiable and self-contained. See RngAlgorithms.
+                if (isFunction && fastNode.TargetFunction?.RngFunctionKind is not null)
+                {
+                    newNodes.Add(fastNode);
+                    continue;
+                }
+
                 FastComputationGraph subFastGraph;
                 var hyperparamNodeKeys = new List<FastTensorKey?>();
 

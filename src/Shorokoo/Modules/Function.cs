@@ -65,6 +65,28 @@ namespace Shorokoo.Core
         /// </summary>
         public const string IRDefaultValue = "DefaultValue";
 
+        /// <summary>
+        /// Metadata property on FunctionProto: the named RNG algorithm this function belongs to
+        /// (e.g. "Threefry2x32-BoxMuller.v1"). Present only on RNG algorithm functions.
+        /// </summary>
+        public const string IRRngAlgorithmParamName = "RngAlgorithm";
+
+        /// <summary>
+        /// Metadata property on FunctionProto: which RNG function kind this is
+        /// ("split", "uniform", "normal"). Present only on RNG algorithm functions.
+        /// </summary>
+        public const string IRRngFunctionKindParamName = "RngFunctionKind";
+
+        /// <summary>
+        /// The named RNG algorithm this function implements a piece of, or null for ordinary
+        /// functions. RNG algorithm functions are never inlined by the function inliner and
+        /// export with this tag in their FunctionProto metadata.
+        /// </summary>
+        public string? RngAlgorithm { get; internal set; }
+
+        /// <summary>The RNG function kind ("split", "uniform", "normal"), or null. See <see cref="RngAlgorithm"/>.</summary>
+        public string? RngFunctionKind { get; internal set; }
+
         public string DefaultName { get; private set; }
         public string FriendlyName { get; private set; }
 

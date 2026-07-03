@@ -280,6 +280,43 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("shape", "T1", 1)
                 .Output("output", "T2", rank: "R"),
 
+            // SHRK_RNG_SPLIT: index-based RNG key split, child = Bijection(key, counter: index)
+            // under the named algorithm. Key = int64[2] (32-bit words). Lowered at ONNX export
+            // to a call of the algorithm's non-inlined "split" function; QEE computes it host-side.
+            Op(SHRK_RNG_SPLIT)
+                .Tensor<int64>("T1")
+                .AttributeString(ShrkAttrRngAlgorithm)
+                .Input("key", "T1", 1)
+                .Input("index", "T1", 0)
+                .Output("childKey", "T1", 1),
+
+            // SHRK_RNG_UNIFORM: keyed deterministic U(low, high) draw of dynamic shape under
+            // the named algorithm. Counter = (flat element index, drawBase). Lowered at ONNX
+            // export to a call of the algorithm's non-inlined "uniform" function.
+            Op(SHRK_RNG_UNIFORM)
+                .Tensor<int64>("T1")
+                .Tensor<float32>("T2")
+                .AttributeString(ShrkAttrRngAlgorithm)
+                .Input("key", "T1", 1)
+                .Input("drawBase", "T1", 0)
+                .Input("shape", "T1", 1)
+                .Input("low", "T2", 0)
+                .Input("high", "T2", 0)
+                .Output("output", "T2", rank: "R"),
+
+            // SHRK_RNG_NORMAL: keyed deterministic N(mean, scale) draw of dynamic shape under
+            // the named algorithm (per-element-pair Box-Muller). See SHRK_RNG_UNIFORM.
+            Op(SHRK_RNG_NORMAL)
+                .Tensor<int64>("T1")
+                .Tensor<float32>("T2")
+                .AttributeString(ShrkAttrRngAlgorithm)
+                .Input("key", "T1", 1)
+                .Input("drawBase", "T1", 0)
+                .Input("shape", "T1", 1)
+                .Input("mean", "T2", 0)
+                .Input("scale", "T2", 0)
+                .Output("output", "T2", rank: "R"),
+
             // SHRK_CONV: Conv variant taking geometry (pads/strides/dilations/kernel_shape/group)
             // as int64 tensor inputs instead of static attributes. Lowered to standard ONNX Conv
             // (with those resolved to static attributes) by FastLowerAttributeTensorOps.

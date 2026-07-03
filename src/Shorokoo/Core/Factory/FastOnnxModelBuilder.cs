@@ -734,6 +734,19 @@ namespace Shorokoo.Core.Factory
             };
             fnProto.MetadataProps.Add(nameMeta);
 
+            if (function.RngAlgorithm is not null)
+                fnProto.MetadataProps.Add(new StringStringEntryProto
+                {
+                    Key = Function.IRRngAlgorithmParamName,
+                    Value = function.RngAlgorithm,
+                });
+            if (function.RngFunctionKind is not null)
+                fnProto.MetadataProps.Add(new StringStringEntryProto
+                {
+                    Key = Function.IRRngFunctionKindParamName,
+                    Value = function.RngFunctionKind,
+                });
+
             return fnProto;
         }
 

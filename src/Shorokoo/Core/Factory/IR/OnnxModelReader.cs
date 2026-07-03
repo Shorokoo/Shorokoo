@@ -230,7 +230,13 @@ namespace Shorokoo.Core.Factory.IR
                     fastGraph.OutputUniqueNames.Add(outputName);
                 }
 
-                Function onnxFunction = new Function(fastGraph, functionType, defaultName: defaultName, friendlyName: friendlyName);
+                Function onnxFunction = new Function(fastGraph, functionType, defaultName: defaultName, friendlyName: friendlyName)
+                {
+                    RngAlgorithm = functionProto.MetadataProps
+                        .FirstOrDefault(x => x.Key == Function.IRRngAlgorithmParamName)?.Value,
+                    RngFunctionKind = functionProto.MetadataProps
+                        .FirstOrDefault(x => x.Key == Function.IRRngFunctionKindParamName)?.Value,
+                };
                 return onnxFunction;
             }
             catch (Function.FunctionNotFoundException)

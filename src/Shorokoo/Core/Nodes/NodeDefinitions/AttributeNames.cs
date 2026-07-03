@@ -263,6 +263,9 @@ public static class OnnxOpAttributeNames
     public const string ShrkAttrFunctionName = "shrk_function_name";
     public const string ShrkAttrDomainName = "shrk_domain_name";
     public const string ShrkAttrLocalModelId = "shrk_local_model_id";
+
+    /// <summary>The named RNG algorithm ("Threefry2x32-BoxMuller.v1") a SHRK_RNG_* op draws with.</summary>
+    public const string ShrkAttrRngAlgorithm = "shrk_rng_algorithm";
     public const string ShrkAttrRelativeModelId = "shrk_relative_model_id";
     public const string ShrkAttrInputType = "shrk_input_type";
     public const string ShrkAttrHyperparamIndex = "shrk_hyperparam_index";

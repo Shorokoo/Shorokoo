@@ -78,6 +78,18 @@ public static class RuntimeRng
     private static Scalar<int64> KeyWord(Scalar<int64> ks0, Scalar<int64> ks1, Scalar<int64> ks2, int i)
         => i == 0 ? ks0 : i == 1 ? ks1 : ks2;
 
+    /// <summary>
+    /// Index-based key split: child key words = Bijection(counter: (index, 0), key).
+    /// Random access — computing child <paramref name="index"/> never computes any sibling.
+    /// </summary>
+    public static (Scalar<int64> k0, Scalar<int64> k1) SplitKey(
+        Scalar<int64> k0, Scalar<int64> k1, Scalar<int64> index)
+    {
+        Vector<int64> ctr = [index];
+        var (x0, x1) = Bijection(Mask32(ctr), Scalar(0L), k0, k1);
+        return (x0.Vec()[0], x1.Vec()[0]);
+    }
+
     /// <summary>A [0,1) uniform from a 32-bit word: low 24 bits × 2⁻²⁴.</summary>
     private static Tensor<float32> ToUniform(Tensor<int64> word)
         => OnnxOp.Mod(word, Scalar(0x0100_0000L)).int64().Cast<float32>() * Scalar(TwoPow24Inv);

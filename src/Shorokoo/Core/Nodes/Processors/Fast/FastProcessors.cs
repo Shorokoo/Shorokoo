@@ -260,12 +260,30 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var loopDedupeIdsMap = new Dictionary<FastTensorKey, int>();
             var moduleNameDedupeIdMap = new Dictionary<string, int>();
 
-            // Rng.Pin: pinned nodes take the first id slots in pin order; everything else
-            // follows in node order. A pinned handle's OwningNode may sit behind Identity
-            // wrappers — walk back to the id-bearing producer.
+            // All-or-nothing invariant: every module body graph gets ALL its local ModelIds
+            // assigned right here at body build, so a graph arriving later (concretization,
+            // training assembly) is either fully assigned — this pass is a no-op — or a
+            // hand-built top-level graph with NO ids yet, which gets assigned now. A mixed
+            // graph has no coherent numbering and indicates a broken producer: fail loudly
+            // rather than guess.
             var orderedTargets = graph.Nodes
                 .Where(n => n.Attributes.IsAttributeDefined(OnnxOpAttributeNames.ShrkAttrLocalModelId))
                 .ToList();
+            int assignedCount = orderedTargets.Count(
+                n => n.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId) is { Length: > 0 });
+            if (assignedCount == orderedTargets.Count)
+                return;   // fully assigned (module graph / re-run): nothing to do
+            if (assignedCount != 0)
+                throw new InvalidOperationException(
+                    "FastApplyIdentifierTemplates: graph has a MIX of assigned and unassigned local " +
+                    $"ModelIds ({assignedCount} of {orderedTargets.Count} id-bearing nodes assigned). " +
+                    "Module body graphs are fully assigned at build; a hand-built top-level graph must " +
+                    "be fully unassigned. Mixing (e.g. appending raw id-bearing nodes — Model()/Init()/" +
+                    "Globals.Random* calls — onto an already-built graph) has no coherent numbering.");
+
+            // Rng.Pin: pinned nodes take the first id slots in pin order; everything else
+            // follows in node order. A pinned handle's OwningNode may sit behind Identity
+            // wrappers — walk back to the id-bearing producer.
             if (pinnedNodeKeys is { Count: > 0 })
             {
                 var pinnedNodes = new List<FastNode>();
@@ -291,30 +309,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         .ToList();
             }
 
-            // Id stability: nodes that already carry a non-empty ModelId (assigned at module
-            // body build — possibly under an Rng.Pin ordering) KEEP it; re-runs of this pass
-            // (e.g. at concretization) only fill gaps. Their top-level slots are reserved so
-            // fresh allocations never collide.
-            var preassigned = new HashSet<FastNode>(ReferenceEqualityComparer.Instance);
-            var reservedTopLevel = new HashSet<int>();
-            foreach (var t in orderedTargets)
-            {
-                var existing = t.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId);
-                if (existing is { Length: > 0 })
-                {
-                    preassigned.Add(t);
-                    reservedTopLevel.Add(existing[0]);
-                }
-            }
-            if (reservedTopLevel.Count > 0)
-                idPickerEnumerator = FindNextSpot().Where(v => !reservedTopLevel.Contains(v)).GetEnumerator();
-
             foreach (var fastNode in orderedTargets)
             {
-                if (preassigned.Contains(fastNode))
-                    continue;
-                if (!fastNode.Attributes.IsAttributeDefined(OnnxOpAttributeNames.ShrkAttrLocalModelId))
-                    continue;
 
                 bool isRngFeed = fastNode.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
                                  fastNode.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL;

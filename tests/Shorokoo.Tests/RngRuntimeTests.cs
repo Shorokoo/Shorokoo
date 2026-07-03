@@ -124,6 +124,28 @@ public class RngRuntimeTests
     }
 
     [Fact]
+    public void TestSplitExplicitKeyAttributeOverridesParentKeyInput()
+    {
+        // The split-side override hook: a SHRK_RNG_SPLIT stamped with shrk_rng_explicit_key
+        // ignores its parent_rng_key input and folds from the stamped key instead — the
+        // same override contract the config stamps on consumer draw ops.
+        var parentKey = Vector(1L, 2L);
+        var split = Shorokoo.Core.Nodes.NodeDefinitions.InternalOp.RngSplit(
+            parentKey, Scalar(7L), Shorokoo.Core.Rng.RngAlgorithms.Default);
+        var g = new FastComputationGraph([], [split]);
+
+        var splitNode = g.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RNG_SPLIT);
+        splitNode.Attributes = splitNode.Attributes.SetAttributes(
+            (Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRngExplicitKey,
+             (long[])[100, 200]));
+
+        var childWords = ComputeContext.Default.Execute(g)[0]
+            .ToTensorData().As<int64>().AccessMemory().ToArray();
+        var (x0, x1) = Threefry2x32.Bijection(7u, 0u, 100u, 200u);
+        Assert.Equal(new long[] { x0, x1 }, childWords);
+    }
+
+    [Fact]
     public void TestInGraphNormalHasStandardMoments()
     {
         var vals = RunDraw<RtNormalDraw>(40, 40);

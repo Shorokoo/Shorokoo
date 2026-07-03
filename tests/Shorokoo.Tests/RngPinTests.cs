@@ -111,6 +111,63 @@ public class RngPinTests
     }
 
     [Fact]
+    public void TestRngStreamReportDescribesStreamsAndEmitsPinSkeleton()
+    {
+        var g = (FastComputationGraph)typeof(PinBaselineTwoLinears)
+            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var input = TensorData([1L, 4L], 0.1f, 0.2f, 0.3f, 0.4f);
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
+
+        var cfg = new RngConfig { MasterSeed = 3 };
+        var report = arch.GetRngStreamReport(cfg);
+
+        // Two Linears, one weight each: two init streams at [1, 1] and [2, 1], named,
+        // shaped, and keyed distinctly under the config.
+        var inits = report.Streams.Where(s => s.Kind == RngStreamKind.ParamInit).ToList();
+        Assert.Equal(2, inits.Count);
+        Assert.Equal([1, 1], inits[0].ModelIdPath);
+        Assert.Equal([2, 1], inits[1].ModelIdPath);
+        Assert.All(inits, s => Assert.Contains("Linear", s.Name));
+        Assert.All(inits, s => Assert.NotNull(s.Shape));
+        Assert.NotNull(inits[0].KeyWords);
+        Assert.NotEqual(inits[0].KeyWords, inits[1].KeyWords);
+
+        // The skeleton lists each stream at its path with the variable left as ?.
+        var skeleton = report.EmitPinSkeleton();
+        Assert.StartsWith("Rng.Pin(", skeleton);
+        Assert.Contains("([1, 1], /*", skeleton);
+        Assert.Contains("*/ ?)", skeleton);
+
+        // Without a config, streams are listed but unkeyed.
+        Assert.All(arch.GetRngStreamReport().Streams, s => Assert.Null(s.KeyWords));
+    }
+
+    [Fact]
+    public void TestRngStreamReportShowsLoopFeedWithPrefixKey()
+    {
+        var g = (FastComputationGraph)typeof(RngRuntimeLoopFeed)
+            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var x = TensorData([8L], new float[8]);
+        var steps = TensorData(System.Array.Empty<long>(), 2L);
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps]));
+
+        var cfg = new RngConfig { MasterSeed = 3 };
+        var feed = Assert.Single(arch.GetRngStreamReport(cfg).Streams);
+
+        // The loop-body feed sits at [1, -1, 1]; the reported key is the PREFIX key before
+        // the iteration slot (per-iteration keys are split at runtime).
+        Assert.Equal(RngStreamKind.UniformFeed, feed.Kind);
+        Assert.Equal([1, -1, 1], feed.ModelIdPath);
+        Assert.True(feed.KeyIsPrefix);
+        var (k0, k1) = cfg.FoldRunKey([1]);
+        Assert.Equal([k0, k1], feed.KeyWords);
+
+        // The skeleton elides the -1 slot and flags the loop.
+        var skeleton = arch.GetRngStreamReport().EmitPinSkeleton();
+        Assert.Contains("([1, 1], /* uniform feed (loop body) */ ?)", skeleton);
+    }
+
+    [Fact]
     public void TestUnresolvablePinFailsTheModuleBuild()
     {
         // Pinning something with no RNG stream (here: the module input) must fail the build

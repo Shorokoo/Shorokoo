@@ -61,6 +61,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     node.OpCode == InternalOpCodes.SHRK_RNG_UNIFORM ||
                     node.OpCode == InternalOpCodes.SHRK_RNG_NORMAL)
                 {
+                    // A split carrying an explicit-key stamp draws from the stamped key
+                    // instead of its parent_rng_key input — the split-side override hook
+                    // (the config's own stamping targets the consumer draw ops).
+                    if (node.OpCode == InternalOpCodes.SHRK_RNG_SPLIT &&
+                        node.Attributes.GetLongsVal(ShrkAttrRngExplicitKey) is { Length: 2 } splitKey)
+                    {
+                        node.FullInputs[""][0] = AppendKeyConstant(splitKey, newNodes);
+                    }
                     LowerKeyedRngToFunctionCall(node);
                     newNodes.Add(node);
                     continue;
@@ -78,6 +86,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 {
                     // Config-stamped feed: materialize the stamped key (plus drawBase and
                     // distribution bounds) as constants and call the algorithm function.
+                    // Ids with -1 iteration slots first realize the stamped PREFIX key into
+                    // the site key via in-graph splits on the runtime iteration indices.
                     RewriteStampedToKeyedDraw(node, isUniform, stampedKey, newNodes);
                     LowerKeyedRngToFunctionCall(node);
                     newNodes.Add(node);
@@ -184,6 +194,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 ?? RngAlgorithms.Default;
 
             var keyKey = AppendKeyConstant(stampedKey, newNodes);
+            keyKey = AppendIterationSplits(node, keyKey, algorithm, newNodes);
             var drawBaseKey = node.Inputs.Count > 1 && node.Inputs[1] is { } db
                 ? db
                 : AppendScalarInt64(0L, newNodes);
@@ -200,6 +211,84 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 [""] = new List<FastTensorKey?> { keyKey, drawBaseKey, shapeInput, aKey, bKey }
             };
+        }
+
+        /// <summary>
+        /// Realizes a stamped PREFIX key into the feed's site key when the feed's ModelId
+        /// carries <c>-1</c> iteration slots: starting after the stamped prefix (everything
+        /// before the first <c>-1</c>), each remaining path slot becomes one
+        /// <c>SHRK_RNG_SPLIT</c> fold — a <c>-1</c> consumes the next scalar of the feed's
+        /// iteration-indices input (Gather on element j; works identically whether the loop
+        /// survives to runtime or was unrolled into constants), a concrete slot folds a
+        /// constant. Ids without <c>-1</c> return the stamped key unchanged.
+        /// </summary>
+        private static FastTensorKey AppendIterationSplits(
+            FastNode node, FastTensorKey keyKey, string algorithm, List<FastNode> newNodes)
+        {
+            var idVals = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId);
+            if (idVals is null) return keyKey;
+            int firstIterationSlot = Array.IndexOf(idVals, -1);
+            if (firstIterationSlot < 0) return keyKey;
+
+            var iterationIndicesInput = node.Inputs.Count > 2 ? node.Inputs[2] : null;
+            if (iterationIndicesInput is null)
+                throw new InvalidOperationException(
+                    $"{node.OpCode}: ModelId [{string.Join(", ", idVals)}] has an iteration slot " +
+                    "but the node carries no iteration-indices input to realize it.");
+
+            int iterationScalarsUsed = 0;
+            for (int j = firstIterationSlot; j < idVals.Length; j++)
+            {
+                FastTensorKey indexKey = idVals[j] == -1
+                    ? AppendGatherScalar(iterationIndicesInput.Value, iterationScalarsUsed++, newNodes)
+                    : AppendScalarInt64(idVals[j], newNodes);
+                keyKey = AppendSplit(keyKey, indexKey, algorithm, newNodes);
+            }
+            return keyKey;
+        }
+
+        /// <summary>Gathers element <paramref name="index"/> of a rank-1 int64 vector as a rank-0 scalar.</summary>
+        private static FastTensorKey AppendGatherScalar(
+            FastTensorKey vector, int index, List<FastNode> newNodes)
+        {
+            var indexConst = AppendScalarInt64(index, newNodes);
+            var nodeKey = FastNodeKey.New();
+            var outKey = new FastTensorKey(nodeKey, 0);
+            var attrDefs = Definitions.NodeDefinitions[OpCodes.GATHER].AttributeDefs;
+            newNodes.Add(new FastNode
+            {
+                Key = nodeKey,
+                OpCode = OpCodes.GATHER,
+                Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                    new Dictionary<string, object?> { [AttrAxis] = 0L }, attrDefs),
+                FullInputs = { [""] = new List<FastTensorKey?> { vector, indexConst } },
+                FullOutputs = { [""] = new List<FastTensorKey?> { outKey } },
+            });
+            return outKey;
+        }
+
+        /// <summary>
+        /// One key fold: <c>child = split(key, index)</c> under the named algorithm, emitted
+        /// directly as the lowered FUNCTION_INVOKE form (this pass will not revisit it).
+        /// </summary>
+        private static FastTensorKey AppendSplit(
+            FastTensorKey keyKey, FastTensorKey indexKey, string algorithm, List<FastNode> newNodes)
+        {
+            var nodeKey = FastNodeKey.New();
+            var outKey = new FastTensorKey(nodeKey, 0);
+            var attrDefs = Definitions.NodeDefinitions[InternalOpCodes.SHRK_RNG_SPLIT].AttributeDefs;
+            var splitNode = new FastNode
+            {
+                Key = nodeKey,
+                OpCode = InternalOpCodes.SHRK_RNG_SPLIT,
+                Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                    new Dictionary<string, object?> { [ShrkAttrRngAlgorithm] = algorithm }, attrDefs),
+                FullInputs = { [""] = new List<FastTensorKey?> { keyKey, indexKey } },
+                FullOutputs = { [""] = new List<FastTensorKey?> { outKey } },
+            };
+            LowerKeyedRngToFunctionCall(splitNode);
+            newNodes.Add(splitNode);
+            return outKey;
         }
 
         private static FastTensorKey AppendKeyConstant(long[] keyWords, List<FastNode> newNodes)

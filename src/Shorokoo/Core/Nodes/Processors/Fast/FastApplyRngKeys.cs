@@ -22,10 +22,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// the stamp and rewrites the feed to the keyed deterministic draw; an unstamped feed
     /// falls back to the ONNX random ops.
     ///
-    /// <para>Feeds inside loops are left unstamped (ONNX fallback): a loop body's node
-    /// executes once per iteration with the same key and drawBase, which under the keyed path
-    /// would repeat the same values every iteration; the fallback preserves
-    /// fresh-per-iteration draws until per-iteration key splitting is plumbed.</para>
+    /// <para>Feeds under loops carry the <c>-1</c> iteration placeholder in their ModelId
+    /// (one per enclosing loop level, exactly like params). For those the stamp carries the
+    /// key of the path PREFIX up to the first <c>-1</c>; the remaining slots — runtime
+    /// iteration indices and the concrete slots after them — are realized in-graph at ONNX
+    /// prep by SHRK_RNG_SPLIT folds on the feed's iteration-indices input (so every loop
+    /// iteration draws from its own stream, and an unrolled copy of the same loop
+    /// constant-folds to bit-identical keys). A feed inside a loop scope whose id has no
+    /// <c>-1</c> (no iteration-indices plumbing — an older build path) stays unstamped: a
+    /// single key would repeat identical values every iteration, so the ONNX fallback
+    /// keeps draws fresh instead.</para>
     /// </summary>
     internal static class FastApplyRngKeys
     {
@@ -49,7 +55,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 bool isUniform = node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM;
                 bool isNormal = node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL;
-                if ((!isUniform && !isNormal) || loopDepth > 0)
+                if (!isUniform && !isNormal)
                     continue;
 
                 var idVals = node.Attributes.GetIntsVal(ShrkAttrLocalModelId);
@@ -60,7 +66,20 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     continue;
                 }
 
-                var (k0, k1) = rngConfig.FoldRunKey(idVals);
+                int firstIterationSlot = Array.IndexOf(idVals, -1);
+                if (firstIterationSlot < 0 && loopDepth > 0)
+                {
+                    // In a loop scope but no iteration slot in the id: the feed has no
+                    // iteration-indices plumbing, so a stamped key would repeat the same
+                    // values every iteration. Leave it to the ONNX fallback.
+                    continue;
+                }
+
+                // Fold up to the first iteration placeholder (the whole path when none):
+                // the rest of the path is realized at ONNX prep by in-graph splits on the
+                // runtime iteration index.
+                var foldVals = firstIterationSlot < 0 ? idVals : idVals[..firstIterationSlot];
+                var (k0, k1) = rngConfig.FoldRunKey(foldVals);
                 node.Attributes = node.Attributes.SetAttributes(
                     (ShrkAttrRngExplicitKey, (long[])[k0, k1]),
                     (ShrkAttrRngAlgorithm, algorithmName));

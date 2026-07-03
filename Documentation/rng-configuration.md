@@ -75,14 +75,38 @@ like Dropout threads a model-state counter (advanced once per training step thro
 checkpoint) into its draw, so masks differ per step while the stream key — and therefore
 resume-exactness — is untouched.
 
+## Feeds inside loops
+
+A feed under a loop takes a ModelId with a `-1` iteration slot (exactly like a parameter
+created in a loop): conceptually one stream **per iteration**. The stamp carries the key of
+the path prefix before the `-1`; at ONNX prep the remaining slots become in-graph `split`
+folds on the runtime iteration index, so iteration *i* draws from
+`fold(fold(prefixKey, i), …)` — deterministic, resumable, and reconstructible offline from
+the path and the iteration number. This works identically whether the loop survives to
+runtime (an ONNX `Loop` splitting per iteration) or is unrolled at concretization (the
+splits constant-fold to the very same keys, bit-for-bit).
+
+## Per-stream overrides
+
+`config.Override(RngCollection.Params, [1, 1], seed)` pins a single stream — addressed by
+its consumer's ModelId path, as listed by the stream report — to an explicit seed,
+replacing the fully folded key for that stream only. Because the override replaces the
+*result* of the fold, it survives a later `MasterSeed` change. Matching is exact and
+per-collection.
+
+## The stream report
+
+`arch.GetRngStreamReport(config)` inventories every stream of a concrete architecture — the
+init stream of each parameter (ModelId path, name, shape, resolved key) and each runtime
+feed (path, kind; for loop-body feeds the prefix key) — and can emit the sparse `Rng.Pin`
+skeleton for freezing streams before a refactor (see
+[Pinning RNG streams](rng-pinning.md)).
+
 ## Without a config
 
 A feed with no stamp lowers to the plain ONNX random ops (`RandomUniformLike` /
 `RandomNormalLike`): the conventional, backend-seeded behavior — non-reproducible by nature,
-with any user-supplied seed passed through and none synthesized. This is also the current
-behavior of feeds inside loops, which the stamping pass skips until per-iteration key
-splitting is plumbed (a single key would repeat identical values every iteration; the
-fallback keeps draws fresh per iteration).
+with any user-supplied seed passed through and none synthesized.
 
 ## Choosing seeds
 

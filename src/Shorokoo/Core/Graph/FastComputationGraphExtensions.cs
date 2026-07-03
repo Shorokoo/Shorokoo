@@ -380,6 +380,60 @@ namespace Shorokoo.Graph
             => ModelIdNamingScheme.CreateShorokooNamingScheme(graph.GetConcreteModelParamInfos());
 
         /// <summary>
+        /// Builds the RNG stream inventory of a <b>concrete architecture</b>: one entry per
+        /// stream — every parameter's init stream and every runtime random feed — with its
+        /// ModelId path, consumer kind, parameter name/shape where known, and (when
+        /// <paramref name="rngConfig"/> is supplied) the resolved stream key. The report also
+        /// emits the sparse <c>Rng.Pin</c> skeleton (see <see cref="RngStreamReport.EmitPinSkeleton"/>).
+        /// Requires a concrete architecture from <see cref="ToConcreteArchitecture"/>.
+        /// </summary>
+        public static RngStreamReport GetRngStreamReport(
+            this FastComputationGraph graph, RngConfig? rngConfig = null)
+        {
+            var streams = new List<RngStreamInfo>();
+
+            foreach (var info in graph.GetConcreteModelParamInfos().ParamInfos)
+            {
+                streams.Add(new RngStreamInfo
+                {
+                    Collection = RngCollection.Params,
+                    ModelIdPath = info.ModelId.Vals,
+                    Kind = RngStreamKind.ParamInit,
+                    Name = info.ToShorokooIdString(),
+                    Shape = info.Shape.Dims,
+                    KeyWords = rngConfig is null
+                        ? null
+                        : ToKeyWords(rngConfig.FoldInitKey(info.ModelId.Vals)),
+                });
+            }
+
+            foreach (var node in graph.Nodes)
+            {
+                bool isUniform = node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM;
+                bool isNormal = node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL;
+                if (!isUniform && !isNormal) continue;
+                var idVals = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId);
+                if (idVals is null || idVals.Length == 0) continue;
+
+                // For a loop-body feed (a -1 iteration slot in the path) the key shown is
+                // the stamped PREFIX key — per-iteration keys only exist at runtime.
+                int firstIterationSlot = System.Array.IndexOf(idVals, -1);
+                var foldVals = firstIterationSlot < 0 ? idVals : idVals[..firstIterationSlot];
+                streams.Add(new RngStreamInfo
+                {
+                    Collection = RngCollection.Runtime,
+                    ModelIdPath = idVals,
+                    Kind = isUniform ? RngStreamKind.UniformFeed : RngStreamKind.NormalFeed,
+                    KeyWords = rngConfig is null ? null : ToKeyWords(rngConfig.FoldRunKey(foldVals)),
+                });
+            }
+
+            return new RngStreamReport(streams);
+
+            static long[] ToKeyWords((uint k0, uint k1) key) => [key.k0, key.k1];
+        }
+
+        /// <summary>
         /// Pairs the graph's input names (in declaration order) with the supplied values to produce a
         /// <see cref="ModelParamList"/> of named inputs — the <c>inputHints</c> argument for
         /// <see cref="ToConcreteArchitecture"/>, or the inputs for an <c>Execute</c> call.

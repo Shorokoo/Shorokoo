@@ -68,9 +68,10 @@ shortcuts, or opaque helper calls that may create streams internally. This is by
 wrong pin silently changes seeds, so no suggestion beats a bad one.
 
 **Everything else: tools supply slots, you supply names.** For bodies the generator refuses,
-a bind-time stream report can describe every slot — ModelId path, consumer kind, parameter
-name, shape — and emit a skeleton for the sparse form with the one thing it cannot know left
-as a placeholder:
+the bind-time stream report (`arch.GetRngStreamReport(config)`) describes every slot —
+ModelId path, consumer kind, parameter name, shape, resolved key — and its
+`EmitPinSkeleton()` emits the sparse form with the one thing it cannot know left as a
+placeholder:
 
 ```csharp
 Rng.Pin(
@@ -85,14 +86,23 @@ is Turing-complete, a `for` loop makes one identifier refer to many consumers, a
 a consumer exist conditionally — so any tool that claimed to bind names for you in such
 bodies would be guessing, and a guessed pin is worse than none.
 
+## The sparse form
+
+`Rng.Pin(([3], item), ...)` pins each listed item to exactly the named module-local slot;
+unlisted consumers fill the remaining slots in node order. Unlike the positional form, a
+*partial* sparse pin is seed-preserving — pinned items sit at their named slots, everything
+else keeps its position relative to the other unpinned consumers — which is why it is the
+form the stream report's skeleton emits. Slots are 1-based; currently only top-level slots
+(paths of length 1) are supported — nested and loop-body paths (loop-iteration slots elided)
+are a specified follow-up.
+
 ## Current limits
 
-- The positional form is implemented. The sparse explicit-index form
-  (`Rng.Pin(([3], item), ...)`, module-local id paths with loop-iteration slots elided) is
-  specified but not yet implemented; it makes *partial* pinning seed-preserving (pin items at
-  their current slots; unpinned items keep theirs) and is the form tools should emit.
 - A consumer whose variable is scoped inside a C# block (`if`/`for`) cannot be referenced by
   an end-of-body pin at all; such consumers remain positional.
-- A pinned handle that cannot be resolved to a graph node is currently ignored silently;
-  this will become a build error (an inactive pin the author believes is active is exactly
-  the silent re-keying the feature exists to prevent).
+- A pin that cannot be resolved — an unsupported item type, a handle created outside the
+  module body, or one that leads to no id-bearing node — **fails the module build** with an
+  `Rng.Pin` error: an inactive pin the author believes is active is exactly the silent
+  re-keying the feature exists to prevent.
+- Sparse paths are top-level only (see above); an item inside a loop cannot take an explicit
+  slot yet.

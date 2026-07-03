@@ -296,6 +296,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             Op(SHRK_RNG_SPLIT)
                 .Tensor<int64>("T1")
                 .AttributeString(ShrkAttrRngAlgorithm)
+                .AttributeLongs(ShrkAttrRngExplicitKey)
                 .Input("key", "T1", 1)
                 .Input("index", "T1", 0)
                 .Output("childKey", "T1", 1),

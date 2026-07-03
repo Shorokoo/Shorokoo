@@ -1,0 +1,138 @@
+using System;
+using System.Linq;
+using Shorokoo.Core.Nodes.NodeDefinitions;
+using Shorokoo.Core.Rng;
+using Shorokoo.Runtime;
+
+namespace Shorokoo.Tests;
+
+/// <summary>
+/// Adds <c>steps</c> keyed uniform draws to <c>x</c> inside a RUNTIME loop — the trip count
+/// is a graph input, so the loop survives concretization and executes as an ONNX Loop.
+/// </summary>
+[Module]
+public partial class RngRuntimeLoopFeed
+{
+    public static Tensor<float32> Inline(Tensor<float32> x, Scalar<int64> steps)
+    {
+        var acc = x;
+        foreach (var ctx in LoopAPI.Iterate(steps))
+        {
+            var u = RandomUniform(x.ShapeTensor(), 0f, 1f);
+            acc = acc + u;
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return acc;
+    }
+}
+
+/// <summary>Same body with a CONSTANT trip count of 2: the loop unrolls at concretization.</summary>
+[Module]
+public partial class RngUnrolledLoopFeed
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var acc = x;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
+        {
+            var u = RandomUniform(x.ShapeTensor(), 0f, 1f);
+            acc = acc + u;
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return acc;
+    }
+}
+
+/// <summary>
+/// In-loop feed keying via runtime iteration-index splits: a feed under a loop takes the
+/// ModelId <c>[loopSlot, -1, feedSlot]</c>; the config stamp carries the key of the prefix
+/// before the <c>-1</c>, and at ONNX prep the remaining slots become in-graph
+/// <c>SHRK_RNG_SPLIT</c> folds on the runtime iteration index — so iteration <c>i</c> draws
+/// from the stream <c>fold(fold(fold(runMaster, loopSlot), i), feedSlot)</c>, bit-exactly
+/// reproducible host-side, whether the loop survives to runtime or unrolls into constants.
+/// </summary>
+[Trait("Domain", "Core")]
+[Trait("Purpose", "Coverage")]
+public class RngLoopTests
+{
+    private const long N = 8;
+
+    private static readonly float[] XVals = [10f, 20f, 30f, 40f, 50f, 60f, 70f, 80f];
+
+    /// <summary>Host replica of one keyed uniform draw: element e -> counter (e, drawBase=0).</summary>
+    private static float HostUniform(long e, (uint k0, uint k1) key)
+    {
+        var (x0, _) = Threefry2x32.Bijection((uint)e, 0u, key.k0, key.k1);
+        return (x0 & 0x00FFFFFFu) * (1.0f / 16777216.0f);
+    }
+
+    /// <summary>x + sum of per-iteration draws, added in loop order (float order matters).</summary>
+    private static float[] HostExpected(RngConfig cfg, int steps)
+    {
+        var expected = (float[])XVals.Clone();
+        for (int i = 0; i < steps; i++)
+        {
+            // Feed ModelId is [1, -1, 1]: prefix [1] is stamped, then split by the
+            // iteration index, then by the feed's slot under the loop (1).
+            var key = RngConfig.FoldKey(RngConfig.FoldKey(cfg.FoldRunKey([1]), i), 1);
+            for (long e = 0; e < N; e++)
+                expected[e] += HostUniform(e, key);
+        }
+        return expected;
+    }
+
+    private static (float[] output, FastComputationGraph concrete) RunRuntimeLoop(RngConfig cfg, long steps)
+    {
+        var g = (FastComputationGraph)typeof(RngRuntimeLoopFeed)
+            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var x = TensorData([N], XVals);
+        var stepsData = TensorData(Array.Empty<long>(), steps);
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x, stepsData]))
+            .ToConcreteModel(cfg);
+        var output = ComputeContext.Default.Execute(concrete, x, stepsData)[0]
+            .ToTensorData().As<float32>().AccessMemory().ToArray();
+        return (output, concrete);
+    }
+
+    [Fact]
+    public void TestRuntimeLoopFeedDrawsPerIterationStreamsBitExactly()
+    {
+        var cfg = new RngConfig { MasterSeed = 11 };
+        var (output, concrete) = RunRuntimeLoop(cfg, steps: 3);
+
+        // The loop really survived to runtime — otherwise this test proves nothing.
+        Assert.Contains(concrete.Nodes, n => n.OpCode == OpCodes.LOOP_OPEN);
+
+        // Every iteration drew from its own stream, and each matches the host fold exactly.
+        Assert.Equal(HostExpected(cfg, steps: 3), output);
+
+        // Deterministic across executions; re-keyed by a different master.
+        var (again, _) = RunRuntimeLoop(cfg, steps: 3);
+        Assert.Equal(output, again);
+        var (other, _) = RunRuntimeLoop(new RngConfig { MasterSeed = 12 }, steps: 3);
+        Assert.NotEqual(output, other);
+    }
+
+    [Fact]
+    public void TestUnrolledLoopFoldsToSameKeysAsRuntimeLoop()
+    {
+        var cfg = new RngConfig { MasterSeed = 11 };
+
+        var g = (FastComputationGraph)typeof(RngUnrolledLoopFeed)
+            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var x = TensorData([N], XVals);
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel(cfg);
+
+        // Constant trip count: the loop is gone by concretization…
+        Assert.DoesNotContain(concrete.Nodes, n => n.OpCode == OpCodes.LOOP_OPEN);
+
+        // …yet each unrolled copy folds to the same per-iteration key the runtime loop
+        // splits at execution: graceful degradation in both directions, bit-for-bit.
+        var output = ComputeContext.Default.Execute(concrete, x)[0]
+            .ToTensorData().As<float32>().AccessMemory().ToArray();
+        Assert.Equal(HostExpected(cfg, steps: 2), output);
+
+        var (runtimeOutput, _) = RunRuntimeLoop(cfg, steps: 2);
+        Assert.Equal(runtimeOutput, output);
+    }
+}

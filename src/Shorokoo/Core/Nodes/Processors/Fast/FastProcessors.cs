@@ -358,14 +358,26 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (isRngFeed)
                 {
                     // Runtime RNG feed sites share the module's id address space (so their
-                    // stream keys ride the same ModelId tree as params/sub-modules) but have
-                    // no iteration-indices input or identifier template. In-loop feeds draw
-                    // from the enclosing scope's picker only if inside a loop that already
-                    // has id-bearing content; otherwise the global picker (see
-                    // FastApplyRngKeys for the in-loop keying limitation).
-                    var feedModelId = explicitSlotByNode.TryGetValue(fastNode, out var feedSlot)
-                        ? new ModelId(feedSlot)
-                        : AllocateLoopModelIds([], idPickerEnumerator, loopModelIds);
+                    // stream keys ride the same ModelId tree as params/sub-modules) but carry
+                    // no identifier template. Like params, they thread an iteration-indices
+                    // input, so a feed inside a loop takes a slot under the loop's own id
+                    // space (with the -1 iteration placeholder) — realized at runtime by
+                    // splitting the stream key on the iteration index (see FastLowerRandomOps).
+                    var feedIterationIndices = GetIterationIndices(fastNode, nodeByKey);
+                    ModelId feedModelId;
+                    if (explicitSlotByNode.TryGetValue(fastNode, out var feedSlot))
+                    {
+                        if (feedIterationIndices.Length > 0)
+                            throw new InvalidOperationException(
+                                "Rng.Pin (sparse): a loop-body feed cannot take an explicit " +
+                                "top-level slot — loop items live under the loop's own id " +
+                                "space. Loop-body paths are a specified follow-up.");
+                        feedModelId = new ModelId(feedSlot);
+                    }
+                    else
+                    {
+                        feedModelId = AllocateLoopModelIds(feedIterationIndices, idPickerEnumerator, loopModelIds);
+                    }
                     var dctFeedAttributes = fastNode.Attributes.GetAttributeVals().ToDictionary();
                     dctFeedAttributes[OnnxOpAttributeNames.ShrkAttrLocalModelId] =
                         feedModelId.Vals.Select(x => (long)x).ToArray();
@@ -449,11 +461,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 inputIndex = 1;
             else if (node.OpCode == InternalOpCodes.TRAINABLE_PARAM_REF)
                 inputIndex = 0;
+            else if (node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
+                     node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL)
+                inputIndex = 2;   // [shape, drawBase, iterationIndices]
             else
                 throw new InvalidOperationException(
                     $"FastApplyIdentifierTemplates: unexpected OpCode '{node.OpCode}'");
 
             var inputs = node.Inputs;
+            if (inputs.Count <= inputIndex)
+                return [];   // node built by an older path with no iteration-indices input
             var iterationIndicesKey = inputs[inputIndex];
             if (iterationIndicesKey is null || iterationIndicesKey.Value.IsEmpty)
                 return [];
@@ -814,7 +831,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 {
                     // Runtime RNG feed site: prepend the parent path to its ModelId so its
                     // stream key stays unique per call site (same-object reuse shares the
-                    // parent id, hence the stream). No template / iteration-indices input.
+                    // parent id, hence the stream), and combine iteration indices like a
+                    // param ref — a feed inside a module called from a loop needs the call
+                    // site's iteration scalars to realize the -1 slots the parent id brings.
+                    // Feed inputs: [shape, drawBase, iterationIndices].
+                    var childFeedIterKey = node.Inputs.Count > 2 ? node.Inputs[2] : null;
+                    var combinedFeedIterKey = CombineIterationIndices(
+                        parentIterIndicesKey, childFeedIterKey,
+                        subGraph, mainGraph, subNodeByKey, nodesToInsert, i);
+
                     var dctFeedAttributes = node.Attributes.GetAttributeVals().ToDictionary();
                     var feedIdVals = (long[])dctFeedAttributes[OnnxOpAttributeNames.ShrkAttrLocalModelId]!;
                     var combinedFeedId = new ModelId(parentModelId, ModelId.FromLongVals(feedIdVals));
@@ -822,6 +847,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         combinedFeedId.Vals.Select(x => (long)x).ToArray();
                     node.Attributes = OnnxCSharpAttributes.FromCSharpVals(
                         dctFeedAttributes, node.Attributes.AttributeDefs);
+
+                    var feedInputs = node.FullInputs[""];
+                    while (feedInputs.Count < 3) feedInputs.Add(null);
+                    feedInputs[2] = combinedFeedIterKey;
                 }
                 else if (node.OpCode == InternalOpCodes.TRAINABLE_PARAM_REF)
                 {

@@ -35,11 +35,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <paramref name="fn"/> contains no random ops (the caller then keeps the original).
         /// </summary>
         public static Function? BuildNoiseInjected(
-            Function fn, string streamName, long elementCount, RngConfig rngConfig)
+            Function fn, (uint k0, uint k1) streamKey, string streamName, long elementCount)
         {
             var body = fn.OriginalFastGraph.Clone();
 
-            var (k0, k1) = rngConfig.ResolveKey(RngCollection.Params, streamName);
+            var (k0, k1) = streamKey;
 
             var constAttrDefs = Definitions.NodeDefinitions[OpCodes.CONSTANT].AttributeDefs;
             var reshapeAttrDefs = Definitions.NodeDefinitions[OpCodes.RESHAPE].AttributeDefs;

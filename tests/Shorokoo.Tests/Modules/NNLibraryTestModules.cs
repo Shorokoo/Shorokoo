@@ -4105,7 +4105,8 @@ public partial class RnnCellClosedFormRelu
         long hv = 2L;
         var h = Tensor(new long[] { 1L, 2L }, 0.3f, -0.4f);   // nonzero previous state
         var hOut = Recurrent.RNNCell(x, h, hiddenSize: hv, nonlinearity: RnnNonlinearity.Relu);
-        return Sanity.Reasonable(hOut);
+        // Bounded-only: relu over an H=2 state can legitimately be all-zero under a weight draw.
+        return Sanity.Bounded(hOut);
     }
 }
 

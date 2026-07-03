@@ -265,8 +265,28 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (!fastNode.Attributes.IsAttributeDefined(OnnxOpAttributeNames.ShrkAttrLocalModelId))
                     continue;
 
-                Debug.Assert(fastNode.OpCode == InternalOpCodes.TRAINABLE_PARAM_REF ||
+                bool isRngFeed = fastNode.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
+                                 fastNode.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL;
+                Debug.Assert(isRngFeed ||
+                             fastNode.OpCode == InternalOpCodes.TRAINABLE_PARAM_REF ||
                              fastNode.OpCode == InternalOpCodes.MODULE_SET_HYPERPARAMS);
+
+                if (isRngFeed)
+                {
+                    // Runtime RNG feed sites share the module's id address space (so their
+                    // stream keys ride the same ModelId tree as params/sub-modules) but have
+                    // no iteration-indices input or identifier template. In-loop feeds draw
+                    // from the enclosing scope's picker only if inside a loop that already
+                    // has id-bearing content; otherwise the global picker (see
+                    // FastApplyRngKeys for the in-loop keying limitation).
+                    var feedModelId = AllocateLoopModelIds([], idPickerEnumerator, loopModelIds);
+                    var dctFeedAttributes = fastNode.Attributes.GetAttributeVals().ToDictionary();
+                    dctFeedAttributes[OnnxOpAttributeNames.ShrkAttrLocalModelId] =
+                        feedModelId.Vals.Select(x => (long)x).ToArray();
+                    fastNode.Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                        dctFeedAttributes, fastNode.Attributes.AttributeDefs);
+                    continue;
+                }
 
                 var toIdentifyKey = fastNode.Outputs[0]!.Value;
 
@@ -689,7 +709,21 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 var node = subGraph.Nodes[i];
 
-                if (node.OpCode == InternalOpCodes.TRAINABLE_PARAM_REF)
+                if (node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
+                    node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL)
+                {
+                    // Runtime RNG feed site: prepend the parent path to its ModelId so its
+                    // stream key stays unique per call site (same-object reuse shares the
+                    // parent id, hence the stream). No template / iteration-indices input.
+                    var dctFeedAttributes = node.Attributes.GetAttributeVals().ToDictionary();
+                    var feedIdVals = (long[])dctFeedAttributes[OnnxOpAttributeNames.ShrkAttrLocalModelId]!;
+                    var combinedFeedId = new ModelId(parentModelId, ModelId.FromLongVals(feedIdVals));
+                    dctFeedAttributes[OnnxOpAttributeNames.ShrkAttrLocalModelId] =
+                        combinedFeedId.Vals.Select(x => (long)x).ToArray();
+                    node.Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                        dctFeedAttributes, node.Attributes.AttributeDefs);
+                }
+                else if (node.OpCode == InternalOpCodes.TRAINABLE_PARAM_REF)
                 {
                     // TRAINABLE_PARAM_REF inputs: [iterationIndices, ...initializerParams]
                     var childIterIndicesKey = node.Inputs[0];

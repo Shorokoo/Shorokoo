@@ -2,7 +2,6 @@ using Shorokoo;
 using Shorokoo.Core;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Core.Nodes.OnnxNodes;
-using Shorokoo.Core.Rng;
 using Shorokoo.Graph;
 using Shorokoo.Modules;
 using Shorokoo.Onnx;
@@ -11,23 +10,23 @@ using static Shorokoo.Globals;
 namespace Shorokoo.Modules.Layers;
 
 /// <summary>
-/// Builds Dropout keep/scale masks from the deterministic in-graph counter-based RNG
-/// (<see cref="RuntimeRng"/>) instead of the non-portable ONNX <c>Dropout</c> op, so the mask is
-/// reproducible on every execution provider and in the Quick Execution Engine (and needs no
-/// optimization-disable hack, since it does not constant-fold to a no-op). One draw per mask
-/// element; survivors scale to <c>1/(1−ratio)</c>, drops to 0; eval (<c>training = false</c>) is
-/// all-ones (identity).
-///
-/// <para>The <c>drawBase</c> (Threefry counter high word) is 0, so the mask is fixed across
-/// executions — inference stays stateless (no per-layer state forcing the training path). A
-/// per-step-varying <c>drawBase</c> is fed by the training rig's step channel where available.</para>
+/// Builds Dropout keep/scale masks from a plain uniform draw (<see cref="Globals.RandomUniform"/>)
+/// instead of the ONNX <c>Dropout</c> op. The draw site is id-bearing, so when an
+/// <see cref="RngConfig"/> is bound at concretization the mask rides the keyed deterministic
+/// RNG — its stream key folds from the runtime master along this site's ModelId path, giving
+/// every dropout layer instance its own decorrelated, reproducible, backend-independent
+/// stream. Without a bound config the draw takes the ONNX random-op fallback (fresh values
+/// per execution, non-reproducible). One draw per mask element; survivors scale to
+/// <c>1/(1−ratio)</c>, drops to 0; eval (<c>training = false</c>) is all-ones (identity).
 /// </summary>
 internal static class DropoutMasking
 {
     public static Tensor<float32> Mask(Vector<int64> maskShape, Scalar<float32> ratio, Scalar<bit> training)
     {
-        var (k0, k1) = RngConfig.Default.RuntimeKey("dropout");
-        var u = RuntimeRng.Uniform(maskShape, Scalar(k0), Scalar(k1), Scalar(0L), Scalar(0f), Scalar(1f));
+        // Seed 42 is honored only by the unkeyed ONNX fallback (RandomUniformLike), keeping
+        // that path deterministic per session — the pre-keyed-RNG behavior. The keyed path
+        // derives its stream from the RngConfig masters and ignores this attribute.
+        var u = RandomUniform(maskShape, low: 0f, high: 1f, seed: 42f);
 
         var keep = (u >= ratio).Cast<float32>();                        // 1 if kept (prob 1−ratio), else 0
         var scaled = keep / (Scalar(1f) - ratio);                       // survivors → 1/(1−ratio)

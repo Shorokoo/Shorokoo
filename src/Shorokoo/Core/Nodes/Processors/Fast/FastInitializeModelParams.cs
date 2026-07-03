@@ -69,8 +69,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     foreach (var d in info.Shape.Dims) elementCount *= d;
                     if (elementCount > 0)
                     {
+                        // Stream key = init master folded along the parameter's ModelId path —
+                        // the RNG key tree IS the ModelId tree, host-side here (bit-identical
+                        // to the in-graph SHRK_RNG_SPLIT chain), so a param's init stream is
+                        // reconstructible offline from its ModelId alone.
+                        var key = rngConfig!.FoldInitKey(modelId.Vals);
                         var injected = FastInitRngNoise.BuildNoiseInjected(
-                            initFn, info.ToShorokooIdString(), elementCount, rngConfig!);
+                            initFn, key, info.ToShorokooIdString(), elementCount);
                         if (injected is not null)
                             node.TargetFunction = injected;
                     }

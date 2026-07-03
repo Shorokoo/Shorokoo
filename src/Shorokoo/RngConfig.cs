@@ -126,15 +126,44 @@ public sealed class RngConfig
     }
 
     /// <summary>
-    /// A runtime stream's two 32-bit Threefry key words as <c>int64</c> values (each in
-    /// <c>[0, 2^32)</c>), for feeding <see cref="Shorokoo.Core.Rng.RuntimeRng"/>'s in-graph draws
-    /// (e.g. Dropout masks). Public counterpart to <see cref="ResolveKey"/> for the
-    /// <see cref="RngCollection.Runtime"/> collection.
+    /// The init-collection master key: two 32-bit words of <c>Fold(MasterSeed, "init")</c>.
+    /// Every trainable-parameter stream folds from this along the parameter's ModelId path,
+    /// so overriding the init sub-master re-rolls all weights while runtime streams stay put.
     /// </summary>
-    public (long k0, long k1) RuntimeKey(string streamName)
+    internal (uint k0, uint k1) InitMasterKey => SplitWords(Fold(MasterSeed, "init"));
+
+    /// <summary>The runtime-collection master key (Dropout masks, sampling, noise): words of <c>Fold(MasterSeed, "runtime")</c>.</summary>
+    internal (uint k0, uint k1) RunMasterKey => SplitWords(Fold(MasterSeed, "runtime"));
+
+    private static (uint k0, uint k1) SplitWords(ulong key)
+        => ((uint)(key & 0xFFFFFFFF), (uint)(key >> 32));
+
+    /// <summary>
+    /// Host-side index fold — one Threefry bijection, bit-identical to the in-graph
+    /// SHRK_RNG_SPLIT: child = Bijection(counter: (index, 0), key).
+    /// </summary>
+    internal static (uint k0, uint k1) FoldKey((uint k0, uint k1) key, long index)
+        => Core.Rng.Threefry2x32.Bijection(unchecked((uint)index), 0u, key.k0, key.k1);
+
+    /// <summary>
+    /// A trainable parameter's stream key: the init master folded along the parameter's
+    /// ModelId path (specific ids — loop slots carry real iteration values). SharedKey mode
+    /// skips the fold so same-shape params tie (test/debug only).
+    /// </summary>
+    internal (uint k0, uint k1) FoldInitKey(IEnumerable<int> modelIdVals)
     {
-        var (k0, k1) = ResolveKey(RngCollection.Runtime, streamName);
-        return (k0, k1);
+        var key = InitMasterKey;
+        if (SharedKey) return key;
+        foreach (var v in modelIdVals) key = FoldKey(key, v);
+        return key;
+    }
+
+    /// <summary>A runtime feed's stream key: the runtime master folded along the feed's ModelId path.</summary>
+    internal (uint k0, uint k1) FoldRunKey(IEnumerable<int> modelIdVals)
+    {
+        var key = RunMasterKey;
+        foreach (var v in modelIdVals) key = FoldKey(key, v);
+        return key;
     }
 
     /// <summary>

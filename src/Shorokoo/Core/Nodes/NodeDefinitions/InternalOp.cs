@@ -329,7 +329,8 @@ internal static partial class InternalOp
     /// </summary>
     public static Variable RandomUniform(Variable shape, float? high = null, float? low = null, float? seed = null)
         => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_UNIFORM, [shape], [
-            (AttrHigh, high), (AttrLow, low), (AttrSeed, seed)]);
+            (AttrHigh, high), (AttrLow, low), (AttrSeed, seed),
+            (ShrkAttrLocalModelId, (long[])[])]);
 
     /// <summary>
     /// Creates a tensor filled with random values from a normal distribution.
@@ -338,7 +339,8 @@ internal static partial class InternalOp
     /// </summary>
     public static Variable RandomNormal(Variable shape, float? mean = null, float? scale = null, float? seed = null)
         => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_NORMAL, [shape], [
-            (AttrMean, mean), (AttrScale, scale), (AttrSeed, seed)]);
+            (AttrMean, mean), (AttrScale, scale), (AttrSeed, seed),
+            (ShrkAttrLocalModelId, (long[])[])]);
 
     /// <summary>Index-based RNG key split under the named algorithm: child = Bijection(key, counter: index).</summary>
     public static Variable RngSplit(Variable key, Variable index, string algorithm)

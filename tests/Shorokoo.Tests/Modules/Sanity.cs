@@ -16,6 +16,19 @@ namespace Shorokoo.Tests.Modules;
 internal static class Sanity
 {
     /// <summary>
+    /// Bounded-output bit: <paramref name="y"/> is within ±<paramref name="bound"/> (NaN/Inf
+    /// fail the comparison). No non-degeneracy requirement — use for outputs that can
+    /// legitimately be all-zero, e.g. a relu over a tiny hidden state whose pre-activations
+    /// all landed negative under some weight draw.
+    /// </summary>
+    public static Scalar<bit> Bounded(Tensor<float32> y, float bound = 1000f)
+    {
+        var maxv = y.Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        var minv = y.Reduce(ReduceKind.Min, keepDims: false).Scalar();
+        return (maxv < Scalar(bound)) & (minv > Scalar(-bound));
+    }
+
+    /// <summary>
     /// Reasonable-output bit: <paramref name="y"/> is bounded by ±<paramref name="bound"/> and
     /// carries non-zero mass. NaN/Inf fail (a NaN max compares false against the bound; a NaN
     /// abs-sum compares false against zero), so this also serves as a finiteness guard.

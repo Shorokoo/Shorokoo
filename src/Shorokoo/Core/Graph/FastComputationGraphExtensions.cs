@@ -237,7 +237,12 @@ namespace Shorokoo.Graph
         public static FastComputationGraph ToConcreteModel(this FastComputationGraph graph, RngConfig rngConfig)
         {
             var defaultTrainableParams = graph.InitializeTrainableParams(rngConfig: rngConfig);
-            return graph.ToConcreteModel(defaultTrainableParams);
+            var concrete = graph.ToConcreteModel(defaultTrainableParams);
+            // Bind the config to the runtime feeds too: each top-level SHRK_RANDOM_* site is
+            // rewritten to the keyed deterministic draw whose stream key folds from the
+            // runtime master along the feed's ModelId path (see FastApplyRngKeys).
+            Shorokoo.Core.Nodes.Processors.Fast.FastApplyRngKeys.Process(concrete, rngConfig);
+            return concrete;
         }
 
         /// <summary>

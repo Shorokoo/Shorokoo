@@ -140,6 +140,47 @@ public class ModuleV2CompilerCoverageTests
     }
 
     [Fact]
+    public void TransposeAttributeArg_MatchesTracer()
+    {
+        const string source = """
+            static Tensor<float32> F(Tensor<float32> x)
+            {
+                return x.Transpose([1L, 0L]);
+            }
+            """;
+        var mlir = ModuleV2Compiler.CompileToMlir(source);
+        Assert.Contains("\"perm\" = [1, 0] : i64", mlir); // arg classified as attribute, not input
+
+        var compiled = MlirTextReader.Parse(mlir);
+        var traced = GraphBuilder.BuildFastComputationGraphFromDelegate(
+            (System.Func<Tensor<float32>, Tensor<float32>>)(static x => x.Transpose([1L, 0L])));
+        Assert.Equal(SortedOpCodes(traced), SortedOpCodes(compiled));
+    }
+
+    [Fact]
+    public void HyperParam_IsTypedAndOrderedFirst()
+    {
+        // Source lists the tensor input first and the hyperparameter last; the graph must order
+        // the hyperparameter input first and type it as Hyperparam.
+        const string source = """
+            static Tensor<float32> F(Tensor<float32> x, [Hyper] Scalar<int64> n)
+            {
+                return x + x;
+            }
+            """;
+        var mlir = ModuleV2Compiler.CompileToMlir(source);
+        Assert.Contains("enum<InputType, Hyperparam>", mlir);
+        Assert.Contains("enum<InputType, ReadyInput>", mlir);
+
+        var g = MlirTextReader.Parse(mlir);
+        Assert.Equal(2, g.Inputs.Count);
+        // First input is the hyperparameter node (int64 scalar), reordered ahead of the tensor input.
+        var firstInputNode = g.FindNode(g.Inputs[0].FastNodeKey)!;
+        Assert.Equal(InputType.Hyperparam,
+            firstInputNode.Attributes.GetEnumVal<InputType>("shrk_input_type"));
+    }
+
+    [Fact]
     public void UnsupportedConstruct_Throws()
     {
         // A numeric literal is not lowerable in this slice (constants come later).

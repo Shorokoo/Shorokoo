@@ -17,13 +17,15 @@ namespace Shorokoo.ModuleV2
     /// <para><b>Phase 2 slice.</b> Supported today: a single static method whose parameters are
     /// <c>Tensor&lt;T&gt;</c>/<c>Vector&lt;T&gt;</c>/<c>Scalar&lt;T&gt;</c>, a straight-line body of
     /// <c>var</c> declarations and a final <c>return</c>, and expressions built from:
-    /// the binary operators <c>+ - * /</c>; a small set of input-only method calls (<c>MatMul</c>,
-    /// <c>Relu</c>, <c>Sqrt</c>, <c>Exp</c>, <c>Abs</c>); constant constructors
-    /// (<c>Scalar(1.0f)</c>, <c>Scalar(1L)</c>, <c>Vector(2L, 3L)</c>) → <c>Constant</c> nodes; and
-    /// external initializer calls (<c>InitSimple.Init(...)</c>) referenced by name and bound at
-    /// link time, never inlined. Attribute arguments, module <c>.Call(...)</c> invocations, and
-    /// control flow are not handled yet and raise <see cref="NotSupportedException"/>. See
-    /// <c>src/docs/design/mlir-assembly-parser.md</c>.</para>
+    /// the binary operators <c>+ - * /</c>; method-call ops whose arguments are classified per an
+    /// <c>OpSpec</c> as inputs or host-constant attributes (<c>MatMul</c>/<c>Relu</c>/<c>Sqrt</c>/
+    /// <c>Exp</c>/<c>Abs</c> input-only; <c>Transpose([1L,0L])</c> → <c>perm</c>; <c>Softmax(axis)</c>
+    /// → <c>axis</c>); constant constructors (<c>Scalar(1.0f)</c>, <c>Scalar(1L)</c>,
+    /// <c>Vector(2L, 3L)</c>) → <c>Constant</c> nodes; <c>[Hyper]</c> parameters (typed and ordered
+    /// hyperparameters-first); and external initializer calls (<c>InitSimple.Init(...)</c>)
+    /// referenced by name and bound at link time, never inlined. Module <c>.Call(...)</c>
+    /// invocations, dynamic shape-collection arguments, and control flow are not handled yet and
+    /// raise <see cref="NotSupportedException"/>. See <c>src/docs/design/mlir-assembly-parser.md</c>.</para>
     /// </summary>
     public static class ModuleV2Compiler
     {
@@ -35,15 +37,29 @@ namespace Shorokoo.ModuleV2
             [SyntaxKind.DivideExpression] = "Div",
         };
 
-        // Method-call ops: name -> opcode. The receiver is the first operand, remaining arguments
-        // follow in order. Restricted to input-only ops (no attribute arguments) for this slice.
-        private static readonly Dictionary<string, string> MethodOps = new()
+        private enum AttrKind { Longs, Long, Float, Bool }
+
+        /// <summary>A method argument is either a graph input (an IValue) or a host-constant attribute.</summary>
+        private sealed record ArgRole(bool IsInput, string? AttrName = null, AttrKind Kind = default);
+
+        /// <summary>Maps a method call to its opcode and the roles of its arguments after the receiver.</summary>
+        private sealed record OpSpec(string Opcode, ArgRole[] Args);
+
+        private static ArgRole Input { get; } = new(true);
+        private static ArgRole Attr(string name, AttrKind kind) => new(false, name, kind);
+
+        // Method-call ops: the receiver is the first operand; the remaining arguments are consumed
+        // per the ArgRole list (input operand vs host-constant attribute). Trailing roles beyond the
+        // supplied argument count are treated as omitted optionals.
+        private static readonly Dictionary<string, OpSpec> MethodOps = new()
         {
-            ["MatMul"] = "MatMul",
-            ["Relu"] = "Relu",
-            ["Sqrt"] = "Sqrt",
-            ["Exp"] = "Exp",
-            ["Abs"] = "Abs",
+            ["MatMul"] = new("MatMul", [Input]),
+            ["Relu"] = new("Relu", []),
+            ["Sqrt"] = new("Sqrt", []),
+            ["Exp"] = new("Exp", []),
+            ["Abs"] = new("Abs", []),
+            ["Transpose"] = new("Transpose", [Attr("perm", AttrKind.Longs)]),
+            ["Softmax"] = new("Softmax", [Attr("axis", AttrKind.Long)]),
         };
 
         private static readonly Dictionary<string, int> DTypeProtoByName = new(StringComparer.Ordinal)
@@ -81,8 +97,11 @@ namespace Shorokoo.ModuleV2
                 if (method.Body is null)
                     throw new NotSupportedException("ModuleV2Compiler: expression-bodied methods are not supported yet; use a block body.");
 
-                foreach (var p in method.ParameterList.Parameters)
-                    EmitInput(p);
+                // Graph inputs are ordered hyperparameters-first, matching the tracer's convention
+                // (even though the source signature lists tensor inputs first, hypers last).
+                var parameters = method.ParameterList.Parameters;
+                foreach (var p in parameters.Where(IsHyper)) EmitInput(p, isHyper: true);
+                foreach (var p in parameters.Where(p => !IsHyper(p))) EmitInput(p, isHyper: false);
 
                 string? outputRef = null;
                 foreach (var stmt in method.Body.Statements)
@@ -116,16 +135,26 @@ namespace Shorokoo.ModuleV2
                 return Assemble(outputRef);
             }
 
-            private void EmitInput(ParameterSyntax p)
+            private void EmitInput(ParameterSyntax p, bool isHyper)
             {
-                var proto = DTypeProtoOf(p.Type ?? throw new NotSupportedException($"ModuleV2Compiler: parameter '{p.Identifier}' has no type."));
+                var type = p.Type ?? throw new NotSupportedException($"ModuleV2Compiler: parameter '{p.Identifier}' has no type.");
+                var proto = DTypeProtoOf(type);
+                var inputType = isHyper ? "Hyperparam" : "ReadyInput";
+
+                var attrs = new List<string> { $"\"dtype\" = dtype<{proto}>" };
+                if (RankOf(type) is int rank) attrs.Add($"\"shrk_rank\" = {rank} : i64");
+                attrs.Add($"\"shrk_input_type\" = enum<InputType, {inputType}>");
+
                 int k = ++_counter;
-                _nodeLines.Add($"  %N{k} = \"#ModelTensorInput#\"() -> (%N{k}_T0) {{\"dtype\" = dtype<{proto}>}}");
+                _nodeLines.Add($"  %N{k} = \"#ModelTensorInput#\"() -> (%N{k}_T0) {{{string.Join(", ", attrs)}}}");
                 var refTxt = $"%N{k}_T0";
                 _inputRefs.Add(refTxt);
                 _inputNames.Add(p.Identifier.Text);
                 _env[p.Identifier.Text] = refTxt;
             }
+
+            private static bool IsHyper(ParameterSyntax p)
+                => p.AttributeLists.SelectMany(al => al.Attributes).Any(a => a.Name.ToString() is "Hyper" or "HyperAttribute");
 
             private string Lower(ExpressionSyntax expr)
             {
@@ -153,11 +182,9 @@ namespace Shorokoo.ModuleV2
                             return LowerSubmoduleCall(recvId.Identifier.Text, ma.Name.Identifier.Text, inv.ArgumentList.Arguments);
 
                         var name = ma.Name.Identifier.Text;
-                        if (!MethodOps.TryGetValue(name, out var opcode))
+                        if (!MethodOps.TryGetValue(name, out var spec))
                             throw new NotSupportedException($"ModuleV2Compiler: method '{name}' is not in the supported op set.");
-                        var operands = new List<string> { Lower(ma.Expression) };
-                        operands.AddRange(inv.ArgumentList.Arguments.Select(a => Lower(a.Expression)));
-                        return EmitNode(opcode, operands);
+                        return LowerOpCall(spec, ma.Expression, inv.ArgumentList.Arguments);
 
                     default:
                         throw new NotSupportedException(
@@ -165,12 +192,67 @@ namespace Shorokoo.ModuleV2
                 }
             }
 
-            private string EmitNode(string opcode, IReadOnlyList<string> operandRefs)
+            private string LowerOpCall(OpSpec spec, ExpressionSyntax receiver, SeparatedSyntaxList<ArgumentSyntax> args)
+            {
+                if (args.Count > spec.Args.Length)
+                    throw new NotSupportedException($"ModuleV2Compiler: op '{spec.Opcode}' got {args.Count} arguments but expects at most {spec.Args.Length}.");
+
+                var operands = new List<string> { Lower(receiver) };
+                var attrs = new List<string>();
+                for (int i = 0; i < args.Count; i++)
+                {
+                    var role = spec.Args[i];
+                    if (role.IsInput) operands.Add(Lower(args[i].Expression));
+                    else attrs.Add($"{Quote(role.AttrName!)} = {AttrLiteral(role.Kind, args[i].Expression)}");
+                }
+                return EmitNode(spec.Opcode, operands, attrs);
+            }
+
+            private string EmitNode(string opcode, IReadOnlyList<string> operandRefs, IReadOnlyList<string>? attrs = null)
             {
                 int k = ++_counter;
-                _nodeLines.Add($"  %N{k} = \"{opcode}\"({string.Join(", ", operandRefs)}) -> (%N{k}_T0)");
+                var attrText = attrs is { Count: > 0 } ? $" {{{string.Join(", ", attrs)}}}" : "";
+                _nodeLines.Add($"  %N{k} = \"{opcode}\"({string.Join(", ", operandRefs)}) -> (%N{k}_T0){attrText}");
                 return $"%N{k}_T0";
             }
+
+            private static string AttrLiteral(AttrKind kind, ExpressionSyntax e) => kind switch
+            {
+                AttrKind.Long => $"{LongLiteral(e)} : i64",
+                AttrKind.Longs => $"[{string.Join(", ", LongCollection(e))}] : i64",
+                AttrKind.Float => $"{FloatLiteral(e)} : f32",
+                AttrKind.Bool => BoolLiteral(e) ? "true" : "false",
+                _ => throw new NotSupportedException($"ModuleV2Compiler: attribute kind {kind} not supported.")
+            };
+
+            private static IEnumerable<long> LongCollection(ExpressionSyntax e) => e switch
+            {
+                CollectionExpressionSyntax coll => coll.Elements.Select(el =>
+                    el is ExpressionElementSyntax ee ? LongLiteral(ee.Expression)
+                    : throw new NotSupportedException("ModuleV2Compiler: only plain elements are supported in an attribute list.")),
+                _ => throw new NotSupportedException($"ModuleV2Compiler: expected a collection literal like [1L, 0L], got '{e.Kind()}'.")
+            };
+
+            private static float FloatLiteral(ExpressionSyntax e)
+            {
+                var (neg, lit) = Unminus(e);
+                float v = lit.Token.Value switch
+                {
+                    float f => f,
+                    double d => (float)d,
+                    int i => i,
+                    long l => l,
+                    _ => throw new NotSupportedException($"ModuleV2Compiler: expected a float literal, got '{lit.Token.Text}'.")
+                };
+                return neg ? -v : v;
+            }
+
+            private static bool BoolLiteral(ExpressionSyntax e) => e.Kind() switch
+            {
+                SyntaxKind.TrueLiteralExpression => true,
+                SyntaxKind.FalseLiteralExpression => false,
+                _ => throw new NotSupportedException($"ModuleV2Compiler: expected 'true' or 'false', got '{e.Kind()}'.")
+            };
 
             // Scalar(literal) / Vector(literal, ...) → a Constant node carrying a dense value.
             private string LowerConstant(string ctor, SeparatedSyntaxList<ArgumentSyntax> args)
@@ -271,6 +353,14 @@ namespace Shorokoo.ModuleV2
                 }
                 throw new NotSupportedException($"ModuleV2Compiler: parameter type '{type}' must be a tensor type like Tensor<float32>.");
             }
+
+            /// <summary>Statically known rank of a value type: Scalar → 0, Vector → 1, Tensor → unknown (null).</summary>
+            private static int? RankOf(TypeSyntax type) => (type as GenericNameSyntax)?.Identifier.Text switch
+            {
+                "Scalar" => 0,
+                "Vector" => 1,
+                _ => null,
+            };
 
             private static string Quote(string s) => "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
         }

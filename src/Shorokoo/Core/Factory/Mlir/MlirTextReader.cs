@@ -284,6 +284,7 @@ namespace Shorokoo.Core.Factory.Mlir
                     case AttributeType.DTypes: return ParseArray(ParseDType).ToArray();
                     case AttributeType.Enum: return ParseEnum(def);
                     case AttributeType.Enums: return ParseArray(() => ParseEnum(def)).ToArray();
+                    case AttributeType.Tensor: return ParseDenseTensor();
                     default:
                         throw new NotSupportedException(
                             $"MlirTextReader: attribute '{def.AttributeName}' has type {def.Type}, which Phase 1 does not parse.");
@@ -329,6 +330,19 @@ namespace Shorokoo.Core.Factory.Mlir
                 int protoNum = (int)ParseLong();
                 ExpectPunct(">");
                 return DType.FromProtoTypeNum(protoNum);
+            }
+
+            private TensorData ParseDenseTensor()
+            {
+                ExpectWord("dense");
+                ExpectPunct("<");
+                var dims = ParseArray(ParseLong).ToArray();
+                ExpectPunct(",");
+                var dtype = ParseDType();
+                ExpectPunct(",");
+                var data = Convert.FromBase64String(Expect(TokKind.Str).Text);
+                ExpectPunct(">");
+                return MlirTensorCodec.FromRawBytes(dims, dtype, data);
             }
 
             private object ParseEnum(NodeDefAttributeDef def)

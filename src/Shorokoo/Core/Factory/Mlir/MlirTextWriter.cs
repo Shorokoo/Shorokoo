@@ -119,6 +119,7 @@ namespace Shorokoo.Core.Factory.Mlir
             AttributeType.DTypes => $"[{string.Join(", ", ((DType[])value).Select(DTypeRef))}]",
             AttributeType.Enum => EnumRef(def, value),
             AttributeType.Enums => $"[{string.Join(", ", ((System.Collections.IEnumerable)value).Cast<object>().Select(v => EnumRef(def, v)))}]",
+            AttributeType.Tensor => DenseTensor((TensorData)value),
             _ => throw new NotSupportedException(
                 $"MlirTextWriter: attribute '{def.AttributeName}' on node '{opCode}' has type {def.Type}, which Phase 1 does not serialize.")
         };
@@ -131,6 +132,13 @@ namespace Shorokoo.Core.Factory.Mlir
         }
 
         private static string DTypeRef(DType dtype) => $"dtype<{dtype.ProtoTypeNum.ToString(CultureInfo.InvariantCulture)}>";
+
+        private static string DenseTensor(TensorData td)
+        {
+            var dims = (long[])td.Shape;
+            var bytes = MlirTensorCodec.ToRawBytes(td);
+            return $"dense<[{string.Join(", ", dims)}], {DTypeRef(td.DType)}, {Quote(Convert.ToBase64String(bytes))}>";
+        }
 
         private static string NodeRef(FastNodeKey key) => "%N" + key.Id.ToString(CultureInfo.InvariantCulture);
 

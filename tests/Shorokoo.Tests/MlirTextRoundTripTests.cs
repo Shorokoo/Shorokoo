@@ -88,6 +88,28 @@ public class MlirTextRoundTripCoverageTests
     }
 
     [Fact]
+    public void ScalarConstant_TensorAttribute_RoundTrips()
+    {
+        var x = InputTensor<float32>("x");
+        var graph = new FastComputationGraph([x], [x + Scalar(1.0f)]);
+        AssertRoundTrips(graph);
+
+        // The float32 Constant node forces the Tensor (dense<…>) attribute path.
+        Assert.Contains("dense<", MlirTextWriter.Write(graph));
+    }
+
+    [Fact]
+    public void Int64ShapeConstant_TensorAttribute_RoundTrips()
+    {
+        var x = InputTensor<float32>("x", rank: 2);
+        var reshaped = x.Reshape([Scalar(4L), Scalar(4L)]);
+        var graph = new FastComputationGraph([x], [reshaped]);
+        AssertRoundTrips(graph);
+
+        Assert.Contains("dtype<7>", MlirTextWriter.Write(graph)); // int64 shape constant(s)
+    }
+
+    [Fact]
     public void Parse_UnknownOpCode_Throws()
     {
         const string text = """

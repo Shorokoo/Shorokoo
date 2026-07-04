@@ -65,10 +65,26 @@ construction.
 ## What a stamped feed lowers to
 
 At ONNX prep, a stamped feed becomes a call to the config's **named RNG algorithm** — a
-versioned set of functions (default `"Threefry2x32-BoxMuller.v1"`, kinds *split* / *uniform*
-/ *normal*) that export as tagged, non-inlined ONNX local `FunctionProto`s. The exported
-model's randomness is therefore deterministic, portable across execution providers, and
-identifiable: you can point at the function in the ONNX file that produced any draw.
+versioned set of functions (kinds *split* / *uniform* / *normal*) that export as tagged,
+non-inlined ONNX local `FunctionProto`s. The exported model's randomness is therefore
+deterministic, portable across execution providers, and identifiable: you can point at the
+function in the ONNX file that produced any draw.
+
+## Choosing the generator
+
+`RngConfig.Algorithm` selects the bit generator:
+
+- `RngAlgorithm.Threefry2x32` (default) — Threefry-2x32, 20 rounds; the Random123
+  safety-margin default.
+- `RngAlgorithm.Threefry2x32Rounds13` — the reduced 13-round variant (Random123
+  `threefry2x32x13`): still BigCrush-resistant, ~35% cheaper — the faster, lower-margin choice.
+
+All algorithms **share one key tree**: a stream's key is derived the same way regardless of
+generator, so switching `Algorithm` never reshuffles which stream is which — the same stream
+simply draws different numbers. Both parameter initialization and runtime feeds honor the
+choice. Because binding is stamping, you can switch generators on an already-built model the
+same way you re-seed it (`concrete.ApplyRngConfig(...)` / re-materialize for init), and the
+exported model calls — and is tagged with — the selected algorithm's functions.
 
 Per-execution variation is carried by a separate **drawBase** counter, not by the key — and
 the RNG system manages it itself: concretization injects one model-global execution counter

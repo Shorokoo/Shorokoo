@@ -40,12 +40,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (graph is null) throw new ArgumentNullException(nameof(graph));
             if (rngConfig is null) throw new ArgumentNullException(nameof(rngConfig));
 
-            string algorithmName = rngConfig.Algorithm switch
-            {
-                RngAlgorithm.Threefry2x32 => RngAlgorithms.Default,
-                _ => throw new ArgumentOutOfRangeException(
-                    nameof(rngConfig), rngConfig.Algorithm, "Unknown RNG algorithm."),
-            };
+            string algorithmName = RngAlgorithms.NameOf(rngConfig.Algorithm);
 
             int loopDepth = 0;
             foreach (var node in graph.Nodes)

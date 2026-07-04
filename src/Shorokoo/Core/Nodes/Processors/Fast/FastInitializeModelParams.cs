@@ -74,8 +74,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         // to the in-graph SHRK_RNG_SPLIT chain), so a param's init stream is
                         // reconstructible offline from its ModelId alone.
                         var key = rngConfig!.FoldInitKey(modelId.Vals);
+                        // Init noise uses the configured algorithm's draw round count (the key
+                        // itself is algorithm-independent — see RngConfig.FoldInitKey), so a
+                        // param's init values switch with the algorithm just like runtime feeds.
                         var injected = FastInitRngNoise.BuildNoiseInjected(
-                            initFn, key, info.ToShorokooIdString(), elementCount);
+                            initFn, key, info.ToShorokooIdString(), elementCount,
+                            Core.Rng.RngAlgorithms.DrawRoundsOf(rngConfig.Algorithm));
                         if (injected is not null)
                             node.TargetFunction = injected;
                     }

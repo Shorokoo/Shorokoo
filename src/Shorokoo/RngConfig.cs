@@ -5,11 +5,17 @@ using System.Text;
 
 namespace Shorokoo;
 
-/// <summary>The bit generator a <see cref="RngConfig"/> uses. Configuration, never part of a model definition.</summary>
+/// <summary>The bit generator a <see cref="RngConfig"/> uses for keyed draws. Configuration, never
+/// part of a model definition. Every algorithm shares one key tree (so switching preserves stream
+/// identity — the same stream just draws different numbers); only the draw's bit generator differs.</summary>
 public enum RngAlgorithm
 {
     /// <summary>Threefry-2x32 (Random123), 20 rounds. The default: expressible as portable ONNX integer ops.</summary>
     Threefry2x32,
+
+    /// <summary>Threefry-2x32 with the reduced 13-round bit generator (Random123 <c>threefry2x32x13</c>):
+    /// still BigCrush-resistant, ~35% cheaper than the 20-round default — the faster, lower-margin choice.</summary>
+    Threefry2x32Rounds13,
 }
 
 /// <summary>

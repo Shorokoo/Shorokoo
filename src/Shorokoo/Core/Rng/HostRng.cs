@@ -24,12 +24,14 @@ internal sealed class HostRng
     private readonly uint _k0;
     private readonly uint _k1;
     private readonly ulong _counterBase;
+    private readonly int _rounds;
 
-    public HostRng(uint k0, uint k1, ulong counterBase = 0)
+    public HostRng(uint k0, uint k1, ulong counterBase = 0, int rounds = 20)
     {
         _k0 = k0;
         _k1 = k1;
         _counterBase = counterBase;
+        _rounds = rounds;
     }
 
     /// <summary>The uniform draw in [0, 1) at draw index <paramref name="d"/>.</summary>
@@ -37,7 +39,7 @@ internal sealed class HostRng
     {
         ulong block = _counterBase + (d >> 1);
         var (w0, w1) = Threefry2x32.Bijection(
-            (uint)(block & 0xFFFFFFFF), (uint)(block >> 32), _k0, _k1);
+            (uint)(block & 0xFFFFFFFF), (uint)(block >> 32), _k0, _k1, _rounds);
         uint bits = (d & 1) == 0 ? w0 : w1;
         return (bits & 0x00FFFFFFu) * TwoPow24Inv;
     }

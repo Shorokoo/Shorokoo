@@ -46,10 +46,12 @@ public static class RuntimeRng
         return hi + lo;
     }
 
-    /// <summary>Threefry-2x32 (20 rounds) over the per-element counter <c>(c0, drawBase)</c>.
-    /// <paramref name="c0"/> is the flat element-index tensor <c>[N]</c>; the other words are scalars.</summary>
+    /// <summary>Threefry-2x32 over the per-element counter <c>(c0, drawBase)</c> with an explicit
+    /// <paramref name="rounds"/> count (default 20; 13 is the Crush-resistant fast variant).
+    /// <paramref name="c0"/> is the flat element-index tensor <c>[N]</c>; the other words are scalars.
+    /// Bit-for-bit identical to <see cref="Threefry2x32.Bijection(uint, uint, uint, uint, int)"/>.</summary>
     public static (Tensor<int64> x0, Tensor<int64> x1) Bijection(
-        Tensor<int64> c0, Scalar<int64> drawBase, Scalar<int64> k0, Scalar<int64> k1)
+        Tensor<int64> c0, Scalar<int64> drawBase, Scalar<int64> k0, Scalar<int64> k1, int rounds = 20)
     {
         // Key schedule (host-foldable: keys are scalars). ks2 = parity ^ k0 ^ k1.
         Scalar<int64> ks0 = k0, ks1 = k1, ks2 = Scalar(SkeinParity) ^ k0 ^ k1;
@@ -57,7 +59,7 @@ public static class RuntimeRng
         var x0 = Mask32(c0 + ks0);                       // [N]
         var x1 = Mask32((c0 - c0) + drawBase + ks1);     // broadcast drawBase to [N]
 
-        for (int r = 0; r < 20; r++)
+        for (int r = 0; r < rounds; r++)
         {
             x0 = Mask32(x0 + x1);
             x1 = RotL(x1, Rot[r & 7]);
@@ -101,19 +103,19 @@ public static class RuntimeRng
         return OnnxOp.Range(Scalar(0L), n, Scalar(1L)).int64();   // [N]
     }
 
-    /// <summary>Standard uniform U(0,1) of the given shape.</summary>
+    /// <summary>Standard uniform U(0,1) of the given shape (bit generator: Threefry-2x32-<paramref name="rounds"/>).</summary>
     public static Tensor<float32> StandardUniform(
-        Vector<int64> shape, Scalar<int64> k0, Scalar<int64> k1, Scalar<int64> drawBase)
+        Vector<int64> shape, Scalar<int64> k0, Scalar<int64> k1, Scalar<int64> drawBase, int rounds = 20)
     {
-        var (x0, _) = Bijection(Counter(shape), drawBase, k0, k1);
+        var (x0, _) = Bijection(Counter(shape), drawBase, k0, k1, rounds);
         return ToUniform(x0).Reshape(shape);
     }
 
-    /// <summary>Standard normal N(0,1) of the given shape (per-element Box–Muller).</summary>
+    /// <summary>Standard normal N(0,1) of the given shape (per-element Box–Muller over Threefry-2x32-<paramref name="rounds"/>).</summary>
     public static Tensor<float32> StandardNormal(
-        Vector<int64> shape, Scalar<int64> k0, Scalar<int64> k1, Scalar<int64> drawBase)
+        Vector<int64> shape, Scalar<int64> k0, Scalar<int64> k1, Scalar<int64> drawBase, int rounds = 20)
     {
-        var (x0, x1) = Bijection(Counter(shape), drawBase, k0, k1);
+        var (x0, x1) = Bijection(Counter(shape), drawBase, k0, k1, rounds);
         var u1 = ToUniform(x0);
         var u2 = ToUniform(x1);
         var radius = ((-u1 + Scalar(1.0f)).Ln() * Scalar(-2.0f)).Sqrt();   // √(−2·ln(1−u₁))
@@ -124,12 +126,12 @@ public static class RuntimeRng
     /// <summary>U(low, high) of the given shape.</summary>
     public static Tensor<float32> Uniform(
         Vector<int64> shape, Scalar<int64> k0, Scalar<int64> k1, Scalar<int64> drawBase,
-        Scalar<float32> low, Scalar<float32> high)
-        => StandardUniform(shape, k0, k1, drawBase) * (high - low) + low;
+        Scalar<float32> low, Scalar<float32> high, int rounds = 20)
+        => StandardUniform(shape, k0, k1, drawBase, rounds) * (high - low) + low;
 
     /// <summary>N(mean, scale) of the given shape.</summary>
     public static Tensor<float32> Normal(
         Vector<int64> shape, Scalar<int64> k0, Scalar<int64> k1, Scalar<int64> drawBase,
-        Scalar<float32> mean, Scalar<float32> scale)
-        => StandardNormal(shape, k0, k1, drawBase) * scale + mean;
+        Scalar<float32> mean, Scalar<float32> scale, int rounds = 20)
+        => StandardNormal(shape, k0, k1, drawBase, rounds) * scale + mean;
 }

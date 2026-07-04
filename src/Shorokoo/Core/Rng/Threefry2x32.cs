@@ -22,6 +22,10 @@ internal static class Threefry2x32
     /// <summary>Number of Feistel rounds. 20 is the Random123 safety-margin default.</summary>
     public const int Rounds = 20;
 
+    /// <summary>The minimum Crush-resistant round count (Random123 <c>threefry2x32x13</c>):
+    /// still passes BigCrush, ~35% fewer rounds than the default. A faster, lower-margin variant.</summary>
+    public const int Rounds13 = 13;
+
     // Skein key-schedule parity constant for 32-bit words.
     private const uint SkeinParity = 0x1BD11BDAu;
 
@@ -33,6 +37,15 @@ internal static class Threefry2x32
     /// <c>(k0, k1)</c>, returning 64 pseudo-random bits as two 32-bit words.
     /// </summary>
     public static (uint x0, uint x1) Bijection(uint c0, uint c1, uint k0, uint k1)
+        => Bijection(c0, c1, k0, k1, Rounds);
+
+    /// <summary>
+    /// The keyed bijection with an explicit <paramref name="rounds"/> count (Random123
+    /// Threefry-2x32-R). The per-4-rounds key injection keys off the round index, so any R
+    /// is the correct Random123 variant — R=13 injects after rounds 4/8/12 with no trailing
+    /// injection, R=20 injects after 4/8/12/16/20.
+    /// </summary>
+    public static (uint x0, uint x1) Bijection(uint c0, uint c1, uint k0, uint k1, int rounds)
     {
         // Key schedule: ks[2] = parity ^ k0 ^ k1.
         uint ks0 = k0, ks1 = k1, ks2 = SkeinParity ^ k0 ^ k1;
@@ -40,7 +53,7 @@ internal static class Threefry2x32
         uint x0 = c0 + ks0;
         uint x1 = c1 + ks1;
 
-        for (int r = 0; r < Rounds; r++)
+        for (int r = 0; r < rounds; r++)
         {
             x0 += x1;
             int s = Rot[r & 7];

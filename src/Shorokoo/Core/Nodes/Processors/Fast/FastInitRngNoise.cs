@@ -35,7 +35,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <paramref name="fn"/> contains no random ops (the caller then keeps the original).
         /// </summary>
         public static Function? BuildNoiseInjected(
-            Function fn, (uint k0, uint k1) streamKey, string streamName, long elementCount)
+            Function fn, (uint k0, uint k1) streamKey, string streamName, long elementCount, int drawRounds = 20)
         {
             var body = fn.OriginalFastGraph.Clone();
 
@@ -60,7 +60,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 // Distinct sub-stream per random node within one initializer (all shipping
                 // initializers have exactly one, so this is ordinal 0 in practice).
                 ulong counterBase = (ulong)randomOrdinal << 40;
-                var rng = new HostRng(k0, k1, counterBase);
+                var rng = new HostRng(k0, k1, counterBase, drawRounds);
 
                 float[] noise = isUniform
                     ? rng.Uniform(elementCount,

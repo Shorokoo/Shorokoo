@@ -84,6 +84,62 @@ public class ModuleV2CompilerCoverageTests
     }
 
     [Fact]
+    public void ScalarConstantAdd_MatchesTracer()
+    {
+        const string source = """
+            static Tensor<float32> F(Tensor<float32> x)
+            {
+                return x + Scalar(1.0f);
+            }
+            """;
+        var compiled = MlirTextReader.Parse(ModuleV2Compiler.CompileToMlir(source));
+        Assert.Contains("Constant", SortedOpCodes(compiled));
+
+        var traced = GraphBuilder.BuildFastComputationGraphFromDelegate(
+            (System.Func<Tensor<float32>, Tensor<float32>>)(static x => x + Scalar(1.0f)));
+        Assert.Equal(SortedOpCodes(traced), SortedOpCodes(compiled));
+    }
+
+    [Fact]
+    public void VectorConstant_MatchesTracer()
+    {
+        const string source = """
+            static Vector<int64> F()
+            {
+                return Vector(2L, 3L);
+            }
+            """;
+        var compiled = MlirTextReader.Parse(ModuleV2Compiler.CompileToMlir(source));
+        Assert.Empty(compiled.Inputs);
+        Assert.Equal(["Constant"], SortedOpCodes(compiled));
+
+        var traced = GraphBuilder.BuildFastComputationGraphFromDelegate(
+            (System.Func<Vector<int64>>)(static () => Vector(2L, 3L)));
+        Assert.Equal(SortedOpCodes(traced), SortedOpCodes(compiled));
+    }
+
+    [Fact]
+    public void SubmoduleInitCall_EmitsExternalReferenceByName()
+    {
+        // An external initializer call: referenced by name, not bound/inlined at codegen time.
+        const string source = """
+            static Tensor<float32> F(Tensor<float32> x)
+            {
+                return InitSimple.Init(x);
+            }
+            """;
+        var mlir = ModuleV2Compiler.CompileToMlir(source);
+        Assert.Contains("#TrainableParamRef#", mlir);
+        Assert.Contains("\"shrk_function_name\" = \"InitSimple\"", mlir);
+        Assert.DoesNotContain("tgtfn", mlir); // external → no embedded function body / reference
+
+        // It parses into a structurally valid graph (name attributes carry the unbound reference).
+        var g = MlirTextReader.Parse(mlir);
+        Assert.True(g.IsLinearOrderValid());
+        Assert.Contains("#TrainableParamRef#", SortedOpCodes(g));
+    }
+
+    [Fact]
     public void UnsupportedConstruct_Throws()
     {
         // A numeric literal is not lowerable in this slice (constants come later).

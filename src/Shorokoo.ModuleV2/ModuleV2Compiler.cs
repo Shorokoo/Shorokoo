@@ -16,10 +16,14 @@ namespace Shorokoo.ModuleV2
     ///
     /// <para><b>Phase 2 slice.</b> Supported today: a single static method whose parameters are
     /// <c>Tensor&lt;T&gt;</c>/<c>Vector&lt;T&gt;</c>/<c>Scalar&lt;T&gt;</c>, a straight-line body of
-    /// <c>var</c> declarations and a final <c>return</c>, and expressions built from the binary
-    /// operators <c>+ - * /</c> and a small set of unary/binary method calls (e.g. <c>MatMul</c>,
-    /// <c>Relu</c>). Literals, submodule calls, and control flow are not handled yet and raise
-    /// <see cref="NotSupportedException"/>. See <c>src/docs/design/mlir-assembly-parser.md</c>.</para>
+    /// <c>var</c> declarations and a final <c>return</c>, and expressions built from:
+    /// the binary operators <c>+ - * /</c>; a small set of input-only method calls (<c>MatMul</c>,
+    /// <c>Relu</c>, <c>Sqrt</c>, <c>Exp</c>, <c>Abs</c>); constant constructors
+    /// (<c>Scalar(1.0f)</c>, <c>Scalar(1L)</c>, <c>Vector(2L, 3L)</c>) → <c>Constant</c> nodes; and
+    /// external initializer calls (<c>InitSimple.Init(...)</c>) referenced by name and bound at
+    /// link time, never inlined. Attribute arguments, module <c>.Call(...)</c> invocations, and
+    /// control flow are not handled yet and raise <see cref="NotSupportedException"/>. See
+    /// <c>src/docs/design/mlir-assembly-parser.md</c>.</para>
     /// </summary>
     public static class ModuleV2Compiler
     {
@@ -137,7 +141,17 @@ namespace Shorokoo.ModuleV2
                     case BinaryExpressionSyntax bin when BinaryOps.TryGetValue(bin.Kind(), out var op):
                         return EmitNode(op, [Lower(bin.Left), Lower(bin.Right)]);
 
+                    // Constant constructors: Scalar(literal) / Vector(literal, ...).
+                    case InvocationExpressionSyntax inv when inv.Expression is IdentifierNameSyntax callee && callee.Identifier.Text is "Scalar" or "Vector":
+                        return LowerConstant(callee.Identifier.Text, inv.ArgumentList.Arguments);
+
                     case InvocationExpressionSyntax inv when inv.Expression is MemberAccessExpressionSyntax ma:
+                        // A member call whose receiver is an identifier not bound as a value is a
+                        // type-qualified submodule/initializer call (e.g. InitSimple.Init(...)); a
+                        // receiver that is a bound value is an op call (e.g. x.MatMul(y)).
+                        if (ma.Expression is IdentifierNameSyntax recvId && !_env.ContainsKey(recvId.Identifier.Text))
+                            return LowerSubmoduleCall(recvId.Identifier.Text, ma.Name.Identifier.Text, inv.ArgumentList.Arguments);
+
                         var name = ma.Name.Identifier.Text;
                         if (!MethodOps.TryGetValue(name, out var opcode))
                             throw new NotSupportedException($"ModuleV2Compiler: method '{name}' is not in the supported op set.");
@@ -155,6 +169,82 @@ namespace Shorokoo.ModuleV2
             {
                 int k = ++_counter;
                 _nodeLines.Add($"  %N{k} = \"{opcode}\"({string.Join(", ", operandRefs)}) -> (%N{k}_T0)");
+                return $"%N{k}_T0";
+            }
+
+            // Scalar(literal) / Vector(literal, ...) → a Constant node carrying a dense value.
+            private string LowerConstant(string ctor, SeparatedSyntaxList<ArgumentSyntax> args)
+            {
+                if (ctor == "Scalar")
+                {
+                    if (args.Count != 1) throw new NotSupportedException("ModuleV2Compiler: Scalar(...) takes exactly one literal.");
+                    var (proto, bytes) = ScalarConst(args[0].Expression);
+                    return EmitConstant([], proto, bytes);
+                }
+
+                // Vector(long, long, ...) → rank-1 int64 constant.
+                var buf = new List<byte>();
+                foreach (var a in args)
+                    buf.AddRange(BitConverter.GetBytes(LongLiteral(a.Expression)));
+                return EmitConstant([args.Count], 7, buf.ToArray());
+            }
+
+            private string EmitConstant(long[] dims, int proto, byte[] bytes)
+            {
+                int k = ++_counter;
+                var dense = $"dense<[{string.Join(", ", dims)}], dtype<{proto}>, \"{Convert.ToBase64String(bytes)}\">";
+                _nodeLines.Add($"  %N{k} = \"Constant\"() -> (%N{k}_T0) {{\"value\" = {dense}}}");
+                return $"%N{k}_T0";
+            }
+
+            private static (int proto, byte[] bytes) ScalarConst(ExpressionSyntax e)
+            {
+                var (neg, lit) = Unminus(e);
+                return lit.Token.Value switch
+                {
+                    float f => (1, BitConverter.GetBytes(neg ? -f : f)),
+                    double d => (1, BitConverter.GetBytes((float)(neg ? -d : d))),
+                    long l => (7, BitConverter.GetBytes(neg ? -l : l)),
+                    int i => (7, BitConverter.GetBytes(neg ? -(long)i : i)),
+                    _ => throw new NotSupportedException($"ModuleV2Compiler: unsupported Scalar literal '{lit.Token.Text}' (use e.g. 1.0f or 1L).")
+                };
+            }
+
+            private static long LongLiteral(ExpressionSyntax e)
+            {
+                var (neg, lit) = Unminus(e);
+                long v = lit.Token.Value switch
+                {
+                    long l => l,
+                    int i => i,
+                    _ => throw new NotSupportedException($"ModuleV2Compiler: expected an integer literal, got '{lit.Token.Text}'.")
+                };
+                return neg ? -v : v;
+            }
+
+            private static (bool neg, LiteralExpressionSyntax lit) Unminus(ExpressionSyntax e)
+            {
+                bool neg = false;
+                if (e is PrefixUnaryExpressionSyntax u && u.IsKind(SyntaxKind.UnaryMinusExpression)) { neg = true; e = u.Operand; }
+                if (e is not LiteralExpressionSyntax lit)
+                    throw new NotSupportedException($"ModuleV2Compiler: expected a numeric literal, got '{e.Kind()}'.");
+                return (neg, lit);
+            }
+
+            // A call to an *external* module/initializer (e.g. InitSimple.Init(...)). Per design, the
+            // callee is referenced by name and bound at link time, not inlined at codegen — the node
+            // carries the callee's name; no function body is emitted. (Full arg-shape lowering and
+            // module .Call() invocations are future work.)
+            private string LowerSubmoduleCall(string typeName, string methodName, SeparatedSyntaxList<ArgumentSyntax> args)
+            {
+                if (methodName != "Init")
+                    throw new NotSupportedException($"ModuleV2Compiler: submodule call '{typeName}.{methodName}' is not supported yet (only initializer '.Init' calls).");
+
+                var operands = args.Select(a => Lower(a.Expression)).ToList();
+                int k = ++_counter;
+                _nodeLines.Add(
+                    $"  %N{k} = \"#TrainableParamRef#\"({string.Join(", ", operands)}) -> (%N{k}_T0) " +
+                    $"{{\"shrk_function_name\" = {Quote(typeName)}, \"shrk_domain_name\" = \"Functions\", \"shrk_is_trainable\" = true}}");
                 return $"%N{k}_T0";
             }
 

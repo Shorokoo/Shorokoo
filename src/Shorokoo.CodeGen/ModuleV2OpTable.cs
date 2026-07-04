@@ -24,7 +24,7 @@ namespace Shorokoo.ModuleV2
         public static Dictionary<string, OpSpelling> BuildFromSharedDefs()
         {
             var table = new Dictionary<string, OpSpelling>();
-            foreach (var m in Definitions.GetProofMakers())
+            foreach (var m in Definitions.AllSharedMakers())
             {
                 if (m.OpName is not string op) continue;
                 table[op] = new OpSpelling

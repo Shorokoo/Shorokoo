@@ -36,12 +36,22 @@ namespace Shorokoo
 
     // Referenced in AttributeDType/AttributeDTypes signatures only.
     public sealed class DType { }
+
+    // A shared definition file may `using static Shorokoo.Globals;` (vestigial in the structural
+    // defs); the generator only needs the type to exist for the directive to resolve.
+    public static class Globals { }
 }
 
-namespace Shorokoo.Core.Nodes.AutoDiff { }   // empty shims for `using`s the generator doesn't need
+// Empty shims for namespaces the shared definition / OpCodes / AttributeNames files `using` but that
+// the generator does not otherwise populate, so those `using`s resolve.
+namespace Shorokoo.Core.Nodes.AutoDiff { }
 namespace Shorokoo.Modules { }
 namespace Shorokoo.Core.Training { }
-namespace Shorokoo.Core { }
+namespace Shorokoo.Core { public static class InternalGlobals { } }
+namespace Shorokoo.Core.Nodes { }
+namespace Shorokoo.Core.Factory { }
+namespace Shorokoo.Core.Factory.IR { }
+namespace Shorokoo.Onnx { }
 
 namespace Shorokoo.Core.Nodes.NodeDefinitions
 {

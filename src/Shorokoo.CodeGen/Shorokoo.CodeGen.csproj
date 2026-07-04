@@ -45,6 +45,11 @@
        dummy stand-ins in NodeDefsShim.cs. See src/docs/design/mlir-assembly-parser.md (step 2). -->
   <ItemGroup>
     <Compile Include="..\Shorokoo\Core\Nodes\NodeDefinitions\Definitions.Proof.cs" Link="NodeDefs\Definitions.Proof.cs" />
+    <!-- Pure string-constant classes, shared verbatim. -->
+    <Compile Include="..\Shorokoo\Core\Nodes\NodeDefinitions\OpCodes.cs" Link="NodeDefs\OpCodes.cs" />
+    <Compile Include="..\Shorokoo\Core\Nodes\NodeDefinitions\AttributeNames.cs" Link="NodeDefs\AttributeNames.cs" />
+    <!-- First real op group shared into the generator (runtime still compiles it unchanged). -->
+    <Compile Include="..\Shorokoo\Core\Nodes\NodeDefinitions\Definitions.TZ.cs" Link="NodeDefs\Definitions.TZ.cs" />
   </ItemGroup>
 
 </Project>

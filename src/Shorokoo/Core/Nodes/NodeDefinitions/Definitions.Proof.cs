@@ -26,6 +26,18 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("b", "T", "R2")
                 .Output("c", "T", "R")
                 .Code("{1:low_op} + {2:low_op}"),
+
+            // Exercises the attribute surface (enum / longs / bool) and generic markers, so the
+            // dummy maker is validated against real-shaped usage, not just input-only ops.
+            new NodeDefinitionMaker()
+                .Op("ProofPool")
+                .Tensor<FloatLike>("T")
+                .AttributeEnum<AutoPad>("auto_pad", ["NOTSET", "SAME_UPPER", "SAME_LOWER", "VALID"])
+                .AttributeLongs("kernel_shape")
+                .AttributeBool("ceil_mode")
+                .Input("X", "T", "R")
+                .Output("Y", "T", "R")
+                .Code("{1:this}.ProofPool({a:param}{b:param}{c:param})"),
         ];
     }
 }

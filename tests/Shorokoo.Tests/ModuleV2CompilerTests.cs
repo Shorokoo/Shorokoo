@@ -227,6 +227,36 @@ public class ModuleV2CompilerCoverageTests
     }
 
     [Fact]
+    public void NativeWhile_LowersToLoopScope_WithCarriedVariable()
+    {
+        // Native C# while lowered to a Loop#OPEN/Loop#CLOSE scope: `acc` is bound before the loop
+        // and reassigned in the body, so it is loop-carried — init on the open, per-iteration value
+        // as an open body output, updated value + re-evaluated condition on the close.
+        const string source = """
+            static Tensor<float32> F(Scalar<bit> keepGoing, Tensor<float32> x)
+            {
+                var acc = x;
+                while (keepGoing) { acc = acc + acc; }
+                return acc;
+            }
+            """;
+        var mlir = ModuleV2Compiler.CompileToMlir(source);
+        Assert.Contains("Loop#OPEN", mlir);
+        Assert.Contains("Loop#CLOSE", mlir);
+        Assert.Contains("out \"body\"", mlir);
+        Assert.Contains("in \"body\"", mlir);
+
+        var g = MlirTextReader.Parse(mlir);
+        Assert.True(g.IsLinearOrderValid());
+        Assert.Contains("Loop#OPEN", SortedOpCodes(g));
+        Assert.Contains("Loop#CLOSE", SortedOpCodes(g));
+
+        // The lowered loop scope is a well-formed graph: it survives a write→parse→write fixpoint.
+        var text = Shorokoo.Core.Factory.Mlir.MlirTextWriter.Write(g);
+        Assert.Equal(text, Shorokoo.Core.Factory.Mlir.MlirTextWriter.Write(MlirTextReader.Parse(text)));
+    }
+
+    [Fact]
     public void UnsupportedConstruct_Throws()
     {
         // A numeric literal is not lowerable in this slice (constants come later).

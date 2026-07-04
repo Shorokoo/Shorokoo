@@ -24,9 +24,10 @@ namespace Shorokoo.ModuleV2
     /// <c>Vector(2L, 3L)</c>) → <c>Constant</c> nodes; <c>[Hyper]</c> parameters (typed and ordered
     /// hyperparameters-first); and external initializer calls (<c>InitSimple.Init(...)</c>)
     /// referenced by name and bound at link time, never inlined; and native <c>if</c>/<c>else</c>
-    /// lowered to an <c>If#OPEN</c>/<c>If#CLOSE</c> scope via SSA merge. Module <c>.Call(...)</c>
-    /// invocations, dynamic shape-collection arguments, and loops (<c>while</c>/<c>for</c>) are not
-    /// handled yet and raise <see cref="NotSupportedException"/>. See
+    /// lowered to an <c>If#OPEN</c>/<c>If#CLOSE</c> scope via SSA merge; and native <c>while</c>
+    /// lowered to a <c>Loop#OPEN</c>/<c>Loop#CLOSE</c> scope with loop-carried variables. Module
+    /// <c>.Call(...)</c> invocations, dynamic shape-collection arguments, and <c>for</c> loops are
+    /// not handled yet and raise <see cref="NotSupportedException"/>. See
     /// <c>src/docs/design/mlir-assembly-parser.md</c>.</para>
     /// </summary>
     public static class ModuleV2Compiler
@@ -147,6 +148,10 @@ namespace Shorokoo.ModuleV2
                         LowerIf(ifStmt);
                         break;
 
+                    case WhileStatementSyntax whileStmt:
+                        LowerWhile(whileStmt);
+                        break;
+
                     default:
                         throw new NotSupportedException(
                             $"ModuleV2Compiler: statement '{stmt.Kind()}' is not supported in this slice.");
@@ -207,6 +212,64 @@ namespace Shorokoo.ModuleV2
                     foreach (var s in block.Statements) ProcessStatement(s);
                 }
                 else ProcessStatement(branch);
+            }
+
+            /// <summary>
+            /// Lowers <c>while (cond) { … }</c> to a <c>Loop#OPEN</c>/<c>Loop#CLOSE</c> scope. The
+            /// loop-carried variables are those bound before the loop and reassigned in the body;
+            /// their initial values become the open node's initializers, their per-iteration values
+            /// are the open's <c>body</c>-group outputs (index, condition, then one per carried var),
+            /// and the body-computed updates plus the re-evaluated condition become the close node's
+            /// <c>body</c>-group inputs, with the close's outputs the post-loop values.
+            /// </summary>
+            private void LowerWhile(WhileStatementSyntax w)
+            {
+                var pre = new Dictionary<string, string>(_env, StringComparer.Ordinal);
+                var carried = CollectAssignedNames(w.Statement)
+                    .Where(pre.ContainsKey)
+                    .OrderBy(k => k, StringComparer.Ordinal)
+                    .ToList();
+
+                // Initial condition, evaluated in the enclosing scope over the pre-loop values.
+                var condInit = Lower(w.Condition);
+
+                int open = ++_counter;
+                var openInputs = new List<string> { "_", condInit };            // [maxIterations(unset), condition, …inits]
+                openInputs.AddRange(carried.Select(v => pre[v]));
+                var bodyOuts = new List<string> { $"%N{open}_T0", $"%N{open}_T1" }; // [iterationIndex, conditionIn, …loopVars]
+                for (int i = 0; i < carried.Count; i++) bodyOuts.Add($"%N{open}_T{2 + i}");
+                _nodeLines.Add($"  %N{open} = \"Loop#OPEN\"({string.Join(", ", openInputs)}) -> out \"body\"({string.Join(", ", bodyOuts)})");
+
+                // Body: carried variables resolve to their per-iteration open outputs.
+                var outer = _env;
+                _env = new Dictionary<string, string>(pre, StringComparer.Ordinal);
+                for (int i = 0; i < carried.Count; i++) _env[carried[i]] = $"%N{open}_T{2 + i}";
+                ProcessBranch(w.Statement);
+                var continueWhile = Lower(w.Condition);                          // re-evaluated over the updated values
+                var updaters = carried.Select(v => _env[v]).ToList();
+                _env = outer;
+
+                int close = ++_counter;
+                var closeIns = new List<string> { continueWhile };
+                closeIns.AddRange(updaters);
+                var closeOuts = carried.Select((_, i) => $"%N{close}_T{i}");
+                _nodeLines.Add(
+                    $"  %N{close} = \"Loop#CLOSE\" in \"body\"({string.Join(", ", closeIns)}) -> ({string.Join(", ", closeOuts)}) " +
+                    $"{{\"body\" = graphattr<\"body\">}} open %N{open}");
+
+                for (int i = 0; i < carried.Count; i++) _env[carried[i]] = $"%N{close}_T{i}";
+            }
+
+            /// <summary>Names assigned anywhere in <paramref name="body"/> (via <c>x = …</c> or <c>var x = …</c>).</summary>
+            private static HashSet<string> CollectAssignedNames(StatementSyntax body)
+            {
+                var names = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var n in body.DescendantNodes())
+                {
+                    if (n is AssignmentExpressionSyntax { Left: IdentifierNameSyntax id }) names.Add(id.Identifier.Text);
+                    else if (n is VariableDeclaratorSyntax vd) names.Add(vd.Identifier.Text);
+                }
+                return names;
             }
 
             private void EmitInput(ParameterSyntax p, bool isHyper)

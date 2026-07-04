@@ -34,4 +34,10 @@
     <None Include="$(OutputPath)\$(AssemblyName).dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
   </ItemGroup>
 
+  <!-- The [ModuleV2] frontend lowering is pure Roslyn syntax analysis (no runtime types), so the
+       generator shares the exact source the Shorokoo.ModuleV2 prototype is tested against. -->
+  <ItemGroup>
+    <Compile Include="..\Shorokoo.ModuleV2\ModuleV2Compiler.cs" Link="ModuleV2Compiler.cs" />
+  </ItemGroup>
+
 </Project>

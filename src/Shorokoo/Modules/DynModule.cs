@@ -22,6 +22,16 @@ namespace Shorokoo.Modules
     public class ModuleAttribute : Attribute { }
 
     /// <summary>
+    /// Marks a partial class whose static <c>Inline</c> method defines a module body that is
+    /// compiled <b>statically</b> (read as syntax, never executed) to MLIR-flavored assembly text
+    /// and parsed into the graph at runtime. Unlike <c>[Module]</c> — which traces the body — this
+    /// lets native C# <c>if</c>/<c>while</c> lower to graph control flow. The body is restricted to
+    /// the ModuleV2 subset (see <c>src/docs/design/mlir-assembly-parser.md</c>). The generator emits
+    /// a static <c>ComputationGraph</c> property that parses the embedded text.
+    /// </summary>
+    public class ModuleV2Attribute : Attribute { }
+
+    /// <summary>
     /// Marks a static partial class whose static <c>Inline</c> method initializes a trainable
     /// parameter (typically shape-only: <c>Inline(Vector&lt;int64&gt; shape)</c>). The source
     /// generator wires it through <c>Globals.CallTrainableParamInitializer</c>.

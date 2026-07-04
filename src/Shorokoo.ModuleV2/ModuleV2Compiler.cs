@@ -43,10 +43,26 @@ namespace Shorokoo.ModuleV2
         private enum AttrKind { Longs, Long, Float, Bool }
 
         /// <summary>A method argument is either a graph input (an IValue) or a host-constant attribute.</summary>
-        private sealed record ArgRole(bool IsInput, string? AttrName = null, AttrKind Kind = default);
+        private sealed class ArgRole
+        {
+            public bool IsInput { get; }
+            public string? AttrName { get; }
+            public AttrKind Kind { get; }
+            public ArgRole(bool isInput, string? attrName = null, AttrKind kind = default)
+            {
+                IsInput = isInput;
+                AttrName = attrName;
+                Kind = kind;
+            }
+        }
 
         /// <summary>Maps a method call to its opcode and the roles of its arguments after the receiver.</summary>
-        private sealed record OpSpec(string Opcode, ArgRole[] Args);
+        private sealed class OpSpec
+        {
+            public string Opcode { get; }
+            public ArgRole[] Args { get; }
+            public OpSpec(string opcode, ArgRole[] args) { Opcode = opcode; Args = args; }
+        }
 
         private static ArgRole Input { get; } = new(true);
         private static ArgRole Attr(string name, AttrKind kind) => new(false, name, kind);
@@ -84,6 +100,17 @@ namespace Shorokoo.ModuleV2
             var method = root.DescendantNodes().OfType<MethodDeclarationSyntax>().FirstOrDefault()
                 ?? throw new NotSupportedException("ModuleV2Compiler: no method declaration found.");
 
+            return CompileMethod(method);
+        }
+
+        /// <summary>
+        /// Lowers a parsed <paramref name="method"/> declaration to MLIR text. This is the entry the
+        /// source generator uses directly (it already has the <c>Inline</c> method's syntax); the
+        /// string overload is a convenience for tests.
+        /// </summary>
+        public static string CompileMethod(MethodDeclarationSyntax method)
+        {
+            if (method is null) throw new ArgumentNullException(nameof(method));
             return new Lowering().Compile(method);
         }
 

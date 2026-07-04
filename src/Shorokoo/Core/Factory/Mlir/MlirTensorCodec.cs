@@ -9,10 +9,10 @@ namespace Shorokoo.Core.Factory.Mlir
     /// <c>dense&lt;[d0, d1], dtype&lt;N&gt;, "base64"&gt;</c> — dimensions, proto element type, and the
     /// raw little-endian storage bytes.
     ///
-    /// <para>Phase 1 covers the integer and IEEE float element types that appear in module graphs
-    /// (shape constants are int64; scalar constants are float32/float64/int32/int64). float16,
-    /// bfloat16, bool, string and complex tensors throw <see cref="NotSupportedException"/> until a
-    /// later phase adds them.</para>
+    /// <para>Phase 1 covers the integer, bool, and IEEE float element types that appear in module
+    /// graphs (shape constants are int64; scalar constants are float32/float64/int32/int64; a loop's
+    /// continue flag is bool). float16, bfloat16, string and complex tensors throw
+    /// <see cref="NotSupportedException"/> until a later phase adds them.</para>
     /// </summary>
     internal static class MlirTensorCodec
     {
@@ -27,6 +27,7 @@ namespace Shorokoo.Core.Factory.Mlir
                 7 => MemoryMarshal.AsBytes(tv.GetTensorDataAsSpan<long>()).ToArray(),    // Int64
                 3 => MemoryMarshal.AsBytes(tv.GetTensorDataAsSpan<sbyte>()).ToArray(),   // Int8
                 2 => MemoryMarshal.AsBytes(tv.GetTensorDataAsSpan<byte>()).ToArray(),    // UInt8
+                9 => MemoryMarshal.AsBytes(tv.GetTensorDataAsSpan<byte>()).ToArray(),    // Bool (1 byte/element)
                 5 => MemoryMarshal.AsBytes(tv.GetTensorDataAsSpan<short>()).ToArray(),   // Int16
                 4 => MemoryMarshal.AsBytes(tv.GetTensorDataAsSpan<ushort>()).ToArray(),  // UInt16
                 12 => MemoryMarshal.AsBytes(tv.GetTensorDataAsSpan<uint>()).ToArray(),   // UInt32
@@ -42,7 +43,7 @@ namespace Shorokoo.Core.Factory.Mlir
             // than producing a tensor that could not have been written.
             _ = dtype.ProtoTypeNum switch
             {
-                1 or 11 or 6 or 7 or 3 or 2 or 5 or 4 or 12 or 13 => true,
+                1 or 11 or 6 or 7 or 3 or 2 or 9 or 5 or 4 or 12 or 13 => true,
                 _ => throw new NotSupportedException(
                     $"MlirTensorCodec: tensor element type {dtype} (proto {dtype.ProtoTypeNum}) is not parsed in Phase 1.")
             };

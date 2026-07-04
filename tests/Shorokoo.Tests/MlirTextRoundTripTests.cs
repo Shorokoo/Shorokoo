@@ -110,6 +110,39 @@ public class MlirTextRoundTripCoverageTests
     }
 
     [Fact]
+    public void LoopWithTrainableParams_RoundTrips()
+    {
+        // LoopLayer exercises everything at once: a Loop#OPEN/#CLOSE scope with named 'body'
+        // input/output groups, the close node's Graph (body) attribute, #TrainableParamRef#
+        // nodes carrying a TargetFunction (InitSimple), and int64 shape constants.
+        var graph = Shorokoo.Tests.Modules.LoopLayer.ComputationGraph;
+        AssertRoundTrips(graph);
+
+        var text = MlirTextWriter.Write(graph);
+        Assert.Contains("Loop#OPEN", text);
+        Assert.Contains("out \"body\"", text);      // named output group
+        Assert.Contains("graphattr<", text);         // Graph (body) attribute
+        Assert.Contains("func @fn", text);           // function symbol table
+        Assert.Contains("tgtfn @fn", text);          // TargetFunction reference
+    }
+
+    [Fact]
+    public void IfElse_RoundTrips()
+    {
+        // If#OPEN/#CLOSE with then/else branch groups plus trainable params on both branches.
+        var graph = Shorokoo.Tests.Modules.ConditionalTrainableParamLayer.ComputationGraph;
+        AssertRoundTrips(graph);
+        Assert.Contains("If#OPEN", MlirTextWriter.Write(graph));
+    }
+
+    [Fact]
+    public void IfInsideLoop_RoundTrips()
+    {
+        // Nested control flow: an If scope inside a Loop scope, both with trainable params.
+        AssertRoundTrips(Shorokoo.Tests.Modules.ConditionalTrainableParamInLoopLayer.ComputationGraph);
+    }
+
+    [Fact]
     public void Parse_UnknownOpCode_Throws()
     {
         const string text = """

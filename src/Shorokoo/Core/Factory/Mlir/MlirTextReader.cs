@@ -6,7 +6,9 @@ using System.Linq;
 using System.Text;
 using Shorokoo.Core.Graph;
 using Shorokoo.Core.Nodes.NodeDefinitions;
+using Shorokoo.Core.Nodes.OnnxNodes;
 using Shorokoo.Graph;
+using Shorokoo.Modules;
 
 namespace Shorokoo.Core.Factory.Mlir
 {
@@ -14,12 +16,9 @@ namespace Shorokoo.Core.Factory.Mlir
     /// Parses flat, MLIR-flavored assembly text (as produced by <see cref="MlirTextWriter"/>)
     /// back into a <see cref="FastComputationGraph"/>. Per-opcode attribute schemas are recovered
     /// from <see cref="Definitions.NodeDefinitions"/>, so the reconstructed
-    /// <see cref="OnnxCSharpAttributes"/> match what the runtime builds directly.
-    ///
-    /// <para>Scoping is implicit: close nodes carry their matching open via the <c>open %N…</c>
-    /// suffix, exactly as the printer emits it, and the reconstructed graph is checked against
-    /// <see cref="FastComputationGraph.IsLinearOrderValid"/> in debug builds. See
-    /// <c>src/docs/design/mlir-assembly-parser.md</c>.</para>
+    /// <see cref="OnnxCSharpAttributes"/> match what the runtime builds directly. Leading
+    /// <c>func @fnN { … }</c> blocks are parsed first into a symbol table that <c>tgtfn @fnN</c>
+    /// node suffixes resolve against. See <c>src/docs/design/mlir-assembly-parser.md</c>.
     /// </summary>
     public static class MlirTextReader
     {
@@ -28,7 +27,7 @@ namespace Shorokoo.Core.Factory.Mlir
         {
             if (text is null) throw new ArgumentNullException(nameof(text));
             var parser = new Parser(Tokenizer.Tokenize(text));
-            return parser.ParseGraph();
+            return parser.ParseTop();
         }
 
         // ─────────────────────────────── tokenizer ───────────────────────────────
@@ -69,6 +68,15 @@ namespace Shorokoo.Core.Factory.Mlir
                         int start = i++;
                         while (i < n && (char.IsLetterOrDigit(s[i]) || s[i] == '_' || s[i] == '-')) i++;
                         toks.Add(new Tok(TokKind.Percent, s.Substring(start + 1, i - start - 1)));
+                        continue;
+                    }
+
+                    // '@' introduces a function symbol (@fn0); keep the sigil in the Word text.
+                    if (c == '@')
+                    {
+                        int start = i++;
+                        while (i < n && (char.IsLetterOrDigit(s[i]) || s[i] == '_')) i++;
+                        toks.Add(new Tok(TokKind.Word, s.Substring(start, i - start)));
                         continue;
                     }
 
@@ -128,6 +136,7 @@ namespace Shorokoo.Core.Factory.Mlir
         {
             private readonly List<Tok> _toks;
             private int _pos;
+            private readonly Dictionary<string, Function> _functions = new();
 
             public Parser(List<Tok> toks) { _toks = toks; }
 
@@ -158,13 +167,46 @@ namespace Shorokoo.Core.Factory.Mlir
                 return false;
             }
 
+            private bool PeekWord(string w) => Peek.Kind == TokKind.Word && Peek.Text == w;
+
             private FormatException Fail(string what) => new($"MlirTextReader: {what} but found {Peek}.");
 
-            public FastComputationGraph ParseGraph()
+            public FastComputationGraph ParseTop()
             {
+                while (PeekWord("func"))
+                    ParseFunc();
+
                 ExpectWord("graph");
                 ExpectPunct("{");
+                var graph = ParseGraphBody();
+                ExpectPunct("}");
+                Expect(TokKind.End);
+                return graph;
+            }
 
+            private void ParseFunc()
+            {
+                ExpectWord("func");
+                var id = ParseFuncSymbol();
+                ExpectWord("type");
+                var type = Enum.Parse<FunctionType>(Expect(TokKind.Word).Text);
+                ExpectWord("default");
+                var defaultName = Expect(TokKind.Str).Text;
+                ExpectWord("friendly");
+                var friendlyName = Expect(TokKind.Str).Text;
+
+                StateOwnership? ownership = null;
+                if (PeekWord("ownership")) { Next(); ownership = Enum.Parse<StateOwnership>(Expect(TokKind.Word).Text); }
+
+                ExpectPunct("{");
+                var body = ParseGraphBody();
+                ExpectPunct("}");
+
+                _functions[id] = new Function(body, type, defaultName, friendlyName, ownership);
+            }
+
+            private FastComputationGraph ParseGraphBody()
+            {
                 var graph = new FastComputationGraph();
                 while (Peek.Kind == TokKind.Word)
                 {
@@ -181,9 +223,6 @@ namespace Shorokoo.Core.Factory.Mlir
 
                 while (Peek.Kind == TokKind.Percent)
                     graph.Nodes.Add(ParseNode());
-
-                ExpectPunct("}");
-                Expect(TokKind.End);
 
                 Debug.Assert(graph.IsLinearOrderValid(), "MlirTextReader: parsed graph is not in valid linear order.");
                 return graph;
@@ -207,13 +246,10 @@ namespace Shorokoo.Core.Factory.Mlir
                 ExpectPunct("=");
                 var opCode = Expect(TokKind.Str).Text;
 
-                var inputs = ParseSlotGroup();
-                Expect(TokKind.Arrow);
-                var outputs = ParseSlotGroup();
-
                 var node = new FastNode { Key = nodeKey, OpCode = opCode };
-                node.FullInputs[string.Empty] = inputs;
-                node.FullOutputs[string.Empty] = outputs;
+                foreach (var kv in ParseGroups("in")) node.FullInputs[kv.Key] = kv.Value;
+                Expect(TokKind.Arrow);
+                foreach (var kv in ParseGroups("out")) node.FullOutputs[kv.Key] = kv.Value;
 
                 var attrVals = (Peek.Kind == TokKind.Punct && Peek.Text == "{") ? ParseAttributes(opCode) : new();
 
@@ -224,6 +260,7 @@ namespace Shorokoo.Core.Factory.Mlir
                         case "open": Next(); node.GraphOpenNodeKey = ParseNodeKey(); break;
                         case "name": Next(); node.FriendlyName = Expect(TokKind.Str).Text; break;
                         case "template": Next(); node.IdentifierTemplate = Expect(TokKind.Str).Text; break;
+                        case "tgtfn": Next(); node.TargetFunction = ResolveFunction(ParseFuncSymbol()); break;
                         default: goto done;
                     }
                 }
@@ -232,7 +269,25 @@ namespace Shorokoo.Core.Factory.Mlir
                 return node;
             }
 
-            private List<FastTensorKey?> ParseSlotGroup()
+            /// <summary>
+            /// Parses a group section: an optional default group as a bare <c>(…)</c>, then zero or more
+            /// named groups <c>&lt;keyword&gt; "name"(…)</c>. Absent default group ⇒ no "" key in the result.
+            /// </summary>
+            private Dictionary<string, List<FastTensorKey?>> ParseGroups(string keyword)
+            {
+                var groups = new Dictionary<string, List<FastTensorKey?>>();
+                if (Peek.Kind == TokKind.Punct && Peek.Text == "(")
+                    groups[string.Empty] = ParseSlotList();
+                while (PeekWord(keyword))
+                {
+                    Next();
+                    var name = Expect(TokKind.Str).Text;
+                    groups[name] = ParseSlotList();
+                }
+                return groups;
+            }
+
+            private List<FastTensorKey?> ParseSlotList()
             {
                 var slots = new List<FastTensorKey?>();
                 ExpectPunct("(");
@@ -285,9 +340,10 @@ namespace Shorokoo.Core.Factory.Mlir
                     case AttributeType.Enum: return ParseEnum(def);
                     case AttributeType.Enums: return ParseArray(() => ParseEnum(def)).ToArray();
                     case AttributeType.Tensor: return ParseDenseTensor();
+                    case AttributeType.Graph: return ParseGraphAttr();
                     default:
                         throw new NotSupportedException(
-                            $"MlirTextReader: attribute '{def.AttributeName}' has type {def.Type}, which Phase 1 does not parse.");
+                            $"MlirTextReader: attribute '{def.AttributeName}' has type {def.Type}, which is not parsed yet.");
                 }
             }
 
@@ -345,6 +401,23 @@ namespace Shorokoo.Core.Factory.Mlir
                 return MlirTensorCodec.FromRawBytes(dims, dtype, data);
             }
 
+            private BestGraphAttribute ParseGraphAttr()
+            {
+                ExpectWord("graphattr");
+                ExpectPunct("<");
+                var name = Expect(TokKind.Str).Text;
+                string? defaultGraphName = null;
+                string[]? inputNames = null;
+                while (TryPunct(","))
+                {
+                    if (PeekWord("default")) { Next(); defaultGraphName = Expect(TokKind.Str).Text; }
+                    else if (PeekWord("names")) { Next(); inputNames = ParseArray(() => Expect(TokKind.Str).Text).ToArray(); }
+                    else throw Fail("expected 'default' or 'names' in graphattr");
+                }
+                ExpectPunct(">");
+                return new BestGraphAttribute { GraphAttributeName = name, DefaultGraphName = defaultGraphName, DefautGraphInputNames = inputNames };
+            }
+
             private object ParseEnum(NodeDefAttributeDef def)
             {
                 if (def.EnumDef is null) throw new NotSupportedException($"MlirTextReader: enum attribute '{def.AttributeName}' has no EnumDef.");
@@ -362,6 +435,20 @@ namespace Shorokoo.Core.Factory.Mlir
                 if (!Definitions.NodeDefinitions.TryGetValue(opCode, out var resolver))
                     throw new NotSupportedException($"MlirTextReader: unknown op code '{opCode}' (no NodeDefinition registered).");
                 return resolver.AttributeDefs;
+            }
+
+            private string ParseFuncSymbol()
+            {
+                if (Peek.Kind != TokKind.Word || !Peek.Text.StartsWith("@", StringComparison.Ordinal))
+                    throw Fail("expected a function symbol (@fnN)");
+                return Next().Text;
+            }
+
+            private Function ResolveFunction(string symbol)
+            {
+                if (!_functions.TryGetValue(symbol, out var fn))
+                    throw Fail($"reference to undefined function symbol '{symbol}'");
+                return fn;
             }
 
             private FastNodeKey ParseNodeKey()

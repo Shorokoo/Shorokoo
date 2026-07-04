@@ -5,7 +5,9 @@ using System.Linq;
 using System.Text;
 using Shorokoo.Core.Graph;
 using Shorokoo.Core.Nodes.NodeDefinitions;
+using Shorokoo.Core.Nodes.OnnxNodes;
 using Shorokoo.Graph;
+using Shorokoo.Modules;
 
 namespace Shorokoo.Core.Factory.Mlir
 {
@@ -15,15 +17,14 @@ namespace Shorokoo.Core.Factory.Mlir
     /// <para>The text is a near-isomorph of <see cref="FastComputationGraph.Nodes"/>: one op
     /// per node, SSA names carrying <see cref="FastTensorKey"/> identity, and
     /// <c>*#OPEN</c>/<c>*#CLOSE</c> ops delimiting scopes purely by position (no nested
-    /// regions). See <c>src/docs/design/mlir-assembly-parser.md</c>. The inverse is
-    /// <see cref="MlirTextReader"/>; <c>Read(Write(g))</c> is expected to reproduce the same
-    /// printed text.</para>
+    /// regions). Functions reachable from the graph (<see cref="FastNode.TargetFunction"/>,
+    /// transitively) are emitted first as a <c>func @fnN { … }</c> symbol table and referenced
+    /// by nodes via a <c>tgtfn @fnN</c> suffix. See
+    /// <c>src/docs/design/mlir-assembly-parser.md</c>. The inverse is
+    /// <see cref="MlirTextReader"/>; <c>Read(Write(g))</c> is expected to reproduce the same text.</para>
     ///
-    /// <para>Phase 1 scope: structural core plus scalar attribute types (Long/Longs, Float/Floats,
-    /// Bool/Bools, String/Strings, DType/DTypes, Enum/Enums). Nodes carrying
-    /// <see cref="AttributeType.Tensor"/>, <see cref="AttributeType.Graph"/> or
-    /// <see cref="AttributeType.TypeProto"/> attributes, a non-null
-    /// <see cref="FastNode.TargetFunction"/>, or graph-attribute input/output groups throw
+    /// <para>Not yet serialized: <see cref="AttributeType.TypeProto"/> attributes, and
+    /// float16/bfloat16/bool/string/complex tensor constants — these throw
     /// <see cref="NotSupportedException"/> naming the offending opcode/attribute.</para>
     /// </summary>
     public static class MlirTextWriter
@@ -33,9 +34,33 @@ namespace Shorokoo.Core.Factory.Mlir
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
-            var sb = new StringBuilder();
-            sb.Append("graph {\n");
+            // Assign a stable @fnN symbol to every function reachable from the graph, in
+            // dependency (post) order so a function only ever references earlier ones.
+            var fnIds = new Dictionary<Function, string>(ReferenceEqualityComparer.Instance);
+            var fns = FastComputationGraphConverter.FunctionsPostOrder(graph);
+            for (int i = 0; i < fns.Length; i++)
+                fnIds[fns[i]] = "@fn" + i.ToString(CultureInfo.InvariantCulture);
 
+            var sb = new StringBuilder();
+            foreach (var fn in fns)
+            {
+                sb.Append("func ").Append(fnIds[fn]).Append(" type ").Append(fn.FunctionType);
+                sb.Append(" default ").Append(Quote(fn.DefaultName));
+                sb.Append(" friendly ").Append(Quote(fn.FriendlyName));
+                if (fn.StateOwnership is StateOwnership so) sb.Append(" ownership ").Append(so);
+                sb.Append(" {\n");
+                WriteGraphBody(sb, fn.OriginalFastGraph, fnIds);
+                sb.Append("}\n");
+            }
+
+            sb.Append("graph {\n");
+            WriteGraphBody(sb, graph, fnIds);
+            sb.Append("}\n");
+            return sb.ToString();
+        }
+
+        private static void WriteGraphBody(StringBuilder sb, FastComputationGraph graph, Dictionary<Function, string> fnIds)
+        {
             WriteDirective(sb, "inputs", graph.Inputs.Select(TensorRef));
             WriteDirective(sb, "outputs", graph.Outputs.Select(TensorRef));
             WriteDirective(sb, "input_names", graph.InputUniqueNames.Select(StringOrHole));
@@ -45,27 +70,19 @@ namespace Shorokoo.Core.Factory.Mlir
                     graph.OutputRankOverrides.Select(r => r is null ? "_" : r.Value.ToString(CultureInfo.InvariantCulture)));
 
             foreach (var node in graph.Nodes)
-                WriteNode(sb, node);
-
-            sb.Append("}\n");
-            return sb.ToString();
+                WriteNode(sb, node, fnIds);
         }
 
         private static void WriteDirective(StringBuilder sb, string name, IEnumerable<string> items)
             => sb.Append("  ").Append(name).Append(" = [").Append(string.Join(", ", items)).Append("]\n");
 
-        private static void WriteNode(StringBuilder sb, FastNode node)
+        private static void WriteNode(StringBuilder sb, FastNode node, Dictionary<Function, string> fnIds)
         {
-            RequireSingleDefaultGroup(node.FullInputs, node, "inputs");
-            RequireSingleDefaultGroup(node.FullOutputs, node, "outputs");
-            if (node.TargetFunction is not null)
-                throw new NotSupportedException(
-                    $"MlirTextWriter: node '{node.OpCode}' ({node.Key}) has a TargetFunction, which Phase 1 does not serialize.");
-
             sb.Append("  ").Append(NodeRef(node.Key)).Append(" = ").Append('"').Append(node.OpCode).Append('"');
 
-            sb.Append('(').Append(string.Join(", ", SlotRefs(node.FullInputs))).Append(')');
-            sb.Append(" -> (").Append(string.Join(", ", SlotRefs(node.FullOutputs))).Append(')');
+            AppendGroups(sb, node.FullInputs, "in");
+            sb.Append(" ->");
+            AppendGroups(sb, node.FullOutputs, "out");
 
             var attrText = WriteAttributes(node);
             if (attrText.Length > 0)
@@ -77,16 +94,33 @@ namespace Shorokoo.Core.Factory.Mlir
                 sb.Append(" name ").Append(Quote(node.FriendlyName));
             if (node.IdentifierTemplate is not null)
                 sb.Append(" template ").Append(Quote(node.IdentifierTemplate));
+            if (node.TargetFunction is Function tf)
+            {
+                if (!fnIds.TryGetValue(tf, out var id))
+                    throw new NotSupportedException(
+                        $"MlirTextWriter: node '{node.OpCode}' references a function not reachable via FunctionsPostOrder.");
+                sb.Append(" tgtfn ").Append(id);
+            }
 
             sb.Append('\n');
         }
 
-        private static IEnumerable<string> SlotRefs(Dictionary<string, List<FastTensorKey?>> group)
+        /// <summary>
+        /// Appends a group section: the default (empty-name) group as a bare <c>(…)</c> when present,
+        /// followed by each named group as <c>&lt;keyword&gt; "name"(…)</c>. An absent default group emits
+        /// no bare parens, so the read side can distinguish "no default group" from "empty default group".
+        /// </summary>
+        private static void AppendGroups(StringBuilder sb, Dictionary<string, List<FastTensorKey?>> groups, string keyword)
         {
-            // RequireSingleDefaultGroup has already guaranteed a single "" group (or none).
-            if (group.Count == 0) return [];
-            return group[string.Empty].Select(k => k is null || k.Value.IsEmpty ? "_" : TensorRef(k.Value));
+            if (groups.TryGetValue(string.Empty, out var defaultSlots))
+                sb.Append(" (").Append(string.Join(", ", defaultSlots.Select(SlotRef))).Append(')');
+
+            foreach (var key in groups.Keys.Where(k => k.Length != 0).OrderBy(k => k, StringComparer.Ordinal))
+                sb.Append(' ').Append(keyword).Append(' ').Append(Quote(key))
+                  .Append('(').Append(string.Join(", ", groups[key].Select(SlotRef))).Append(')');
         }
+
+        private static string SlotRef(FastTensorKey? k) => k is null || k.Value.IsEmpty ? "_" : TensorRef(k.Value);
 
         private static string WriteAttributes(FastNode node)
         {
@@ -120,9 +154,21 @@ namespace Shorokoo.Core.Factory.Mlir
             AttributeType.Enum => EnumRef(def, value),
             AttributeType.Enums => $"[{string.Join(", ", ((System.Collections.IEnumerable)value).Cast<object>().Select(v => EnumRef(def, v)))}]",
             AttributeType.Tensor => DenseTensor((TensorData)value),
+            AttributeType.Graph => GraphAttr((BestGraphAttribute)value),
             _ => throw new NotSupportedException(
-                $"MlirTextWriter: attribute '{def.AttributeName}' on node '{opCode}' has type {def.Type}, which Phase 1 does not serialize.")
+                $"MlirTextWriter: attribute '{def.AttributeName}' on node '{opCode}' has type {def.Type}, which is not serialized yet.")
         };
+
+        private static string GraphAttr(BestGraphAttribute g)
+        {
+            var sb = new StringBuilder("graphattr<");
+            sb.Append(Quote(g.GraphAttributeName));
+            if (g.DefaultGraphName is not null) sb.Append(", default ").Append(Quote(g.DefaultGraphName));
+            if (g.DefautGraphInputNames is not null)
+                sb.Append(", names [").Append(string.Join(", ", g.DefautGraphInputNames.Select(Quote))).Append(']');
+            sb.Append('>');
+            return sb.ToString();
+        }
 
         private static string EnumRef(NodeDefAttributeDef def, object value)
         {
@@ -177,15 +223,6 @@ namespace Shorokoo.Core.Factory.Mlir
             }
             sb.Append('"');
             return sb.ToString();
-        }
-
-        private static void RequireSingleDefaultGroup(Dictionary<string, List<FastTensorKey?>> groups, FastNode node, string which)
-        {
-            if (groups.Count == 0) return;
-            if (groups.Count > 1 || !groups.ContainsKey(string.Empty))
-                throw new NotSupportedException(
-                    $"MlirTextWriter: node '{node.OpCode}' ({node.Key}) has graph-attribute {which} groups "
-                    + $"[{string.Join(", ", groups.Keys.Select(k => k.Length == 0 ? "\"\"" : k))}], which Phase 1 does not serialize.");
         }
     }
 }

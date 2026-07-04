@@ -46,6 +46,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Shorokoo\Shorokoo.csproj" />
+    <ProjectReference Include="..\..\src\Shorokoo.ModuleV2\Shorokoo.ModuleV2.csproj" />
     <ProjectReference Include="..\..\src\Shorokoo.Modules\Shorokoo.Modules.csproj" />
     <ProjectReference Include="..\..\src\Shorokoo.CodeGen\Shorokoo.CodeGen.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
     <ProjectReference Include="..\..\samples\RetinaNet\RetinaNet.csproj" />

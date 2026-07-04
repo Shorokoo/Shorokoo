@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Prototype of the [ModuleV2] frontend: statically lowers a restricted, straight-line
+    C# method to MLIR-flavored assembly text (consumed by MlirTextReader). This is the
+    lowering *core*; the eventual production form is an in-compiler Roslyn source
+    generator (netstandard2.0) driven by a mirrored op table. Here it is a net10.0
+    library referencing the runtime so the lowering can be developed and differential-
+    tested against the tracer. See src/docs/design/mlir-assembly-parser.md (Phase 2).
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.13.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Shorokoo\Shorokoo.csproj" />
+  </ItemGroup>
+
+</Project>

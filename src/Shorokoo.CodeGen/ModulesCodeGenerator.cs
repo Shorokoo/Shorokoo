@@ -121,13 +121,27 @@ public class ModuleSourceGenerator : IIncrementalGenerator
         });
     }
 
+    private enum LoopSlotClass { Empty, OccupiesSlot, Refuse }
+
     /// <summary>
-    /// Builds the ready-to-paste <c>Rng.Pin(...)</c> statement for a module whose Inline body
-    /// is straight-line (no C# control flow) and whose RNG stream consumers are all captured
-    /// in local variables. Returns null (no diagnostic) when the body has control flow, an
-    /// existing Rng.Pin, uncaptured Model/Init calls, chained Model(...).Call(...), static
-    /// TypeName.Call shortcuts, or opaque static-helper calls that may create streams — a
-    /// wrong pin is worse than none, so anything not provably capturable refuses.
+    /// Builds the ready-to-paste <c>Rng.Pin(...)</c> statement for a module whose Inline body's
+    /// RNG stream consumers are all provably nameable. The nameable consumers are the
+    /// <c>X.Model(...)</c> / <c>X.Init(...)</c> results captured directly in body-level locals;
+    /// each takes one module-local id slot in source order. A <c>LoopAPI.Iterate(...)</c> loop
+    /// takes exactly one slot too (its body items live under it), but its interior variables are
+    /// loop-scoped and can't be named from an end-of-body pin — so when a loop occupies a slot
+    /// the suggestion switches to the <b>sparse</b> form, pinning each nameable item to its
+    /// exact current slot and leaving the loop's slot to be filled positionally. That keeps the
+    /// named items refactor-stable without disturbing the loop's streams. Nested loops are just
+    /// one outer slot, so they need no special handling.
+    ///
+    /// <para>Returns null (no diagnostic) for anything not provably capturable: C# control flow
+    /// (<c>if</c>/<c>for</c>/<c>while</c>/<c>switch</c>/a non-<c>Iterate</c> <c>foreach</c>), an
+    /// existing <c>Rng.Pin</c>, an uncaptured Model/Init/feed, a chained <c>Model(...).Call(...)</c>
+    /// or static <c>TypeName.Call</c>, or an opaque static-helper call that may create streams —
+    /// including inside a loop, where such a call makes the loop's slot count uncertain. A wrong
+    /// pin silently re-keys, so anything uncertain refuses. (Method-call "control flow" like
+    /// <c>cond.IfElse(...)</c> is an ordinary expression and is fine.)</para>
     /// </summary>
     private static string? TryBuildRngPinSuggestion(ClassDeclarationSyntax classDecl)
     {
@@ -135,64 +149,156 @@ public class ModuleSourceGenerator : IIncrementalGenerator
             .FirstOrDefault(m => m.Identifier.Text == "Inline" && m.Body is not null);
         if (inline?.Body is null) return null;
 
-        var items = new List<string>();
-        var sanctioned = new HashSet<InvocationExpressionSyntax>();
+        // Already pinned anywhere in the body: no suggestion needed.
+        foreach (var inv in inline.Body.DescendantNodes().OfType<InvocationExpressionSyntax>())
+            if (inv.Expression is MemberAccessExpressionSyntax pinMa &&
+                pinMa.Name.Identifier.Text == "Pin" &&
+                pinMa.Expression is IdentifierNameSyntax { Identifier.Text: "Rng" })
+                return null;
+
+        var pinned = new List<(int slot, string name)>();
+        int slot = 0;
+        bool anyLoopSlot = false;
+
         foreach (var stmt in inline.Body.Statements)
         {
             switch (stmt)
             {
                 case LocalDeclarationStatementSyntax decl:
                     foreach (var v in decl.Declaration.Variables)
-                        if (v.Initializer?.Value is InvocationExpressionSyntax inv &&
-                            inv.Expression is MemberAccessExpressionSyntax ma &&
-                            (ma.Name.Identifier.Text == "Model" || ma.Name.Identifier.Text == "Init"))
+                    {
+                        var init = v.Initializer?.Value;
+                        if (init is InvocationExpressionSyntax inv && IsSimpleModelOrInit(inv))
                         {
-                            items.Add(v.Identifier.Text);
-                            sanctioned.Add(inv);
+                            slot++;
+                            pinned.Add((slot, v.Identifier.Text));
                         }
+                        else if (init is not null && SubtreeHasUnnameableStream(init))
+                        {
+                            return null;   // uncaptured Model/Init/feed, static/chained Call, opaque helper
+                        }
+                        // else: pure math (ShapeTensor, arithmetic, instance .Call on a local) — 0 slots
+                    }
                     break;
-                case ExpressionStatementSyntax:
-                case ReturnStatementSyntax:
+
+                case ExpressionStatementSyntax es:
+                    if (SubtreeHasUnnameableStream(es.Expression)) return null;
                     break;
+
+                case ReturnStatementSyntax rs:
+                    if (rs.Expression is not null && SubtreeHasUnnameableStream(rs.Expression)) return null;
+                    break;
+
+                case ForEachStatementSyntax fe when IsLoopApiIterate(fe):
+                    switch (ClassifyLoop(fe.Statement))
+                    {
+                        case LoopSlotClass.Refuse: return null;
+                        case LoopSlotClass.OccupiesSlot: slot++; anyLoopSlot = true; break;
+                        // Empty (pure-math) loop takes no top-level slot.
+                    }
+                    break;
+
                 default:
-                    return null;   // control flow / unsupported statement
-            }
-        }
-        if (items.Count == 0) return null;
-
-        foreach (var inv in inline.Body.DescendantNodes().OfType<InvocationExpressionSyntax>())
-        {
-            if (inv.Expression is not MemberAccessExpressionSyntax member) continue;
-            var name = member.Name.Identifier.Text;
-
-            // Already pinned: no suggestion needed.
-            if (name == "Pin" && member.Expression is IdentifierNameSyntax { Identifier.Text: "Rng" })
-                return null;
-
-            // Model/Init calls that are not local-capture initializers create streams the pin
-            // cannot reference.
-            if ((name == "Model" || name == "Init") && !sanctioned.Contains(inv))
-                return null;
-
-            if (name == "Call")
-            {
-                // Chained Model(...).Call(...) or static TypeName.Call shortcuts hide the model.
-                if (member.Expression is not IdentifierNameSyntax recv) return null;
-                if (!items.Contains(recv.Identifier.Text) && char.IsUpper(recv.Identifier.Text[0]))
-                    return null;
-            }
-            else if (name != "Model" && name != "Init" &&
-                     member.Expression is IdentifierNameSyntax staticRecv &&
-                     char.IsUpper(staticRecv.Identifier.Text[0]))
-            {
-                // Opaque static-helper call (Recurrent.RNN, Globals.RandomUniform, ...): may
-                // create streams that cannot be captured — refuse rather than mis-pin.
-                return null;
+                    return null;   // C# control flow / unsupported statement
             }
         }
 
-        return "Rng.Pin(" + string.Join(", ", items) + ");";
+        if (pinned.Count == 0) return null;
+
+        // No loop took a slot: the nameable items are slots 1..N contiguously, so the terse
+        // positional form is exact. A loop occupying a slot needs the sparse form so the named
+        // items keep their exact positions and the loop's (unnameable) slot is undisturbed.
+        return anyLoopSlot
+            ? "Rng.Pin(" + string.Join(", ", pinned.Select(p => "([" + p.slot + "], " + p.name + ")")) + ");"
+            : "Rng.Pin(" + string.Join(", ", pinned.Select(p => p.name)) + ");";
     }
+
+    /// <summary>A direct top-level capture: <c>Recv.Model(...)</c> / <c>Recv.Init(...)</c> whose
+    /// receiver is a plain dotted name (not a chained invocation).</summary>
+    private static bool IsSimpleModelOrInit(InvocationExpressionSyntax inv)
+    {
+        if (inv.Expression is not MemberAccessExpressionSyntax ma) return false;
+        var name = ma.Name.Identifier.Text;
+        if (name != "Model" && name != "Init") return false;
+        // Receiver must contain no invocation (excludes chained X.Model(...).Call(...) etc.).
+        return !ma.Expression.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>().Any();
+    }
+
+    /// <summary>Whether a subtree touches an RNG stream that an end-of-body pin cannot name:
+    /// an (uncaptured) Model/Init call, a runtime feed, a static/uppercase-receiver <c>.Call</c>
+    /// (anonymous sub-model), or an opaque uppercase static-helper call that may create streams.
+    /// An instance <c>.Call</c> on a lowercase local (re-invoking an already-counted model) is
+    /// fine.</summary>
+    private static bool SubtreeHasUnnameableStream(SyntaxNode node)
+    {
+        foreach (var inv in node.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>())
+        {
+            // Bare feed via `using static Globals`: RandomUniform(...) / RandomNormal(...).
+            if (inv.Expression is IdentifierNameSyntax bare &&
+                (bare.Identifier.Text == "RandomUniform" || bare.Identifier.Text == "RandomNormal"))
+                return true;
+
+            if (inv.Expression is MemberAccessExpressionSyntax ma)
+            {
+                var name = ma.Name.Identifier.Text;
+                if (name is "Model" or "Init" or "RandomUniform" or "RandomNormal") return true;
+                if (name == "Call")
+                {
+                    // Instance call on a lowercase local model creates no new id; anything else
+                    // (static TypeName.Call, chained (...).Call) creates an anonymous sub-model.
+                    if (ma.Expression is IdentifierNameSyntax lc && !char.IsUpper(lc.Identifier.Text[0]))
+                        continue;
+                    return true;
+                }
+                // Opaque uppercase static-helper call (DropoutMasking.Mask, Recurrent.RNN, ...):
+                // may create streams internally — can't name them, so refuse.
+                if (ma.Expression is IdentifierNameSyntax uc && char.IsUpper(uc.Identifier.Text[0]))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>Classifies a <c>LoopAPI.Iterate</c> loop body for top-level slot counting:
+    /// <see cref="LoopSlotClass.OccupiesSlot"/> if it (recursively) creates an interior id
+    /// (a Model/Init/feed), <see cref="LoopSlotClass.Empty"/> if it is pure tensor math, and
+    /// <see cref="LoopSlotClass.Refuse"/> if it contains a static/chained <c>.Call</c> or opaque
+    /// static-helper whose interior-id contribution can't be determined syntactically (making
+    /// the loop's slot count — and therefore every later slot — uncertain).</summary>
+    private static LoopSlotClass ClassifyLoop(SyntaxNode loopBody)
+    {
+        bool createsId = false;
+        foreach (var inv in loopBody.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>())
+        {
+            if (IsIterateInvocation(inv)) continue;   // a nested Iterate header — not itself an id
+
+            if (inv.Expression is IdentifierNameSyntax bare)
+            {
+                if (bare.Identifier.Text is "RandomUniform" or "RandomNormal") createsId = true;
+                continue;
+            }
+            if (inv.Expression is MemberAccessExpressionSyntax ma)
+            {
+                var name = ma.Name.Identifier.Text;
+                if (name is "Model" or "Init" or "RandomUniform" or "RandomNormal") { createsId = true; continue; }
+                if (name == "Call")
+                {
+                    if (ma.Expression is IdentifierNameSyntax lc && !char.IsUpper(lc.Identifier.Text[0]))
+                        continue;   // instance call on a local model: no new interior id
+                    return LoopSlotClass.Refuse;   // static/chained Call: anonymous sub-model, uncertain
+                }
+                if (ma.Expression is IdentifierNameSyntax uc && char.IsUpper(uc.Identifier.Text[0]))
+                    return LoopSlotClass.Refuse;   // opaque static helper: may create a stream
+            }
+        }
+        return createsId ? LoopSlotClass.OccupiesSlot : LoopSlotClass.Empty;
+    }
+
+    private static bool IsIterateInvocation(InvocationExpressionSyntax inv)
+        => inv.Expression is MemberAccessExpressionSyntax ma && ma.Name.Identifier.Text == "Iterate";
+
+    private static bool IsLoopApiIterate(ForEachStatementSyntax fe)
+        => fe.Expression is InvocationExpressionSyntax inv && IsIterateInvocation(inv);
 
     // V2: Partial class with [Module] attribute (both static and non-static)
     private static bool IsPotentialModuleClass(SyntaxNode node)

@@ -40,4 +40,11 @@
     <Compile Include="..\Shorokoo.ModuleV2\ModuleV2Compiler.cs" Link="ModuleV2Compiler.cs" />
   </ItemGroup>
 
+  <!-- Proof of concept: one NodeDefinitions source compiled into both the runtime and this
+       generator. The runtime supplies the real NodeDefinitionMaker/types; this project supplies the
+       dummy stand-ins in NodeDefsShim.cs. See src/docs/design/mlir-assembly-parser.md (step 2). -->
+  <ItemGroup>
+    <Compile Include="..\Shorokoo\Core\Nodes\NodeDefinitions\Definitions.Proof.cs" Link="NodeDefs\Definitions.Proof.cs" />
+  </ItemGroup>
+
 </Project>

@@ -23,9 +23,11 @@ namespace Shorokoo.ModuleV2
     /// → <c>axis</c>); constant constructors (<c>Scalar(1.0f)</c>, <c>Scalar(1L)</c>,
     /// <c>Vector(2L, 3L)</c>) → <c>Constant</c> nodes; <c>[Hyper]</c> parameters (typed and ordered
     /// hyperparameters-first); and external initializer calls (<c>InitSimple.Init(...)</c>)
-    /// referenced by name and bound at link time, never inlined. Module <c>.Call(...)</c>
-    /// invocations, dynamic shape-collection arguments, and control flow are not handled yet and
-    /// raise <see cref="NotSupportedException"/>. See <c>src/docs/design/mlir-assembly-parser.md</c>.</para>
+    /// referenced by name and bound at link time, never inlined; and native <c>if</c>/<c>else</c>
+    /// lowered to an <c>If#OPEN</c>/<c>If#CLOSE</c> scope via SSA merge. Module <c>.Call(...)</c>
+    /// invocations, dynamic shape-collection arguments, and loops (<c>while</c>/<c>for</c>) are not
+    /// handled yet and raise <see cref="NotSupportedException"/>. See
+    /// <c>src/docs/design/mlir-assembly-parser.md</c>.</para>
     /// </summary>
     public static class ModuleV2Compiler
     {
@@ -88,7 +90,7 @@ namespace Shorokoo.ModuleV2
         {
             private int _counter;
             private readonly List<string> _nodeLines = new();
-            private readonly Dictionary<string, string> _env = new(StringComparer.Ordinal); // local/param name -> SSA tensor ref
+            private Dictionary<string, string> _env = new(StringComparer.Ordinal); // local/param name -> SSA tensor ref (swapped per branch)
             private readonly List<string> _inputRefs = new();
             private readonly List<string> _inputNames = new();
 
@@ -106,33 +108,105 @@ namespace Shorokoo.ModuleV2
                 string? outputRef = null;
                 foreach (var stmt in method.Body.Statements)
                 {
-                    switch (stmt)
+                    if (stmt is ReturnStatementSyntax ret)
                     {
-                        case LocalDeclarationStatementSyntax decl:
-                            foreach (var v in decl.Declaration.Variables)
-                            {
-                                if (v.Initializer is null)
-                                    throw new NotSupportedException($"ModuleV2Compiler: local '{v.Identifier}' has no initializer.");
-                                _env[v.Identifier.Text] = Lower(v.Initializer.Value);
-                            }
-                            break;
-
-                        case ReturnStatementSyntax ret:
-                            if (ret.Expression is null)
-                                throw new NotSupportedException("ModuleV2Compiler: bare 'return;' is not supported.");
-                            outputRef = Lower(ret.Expression);
-                            break;
-
-                        default:
-                            throw new NotSupportedException(
-                                $"ModuleV2Compiler: statement '{stmt.Kind()}' is not supported in this slice.");
+                        if (ret.Expression is null)
+                            throw new NotSupportedException("ModuleV2Compiler: bare 'return;' is not supported.");
+                        outputRef = Lower(ret.Expression);
+                        continue;
                     }
+                    ProcessStatement(stmt);
                 }
 
                 if (outputRef is null)
                     throw new NotSupportedException("ModuleV2Compiler: method has no 'return' statement.");
 
                 return Assemble(outputRef);
+            }
+
+            /// <summary>Processes a non-return statement, mutating the current environment (<see cref="_env"/>).</summary>
+            private void ProcessStatement(StatementSyntax stmt)
+            {
+                switch (stmt)
+                {
+                    case LocalDeclarationStatementSyntax decl:
+                        foreach (var v in decl.Declaration.Variables)
+                        {
+                            if (v.Initializer is null)
+                                throw new NotSupportedException($"ModuleV2Compiler: local '{v.Identifier}' has no initializer.");
+                            _env[v.Identifier.Text] = Lower(v.Initializer.Value);
+                        }
+                        break;
+
+                    case ExpressionStatementSyntax { Expression: AssignmentExpressionSyntax { Left: IdentifierNameSyntax lhs } asg }
+                        when asg.IsKind(SyntaxKind.SimpleAssignmentExpression):
+                        _env[lhs.Identifier.Text] = Lower(asg.Right);
+                        break;
+
+                    case IfStatementSyntax ifStmt:
+                        LowerIf(ifStmt);
+                        break;
+
+                    default:
+                        throw new NotSupportedException(
+                            $"ModuleV2Compiler: statement '{stmt.Kind()}' is not supported in this slice.");
+                }
+            }
+
+            /// <summary>
+            /// Lowers <c>if (cond) { … } else { … }</c> to an <c>If#OPEN</c>/<c>If#CLOSE</c> scope. Both
+            /// branches are evaluated in the enclosing scope (the flat model the tracer produces for
+            /// <c>.IfElse</c>); the SSA merge — every variable that ends up bound differently on the two
+            /// branches — becomes the close node's outputs, wired through its <c>then_branch</c> /
+            /// <c>else_branch</c> input groups. Variables assigned on only one path must have a prior
+            /// value (so the other path can yield it); a branch-local temporary simply does not escape.
+            /// </summary>
+            private void LowerIf(IfStatementSyntax ifStmt)
+            {
+                var condRef = Lower(ifStmt.Condition);
+                var pre = new Dictionary<string, string>(_env, StringComparer.Ordinal);
+
+                var outer = _env;
+                _env = new Dictionary<string, string>(pre, StringComparer.Ordinal);
+                ProcessBranch(ifStmt.Statement);
+                var thenEnv = _env;
+
+                _env = new Dictionary<string, string>(pre, StringComparer.Ordinal);
+                if (ifStmt.Else is not null) ProcessBranch(ifStmt.Else.Statement);
+                var elseEnv = _env;
+
+                _env = outer;
+
+                // Merge = variables bound on both paths to different SSA values. (A var new to only one
+                // path can't be selected, so it does not escape the if.)
+                var mergeVars = thenEnv.Keys
+                    .Where(k => elseEnv.ContainsKey(k) && thenEnv[k] != elseEnv[k])
+                    .OrderBy(k => k, StringComparer.Ordinal)
+                    .ToList();
+
+                int open = ++_counter;
+                _nodeLines.Add($"  %N{open} = \"If#OPEN\"({condRef}) -> out \"else_branch\"() out \"then_branch\"()");
+
+                int close = ++_counter;
+                var thenRefs = mergeVars.Select(v => thenEnv[v]);
+                var elseRefs = mergeVars.Select(v => elseEnv[v]);
+                var outs = mergeVars.Select((_, i) => $"%N{close}_T{i}");
+                _nodeLines.Add(
+                    $"  %N{close} = \"If#CLOSE\" in \"else_branch\"({string.Join(", ", elseRefs)}) " +
+                    $"in \"then_branch\"({string.Join(", ", thenRefs)}) -> ({string.Join(", ", outs)}) " +
+                    $"{{\"else_branch\" = graphattr<\"else_branch\">, \"then_branch\" = graphattr<\"then_branch\">}} open %N{open}");
+
+                for (int i = 0; i < mergeVars.Count; i++)
+                    _env[mergeVars[i]] = $"%N{close}_T{i}";
+            }
+
+            private void ProcessBranch(StatementSyntax branch)
+            {
+                if (branch is BlockSyntax block)
+                {
+                    foreach (var s in block.Statements) ProcessStatement(s);
+                }
+                else ProcessStatement(branch);
             }
 
             private void EmitInput(ParameterSyntax p, bool isHyper)

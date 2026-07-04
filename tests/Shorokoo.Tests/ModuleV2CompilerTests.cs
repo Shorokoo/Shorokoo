@@ -181,6 +181,52 @@ public class ModuleV2CompilerCoverageTests
     }
 
     [Fact]
+    public void NativeIfElse_LowersToIfScope_MatchesTracer()
+    {
+        // Native C# if/else lowered to an If#OPEN/If#CLOSE scope via SSA merge — the capability
+        // tracing cannot provide (it would execute only one branch). The equivalent traced form is
+        // the eager .IfElse combinator.
+        const string source = """
+            static Tensor<float32> F(Scalar<bit> c, Tensor<float32> a, Tensor<float32> b)
+            {
+                var r = a;
+                if (c) { r = a + a; } else { r = b + b; }
+                return r;
+            }
+            """;
+        var mlir = ModuleV2Compiler.CompileToMlir(source);
+        Assert.Contains("If#OPEN", mlir);
+        Assert.Contains("If#CLOSE", mlir);
+        Assert.Contains("in \"then_branch\"", mlir);
+        Assert.Contains("in \"else_branch\"", mlir);
+
+        var compiled = MlirTextReader.Parse(mlir);
+        Assert.True(compiled.IsLinearOrderValid());
+
+        var traced = GraphBuilder.BuildFastComputationGraphFromDelegate(
+            (System.Func<Scalar<bit>, Tensor<float32>, Tensor<float32>, Tensor<float32>>)(
+                static (c, a, b) => c.IfElse(a + a, b + b)));
+        Assert.Equal(SortedOpCodes(traced), SortedOpCodes(compiled));
+    }
+
+    [Fact]
+    public void NativeIf_RoundTripsThroughWriter()
+    {
+        // The lowered If scope is a well-formed graph: it survives a full write→parse→write fixpoint.
+        const string source = """
+            static Tensor<float32> F(Scalar<bit> c, Tensor<float32> a, Tensor<float32> b)
+            {
+                var r = a;
+                if (c) { r = a.Relu(); } else { r = b.Relu(); }
+                return r;
+            }
+            """;
+        var g = MlirTextReader.Parse(ModuleV2Compiler.CompileToMlir(source));
+        var text = Shorokoo.Core.Factory.Mlir.MlirTextWriter.Write(g);
+        Assert.Equal(text, Shorokoo.Core.Factory.Mlir.MlirTextWriter.Write(MlirTextReader.Parse(text)));
+    }
+
+    [Fact]
     public void UnsupportedConstruct_Throws()
     {
         // A numeric literal is not lowerable in this slice (constants come later).

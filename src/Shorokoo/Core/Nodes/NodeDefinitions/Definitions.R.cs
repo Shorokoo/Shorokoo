@@ -34,9 +34,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("start", "T", 0) // start
                 .Input("limit", "T", 0) // limit
                 .Input("delta", "T", 0) // delta
-                .InputTestValues("start", [TensorData([], 1L), TensorData([], 2f), TensorData([], 3d)])
-                .InputTestValues("limit", [TensorData([], 12L), TensorData([], 34f), TensorData([], 3954d)])
-                .InputTestValues("delta", [TensorData([], 2L), TensorData([], 3.6f), TensorData([], 203d)])
                 .Output("output", "T", 1)
                 .Code("VectorRange({1:param}{2:param}{3:param})"),
 
@@ -122,15 +119,11 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("data", "T1", "R")
                 .Input("axes", "T2?", 1)
                 .Output("reduced", "T1", "R")
-                .InputTestShapes("data", [[3,1,2],[1,2,2]])
-                .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
                 .Code("NN.Reduce(ReduceKind.L1, {1:param}{2:param}{a:param}{b:param})")
 
                 .Constraint(AttrKeepdims, 0)
                 .Input("data", "T1", "R")
                 .Input("axes", "T2?", 1)
-                .InputTestShapes("data", [[3,1,2],[1,2,2]])
-                .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
                 .Output("reduced", "T1", "R2")
                 .Code("NN.Reduce(ReduceKind.L1, {1:param}{2:param}{a:param}{b:param})"),
 
@@ -144,15 +137,11 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("data", "T1", "R")
                 .Input("axes", "T2?", 1)
                 .Output("reduced", "T1", "R")
-                .InputTestShapes("data", [[3,1,2],[1,2,2]])
-                .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
                 .Code("NN.Reduce(ReduceKind.L2, {1:param}{2:param}{a:param}{b:param})")
 
                 .Constraint(AttrKeepdims, 0)
                 .Input("data", "T1", "R")
                 .Input("axes", "T2?", 1)
-                .InputTestShapes("data", [[3,1,2],[1,2,2]])
-                .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
                 .Output("reduced", "T1", "R2")
                 .Code("NN.Reduce(ReduceKind.L2, {1:param}{2:param}{a:param}{b:param})"),
 
@@ -166,15 +155,11 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("data", "T1", "R")
                 .Input("axes", "T2?", 1)
                 .Output("reduced", "T1", "R")
-                .InputTestShapes("data", [[3,1,2],[1,2,2]])
-                .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
                 .Code("NN.Reduce(ReduceKind.LogSum, {1:param}{2:param}{a:param}{b:param})")
 
                 .Constraint(AttrKeepdims, 0)
                 .Input("data", "T1", "R")
                 .Input("axes", "T2?", 1)
-                .InputTestShapes("data", [[3,1,2],[1,2,2]])
-                .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
                 .Output("reduced", "T1", "R2")
                 .Code("NN.Reduce(ReduceKind.LogSum, {1:param}{2:param}{a:param}{b:param})"),
 
@@ -188,15 +173,11 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("data", "T1", "R")
                 .Input("axes", "T2?", 1)
                 .Output("reduced", "T1", "R")
-                .InputTestShapes("data", [[3,1,2],[1,2,2]])
-                .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
                 .Code("NN.Reduce(ReduceKind.LogSumExp, {1:param}{2:param}{a:param}{b:param})")
 
                 .Constraint(AttrKeepdims, 0)
                 .Input("data", "T1", "R")
                 .Input("axes", "T2?", 1)
-                .InputTestShapes("data", [[3,1,2],[1,2,2]])
-                .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
                 .Output("reduced", "T1", "R2")
                 .Code("NN.Reduce(ReduceKind.LogSumExp, {1:param}{2:param}{a:param}{b:param})"),
 
@@ -210,15 +191,11 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("data", "T1", "R")
                 .Input("axes", "T2?", 1)
                 .Output("reduced", "T1", "R")
-                .InputTestShapes("data", [[3,1,2],[1,2,2]])
-                .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
                 .Code("NN.Reduce(ReduceKind.Max, {1:param}{2:param}{a:param}{b:param})")
 
                 .Constraint(AttrKeepdims, 0)
                 .Input("data", "T1", "R")
                 .Input("axes", "T2?", 1)
-                .InputTestShapes("data", [[3,1,2],[1,2,2]])
-                .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
                 .Output("reduced", "T1", "R2")
                 .Code("NN.Reduce(ReduceKind.Max, {1:param}{2:param}{a:param}{b:param})"),
 
@@ -232,15 +209,11 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("data", "T1", "R")
                 .Input("axes", "T2?", 1)
                 .Output("reduced", "T1", "R")
-                .InputTestShapes("data", [[3,1,2],[1,2,2]])
-                .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
                 .Code("NN.Reduce(ReduceKind.Mean, {1:param}{2:param}{a:param}{b:param})")
 
                 .Constraint(AttrKeepdims, 0)
                 .Input("data", "T1", "R")
                 .Input("axes", "T2?", 1)
-                .InputTestShapes("data", [[3,1,2],[1,2,2]])
-                .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
                 .Output("reduced", "T1", "R2")
                 .Code("NN.Reduce(ReduceKind.Mean, {1:param}{2:param}{a:param}{b:param})"),
 
@@ -254,15 +227,11 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("data", "T1", "R")
                 .Input("axes", "T2?", 1)
                 .Output("reduced", "T1", "R")
-                .InputTestShapes("data", [[3,1,2],[1,2,2]])
-                .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
                 .Code("NN.Reduce(ReduceKind.Min, {1:param}{2:param}{a:param}{b:param})")
 
                 .Constraint(AttrKeepdims, 0)
                 .Input("data", "T1", "R")
                 .Input("axes", "T2?", 1)
-                .InputTestShapes("data", [[3,1,2],[1,2,2]])
-                .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
                 .Output("reduced", "T1", "R2")
                 .Code("NN.Reduce(ReduceKind.Min, {1:param}{2:param}{a:param}{b:param})"),
 
@@ -276,15 +245,11 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("data", "T1", "R")
                 .Input("axes", "T2?", 1)
                 .Output("reduced", "T1", "R")
-                .InputTestShapes("data", [[3,1,2],[1,2,2]])
-                .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
                 .Code("NN.Reduce(ReduceKind.Prod, {1:param}{2:param}{a:param}{b:param})")
 
                 .Constraint(AttrKeepdims, 0)
                 .Input("data", "T1", "R")
                 .Input("axes", "T2?", 1)
-                .InputTestShapes("data", [[3,1,2],[1,2,2]])
-                .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
                 .Output("reduced", "T1", "R2")
                 .Code("NN.Reduce(ReduceKind.Prod, {1:param}{2:param}{a:param}{b:param})"),
 
@@ -298,15 +263,11 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("data", "T1", "R")
                 .Input("axes", "T2?", 1)
                 .Output("reduced", "T1", "R")
-                .InputTestShapes("data", [[3,1,2],[1,2,2]])
-                .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
                 .Code("NN.Reduce(ReduceKind.Sum, {1:param}{2:param}{a:param}{b:param})")
 
                 .Constraint(AttrKeepdims, 0)
                 .Input("data", "T1", "R")
                 .Input("axes", "T2?", 1)
-                .InputTestShapes("data", [[3,1,2],[1,2,2]])
-                .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
                 .Output("reduced", "T1", "R2")
                 .Code("NN.Reduce(ReduceKind.Sum, {1:param}{2:param}{a:param}{b:param})"),
 
@@ -320,15 +281,11 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("data", "T1", "R")
                 .Input("axes", "T2?", 1)
                 .Output("reduced", "T1", "R")
-                .InputTestShapes("data", [[3,1,2],[1,2,2]])
-                .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
                 .Code("NN.Reduce(ReduceKind.SumSquare, {1:param}{2:param}{a:param}{b:param})")
 
                 .Constraint(AttrKeepdims, 0)
                 .Input("data", "T1", "R")
                 .Input("axes", "T2?", 1)
-                .InputTestShapes("data", [[3,1,2],[1,2,2]])
-                .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
                 .Output("reduced", "T1", "R2")
                 .Code("NN.Reduce(ReduceKind.SumSquare, {1:param}{2:param}{a:param}{b:param})"),
 
@@ -345,8 +302,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("input", "T1", "R")
                 .Input("shape", "T2", 1)
                 .Output("output", "T1", "R2")
-                .InputTestShapes("input", [[2,3,4],[6,4]])
-                .InputTestValues("shape", [TensorData([2], 12L, 2L), TensorData([3], 3L, 4L, 2L)])
                 .Code("{1:this}.Reshape({2:param})"),
 
             Op(REVERSE_SEQUENCE)
@@ -357,10 +312,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("input", "T", "R")
                 .Input("sequence_lens", "T2", 1)
                 .Output("Y", "T", "R")
-                .InputTestShapes("input", [[4, 4], [2, 4, 3]])
-                .InputTestValues("sequence_lens", [TensorData([4], 1L, 2L, 3L, 4L), TensorData([2], 3L, 2L)])
-                .AttributeTestValues(AttrBatchAxis, [0L, 0L])
-                .AttributeTestValues(AttrTimeAxis, [1L, 1L])
                 .Code("NN.ReverseSequence({1:param}{2:param}{a:param}{b:param})"),
 
             Op(RESIZE)
@@ -386,19 +337,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("scales", "T3?", 1)               // scales: [rank(X)] or [len(axes)]
                 .Input("sizes", "T4?", 1)               // sizes: [rank(X)] or [len(axes)]
                 .Output("Y", "T1", "R")             // Y: same rank as X (used to be an unconstrained "R2")
-                .AttributeTestValues(AttrAntialias, [1L])
-                .AttributeTestValues(AttrAxes, (long[]?[])[null])
-                .AttributeTestValues(AttrCoordinateTransformationMode, ["half_pixel_symmetric"])
-                .AttributeTestValues(AttrCubicCoeffA, [null])
-                .AttributeTestValues(AttrExcludeOutside, [1L])
-                .AttributeTestValues(AttrExtrapolationValue, [3f])
-                .AttributeTestValues(AttrKeepAspectRatioPolicy, ["stretch"])
-                .AttributeTestValues(AttrMode, ["linear"])
-                .AttributeTestValues(AttrNearestMode, ["round_prefer_ceil"])
-                .InputTestShapes("X", [[3,4,5]])
-                .InputTestValues("roi", [null])
-                .InputTestValues("scales", [TensorData([3], 1.4f, 0.5f, 1.2f)])
-                .InputTestValues("sizes", [null])
                 .Code("NN.Resize({1:param}{3:param}{4:param}{a:param}{b:param}{c:param}{d:param}{e:param}{f:param}{g:param}{h:param}{i:param}{2:param?})"),
 
             Op(ROI_ALIGN)
@@ -415,15 +353,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("rois", "T1", 2)                      // rois: [num_rois, 4]
                 .Input("batch_indices", "T2", 1)             // batch_indices: [num_rois]
                 .Output("Y", "T1", 4)                        // Y: [num_rois, C, output_height, output_width]
-                .InputTestShapes("X", [[1L,1L,4L,4L]])
-                .InputTestValues("rois", [TensorData([1, 4], 0f, 0f, 3f, 3f)])
-                .InputTestValues("batch_indices", [TensorData([1], 0L)])
-                .AttributeTestValues(AttrCoordinateTransformationMode, ["half_pixel"])
-                .AttributeTestValues(AttrMode, ["avg"])
-                .AttributeTestValues(AttrOutputHeight, [2L])
-                .AttributeTestValues(AttrOutputWidth, [2L])
-                .AttributeTestValues(AttrSamplingRatio, [2L])
-                .AttributeTestValues(AttrSpatialScale, [1f])
                 .Code("NN.RoiAlign({1:param}{2:param}{3:param}{a:param}{b:param}{c:param}{d:param}{e:param}{f:param})"),
 
             Op(ROUND)
@@ -450,11 +379,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("X", "T", "R")
                 .Input("scale", "V", "R2")
                 .Output("Y", "V", rank: "R")
-                .InputTestShapes("X", [[2, 4], [2, 3, 4]])
-                .InputTestShapes("scale", [[4], [4]])
-                .AttributeTestValues(AttrAxis, [-1L, 2L])
-                .AttributeTestValues(AttrEpsilon, [1e-5f, 1e-5f])
-                .AttributeTestValues(AttrStashType, [1L, 1L])
                 .Code("NN.RMSNormalization({1:param}{2:param}{a:param}{b:param}{c:param})"),
 
             // Rotary positional embedding (opset 23+). Y has X's shape and dtype.
@@ -472,10 +396,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("sin_cache", "T", "R3")
                 .Input("position_ids", "M?", 2)
                 .Output("Y", "T", rank: "R")
-                .InputTestShapes("X", [[1, 2, 3, 4]])
-                .InputTestShapes("cos_cache", [[8, 2]])
-                .InputTestShapes("sin_cache", [[8, 2]])
-                .InputTestValues("position_ids", [TensorData([1, 3], 0L, 1L, 2L)])
                 .Code("NN.RotaryEmbedding({1:param}{2:param}{3:param}{4:param}{a:param}{b:param}{c:param})"),
 
         ];

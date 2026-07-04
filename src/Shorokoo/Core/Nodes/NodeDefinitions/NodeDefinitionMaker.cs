@@ -362,6 +362,9 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
         private string? codeTemplate;
         private bool? isGraphOpen = null;
 
+        /// <summary>The op code this maker is building, if set. Used to key out-of-line test data.</summary>
+        public string? OpName => opName;
+
         public NodeDefinitionMaker Op(string opName)
         {
             this.opName = opName;

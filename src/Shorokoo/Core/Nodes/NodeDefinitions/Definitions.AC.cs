@@ -33,7 +33,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("a", "T", "R1")
                 .Input("b", "T", "R2")
                 .Output("c", "T", rankBroadcast: "R")
-                .WithBroadcastTestShapes()
                 .Code("{1:low_op} + {2:low_op}"),
 
             Op(AFFINE_GRID)
@@ -43,8 +42,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("theta", "T1", "R")
                 .Input("size", "T2", 1)
                 .Output("grid", "T1", "R2")
-                .InputTestShapes("theta", [[2, 2, 3], [1, 3, 4]])
-                .InputTestValues("size", [TensorData(4, 2L, 3L, 4L, 2L), TensorData(5, 1L, 2L, 3L, 4L, 3L)])
                 .Code("NN.AffineGrid({1:param}{2:param}{a:param?})"),
 
             Op(AND)
@@ -65,15 +62,11 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Constraint(AttrKeepdims, 1)
                 .Input("data", "Tin", "R")
                 .Output("reduced", "Tout", rank: "R")
-                .AttributeTestValues(AttrAxis, [0L, 1L, 2L])
-                .InputTestShapes("data", [[5],[3,4],[2,3,4]])
                 .Code("{1:this}.ArgMax({a:param?}{b:param?}{c:param?}){o1:torank}")
 
                 .Constraint(AttrKeepdims, 0)
                 .Input("data", "Tin", "R")
                 .Output("reduced", "Tout", rankMinusOne: "R")
-                .AttributeTestValues(AttrAxis, [0L, 1L, 2L])
-                .InputTestShapes("data", [[5],[3,4],[2,3,4]])
                 .Code("{1:this}.ArgMax({a:param?}{b:param?}{c:param?}){o1:torank}"),
 
             Op(ARG_MIN)
@@ -87,15 +80,11 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Constraint(AttrKeepdims, 1)
                 .Input("data", "Tin", "R")
                 .Output("reduced", "Tout", rank: "R")
-                .AttributeTestValues(AttrAxis, [0L, 1L, 2L])
-                .InputTestShapes("data", [[5],[3,4],[2,3,4]])
                 .Code("{1:this}.ArgMin({a:param?}{b:param?}{c:param?}){o1:torank}")
 
                 .Constraint(AttrKeepdims, 0)
                 .Input("data", "Tin", "R")
                 .Output("reduced", "Tout", rankMinusOne: "R")
-                .AttributeTestValues(AttrAxis, [0L, 1L, 2L])
-                .InputTestShapes("data", [[5],[3,4],[2,3,4]])
                 .Code("{1:this}.ArgMin({a:param?}{b:param?}{c:param?}){o1:torank}"),
 
             Op(ASIN)
@@ -142,25 +131,17 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeBool(InternalAttrHasOptionalOutputs)
 
                 .Constraint(InternalAttrHasOptionalOutputs, 1)
-                .AttributeTestValues(InternalAttrHasOptionalOutputs, [1L])
                 .Input("Q", "T1", "R")
                 .Input("K", "T1", "R2")
                 .Input("V", "T2", "R3")
                 .Input("attn_mask", "U?", "R4")
                 .Input("past_key", "T1?", "R5")
                 .Input("past_value", "T2?", "R6")
-                .InputTestShapes("Q", [[1, 2, 3, 4]])
-                .InputTestShapes("K", [[1, 2, 5, 4]])
-                .InputTestShapes("V", [[1, 2, 5, 4]])
-                .InputTestShapes("attn_mask", [[3, 7]])
-                .InputTestShapes("past_key", [[1, 2, 2, 4]])
-                .InputTestShapes("past_value", [[1, 2, 2, 4]])
                 .Output("Y", "T1", rank: "R")
                 .Output("present_key", "T1?", "R5")
                 .Output("present_value", "T2?", "R6")
 
                 .Constraint(InternalAttrHasOptionalOutputs, 0)
-                .AttributeTestValues(InternalAttrHasOptionalOutputs, [0L])
                 .Input("Q", "T1", "R")
                 .Input("K", "T1", "R2")
                 .Input("V", "T2", "R3")
@@ -168,11 +149,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("past_key", "T1?", "R5")      // positional placeholder — never wired in this variant
                 .Input("past_value", "T2?", "R6")    // positional placeholder — never wired in this variant
                 .Input("nonpad_kv_seqlen", "T3?", 1)
-                .InputTestShapes("Q", [[1, 2, 3, 4]])
-                .InputTestShapes("K", [[1, 2, 5, 4]])
-                .InputTestShapes("V", [[1, 2, 5, 4]])
-                .InputTestShapes("attn_mask", [[3, 5]])
-                .InputTestValues("nonpad_kv_seqlen", [TensorData([1], 4L)])
                 .Output("Y", "T1", rank: "R"),
 
             Op(ATANH)
@@ -193,21 +169,11 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
 
                 .Constraint(AttrAutoPad, "NOTSET")
                 .Input("x", "T", "R")
-                .AttributeTestValues(AttrDilations, (long[][])[[1L,1L],[2L,2L]])
-                .AttributeTestValues(AttrKernelShape, (long[][])[[2L,2L],[3L,3L]])
-                .AttributeTestValues(AttrPads, (long[][])[[0L,0L,0L,0L],[1L,1L,1L,1L]])
-                .AttributeTestValues(AttrStrides, (long[][])[[2L,2L],[2L,2L]])
-                .InputTestShapes("x", [[1L,2L,5L,3L],[1L,3L,2L,5L]])
                 .Output("y", "T", rank: "R")
                 .Code("Shorokoo.Core.Nodes.NodeDefinitions.OnnxOp.AveragePool({1:param}{a:param}{b:param}{c:param}{d:param}{e:param}{f:param}{g:param}){o1:fromvar}")
 
                 .ConstraintIsSet(AttrAutoPad, true)
                 .Input("x", "T", "R")
-                .AttributeTestValues(AttrDilations, (long[][])[[1L,1L],[2L,2L]])
-                .AttributeTestValues(AttrKernelShape, (long[][])[[2L,2L],[3L,3L]])
-                .AttributeTestValues(AttrPads, (long[]?[])[null, null])
-                .AttributeTestValues(AttrStrides, (long[][])[[2L,2L],[2L,2L]])
-                .InputTestShapes("x", [[1L,2L,5L,3L],[1L,3L,2L,5L]])
                 .Output("y", "T", rank: "R")
                 .Code("Shorokoo.Core.Nodes.NodeDefinitions.OnnxOp.AveragePool({1:param}{a:param}{b:param}{c:param}{d:param}{e:param}{f:param}{g:param}){o1:fromvar}"),
 
@@ -226,11 +192,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("inputMean", "T2", 1)  // input mean
                 .Input("inputVariance", "T2", 1)  // input var
                 .Output("y", "T", rank: "R")  // y
-                .InputTestShapes("x", [[3L,2L],[3L,2L,4L]])
-                .InputTestShapes("scale", [[2L],[2L]])
-                .InputTestShapes("b", [[2L],[2L]])
-                .InputTestShapes("inputMean", [[2L],[2L]])
-                .InputTestShapes("inputVariance", [[2L],[2L]])
                 .Code("{1:this}.BatchNormalization({2:param}{3:param}{4:param}{5:param}{a:param}{b:param}{c:param})")
 
                 .Constraint(AttrTrainingMode, 1)
@@ -242,11 +203,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Output("y", "T", rank: "R")  // y
                 .Output("runningMean", "T2", 1)  // running mean
                 .Output("runningVariance", "T2", 1) // running var
-                .InputTestShapes("x", [[3L,2L],[3L,2L,4L]])
-                .InputTestShapes("scale", [[2L],[2L]])
-                .InputTestShapes("b", [[2L],[2L]])
-                .InputTestShapes("inputMean", [[2L],[2L]])
-                .InputTestShapes("inputVariance", [[2L],[2L]])
                 .Code("{1:this}.BatchNormalizationFullOuputs({2:param}{3:param}{4:param}{5:param}{a:param}{b:param}{c:param})"),
 
             Op(BERNOULLI)
@@ -276,7 +232,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeDType(AttrTo, "T2")
                 .Input("input", "T1", "R")
                 .Output("output", "T2", "R")
-                .InputTestShapes("input", [[2, 3]]),
+                ,
 
             Op(BIT_SHIFT)
                 .Tensor<UnsignedIntLike>("T")
@@ -286,14 +242,12 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("X", "T", "R1") // X
                 .Input("Y", "T", "R2") // Y
                 .Output("Z", "T", rankBroadcast: "R")
-                .WithBroadcastTestShapes()
                 .Code("{1:low_op} << {2:low_op}")
 
                 .Constraint(AttrDirection, "RIGHT")
                 .Input("X", "T", "R1") // X
                 .Input("Y", "T", "R2") // Y
                 .Output("Z", "T", rankBroadcast: "R")
-                .WithBroadcastTestShapes()
                 .Code("{1:low_op} >> {2:low_op}"),
 
             Op(BITWISE_AND)
@@ -301,7 +255,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("X", "T", "R1") // X
                 .Input("Y", "T", "R2") // Y
                 .Output("Z", "T", rankBroadcast: "R")
-                .WithBroadcastTestShapes()
                 .Code("{1:low_op} & {2:low_op}"),
 
             Op(BITWISE_NOT)
@@ -315,7 +268,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("X", "T", "R1") // X
                 .Input("Y", "T", "R2") // Y
                 .Output("Z", "T", rankBroadcast: "R")
-                .WithBroadcastTestShapes()
                 .Code("{1:low_op} | {2:low_op}"),
 
             Op(BITWISE_XOR)
@@ -323,7 +275,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("X", "T", "R1") // X
                 .Input("Y", "T", "R2") // Y
                 .Output("Z", "T", rankBroadcast: "R")
-                .WithBroadcastTestShapes()
                 .Code("{1:low_op} ^ {2:low_op}"),
 
             Op(BLACKMAN_WINDOW)
@@ -336,13 +287,11 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .ConstraintIsSet(AttrOutputDatatype, true)
                 .Input("size", "T2", 0)
                 .Output("output", "T1", 1)
-                .InputTestValues("size", [TensorData([], 3L), TensorData([], 20L), TensorData([], 6L), TensorData([], 32L)])
                 .Code("NN.BlackmanWindow<{T1:ivartype}>({1:param}{b:param})")
 
                 .ConstraintIsSet(AttrOutputDatatype, false)
                 .Input("size", "T2", 0)
                 .Output("output", "T3", 1)
-                .InputTestValues("size", [TensorData([], 3L), TensorData([], 20L), TensorData([], 6L), TensorData([], 32L)])
                 .Code("NN.BlackmanWindow<float32>({1:param}{b:param})"),
 
             Op(CAST)
@@ -396,9 +345,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("input_data", "T", "R") // input_data
                 .Input("shape", "Tind", "R2") // shape
                 .Output("output_data", "T", "R") // output_data
-                .AttributeTestValues(AttrAxes, (long[]?[])[null, [-1L, 1L], [0L, 2L]])
-                .InputTestValues("input_data", [TensorData([2,3], 1f, 2f, 3f, 4f, 5f, 6f), TensorData([1, 2, 3], 1L, 2L, 3L, 4L, 5L, 6L), TensorData([2,1,3], 1d, 2d, 3d, 4d, 5d, 6d)])
-                .InputTestValues("shape", [TensorData([2], 1L, 2L), TensorData([2], 2L, 2L), TensorData([2], 1L, 2L)])
                 .Code("{1:this}.CenterCropPad({2:param}{a:param}){o1:torank}"),
 
             Op(CLIP)
@@ -421,12 +367,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 // Output is [N, C, *image_shape] = rank 2 + len(image_shape), which differs
                 // from the 3-D input's rank — it must NOT share the input's "R" token.
                 .Output("output", "T", "R3")
-                .InputTestShapes("input", [[1, 2, 15]])
-                .InputTestValues("image_shape", [TensorData([2], 3L, 5L)])
-                .InputTestValues("block_shape", [TensorData([2], 1L, 1L)])
-                .AttributeTestValues(AttrDilations, (long[][])[[1L,1L]])
-                .AttributeTestValues(AttrPads, (long[][])[[0L, 0L, 0L, 0L]])
-                .AttributeTestValues(AttrStrides, (long[][])[[1L,1L]])
                 .Code("NN.Col2Im({1:param}{2:param}{3:param}{a:param}{b:param}{c:param})"),
 
             Op(COMPRESS)
@@ -504,7 +444,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
 
                 .ConstraintIsSet(AttrValue, true)
                 .Code("MakeTensor<{T4:ivartype}>({a:dims}, \"{a:base64string}\"){o1:torank}")
-                .AttributeTestValues(AttrValue, [TensorData([2,3], 1f, 2f, 3f, 4f, 5f, 6f)])
                 .Output("value", "T4", rank: "R"),
 
             Op(CONSTANT_OF_SHAPE)
@@ -516,14 +455,11 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .ConstraintIsSet(AttrValue, false)
                 .Input("shape", "T1", 1)
                 .Output("value", "T2", rank: "R2")
-                .InputTestValues("shape", [TensorData([3], 1L, 2L, 3L), TensorData([2], 2L, 3L), TensorData([1], 3L), TensorData([1], 3L), TensorData([0], (long[])[])])
                 .Code("TensorFill({1:param}0f){o1:torank}")
 
                 .ConstraintIsSet(AttrValue, true)
                 .Input("shape", "T1", 1)
                 .Output("value", "T3", rank: "R2")
-                .InputTestValues("shape", [TensorData([1], 1L, 2L, 3L), TensorData([1], 2L, 3L), TensorData([1], 3L), TensorData([1], 3L), TensorData([0L], (long[])[])])
-                .AttributeTestValues(AttrValue, [TensorData([1], 1f), TensorData([1], 2L), TensorData([1], -1.01d), TensorData([1], (uint)2), TensorData([1], true)])
                 .Code("Tensor<{T3:ivartype}>.Fill({1:param}{a:param})"),
 
             Op(CONV)
@@ -538,15 +474,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("W", "T", "R2")
                 .Input("B", "T?", 1)
                 .Output("Y", "T", "R")
-                .InputTestShapes("X", [[1L,1L,5L,5L],[1L,1L,5L,5L]])
-                .InputTestShapes("W", [[1L,1L,2L,2L],[1L,1L,3L,3L]])
-                .InputTestShapes("B", [[1L],[1L]])
-                .AttributeTestValues(AttrAutoPad, ["NOTSET", "SAME_UPPER"])
-                .AttributeTestValues(AttrDilations, (long[][])[[1L,1L], [1L,1L]])
-                .AttributeTestValues(AttrGroup, [1L, 1L])
-                .AttributeTestValues(AttrKernelShape, (long[][])[[2L,2L], [3L,3L]])
-                .AttributeTestValues(AttrPads, (long[]?[])[[0L,0L,0L,0L], null])
-                .AttributeTestValues(AttrStrides, (long[][])[[1L,1L], [1L,1L]])
                 .Code("NN.Conv({1:param}{2:param}{3:param}{a:param}{b:param}{c:param}{d:param}{e:param}{f:param})"),
 
             Op(CONV_INTEGER)
@@ -564,14 +491,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("x_zero_point", "T1?", 0)
                 .Input("w_zero_point", "T2?", 0)
                 .Output("Y", "T3", "R")
-                .InputTestShapes("X", [[1L,1L,5L,5L],[1L,1L,5L,5L]])
-                .InputTestShapes("W", [[1L,1L,2L,2L],[1L,1L,3L,3L]])
-                .AttributeTestValues(AttrAutoPad, ["NOTSET", "SAME_UPPER"])
-                .AttributeTestValues(AttrDilations, (long[][])[[1L,1L], [1L,1L]])
-                .AttributeTestValues(AttrGroup, [1L, 1L])
-                .AttributeTestValues(AttrKernelShape, (long[][])[[2L,2L], [3L,3L]])
-                .AttributeTestValues(AttrPads, (long[]?[])[[0L,0L,0L,0L], null])
-                .AttributeTestValues(AttrStrides, (long[][])[[1L,1L], [1L,1L]])
                 .Code("NN.ConvInteger({1:param}{2:param}{3:param}{4:param}{a:param}{b:param}{c:param}{d:param}{e:param}{f:param})"),
 
             Op(CONV_TRANSPOSE)
@@ -589,17 +508,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("B", "T?", 1)
                 .Output("Y", "T", "R")
 
-                .InputTestShapes("X", [[1L, 1L, 5L, 5L], [1L, 1L, 5L, 5L]])  // Input Tensor (N, C, H, W)
-                .InputTestShapes("W", [[1L, 1L, 2L, 2L], [1L, 1L, 3L, 3L]])  // Weight Tensor (C, M/group, kH, kW)
-                .InputTestShapes("B", [[1L], [1L]])  // Bias Tensor (M)
-                .AttributeTestValues(AttrAutoPad, ["NOTSET"]) // Padding mode
-                .AttributeTestValues(AttrDilations, (long[][])[[1L, 1L]])   // No dilation
-                .AttributeTestValues(AttrGroup, [1L])                   // Standard convolution (no grouping)
-                .AttributeTestValues(AttrKernelShape, (long[][])[[3L, 3L]]) // Kernel sizes
-                .AttributeTestValues(AttrOutputPadding, (long[][])[[0,0,0,0]])  // Controls extra padding in output
-                .AttributeTestValues(AttrOutputShape, (long[][])[[11,11]])  // Explicit output shapes
-                .AttributeTestValues(AttrPads, (long[]?[])[[0,0,0,0]])    // Explicit padding for "NOTSET"
-                .AttributeTestValues(AttrStrides, (long[][])[[2L, 2L]])     // Added strides
 
                 .Code("NN.ConvTranspose({1:param}{2:param}{3:param}{a:param}{b:param}{c:param}{d:param}{e:param}{f:param}{g:param}{h:param})"),
 
@@ -624,8 +532,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeBool(AttrReverse)
                 .Input("x", "T", "R")
                 .Input("axis", "T2", 0)
-                .InputTestShapes("x", [[5], [3, 4], [2, 3, 4]])
-                .InputTestValues("axis", [TensorData([], 0L), TensorData([], 1L), TensorData([], 2L)])
                 .Output("y", "T", rank: "R"),
 
             Op(CUM_SUM)
@@ -635,8 +541,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeBool(AttrReverse)
                 .Input("x", "T", "R")
                 .Input("axis", "T2?", 0)
-                .InputTestShapes("x", [[5],[3,4],[2,3,4]])
-                .InputTestValues("axis", [TensorData([], 0L), TensorData([], 1L), TensorData([], 2L)])
                 .Output("result", "T", rank: "R")
                 .Code("{1:this}.CumSum({2:param}{a:param}{b:param}){o1:torank}"),
         ];

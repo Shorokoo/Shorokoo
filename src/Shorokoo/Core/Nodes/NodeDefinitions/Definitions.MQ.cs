@@ -15,8 +15,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("a", "T", "R1")
                 .Input("b", "T", "R2")
                 .Output("c", "T", rankBroadcast: "R")
-                .InputTestShapes("a", [[1,2,3,4],[2,1,5,2]])
-                .InputTestShapes("b", [[3,1,4,2],[2,2]])
                 .Code("{1:this}.MatMul({2:param})"),
 
             Op(MATMUL_INTEGER)
@@ -28,10 +26,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("a_zero_point", "T1?", "R3") // a_zero_point (optional per spec)
                 .Input("b_zero_point", "T2?", "R4") // b_zero_point (optional per spec)
                 .Output("c", "T3", rankBroadcast: "R")
-                .InputTestShapes("a", [[1,2,3,4],[2,1,5,2]])
-                .InputTestShapes("b", [[3,1,4,2],[2,2]])
-                .InputTestShapes("a_zero_point", [[],[]])
-                .InputTestShapes("b_zero_point", [[],[]])
                 .Code("NN.MatMulInteger({1:param}{2:param}{3:param}{4:param})"),
 
             Op(MAX)
@@ -39,7 +33,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Variadic("V", minCount: 1)
                 .Input("x", ["T", "V"], "R")
                 .Output("y", "T", rankBroadcast: "R")
-                .VariadicInputTestShapes([[[3,1,2],[1,2,2]],[[2,3],[2,1,3],[2,2,3]],[[1,2,3,4], [3,2,3,1], [3,1,1,1], []]])
                 .Code("NN.Max({#:param})"),
 
             Op(MAX_POOL)
@@ -55,28 +48,12 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeBool(InternalAttrHasOptionalOutputs)
 
                 .Constraint(InternalAttrHasOptionalOutputs, 1)
-                .AttributeTestValues(InternalAttrHasOptionalOutputs, [1L])
-                .AttributeTestValues(AttrAutoPad, [AutoPad.NotSet])
-                .AttributeTestValues(AttrCeilMode, [0L])
-                .AttributeTestValues(AttrDilations, (long[]?[])[[1,1]])
-                .AttributeTestValues(AttrKernelShape, (long[]?[])[[3,3]])
-                .AttributeTestValues(AttrPads, (long[]?[])[[0,0,0,0]])
-                .AttributeTestValues(AttrStorageOrder, [0L])
-                .AttributeTestValues(AttrStrides, (long[]?[])[[1,1]])
                 .Input("X", "T", "R")  // X
                 .Output("Y", "T", rank: "R") // Y
                 .Output("Indices", "T2?", rank: "R2") // Indices (int64 per spec)
                 .Code("NN.MaxPoolWithIndices({{1:param}{c:param}{d:param}{e:param}{f:param}{g:param}{h:param}{b:param})")
 
                 .Constraint(InternalAttrHasOptionalOutputs, 0)
-                .AttributeTestValues(InternalAttrHasOptionalOutputs, [0L])
-                .AttributeTestValues(AttrAutoPad, [AutoPad.NotSet])
-                .AttributeTestValues(AttrCeilMode, [0L])
-                .AttributeTestValues(AttrDilations, (long[]?[])[[1,1]])
-                .AttributeTestValues(AttrKernelShape, (long[]?[])[[3,3]])
-                .AttributeTestValues(AttrPads, (long[]?[])[[0,0,0,0]])
-                .AttributeTestValues(AttrStorageOrder, [0L])
-                .AttributeTestValues(AttrStrides, (long[]?[])[[1,1]])
                 .Input("X", "T", "R")  // X
                 .Output("Y", "T", rank: "R") // Y
                 .Output("Indices", "T2?", rank: "R2") // Indices (int64 per spec)
@@ -92,10 +69,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("I", "T2", "R")  // indices (int64 per spec)
                 .Input("output_shape", "T2?", 1)
                 .Output("output", "T", "R2")
-                .InputTestShapes("X", [[1L,1L,2L,2L]])
-                .InputTestShapes("I", [[1L,1L,2L,2L]])
-                .AttributeTestValues(AttrKernelShape, (long[][])[[2L,2L]])
-                .AttributeTestValues(AttrStrides, (long[][])[[2L,2L]])
                 .Code("NN.MaxUnpool({1:param}{2:param}{3:param}{a:param}{b:param}{c:param})"),
 
             Op(MAX_ROI_POOL)
@@ -105,10 +78,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("X", "T", 4)                                  // X: [N, C, H, W]
                 .Input("rois", "T", 2)                               // rois: [num_rois, 5] — (batch_id, x1, y1, x2, y2)
                 .Output("Y", "T", 4)                                 // Y: [num_rois, C, pooled_h, pooled_w]
-                .InputTestShapes("X", [[1L,1L,4L,4L]])
-                .InputTestValues("rois", [TensorData([1, 5], 0f, 0f, 0f, 3f, 3f)])
-                .AttributeTestValues(AttrPooledShape, (long[][])[[2L,2L]])
-                .AttributeTestValues(AttrSpatialScale, [1f])
                 .Code("NN.MaxRoiPool({1:param}{2:param}{a:param}{b:param})"),
 
             Op(MIN)
@@ -116,7 +85,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Variadic("V", minCount: 1)
                 .Input("x", ["T", "V"], "R")
                 .Output("y", "T", rankBroadcast: "R")
-                .VariadicInputTestShapes([[[3,1,2],[1,2,2]],[[2,3],[2,1,3],[2,2,3]],[[1,2,3,4], [3,2,3,1], [3,1,1,1], []]])
                 .Code("NN.Min({#:param})"),
 
             Op(MEAN)
@@ -124,7 +92,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Variadic("V", minCount: 1)
                 .Input("x", ["T", "V"], "R")
                 .Output("y", "T", rankBroadcast: "R")
-                .VariadicInputTestShapes([[[3,1,2],[1,2,2]],[[2,3],[2,1,3],[2,2,3]]])
                 .Code("NN.Mean({#:param})"),
 
             Op(MOD)
@@ -136,14 +103,12 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("A", "T2", "R1")
                 .Input("B", "T2", "R2")
                 .Output("C", "T2", rankBroadcast: "R")
-                .WithBroadcastTestShapes()
                 .Code("{1:low_op} % {2:low_op}")
             
                 .Constraint(AttrFmod, 1)
                 .Input("A", "T1", "R1")
                 .Input("B", "T1", "R2")
                 .Output("C", "T1", rankBroadcast: "R")
-                .WithBroadcastTestShapes()
                 .Code("NN.FMod({1:param}{2:param}){o1:torank}"),
 
             Op(MUL)
@@ -151,7 +116,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("A", "T", "R1")
                 .Input("B", "T", "R2")
                 .Output("C", "T", rankBroadcast: "R")
-                .WithBroadcastTestShapes()
                 .Code("{1:low_op} * {2:low_op}"),
 
             Op(NEG)
@@ -170,12 +134,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("iou_threshold", "T1?", 0)               // iou_threshold: scalar
                 .Input("score_threshold", "T1?", 0)               // score_threshold: scalar
                 .Output("selected_indices", "T2", 2)           // selected_indices: [num_selected_indices, 3] — rank 2 per spec (was wrongly 3)
-                .AttributeTestValues(AttrCenterPointBox, [0L])
-                .InputTestValues("boxes", [TensorData([1, 3, 4], 0f, 0f, 1f, 1f, 0.1f, 0.1f, 0.8f, 0.8f, 0.2f, 0.2f, 0.7f, 0.7f)])
-                .InputTestValues("scores", [TensorData([1, 1, 3], 0.9f, 0.75f, 0.6f)])
-                .InputTestValues("max_output_boxes_per_class", [TensorData([], 2L)])
-                .InputTestValues("iou_threshold", [TensorData([],0.5f)])
-                .InputTestValues("score_threshold", [TensorData([], 0.3f)])
                 .Code("NN.NonMaxSuppression({1:param}{2:param}{3:param}{4:param}{5:param}{a:param})"),
 
             Op(NON_ZERO)
@@ -222,7 +180,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("A", "T", "R1")
                 .Input("B", "T", "R2")
                 .Output("C", "T", rankBroadcast: "R")
-                .WithBroadcastTestShapes()
                 .Code("{1:low_op} | {2:low_op}"),
 
             Op(PAD)
@@ -235,9 +192,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("constant_value", "T?", 0)                // constant_value (optional): scalar
                 .Input("axes", "T3?", 1)               // axes (optional): [num_axes]
                 .Output("output", "T", "R")// output: padded tensor
-                .InputTestShapes("data", [[1,2,3],[3],[3,4,1]])
-                .InputTestValues("pads", [TensorData([2], 2L, 3L), TensorData([2], 0L, 5L), TensorData([4], 0L, 1L, 2L, 3L)])
-                .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 0L), TensorData([2], 0L, 2L)])
                 .Code("{1:this}.Pad({a:param}{2:param}{3:param}{4:param})"),             
             
             Op(POW)
@@ -246,7 +200,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("X", "T1", "R1")
                 .Input("Y", "T2", "R2")
                 .Output("Z", "T1", rankBroadcast: "R")
-                .WithBroadcastTestShapes()
                 .Code("{1:this}.Pow({2:param})"),
 
             Op(MISH)

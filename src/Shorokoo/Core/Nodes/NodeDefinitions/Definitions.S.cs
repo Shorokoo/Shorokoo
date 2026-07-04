@@ -20,9 +20,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("indices", "Tind", "R2")          // indices: same rank as data
                 .Input("updates", "T", "R3")             // updates: same shape as indices
                 .Output("output", "T", "R1")             // output: same shape (and rank) as data
-                .InputTestShapes("data", [[3, 3]])
-                .InputTestValues("indices", [TensorData([2, 3], 1L, 0L, 2L, 0L, 2L, 1L)])
-                .InputTestShapes("updates", [[2, 3]])
                 .Code("NN.ScatterElements({1:param}{2:param}{3:param}{a:param}{b:param})"),
 
             Op(SCATTER_ND)
@@ -33,9 +30,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("indices", "Tind", "R2")            // indices: rank q >= 1
                 .Input("updates", "T", "R3")              // updates: rank q + r - indices_shape[-1] - 1
                 .Output("output", "T", "R1")             // output: same shape (and rank) as data
-                .InputTestShapes("data", [[5]])
-                .InputTestValues("indices", [TensorData([2,1], 1L, 3L)])
-                .InputTestShapes("updates", [[2]])
                 .Code("{1:this}.ScatterND({2:param}{3:param}{a:param})"),
 
             Op(SELU)
@@ -54,8 +48,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("input_tensors", ["T", "S"], "R1")
                 .Input("position", "T2", 0)
                 .Output("tensor", ["T", "Tensor"], "R2")
-                .VariadicInputTestShapes([[[1,2,3],[2,3]], [[1],[]]])
-                .InputTestValues("position", [TensorData([], 1L), TensorData([], 0L)])
                 .Code("{1:this}[{2:param}]{o1:torank}"),
 
             Op(SEQUENCE_CONSTRUCT)
@@ -67,9 +59,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeString(ShrkAttrDomainName)
                 .Input("input_tensors", ["T", "Tensor", "V"], "R1")
                 .Output("sequence", ["T", "S"], "R2")
-                .AttributeTestValues(ShrkAttrFunctionName, [null, null])
-                .AttributeTestValues(ShrkAttrDomainName, [null, null])
-                .VariadicInputTestShapes([[[1,2,3],[2,3]], [[1],[]]])
                 .Code("TensorSequence({#:param})"),
 
             Op(SEQUENCE_EMPTY)
@@ -78,8 +67,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeString(ShrkAttrFunctionName)
                 .AttributeString(ShrkAttrDomainName)
                 .Output("sequence", "T", "R")
-                .AttributeTestValues(ShrkAttrFunctionName, [null, null])
-                .AttributeTestValues(ShrkAttrDomainName, [null, null])
                 .Code("TensorSequence<{T:ivartype}>()"),
 
             Op(SEQUENCE_ERASE)
@@ -89,8 +76,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 // position is optional per spec: absent means "erase the last element".
                 .Input("position", "T2?", 0)
                 .Output("output_sequence", "T", "R2")
-                .VariadicInputTestShapes([[[1,2,3],[2,3]], [[1],[]]])
-                .InputTestValues("position", [TensorData([], 1L), TensorData([], 0L)])
                 .Code("{1:this}.RemoveAt({2:param})"),
 
             Op(SEQUENCE_INSERT)
@@ -102,8 +87,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("input", ["T", "Tensor"], "R2")
                 .Input("position", "T2?", 0)
                 .Output("output_sequence", ["T", "S"], "R3")
-                .VariadicInputTestShapes([[[1,2,3],[2,3]], [[1],[]]])
-                .InputTestValues("position", [TensorData([], 1L), TensorData([], 0L)])
                 .Code("{1:this}.InsertAt({2:param}{3:param})"),
 
             Op(SEQUENCE_LENGTH)
@@ -111,7 +94,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Tensor<int64>("T2")
                 .Input("sequence", "T1")
                 .Output("length", "T2", 0)
-                .VariadicInputTestShapes([[[1,2,3],[2,3]], [[1],[]]])
                 .Code("{1:this}.Count"),
 
             Op(SHAPE)
@@ -156,11 +138,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("axes", "Tind?", 1) // axes
                 .Input("steps", "Tind?", 1) // steps
                 .Output("output", "T", rank: "R")
-                .InputTestShapes("x", [[2,8,3],[1,3,4,5,2]])
-                .InputTestValues("starts", [TensorData([2], 1L,2L), TensorData([3], 1L, 2L, 2L)])
-                .InputTestValues("ends", [TensorData([2], 8L,3L), TensorData([3], 3L, 3L, 3L)])
-                .InputTestValues("axes", [TensorData([2], 1L,2L), TensorData([3], 1L,2L,3L)])
-                .InputTestValues("steps", [TensorData([2], 2L,1L), TensorData([3], 1L,1L,1L)])
                 .Code("{1:this}.Slice({2:param}{3:param}{4:param}{5:param})"),
 
             Op(SOFTMAX)
@@ -168,8 +145,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeLong(AttrAxis)
                 .Input("input", "T", "R")
                 .Output("output", "T", rank: "R")
-                .InputTestShapes("input", [[2,3,4],[1,2,2,2,2],[3]])
-                .AttributeTestValues(AttrAxis, [2L,3L,null])
                 .Code("{1:this}.Softmax({a:param?})"),
 
             Op(SPLIT)
@@ -180,11 +155,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeLong(AttrNumOutputs, variadicCount: "V")
                 .Input("input", "T", "R1")
                 .Input("split", "T2?", 1)
-                .AttributeTestValues(AttrAxis, [2L, 1L])
-                .AttributeTestValues(AttrNumOutputs, [null, 3L])
-                .InputTestShapes("input", [[2,1,3],[1,6,2]])
-                .InputTestValues("split", [TensorData([2], 1L,2L), null])
-                .VariadicTestCounts("V", [2, 3])
                 .Output("outputs", ["T", "V"], rank: "R2")
                 .Code("{1:this}.Split({2:param}{a:param}{numoutputs:param})"),
 
@@ -193,8 +163,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Tensor<int64>("T2")
                 .Input("data", "T1", "R") // data
                 .Input("axes", "T2?", 1) // axes (optional per spec: absent → squeeze all size-1 dims)
-                .InputTestShapes("data", [[2,1,3,1,4,1],[1,2,2,2,1,1,1]])
-                .InputTestValues("axes", [TensorData([2], 1L,3L), TensorData([3], 6L, 5L, 4L)])
                 .Output("squeezed", "T1", "R2") // squeezed
                 .Code("{1:this}.Squeeze({2:param})"),
 
@@ -209,7 +177,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("A", "T", "R1")
                 .Input("B", "T", "R2")
                 .Output("C", "T", rankBroadcast: "R")
-                .WithBroadcastTestShapes()
                 .Code("{1:low_op} - {2:low_op}"),
 
             Op(SUM)
@@ -217,7 +184,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Variadic("V", minCount: 1)
                 .Input("x", ["T", "V"], "R")
                 .Output("y", "T", rankBroadcast: "R")
-                .VariadicInputTestShapes([[[3,1,2],[1,2,2]],[[2,3],[2,1,3],[2,2,3]]])
                 .Code("NN.Sum({#:param})"),
 
             // Swish activation (opset 24+): y = x * sigmoid(alpha * x), alpha default 1.
@@ -228,8 +194,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeFloat(AttrAlpha)      // a (default 1.0)
                 .Input("X", "T", "R")
                 .Output("Y", "T", rank: "R")
-                .InputTestShapes("X", [[5], [2, 3]])
-                .AttributeTestValues(AttrAlpha, [1.0f, 2.0f])
                 .Code("NN.Swish({1:param}{a:param})"),
 
             Op(SPACE_TO_DEPTH)
@@ -237,8 +201,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeLong(AttrBlocksize)
                 .Input("input", "T", 4)
                 .Output("output", "T", 4)
-                .InputTestShapes("input", [[1, 1, 4, 4]])
-                .AttributeTestValues(AttrBlocksize, [2L])
                 .Code("NN.SpaceToDepth({1:param}{a:param})"),
 
             Op(SHRINK)

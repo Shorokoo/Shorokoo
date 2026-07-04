@@ -48,7 +48,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("a", "T", "R1")
                 .Input("b", "T", "R2")
                 .Output("c", "T2", rankBroadcast: "R")
-                .WithBroadcastTestShapes()
                 .Code("{1:low_op} < {2:low_op}"),
 
             Op(LESS_OR_EQUAL)
@@ -57,7 +56,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("a", "T", "R1")
                 .Input("b", "T", "R2")
                 .Output("c", "T2", rankBroadcast: "R")
-                .WithBroadcastTestShapes()
                 .Code("{1:low_op} <= {2:low_op}"),
 
             Op(LOOP_OPEN)
@@ -120,9 +118,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("scale", "T", 1)
                 .Input("B", "T", 1)
                 .Output("output", "T", "R")
-                .InputTestShapes("input", [[1, 3, 4, 5]])
-                .InputTestShapes("scale", [[3]])
-                .InputTestShapes("B", [[3]])
                 .Code("NN.InstanceNormalization({1:param}{2:param}{3:param}{a:param})"),
 
             Op(LP_NORMALIZATION)
@@ -145,23 +140,11 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
 
                 .Constraint(AttrAutoPad, "NOTSET")
                 .Input("X", "T", "R")
-                .AttributeTestValues(AttrDilations, (long[][])[[1L,1L],[1L,1L]])
-                .AttributeTestValues(AttrKernelShape, (long[][])[[2L,2L],[3L,3L]])
-                .AttributeTestValues(AttrP, [2L, 2L])
-                .AttributeTestValues(AttrPads, (long[][])[[0L,0L,0L,0L],[1L,1L,1L,1L]])
-                .AttributeTestValues(AttrStrides, (long[][])[[2L,2L],[1L,1L]])
-                .InputTestShapes("X", [[1L,1L,5L,5L],[1L,1L,6L,4L]])
                 .Output("Y", "T", rank: "R")
                 .Code("Shorokoo.Core.Nodes.NodeDefinitions.OnnxOp.LpPool({1:param}{a:param}{b:param}{c:param}{d:param}{e:param}{f:param}{g:param}){o1:fromvar}")
 
                 .ConstraintIsSet(AttrAutoPad, true)
                 .Input("X", "T", "R")
-                .AttributeTestValues(AttrDilations, (long[][])[[1L,1L],[1L,1L]])
-                .AttributeTestValues(AttrKernelShape, (long[][])[[2L,2L],[3L,3L]])
-                .AttributeTestValues(AttrP, [2L, 2L])
-                .AttributeTestValues(AttrPads, (long[]?[])[null, null])
-                .AttributeTestValues(AttrStrides, (long[][])[[2L,2L],[1L,1L]])
-                .InputTestShapes("X", [[1L,1L,5L,5L],[1L,1L,6L,4L]])
                 .Output("Y", "T", rank: "R")
                 .Code("Shorokoo.Core.Nodes.NodeDefinitions.OnnxOp.LpPool({1:param}{a:param}{b:param}{c:param}{d:param}{e:param}{f:param}{g:param}){o1:fromvar}"),
 

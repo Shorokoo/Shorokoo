@@ -132,10 +132,13 @@ public class RngPinTests
         Assert.NotNull(inits[0].KeyWords);
         Assert.NotEqual(inits[0].KeyWords, inits[1].KeyWords);
 
-        // The skeleton lists each stream at its path with the variable left as ?.
+        // The skeleton groups by scope (here just the module body) and lists each consumer's
+        // local slot with the variable left as ?. The two Linears are top-level slots 1 and 2.
         var skeleton = report.EmitPinSkeleton();
-        Assert.StartsWith("Rng.Pin(", skeleton);
-        Assert.Contains("([1, 1], /*", skeleton);
+        Assert.Contains("// at the end of Inline:", skeleton);
+        Assert.Contains("Rng.Pin(", skeleton);
+        Assert.Contains("([1], /*", skeleton);
+        Assert.Contains("([2], /*", skeleton);
         Assert.Contains("*/ ?)", skeleton);
 
         // Without a config, streams are listed but unkeyed.
@@ -170,9 +173,11 @@ public class RngPinTests
         var (k0, k1) = cfg.FoldRunKey([1]);
         Assert.Equal([k0, k1], feed.KeyWords);
 
-        // The skeleton elides the -1 slot and flags the loop.
+        // The skeleton groups the loop-body feed under its loop scope [1, -1] with the feed's
+        // local slot (1), so the author writes that pin inside the loop body.
         var skeleton = arch.GetRngStreamReport().EmitPinSkeleton();
-        Assert.Contains("([1, 1], /* uniform feed (loop body) */ ?)", skeleton);
+        Assert.Contains("// inside the loop body at ModelId path [1, -1]:", skeleton);
+        Assert.Contains("([1], /* uniform feed */ ?)", skeleton);
     }
 
     [Fact]

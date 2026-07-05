@@ -36,7 +36,7 @@ public class ModuleSourceGenerator : IIncrementalGenerator
     private static readonly DiagnosticDescriptor RngPinAvailable = new(
         id: "MSG004",
         title: "RNG streams of this module can be pinned",
-        messageFormat: "Module '{0}' has RNG stream consumers capturable by Rng.Pin. To freeze their stream identities against refactoring, paste at the end of Inline: {1}.",
+        messageFormat: "Module '{0}' has RNG stream consumers capturable by Rng.Pin. To freeze their stream identities against refactoring, {1}.",
         category: "SourceGeneration",
         DiagnosticSeverity.Info,
         isEnabledByDefault: true);
@@ -121,27 +121,25 @@ public class ModuleSourceGenerator : IIncrementalGenerator
         });
     }
 
-    private enum LoopSlotClass { Empty, OccupiesSlot, Refuse }
-
     /// <summary>
-    /// Builds the ready-to-paste <c>Rng.Pin(...)</c> statement for a module whose Inline body's
-    /// RNG stream consumers are all provably nameable. The nameable consumers are the
-    /// <c>X.Model(...)</c> / <c>X.Init(...)</c> results captured directly in body-level locals;
-    /// each takes one module-local id slot in source order. A <c>LoopAPI.Iterate(...)</c> loop
-    /// takes exactly one slot too (its body items live under it), but its interior variables are
-    /// loop-scoped and can't be named from an end-of-body pin — so when a loop occupies a slot
-    /// the suggestion switches to the <b>sparse</b> form, pinning each nameable item to its
-    /// exact current slot and leaving the loop's slot to be filled positionally. That keeps the
-    /// named items refactor-stable without disturbing the loop's streams. Nested loops are just
-    /// one outer slot, so they need no special handling.
+    /// Builds the ready-to-paste <c>Rng.Pin(...)</c> guidance for a module whose RNG stream
+    /// consumers are all provably nameable. Each scope — the <c>Inline</c> body and every
+    /// <c>LoopAPI.Iterate(...)</c> loop body, at any nesting — is pinned independently: the
+    /// nameable <c>X.Model(...)</c> / <c>X.Init(...)</c> captures directly in that scope take its
+    /// local id slots in source order, and a nested loop takes one local slot too. So the
+    /// guidance is one compilable <c>Rng.Pin(...)</c> per scope, placed at the end of that scope
+    /// (loop-body pins go inside the loop, where those variables are in scope). Within a scope,
+    /// when a nested loop occupies a local slot the pin uses the <b>sparse</b> form so the named
+    /// items keep their exact slots and the loop's slot is left to be filled positionally;
+    /// otherwise the terse positional form is exact.
     ///
-    /// <para>Returns null (no diagnostic) for anything not provably capturable: C# control flow
-    /// (<c>if</c>/<c>for</c>/<c>while</c>/<c>switch</c>/a non-<c>Iterate</c> <c>foreach</c>), an
-    /// existing <c>Rng.Pin</c>, an uncaptured Model/Init/feed, a chained <c>Model(...).Call(...)</c>
-    /// or static <c>TypeName.Call</c>, or an opaque static-helper call that may create streams —
-    /// including inside a loop, where such a call makes the loop's slot count uncertain. A wrong
-    /// pin silently re-keys, so anything uncertain refuses. (Method-call "control flow" like
-    /// <c>cond.IfElse(...)</c> is an ordinary expression and is fine.)</para>
+    /// <para>Returns null (no diagnostic) for anything not provably capturable in <em>any</em>
+    /// scope: C# control flow (<c>if</c>/<c>for</c>/<c>while</c>/<c>switch</c>/a non-<c>Iterate</c>
+    /// <c>foreach</c>), an existing <c>Rng.Pin</c>, an uncaptured Model/Init/feed, a chained
+    /// <c>Model(...).Call(...)</c> or static <c>TypeName.Call</c>, or an opaque static-helper call
+    /// that may create streams. A wrong pin silently re-keys, so anything uncertain refuses.
+    /// (Method-call "control flow" like <c>cond.IfElse(...)</c> is an ordinary expression and is
+    /// fine.)</para>
     /// </summary>
     private static string? TryBuildRngPinSuggestion(ClassDeclarationSyntax classDecl)
     {
@@ -156,11 +154,39 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                 pinMa.Expression is IdentifierNameSyntax { Identifier.Text: "Rng" })
                 return null;
 
+        var scopes = new List<(string placement, string pin)>();
+        if (!TryAnalyzeScope(inline.Body.Statements, "at the end of Inline", scopes, out _))
+            return null;
+        if (scopes.Count == 0) return null;
+
+        if (scopes.Count == 1 && scopes[0].placement == "at the end of Inline")
+            return "paste " + scopes[0].placement + ": " + scopes[0].pin;   // common single-scope case
+
+        return "paste a pin at the end of each scope — " +
+            string.Join(" ", scopes.Select(s => s.placement + ": " + s.pin));
+    }
+
+    /// <summary>
+    /// Recursively analyzes one scope's statements (the module body or a loop body). On success
+    /// appends this scope's compilable <c>Rng.Pin(...)</c> — module scope first, then nested
+    /// scopes in source order — to <paramref name="scopes"/> and reports via
+    /// <paramref name="occupies"/> whether the scope contains any id-bearing consumer (so its
+    /// parent counts it as one local slot). Returns false if anything in this scope (or a nested
+    /// one) is not provably capturable, so the whole suggestion is withheld.
+    /// </summary>
+    private static bool TryAnalyzeScope(
+        IReadOnlyList<StatementSyntax> statements,
+        string placement,
+        List<(string placement, string pin)> scopes,
+        out bool occupies)
+    {
+        occupies = false;
         var pinned = new List<(int slot, string name)>();
         int slot = 0;
         bool anyLoopSlot = false;
+        var childScopes = new List<(string placement, string pin)>();
 
-        foreach (var stmt in inline.Body.Statements)
+        foreach (var stmt in statements)
         {
             switch (stmt)
             {
@@ -175,43 +201,53 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                         }
                         else if (init is not null && SubtreeHasUnnameableStream(init))
                         {
-                            return null;   // uncaptured Model/Init/feed, static/chained Call, opaque helper
+                            return false;   // uncaptured Model/Init/feed, static/chained Call, opaque helper
                         }
                         // else: pure math (ShapeTensor, arithmetic, instance .Call on a local) — 0 slots
                     }
                     break;
 
                 case ExpressionStatementSyntax es:
-                    if (SubtreeHasUnnameableStream(es.Expression)) return null;
+                    if (SubtreeHasUnnameableStream(es.Expression)) return false;
                     break;
 
                 case ReturnStatementSyntax rs:
-                    if (rs.Expression is not null && SubtreeHasUnnameableStream(rs.Expression)) return null;
+                    if (rs.Expression is not null && SubtreeHasUnnameableStream(rs.Expression)) return false;
                     break;
 
                 case ForEachStatementSyntax fe when IsLoopApiIterate(fe):
-                    switch (ClassifyLoop(fe.Statement))
-                    {
-                        case LoopSlotClass.Refuse: return null;
-                        case LoopSlotClass.OccupiesSlot: slot++; anyLoopSlot = true; break;
-                        // Empty (pure-math) loop takes no top-level slot.
-                    }
+                    var body = fe.Statement is BlockSyntax b
+                        ? (IReadOnlyList<StatementSyntax>)b.Statements
+                        : new[] { fe.Statement };
+                    if (!TryAnalyzeScope(body, LoopPlacement(fe), childScopes, out var childOccupies))
+                        return false;
+                    if (childOccupies) { slot++; anyLoopSlot = true; }
+                    // A loop with no id-bearing content takes no local slot.
                     break;
 
                 default:
-                    return null;   // C# control flow / unsupported statement
+                    return false;   // C# control flow / unsupported statement
             }
         }
 
-        if (pinned.Count == 0) return null;
+        occupies = pinned.Count > 0 || anyLoopSlot;
 
-        // No loop took a slot: the nameable items are slots 1..N contiguously, so the terse
-        // positional form is exact. A loop occupying a slot needs the sparse form so the named
-        // items keep their exact positions and the loop's (unnameable) slot is undisturbed.
-        return anyLoopSlot
-            ? "Rng.Pin(" + string.Join(", ", pinned.Select(p => "([" + p.slot + "], " + p.name + ")")) + ");"
-            : "Rng.Pin(" + string.Join(", ", pinned.Select(p => p.name)) + ");";
+        if (pinned.Count > 0)
+        {
+            // A nested loop occupying a local slot forces the sparse form so the named items
+            // keep their exact slots; otherwise the terse positional form is exact.
+            var pin = anyLoopSlot
+                ? "Rng.Pin(" + string.Join(", ", pinned.Select(p => "([" + p.slot + "], " + p.name + ")")) + ");"
+                : "Rng.Pin(" + string.Join(", ", pinned.Select(p => p.name)) + ");";
+            scopes.Add((placement, pin));
+        }
+        scopes.AddRange(childScopes);
+        return true;
     }
+
+    /// <summary>Human-readable placement for a loop-body pin, echoing the loop header.</summary>
+    private static string LoopPlacement(ForEachStatementSyntax fe)
+        => $"inside `foreach (var {fe.Identifier.Text} in {fe.Expression})`";
 
     /// <summary>A direct top-level capture: <c>Recv.Model(...)</c> / <c>Recv.Init(...)</c> whose
     /// receiver is a plain dotted name (not a chained invocation).</summary>
@@ -257,41 +293,6 @@ public class ModuleSourceGenerator : IIncrementalGenerator
             }
         }
         return false;
-    }
-
-    /// <summary>Classifies a <c>LoopAPI.Iterate</c> loop body for top-level slot counting:
-    /// <see cref="LoopSlotClass.OccupiesSlot"/> if it (recursively) creates an interior id
-    /// (a Model/Init/feed), <see cref="LoopSlotClass.Empty"/> if it is pure tensor math, and
-    /// <see cref="LoopSlotClass.Refuse"/> if it contains a static/chained <c>.Call</c> or opaque
-    /// static-helper whose interior-id contribution can't be determined syntactically (making
-    /// the loop's slot count — and therefore every later slot — uncertain).</summary>
-    private static LoopSlotClass ClassifyLoop(SyntaxNode loopBody)
-    {
-        bool createsId = false;
-        foreach (var inv in loopBody.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>())
-        {
-            if (IsIterateInvocation(inv)) continue;   // a nested Iterate header — not itself an id
-
-            if (inv.Expression is IdentifierNameSyntax bare)
-            {
-                if (bare.Identifier.Text is "RandomUniform" or "RandomNormal") createsId = true;
-                continue;
-            }
-            if (inv.Expression is MemberAccessExpressionSyntax ma)
-            {
-                var name = ma.Name.Identifier.Text;
-                if (name is "Model" or "Init" or "RandomUniform" or "RandomNormal") { createsId = true; continue; }
-                if (name == "Call")
-                {
-                    if (ma.Expression is IdentifierNameSyntax lc && !char.IsUpper(lc.Identifier.Text[0]))
-                        continue;   // instance call on a local model: no new interior id
-                    return LoopSlotClass.Refuse;   // static/chained Call: anonymous sub-model, uncertain
-                }
-                if (ma.Expression is IdentifierNameSyntax uc && char.IsUpper(uc.Identifier.Text[0]))
-                    return LoopSlotClass.Refuse;   // opaque static helper: may create a stream
-            }
-        }
-        return createsId ? LoopSlotClass.OccupiesSlot : LoopSlotClass.Empty;
     }
 
     private static bool IsIterateInvocation(InvocationExpressionSyntax inv)

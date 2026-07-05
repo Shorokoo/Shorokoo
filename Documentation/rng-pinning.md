@@ -58,51 +58,61 @@ graph-side tool can substitute for it, because names exist only in source.
 
 ## Tooling, and the division of labor
 
-**Straight-line bodies: the compiler writes the pin for you.** For a `[Module]` whose
-`Inline` body has no C# control flow and captures every `Model(...)` / `Init(...)` result in
-a local variable, the source generator emits an Info diagnostic (`MSG004`) carrying the exact
-ready-to-paste statement, in current creation order — so freezing such a module is one
-copy-paste. The generator *refuses* to emit a suggestion for anything it cannot fully
-analyze: bodies with `if`/loops, chained `X.Model(...).Call(...)`, static `X.Call(...)`
-shortcuts, or opaque helper calls that may create streams internally. This is by design — a
-wrong pin silently changes seeds, so no suggestion beats a bad one.
-
-**Everything else: tools supply slots, you supply names.** For bodies the generator refuses,
-the bind-time stream report (`arch.GetRngStreamReport(config)`) describes every slot —
-ModelId path, consumer kind, parameter name, shape, resolved key — and its
-`EmitPinSkeleton()` emits the sparse form with the one thing it cannot know left as a
-placeholder:
+**The compiler writes the pins for you.** For a `[Module]` whose `Inline` body captures every
+`Model(...)` / `Init(...)` result in a local variable, the source generator emits an Info
+diagnostic (`MSG004`) carrying the exact ready-to-paste statements, in current creation order
+— so freezing such a module is one copy-paste. This covers `LoopAPI.Iterate(...)` loops at
+any nesting depth: because a pin reshapes only its own scope, the generator emits **one pin
+per scope**, each placed where its variables are in scope — a module-level pin at the end of
+`Inline`, and a pin inside each loop body:
 
 ```csharp
-Rng.Pin(
-    ([1], /* Linear#0.weight  [64,128] */ ?),
-    ([2], /* Dropout#0 mask feed       */ ?),
-    ([4,2], /* loop-body Linear.weight */ ?));
+public static Tensor<float32> Inline(Tensor<float32> x)
+{
+    var a = Linear.Model(Scalar(2L), Scalar(false));
+    foreach (var ctx in LoopAPI.Iterate(steps))
+    {
+        var w = KaimingUniform.Init(shape);
+        // ... use w ...
+        Rng.Pin(w);                       // pins this loop's local slots
+        ctx.ContinueWhile(cond);
+    }
+    var b = Linear.Model(Scalar(3L), Scalar(false));
+    Rng.Pin(([1], a), ([3], b));          // module-level: loop keeps slot 2
+}
 ```
 
-Filling in the `?`s is the author's job, necessarily: attaching a durable source identity to
-a stream is inherently a source-side act. No automatic linkage is possible in general — C#
-is Turing-complete, a `for` loop makes one identifier refer to many consumers, an `if` makes
-a consumer exist conditionally — so any tool that claimed to bind names for you in such
-bodies would be guessing, and a guessed pin is worse than none.
+The generator *refuses* to emit a suggestion for anything it cannot fully analyze in **any**
+scope: bodies with C# control flow (`if`/`switch`/raw `for`/`while`/a non-`Iterate`
+`foreach`), chained `X.Model(...).Call(...)`, static `X.Call(...)` shortcuts, or opaque helper
+calls that may create streams internally. This is by design — a wrong pin silently changes
+seeds, so no suggestion beats a bad one.
+
+**The report supplies slots, you supply names.** For bodies the generator refuses, the
+bind-time stream report (`arch.GetRngStreamReport(config)`) describes every slot — ModelId
+path, consumer kind, parameter name, shape, resolved key — and its `EmitPinSkeleton()` emits
+per-scope sparse skeletons with the one thing it cannot know left as a placeholder for you to
+fill in. Attaching a durable source identity to a stream is inherently a source-side act: C#
+is Turing-complete, a loop makes one identifier refer to many consumers, an `if` makes a
+consumer exist conditionally — so any tool that claimed to bind names for you would be
+guessing, and a guessed pin is worse than none.
 
 ## The sparse form
 
-`Rng.Pin(([3], item), ...)` pins each listed item to exactly the named module-local slot;
-unlisted consumers fill the remaining slots in node order. Unlike the positional form, a
-*partial* sparse pin is seed-preserving — pinned items sit at their named slots, everything
-else keeps its position relative to the other unpinned consumers — which is why it is the
-form the stream report's skeleton emits. Slots are 1-based; currently only top-level slots
-(paths of length 1) are supported — nested and loop-body paths (loop-iteration slots elided)
-are a specified follow-up.
+`Rng.Pin(([3], item), ...)` pins each listed item to exactly the named **local slot in the
+scope the pin is written in**; unlisted consumers fill the remaining slots in node order.
+Unlike the positional form, a *partial* sparse pin is seed-preserving — pinned items sit at
+their named slots, everything else keeps its position relative to the other unpinned
+consumers — which is why it is the form the stream report's skeleton emits. The path is a
+single 1-based local slot; the scope is the module body, or the loop body the pin is written
+in (to pin a loop's consumer, write the sparse pin inside that loop).
 
 ## Current limits
 
-- A consumer whose variable is scoped inside a C# block (`if`/`for`) cannot be referenced by
-  an end-of-body pin at all; such consumers remain positional.
+- A consumer whose variable is scoped inside a C# `if`/`for`/`while` block (rather than a
+  `LoopAPI.Iterate` loop body, which pins support) cannot be referenced by an end-of-scope
+  pin; such consumers remain positional.
 - A pin that cannot be resolved — an unsupported item type, a handle created outside the
   module body, or one that leads to no id-bearing node — **fails the module build** with an
   `Rng.Pin` error: an inactive pin the author believes is active is exactly the silent
   re-keying the feature exists to prevent.
-- Sparse paths are top-level only (see above); an item inside a loop cannot take an explicit
-  slot yet.

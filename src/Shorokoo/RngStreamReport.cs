@@ -91,38 +91,67 @@ public sealed class RngStreamReport
     }
 
     /// <summary>
-    /// Emits the sparse-form <c>Rng.Pin</c> skeleton for this architecture's streams: one
-    /// entry per stream at its current id path (loop-iteration <c>-1</c> slots elided, per
-    /// the sparse-form contract), with a descriptive comment and a <c>?</c> placeholder
-    /// where the author must supply the captured variable. Deliberately non-compiling until
-    /// every <c>?</c> is filled — a guessed pin is worse than none.
+    /// Emits the sparse-form <c>Rng.Pin</c> skeleton, grouped by pinning <b>scope</b> — one
+    /// <c>Rng.Pin(...)</c> per scope (the module body, and each loop body), matching how pins
+    /// are scoped: a module-level pin at the end of <c>Inline</c>, and a loop-body pin written
+    /// inside that loop. Each entry names a consumer's LOCAL slot in its scope with a
+    /// descriptive comment and a <c>?</c> placeholder for the captured variable the author must
+    /// supply. Deliberately non-compiling until every <c>?</c> is filled — a guessed pin is
+    /// worse than none.
     /// </summary>
     public string EmitPinSkeleton()
     {
-        var sb = new StringBuilder("Rng.Pin(");
-        bool first = true;
+        // Group streams by scope (the ModelId prefix up to and including the last loop-iteration
+        // -1 slot). Within a scope the pinnable unit is a consumer's LOCAL slot: the element
+        // after that last -1, or the top-level slot when the stream is not in a loop. Multiple
+        // params under one consumer collapse to that consumer's single slot.
+        var byScope = new List<(IReadOnlyList<int> scope, SortedDictionary<int, RngStreamInfo> bySlot)>();
         foreach (var s in Streams)
         {
-            sb.Append(first ? "\n" : ",\n");
-            first = false;
+            var path = s.ModelIdPath;
+            int lastNeg = -1;
+            for (int i = 0; i < path.Count; i++) if (path[i] == -1) lastNeg = i;
+            int localSlot = lastNeg + 1 < path.Count ? path[lastNeg + 1] : path[0];
+            var scope = lastNeg >= 0 ? path.Take(lastNeg + 1).ToArray() : System.Array.Empty<int>();
 
-            var path = s.ModelIdPath.Where(v => v != -1);
-            var desc = s.Kind switch
-            {
-                RngStreamKind.ParamInit => s.Name ?? "param",
-                RngStreamKind.UniformFeed => "uniform feed",
-                _ => "normal feed",
-            };
-            if (s.Kind == RngStreamKind.ParamInit && s.Shape is not null)
-                desc += $"  [{string.Join(", ", s.Shape)}]";
-            if (s.ModelIdPath.Contains(-1))
-                desc += " (loop body)";
-
-            sb.Append("    ([").Append(string.Join(", ", path)).Append("], /* ")
-              .Append(desc).Append(" */ ?)");
+            var entry = byScope.FirstOrDefault(e => e.scope.SequenceEqual(scope));
+            if (entry.bySlot is null) { entry = (scope, new SortedDictionary<int, RngStreamInfo>()); byScope.Add(entry); }
+            if (!entry.bySlot.ContainsKey(localSlot)) entry.bySlot[localSlot] = s;
         }
-        sb.Append(");");
+
+        var sb = new StringBuilder();
+        bool firstScope = true;
+        foreach (var (scope, bySlot) in byScope.OrderBy(e => e.scope.Count).ThenBy(e => string.Join(",", e.scope)))
+        {
+            if (!firstScope) sb.Append("\n\n");
+            firstScope = false;
+            sb.Append(scope.Count == 0
+                ? "// at the end of Inline:\n"
+                : $"// inside the loop body at ModelId path [{string.Join(", ", scope)}]:\n");
+            sb.Append("Rng.Pin(");
+            bool firstItem = true;
+            foreach (var (slot, s) in bySlot)
+            {
+                sb.Append(firstItem ? "\n" : ",\n");
+                firstItem = false;
+                sb.Append("    ([").Append(slot).Append("], /* ").Append(DescribeStream(s)).Append(" */ ?)");
+            }
+            sb.Append(");");
+        }
         return sb.ToString();
+    }
+
+    private static string DescribeStream(RngStreamInfo s)
+    {
+        var desc = s.Kind switch
+        {
+            RngStreamKind.ParamInit => s.Name ?? "param",
+            RngStreamKind.UniformFeed => "uniform feed",
+            _ => "normal feed",
+        };
+        if (s.Kind == RngStreamKind.ParamInit && s.Shape is not null)
+            desc += $"  [{string.Join(", ", s.Shape)}]";
+        return desc;
     }
 
     /// <summary>The report as one line per stream.</summary>

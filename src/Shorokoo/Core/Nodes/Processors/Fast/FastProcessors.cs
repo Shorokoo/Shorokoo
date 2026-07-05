@@ -258,17 +258,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             var tensorInfos = FastTensorInfoProcessor.BuildTensorInfoLookup(graph);
 
-            // Sparse pins reserve their slots: the top-level picker skips them, so unpinned
-            // consumers keep their positions relative to each other while pinned ones sit at
-            // exactly their named slots.
-            var reservedSlots = new HashSet<int>();
-            if (slotPinnedNodeKeys is { Count: > 0 })
-                foreach (var (slot, _) in slotPinnedNodeKeys)
-                    if (!reservedSlots.Add(slot))
-                        throw new InvalidOperationException(
-                            $"Rng.Pin (sparse): slot [{slot}] is pinned more than once.");
-
-            var idPickerEnumerator = FindNextSpot(reservedSlots).GetEnumerator();
             var loopModelIds = new Dictionary<FastTensorKey, (ModelId loopModelId, IEnumerator<int> loopContentsModelIdPicker)>();
             var loopDedupeIdsMap = new Dictionary<FastTensorKey, int>();
             var moduleNameDedupeIdMap = new Dictionary<string, int>();
@@ -316,35 +305,67 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     "Graph inputs and derived values have no RNG stream to pin.");
             }
 
-            // Positional pins: pinned nodes take the first (unreserved) id slots in pin
-            // order; everything else follows in node order.
-            if (pinnedNodeKeys is { Count: > 0 })
+            // A pin belongs to the SCOPE of its node — its loop-iteration-index path. A
+            // module-level pin lands in the top-level scope; a pin written inside a loop body
+            // lands in that loop's scope. A pin reshapes only the local slots of its own
+            // scope, so the loop's own (top-level) slot is never disturbed by pinning its
+            // interior. (Loop bodies are traced multiple times during construction; Rng.Pin
+            // records only in the canonical pass, so each pin resolves to a surviving node.)
+            var scopeOf = new Dictionary<FastNode, ImmutableArray<FastTensorKey>>();
+            ImmutableArray<FastTensorKey> ScopeOf(FastNode n)
             {
-                var pinnedNodes = new List<FastNode>();
-                foreach (var pinKey in pinnedNodeKeys)
-                {
-                    var pinnedNode = ResolvePinnedNode(pinKey, "positional");
-                    if (!pinnedNodes.Contains(pinnedNode))
-                        pinnedNodes.Add(pinnedNode);
-                }
-                orderedTargets = pinnedNodes
-                    .Concat(orderedTargets.Where(t => !pinnedNodes.Contains(t)))
-                    .ToList();
+                if (!scopeOf.TryGetValue(n, out var s)) scopeOf[n] = s = GetIterationIndices(n, nodeByKey);
+                return s;
             }
 
-            // Sparse pins: each pinned node bypasses the picker and takes exactly its slot.
-            var explicitSlotByNode = new Dictionary<FastNode, int>();
+            // Positional pins grouped by scope, in pin order (deduped within a scope).
+            var positionalByScope = new Dictionary<ImmutableArray<FastTensorKey>, List<FastNode>>(ScopeSeqComparer.Instance);
+            if (pinnedNodeKeys is { Count: > 0 })
+                foreach (var pinKey in pinnedNodeKeys)
+                {
+                    var node = ResolvePinnedNode(pinKey, "positional");
+                    var scope = ScopeOf(node);
+                    if (!positionalByScope.TryGetValue(scope, out var list))
+                        positionalByScope[scope] = list = new List<FastNode>();
+                    if (!list.Contains(node)) list.Add(node);
+                }
+
+            // Sparse pins: each pinned node takes an explicit LOCAL slot in its own scope; the
+            // scope's picker reserves those slots so unpinned members fill the gaps.
+            var sparseLocalSlotOf = new Dictionary<FastNode, int>();
+            var reservedByScope = new Dictionary<ImmutableArray<FastTensorKey>, HashSet<int>>(ScopeSeqComparer.Instance);
             if (slotPinnedNodeKeys is { Count: > 0 })
-            {
                 foreach (var (slot, pinKey) in slotPinnedNodeKeys)
                 {
-                    var pinnedNode = ResolvePinnedNode(pinKey, "sparse");
-                    if (explicitSlotByNode.TryGetValue(pinnedNode, out var prior) && prior != slot)
+                    var node = ResolvePinnedNode(pinKey, "sparse");
+                    if (sparseLocalSlotOf.TryGetValue(node, out var prior) && prior != slot)
                         throw new InvalidOperationException(
                             $"Rng.Pin (sparse): the same item is pinned to slots [{prior}] and [{slot}].");
-                    explicitSlotByNode[pinnedNode] = slot;
+                    sparseLocalSlotOf[node] = slot;
+                    var scope = ScopeOf(node);
+                    if (!reservedByScope.TryGetValue(scope, out var reserved))
+                        reservedByScope[scope] = reserved = new HashSet<int>();
+                    if (!reserved.Add(slot))
+                        throw new InvalidOperationException(
+                            $"Rng.Pin (sparse): slot [{slot}] is pinned more than once in one scope.");
                 }
+
+            // Reorder so that within each scope, positionally-pinned members lead (in pin
+            // order), then the scope's remaining consumers — unpinned members and nested loops
+            // — in node order, recursively. Because reordering stays inside each contiguous
+            // scope block, every loop keeps its own top-level slot.
+            if (positionalByScope.Count > 0)
+            {
+                var indexOf = new Dictionary<FastNode, int>();
+                for (int i = 0; i < orderedTargets.Count; i++) indexOf[orderedTargets[i]] = i;
+                orderedTargets = ReorderByScope(
+                    orderedTargets, ImmutableArray<FastTensorKey>.Empty, ScopeOf, positionalByScope, indexOf);
             }
+
+            // The top-level picker skips top-level sparse slots; each loop's sub-picker skips
+            // that loop's sparse slots (created inside AllocateLoopModelIds from reservedByScope).
+            var topLevelReserved = reservedByScope.TryGetValue(ImmutableArray<FastTensorKey>.Empty, out var tlr) ? tlr : null;
+            var idPickerEnumerator = FindNextSpot(topLevelReserved).GetEnumerator();
 
             foreach (var fastNode in orderedTargets)
             {
@@ -363,21 +384,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     // input, so a feed inside a loop takes a slot under the loop's own id
                     // space (with the -1 iteration placeholder) — realized at runtime by
                     // splitting the stream key on the iteration index (see FastLowerRandomOps).
-                    var feedIterationIndices = GetIterationIndices(fastNode, nodeByKey);
-                    ModelId feedModelId;
-                    if (explicitSlotByNode.TryGetValue(fastNode, out var feedSlot))
-                    {
-                        if (feedIterationIndices.Length > 0)
-                            throw new InvalidOperationException(
-                                "Rng.Pin (sparse): a loop-body feed cannot take an explicit " +
-                                "top-level slot — loop items live under the loop's own id " +
-                                "space. Loop-body paths are a specified follow-up.");
-                        feedModelId = new ModelId(feedSlot);
-                    }
-                    else
-                    {
-                        feedModelId = AllocateLoopModelIds(feedIterationIndices, idPickerEnumerator, loopModelIds);
-                    }
+                    var feedIterationIndices = ScopeOf(fastNode);
+                    int? feedLocalSlot = sparseLocalSlotOf.TryGetValue(fastNode, out var fs) ? fs : null;
+                    var feedModelId = AllocateLoopModelIds(
+                        feedIterationIndices, idPickerEnumerator, loopModelIds, feedLocalSlot, reservedByScope);
                     var dctFeedAttributes = fastNode.Attributes.GetAttributeVals().ToDictionary();
                     dctFeedAttributes[OnnxOpAttributeNames.ShrkAttrLocalModelId] =
                         feedModelId.Vals.Select(x => (long)x).ToArray();
@@ -388,21 +398,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 var toIdentifyKey = fastNode.Outputs[0]!.Value;
 
-                var loopIterationIndices = GetIterationIndices(fastNode, nodeByKey);
-                ModelId modelIdToUse;
-                if (explicitSlotByNode.TryGetValue(fastNode, out var explicitSlot))
-                {
-                    if (loopIterationIndices.Length > 0)
-                        throw new InvalidOperationException(
-                            "Rng.Pin (sparse): a loop-body consumer cannot take an explicit " +
-                            "top-level slot — loop items live under the loop's own id space. " +
-                            "Loop-body paths are a specified follow-up.");
-                    modelIdToUse = new ModelId(explicitSlot);
-                }
-                else
-                {
-                    modelIdToUse = AllocateLoopModelIds(loopIterationIndices, idPickerEnumerator, loopModelIds);
-                }
+                var loopIterationIndices = ScopeOf(fastNode);
+                int? localSlot = sparseLocalSlotOf.TryGetValue(fastNode, out var ls) ? ls : null;
+                ModelId modelIdToUse = AllocateLoopModelIds(
+                    loopIterationIndices, idPickerEnumerator, loopModelIds, localSlot, reservedByScope);
 
                 // Update model ID in attributes.
                 var dctRebuiltAttributes = fastNode.Attributes.GetAttributeVals().ToDictionary();
@@ -513,10 +512,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         private static ModelId AllocateLoopModelIds(
             ImmutableArray<FastTensorKey> iterationIndices,
             IEnumerator<int> globalScopeIdPicker,
-            Dictionary<FastTensorKey, (ModelId loopModelId, IEnumerator<int> loopContentsModelIdPicker)> loopModelIds)
+            Dictionary<FastTensorKey, (ModelId loopModelId, IEnumerator<int> loopContentsModelIdPicker)> loopModelIds,
+            int? explicitLocalSlot,
+            Dictionary<ImmutableArray<FastTensorKey>, HashSet<int>> reservedByScope)
         {
             if (iterationIndices.Length == 0)
             {
+                // A top-level sparse pin takes its explicit slot; the global picker (created
+                // with the top-level reserved set) skips it for the unpinned members.
+                if (explicitLocalSlot is int topSlot) return new ModelId(topSlot);
                 globalScopeIdPicker.MoveNext();
                 return new ModelId(globalScopeIdPicker.Current);
             }
@@ -524,8 +528,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var parentLoopModelIdPicker = globalScopeIdPicker;
             var parentLoopModelId = new ModelId((int[])[]);
 
-            foreach (var iterationIndex in iterationIndices)
+            for (int level = 0; level < iterationIndices.Length; level++)
             {
+                var iterationIndex = iterationIndices[level];
                 if (loopModelIds.TryGetValue(iterationIndex, out var entry))
                 {
                     (parentLoopModelId, parentLoopModelIdPicker) = entry;
@@ -535,7 +540,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     parentLoopModelIdPicker.MoveNext();
                     var loopModelId = parentLoopModelIdPicker.Current;
                     var currentLoopModelId = new ModelId(parentLoopModelId, new ModelId(loopModelId, -1));
-                    var currentLoopModelIdPicker = FindNextSpot().GetEnumerator();
+                    // This loop's sub-picker skips the local slots pinned inside it (sparse).
+                    var scopePrefix = ImmutableArray.CreateRange(iterationIndices.Take(level + 1));
+                    var reserved = reservedByScope.TryGetValue(scopePrefix, out var r) ? r : null;
+                    var currentLoopModelIdPicker = FindNextSpot(reserved).GetEnumerator();
 
                     loopModelIds[iterationIndex] = (currentLoopModelId, currentLoopModelIdPicker);
 
@@ -544,6 +552,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
             }
 
+            if (explicitLocalSlot is int leafSlot) return new ModelId(parentLoopModelId, new ModelId(leafSlot));
             parentLoopModelIdPicker.MoveNext();
             return new ModelId(parentLoopModelId, new ModelId(parentLoopModelIdPicker.Current));
         }
@@ -553,6 +562,77 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             for (int spot = 1; ; spot++)
                 if (reservedSlots is null || !reservedSlots.Contains(spot))
                     yield return spot;
+        }
+
+        /// <summary>Value-equality comparer for a scope path (a sequence of loop iteration-index keys).</summary>
+        private sealed class ScopeSeqComparer : IEqualityComparer<ImmutableArray<FastTensorKey>>
+        {
+            public static readonly ScopeSeqComparer Instance = new();
+            public bool Equals(ImmutableArray<FastTensorKey> a, ImmutableArray<FastTensorKey> b) => a.SequenceEqual(b);
+            public int GetHashCode(ImmutableArray<FastTensorKey> a)
+            {
+                var h = new HashCode();
+                foreach (var k in a) h.Add(k);
+                return h.ToHashCode();
+            }
+        }
+
+        private static bool ScopeStartsWith(ImmutableArray<FastTensorKey> scope, ImmutableArray<FastTensorKey> prefix)
+        {
+            if (scope.Length < prefix.Length) return false;
+            for (int i = 0; i < prefix.Length; i++)
+                if (!scope[i].Equals(prefix[i])) return false;
+            return true;
+        }
+
+        /// <summary>
+        /// Recursively reorders id-bearing targets so that within each scope, positionally-pinned
+        /// members come first (in pin order), then the scope's other consumers — unpinned direct
+        /// members and nested-loop sub-scopes — in original node order. Reordering never crosses a
+        /// scope boundary, so every loop's own (parent-scope) slot is preserved.
+        /// </summary>
+        private static List<FastNode> ReorderByScope(
+            List<FastNode> targets,
+            ImmutableArray<FastTensorKey> scopePath,
+            Func<FastNode, ImmutableArray<FastTensorKey>> scopeOf,
+            Dictionary<ImmutableArray<FastTensorKey>, List<FastNode>> positionalByScope,
+            Dictionary<FastNode, int> indexOf)
+        {
+            // Positionally-pinned direct members of this scope, in pin order.
+            var pinned = positionalByScope.TryGetValue(scopePath, out var p)
+                ? p.Where(n => ScopeSeqComparer.Instance.Equals(scopeOf(n), scopePath)).ToList()
+                : new List<FastNode>();
+            var pinnedSet = new HashSet<FastNode>(pinned);
+
+            // The immediate child scopes present under this scope (one level deeper), taken as
+            // the distinct (scopePath + 1) prefixes of any deeper target — so an empty
+            // intermediate loop (only a nested loop inside) is still discovered.
+            var childScopes = targets
+                .Select(scopeOf)
+                .Where(s => s.Length > scopePath.Length && ScopeStartsWith(s, scopePath))
+                .Select(s => ImmutableArray.CreateRange(s.Take(scopePath.Length + 1)))
+                .Distinct(ScopeSeqComparer.Instance)
+                .ToList();
+
+            // Remaining consumers (unpinned direct members + child scopes) by first-appearance.
+            var consumers = new List<(int idx, FastNode? direct, ImmutableArray<FastTensorKey> child)>();
+            foreach (var n in targets)
+                if (ScopeSeqComparer.Instance.Equals(scopeOf(n), scopePath) && !pinnedSet.Contains(n))
+                    consumers.Add((indexOf[n], n, default));
+            foreach (var cs in childScopes)
+            {
+                int firstIdx = targets.Where(n => ScopeStartsWith(scopeOf(n), cs)).Min(n => indexOf[n]);
+                consumers.Add((firstIdx, null, cs));
+            }
+            consumers.Sort((x, y) => x.idx.CompareTo(y.idx));
+
+            var result = new List<FastNode>(pinned);
+            foreach (var (_, direct, child) in consumers)
+            {
+                if (direct is not null) result.Add(direct);
+                else result.AddRange(ReorderByScope(targets, child, scopeOf, positionalByScope, indexOf));
+            }
+            return result;
         }
     }
 

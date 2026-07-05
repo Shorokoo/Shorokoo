@@ -109,6 +109,7 @@ public sealed class RngStreamReport
         foreach (var s in Streams)
         {
             var path = s.ModelIdPath;
+            if (path.Count == 0) continue;   // defensive: a consumer always carries ≥1 id element
             int lastNeg = -1;
             for (int i = 0; i < path.Count; i++) if (path[i] == -1) lastNeg = i;
             int localSlot = lastNeg + 1 < path.Count ? path[lastNeg + 1] : path[0];

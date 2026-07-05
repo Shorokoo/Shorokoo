@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Security.Cryptography;
 using System.Text;
@@ -86,7 +87,7 @@ public sealed class RngConfig
     {
         Span<byte> b = stackalloc byte[8];
         RandomNumberGenerator.Fill(b);
-        return new RngConfig { MasterSeed = BitConverter.ToUInt64(b) };
+        return new RngConfig { MasterSeed = BinaryPrimitives.ReadUInt64LittleEndian(b) };
     }
 
     /// <summary>
@@ -174,12 +175,14 @@ public sealed class RngConfig
 
     /// <summary>
     /// Folds a stream name into the master seed: <c>masterSeed XOR (first 8 bytes of
-    /// SHA-256(name))</c>. Deterministic and platform-independent (SHA-256 + XOR).
+    /// SHA-256(name), read little-endian)</c>. Deterministic and platform-independent (SHA-256
+    /// gives identical bytes everywhere; the explicit little-endian read makes the fold
+    /// endian-independent too).
     /// </summary>
     internal static ulong Fold(ulong masterSeed, string fullStreamName)
     {
         Span<byte> hash = stackalloc byte[32];
         SHA256.HashData(Encoding.UTF8.GetBytes(fullStreamName), hash);
-        return masterSeed ^ BitConverter.ToUInt64(hash);
+        return masterSeed ^ BinaryPrimitives.ReadUInt64LittleEndian(hash);
     }
 }

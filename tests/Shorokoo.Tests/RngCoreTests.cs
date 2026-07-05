@@ -29,6 +29,26 @@ public class RngCoreTests
         Assert.Equal(expected1, x1);
     }
 
+    // Random123 known-answer vectors for threefry2x32, 13 rounds (the Crush-resistant fast
+    // variant, RngAlgorithm.Threefry2x32Rounds13). The all-zero vector (9d1c5ec6, 8bd50731)
+    // is the published threefry2x32x13 KAT; the others pin the reduced-round output against
+    // regression. This anchors the 13-round injection schedule (after rounds 4/8/12, none
+    // trailing) to a reference, not just to self-agreement with the in-graph lowering.
+    [Theory]
+    [InlineData(0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x9d1c5ec6u, 0x8bd50731u)]
+    [InlineData(0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xfd36d048u, 0x2d17272cu)]
+    [InlineData(0x243f6a88u, 0x85a308d3u, 0x13198a2eu, 0x03707344u, 0xba3e4725u, 0xf27d669eu)]
+    public void TestThreefry2x32Rounds13KnownAnswerVectors(
+        uint c0, uint c1, uint k0, uint k1, uint expected0, uint expected1)
+    {
+        var (x0, x1) = Threefry2x32.Bijection(c0, c1, k0, k1, Threefry2x32.Rounds13);
+        Assert.Equal(expected0, x0);
+        Assert.Equal(expected1, x1);
+        // The round count genuinely changes the output (guards against an ignored/miswired
+        // rounds parameter that would make the 13-round algorithm alias the 20-round default).
+        Assert.NotEqual((x0, x1), Threefry2x32.Bijection(c0, c1, k0, k1, Threefry2x32.Rounds));
+    }
+
     [Fact]
     public void TestThreefryIsPureFunction()
     {

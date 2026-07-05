@@ -13,9 +13,12 @@ namespace Shorokoo.Core.Rng;
 /// integer math run host-side (initialization) or as an ONNX subgraph (runtime) with
 /// bit-for-bit agreement.</para>
 ///
-/// <para>This is the 20-round variant (the Random123 safety-margin default; 13 rounds
-/// is the minimum Crush-resistant form). Validated against the Random123 known-answer
-/// test vectors — see <c>RngCoreTests</c>.</para>
+/// <para>The bijection is parameterized by round count. The default 20-round form (the
+/// Random123 safety-margin default) is validated against the Random123 known-answer test
+/// vectors — see <c>RngCoreTests</c>. The 13-round form (the minimum Crush-resistant variant,
+/// selected by <c>RngAlgorithm.Threefry2x32Rounds13</c>) runs the identical per-round loop
+/// body with a smaller bound — it is not a separate code path — and the reduced-round injection
+/// (after rounds 4/8/12, none trailing) falls out of the same round-index-driven schedule.</para>
 /// </summary>
 internal static class Threefry2x32
 {

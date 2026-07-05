@@ -1294,7 +1294,13 @@ namespace Shorokoo
                 (isTrainable ? trainableModelIds : stateModelIds).Add(modelId);
             }
 
-            var paramValuesById = Shorokoo.Core.Nodes.Processors.Fast.FastInitializeModelParams.Process(concreteArch, ctx, rngConfig);
+            // Pass the concrete param infos so keyed per-parameter init actually engages:
+            // FastInitializeModelParams keys init noise only when BOTH rngConfig and paramInfos
+            // are non-null. Without the infos the rig would silently fall back to the legacy
+            // seeded init, ignoring the config's master seed / algorithm for the weights.
+            var paramInfos = rngConfig is null ? null : concreteArch.GetConcreteModelParamInfos();
+            var paramValuesById = Shorokoo.Core.Nodes.Processors.Fast.FastInitializeModelParams.Process(
+                concreteArch, ctx, rngConfig, paramInfos);
 
             if (trainableModelIds.Count != TrainableParamStructDef.Fields.Length)
                 throw new InvalidOperationException(

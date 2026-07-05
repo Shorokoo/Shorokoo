@@ -6,9 +6,18 @@ namespace Shorokoo.Core.Rng;
 /// Host-side draw engine over <see cref="Threefry2x32"/>: turns a stream key
 /// <c>(k0, k1)</c> plus a counter base into arrays of standard uniform / normal
 /// floats. Used for trainable-parameter initialization (a one-time, host-mediated
-/// step). The bit→float and normal conventions here are chosen to match the
-/// in-graph runtime lowering exactly, so a value drawn host-side and one drawn as an
-/// ONNX subgraph agree for the same (key, counter).
+/// step). The underlying Threefry bijection and the bit→float / Box–Muller
+/// conventions are bit-identical to the in-graph <see cref="RuntimeRng"/>.
+///
+/// <para>The two do NOT realize the same value sequence for a given key, however:
+/// this host engine packs two draws per Threefry block (both output words, via the
+/// draw index below), whereas the in-graph runtime path uses one word per element
+/// with counter <c>(elementIndex, drawBase)</c>. That is by design and harmless —
+/// initialization (host) and runtime feeds (in-graph) are separate streams keyed
+/// from different sub-masters and are never compared. The one host↔graph value
+/// agreement that IS relied on — index-based key splitting — matches exactly
+/// (<c>HostFold</c> == <c>SHRK_RNG_SPLIT</c>), since both take both words of
+/// <c>Bijection(counter: (index, 0), key)</c>.</para>
 ///
 /// <para>A single "draw index" <c>d</c> addresses the stream: each Threefry block
 /// yields two 32-bit words, so <c>d</c> maps to block <c>d/2</c>, word <c>d%2</c> —

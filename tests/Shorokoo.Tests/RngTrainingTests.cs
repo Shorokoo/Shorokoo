@@ -102,4 +102,33 @@ public class RngTrainingTests
         Assert.NotEqual(lossesA1, lossesB);
         Assert.All(lossesA1, l => Assert.True(float.IsFinite(l)));
     }
+
+    [Fact]
+    public void TestKeyedRigInitializesWeightsFromTheMasterSeed()
+    {
+        // The rig's RngConfig must key parameter INITIALIZATION, not only runtime feeds:
+        // a random initializer's weights come from the config's master seed. (SwitchInitLinear
+        // is a single Linear whose weight is drawn by KaimingUniform — a random initializer.)
+        float[] InitialWeight(RngConfig cfg)
+        {
+            var sample = new NamedModelParam[]
+            {
+                new TensorDataModelParam("input", ModelParamType.InputParam,
+                    TensorData([1L, 3L], 0.1f, 0.2f, 0.3f)),
+            };
+            var rig = TrainingRig.FromScratch(
+                SwitchInitLinear.ComputationGraph, L2Loss.ComputationGraph,
+                SGDOptimizer.ComputationGraph, sample, cfg, 0.05f);
+            var ckpt = rig.CreateDefaultCheckpoint();
+            var name = rig.TrainableParamStructDef.Fields[0].Name;
+            return ((TensorData<float32>)ckpt.TrainableParams.Fields[name]).AccessMemory().ToArray();
+        }
+
+        var w5 = InitialWeight(new RngConfig { MasterSeed = 5 });
+        var w5again = InitialWeight(new RngConfig { MasterSeed = 5 });
+        var w6 = InitialWeight(new RngConfig { MasterSeed = 6 });
+
+        Assert.Equal(w5, w5again);   // deterministic under a fixed master seed
+        Assert.NotEqual(w5, w6);     // init weights are keyed by the master seed (not constant)
+    }
 }

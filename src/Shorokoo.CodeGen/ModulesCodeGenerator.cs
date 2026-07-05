@@ -196,6 +196,11 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                         var init = v.Initializer?.Value;
                         if (init is InvocationExpressionSyntax inv && IsSimpleModelOrInit(inv))
                         {
+                            // The receiver is a plain name, but the ARGUMENTS could still create
+                            // streams (a nested Model/Init/feed, static Call, opaque helper) — those
+                            // would be uncounted siblings, so refuse rather than emit a mis-slotting pin.
+                            if (inv.ArgumentList is { } args && SubtreeHasUnnameableStream(args))
+                                return false;
                             slot++;
                             pinned.Add((slot, v.Identifier.Text));
                         }
@@ -216,6 +221,12 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                     break;
 
                 case ForEachStatementSyntax fe when IsLoopApiIterate(fe):
+                    // The Iterate(...) header's arguments could create streams too (a feed or
+                    // Model/Init used to compute the trip count) — scan them, but not the
+                    // Iterate call itself (its uppercase receiver would always trip the check).
+                    if (fe.Expression is InvocationExpressionSyntax iterInv &&
+                        iterInv.ArgumentList is { } iterArgs && SubtreeHasUnnameableStream(iterArgs))
+                        return false;
                     var body = fe.Statement is BlockSyntax b
                         ? (IReadOnlyList<StatementSyntax>)b.Statements
                         : new[] { fe.Statement };

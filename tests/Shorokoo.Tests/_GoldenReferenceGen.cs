@@ -26,12 +26,12 @@ public class _GoldenReferenceGen
 
         // --- golden: Conv2d collapsed forward output ---
         var conv = ModuleForwardValueTests.Collapse(
-            ModuleForwardValueTests.RunForward<ParityConv2d>(ModuleForwardValueTests.SinInput([2L, 2L, 9L, 9L])));
+            ModuleForwardValueTests.RunForward<ParityConv2dRaw>(ModuleForwardValueTests.SinInput([2L, 2L, 9L, 9L])));
         Console.WriteLine("GOLDEN_CONV2D " + string.Join(", ", conv.Select(v => v.ToString("R") + "f")));
 
         // --- pytorch: export Linear seeded weights + input for tests/pytorch-reference/linear.py ---
         var input = ModuleForwardValueTests.SinInput([3L, 5L]);
-        var g = ParityLinear.ComputationGraph;
+        var g = ParityLinearRaw.ComputationGraph;
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
         var pl = arch.InitializeTrainableParams(rngConfig: ModuleForwardValueTests.ParitySeed);
         var tensors = new List<SafeTensor>();

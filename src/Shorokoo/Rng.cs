@@ -27,7 +27,10 @@ namespace Shorokoo;
 ///
 /// <para>To freeze a scope's current streams, list ALL of its random consumers in creation
 /// order — or use the sparse form <see cref="Pin(System.ValueTuple{int[], object}[])"/>, which
-/// pins items to explicit local slots and leaves unlisted items at theirs.</para>
+/// pins items to explicit local slots and leaves unlisted items at theirs. The two forms are
+/// mutually exclusive <b>within a scope</b>: a scope pinned both ways fails the module build
+/// (the sparse reservations would shift the positional pins off the first id slots, silently
+/// re-keying them). Different scopes of the same module may use different forms.</para>
 ///
 /// <para>Nothing here is baked into the computation graph: the pin list only reshapes how the
 /// compiler numbers the graph it was already building. A pin that cannot be resolved to a
@@ -47,7 +50,8 @@ public static class Rng
     /// current scope (first item = first local slot, ...). Call once per scope, at the end of
     /// the module's Inline body or at the end of a loop body (to pin that loop's consumers).
     /// Unlisted consumers follow in node order, so a PARTIAL positional pin re-keys them; to
-    /// pin some items while leaving the rest untouched, use the sparse form instead.
+    /// pin some items while leaving the rest untouched, use the sparse form instead. Mixing the
+    /// two forms in one scope fails the module build.
     /// </summary>
     public static void Pin(params object[] items)
     {
@@ -65,7 +69,8 @@ public static class Rng
     /// consumers fill the remaining slots in node order — so unlike the positional form, a
     /// partial sparse pin leaves every unlisted consumer's slot (hence stream) unchanged. This
     /// is the form bind-time stream reports emit skeletons for. The path is a single local
-    /// slot; the scope is given by where the pin is written, not by the path.
+    /// slot; the scope is given by where the pin is written, not by the path. Mixing the two
+    /// forms in one scope fails the module build.
     /// </summary>
     public static void Pin(params (int[] path, object item)[] items)
     {

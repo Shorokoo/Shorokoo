@@ -42,6 +42,20 @@ public partial class PinSparseTwoLinears
     }
 }
 
+/// <summary>Mixes positional and sparse pins in ONE scope (the module body): must fail the build.</summary>
+[Module]
+public partial class PinMixedFormsOneScope
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var a = Linear.Model(Scalar(2L), Scalar(false));
+        var b = Linear.Model(Scalar(3L), Scalar(false));
+        Rng.Pin(a);
+        Rng.Pin(([1], b));
+        return a.Call(x).Concat(-1L, b.Call(x));
+    }
+}
+
 /// <summary>Pins the module INPUT — no id-bearing producer, so the module build must fail.</summary>
 [Module]
 public partial class PinUnresolvableInput
@@ -178,6 +192,20 @@ public class RngPinTests
         var skeleton = arch.GetRngStreamReport().EmitPinSkeleton();
         Assert.Contains("// inside the loop body at ModelId path [1, -1]:", skeleton);
         Assert.Contains("([1], /* uniform feed */ ?)", skeleton);
+    }
+
+    [Fact]
+    public void TestMixedFormPinsInOneScopeFailTheModuleBuild()
+    {
+        // In one scope, sparse reservations shift positional pins off the first id slots
+        // (they take the first UNRESERVED slots), silently re-keying the streams the
+        // positional pin froze — so a scope pinned both ways is rejected at build. Different
+        // scopes may still use different forms (covered by SiblingNestedLoopsPin).
+        var ex = Assert.ThrowsAny<Exception>(() =>
+            _ = typeof(PinMixedFormsOneScope).GetProperty("ComputationGraph")!.GetValue(null));
+        for (Exception? e = ex; e is not null; e = e.InnerException)
+            if (e.Message.Contains("cannot be mixed within one scope")) return;
+        Assert.Fail($"expected the mixed-form Rng.Pin build error, got: {ex}");
     }
 
     [Fact]

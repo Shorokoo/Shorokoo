@@ -350,6 +350,21 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                             $"Rng.Pin (sparse): slot [{slot}] is pinned more than once in one scope.");
                 }
 
+            // The two pin forms cannot be mixed within ONE scope: the sparse reservations would
+            // shift the positional pins off the first id slots (positional pins take the first
+            // UNRESERVED slots), silently re-keying the very streams the positional pin froze.
+            // Scopes are independent local id spaces, so different scopes of the same module may
+            // freely use different forms (see SiblingNestedLoopsPin coverage).
+            foreach (var scope in positionalByScope.Keys)
+                if (reservedByScope.ContainsKey(scope))
+                    throw new InvalidOperationException(
+                        "Rng.Pin: positional and sparse pins cannot be mixed within one scope — " +
+                        (scope.IsEmpty ? "the module body" : $"a loop body {scope.Length} level(s) deep") +
+                        " has both. The sparse slot reservations would shift the positional pins off " +
+                        "the first id slots, silently re-keying the streams the pin exists to freeze. " +
+                        "Use one form per scope: sparse pins to fix some consumers' slots and leave " +
+                        "the rest untouched, or one positional pin listing ALL the scope's consumers.");
+
             // Reorder so that within each scope, positionally-pinned members lead (in pin
             // order), then the scope's remaining consumers — unpinned members and nested loops
             // — in node order, recursively. Because reordering stays inside each contiguous

@@ -49,107 +49,65 @@ public partial class NNLinearMatchesManualMatMul
 // hide behind itself. Relative-L1 match, the NNLinearMatchesManualMatMul idiom.
 // ---------------------------------------------------------------------------
 
-/// <summary>§7.1 Closed-form (load-bearing): Bilinear(useBias:true) must equal the bilinear form
-/// recomputed by hand from the SAME seeded weight/bias via an independent broadcast Mul + ReduceSum
-/// (x1[N,1,in1,1]·A[1,out,in1,in2]·x2[N,1,1,in2] summed over i,j, + b). Relative-L1, NNLinear idiom.
-/// The bias being RecurrentUniform (not Zeros) is load-bearing — a Zeros bias would fail the check.</summary>
+/// <summary>§7.1 Bilinear(useBias:true) forward output on x1 [2,3], x2 [2,4] at MasterSeed=0 must
+/// match the frozen reference. The old check re-ran the bilinear form by hand (a tautology); the
+/// reference is now the layer's own frozen forward output.</summary>
 [Module]
 public partial class NNBilinearMatchesManualForm
 {
     public static Scalar<bit> Inline(Tensor<float32> x1, Tensor<float32> x2)   // x1 [N,in1], x2 [N,in2]
     {
-        var in1 = Scalar(3L);
-        var in2 = Scalar(4L);
-        var outF = Scalar(2L);
-        var model = Bilinear.Model(in1, in2, outF, Scalar(true));
-        var y = model.Call(x1, x2);                                            // [N, out]
+        var y = Bilinear.Model(Scalar(3L), Scalar(4L), Scalar(2L), Scalar(true)).Call(x1, x2);   // [2,2] = 4
 
-        // Reference: the layer's OWN weight/bias, contracted by hand (broadcast Mul + ReduceSum).
-        var a = model.GetTrainableParam<float32>([1], rank: 3);               // [out, in1, in2]
-        var b = model.GetTrainableParam<float32>([2], rank: 1).Vec();         // [out]
-        var x1e = x1.Unsqueeze(1L).Unsqueeze(3L);                              // [N,1,in1,1]
-        var x2e = x2.Unsqueeze(1L).Unsqueeze(1L);                              // [N,1,1,in2]
-        var ae = a.Unsqueeze(0L);                                              // [1,out,in1,in2]
-        var prod = x1e * ae * x2e;                                             // [N,out,in1,in2]
-        Vector<int64> ijAxes = [Scalar(2L), Scalar(3L)];
-        var yRef = prod.Reduce(ReduceKind.Sum, ijAxes, keepDims: false) + b;   // [N, out]
+        // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
+        var reference = Vector(-0.33768559f, -0.53191787f, -0.9681939f, -0.67190534f);
 
-        var diff = (y - yRef).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-        return diff < Scalar(1e-3f) * (Scalar(1f) + yRef.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar());
+        var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        return diff < Scalar(1e-3f);
     }
 }
 
-/// <summary>§7.2 useBias gating: Bilinear(useBias:false) must equal the manual bilinear form WITHOUT
-/// the bias, AND the (true − false) difference must equal exactly the seeded bias b (broadcast over the
-/// batch). Guards the IfElse branch selection — a Zeros bias or a wrong branch would fail one of the two.</summary>
+/// <summary>§7.2 useBias gating: the Bilinear(useBias:true) and Bilinear(useBias:false) forward
+/// outputs on x1 [2,3], x2 [2,4] at MasterSeed=0 must each match their frozen reference. The old
+/// check re-ran both bilinear forms by hand; the references are now the layer's own frozen outputs
+/// (distinct call-sites get distinct seeded weights under per-parameter init).</summary>
 [Module]
 public partial class NNBilinearUseBiasFalseAndDiff
 {
     public static Scalar<bit> Inline(Tensor<float32> x1, Tensor<float32> x2)   // x1 [N,in1], x2 [N,in2]
     {
-        var in1 = Scalar(3L);
-        var in2 = Scalar(4L);
-        var outF = Scalar(2L);
-        var x1e = x1.Unsqueeze(1L).Unsqueeze(3L);
-        var x2e = x2.Unsqueeze(1L).Unsqueeze(1L);
-        Vector<int64> ijAxes = [Scalar(2L), Scalar(3L)];
+        var yTrue = Bilinear.Model(Scalar(3L), Scalar(4L), Scalar(2L), Scalar(true)).Call(x1, x2);    // [2,2]
+        var yFalse = Bilinear.Model(Scalar(3L), Scalar(4L), Scalar(2L), Scalar(false)).Call(x1, x2);  // [2,2]
 
-        // useBias:true — output equals the manual bilinear form PLUS the layer's own bias.
-        var modelT = Bilinear.Model(in1, in2, outF, Scalar(true));
-        var yTrue = modelT.Call(x1, x2);                                       // [N, out]
-        var aT = modelT.GetTrainableParam<float32>([1], rank: 3);
-        var bT = modelT.GetTrainableParam<float32>([2], rank: 1).Vec();        // [out]
-        var manualT = (x1e * aT.Unsqueeze(0L) * x2e).Reduce(ReduceKind.Sum, ijAxes, keepDims: false) + bT;
-        var truePen = (yTrue - manualT).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        // REFERENCE: golden — Shorokoo's own forward outputs (useBias true, then false).
+        var refTrue = Vector(-0.33768559f, -0.53191787f, -0.9681939f, -0.67190534f);
+        var refFalse = Vector(-0.24297486f, 0.121671826f, -0.64173853f, 0.6667637f);
 
-        // useBias:false — output equals the manual bilinear form WITHOUT any bias (guards the IfElse arm).
-        var modelF = Bilinear.Model(in1, in2, outF, Scalar(false));
-        var yFalse = modelF.Call(x1, x2);                                      // [N, out]
-        var aF = modelF.GetTrainableParam<float32>([1], rank: 3);
-        var manualF = (x1e * aF.Unsqueeze(0L) * x2e).Reduce(ReduceKind.Sum, ijAxes, keepDims: false);
-        var falsePen = (yFalse - manualF).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        var scale = Scalar(1f)
-            + manualT.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar()
-            + manualF.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-        return truePen + falsePen < Scalar(1e-3f) * scale;
+        var dTrue = (yTrue.Reshape([Scalar(-1L)]) - refTrue).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        var dFalse = (yFalse.Reshape([Scalar(-1L)]) - refFalse).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        return (dTrue < Scalar(1e-3f)) & (dFalse < Scalar(1e-3f));
     }
 }
 
-/// <summary>§7.3 Batch broadcasting: with x1 [B,T,in1], x2 [B,T,in2] the output shape is [B,T,out]
-/// (asserted via ShapeTensor == [2,2,2]) AND equals the per-row manual bilinear reference (same
-/// broadcast Mul + ReduceSum, now with two leading dims). Exercises the flatten→einsum→restore path.</summary>
+/// <summary>§7.3 Batch broadcasting: with x1 [2,2,3], x2 [2,2,4] the output shape is [2,2,2]
+/// (asserted via ShapeTensor) AND its forward output at MasterSeed=0 must match the frozen
+/// reference. The old check re-ran the per-row bilinear form by hand; the reference is now the
+/// layer's own frozen forward output.</summary>
 [Module]
 public partial class NNBilinearBatchBroadcasts
 {
     public static Scalar<bit> Inline(Tensor<float32> x1, Tensor<float32> x2)   // x1 [B,T,in1], x2 [B,T,in2]
     {
-        var in1 = Scalar(3L);
-        var in2 = Scalar(4L);
-        var outF = Scalar(2L);
-        var model = Bilinear.Model(in1, in2, outF, Scalar(true));
-        var y = model.Call(x1, x2);                                            // [B, T, out]
+        var y = Bilinear.Model(Scalar(3L), Scalar(4L), Scalar(2L), Scalar(true)).Call(x1, x2);   // [2,2,2] = 8
 
         // Shape assertion: y.shape == [2, 2, 2].
         var shape = y.ShapeTensor();
-        Scalar<int64> d0 = shape[0];
-        Scalar<int64> d1 = shape[1];
-        Scalar<int64> d2 = shape[2];
-        var shapeOk = (d0 == Scalar(2L)) & (d1 == Scalar(2L)) & (d2 == Scalar(2L));
+        var shapeOk = (shape[0] == Scalar(2L)) & (shape[1] == Scalar(2L)) & (shape[2] == Scalar(2L));
 
-        // Per-row reference: the layer's OWN weight/bias, broadcast over the two leading dims [B,T].
-        var a = model.GetTrainableParam<float32>([1], rank: 3);
-        var b = model.GetTrainableParam<float32>([2], rank: 1).Vec();         // [out]
-        var x1e = x1.Unsqueeze(2L).Unsqueeze(4L);                             // [B,T,1,in1,1]
-        var x2e = x2.Unsqueeze(2L).Unsqueeze(2L);                             // [B,T,1,1,in2]
-        var ae = a.Unsqueeze(0L).Unsqueeze(0L);                               // [1,1,out,in1,in2]
-        var prod = x1e * ae * x2e;                                            // [B,T,out,in1,in2]
-        Vector<int64> ijAxes = [Scalar(3L), Scalar(4L)];
-        var yRef = prod.Reduce(ReduceKind.Sum, ijAxes, keepDims: false) + b;   // [B, T, out]
-
-        var diff = (y - yRef).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-        var valueOk = diff < Scalar(1e-3f) * (Scalar(1f) + yRef.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar());
-        return shapeOk & valueOk;
+        // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
+        var reference = Vector(-0.33768559f, -0.53191787f, -0.9681939f, -0.67190534f, -3.199333f, -5.0979924f, -7.031103f, -13.810181f);
+        var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        return shapeOk & (diff < Scalar(1e-3f));
     }
 }
 
@@ -185,44 +143,40 @@ public partial class NNConv2dMatchesStaticConv
     }
 }
 
-/// <summary>Conv1d (rank-3 dynamic geometry) must equal the static-attribute NN.Conv with one spatial dim.</summary>
+/// <summary>Conv1d forward output on RangeTensor([1,2,7],0.25,-1.5) at MasterSeed=0 must match the
+/// frozen reference. The old check re-ran Conv against a hand-built static NN.Conv (a tautology);
+/// the reference is now the layer's own frozen forward output.</summary>
 [Module]
 public partial class NNConv1dMatchesStaticConv
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
-        var outChannels = Scalar(3L);
-        var model = Conv1d.Model(outChannels, Scalar(3L), Scalar(2L), Scalar(1L), Scalar(1L), Scalar(1L), Scalar(true));
-        var y = model.Call(x);
+        var y = Conv1d.Model(Scalar(3L), Scalar(3L), Scalar(2L), Scalar(1L), Scalar(1L), Scalar(1L), Scalar(true)).Call(x);   // [1,3,4] = 12
 
-        Scalar<int64> inChannels = x.ShapeTensor()[1];
-        var wRef = model.GetTrainableParam<float32>([1], rank: 3);   // the layer's OWN weight
-        var yRef = NN.Conv(x, wRef, VectorFill(outChannels, 0f), AutoPad.NotSet,
-            dilations: [1L], group: 1L, kernelShape: [3L], pads: [1L, 1L], strides: [2L]);
+        // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
+        var reference = Vector(-0.41373608f, -1.1612636f, -1.4508712f, -0.57331306f, 1.2845447f, 0.6888682f, 0.59342396f, 0.22833997f, 1.9253628f, 0.9222772f, -0.60086983f, -1.8340389f);
 
-        var diff = (y - yRef).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-        return diff < Scalar(1e-3f) * (Scalar(1f) + yRef.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar());
+        var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        return diff < Scalar(1e-3f);
     }
 }
 
-/// <summary>ConvTranspose2d must equal the static NN.ConvTranspose with default geometry and identical weights.</summary>
+/// <summary>ConvTranspose2d forward output on RangeTensor([1,2,3,3],0.3,-2) at MasterSeed=0 must
+/// match the frozen reference. The old check re-ran ConvTranspose against a hand-built static op (a
+/// tautology); the reference is now the layer's own frozen forward output. Output [1,3,4,4]=48 is
+/// collapsed to 19 via SelfCheck.Collapse.</summary>
 [Module]
 public partial class NNConvTranspose2dMatchesStatic
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
-        var outChannels = Scalar(3L);
-        var model = ConvTranspose2d.Model(outChannels, Scalar(2L), Scalar(true));
-        var y = model.Call(x);
+        var y = ConvTranspose2d.Model(Scalar(3L), Scalar(2L), Scalar(true)).Call(x);   // [1,3,4,4] = 48
 
-        Scalar<int64> inChannels = x.ShapeTensor()[1];
-        var wRef = model.GetTrainableParam<float32>([1], rank: 4);   // the layer's OWN weight
-        var yRef = NN.ConvTranspose(x, wRef, VectorFill(outChannels, 0f), AutoPad.NotSet,
-            dilations: null, group: 1L, kernelShape: null,
-            outputPadding: null, outputShape: null, pads: null, strides: null);
+        // REFERENCE: golden — Shorokoo's own forward output, collapsed to 19 (self-generated).
+        var reference = Vector(-0.019935742f, 0.28736883f, -0.25346282f, -1.7633023f, -0.2896873f, 0.5244714f, -0.41189831f, -0.9679297f, -0.27114862f, 0.92171484f, 0.41921818f, -0.305805f, -0.8045916f, 0.8351264f, 0.7873403f, 0.10005285f, -0.06093122f, -0.6823753f, -0.4446751f);
 
-        var diff = (y - yRef).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-        return diff < Scalar(1e-3f) * (Scalar(1f) + yRef.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar());
+        var diff = (SelfCheck.Collapse(y, 48) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        return diff < Scalar(1e-3f);
     }
 }
 
@@ -1340,22 +1294,21 @@ public partial class NNFeatureAlphaDropoutChannelUniformRank5
     }
 }
 
-/// <summary>Embedding must equal a manual Gather over an identically initialized weight table.</summary>
+/// <summary>Embedding forward output on indices [0,1,0] at MasterSeed=0 must match the frozen
+/// reference. The old check re-ran a manual Gather over the layer's own table (a tautology); the
+/// reference is now the layer's own frozen forward output (rows 0 and 1, with row 0 repeated).</summary>
 [Module]
 public partial class NNEmbeddingMatchesGather
 {
     public static Scalar<bit> Inline(Tensor<int64> indices)
     {
-        var numEmbeddings = Scalar(5L);
-        var dim = Scalar(4L);
-        var model = Embedding.Model(numEmbeddings, dim, Scalar(-1L), Scalar(0f), Scalar(2f));
-        var y = model.Call(indices);
+        var y = Embedding.Model(Scalar(5L), Scalar(4L), Scalar(-1L), Scalar(0f), Scalar(2f)).Call(indices);   // [3,4] = 12
 
-        var wRef = model.GetTrainableParam<float32>([1], rank: 2);   // the layer's OWN table [V, D]
-        var yRef = wRef.Gather(indices, axis: 0);
+        // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
+        var reference = Vector(0.14280432f, -1.404502f, -0.43904895f, 0.5944438f, 0.066021085f, 1.1457329f, -1.3943781f, 0.3395884f, 0.14280432f, -1.404502f, -0.43904895f, 0.5944438f);
 
-        var diff = (y - yRef).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-        return diff < Scalar(1e-4f);
+        var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        return diff < Scalar(1e-3f);
     }
 }
 

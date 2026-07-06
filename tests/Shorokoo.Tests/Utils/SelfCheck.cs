@@ -42,5 +42,31 @@ namespace Shorokoo.Tests.Utils
 
         public static Scalar<float32> NanAny<T>(Scalar<T> a) where T : IVarType
             => Nan(a.Cast<float32>());
+
+        /// <summary>
+        /// Collapses a forward output of known flat length <paramref name="n"/> to a comparable
+        /// vector for a frozen-reference check. Outputs of &lt;=30 values are returned flattened
+        /// (compare elementwise); larger ones are reduced to <paramref name="p"/> (=19) numbers by
+        /// one MatMul against a baked [p, n] projection <c>W</c> with <c>W[c,i] = w(i)</c> when
+        /// <c>i mod p == c</c> else 0 — a fixed, fp-stable linear sketch (order- and value-sensitive;
+        /// the weight <c>w(i)</c> is an integer hash of the position, not the value, so it is
+        /// bit-identical across machines). Regenerate a reference by applying the same formula to the
+        /// module's raw forward output.
+        /// </summary>
+        public static Tensor<float32> Collapse(Tensor<float32> y, int n, int p = 19)
+        {
+            var flat = y.Reshape([Scalar((long)n)]);
+            if (n <= 30) return flat;
+            var proj = new float[p * n];
+            for (int i = 0; i < n; i++) proj[(i % p) * n + i] = Weight(i);
+            var w = Vector(proj).Reshape([Scalar((long)p), Scalar((long)n)]);
+            return w.MatMul(flat.Reshape([Scalar((long)n), Scalar(1L)])).Reshape([Scalar((long)p)]);
+        }
+
+        private static float Weight(int i)
+        {
+            uint h = unchecked((uint)(i + 1) * 2654435761u);
+            return ((h >> 8) & 0xFFFF) / 65535.0f - 0.5f;
+        }
     }
 }

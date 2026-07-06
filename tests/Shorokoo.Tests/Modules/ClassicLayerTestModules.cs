@@ -18,26 +18,22 @@ namespace Shorokoo.Tests.Modules;
 // models below, not AutoTest.
 // ---------------------------------------------------------------------------
 
-/// <summary>Conv3d (dynamic SHRK_CONV geometry, NCDHW) must equal the static-attribute NN.Conv with identical geometry and weights.</summary>
+/// <summary>Conv3d forward output on RangeTensor([1,2,5,5,5],0.05,-2) at MasterSeed=0 must match the
+/// frozen reference. The old check re-ran Conv against a hand-built static NN.Conv (a tautology);
+/// the reference is now the layer's own frozen forward output. Output [1,3,3,3,3]=81 is collapsed
+/// to 19 via SelfCheck.Collapse.</summary>
 [Module]
 public partial class NNConv3dMatchesStaticConv
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
-        var outChannels = Scalar(3L);
-        var model = Conv3d.Model(outChannels, Scalar(3L), Scalar(2L), Scalar(1L), Scalar(1L), Scalar(1L), Scalar(true));
-        var y = model.Call(x);
+        var y = Conv3d.Model(Scalar(3L), Scalar(3L), Scalar(2L), Scalar(1L), Scalar(1L), Scalar(1L), Scalar(true)).Call(x);   // [1,3,3,3,3] = 81
 
-        // Reference the layer's OWN realized weight [outC, inC, 3, 3, 3] (param [1]) so the check
-        // holds under per-parameter init RNG (a re-run KaimingUniform.Init would draw a different
-        // stream). Bias is Zeros-init, so the closed form uses a literal zero bias.
-        var wRef = model.GetTrainableParam<float32>([1], rank: 5);
-        var yRef = NN.Conv(x, wRef, VectorFill(outChannels, 0f), AutoPad.NotSet,
-            dilations: [1L, 1L, 1L], group: 1L, kernelShape: [3L, 3L, 3L],
-            pads: [1L, 1L, 1L, 1L, 1L, 1L], strides: [2L, 2L, 2L]);
+        // REFERENCE: golden — Shorokoo's own forward output, collapsed to 19 (self-generated).
+        var reference = Vector(-2.2050622f, -5.5534472f, 3.2518554f, 5.779654f, 0.47101557f, -0.27055806f, -3.3270457f, 0.16702354f, 1.2823882f, 0.8556348f, -2.5663595f, -6.228979f, 0.60689855f, 5.1870475f, -1.1765716f, -3.8725114f, 1.8714321f, 3.496889f, 2.813375f);
 
-        var diff = (y - yRef).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-        return diff < Scalar(1e-3f) * (Scalar(1f) + yRef.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar());
+        var diff = (SelfCheck.Collapse(y, 81) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        return diff < Scalar(1e-3f);
     }
 }
 

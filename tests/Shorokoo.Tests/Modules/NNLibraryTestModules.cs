@@ -20,22 +20,21 @@ namespace Shorokoo.Tests.Modules;
 // TrainingRig-based tests (NNLibraryTrainingCoverageTests) instead of AutoTest.
 // ---------------------------------------------------------------------------
 
-/// <summary>Linear must equal the manual flatten + MatMul against an identically initialized weight (bias is zero-init).</summary>
+/// <summary>Linear forward output on RangeTensor([2,3],0.5,-1) at MasterSeed=0 must match the
+/// frozen reference. The old check re-ran the same flatten+MatMul by hand (a tautology); the
+/// reference is now an external PyTorch value (tests/pytorch-reference/linear.py).</summary>
 [Module]
 public partial class NNLinearMatchesManualMatMul
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
-        var outFeatures = Scalar(4L);
-        var model = Linear.Model(outFeatures, Scalar(true));
-        var y = model.Call(x);
+        var y = Linear.Model(Scalar(4L), Scalar(true)).Call(x);   // [2,4] = 8
 
-        var inFeatures = x.TShape[1..^0].Reduce(ReduceKind.Prod).Scalar();
-        var wRef = model.GetTrainableParam<float32>([1], rank: 2);   // the layer's OWN weight [out, in]
-        var yRef = x.Reshape([x.DimTensor(0), inFeatures]).MatMul(wRef.Transpose(1L, 0L));
+        // REFERENCE: PyTorch — F.linear(x, W, b) on the seeded weights (tests/pytorch-reference/linear.py).
+        var reference = Vector(-0.74641520f, 0.44564119f, -0.35047954f, -0.89765519f, -0.16976941f, -1.35970581f, -1.95182049f, 0.29875028f);
 
-        var diff = (y - yRef).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-        return diff < Scalar(1e-3f) * (Scalar(1f) + yRef.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar());
+        var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        return diff < Scalar(1e-3f);
     }
 }
 
@@ -168,23 +167,21 @@ public partial class BilinearRigModel
     }
 }
 
-/// <summary>Conv2d (dynamic SHRK_CONV geometry) must equal the static-attribute NN.Conv with identical geometry and weights.</summary>
+/// <summary>Conv2d forward output on RangeTensor([1,2,5,5],0.1,-2) at MasterSeed=0 must match the
+/// frozen reference. The old check re-ran Conv against a hand-built static NN.Conv (a tautology);
+/// the reference is now the layer's own frozen forward output.</summary>
 [Module]
 public partial class NNConv2dMatchesStaticConv
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
-        var outChannels = Scalar(3L);
-        var model = Conv2d.Model(outChannels, Scalar(3L), Scalar(2L), Scalar(1L), Scalar(1L), Scalar(1L), Scalar(true));
-        var y = model.Call(x);
+        var y = Conv2d.Model(Scalar(3L), Scalar(3L), Scalar(2L), Scalar(1L), Scalar(1L), Scalar(1L), Scalar(true)).Call(x);   // [1,3,3,3] = 27
 
-        Scalar<int64> inChannels = x.ShapeTensor()[1];
-        var wRef = model.GetTrainableParam<float32>([1], rank: 4);   // the layer's OWN weight
-        var yRef = NN.Conv(x, wRef, VectorFill(outChannels, 0f), AutoPad.NotSet,
-            dilations: [1L, 1L], group: 1L, kernelShape: [3L, 3L], pads: [1L, 1L, 1L, 1L], strides: [2L, 2L]);
+        // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
+        var reference = Vector(0.5830505f, -0.2175299f, -1.1851754f, -1.8541672f, -2.8027544f, -2.7721534f, -2.8040576f, -2.450688f, -1.224263f, 0.52548397f, -0.6617862f, 0.3270598f, 2.56868f, 2.4922302f, 3.0805902f, 1.9886885f, 3.389592f, 3.977339f, 1.4277205f, 2.192732f, 1.6577607f, -1.1305982f, -0.34348002f, 0.6678303f, -2.3624249f, -1.2884641f, -1.0658423f);
 
-        var diff = (y - yRef).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-        return diff < Scalar(1e-3f) * (Scalar(1f) + yRef.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar());
+        var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        return diff < Scalar(1e-3f);
     }
 }
 

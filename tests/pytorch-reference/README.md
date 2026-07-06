@@ -1,44 +1,47 @@
 # PyTorch reference generators
 
-Scripts here produce the **frozen reference constants** for
-`ModuleForwardValueTests` from the equivalent PyTorch op, giving those tests an
-*external* source of truth (rather than re-running the layer's own math by hand,
-which is a tautology).
+Scripts here produce **external-truth reference constants** for the forward-value
+checks in the NN-library coverage modules (e.g. `NNLinearMatchesManualMatMul` in
+`tests/Shorokoo.Tests/Modules/NNLibraryTestModules.cs`).
 
-## How a forward-value test is anchored
+Those modules replace the old "recompute the layer's own math by hand and assert
+agreement" pattern (a tautology). Each now runs the layer forward and compares —
+*in-graph*, returning `Scalar<bit>` via `AutoTest.AdvancedTestGraph` — against a
+reference frozen as a one-line `Vector<float32>` in the module, tagged with a
+provenance comment:
 
-1. A fixture `[Module]` (e.g. `ParityLinear`) wraps one layer as a single
-   tensor-in / tensor-out graph.
-2. The `_GoldenReferenceGen` harness (in `Shorokoo.Tests`, `Purpose=Manual`)
-   materializes the fixture from a **fixed seed** (`MasterSeed = 12345`), runs it
-   forward on a **fixed input**, and:
-   - prints the collapsed output for **golden** (self-generated) references, and
-   - exports the seeded weights + input to `.safetensors` for **PyTorch** references.
-3. For a PyTorch reference, the matching script here loads that `.safetensors`,
-   runs the PyTorch analog on the **identical** weights + input, and prints the
-   output as C# `float[]` initializer text.
-4. The values are pasted into `ModuleForwardValueTests` and marked with a
-   provenance comment: `// REFERENCE: PyTorch` or `// REFERENCE: golden`.
+- `// REFERENCE: PyTorch` — produced by the equivalent PyTorch op on the same
+  seeded weights + input (the scripts here); an external source of truth.
+- `// REFERENCE: golden` — self-generated: the layer's own forward output, frozen.
+  Catches regressions; upgraded to a PyTorch reference over time.
 
-Because the fixture init is deterministic for a seed, the test reproduces the
-exact same weights at runtime — it does not load the `.safetensors`; that file is
-only the bridge to PyTorch during generation.
+## Regenerating a PyTorch reference
 
-## Regenerating
+The reference is deterministic from the test's `MasterSeed` (default 0) and its
+fixed input, so it is reproduced at test time — the `.safetensors` below is only
+the bridge to PyTorch during generation.
 
-```bash
-pip install torch safetensors numpy      # CPU wheel is fine
+1. Export the seeded weights + the exact test input to a `.safetensors` file
+   (materialize the layer's concrete architecture at the test seed,
+   `InitializeTrainableParams`, and save each param plus an `"input"` tensor via
+   `SafeTensorLoader.SaveSafeTensors`).
+2. Run the matching script to print the C# `Vector(...)` initializer text:
 
-# export weights + input (and print golden values) from the C# side:
-PILOT_DIR=/tmp/pilot dotnet test tests/Shorokoo.Tests/Shorokoo.Tests.csproj \
-    --filter "FullyQualifiedName~_GoldenReferenceGen"
+   ```bash
+   pip install torch safetensors numpy       # CPU wheel is fine
+   python3 tests/pytorch-reference/linear.py /tmp/linear.safetensors
+   ```
+3. Paste the numbers into the module's `reference` vector.
 
-# produce a PyTorch reference:
-python3 tests/pytorch-reference/linear.py /tmp/pilot/linear.safetensors
-```
+A `golden` reference needs no PyTorch: run the layer forward once at the test
+seed + input and freeze the flattened output.
 
-Collapse convention (large outputs): outputs of >30 values are reduced to 19
-prime-strided, position-weighted sums (`ModuleForwardValueTests.Collapse`) —
-order- and value-sensitive but fp-stable and transcendental-free, so it is
-portable across machines. Replicate it on the PyTorch side when a collapsed
-output needs a PyTorch reference.
+## Collapsing large outputs
+
+Outputs of <=30 values are compared elementwise (the current examples: Linear
+[2,4]=8, Conv2d [1,3,3,3]=27). For a layer whose output exceeds ~30 values,
+collapse it in-graph to ~19 numbers first — a single `MatMul` against a baked
+`[19, n]` projection matrix `W` with `W[c,i] = w(i)` when `i mod 19 == c` else 0
+(a fixed, fp-stable linear sketch; the weight `w(i)` is an integer hash of the
+position, not the value). Replicate the same formula on the PyTorch side when a
+collapsed output needs a PyTorch reference.

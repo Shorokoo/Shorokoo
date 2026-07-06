@@ -55,12 +55,15 @@ namespace Shorokoo.Tests.Utils
         /// </summary>
         public static Tensor<float32> Collapse(Tensor<float32> y, int n, int p = 19)
         {
-            var flat = y.Reshape([Scalar((long)n)]);
-            if (n <= 30) return flat;
+            if (n <= 30) return y.Reshape([Scalar((long)n)]);
             var proj = new float[p * n];
             for (int i = 0; i < n; i++) proj[(i % p) * n + i] = Weight(i);
-            var w = Vector(proj).Reshape([Scalar((long)p), Scalar((long)n)]);
-            return w.MatMul(flat.Reshape([Scalar((long)n), Scalar(1L)])).Reshape([Scalar((long)p)]);
+            // collapsed[c] = Σ_i W[c,i]·y[i], via broadcast-multiply + ReduceSum. Flatten with a
+            // free (-1) dim: pinning y to a static [.,n] shape can dangle a reshape node through the
+            // ONNX roundtrip when y is a function output whose shape metadata is dynamic (e.g. GroupNorm).
+            var w = Vector(proj).Reshape([Scalar((long)p), Scalar((long)n)]);   // [p, n]
+            var yFlat = y.Reshape([Scalar(-1L)]);                                // [n], broadcasts to [p, n]
+            return (w * yFlat).Reduce(ReduceKind.Sum, [Scalar(1L)], keepDims: false);  // [p]
         }
 
         private static float Weight(int i)

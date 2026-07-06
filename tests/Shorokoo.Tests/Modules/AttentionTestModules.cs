@@ -16,8 +16,9 @@ namespace Shorokoo.Tests.Modules;
 // ---------------------------------------------------------------------------
 
 /// <summary>
-/// ScaledDotProductAttention on a [1, 1, L, d] input (used as q = k = v) must equal
-/// the manual softmax(qkᵀ / sqrt(d)) · v built from the same primitives.
+/// ScaledDotProductAttention on the fixed [1,1,3,2] input (used as q = k = v) must match the
+/// frozen reference. The old check re-ran softmax(qkᵀ/sqrt(d))·v by hand (a tautology); the
+/// reference is now the op's own frozen output. Output [1,1,3,2]=6.
 /// </summary>
 [Module]
 public partial class AttnSdpaMatchesManual
@@ -26,13 +27,11 @@ public partial class AttnSdpaMatchesManual
     {
         var y = Attention.ScaledDotProductAttention(qkv, qkv, qkv);
 
-        var d = qkv.DimTensor(-1);
-        var scale = Scalar(1f) / d.Cast<float32>().Sqrt();
-        var scores = (qkv.MatMul(qkv.Transpose(0L, 1L, 3L, 2L)) * scale).Softmax(-1L);
-        var yRef = scores.MatMul(qkv);
+        // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
+        var reference = Vector(-0.06533041f, 0.47590908f, 0.07712328f, 0.2375093f, -0.17771891f, 0.43166658f);
 
-        var diff = (y - yRef).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-        return diff < Scalar(1e-4f) * (Scalar(1f) + yRef.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar());
+        var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        return diff < Scalar(1e-3f);
     }
 }
 
@@ -211,9 +210,10 @@ public partial class DecoderLayerShapeCheck
 }
 
 /// <summary>
-/// TransformerDecoderLayer (embedDim 4, numHeads 2, ffnDim 8, NO bias) runs end-to-end on
-/// tgt [N, Lt, 4] + memory [N, Lm, 4] (Lt != Lm exercises the distinct-k/v cross-attention)
-/// and produces a sane, finite, bounded output. Self-attn is causal; cross-attn is non-causal.
+/// TransformerDecoderLayer (embedDim 4, numHeads 2, ffnDim 8, NO bias) runs end-to-end on the fixed
+/// tgt [1,3,4] + memory [1,5,4] (Lt != Lm exercises distinct-k/v cross-attention; self-attn causal,
+/// cross-attn non-causal) at MasterSeed=0 and must match the frozen reference. Was a finiteness-only
+/// Sanity.Reasonable check; now a frozen forward-value golden (self-generated). Output [1,3,4]=12.
 /// </summary>
 [Module]
 public partial class DecoderLayerMatchesManualNoBias
@@ -223,13 +223,20 @@ public partial class DecoderLayerMatchesManualNoBias
         Tensor<float32> memory)     // [N, Lm, 4]
     {
         var y = TransformerDecoderLayer.Call(Scalar(4L), Scalar(2L), Scalar(8L), Scalar(false), tgt, memory);
-        return Sanity.Reasonable(y);
+
+        // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
+        var reference = Vector(-1.5287459f, -1.4194263f, 1.5331187f, -1.2372686f, -0.76054126f, -0.8759116f, 1.9987078f, -0.29077232f, -1.2313218f, -1.3476028f, 2.0946798f, -2.0561018f);
+
+        var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        return diff < Scalar(1e-3f);
     }
 }
 
 /// <summary>
-/// Same as <see cref="DecoderLayerMatchesManualNoBias"/> but with useBias = true (the biases
-/// are Zeros-init, so this exercises the useBias.IfElse(true) branch and must still be sane).
+/// Same as <see cref="DecoderLayerMatchesManualNoBias"/> but useBias = true (biases are Zeros-init,
+/// so this exercises the useBias.IfElse(true) branch and must produce the same output — the frozen
+/// reference below equals the no-bias one). Was a finiteness-only Sanity.Reasonable check; now a
+/// frozen forward-value golden (self-generated).
 /// </summary>
 [Module]
 public partial class DecoderLayerMatchesManualWithBias
@@ -239,7 +246,12 @@ public partial class DecoderLayerMatchesManualWithBias
         Tensor<float32> memory)     // [N, Lm, 4]
     {
         var y = TransformerDecoderLayer.Call(Scalar(4L), Scalar(2L), Scalar(8L), Scalar(true), tgt, memory);
-        return Sanity.Reasonable(y);
+
+        // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated; zero biases ⇒ == no-bias).
+        var reference = Vector(-1.5287459f, -1.4194263f, 1.5331187f, -1.2372686f, -0.76054126f, -0.8759116f, 1.9987078f, -0.29077232f, -1.2313218f, -1.3476028f, 2.0946798f, -2.0561018f);
+
+        var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        return diff < Scalar(1e-3f);
     }
 }
 

@@ -193,8 +193,19 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var algorithm = node.Attributes.GetStringVal(ShrkAttrRngAlgorithm)
                 ?? RngAlgorithms.Default;
 
-            var keyKey = AppendKeyConstant(stampedKey, newNodes);
-            keyKey = AppendIterationSplits(node, keyKey, algorithm, newNodes);
+            FastTensorKey keyKey;
+            var keyTable = node.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRngKeyTable);
+            if (keyTable is { Length: > 2 })
+            {
+                // Per-stream key table (stamped when a realized stream carries an override):
+                // select this iteration's [k0, k1] row by the flattened iteration index.
+                keyKey = AppendKeyTableSelect(node, keyTable, newNodes);
+            }
+            else
+            {
+                keyKey = AppendKeyConstant(stampedKey, newNodes);
+                keyKey = AppendIterationSplits(node, keyKey, algorithm, newNodes);
+            }
             var drawBaseKey = node.Inputs.Count > 1 && node.Inputs[1] is { } db
                 ? db
                 : AppendScalarInt64(0L, newNodes);
@@ -297,6 +308,82 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 new Shape(2),
                 OnnxUtils.CreateTensorValue(new Shape(2), keyWords));
             return AppendConstant(data, newNodes);
+        }
+
+        /// <summary>
+        /// Selects this iteration's key row from a stamped per-stream key table: the table is a
+        /// [N, 2] int64 constant (rows in lexicographic iteration order), the row index is
+        /// Σ iterationIndices[j] · stride[j] over the stamped per-level strides, and a Gather on
+        /// axis 0 yields the [2] key. Used instead of split folds when a realized stream of the
+        /// feed carries a per-stream override (a single overridden iteration is inexpressible as
+        /// a derivation chain).
+        /// </summary>
+        private static FastTensorKey AppendKeyTableSelect(
+            FastNode node, long[] keyTable, List<FastNode> newNodes)
+        {
+            int n = keyTable.Length / 2;
+            var tableData = new OnnxTensorData<int64>(
+                new Shape(n, 2),
+                OnnxUtils.CreateTensorValue(new Shape(n, 2), keyTable));
+            var tableKey = AppendConstant(tableData, newNodes);
+
+            var strides = node.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRngIterStrides) ?? [];
+            FastTensorKey indexKey;
+            if (strides.Length == 0)
+            {
+                indexKey = AppendScalarInt64(0L, newNodes);
+            }
+            else
+            {
+                var iterationIndicesInput = node.Inputs.Count > 2 ? node.Inputs[2] : null;
+                if (iterationIndicesInput is null)
+                    throw new InvalidOperationException(
+                        $"{node.OpCode}: a key table with iteration strides needs the feed's " +
+                        "iteration-indices input to select a row.");
+                indexKey = default;
+                bool first = true;
+                for (int j = 0; j < strides.Length; j++)
+                {
+                    var term = AppendBinaryScalarInt64(OpCodes.MUL,
+                        AppendGatherScalar(iterationIndicesInput.Value, j, newNodes),
+                        AppendScalarInt64(strides[j], newNodes), newNodes);
+                    indexKey = first ? term : AppendBinaryScalarInt64(OpCodes.ADD, indexKey, term, newNodes);
+                    first = false;
+                }
+            }
+
+            var nodeKey = FastNodeKey.New();
+            var outKey = new FastTensorKey(nodeKey, 0);
+            var attrDefs = Definitions.NodeDefinitions[OpCodes.GATHER].AttributeDefs;
+            newNodes.Add(new FastNode
+            {
+                Key = nodeKey,
+                OpCode = OpCodes.GATHER,
+                Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                    new Dictionary<string, object?> { [AttrAxis] = 0L }, attrDefs),
+                FullInputs = { [""] = new List<FastTensorKey?> { tableKey, indexKey } },
+                FullOutputs = { [""] = new List<FastTensorKey?> { outKey } },
+            });
+            return outKey;
+        }
+
+        /// <summary>Element-wise int64 scalar binary op node (MUL/ADD) for index arithmetic.</summary>
+        private static FastTensorKey AppendBinaryScalarInt64(
+            string opCode, FastTensorKey a, FastTensorKey b, List<FastNode> newNodes)
+        {
+            var nodeKey = FastNodeKey.New();
+            var outKey = new FastTensorKey(nodeKey, 0);
+            var attrDefs = Definitions.NodeDefinitions[opCode].AttributeDefs;
+            newNodes.Add(new FastNode
+            {
+                Key = nodeKey,
+                OpCode = opCode,
+                Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                    new Dictionary<string, object?>(), attrDefs),
+                FullInputs = { [""] = new List<FastTensorKey?> { a, b } },
+                FullOutputs = { [""] = new List<FastTensorKey?> { outKey } },
+            });
+            return outKey;
         }
 
         private static FastTensorKey AppendScalarInt64(long value, List<FastNode> newNodes)

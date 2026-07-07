@@ -191,7 +191,7 @@ public class RngPinTests
     }
 
     [Fact]
-    public void TestRngStreamReportShowsLoopFeedWithPrefixKey()
+    public void TestRngStreamReportShowsRealizedLoopFeedStreams()
     {
         var g = (FastComputationGraph)typeof(RngRuntimeLoopFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
@@ -202,24 +202,28 @@ public class RngPinTests
         var cfg = new RngConfig { MasterSeed = 3 };
         var report = arch.GetRngStreamReport(cfg);
 
-        // Two streams: the feed, plus the generator's injected drawBase counter state
-        // (RngExecutionCounter — a draw-free zero fill, but it occupies an id slot, so the
-        // inventory lists it).
-        Assert.Equal(2, report.Streams.Count);
+        // Three streams: the generator's injected drawBase counter state (RngExecutionCounter —
+        // a draw-free zero fill, but it occupies an id slot, so the inventory lists it), plus
+        // one REALIZED stream per hinted loop iteration of the feed site [1, -1, 1]. Realized
+        // ids are static and carry the exact per-stream key (no prefix, no -1).
+        Assert.Equal(3, report.Streams.Count);
         Assert.Contains(report.Streams, s =>
             s.Kind == RngStreamKind.ParamInit && s.Name!.Contains("RngExecutionCounter"));
-        var feed = report.Streams.Single(s => s.Kind == RngStreamKind.UniformFeed);
+        var feeds = report.Streams.Where(s => s.Kind == RngStreamKind.UniformFeed).ToList();
+        Assert.Equal(2, feeds.Count);
+        for (int i = 0; i < 2; i++)
+        {
+            Assert.Equal([1, i, 1], feeds[i].ModelIdPath);
+            Assert.False(feeds[i].KeyIsPrefix);
+            Assert.Equal([1, -1, 1], feeds[i].SitePath);
+            // Exact stream key: fold(fold(fold(runMaster, 1), i), 1) — identical to the key
+            // the runtime split chain derives for iteration i.
+            var (k0, k1) = RngConfig.FoldKey(RngConfig.FoldKey(cfg.FoldRunKey([1]), i), 1);
+            Assert.Equal([k0, k1], feeds[i].KeyWords);
+        }
 
-        // The loop-body feed sits at [1, -1, 1]; the reported key is the PREFIX key before
-        // the iteration slot (per-iteration keys are split at runtime).
-        Assert.Equal(RngStreamKind.UniformFeed, feed.Kind);
-        Assert.Equal([1, -1, 1], feed.ModelIdPath);
-        Assert.True(feed.KeyIsPrefix);
-        var (k0, k1) = cfg.FoldRunKey([1]);
-        Assert.Equal([k0, k1], feed.KeyWords);
-
-        // The skeleton groups the loop-body feed under its loop scope [1, -1] with the feed's
-        // local slot (1), so the author writes that pin inside the loop body.
+        // The skeleton still groups the feed under its loop SCOPE [1, -1] with the feed's
+        // local slot (1) — pins address sites, not iterations — and lists it once.
         var skeleton = arch.GetRngStreamReport().EmitPinSkeleton();
         Assert.Contains("// inside the loop body at ModelId path [1, -1]:", skeleton);
         Assert.Contains("([1], /* uniform feed */ ?)", skeleton);

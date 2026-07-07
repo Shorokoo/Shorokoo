@@ -108,6 +108,11 @@ public sealed class RngConfig
         return this;
     }
 
+    /// <summary>All registered override addresses (collection + comma-joined path), for
+    /// bind-time validation: an override that matches no stream fails the bind loudly.</summary>
+    internal IEnumerable<(RngCollection collection, string pathKey)> OverrideKeys
+        => _overrides.Keys;
+
     /// <summary>Whether a stream has an explicit override.</summary>
     public bool HasOverride(RngCollection collection, int[] modelIdPath)
         => _overrides.ContainsKey((collection, PathKey(modelIdPath ?? throw new ArgumentNullException(nameof(modelIdPath)))));

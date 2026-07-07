@@ -274,6 +274,30 @@ public static class OnnxOpAttributeNames
     /// deterministic draw (absent = ONNX random fallback).
     /// </summary>
     public const string ShrkAttrRngExplicitKey = "shrk_rng_explicit_key";
+
+    /// <summary>
+    /// The feed's REALIZED stream ids, enumerated at concretization by the same QEE pass that
+    /// realizes trainable-param ids: the site's ModelId with every <c>-1</c> iteration slot
+    /// filled per observed loop iteration, flattened (id length × N streams, lexicographic by
+    /// iteration). Present only on SHRK_RANDOM_* nodes of a concrete architecture; makes the
+    /// stream report static and every stream individually addressable by RngConfig.Override.
+    /// </summary>
+    public const string ShrkAttrRngRealizedIds = "shrk_rng_realized_ids";
+
+    /// <summary>
+    /// Per-stream resolved keys ([k0, k1] per realized id, flattened 2N longs, same order as
+    /// <see cref="ShrkAttrRngRealizedIds"/>) stamped when at least one of the feed's realized
+    /// streams carries a per-stream override — the in-graph derivation chain cannot express a
+    /// single overridden iteration, so the lowering selects from this table by flattened
+    /// iteration index instead.
+    /// </summary>
+    public const string ShrkAttrRngKeyTable = "shrk_rng_key_table";
+
+    /// <summary>
+    /// Row strides for indexing <see cref="ShrkAttrRngKeyTable"/>: one stride per <c>-1</c>
+    /// level of the feed's site id; flat row index = Σ iterationIndex[j] · stride[j].
+    /// </summary>
+    public const string ShrkAttrRngIterStrides = "shrk_rng_iter_strides";
     public const string ShrkAttrRelativeModelId = "shrk_relative_model_id";
     public const string ShrkAttrInputType = "shrk_input_type";
     public const string ShrkAttrHyperparamIndex = "shrk_hyperparam_index";

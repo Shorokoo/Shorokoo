@@ -135,4 +135,43 @@ public class RngLoopTests
         var (runtimeOutput, _) = RunRuntimeLoop(cfg, steps: 2);
         Assert.Equal(runtimeOutput, output);
     }
+
+    [Fact]
+    public void TestPerIterationOverrideReSeedsExactlyOneStream()
+    {
+        // Override ITERATION 1 of the loop feed site [1, -1, 1] by its realized stream path.
+        // The stamp resolves every realized stream's key host-side (override-aware) and, since
+        // one stream deviates from pure derivation, stamps the per-stream key table that the
+        // lowering selects from by iteration index.
+        var cfg = new RngConfig { MasterSeed = 11 };
+        cfg.Override(RngCollection.Runtime, [1, 1, 1], 424242UL);
+        var (output, concrete) = RunRuntimeLoop(cfg, steps: 3);
+        Assert.Contains(concrete.Nodes, n => n.OpCode == OpCodes.LOOP_OPEN);
+
+        // Iterations 0 and 2 derive as usual; iteration 1 draws from the override — bit-exact.
+        var expected = (float[])XVals.Clone();
+        for (int i = 0; i < 3; i++)
+        {
+            var key = i == 1
+                ? cfg.FoldRunKey([1, 1, 1])
+                : RngConfig.FoldKey(RngConfig.FoldKey(cfg.FoldRunKey([1]), i), 1);
+            for (long e = 0; e < N; e++)
+                expected[e] += HostUniform(e, key);
+        }
+        Assert.Equal(expected, output);
+    }
+
+    [Fact]
+    public void TestUnmatchedRuntimeOverrideFailsTheBind()
+    {
+        // An override that matches no stream of the graph must fail the bind loudly — a
+        // silently inactive override is exactly the re-keying hazard explicit seeding
+        // exists to prevent.
+        var cfg = new RngConfig { MasterSeed = 11 };
+        cfg.Override(RngCollection.Runtime, [9, 9, 9], 1UL);
+        var ex = Assert.ThrowsAny<System.Exception>(() => RunRuntimeLoop(cfg, steps: 2));
+        for (System.Exception? e = ex; e is not null; e = e.InnerException)
+            if (e.Message.Contains("matches no runtime stream")) return;
+        Assert.Fail($"expected the unmatched-override bind error, got: {ex}");
+    }
 }

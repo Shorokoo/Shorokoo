@@ -413,6 +413,7 @@ namespace Shorokoo.Graph
                 });
             }
 
+            var seenFeedPaths = new HashSet<string>();
             foreach (var node in graph.Nodes)
             {
                 bool isUniform = node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM;
@@ -420,16 +421,42 @@ namespace Shorokoo.Graph
                 if (!isUniform && !isNormal) continue;
                 var idVals = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId);
                 if (idVals is null || idVals.Length == 0) continue;
+                var kind = isUniform ? RngStreamKind.UniformFeed : RngStreamKind.NormalFeed;
 
-                // For a loop-body feed (a -1 iteration slot in the path) the key shown is
-                // the stamped PREFIX key — per-iteration keys only exist at runtime.
+                // Realized streams (concrete architectures): one row per stream — the site id
+                // with every -1 iteration slot filled at concretization — each with its exact,
+                // override-aware key. The site id is kept alongside for pin-skeleton grouping.
+                // Unrolled clones of one site share realized ids; report each stream once.
+                var realizedFlat = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrRngRealizedIds);
+                if (realizedFlat is { Length: > 0 })
+                {
+                    int idLen = idVals.Length;
+                    for (int r = 0; r < realizedFlat.Length / idLen; r++)
+                    {
+                        var pathArr = realizedFlat[(r * idLen)..((r + 1) * idLen)];
+                        if (!seenFeedPaths.Add(string.Join(",", pathArr))) continue;
+                        streams.Add(new RngStreamInfo
+                        {
+                            Collection = RngCollection.Runtime,
+                            ModelIdPath = pathArr,
+                            SitePath = idVals,
+                            Kind = kind,
+                            KeyWords = rngConfig is null ? null : ToKeyWords(rngConfig.FoldRunKey(pathArr)),
+                        });
+                    }
+                    continue;
+                }
+
+                // Legacy (non-enumerated) row: for a loop-body feed (a -1 slot in the path)
+                // the key shown is the stamped PREFIX key — per-iteration keys only exist at
+                // runtime.
                 int firstIterationSlot = System.Array.IndexOf(idVals, -1);
                 var foldVals = firstIterationSlot < 0 ? idVals : idVals[..firstIterationSlot];
                 streams.Add(new RngStreamInfo
                 {
                     Collection = RngCollection.Runtime,
                     ModelIdPath = idVals,
-                    Kind = isUniform ? RngStreamKind.UniformFeed : RngStreamKind.NormalFeed,
+                    Kind = kind,
                     KeyWords = rngConfig is null ? null : ToKeyWords(rngConfig.FoldRunKey(foldVals)),
                 });
             }

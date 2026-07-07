@@ -4,6 +4,7 @@ using Shorokoo.Core.Nodes;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Core.Rng;
 using System;
+using System.Linq;
 using static Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames;
 
 namespace Shorokoo.Core.Nodes.Processors.Fast
@@ -41,6 +42,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (rngConfig is null) throw new ArgumentNullException(nameof(rngConfig));
 
             string algorithmName = RngAlgorithms.NameOf(rngConfig.Algorithm);
+            var realizedPaths = new HashSet<string>();
 
             int loopDepth = 0;
             foreach (var node in graph.Nodes)
@@ -61,6 +63,50 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     continue;
                 }
 
+                // Realized-streams path (concrete architectures): the QEE enumeration stamped
+                // the feed's full stream ids at concretization. Every stream's key is resolved
+                // host-side over its FULL realized path, so per-stream overrides — including a
+                // single loop iteration's — take effect. When any of the feed's streams is
+                // overridden, the resolved keys are stamped as a table the lowering selects
+                // from by flattened iteration index; otherwise the legacy prefix stamp is kept
+                // (the in-graph split derivation folds to bit-identical keys).
+                var realizedFlat = node.Attributes.GetIntsVal(ShrkAttrRngRealizedIds);
+                if (realizedFlat is { Length: > 0 })
+                {
+                    int idLen = idVals.Length;
+                    int n = realizedFlat.Length / idLen;
+                    bool anyOverride = false;
+                    var table = new long[2 * n];
+                    for (int r = 0; r < n; r++)
+                    {
+                        var path = realizedFlat[(r * idLen)..((r + 1) * idLen)];
+                        realizedPaths.Add(string.Join(",", path));
+                        if (rngConfig.HasOverride(RngCollection.Runtime, path)) anyOverride = true;
+                        var (rk0, rk1) = rngConfig.FoldRunKey(path);
+                        table[2 * r] = rk0;
+                        table[2 * r + 1] = rk1;
+                    }
+
+                    if (anyOverride)
+                    {
+                        node.Attributes = node.Attributes.SetAttributes(
+                            (ShrkAttrRngKeyTable, table),
+                            (ShrkAttrRngExplicitKey, (long[])[table[0], table[1]]),
+                            (ShrkAttrRngAlgorithm, algorithmName));
+                    }
+                    else
+                    {
+                        int prefixEnd = Array.IndexOf(idVals, -1);
+                        var prefix = prefixEnd < 0 ? idVals : idVals[..prefixEnd];
+                        var (pk0, pk1) = rngConfig.FoldRunKey(prefix);
+                        node.Attributes = node.Attributes.SetAttributes(
+                            (ShrkAttrRngKeyTable, (long[])[]),
+                            (ShrkAttrRngExplicitKey, (long[])[pk0, pk1]),
+                            (ShrkAttrRngAlgorithm, algorithmName));
+                    }
+                    continue;
+                }
+
                 int firstIterationSlot = Array.IndexOf(idVals, -1);
                 if (firstIterationSlot < 0 && loopDepth > 0)
                 {
@@ -70,15 +116,30 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     continue;
                 }
 
-                // Fold up to the first iteration placeholder (the whole path when none):
-                // the rest of the path is realized at ONNX prep by in-graph splits on the
-                // runtime iteration index.
+                // Legacy (non-enumerated) path: fold up to the first iteration placeholder
+                // (the whole path when none); the rest of the path is realized at ONNX prep
+                // by in-graph splits on the runtime iteration index.
                 var foldVals = firstIterationSlot < 0 ? idVals : idVals[..firstIterationSlot];
                 var (k0, k1) = rngConfig.FoldRunKey(foldVals);
+                realizedPaths.Add(string.Join(",", foldVals));
                 node.Attributes = node.Attributes.SetAttributes(
                     (ShrkAttrRngExplicitKey, (long[])[k0, k1]),
                     (ShrkAttrRngAlgorithm, algorithmName));
             }
+
+            // Fail-loud override validation: a Runtime override that matches no stream of this
+            // graph would otherwise be a silent no-op — exactly the re-keying hazard explicit
+            // seeding exists to prevent.
+            var unmatched = rngConfig.OverrideKeys
+                .Where(k => k.collection == RngCollection.Runtime && !realizedPaths.Contains(k.pathKey))
+                .Select(k => $"[{k.pathKey}]")
+                .ToArray();
+            if (unmatched.Length > 0)
+                throw new InvalidOperationException(
+                    "RngConfig.Override(Runtime, ...) matches no runtime stream of this graph: " +
+                    string.Join(", ", unmatched) +
+                    ". Available stream paths are listed by GetRngStreamReport(); overrides must " +
+                    "use a reported path exactly.");
         }
     }
 }

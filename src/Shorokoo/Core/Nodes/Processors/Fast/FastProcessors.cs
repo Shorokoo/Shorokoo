@@ -2635,6 +2635,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     "FastConvertTrainableParamIdRefToTrainableParam: QEE could not resolve all " +
                     "TRAINABLE_PARAM_ID_REF model IDs (integer data unavailable).");
 
+            // Runtime random feeds ride the same QEE evaluation: realize each feed's stream ids
+            // (the site id with every -1 iteration slot filled per observed loop iteration) so
+            // the stream report is static and every stream is addressable by RngConfig.Override.
+            RealizeRngFeedStreams(graph, store);
+
             if (candidateModelIdInfos.IsEmpty) return;
 
             // Liveness filter: ExtractModelIdInfosFromStore returns every model ID a
@@ -3149,6 +3154,83 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     list.Add(h as RuntimeTensor);
             list.Add(rt);
             return list;
+        }
+
+        /// <summary>
+        /// Realizes every SHRK_RANDOM_* feed's stream ids from the QEE store: the site id's
+        /// <c>-1</c> iteration slots are filled per observed loop iteration (the same loop
+        /// history that realizes trainable-param ids), and the resulting id list — sorted
+        /// lexicographically by iteration so a flat index of Σ iter[j]·stride[j] addresses it —
+        /// is stamped on the node together with the per-level strides. A feed whose iteration
+        /// input QEE could not resolve is left unstamped and keeps the legacy prefix-key +
+        /// in-graph-split derivation.
+        /// </summary>
+        private static void RealizeRngFeedStreams(
+            FastComputationGraph graph, Dictionary<FastTensorKey, IRuntimeTensor> store)
+        {
+            foreach (var node in graph.Nodes)
+            {
+                if (node.OpCode != InternalOpCodes.SHRK_RANDOM_UNIFORM &&
+                    node.OpCode != InternalOpCodes.SHRK_RANDOM_NORMAL) continue;
+                var idVals = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId);
+                if (idVals is null || idVals.Length == 0) continue;
+
+                int depth = idVals.Count(v => v == -1);
+                List<long[]> realized;
+                long[] strides;
+                if (depth == 0)
+                {
+                    realized = [[.. idVals.Select(v => (long)v)]];
+                    strides = [];
+                }
+                else
+                {
+                    var iterInput = node.Inputs.Count > 2 ? node.Inputs[2] : null;
+                    if (iterInput is null || !store.TryGetValue(iterInput.Value, out var raw)
+                        || raw is not RuntimeTensor rt) continue;
+
+                    var seen = new HashSet<string>();
+                    var iterVectors = new List<long[]>();
+                    foreach (var it in CollectAllIterations(rt))
+                    {
+                        if (it?.IntData is not { } iv) continue;
+                        var clean = iv.Where(x => x != -2).ToArray();
+                        if (clean.Length != depth) continue;
+                        if (seen.Add(string.Join(",", clean))) iterVectors.Add(clean);
+                    }
+                    if (iterVectors.Count == 0) continue;
+
+                    // Lexicographic iteration order so flat index = Σ iter[j]·stride[j].
+                    iterVectors.Sort((a, b) =>
+                    {
+                        for (int j = 0; j < depth; j++)
+                            if (a[j] != b[j]) return a[j].CompareTo(b[j]);
+                        return 0;
+                    });
+                    var counts = new long[depth];
+                    for (int j = 0; j < depth; j++) counts[j] = iterVectors.Max(v => v[j]) + 1;
+                    strides = new long[depth];
+                    long acc = 1;
+                    for (int j = depth - 1; j >= 0; j--) { strides[j] = acc; acc *= counts[j]; }
+
+                    realized = new List<long[]>(iterVectors.Count);
+                    foreach (var iv in iterVectors)
+                    {
+                        var full = new long[idVals.Length];
+                        int k = 0;
+                        for (int i = 0; i < idVals.Length; i++)
+                            full[i] = idVals[i] == -1 ? iv[k++] : idVals[i];
+                        realized.Add(full);
+                    }
+                }
+
+                long[] flat = new long[realized.Count * idVals.Length];
+                for (int r = 0; r < realized.Count; r++)
+                    realized[r].CopyTo(flat, r * idVals.Length);
+                node.Attributes = node.Attributes.SetAttributes(
+                    (OnnxOpAttributeNames.ShrkAttrRngRealizedIds, flat),
+                    (OnnxOpAttributeNames.ShrkAttrRngIterStrides, strides));
+            }
         }
     }
 

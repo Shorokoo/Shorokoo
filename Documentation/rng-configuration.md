@@ -115,6 +115,17 @@ replacing the fully folded key for that stream only. Because the override replac
 *result* of the fold, it survives a later `MasterSeed` change. Matching is exact and
 per-collection.
 
+Every path the stream report lists is a valid override address, including the realized
+per-iteration streams of a loop feed (e.g. `[1, 2, 1]` = iteration 2 of the feed at loop
+slot 1) — overriding one iteration re-seeds that iteration only; sibling iterations keep
+their derived keys. A `Runtime` override that matches no stream of the graph fails the
+bind loudly rather than being silently inactive.
+
+Stream ids are realized at `ToConcreteArchitecture` from the input hints, so — like
+trainable params inside loops — a loop feed's streams are enumerated for the hinted trip
+count: the concrete architecture is only valid for inputs that produce the same model-id
+list (or a subset).
+
 ## The stream report
 
 `arch.GetRngStreamReport(config)` inventories every stream of a concrete architecture — the

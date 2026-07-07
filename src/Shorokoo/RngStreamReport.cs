@@ -46,6 +46,13 @@ public sealed class RngStreamInfo
     /// <summary>Whether <see cref="KeyWords"/> is a prefix key (path contains loop-iteration slots).</summary>
     public bool KeyIsPrefix => KeyWords is not null && ModelIdPath.Contains(-1);
 
+    /// <summary>
+    /// The stream's SITE id (the ModelId with <c>-1</c> iteration placeholders) when
+    /// <see cref="ModelIdPath"/> is a realized per-iteration stream of a loop feed; null when
+    /// the path is its own site. Pinning addresses sites, so the pin skeleton groups by this.
+    /// </summary>
+    public IReadOnlyList<int>? SitePath { get; init; }
+
     /// <summary>One human-readable line: collection, path, kind, name/shape, key.</summary>
     public override string ToString()
     {
@@ -108,7 +115,7 @@ public sealed class RngStreamReport
         var byScope = new List<(IReadOnlyList<int> scope, SortedDictionary<int, RngStreamInfo> bySlot)>();
         foreach (var s in Streams)
         {
-            var path = s.ModelIdPath;
+            var path = s.SitePath ?? s.ModelIdPath;
             if (path.Count == 0) continue;   // defensive: a consumer always carries ≥1 id element
             int lastNeg = -1;
             for (int i = 0; i < path.Count; i++) if (path[i] == -1) lastNeg = i;

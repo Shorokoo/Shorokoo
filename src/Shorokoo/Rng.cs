@@ -45,6 +45,9 @@ public static class Rng
     [ThreadStatic]
     private static List<(int[] path, object item)>? _slotPins;
 
+    [ThreadStatic]
+    private static Stack<(List<object>? pins, List<(int[] path, object item)>? slotPins)>? _pinScopes;
+
     /// <summary>
     /// Pins the RNG stream identities of the listed items to their list positions within the
     /// current scope (first item = first local slot, ...). Call once per scope, at the end of
@@ -105,5 +108,26 @@ public static class Rng
         _slotPins = null;
         return (pins?.ToArray() ?? Array.Empty<object>(),
                 slotPins?.ToArray() ?? Array.Empty<(int[], object)>());
+    }
+
+    /// <summary>
+    /// Opens a fresh pin recording scope for one body trace, saving the current lists. The graph
+    /// builder RE-ENTERS mid-trace whenever a body first-uses a sub-module or initializer whose
+    /// Function is not yet cached; a destructive clear at build entry would silently wipe the
+    /// OUTER body's already-recorded pins (cache-order-dependently). Save/restore keeps every
+    /// build isolated without losing the enclosing trace's records — the same discipline
+    /// <c>LoopAPI.PushLooperContext</c> applies to the looper state across the same re-entrancy.
+    /// </summary>
+    internal static void PushPinScope()
+    {
+        (_pinScopes ??= new Stack<(List<object>?, List<(int[], object)>?)>()).Push((_pins, _slotPins));
+        _pins = null;
+        _slotPins = null;
+    }
+
+    /// <summary>Closes the current pin scope, restoring the enclosing trace's recorded pins.</summary>
+    internal static void PopPinScope()
+    {
+        (_pins, _slotPins) = _pinScopes!.Pop();
     }
 }

@@ -42,6 +42,37 @@ public partial class PinSparseTwoLinears
     }
 }
 
+/// <summary>Initializer used ONLY by <see cref="PinSurvivesNestedFirstUseBuild"/>, so its Function is
+/// guaranteed uncached when that module's body traces — forcing a nested graph build mid-trace.</summary>
+[TrainableParamInitializer]
+public static partial class PinWipeFreshInit
+{
+    public static Tensor<float32> Inline(Vector<int64> shape)
+    {
+        return Globals.TensorFill(shape, 0.5f);
+    }
+}
+
+/// <summary>
+/// Pins recorded BEFORE a nested first-use build must survive it. Building a not-yet-cached
+/// sub-module/initializer mid-trace re-enters the graph builder on the same thread; its entry-time
+/// pin clearing used to wipe the outer body's already-recorded pins, silently deactivating them
+/// (and cache-order-dependently: a warm Function cache hid the loss). Pin(b, a) then first-use
+/// a fresh initializer: b must still take the first id slot.
+/// </summary>
+[Module]
+public partial class PinSurvivesNestedFirstUseBuild
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var a = Linear.Model(Scalar(2L), Scalar(false));
+        var b = Linear.Model(Scalar(3L), Scalar(false));
+        Rng.Pin(b, a);                                    // recorded now — before the nested build
+        var w = PinWipeFreshInit.Init([Scalar(4L)]);      // FIRST use: nested initializer body build
+        return a.Call(x).Concat(-1L, b.Call(x)) + w.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+    }
+}
+
 /// <summary>Mixes positional and sparse pins in ONE scope (the module body): must fail the build.</summary>
 [Module]
 public partial class PinMixedFormsOneScope
@@ -192,6 +223,18 @@ public class RngPinTests
         var skeleton = arch.GetRngStreamReport().EmitPinSkeleton();
         Assert.Contains("// inside the loop body at ModelId path [1, -1]:", skeleton);
         Assert.Contains("([1], /* uniform feed */ ?)", skeleton);
+    }
+
+    [Fact]
+    public void TestPinSurvivesNestedFirstUseModuleBuild()
+    {
+        // Pin(b, a) is recorded, then the body first-uses PinWipeFreshInit — whose Function is
+        // uncached (it is referenced nowhere else), so its body graph builds mid-trace. The pin
+        // must survive that nested build: b (out=3) takes id slot 1. Before the fix, the nested
+        // build's entry-time clear wiped the recorded pins and creation order won (a first).
+        var (firstSlotOutFeatures, output) = Probe<PinSurvivesNestedFirstUseBuild>();
+        Assert.Equal(3L, firstSlotOutFeatures);
+        Assert.Equal(5, output.Length);
     }
 
     [Fact]

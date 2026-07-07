@@ -136,7 +136,6 @@ namespace Shorokoo.Core
             // This is important because state updates registered outside of a module graph context
             // should not affect subsequent module/initializer graph builds
             Shorokoo.Core.InternalGlobals.GetAndClearStateUpdates();
-            Shorokoo.Rng.GetAndClearPins();
 
             // Modules speak in value handles, not the internal graph node type. (Inputs are validated
             // per-parameter inside CreateInputParams.)
@@ -145,7 +144,12 @@ namespace Shorokoo.Core
             // Create input parameters based on the method signature
             var fnInputs = ModuleHelper.CreateInputParams(methodInfo.GetParameters());
 
+            // This method re-enters mid-trace whenever the body first-uses a sub-module or
+            // initializer whose Function is not yet cached, so per-trace state is scoped with
+            // push/pop (a destructive clear here would wipe the OUTER body's records): the
+            // looper context, and the Rng.Pin recording lists.
             LoopAPI.PushLooperContext();
+            Shorokoo.Rng.PushPinScope();
             try
             {
                 Variable[] fnOutputs;
@@ -283,6 +287,7 @@ namespace Shorokoo.Core
             }
             finally
             {
+                Shorokoo.Rng.PopPinScope();
                 LoopAPI.PopLooperContext();
             }
         }

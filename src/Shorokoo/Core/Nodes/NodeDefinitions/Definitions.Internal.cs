@@ -296,6 +296,16 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("iterationIndices", "T1", 1)
                 .Output("output", "T2", rank: "R"),
 
+            // SHRK_RNG_KEY_VECTOR: the model's compact RNG key vector (int64 [1|3|3+N]) plus
+            // the algorithm name and the expansion's init-stream count. No inputs; lowered to a
+            // plain CONSTANT at ONNX prep so every backend treats it as ordinary (unused) data.
+            Op(SHRK_RNG_KEY_VECTOR)
+                .Tensor<int64>("T1")
+                .AttributeTensor(AttrValue, "T1", "R")
+                .AttributeString(ShrkAttrRngAlgorithm)
+                .AttributeLong(ShrkAttrRngInitStreamCount)
+                .Output("keys", "T1", 1),
+
             // SHRK_RNG_SPLIT: index-based RNG key split, child = Bijection(key, counter: index)
             // under the named algorithm. Key = int64[2] (32-bit words). Lowered at ONNX export
             // to a call of the algorithm's non-inlined "split" function; QEE computes it host-side.

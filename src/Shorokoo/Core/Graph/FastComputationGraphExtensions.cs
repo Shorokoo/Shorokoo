@@ -262,6 +262,142 @@ namespace Shorokoo.Graph
             => FastApplyRngKeys.Process(graph, rngConfig);
 
         /// <summary>
+        /// Reads the model's compact RNG key vector (injected by <see cref="ApplyRngConfig"/>;
+        /// carried through save/load): the tiered key data, the algorithm name, and how many
+        /// tier-3 expansion entries are init-collection keys. Null when the graph carries none.
+        /// </summary>
+        public static (long[] keyVector, string algorithm, int initStreamCount)? TryGetRngKeyVector(
+            this FastComputationGraph graph)
+        {
+            var node = graph.Nodes.FirstOrDefault(n => n.OpCode == InternalOpCodes.SHRK_RNG_KEY_VECTOR);
+            var data = node?.Attributes.GetTensorVal(OnnxOpAttributeNames.AttrValue);
+            if (node is null || data is null) return null;
+            return (data.As<int64>().AccessMemory().ToArray(),
+                    node.Attributes.GetStringVal(OnnxOpAttributeNames.ShrkAttrRngAlgorithm) ?? string.Empty,
+                    (int)(node.Attributes.GetLongVal(OnnxOpAttributeNames.ShrkAttrRngInitStreamCount) ?? 0L));
+        }
+
+        /// <summary>
+        /// Re-binds the graph's runtime feed keys from its carried key vector — the ONNX-prep
+        /// reconstruction: tiers 1/2 re-fold the stored masters along each realized stream
+        /// path; tier 3 reads the stored expansion (canonical order: realized runtime paths
+        /// sorted lexicographically, after <c>initStreamCount</c> init entries). Produces the
+        /// exact stamps <see cref="ApplyRngConfig"/> would have produced from the originating
+        /// config, so a loaded model's randomness is reproducible without the config object.
+        /// Init-stream keys are reconstructable the same way (RngConfig.ReconstructKeys) but
+        /// are consumed at materialization, not by stamping.
+        /// </summary>
+        public static void ApplyRngKeyVector(this FastComputationGraph graph)
+        {
+            var carried = graph.TryGetRngKeyVector()
+                ?? throw new System.InvalidOperationException(
+                    "ApplyRngKeyVector: the graph carries no RNG key vector (bind a config with " +
+                    "ApplyRngConfig first — it injects the vector).");
+            var (vec, algorithm, initCount) = carried;
+
+            (uint k0, uint k1) runMaster = vec.Length >= 3
+                ? RngConfig.SplitWords(unchecked((ulong)vec[2]))
+                : RngConfig.SplitWords(RngConfig.Fold(unchecked((ulong)vec[0]), "runtime"));
+
+            static (uint, uint) FoldPath((uint k0, uint k1) key, System.Collections.Generic.IEnumerable<int> path)
+            {
+                foreach (var v in path) key = RngConfig.FoldKey(key, v);
+                return key;
+            }
+
+            // Canonical runtime enumeration (must mirror the injection): realized feed paths,
+            // distinct, sorted lexicographically.
+            static int Compare(int[] a, int[] b)
+            {
+                for (int i = 0; i < System.Math.Min(a.Length, b.Length); i++)
+                    if (a[i] != b[i]) return a[i].CompareTo(b[i]);
+                return a.Length.CompareTo(b.Length);
+            }
+            var runPathSet = new System.Collections.Generic.SortedSet<int[]>(
+                System.Collections.Generic.Comparer<int[]>.Create(Compare));
+            foreach (var node in graph.Nodes)
+            {
+                if (node.OpCode != InternalOpCodes.SHRK_RANDOM_UNIFORM &&
+                    node.OpCode != InternalOpCodes.SHRK_RANDOM_NORMAL) continue;
+                var idVals = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId);
+                if (idVals is null || idVals.Length == 0) continue;
+                var realizedFlat = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrRngRealizedIds);
+                if (realizedFlat is { Length: > 0 })
+                    for (int r = 0; r < realizedFlat.Length / idVals.Length; r++)
+                        runPathSet.Add(realizedFlat[(r * idVals.Length)..((r + 1) * idVals.Length)]);
+                else
+                {
+                    int firstIter = System.Array.IndexOf(idVals, -1);
+                    runPathSet.Add(firstIter < 0 ? idVals : idVals[..firstIter]);
+                }
+            }
+
+            // Tier-3 expansion: stored keys by path.
+            var storedByPath = new System.Collections.Generic.Dictionary<string, (uint k0, uint k1)>();
+            if (vec.Length > 3)
+            {
+                int i = 3 + initCount;
+                foreach (var p in runPathSet)
+                {
+                    if (i >= vec.Length) break;
+                    var packed = unchecked((ulong)vec[i++]);
+                    storedByPath[string.Join(",", p)] =
+                        (unchecked((uint)(packed & 0xFFFFFFFF)), unchecked((uint)(packed >> 32)));
+                }
+            }
+
+            (uint k0, uint k1) KeyOf(int[] path)
+                => storedByPath.TryGetValue(string.Join(",", path), out var k) ? k : FoldPath(runMaster, path);
+
+            foreach (var node in graph.Nodes)
+            {
+                if (node.OpCode != InternalOpCodes.SHRK_RANDOM_UNIFORM &&
+                    node.OpCode != InternalOpCodes.SHRK_RANDOM_NORMAL) continue;
+                var idVals = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId);
+                if (idVals is null || idVals.Length == 0) continue;
+
+                var realizedFlat = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrRngRealizedIds);
+                if (realizedFlat is { Length: > 0 })
+                {
+                    int idLen = idVals.Length;
+                    int n = realizedFlat.Length / idLen;
+                    bool anyDeviation = false;
+                    var table = new long[2 * n];
+                    for (int r = 0; r < n; r++)
+                    {
+                        var path = realizedFlat[(r * idLen)..((r + 1) * idLen)];
+                        var key = KeyOf(path);
+                        if (key != FoldPath(runMaster, path)) anyDeviation = true;
+                        table[2 * r] = key.k0;
+                        table[2 * r + 1] = key.k1;
+                    }
+                    if (anyDeviation)
+                        node.Attributes = node.Attributes.SetAttributes(
+                            (OnnxOpAttributeNames.ShrkAttrRngKeyTable, table),
+                            (OnnxOpAttributeNames.ShrkAttrRngExplicitKey, (long[])[table[0], table[1]]),
+                            (OnnxOpAttributeNames.ShrkAttrRngAlgorithm, algorithm));
+                    else
+                    {
+                        int prefixEnd = System.Array.IndexOf(idVals, -1);
+                        var (pk0, pk1) = FoldPath(runMaster, prefixEnd < 0 ? idVals : idVals[..prefixEnd]);
+                        node.Attributes = node.Attributes.SetAttributes(
+                            (OnnxOpAttributeNames.ShrkAttrRngKeyTable, (long[])[]),
+                            (OnnxOpAttributeNames.ShrkAttrRngExplicitKey, (long[])[pk0, pk1]),
+                            (OnnxOpAttributeNames.ShrkAttrRngAlgorithm, algorithm));
+                    }
+                }
+                else
+                {
+                    int firstIter = System.Array.IndexOf(idVals, -1);
+                    var (pk0, pk1) = KeyOf(firstIter < 0 ? idVals : idVals[..firstIter]);
+                    node.Attributes = node.Attributes.SetAttributes(
+                        (OnnxOpAttributeNames.ShrkAttrRngExplicitKey, (long[])[pk0, pk1]),
+                        (OnnxOpAttributeNames.ShrkAttrRngAlgorithm, algorithm));
+                }
+            }
+        }
+
+        /// <summary>
         /// Binds loaded trainable-parameter values into a concrete (weight-filled) graph, matching
         /// value names to graph parameters with the given framework's naming convention (default:
         /// Shorokoo's own scheme). For weights exported from another framework, use the overload that

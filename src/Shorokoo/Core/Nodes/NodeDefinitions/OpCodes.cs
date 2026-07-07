@@ -108,6 +108,13 @@ internal static class InternalOpCodes
     public const string SHRK_RNG_UNIFORM = "shrk_RngUniform";
 
     /// <summary>
+    /// The model's compact RNG key vector — a single parameter-like int64 tensor carrying the
+    /// randomness state (see RngConfig.BuildKeyVector: master / 3 masters / full expansion).
+    /// Injected by ApplyRngConfig; lowered to a plain CONSTANT at ONNX prep.
+    /// </summary>
+    public const string SHRK_RNG_KEY_VECTOR = "shrk_RngKeyVector";
+
+    /// <summary>
     /// Keyed deterministic normal draw N(mean, scale) of dynamic shape under the named
     /// algorithm (shrk_rng_algorithm attribute). Inputs: key int64[2], drawBase int64
     /// scalar, shape int64[r], mean f32, scale f32. See <see cref="SHRK_RNG_UNIFORM"/>.

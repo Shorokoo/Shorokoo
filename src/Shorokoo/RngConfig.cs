@@ -240,7 +240,7 @@ public sealed class RngConfig
         return (initKeys, runKeys);
     }
 
-    private static (uint k0, uint k1) SplitWords(ulong key)
+    internal static (uint k0, uint k1) SplitWords(ulong key)
         => ((uint)(key & 0xFFFFFFFF), (uint)(key >> 32));
 
     /// <summary>

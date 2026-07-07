@@ -298,6 +298,10 @@ public static class OnnxOpAttributeNames
     /// level of the feed's site id; flat row index = Σ iterationIndex[j] · stride[j].
     /// </summary>
     public const string ShrkAttrRngIterStrides = "shrk_rng_iter_strides";
+
+    /// <summary>On SHRK_RNG_KEY_VECTOR: how many leading expansion entries (after the 3
+    /// masters) are init-collection stream keys; the rest are runtime stream keys.</summary>
+    public const string ShrkAttrRngInitStreamCount = "shrk_rng_init_stream_count";
     public const string ShrkAttrRelativeModelId = "shrk_relative_model_id";
     public const string ShrkAttrInputType = "shrk_input_type";
     public const string ShrkAttrHyperparamIndex = "shrk_hyperparam_index";

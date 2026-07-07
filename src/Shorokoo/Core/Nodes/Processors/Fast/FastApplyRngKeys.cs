@@ -5,6 +5,7 @@ using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Core.Rng;
 using System;
 using System.Linq;
+using System.Collections.Generic;
 using static Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames;
 
 namespace Shorokoo.Core.Nodes.Processors.Fast
@@ -140,6 +141,63 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     string.Join(", ", unmatched) +
                     ". Available stream paths are listed by GetRngStreamReport(); overrides must " +
                     "use a reported path exactly.");
+
+            InjectKeyVector(graph, rngConfig, algorithmName, realizedPaths);
+        }
+
+        private static int ComparePaths(int[] a, int[] b)
+        {
+            for (int i = 0; i < Math.Min(a.Length, b.Length); i++)
+                if (a[i] != b[i]) return a[i].CompareTo(b[i]);
+            return a.Length.CompareTo(b.Length);
+        }
+
+        /// <summary>
+        /// Injects (or replaces) the model's compact RNG key vector — a single parameter-like
+        /// int64 tensor carrying the config's randomness state in the smallest of three tiers
+        /// (see <see cref="RngConfig.BuildKeyVector"/>). The tier-3 expansion enumerates init
+        /// streams (trainable-param ids) then runtime streams (realized feed paths), each
+        /// sorted lexicographically — the same canonical order reconstruction uses. Lowered to
+        /// a plain CONSTANT at ONNX prep; re-stamping with a different config replaces it.
+        /// </summary>
+        private static void InjectKeyVector(
+            FastComputationGraph graph, RngConfig rngConfig, string algorithmName,
+            HashSet<string> runtimePathKeys)
+        {
+            var initPaths = graph.Nodes
+                .Where(n => n.OpCode == InternalOpCodes.TRAINABLE_PARAM)
+                .Select(n => n.Attributes.GetIntsVal(ShrkAttrLocalModelId))
+                .Where(v => v is { Length: > 0 })
+                .Select(v => v!)
+                .OrderBy(v => v, Comparer<int[]>.Create(ComparePaths))
+                .ToList();
+            var runPaths = runtimePathKeys
+                .Select(k => k.Split(',').Select(int.Parse).ToArray())
+                .OrderBy(v => v, Comparer<int[]>.Create(ComparePaths))
+                .ToList();
+
+            var vector = rngConfig.BuildKeyVector(initPaths, runPaths);
+            var data = new OnnxTensorData<int64>(
+                new Shape(vector.Length),
+                Core.Utils.OnnxUtils.CreateTensorValue(new Shape(vector.Length), vector));
+
+            graph.Nodes.RemoveAll(n => n.OpCode == InternalOpCodes.SHRK_RNG_KEY_VECTOR);
+            var nodeKey = FastNodeKey.New();
+            var attrDefs = Definitions.NodeDefinitions[InternalOpCodes.SHRK_RNG_KEY_VECTOR].AttributeDefs;
+            graph.Nodes.Add(new FastNode
+            {
+                Key = nodeKey,
+                OpCode = InternalOpCodes.SHRK_RNG_KEY_VECTOR,
+                Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                    new System.Collections.Generic.Dictionary<string, object?>
+                    {
+                        [AttrValue] = data,
+                        [ShrkAttrRngAlgorithm] = algorithmName,
+                        [ShrkAttrRngInitStreamCount] = (long)initPaths.Count,
+                    }, attrDefs),
+                FullInputs = new System.Collections.Generic.Dictionary<string, System.Collections.Generic.List<FastTensorKey?>>(),
+                FullOutputs = { [""] = new System.Collections.Generic.List<FastTensorKey?> { new FastTensorKey(nodeKey, 0) } },
+            });
         }
     }
 }

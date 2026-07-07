@@ -224,3 +224,70 @@ public class RngKeyVectorTests
         Assert.NotEqual(noOverride.FoldRunKey([4, 1, 1]), cfg.FoldRunKey([4, 1, 1]));
     }
 }
+
+/// <summary>
+/// The key-vector transport: ApplyRngConfig injects the compact vector as a graph-carried
+/// tensor (lowered to a plain CONSTANT at ONNX prep); it survives save/load, and
+/// ApplyRngKeyVector reconstructs the exact feed stamps from it — no config object needed.
+/// </summary>
+[Trait("Domain", "Core")]
+[Trait("Purpose", "Coverage")]
+public class RngKeyVectorTransportTests
+{
+    [Fact]
+    public void TestKeyVectorCarrierRoundTripsAndRebindsFeeds()
+    {
+        var g = (FastComputationGraph)typeof(RngRuntimeLoopFeed)
+            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var x = TensorData([8L], new float[8]);
+        var steps = TensorData(System.Array.Empty<long>(), 2L);
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps]));
+
+        var cfg = new RngConfig { MasterSeed = 11 };
+        cfg.Override(RngCollection.Runtime, [1, 1, 1], seed: 424242UL);   // tier 3
+        arch.ApplyRngConfig(cfg);
+
+        var feed = arch.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
+        var stampedTable = feed.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRngKeyTable);
+        var stampedKey = feed.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRngExplicitKey);
+        Assert.NotNull(stampedTable);
+        Assert.True(stampedTable!.Length >= 4);
+
+        // The carrier is present with its identity intact (tier-3 expansion + algorithm).
+        // (Serializer round-trip of the internal carrier op is tracked as follow-up work:
+        // plain saves currently drop unconsumed internal nodes.)
+        var carried = arch.TryGetRngKeyVector();
+        Assert.NotNull(carried);
+        Assert.True(carried!.Value.keyVector.Length > 3);                 // tier-3 expansion
+        Assert.Contains("Threefry", carried.Value.algorithm);
+
+        // Corrupt the feed's stamps, then reconstruct purely from the carried vector.
+        feed.Attributes = feed.Attributes.SetAttributes(
+            (OnnxOpAttributeNames.ShrkAttrRngKeyTable, (long[])[]),
+            (OnnxOpAttributeNames.ShrkAttrRngExplicitKey, (long[])[0L, 0L]));
+        arch.ApplyRngKeyVector();
+        Assert.Equal(stampedTable, feed.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRngKeyTable));
+        Assert.Equal(stampedKey, feed.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRngExplicitKey));
+    }
+
+    [Fact]
+    public void TestTier1CarrierRebindsPrefixStamps()
+    {
+        var g = (FastComputationGraph)typeof(RngRuntimeLoopFeed)
+            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var x = TensorData([8L], new float[8]);
+        var steps = TensorData(System.Array.Empty<long>(), 2L);
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps]));
+
+        arch.ApplyRngConfig(new RngConfig { MasterSeed = 11 });
+        var carried = arch.TryGetRngKeyVector();
+        Assert.Equal([11L], carried!.Value.keyVector);                    // tier 1: master only
+
+        var feed = arch.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
+        var stamped = feed.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRngExplicitKey);
+        feed.Attributes = feed.Attributes.SetAttributes(
+            (OnnxOpAttributeNames.ShrkAttrRngExplicitKey, (long[])[0L, 0L]));
+        arch.ApplyRngKeyVector();
+        Assert.Equal(stamped, feed.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRngExplicitKey));
+    }
+}

@@ -29,6 +29,22 @@ public class NNLibraryCoverageTests
             Enumerable.Range(0, (int)total).Select(i => (object)(i * scale + offset)).ToArray());
     }
 
+    /// <summary>[i * scale + offset + curv * i² for i in 0..N) as a float32 TensorData — a QUADRATIC
+    /// ramp. A linear <see cref="RangeTensor"/> is degenerate for a frozen norm reference: every
+    /// per-(sample, channel)/group slice is a contiguous arithmetic run differing only by an offset,
+    /// and normalization's mean-subtraction annihilates that offset, so all slices standardize to the
+    /// IDENTICAL pattern — the output (and its collapsed golden) is then invariant under an internal
+    /// N/C transpose, which the reference can't catch. The i² term gives each slice a position-dependent
+    /// slope (the cross term 2·curv·base·k survives mean-subtraction), so slices standardize distinctly
+    /// and a transpose moves the output. Deterministic/portable (integer i², one float multiply).</summary>
+    private static TensorData CurvedTensor(long[] dims, float scale, float offset, float curv)
+    {
+        long total = 1;
+        foreach (var d in dims) total *= d;
+        return TensorData(DType.Float32, dims,
+            Enumerable.Range(0, (int)total).Select(i => (object)(i * scale + offset + curv * i * i)).ToArray());
+    }
+
     [Fact]
     public void TestLinearAndConvLayersCoverage()
     {
@@ -184,11 +200,13 @@ public class NNLibraryCoverageTests
         Assert.True(AutoTest.AdvancedTestGraph<NNGroupNormRank5Normalizes>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 4L, 2L, 2L, 2L], 0.5f, -8f)]));
 
-        // §7-2a affine:false == hand-built x̂ reference.
+        // §7-2a affine:false == frozen forward reference. Distinct-valued (quadratic) input so the
+        // per-slice patterns differ — a linear ramp makes every slice standardize identically, leaving
+        // the reference blind to an internal N/C transpose (all slices interchangeable).
         Assert.True(AutoTest.AdvancedTestGraph<NNInstanceNormAffineFalseMatchesManual>(
-            hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 3L, 4L, 4L], 0.4f, -3f)]));
+            hyperparamInputs: [], runtimeInputs: [CurvedTensor([2L, 3L, 4L, 4L], 0.4f, -3f, 0.05f)]));
         Assert.True(AutoTest.AdvancedTestGraph<NNGroupNormAffineFalseMatchesManual>(
-            hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 4L, 3L, 3L], 0.7f, -10f)]));
+            hyperparamInputs: [], runtimeInputs: [CurvedTensor([2L, 4L, 3L, 3L], 0.7f, -10f, 0.05f)]));
 
         // §7-3 GroupNorm(G=1) ≡ LayerNorm-over-CHW (rank-4).
         Assert.True(AutoTest.AdvancedTestGraph<NNGroupNormG1MatchesLayerNorm>(

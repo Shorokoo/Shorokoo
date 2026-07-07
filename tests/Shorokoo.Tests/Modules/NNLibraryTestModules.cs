@@ -648,9 +648,12 @@ public partial class NNGroupNormRank5Normalizes
 // discriminating value check is against an independent hand-built x̂ (reduce/
 // sqrt over the same region), NOT against the affine:true output. Relative-L1.
 
-/// <summary>§7-2(a) InstanceNorm(affine:false) forward output on RangeTensor([2,3,4,4],0.4,-3) at
+/// <summary>§7-2(a) InstanceNorm(affine:false) forward output on CurvedTensor([2,3,4,4],0.4,-3,0.05) at
 /// MasterSeed=0 must match the frozen reference. The old check re-ran (x−mean)/sqrt(var+eps) by hand
-/// (a tautology); the reference is now the layer's own frozen output. [2,3,4,4]=96 collapsed to 19.</summary>
+/// (a tautology); the reference is now the layer's own frozen output. The input is a DISTINCT-valued
+/// (quadratic) ramp, not a linear one: a linear ramp standardizes every (sample,channel) slice to the
+/// identical pattern, so the frozen reference would be blind to an internal N/C transpose; the quadratic
+/// gives each slice a distinct pattern so a transpose moves the output. [2,3,4,4]=96 collapsed to 19.</summary>
 [Module]
 public partial class NNInstanceNormAffineFalseMatchesManual
 {
@@ -659,17 +662,19 @@ public partial class NNInstanceNormAffineFalseMatchesManual
         var y = InstanceNorm.Call(Scalar(false), Scalar(1e-5f), x);   // [2,3,4,4] = 96
 
         // REFERENCE: golden — Shorokoo's own forward output, collapsed to 19 (self-generated).
-        var reference = Vector(1.3360841f, 0.67232716f, -1.1972327f, -1.1865988f, 0.08717178f, -0.039563358f, 0.30378217f, 1.6880355f, -0.3837786f, -0.57543916f, -0.59926677f, -0.38594338f, 1.7075194f, 0.2756397f, -0.046058156f, 0.10235089f, -1.2190765f, -0.44878995f, 0.6831514f);
+        var reference = Vector(1.2490876f, 0.64456594f, -1.2203515f, -1.2086581f, 0.14979805f, 0.0051061511f, 0.31833237f, 1.6107239f, -0.4773435f, -0.52412701f, -0.58257258f, -0.36030608f, 1.7623465f, 0.21758696f, -0.10315616f, 0.074702829f, -1.1945477f, -0.3857736f, 0.68630159f);
 
         var diff = (SelfCheck.Collapse(y, 96) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
 }
 
-/// <summary>§7-2(a) GroupNorm(G=2, affine:false) forward output on RangeTensor([2,4,3,3],0.7,-10) at
+/// <summary>§7-2(a) GroupNorm(G=2, affine:false) forward output on CurvedTensor([2,4,3,3],0.7,-10,0.05) at
 /// MasterSeed=0 must match the frozen reference. The old check re-ran the per-group
 /// (x−mean)/sqrt(var+eps) by hand (a tautology); the reference is now the layer's own frozen output.
-/// [2,4,3,3]=72 collapsed to 19.</summary>
+/// The input is a DISTINCT-valued (quadratic) ramp, not a linear one: a linear ramp standardizes every
+/// (sample,group) region to the identical pattern, so the frozen reference would be blind to an internal
+/// N/C transpose; the quadratic gives each region a distinct pattern. [2,4,3,3]=72 collapsed to 19.</summary>
 [Module]
 public partial class NNGroupNormAffineFalseMatchesManual
 {
@@ -678,7 +683,7 @@ public partial class NNGroupNormAffineFalseMatchesManual
         var y = GroupNorm.Call(Scalar(2L), Scalar(false), Scalar(1e-5f), x);   // [2,4,3,3] = 72
 
         // REFERENCE: golden — Shorokoo's own forward output, collapsed to 19 (self-generated).
-        var reference = Vector(0.69234604f, -0.39287788f, -0.46932963f, -0.40434188f, 0.66940963f, 0.14979811f, -0.035641022f, -0.1760686f, -0.27146143f, -0.12907046f, 0.2510864f, 0.9654f, -0.29913008f, -1.229528f, -0.28375554f, 0.41180307f, 0.07363802f, 1.9735041f, 1.1961175f);
+        var reference = Vector(0.59265316f, -0.40483442f, -0.44441506f, -0.38220644f, 0.70379376f, 0.16393512f, -0.073275648f, -0.24669781f, -0.29130843f, -0.055236947f, 0.26341963f, 0.93995595f, -0.34839317f, -1.2193623f, -0.28585726f, 0.43276089f, 0.16860867f, 2.0212572f, 1.1266559f);
 
         var diff = (SelfCheck.Collapse(y, 72) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);

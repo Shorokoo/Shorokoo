@@ -50,4 +50,42 @@ public class GroupNormStaticReshapeRegressionTests
     public void GroupNormOutputStaticReshapeLoadsAndRuns()
         => Assert.True(AutoTest.AdvancedTestGraph<GroupNormStaticReshapeRepro>(
             hyperparamInputs: [], runtimeInputs: [Range([2L, 4L, 3L, 3L], 0.7f, -10f)]));
+
+    /// <summary>
+    /// Same ORT ReshapeFusion crash, one Identity deeper: a STATEFUL module's output is
+    /// WITH_STATE_DEPS-wrapped, which the inference lowering turns into an IDENTITY sitting
+    /// between GroupNorm's dynamic restore reshape and the user's static reshape. ORT's
+    /// EliminateIdentity runs in the same L1 loop as ReshapeFusion, so the crashing adjacency
+    /// re-forms inside ORT unless FastComposeContiguousReshapes walks through same-scope
+    /// identities too.
+    /// </summary>
+    [Fact]
+    public void StatefulGroupNormOutputStaticReshapeLoadsAndRuns()
+        => Assert.True(AutoTest.AdvancedTestGraph<StatefulGroupNormStaticReshapeRepro>(
+            hyperparamInputs: [], runtimeInputs: [Range([2L, 4L, 3L, 3L], 0.7f, -10f)]));
+}
+
+// Stateful GroupNorm: the StateUpdate forces the module's output to be wrapped in
+// WITH_STATE_DEPS — lowered to an IDENTITY between the dynamic reshape and its consumers.
+[Module]
+public partial class _StatefulGroupNormInner
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)   // [2, 4, 3, 3]
+    {
+        var y = GroupNorm.Call(Scalar(2L), Scalar(false), Scalar(1e-5f), x);
+        var counter = Shorokoo.Tests.Modules.InitRunningMean.Init(x.ShapeTensor());
+        Globals.StateUpdate(counter, counter + Scalar(1f));
+        return y;
+    }
+}
+
+[Module]
+public partial class StatefulGroupNormStaticReshapeRepro
+{
+    public static Scalar<bit> Inline(Tensor<float32> x)
+    {
+        var y = _StatefulGroupNormInner.Call(x);
+        var flat = y.Reshape([Scalar(72L)]);              // STATIC target — the trigger
+        return SelfCheck.Nan(flat) < Scalar(1f);          // finite output => true; self-checking
+    }
 }

@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Shorokoo.Core.Graph;
@@ -38,6 +39,18 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         {
             var nodeByKey = graph.Nodes.ToDictionary(n => n.Key);
 
+            // Positional scope of every node: the innermost enclosing OPEN node's key (null =
+            // top level). Prep-stage graphs keep OPEN…CLOSE spans contiguous and properly
+            // nested, so a linear sweep suffices.
+            var scopeOf = new Dictionary<FastNodeKey, FastNodeKey?>();
+            var openStack = new Stack<FastNodeKey>();
+            foreach (var n in graph.Nodes)
+            {
+                if (n.OpCode is OpCodes.LOOP_CLOSE or OpCodes.IF_CLOSE) openStack.Pop();
+                scopeOf[n.Key] = openStack.Count > 0 ? openStack.Peek() : null;
+                if (n.OpCode is OpCodes.LOOP_OPEN or OpCodes.IF_OPEN) openStack.Push(n.Key);
+            }
+
             foreach (var node in graph.Nodes)
             {
                 if (node.OpCode != OpCodes.RESHAPE) continue;
@@ -46,17 +59,28 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (!IsLiteralComposableShape(nodeByKey, shapeKey)) continue;
 
                 // Walk up through metadata-only producers; every step preserves the element
-                // sequence this reshape reinterprets.
+                // sequence this reshape reinterprets. A SAME-SCOPE IDENTITY (e.g. a lowered
+                // state-update link) is transparent too: ONNX Runtime's EliminateIdentity
+                // removes it in the same L1 optimization loop as ReshapeFusion, so declining
+                // to compose across it would leave the crashing dynamic-reshape→static-reshape
+                // adjacency reachable (Shorokoo/Shorokoo#10). Cross-scope identities — the
+                // outer-scope wrapping FastAddIdentityForOuterScopeValues inserts — remain
+                // barriers, so composition never crosses a scope boundary.
+                var nodeScope = scopeOf[node.Key];
                 var root = dataKey;
                 while (nodeByKey.TryGetValue(root.FastNodeKey, out var producer)
-                       && root.OutputIndex == 0
-                       && (producer.OpCode == OpCodes.RESHAPE
-                           || producer.OpCode == OpCodes.SQUEEZE
-                           || producer.OpCode == OpCodes.UNSQUEEZE)
-                       && producer.FullInputs.TryGetValue("", out var producerInputs)
-                       && producerInputs.Count >= 1
-                       && producerInputs[0] is { } upstream)
+                       && root.OutputIndex == 0)
                 {
+                    bool composable = producer.OpCode == OpCodes.RESHAPE
+                        || producer.OpCode == OpCodes.SQUEEZE
+                        || producer.OpCode == OpCodes.UNSQUEEZE;
+                    bool transparentIdentity = producer.OpCode == OpCodes.IDENTITY
+                        && scopeOf.TryGetValue(producer.Key, out var producerScope)
+                        && Nullable.Equals(producerScope, nodeScope);
+                    if (!composable && !transparentIdentity) break;
+                    if (!producer.FullInputs.TryGetValue("", out var producerInputs)
+                        || producerInputs.Count < 1
+                        || producerInputs[0] is not { } upstream) break;
                     root = upstream;
                 }
 

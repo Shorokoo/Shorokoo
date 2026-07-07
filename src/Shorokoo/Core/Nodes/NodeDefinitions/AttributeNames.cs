@@ -327,6 +327,13 @@ public static class OnnxOpAttributeNames
     public const string ShrkMetaIdentityNodeEthereal = "EtherealIdentity";
     public const string ShrkMetaNodeIdentifierTemplate = "IdentifierTemplate";
     public const string ShrkMetaIsTrainable = "IsTrainable";
+
+    /// <summary>Reserved initializer name of the model's compact RNG key vector.</summary>
+    public const string ShrkRngKeysTensorName = "shorokoo.rng.keys";
+    /// <summary>Metadata key (initializer + model level) naming the RNG algorithm.</summary>
+    public const string ShrkMetaRngAlgorithm = "shorokoo.rng.algorithm";
+    /// <summary>Metadata key: how many tier-3 expansion entries are init-collection keys.</summary>
+    public const string ShrkMetaRngInitStreamCount = "shorokoo.rng.init_stream_count";
     
     // NodeKey metadata - stores the GUID for stable node identification
     public const string ShrkMetaNodeKey = "NodeKey";

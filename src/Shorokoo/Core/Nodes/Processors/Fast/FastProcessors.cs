@@ -87,6 +87,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             foreach (var outputKey in graph.Outputs)
                 EnqueueTensor(outputKey);
 
+            // The model's compact RNG key vector is intentional graph-carried metadata with
+            // no consumers — reachability does not apply to it; keep it alive explicitly.
+            foreach (var node in graph.Nodes)
+                if (node.OpCode == InternalOpCodes.SHRK_RNG_KEY_VECTOR && reachable.Add(node.Key))
+                    worklist.Enqueue(node.Key);
+
             // Graph inputs must keep their producer (MODEL_*INPUT) nodes alive even
             // if no path from any output reaches them — otherwise graph.Inputs ends
             // up referencing a tensor produced by a node that no longer exists.

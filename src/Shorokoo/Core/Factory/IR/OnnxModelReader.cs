@@ -722,6 +722,37 @@ namespace Shorokoo.Core.Factory.IR
 
             foreach (var initializer in initializers)
             {
+                // The model's compact RNG key vector rides as a reserved-name initializer;
+                // rebuild its carrier node (SHRK_RNG_KEY_VECTOR) so TryGetRngKeyVector /
+                // ApplyRngKeyVector work on the loaded graph.
+                if (initializer.Name == OnnxOpAttributeNames.ShrkRngKeysTensorName)
+                {
+                    var rngAlgorithm = initializer.MetadataProps
+                        .FirstOrDefault(x => x.Key == OnnxOpAttributeNames.ShrkMetaRngAlgorithm)?.Value ?? string.Empty;
+                    var initCountStr = initializer.MetadataProps
+                        .FirstOrDefault(x => x.Key == OnnxOpAttributeNames.ShrkMetaRngInitStreamCount)?.Value;
+                    var kvDefs = Definitions.NodeDefinitions[InternalOpCodes.SHRK_RNG_KEY_VECTOR].AttributeDefs;
+                    var kvAttrs = OnnxCSharpAttributes.FromCSharpVals(
+                        new Dictionary<string, object?>
+                        {
+                            [OnnxOpAttributeNames.AttrValue] = CreateTensorData(initializer),
+                            [OnnxOpAttributeNames.ShrkAttrRngAlgorithm] = rngAlgorithm,
+                            [OnnxOpAttributeNames.ShrkAttrRngInitStreamCount] =
+                                long.TryParse(initCountStr, out var cnt) ? cnt : 0L,
+                        }, kvDefs);
+                    var kvNodeKey = FastNodeKey.New();
+                    var kvKey = new FastTensorKey(kvNodeKey, 0);
+                    results.Add((initializer, kvKey, new FastNode
+                    {
+                        Key = kvNodeKey,
+                        OpCode = InternalOpCodes.SHRK_RNG_KEY_VECTOR,
+                        Attributes = kvAttrs,
+                        FullOutputs = { [""] = new List<FastTensorKey?> { kvKey } },
+                        FriendlyName = initializer.Name,
+                    }));
+                    continue;
+                }
+
                 var identifierTemplate = initializer.MetadataProps
                     .FirstOrDefault(x => x.Key == ShrkMetaNodeIdentifierTemplate)?.Value;
                 var isTrainableStr = initializer.MetadataProps

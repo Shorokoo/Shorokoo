@@ -253,13 +253,17 @@ public class RngKeyVectorTransportTests
         Assert.NotNull(stampedTable);
         Assert.True(stampedTable!.Length >= 4);
 
-        // The carrier is present with its identity intact (tier-3 expansion + algorithm).
-        // (Serializer round-trip of the internal carrier op is tracked as follow-up work:
-        // plain saves currently drop unconsumed internal nodes.)
-        var carried = arch.TryGetRngKeyVector();
+        // The carrier survives a save/load round trip: it rides the ONNX file as the
+        // reserved-name initializer (with per-initializer metadata) and the loader rebuilds
+        // the carrier node from it.
+        var data = CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: true);
+        var loaded = CompressedFormatUtils.LoadFastGraphFromBinary(data, isCompressed: true);
+        var carried = loaded.TryGetRngKeyVector();
         Assert.NotNull(carried);
         Assert.True(carried!.Value.keyVector.Length > 3);                 // tier-3 expansion
         Assert.Contains("Threefry", carried.Value.algorithm);
+        Assert.Equal(arch.TryGetRngKeyVector()!.Value.keyVector, carried.Value.keyVector);
+        Assert.Equal(arch.TryGetRngKeyVector()!.Value.initStreamCount, carried.Value.initStreamCount);
 
         // Corrupt the feed's stamps, then reconstruct purely from the carried vector.
         feed.Attributes = feed.Attributes.SetAttributes(

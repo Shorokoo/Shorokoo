@@ -118,7 +118,42 @@ namespace Shorokoo.Core.Factory
             // inputs/outputs so the loader can reconstruct DType identity.
             AddTensorStructMetadata(model, prepFast, tensorInfoLookup);
 
+            // ----- 7. Mirror the model's compact RNG key vector (when a config was bound)
+            // into the ONNX file as a named initializer with per-initializer metadata, plus
+            // model-level metadata_props — the loader rebuilds the carrier node from it.
+            AttachRngKeyVector(model, fastGraph);
+
             return model;
+        }
+
+        private static void AttachRngKeyVector(ModelProto model, FastComputationGraph fastGraph)
+        {
+            var carrier = fastGraph.Nodes.FirstOrDefault(
+                n => n.OpCode == InternalOpCodes.SHRK_RNG_KEY_VECTOR);
+            var data = carrier?.Attributes.GetTensorVal(OnnxOpAttributeNames.AttrValue);
+            if (carrier is null || data is null) return;
+
+            var vec = data.As<int64>().AccessMemory().ToArray();
+            var algorithm = carrier.Attributes.GetStringVal(OnnxOpAttributeNames.ShrkAttrRngAlgorithm) ?? string.Empty;
+            var initCount = carrier.Attributes.GetLongVal(OnnxOpAttributeNames.ShrkAttrRngInitStreamCount) ?? 0L;
+
+            var tp = new TensorProto
+            {
+                Name = OnnxOpAttributeNames.ShrkRngKeysTensorName,
+                data_type = (int)TensorProto.DataType.Int64,
+                Dims = [vec.Length],
+                Int64Datas = vec,
+            };
+            tp.MetadataProps.Add(new StringStringEntryProto
+            { Key = OnnxOpAttributeNames.ShrkMetaRngAlgorithm, Value = algorithm });
+            tp.MetadataProps.Add(new StringStringEntryProto
+            { Key = OnnxOpAttributeNames.ShrkMetaRngInitStreamCount, Value = initCount.ToString() });
+            model.Graph.Initializers.Add(tp);
+
+            model.MetadataProps.Add(new StringStringEntryProto
+            { Key = OnnxOpAttributeNames.ShrkMetaRngAlgorithm, Value = algorithm });
+            model.MetadataProps.Add(new StringStringEntryProto
+            { Key = OnnxOpAttributeNames.ShrkMetaRngInitStreamCount, Value = initCount.ToString() });
         }
 
         /// <summary>

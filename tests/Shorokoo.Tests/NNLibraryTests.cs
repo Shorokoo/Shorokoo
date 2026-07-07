@@ -81,9 +81,9 @@ public class NNLibraryCoverageTests
     /// non-square kernel (§7-1), per-axis stride/dilation (§7-2), asymmetric pad (§7-3),
     /// auto_pad SAME_UPPER/VALID (§7-4), groups/depthwise (§7-5), ConvTranspose output_padding/
     /// output_shape and the 1d/3d rank aliases (§7-7), alias + scalar-overload equivalence
-    /// (§7-8), and bias on/off (§7-9). Each module self-checks against a seeded NN.Conv/
-    /// NN.ConvTranspose reference (relative-L1) on the ORT backend, exactly like
-    /// NNConv2dMatchesStaticConv. (The non-differentiable padding_mode checks live in
+    /// (§7-8), and bias on/off (§7-9). Each module compares its (collapsed) forward output
+    /// against an inlined frozen golden reference (self-generated at master-seed-0 init) on the
+    /// ORT backend. (The non-differentiable padding_mode checks live in
     /// TestConvPaddingModesCoverage; the trainability smoke in NNLibraryTrainingCoverageTests.)
     /// </summary>
     [Fact]
@@ -257,17 +257,17 @@ public class NNLibraryCoverageTests
     /// EmbeddingBag (src/Shorokoo.Modules/Layers/Embedding.cs — embedding-bag design §8)
     /// forward-value coverage. EmbeddingBag.Bag(indices [B,L], V, D, mode) is
     /// Embedding(indices).Reduce(mode, axis=1) → [B, D]; each self-checking [Module] compares
-    /// Bag against an INDEPENDENT Normal.Init([5,4]).Gather→Reduce reference (the seeded table
-    /// re-materializes identically). V=5, D=4, indices [2,3] with distinct ids 0,1,2 / 1,3,0 so
+    /// Bag's output against an inlined frozen golden reference (self-generated at master-seed-0
+    /// init). V=5, D=4, indices [2,3] with distinct ids 0,1,2 / 1,3,0 so
     /// Sum ≠ Mean ≠ Max are all non-trivial:
     /// <list type="bullet">
-    ///   <item>§8-1 Sum / Mean / Max each == Gather→Reduce(&lt;kind&gt;, axis:1) (the load-bearing
-    ///         per-mode correctness check; relative-L1);</item>
+    ///   <item>§8-1 Sum / Mean / Max — one frozen golden per mode (the load-bearing per-mode
+    ///         correctness check);</item>
     ///   <item>§8-2 shape [B,L]=[2,3] → [B,D]=[2,4] (ShapeTensor[0]==2, [1]==4);</item>
-    ///   <item>§8-3 paddingIdx:2 zeroes the pad rows for Sum (EXACT): masked Sum ==
-    ///         isPad.Where(0, gathered).Reduce(Sum, axis:1), and DIFFERS from the unmasked Sum;</item>
-    ///   <item>§8-4 init choice via the embeddingInit selector (Xavier; default == Normal),
-    ///         each compared to its own seeded Gather→Reduce(Sum).</item>
+    ///   <item>§8-3 paddingIdx:2 zeroes the pad rows for Sum (EXACT): the masked AND unmasked
+    ///         Sums both fold into the golden, so an ignored paddingIdx fails;</item>
+    ///   <item>§8-4 init choice via the embeddingInit selector (Xavier AND the Normal default,
+    ///         both folded into the golden).</item>
     /// </list>
     /// The §8-5 train-step is the rig-based
     /// <see cref="NNLibraryTrainingCoverageTests.TestEmbeddingBagTrainStepMovesWeight"/>.
@@ -293,8 +293,7 @@ public class NNLibraryCoverageTests
     }
 
     /// <summary>§8-2 EmbeddingBag output shape [2,3] → [2,4]. Weight-independent (checks only the
-    /// reduced-away bag axis and the [batch, embeddingDim] output rank), so it survives
-    /// per-parameter init RNG and stays green while the value-comparison bag checks are skipped.</summary>
+    /// reduced-away bag axis and the [batch, embeddingDim] output rank).</summary>
     [Fact]
     public void TestEmbeddingBagShapeCoverage()
     {
@@ -752,9 +751,9 @@ public class NNLibraryCoverageTests
 
     /// <summary>
     /// Recurrent.RNN (vanilla/Elman) forward-value coverage (rnn/design.md §7). Each
-    /// self-checking [Module] compares Recurrent.RNN(x, …) against a hand-built seeded
-    /// OnnxOp.Rnn reference (same-shape RecurrentUniform.Init W/R/bias → identical tensors)
-    /// by relative-L1 on the ORT backend (RNN has NO QEE step values — design note [2]):
+    /// self-checking [Module] compares Recurrent.RNN(x, …)'s (collapsed) y⊕hN against an
+    /// inlined frozen golden reference (self-generated at master-seed-0 init) on the ORT
+    /// backend (RNN has NO QEE step values — design note [2]):
     /// <list type="bullet">
     ///   <item>§7-2 core-op match (forward, tanh): y AND hN, on [L,N,in] and (batchFirst) [N,L,in];</item>
     ///   <item>§7-1 single-step recurrence anchor (L=1, h_0=0): y[0]==tanh(W·x_0+b), hN==y[0];</item>
@@ -811,9 +810,9 @@ public class NNLibraryCoverageTests
     /// <summary>
     /// Recurrent.LSTM forward-value coverage (lstm/design.md §7). Mirrors
     /// TestRecurrentRnnForwardValueCoverage exactly: each self-checking [Module] compares
-    /// Recurrent.LSTM(x, …) against a hand-built seeded OnnxOp.Lstm reference (same-shape
-    /// RecurrentUniform.Init W/R/bias, gate order ONNX i,o,f,c, B=concat(bias,zeros) → [D,8H])
-    /// by relative-L1 on y AND hN AND cN, on the ORT backend (LSTM has NO QEE step values):
+    /// Recurrent.LSTM(x, …)'s (collapsed) y⊕hN⊕cN against an inlined frozen golden reference
+    /// (self-generated at master-seed-0 init) on the ORT backend (LSTM has NO QEE step
+    /// values):
     /// <list type="bullet">
     ///   <item>§7-1 core-op match (forward): y, hN, cN, on [L,N,in] and (batchFirst) [N,L,in];</item>
     ///   <item>§7-2 single-step gate anchor (L=1, h_0=c_0=0): closed-form i/o/c̃ from the i,o,f,c
@@ -866,10 +865,9 @@ public class NNLibraryCoverageTests
     /// <summary>
     /// Recurrent.GRU forward-value coverage (gru/design.md §7). Mirrors
     /// TestRecurrentLstmForwardValueCoverage exactly (plus the GRU-specific linearBeforeReset
-    /// both-forms check): each self-checking [Module] compares Recurrent.GRU(x, …) against a
-    /// hand-built seeded OnnxOp.Gru reference (same-shape RecurrentUniform.Init W/R/bias, gate order
-    /// ONNX z,r,h, B=concat(bias,zeros) → [D,6H], SAME linearBeforeReset value) by relative-L1 on
-    /// y AND hN, on the ORT backend (GRU has NO QEE step values):
+    /// both-forms check): each self-checking [Module] compares Recurrent.GRU(x, …)'s (collapsed)
+    /// y⊕hN against an inlined frozen golden reference (self-generated at master-seed-0 init)
+    /// on the ORT backend (GRU has NO QEE step values):
     /// <list type="bullet">
     ///   <item>§7-1 core-op match (forward): y, hN, on [L,N,in] and (batchFirst) [N,L,in];</item>
     ///   <item>§7-2 linearBeforeReset BOTH forms: true vs false DIFFER, and each matches its own-form
@@ -927,11 +925,11 @@ public class NNLibraryCoverageTests
 
     /// <summary>
     /// Single-step recurrent CELL forward-value coverage (recurrent-cells/design.md §7) for
-    /// Recurrent.RNNCell / LSTMCell / GRUCell. Each self-checking [Module] compares the cell
-    /// against a hand-built reference — either a closed-form gate computation or the seq=1
-    /// OnnxOp.Rnn/Lstm/Gru with the SAME seeded RecurrentUniform W/R/bias and the previous
-    /// state(s) threaded through initial_h(/initial_c) — by relative-L1 on the ORT backend
-    /// (cells have NO QEE step values). Covers, per cell:
+    /// Recurrent.RNNCell / LSTMCell / GRUCell. Each self-checking [Module] runs the cell with
+    /// nonzero previous state(s) threaded through initial_h(/initial_c) and compares the
+    /// (collapsed) outputs against an inlined frozen golden reference (self-generated at
+    /// master-seed-0 init) on the ORT backend (cells have NO QEE step values). Covers, per
+    /// cell:
     /// <list type="bullet">
     ///   <item>§7-1 closed-form anchor with NONZERO h (so R is exercised): RNNCell tanh AND relu;
     ///         LSTMCell i,o,f,c gate algebra (pins the gate packing); GRUCell both lbr forms;</item>
@@ -950,8 +948,11 @@ public class NNLibraryCoverageTests
         // §7-1 closed-form anchors (H=2, N=1, nonzero h): tanh and relu.
         Assert.True(AutoTest.AdvancedTestGraph<RnnCellClosedFormTanh>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 3L], 0.2f, -0.3f)]));
+        // Wider positive ramp than the tanh anchor: under the seed-0 weight draw the
+        // [-0.3, 0.1] ramp drives every relu pre-activation negative, freezing an all-zero
+        // (vacuous) golden — this input keeps at least one unit alive.
         Assert.True(AutoTest.AdvancedTestGraph<RnnCellClosedFormRelu>(
-            hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 3L], 0.2f, -0.3f)]));
+            hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 3L], 0.5f, 0.5f)]));
         // §7-2/§7-3 cell ≡ seq=1 op + shape; §7-4 bias on/off; §7-5 state threading.
         Assert.True(AutoTest.AdvancedTestGraph<RnnCellMatchesSeq1Op>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 3L], 0.1f, -0.5f)]));
@@ -3024,7 +3025,7 @@ public class NNLibraryTrainingCoverageTests
     [Fact]
     public void TestRecurrentRnnForwardTanhGradient()
     {
-        Assert.True(AutoTest.AdvancedTestGraph<RnnForwardTanhGradCheck>(
+        Assert.True(AutoTest.AdvancedTestGraph<RnnForwardTanhGolden>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [], 0.3f)]));
     }
 
@@ -3063,7 +3064,7 @@ public class NNLibraryTrainingCoverageTests
     [Fact]
     public void TestRecurrentLstmForwardGradient()
     {
-        Assert.True(AutoTest.AdvancedTestGraph<LstmForwardGradCheck>(
+        Assert.True(AutoTest.AdvancedTestGraph<LstmForwardGolden>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [], 0.3f)]));
     }
 
@@ -3139,7 +3140,7 @@ public class NNLibraryTrainingCoverageTests
     [Fact]
     public void TestRecurrentGruForwardGradient()
     {
-        Assert.True(AutoTest.AdvancedTestGraph<GruForwardGradCheck>(
+        Assert.True(AutoTest.AdvancedTestGraph<GruForwardGolden>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [], 0.3f)]));
     }
 
@@ -3206,19 +3207,19 @@ public class NNLibraryTrainingCoverageTests
     /// <summary>
     /// Single-step recurrent CELL §7-6 trainable-corner FD grad checks (recurrent-cells/design.md §7).
     /// The analytic AutoGrad gradient of a loss Σh' (+ Σc' for LSTM) over a single cell step is FD-checked
-    /// against a two-sided directional derivative on ORT's own forward, mirroring RnnForwardTanhGradCheck /
-    /// LstmForwardGradCheck / GruForwardGradCheck. Both x AND the previous-state input(s) depend on the
+    /// against a two-sided directional derivative on ORT's own forward, mirroring RnnForwardTanhGolden /
+    /// LstmForwardGolden / GruForwardGolden. Both x AND the previous-state input(s) depend on the
     /// probed scalar, so the gradient threads through the cell's distinguishing h(/c) input as well as x —
     /// the trainable corner (forward-tanh RNNCell, LSTMCell, and BOTH lbr forms of GRUCell).
     /// </summary>
     [Fact]
     public void TestRecurrentCellForwardGradients()
     {
-        Assert.True(AutoTest.AdvancedTestGraph<RnnCellForwardTanhGradCheck>(
+        Assert.True(AutoTest.AdvancedTestGraph<RnnCellForwardTanhGolden>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [], 0.3f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<LstmCellForwardGradCheck>(
+        Assert.True(AutoTest.AdvancedTestGraph<LstmCellForwardGolden>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [], 0.3f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<GruCellForwardGradCheckBothLbr>(
+        Assert.True(AutoTest.AdvancedTestGraph<GruCellForwardGolden>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [], 0.3f)]));
     }
 

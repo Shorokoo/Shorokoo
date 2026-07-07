@@ -180,12 +180,12 @@ public partial class RoPEClosedFormPositionOne
 }
 
 // ---------------------------------------------------------------------------
-// Self-checking [Module]s for TransformerDecoderLayer: a shape check plus two
-// reasonable-output checks. The decoder composes LayerNorm + two MultiHeadAttention
-// sublayers + a GELU FFN; a full closed-form re-derivation would just re-implement
-// that composition, so instead these run the layer end-to-end and assert the output
-// is sane (Sanity.Reasonable). The FFN weight training path is covered by the
-// TransformerDecoderLayer training-rig smoke test.
+// Self-checking [Module]s for TransformerDecoderLayer. The decoder composes
+// LayerNorm + two MultiHeadAttention sublayers + a GELU FFN; a full closed-form
+// re-derivation would just re-implement that composition, so instead these run the
+// layer end-to-end and compare the output against an inlined frozen golden
+// reference (self-generated at master-seed-0 init). The FFN weight training path
+// is covered by the TransformerDecoderLayer training-rig smoke test.
 // ---------------------------------------------------------------------------
 
 /// <summary>

@@ -56,6 +56,20 @@ public sealed class RngConfig
     /// <summary>The master seed folded into every non-overridden stream key. Default 0.</summary>
     public ulong MasterSeed { get; init; }
 
+    /// <summary>
+    /// Explicit init-collection sub-master. When set, every trainable-parameter stream folds
+    /// from this key instead of <c>Fold(MasterSeed, "init")</c> — re-rolling all weights while
+    /// runtime streams stay put. Null (default) derives from <see cref="MasterSeed"/>.
+    /// </summary>
+    public ulong? InitMasterSeed { get; init; }
+
+    /// <summary>
+    /// Explicit runtime-collection sub-master. When set, every runtime feed stream folds from
+    /// this key instead of <c>Fold(MasterSeed, "runtime")</c> — re-seeding all feeds while
+    /// parameter init stays put. Null (default) derives from <see cref="MasterSeed"/>.
+    /// </summary>
+    public ulong? RunMasterSeed { get; init; }
+
     /// <summary>The bit generator. Default <see cref="RngAlgorithm.Threefry2x32"/>.</summary>
     public RngAlgorithm Algorithm { get; init; } = RngAlgorithm.Threefry2x32;
 
@@ -134,10 +148,97 @@ public sealed class RngConfig
     /// Every trainable-parameter stream folds from this along the parameter's ModelId path,
     /// so overriding the init sub-master re-rolls all weights while runtime streams stay put.
     /// </summary>
-    internal (uint k0, uint k1) InitMasterKey => SplitWords(Fold(MasterSeed, "init"));
+    internal (uint k0, uint k1) InitMasterKey => SplitWords(InitMasterSeed ?? Fold(MasterSeed, "init"));
 
     /// <summary>The runtime-collection master key (Dropout masks, sampling, noise): words of <c>Fold(MasterSeed, "runtime")</c>.</summary>
-    internal (uint k0, uint k1) RunMasterKey => SplitWords(Fold(MasterSeed, "runtime"));
+    internal (uint k0, uint k1) RunMasterKey => SplitWords(RunMasterSeed ?? Fold(MasterSeed, "runtime"));
+
+    /// <summary>
+    /// Serializes this config's randomness state as the compact RNG key vector a model carries
+    /// (as a single parameter-like tensor), in the smallest of three tiers:
+    /// <list type="bullet">
+    ///   <item><b>[1]</b> — the master seed alone, when every key derives from it;</item>
+    ///   <item><b>[3]</b> — master + init master + run master, when a sub-master was set
+    ///     explicitly but no per-stream override exists;</item>
+    ///   <item><b>[3 + N]</b> — the three masters followed by every realized stream's resolved
+    ///     key (init streams then runtime streams, in the caller's order — the stream report's
+    ///     enumeration), when any per-stream override exists.</item>
+    /// </list>
+    /// ONNX-prep reconstruction is the inverse: tier 1/2 re-fold the masters along each
+    /// realized path; tier 3 reads the expanded keys directly. Keys are (k0, k1) 32-bit word
+    /// pairs packed as one long each.
+    /// </summary>
+    internal long[] BuildKeyVector(
+        IEnumerable<IReadOnlyList<int>> initStreamPaths,
+        IEnumerable<IReadOnlyList<int>> runStreamPaths)
+    {
+        static long Pack((uint k0, uint k1) key) => unchecked((long)(((ulong)key.k1 << 32) | key.k0));
+
+        if (_overrides.Count == 0)
+        {
+            if (InitMasterSeed is null && RunMasterSeed is null)
+                return [unchecked((long)MasterSeed)];
+            return [unchecked((long)MasterSeed), Pack(InitMasterKey), Pack(RunMasterKey)];
+        }
+
+        var vec = new List<long>
+        {
+            unchecked((long)MasterSeed), Pack(InitMasterKey), Pack(RunMasterKey)
+        };
+        foreach (var p in initStreamPaths) vec.Add(Pack(FoldInitKey(p)));
+        foreach (var p in runStreamPaths) vec.Add(Pack(FoldRunKey(p)));
+        return [.. vec];
+    }
+
+    /// <summary>
+    /// Reconstructs every realized stream's key from a compact key vector produced by
+    /// <see cref="BuildKeyVector"/>, given the same stream enumeration (init paths then run
+    /// paths, same order). Tier 1/2 re-fold from the stored masters; tier 3 reads the stored
+    /// expansion. Returns (initKeys, runKeys) as (k0, k1) word pairs.
+    /// </summary>
+    internal static ((uint k0, uint k1)[] initKeys, (uint k0, uint k1)[] runKeys) ReconstructKeys(
+        long[] keyVector,
+        IReadOnlyList<IReadOnlyList<int>> initStreamPaths,
+        IReadOnlyList<IReadOnlyList<int>> runStreamPaths)
+    {
+        static (uint k0, uint k1) Unpack(long packed)
+            => (unchecked((uint)((ulong)packed & 0xFFFFFFFF)), unchecked((uint)((ulong)packed >> 32)));
+
+        if (keyVector.Length >= 3 + initStreamPaths.Count + runStreamPaths.Count
+            && keyVector.Length > 3)
+        {
+            // Tier 3: stored expansion.
+            var init = new (uint, uint)[initStreamPaths.Count];
+            var run = new (uint, uint)[runStreamPaths.Count];
+            for (int i = 0; i < init.Length; i++) init[i] = Unpack(keyVector[3 + i]);
+            for (int i = 0; i < run.Length; i++) run[i] = Unpack(keyVector[3 + init.Length + i]);
+            return (init, run);
+        }
+
+        (uint, uint) initMaster, runMaster;
+        if (keyVector.Length >= 3)
+        {
+            initMaster = Unpack(keyVector[1]);
+            runMaster = Unpack(keyVector[2]);
+        }
+        else
+        {
+            var master = unchecked((ulong)keyVector[0]);
+            initMaster = SplitWords(Fold(master, "init"));
+            runMaster = SplitWords(Fold(master, "runtime"));
+        }
+
+        static (uint, uint) FoldPath((uint k0, uint k1) key, IReadOnlyList<int> path)
+        {
+            foreach (var v in path) key = FoldKey(key, v);
+            return key;
+        }
+        var initKeys = new (uint, uint)[initStreamPaths.Count];
+        var runKeys = new (uint, uint)[runStreamPaths.Count];
+        for (int i = 0; i < initKeys.Length; i++) initKeys[i] = FoldPath(initMaster, initStreamPaths[i]);
+        for (int i = 0; i < runKeys.Length; i++) runKeys[i] = FoldPath(runMaster, runStreamPaths[i]);
+        return (initKeys, runKeys);
+    }
 
     private static (uint k0, uint k1) SplitWords(ulong key)
         => ((uint)(key & 0xFFFFFFFF), (uint)(key >> 32));

@@ -155,3 +155,72 @@ public class RngCoreTests
         Assert.Equal(cfg.FoldInitKey([1, 1]), otherMaster.FoldInitKey([1, 1]));
     }
 }
+
+/// <summary>
+/// The compact RNG key vector — the single parameter-like tensor a model carries to make its
+/// randomness state self-contained. Three tiers: [master] when everything derives from the
+/// master seed; [master, initMaster, runMaster] when a sub-master was set explicitly; the
+/// 3 masters + the full per-stream expansion when any per-stream override exists. ONNX-prep
+/// reconstruction must reproduce every stream key bit-exactly in all three tiers.
+/// </summary>
+[Trait("Domain", "Core")]
+[Trait("Purpose", "Coverage")]
+public class RngKeyVectorTests
+{
+    private static readonly int[][] InitPaths = [[1, 1], [2, 1], [2, 2]];
+    private static readonly int[][] RunPaths = [[3], [4, 0, 1], [4, 1, 1]];
+
+    private static void AssertReconstructs(RngConfig cfg, long[] vec)
+    {
+        var (init, run) = RngConfig.ReconstructKeys(vec, InitPaths, RunPaths);
+        for (int i = 0; i < InitPaths.Length; i++)
+            Assert.Equal(cfg.FoldInitKey(InitPaths[i]), init[i]);
+        for (int i = 0; i < RunPaths.Length; i++)
+            Assert.Equal(cfg.FoldRunKey(RunPaths[i]), run[i]);
+    }
+
+    [Fact]
+    public void TestTier1MasterOnly()
+    {
+        var cfg = new RngConfig { MasterSeed = 42 };
+        var vec = cfg.BuildKeyVector(InitPaths, RunPaths);
+        Assert.Single(vec);
+        Assert.Equal(42L, vec[0]);
+        AssertReconstructs(cfg, vec);
+    }
+
+    [Fact]
+    public void TestTier2SubMasters()
+    {
+        // Explicit run sub-master: feeds re-seed, init stays derived from the master.
+        var cfg = new RngConfig { MasterSeed = 42, RunMasterSeed = 777 };
+        var vec = cfg.BuildKeyVector(InitPaths, RunPaths);
+        Assert.Equal(3, vec.Length);
+        AssertReconstructs(cfg, vec);
+
+        // The sub-master genuinely changed the runtime keys and left init untouched.
+        var baseline = new RngConfig { MasterSeed = 42 };
+        Assert.NotEqual(baseline.FoldRunKey(RunPaths[0]), cfg.FoldRunKey(RunPaths[0]));
+        Assert.Equal(baseline.FoldInitKey(InitPaths[0]), cfg.FoldInitKey(InitPaths[0]));
+
+        var cfgInit = new RngConfig { MasterSeed = 42, InitMasterSeed = 888 };
+        AssertReconstructs(cfgInit, cfgInit.BuildKeyVector(InitPaths, RunPaths));
+    }
+
+    [Fact]
+    public void TestTier3FullExpansion()
+    {
+        // A single per-stream override (one loop iteration's feed) forces the full expansion,
+        // and reconstruction reads the stored keys — override included — bit-exactly.
+        var cfg = new RngConfig { MasterSeed = 42, RunMasterSeed = 777 };
+        cfg.Override(RngCollection.Runtime, [4, 1, 1], seed: 424242UL);
+        var vec = cfg.BuildKeyVector(InitPaths, RunPaths);
+        Assert.Equal(3 + InitPaths.Length + RunPaths.Length, vec.Length);
+        AssertReconstructs(cfg, vec);
+
+        // Sibling streams keep their derived keys; only the overridden one deviates.
+        var noOverride = new RngConfig { MasterSeed = 42, RunMasterSeed = 777 };
+        Assert.Equal(noOverride.FoldRunKey([4, 0, 1]), cfg.FoldRunKey([4, 0, 1]));
+        Assert.NotEqual(noOverride.FoldRunKey([4, 1, 1]), cfg.FoldRunKey([4, 1, 1]));
+    }
+}

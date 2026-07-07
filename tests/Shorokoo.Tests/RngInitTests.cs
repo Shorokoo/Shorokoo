@@ -90,3 +90,48 @@ public class RngInitTests
             }
     }
 }
+
+/// <summary>
+/// The init-value derivation pinned to FROZEN constants — the cross-version seed contract.
+/// Every other init test is relational (the system compared against itself), so a silent
+/// change anywhere in the chain — master → "init" sub-master fold → per-path FoldInitKey →
+/// HostRng (counterBase, draw rounds) → uniform transform → Kaiming scaling — would keep
+/// them all green while breaking every seed anyone has ever shared. These values were
+/// generated once from the implementation that defines the derivation; a red here means
+/// "MasterSeed 123 no longer produces the weights it used to" and must never be fixed by
+/// regenerating the constants without a deliberate, breaking-change decision.
+/// </summary>
+[Trait("Domain", "Core")]
+[Trait("Purpose", "Coverage")]
+public class RngInitFrozenDerivationTests
+{
+    [Fact]
+    public void TestInitKeyDerivationIsFrozen()
+    {
+        // Layer 1: the key derivation alone (fold order, the "init" label, sub-master wiring).
+        var cfg = new RngConfig { MasterSeed = 123 };
+        Assert.Equal((0x0177f47cu, 0x33e150fcu), cfg.FoldInitKey([1, 1]));
+        Assert.Equal((0x3c6c3147u, 0x2a93ecfcu), cfg.FoldInitKey([2, 1]));
+    }
+
+    [Fact]
+    public void TestInitValuesAreFrozen()
+    {
+        // Layer 2: the full materialized values (draw composition: counterBase, rounds,
+        // uniform transform, ordinal scheme, initializer scaling). REFERENCE: golden.
+        float[] expected0 = [0.30900666f, 0.6994194f, 0.08134546f, -0.33324182f, 0.37910292f, 1.0430968f, 1.1605477f, -0.09467988f, 1.2190907f, 0.10304924f, 0.94080746f, -0.7929816f, -0.56461143f, -0.6191869f, 0.02709632f, 0.8262475f];
+        float[] expected1 = [-0.17985144f, -0.28237903f, 0.14574882f, 0.9324704f, 0.6254746f, -0.6462647f, 0.06555341f, 0.7868881f, 0.7384043f, -0.21305309f, -0.88358283f, 0.10607847f, -0.1497983f, -1.006346f, -0.48929685f, 0.80844414f];
+
+        var g = RngInitTwoLinears.ComputationGraph;
+        var sample = TensorData([4L, 4L], System.Linq.Enumerable.Repeat(1f, 16).ToArray());
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([sample]));
+        var pl = arch.InitializeTrainableParams(rngConfig: new RngConfig { MasterSeed = 123 });
+        var ws = pl.ModelParams
+            .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
+            .Where(v => v.Length == 16).ToArray();
+
+        Assert.Equal(2, ws.Length);
+        Assert.Equal(expected0, ws[0]);   // weight at ModelId [1, 1]
+        Assert.Equal(expected1, ws[1]);   // weight at ModelId [2, 1]
+    }
+}

@@ -132,11 +132,6 @@ namespace Shorokoo.Core
                 methodInfo = ResolveGenericMethodWithPlaceholders(methodInfo, out genericConstraints);
             }
 
-            // Clear any leftover state updates from previous invocations to prevent state leakage
-            // This is important because state updates registered outside of a module graph context
-            // should not affect subsequent module/initializer graph builds
-            Shorokoo.Core.InternalGlobals.GetAndClearStateUpdates();
-
             // Modules speak in value handles, not the internal graph node type. (Inputs are validated
             // per-parameter inside CreateInputParams.)
             ModuleHelper.RejectVariableParam(methodInfo.ReturnType);
@@ -147,9 +142,12 @@ namespace Shorokoo.Core
             // This method re-enters mid-trace whenever the body first-uses a sub-module or
             // initializer whose Function is not yet cached, so per-trace state is scoped with
             // push/pop (a destructive clear here would wipe the OUTER body's records): the
-            // looper context, and the Rng.Pin recording lists.
+            // looper context, the Rng.Pin recording lists, and the StateUpdate registrations.
+            // Pushing also hands this build empty lists, so records made outside any module
+            // graph context never leak into it.
             LoopAPI.PushLooperContext();
             Shorokoo.Rng.PushPinScope();
+            Shorokoo.Core.InternalGlobals.PushStateUpdateScope();
             try
             {
                 Variable[] fnOutputs;
@@ -287,6 +285,7 @@ namespace Shorokoo.Core
             }
             finally
             {
+                Shorokoo.Core.InternalGlobals.PopStateUpdateScope();
                 Shorokoo.Rng.PopPinScope();
                 LoopAPI.PopLooperContext();
             }

@@ -25,6 +25,9 @@ namespace Shorokoo.Core
         [ThreadStatic]
         private static List<(Variable original, Variable updated)>? _stateUpdatePairs;
 
+        [ThreadStatic]
+        private static Stack<List<(Variable original, Variable updated)>?>? _stateUpdateScopes;
+
         /// <summary>
         /// Gets the current state update pairs collection, creating it if necessary.
         /// </summary>
@@ -71,6 +74,28 @@ namespace Shorokoo.Core
         /// </summary>
         internal static bool HasPendingStateUpdates
             => _stateUpdatePairs != null && _stateUpdatePairs.Count > 0;
+
+        /// <summary>
+        /// Opens a fresh state-update registration scope for one body trace, saving the current
+        /// list. The graph builder RE-ENTERS mid-trace whenever a body first-uses a sub-module or
+        /// initializer whose Function is not yet cached; a destructive clear at build entry would
+        /// silently drop the OUTER body's already-registered updates — and with them the
+        /// WITH_STATE_DEPS output wrap (cache-order-dependently). Save/restore keeps every build
+        /// isolated without losing the enclosing trace's registrations — the same discipline
+        /// <c>LoopAPI.PushLooperContext</c> and <c>Rng.PushPinScope</c> apply across the same
+        /// re-entrancy.
+        /// </summary>
+        internal static void PushStateUpdateScope()
+        {
+            (_stateUpdateScopes ??= new Stack<List<(Variable, Variable)>?>()).Push(_stateUpdatePairs);
+            _stateUpdatePairs = null;
+        }
+
+        /// <summary>Closes the current state-update scope, restoring the enclosing trace's registrations.</summary>
+        internal static void PopStateUpdateScope()
+        {
+            _stateUpdatePairs = _stateUpdateScopes!.Pop();
+        }
 
         // Every kind is now the single non-generic Variable, built directly from the runtime DType +
         // kind + rank — no per-output CallGeneric/MakeGenericType reflection round-trip.

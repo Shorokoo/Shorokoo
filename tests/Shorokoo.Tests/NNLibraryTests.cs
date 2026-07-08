@@ -232,6 +232,9 @@ public class NNLibraryCoverageTests
     {
         Assert.True(AutoTest.AdvancedTestGraph<NNDropoutChecks>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 8L], 0.5f, 1f)]));
+        // ratio == 1 edge: train mode is exactly all zeros (never NaN), eval stays identity.
+        Assert.True(AutoTest.AdvancedTestGraph<NNDropoutRatioOneAllZeros>(
+            hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 8L], 0.5f, 1f)]));
         Assert.True(AutoTest.AdvancedTestGraph<NNEmbeddingMatchesGather>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Int64, [3L], 0L, 1L, 0L)]));
         Assert.True(AutoTest.AdvancedTestGraph<NNLeakyReLUAndELUClosedForm>(

@@ -880,6 +880,27 @@ public partial class NNDropoutChecks
     }
 }
 
+/// <summary>
+/// Dropout at ratio == 1 (drop everything): training mode is exactly all zeros — never NaN
+/// (the survivor rescale keep/(1−ratio) is 0/0 there and is gated to the all-zero mask;
+/// PyTorch's p = 1 behavior) — and eval mode stays the exact identity. A NaN anywhere would
+/// poison the penalty sum, so this self-check cannot pass vacuously.
+/// </summary>
+[Module]
+public partial class NNDropoutRatioOneAllZeros
+{
+    public static Scalar<bit> Inline(Tensor<float32> x)
+    {
+        var trainY = Dropout.Call(Scalar(1.0f), Scalar(true), x);
+        var trainPen = trainY.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+
+        var evalY = Dropout.Call(Scalar(1.0f), Scalar(false), x);
+        var evalPen = (evalY - x).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+
+        return trainPen + evalPen < Scalar(1e-6f);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SpatialDropout (channel-wise dropout) coverage — src/Shorokoo.Modules/Layers/
 // Dropout.cs. ONNX Dropout in TRAINING mode is QEE-value-blocked (random draw →

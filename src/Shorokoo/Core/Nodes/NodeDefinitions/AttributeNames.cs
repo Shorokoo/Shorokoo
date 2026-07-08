@@ -268,40 +268,25 @@ public static class OnnxOpAttributeNames
     public const string ShrkAttrRngAlgorithm = "shrk_rng_algorithm";
 
     /// <summary>
-    /// The resolved stream key ([k0, k1] 32-bit words as two longs) an RngConfig stamped on a
-    /// SHRK_RANDOM_* feed. Pure metadata: stamping changes no graph structure, so a different
-    /// config can re-stamp at any time; the ONNX-prep lowering reads it to emit the keyed
-    /// deterministic draw (absent = ONNX random fallback).
-    /// </summary>
-    public const string ShrkAttrRngExplicitKey = "shrk_rng_explicit_key";
-
-    /// <summary>
     /// The feed's REALIZED stream ids, enumerated at concretization by the same QEE pass that
     /// realizes trainable-param ids: the site's ModelId with every <c>-1</c> iteration slot
     /// filled per observed loop iteration, flattened (id length × N streams, lexicographic by
-    /// iteration). Present only on SHRK_RANDOM_* nodes of a concrete architecture; makes the
-    /// stream report static and every stream individually addressable by RngConfig.Override.
+    /// iteration). Present on every id-bearing SHRK_RANDOM_* node of a concrete architecture
+    /// (enumeration failure is a hard concretization error — the concreteness contract);
+    /// makes the stream report static and every stream individually addressable by
+    /// RngConfig.Override. Structural (stage-of-concretization) metadata: never derived from
+    /// an RngConfig — key derivation reads the graph's SHRK_RNG_KEY_VECTOR carrier at lowering.
     /// </summary>
     public const string ShrkAttrRngRealizedIds = "shrk_rng_realized_ids";
 
     /// <summary>
-    /// Per-stream resolved keys ([k0, k1] per realized id, flattened 2N longs, same order as
-    /// <see cref="ShrkAttrRngRealizedIds"/>) stamped when at least one of the feed's realized
-    /// streams carries a per-stream override — the in-graph derivation chain cannot express a
-    /// single overridden iteration, so the lowering selects from this table by flattened
-    /// iteration index instead.
+    /// The per-level iteration counts of the feed's enumerated iteration space (one count per
+    /// <c>-1</c> level of the site id, <c>max observed index + 1</c> each). The lowering sizes
+    /// the feed's dense key table to Π counts and computes the runtime row index as
+    /// Σ iterationIndex[j] · stride[j] with strides the suffix products of these counts.
+    /// Structural metadata, like <see cref="ShrkAttrRngRealizedIds"/>.
     /// </summary>
-    public const string ShrkAttrRngKeyTable = "shrk_rng_key_table";
-
-    /// <summary>
-    /// Row strides for indexing <see cref="ShrkAttrRngKeyTable"/>: one stride per <c>-1</c>
-    /// level of the feed's site id; flat row index = Σ iterationIndex[j] · stride[j].
-    /// </summary>
-    public const string ShrkAttrRngIterStrides = "shrk_rng_iter_strides";
-
-    /// <summary>On SHRK_RNG_KEY_VECTOR: how many leading expansion entries (after the 3
-    /// masters) are init-collection stream keys; the rest are runtime stream keys.</summary>
-    public const string ShrkAttrRngInitStreamCount = "shrk_rng_init_stream_count";
+    public const string ShrkAttrRngIterCounts = "shrk_rng_iter_counts";
     public const string ShrkAttrRelativeModelId = "shrk_relative_model_id";
     public const string ShrkAttrInputType = "shrk_input_type";
     public const string ShrkAttrHyperparamIndex = "shrk_hyperparam_index";
@@ -332,8 +317,6 @@ public static class OnnxOpAttributeNames
     public const string ShrkRngKeysTensorName = "shorokoo.rng.keys";
     /// <summary>Metadata key (initializer + model level) naming the RNG algorithm.</summary>
     public const string ShrkMetaRngAlgorithm = "shorokoo.rng.algorithm";
-    /// <summary>Metadata key: how many tier-3 expansion entries are init-collection keys.</summary>
-    public const string ShrkMetaRngInitStreamCount = "shorokoo.rng.init_stream_count";
     
     // NodeKey metadata - stores the GUID for stable node identification
     public const string ShrkMetaNodeKey = "NodeKey";

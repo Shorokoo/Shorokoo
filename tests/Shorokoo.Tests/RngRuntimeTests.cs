@@ -92,13 +92,13 @@ public class RngRuntimeTests
     }
 
     [Fact]
-    public void TestRngConfigRebindsByRestampingWithoutGraphChange()
+    public void TestRngConfigRebindsInPlaceWithoutGraphChange()
     {
-        // Binding an RngConfig stamps each feed's resolved stream key as an ATTRIBUTE on the
-        // SHRK_RANDOM node — no opcode, input, or node-count change — so a different master
-        // seed can be re-bound on the SAME already-concrete model, after the fact, by
-        // re-stamping. The structural rewrite to the keyed draw happens only on the clone
-        // taken at ONNX prep, never on this graph.
+        // Binding an RngConfig writes the graph's single key-vector carrier node — no feed
+        // is touched — so a different master seed can be re-bound on the SAME
+        // already-concrete model, after the fact, by replacing that one node. The
+        // structural rewrite to the keyed draw happens only on the clone taken at ONNX
+        // prep, never on this graph.
         var g = (FastComputationGraph)typeof(RtLoweredUniform)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
@@ -113,7 +113,7 @@ public class RngRuntimeTests
         var underSeed1 = Run();
 
         concrete.ApplyRngConfig(new RngConfig { MasterSeed = 2 });
-        Assert.Equal(nodeCount, concrete.Nodes.Count);   // stamping is structure-free
+        Assert.Equal(nodeCount, concrete.Nodes.Count);   // re-binding replaces one node
         Assert.Contains(concrete.Nodes, n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
         var underSeed2 = Run();
         Assert.NotEqual(underSeed1, underSeed2);         // new master -> new stream
@@ -124,25 +124,20 @@ public class RngRuntimeTests
     }
 
     [Fact]
-    public void TestSplitExplicitKeyAttributeOverridesParentKeyInput()
+    public void TestSplitDerivesChildKeyFromParentKeyInput()
     {
-        // The split-side override hook: a SHRK_RNG_SPLIT stamped with shrk_rng_explicit_key
-        // ignores its parent_rng_key input and folds from the stamped key instead — the
-        // same override contract the config stamps on consumer draw ops.
+        // SHRK_RNG_SPLIT folds its parent key input with the index — bit-exact with the host
+        // bijection. The split function is the versioned in-graph form of the key tree's
+        // derivation primitive (the lowering itself derives keys host-side from the carrier).
         var parentKey = Vector(1L, 2L);
         var split = Shorokoo.Core.Nodes.NodeDefinitions.InternalOp.RngSplit(
             parentKey, Scalar(7L), Shorokoo.Core.Rng.RngAlgorithms.Default);
         var g = new FastComputationGraph([], [split]);
 
-        var splitNode = g.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RNG_SPLIT);
-        splitNode.Attributes = splitNode.Attributes.SetAttributes(
-            (Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRngExplicitKey,
-             (long[])[100, 200]));
-
         var childWords = ComputeContext.Default.Execute(g)[0]
             .ToTensorData().As<int64>().AccessMemory().ToArray();
-        var (x0, x1) = Threefry2x32.Bijection(7u, 0u, 100u, 200u);
-        Assert.Equal(new long[] { x0, x1 }, childWords);
+        var (x0, x1) = Threefry2x32.Bijection(7u, 0u, 1u, 2u);
+        Assert.Equal((long[])[x0, x1], childWords);
     }
 
     [Fact]

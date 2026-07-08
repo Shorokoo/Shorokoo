@@ -403,8 +403,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     // stream keys ride the same ModelId tree as params/sub-modules) but carry
                     // no identifier template. Like params, they thread an iteration-indices
                     // input, so a feed inside a loop takes a slot under the loop's own id
-                    // space (with the -1 iteration placeholder) — realized at runtime by
-                    // splitting the stream key on the iteration index (see FastLowerRandomOps).
+                    // space (with the -1 iteration placeholder) — its per-iteration streams
+                    // are enumerated at concretization and the runtime iteration index selects
+                    // the stream's key-table row (see FastLowerRandomOps).
                     var feedIterationIndices = ScopeOf(fastNode);
                     int? feedLocalSlot = sparseLocalSlotOf.TryGetValue(fastNode, out var fs) ? fs : null;
                     var feedModelId = AllocateLoopModelIds(
@@ -3187,9 +3188,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <c>-1</c> iteration slots are filled per observed loop iteration (the same loop
         /// history that realizes trainable-param ids), and the resulting id list — sorted
         /// lexicographically by iteration so a flat index of Σ iter[j]·stride[j] addresses it —
-        /// is stamped on the node together with the per-level strides. A feed whose iteration
-        /// input QEE could not resolve is left unstamped and keeps the legacy prefix-key +
-        /// in-graph-split derivation.
+        /// is recorded on the node together with the per-level iteration counts (structural
+        /// metadata the key-derivation lowering reads). A feed whose iteration input QEE could
+        /// not resolve is a hard error: per the concreteness contract there is no dynamic
+        /// stream derivation to fall back to.
         /// </summary>
         private static void RealizeRngFeedStreams(
             FastComputationGraph graph, Dictionary<FastTensorKey, IRuntimeTensor> store)
@@ -3203,17 +3205,26 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 int depth = idVals.Count(v => v == -1);
                 List<long[]> realized;
-                long[] strides;
+                long[] counts;
                 if (depth == 0)
                 {
                     realized = [[.. idVals.Select(v => (long)v)]];
-                    strides = [];
+                    counts = [];
                 }
                 else
                 {
+                    // Static ModelIds are what makes an architecture concrete: a feed whose
+                    // per-iteration stream set cannot be enumerated here would have no static
+                    // stream identity, so failure is a hard error — exactly like an
+                    // unresolvable TRAINABLE_PARAM_ID_REF above — never a silent fallback.
                     var iterInput = node.Inputs.Count > 2 ? node.Inputs[2] : null;
                     if (iterInput is null || !store.TryGetValue(iterInput.Value, out var raw)
-                        || raw is not RuntimeTensor rt) continue;
+                        || raw is not RuntimeTensor rt)
+                        throw new FastPipelineUnsupportedException(
+                            "RealizeRngFeedStreams: QEE could not resolve the iteration indices " +
+                            $"of the runtime random feed at ModelId [{string.Join(", ", idVals)}] " +
+                            "(integer data unavailable), so its per-iteration RNG streams cannot " +
+                            "be enumerated. A concrete architecture requires a static stream set.");
 
                     var seen = new HashSet<string>();
                     var iterVectors = new List<long[]>();
@@ -3224,7 +3235,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         if (clean.Length != depth) continue;
                         if (seen.Add(string.Join(",", clean))) iterVectors.Add(clean);
                     }
-                    if (iterVectors.Count == 0) continue;
+                    // Zero observed iterations (the loop never ran under the concretization
+                    // inputs): realize the single all-zero grid cell as padding so the stream
+                    // set — and the lowering's key table — is never empty. It is a validly
+                    // derived stream; under valid use of the artifact it is simply never drawn.
+                    if (iterVectors.Count == 0) iterVectors.Add(new long[depth]);
 
                     // Lexicographic iteration order so flat index = Σ iter[j]·stride[j].
                     iterVectors.Sort((a, b) =>
@@ -3233,11 +3248,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                             if (a[j] != b[j]) return a[j].CompareTo(b[j]);
                         return 0;
                     });
-                    var counts = new long[depth];
+                    counts = new long[depth];
                     for (int j = 0; j < depth; j++) counts[j] = iterVectors.Max(v => v[j]) + 1;
-                    strides = new long[depth];
-                    long acc = 1;
-                    for (int j = depth - 1; j >= 0; j--) { strides[j] = acc; acc *= counts[j]; }
 
                     realized = new List<long[]>(iterVectors.Count);
                     foreach (var iv in iterVectors)
@@ -3255,7 +3267,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     realized[r].CopyTo(flat, r * idVals.Length);
                 node.Attributes = node.Attributes.SetAttributes(
                     (OnnxOpAttributeNames.ShrkAttrRngRealizedIds, flat),
-                    (OnnxOpAttributeNames.ShrkAttrRngIterStrides, strides));
+                    (OnnxOpAttributeNames.ShrkAttrRngIterCounts, counts));
             }
         }
     }

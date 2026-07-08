@@ -26,20 +26,16 @@ internal sealed class ShrkRngSplitOp : QuickOp
     {
         var key = inputs[0];
         var index = inputs[1];
-        var outShape = new Shape(new long[] { 2 });
+        var outShape = new Shape([2]);
 
-        // An explicit-key stamp overrides the parent key input (same override contract as
-        // on the draw ops; see FastLowerRandomOps).
-        var keyWords = attrs.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRngExplicitKey) is { Length: 2 } stamped
-            ? stamped
-            : key?.IntData is { Length: 2 } k ? new[] { k[0], k[1] } : null;
+        long[]? keyWords = key?.IntData is { Length: 2 } k ? [k[0], k[1]] : null;
 
         if (keyWords is not null && index?.IntData is { Length: 1 } i)
         {
             var (x0, x1) = Threefry2x32.Bijection(
                 (uint)(ulong)i[0], 0u, (uint)(ulong)keyWords[0], (uint)(ulong)keyWords[1]);
             return [RuntimeTensorFactory.Create(DType.Int64, outShape)
-                with { IntData = ImmutableArray.Create(new long[] { x0, x1 }) }];
+                with { IntData = [x0, x1] }];
         }
 
         // Key or index value unavailable: shape-only result.

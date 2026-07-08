@@ -107,6 +107,27 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 collectedOutputKeys.Add(outputKey);
             }
 
+            // Fail-loud override validation, mirroring the Runtime-side check at bind
+            // (FastBindRngConfig): a Params override that matches no parameter of this graph
+            // would otherwise be a silent no-op — the exact re-keying hazard explicit seeding
+            // exists to prevent.
+            if (rngConfig is not null)
+            {
+                var paramPaths = collectedModelIds
+                    .Select(id => string.Join(",", id.Vals))
+                    .ToHashSet();
+                var unmatched = rngConfig.OverrideKeys
+                    .Where(k => k.collection == RngCollection.Params && !paramPaths.Contains(k.pathKey))
+                    .Select(k => $"[{k.pathKey}]")
+                    .ToArray();
+                if (unmatched.Length > 0)
+                    throw new System.InvalidOperationException(
+                        "RngConfig.Override(Params, ...) matches no trainable parameter of this " +
+                        "graph: " + string.Join(", ", unmatched) +
+                        ". Parameter stream paths are listed by GetRngStreamReport(); overrides " +
+                        "must use a reported path exactly.");
+            }
+
             if (collectedOutputKeys.Count == 0)
                 return ImmutableDictionary<ModelId, TensorData>.Empty;
 

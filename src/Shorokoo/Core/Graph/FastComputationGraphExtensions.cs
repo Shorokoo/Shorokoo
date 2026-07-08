@@ -37,6 +37,19 @@ namespace Shorokoo.Graph
         /// every trainable parameter becomes visible at the top level. This is the prerequisite step
         /// for <see cref="ToConcreteModel(FastComputationGraph)"/>, <see cref="InitializeTrainableParams"/>,
         /// and <see cref="GetConcreteModelParamInfos"/>.
+        ///
+        /// <para><b>The concreteness contract: static ModelIds.</b> After this call, every
+        /// ModelId-based component of the graph is statically known — trainable parameters, RNG
+        /// streams (every runtime feed's per-iteration stream set is enumerated here, with loop
+        /// slots filled from the iterations observed under <paramref name="inputHints"/>), and
+        /// every other id-addressed consumer. That static id space <em>is</em> what makes the
+        /// architecture concrete. Some of it derives from input hints that were not constant
+        /// folded; executing the concrete artifact with inputs that would produce ModelIds that
+        /// did not exist at concretization (e.g. driving a loop past the iteration space
+        /// enumerated here) is <em>invalid use</em> — such ids are not re-derived at runtime,
+        /// and anything enumerated per-id (parameter storage, RNG stream tables) has no entry
+        /// for them. Enumeration failures are therefore hard build errors, never silent
+        /// fallbacks (see <c>FastPipelineUnsupportedException</c>).</para>
         /// </summary>
         /// <param name="graph">The module graph to lower (e.g. <c>MyModel.ComputationGraph</c>).</param>
         /// <param name="inputHints">Sample inputs (names + shapes/values) used as shape hints and as
@@ -249,153 +262,38 @@ namespace Shorokoo.Graph
         }
 
         /// <summary>
-        /// Binds <paramref name="rngConfig"/> to the graph's runtime random feeds by stamping
-        /// each feed's resolved stream key (the runtime master folded along the feed's ModelId
-        /// path) as an attribute on the feed node. Stamping changes no graph structure —
-        /// re-invoking with a different config re-binds all randomness in place, even on an
-        /// already-concrete model — and the stamped key only takes structural effect at ONNX
-        /// prep, where the feed lowers to the keyed deterministic draw (unstamped feeds lower
-        /// to the ONNX random-op fallback). Works on any graph whose ModelIds are absolute:
-        /// a concrete architecture, a concrete model, or a training-rig step graph.
+        /// Binds <paramref name="rngConfig"/> to the graph by validating it against the
+        /// graph's realized stream set (fail-loud — see <see cref="RngConfig.Override"/>) and
+        /// writing the config's randomness state as the graph's single RNG key-vector carrier,
+        /// the source of truth all key derivation reads. Binding changes nothing else —
+        /// re-invoking with a different config re-binds all randomness by replacing that one
+        /// node, even on an already-concrete model — and takes structural effect only at ONNX
+        /// prep, where each feed's keys are derived from the carrier plus the feed's
+        /// structural attributes and the feed lowers to the keyed deterministic draw (with no
+        /// carrier, feeds lower to the ONNX random-op fallback). Because the carrier rides the
+        /// graph — including through save/load — a loaded model's randomness is reproducible
+        /// with no config object. Works on any graph whose RNG streams were realized at
+        /// concretization: a concrete architecture, a concrete model, or a training-rig step
+        /// graph.
         /// </summary>
         public static void ApplyRngConfig(this FastComputationGraph graph, RngConfig rngConfig)
-            => FastApplyRngKeys.Process(graph, rngConfig);
+            => FastBindRngConfig.Process(graph, rngConfig);
 
         /// <summary>
         /// Reads the model's compact RNG key vector (injected by <see cref="ApplyRngConfig"/>;
-        /// carried through save/load): the tiered key data, the algorithm name, and how many
-        /// tier-3 expansion entries are init-collection keys. Null when the graph carries none.
+        /// carried through save/load): the tiered key data and the algorithm name. Null when
+        /// the graph carries none (no config bound).
         /// </summary>
-        public static (long[] keyVector, string algorithm, int initStreamCount)? TryGetRngKeyVector(
+        public static (long[] keyVector, string algorithm)? TryGetRngKeyVector(
             this FastComputationGraph graph)
         {
             var node = graph.Nodes.FirstOrDefault(n => n.OpCode == InternalOpCodes.SHRK_RNG_KEY_VECTOR);
             var data = node?.Attributes.GetTensorVal(OnnxOpAttributeNames.AttrValue);
             if (node is null || data is null) return null;
             return (data.As<int64>().AccessMemory().ToArray(),
-                    node.Attributes.GetStringVal(OnnxOpAttributeNames.ShrkAttrRngAlgorithm) ?? string.Empty,
-                    (int)(node.Attributes.GetLongVal(OnnxOpAttributeNames.ShrkAttrRngInitStreamCount) ?? 0L));
+                    node.Attributes.GetStringVal(OnnxOpAttributeNames.ShrkAttrRngAlgorithm) ?? string.Empty);
         }
 
-        /// <summary>
-        /// Re-binds the graph's runtime feed keys from its carried key vector — the ONNX-prep
-        /// reconstruction: tiers 1/2 re-fold the stored masters along each realized stream
-        /// path; tier 3 reads the stored expansion (canonical order: realized runtime paths
-        /// sorted lexicographically, after <c>initStreamCount</c> init entries). Produces the
-        /// exact stamps <see cref="ApplyRngConfig"/> would have produced from the originating
-        /// config, so a loaded model's randomness is reproducible without the config object.
-        /// Init-stream keys are reconstructable the same way (RngConfig.ReconstructKeys) but
-        /// are consumed at materialization, not by stamping.
-        /// </summary>
-        public static void ApplyRngKeyVector(this FastComputationGraph graph)
-        {
-            var carried = graph.TryGetRngKeyVector()
-                ?? throw new System.InvalidOperationException(
-                    "ApplyRngKeyVector: the graph carries no RNG key vector (bind a config with " +
-                    "ApplyRngConfig first — it injects the vector).");
-            var (vec, algorithm, initCount) = carried;
-
-            (uint k0, uint k1) runMaster = vec.Length >= 3
-                ? RngConfig.SplitWords(unchecked((ulong)vec[2]))
-                : RngConfig.SplitWords(RngConfig.Fold(unchecked((ulong)vec[0]), "runtime"));
-
-            static (uint, uint) FoldPath((uint k0, uint k1) key, System.Collections.Generic.IEnumerable<int> path)
-            {
-                foreach (var v in path) key = RngConfig.FoldKey(key, v);
-                return key;
-            }
-
-            // Canonical runtime enumeration (must mirror the injection): realized feed paths,
-            // distinct, sorted lexicographically.
-            static int Compare(int[] a, int[] b)
-            {
-                for (int i = 0; i < System.Math.Min(a.Length, b.Length); i++)
-                    if (a[i] != b[i]) return a[i].CompareTo(b[i]);
-                return a.Length.CompareTo(b.Length);
-            }
-            var runPathSet = new System.Collections.Generic.SortedSet<int[]>(
-                System.Collections.Generic.Comparer<int[]>.Create(Compare));
-            foreach (var node in graph.Nodes)
-            {
-                if (node.OpCode != InternalOpCodes.SHRK_RANDOM_UNIFORM &&
-                    node.OpCode != InternalOpCodes.SHRK_RANDOM_NORMAL) continue;
-                var idVals = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId);
-                if (idVals is null || idVals.Length == 0) continue;
-                var realizedFlat = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrRngRealizedIds);
-                if (realizedFlat is { Length: > 0 })
-                    for (int r = 0; r < realizedFlat.Length / idVals.Length; r++)
-                        runPathSet.Add(realizedFlat[(r * idVals.Length)..((r + 1) * idVals.Length)]);
-                else
-                {
-                    int firstIter = System.Array.IndexOf(idVals, -1);
-                    runPathSet.Add(firstIter < 0 ? idVals : idVals[..firstIter]);
-                }
-            }
-
-            // Tier-3 expansion: stored keys by path.
-            var storedByPath = new System.Collections.Generic.Dictionary<string, (uint k0, uint k1)>();
-            if (vec.Length > 3)
-            {
-                int i = 3 + initCount;
-                foreach (var p in runPathSet)
-                {
-                    if (i >= vec.Length) break;
-                    var packed = unchecked((ulong)vec[i++]);
-                    storedByPath[string.Join(",", p)] =
-                        (unchecked((uint)(packed & 0xFFFFFFFF)), unchecked((uint)(packed >> 32)));
-                }
-            }
-
-            (uint k0, uint k1) KeyOf(int[] path)
-                => storedByPath.TryGetValue(string.Join(",", path), out var k) ? k : FoldPath(runMaster, path);
-
-            foreach (var node in graph.Nodes)
-            {
-                if (node.OpCode != InternalOpCodes.SHRK_RANDOM_UNIFORM &&
-                    node.OpCode != InternalOpCodes.SHRK_RANDOM_NORMAL) continue;
-                var idVals = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId);
-                if (idVals is null || idVals.Length == 0) continue;
-
-                var realizedFlat = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrRngRealizedIds);
-                if (realizedFlat is { Length: > 0 })
-                {
-                    int idLen = idVals.Length;
-                    int n = realizedFlat.Length / idLen;
-                    bool anyDeviation = false;
-                    var table = new long[2 * n];
-                    for (int r = 0; r < n; r++)
-                    {
-                        var path = realizedFlat[(r * idLen)..((r + 1) * idLen)];
-                        var key = KeyOf(path);
-                        if (key != FoldPath(runMaster, path)) anyDeviation = true;
-                        table[2 * r] = key.k0;
-                        table[2 * r + 1] = key.k1;
-                    }
-                    if (anyDeviation)
-                        node.Attributes = node.Attributes.SetAttributes(
-                            (OnnxOpAttributeNames.ShrkAttrRngKeyTable, table),
-                            (OnnxOpAttributeNames.ShrkAttrRngExplicitKey, (long[])[table[0], table[1]]),
-                            (OnnxOpAttributeNames.ShrkAttrRngAlgorithm, algorithm));
-                    else
-                    {
-                        int prefixEnd = System.Array.IndexOf(idVals, -1);
-                        var (pk0, pk1) = FoldPath(runMaster, prefixEnd < 0 ? idVals : idVals[..prefixEnd]);
-                        node.Attributes = node.Attributes.SetAttributes(
-                            (OnnxOpAttributeNames.ShrkAttrRngKeyTable, (long[])[]),
-                            (OnnxOpAttributeNames.ShrkAttrRngExplicitKey, (long[])[pk0, pk1]),
-                            (OnnxOpAttributeNames.ShrkAttrRngAlgorithm, algorithm));
-                    }
-                }
-                else
-                {
-                    int firstIter = System.Array.IndexOf(idVals, -1);
-                    var (pk0, pk1) = KeyOf(firstIter < 0 ? idVals : idVals[..firstIter]);
-                    node.Attributes = node.Attributes.SetAttributes(
-                        (OnnxOpAttributeNames.ShrkAttrRngExplicitKey, (long[])[pk0, pk1]),
-                        (OnnxOpAttributeNames.ShrkAttrRngAlgorithm, algorithm));
-                }
-            }
-        }
 
         /// <summary>
         /// Binds loaded trainable-parameter values into a concrete (weight-filled) graph, matching
@@ -486,10 +384,10 @@ namespace Shorokoo.Graph
         /// <param name="namingScheme">Optional scheme for the returned parameter names; defaults to Shorokoo's.</param>
         /// <param name="computeContext">Optional context used to evaluate the initializers.</param>
         /// <param name="rngConfig">
-        /// Optional RNG configuration. When supplied, each random initializer draws host-generated
-        /// noise keyed by its parameter's own stream (so same-shape parameters get distinct values,
-        /// reproducibly and backend-independently). When <c>null</c>, the legacy in-graph seeded
-        /// draw is used.
+        /// Optional RNG configuration. Each random initializer draws host-generated noise keyed
+        /// by its parameter's own stream (so same-shape parameters get distinct values,
+        /// reproducibly and backend-independently). When <c>null</c>,
+        /// <see cref="RngConfig.Default"/> (master seed 0) is used.
         /// </param>
         /// <returns>The default trainable-parameter values, named.</returns>
         public static ModelParamList InitializeTrainableParams(
@@ -559,42 +457,32 @@ namespace Shorokoo.Graph
                 if (idVals is null || idVals.Length == 0) continue;
                 var kind = isUniform ? RngStreamKind.UniformFeed : RngStreamKind.NormalFeed;
 
-                // Realized streams (concrete architectures): one row per stream — the site id
-                // with every -1 iteration slot filled at concretization — each with its exact,
-                // override-aware key. The site id is kept alongside for pin-skeleton grouping.
-                // Unrolled clones of one site share realized ids; report each stream once.
+                // One row per realized stream — the site id with every -1 iteration slot
+                // filled at concretization — each with its exact, override-aware key. The
+                // site id is kept alongside for pin-skeleton grouping. Unrolled clones of one
+                // site share realized ids; report each stream once. Realization is enforced
+                // at concretization (the concreteness contract), so an id-bearing feed
+                // without realized ids means the graph is not a concrete architecture.
                 var realizedFlat = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrRngRealizedIds);
-                if (realizedFlat is { Length: > 0 })
+                if (realizedFlat is not { Length: > 0 })
+                    throw new System.InvalidOperationException(
+                        $"GetRngStreamReport: the runtime random feed at ModelId " +
+                        $"[{string.Join(", ", idVals)}] carries no realized stream ids — " +
+                        "the report requires a concrete architecture (ToConcreteArchitecture).");
+                int idLen = idVals.Length;
+                for (int r = 0; r < realizedFlat.Length / idLen; r++)
                 {
-                    int idLen = idVals.Length;
-                    for (int r = 0; r < realizedFlat.Length / idLen; r++)
+                    var pathArr = realizedFlat[(r * idLen)..((r + 1) * idLen)];
+                    if (!seenFeedPaths.Add(string.Join(",", pathArr))) continue;
+                    streams.Add(new RngStreamInfo
                     {
-                        var pathArr = realizedFlat[(r * idLen)..((r + 1) * idLen)];
-                        if (!seenFeedPaths.Add(string.Join(",", pathArr))) continue;
-                        streams.Add(new RngStreamInfo
-                        {
-                            Collection = RngCollection.Runtime,
-                            ModelIdPath = pathArr,
-                            SitePath = idVals,
-                            Kind = kind,
-                            KeyWords = rngConfig is null ? null : ToKeyWords(rngConfig.FoldRunKey(pathArr)),
-                        });
-                    }
-                    continue;
+                        Collection = RngCollection.Runtime,
+                        ModelIdPath = pathArr,
+                        SitePath = idVals,
+                        Kind = kind,
+                        KeyWords = rngConfig is null ? null : ToKeyWords(rngConfig.FoldRunKey(pathArr)),
+                    });
                 }
-
-                // Legacy (non-enumerated) row: for a loop-body feed (a -1 slot in the path)
-                // the key shown is the stamped PREFIX key — per-iteration keys only exist at
-                // runtime.
-                int firstIterationSlot = System.Array.IndexOf(idVals, -1);
-                var foldVals = firstIterationSlot < 0 ? idVals : idVals[..firstIterationSlot];
-                streams.Add(new RngStreamInfo
-                {
-                    Collection = RngCollection.Runtime,
-                    ModelIdPath = idVals,
-                    Kind = kind,
-                    KeyWords = rngConfig is null ? null : ToKeyWords(rngConfig.FoldRunKey(foldVals)),
-                });
             }
 
             return new RngStreamReport(streams);

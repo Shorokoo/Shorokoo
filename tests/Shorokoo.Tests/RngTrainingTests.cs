@@ -25,7 +25,7 @@ public partial class RngRigDropoutModel
 
 /// <summary>
 /// End-to-end determinism of a keyed training rig: binding an <see cref="RngConfig"/> at
-/// <see cref="TrainingRig.FromScratch"/> stamps the model's runtime feeds (Dropout masks)
+/// <see cref="TrainingRig.FromScratch"/> keys the model's runtime feeds (Dropout masks)
 /// before loss composition and autodiff, so the whole trajectory — losses and updated
 /// weights across steps — reproduces bit-for-bit from the master seed, and re-keys under a
 /// different one.
@@ -90,11 +90,12 @@ public class RngTrainingTests
         var counterValue = ((TensorData<float32>)counterField.Value).AccessMemory()[0];
         Assert.Equal(3f, counterValue);
 
-        // The stamped feed rides through loss composition and autodiff into the
-        // training-step graph — the stamp is visible on the step graph itself.
+        // The key-vector carrier rides through loss composition and autodiff into the
+        // training-step graph — the step graph itself carries the model's RNG identity,
+        // which is what keys its Dropout feeds at lowering.
+        Assert.NotNull(rigA.TrainingStepPureGraph.TryGetRngKeyVector());
         Assert.Contains(rigA.TrainingStepPureGraph.Nodes, n =>
-            n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM &&
-            n.Attributes.GetLongsVal(ShrkAttrRngExplicitKey) is { Length: 2 });
+            n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
 
         // Same master seed -> bit-identical trajectory across independent rig builds.
         Assert.Equal(lossesA1, lossesA2);

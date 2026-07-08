@@ -398,11 +398,11 @@ namespace Shorokoo
         /// </param>
         /// <param name="rngConfig">
         /// Optional RNG configuration. When supplied, trainable parameters initialize from
-        /// per-parameter keyed streams and every runtime random feed in the training-step
-        /// graph (e.g. Dropout masks) is stamped with its resolved stream key, making the
-        /// whole run's randomness deterministic and reproducible from the config's master
-        /// seed. When <c>null</c>, the legacy in-graph seeded init and the ONNX random-op
-        /// fallback are used.
+        /// per-parameter keyed streams and the config is bound to the training-step graph
+        /// (its key-vector carrier keys every runtime random feed, e.g. Dropout masks),
+        /// making the whole run's randomness deterministic and reproducible from the config's
+        /// master seed. When <c>null</c>, the legacy in-graph seeded init and the ONNX
+        /// random-op fallback are used.
         /// </param>
         /// <returns>A configured TrainingRig ready for training</returns>
         public static TrainingRig FromScratch(
@@ -534,10 +534,10 @@ namespace Shorokoo
             // trainable params whose reachability is killed by the sample input shape.
             var concreteArch = modelGraph.ToConcreteArchitecture(new ModelParamList(sampleInputs), ctx);
 
-            // Bind the RNG config at the shared concretization point: stamping each runtime
-            // random feed's resolved stream key as an attribute changes no graph structure,
-            // so the stamp rides unchanged through loss composition and autograd into the
-            // training-step graph, where the ONNX-prep lowering turns it into the keyed draw.
+            // Bind the RNG config at the shared concretization point: binding writes the
+            // config's key-vector carrier (one node, no other graph change), which rides
+            // unchanged through loss composition and autograd into the training-step graph,
+            // where the ONNX-prep lowering derives every feed's keys from it.
             if (rngConfig is not null)
                 concreteArch.ApplyRngConfig(rngConfig);
 

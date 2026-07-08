@@ -135,7 +135,6 @@ namespace Shorokoo.Core.Factory
 
             var vec = data.As<int64>().AccessMemory().ToArray();
             var algorithm = carrier.Attributes.GetStringVal(OnnxOpAttributeNames.ShrkAttrRngAlgorithm) ?? string.Empty;
-            var initCount = carrier.Attributes.GetLongVal(OnnxOpAttributeNames.ShrkAttrRngInitStreamCount) ?? 0L;
 
             var tp = new TensorProto
             {
@@ -146,14 +145,16 @@ namespace Shorokoo.Core.Factory
             };
             tp.MetadataProps.Add(new StringStringEntryProto
             { Key = OnnxOpAttributeNames.ShrkMetaRngAlgorithm, Value = algorithm });
-            tp.MetadataProps.Add(new StringStringEntryProto
-            { Key = OnnxOpAttributeNames.ShrkMetaRngInitStreamCount, Value = initCount.ToString() });
             model.Graph.Initializers.Add(tp);
 
             model.MetadataProps.Add(new StringStringEntryProto
             { Key = OnnxOpAttributeNames.ShrkMetaRngAlgorithm, Value = algorithm });
-            model.MetadataProps.Add(new StringStringEntryProto
-            { Key = OnnxOpAttributeNames.ShrkMetaRngInitStreamCount, Value = initCount.ToString() });
+
+            // The initializer is the file's ONE carrier representation: drop the serialized
+            // carrier NodeProto a plain (non-prep) save would otherwise also emit, so a
+            // save→load cycle rebuilds exactly one carrier instead of accumulating
+            // duplicates. (Under prepForOnnx the node was already lowered to a CONSTANT.)
+            model.Graph.Nodes.RemoveAll(n => n.OpType == InternalOpCodes.SHRK_RNG_KEY_VECTOR);
         }
 
         /// <summary>

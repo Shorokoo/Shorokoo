@@ -157,36 +157,35 @@ public class RngCoreTests
 }
 
 /// <summary>
-/// The compact RNG key vector — the single parameter-like tensor a model carries to make its
-/// randomness state self-contained. Three tiers: [master] when everything derives from the
-/// master seed; [master, initMaster, runMaster] when a sub-master was set explicitly; the
-/// 3 masters + the full per-stream expansion when any per-stream override exists. ONNX-prep
-/// reconstruction must reproduce every stream key bit-exactly in all three tiers.
+/// The compact RNG key vector — the single tensor a model carries as the SOURCE OF TRUTH for
+/// its randomness state. Three tiers: [master]; [master, initMaster, runMaster]; the masters
+/// plus path-keyed, self-describing override records. <see cref="RngConfig.FromKeyVector"/>
+/// must decode a config that derives every stream key bit-exactly like the original — with no
+/// stream inventory and no enumeration-order contract.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
 public class RngKeyVectorTests
 {
-    private static readonly int[][] InitPaths = [[1, 1], [2, 1], [2, 2]];
-    private static readonly int[][] RunPaths = [[3], [4, 0, 1], [4, 1, 1]];
+    private static readonly int[][] Paths = [[1, 1], [2, 1], [3], [4, 0, 1], [4, 1, 1]];
 
-    private static void AssertReconstructs(RngConfig cfg, long[] vec)
+    private static void AssertRoundTrips(RngConfig cfg)
     {
-        var (init, run) = RngConfig.ReconstructKeys(vec, InitPaths, RunPaths);
-        for (int i = 0; i < InitPaths.Length; i++)
-            Assert.Equal(cfg.FoldInitKey(InitPaths[i]), init[i]);
-        for (int i = 0; i < RunPaths.Length; i++)
-            Assert.Equal(cfg.FoldRunKey(RunPaths[i]), run[i]);
+        var decoded = RngConfig.FromKeyVector(cfg.BuildKeyVector());
+        foreach (var p in Paths)
+        {
+            Assert.Equal(cfg.FoldInitKey(p), decoded.FoldInitKey(p));
+            Assert.Equal(cfg.FoldRunKey(p), decoded.FoldRunKey(p));
+        }
     }
 
     [Fact]
     public void TestTier1MasterOnly()
     {
         var cfg = new RngConfig { MasterSeed = 42 };
-        var vec = cfg.BuildKeyVector(InitPaths, RunPaths);
-        Assert.Single(vec);
-        Assert.Equal(42L, vec[0]);
-        AssertReconstructs(cfg, vec);
+        var vec = cfg.BuildKeyVector();
+        Assert.Equal([42L], vec);
+        AssertRoundTrips(cfg);
     }
 
     [Fact]
@@ -194,48 +193,69 @@ public class RngKeyVectorTests
     {
         // Explicit run sub-master: feeds re-seed, init stays derived from the master.
         var cfg = new RngConfig { MasterSeed = 42, RunMasterSeed = 777 };
-        var vec = cfg.BuildKeyVector(InitPaths, RunPaths);
-        Assert.Equal(3, vec.Length);
-        AssertReconstructs(cfg, vec);
+        Assert.Equal(3, cfg.BuildKeyVector().Length);
+        AssertRoundTrips(cfg);
 
         // The sub-master genuinely changed the runtime keys and left init untouched.
         var baseline = new RngConfig { MasterSeed = 42 };
-        Assert.NotEqual(baseline.FoldRunKey(RunPaths[0]), cfg.FoldRunKey(RunPaths[0]));
-        Assert.Equal(baseline.FoldInitKey(InitPaths[0]), cfg.FoldInitKey(InitPaths[0]));
+        Assert.NotEqual(baseline.FoldRunKey(Paths[0]), cfg.FoldRunKey(Paths[0]));
+        Assert.Equal(baseline.FoldInitKey(Paths[0]), cfg.FoldInitKey(Paths[0]));
 
-        var cfgInit = new RngConfig { MasterSeed = 42, InitMasterSeed = 888 };
-        AssertReconstructs(cfgInit, cfgInit.BuildKeyVector(InitPaths, RunPaths));
+        AssertRoundTrips(new RngConfig { MasterSeed = 42, InitMasterSeed = 888 });
     }
 
     [Fact]
-    public void TestTier3FullExpansion()
+    public void TestTier3PathKeyedOverrideRecords()
     {
-        // A single per-stream override (one loop iteration's feed) forces the full expansion,
-        // and reconstruction reads the stored keys — override included — bit-exactly.
+        // Overrides in BOTH collections, multi-element paths included. Each record encodes
+        // (collection, path length, path, seed), so decoding needs no stream enumeration.
         var cfg = new RngConfig { MasterSeed = 42, RunMasterSeed = 777 };
         cfg.Override(RngCollection.Runtime, [4, 1, 1], seed: 424242UL);
-        var vec = cfg.BuildKeyVector(InitPaths, RunPaths);
-        Assert.Equal(3 + InitPaths.Length + RunPaths.Length, vec.Length);
-        AssertReconstructs(cfg, vec);
+        cfg.Override(RngCollection.Params, [2, 1], seed: 7UL);
 
-        // Sibling streams keep their derived keys; only the overridden one deviates.
+        var vec = cfg.BuildKeyVector();
+        // 3 masters + count + (1 + 1 + 3 + 1) + (1 + 1 + 2 + 1) elements.
+        Assert.Equal(3 + 1 + 6 + 5, vec.Length);
+        AssertRoundTrips(cfg);
+
+        var decoded = RngConfig.FromKeyVector(vec);
+        Assert.True(decoded.HasOverride(RngCollection.Runtime, [4, 1, 1]));
+        Assert.True(decoded.HasOverride(RngCollection.Params, [2, 1]));
+        Assert.False(decoded.HasOverride(RngCollection.Runtime, [4, 0, 1]));
+
+        // Sibling streams keep their derived keys; only the overridden ones deviate.
         var noOverride = new RngConfig { MasterSeed = 42, RunMasterSeed = 777 };
         Assert.Equal(noOverride.FoldRunKey([4, 0, 1]), cfg.FoldRunKey([4, 0, 1]));
         Assert.NotEqual(noOverride.FoldRunKey([4, 1, 1]), cfg.FoldRunKey([4, 1, 1]));
+        Assert.NotEqual(noOverride.FoldInitKey([2, 1]), cfg.FoldInitKey([2, 1]));
+    }
+
+    [Fact]
+    public void TestMalformedVectorFailsLoudly()
+    {
+        // Corrupt carriers must throw, never silently fall back to a different derivation.
+        Assert.ThrowsAny<ArgumentException>(() => RngConfig.FromKeyVector([]));
+        Assert.ThrowsAny<ArgumentException>(() => RngConfig.FromKeyVector([1L, 2L]));
+        // Truncated override record (claims one record, supplies nothing).
+        Assert.ThrowsAny<ArgumentException>(() => RngConfig.FromKeyVector([1L, 2L, 3L, 1L]));
+        // Trailing garbage after the declared records.
+        Assert.ThrowsAny<ArgumentException>(
+            () => RngConfig.FromKeyVector([1L, 2L, 3L, 0L, 99L]));
     }
 }
 
 /// <summary>
-/// The key-vector transport: ApplyRngConfig injects the compact vector as a graph-carried
-/// tensor (lowered to a plain CONSTANT at ONNX prep); it survives save/load, and
-/// ApplyRngKeyVector reconstructs the exact feed stamps from it — no config object needed.
+/// The key-vector transport: ApplyRngConfig writes the compact vector as the graph's single
+/// carrier node (mirrored into the saved file as a reserved-name initializer, lowered to a
+/// plain CONSTANT at ONNX prep); it survives save/load bit-exactly and without duplication,
+/// and the loaded model's key derivation reads it with no config object needed.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
 public class RngKeyVectorTransportTests
 {
     [Fact]
-    public void TestKeyVectorCarrierRoundTripsAndRebindsFeeds()
+    public void TestKeyVectorCarrierRoundTripsWithoutDuplication()
     {
         var g = (FastComputationGraph)typeof(RngRuntimeLoopFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
@@ -247,35 +267,34 @@ public class RngKeyVectorTransportTests
         cfg.Override(RngCollection.Runtime, [1, 1, 1], seed: 424242UL);   // tier 3
         arch.ApplyRngConfig(cfg);
 
-        var feed = arch.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
-        var stampedTable = feed.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRngKeyTable);
-        var stampedKey = feed.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRngExplicitKey);
-        Assert.NotNull(stampedTable);
-        Assert.True(stampedTable!.Length >= 4);
+        // Binding writes exactly one node (the carrier) and nothing per-feed.
+        Assert.Single(arch.Nodes, n => n.OpCode == InternalOpCodes.SHRK_RNG_KEY_VECTOR);
 
-        // The carrier survives a save/load round trip: it rides the ONNX file as the
-        // reserved-name initializer (with per-initializer metadata) and the loader rebuilds
-        // the carrier node from it.
         var data = CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: true);
         var loaded = CompressedFormatUtils.LoadFastGraphFromBinary(data, isCompressed: true);
         var carried = loaded.TryGetRngKeyVector();
         Assert.NotNull(carried);
-        Assert.True(carried!.Value.keyVector.Length > 3);                 // tier-3 expansion
-        Assert.Contains("Threefry", carried.Value.algorithm);
+        Assert.Contains("Threefry", carried!.Value.algorithm);
         Assert.Equal(arch.TryGetRngKeyVector()!.Value.keyVector, carried.Value.keyVector);
-        Assert.Equal(arch.TryGetRngKeyVector()!.Value.initStreamCount, carried.Value.initStreamCount);
 
-        // Corrupt the feed's stamps, then reconstruct purely from the carried vector.
-        feed.Attributes = feed.Attributes.SetAttributes(
-            (OnnxOpAttributeNames.ShrkAttrRngKeyTable, (long[])[]),
-            (OnnxOpAttributeNames.ShrkAttrRngExplicitKey, (long[])[0L, 0L]));
-        arch.ApplyRngKeyVector();
-        Assert.Equal(stampedTable, feed.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRngKeyTable));
-        Assert.Equal(stampedKey, feed.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRngExplicitKey));
+        // The decoded carrier reproduces the config's derivation, override included — the
+        // loaded model needs no config object.
+        var decoded = RngConfig.FromKeyVector(carried.Value.keyVector);
+        Assert.True(decoded.HasOverride(RngCollection.Runtime, [1, 1, 1]));
+        Assert.Equal(cfg.FoldRunKey([1, 1, 1]), decoded.FoldRunKey([1, 1, 1]));
+        Assert.Equal(cfg.FoldRunKey([1, 0, 1]), decoded.FoldRunKey([1, 0, 1]));
+
+        // Exactly one carrier after each save/load cycle — the file's single representation
+        // (the reserved-name initializer) never accumulates duplicates.
+        Assert.Single(loaded.Nodes, n => n.OpCode == InternalOpCodes.SHRK_RNG_KEY_VECTOR);
+        var loaded2 = CompressedFormatUtils.LoadFastGraphFromBinary(
+            CompressedFormatUtils.SaveFastGraphToBinary(loaded, compressed: true), isCompressed: true);
+        Assert.Single(loaded2.Nodes, n => n.OpCode == InternalOpCodes.SHRK_RNG_KEY_VECTOR);
+        Assert.Equal(carried.Value.keyVector, loaded2.TryGetRngKeyVector()!.Value.keyVector);
     }
 
     [Fact]
-    public void TestTier1CarrierRebindsPrefixStamps()
+    public void TestRebindingReplacesTheCarrier()
     {
         var g = (FastComputationGraph)typeof(RngRuntimeLoopFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
@@ -284,14 +303,26 @@ public class RngKeyVectorTransportTests
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps]));
 
         arch.ApplyRngConfig(new RngConfig { MasterSeed = 11 });
-        var carried = arch.TryGetRngKeyVector();
-        Assert.Equal([11L], carried!.Value.keyVector);                    // tier 1: master only
+        Assert.Equal([11L], arch.TryGetRngKeyVector()!.Value.keyVector);   // tier 1: master only
 
-        var feed = arch.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
-        var stamped = feed.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRngExplicitKey);
+        arch.ApplyRngConfig(new RngConfig { MasterSeed = 12 });
+        Assert.Equal([12L], arch.TryGetRngKeyVector()!.Value.keyVector);
+        Assert.Single(arch.Nodes, n => n.OpCode == InternalOpCodes.SHRK_RNG_KEY_VECTOR);
+    }
+
+    [Fact]
+    public void TestBindingRequiresRealizedStreams()
+    {
+        // The concreteness contract at bind: an id-bearing feed without realized stream ids
+        // (a graph that never went through ToConcreteArchitecture) fails loudly.
+        var draw = RandomUniform(Vector(4L), 0f, 1f);
+        var graph = new FastComputationGraph([], [draw]);
+        var feed = graph.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
         feed.Attributes = feed.Attributes.SetAttributes(
-            (OnnxOpAttributeNames.ShrkAttrRngExplicitKey, (long[])[0L, 0L]));
-        arch.ApplyRngKeyVector();
-        Assert.Equal(stamped, feed.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRngExplicitKey));
+            (OnnxOpAttributeNames.ShrkAttrLocalModelId, (long[])[1]));
+
+        var ex = Assert.Throws<System.InvalidOperationException>(
+            () => graph.ApplyRngConfig(new RngConfig { MasterSeed = 1 }));
+        Assert.Contains("no realized stream ids", ex.Message);
     }
 }

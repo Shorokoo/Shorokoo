@@ -89,6 +89,36 @@ public class RngInitTests
                 Assert.InRange(x, -1.2248f, 1.2248f);
             }
     }
+
+    [Fact]
+    public void TestUnmatchedParamsOverrideFailsInitialization()
+    {
+        // Mirror of the Runtime-side bind check: a Params override that matches no trainable
+        // parameter must fail initialization loudly — a silently inactive override is exactly
+        // the re-keying hazard explicit seeding exists to prevent.
+        var cfg = new RngConfig { MasterSeed = 1 };
+        cfg.Override(RngCollection.Params, [9, 9, 9], 1UL);
+        var ex = Assert.Throws<InvalidOperationException>(() => InitWeights(cfg));
+        Assert.Contains("matches no trainable parameter", ex.Message);
+    }
+
+    [Fact]
+    public void TestMatchedParamsOverrideReSeedsExactlyOneParam()
+    {
+        // Overriding one weight's stream by its ModelId path re-rolls that weight only.
+        var baseline = InitWeights(new RngConfig { MasterSeed = 5 });
+
+        var arch = ConcreteArch();
+        var firstWeightPath = arch.GetConcreteModelParamInfos().ParamInfos
+            .Single(p => p.Shape.Dims.SequenceEqual((long[])[4, 4]) && p.ModelId.Vals[0] == 1)
+            .ModelId.Vals.ToArray();
+        var cfg = new RngConfig { MasterSeed = 5 };
+        cfg.Override(RngCollection.Params, firstWeightPath, 4242UL);
+
+        var overridden = InitWeights(cfg);
+        Assert.False(baseline[0].SequenceEqual(overridden[0]));   // re-seeded
+        Assert.Equal(baseline[1], overridden[1]);                 // untouched
+    }
 }
 
 /// <summary>

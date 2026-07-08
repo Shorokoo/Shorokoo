@@ -39,12 +39,9 @@ public sealed class RngStreamInfo
     public IReadOnlyList<long>? Shape { get; init; }
 
     /// <summary>The stream key ([k0, k1] 32-bit words) resolved under the supplied config;
-    /// <c>null</c> when no config was supplied. For a path with <c>-1</c> slots this is the
-    /// PREFIX key before the first iteration slot (per-iteration keys only exist at runtime).</summary>
+    /// <c>null</c> when no config was supplied. Runtime rows are realized per-iteration
+    /// streams, so every key is exact (never a prefix).</summary>
     public IReadOnlyList<long>? KeyWords { get; init; }
-
-    /// <summary>Whether <see cref="KeyWords"/> is a prefix key (path contains loop-iteration slots).</summary>
-    public bool KeyIsPrefix => KeyWords is not null && ModelIdPath.Contains(-1);
 
     /// <summary>
     /// The stream's SITE id (the ModelId with <c>-1</c> iteration placeholders) when
@@ -71,7 +68,6 @@ public sealed class RngStreamInfo
         {
             sb.Append("  key=0x").Append(((uint)KeyWords[1]).ToString("x8"))
               .Append(((uint)KeyWords[0]).ToString("x8"));
-            if (KeyIsPrefix) sb.Append(" (prefix)");
         }
         return sb.ToString();
     }

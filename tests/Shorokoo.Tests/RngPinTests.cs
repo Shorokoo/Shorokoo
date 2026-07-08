@@ -214,10 +214,9 @@ public class RngPinTests
         for (int i = 0; i < 2; i++)
         {
             Assert.Equal([1, i, 1], feeds[i].ModelIdPath);
-            Assert.False(feeds[i].KeyIsPrefix);
             Assert.Equal([1, -1, 1], feeds[i].SitePath);
-            // Exact stream key: fold(fold(fold(runMaster, 1), i), 1) — identical to the key
-            // the runtime split chain derives for iteration i.
+            // Exact stream key: fold(fold(fold(runMaster, 1), i), 1) — identical to the
+            // key-table row the lowering emits for iteration i.
             var (k0, k1) = RngConfig.FoldKey(RngConfig.FoldKey(cfg.FoldRunKey([1]), i), 1);
             Assert.Equal([k0, k1], feeds[i].KeyWords);
         }

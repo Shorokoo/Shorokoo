@@ -44,12 +44,13 @@ public partial class RngUnrolledLoopFeed
 }
 
 /// <summary>
-/// In-loop feed keying via runtime iteration-index splits: a feed under a loop takes the
-/// ModelId <c>[loopSlot, -1, feedSlot]</c>; the config stamp carries the key of the prefix
-/// before the <c>-1</c>, and at ONNX prep the remaining slots become in-graph
-/// <c>SHRK_RNG_SPLIT</c> folds on the runtime iteration index — so iteration <c>i</c> draws
-/// from the stream <c>fold(fold(fold(runMaster, loopSlot), i), feedSlot)</c>, bit-exactly
-/// reproducible host-side, whether the loop survives to runtime or unrolls into constants.
+/// In-loop feed keying via the enumerated per-stream key table: a feed under a loop takes the
+/// ModelId <c>[loopSlot, -1, feedSlot]</c>; its per-iteration streams are enumerated at
+/// concretization (the concreteness contract — static stream set), and at ONNX prep the feed
+/// draws from a dense key table with the row selected by the runtime iteration index — so
+/// iteration <c>i</c> draws from the stream
+/// <c>fold(fold(fold(runMaster, loopSlot), i), feedSlot)</c>, bit-exactly reproducible
+/// host-side, whether the loop survives to runtime or unrolls into constants.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -72,8 +73,8 @@ public class RngLoopTests
         var expected = (float[])XVals.Clone();
         for (int i = 0; i < steps; i++)
         {
-            // Feed ModelId is [1, -1, 1]: prefix [1] is stamped, then split by the
-            // iteration index, then by the feed's slot under the loop (1).
+            // Feed ModelId is [1, -1, 1]: the runtime master folds slot 1, then the
+            // iteration index, then the feed's slot under the loop (1).
             var key = RngConfig.FoldKey(RngConfig.FoldKey(cfg.FoldRunKey([1]), i), 1);
             for (long e = 0; e < N; e++)
                 expected[e] += HostUniform(e, key);
@@ -140,9 +141,8 @@ public class RngLoopTests
     public void TestPerIterationOverrideReSeedsExactlyOneStream()
     {
         // Override ITERATION 1 of the loop feed site [1, -1, 1] by its realized stream path.
-        // The stamp resolves every realized stream's key host-side (override-aware) and, since
-        // one stream deviates from pure derivation, stamps the per-stream key table that the
-        // lowering selects from by iteration index.
+        // The lowering resolves every realized stream's key host-side from the carrier
+        // (override-aware) into the per-stream key table it selects from by iteration index.
         var cfg = new RngConfig { MasterSeed = 11 };
         cfg.Override(RngCollection.Runtime, [1, 1, 1], 424242UL);
         var (output, concrete) = RunRuntimeLoop(cfg, steps: 3);
@@ -159,6 +159,43 @@ public class RngLoopTests
                 expected[e] += HostUniform(e, key);
         }
         Assert.Equal(expected, output);
+    }
+
+    [Fact]
+    public void TestSingleIterationLoopOverrideIsHonored()
+    {
+        // A loop whose enumerated iteration space has exactly ONE stream: the override must
+        // reach the draw (regression guard — a representation-dispatch bug once dropped the
+        // override precisely when the key table had a single row).
+        var cfg = new RngConfig { MasterSeed = 11 };
+        cfg.Override(RngCollection.Runtime, [1, 0, 1], 99999UL);
+        var (output, concrete) = RunRuntimeLoop(cfg, steps: 1);
+        Assert.Contains(concrete.Nodes, n => n.OpCode == OpCodes.LOOP_OPEN);
+
+        var expected = (float[])XVals.Clone();
+        var key = cfg.FoldRunKey([1, 0, 1]);   // the override, not the master derivation
+        for (long e = 0; e < N; e++)
+            expected[e] += HostUniform(e, key);
+        Assert.Equal(expected, output);
+    }
+
+    [Fact]
+    public void TestExecutingFewerIterationsThanEnumeratedStaysExact()
+    {
+        // The concreteness contract: the enumerated iteration space is the stream set, and
+        // running FEWER iterations than enumerated is valid use — the executed subset draws
+        // from exactly the same per-iteration streams. (Running MORE would mint stream ids
+        // that did not exist at concretization — invalid use of the concrete artifact.)
+        var cfg = new RngConfig { MasterSeed = 11 };
+        var g = (FastComputationGraph)typeof(RngRuntimeLoopFeed)
+            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var x = TensorData([N], XVals);
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x, TensorData(Array.Empty<long>(), 3L)]))
+            .ToConcreteModel(cfg);
+
+        var output = ComputeContext.Default.Execute(concrete, x, TensorData(Array.Empty<long>(), 2L))[0]
+            .ToTensorData().As<float32>().AccessMemory().ToArray();
+        Assert.Equal(HostExpected(cfg, steps: 2), output);
     }
 
     [Fact]

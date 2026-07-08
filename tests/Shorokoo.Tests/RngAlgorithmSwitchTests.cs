@@ -46,13 +46,19 @@ public class RngAlgorithmSwitchTests
             .ToTensorData().As<float32>().AccessMemory().ToArray();
     }
 
-    private static long[] StampedKey(FastComputationGraph concrete)
-        => concrete.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM)
-            .Attributes.GetLongsVal(ShrkAttrRngExplicitKey)!;
+    /// <summary>The feed's resolved stream key, derived from the graph's carrier — exactly
+    /// what the lowering derives when it emits the keyed draw.</summary>
+    private static long[] ResolvedKey(FastComputationGraph concrete)
+    {
+        var feed = concrete.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
+        var path = feed.Attributes.GetIntsVal(ShrkAttrLocalModelId)!;
+        var decoded = RngConfig.FromKeyVector(concrete.TryGetRngKeyVector()!.Value.keyVector);
+        var (k0, k1) = decoded.FoldRunKey(path);
+        return [k0, k1];
+    }
 
-    private static string StampedAlgorithm(FastComputationGraph concrete)
-        => concrete.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM)
-            .Attributes.GetStringVal(ShrkAttrRngAlgorithm)!;
+    private static string BoundAlgorithm(FastComputationGraph concrete)
+        => concrete.TryGetRngKeyVector()!.Value.algorithm;
 
     [Fact]
     public void TestRuntimeFeedDrawSwitchesWithAlgorithmAndStaysDeterministic()
@@ -72,8 +78,8 @@ public class RngAlgorithmSwitchTests
         // Bit-exact against the host generator at each algorithm's round count, using the
         // feed's actually-resolved key (drawBase 0 — the injected counter is baked at 0 in
         // one-shot inference).
-        var key20 = StampedKey(concrete20);
-        var key13 = StampedKey(concrete13);
+        var key20 = ResolvedKey(concrete20);
+        var key13 = ResolvedKey(concrete13);
         for (long i = 0; i < 16; i++)
         {
             var (h20, _) = Threefry2x32.Bijection((uint)i, 0u, (uint)key20[0], (uint)key20[1], Threefry2x32.Rounds);
@@ -86,15 +92,15 @@ public class RngAlgorithmSwitchTests
     [Fact]
     public void TestSwitchingAlgorithmDoesNotRekeyTheStream()
     {
-        // The stamped stream key is identical across algorithms (the key tree is fixed); only
-        // the algorithm tag differs. Switching draws different numbers from the SAME stream —
-        // it never reshuffles which stream is which.
+        // The resolved stream key is identical across algorithms (the key tree is fixed);
+        // only the carrier's algorithm tag differs. Switching draws different numbers from
+        // the SAME stream — it never reshuffles which stream is which.
         var concrete20 = FeedModel(Rounds20);
         var concrete13 = FeedModel(Rounds13);
 
-        Assert.Equal(StampedKey(concrete20), StampedKey(concrete13));
-        Assert.Equal(RngAlgorithms.Threefry2x32BoxMullerV1, StampedAlgorithm(concrete20));
-        Assert.Equal(RngAlgorithms.Threefry2x32x13BoxMullerV1, StampedAlgorithm(concrete13));
+        Assert.Equal(ResolvedKey(concrete20), ResolvedKey(concrete13));
+        Assert.Equal(RngAlgorithms.Threefry2x32BoxMullerV1, BoundAlgorithm(concrete20));
+        Assert.Equal(RngAlgorithms.Threefry2x32x13BoxMullerV1, BoundAlgorithm(concrete13));
     }
 
     [Fact]

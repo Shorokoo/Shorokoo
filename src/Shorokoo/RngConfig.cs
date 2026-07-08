@@ -84,7 +84,7 @@ public sealed class RngConfig
     public bool SharedKey { get; init; }
 
     // (collection, ModelId path) -> seed. Insertion into a live config; frozen in
-    // practice once bound (re-stamp after changing it to make it take effect).
+    // practice once bound (re-bind after changing it to make it take effect).
     private readonly Dictionary<(RngCollection collection, string pathKey), ulong> _overrides = new();
 
     private static string PathKey(IReadOnlyList<int> modelIdPath) => string.Join(",", modelIdPath);
@@ -111,7 +111,10 @@ public sealed class RngConfig
     /// <c>Override(RngCollection.Params, [1, 1], 1234)</c> re-seeds the first
     /// sub-module's first parameter and nothing else. The override replaces the fully
     /// folded key, so it survives a <see cref="MasterSeed"/> change. Matching is exact
-    /// (leaf streams); returns <c>this</c> for chaining.
+    /// (leaf streams); returns <c>this</c> for chaining. An override that matches no
+    /// stream fails loudly where its collection is consumed: <see cref="RngCollection.Runtime"/>
+    /// at bind (<c>ApplyRngConfig</c>), <see cref="RngCollection.Params"/> at parameter
+    /// initialization.
     /// </summary>
     public RngConfig Override(RngCollection collection, int[] modelIdPath, ulong seed)
     {
@@ -123,7 +126,9 @@ public sealed class RngConfig
     }
 
     /// <summary>All registered override addresses (collection + comma-joined path), for
-    /// bind-time validation: an override that matches no stream fails the bind loudly.</summary>
+    /// fail-loud validation: Runtime overrides are checked against the realized stream set at
+    /// bind, Params overrides against the parameter inventory at initialization — an override
+    /// that matches no stream throws instead of silently doing nothing.</summary>
     internal IEnumerable<(RngCollection collection, string pathKey)> OverrideKeys
         => _overrides.Keys;
 
@@ -155,22 +160,24 @@ public sealed class RngConfig
 
     /// <summary>
     /// Serializes this config's randomness state as the compact RNG key vector a model carries
-    /// (as a single parameter-like tensor), in the smallest of three tiers:
+    /// (as a single parameter-like tensor) — the model's persisted <b>source of truth</b> for
+    /// all key derivation. The smallest of three tiers:
     /// <list type="bullet">
     ///   <item><b>[1]</b> — the master seed alone, when every key derives from it;</item>
-    ///   <item><b>[3]</b> — master + init master + run master, when a sub-master was set
-    ///     explicitly but no per-stream override exists;</item>
-    ///   <item><b>[3 + N]</b> — the three masters followed by every realized stream's resolved
-    ///     key (init streams then runtime streams, in the caller's order — the stream report's
-    ///     enumeration), when any per-stream override exists.</item>
+    ///   <item><b>[3]</b> — master + packed init master + packed run master, when a sub-master
+    ///     was set explicitly but no per-stream override exists;</item>
+    ///   <item><b>[3, C, records…]</b> — the three masters, the override count, then one
+    ///     self-describing record per override: <c>collection (0=Params, 1=Runtime), path
+    ///     length L, the L path elements, seed</c>. Records are keyed by path, never by
+    ///     enumeration order, so decoding needs no stream inventory and no canonical
+    ///     ordering contract.</item>
     /// </list>
-    /// ONNX-prep reconstruction is the inverse: tier 1/2 re-fold the masters along each
-    /// realized path; tier 3 reads the expanded keys directly. Keys are (k0, k1) 32-bit word
-    /// pairs packed as one long each.
+    /// <see cref="FromKeyVector"/> is the exact inverse: the decoded config derives every
+    /// stream key bit-identically to this one. <see cref="SharedKey"/> (debug-only) and
+    /// <see cref="Algorithm"/> are deliberately not encoded — the key tree is
+    /// algorithm-independent, and the algorithm name rides the carrier node's own attribute.
     /// </summary>
-    internal long[] BuildKeyVector(
-        IEnumerable<IReadOnlyList<int>> initStreamPaths,
-        IEnumerable<IReadOnlyList<int>> runStreamPaths)
+    internal long[] BuildKeyVector()
     {
         static long Pack((uint k0, uint k1) key) => unchecked((long)(((ulong)key.k1 << 32) | key.k0));
 
@@ -183,61 +190,67 @@ public sealed class RngConfig
 
         var vec = new List<long>
         {
-            unchecked((long)MasterSeed), Pack(InitMasterKey), Pack(RunMasterKey)
+            unchecked((long)MasterSeed), Pack(InitMasterKey), Pack(RunMasterKey),
+            _overrides.Count,
         };
-        foreach (var p in initStreamPaths) vec.Add(Pack(FoldInitKey(p)));
-        foreach (var p in runStreamPaths) vec.Add(Pack(FoldRunKey(p)));
+        foreach (var ((collection, pathKey), seed) in _overrides)
+        {
+            var path = pathKey.Split(',');
+            vec.Add(collection == RngCollection.Params ? 0L : 1L);
+            vec.Add(path.Length);
+            foreach (var p in path) vec.Add(long.Parse(p));
+            vec.Add(unchecked((long)seed));
+        }
         return [.. vec];
     }
 
     /// <summary>
-    /// Reconstructs every realized stream's key from a compact key vector produced by
-    /// <see cref="BuildKeyVector"/>, given the same stream enumeration (init paths then run
-    /// paths, same order). Tier 1/2 re-fold from the stored masters; tier 3 reads the stored
-    /// expansion. Returns (initKeys, runKeys) as (k0, k1) word pairs.
+    /// Decodes a key vector produced by <see cref="BuildKeyVector"/> back into a config that
+    /// derives every stream key bit-identically to the originating one — no stream inventory
+    /// needed. Sub-masters decode as explicit seeds (a packed key seed reproduces the packed
+    /// key exactly, since <c>SplitWords</c> inverts the packing); override records restore the
+    /// per-stream seeds by path. <see cref="Algorithm"/> is not carried by the vector (the
+    /// carrier node's attribute is authoritative) and <see cref="SharedKey"/> is debug-only;
+    /// both decode as their defaults.
     /// </summary>
-    internal static ((uint k0, uint k1)[] initKeys, (uint k0, uint k1)[] runKeys) ReconstructKeys(
-        long[] keyVector,
-        IReadOnlyList<IReadOnlyList<int>> initStreamPaths,
-        IReadOnlyList<IReadOnlyList<int>> runStreamPaths)
+    internal static RngConfig FromKeyVector(long[] keyVector)
     {
-        static (uint k0, uint k1) Unpack(long packed)
-            => (unchecked((uint)((ulong)packed & 0xFFFFFFFF)), unchecked((uint)((ulong)packed >> 32)));
+        if (keyVector is not { Length: >= 1 })
+            throw new ArgumentException("RNG key vector must have at least the master seed.", nameof(keyVector));
 
-        if (keyVector.Length >= 3 + initStreamPaths.Count + runStreamPaths.Count
-            && keyVector.Length > 3)
-        {
-            // Tier 3: stored expansion.
-            var init = new (uint, uint)[initStreamPaths.Count];
-            var run = new (uint, uint)[runStreamPaths.Count];
-            for (int i = 0; i < init.Length; i++) init[i] = Unpack(keyVector[3 + i]);
-            for (int i = 0; i < run.Length; i++) run[i] = Unpack(keyVector[3 + init.Length + i]);
-            return (init, run);
-        }
+        if (keyVector.Length == 1)
+            return new RngConfig { MasterSeed = unchecked((ulong)keyVector[0]) };
 
-        (uint, uint) initMaster, runMaster;
-        if (keyVector.Length >= 3)
-        {
-            initMaster = Unpack(keyVector[1]);
-            runMaster = Unpack(keyVector[2]);
-        }
-        else
-        {
-            var master = unchecked((ulong)keyVector[0]);
-            initMaster = SplitWords(Fold(master, "init"));
-            runMaster = SplitWords(Fold(master, "runtime"));
-        }
+        if (keyVector.Length < 3)
+            throw new ArgumentException(
+                $"Malformed RNG key vector: length {keyVector.Length} (expected 1, 3, or 3 + override records).",
+                nameof(keyVector));
 
-        static (uint, uint) FoldPath((uint k0, uint k1) key, IReadOnlyList<int> path)
+        var cfg = new RngConfig
         {
-            foreach (var v in path) key = FoldKey(key, v);
-            return key;
+            MasterSeed = unchecked((ulong)keyVector[0]),
+            InitMasterSeed = unchecked((ulong)keyVector[1]),
+            RunMasterSeed = unchecked((ulong)keyVector[2]),
+        };
+        if (keyVector.Length == 3) return cfg;
+
+        int i = 3;
+        long count = keyVector[i++];
+        for (long r = 0; r < count; r++)
+        {
+            if (i + 2 > keyVector.Length)
+                throw new ArgumentException("Malformed RNG key vector: truncated override record.", nameof(keyVector));
+            var collection = keyVector[i++] == 0L ? RngCollection.Params : RngCollection.Runtime;
+            int pathLen = checked((int)keyVector[i++]);
+            if (pathLen <= 0 || i + pathLen + 1 > keyVector.Length)
+                throw new ArgumentException("Malformed RNG key vector: truncated override record.", nameof(keyVector));
+            int[] path = new int[pathLen];
+            for (int j = 0; j < pathLen; j++) path[j] = checked((int)keyVector[i++]);
+            cfg.Override(collection, path, unchecked((ulong)keyVector[i++]));
         }
-        var initKeys = new (uint, uint)[initStreamPaths.Count];
-        var runKeys = new (uint, uint)[runStreamPaths.Count];
-        for (int i = 0; i < initKeys.Length; i++) initKeys[i] = FoldPath(initMaster, initStreamPaths[i]);
-        for (int i = 0; i < runKeys.Length; i++) runKeys[i] = FoldPath(runMaster, runStreamPaths[i]);
-        return (initKeys, runKeys);
+        if (i != keyVector.Length)
+            throw new ArgumentException("Malformed RNG key vector: trailing data after override records.", nameof(keyVector));
+        return cfg;
     }
 
     internal static (uint k0, uint k1) SplitWords(ulong key)

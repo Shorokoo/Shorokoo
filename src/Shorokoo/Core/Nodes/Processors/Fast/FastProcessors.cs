@@ -3095,8 +3095,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (!store.TryGetValue(inputs[0]!.Value, out var modelIdRaw)) continue;
                 if (modelIdRaw is not RuntimeTensor modelIdRt) continue;
 
-                var modelIdIterations = CollectAllIterations(modelIdRt);
-
                 // Gather all iterations for each initializer param (inputs[2+]).
                 var initParamIterations = new List<List<RuntimeTensor?>>();
                 for (int i = 2; i < inputs.Count; i++)
@@ -3110,12 +3108,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         CollectAllIterations(paramRaw is RuntimeTensor prt ? prt : null));
                 }
 
-                for (int iterIdx = 0; iterIdx < modelIdIterations.Count; iterIdx++)
+                foreach (var (iterIdx, filteredId) in EnumerateIterationIntVectors(modelIdRt))
                 {
-                    var modelIdIter = modelIdIterations[iterIdx];
-                    if (modelIdIter?.IntData is not { } idData) continue;
-
-                    var filteredId = idData.Where(x => x != -2).ToArray();
                     if (filteredId.Length == 0) continue;
                     var modelId = ModelId.FromLongVals(filteredId);
 
@@ -3184,6 +3178,22 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
+        /// Enumerates a QEE-resolved tensor's per-iteration integer values: one entry per
+        /// loop-history iteration (plus the final value), each with the <c>-2</c> loop-padding
+        /// sentinel filtered out, paired with its iteration ordinal so callers can pair values
+        /// across inputs of the same node. This is the one history walk both realizations ride —
+        /// trainable-param ids (<see cref="ExtractModelIdInfosFromStore"/>) and RNG feed streams
+        /// (<see cref="RealizeRngFeedStreams"/>) must enumerate iterations identically.
+        /// </summary>
+        private static IEnumerable<(int iterIdx, long[] vals)> EnumerateIterationIntVectors(RuntimeTensor? rt)
+        {
+            var iterations = CollectAllIterations(rt);
+            for (int i = 0; i < iterations.Count; i++)
+                if (iterations[i]?.IntData is { } iv)
+                    yield return (i, iv.Where(x => x != -2).ToArray());
+        }
+
+        /// <summary>
         /// Realizes every SHRK_RANDOM_* feed's stream ids from the QEE store: the site id's
         /// <c>-1</c> iteration slots are filled per observed loop iteration (the same loop
         /// history that realizes trainable-param ids), and the resulting id list — sorted
@@ -3228,10 +3238,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                     var seen = new HashSet<string>();
                     var iterVectors = new List<long[]>();
-                    foreach (var it in CollectAllIterations(rt))
+                    foreach (var (_, clean) in EnumerateIterationIntVectors(rt))
                     {
-                        if (it?.IntData is not { } iv) continue;
-                        var clean = iv.Where(x => x != -2).ToArray();
                         if (clean.Length != depth) continue;
                         if (seen.Add(string.Join(",", clean))) iterVectors.Add(clean);
                     }

@@ -3,6 +3,7 @@ using System.Linq;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Core.Rng;
 using Shorokoo.Runtime;
+using Shorokoo.Tests.Modules;
 
 namespace Shorokoo.Tests;
 
@@ -20,6 +21,29 @@ public partial class RngRuntimeLoopFeed
         {
             var u = RandomUniform(x.ShapeTensor(), 0f, 1f);
             acc = acc + u;
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return acc;
+    }
+}
+
+/// <summary>
+/// A trainable param AND a runtime feed inside one RUNTIME loop — the fixture for asserting
+/// that the two consumer kinds get identical ModelId treatment (realization, padding,
+/// reporting, pin-skeleton grouping). Loop = top slot 1; in the loop body the param takes
+/// local slot 1 and the feed local slot 2 (creation order).
+/// </summary>
+[Module]
+public partial class RngRuntimeLoopParamAndFeed
+{
+    public static Tensor<float32> Inline(Tensor<float32> x, Scalar<int64> steps)
+    {
+        var acc = x;
+        foreach (var ctx in LoopAPI.Iterate(steps))
+        {
+            var w = InitSimple.Init([Scalar(2L)]);
+            var u = RandomUniform(x.ShapeTensor(), 0f, 1f);
+            acc = acc + u + w.Reduce(ReduceKind.Sum);
             ctx.ContinueWhile(Scalar(true));
         }
         return acc;
@@ -196,6 +220,42 @@ public class RngLoopTests
         var output = ComputeContext.Default.Execute(concrete, x, TensorData(Array.Empty<long>(), 2L))[0]
             .ToTensorData().As<float32>().AccessMemory().ToArray();
         Assert.Equal(HostExpected(cfg, steps: 2), output);
+    }
+
+    [Fact]
+    public void TestZeroEnumeratedIterationsPadOneCellForParamsAndFeedsAlike()
+    {
+        // Concretizing with a trip-count hint of 0 means the loop never runs under the hints,
+        // yet the concreteness contract requires a static, non-empty consumer set. BOTH
+        // ModelId-based consumer kinds resolve this the same way: the single all-zero grid
+        // cell is realized as padding — validly derived, never consumed when the executed
+        // iteration count is 0 (the only valid use of this concrete artifact).
+        var g = (FastComputationGraph)typeof(RngRuntimeLoopParamAndFeed)
+            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var x = TensorData([N], XVals);
+        var arch = g.ToConcreteArchitecture(
+            g.FromOrderedInputs([x, TensorData(Array.Empty<long>(), 0L)]));
+
+        // Param side: exactly one realized in-loop param, at the padded cell [1, 0, 1]
+        // (the second entry is the injected RngExecutionCounter at the next free top slot).
+        var paramIds = arch.GetConcreteModelParamInfos().ParamInfos
+            .Select(p => p.ModelId.Vals.ToArray()).OrderBy(v => v.Length).ToArray();
+        Assert.Equal(2, paramIds.Length);
+        Assert.Equal((int[])[2], paramIds[0]);
+        Assert.Equal((int[])[1, 0, 1], paramIds[1]);
+
+        // Feed side: exactly one realized runtime stream, at the padded cell [1, 0, 2].
+        var feedRows = arch.GetRngStreamReport().Streams
+            .Where(s => s.Collection == RngCollection.Runtime).ToArray();
+        Assert.Single(feedRows);
+        Assert.Equal((int[])[1, 0, 2], feedRows[0].ModelIdPath.ToArray());
+
+        // Initialization succeeds (the padded param materializes like any other) and
+        // executing the valid iteration count — 0 — consumes neither padding cell.
+        var concrete = arch.ToConcreteModel(new RngConfig { MasterSeed = 11 });
+        var output = ComputeContext.Default.Execute(concrete, x, TensorData(Array.Empty<long>(), 0L))[0]
+            .ToTensorData().As<float32>().AccessMemory().ToArray();
+        Assert.Equal(XVals, output);
     }
 
     [Fact]

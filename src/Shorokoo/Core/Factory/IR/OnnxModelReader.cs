@@ -725,7 +725,7 @@ namespace Shorokoo.Core.Factory.IR
                 // The model's compact RNG key vector rides as a reserved-name initializer —
                 // the file's single carrier representation (the serializer strips the carrier
                 // NodeProto); rebuild the carrier node (SHRK_RNG_KEY_VECTOR) so
-                // TryGetRngKeyVector and the ONNX-prep key derivation work on the loaded graph.
+                // TryGetRngKeyVector and key-entity materialization work on the loaded graph.
                 if (initializer.Name == OnnxOpAttributeNames.ShrkRngKeysTensorName)
                 {
                     var rngAlgorithm = initializer.MetadataProps

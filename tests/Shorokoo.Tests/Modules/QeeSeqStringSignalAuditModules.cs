@@ -427,8 +427,8 @@ namespace Shorokoo.Tests.Modules
                 kernelShape: Vector(2L, 2L),
                 group: Scalar(1L));
 
-            var srn = (Tensor<float32>)InternalOp.RandomNormal(x.ShapeTensor(), mean: 0f, scale: 1f, seed: 7f);
-            var sru = (Tensor<float32>)InternalOp.RandomUniform(x.ShapeTensor(), high: 1f, low: 0f, seed: 8f);
+            var srn = (Tensor<float32>)InternalOp.RandomNormal(x.ShapeTensor(), mean: 0f, scale: 1f);
+            var sru = (Tensor<float32>)InternalOp.RandomUniform(x.ShapeTensor(), high: 1f, low: 0f);
 
             var loopIdx = (Tensor<int64>)OnnxOp.LoopIndexVariable();
             var fakeInput = (Tensor<float32>)OnnxOp.LoopFakeInput(DType.Float32, rank: 2, DataStructure.Tensor);

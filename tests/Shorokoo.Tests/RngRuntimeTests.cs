@@ -92,13 +92,34 @@ public class RngRuntimeTests
     }
 
     [Fact]
+    public void TestNoConfigModelDrawsKeyedThreefryUnderTheDefaultIdentity()
+    {
+        // "No config" means the DEFAULT deterministic identity (master seed 0), never the
+        // ONNX random fallback: a concrete model built without any RngConfig carries the
+        // default identity, and its feed draws are bit-exactly the host fold of the
+        // default runtime master along the feed's ModelId — reconstructible offline.
+        var g = (FastComputationGraph)typeof(RtLoweredUniform)
+            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+
+        Assert.NotNull(concrete.TryGetRngKeyVector());   // the default identity, recorded
+
+        var vals = ComputeContext.Default.Execute(concrete, input)[0]
+            .ToTensorData().As<float32>().AccessMemory().ToArray();
+        var (k0, k1) = RngConfig.Default.FoldRunKey([1]);   // the feed's site is slot 1
+        for (long i = 0; i < 16; i++)
+            Assert.Equal(HostUniform(i, k0, k1, 0), vals[i]);
+    }
+
+    [Fact]
     public void TestRngConfigRebindsInPlaceWithoutGraphChange()
     {
-        // Binding an RngConfig writes the graph's single key-vector carrier node — no feed
-        // is touched — so a different master seed can be re-bound on the SAME
-        // already-concrete model, after the fact, by replacing that one node. The
-        // structural rewrite to the keyed draw happens only on the clone taken at ONNX
-        // prep, never on this graph.
+        // Re-binding is re-initialization scoped to keys: it replaces the identity carrier
+        // and re-runs the key initializers (each SHRK_RNG_KEY entity's value re-materializes
+        // in place — key initializers are pure in the identity, so this is always safe).
+        // No node is added or removed and no feed is touched; parameter values would be
+        // untouched too (this model has none to re-key).
         var g = (FastComputationGraph)typeof(RtLoweredUniform)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());

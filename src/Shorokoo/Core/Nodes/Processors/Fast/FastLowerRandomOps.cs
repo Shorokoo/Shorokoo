@@ -14,30 +14,30 @@ using static Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames;
 namespace Shorokoo.Core.Nodes.Processors.Fast
 {
     /// <summary>
-    /// Random-op lowering pass (runs in the ONNX-export pre-passes).
+    /// Random-op lowering pass (runs in the ONNX-export pre-passes). Pure wiring: key
+    /// DERIVATION does not happen here — a feed site's keys are the VALUE of its
+    /// <c>SHRK_RNG_KEY</c> entity, materialized from the bound <see cref="RngConfig"/> when
+    /// the graph became a concrete model (see <see cref="FastMaterializeRngKeys"/>), exactly
+    /// like trainable-parameter values.
     ///
-    /// <para><b>Keyed feeds.</b> When the graph carries a <c>SHRK_RNG_KEY_VECTOR</c> (written
-    /// by <see cref="FastBindRngConfig"/> when an <see cref="RngConfig"/> is bound), it is the
-    /// single source of truth: this pass decodes it ONCE (<see cref="RngConfig.FromKeyVector"/>)
-    /// and derives every id-bearing <c>SHRK_RANDOM_*</c> feed's keys HERE — and only here —
-    /// from the carrier plus the feed's structural attributes (ModelId + realized stream ids).
-    /// A feed outside any loop draws from its key materialized as an int64[2] constant; a
-    /// loop-body feed draws from a dense per-stream key table ([N, 2] constant over the feed's
-    /// enumerated iteration space, one row per grid cell) selected by the runtime iteration
-    /// index — realized streams are static and individually addressable per the concreteness
-    /// contract, so there is nothing to derive in-graph. Deferring key derivation to ONNX prep
-    /// is what makes config binding cheap and re-bindable: the pre-export graph keeps its
-    /// structure and the derivation happens on the export clone.</para>
+    /// <para><b>Key entities</b> lower to plain int64 CONSTANTs (their materialized [N, 2]
+    /// key table). An entity that was never materialized — e.g. a concrete architecture
+    /// exported without a config — materializes here under the graph's carrier identity, or
+    /// <see cref="RngConfig.Default"/> when none is bound: a concrete artifact is never
+    /// unkeyed, and "no config" simply means the default deterministic identity.</para>
     ///
-    /// <para><b>Keyed draws</b> (<c>SHRK_RNG_SPLIT/UNIFORM/NORMAL</c>) lower to
-    /// FUNCTION_INVOKEs of the named algorithm's non-inlined functions — the exported model
-    /// calls tagged local FunctionProtos, so its randomness is deterministic, portable, and
-    /// identifiable.</para>
+    /// <para><b>Keyed feeds</b> (id-bearing, wired to their key entity at concretization)
+    /// rewrite to the keyed deterministic draw: Gather their iteration's [k0, k1] row from
+    /// the key table by the runtime flat index Σ iterationIndex[j] · stride[j] (row 0 for a
+    /// feed outside any loop), then call the named algorithm's non-inlined function — the
+    /// exported model calls tagged local FunctionProtos, so its randomness is deterministic,
+    /// portable, and identifiable.</para>
     ///
-    /// <para><b>Unkeyed draws</b> (no carrier — no config bound — or feeds without stream
-    /// identity) take the ONNX fallback: <c>ConstantOfShape +
-    /// RandomUniformLike/RandomNormalLike</c> — the pre-keyed-RNG behavior, non-reproducible
-    /// by nature, with any user seed copied through and none synthesized.</para>
+    /// <para><b>Feeds without stream identity</b> (no ModelId or no key entity — e.g. draws
+    /// inside un-run initializer function bodies, or graphs that never went through
+    /// concretization) take the ONNX fallback: <c>ConstantOfShape +
+    /// RandomUniformLike/RandomNormalLike</c>, with any user seed copied through and none
+    /// synthesized.</para>
     /// </summary>
     internal static class FastLowerRandomOps
     {
@@ -57,25 +57,45 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (node.TargetFunction is { } fn)
                     LowerFunctionRecursive(fn, functionRemap);
 
-            // The graph's RNG identity, when bound: decode the carrier once into the config
-            // view all key derivation below reads. Function bodies never carry a carrier, so
-            // their feeds (e.g. inside un-run initializer functions) take the ONNX fallback.
+            // The graph's recorded identity: the algorithm the keyed draws call, and the
+            // fallback identity for any key entity not yet materialized. No carrier means
+            // the default deterministic identity (never the ONNX random fallback).
             var carrier = graph.Nodes.FirstOrDefault(
                 n => n.OpCode == InternalOpCodes.SHRK_RNG_KEY_VECTOR);
-            RngConfig? keyConfig = null;
+            RngConfig? carrierConfig = null;
             string algorithm = RngAlgorithms.Default;
             if (carrier?.Attributes.GetTensorVal(AttrValue) is { } carrierData)
             {
-                keyConfig = RngConfig.FromKeyVector(
+                carrierConfig = RngConfig.FromKeyVector(
                     carrierData.As<int64>().AccessMemory().ToArray());
                 algorithm = carrier.Attributes.GetStringVal(ShrkAttrRngAlgorithm)
                     ?? RngAlgorithms.Default;
+            }
+
+            // Pre-scan the key entities: materialize any missing value, and keep each site's
+            // iteration counts (needed for the feeds' index arithmetic) before the entity is
+            // rewritten to a plain CONSTANT below.
+            Dictionary<FastTensorKey, long[]>? countsByKeySource = null;
+            foreach (var node in graph.Nodes)
+            {
+                if (node.OpCode != InternalOpCodes.SHRK_RNG_KEY) continue;
+                if (node.Attributes.GetTensorVal(AttrValue) is null)
+                    FastMaterializeRngKeys.Materialize(node, carrierConfig ?? RngConfig.Default);
+                (countsByKeySource ??= new Dictionary<FastTensorKey, long[]>())
+                    [node.Outputs[0]!.Value] = node.Attributes.GetLongsVal(ShrkAttrRngIterCounts) ?? [];
             }
 
             var newNodes = new List<FastNode>(graph.Nodes.Count);
 
             foreach (var node in graph.Nodes)
             {
+                if (node.OpCode == InternalOpCodes.SHRK_RNG_KEY)
+                {
+                    LowerKeyEntityToConstant(node);
+                    newNodes.Add(node);
+                    continue;
+                }
+
                 if (node.OpCode == InternalOpCodes.SHRK_RNG_SPLIT ||
                     node.OpCode == InternalOpCodes.SHRK_RNG_UNIFORM ||
                     node.OpCode == InternalOpCodes.SHRK_RNG_NORMAL)
@@ -94,17 +114,19 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
 
                 var idVals = node.Attributes.GetIntsVal(ShrkAttrLocalModelId);
-                if (keyConfig is not null && idVals is { Length: > 0 })
+                var keySource = node.Inputs.Count > 3 ? node.Inputs[3] : null;
+                if (idVals is { Length: > 0 } && keySource is { } ks &&
+                    countsByKeySource is not null && countsByKeySource.TryGetValue(ks, out var counts))
                 {
-                    RewriteFeedToKeyedDraw(node, isUniform, idVals, keyConfig, algorithm, newNodes);
+                    RewriteFeedToKeyedDraw(node, isUniform, idVals, ks, counts, algorithm, newNodes);
                     LowerKeyedRngToFunctionCall(node);
                     newNodes.Add(node);
                     continue;
                 }
 
-                // Unkeyed random op (no RngConfig bound, or a feed without stream identity):
-                // the ONNX fallback — ConstantOfShape + RandomUniformLike/NormalLike.
-                // Non-portable/non-reproducible by nature; documented as the no-config behavior.
+                // A feed without stream identity (no ModelId, or never realized — e.g. inside
+                // an initializer function body): the ONNX fallback — ConstantOfShape +
+                // RandomUniformLike/NormalLike.
                 LowerToOnnxRandomLike(node, isUniform, newNodes);
                 newNodes.Add(node);
             }
@@ -115,6 +137,19 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 foreach (var node in graph.Nodes)
                     if (node.TargetFunction is { } fn && functionRemap.TryGetValue(fn, out var newFn))
                         node.TargetFunction = newFn;
+        }
+
+        /// <summary>
+        /// Rewrites a materialized SHRK_RNG_KEY entity in place to a plain CONSTANT of its
+        /// key-table value, so every backend treats the keys as ordinary tensor data.
+        /// </summary>
+        private static void LowerKeyEntityToConstant(FastNode node)
+        {
+            var data = node.Attributes.GetTensorVal(AttrValue);
+            var constDefs = Definitions.NodeDefinitions[OpCodes.CONSTANT].AttributeDefs;
+            node.OpCode = OpCodes.CONSTANT;
+            node.Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                new Dictionary<string, object?> { [AttrValue] = data }, constDefs);
         }
 
         private static void LowerFunctionRecursive(
@@ -181,16 +216,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         /// <summary>
         /// Rewrites an id-bearing SHRK_RANDOM_* feed in place to the SHRK_RNG_UNIFORM/NORMAL
-        /// form (inputs <c>[key, drawBase, shape, a, b]</c>), deriving the key from the
-        /// decoded carrier config: a feed outside any loop gets its stream key as an int64[2]
-        /// constant; a loop-body feed gets its dense per-stream key table with the row
-        /// selected by the runtime iteration index. drawBase is the site's own counter input
-        /// when wired (e.g. Dropout's per-execution state counter) else a constant 0, and the
-        /// distribution bounds come off the node's attributes as f32 scalar constants.
+        /// form (inputs <c>[key, drawBase, shape, a, b]</c>). The key is this iteration's
+        /// [k0, k1] row of the site's key entity (the feed's key input, already materialized),
+        /// selected by Gather at the runtime flat index Σ iterationIndex[j] · stride[j] over
+        /// the site's iteration counts — row 0 for a feed outside any loop. drawBase is the
+        /// site's own counter input when wired (e.g. the injected per-execution state counter)
+        /// else a constant 0, and the distribution bounds come off the node's attributes as
+        /// f32 scalar constants.
         /// </summary>
         private static void RewriteFeedToKeyedDraw(
-            FastNode node, bool isUniform, int[] idVals, RngConfig keyConfig, string algorithm,
-            List<FastNode> newNodes)
+            FastNode node, bool isUniform, int[] idVals, FastTensorKey keySource, long[] counts,
+            string algorithm, List<FastNode> newNodes)
         {
             var shapeInput = node.Inputs[0]
                 ?? throw new InvalidOperationException("SHRK_RANDOM_* has null shape input.");
@@ -203,9 +239,52 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 : node.Attributes.GetFloatVal(AttrScale) ?? 1.0f;
 
             int depth = idVals.Count(v => v == -1);
-            FastTensorKey keyKey = depth == 0
-                ? AppendKeyConstant(keyConfig.FoldRunKey(idVals), newNodes)
-                : AppendKeyTableSelect(node, idVals, depth, keyConfig, newNodes);
+            if (counts.Length != depth)
+                throw new InvalidOperationException(
+                    $"{node.OpCode}: ModelId [{string.Join(", ", idVals)}] has {depth} iteration " +
+                    $"slot(s) but its key entity carries {counts.Length} iteration count(s).");
+
+            FastTensorKey indexKey;
+            if (depth == 0)
+            {
+                indexKey = AppendScalarInt64(0L, newNodes);
+            }
+            else
+            {
+                var iterationIndicesInput = node.Inputs.Count > 2 ? node.Inputs[2] : null;
+                if (iterationIndicesInput is null)
+                    throw new InvalidOperationException(
+                        $"{node.OpCode}: ModelId [{string.Join(", ", idVals)}] has an iteration slot " +
+                        "but the node carries no iteration-indices input to select its stream.");
+
+                long[] strides = new long[depth];
+                long total = 1;
+                for (int j = depth - 1; j >= 0; j--) { strides[j] = total; total *= counts[j]; }
+
+                indexKey = default;
+                bool first = true;
+                for (int j = 0; j < depth; j++)
+                {
+                    var term = AppendBinaryScalarInt64(OpCodes.MUL,
+                        AppendGatherScalar(iterationIndicesInput.Value, j, newNodes),
+                        AppendScalarInt64(strides[j], newNodes), newNodes);
+                    indexKey = first ? term : AppendBinaryScalarInt64(OpCodes.ADD, indexKey, term, newNodes);
+                    first = false;
+                }
+            }
+
+            var gatherKey = FastNodeKey.New();
+            var keyKey = new FastTensorKey(gatherKey, 0);
+            var gatherDefs = Definitions.NodeDefinitions[OpCodes.GATHER].AttributeDefs;
+            newNodes.Add(new FastNode
+            {
+                Key = gatherKey,
+                OpCode = OpCodes.GATHER,
+                Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                    new Dictionary<string, object?> { [AttrAxis] = 0L }, gatherDefs),
+                FullInputs = { [""] = new List<FastTensorKey?> { keySource, indexKey } },
+                FullOutputs = { [""] = new List<FastTensorKey?> { keyKey } },
+            });
 
             var drawBaseKey = node.Inputs.Count > 1 && node.Inputs[1] is { } db
                 ? db
@@ -223,84 +302,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 [""] = new List<FastTensorKey?> { keyKey, drawBaseKey, shapeInput, aKey, bKey }
             };
-        }
-
-        /// <summary>
-        /// Emits a loop-body feed's dense per-stream key table and the Gather that selects
-        /// this iteration's [k0, k1] row. The table is a [Π counts, 2] int64 constant with one
-        /// row per grid cell of the feed's enumerated iteration space (counts recorded at
-        /// concretization), each row the fold of the cell's fully realized path — so every row
-        /// sits at exactly the flat index Σ iterationIndex[j] · stride[j] the runtime
-        /// computes, jagged observed sets included (cells no valid input ever reaches carry
-        /// well-defined derived keys and are simply never gathered).
-        /// </summary>
-        private static FastTensorKey AppendKeyTableSelect(
-            FastNode node, int[] idVals, int depth, RngConfig keyConfig, List<FastNode> newNodes)
-        {
-            var counts = node.Attributes.GetLongsVal(ShrkAttrRngIterCounts);
-            if (counts is null || counts.Length != depth)
-                throw new InvalidOperationException(
-                    $"{node.OpCode}: ModelId [{string.Join(", ", idVals)}] has {depth} iteration " +
-                    $"slot(s) but carries {(counts is null ? "no" : $"{counts.Length}")} iteration " +
-                    "count(s) — the feed was not realized at concretization.");
-            var iterationIndicesInput = node.Inputs.Count > 2 ? node.Inputs[2] : null;
-            if (iterationIndicesInput is null)
-                throw new InvalidOperationException(
-                    $"{node.OpCode}: ModelId [{string.Join(", ", idVals)}] has an iteration slot " +
-                    "but the node carries no iteration-indices input to select its stream.");
-
-            long[] strides = new long[depth];
-            long total = 1;
-            for (int j = depth - 1; j >= 0; j--) { strides[j] = total; total *= counts[j]; }
-
-            var table = new long[2 * total];
-            var path = new int[idVals.Length];
-            for (long flat = 0; flat < total; flat++)
-            {
-                int slot = 0;
-                for (int i = 0; i < idVals.Length; i++)
-                {
-                    if (idVals[i] == -1)
-                    {
-                        path[i] = checked((int)(flat / strides[slot] % counts[slot]));
-                        slot++;
-                    }
-                    else path[i] = idVals[i];
-                }
-                var (k0, k1) = keyConfig.FoldRunKey(path);
-                table[2 * flat] = k0;
-                table[2 * flat + 1] = k1;
-            }
-
-            var tableData = new OnnxTensorData<int64>(
-                new Shape(total, 2),
-                OnnxUtils.CreateTensorValue(new Shape(total, 2), table));
-            var tableKey = AppendConstant(tableData, newNodes);
-
-            FastTensorKey indexKey = default;
-            bool first = true;
-            for (int j = 0; j < depth; j++)
-            {
-                var term = AppendBinaryScalarInt64(OpCodes.MUL,
-                    AppendGatherScalar(iterationIndicesInput.Value, j, newNodes),
-                    AppendScalarInt64(strides[j], newNodes), newNodes);
-                indexKey = first ? term : AppendBinaryScalarInt64(OpCodes.ADD, indexKey, term, newNodes);
-                first = false;
-            }
-
-            var nodeKey = FastNodeKey.New();
-            var outKey = new FastTensorKey(nodeKey, 0);
-            var attrDefs = Definitions.NodeDefinitions[OpCodes.GATHER].AttributeDefs;
-            newNodes.Add(new FastNode
-            {
-                Key = nodeKey,
-                OpCode = OpCodes.GATHER,
-                Attributes = OnnxCSharpAttributes.FromCSharpVals(
-                    new Dictionary<string, object?> { [AttrAxis] = 0L }, attrDefs),
-                FullInputs = { [""] = new List<FastTensorKey?> { tableKey, indexKey } },
-                FullOutputs = { [""] = new List<FastTensorKey?> { outKey } },
-            });
-            return outKey;
         }
 
         /// <summary>Gathers element <paramref name="index"/> of a rank-1 int64 vector as a rank-0 scalar.</summary>
@@ -321,15 +322,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 FullOutputs = { [""] = new List<FastTensorKey?> { outKey } },
             });
             return outKey;
-        }
-
-        private static FastTensorKey AppendKeyConstant((uint k0, uint k1) key, List<FastNode> newNodes)
-        {
-            long[] keyWords = [key.k0, key.k1];
-            var data = new OnnxTensorData<int64>(
-                new Shape(2),
-                OnnxUtils.CreateTensorValue(new Shape(2), keyWords));
-            return AppendConstant(data, newNodes);
         }
 
         /// <summary>Element-wise int64 scalar binary op node (MUL/ADD) for index arithmetic.</summary>

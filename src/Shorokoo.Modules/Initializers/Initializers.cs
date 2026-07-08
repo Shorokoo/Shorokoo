@@ -16,12 +16,15 @@ namespace Shorokoo.Modules.Initializers;
 // the codegen does support extra Inline parameters, but keeping the baseline
 // set shape-only keeps every call site a one-liner (`Zeros.Init([c])`) and
 // keeps the initializer graphs trivially resolvable at materialization time.
-// Gains and seeds are therefore fixed, documented constants:
+// Gains are therefore fixed, documented constants:
 //   - Xavier initializers use gain = 1.
 //   - Kaiming initializers use gain = sqrt(2) (the ReLU gain, fan-in mode).
-//   - Random initializers are seeded (deterministic): every materialization of
-//     a parameter produces the same values, and two parameters of the same
-//     shape initialized by the same class receive identical values.
+//   - Random initializers draw from the parameter's OWN RNG stream — keyed by
+//     its ModelId under the model's RNG identity (RngConfig; the default
+//     deterministic identity when none is bound). Materialization is
+//     deterministic and reproducible for a config, and two same-shape
+//     parameters receive distinct values (SharedKey mode ties them for
+//     reference tests). There is no per-initializer seed.
 // Fan-in/fan-out are computed in-graph from the shape vector:
 //   fanIn  = prod(shape) / shape[0]   (= shape[1] * receptive-field size)
 //   fanOut = prod(shape) / shape[1]   (= shape[0] * receptive-field size)
@@ -90,24 +93,24 @@ public static partial class Constant
         => Globals.TensorFill(shape, 1.0f) * value;   // TensorFill takes a LITERAL; apply the runtime value via *
 }
 
-/// <summary>Uniform U(0, 1) initializer, seeded (deterministic).</summary>
+/// <summary>Uniform U(0, 1) initializer, stream-keyed (deterministic).</summary>
 [TrainableParamInitializer]
 public static partial class Uniform
 {
     public static Tensor<float32> Inline(Vector<int64> shape)
-        => Globals.RandomUniform(shape, low: 0.0f, high: 1.0f, seed: 11.0f);
+        => Globals.RandomUniform(shape, low: 0.0f, high: 1.0f);
 }
 
-/// <summary>Standard normal N(0, 1) initializer, seeded (deterministic). PyTorch's nn.Embedding default.</summary>
+/// <summary>Standard normal N(0, 1) initializer, stream-keyed (deterministic). PyTorch's nn.Embedding default.</summary>
 [TrainableParamInitializer]
 public static partial class Normal
 {
     public static Tensor<float32> Inline(Vector<int64> shape)
-        => Globals.RandomNormal(shape, mean: 0.0f, scale: 1.0f, seed: 12.0f);
+        => Globals.RandomNormal(shape, mean: 0.0f, scale: 1.0f);
 }
 
 /// <summary>
-/// Xavier/Glorot uniform: U(-a, a) with a = sqrt(6 / (fanIn + fanOut)), gain = 1. Seeded.
+/// Xavier/Glorot uniform: U(-a, a) with a = sqrt(6 / (fanIn + fanOut)), gain = 1. Stream-keyed.
 /// Requires a rank >= 2 shape.
 /// </summary>
 [TrainableParamInitializer]
@@ -116,12 +119,12 @@ public static partial class XavierUniform
     public static Tensor<float32> Inline(Vector<int64> shape)
     {
         var bound = (6.0f / (InitializerMath.FanIn(shape) + InitializerMath.FanOut(shape))).Sqrt();
-        return Globals.RandomUniform(shape, low: -1.0f, high: 1.0f, seed: 13.0f) * bound;
+        return Globals.RandomUniform(shape, low: -1.0f, high: 1.0f) * bound;
     }
 }
 
 /// <summary>
-/// Xavier/Glorot normal: N(0, std) with std = sqrt(2 / (fanIn + fanOut)), gain = 1. Seeded.
+/// Xavier/Glorot normal: N(0, std) with std = sqrt(2 / (fanIn + fanOut)), gain = 1. Stream-keyed.
 /// Requires a rank >= 2 shape.
 /// </summary>
 [TrainableParamInitializer]
@@ -130,12 +133,12 @@ public static partial class XavierNormal
     public static Tensor<float32> Inline(Vector<int64> shape)
     {
         var std = (2.0f / (InitializerMath.FanIn(shape) + InitializerMath.FanOut(shape))).Sqrt();
-        return Globals.RandomNormal(shape, mean: 0.0f, scale: 1.0f, seed: 14.0f) * std;
+        return Globals.RandomNormal(shape, mean: 0.0f, scale: 1.0f) * std;
     }
 }
 
 /// <summary>
-/// Kaiming/He uniform (fan-in mode, ReLU gain sqrt(2)): U(-b, b) with b = sqrt(6 / fanIn). Seeded.
+/// Kaiming/He uniform (fan-in mode, ReLU gain sqrt(2)): U(-b, b) with b = sqrt(6 / fanIn). Stream-keyed.
 /// Requires a rank >= 2 shape. The default weight initializer for <see cref="Layers.Linear"/> and the Conv layers.
 /// </summary>
 [TrainableParamInitializer]
@@ -144,12 +147,12 @@ public static partial class KaimingUniform
     public static Tensor<float32> Inline(Vector<int64> shape)
     {
         var bound = (6.0f / InitializerMath.FanIn(shape)).Sqrt();
-        return Globals.RandomUniform(shape, low: -1.0f, high: 1.0f, seed: 15.0f) * bound;
+        return Globals.RandomUniform(shape, low: -1.0f, high: 1.0f) * bound;
     }
 }
 
 /// <summary>
-/// Kaiming/He normal (fan-in mode, ReLU gain sqrt(2)): N(0, std) with std = sqrt(2 / fanIn). Seeded.
+/// Kaiming/He normal (fan-in mode, ReLU gain sqrt(2)): N(0, std) with std = sqrt(2 / fanIn). Stream-keyed.
 /// Requires a rank >= 2 shape.
 /// </summary>
 [TrainableParamInitializer]
@@ -158,13 +161,13 @@ public static partial class KaimingNormal
     public static Tensor<float32> Inline(Vector<int64> shape)
     {
         var std = (2.0f / InitializerMath.FanIn(shape)).Sqrt();
-        return Globals.RandomNormal(shape, mean: 0.0f, scale: 1.0f, seed: 16.0f) * std;
+        return Globals.RandomNormal(shape, mean: 0.0f, scale: 1.0f) * std;
     }
 }
 
 /// <summary>
 /// Recurrent-weight uniform init: U(−1/√H, 1/√H) with the hidden dimension <c>H</c>
-/// passed explicitly via <c>hiddenSize</c>, seeded. This is PyTorch's
+/// passed explicitly via <c>hiddenSize</c>, stream-keyed. This is PyTorch's
 /// <c>nn.RNN</c>/<c>nn.LSTM</c>/<c>nn.GRU</c> default (<c>k = 1/hidden_size</c>,
 /// every weight and bias drawn from <c>U(−√k, √k)</c>). The bound is keyed off the
 /// caller-supplied hidden size rather than <c>shape[1]</c> because for the gated
@@ -181,6 +184,6 @@ public static partial class RecurrentUniform
     public static Tensor<float32> Inline(Vector<int64> shape, Scalar<int64> hiddenSize)
     {
         var bound = Scalar(1.0f) / hiddenSize.Cast<float32>().Sqrt();
-        return Globals.RandomUniform(shape, low: -1.0f, high: 1.0f, seed: 17.0f) * bound;
+        return Globals.RandomUniform(shape, low: -1.0f, high: 1.0f) * bound;
     }
 }

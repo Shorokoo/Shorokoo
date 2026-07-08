@@ -241,17 +241,19 @@ public sealed class RngConfig
     /// derives every stream key bit-identically to the originating one — no stream inventory
     /// needed. Sub-masters decode as explicit seeds (a packed key seed reproduces the packed
     /// key exactly, since <c>SplitWords</c> inverts the packing); override records restore the
-    /// per-stream seeds by path. <see cref="Algorithm"/> is not carried by the vector (the
-    /// carrier node's attribute is authoritative) and <see cref="SharedKey"/> is debug-only;
-    /// both decode as their defaults.
+    /// per-stream seeds by path. <see cref="Algorithm"/> is not carried by the vector — the
+    /// carrier node's attribute is authoritative, so callers reconstructing a full identity
+    /// pass it via <paramref name="algorithm"/>. <see cref="SharedKey"/> is debug-only and
+    /// decodes as default.
     /// </summary>
-    internal static RngConfig FromKeyVector(long[] keyVector)
+    internal static RngConfig FromKeyVector(
+        long[] keyVector, RngAlgorithm algorithm = RngAlgorithm.Threefry2x32)
     {
         if (keyVector is not { Length: >= 1 })
             throw new ArgumentException("RNG key vector must have at least the master seed.", nameof(keyVector));
 
         if (keyVector.Length == 1)
-            return new RngConfig { MasterSeed = unchecked((ulong)keyVector[0]) };
+            return new RngConfig { MasterSeed = unchecked((ulong)keyVector[0]), Algorithm = algorithm };
 
         if (keyVector.Length < 3)
             throw new ArgumentException(
@@ -263,6 +265,7 @@ public sealed class RngConfig
             MasterSeed = unchecked((ulong)keyVector[0]),
             InitMasterSeed = unchecked((ulong)keyVector[1]),
             RunMasterSeed = unchecked((ulong)keyVector[2]),
+            Algorithm = algorithm,
         };
         if (keyVector.Length == 3) return cfg;
 

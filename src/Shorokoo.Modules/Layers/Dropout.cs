@@ -26,12 +26,10 @@ internal static class DropoutMasking
         // Per-step mask freshness needs nothing here: the RNG system owns the drawBase.
         // Concretization injects one model-global execution counter (state, +1 per step
         // under the training rig; frozen at 0 in one-shot inference) and wires it into
-        // every feed — see FastInjectRngDrawCounter.
-        //
-        // Seed 42 is honored only by the unkeyed ONNX fallback (RandomUniformLike), keeping
-        // that path deterministic per session — the pre-keyed-RNG behavior. The keyed path
-        // derives its stream from the RngConfig masters and ignores this attribute.
-        var u = RandomUniform(maskShape, low: 0f, high: 1f, seed: 42f);
+        // every feed — see FastInjectRngDrawCounter. The mask's stream is keyed by this
+        // site's ModelId under the model's RNG identity (RngConfig.Default when none is
+        // bound) — there is no per-site seed.
+        var u = RandomUniform(maskShape, low: 0f, high: 1f);
 
         var keep = (u >= ratio).Cast<float32>();                        // 1 if kept (prob 1−ratio), else 0
         var scaled = keep / (Scalar(1f) - ratio);                       // survivors → 1/(1−ratio)

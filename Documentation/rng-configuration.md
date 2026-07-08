@@ -31,20 +31,30 @@ Because the key tree *is* the ModelId tree:
   [`Rng.Pin`](rng-pinning.md) can freeze those against refactoring;
 - changing `MasterSeed` re-randomizes everything at once, coherently.
 
-## Binding writes the model's RNG identity
+## Feed keys are parameters of the model
 
-Applying a config does **not** transform the graph. Binding validates the config against the
-model's stream inventory and writes one thing: a compact **key vector** the model carries as
-a single parameter-like tensor — its RNG identity (master seed, sub-masters, any per-stream
-overrides, and the algorithm name). No feed is touched, no opcode changes, no inputs change.
-Structure is deferred: only when a graph is prepared for execution or ONNX export does the
-lowering derive each feed's keys from that identity and rewrite the feed into the keyed
-deterministic draw — and that rewrite happens on the export-time clone, never on your graph.
+A runtime feed mirrors a trainable parameter exactly. Both are ModelId-addressed consumers;
+both have an *initializer*; both get their values when the model becomes concrete. The only
+difference is what the initializer needs: a parameter's initializer takes model tensors, a
+feed's **key initializer** needs nothing but the RNG identity and the site's ModelId — it
+*is* the fold described above.
+
+- `ToConcreteArchitecture` enumerates each feed site's streams and creates its **key
+  entity** — the param-like carrier of the site's realized stream set — exactly as it
+  realizes the model's parameters.
+- Binding a config (`ToConcreteModel(config)` / `ApplyRngConfig`) validates it against the
+  stream inventory, records the identity as a compact **key vector** the model carries as a
+  single parameter-like tensor (master seed, sub-masters, any per-stream overrides, plus
+  the algorithm name), and **runs the key initializers**: every key entity's value — its
+  per-stream key table — is materialized from the identity, the same way parameter values
+  come from running their initializers.
 
 Three properties follow directly:
 
-**Re-binding is cheap and late.** Because binding is replacing one tensor, you can change
-the master seed *after* `ToConcreteModel`, on the already-built model:
+**Re-binding is re-initialization, scoped to keys.** Because a key initializer is pure in
+the identity, re-running it is always safe: you can change the master seed *after*
+`ToConcreteModel`, on the already-built model — key values re-materialize, trained or
+loaded weights are untouched:
 
 ```csharp
 var concrete = arch.ToConcreteModel(new RngConfig { MasterSeed = 1 });
@@ -54,24 +64,25 @@ concrete.ApplyRngConfig(new RngConfig { MasterSeed = 2 });
 
 Re-applying the original config restores the original draws bit-for-bit.
 
-**Randomness survives save/load.** The identity tensor rides the model file (as a
-reserved-name initializer), so a loaded model draws exactly what it drew before saving — no
-config object needed on the loading side.
+**Randomness survives save/load.** The identity tensor and the materialized key values ride
+the model file, so a loaded model draws exactly what it drew before saving — no config
+object needed on the loading side.
 
 **Training needs nothing special.** The rig binds the concrete architecture at the same
-shared point inference uses, *before* loss composition and autodiff. Since binding changes
-no opcodes, autodiff sees exactly the graph it always saw; the identity tensor rides along
-into the training-step graph, and the forward and any recomputed backward copy of a feed
-derive the same key — so e.g. a Dropout's backward mask matches its forward mask by
-construction.
+shared point inference uses, *before* loss composition and autodiff. The identity tensor
+and the key entities ride along into the training-step graph, and the forward and any
+recomputed backward copy of a feed read the same key entity — so e.g. a Dropout's backward
+mask matches its forward mask by construction.
 
 ## What a keyed feed lowers to
 
-At ONNX prep, a feed of a bound model becomes a call to the config's **named RNG
-algorithm** — a versioned set of functions (kinds *split* / *uniform* / *normal*) that
-export as tagged, non-inlined ONNX local `FunctionProto`s. The exported model's randomness
-is therefore deterministic, portable across execution providers, and identifiable: you can
-point at the function in the ONNX file that produced any draw.
+At ONNX prep the already-materialized keys just get wired: a feed selects its iteration's
+[k0, k1] row from its key entity's table (a plain int64 constant in the exported file) and
+calls the config's **named RNG algorithm** — a versioned set of functions (kinds *split* /
+*uniform* / *normal*) that export as tagged, non-inlined ONNX local `FunctionProto`s. The
+exported model's randomness is therefore deterministic, portable across execution
+providers, and identifiable: you can point at the function in the ONNX file that produced
+any draw — and at the constant that carries its keys.
 
 ## Choosing the generator
 
@@ -152,14 +163,20 @@ skeleton for freezing streams before a refactor (see
 
 ## Without a config
 
-A model that was never bound carries no RNG identity, and its feeds lower to the plain ONNX
-random ops (`RandomUniformLike` / `RandomNormalLike`): the conventional, backend-seeded
-behavior — non-reproducible by nature, with any user-supplied seed passed through and none
-synthesized.
+There is no unkeyed concrete model. A model concretized without a config gets the **default
+deterministic identity** — `RngConfig.Default`, master seed 0 — for both collections:
+parameters initialize under it and feeds draw keyed Threefry under it, exactly as if you had
+passed it explicitly. "No config" configures the seed to 0; it never falls back to backend
+random ops. In particular, repeated one-shot inference of a no-config model repeats its
+draws bit-for-bit; if you want per-run variation, say so with `RngConfig.NonDeterministic()`.
+
+There is likewise no per-site seed: `Globals.RandomUniform` / `RandomNormal` take no seed
+parameter. Randomness is configuration — a model definition never contains a seed — so all
+seeding goes through `RngConfig`, addressed by ModelId when a single stream needs pinning.
 
 ## Choosing seeds
 
-- `RngConfig.Default` — master seed 0; fully deterministic.
+- `RngConfig.Default` — master seed 0; fully deterministic, and what "no config" means.
 - `new RngConfig { MasterSeed = s }` — deterministic under your seed.
 - `RngConfig.NonDeterministic()` — a fresh master from system entropy each run; the chosen
   seed is fixed on the object so the run stays internally consistent and can be recorded.

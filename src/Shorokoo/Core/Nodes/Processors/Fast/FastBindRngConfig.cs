@@ -11,18 +11,18 @@ using static Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames;
 namespace Shorokoo.Core.Nodes.Processors.Fast
 {
     /// <summary>
-    /// Binds an <see cref="RngConfig"/> to a graph by validating it against the graph's
-    /// realized stream set and writing the config's randomness state as the graph's single
-    /// <c>SHRK_RNG_KEY_VECTOR</c> carrier (see <see cref="RngConfig.BuildKeyVector"/>) — the
-    /// <b>source of truth</b> every key derivation reads. Binding writes NO per-node state:
-    /// the ONNX-prep lowering (<see cref="FastLowerRandomOps"/>) decodes the carrier and
-    /// derives each feed's keys from its structural attributes (ModelId + realized ids) on the
-    /// export clone, so re-binding a different config is replacing one node, the pre-export
-    /// graph keeps its structure, and there is no second representation to drift out of sync.
-    /// A graph with no carrier lowers its feeds to the ONNX random fallback.
+    /// Binds an <see cref="RngConfig"/> to a graph: validates it against the graph's realized
+    /// stream set, writes the config's randomness state as the graph's single
+    /// <c>SHRK_RNG_KEY_VECTOR</c> carrier (the recorded identity — see
+    /// <see cref="RngConfig.BuildKeyVector"/>), and runs the RNG key initializers
+    /// (<see cref="FastMaterializeRngKeys"/>): every feed site's <c>SHRK_RNG_KEY</c> entity
+    /// gets its key-table value materialized from the identity, exactly as trainable
+    /// parameters get their values by running their initializers. Re-binding re-runs the key
+    /// initializers only — parameter values are untouched — so a concrete model can be
+    /// re-seeded or switched to another algorithm in place, bit-exactly.
     ///
     /// <para>Validation is fail-loud, per the concreteness contract: every id-bearing feed
-    /// must carry realized stream ids (enumerated at concretization — see
+    /// must be wired to the key entity created at concretization (see
     /// <c>ToConcreteArchitecture</c>), a loop-body feed without per-iteration identity is an
     /// error (a single key would repeat identical values every iteration), and a
     /// <see cref="RngCollection.Runtime"/> override that matches no realized stream throws
@@ -44,6 +44,20 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 if (node.OpCode == OpCodes.LOOP_OPEN) loopDepth++;
                 else if (node.OpCode == OpCodes.LOOP_CLOSE) loopDepth--;
+
+                if (node.OpCode == InternalOpCodes.SHRK_RNG_KEY)
+                {
+                    // The site's key entity owns the realized stream set.
+                    var siteId = node.Attributes.GetIntsVal(ShrkAttrLocalModelId);
+                    var realizedFlat = node.Attributes.GetIntsVal(ShrkAttrRngRealizedIds);
+                    if (siteId is { Length: > 0 } && realizedFlat is { Length: > 0 })
+                    {
+                        int idLen = siteId.Length;
+                        for (int r = 0; r < realizedFlat.Length / idLen; r++)
+                            realizedPaths.Add(string.Join(",", realizedFlat[(r * idLen)..((r + 1) * idLen)]));
+                    }
+                    continue;
+                }
 
                 bool isUniform = node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM;
                 bool isNormal = node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL;
@@ -70,17 +84,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         "stream identity), so it cannot draw deterministically per iteration.");
                 }
 
-                var realizedFlat = node.Attributes.GetIntsVal(ShrkAttrRngRealizedIds);
-                if (realizedFlat is not { Length: > 0 })
+                if (node.Inputs.Count < 4 || node.Inputs[3] is null)
                     throw new InvalidOperationException(
                         $"ApplyRngConfig: the runtime random feed at ModelId [{string.Join(", ", idVals)}] " +
-                        "carries no realized stream ids. RNG streams are enumerated at " +
-                        "concretization (ToConcreteArchitecture) — bind the config to a " +
-                        "concrete architecture, concrete model, or training-rig step graph.");
-
-                int idLen = idVals.Length;
-                for (int r = 0; r < realizedFlat.Length / idLen; r++)
-                    realizedPaths.Add(string.Join(",", realizedFlat[(r * idLen)..((r + 1) * idLen)]));
+                        "carries no realized stream ids (no key entity is wired). RNG streams " +
+                        "are enumerated at concretization (ToConcreteArchitecture) — bind the " +
+                        "config to a concrete architecture, concrete model, or training-rig " +
+                        "step graph.");
             }
 
             // Fail-loud override validation: a Runtime override that matches no stream of this
@@ -98,6 +108,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     "use a reported path exactly.");
 
             InjectKeyVector(graph, rngConfig, algorithmName);
+            FastMaterializeRngKeys.Process(graph, rngConfig);
         }
 
         /// <summary>

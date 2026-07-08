@@ -47,6 +47,15 @@ internal static class RngAlgorithms
         _ => throw new NotSupportedException($"Unknown RNG algorithm '{algorithm}'."),
     };
 
+    /// <summary>The configured <see cref="RngAlgorithm"/> for a registry name, or null when the
+    /// name is unknown (e.g. a carrier written by a newer version).</summary>
+    public static RngAlgorithm? TryFromName(string algorithm) => algorithm switch
+    {
+        Threefry2x32BoxMullerV1 => RngAlgorithm.Threefry2x32,
+        Threefry2x32x13BoxMullerV1 => RngAlgorithm.Threefry2x32Rounds13,
+        _ => null,
+    };
+
     // The draw (uniform/normal) bit-generator round count per algorithm. The key tree (split)
     // is deliberately NOT algorithm-dependent — see DrawRounds usage below.
     private static int DrawRounds(string algorithm) => algorithm switch

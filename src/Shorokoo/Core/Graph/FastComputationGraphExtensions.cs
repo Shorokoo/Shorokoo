@@ -262,17 +262,17 @@ namespace Shorokoo.Graph
         }
 
         /// <summary>
-        /// Binds <paramref name="rngConfig"/> to the graph by validating it against the
-        /// graph's realized stream set (fail-loud — see <see cref="RngConfig.Override"/>) and
-        /// writing the config's randomness state as the graph's single RNG key-vector carrier,
-        /// the source of truth all key derivation reads. Binding changes nothing else —
-        /// re-invoking with a different config re-binds all randomness by replacing that one
-        /// node, even on an already-concrete model — and takes structural effect only at ONNX
-        /// prep, where each feed's keys are derived from the carrier plus the feed's
-        /// structural attributes and the feed lowers to the keyed deterministic draw (with no
-        /// carrier, feeds lower to the ONNX random-op fallback). Because the carrier rides the
-        /// graph — including through save/load — a loaded model's randomness is reproducible
-        /// with no config object. Works on any graph whose RNG streams were realized at
+        /// Binds <paramref name="rngConfig"/> to the graph: validates it against the graph's
+        /// realized stream set (fail-loud — see <see cref="RngConfig.Override"/>), records the
+        /// config's randomness state as the graph's single RNG key-vector carrier (the model's
+        /// identity), and runs the RNG key initializers — every feed site's key entity gets
+        /// its key-table value materialized from the identity, exactly as trainable parameters
+        /// get their values by running their initializers. Re-invoking with a different config
+        /// is re-initialization scoped to keys: key initializers are pure in the identity, so
+        /// they re-run safely on an already-concrete model while parameter values stay
+        /// untouched. Because the identity and the materialized keys ride the graph —
+        /// including through save/load — a loaded model's randomness is reproducible with no
+        /// config object. Works on any graph whose RNG streams were realized at
         /// concretization: a concrete architecture, a concrete model, or a training-rig step
         /// graph.
         /// </summary>
@@ -355,7 +355,16 @@ namespace Shorokoo.Graph
                 .ToImmutableDictionary(g => g.Key, g => g.First().ParamValue);
 
             var fastGraph = graph.Clone();
-            return FastApplyModelParamValues.Process(fastGraph, paramValuesById);
+            var concrete = FastApplyModelParamValues.Process(fastGraph, paramValuesById);
+
+            // A concrete model with RNG feed sites always carries an identity: when none was
+            // bound, bind the default deterministic config now — its key entities materialize
+            // under master seed 0 and the feeds draw keyed Threefry. "No config" means the
+            // default identity, never the non-reproducible ONNX random fallback.
+            if (concrete.TryGetRngKeyVector() is null &&
+                concrete.Nodes.Any(n => n.OpCode == InternalOpCodes.SHRK_RNG_KEY))
+                concrete.ApplyRngConfig(RngConfig.Default);
+            return concrete;
         }
 
         /// <summary>
@@ -386,8 +395,10 @@ namespace Shorokoo.Graph
         /// <param name="rngConfig">
         /// Optional RNG configuration. Each random initializer draws host-generated noise keyed
         /// by its parameter's own stream (so same-shape parameters get distinct values,
-        /// reproducibly and backend-independently). When <c>null</c>,
-        /// <see cref="RngConfig.Default"/> (master seed 0) is used.
+        /// reproducibly and backend-independently). When <c>null</c>, the graph's bound identity
+        /// (the RNG key-vector carrier, algorithm included) is used when one is present — the
+        /// carrier is the source of truth for BOTH collections — else
+        /// <see cref="RngConfig.Default"/> (master seed 0).
         /// </param>
         /// <returns>The default trainable-parameter values, named.</returns>
         public static ModelParamList InitializeTrainableParams(
@@ -398,6 +409,9 @@ namespace Shorokoo.Graph
         {
             AssertConcreteArchitecture(graph, nameof(InitializeTrainableParams));
             computeContext ??= ComputeContext.Default;
+            if (rngConfig is null && graph.TryGetRngKeyVector() is { } carried)
+                rngConfig = RngConfig.FromKeyVector(carried.keyVector,
+                    Core.Rng.RngAlgorithms.TryFromName(carried.algorithm) ?? RngAlgorithm.Threefry2x32);
             rngConfig ??= RngConfig.Default;
 
             var paramNamingInfo = graph.GetConcreteModelParamInfos();
@@ -455,6 +469,14 @@ namespace Shorokoo.Graph
                 });
             }
 
+            // A feed site's realized stream set lives on its key entity (the param-like
+            // SHRK_RNG_KEY node wired at concretization) — index them by output so each
+            // feed's rows can be built from its own entity.
+            var keyEntityByOutput = new Dictionary<FastTensorKey, FastNode>();
+            foreach (var node in graph.Nodes)
+                if (node.OpCode == InternalOpCodes.SHRK_RNG_KEY)
+                    keyEntityByOutput[node.Outputs[0]!.Value] = node;
+
             var seenFeedPaths = new HashSet<string>();
             foreach (var node in graph.Nodes)
             {
@@ -470,8 +492,11 @@ namespace Shorokoo.Graph
                 // site id is kept alongside for pin-skeleton grouping. Unrolled clones of one
                 // site share realized ids; report each stream once. Realization is enforced
                 // at concretization (the concreteness contract), so an id-bearing feed
-                // without realized ids means the graph is not a concrete architecture.
-                var realizedFlat = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrRngRealizedIds);
+                // without a key entity means the graph is not a concrete architecture.
+                var keySource = node.Inputs.Count > 3 ? node.Inputs[3] : null;
+                var realizedFlat = keySource is { } ks && keyEntityByOutput.TryGetValue(ks, out var keyEntity)
+                    ? keyEntity.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrRngRealizedIds)
+                    : null;
                 if (realizedFlat is not { Length: > 0 })
                     throw new System.InvalidOperationException(
                         $"GetRngStreamReport: the runtime random feed at ModelId " +

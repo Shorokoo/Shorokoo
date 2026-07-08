@@ -323,23 +323,23 @@ internal static partial class InternalOp
     }
 
     /// <summary>
-    /// Creates a tensor filled with random values from a uniform distribution in [low, high).
-    /// Takes shape as a tensor input (dynamic shape support).
-    /// Lowered to ONNX ConstantOfShape + RandomUniformLike before execution.
+    /// A uniform random feed in [low, high) taking its shape as a tensor input (dynamic shape
+    /// support). An id-bearing feed lowers to the keyed deterministic draw under the model's
+    /// RNG identity; a feed without stream identity lowers to ConstantOfShape +
+    /// RandomUniformLike.
     /// </summary>
-    public static Variable RandomUniform(Variable shape, float? high = null, float? low = null, float? seed = null, Variable? drawBase = null, Variable? iterationIndices = null)
+    public static Variable RandomUniform(Variable shape, float? high = null, float? low = null, Variable? drawBase = null, Variable? iterationIndices = null)
         => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_UNIFORM, [shape, drawBase, iterationIndices], [
-            (AttrHigh, high), (AttrLow, low), (AttrSeed, seed),
+            (AttrHigh, high), (AttrLow, low),
             (ShrkAttrLocalModelId, (long[])[])]);
 
     /// <summary>
-    /// Creates a tensor filled with random values from a normal distribution.
-    /// Takes shape as a tensor input (dynamic shape support).
-    /// Lowered to ONNX ConstantOfShape + RandomNormalLike before execution.
+    /// A normal random feed N(mean, scale) taking its shape as a tensor input; see
+    /// <see cref="RandomUniform(Variable, float?, float?, Variable?, Variable?)"/>.
     /// </summary>
-    public static Variable RandomNormal(Variable shape, float? mean = null, float? scale = null, float? seed = null, Variable? drawBase = null, Variable? iterationIndices = null)
+    public static Variable RandomNormal(Variable shape, float? mean = null, float? scale = null, Variable? drawBase = null, Variable? iterationIndices = null)
         => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_NORMAL, [shape, drawBase, iterationIndices], [
-            (AttrMean, mean), (AttrScale, scale), (AttrSeed, seed),
+            (AttrMean, mean), (AttrScale, scale),
             (ShrkAttrLocalModelId, (long[])[])]);
 
     /// <summary>Index-based RNG key split under the named algorithm: child = Bijection(key, counter: index).</summary>

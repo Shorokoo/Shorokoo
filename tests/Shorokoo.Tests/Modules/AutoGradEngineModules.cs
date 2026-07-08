@@ -58,7 +58,7 @@ namespace Shorokoo.Tests.Modules
     {
         public static Scalar<bit> Inline(Tensor<float32> x)
         {
-            var r = Globals.RandomNormal(Vector(4L), mean: 0.0f, scale: 1.0f, seed: 7f);
+            var r = Globals.RandomNormal(Vector(4L), mean: 0.0f, scale: 1.0f);
             var loss = (x * r).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
             var grad = (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, loss);
             var diff = (grad - r).Abs();

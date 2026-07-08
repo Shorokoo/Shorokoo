@@ -581,10 +581,12 @@ namespace Shorokoo
 
 
         /// <summary>
-        /// Creates a tensor filled with random values from a uniform distribution in [low, high).
-        /// Takes shape as a dynamic tensor input. Lowered to ONNX RandomUniformLike before execution.
+        /// A runtime uniform random feed in [low, high) of dynamic shape. The draw is keyed by
+        /// the site's ModelId under the model's RNG identity (the bound <see cref="RngConfig"/>,
+        /// or the default deterministic identity when none is bound) — there is no seed to pass:
+        /// randomness is configuration, never part of the model definition.
         /// </summary>
-        public static Tensor<float32> RandomUniform(Vector<int64> shape, float low = 0.0f, float high = 1.0f, float? seed = null)
+        public static Tensor<float32> RandomUniform(Vector<int64> shape, float low = 0.0f, float high = 1.0f)
         {
             // Capture the ambient loop context (exactly like trainable-param Init calls) so an
             // in-loop feed's ModelId gets an iteration slot and the runtime iteration index
@@ -594,18 +596,18 @@ namespace Shorokoo
             // concretization (FastInjectRngDrawCounter), giving per-step freshness under
             // training for free.
             Vector<int64> iterationIndices = [.. LoopAPI.IterationIndices];
-            return InternalOp.RandomUniform(shape, high: high, low: low, seed: seed,
+            return InternalOp.RandomUniform(shape, high: high, low: low,
                 drawBase: null, iterationIndices: iterationIndices);
         }
 
         /// <summary>
-        /// Creates a tensor filled with random values from a normal distribution with given mean and scale (std dev).
-        /// Takes shape as a dynamic tensor input. Lowered to ONNX RandomNormalLike before execution.
+        /// A runtime normal random feed N(mean, scale) of dynamic shape. Keyed by the site's
+        /// ModelId under the model's RNG identity — see <see cref="RandomUniform(Vector{int64}, float, float)"/>.
         /// </summary>
-        public static Tensor<float32> RandomNormal(Vector<int64> shape, float mean = 0.0f, float scale = 1.0f, float? seed = null)
+        public static Tensor<float32> RandomNormal(Vector<int64> shape, float mean = 0.0f, float scale = 1.0f)
         {
             Vector<int64> iterationIndices = [.. LoopAPI.IterationIndices];
-            return InternalOp.RandomNormal(shape, mean: mean, scale: scale, seed: seed,
+            return InternalOp.RandomNormal(shape, mean: mean, scale: scale,
                 drawBase: null, iterationIndices: iterationIndices);
         }
 

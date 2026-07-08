@@ -397,12 +397,12 @@ namespace Shorokoo
         /// <see cref="Schedule"/> is applied per step; <see cref="HyperValue.Runtime"/> is supplied manually.
         /// </param>
         /// <param name="rngConfig">
-        /// Optional RNG configuration. When supplied, trainable parameters initialize from
-        /// per-parameter keyed streams and the config is bound to the training-step graph
-        /// (its key-vector carrier keys every runtime random feed, e.g. Dropout masks),
-        /// making the whole run's randomness deterministic and reproducible from the config's
-        /// master seed. When <c>null</c>, the legacy in-graph seeded init and the ONNX
-        /// random-op fallback are used.
+        /// Optional RNG configuration. Trainable parameters initialize from per-parameter keyed
+        /// streams and the config is bound to the training-step graph (keying every runtime
+        /// random feed, e.g. Dropout masks), making the whole run's randomness deterministic
+        /// and reproducible from the config's master seed. When <c>null</c>,
+        /// <see cref="RngConfig.Default"/> (master seed 0) is used — "no config" means the
+        /// default deterministic identity, never non-reproducible backend randomness.
         /// </param>
         /// <returns>A configured TrainingRig ready for training</returns>
         public static TrainingRig FromScratch(
@@ -526,6 +526,10 @@ namespace Shorokoo
 
             var ctx = ComputeContext.Default;
 
+            // No config means the default deterministic identity — the rig's randomness
+            // (init and runtime feeds alike) is always keyed, never backend random ops.
+            rngConfig ??= RngConfig.Default;
+
             // Single ToConcreteArchitecture pass. The resulting concrete arch graph is the
             // shared substrate for both phases below: Phase 1 composes it with loss +
             // autograd + optimizer to build the training-step graph; Phase 2 reads its
@@ -535,11 +539,10 @@ namespace Shorokoo
             var concreteArch = modelGraph.ToConcreteArchitecture(new ModelParamList(sampleInputs), ctx);
 
             // Bind the RNG config at the shared concretization point: binding writes the
-            // config's key-vector carrier (one node, no other graph change), which rides
-            // unchanged through loss composition and autograd into the training-step graph,
-            // where the ONNX-prep lowering derives every feed's keys from it.
-            if (rngConfig is not null)
-                concreteArch.ApplyRngConfig(rngConfig);
+            // config's key-vector carrier and materializes every feed site's key entity —
+            // both ride unchanged through loss composition and autograd into the
+            // training-step graph, where the ONNX-prep lowering wires the keyed draws.
+            concreteArch.ApplyRngConfig(rngConfig);
 
             var rig = new TrainingRig();
             rig.BuildTrainingStepPureGraph(concreteArch, lossGraph, optimizerGraph, hyperparameters, names);

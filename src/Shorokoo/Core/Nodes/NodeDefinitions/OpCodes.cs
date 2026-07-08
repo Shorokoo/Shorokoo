@@ -115,6 +115,17 @@ internal static class InternalOpCodes
     public const string SHRK_RNG_KEY_VECTOR = "shrk_RngKeyVector";
 
     /// <summary>
+    /// A feed site's key entity — the param-like counterpart of TRAINABLE_PARAM for runtime
+    /// randomness. Created at concretization (one per feed site) carrying the site's structural
+    /// identity (site ModelId, realized stream ids, iteration counts); its VALUE — the [N, 2]
+    /// int64 key table, one row per grid cell of the site's enumerated iteration space — is
+    /// materialized from the bound <c>RngConfig</c> when the graph becomes a concrete model
+    /// (and re-materialized on re-bind), exactly as a trainable parameter's value is
+    /// materialized by running its initializer. Lowered to a plain CONSTANT at ONNX prep.
+    /// </summary>
+    public const string SHRK_RNG_KEY = "shrk_RngKey";
+
+    /// <summary>
     /// Keyed deterministic normal draw N(mean, scale) of dynamic shape under the named
     /// algorithm (shrk_rng_algorithm attribute). Inputs: key int64[2], drawBase int64
     /// scalar, shape int64[r], mean f32, scale f32. See <see cref="SHRK_RNG_UNIFORM"/>.

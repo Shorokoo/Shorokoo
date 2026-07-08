@@ -40,8 +40,8 @@ Related: [defining-models.md](defining-models.md) · [inference.md](inference.md
 | `TensorData([1L,3L,2L,2L], myFloats)` | `TensorData<float32>` | Materialized data from dims + a flat `float[]`. |
 | `TensorFill(shape, TensorData([1], 0f))` | `Tensor<T>` | Constant-filled tensor. |
 | `Tensor<float32>.Fill(shape, TensorData(...))` | `Tensor<float32>` | Static fill on the type. |
-| `RandomUniform(shape, low = 0f, high = 1f, seed = null)` | `Tensor<float32>` | Random init; all but `shape` are optional. |
-| `RandomNormal(shape, mean = 0f, scale = 1f, seed = null)` | `Tensor<float32>` | Random init; `RandomNormal(shape, seed: 0)` is valid. |
+| `RandomUniform(shape, low = 0f, high = 1f)` | `Tensor<float32>` | Random feed; all but `shape` are optional. Keyed by the model's [RNG identity](rng-configuration.md) — no per-site seed. |
+| `RandomNormal(shape, mean = 0f, scale = 1f)` | `Tensor<float32>` | Random feed; see `RandomUniform`. |
 
 **Implicit primitive → `Scalar<T>` conversion.** Wherever a `Scalar<T>` is expected, a bare
 primitive value converts to one automatically, so the `Scalar(...)` wrapper is usually
@@ -103,7 +103,7 @@ using static Shorokoo.Globals;
 using static Shorokoo.NN;
 
 var x = TensorFill(Vector(1L, 3L, 224L, 224L), TensorData([1], 0.1f)); // [1,3,224,224]
-var w = RandomNormal(Vector(64L, 3L, 7L, 7L), seed: 0);
+var w = RandomNormal(Vector(64L, 3L, 7L, 7L));
 var b = VectorFill(64L, 0f);
 
 var y = Conv(x, w, b, AutoPad.NotSet,

@@ -258,8 +258,11 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("fields", "TFields")
                 .Output("structOutput", "TStruct"),
 
-            // SHRK_RANDOM_UNIFORM: Generates random uniform values with dynamic shape input.
-            // Lowered to ConstantOfShape + RandomUniformLike before ONNX execution.
+            // SHRK_RANDOM_UNIFORM: a uniform runtime feed with dynamic shape input. An
+            // id-bearing feed is wired at concretization to its SHRK_RNG_KEY entity ("key"
+            // input) and lowers to a keyed deterministic draw selecting its iteration's key
+            // row; a feed without stream identity (e.g. inside an initializer function body)
+            // lowers to ConstantOfShape + RandomUniformLike.
             Op(SHRK_RANDOM_UNIFORM)
                 .Tensor<int64>("T1")
                 .Tensor<float32>("T2")
@@ -267,15 +270,13 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeFloat(AttrLow)
                 .AttributeFloat(AttrSeed)
                 .AttributeLongs(ShrkAttrLocalModelId)
-                .AttributeLongs(ShrkAttrRngRealizedIds)
-                .AttributeLongs(ShrkAttrRngIterCounts)
                 .Input("shape", "T1", 1)
                 .Input("drawBase", "T1", 0)
                 .Input("iterationIndices", "T1", 1)
+                .Input("key", "T1?", 2)
                 .Output("output", "T2", rank: "R"),
 
-            // SHRK_RANDOM_NORMAL: Generates random normal values with dynamic shape input.
-            // Lowered to ConstantOfShape + RandomNormalLike before ONNX execution.
+            // SHRK_RANDOM_NORMAL: the normal-distribution runtime feed; see SHRK_RANDOM_UNIFORM.
             Op(SHRK_RANDOM_NORMAL)
                 .Tensor<int64>("T1")
                 .Tensor<float32>("T2")
@@ -283,22 +284,38 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeFloat(AttrScale)
                 .AttributeFloat(AttrSeed)
                 .AttributeLongs(ShrkAttrLocalModelId)
-                .AttributeLongs(ShrkAttrRngRealizedIds)
-                .AttributeLongs(ShrkAttrRngIterCounts)
                 .Input("shape", "T1", 1)
                 .Input("drawBase", "T1", 0)
                 .Input("iterationIndices", "T1", 1)
+                .Input("key", "T1?", 2)
                 .Output("output", "T2", rank: "R"),
 
             // SHRK_RNG_KEY_VECTOR: the model's compact RNG key vector (int64, tiered — see
-            // RngConfig.BuildKeyVector) plus the algorithm name: the SINGLE source of truth all
-            // key derivation reads at lowering. No inputs; lowered to a plain CONSTANT at ONNX
-            // prep so every backend treats it as ordinary (unused) data.
+            // RngConfig.BuildKeyVector) plus the algorithm name: the recorded RNG identity.
+            // Key entities (SHRK_RNG_KEY) materialize their values from it at bind — or at
+            // lowering, for a graph never bound (no config = the default identity). No inputs;
+            // lowered to a plain CONSTANT at ONNX prep so every backend treats it as ordinary
+            // (unused) data.
             Op(SHRK_RNG_KEY_VECTOR)
                 .Tensor<int64>("T1")
                 .AttributeTensor(AttrValue, "T1", "R")
                 .AttributeString(ShrkAttrRngAlgorithm)
                 .Output("keys", "T1", 1),
+
+            // SHRK_RNG_KEY: a feed site's key entity — the param-like carrier of the site's
+            // realized stream set (site ModelId + realized stream ids + iteration counts),
+            // whose value ([N, 2] int64 key table over the site's dense iteration grid) is
+            // materialized from the bound RngConfig at concrete-model time and re-materialized
+            // on re-bind — exactly as a trainable parameter's value comes from running its
+            // initializer. Value absent until materialization. Feeds select their iteration's
+            // row by runtime index; lowered to a plain CONSTANT at ONNX prep.
+            Op(SHRK_RNG_KEY)
+                .Tensor<int64>("T1")
+                .AttributeTensor(AttrValue, "T1", "R")
+                .AttributeLongs(ShrkAttrLocalModelId)
+                .AttributeLongs(ShrkAttrRngRealizedIds)
+                .AttributeLongs(ShrkAttrRngIterCounts)
+                .Output("keys", "T1", 2),
 
             // SHRK_RNG_SPLIT: index-based RNG key split, child = Bijection(key, counter: index)
             // under the named algorithm. Key = int64[2] (32-bit words). Lowered at ONNX export

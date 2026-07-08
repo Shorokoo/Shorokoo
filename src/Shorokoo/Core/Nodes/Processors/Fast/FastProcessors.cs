@@ -3196,16 +3196,19 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <summary>
         /// Realizes every SHRK_RANDOM_* feed's stream ids from the QEE store: the site id's
         /// <c>-1</c> iteration slots are filled per observed loop iteration (the same loop
-        /// history that realizes trainable-param ids), and the resulting id list — sorted
-        /// lexicographically by iteration so a flat index of Σ iter[j]·stride[j] addresses it —
-        /// is recorded on the node together with the per-level iteration counts (structural
-        /// metadata the key-derivation lowering reads). A feed whose iteration input QEE could
-        /// not resolve is a hard error: per the concreteness contract there is no dynamic
-        /// stream derivation to fall back to.
+        /// history that realizes trainable-param ids), and the site's <b>key entity</b> — a
+        /// <c>SHRK_RNG_KEY</c> node carrying the realized stream set (site id, realized ids,
+        /// per-level iteration counts) — is created and wired as the feed's key input. This
+        /// mirrors trainable params exactly: concretization creates the param-like entity
+        /// whose VALUE (the key table) is materialized later from the bound
+        /// <see cref="RngConfig"/> (see <see cref="FastMaterializeRngKeys"/>). A feed whose
+        /// iteration input QEE could not resolve is a hard error: per the concreteness
+        /// contract there is no dynamic stream derivation to fall back to.
         /// </summary>
         private static void RealizeRngFeedStreams(
             FastComputationGraph graph, Dictionary<FastTensorKey, IRuntimeTensor> store)
         {
+            List<FastNode>? keyNodes = null;
             foreach (var node in graph.Nodes)
             {
                 if (node.OpCode != InternalOpCodes.SHRK_RANDOM_UNIFORM &&
@@ -3273,10 +3276,34 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 long[] flat = new long[realized.Count * idVals.Length];
                 for (int r = 0; r < realized.Count; r++)
                     realized[r].CopyTo(flat, r * idVals.Length);
-                node.Attributes = node.Attributes.SetAttributes(
-                    (OnnxOpAttributeNames.ShrkAttrRngRealizedIds, flat),
-                    (OnnxOpAttributeNames.ShrkAttrRngIterCounts, counts));
+
+                // The site's key entity: owns the realized stream set, value materialized
+                // from the bound config at concrete-model time. Top-level like TRAINABLE_PARAM
+                // nodes — an in-loop feed references it across the loop boundary the same way
+                // an in-loop param reference selects from the top-level param sequence.
+                var keyNodeKey = FastNodeKey.New();
+                var keyOut = new FastTensorKey(keyNodeKey, 0);
+                var keyAttrDefs = Definitions.NodeDefinitions[InternalOpCodes.SHRK_RNG_KEY].AttributeDefs;
+                (keyNodes ??= []).Add(new FastNode
+                {
+                    Key = keyNodeKey,
+                    OpCode = InternalOpCodes.SHRK_RNG_KEY,
+                    Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                        new Dictionary<string, object?>
+                        {
+                            [OnnxOpAttributeNames.ShrkAttrLocalModelId] = idVals.Select(x => (long)x).ToArray(),
+                            [OnnxOpAttributeNames.ShrkAttrRngRealizedIds] = flat,
+                            [OnnxOpAttributeNames.ShrkAttrRngIterCounts] = counts,
+                        }, keyAttrDefs),
+                    FullInputs = new Dictionary<string, List<FastTensorKey?>>(),
+                    FullOutputs = { [""] = new List<FastTensorKey?> { keyOut } },
+                });
+
+                var feedInputs = node.FullInputs[""];
+                while (feedInputs.Count < 4) feedInputs.Add(null);
+                feedInputs[3] = keyOut;
             }
+            if (keyNodes is not null) graph.Nodes.InsertRange(0, keyNodes);
         }
     }
 

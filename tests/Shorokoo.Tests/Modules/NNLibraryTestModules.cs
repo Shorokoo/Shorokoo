@@ -3333,8 +3333,9 @@ public partial class RnnMatchesCoreOpBatchFirst
 }
 
 /// <summary>§7-1 Single-step recurrence anchor: L=1, h_0=0, so the layer computes y[0] = tanh(W·x_0 + bias)
-/// (R is unused at step 0) and hN == y[0]. Frozen forward-value golden (self-generated): the single-step
-/// output under the fixed seed-0 W/bias must match the inlined reference.</summary>
+/// (R is unused at step 0) and hN == y[0]. Frozen forward-value golden (self-generated) on y, PLUS the
+/// state contract asserted relationally on the layer's own outputs (hN equals y, which at L=1 is y[0],
+/// and hN's leading dim is D·numLayers == 1) — output-vs-output, valid under any initialization.</summary>
 [Module]
 public partial class RnnSingleStepAnchorTanh
 {
@@ -3343,8 +3344,11 @@ public partial class RnnSingleStepAnchorTanh
         var (y, hN) = Recurrent.RNN(x, hiddenSize: 2L);   // y [1, N, H], hN [1, N, H]
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
         var reference = Vector(-0.42514038f, -0.2159316f, -0.5531751f, -0.032021046f);
-        var diff = (SelfCheck.Collapse(y, 4) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
-        return diff < Scalar(1e-3f);
+        var goldenDiff = (SelfCheck.Collapse(y, 4) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        // State contract: at L=1, hN == y[0] == y (both [1, N, H]); leading dim == 1.
+        var stateDiff = (hN - y).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        var hLeadingOk = (hN.DimTensor(0) - Scalar(1L)).Abs().Cast<float32>();
+        return (goldenDiff + stateDiff + hLeadingOk) < Scalar(1e-3f);
     }
 }
 
@@ -3458,8 +3462,9 @@ public partial class RnnBatchFirstEquivalence
 }
 
 /// <summary>§7-8 state contract: for a forward single-layer RNN, hN == y[-1] (the last step's
-/// hidden state) and — frozen forward-value golden (self-generated): the configured layer's output
-/// must match the inlined reference. Pins the (y, hN) return relationship.</summary>
+/// hidden state), asserted relationally on the layer's own outputs — output-vs-output, valid under
+/// any initialization — together with hN's leading dim (D·numLayers == 1) and the frozen
+/// forward-value golden (self-generated) on y. Pins the (y, hN) return relationship.</summary>
 [Module]
 public partial class RnnStateContractForwardSingleLayer
 {
@@ -3468,8 +3473,12 @@ public partial class RnnStateContractForwardSingleLayer
         var (y, hN) = Recurrent.RNN(x, hiddenSize: 3L);   // y [L, N, H], hN [1, N, H]
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
         var reference = Vector(-0.17373544f, -0.27466792f, 0.8597976f, -0.23974895f, -0.20257777f, 0.73698604f, -0.2082305f, 0.20641482f, 0.2690121f, -0.25773376f, 0.24033892f, -0.06970912f, -0.22683054f, 0.14699924f, -0.200679f, -0.35103303f, 0.098100066f, -0.47503126f, -0.48486203f, 0.11939013f, -0.6934142f, -0.59459865f, 0.09852862f, -0.84707177f);
-        var diff = (SelfCheck.Collapse(y, 24) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
-        return diff < Scalar(1e-3f);
+        var goldenDiff = (SelfCheck.Collapse(y, 24) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        // State contract: hN == y[-1] (last step along axis 0; both [1, N, H]), leading dim == 1.
+        var lastStep = y.Slice(Vector(-1L), Vector(System.Int64.MaxValue), Vector(0L));
+        var stateDiff = (hN - lastStep).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        var hLeadingOk = (hN.DimTensor(0) - Scalar(1L)).Abs().Cast<float32>();
+        return (goldenDiff + stateDiff + hLeadingOk) < Scalar(1e-3f);
     }
 }
 
@@ -3683,8 +3692,11 @@ public partial class LstmBatchFirstEquivalence
 }
 
 /// <summary>§7-7 state contract: for a forward single-layer LSTM, hN == y[-1] (the last step's
-/// hidden state) and — frozen forward-value golden (self-generated): the configured layer's output
-/// must match the inlined reference. Pins the (y, hN, cN) return relationship.</summary>
+/// hidden state), asserted relationally on the layer's own outputs — output-vs-output, valid under
+/// any initialization — together with hN's and cN's leading dims (D·numLayers == 1) and the frozen
+/// forward-value golden (self-generated) on y. Pins the (y, hN, cN) return relationship (cN has no
+/// within-layer relational anchor — it is not derivable from y — so it gets the shape contract here
+/// and value coverage via the goldens that concatenate it, e.g. LstmForwardGolden).</summary>
 [Module]
 public partial class LstmStateContractForwardSingleLayer
 {
@@ -3693,8 +3705,14 @@ public partial class LstmStateContractForwardSingleLayer
         var (y, hN, cN) = Recurrent.LSTM(x, hiddenSize: 3L);   // y [L,N,H], hN/cN [1,N,H]
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
         var reference = Vector(0.11317409f, -0.17832823f, 0.16449918f, 0.06303461f, -0.15622467f, 0.13228355f, 0.056307796f, -0.19639853f, 0.15588094f, -0.06749498f, -0.15526424f, 0.11855087f, -0.13697268f, -0.13327843f, 0.10542938f, -0.26116505f, -0.074378565f, 0.07426234f, -0.32657033f, -0.02437039f, 0.058734268f, -0.4117053f, 0.036474817f, 0.03893798f);
-        var diff = (SelfCheck.Collapse(y, 24) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
-        return diff < Scalar(1e-3f);
+        var goldenDiff = (SelfCheck.Collapse(y, 24) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        // State contract: hN == y[-1] (last step along axis 0; both [1, N, H]); hN and cN
+        // carry the [D·numLayers == 1, N, H] leading dim.
+        var lastStep = y.Slice(Vector(-1L), Vector(System.Int64.MaxValue), Vector(0L));
+        var stateDiff = (hN - lastStep).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        var leadingOk = (hN.DimTensor(0) - Scalar(1L)).Abs().Cast<float32>()
+                      + (cN.DimTensor(0) - Scalar(1L)).Abs().Cast<float32>();
+        return (goldenDiff + stateDiff + leadingOk) < Scalar(1e-3f);
     }
 }
 
@@ -3935,8 +3953,9 @@ public partial class GruBatchFirstEquivalence
 }
 
 /// <summary>§7-8 state contract: for a forward single-layer GRU, hN == y[-1] (the last step's
-/// hidden state) and — frozen forward-value golden (self-generated): the configured layer's output
-/// must match the inlined reference. Pins the (y, hN) return relationship.</summary>
+/// hidden state), asserted relationally on the layer's own outputs — output-vs-output, valid under
+/// any initialization — together with hN's leading dim (D·numLayers == 1) and the frozen
+/// forward-value golden (self-generated) on y. Pins the (y, hN) return relationship.</summary>
 [Module]
 public partial class GruStateContractForwardSingleLayer
 {
@@ -3945,8 +3964,12 @@ public partial class GruStateContractForwardSingleLayer
         var (y, hN) = Recurrent.GRU(x, hiddenSize: 3L);   // y [L,N,H], hN [1,N,H]
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
         var reference = Vector(0.27399692f, -0.29238102f, -0.032711826f, 0.2549979f, -0.26112053f, -0.032672692f, 0.32737115f, -0.37541848f, -0.07276946f, 0.282864f, -0.33484834f, -0.062413827f, 0.25657204f, -0.3630614f, -0.07313037f, 0.20271942f, -0.3191216f, -0.0397749f, 0.15450838f, -0.3079069f, -0.010286821f, 0.10164662f, -0.2647475f, 0.0383931f);
-        var diff = (SelfCheck.Collapse(y, 24) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
-        return diff < Scalar(1e-3f);
+        var goldenDiff = (SelfCheck.Collapse(y, 24) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        // State contract: hN == y[-1] (last step along axis 0; both [1, N, H]), leading dim == 1.
+        var lastStep = y.Slice(Vector(-1L), Vector(System.Int64.MaxValue), Vector(0L));
+        var stateDiff = (hN - lastStep).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        var hLeadingOk = (hN.DimTensor(0) - Scalar(1L)).Abs().Cast<float32>();
+        return (goldenDiff + stateDiff + hLeadingOk) < Scalar(1e-3f);
     }
 }
 

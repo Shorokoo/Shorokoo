@@ -115,11 +115,19 @@ concretization (each copy resolves to the very same key, bit-for-bit).
 
 ## Per-stream overrides
 
-`config.Override(RngCollection.Params, [1, 1], seed)` pins a single stream — addressed by
-its consumer's ModelId path, as listed by the stream report — to an explicit seed,
-replacing the fully folded key for that stream only. Because the override replaces the
+`config.Override(RngCollection.Params, [1, 1], seed)` returns a **copy** of the config with
+a single stream pinned — addressed by its consumer's ModelId path, as listed by the stream
+report — to an explicit seed, replacing the fully folded key for that stream only. Configs
+are immutable values: the receiver (including `RngConfig.Default`) is never changed, so
+chain `Override` calls to stack pins and keep the result. Because the override replaces the
 *result* of the fold, it survives a later `MasterSeed` change. Matching is exact and
 per-collection.
+
+```csharp
+var config = new RngConfig { MasterSeed = 42 }
+    .Override(RngCollection.Params, [1, 1], 1234)
+    .Override(RngCollection.Runtime, [2, 0, 1], 5678);
+```
 
 Every path the stream report lists is a valid override address, including the realized
 per-iteration streams of a loop feed (e.g. `[1, 2, 1]` = iteration 2 of the feed at loop

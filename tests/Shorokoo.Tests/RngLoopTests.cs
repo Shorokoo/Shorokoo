@@ -144,7 +144,7 @@ public class RngLoopTests
         // The lowering resolves every realized stream's key host-side from the carrier
         // (override-aware) into the per-stream key table it selects from by iteration index.
         var cfg = new RngConfig { MasterSeed = 11 };
-        cfg.Override(RngCollection.Runtime, [1, 1, 1], 424242UL);
+        cfg = cfg.Override(RngCollection.Runtime, [1, 1, 1], 424242UL);
         var (output, concrete) = RunRuntimeLoop(cfg, steps: 3);
         Assert.Contains(concrete.Nodes, n => n.OpCode == OpCodes.LOOP_OPEN);
 
@@ -168,7 +168,7 @@ public class RngLoopTests
         // reach the draw (regression guard — a representation-dispatch bug once dropped the
         // override precisely when the key table had a single row).
         var cfg = new RngConfig { MasterSeed = 11 };
-        cfg.Override(RngCollection.Runtime, [1, 0, 1], 99999UL);
+        cfg = cfg.Override(RngCollection.Runtime, [1, 0, 1], 99999UL);
         var (output, concrete) = RunRuntimeLoop(cfg, steps: 1);
         Assert.Contains(concrete.Nodes, n => n.OpCode == OpCodes.LOOP_OPEN);
 
@@ -205,7 +205,7 @@ public class RngLoopTests
         // silently inactive override is exactly the re-keying hazard explicit seeding
         // exists to prevent.
         var cfg = new RngConfig { MasterSeed = 11 };
-        cfg.Override(RngCollection.Runtime, [9, 9, 9], 1UL);
+        cfg = cfg.Override(RngCollection.Runtime, [9, 9, 9], 1UL);
         var ex = Assert.ThrowsAny<System.Exception>(() => RunRuntimeLoop(cfg, steps: 2));
         for (System.Exception? e = ex; e is not null; e = e.InnerException)
             if (e.Message.Contains("matches no runtime stream")) return;

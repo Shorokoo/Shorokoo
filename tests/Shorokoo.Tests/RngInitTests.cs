@@ -97,7 +97,7 @@ public class RngInitTests
         // parameter must fail initialization loudly — a silently inactive override is exactly
         // the re-keying hazard explicit seeding exists to prevent.
         var cfg = new RngConfig { MasterSeed = 1 };
-        cfg.Override(RngCollection.Params, [9, 9, 9], 1UL);
+        cfg = cfg.Override(RngCollection.Params, [9, 9, 9], 1UL);
         var ex = Assert.Throws<InvalidOperationException>(() => InitWeights(cfg));
         Assert.Contains("matches no trainable parameter", ex.Message);
     }
@@ -113,7 +113,7 @@ public class RngInitTests
             .Single(p => p.Shape.Dims.SequenceEqual((long[])[4, 4]) && p.ModelId.Vals[0] == 1)
             .ModelId.Vals.ToArray();
         var cfg = new RngConfig { MasterSeed = 5 };
-        cfg.Override(RngCollection.Params, firstWeightPath, 4242UL);
+        cfg = cfg.Override(RngCollection.Params, firstWeightPath, 4242UL);
 
         var overridden = InitWeights(cfg);
         Assert.False(baseline[0].SequenceEqual(overridden[0]));   // re-seeded

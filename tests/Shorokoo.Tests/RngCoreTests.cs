@@ -154,6 +154,31 @@ public class RngCoreTests
             .Override(RngCollection.Params, [1, 1], seed: 1234);
         Assert.Equal(cfg.FoldInitKey([1, 1]), otherMaster.FoldInitKey([1, 1]));
     }
+
+    [Fact]
+    public void TestOverrideReturnsACopyAndNeverMutatesTheReceiver()
+    {
+        // Configs are immutable values: Override returns a modified copy carrying every
+        // property, and the receiver — crucially including the process-wide Default — is
+        // untouched. (Guards against the shared-mutable-singleton hazard: one caller's
+        // fluent tweak must never re-key another model's streams.)
+        var baseCfg = new RngConfig { MasterSeed = 7, Algorithm = RngAlgorithm.Threefry2x32Rounds13 };
+        var derived = baseCfg.Override(RngCollection.Params, [1, 1], seed: 1234);
+
+        Assert.False(baseCfg.HasOverride(RngCollection.Params, [1, 1]));
+        Assert.True(derived.HasOverride(RngCollection.Params, [1, 1]));
+        Assert.Equal(baseCfg.MasterSeed, derived.MasterSeed);
+        Assert.Equal(baseCfg.Algorithm, derived.Algorithm);
+
+        // Stacking builds on the copy; earlier copies stay at their own override sets.
+        var stacked = derived.Override(RngCollection.Runtime, [2], seed: 9);
+        Assert.False(derived.HasOverride(RngCollection.Runtime, [2]));
+        Assert.True(stacked.HasOverride(RngCollection.Params, [1, 1]));
+        Assert.True(stacked.HasOverride(RngCollection.Runtime, [2]));
+
+        _ = RngConfig.Default.Override(RngCollection.Params, [1, 1], seed: 7);
+        Assert.False(RngConfig.Default.HasOverride(RngCollection.Params, [1, 1]));
+    }
 }
 
 /// <summary>
@@ -210,8 +235,8 @@ public class RngKeyVectorTests
         // Overrides in BOTH collections, multi-element paths included. Each record encodes
         // (collection, path length, path, seed), so decoding needs no stream enumeration.
         var cfg = new RngConfig { MasterSeed = 42, RunMasterSeed = 777 };
-        cfg.Override(RngCollection.Runtime, [4, 1, 1], seed: 424242UL);
-        cfg.Override(RngCollection.Params, [2, 1], seed: 7UL);
+        cfg = cfg.Override(RngCollection.Runtime, [4, 1, 1], seed: 424242UL)
+                 .Override(RngCollection.Params, [2, 1], seed: 7UL);
 
         var vec = cfg.BuildKeyVector();
         // 3 masters + count + (1 + 1 + 3 + 1) + (1 + 1 + 2 + 1) elements.
@@ -264,7 +289,7 @@ public class RngKeyVectorTransportTests
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps]));
 
         var cfg = new RngConfig { MasterSeed = 11 };
-        cfg.Override(RngCollection.Runtime, [1, 1, 1], seed: 424242UL);   // tier 3
+        cfg = cfg.Override(RngCollection.Runtime, [1, 1, 1], seed: 424242UL);   // tier 3
         arch.ApplyRngConfig(cfg);
 
         // Binding writes exactly one node (the carrier) and nothing per-feed.

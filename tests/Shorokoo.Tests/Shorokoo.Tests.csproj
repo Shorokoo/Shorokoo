@@ -27,6 +27,10 @@
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <!-- For the MSG004 Rng.Pin-suggestion unit tests, which parse module snippets and drive
+         the generator's suggestion builder directly (version aligned with the transitive
+         Shorokoo.Core dependency; the generator targets 4.8.0, and Roslyn is back-compatible). -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.13.0" />
   </ItemGroup>
 
   <!--
@@ -47,7 +51,9 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Shorokoo\Shorokoo.csproj" />
     <ProjectReference Include="..\..\src\Shorokoo.Modules\Shorokoo.Modules.csproj" />
-    <ProjectReference Include="..\..\src\Shorokoo.CodeGen\Shorokoo.CodeGen.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+    <!-- Referenced both as the analyzer that generates the [Module] wrappers AND as an
+         ordinary assembly so the MSG004 suggestion builder can be unit-tested directly. -->
+    <ProjectReference Include="..\..\src\Shorokoo.CodeGen\Shorokoo.CodeGen.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="true" />
     <ProjectReference Include="..\..\samples\RetinaNet\RetinaNet.csproj" />
   </ItemGroup>
 

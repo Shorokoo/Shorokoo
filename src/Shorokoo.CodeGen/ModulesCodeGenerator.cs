@@ -125,13 +125,15 @@ public class ModuleSourceGenerator : IIncrementalGenerator
     /// Builds the ready-to-paste <c>Rng.Pin(...)</c> guidance for a module whose RNG stream
     /// consumers are all provably nameable. Each scope — the <c>Inline</c> body and every
     /// <c>LoopAPI.Iterate(...)</c> loop body, at any nesting — is pinned independently: the
-    /// nameable <c>X.Model(...)</c> / <c>X.Init(...)</c> captures directly in that scope take its
-    /// local id slots in source order, and a nested loop takes one local slot too. So the
-    /// guidance is one compilable <c>Rng.Pin(...)</c> per scope, placed at the end of that scope
-    /// (loop-body pins go inside the loop, where those variables are in scope). Within a scope,
-    /// when a nested loop occupies a local slot the pin uses the <b>sparse</b> form so the named
-    /// items keep their exact slots and the loop's slot is left to be filled positionally;
-    /// otherwise the terse positional form is exact.
+    /// nameable <c>X.Model(...)</c> / <c>X.Init(...)</c> / <c>RandomUniform(...)</c> /
+    /// <c>RandomNormal(...)</c> captures directly in that scope take its local id slots in
+    /// source order (a captured feed tensor is pinnable exactly like a captured Init result —
+    /// feeds share the module's id address space), and a nested loop takes one local slot too.
+    /// So the guidance is one compilable <c>Rng.Pin(...)</c> per scope, placed at the end of
+    /// that scope (loop-body pins go inside the loop, where those variables are in scope).
+    /// Within a scope, when a nested loop occupies a local slot the pin uses the <b>sparse</b>
+    /// form so the named items keep their exact slots and the loop's slot is left to be filled
+    /// positionally; otherwise the terse positional form is exact.
     ///
     /// <para>Returns null (no diagnostic) for anything not provably capturable in <em>any</em>
     /// scope: C# control flow (<c>if</c>/<c>for</c>/<c>while</c>/<c>switch</c>/a non-<c>Iterate</c>
@@ -141,7 +143,7 @@ public class ModuleSourceGenerator : IIncrementalGenerator
     /// (Method-call "control flow" like <c>cond.IfElse(...)</c> is an ordinary expression and is
     /// fine.)</para>
     /// </summary>
-    private static string? TryBuildRngPinSuggestion(ClassDeclarationSyntax classDecl)
+    internal static string? TryBuildRngPinSuggestion(ClassDeclarationSyntax classDecl)
     {
         var inline = classDecl.Members.OfType<MethodDeclarationSyntax>()
             .FirstOrDefault(m => m.Identifier.Text == "Inline" && m.Body is not null);
@@ -194,7 +196,8 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                     foreach (var v in decl.Declaration.Variables)
                     {
                         var init = v.Initializer?.Value;
-                        if (init is InvocationExpressionSyntax inv && IsSimpleModelOrInit(inv))
+                        if (init is InvocationExpressionSyntax inv &&
+                            (IsSimpleModelOrInit(inv) || IsSimpleFeed(inv)))
                         {
                             // The receiver is a plain name, but the ARGUMENTS could still create
                             // streams (a nested Model/Init/feed, static Call, opaque helper) — those
@@ -269,6 +272,20 @@ public class ModuleSourceGenerator : IIncrementalGenerator
         if (name != "Model" && name != "Init") return false;
         // Receiver must contain no invocation (excludes chained X.Model(...).Call(...) etc.).
         return !ma.Expression.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>().Any();
+    }
+
+    /// <summary>A direct top-level feed capture: bare <c>RandomUniform(...)</c> /
+    /// <c>RandomNormal(...)</c> (via <c>using static Globals</c>) or the
+    /// <c>Globals.</c>-qualified form. A captured feed tensor is pinnable exactly like a
+    /// captured Init result — feeds share the module's id address space — so it takes a
+    /// local slot instead of refusing the whole suggestion.</summary>
+    private static bool IsSimpleFeed(InvocationExpressionSyntax inv)
+    {
+        if (inv.Expression is IdentifierNameSyntax bare)
+            return bare.Identifier.Text is "RandomUniform" or "RandomNormal";
+        return inv.Expression is MemberAccessExpressionSyntax ma
+            && ma.Name.Identifier.Text is "RandomUniform" or "RandomNormal"
+            && ma.Expression is IdentifierNameSyntax { Identifier.Text: "Globals" };
     }
 
     /// <summary>Whether a subtree touches an RNG stream that an end-of-body pin cannot name:

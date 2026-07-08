@@ -26,11 +26,12 @@ namespace Shorokoo;
 /// resolves to the surviving nodes exactly once.</para>
 ///
 /// <para>To freeze a scope's current streams, list ALL of its random consumers in creation
-/// order — or use the sparse form <see cref="Pin(System.ValueTuple{int[], object}[])"/>, which
-/// pins items to explicit local slots and leaves unlisted items at theirs. The two forms are
-/// mutually exclusive <b>within a scope</b>: a scope pinned both ways fails the module build
-/// (the sparse reservations would shift the positional pins off the first id slots, silently
-/// re-keying them). Different scopes of the same module may use different forms.</para>
+/// order — or use the sparse form <see cref="Pin(System.ValueTuple{int[], object}[])"/> and
+/// pin items to their CURRENT slots (what the stream report's skeleton emits), which leaves
+/// unlisted items at theirs. The two forms are mutually exclusive <b>within a scope</b>: a
+/// scope pinned both ways fails the module build (the sparse reservations would shift the
+/// positional pins off the first id slots, silently re-keying them). Different scopes of the
+/// same module may use different forms.</para>
 ///
 /// <para>Nothing here is baked into the computation graph: the pin list only reshapes how the
 /// compiler numbers the graph it was already building. A pin that cannot be resolved to a
@@ -68,12 +69,16 @@ public static class Rng
     /// <summary>
     /// Sparse pin: each item takes exactly the local id slot named by its path within the
     /// current scope (1-based; e.g. <c>Rng.Pin(([3], proj))</c> pins <c>proj</c> to slot 3 of
-    /// the scope it is written in — the module body, or the enclosing loop body). Unlisted
-    /// consumers fill the remaining slots in node order — so unlike the positional form, a
-    /// partial sparse pin leaves every unlisted consumer's slot (hence stream) unchanged. This
-    /// is the form bind-time stream reports emit skeletons for. The path is a single local
-    /// slot; the scope is given by where the pin is written, not by the path. Mixing the two
-    /// forms in one scope fails the module build.
+    /// the scope it is written in — the module body, or the enclosing loop body). The named
+    /// slots are RESERVATIONS: unlisted consumers fill the remaining free slots in creation
+    /// order. Pinning items to their CURRENT slots — the form the bind-time stream report's
+    /// skeleton emits — therefore leaves every unlisted consumer's slot (hence stream)
+    /// unchanged; pinning an item to a DIFFERENT slot perturbs the free-slot sequence, so an
+    /// unlisted consumer whose slot was taken (or vacated) can move and silently re-key. To
+    /// relocate streams, list every consumer the move disturbs (an intentional swap is
+    /// <c>Rng.Pin(([2], a), ([1], b))</c>); to freeze streams, pin to current slots or list
+    /// all consumers. The path is a single local slot; the scope is given by where the pin is
+    /// written, not by the path. Mixing the two forms in one scope fails the module build.
     /// </summary>
     public static void Pin(params (int[] path, object item)[] items)
     {

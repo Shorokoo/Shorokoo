@@ -145,11 +145,14 @@ public class RngPinTests
     }
 
     [Fact]
-    public void TestSparsePinTakesExplicitSlotAndLeavesOthersAlone()
+    public void TestSparsePinReservesItsSlotAndUnlistedConsumersFillFreeSlots()
     {
-        // Pin(([2], a)) puts a (out=2) at slot 2; unpinned b (out=3) fills the first FREE
-        // slot, 1 — a partial sparse pin does not shift unlisted consumers behind the
-        // pinned ones the way a partial positional pin would.
+        // Pin(([2], a)) RESERVES slot 2 for a (out=2); unlisted b (out=3) fills the first
+        // FREE slot, 1. Note that b MOVED — unpinned it sat at slot 2 — so a sparse pin
+        // that relocates an item displaces (re-keys) the unlisted consumer whose slot it
+        // takes. Only pinning items to their CURRENT slots (the skeleton workflow) leaves
+        // unlisted consumers untouched; a relocation must list every consumer it disturbs.
+        // The docs state this reservation rule — this test pins the displacement behavior.
         var (firstSlotOutFeatures, output) = Probe<PinSparseTwoLinears>();
         Assert.Equal(3L, firstSlotOutFeatures);
         Assert.Equal(5, output.Length);

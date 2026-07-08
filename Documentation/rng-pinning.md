@@ -103,12 +103,20 @@ guessing, and a guessed pin is worse than none.
 ## The sparse form
 
 `Rng.Pin(([3], item), ...)` pins each listed item to exactly the named **local slot in the
-scope the pin is written in**; unlisted consumers fill the remaining slots in node order.
-Unlike the positional form, a *partial* sparse pin is seed-preserving — pinned items sit at
-their named slots, everything else keeps its position relative to the other unpinned
-consumers — which is why it is the form the stream report's skeleton emits. The path is a
-single 1-based local slot; the scope is the module body, or the loop body the pin is written
-in (to pin a loop's consumer, write the sparse pin inside that loop).
+scope the pin is written in**. The named slots are *reservations*: unlisted consumers fill
+the remaining free slots in creation order. Two consequences:
+
+- Pinning items to their **current** slots — what the stream report's skeleton emits — leaves
+  every unlisted consumer's slot, hence stream, unchanged. This is the freeze workflow, and
+  the reason the skeleton uses this form.
+- Pinning an item to a **different** slot perturbs the free-slot sequence: an unlisted
+  consumer whose slot was taken (or vacated) can move and silently re-key — e.g. with `a`
+  and `b` at slots 1 and 2, `Rng.Pin(([2], a))` displaces the unlisted `b` to slot 1. To
+  relocate streams, list every consumer the move disturbs; an intentional swap is
+  `Rng.Pin(([2], a), ([1], b))`.
+
+The path is a single 1-based local slot; the scope is the module body, or the loop body the
+pin is written in (to pin a loop's consumer, write the sparse pin inside that loop).
 
 ## Current limits
 

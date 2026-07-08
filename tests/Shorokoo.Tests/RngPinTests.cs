@@ -205,7 +205,7 @@ public class RngPinTests
         // Three streams: the generator's injected drawBase counter state (RngExecutionCounter —
         // a draw-free zero fill, but it occupies an id slot, so the inventory lists it), plus
         // one REALIZED stream per hinted loop iteration of the feed site [1, -1, 1]. Realized
-        // ids are static and carry the exact per-stream key (no prefix, no -1).
+        // ids are static and carry the exact per-stream key (no -1 placeholders).
         Assert.Equal(3, report.Streams.Count);
         Assert.Contains(report.Streams, s =>
             s.Kind == RngStreamKind.ParamInit && s.Name!.Contains("RngExecutionCounter"));

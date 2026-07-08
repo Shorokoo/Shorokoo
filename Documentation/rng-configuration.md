@@ -106,11 +106,12 @@ A feed under a loop takes a ModelId with a `-1` iteration slot (exactly like a p
 created in a loop): one stream **per iteration**. Its per-iteration streams are enumerated
 at `ToConcreteArchitecture` — a concrete architecture's stream set is static, exactly like
 its parameter set — and at ONNX prep the feed draws from a per-stream **key table** with
-the row selected by the runtime iteration index, so iteration *i* draws from
-`fold(fold(prefixKey, i), …)` — deterministic, resumable, and reconstructible offline from
-the path and the iteration number. This works identically whether the loop survives to
-runtime (an ONNX `Loop` selecting a row per iteration) or is unrolled at concretization
-(each copy resolves to the very same key, bit-for-bit).
+the row selected by the runtime iteration index. Iteration *i*'s stream is simply the one
+at the realized path with `i` in the iteration slot (e.g. `[loopSlot, i, feedSlot]`), its
+key the runtime master folded along that full path — deterministic, resumable, and
+reconstructible offline from the path alone. This works identically whether the loop
+survives to runtime (an ONNX `Loop` selecting a row per iteration) or is unrolled at
+concretization (each copy resolves to the very same key, bit-for-bit).
 
 ## Per-stream overrides
 

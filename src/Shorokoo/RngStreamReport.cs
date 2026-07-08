@@ -40,7 +40,7 @@ public sealed class RngStreamInfo
 
     /// <summary>The stream key ([k0, k1] 32-bit words) resolved under the supplied config;
     /// <c>null</c> when no config was supplied. Runtime rows are realized per-iteration
-    /// streams, so every key is exact (never a prefix).</summary>
+    /// streams, so every row carries its exact per-stream key.</summary>
     public IReadOnlyList<long>? KeyWords { get; init; }
 
     /// <summary>
@@ -104,7 +104,7 @@ public sealed class RngStreamReport
     /// </summary>
     public string EmitPinSkeleton()
     {
-        // Group streams by scope (the ModelId prefix up to and including the last loop-iteration
+        // Group streams by scope (the leading ModelId elements through the last loop-iteration
         // -1 slot). Within a scope the pinnable unit is a consumer's LOCAL slot: the element
         // after that last -1, or the top-level slot when the stream is not in a loop. Multiple
         // params under one consumer collapse to that consumer's single slot.

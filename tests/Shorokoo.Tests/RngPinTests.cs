@@ -229,6 +229,44 @@ public class RngPinTests
     }
 
     [Fact]
+    public void TestPinSkeletonGroupsInLoopParamsLikeFeeds()
+    {
+        // A param AND a feed inside ONE runtime loop: both consumer kinds carry the same
+        // site identity ([1, -1, localSlot]) and the skeleton groups both under the
+        // loop-body scope at their local slots. Previously an in-loop param — whose
+        // realized ModelId carries no -1 — was mis-slotted to module scope under the
+        // loop's own slot (an unusable handle) and its sibling iterations were dropped.
+        var g = (FastComputationGraph)typeof(RngRuntimeLoopParamAndFeed)
+            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var x = TensorData([8L], new float[8]);
+        var steps = TensorData(System.Array.Empty<long>(), 2L);
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps]));
+
+        var report = arch.GetRngStreamReport();
+
+        // Realized in-loop param rows carry their site id exactly like realized feed rows.
+        var paramRows = report.Streams
+            .Where(s => s.Kind == RngStreamKind.ParamInit && !s.FrameworkOwned).ToList();
+        Assert.Equal(2, paramRows.Count);
+        for (int i = 0; i < 2; i++)
+        {
+            Assert.Equal([1, i, 1], paramRows[i].ModelIdPath);
+            Assert.Equal([1, -1, 1], paramRows[i].SitePath);
+        }
+
+        // One pin per scope: the loop body lists the param (local slot 1) and the feed
+        // (local slot 2) once each. Module scope has no author-pinnable consumer — the
+        // framework-owned RngExecutionCounter is excluded — so no module block is emitted.
+        var skeleton = report.EmitPinSkeleton();
+        Assert.Contains("// inside the loop body at ModelId path [1, -1]:", skeleton);
+        Assert.Contains("([1], /*", skeleton);
+        Assert.Contains("InitSimple", skeleton);
+        Assert.Contains("([2], /* uniform feed */ ?)", skeleton);
+        Assert.DoesNotContain("// at the end of Inline:", skeleton);
+        Assert.DoesNotContain("RngExecutionCounter", skeleton);
+    }
+
+    [Fact]
     public void TestPinSurvivesNestedFirstUseModuleBuild()
     {
         // Pin(b, a) is recorded, then the body first-uses PinWipeFreshInit — whose Function is

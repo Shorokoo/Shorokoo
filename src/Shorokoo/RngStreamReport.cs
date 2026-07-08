@@ -45,10 +45,21 @@ public sealed class RngStreamInfo
 
     /// <summary>
     /// The stream's SITE id (the ModelId with <c>-1</c> iteration placeholders) when
-    /// <see cref="ModelIdPath"/> is a realized per-iteration stream of a loop feed; null when
-    /// the path is its own site. Pinning addresses sites, so the pin skeleton groups by this.
+    /// <see cref="ModelIdPath"/> is a realized per-iteration stream of an in-loop consumer —
+    /// a loop feed's iteration stream or an in-loop parameter's iteration copy; null when the
+    /// path is its own site. Pinning addresses sites, so the pin skeleton groups by this.
+    /// Both consumer kinds carry it the same way: ModelId-based components are treated
+    /// uniformly whether they are parameters or feeds.
     /// </summary>
     public IReadOnlyList<int>? SitePath { get; init; }
+
+    /// <summary>
+    /// True for a framework-injected consumer (the <c>RngExecutionCounter</c> drawBase state):
+    /// listed for inventory completeness, but excluded from the pin skeleton — no source-level
+    /// variable exists to pin it with, and the framework appends it after id assignment, so it
+    /// never needs freezing.
+    /// </summary>
+    public bool FrameworkOwned { get; init; }
 
     /// <summary>One human-readable line: collection, path, kind, name/shape, key.</summary>
     public override string ToString()
@@ -111,6 +122,7 @@ public sealed class RngStreamReport
         var byScope = new List<(IReadOnlyList<int> scope, SortedDictionary<int, RngStreamInfo> bySlot)>();
         foreach (var s in Streams)
         {
+            if (s.FrameworkOwned) continue;   // not an author-nameable consumer — see FrameworkOwned
             var path = s.SitePath ?? s.ModelIdPath;
             if (path.Count == 0) continue;   // defensive: a consumer always carries ≥1 id element
             int lastNeg = -1;

@@ -434,13 +434,21 @@ namespace Shorokoo.Graph
 
             foreach (var info in graph.GetConcreteModelParamInfos().ParamInfos)
             {
+                // A param's SITE is its identifier template's generic ModelId (loop-iteration
+                // slots as -1) — the exact analogue of a runtime feed's site attribute, so
+                // realized per-iteration params of one in-loop definition group by site in the
+                // pin skeleton exactly like realized feed streams do.
+                var siteVals = info.ParamIdentifier.ModelIdTemplate.Vals;
+                var name = info.ToShorokooIdString();
                 streams.Add(new RngStreamInfo
                 {
                     Collection = RngCollection.Params,
                     ModelIdPath = info.ModelId.Vals,
+                    SitePath = siteVals.SequenceEqual(info.ModelId.Vals) ? null : siteVals,
                     Kind = RngStreamKind.ParamInit,
-                    Name = info.ToShorokooIdString(),
+                    Name = name,
                     Shape = info.Shape.Dims,
+                    FrameworkOwned = name.Contains(FastInjectRngDrawCounter.CounterName),
                     KeyWords = rngConfig is null
                         ? null
                         : ToKeyWords(rngConfig.FoldInitKey(info.ModelId.Vals)),

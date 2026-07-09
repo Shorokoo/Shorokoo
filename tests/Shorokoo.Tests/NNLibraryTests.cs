@@ -324,24 +324,34 @@ public class NNLibraryCoverageTests
 
     /// <summary>
     /// SpatialDropout (channel-wise dropout, src/Shorokoo.Modules/Layers/Dropout.cs)
-    /// TRAIN-MODE behavior — the defining property of the unit. Mask-AGNOSTIC self-checks
-    /// (ONNX Dropout's random draw is QEE-value-blocked, computed on the ORT backend inside
-    /// AdvancedTestGraph): each element must be 0 or survivor-scale·x, AND the per-channel
-    /// mask m=y/x must be CONSTANT across the spatial axes (channel uniformity — what
-    /// distinguishes channel-wise from elementwise dropout). x is strictly positive so y/x
-    /// is a clean mask. Covers (A) rank-4 channel-wise behavior (0-or-2x + uniformity),
-    /// (B) ratio-0.75 survivor scaling (0-or-4x), and (D-train) channel uniformity at rank 3
-    /// ([N,C,1] mask) and rank 5 ([N,C,1,1,1] mask).
-    ///
-    /// REGRESSION GUARD (#440): asserts the corrected training-mode behavior. ORT's
-    /// constant-folding used to collapse a training-mode Dropout feeding a downstream op (the
-    /// channel-broadcast Mul `x * Dropout(ones,…)`) to the identity all-ones mask, making
-    /// training-mode SpatialDropout a silent NO-OP (y == x) that never drops a channel. The fix
-    /// (HasTrainingModeDropout disables graph optimizations for such models) is verified here:
-    /// the channel-wise mask must genuinely drop. Adds no unique line/branch coverage (the rig +
-    /// eval dropout tests already execute these paths) — kept as the only assertion of correct
-    /// channel-wise drop, so the bug cannot silently regress.
+    /// TRAIN-MODE behavior — the defining property of the unit. Mask-AGNOSTIC self-checks:
+    /// each element must be 0 or survivor-scale·x, AND the per-channel mask m=y/x must be
+    /// CONSTANT across the spatial axes (channel uniformity — what distinguishes
+    /// channel-wise from elementwise dropout). x is strictly positive so y/x is a clean
+    /// mask. Covers (A) rank-4 channel-wise behavior (0-or-2x + uniformity), (B) ratio-0.75
+    /// survivor scaling (0-or-4x), and (D-train) channel uniformity at rank 3 ([N,C,1] mask)
+    /// and rank 5 ([N,C,1,1,1] mask). Kept as the only assertion of correct channel-wise
+    /// drop, so a train-mode no-op (y == x) cannot silently regress. (The masks are now
+    /// built in-graph from the keyed RNG feed; the historical #440 ONNX-Dropout
+    /// constant-fold hazard is pinned for LOADED legacy models by
+    /// TestBakedOnnxTrainingDropoutIsNotFoldedToIdentity above.)
     /// </summary>
+    /// <summary>
+    /// Loaded-legacy-model guard (#440 redux): Shorokoo no longer emits ONNX Dropout nodes —
+    /// masks are built in-graph from the keyed feed — but models saved before that change
+    /// carry them baked, and executing one must not let ORT constant-fold a training-mode
+    /// Dropout-on-constant into the no-drop identity. NNBakedOnnxDropoutTrainMode rebuilds
+    /// exactly that baked pattern with a raw ONNX Dropout node; the
+    /// ComputeContext.HasTrainingModeDropout guard (disable graph optimizations for such
+    /// models) is what keeps the real random kernel running.
+    /// </summary>
+    [Fact]
+    public void TestBakedOnnxTrainingDropoutIsNotFoldedToIdentity()
+    {
+        Assert.True(AutoTest.AdvancedTestGraph<NNBakedOnnxDropoutTrainMode>(
+            hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 16L], 0.5f, 1f)]));
+    }
+
     [Fact]
     public void TestSpatialDropoutTrainModeChannelWise()
     {

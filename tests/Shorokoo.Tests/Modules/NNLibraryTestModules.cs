@@ -881,6 +881,29 @@ public partial class NNDropoutChecks
 }
 
 /// <summary>
+/// REGRESSION GUARD (#440, loaded legacy models): a RAW ONNX Dropout node with a wired
+/// training_mode input, drawing on a provably-constant ones tensor, with the mask applied
+/// via Mul — exactly the baked pattern a model saved BEFORE the in-graph keyed masks
+/// carries. ORT's constant folding evaluates a Dropout whose data input is constant at
+/// session-load time as the inference-mode identity (an all-ones, no-drop mask); with
+/// graph optimizations disabled for such models (ComputeContext.HasTrainingModeDropout)
+/// the real random kernel runs, so every element of y is 0 or exactly 2x and
+/// y·(y−2x) == 0 — which the folded identity (y == x, penalty x² &gt; 0) fails.
+/// </summary>
+[Module]
+public partial class NNBakedOnnxDropoutTrainMode
+{
+    public static Scalar<bit> Inline(Tensor<float32> x)   // x is [4, 16], strictly positive
+    {
+        var ones = TensorFill(Vector(4L, 16L), 1.0f);      // constant data input — foldable
+        var (mask, _) = OnnxOp.Dropout(ones, Scalar(0.5f), Scalar(true));
+        var y = x * (Tensor<float32>)mask;
+        var maskPen = (y * (y - x * Scalar(2f))).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        return maskPen < Scalar(1e-5f);
+    }
+}
+
+/// <summary>
 /// Dropout at ratio == 1 (drop everything): training mode is exactly all zeros — never NaN
 /// (the survivor rescale keep/(1−ratio) is 0/0 there and is gated to the all-zero mask;
 /// PyTorch's p = 1 behavior) — and eval mode stays the exact identity. A NaN anywhere would

@@ -398,7 +398,10 @@ namespace Shorokoo.Graph
         /// reproducibly and backend-independently). When <c>null</c>, the graph's bound identity
         /// (the RNG key-vector carrier, algorithm included) is used when one is present — the
         /// carrier is the source of truth for BOTH collections — else
-        /// <see cref="RngConfig.Default"/> (master seed 0).
+        /// <see cref="RngConfig.Default"/> (master seed 0). A carrier naming an algorithm this
+        /// build does not recognize (e.g. written by a newer version) fails loudly here, exactly
+        /// as an unrecognized algorithm fails loudly on the runtime-feed side at lowering —
+        /// never a silent substitution that would initialize weights under the wrong identity.
         /// </param>
         /// <returns>The default trainable-parameter values, named.</returns>
         public static ModelParamList InitializeTrainableParams(
@@ -410,8 +413,16 @@ namespace Shorokoo.Graph
             AssertConcreteArchitecture(graph, nameof(InitializeTrainableParams));
             computeContext ??= ComputeContext.Default;
             if (rngConfig is null && graph.TryGetRngKeyVector() is { } carried)
-                rngConfig = RngConfig.FromKeyVector(carried.keyVector,
-                    Core.Rng.RngAlgorithms.TryFromName(carried.algorithm) ?? RngAlgorithm.Threefry2x32);
+            {
+                var algorithm = Core.Rng.RngAlgorithms.TryFromName(carried.algorithm)
+                    ?? throw new InvalidOperationException(
+                        $"InitializeTrainableParams: this model's RNG key vector names the " +
+                        $"algorithm '{carried.algorithm}', which this build does not recognize " +
+                        "(e.g. the carrier was written by a newer version). Initializing under a " +
+                        "substitute algorithm would silently draw weights under the wrong identity " +
+                        "— upgrade to a build that recognizes it, or pass an explicit RngConfig.");
+                rngConfig = RngConfig.FromKeyVector(carried.keyVector, algorithm);
+            }
             rngConfig ??= RngConfig.Default;
 
             var paramNamingInfo = graph.GetConcreteModelParamInfos();

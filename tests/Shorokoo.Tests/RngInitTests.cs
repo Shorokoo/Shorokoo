@@ -119,6 +119,28 @@ public class RngInitTests
         Assert.False(baseline[0].SequenceEqual(overridden[0]));   // re-seeded
         Assert.Equal(baseline[1], overridden[1]);                 // untouched
     }
+
+    [Fact]
+    public void TestInitFailsLoudlyOnUnrecognizedCarrierAlgorithm()
+    {
+        // Regression: an unrecognized carrier algorithm (e.g. one written by a newer
+        // Shorokoo version) used to silently substitute the 20-round default here, while
+        // the runtime-feed side already failed loudly for the same situation — so a
+        // loaded model's weights could initialize under an identity the carrier didn't
+        // actually name. Both sides must fail loudly now.
+        var arch = ConcreteArch();
+        arch.ApplyRngConfig(new RngConfig { MasterSeed = 1 });
+
+        var carrier = arch.Nodes.Single(
+            n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.SHRK_RNG_KEY_VECTOR);
+        carrier.Attributes = carrier.Attributes.SetAttributes(
+            (Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRngAlgorithm,
+                (object?)"SomeFutureAlgorithm.v1"));
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => arch.InitializeTrainableParams());
+        Assert.Contains("SomeFutureAlgorithm.v1", ex.Message);
+    }
 }
 
 /// <summary>

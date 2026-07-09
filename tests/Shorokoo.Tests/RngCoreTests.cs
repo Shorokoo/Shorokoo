@@ -336,6 +336,31 @@ public class RngKeyVectorTransportTests
     }
 
     [Fact]
+    public void TestRebindingLoweredStreamsFailsLoudly()
+    {
+        // A prepped-for-ONNX export lowers every key entity to a plain CONSTANT (the
+        // interchange artifact must be ordinary ONNX). Re-importing such a file gives a
+        // model whose streams can no longer be re-keyed: binding a config to it must
+        // throw — silently recording an identity the baked draw keys don't use is
+        // exactly the divergence the carrier-as-source-of-truth contract forbids.
+        var g = (FastComputationGraph)typeof(RtLoweredUniform)
+            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var input = TensorData([4L, 4L], new float[16]);
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input]))
+            .ToConcreteModel(new RngConfig { MasterSeed = 1 });
+
+        var proto = Shorokoo.Core.Factory.FastOnnxModelBuilder.BuildOnnxModel(
+            concrete, prepForOnnx: true);
+        using var ms = new System.IO.MemoryStream();
+        ProtoBuf.Serializer.Serialize(ms, proto);
+        var imported = OnnxModelImporter.FromOnnxModelToFastGraph(ms.ToArray());
+
+        var ex = Assert.Throws<System.InvalidOperationException>(
+            () => imported.ApplyRngConfig(new RngConfig { MasterSeed = 2 }));
+        Assert.Contains("lowered", ex.Message);
+    }
+
+    [Fact]
     public void TestBindingRequiresRealizedStreams()
     {
         // The concreteness contract at bind: an id-bearing feed without realized stream ids

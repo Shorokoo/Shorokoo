@@ -66,7 +66,11 @@ Re-applying the original config restores the original draws bit-for-bit.
 
 **Randomness survives save/load.** The identity tensor and the materialized key values ride
 the model file, so a loaded model draws exactly what it drew before saving — no config
-object needed on the loading side.
+object needed on the loading side. A loaded model is also re-bindable like any concrete
+model: `ApplyRngConfig` re-materializes its keys in place. The one exception is a
+re-imported *exported ONNX* file (`.onnx`): export bakes the key values to plain constants
+for the runtime, so binding a config to a re-import fails loudly rather than record an
+identity the baked draws would not use.
 
 **Training needs nothing special.** The rig binds the concrete architecture at the same
 shared point inference uses, *before* loss composition and autodiff. The identity tensor

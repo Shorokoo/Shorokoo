@@ -42,7 +42,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 StripCloseInputIdentities(fnFast);
                 FastProcessorHelper.RemoveUnreachableNodes(fnFast);
 
-                var newFn = new Function(fnFast, fn.FunctionType, defaultName: fn.DefaultName, friendlyName: fn.FriendlyName);
+                // Carry the RNG algorithm tags across the rebuild: they gate the function
+                // inliner (tagged functions are never inlined) and the export metadata, so
+                // dropping them here would silently untag every RNG function on load.
+                var newFn = new Function(fnFast, fn.FunctionType, defaultName: fn.DefaultName, friendlyName: fn.FriendlyName)
+                {
+                    RngAlgorithm = fn.RngAlgorithm,
+                    RngFunctionKind = fn.RngFunctionKind,
+                };
                 oldToNew[fn] = newFn;
             }
 

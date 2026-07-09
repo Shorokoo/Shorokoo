@@ -20,11 +20,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// the graph became a concrete model (see <see cref="FastMaterializeRngKeys"/>), exactly
     /// like trainable-parameter values.
     ///
-    /// <para><b>Key entities</b> lower to plain int64 CONSTANTs (their materialized [N, 2]
-    /// key table). An entity that was never materialized — e.g. a concrete architecture
-    /// exported without a config — materializes here under the graph's carrier identity, or
-    /// <see cref="RngConfig.Default"/> when none is bound: a concrete artifact is never
-    /// unkeyed, and "no config" simply means the default deterministic identity.</para>
+    /// <para><b>Key entities</b> pass through intact — structural metadata (site id,
+    /// realized ids, iteration counts) and all, so a non-prepped save round-trips a
+    /// re-bindable model (<c>ApplyRngConfig</c> re-materializes the loaded entities and the
+    /// lowered draws Gather from them). They become plain int64 CONSTANTs of their key table
+    /// only at ONNX prep (<see cref="FastPrepForOnnx"/>), for execution/export. An entity
+    /// that was never materialized — e.g. a concrete architecture exported without a config —
+    /// materializes here under the graph's carrier identity, or <see cref="RngConfig.Default"/>
+    /// when none is bound: a concrete artifact is never unkeyed, and "no config" simply means
+    /// the default deterministic identity.</para>
     ///
     /// <para><b>Keyed feeds</b> (id-bearing, wired to their key entity at concretization)
     /// rewrite to the keyed deterministic draw: Gather their iteration's [k0, k1] row from
@@ -89,13 +93,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             foreach (var node in graph.Nodes)
             {
-                if (node.OpCode == InternalOpCodes.SHRK_RNG_KEY)
-                {
-                    LowerKeyEntityToConstant(node);
-                    newNodes.Add(node);
-                    continue;
-                }
-
                 if (node.OpCode == InternalOpCodes.SHRK_RNG_SPLIT ||
                     node.OpCode == InternalOpCodes.SHRK_RNG_UNIFORM ||
                     node.OpCode == InternalOpCodes.SHRK_RNG_NORMAL)
@@ -139,19 +136,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         node.TargetFunction = newFn;
         }
 
-        /// <summary>
-        /// Rewrites a materialized SHRK_RNG_KEY entity in place to a plain CONSTANT of its
-        /// key-table value, so every backend treats the keys as ordinary tensor data.
-        /// </summary>
-        private static void LowerKeyEntityToConstant(FastNode node)
-        {
-            var data = node.Attributes.GetTensorVal(AttrValue);
-            var constDefs = Definitions.NodeDefinitions[OpCodes.CONSTANT].AttributeDefs;
-            node.OpCode = OpCodes.CONSTANT;
-            node.Attributes = OnnxCSharpAttributes.FromCSharpVals(
-                new Dictionary<string, object?> { [AttrValue] = data }, constDefs);
-        }
-
         private static void LowerFunctionRecursive(
             Function fn, Dictionary<Function, Function> functionRemap)
         {
@@ -169,7 +153,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             ProcessGraph(bodyFast, functionRemap);
 
             functionRemap[fn] = new Function(bodyFast, fn.FunctionType,
-                defaultName: fn.DefaultName, friendlyName: fn.FriendlyName);
+                defaultName: fn.DefaultName, friendlyName: fn.FriendlyName)
+            {
+                RngAlgorithm = fn.RngAlgorithm,
+                RngFunctionKind = fn.RngFunctionKind,
+            };
         }
 
         private static bool HasRandomOps(FastComputationGraph graph) =>

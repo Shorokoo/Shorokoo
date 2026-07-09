@@ -38,6 +38,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             string algorithmName = RngAlgorithms.NameOf(rngConfig.Algorithm);
             var realizedPaths = new HashSet<string>();
+            bool hasKeyEntities = false;
 
             int loopDepth = 0;
             foreach (var node in graph.Nodes)
@@ -47,6 +48,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 if (node.OpCode == InternalOpCodes.SHRK_RNG_KEY)
                 {
+                    hasKeyEntities = true;
                     // The site's key entity owns the realized stream set.
                     var siteId = node.Attributes.GetIntsVal(ShrkAttrLocalModelId);
                     var realizedFlat = node.Attributes.GetIntsVal(ShrkAttrRngRealizedIds);
@@ -92,6 +94,20 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         "config to a concrete architecture, concrete model, or training-rig " +
                         "step graph.");
             }
+
+            // A graph with keyed draws but no key entities has its streams already lowered to
+            // their exported form (the entities became plain CONSTANTs at ONNX prep — e.g. a
+            // re-imported prepped export): nothing could be re-materialized, so binding would
+            // silently record an identity the baked draw keys don't use. Fail loudly instead.
+            if (!hasKeyEntities && graph.Nodes.Any(n =>
+                    n.TargetFunction is { } fn &&
+                    (fn.RngFunctionKind == RngAlgorithms.KindUniform ||
+                     fn.RngFunctionKind == RngAlgorithms.KindNormal)))
+                throw new InvalidOperationException(
+                    "ApplyRngConfig: this model's RNG streams are already lowered to their " +
+                    "exported form (its key entities were baked to constants at ONNX prep, " +
+                    "e.g. by re-importing a prepped ONNX export), so a config cannot re-key " +
+                    "them. Re-bind the original model, or reload it from a non-prepped save.");
 
             // Fail-loud override validation: a Runtime override that matches no stream of this
             // graph would otherwise be a silent no-op — exactly the re-keying hazard explicit

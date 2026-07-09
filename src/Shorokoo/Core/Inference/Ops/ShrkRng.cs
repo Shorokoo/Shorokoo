@@ -70,7 +70,7 @@ internal abstract class ShrkRngDrawOpBase : QuickOp
 /// materialized: exposing it would let constant folding replace the entity with a plain
 /// CONSTANT mid-pipeline, stripping the structural metadata (site id, realized ids, counts)
 /// the export lowering and re-binding read. The entity lowers to a CONSTANT exactly once,
-/// at ONNX prep (see FastLowerRandomOps).
+/// at ONNX prep (see FastPrepForOnnx).
 /// </summary>
 internal sealed class ShrkRngKeyOp : QuickOp
 {

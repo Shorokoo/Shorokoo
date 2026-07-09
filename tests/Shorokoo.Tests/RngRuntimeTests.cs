@@ -145,6 +145,45 @@ public class RngRuntimeTests
     }
 
     [Fact]
+    public void TestRebindingALoadedModelReKeysItsDraws()
+    {
+        // Re-binding must work on a save/loaded model exactly as on the in-memory one.
+        // Regression: the key entities used to be lowered to plain CONSTANTs on every save
+        // (not just at ONNX prep), so a loaded model's ApplyRngConfig found nothing to
+        // re-materialize and silently swapped the recorded identity while every draw kept
+        // the old keys — the carrier lied about what the model draws.
+        var g = (FastComputationGraph)typeof(RtLoweredUniform)
+            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input]))
+            .ToConcreteModel(new RngConfig { MasterSeed = 1 });
+
+        float[] Run(FastComputationGraph model) => ComputeContext.Default.Execute(model, input)[0]
+            .ToTensorData().As<float32>().AccessMemory().ToArray();
+
+        var underSeed1 = Run(concrete);
+
+        var loaded = CompressedFormatUtils.LoadFastGraphFromBinary(
+            CompressedFormatUtils.SaveFastGraphToBinary(concrete, compressed: true), isCompressed: true);
+
+        // The loaded model still carries its re-bindable key entity, and draws what it drew.
+        Assert.Contains(loaded.Nodes, n => n.OpCode == InternalOpCodes.SHRK_RNG_KEY);
+        Assert.Equal(underSeed1, Run(loaded));
+
+        // Re-binding the loaded model re-keys its draws — bit-identical to re-binding the
+        // in-memory model — and restoring the original identity restores the draws exactly.
+        loaded.ApplyRngConfig(new RngConfig { MasterSeed = 2 });
+        var loadedUnderSeed2 = Run(loaded);
+        Assert.NotEqual(underSeed1, loadedUnderSeed2);
+
+        concrete.ApplyRngConfig(new RngConfig { MasterSeed = 2 });
+        Assert.Equal(Run(concrete), loadedUnderSeed2);
+
+        loaded.ApplyRngConfig(new RngConfig { MasterSeed = 1 });
+        Assert.Equal(underSeed1, Run(loaded));
+    }
+
+    [Fact]
     public void TestSplitDerivesChildKeyFromParentKeyInput()
     {
         // SHRK_RNG_SPLIT folds its parent key input with the index — bit-exact with the host

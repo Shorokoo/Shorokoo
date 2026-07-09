@@ -104,6 +104,54 @@ public class ModulesCodeGeneratorRngPinTests
     }
 
     [Fact]
+    public void TestCallOnUncountedReceiverRefuses()
+    {
+        // m comes from an opaque bare helper call, not a counted Recv.Model(...) capture —
+        // its .Call may create streams the pin would silently omit. A lowercase receiver
+        // alone proves nothing, so the suggestion is withheld.
+        var s = Suggest("""
+            public partial class M
+            {
+                public static Tensor<float32> Inline(Tensor<float32> x)
+                {
+                    var m = MakeModel();
+                    var w = InitSimple.Init([Scalar(2L)]);
+                    return m.Call(x) + w.Reduce(ReduceKind.Sum);
+                }
+            }
+            """);
+        Assert.Null(s);
+    }
+
+    [Fact]
+    public void TestCallOnCountedModelInsideLoopIsTrusted()
+    {
+        // A model captured at module scope and re-invoked inside a loop body: the counted
+        // capture flows into the nested scope, so the .Call is provably stream-free and
+        // both scopes get their pins.
+        var s = Suggest("""
+            public partial class M
+            {
+                public static Tensor<float32> Inline(Tensor<float32> x, Scalar<int64> steps)
+                {
+                    var a = Linear.Model(Scalar(4L), Scalar(false));
+                    var acc = a.Call(x);
+                    foreach (var ctx in LoopAPI.Iterate(steps))
+                    {
+                        var u = RandomUniform(x.ShapeTensor(), 0f, 1f);
+                        acc = a.Call(acc) + u;
+                        ctx.ContinueWhile(Scalar(true));
+                    }
+                    return acc;
+                }
+            }
+            """);
+        Assert.NotNull(s);
+        Assert.Contains("Rng.Pin(u);", s);
+        Assert.Contains("inside `foreach", s);
+    }
+
+    [Fact]
     public void TestUncapturedFeedStillRefuses()
     {
         // An inline (uncaptured) feed has no name a pin could use — the whole suggestion is

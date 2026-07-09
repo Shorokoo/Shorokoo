@@ -137,11 +137,12 @@ public class ModuleSourceGenerator : IIncrementalGenerator
     ///
     /// <para>Returns null (no diagnostic) for anything not provably capturable in <em>any</em>
     /// scope: C# control flow (<c>if</c>/<c>for</c>/<c>while</c>/<c>switch</c>/a non-<c>Iterate</c>
-    /// <c>foreach</c>), an existing <c>Rng.Pin</c>, an uncaptured Model/Init/feed, a chained
-    /// <c>Model(...).Call(...)</c> or static <c>TypeName.Call</c>, or an opaque static-helper call
-    /// that may create streams. A wrong pin silently re-keys, so anything uncertain refuses.
-    /// (Method-call "control flow" like <c>cond.IfElse(...)</c> is an ordinary expression and is
-    /// fine.)</para>
+    /// <c>foreach</c>), an existing <c>Rng.Pin</c>, an uncaptured Model/Init/feed, any
+    /// <c>.Call</c> whose receiver is not a counted <c>Recv.Model(...)</c> capture (static
+    /// <c>TypeName.Call</c>, chained <c>Model(...).Call(...)</c>, or an unknown receiver that
+    /// may be a stream-creating helper), or an opaque static-helper call that may create
+    /// streams. A wrong pin silently re-keys, so anything uncertain refuses. (Method-call
+    /// "control flow" like <c>cond.IfElse(...)</c> is an ordinary expression and is fine.)</para>
     /// </summary>
     internal static string? TryBuildRngPinSuggestion(ClassDeclarationSyntax classDecl)
     {
@@ -157,7 +158,8 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                 return null;
 
         var scopes = new List<(string placement, string pin)>();
-        if (!TryAnalyzeScope(inline.Body.Statements, "at the end of Inline", scopes, out _))
+        var modelCaptures = new HashSet<string>(StringComparer.Ordinal);
+        if (!TryAnalyzeScope(inline.Body.Statements, "at the end of Inline", scopes, modelCaptures, out _))
             return null;
         if (scopes.Count == 0) return null;
 
@@ -173,13 +175,18 @@ public class ModuleSourceGenerator : IIncrementalGenerator
     /// appends this scope's compilable <c>Rng.Pin(...)</c> — module scope first, then nested
     /// scopes in source order — to <paramref name="scopes"/> and reports via
     /// <paramref name="occupies"/> whether the scope contains any id-bearing consumer (so its
-    /// parent counts it as one local slot). Returns false if anything in this scope (or a nested
-    /// one) is not provably capturable, so the whole suggestion is withheld.
+    /// parent counts it as one local slot). <paramref name="modelCaptures"/> accumulates the
+    /// names of locals captured via <c>Recv.Model(...)</c> — the only receivers a stream-free
+    /// <c>.Call(...)</c> can be proven against (see <see cref="SubtreeHasUnnameableStream"/>);
+    /// each loop body recurses on a copy so sibling scopes never see each other's captures.
+    /// Returns false if anything in this scope (or a nested one) is not provably capturable,
+    /// so the whole suggestion is withheld.
     /// </summary>
     private static bool TryAnalyzeScope(
         IReadOnlyList<StatementSyntax> statements,
         string placement,
         List<(string placement, string pin)> scopes,
+        HashSet<string> modelCaptures,
         out bool occupies)
     {
         occupies = false;
@@ -202,25 +209,27 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                             // The receiver is a plain name, but the ARGUMENTS could still create
                             // streams (a nested Model/Init/feed, static Call, opaque helper) — those
                             // would be uncounted siblings, so refuse rather than emit a mis-slotting pin.
-                            if (inv.ArgumentList is { } args && SubtreeHasUnnameableStream(args))
+                            if (inv.ArgumentList is { } args && SubtreeHasUnnameableStream(args, modelCaptures))
                                 return false;
                             slot++;
                             pinned.Add((slot, v.Identifier.Text));
+                            if (inv.Expression is MemberAccessExpressionSyntax { Name.Identifier.Text: "Model" })
+                                modelCaptures.Add(v.Identifier.Text);
                         }
-                        else if (init is not null && SubtreeHasUnnameableStream(init))
+                        else if (init is not null && SubtreeHasUnnameableStream(init, modelCaptures))
                         {
-                            return false;   // uncaptured Model/Init/feed, static/chained Call, opaque helper
+                            return false;   // uncaptured Model/Init/feed, unproven .Call, opaque helper
                         }
-                        // else: pure math (ShapeTensor, arithmetic, instance .Call on a local) — 0 slots
+                        // else: pure math (ShapeTensor, arithmetic, .Call on a counted model) — 0 slots
                     }
                     break;
 
                 case ExpressionStatementSyntax es:
-                    if (SubtreeHasUnnameableStream(es.Expression)) return false;
+                    if (SubtreeHasUnnameableStream(es.Expression, modelCaptures)) return false;
                     break;
 
                 case ReturnStatementSyntax rs:
-                    if (rs.Expression is not null && SubtreeHasUnnameableStream(rs.Expression)) return false;
+                    if (rs.Expression is not null && SubtreeHasUnnameableStream(rs.Expression, modelCaptures)) return false;
                     break;
 
                 case ForEachStatementSyntax fe when IsLoopApiIterate(fe):
@@ -228,12 +237,13 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                     // Model/Init used to compute the trip count) — scan them, but not the
                     // Iterate call itself (its uppercase receiver would always trip the check).
                     if (fe.Expression is InvocationExpressionSyntax iterInv &&
-                        iterInv.ArgumentList is { } iterArgs && SubtreeHasUnnameableStream(iterArgs))
+                        iterInv.ArgumentList is { } iterArgs && SubtreeHasUnnameableStream(iterArgs, modelCaptures))
                         return false;
                     var body = fe.Statement is BlockSyntax b
                         ? (IReadOnlyList<StatementSyntax>)b.Statements
                         : new[] { fe.Statement };
-                    if (!TryAnalyzeScope(body, LoopPlacement(fe), childScopes, out var childOccupies))
+                    if (!TryAnalyzeScope(body, LoopPlacement(fe), childScopes,
+                            new HashSet<string>(modelCaptures, StringComparer.Ordinal), out var childOccupies))
                         return false;
                     if (childOccupies) { slot++; anyLoopSlot = true; }
                     // A loop with no id-bearing content takes no local slot.
@@ -289,11 +299,18 @@ public class ModuleSourceGenerator : IIncrementalGenerator
     }
 
     /// <summary>Whether a subtree touches an RNG stream that an end-of-body pin cannot name:
-    /// an (uncaptured) Model/Init call, a runtime feed, a static/uppercase-receiver <c>.Call</c>
-    /// (anonymous sub-model), or an opaque uppercase static-helper call that may create streams.
-    /// An instance <c>.Call</c> on a lowercase local (re-invoking an already-counted model) is
-    /// fine.</summary>
-    private static bool SubtreeHasUnnameableStream(SyntaxNode node)
+    /// an (uncaptured) Model/Init call, a runtime feed, any <c>.Call</c> whose receiver is not
+    /// a COUNTED model capture (static <c>TypeName.Call</c> creates an anonymous sub-model;
+    /// a chained or unknown receiver — even a lowercase one — may be a helper whose Call
+    /// creates streams: a lowercase name alone proves nothing), or an opaque uppercase
+    /// static-helper call that may create streams internally. Only <c>m.Call(...)</c> where
+    /// <c>m</c> is in <paramref name="modelCaptures"/> (captured via <c>Recv.Model(...)</c> in
+    /// this analysis) is provably a stream-free re-invocation. Boundary of the syntax-only
+    /// analysis: instance methods with OTHER names on lowercase receivers (tensor math,
+    /// <c>ctx.ContinueWhile</c>) and bare using-static calls other than the feeds are trusted —
+    /// a user helper smuggling stream creation through those shapes is not detectable without
+    /// semantic info.</summary>
+    private static bool SubtreeHasUnnameableStream(SyntaxNode node, HashSet<string> modelCaptures)
     {
         foreach (var inv in node.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>())
         {
@@ -308,9 +325,9 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                 if (name is "Model" or "Init" or "RandomUniform" or "RandomNormal") return true;
                 if (name == "Call")
                 {
-                    // Instance call on a lowercase local model creates no new id; anything else
-                    // (static TypeName.Call, chained (...).Call) creates an anonymous sub-model.
-                    if (ma.Expression is IdentifierNameSyntax lc && !char.IsUpper(lc.Identifier.Text[0]))
+                    // Stream-free only when provably re-invoking a model this analysis counted.
+                    if (ma.Expression is IdentifierNameSyntax rcv &&
+                        modelCaptures.Contains(rcv.Identifier.Text))
                         continue;
                     return true;
                 }

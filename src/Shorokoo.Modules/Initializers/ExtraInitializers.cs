@@ -226,7 +226,7 @@ public static partial class Orthogonal
         Scalar<int64> c = total / r;
         Vector<int64> flatShape = [r, c];
 
-        // Seed: standard Gaussian [r, c] (next free seed; existing inits use 11..18).
+        // Starting point: a standard Gaussian [r, c] from the initializer's keyed stream.
         var y0 = Globals.RandomNormal(flatShape, mean: 0.0f, scale: 1.0f);
 
         // Frobenius-normalize so σ_max ≤ ‖Y‖_F = 1 < √3 (cubic-iteration convergence region).

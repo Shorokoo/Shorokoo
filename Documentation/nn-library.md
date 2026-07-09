@@ -30,26 +30,31 @@ like `Zeros.Init([outFeatures])` or `KaimingUniform.Init([outC, inC, k, k])`.
 | `Zeros` | 0.0 | biases, BatchNorm beta |
 | `Ones` | 1.0 | BatchNorm/LayerNorm gamma |
 | `Constant` | `value` (every element) | deterministic (no RNG); any rank; the parameterized generalization of `Zeros`/`Ones` (`Constant(0)`/`Constant(1)`); `value` is an `Init` arg (`Constant.Init([shape], Scalar(v))`), à la `RecurrentUniform`; PyTorch `constant_` / Keras `Constant` |
-| `Uniform` | U(0, 1) | seeded; the fixed U(0, 1) default form (use `UniformRange` for a configurable range) |
-| `Normal` | N(0, 1) | seeded; PyTorch's `nn.Embedding` default; the fixed N(0, 1) default form (use `NormalDist` for configurable mean/std) |
-| `UniformRange` | U(low, high) | seeded; any rank; the parameterized generalization of `Uniform` (`Uniform` retained as the U(0, 1) default); `low`/`high` are `Init` args (`UniformRange.Init([shape], Scalar(lo), Scalar(hi))`), built as the affine transform of a standard draw; expects `low ≤ high`; PyTorch `uniform_(a, b)` / Keras `RandomUniform(minval, maxval)` |
-| `NormalDist` | N(mean, std) | seeded; any rank; the parameterized generalization of `Normal` (`Normal` retained as the N(0, 1) default); `mean`/`std` are `Init` args (`NormalDist.Init([shape], Scalar(m), Scalar(s))`), built as the affine transform of a standard draw; expects `std ≥ 0`; PyTorch `normal_(mean, std)` / Keras `RandomNormal(mean, stddev)` |
-| `XavierUniform` | U(−a, a), a = √(6 / (fanIn + fanOut)) | gain 1; seeded; rank ≥ 2 |
-| `XavierNormal` | N(0, √(2 / (fanIn + fanOut))) | gain 1; seeded; rank ≥ 2 |
-| `KaimingUniform` | U(−b, b), b = √(6 / fanIn) | ReLU gain √2, fan-in mode; seeded; rank ≥ 2; the default weight init of `Linear` and the conv layers |
-| `KaimingNormal` | N(0, √(2 / fanIn)) | ReLU gain √2, fan-in mode; seeded; rank ≥ 2 |
-| `XavierUniformGain` | U(−a, a), a = gain·√(6 / (fanIn + fanOut)) | seeded; rank ≥ 2; configurable-gain generalization of `XavierUniform` (== it at `gain = 1`; `XavierUniform` retained as the gain-baked default); `gain` is an `Init` arg (`XavierUniformGain.Init([shape], Scalar(g))`); PyTorch `xavier_uniform_(t, gain)` (`gain` = the `calculate_gain` std multiplier — the caller computes it) |
-| `XavierNormalGain` | N(0, gain·√(2 / (fanIn + fanOut))) | seeded; rank ≥ 2; configurable-gain generalization of `XavierNormal` (== it at `gain = 1`; `XavierNormal` retained as the gain-baked default); `gain` is an `Init` arg; PyTorch `xavier_normal_(t, gain)` |
-| `KaimingUniformGain` | U(−b, b), b = gain·√(3 / fanIn) | seeded; rank ≥ 2; configurable-gain generalization of `KaimingUniform` (== it at `gain = √2`; `KaimingUniform` retained as the gain-baked default). **Base factor is the bare √(3 / fanIn), not √(6 / fanIn)** — the default bakes gain √2, so the user-supplied gain replaces it (no double-bake). `gain` is an `Init` arg; PyTorch `kaiming_uniform_` (gain via `calculate_gain`) |
-| `KaimingNormalGain` | N(0, gain·√(1 / fanIn)) | seeded; rank ≥ 2; configurable-gain generalization of `KaimingNormal` (== it at `gain = √2`; `KaimingNormal` retained as the gain-baked default). **Base factor is the bare √(1 / fanIn), not √(2 / fanIn)** — the default bakes gain √2, so the user-supplied gain replaces it (no double-bake). `gain` is an `Init` arg; PyTorch `kaiming_normal_` |
-| `TruncatedNormal` | N(0, 1) clamped to [−2, 2] | seeded; clamp approximation (in-graph rejection sampling isn't possible); Keras/JAX-style default |
-| `LeCunNormal` | N(0, √(1 / fanIn)) | seeded; rank ≥ 2; JAX/Flax `lecun_normal` (SELU / self-normalizing nets) |
-| `Orthogonal` | (semi-)orthogonal matrix (`QᵀQ ≈ I` / `QQᵀ ≈ I`) | seeded; rank ≥ 2; **Björck/Newton–Schulz approximation** (15 cubic iterations `Y ← 1.5·Y − 0.5·Y·(YᵀY)` from a seeded Gaussian — exact QR/SVD-orthogonal isn't expressible in Shorokoo's op set, cf. `TruncatedNormal`); gain 1; Saxe-2013 dynamical isometry (RNN recurrent matrices, deep stacks); PyTorch `orthogonal_` |
-| `RecurrentUniform` | U(−1/√H, 1/√H), H = `shape[1]` | seeded; PyTorch's `nn.RNN`/`nn.LSTM`/`nn.GRU` default (`k = 1/hidden_size`); reads the hidden dim from axis 1, so it inits recurrent W `[D, H, in]`, R `[D, H, H]`, and bias `[D, H]` alike; used by the `Recurrent` layers |
+| `Uniform` | U(0, 1) | stream-keyed; the fixed U(0, 1) default form (use `UniformRange` for a configurable range) |
+| `Normal` | N(0, 1) | stream-keyed; PyTorch's `nn.Embedding` default; the fixed N(0, 1) default form (use `NormalDist` for configurable mean/std) |
+| `UniformRange` | U(low, high) | stream-keyed; any rank; the parameterized generalization of `Uniform` (`Uniform` retained as the U(0, 1) default); `low`/`high` are `Init` args (`UniformRange.Init([shape], Scalar(lo), Scalar(hi))`), built as the affine transform of a standard draw; expects `low ≤ high`; PyTorch `uniform_(a, b)` / Keras `RandomUniform(minval, maxval)` |
+| `NormalDist` | N(mean, std) | stream-keyed; any rank; the parameterized generalization of `Normal` (`Normal` retained as the N(0, 1) default); `mean`/`std` are `Init` args (`NormalDist.Init([shape], Scalar(m), Scalar(s))`), built as the affine transform of a standard draw; expects `std ≥ 0`; PyTorch `normal_(mean, std)` / Keras `RandomNormal(mean, stddev)` |
+| `XavierUniform` | U(−a, a), a = √(6 / (fanIn + fanOut)) | gain 1; stream-keyed; rank ≥ 2 |
+| `XavierNormal` | N(0, √(2 / (fanIn + fanOut))) | gain 1; stream-keyed; rank ≥ 2 |
+| `KaimingUniform` | U(−b, b), b = √(6 / fanIn) | ReLU gain √2, fan-in mode; stream-keyed; rank ≥ 2; the default weight init of `Linear` and the conv layers |
+| `KaimingNormal` | N(0, √(2 / fanIn)) | ReLU gain √2, fan-in mode; stream-keyed; rank ≥ 2 |
+| `XavierUniformGain` | U(−a, a), a = gain·√(6 / (fanIn + fanOut)) | stream-keyed; rank ≥ 2; configurable-gain generalization of `XavierUniform` (== it at `gain = 1`; `XavierUniform` retained as the gain-baked default); `gain` is an `Init` arg (`XavierUniformGain.Init([shape], Scalar(g))`); PyTorch `xavier_uniform_(t, gain)` (`gain` = the `calculate_gain` std multiplier — the caller computes it) |
+| `XavierNormalGain` | N(0, gain·√(2 / (fanIn + fanOut))) | stream-keyed; rank ≥ 2; configurable-gain generalization of `XavierNormal` (== it at `gain = 1`; `XavierNormal` retained as the gain-baked default); `gain` is an `Init` arg; PyTorch `xavier_normal_(t, gain)` |
+| `KaimingUniformGain` | U(−b, b), b = gain·√(3 / fanIn) | stream-keyed; rank ≥ 2; configurable-gain generalization of `KaimingUniform` (== it at `gain = √2`; `KaimingUniform` retained as the gain-baked default). **Base factor is the bare √(3 / fanIn), not √(6 / fanIn)** — the default bakes gain √2, so the user-supplied gain replaces it (no double-bake). `gain` is an `Init` arg; PyTorch `kaiming_uniform_` (gain via `calculate_gain`) |
+| `KaimingNormalGain` | N(0, gain·√(1 / fanIn)) | stream-keyed; rank ≥ 2; configurable-gain generalization of `KaimingNormal` (== it at `gain = √2`; `KaimingNormal` retained as the gain-baked default). **Base factor is the bare √(1 / fanIn), not √(2 / fanIn)** — the default bakes gain √2, so the user-supplied gain replaces it (no double-bake). `gain` is an `Init` arg; PyTorch `kaiming_normal_` |
+| `TruncatedNormal` | N(0, 1) clamped to [−2, 2] | stream-keyed; clamp approximation (in-graph rejection sampling isn't possible); Keras/JAX-style default |
+| `LeCunNormal` | N(0, √(1 / fanIn)) | stream-keyed; rank ≥ 2; JAX/Flax `lecun_normal` (SELU / self-normalizing nets) |
+| `Orthogonal` | (semi-)orthogonal matrix (`QᵀQ ≈ I` / `QQᵀ ≈ I`) | stream-keyed; rank ≥ 2; **Björck/Newton–Schulz approximation** (15 cubic iterations `Y ← 1.5·Y − 0.5·Y·(YᵀY)` from a stream-keyed Gaussian — exact QR/SVD-orthogonal isn't expressible in Shorokoo's op set, cf. `TruncatedNormal`); gain 1; Saxe-2013 dynamical isometry (RNN recurrent matrices, deep stacks); PyTorch `orthogonal_` |
+| `RecurrentUniform` | U(−1/√H, 1/√H), H = `shape[1]` | stream-keyed; PyTorch's `nn.RNN`/`nn.LSTM`/`nn.GRU` default (`k = 1/hidden_size`); reads the hidden dim from axis 1, so it inits recurrent W `[D, H, in]`, R `[D, H, H]`, and bias `[D, H]` alike; used by the `Recurrent` layers |
 
-- **Seeded determinism**: the random initializers use fixed seeds, so every
-  materialization is deterministic — and two parameters of the same shape
-  initialized by the same class receive **identical** values.
+- **Stream-keyed determinism**: each random initializer draws from a per-parameter
+  stream keyed by the model's `RngConfig` identity (master seed 0 when no config is
+  bound), so every materialization is deterministic and reproducible — and two
+  parameters of the same shape initialized by the same class receive **different**
+  values (each folds its own stream key from its position in the model). Change the
+  master seed to re-roll everything coherently, or set `RngConfig.SharedKey` to tie
+  same-shape parameters deliberately (reference tests/debugging) — see
+  [rng-configuration.md](rng-configuration.md).
 - **Fan-in/fan-out** are computed in-graph from the shape vector:
   `fanIn = prod(shape) / shape[0]`, `fanOut = prod(shape) / shape[1]` — the
   PyTorch convention for Linear `[out, in]` and Conv `[outC, inC/g, k...]`
@@ -674,8 +679,11 @@ Dropout.Call(Scalar<float32> ratio, Scalar<bit> training, Tensor<float32> x)
 ```
 
 Training mode zeroes each element with probability `ratio` and scales survivors
-by `1/(1-ratio)`; eval mode is the identity. The mask seed is fixed (42) so
-builds are deterministic; gradients flow through the forward mask automatically.
+by `1/(1-ratio)`; eval mode is the identity. The mask draws from the layer's keyed
+RNG stream — fresh each training step (the rig advances a draw counter), yet fully
+deterministic and reproducible under the model's `RngConfig` (see
+[rng-configuration.md](rng-configuration.md)); gradients flow through the forward
+mask automatically.
 
 ### SpatialDropout
 
@@ -690,8 +698,9 @@ Channel-wise (spatial) dropout over `[N, C, D1..Dn]` (channel = axis 1): one
 Bernoulli draw per `(sample, channel)` drops or rescales the **entire** feature
 map at once (vs `Dropout`'s per-element mask), so whole channels are zeroed or
 scaled by `1/(1-ratio)` together — the regularization for strongly-correlated
-conv feature maps (Tompson et al. 2015). Eval mode is the identity; the mask seed
-is fixed (42). The rank is read in-graph, so `SpatialDropout` is rank-generic; the
+conv feature maps (Tompson et al. 2015). Eval mode is the identity; the mask draws
+from the layer's keyed RNG stream (per-step, deterministic — like `Dropout`'s).
+The rank is read in-graph, so `SpatialDropout` is rank-generic; the
 `Dropout1d/2d/3d` aliases (PyTorch names) are thin forwarders naming the per-rank
 forms. On rank-2 `[N, C]` it degenerates to elementwise `Dropout`.
 
@@ -712,7 +721,7 @@ channel-wise twin: one Bernoulli draw per `(sample, channel)` drops a whole feat
 map to `α'` (reusing the `[N, C, 1, …, 1]` mask shape), rank-generic over 1-D/2-D/3-D.
 Both take `(ratio, training)` like `Dropout`; eval mode (`training = false`) is the
 **exact** identity (gated explicitly, since the affine isn't the identity); the mask
-seed is fixed (42).
+draws from the layer's keyed RNG stream (per-step, deterministic — like `Dropout`'s).
 
 ### Embedding
 

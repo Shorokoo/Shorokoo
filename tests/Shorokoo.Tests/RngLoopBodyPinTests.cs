@@ -211,7 +211,7 @@ public class RngLoopBodyPinTests
         Assert.Equal(1, LocalSlotOfShape(pinned, 3));
         Assert.Equal(2, LocalSlotOfShape(pinned, 2));
         // The loop's own top-level slot is unchanged: the Linear ([2,4]) still holds slot 1.
-        Assert.Contains(pinned, p => p.shape.SequenceEqual(new[] { 2L, 4L }) && p.id.SequenceEqual(new[] { 1, 1 }));
+        Assert.Contains(pinned, p => p.shape.SequenceEqual((long[])[2L, 4L]) && p.id.SequenceEqual((int[])[1, 1]));
     }
 
     [Fact]

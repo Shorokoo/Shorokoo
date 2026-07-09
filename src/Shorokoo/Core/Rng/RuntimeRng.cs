@@ -26,7 +26,7 @@ namespace Shorokoo.Core.Rng;
 /// <c>(key, drawBase, i)</c> replays exactly. The bit→float and Box–Muller conventions match
 /// <see cref="HostRng"/> (low 24 bits × 2⁻²⁴; radius = √(−2·ln(1−u₁))).</para>
 /// </summary>
-public static class RuntimeRng
+internal static class RuntimeRng
 {
     private static readonly int[] Rot = [13, 15, 26, 6, 17, 29, 16, 24];
     private const long Pow2_32 = 0x1_0000_0000L;
@@ -47,11 +47,12 @@ public static class RuntimeRng
     }
 
     /// <summary>Threefry-2x32 over the per-element counter <c>(c0, drawBase)</c> with an explicit
-    /// <paramref name="rounds"/> count (default 20; 13 is the Crush-resistant fast variant).
+    /// <paramref name="rounds"/> count (default <see cref="Threefry2x32.Rounds"/>;
+    /// <see cref="Threefry2x32.Rounds13"/> is the Crush-resistant fast variant).
     /// <paramref name="c0"/> is the flat element-index tensor <c>[N]</c>; the other words are scalars.
     /// Bit-for-bit identical to <see cref="Threefry2x32.Bijection(uint, uint, uint, uint, int)"/>.</summary>
     public static (Tensor<int64> x0, Tensor<int64> x1) Bijection(
-        Tensor<int64> c0, Scalar<int64> drawBase, Scalar<int64> k0, Scalar<int64> k1, int rounds = 20)
+        Tensor<int64> c0, Scalar<int64> drawBase, Scalar<int64> k0, Scalar<int64> k1, int rounds = Threefry2x32.Rounds)
     {
         // Key schedule (host-foldable: keys are scalars). ks2 = parity ^ k0 ^ k1.
         Scalar<int64> ks0 = k0, ks1 = k1, ks2 = Scalar(SkeinParity) ^ k0 ^ k1;
@@ -83,6 +84,10 @@ public static class RuntimeRng
     /// <summary>
     /// Index-based key split: child key words = Bijection(counter: (index, 0), key).
     /// Random access — computing child <paramref name="index"/> never computes any sibling.
+    /// The counter word is the index's LOW 32 BITS (<c>Mask32</c>, matching the host fold's
+    /// <c>uint</c> cast — see <c>RngConfig.FoldKey</c>), so indices <c>i</c> and
+    /// <c>i + 2^32</c> alias to the same child key. Unreachable in practice: split indices
+    /// are ModelId slots and iteration indices, which are <c>int</c>-typed.
     /// </summary>
     public static (Scalar<int64> k0, Scalar<int64> k1) SplitKey(
         Scalar<int64> k0, Scalar<int64> k1, Scalar<int64> index)
@@ -105,7 +110,7 @@ public static class RuntimeRng
 
     /// <summary>Standard uniform U(0,1) of the given shape (bit generator: Threefry-2x32-<paramref name="rounds"/>).</summary>
     public static Tensor<float32> StandardUniform(
-        Vector<int64> shape, Scalar<int64> k0, Scalar<int64> k1, Scalar<int64> drawBase, int rounds = 20)
+        Vector<int64> shape, Scalar<int64> k0, Scalar<int64> k1, Scalar<int64> drawBase, int rounds = Threefry2x32.Rounds)
     {
         var (x0, _) = Bijection(Counter(shape), drawBase, k0, k1, rounds);
         return ToUniform(x0).Reshape(shape);
@@ -113,7 +118,7 @@ public static class RuntimeRng
 
     /// <summary>Standard normal N(0,1) of the given shape (per-element Box–Muller over Threefry-2x32-<paramref name="rounds"/>).</summary>
     public static Tensor<float32> StandardNormal(
-        Vector<int64> shape, Scalar<int64> k0, Scalar<int64> k1, Scalar<int64> drawBase, int rounds = 20)
+        Vector<int64> shape, Scalar<int64> k0, Scalar<int64> k1, Scalar<int64> drawBase, int rounds = Threefry2x32.Rounds)
     {
         var (x0, x1) = Bijection(Counter(shape), drawBase, k0, k1, rounds);
         var u1 = ToUniform(x0);
@@ -126,12 +131,12 @@ public static class RuntimeRng
     /// <summary>U(low, high) of the given shape.</summary>
     public static Tensor<float32> Uniform(
         Vector<int64> shape, Scalar<int64> k0, Scalar<int64> k1, Scalar<int64> drawBase,
-        Scalar<float32> low, Scalar<float32> high, int rounds = 20)
+        Scalar<float32> low, Scalar<float32> high, int rounds = Threefry2x32.Rounds)
         => StandardUniform(shape, k0, k1, drawBase, rounds) * (high - low) + low;
 
     /// <summary>N(mean, scale) of the given shape.</summary>
     public static Tensor<float32> Normal(
         Vector<int64> shape, Scalar<int64> k0, Scalar<int64> k1, Scalar<int64> drawBase,
-        Scalar<float32> mean, Scalar<float32> scale, int rounds = 20)
+        Scalar<float32> mean, Scalar<float32> scale, int rounds = Threefry2x32.Rounds)
         => StandardNormal(shape, k0, k1, drawBase, rounds) * scale + mean;
 }

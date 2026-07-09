@@ -293,7 +293,11 @@ public sealed class RngConfig
 
     /// <summary>
     /// Host-side index fold — one Threefry bijection, bit-identical to the in-graph
-    /// SHRK_RNG_SPLIT: child = Bijection(counter: (index, 0), key).
+    /// SHRK_RNG_SPLIT: child = Bijection(counter: (index, 0), key). The counter word is the
+    /// index's LOW 32 BITS (the <c>uint</c> cast, matching the in-graph split's
+    /// <c>Mask32</c>), so indices <c>i</c> and <c>i + 2^32</c> alias to the same child key —
+    /// unreachable in practice, since fold indices are ModelId slots and iteration indices,
+    /// which are <c>int</c>-typed.
     /// </summary>
     internal static (uint k0, uint k1) FoldKey((uint k0, uint k1) key, long index)
         => Core.Rng.Threefry2x32.Bijection(unchecked((uint)index), 0u, key.k0, key.k1);

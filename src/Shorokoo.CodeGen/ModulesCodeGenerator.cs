@@ -241,7 +241,7 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                         return false;
                     var body = fe.Statement is BlockSyntax b
                         ? (IReadOnlyList<StatementSyntax>)b.Statements
-                        : new[] { fe.Statement };
+                        : (StatementSyntax[])[fe.Statement];
                     if (!TryAnalyzeScope(body, LoopPlacement(fe), childScopes,
                             new HashSet<string>(modelCaptures, StringComparer.Ordinal), out var childOccupies))
                         return false;

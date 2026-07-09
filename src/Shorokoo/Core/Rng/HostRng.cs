@@ -35,7 +35,7 @@ internal sealed class HostRng
     private readonly ulong _counterBase;
     private readonly int _rounds;
 
-    public HostRng(uint k0, uint k1, ulong counterBase = 0, int rounds = 20)
+    public HostRng(uint k0, uint k1, ulong counterBase = 0, int rounds = Threefry2x32.Rounds)
     {
         _k0 = k0;
         _k1 = k1;

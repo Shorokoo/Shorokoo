@@ -67,21 +67,21 @@ per scope**, each placed where its variables are in scope — a module-level pin
 `Inline`, and a pin inside each loop body:
 
 ```csharp
-public static Tensor<float32> Inline(Tensor<float32> x)
+public static Tensor<float32> Inline(Tensor<float32> x, Scalar<int64> steps)
 {
     var a = Linear.Model(Scalar(2L), Scalar(false));
     x = a.Call(x);
     foreach (var ctx in LoopAPI.Iterate(steps))
     {
-        var w = KaimingUniform.Init(shape);
-        x = x + w;                        // ... use w ...
-        Rng.Pin(w);                       // pins this loop's local slots
-        ctx.ContinueWhile(cond);
+        var w = KaimingUniform.Init([Scalar(2L), Scalar(2L)]);
+        x = x + w.Reduce(ReduceKind.Sum);     // ... use w ...
+        Rng.Pin(w);                           // pins this loop's local slots
+        ctx.ContinueWhile(Scalar(true));
     }
     var b = Linear.Model(Scalar(3L), Scalar(false));
     x = b.Call(x);
-    Rng.Pin(([1], a), ([3], b));          // module-level: loop keeps slot 2
-    return x;                             // forward result, returned after the pin
+    Rng.Pin(([1], a), ([3], b));              // module-level: loop keeps slot 2
+    return x;                                 // forward result, returned after the pin
 }
 ```
 

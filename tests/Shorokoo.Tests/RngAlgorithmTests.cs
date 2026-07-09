@@ -127,7 +127,7 @@ public class RngAlgorithmTests
             var algo = fn.MetadataProps.FirstOrDefault(p => p.Key == Function.IRRngAlgorithmParamName)?.Value;
             var kind = fn.MetadataProps.FirstOrDefault(p => p.Key == Function.IRRngFunctionKindParamName)?.Value;
             Assert.Equal(RngAlgorithms.Threefry2x32BoxMullerV1, algo);
-            Assert.Contains(kind, new[] { RngAlgorithms.KindSplit, RngAlgorithms.KindUniform, RngAlgorithms.KindNormal });
+            Assert.Contains(kind, (string[])[RngAlgorithms.KindSplit, RngAlgorithms.KindUniform, RngAlgorithms.KindNormal]);
         }
 
         // The main graph must CALL the draw (a Functions-domain call node), not contain

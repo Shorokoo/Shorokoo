@@ -119,7 +119,7 @@ public class RngPinTests
 
         // The weight of the FIRST-id Linear ([1, 1] = sub-model 1's param 1) has shape [out, in].
         var infos = arch.GetConcreteModelParamInfos().ParamInfos;
-        var firstWeight = infos.Single(i => i.ModelId.Vals.SequenceEqual(new[] { 1, 1 }));
+        var firstWeight = infos.Single(i => i.ModelId.Vals.SequenceEqual((int[])[1, 1]));
         var outFeatures = firstWeight.Shape.Dims[0];
 
         var concrete = arch.ToConcreteModel(RngConfig.Default);

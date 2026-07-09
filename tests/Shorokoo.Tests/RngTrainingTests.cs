@@ -35,11 +35,11 @@ public partial class RngRigDropoutModel
 public class RngTrainingTests
 {
     private static readonly TensorStructDef ModelInputDef = new(
-        new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32) },
+        [new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32)],
         "ModelInput");
 
     private static readonly TensorStructDef TargetDef = new(
-        new[] { new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32) },
+        [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)],
         "Target");
 
     private static (float[] losses, TrainingRig rig, TrainingCheckpoint finalCheckpoint) TrainLosses(

@@ -35,7 +35,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <paramref name="fn"/> contains no random ops (the caller then keeps the original).
         /// </summary>
         public static Function? BuildNoiseInjected(
-            Function fn, (uint k0, uint k1) streamKey, string streamName, long elementCount, int drawRounds = 20)
+            Function fn, (uint k0, uint k1) streamKey, string streamName, long elementCount, int drawRounds = Threefry2x32.Rounds)
         {
             var body = fn.OriginalFastGraph.Clone();
 

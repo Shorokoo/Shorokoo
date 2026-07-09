@@ -3030,16 +3030,17 @@ public class NNLibraryTrainingCoverageTests
     }
 
     /// <summary>
-    /// Recurrent.RNN §7-9 trainable-corner gradient (forward, tanh, single-layer, layout=0 — the
-    /// only autodiff-supported configuration, design note [3]). The analytic AutoGrad gradient of
-    /// the loss ΣY + Σh_n is FD-checked against a two-sided directional derivative on ORT's own
-    /// forward, mirroring TestAutoGradRecurrentReverseDirection / AutoGradRnnReverseCheck — the
-    /// proven AutoGrad-graph gradient path. This is the positive trainable-gradient coverage; the
-    /// end-to-end recurrent-rig training is covered by the LSTM/GRU rig train-step tests (the
-    /// shared RNN-BPTT scheduler stall they exercise was fixed in #440).
+    /// Recurrent.RNN §7-9 frozen forward golden (forward, tanh, single-layer, layout=0): the
+    /// layer's forward output over a probed-scalar sequence must match the self-generated
+    /// inlined reference. Forward values ONLY — layer-level FD grad checks were retired with
+    /// per-parameter init; RNN gradient coverage lives at the op level in
+    /// AutoGradOpsTests.TestAutoGradRNNCoverage (analytic vs FD per input slot), end-to-end
+    /// gradient flow in the LSTM/GRU rig train-step tests (the shared RNN-BPTT scheduler
+    /// stall they exercise was fixed in #440), and the unsupported modes in
+    /// TestRecurrentRnnReluAndBidirectionalBpttThrow above.
     /// </summary>
     [Fact]
-    public void TestRecurrentRnnForwardTanhGradient()
+    public void TestRecurrentRnnForwardTanhGolden()
     {
         Assert.True(AutoTest.AdvancedTestGraph<RnnForwardTanhGolden>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [], 0.3f)]));
@@ -3070,15 +3071,15 @@ public class NNLibraryTrainingCoverageTests
     }
 
     /// <summary>
-    /// Recurrent.LSTM §7-8 trainable-corner gradient (forward, single-layer, layout=0, default
-    /// activations — a supported autodiff configuration, lstm/design.md §5.2). The analytic AutoGrad
-    /// gradient of the loss ΣY + Σh_n + Σc_n is FD-checked against a two-sided directional derivative
-    /// on ORT's own forward, mirroring TestRecurrentRnnForwardTanhGradient / AutoGradLstmReverseCheck.
-    /// This is the positive trainable-gradient coverage; the end-to-end TrainingRig smoke is
-    /// TestRecurrentLstmForwardTrainStepFlows below.
+    /// Recurrent.LSTM §7-8 frozen forward golden (forward, single-layer, layout=0, default
+    /// activations): the layer's forward y/hN/cN over a probed-scalar sequence must match the
+    /// self-generated inlined reference. Forward values ONLY — layer-level FD grad checks were
+    /// retired with per-parameter init; LSTM gradient coverage lives at the op level in
+    /// AutoGradOpsTests.TestAutoGradLSTMPart1–3Coverage (analytic vs FD per input slot), and
+    /// end-to-end gradient flow in TestRecurrentLstmForwardTrainStepFlows below.
     /// </summary>
     [Fact]
-    public void TestRecurrentLstmForwardGradient()
+    public void TestRecurrentLstmForwardGolden()
     {
         Assert.True(AutoTest.AdvancedTestGraph<LstmForwardGolden>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [], 0.3f)]));
@@ -3146,15 +3147,16 @@ public class NNLibraryTrainingCoverageTests
     }
 
     /// <summary>
-    /// Recurrent.GRU §7-9 trainable-corner gradient (forward, single-layer, layout=0, default
-    /// activations, linearBeforeReset:true — a supported autodiff configuration, gru/design.md §5).
-    /// The analytic AutoGrad gradient of the loss ΣY + Σh_n is FD-checked against a two-sided
-    /// directional derivative on ORT's own forward, mirroring TestRecurrentLstmForwardGradient /
-    /// AutoGradGruReverseCheck. This is the positive trainable-gradient coverage; the end-to-end
-    /// TrainingRig smoke is TestRecurrentGruForwardTrainStepFlows below.
+    /// Recurrent.GRU §7-9 frozen forward golden (forward, single-layer, layout=0, default
+    /// activations, linearBeforeReset:true): the layer's forward output over a probed-scalar
+    /// sequence must match the self-generated inlined reference. Forward values ONLY —
+    /// layer-level FD grad checks were retired with per-parameter init; GRU gradient coverage
+    /// lives at the op level in AutoGradOpsTests.TestAutoGradGRUPart1–2Coverage (analytic vs
+    /// FD per input slot), and end-to-end gradient flow in
+    /// TestRecurrentGruForwardTrainStepFlows below.
     /// </summary>
     [Fact]
-    public void TestRecurrentGruForwardGradient()
+    public void TestRecurrentGruForwardGolden()
     {
         Assert.True(AutoTest.AdvancedTestGraph<GruForwardGolden>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [], 0.3f)]));
@@ -3221,15 +3223,17 @@ public class NNLibraryTrainingCoverageTests
     }
 
     /// <summary>
-    /// Single-step recurrent CELL §7-6 trainable-corner FD grad checks (recurrent-cells/design.md §7).
-    /// The analytic AutoGrad gradient of a loss Σh' (+ Σc' for LSTM) over a single cell step is FD-checked
-    /// against a two-sided directional derivative on ORT's own forward, mirroring RnnForwardTanhGolden /
-    /// LstmForwardGolden / GruForwardGolden. Both x AND the previous-state input(s) depend on the
-    /// probed scalar, so the gradient threads through the cell's distinguishing h(/c) input as well as x —
-    /// the trainable corner (forward-tanh RNNCell, LSTMCell, and BOTH lbr forms of GRUCell).
+    /// Single-step recurrent CELL §7-6 frozen forward goldens (recurrent-cells/design.md §7):
+    /// each cell's single-step forward output over probed-scalar x and previous-state input(s)
+    /// must match the self-generated inlined reference (forward-tanh RNNCell, LSTMCell, and
+    /// GRUCell). Both x AND the previous state depend on the probed scalar, so the golden
+    /// covers the cell's distinguishing h(/c) input as well as x. Forward values ONLY —
+    /// layer-level FD grad checks were retired with per-parameter init; cell gradient
+    /// coverage lives at the op level in AutoGradOpsTests, and end-to-end gradient flow
+    /// through a USER loop in TestRecurrentCellTrainStepFlows below.
     /// </summary>
     [Fact]
-    public void TestRecurrentCellForwardGradients()
+    public void TestRecurrentCellForwardGoldens()
     {
         Assert.True(AutoTest.AdvancedTestGraph<RnnCellForwardTanhGolden>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [], 0.3f)]));

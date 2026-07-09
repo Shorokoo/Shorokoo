@@ -276,7 +276,7 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 | Op | Build & run | QEE | Gradient |
 |---|---|---|---|
 | BatchNormalization | ✅ [1] | 🟡 [2] | ✅ [3] |
-| Dropout | ✅ | ✅ | ✅ [4] |
+| Dropout | 🟡 [4] | ✅ | ✅ [4] |
 | GroupNormalization | ✅ | 🟡 [5] | ✅ |
 | InstanceNormalization | ✅ | 🟡 [5] | ✅ |
 | LRN | ✅ | 🟡 [5] | ✅ |
@@ -295,9 +295,14 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 2. Values in inference mode; training mode is shape/dtype only.
 3. Both inference and training modes (batch-stats backward); gradients flowing
    into the running-mean/running-var outputs throw.
-4. Correct for both training and inference, including a runtime
-   `training_mode` input (mask-based); throws if the forward mask is
-   unavailable on a path.
+4. Inference mode is fully supported. TRAINING-mode Dropout is not supported:
+   ONNX Runtime's constant folding may evaluate a training-mode Dropout whose
+   data input is provably constant as the inference-mode identity (a silent
+   no-drop mask) at session load, and Shorokoo does not guard against it.
+   Shorokoo's own dropout layers do not emit the op — masks are built in-graph
+   from the keyed RNG feed (see rng-configuration.md) — so this only affects
+   hand-authored graphs and models saved before the in-graph masks. The
+   gradient path (mask-based) throws if the forward mask is unavailable.
 5. Shape/dtype inference only; values are not computed.
 6. Gradients into the optional Mean/InvStdDev outputs are treated as zero.
 

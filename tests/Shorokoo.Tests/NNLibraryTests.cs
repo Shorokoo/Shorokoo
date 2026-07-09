@@ -331,27 +331,12 @@ public class NNLibraryCoverageTests
     /// mask. Covers (A) rank-4 channel-wise behavior (0-or-2x + uniformity), (B) ratio-0.75
     /// survivor scaling (0-or-4x), and (D-train) channel uniformity at rank 3 ([N,C,1] mask)
     /// and rank 5 ([N,C,1,1,1] mask). Kept as the only assertion of correct channel-wise
-    /// drop, so a train-mode no-op (y == x) cannot silently regress. (The masks are now
-    /// built in-graph from the keyed RNG feed; the historical #440 ONNX-Dropout
-    /// constant-fold hazard is pinned for LOADED legacy models by
-    /// TestBakedOnnxTrainingDropoutIsNotFoldedToIdentity above.)
+    /// drop, so a train-mode no-op (y == x) cannot silently regress. (The masks are built
+    /// in-graph from the keyed RNG feed — the historical #440 hazard, ORT constant-folding
+    /// a training-mode ONNX Dropout on a constant input to the no-drop identity, cannot
+    /// reach them. The raw ONNX Dropout op itself is unsupported for training-mode use;
+    /// see Documentation/operator-support.md.)
     /// </summary>
-    /// <summary>
-    /// Loaded-legacy-model guard (#440 redux): Shorokoo no longer emits ONNX Dropout nodes —
-    /// masks are built in-graph from the keyed feed — but models saved before that change
-    /// carry them baked, and executing one must not let ORT constant-fold a training-mode
-    /// Dropout-on-constant into the no-drop identity. NNBakedOnnxDropoutTrainMode rebuilds
-    /// exactly that baked pattern with a raw ONNX Dropout node; the
-    /// ComputeContext.HasTrainingModeDropout guard (disable graph optimizations for such
-    /// models) is what keeps the real random kernel running.
-    /// </summary>
-    [Fact]
-    public void TestBakedOnnxTrainingDropoutIsNotFoldedToIdentity()
-    {
-        Assert.True(AutoTest.AdvancedTestGraph<NNBakedOnnxDropoutTrainMode>(
-            hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 16L], 0.5f, 1f)]));
-    }
-
     [Fact]
     public void TestSpatialDropoutTrainModeChannelWise()
     {

@@ -267,6 +267,32 @@ public class RngKeyVectorTests
         Assert.ThrowsAny<ArgumentException>(
             () => RngConfig.FromKeyVector([1L, 2L, 3L, 0L, 99L]));
     }
+
+    [Fact]
+    public void TestMalformedVectorRejectsAnInvalidCollectionTag()
+    {
+        // Regression: the collection tag must be exactly 0 (Params) or 1 (Runtime) — a
+        // corrupted tag used to decode as Runtime whenever it merely wasn't 0, silently
+        // accepting garbage as a valid override instead of failing loudly like every
+        // other malformed field in the record.
+        long[] vec = [1L, 2L, 3L, 1L, /* tag */ 7L, /* pathLen */ 1L, /* path */ 5L, /* seed */ 99L];
+        var ex = Assert.ThrowsAny<ArgumentException>(() => RngConfig.FromKeyVector(vec));
+        Assert.Contains("collection tag", ex.Message);
+    }
+
+    [Fact]
+    public void TestMalformedVectorRejectsAnOverflowingPathLength()
+    {
+        // Regression: the truncated-record bounds check used plain `int` arithmetic, so a
+        // corrupted pathLen near int.MaxValue could overflow the check into a false
+        // negative and fall through to `new int[pathLen]` — crashing with an unhelpful
+        // OutOfMemory/IndexOutOfRange instead of this method's own clean diagnostic. The
+        // fixed check widens to `long` before comparing, so it must throw promptly here
+        // (no multi-gigabyte allocation should ever be attempted).
+        long[] vec = [1L, 2L, 3L, 1L, /* tag */ 0L, /* pathLen */ int.MaxValue, /* truncated */ 99L];
+        var ex = Assert.ThrowsAny<ArgumentException>(() => RngConfig.FromKeyVector(vec));
+        Assert.Contains("truncated", ex.Message);
+    }
 }
 
 /// <summary>

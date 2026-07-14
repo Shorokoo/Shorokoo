@@ -273,11 +273,25 @@ public sealed class RngConfig
         long count = keyVector[i++];
         for (long r = 0; r < count; r++)
         {
-            if (i + 2 > keyVector.Length)
+            // Bounds checks below widen to `long` before adding: `i`/`pathLen` are
+            // attacker- or corruption-controlled data read straight off a loaded file, so
+            // an inflated field (e.g. pathLen near int.MaxValue) must not be able to
+            // overflow the `int` check into a false negative and fall through to
+            // `new int[pathLen]` — that crashes with an unhelpful OutOfMemory /
+            // IndexOutOfRange instead of this method's own, intended diagnostic.
+            if ((long)i + 2 > keyVector.Length)
                 throw new ArgumentException("Malformed RNG key vector: truncated override record.", nameof(keyVector));
-            var collection = keyVector[i++] == 0L ? RngCollection.Params : RngCollection.Runtime;
+            long collectionTag = keyVector[i++];
+            var collection = collectionTag switch
+            {
+                0L => RngCollection.Params,
+                1L => RngCollection.Runtime,
+                _ => throw new ArgumentException(
+                    $"Malformed RNG key vector: unrecognized override collection tag {collectionTag} (expected 0 or 1).",
+                    nameof(keyVector)),
+            };
             int pathLen = checked((int)keyVector[i++]);
-            if (pathLen <= 0 || i + pathLen + 1 > keyVector.Length)
+            if (pathLen <= 0 || (long)i + pathLen + 1 > keyVector.Length)
                 throw new ArgumentException("Malformed RNG key vector: truncated override record.", nameof(keyVector));
             int[] path = new int[pathLen];
             for (int j = 0; j < pathLen; j++) path[j] = checked((int)keyVector[i++]);

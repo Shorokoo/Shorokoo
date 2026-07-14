@@ -436,9 +436,8 @@ public partial class ConvScalarBroadcastMatchesPerAxis
     }
 }
 
-/// <summary>§7-9 bias on/off: a bias:false conv — frozen forward-value golden (self-generated): the
-/// configured layer's output must match the inlined reference. Both compared against the same
-/// KaimingUniform-weight, zero-bias NN.Conv.</summary>
+/// <summary>§7-9 bias off: a bias:false conv — frozen forward-value golden (self-generated): the
+/// configured layer's output must match the inlined reference.</summary>
 [Module]
 public partial class ConvBiasOnOffMatchesZeroBias
 {
@@ -3391,9 +3390,8 @@ public partial class RnnReluMatchesCoreOpForward
     }
 }
 
-/// <summary>§7-4 bias on/off: bias:false — frozen forward-value golden (self-generated): the
-/// configured layer's output must match the inlined reference. Both compared against the matching
-/// seeded reference (same W/R; B present iff bias).</summary>
+/// <summary>§7-4 bias off: bias:false — frozen forward-value golden (self-generated): the
+/// configured layer's output (y, hN) must match the inlined reference.</summary>
 [Module]
 public partial class RnnBiasOnOffMatchesCoreOp
 {
@@ -3621,9 +3619,8 @@ public partial class LstmSingleStepGateAnchor
     }
 }
 
-/// <summary>§7-3 bias on/off: bias:false — frozen forward-value golden (self-generated): the
-/// configured layer's output must match the inlined reference. Both compared against the matching
-/// seeded reference (same W/R; B present iff bias) on y, hN, cN.</summary>
+/// <summary>§7-3 bias off: bias:false — frozen forward-value golden (self-generated): the
+/// configured layer's output (y, hN, cN) must match the inlined reference.</summary>
 [Module]
 public partial class LstmBiasOnOffMatchesCoreOp
 {
@@ -3882,9 +3879,8 @@ public partial class GruSingleStepGateAnchor
     }
 }
 
-/// <summary>§7-4 bias on/off: bias:false — frozen forward-value golden (self-generated): the
-/// configured layer's output must match the inlined reference. Both compared against the matching
-/// seeded reference (same W/R; B present iff bias) on y and hN.</summary>
+/// <summary>§7-4 bias off: bias:false — frozen forward-value golden (self-generated): the
+/// configured layer's output (y, hN) must match the inlined reference.</summary>
 [Module]
 public partial class GruBiasOnOffMatchesCoreOp
 {
@@ -4122,9 +4118,8 @@ public partial class RnnCellMatchesSeq1Op
     }
 }
 
-/// <summary>§7-4 (RNNCell) bias on/off: bias:false — frozen forward-value golden (self-generated):
-/// the configured layer's output must match the inlined reference. Both compared against the
-/// matching seeded reference (same W/R; B iff bias).</summary>
+/// <summary>§7-4 (RNNCell) bias off: bias:false — frozen forward-value golden (self-generated):
+/// the configured cell's output must match the inlined reference.</summary>
 [Module]
 public partial class RnnCellBiasOnOff
 {

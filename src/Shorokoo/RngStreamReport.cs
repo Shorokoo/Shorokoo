@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 
@@ -137,7 +138,9 @@ public sealed class RngStreamReport
 
         var sb = new StringBuilder();
         bool firstScope = true;
-        foreach (var (scope, bySlot) in byScope.OrderBy(e => e.scope.Count).ThenBy(e => string.Join(",", e.scope)))
+        foreach (var (scope, bySlot) in byScope
+            .OrderBy(e => e.scope.Count)
+            .ThenBy(e => string.Join(",", e.scope.Select(v => v.ToString(CultureInfo.InvariantCulture))), StringComparer.Ordinal))
         {
             if (!firstScope) sb.Append("\n\n");
             firstScope = false;

@@ -97,8 +97,6 @@ public static class Rng
             if (path[0] < 1)
                 throw new ArgumentException(
                     $"Rng.Pin (sparse): id slots are 1-based; got {path[0]}.", nameof(items));
-            if (item is null)
-                throw new ArgumentException("Rng.Pin (sparse): pinned item is null.", nameof(items));
         }
         if (!LoopAPI.InCanonicalRecordingScope) return;
         (_slotPins ??= new List<(int[], object)>()).AddRange(items);
@@ -111,8 +109,8 @@ public static class Rng
         var slotPins = _slotPins;
         _pins = null;
         _slotPins = null;
-        return (pins?.ToArray() ?? Array.Empty<object>(),
-                slotPins?.ToArray() ?? Array.Empty<(int[], object)>());
+        return (pins?.ToArray() ?? [],
+                slotPins?.ToArray() ?? []);
     }
 
     /// <summary>

@@ -82,18 +82,6 @@ public sealed class RngConfig
     /// <summary>The bit generator. Default <see cref="RngAlgorithm.Threefry2x32"/>.</summary>
     public RngAlgorithm Algorithm { get; init; } = RngAlgorithm.Threefry2x32;
 
-    /// <summary>
-    /// When <c>true</c>, every <b>parameter-init</b> stream shares one key derived from
-    /// <see cref="MasterSeed"/> alone (path-independent), so two parameters of the same shape
-    /// and distribution receive identical values — the "tied" init that reproduces a layer's
-    /// weights from a hand-built reference. Applies to the <see cref="RngCollection.Params"/>
-    /// collection only (see <see cref="FoldInitKey"/>); runtime feeds (Dropout, sampling,
-    /// noise) keep their per-site keys regardless. Off by default (per-parameter, path-derived
-    /// keys). Useful for closed-form reference tests and for debugging; not for real training,
-    /// where distinct parameters should differ.
-    /// </summary>
-    public bool SharedKey { get; init; }
-
     // (collection, ModelId path) -> seed. Immutable, like the config itself: Override
     // returns a copy carrying an extended dictionary.
     private readonly ImmutableDictionary<(RngCollection collection, string pathKey), ulong> _overrides
@@ -110,7 +98,6 @@ public sealed class RngConfig
         InitMasterSeed = source.InitMasterSeed;
         RunMasterSeed = source.RunMasterSeed;
         Algorithm = source.Algorithm;
-        SharedKey = source.SharedKey;
         _overrides = overrides;
     }
 
@@ -209,8 +196,8 @@ public sealed class RngConfig
     ///     the same config always serializes to the same bytes.</item>
     /// </list>
     /// <see cref="FromKeyVector"/> is the exact inverse: the decoded config derives every
-    /// stream key bit-identically to this one. <see cref="SharedKey"/> (debug-only) and
-    /// <see cref="Algorithm"/> are deliberately not encoded — the key tree is
+    /// stream key bit-identically to this one. <see cref="Algorithm"/> is
+    /// deliberately not encoded — the key tree is
     /// algorithm-independent, and the algorithm name rides the carrier node's own attribute.
     /// </summary>
     internal long[] BuildKeyVector()
@@ -252,8 +239,7 @@ public sealed class RngConfig
     /// key exactly, since <c>SplitWords</c> inverts the packing); override records restore the
     /// per-stream seeds by path. <see cref="Algorithm"/> is not carried by the vector — the
     /// carrier node's attribute is authoritative, so callers reconstructing a full identity
-    /// pass it via <paramref name="algorithm"/>. <see cref="SharedKey"/> is debug-only and
-    /// decodes as default.
+    /// pass it via <paramref name="algorithm"/>.
     /// </summary>
     internal static RngConfig FromKeyVector(
         long[] keyVector, RngAlgorithm algorithm = RngAlgorithm.Threefry2x32)
@@ -328,15 +314,13 @@ public sealed class RngConfig
     /// <summary>
     /// A trainable parameter's stream key: an explicit per-stream override when one is set,
     /// else the init master folded along the parameter's ModelId path (specific ids — loop
-    /// slots carry real iteration values). SharedKey mode skips the fold so same-shape
-    /// params tie (test/debug only).
+    /// slots carry real iteration values).
     /// </summary>
     internal (uint k0, uint k1) FoldInitKey(IEnumerable<int> modelIdVals)
     {
         var vals = modelIdVals as IReadOnlyList<int> ?? new List<int>(modelIdVals);
         if (TryGetOverride(RngCollection.Params, vals, out var overridden)) return overridden;
         var key = InitMasterKey;
-        if (SharedKey) return key;
         foreach (var v in vals) key = FoldKey(key, v);
         return key;
     }

@@ -52,8 +52,7 @@ like `Zeros.Init([outFeatures])` or `KaimingUniform.Init([outC, inC, k, k])`.
   bound), so every materialization is deterministic and reproducible — and two
   parameters of the same shape initialized by the same class receive **different**
   values (each folds its own stream key from its position in the model). Change the
-  master seed to re-roll everything coherently, or set `RngConfig.SharedKey` to tie
-  same-shape parameters deliberately (reference tests/debugging) — see
+  master seed to re-roll everything coherently — see
   [rng-configuration.md](rng-configuration.md).
 - **Fan-in/fan-out** are computed in-graph from the shape vector:
   `fanIn = prod(shape) / shape[0]`, `fanOut = prod(shape) / shape[1]` — the

@@ -184,5 +184,3 @@ seeding goes through `RngConfig`, addressed by ModelId when a single stream need
 - `new RngConfig { MasterSeed = s }` — deterministic under your seed.
 - `RngConfig.NonDeterministic()` — a fresh master from system entropy each run; the chosen
   seed is fixed on the object so the run stays internally consistent and can be recorded.
-- `SharedKey = true` — every init stream shares one key, so same-shape parameters receive
-  identical values; a debugging/reference-test mode, not for training.

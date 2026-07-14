@@ -23,8 +23,7 @@ namespace Shorokoo.Modules.Initializers;
 //     its ModelId under the model's RNG identity (RngConfig; the default
 //     deterministic identity when none is bound). Materialization is
 //     deterministic and reproducible for a config, and two same-shape
-//     parameters receive distinct values (SharedKey mode ties them for
-//     reference tests). There is no per-initializer seed.
+//     parameters receive distinct values. There is no per-initializer seed.
 // Fan-in/fan-out are computed in-graph from the shape vector:
 //   fanIn  = prod(shape) / shape[0]   (= shape[1] * receptive-field size)
 //   fanOut = prod(shape) / shape[1]   (= shape[0] * receptive-field size)

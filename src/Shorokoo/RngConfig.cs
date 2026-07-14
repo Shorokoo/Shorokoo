@@ -83,12 +83,14 @@ public sealed class RngConfig
     public RngAlgorithm Algorithm { get; init; } = RngAlgorithm.Threefry2x32;
 
     /// <summary>
-    /// When <c>true</c>, every stream shares one key derived from <see cref="MasterSeed"/>
-    /// alone (name-independent), so two parameters of the same shape and distribution
-    /// receive identical values — the "tied" init that reproduces a layer's weights from a
-    /// hand-built reference. Off by default (per-parameter, name-derived keys). Useful for
-    /// closed-form reference tests and for debugging; not for real training, where distinct
-    /// parameters should differ.
+    /// When <c>true</c>, every <b>parameter-init</b> stream shares one key derived from
+    /// <see cref="MasterSeed"/> alone (path-independent), so two parameters of the same shape
+    /// and distribution receive identical values — the "tied" init that reproduces a layer's
+    /// weights from a hand-built reference. Applies to the <see cref="RngCollection.Params"/>
+    /// collection only (see <see cref="FoldInitKey"/>); runtime feeds (Dropout, sampling,
+    /// noise) keep their per-site keys regardless. Off by default (per-parameter, path-derived
+    /// keys). Useful for closed-form reference tests and for debugging; not for real training,
+    /// where distinct parameters should differ.
     /// </summary>
     public bool SharedKey { get; init; }
 

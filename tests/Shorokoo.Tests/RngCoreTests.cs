@@ -293,6 +293,41 @@ public class RngKeyVectorTests
         var ex = Assert.ThrowsAny<ArgumentException>(() => RngConfig.FromKeyVector(vec));
         Assert.Contains("truncated", ex.Message);
     }
+
+    [Fact]
+    public void TestKeyVectorRoundTripsAcrossCulturesWithNegativePath()
+    {
+        // Regression: an override path was formatted into its dictionary key with the
+        // current culture and parsed back out in BuildKeyVector with the current culture.
+        // Consistent on one thread — but a config built on a thread whose NegativeSign is
+        // not U+002D (sv-SE uses U+2212 MINUS SIGN) and then serialized on another thread
+        // would write "4,−1,1" and later long.Parse it under a culture that rejects
+        // U+2212, throwing FormatException. Pinning both sides to the invariant culture
+        // makes the path-key text round-trip regardless of thread culture.
+        var original = System.Threading.Thread.CurrentThread.CurrentCulture;
+        try
+        {
+            // Build (format the override path key) under sv-SE.
+            System.Threading.Thread.CurrentThread.CurrentCulture =
+                System.Globalization.CultureInfo.GetCultureInfo("sv-SE");
+            var cfg = new RngConfig { MasterSeed = 42 }
+                .Override(RngCollection.Runtime, [4, -1, 1], seed: 424242UL);
+
+            // Serialize (parse the path key back) under a different culture.
+            System.Threading.Thread.CurrentThread.CurrentCulture =
+                System.Globalization.CultureInfo.GetCultureInfo("en-US");
+            var vec = cfg.BuildKeyVector();
+
+            var decoded = RngConfig.FromKeyVector(vec);
+            Assert.True(decoded.HasOverride(RngCollection.Runtime, [4, -1, 1]));
+            Assert.Equal(cfg.FoldRunKey([4, -1, 1]), decoded.FoldRunKey([4, -1, 1]));
+            Assert.Equal(cfg.FoldRunKey([4, 0, 1]), decoded.FoldRunKey([4, 0, 1]));
+        }
+        finally
+        {
+            System.Threading.Thread.CurrentThread.CurrentCulture = original;
+        }
+    }
 }
 
 /// <summary>

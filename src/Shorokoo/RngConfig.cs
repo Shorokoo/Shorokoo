@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Globalization;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -111,7 +112,13 @@ public sealed class RngConfig
         _overrides = overrides;
     }
 
-    private static string PathKey(IReadOnlyList<int> modelIdPath) => string.Join(",", modelIdPath);
+    // Invariant-culture formatting: the path-key text is later split and long.Parse'd back in
+    // BuildKeyVector, so it must round-trip regardless of the thread's culture. Under an ICU
+    // culture whose NegativeSign is not U+002D (e.g. sv-SE), a default int.ToString() would
+    // write a sign the invariant parse rejects — an override with a negative path element would
+    // then throw at serialization on some threads but not others.
+    private static string PathKey(IReadOnlyList<int> modelIdPath)
+        => string.Join(",", modelIdPath.Select(v => v.ToString(CultureInfo.InvariantCulture)));
 
     /// <summary>The default deterministic configuration (master seed 0, Threefry-2x32).
     /// Safe to share: configs are immutable, so this instance can never be changed.</summary>
@@ -230,7 +237,7 @@ public sealed class RngConfig
             var path = pathKey.Split(',');
             vec.Add(collection == RngCollection.Params ? 0L : 1L);
             vec.Add(path.Length);
-            foreach (var p in path) vec.Add(long.Parse(p));
+            foreach (var p in path) vec.Add(long.Parse(p, CultureInfo.InvariantCulture));
             vec.Add(unchecked((long)seed));
         }
         return [.. vec];

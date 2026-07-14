@@ -7,6 +7,8 @@ Which document covers what. For an overview of Shorokoo and an end-to-end exampl
 
 - [defining-models.md](defining-models.md) — declare a model or layer with `[Module]`, expose `[Hyper]` parameters, create trainable weights, compose sub-modules, and add control flow (`IfElse`, `LoopAPI.Iterate`).
 - [core-types.md](core-types.md) — the tensors, scalars, vectors, dtypes, shapes, and `NN` ops you build a model out of.
+- [rng-configuration.md](rng-configuration.md) — control randomness (parameter init, Dropout, sampling, noise) with a single `RngConfig`: one reproducible seed, per-stream overrides, and behavior across re-binding and save/load.
+- [rng-pinning.md](rng-pinning.md) — freeze a module's random streams against refactoring with `Rng.Pin`, so inserting or reordering code doesn't re-seed unrelated consumers.
 
 ## 2. Train them
 

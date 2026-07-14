@@ -45,11 +45,11 @@ public class RngTrainingTests
     private static (float[] losses, TrainingRig rig, TrainingCheckpoint finalCheckpoint) TrainLosses(
         RngConfig? rngConfig, int steps)
     {
-        var sample = new NamedModelParam[]
-        {
+        NamedModelParam[] sample =
+        [
             new TensorDataModelParam("input", ModelParamType.InputParam,
-                TensorData([8L], new float[] { 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f })),
-        };
+                TensorData([8L], (float[])[1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f])),
+        ];
 
         var rig = TrainingRig.FromScratch(
             RngRigDropoutModel.ComputationGraph, L2Loss.ComputationGraph,
@@ -57,7 +57,7 @@ public class RngTrainingTests
 
         var inputBatch = new TensorDataStruct(ModelInputDef,
             new Dictionary<string, IData>
-                { { "input", TensorData([8L], new float[] { 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f }) } });
+                { { "input", TensorData([8L], (float[])[1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f]) } });
         var targetBatch = new TensorDataStruct(TargetDef,
             new Dictionary<string, IData>
                 { { "targets", TensorData([8L], new float[8]) } });
@@ -112,11 +112,11 @@ public class RngTrainingTests
         // is a single Linear whose weight is drawn by KaimingUniform — a random initializer.)
         float[] InitialWeight(RngConfig cfg)
         {
-            var sample = new NamedModelParam[]
-            {
+            NamedModelParam[] sample =
+            [
                 new TensorDataModelParam("input", ModelParamType.InputParam,
                     TensorData([1L, 3L], 0.1f, 0.2f, 0.3f)),
-            };
+            ];
             var rig = TrainingRig.FromScratch(
                 SwitchInitLinear.ComputationGraph, L2Loss.ComputationGraph,
                 SGDOptimizer.ComputationGraph, sample, cfg, 0.05f);

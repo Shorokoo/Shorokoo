@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using Shorokoo.Core.Rng;
+using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
 
@@ -299,7 +300,9 @@ public class RngKeyVectorTransportTests
         var loaded = CompressedFormatUtils.LoadFastGraphFromBinary(data, isCompressed: true);
         var carried = loaded.TryGetRngKeyVector();
         Assert.NotNull(carried);
-        Assert.Contains("Threefry", carried!.Value.algorithm);
+        // Exact name equality: both algorithm names contain "Threefry", so a substring
+        // check could not catch the tag degrading to the wrong (or default) algorithm.
+        Assert.Equal(RngAlgorithms.NameOf(RngAlgorithm.Threefry2x32), carried!.Value.algorithm);
         Assert.Equal(arch.TryGetRngKeyVector()!.Value.keyVector, carried.Value.keyVector);
 
         // The decoded carrier reproduces the config's derivation, override included — the
@@ -316,6 +319,42 @@ public class RngKeyVectorTransportTests
             CompressedFormatUtils.SaveFastGraphToBinary(loaded, compressed: true), isCompressed: true);
         Assert.Single(loaded2.Nodes, n => n.OpCode == InternalOpCodes.SHRK_RNG_KEY_VECTOR);
         Assert.Equal(carried.Value.keyVector, loaded2.TryGetRngKeyVector()!.Value.keyVector);
+    }
+
+    [Fact]
+    public void TestNonDefaultAlgorithmSurvivesSaveLoadByNameAndByBehavior()
+    {
+        // The algorithm identity rides the file in TWO forms — the carrier's recorded name
+        // (trusted by TryGetRngKeyVector and no-config parameter initialization) and the baked
+        // tagged draw functions (what the feeds actually execute) — and they can in principle
+        // disagree. Bind the NON-default algorithm, round-trip the concrete model, and pin both:
+        // the name decodes exactly, and the loaded model still draws 13-round values (equal to
+        // its own pre-save draws, different from a default-algorithm model under the same seed).
+        var g = (FastComputationGraph)typeof(RngRuntimeLoopFeed)
+            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var x = TensorData([8L], new float[8]);
+        var steps = TensorData(System.Array.Empty<long>(), 2L);
+
+        FastComputationGraph Concrete(RngConfig cfg) =>
+            g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps])).ToConcreteModel(cfg);
+        float[] Run(FastComputationGraph m) => ComputeContext.Default.Execute(m, x, steps)[0]
+            .ToTensorData().As<float32>().AccessMemory().ToArray();
+
+        var m13 = Concrete(new RngConfig { MasterSeed = 11, Algorithm = RngAlgorithm.Threefry2x32Rounds13 });
+        var before = Run(m13);
+        var draws20 = Run(Concrete(new RngConfig { MasterSeed = 11 }));   // same seed, default rounds
+        Assert.NotEqual(before, draws20);   // guard: the two algorithms genuinely differ here
+
+        var loaded = CompressedFormatUtils.LoadFastGraphFromBinary(
+            CompressedFormatUtils.SaveFastGraphToBinary(m13, compressed: true), isCompressed: true);
+
+        var carried = loaded.TryGetRngKeyVector();
+        Assert.NotNull(carried);
+        Assert.Equal(RngAlgorithms.NameOf(RngAlgorithm.Threefry2x32Rounds13), carried!.Value.algorithm);
+
+        var after = Run(loaded);
+        Assert.Equal(before, after);        // still draws its pre-save 13-round values
+        Assert.NotEqual(draws20, after);    // and not the default algorithm's
     }
 
     [Fact]

@@ -1,6 +1,8 @@
 using System;
 using System.Linq;
+using Shorokoo.Core.Rng;
 using Shorokoo.Modules.Layers;
+using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
 
@@ -163,5 +165,79 @@ public class RngInitFrozenDerivationTests
         Assert.Equal(2, ws.Length);
         Assert.Equal(expected0, ws[0]);   // weight at ModelId [1, 1]
         Assert.Equal(expected1, ws[1]);   // weight at ModelId [2, 1]
+    }
+}
+
+/// <summary>
+/// The two normal-family consumers in one module: a KaimingNormal-initialized [4,4] weight
+/// (host Box–Muller path, run at parameter initialization) and a Globals.RandomNormal feed
+/// (in-graph Box–Muller path, lowered to the keyed counter RNG). The weight is kept live via
+/// a ×0 term, so with a zero input the module's output equals the feed draw exactly.
+/// </summary>
+[Module]
+public partial class RngNormalBothCollections
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var w = Shorokoo.Modules.Initializers.KaimingNormal.Init([Scalar(4L), Scalar(4L)]);
+        var feed = RandomNormal(x.ShapeTensor(), mean: 0.0f, scale: 1.0f);
+        return feed + w.Reduce(ReduceKind.Sum, keepDims: false).Scalar() * Scalar(0.0f);
+    }
+}
+
+/// <summary>
+/// The NORMAL-family value derivation pinned to FROZEN constants, for both consumer kinds —
+/// the cross-version seed contract for normals (the sibling of
+/// <see cref="RngInitFrozenDerivationTests"/>, which pins the uniform family). Every
+/// Box–Muller composition variant (cos↔sin, u₁↔u₂, 1−u₁↔u₁, uniform-to-element pairing)
+/// yields a perfect N(0,1) distribution, so the moments tests can never detect a composition
+/// change: only value pins hold the convention fixed. One Fact covers the host path
+/// (parameter initialization: fold → init sub-master → HostRng pair-packed Box–Muller →
+/// Kaiming scaling) and the in-graph path (runtime feed: fold → key table → per-element
+/// SHRK lowering → ONNX Ln/Sqrt/Cos kernels), at both round counts. The two paths realize
+/// different sequences BY DESIGN (see HostRng) and are pinned independently, never compared.
+/// Feed values are asserted at 1e-6 (ORT transcendental kernels may drift in the last ULP;
+/// a composition change shifts values by O(1)). A red here means "this seed no longer draws
+/// the normals it used to" and must never be fixed by regenerating the constants without a
+/// deliberate, breaking-change decision.
+/// </summary>
+[Trait("Domain", "Core")]
+[Trait("Purpose", "Coverage")]
+public class RngNormalFrozenDerivationTests
+{
+    private static (float[] init, float[] feed) Run(RngConfig cfg)
+    {
+        var g = RngNormalBothCollections.ComputationGraph;
+        var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
+        var init = arch.InitializeTrainableParams(rngConfig: cfg).ModelParams
+            .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
+            .Single(v => v.Length == 16);
+        var concrete = arch.ToConcreteModel(cfg);
+        var feed = ComputeContext.Default.Execute(concrete, input)[0]
+            .ToTensorData().As<float32>().AccessMemory().ToArray();
+        return (init, feed);
+    }
+
+    [Fact]
+    public void TestNormalInitAndDrawValuesAreFrozen()
+    {
+        // REFERENCE: golden — generated once from the implementation that defines the convention.
+        float[] init20 = [0.74819666f, -1.3497522f, 0.58009183f, -0.5437696f, -1.1170965f, 0.33587033f, 0.31675094f, 0.19958028f, 0.16639294f, 0.9580838f, 0.2545579f, -0.76778877f, 0.17528465f, 0.9627476f, -0.8868993f, -0.65395457f];
+        float[] feed20 = [-0.21420276f, -0.5717528f, 0.46444735f, -1.0332288f, 0.46397528f, 0.84883124f, 0.6769181f, -0.8103971f, 0.25310147f, 0.33421588f, 0.14988664f, 0.105597205f, -0.270022f, 0.26715103f, -0.052951735f, 0.9648315f];
+        float[] init13 = [0.5342924f, 0.030172912f, 0.969521f, -0.4301536f, -0.5262921f, 0.34364656f, 0.0136166755f, 0.48939812f, 1.076198f, 0.542235f, -0.5106929f, -0.28768054f, -0.63540673f, 0.03363665f, -0.03083078f, 0.53736115f];
+        float[] feed13 = [-2.6632779f, -0.93596685f, 1.2713523f, 0.5301773f, -2.0887053f, 0.17946513f, 0.503763f, 0.6912192f, -2.0152493f, -0.9966242f, -0.23023638f, 0.6537417f, 0.16786636f, -0.09063158f, 0.575317f, 1.555586f];
+
+        var (i20, f20) = Run(new RngConfig { MasterSeed = 123 });
+        // Host path: exact, like the uniform pin (pure MathF, no backend kernel involved).
+        Assert.Equal(init20, i20);
+        // In-graph path: ORT Ln/Sqrt/Cos kernels — tight tolerance, not bit-equality.
+        for (int i = 0; i < 16; i++)
+            Assert.Equal(feed20[i], f20[i], 1e-6f);
+
+        var (i13, f13) = Run(new RngConfig { MasterSeed = 123, Algorithm = RngAlgorithm.Threefry2x32Rounds13 });
+        Assert.Equal(init13, i13);
+        for (int i = 0; i < 16; i++)
+            Assert.Equal(feed13[i], f13[i], 1e-6f);
     }
 }

@@ -778,7 +778,9 @@ public class NNLibraryCoverageTests
     ///   <item>§7-5 numLayers:2 ⇒ a hand-built 2-op stack (y + [2,N,H] hN);</item>
     ///   <item>§7-6 Reverse (trainable) and Bidirectional (forward only) ⇒ the matching op,
     ///         with bidi y last axis == 2H and hN == [2,N,H];</item>
-    ///   <item>§7-7 batchFirst transpose equivalence (independent of the op reference);</item>
+    ///   <item>§7-7 batchFirst covered only by the §7-2 batchFirst golden — the relational
+    ///         transpose equivalence is retired (keyed per-site init decorrelates the two paths'
+    ///         weights); see RnnMatchesCoreOpBatchFirst;</item>
     ///   <item>§7-8 state contract: hN == y[-1] == the op's Y_h, shape [D·numLayers,N,H].</item>
     /// </list>
     /// All shapes have N=2 (batch ≥ 2) so the batch axis is non-degenerate.
@@ -814,10 +816,6 @@ public class NNLibraryCoverageTests
         Assert.True(AutoTest.AdvancedTestGraph<RnnBidirectionalMatchesCoreOp>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 2L, 3L], 0.1f, -1f)]));
 
-        // §7-7 batchFirst transpose equivalence.
-        Assert.True(AutoTest.AdvancedTestGraph<RnnBatchFirstEquivalence>(
-            hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 4L, 3L], 0.1f, -1f)]));
-
         // §7-8 state contract.
         Assert.True(AutoTest.AdvancedTestGraph<RnnStateContractForwardSingleLayer>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 2L, 3L], 0.1f, -1f)]));
@@ -837,7 +835,9 @@ public class NNLibraryCoverageTests
     ///   <item>§7-4 numLayers:2 ⇒ a hand-built 2-op stack (y + [2,N,H] hN + [2,N,H] cN);</item>
     ///   <item>§7-5 Reverse (trainable) and Bidirectional (forward only) ⇒ the matching op,
     ///         with bidi y last axis == 2H and hN/cN == [2,N,H];</item>
-    ///   <item>§7-6 batchFirst transpose equivalence (independent of the op reference);</item>
+    ///   <item>§7-6 batchFirst covered only by the §7-1 batchFirst golden — the relational
+    ///         transpose equivalence is retired (keyed per-site init decorrelates the two paths'
+    ///         weights); see LstmMatchesCoreOpBatchFirst;</item>
     ///   <item>§7-7 state contract: hN == y[-1] == the op's Y_h, cN == the op's Y_c, shape [D·numLayers,N,H].</item>
     /// </list>
     /// All shapes have N=2 (batch ≥ 2) so the batch axis is non-degenerate.
@@ -869,10 +869,6 @@ public class NNLibraryCoverageTests
         Assert.True(AutoTest.AdvancedTestGraph<LstmBidirectionalMatchesCoreOp>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 2L, 3L], 0.1f, -1f)]));
 
-        // §7-6 batchFirst transpose equivalence.
-        Assert.True(AutoTest.AdvancedTestGraph<LstmBatchFirstEquivalence>(
-            hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 4L, 3L], 0.1f, -1f)]));
-
         // §7-7 state contract.
         Assert.True(AutoTest.AdvancedTestGraph<LstmStateContractForwardSingleLayer>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 2L, 3L], 0.1f, -1f)]));
@@ -894,7 +890,9 @@ public class NNLibraryCoverageTests
     ///   <item>§7-5 numLayers:2 ⇒ a hand-built 2-op stack (y + [2,N,H] hN);</item>
     ///   <item>§7-6 Reverse (trainable) and Bidirectional (forward only) ⇒ the matching op,
     ///         with bidi y last axis == 2H and hN == [2,N,H];</item>
-    ///   <item>§7-7 batchFirst transpose equivalence (independent of the op reference);</item>
+    ///   <item>§7-7 batchFirst covered only by the §7-1 batchFirst golden — the relational
+    ///         transpose equivalence is retired (keyed per-site init decorrelates the two paths'
+    ///         weights); see GruMatchesCoreOpBatchFirst;</item>
     ///   <item>§7-8 state contract: hN == y[-1] == the op's Y_h, shape [D·numLayers,N,H].</item>
     /// </list>
     /// All shapes have N=2 (batch ≥ 2) so the batch axis is non-degenerate.
@@ -929,10 +927,6 @@ public class NNLibraryCoverageTests
             hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 2L, 3L], 0.1f, -1f)]));
         Assert.True(AutoTest.AdvancedTestGraph<GruBidirectionalMatchesCoreOp>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 2L, 3L], 0.1f, -1f)]));
-
-        // §7-7 batchFirst transpose equivalence.
-        Assert.True(AutoTest.AdvancedTestGraph<GruBatchFirstEquivalence>(
-            hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 4L, 3L], 0.1f, -1f)]));
 
         // §7-8 state contract.
         Assert.True(AutoTest.AdvancedTestGraph<GruStateContractForwardSingleLayer>(

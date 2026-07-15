@@ -3335,10 +3335,14 @@ public partial class RnnMatchesCoreOpForwardTanh
     }
 }
 
-/// <summary>§7-1/§7-2 (batchFirst) Matches the core op with batchFirst input:
+/// <summary>§7-1/§7-2 (batchFirst) + §7-7 Matches the core op with batchFirst input:
 /// Recurrent.RNN(batchFirst:true) on [N, L, in] — frozen forward-value golden (self-generated): the
-/// configured layer's output must match the inlined reference. Pins the in-graph transpose around
-/// the layout=0 op.</summary>
+/// configured layer's output must match the inlined reference. Sole batchFirst pin, covering §7-7
+/// via the golden: the batchFirst↔transpose equivalence (batchFirst:true == transpose in →
+/// layout-0 op → transpose out of the seq-first path) held when this golden was frozen but is no
+/// longer asserted relationally — under keyed per-site init two Recurrent.RNN call sites draw
+/// distinct weights, so the former two-path comparison module became this single-path
+/// golden.</summary>
 [Module]
 public partial class RnnMatchesCoreOpBatchFirst
 {
@@ -3463,25 +3467,6 @@ public partial class RnnBidirectionalMatchesCoreOp
     }
 }
 
-/// <summary>§7-7 batchFirst equivalence: RNN(batchFirst:true, [N,L,in]) — frozen forward-value
-/// golden (self-generated): the configured layer's output must match the inlined reference. Pins
-/// the in-graph transpose + layout=0-always choice independently of the op reference. hN is
-/// batch-second in both (PyTorch keeps hN [D·numLayers, N, H] regardless of batch_first), so it
-/// matches directly.</summary>
-[Module]
-public partial class RnnBatchFirstEquivalence
-{
-    public static Scalar<bit> Inline(Tensor<float32> x)   // x is [N, L, in]
-    {
-        var (yBF, hBF) = Recurrent.RNN(x, hiddenSize: 3L, batchFirst: true);     // y [N, L, D*H]
-        var flat = yBF.Reshape([Scalar(-1L)]).Concat(0L, hBF.Reshape([Scalar(-1L)]));
-        // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.17373544f, -0.27466792f, 0.8597976f, -0.14137572f, 0.13215971f, 0.554265f, -0.06615907f, 0.098089814f, 0.4340241f, -0.19550431f, 0.12150943f, 0.16687167f, -0.42311764f, 0.024035573f, -0.10194969f, -0.44383717f, 0.09320021f, -0.5859147f, -0.56241554f, -0.013551831f, -0.7325691f, -0.6587949f, 0.012843847f, -0.8763608f, -0.19550431f, 0.12150943f, 0.16687167f, -0.6587949f, 0.012843847f, -0.8763608f);
-        var diff = (SelfCheck.Collapse(flat, 30) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
-        return diff < Scalar(1e-3f);
-    }
-}
-
 /// <summary>§7-8 state contract: for a forward single-layer RNN, hN == y[-1] (the last step's
 /// hidden state), asserted relationally on the layer's own outputs — output-vs-output, valid under
 /// any initialization — together with hN's leading dim (D·numLayers == 1) and the frozen
@@ -3585,10 +3570,13 @@ public partial class LstmMatchesCoreOpForward
     }
 }
 
-/// <summary>§7-1 (batchFirst) Matches the core op with batchFirst input:
+/// <summary>§7-1 (batchFirst) + §7-6 Matches the core op with batchFirst input:
 /// Recurrent.LSTM(batchFirst:true) on [N, L, in] — frozen forward-value golden (self-generated):
 /// the configured layer's output must match the inlined reference. hN/cN stay [D·numLayers, N, H].
-/// Pins the in-graph transpose around the layout=0 op.</summary>
+/// Sole batchFirst pin, covering §7-6 via the golden: the batchFirst↔transpose equivalence held
+/// when this golden was frozen but is no longer asserted relationally — under keyed per-site init
+/// two Recurrent.LSTM call sites draw distinct weights, so the former two-path comparison module
+/// became this single-path golden.</summary>
 [Module]
 public partial class LstmMatchesCoreOpBatchFirst
 {
@@ -3689,25 +3677,6 @@ public partial class LstmBidirectionalMatchesCoreOp
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
         var reference = Vector(-0.0171791123f, -0.0254894614f, 0.0635323668f, 0.157808322f, 0.210832445f, 0.047314367f, -0.206614433f, -0.113424866f, 0.112038186f, 0.0594917558f, -0.0908273893f, -0.113273598f, 0.042337909f, 0.180483476f, -0.0415701944f, 0.0117359051f, -0.138804063f, 0.10611206f, 0.0394607332f);
         var diff = (SelfCheck.Collapse(flat, 72) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
-        return diff < Scalar(1e-3f);
-    }
-}
-
-/// <summary>§7-6 batchFirst equivalence: LSTM(batchFirst:true, [N,L,in]) — frozen forward-value
-/// golden (self-generated): the configured layer's output must match the inlined reference. Pins
-/// the in-graph transpose + layout=0-always choice independently of the op reference. hN/cN are
-/// batch-second in both (PyTorch keeps them [D·numLayers, N, H] regardless of batch_first), so they
-/// match directly.</summary>
-[Module]
-public partial class LstmBatchFirstEquivalence
-{
-    public static Scalar<bit> Inline(Tensor<float32> x)   // x is [N, L, in]
-    {
-        var (yBF, hBF, cBF) = Recurrent.LSTM(x, hiddenSize: 3L, batchFirst: true);     // y [N, L, D*H]
-        var flat = yBF.Reshape([Scalar(-1L)]).Concat(0L, hBF.Reshape([Scalar(-1L)])).Concat(0L, cBF.Reshape([Scalar(-1L)]));
-        // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.0352879444f, 0.0136820285f, -0.111469804f, 0.0822292427f, 0.0866030488f, -0.0314609057f, -0.0233364428f, -0.00323860235f, 0.295652268f, 0.0081531109f, 0.0210374884f, -0.0135555522f, -0.231829053f, -0.0727247134f, 0.0796338831f, 0.0297410555f, 0.0140637151f, 0.0200658506f, 0.166782024f);
-        var diff = (SelfCheck.Collapse(flat, 36) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
 }
@@ -3827,10 +3796,13 @@ public partial class GruMatchesCoreOpForward
     }
 }
 
-/// <summary>§7-1 (batchFirst) Matches the core op with batchFirst input:
+/// <summary>§7-1 (batchFirst) + §7-7 Matches the core op with batchFirst input:
 /// Recurrent.GRU(batchFirst:true) on [N, L, in] — frozen forward-value golden (self-generated): the
-/// configured layer's output must match the inlined reference. hN stays [D·numLayers, N, H]. Pins
-/// the in-graph transpose around the layout=0 op.</summary>
+/// configured layer's output must match the inlined reference. hN stays [D·numLayers, N, H].
+/// Sole batchFirst pin, covering §7-7 via the golden: the batchFirst↔transpose equivalence held
+/// when this golden was frozen but is no longer asserted relationally — under keyed per-site init
+/// two Recurrent.GRU call sites draw distinct weights, so the former two-path comparison module
+/// became this single-path golden.</summary>
 [Module]
 public partial class GruMatchesCoreOpBatchFirst
 {
@@ -3950,25 +3922,6 @@ public partial class GruBidirectionalMatchesCoreOp
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
         var reference = Vector(-0.00368851859f, 0.0334700003f, -0.216265408f, -0.125441415f, -0.00293130303f, -0.128228769f, -0.0347601329f, 0.243910034f, -0.131938476f, 0.0313053942f, 0.0530267273f, -0.0195986298f, -0.030214189f, 0.165358456f, -0.0580716027f, -0.0444605758f, -0.00146851796f, 0.103767109f, -0.0990497375f);
         var diff = (SelfCheck.Collapse(flat, 60) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
-        return diff < Scalar(1e-3f);
-    }
-}
-
-/// <summary>§7-7 batchFirst equivalence: GRU(batchFirst:true, [N,L,in]) — frozen forward-value
-/// golden (self-generated): the configured layer's output must match the inlined reference. Pins
-/// the in-graph transpose + layout=0-always choice independently of the op reference. hN is
-/// batch-second in both (PyTorch keeps it [D·numLayers, N, H] regardless of batch_first), so it
-/// matches directly.</summary>
-[Module]
-public partial class GruBatchFirstEquivalence
-{
-    public static Scalar<bit> Inline(Tensor<float32> x)   // x is [N, L, in]
-    {
-        var (yBF, hBF) = Recurrent.GRU(x, hiddenSize: 3L, batchFirst: true);     // y [N, L, D*H]
-        var flat = yBF.Reshape([Scalar(-1L)]).Concat(0L, hBF.Reshape([Scalar(-1L)]));
-        // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.27399692f, -0.29238102f, -0.032711826f, 0.36274162f, -0.4014722f, -0.07511998f, 0.35258955f, -0.42404234f, -0.10562572f, 0.30863762f, -0.40577865f, -0.11112566f, 0.17734714f, -0.17030106f, -0.0050303503f, 0.18215668f, -0.23758808f, -0.006929796f, 0.14269911f, -0.2460983f, 0.015938781f, 0.095182545f, -0.22712389f, 0.054580387f, 0.30863762f, -0.40577865f, -0.11112566f, 0.095182545f, -0.22712389f, 0.054580387f);
-        var diff = (SelfCheck.Collapse(flat, 30) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
 }

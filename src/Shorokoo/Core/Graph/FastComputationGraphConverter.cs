@@ -38,7 +38,8 @@ namespace Shorokoo.Graph
         /// Populates an empty <paramref name="fastGraph"/> by lowering the provided
         /// topologically-ordered <see cref="Node"/> sequence to <see cref="FastNode"/>s
         /// and wiring up <paramref name="inputs"/> / <paramref name="outputs"/>. Used by
-        /// the <see cref="FastComputationGraph"/> constructor.
+        /// the <see cref="FastComputationGraph(System.Collections.Immutable.ImmutableArray{Variable}, System.Collections.Immutable.ImmutableArray{Variable}, System.Collections.Immutable.ImmutableArray{int?}?, IReadOnlyDictionary{Variable, FastTensorKey}?)"/>
+        /// constructor.
         /// </summary>
         internal static void PopulateFromNodes(
             FastComputationGraph fastGraph,
@@ -47,8 +48,7 @@ namespace Shorokoo.Graph
             IEnumerable<Variable> outputs,
             int?[] outputRankOverrides,
             bool useSequentialIds,
-            IReadOnlyDictionary<Variable, FastTensorKey>? externalInputKeys = null,
-            Dictionary<Node, FastNodeKey>? nodeKeyMapOut = null)
+            IReadOnlyDictionary<Variable, FastTensorKey>? externalInputKeys = null)
         {
             fastGraph.OutputRankOverrides = outputRankOverrides;
 
@@ -93,7 +93,6 @@ namespace Shorokoo.Graph
                     assignedKey = isDuplicate ? FastNodeKey.New() : FastNodeKey.FromCgKey(node.Key);
                 }
                 nodeToAssignedKey[node] = assignedKey;
-                if (nodeKeyMapOut is not null) nodeKeyMapOut[node] = assignedKey;
 
                 // Resolve GraphOpenNodeKey using the already-assigned key of the open node.
                 FastNodeKey? graphOpenNodeKey = null;

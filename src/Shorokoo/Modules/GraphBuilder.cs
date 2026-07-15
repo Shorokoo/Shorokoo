@@ -214,16 +214,23 @@ namespace Shorokoo.Core
                 allInputs.AddRange(fnInputVars.Where(IsHyperparamInput));
                 allInputs.AddRange(fnInputVars.Where(v => !IsHyperparamInput(v)));
 
-                // Rng.Pin support: capture the Node -> FastNodeKey assignment so the pinned
-                // handles (recorded during the body trace) can be resolved to graph nodes and
-                // handed to the id-assignment pass — positional pins take the first id slots
-                // in pin order, sparse pins take exactly their named slots (see Shorokoo.Rng.Pin).
+                // Rng.Pin support: pinned handles (recorded during the body trace) resolve to
+                // graph nodes with no side channel from the conversion — for every
+                // non-duplicated trace node the converter derives its FastNodeKey
+                // deterministically from the trace key (FastNodeKey.FromCgKey), so a pin's key
+                // is recomputable from its OwningNode alone. The one case where that derivation
+                // would lie — the pinned node's key occurring more than once in the traced set
+                // (the same cached inner function inlined multiple times), which the converter
+                // re-keys freshly — cannot arise for pinnable captures (model captures, Init
+                // results, and Random* feeds are created fresh per call site); the guard in the
+                // resolution block below fails the build loudly if it ever does. Resolved pins
+                // are handed to the id-assignment pass — positional pins take the first id
+                // slots in pin order, sparse pins take exactly their named slots (see
+                // Shorokoo.Rng.Pin).
                 bool hasPins = rngPins.positional.Length > 0 || rngPins.sparse.Length > 0;
-                var nodeKeyMap = hasPins ? new Dictionary<Node, Shorokoo.Core.Graph.FastNodeKey>() : null;
                 var fastGraph = new FastComputationGraph(
                     [.. allInputs],
-                    [.. fnOutputs],
-                    nodeKeyMapOut: nodeKeyMap);
+                    [.. fnOutputs]);
 
                 if (originalGenericMethod?.IsGenericMethodDefinition == true)
                 {
@@ -240,8 +247,26 @@ namespace Shorokoo.Core
 
                 List<Shorokoo.Core.Graph.FastNodeKey>? pinnedKeys = null;
                 List<(int slot, Shorokoo.Core.Graph.FastNodeKey key)>? slotPinnedKeys = null;
-                if (hasPins && nodeKeyMap is not null)
+                if (hasPins)
                 {
+                    // Rebuild the reachable-node set the constructor lowered (same visitor,
+                    // same de-duplication) — used only to detect the ambiguous duplicated-key
+                    // case, where resolving by derived key could silently point the pin at
+                    // the wrong inline of a cached function.
+                    var tracedNodes = Visitors
+                        .ReversePreOrder(System.Collections.Immutable.ImmutableArray<Variable>.Empty, fnOutputs)
+                        .Select(x => x.OwningNode)
+                        .Concat(allInputs.Select(x => x.OwningNode))
+                        .Where(n => n is not null)
+                        .Distinct()
+                        .ToArray();
+                    System.Diagnostics.Debug.Assert(tracedNodes.Length == fastGraph.Nodes.Count,
+                        "GraphBuilder pin resolution: the rebuilt traced-node set must match the " +
+                        "constructor's lowering 1:1 — a mismatch means the duplicate-key guard is " +
+                        "checking a different node set than the one the graph was built from.");
+                    var duplicatedKeys = tracedNodes.GroupBy(n => n!.Key)
+                        .Where(g => g.Count() > 1).Select(g => g.Key).ToHashSet();
+
                     // An unresolvable pin is a build error, not a skip: an inactive pin the
                     // author believes is active is exactly the silent re-keying Rng.Pin
                     // exists to prevent.
@@ -256,7 +281,15 @@ namespace Shorokoo.Core
                                 "pass model objects (X.Model(...)), initializer result tensors, or " +
                                 "Globals.Random* feed tensors."),
                         };
-                        if (!nodeKeyMap.TryGetValue(pinVar.OwningNode, out var pinKey))
+                        var srcKey = pinVar.OwningNode.Key;
+                        if (duplicatedKeys.Contains(srcKey))
+                            throw new InvalidOperationException(
+                                $"Rng.Pin ({form}): the pinned item's node occurs more than once in " +
+                                $"module '{methodInfo.DeclaringType?.Name}''s traced graph (a cached " +
+                                "function inlined multiple times), so the pin cannot be resolved " +
+                                "unambiguously and the module build fails instead.");
+                        var pinKey = Shorokoo.Core.Graph.FastNodeKey.FromCgKey(srcKey);
+                        if (fastGraph.FindNode(pinKey) is null)
                             throw new InvalidOperationException(
                                 $"Rng.Pin ({form}): pinned item of type '{pin.GetType().Name}' does not " +
                                 $"resolve to a node of module '{methodInfo.DeclaringType?.Name}''s graph " +

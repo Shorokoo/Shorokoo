@@ -259,6 +259,34 @@ public class RngLoopTests
     }
 
     [Fact]
+    public void TestMalformedIterationVectorsFailConcretizationLoudly()
+    {
+        // A feed site whose OBSERVED iteration vectors cannot fill its iteration slots is a
+        // corrupted stream inventory, not a zero-trip loop: realizing it as the padded single
+        // cell would emit a 1-row key table that the executing loop indexes out of range at
+        // runtime — an opaque backend error far from the cause. Pin the fail-loud contract
+        // ("a stream set that cannot be enumerated is a hard build error, never a dynamic
+        // fallback"): concretization itself must throw, naming the site. Corrupt the site id
+        // by adding an iteration slot the loop's counter vector can never fill.
+        var g = ((FastComputationGraph)typeof(RngRuntimeLoopFeed)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).Clone();
+        var feed = g.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
+        var idVals = feed.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId)!;
+        Assert.Contains(-1, idVals);   // guard: the fixture is an in-loop feed as expected
+        feed.Attributes = feed.Attributes.SetAttributes(
+            (OnnxOpAttributeNames.ShrkAttrLocalModelId,
+             (long[])[.. idVals[..^1], -1L, idVals[^1]]));
+
+        var x = TensorData([N], XVals);
+        var steps = TensorData(Array.Empty<long>(), 2L);
+        var ex = Assert.ThrowsAny<System.Exception>(
+            () => g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps])));
+        for (System.Exception? e = ex; e is not null; e = e.InnerException)
+            if (e.Message.Contains("iteration slot")) return;
+        Assert.Fail($"expected the malformed-iteration-vector concretization error, got: {ex}");
+    }
+
+    [Fact]
     public void TestUnmatchedRuntimeOverrideFailsTheBind()
     {
         // An override that matches no stream of the graph must fail the bind loudly — a

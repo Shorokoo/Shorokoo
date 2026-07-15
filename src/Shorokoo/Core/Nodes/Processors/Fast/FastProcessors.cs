@@ -3243,7 +3243,21 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     var iterVectors = new List<long[]>();
                     foreach (var (_, clean) in EnumerateIterationIntVectors(rt))
                     {
-                        if (clean.Length != depth) continue;
+                        // An observed vector that cannot fill the site's iteration slots is a
+                        // corrupted stream inventory, not a zero-trip loop: silently skipping
+                        // it would realize the padded single cell below, whose 1-row key table
+                        // the executing loop then indexes out of range at runtime — an opaque
+                        // backend error far from the cause (and a partially-malformed set
+                        // would under-enumerate, selecting wrong key rows). Hard error, per
+                        // the concreteness contract.
+                        if (clean.Length != depth)
+                            throw new FastPipelineUnsupportedException(
+                                "RealizeRngFeedStreams: the runtime random feed at ModelId " +
+                                $"[{string.Join(", ", idVals)}] observed an iteration-index " +
+                                $"vector of length {clean.Length} where the site has {depth} " +
+                                "iteration slot(s), so its per-iteration RNG streams cannot be " +
+                                "enumerated. A concrete architecture requires a static stream " +
+                                "set — never a silent fallback.");
                         if (seen.Add(string.Join(",", clean))) iterVectors.Add(clean);
                     }
                     // Zero observed iterations (the loop never ran under the concretization

@@ -126,7 +126,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 // A feed without stream identity (no ModelId, or never realized — e.g. inside
                 // an initializer function body): the ONNX fallback — ConstantOfShape +
-                // RandomUniformLike/NormalLike.
+                // RandomUniformLike/NormalLike. Every legitimate fallback case carries NO key
+                // input; a feed with a WIRED key input whose SHRK_RNG_KEY entity is missing
+                // from the graph was concretized and then corrupted (entity pruned, sliced
+                // graph), and silently lowering it here would turn a keyed site into real
+                // backend randomness.
+                System.Diagnostics.Debug.Assert(keySource is null,
+                    $"FastLowerRandomOps: the feed at ModelId [{string.Join(", ", idVals ?? [])}] " +
+                    "has a wired key input but its SHRK_RNG_KEY entity is not in the graph — " +
+                    "the graph was modified since concretization; lowering it to the ONNX " +
+                    "random fallback would silently make a keyed site non-deterministic.");
                 LowerToOnnxRandomLike(node, isUniform, newNodes);
                 newNodes.Add(node);
             }

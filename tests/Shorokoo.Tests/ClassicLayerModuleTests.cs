@@ -7,7 +7,7 @@ namespace Shorokoo.Tests;
 /// <summary>
 /// Coverage for the classic layers added on top of the baseline NN library:
 /// Conv3d (NCDHW). Conv3d is value-checked the same way as the other conv
-/// variants — its self-checking module (NNConv3dMatchesStaticConv) returns a
+/// variants — its self-checking module (NNConv3dForwardGolden) returns a
 /// Scalar&lt;bit&gt; comparing the dynamic SHRK_CONV geometry to a static-attribute
 /// NN.Conv with identical geometry and weights — driven through
 /// <see cref="AutoTest.AdvancedTestGraph{TModule}"/> (ONNX roundtrip, CS codegen, QEE).
@@ -30,7 +30,7 @@ public class ClassicLayerModuleTests
     [Fact]
     public void TestConv3dLayerCoverage()
     {
-        Assert.True(AutoTest.AdvancedTestGraph<NNConv3dMatchesStaticConv>(
+        Assert.True(AutoTest.AdvancedTestGraph<NNConv3dForwardGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 5L, 5L, 5L], 0.05f, -2f)]));
     }
 }

@@ -10,10 +10,15 @@ namespace Shorokoo.Tests.Modules;
 // AutoTest.AdvancedTestGraph treats it as a self-checking graph (the bit must
 // be true), keeping the xUnit tests one-liners.
 //
-// Reference-vs-layer value checks exploit that the library initializers are
-// seeded/deterministic: two trainable params of the same shape created by the
-// same initializer class materialize to identical values, so a hand-built
-// reference using the same initializer reproduces the layer's weights exactly.
+// Value checks pin FROZEN GOLDEN references (self-generated at the fixed
+// master-seed-0 identity, or PyTorch-derived where noted). Under keyed
+// per-parameter init every call site draws its own stream — two same-shape
+// params NEVER materialize identical values — so the old hand-built references
+// that re-created a layer's weights via a second Init call are retired. A
+// reference that genuinely needs the layer's own weight reads it via
+// IModel.GetTrainableParam (a semantic reference to the same parameter).
+// Relations between WEIGHT-FREE paths (norm identities, pooling geometry,
+// constant inits, state threading) are still asserted relationally.
 //
 // BatchNorm2d carries Globals.StateUpdate links (STATE_UPDATE_LINK is not an
 // executable ORT op in the plain inference pipeline), so it is exercised via
@@ -24,7 +29,7 @@ namespace Shorokoo.Tests.Modules;
 /// frozen reference. The old check re-ran the same flatten+MatMul by hand (a tautology); the
 /// reference is now an external PyTorch value (tests/pytorch-reference/linear.py).</summary>
 [Module]
-public partial class NNLinearMatchesManualMatMul
+public partial class NNLinearMatchesPyTorch
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
@@ -41,19 +46,19 @@ public partial class NNLinearMatchesManualMatMul
 // ---------------------------------------------------------------------------
 // Bilinear (src/Shorokoo.Modules/Layers/Bilinear.cs) — PyTorch nn.Bilinear:
 // y[..., k] = Σ_{i,j} x1[..., i]·A[k,i,j]·x2[..., j] (+ b[k]), via a single
-// explicit-label einsum "ni,kij,nj->nk". Design §7. The closed-form modules
-// re-materialize the SAME seeded RecurrentUniform.Init weight A [out,in1,in2]
-// and bias b [out] (both U(±1/√in1), seeded ⇒ identical tensors) and recompute
-// the bilinear form with an INDEPENDENT op path — a manual Σ_{i,j} via broadcast
-// Mul + ReduceSum, NOT a second einsum — so a bug in the einsum equation can't
-// hide behind itself. Relative-L1 match, the NNLinearMatchesManualMatMul idiom.
+// explicit-label einsum "ni,kij,nj->nk". Design §7. The modules pin frozen
+// forward-value goldens (self-generated at master-seed-0). The former manual
+// Σ_{i,j} references re-materialized the layer's A and b via second Init calls
+// and were retired with keyed per-parameter init (call sites no longer share
+// weights); an independent oracle for the einsum equation is tracked with the
+// PyTorch-reference golden migration.
 // ---------------------------------------------------------------------------
 
 /// <summary>§7.1 Bilinear(useBias:true) forward output on x1 [2,3], x2 [2,4] at MasterSeed=0 must
 /// match the frozen reference. The old check re-ran the bilinear form by hand (a tautology); the
 /// reference is now the layer's own frozen forward output.</summary>
 [Module]
-public partial class NNBilinearMatchesManualForm
+public partial class NNBilinearForwardGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x1, Tensor<float32> x2)   // x1 [N,in1], x2 [N,in2]
     {
@@ -72,7 +77,7 @@ public partial class NNBilinearMatchesManualForm
 /// check re-ran both bilinear forms by hand; the references are now the layer's own frozen outputs
 /// (distinct call-sites get distinct seeded weights under per-parameter init).</summary>
 [Module]
-public partial class NNBilinearUseBiasFalseAndDiff
+public partial class NNBilinearUseBiasGoldens
 {
     public static Scalar<bit> Inline(Tensor<float32> x1, Tensor<float32> x2)   // x1 [N,in1], x2 [N,in2]
     {
@@ -129,7 +134,7 @@ public partial class BilinearRigModel
 /// frozen reference. The old check re-ran Conv against a hand-built static NN.Conv (a tautology);
 /// the reference is now the layer's own frozen forward output.</summary>
 [Module]
-public partial class NNConv2dMatchesStaticConv
+public partial class NNConv2dForwardGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
@@ -147,7 +152,7 @@ public partial class NNConv2dMatchesStaticConv
 /// frozen reference. The old check re-ran Conv against a hand-built static NN.Conv (a tautology);
 /// the reference is now the layer's own frozen forward output.</summary>
 [Module]
-public partial class NNConv1dMatchesStaticConv
+public partial class NNConv1dForwardGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
@@ -166,7 +171,7 @@ public partial class NNConv1dMatchesStaticConv
 /// tautology); the reference is now the layer's own frozen forward output. Output [1,3,4,4]=48 is
 /// collapsed to 19 via SelfCheck.Collapse.</summary>
 [Module]
-public partial class NNConvTranspose2dMatchesStatic
+public partial class NNConvTranspose2dForwardGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
@@ -195,7 +200,7 @@ public partial class NNConvTranspose2dMatchesStatic
 /// <summary>§7-1 Non-square kernel: Convolution.Conv(kernelSize:[3,5], pads:[1,2,1,2]) — frozen
 /// forward-value golden (self-generated).</summary>
 [Module]
-public partial class ConvNonSquareKernelMatchesStatic
+public partial class ConvNonSquareKernelGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
@@ -211,7 +216,7 @@ public partial class ConvNonSquareKernelMatchesStatic
 /// <summary>§7-2 Per-axis stride &amp; dilation: stride:[1,2], dilation:[2,1] with explicit pads —
 /// frozen forward-value golden (self-generated).</summary>
 [Module]
-public partial class ConvPerAxisStrideDilationMatchesStatic
+public partial class ConvPerAxisStrideDilationGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
@@ -228,7 +233,7 @@ public partial class ConvPerAxisStrideDilationMatchesStatic
 /// <summary>§7-3 Asymmetric pad: padding:[1,2,0,1] (ONNX begin..end order, applied verbatim) —
 /// frozen forward-value golden (self-generated).</summary>
 [Module]
-public partial class ConvAsymmetricPadMatchesStatic
+public partial class ConvAsymmetricPadGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
@@ -244,7 +249,7 @@ public partial class ConvAsymmetricPadMatchesStatic
 /// <summary>§7-4 auto_pad SAME_UPPER and VALID: both variants run and both outputs fold into one
 /// frozen forward-value golden (self-generated). Forward value only — SAME has no Conv backward.</summary>
 [Module]
-public partial class ConvAutoPadMatchesStatic
+public partial class ConvAutoPadGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
@@ -262,7 +267,7 @@ public partial class ConvAutoPadMatchesStatic
 /// <summary>§7-5 Groups / depthwise: groups:inC (depthwise, inC=4 → outC=4) AND a mid groups:2 —
 /// both variants run and fold into one frozen forward-value golden (self-generated).</summary>
 [Module]
-public partial class ConvGroupsMatchesStatic
+public partial class ConvGroupsGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [N, 4, H, W]
     {
@@ -284,7 +289,7 @@ public partial class ConvGroupsMatchesStatic
 /// non-differentiable and has no QEE values, so QEE / CS-roundtrip are disabled for this check in the
 /// driving [Fact].</summary>
 [Module]
-public partial class ConvPaddingModeMatchesHandPad
+public partial class ConvPaddingModesGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
@@ -308,7 +313,7 @@ public partial class ConvPaddingModeMatchesHandPad
 /// (the Pad here is constant-mode, so it is differentiable, but kept inference-grade for symmetry
 /// with the other padding-mode check).</summary>
 [Module]
-public partial class ConvCausalMatchesLeftPadValid
+public partial class ConvCausalGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [N, C, L]
     {
@@ -327,7 +332,7 @@ public partial class ConvCausalMatchesLeftPadValid
 /// <summary>§7-7 ConvTranspose output_padding: ConvTranspose(kernelSize:[2,2], stride:[2,2],
 /// outputPadding:[1,1]) — frozen forward-value golden (self-generated).</summary>
 [Module]
-public partial class ConvTransposeOutputPaddingMatchesStatic
+public partial class ConvTransposeOutputPaddingGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
@@ -344,7 +349,7 @@ public partial class ConvTransposeOutputPaddingMatchesStatic
 /// <summary>§7-7 ConvTranspose output_shape: ConvTranspose(stride:[2,2], outputShape:[…]) — frozen
 /// forward-value golden (self-generated).</summary>
 [Module]
-public partial class ConvTransposeOutputShapeMatchesStatic
+public partial class ConvTransposeOutputShapeGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [1, C, 3, 3] → stride 2 base out 6, target 7
     {
@@ -362,7 +367,7 @@ public partial class ConvTransposeOutputShapeMatchesStatic
 /// <summary>§7-7 ConvTranspose1d rank alias smoke: rank 3, one spatial dim — frozen forward-value
 /// golden (self-generated).</summary>
 [Module]
-public partial class ConvTranspose1dMatchesStatic
+public partial class ConvTranspose1dGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [N, C, L]
     {
@@ -378,7 +383,7 @@ public partial class ConvTranspose1dMatchesStatic
 /// <summary>§7-7 ConvTranspose3d rank alias smoke: rank 5, three spatial dims — frozen forward-value
 /// golden (self-generated).</summary>
 [Module]
-public partial class ConvTranspose3dMatchesStatic
+public partial class ConvTranspose3dGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [N, C, D, H, W]
     {
@@ -392,11 +397,13 @@ public partial class ConvTranspose3dMatchesStatic
 }
 
 /// <summary>§7-8 Alias coverage: the generic Conv plus the Conv2d and ConvTranspose2d aliases all run
-/// and fold into one frozen forward-value golden (self-generated). The scalar→per-axis broadcast
-/// equivalence is pinned separately in TestConvScalarBroadcastEquivalence (the scalar overload needs a
-/// build-time-known rank, which a symbolic [Module] input lacks).</summary>
+/// and fold into one frozen forward-value golden (self-generated). Each call site draws its own
+/// weights under keyed per-site init, so the golden pins three independent outputs — the former
+/// alias ≡ generic relation is retired, not asserted. The scalar overload is covered separately by
+/// ConvScalarOverloadGolden (it needs a build-time-known rank, which a symbolic [Module] input
+/// lacks).</summary>
 [Module]
-public partial class ConvAliasAndScalarEquivalence
+public partial class ConvAliasesGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
@@ -412,14 +419,16 @@ public partial class ConvAliasAndScalarEquivalence
     }
 }
 
-/// <summary>§7-8 Scalar-overload broadcast: the scalar Conv(c, outC, 3, padding:1) — frozen
-/// forward-value golden (self-generated): the configured layer's output must match the inlined
-/// reference. The scalar overload reads c.Rank()-2 at build time, which is statically known only
-/// for a concretely-shaped tensor (a symbolic graph input has no build-time rank), so the conv
-/// input is a literal constant [1,1,3,3] tensor built in-module. The runtime input <paramref
-/// name="x"/> only gates the result so AutoTest has a graph input to drive.</summary>
+/// <summary>§7-8 Scalar overload: the scalar Conv(c, outC, 3, padding:1) — frozen forward-value
+/// golden (self-generated): the configured layer's output must match the inlined reference. Pins
+/// the scalar overload's own output only; the scalar ≡ per-axis broadcast relation is retired
+/// (keyed per-site init gives the two call sites distinct weights). The scalar overload reads
+/// c.Rank()-2 at build time, which is statically known only for a concretely-shaped tensor (a
+/// symbolic graph input has no build-time rank), so the conv input is a literal constant [1,1,3,3]
+/// tensor built in-module. The runtime input <paramref name="x"/> only gates the result so
+/// AutoTest has a graph input to drive.</summary>
 [Module]
-public partial class ConvScalarBroadcastMatchesPerAxis
+public partial class ConvScalarOverloadGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
@@ -436,11 +445,12 @@ public partial class ConvScalarBroadcastMatchesPerAxis
     }
 }
 
-/// <summary>§7-9 bias on/off: a bias:false conv — frozen forward-value golden (self-generated): the
-/// configured layer's output must match the inlined reference. Both compared against the same
-/// KaimingUniform-weight, zero-bias NN.Conv.</summary>
+/// <summary>§7-9 bias:false — frozen forward-value golden (self-generated): the configured layer's
+/// output must match the inlined reference. The bias:true path is value-covered by the default-arg
+/// baseline goldens; the init-time bias:true == bias:false relation is retired (keyed per-site
+/// init gives the two call sites distinct weights).</summary>
 [Module]
-public partial class ConvBiasOnOffMatchesZeroBias
+public partial class ConvNoBiasGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
@@ -643,10 +653,11 @@ public partial class NNGroupNormRank5Normalizes
     }
 }
 
-// --- §7-2(a): affine:false output == hand-built manualXHat reference ---
-// γ=1/β=0 at init means affine on/off coincide numerically, so the
-// discriminating value check is against an independent hand-built x̂ (reduce/
-// sqrt over the same region), NOT against the affine:true output. Relative-L1.
+// --- §7-2(a): affine:false forward goldens ---
+// γ=1/β=0 at init means affine on/off coincide numerically (constant inits are
+// keying-independent), so the affine:false output is the discriminating value
+// surface; it is pinned by a frozen golden rather than the former hand-built x̂
+// recompute (which re-derived the same formula — a tautology).
 
 /// <summary>§7-2(a) InstanceNorm(affine:false) forward output on CurvedTensor([2,3,4,4],0.4,-3,0.05) at
 /// MasterSeed=0 must match the frozen reference. The old check re-ran (x−mean)/sqrt(var+eps) by hand
@@ -655,7 +666,7 @@ public partial class NNGroupNormRank5Normalizes
 /// identical pattern, so the frozen reference would be blind to an internal N/C transpose; the quadratic
 /// gives each slice a distinct pattern so a transpose moves the output. [2,3,4,4]=96 collapsed to 19.</summary>
 [Module]
-public partial class NNInstanceNormAffineFalseMatchesManual
+public partial class NNInstanceNormAffineFalseGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
@@ -676,7 +687,7 @@ public partial class NNInstanceNormAffineFalseMatchesManual
 /// (sample,group) region to the identical pattern, so the frozen reference would be blind to an internal
 /// N/C transpose; the quadratic gives each region a distinct pattern. [2,4,3,3]=72 collapsed to 19.</summary>
 [Module]
-public partial class NNGroupNormAffineFalseMatchesManual
+public partial class NNGroupNormAffineFalseGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
@@ -1286,7 +1297,7 @@ public partial class NNFeatureAlphaDropoutChannelUniform
         var lo = kept.Reduce(ReduceKind.Min, spatial, keepDims: false);
         var uniformPen = (hi - lo).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        // Relative-L1 (NNInstanceNormAffineFalseMatchesManual idiom): compare the
+        // Relative-L1 (NNInstanceNormAffineFalseGolden idiom): compare the
         // should-be-zero product against the squared value gap (vkeep−vdrop)² so the
         // bound is independent of tensor size and value magnitude. The old absolute
         // Σ|·| < 1e-3 grew with element count and tripped on WinCPU ORT FP; a relative
@@ -1368,7 +1379,7 @@ public partial class NNFeatureAlphaDropoutChannelUniformRank5
 /// reference. The old check re-ran a manual Gather over the layer's own table (a tautology); the
 /// reference is now the layer's own frozen forward output (rows 0 and 1, with row 0 repeated).</summary>
 [Module]
-public partial class NNEmbeddingMatchesGather
+public partial class NNEmbeddingForwardGolden
 {
     public static Scalar<bit> Inline(Tensor<int64> indices)
     {
@@ -1386,18 +1397,18 @@ public partial class NNEmbeddingMatchesGather
 // Embedding knob coverage (paddingIdx / maxNorm / normType / init choice,
 // src/Shorokoo.Modules/Layers/Embedding.cs — embedding-knobs design §8). Each
 // self-checking [Module] returns a Scalar<bit> that AutoTest.AdvancedTestGraph
-// requires true, mirroring NNEmbeddingMatchesGather above: the seeded Normal /
-// XavierUniform init re-materializes identically inside the reference, so the
-// gathered weight rows are reproduced exactly. The reference computes the
-// padding mask / shrink-only p-norm clamp by hand and compares against
+// requires true. Each reference reads the call site's OWN table via
+// IModel.GetTrainableParam — a semantic reference to the same parameter, valid
+// under keyed per-site init (call sites do not share weights) — then computes
+// the padding mask / shrink-only p-norm clamp by hand and compares against
 // Embedding.Call / EmbeddingHelpers.Embed.
 // ---------------------------------------------------------------------------
 
 /// <summary>
 /// §8-2/§8-3 paddingIdx forward mask. With paddingIdx:2 over indices [0,1,2,2,3]
 /// (V=5, D=4): every output row at a pad position (the two `2`s) must be all-zero,
-/// and every non-pad row must equal the plain Normal.Init(...).Gather of that
-/// index (unchanged). Also folds the off-sentinel no-op (§8-3): with paddingIdx:-1
+/// and every non-pad row must equal the model's own table (via GetTrainableParam)
+/// gathered at that index (unchanged). Also folds the off-sentinel no-op (§8-3): with paddingIdx:-1
 /// the SAME call must equal the plain Gather of ALL rows (the IfElse(-1) gate
 /// disables masking). The pad-row L2 mass and the non-pad/off-sentinel diffs are
 /// rolled into one Scalar&lt;bit&gt; penalty.
@@ -1440,10 +1451,10 @@ public partial class NNEmbeddingPaddingIdxZeros
 }
 
 /// <summary>
-/// §8-4/§8-6 maxNorm L2 clamp (shrink-only). The seeded Normal.Init([5,4]) rows are
-/// N(0,1)×4, so each row's L2 norm is ≈2 ≫ a 0.5 cap (the cap binds every gathered
-/// row). The reference re-materializes the seeded weight and applies the hand-built
-/// shrink-only clamp out = gather·min(1, maxNorm/‖row‖₂). Asserts:
+/// §8-4/§8-6 maxNorm L2 clamp (shrink-only). The Normal-initialized [5,4] table's rows
+/// are N(0,1)×4, so each row's L2 norm is ≈2 ≫ a 0.5 cap (the cap binds every gathered
+/// row). The reference reads the model's own table via GetTrainableParam and applies the
+/// hand-built shrink-only clamp out = gather·min(1, maxNorm/‖row‖₂). Asserts:
 ///   (a) the over-cap output row's L2 norm ≈ maxNorm (clamped DOWN to the cap);
 ///   (b) the clamped output matches the hand reference exactly (per-row);
 ///   (c) under-cap rows are UNCHANGED — a huge maxNorm:1000f leaves the output ==
@@ -1572,17 +1583,18 @@ public partial class EmbeddingPaddingRigModel
 // EmbeddingBag (src/Shorokoo.Modules/Layers/Embedding.cs — embedding-bag design
 // §8). EmbeddingBag.Bag(indices [B,L], V, D, mode) is mathematically
 // Embedding(indices).Reduce(mode, axis=1) → [B, D]. Each self-checking [Module]
-// re-materializes the SAME seeded Normal.Init([V,D]) (deterministic, the
-// NNEmbeddingMatchesGather idiom) and compares Bag against an INDEPENDENT
-// Gather→Reduce reference by relative-L1. V=5, D=4, indices [B=2, L=3] with
-// distinct ids so Sum ≠ Mean ≠ Max are all non-trivial.
+// pins a frozen forward-value golden (self-generated). The former Gather→Reduce
+// references re-materialized the table via a second Init call and were retired
+// with keyed per-site init (call sites do not share weights). V=5, D=4, indices
+// [B=2, L=3] with distinct ids so Sum ≠ Mean ≠ Max are all non-trivial.
 // ---------------------------------------------------------------------------
 
 /// <summary>§8-1 (Sum): EmbeddingBag.Bag(BagMode.Sum) on indices [[0,1,2],[1,3,0]] at MasterSeed=0
-/// must match the frozen reference. Was a finiteness-only Sanity.Reasonable check; now a frozen
-/// forward-value golden (self-generated) that pins the per-feature sum over the bag axis.</summary>
+/// must match the frozen reference. Was a Gather→Reduce comparison against a re-materialized
+/// identical table (retired with keyed per-site init); now a frozen forward-value golden
+/// (self-generated) that pins the per-feature sum over the bag axis.</summary>
 [Module]
-public partial class NNEmbeddingBagSumMatchesGatherReduce
+public partial class NNEmbeddingBagSumGolden
 {
     public static Scalar<bit> Inline(Tensor<int64> indices)   // indices [B, L]
     {
@@ -1597,10 +1609,11 @@ public partial class NNEmbeddingBagSumMatchesGatherReduce
 }
 
 /// <summary>§8-1 (Mean): EmbeddingBag.Bag(BagMode.Mean) on indices [[0,1,2],[1,3,0]] at MasterSeed=0
-/// must match the frozen reference (full-L denominator). Was a finiteness-only Sanity.Reasonable
-/// check; now a frozen forward-value golden (self-generated).</summary>
+/// must match the frozen reference (full-L denominator). Was a Gather→Reduce comparison against a
+/// re-materialized identical table (retired with keyed per-site init); now a frozen forward-value
+/// golden (self-generated).</summary>
 [Module]
-public partial class NNEmbeddingBagMeanMatchesGatherReduce
+public partial class NNEmbeddingBagMeanGolden
 {
     public static Scalar<bit> Inline(Tensor<int64> indices)   // indices [B, L]
     {
@@ -1615,10 +1628,11 @@ public partial class NNEmbeddingBagMeanMatchesGatherReduce
 }
 
 /// <summary>§8-1 (Max): EmbeddingBag.Bag(BagMode.Max) on indices [[0,1,2],[1,3,0]] at MasterSeed=0
-/// must match the frozen reference (per-feature max over the bag). Was a finiteness-only
-/// Sanity.Reasonable check; now a frozen forward-value golden (self-generated).</summary>
+/// must match the frozen reference (per-feature max over the bag). Was a Gather→Reduce comparison
+/// against a re-materialized identical table (retired with keyed per-site init); now a frozen
+/// forward-value golden (self-generated).</summary>
 [Module]
-public partial class NNEmbeddingBagMaxMatchesGatherReduce
+public partial class NNEmbeddingBagMaxGolden
 {
     public static Scalar<bit> Inline(Tensor<int64> indices)   // indices [B, L]
     {
@@ -3322,7 +3336,7 @@ public partial class NNBinaryFocalLossChecks
 /// (self-generated) over BOTH y and hN, covering the bias packing and the [L,D,N,H]→[L,N,D*H]
 /// reshape.</summary>
 [Module]
-public partial class RnnMatchesCoreOpForwardTanh
+public partial class RnnBaselineForwardTanhGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [L, N, in]
     {
@@ -3344,7 +3358,7 @@ public partial class RnnMatchesCoreOpForwardTanh
 /// distinct weights, so the former two-path comparison module became this single-path
 /// golden.</summary>
 [Module]
-public partial class RnnMatchesCoreOpBatchFirst
+public partial class RnnBatchFirstGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [N, L, in]
     {
@@ -3382,7 +3396,7 @@ public partial class RnnSingleStepAnchorTanh
 /// Forward-value check only (relu RNN BPTT throws AD003 — pinned separately in
 /// NNLibraryTrainingCoverageTests).</summary>
 [Module]
-public partial class RnnReluMatchesCoreOpForward
+public partial class RnnReluForwardGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [L, N, in]
     {
@@ -3395,11 +3409,12 @@ public partial class RnnReluMatchesCoreOpForward
     }
 }
 
-/// <summary>§7-4 bias on/off: bias:false — frozen forward-value golden (self-generated): the
-/// configured layer's output must match the inlined reference. Both compared against the matching
-/// seeded reference (same W/R; B present iff bias).</summary>
+/// <summary>§7-4 bias:false — frozen forward-value golden (self-generated): the configured layer's
+/// output must match the inlined reference. The bias:true path is value-covered by the default-arg
+/// baseline goldens; the init-time bias:true == bias:false relation is retired (keyed per-site
+/// init gives the two call sites distinct weights).</summary>
 [Module]
-public partial class RnnBiasOnOffMatchesCoreOp
+public partial class RnnNoBiasGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [L, N, in]
     {
@@ -3414,11 +3429,10 @@ public partial class RnnBiasOnOffMatchesCoreOp
 
 /// <summary>§7-5 numLayers stacking: numLayers:2 (forward, tanh) — frozen forward-value golden
 /// (self-generated): the configured layer's output must match the inlined reference. Asserts y and
-/// the stacked [2,N,H] hN both match. Layer-1's input size is D·H = H (D=1), which the helper
-/// passes as Scalar(d·H); the reference reads it from the reshaped layer-0 Y's last axis (same
-/// value), so the seeded inits coincide.</summary>
+/// the stacked [2,N,H] hN both match. Layer-1's input size is D·H = H (D=1), passed as
+/// Scalar(d·H) by the helper.</summary>
 [Module]
-public partial class RnnNumLayersStackMatchesCoreOp
+public partial class RnnNumLayersStackGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [L, N, in]
     {
@@ -3435,7 +3449,7 @@ public partial class RnnNumLayersStackMatchesCoreOp
 /// golden (self-generated): the configured layer's output must match the inlined
 /// reference.</summary>
 [Module]
-public partial class RnnReverseMatchesCoreOp
+public partial class RnnReverseGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [L, N, in]
     {
@@ -3453,7 +3467,7 @@ public partial class RnnReverseMatchesCoreOp
 /// inlined reference. Forward-value only (bidirectional BPTT throws AD003 — pinned in
 /// NNLibraryTrainingCoverageTests).</summary>
 [Module]
-public partial class RnnBidirectionalMatchesCoreOp
+public partial class RnnBidirectionalGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [L, N, in]
     {
@@ -3557,7 +3571,7 @@ public partial class RnnBidirectionalBpttThrowCheck
 /// over y, hN AND cN, covering the i,o,f,c gate packing, bias packing, and the [L,D,N,H]→[L,N,D*H]
 /// reshape.</summary>
 [Module]
-public partial class LstmMatchesCoreOpForward
+public partial class LstmBaselineForwardGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [L, N, in]
     {
@@ -3578,7 +3592,7 @@ public partial class LstmMatchesCoreOpForward
 /// two Recurrent.LSTM call sites draw distinct weights, so the former two-path comparison module
 /// became this single-path golden.</summary>
 [Module]
-public partial class LstmMatchesCoreOpBatchFirst
+public partial class LstmBatchFirstGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [N, L, in]
     {
@@ -3609,11 +3623,12 @@ public partial class LstmSingleStepGateAnchor
     }
 }
 
-/// <summary>§7-3 bias on/off: bias:false — frozen forward-value golden (self-generated): the
-/// configured layer's output must match the inlined reference. Both compared against the matching
-/// seeded reference (same W/R; B present iff bias) on y, hN, cN.</summary>
+/// <summary>§7-3 bias:false — frozen forward-value golden (self-generated) on y, hN, cN: the
+/// configured layer's output must match the inlined reference. The bias:true path is value-covered
+/// by the default-arg baseline goldens; the init-time bias:true == bias:false relation is retired
+/// (keyed per-site init gives the two call sites distinct weights).</summary>
 [Module]
-public partial class LstmBiasOnOffMatchesCoreOp
+public partial class LstmNoBiasGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [L, N, in]
     {
@@ -3629,10 +3644,9 @@ public partial class LstmBiasOnOffMatchesCoreOp
 /// <summary>§7-4 numLayers stacking: numLayers:2 (forward) — frozen forward-value golden
 /// (self-generated): the configured layer's output must match the inlined reference. Asserts y, the
 /// stacked [2,N,H] hN, and the stacked [2,N,H] cN all match. Layer-1's input size is D·H = H (D=1),
-/// which the helper passes as Scalar(d·H); the reference reads it from the reshaped layer-0 Y's
-/// last axis (same value), so the seeded inits coincide.</summary>
+/// passed as Scalar(d·H) by the helper.</summary>
 [Module]
-public partial class LstmNumLayersStackMatchesCoreOp
+public partial class LstmNumLayersStackGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [L, N, in]
     {
@@ -3649,7 +3663,7 @@ public partial class LstmNumLayersStackMatchesCoreOp
 /// golden (self-generated): the configured layer's output must match the inlined
 /// reference.</summary>
 [Module]
-public partial class LstmReverseMatchesCoreOp
+public partial class LstmReverseGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [L, N, in]
     {
@@ -3667,7 +3681,7 @@ public partial class LstmReverseMatchesCoreOp
 /// inlined reference. Forward-value only (bidirectional BPTT throws AD003 — pinned in
 /// NNLibraryTrainingCoverageTests).</summary>
 [Module]
-public partial class LstmBidirectionalMatchesCoreOp
+public partial class LstmBidirectionalGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [L, N, in]
     {
@@ -3783,7 +3797,7 @@ public partial class LstmBidirectionalBpttThrowCheck
 /// forward-value golden (self-generated) over BOTH y and hN, covering the z,r,h gate packing, bias
 /// packing, and the [L,D,N,H]→[L,N,D*H] reshape.</summary>
 [Module]
-public partial class GruMatchesCoreOpForward
+public partial class GruBaselineForwardGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [L, N, in]
     {
@@ -3804,7 +3818,7 @@ public partial class GruMatchesCoreOpForward
 /// two Recurrent.GRU call sites draw distinct weights, so the former two-path comparison module
 /// became this single-path golden.</summary>
 [Module]
-public partial class GruMatchesCoreOpBatchFirst
+public partial class GruBatchFirstGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [N, L, in]
     {
@@ -3854,11 +3868,12 @@ public partial class GruSingleStepGateAnchor
     }
 }
 
-/// <summary>§7-4 bias on/off: bias:false — frozen forward-value golden (self-generated): the
-/// configured layer's output must match the inlined reference. Both compared against the matching
-/// seeded reference (same W/R; B present iff bias) on y and hN.</summary>
+/// <summary>§7-4 bias:false — frozen forward-value golden (self-generated) on y and hN: the
+/// configured layer's output must match the inlined reference. The bias:true path is value-covered
+/// by the default-arg baseline goldens; the init-time bias:true == bias:false relation is retired
+/// (keyed per-site init gives the two call sites distinct weights).</summary>
 [Module]
-public partial class GruBiasOnOffMatchesCoreOp
+public partial class GruNoBiasGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [L, N, in]
     {
@@ -3873,11 +3888,10 @@ public partial class GruBiasOnOffMatchesCoreOp
 
 /// <summary>§7-5 numLayers stacking: numLayers:2 (forward) — frozen forward-value golden
 /// (self-generated): the configured layer's output must match the inlined reference. Asserts y and
-/// the stacked [2,N,H] hN both match. Layer-1's input size is D·H = H (D=1), which the helper
-/// passes as Scalar(d·H); the reference reads it from the reshaped layer-0 Y's last axis (same
-/// value), so the seeded inits coincide.</summary>
+/// the stacked [2,N,H] hN both match. Layer-1's input size is D·H = H (D=1), passed as
+/// Scalar(d·H) by the helper.</summary>
 [Module]
-public partial class GruNumLayersStackMatchesCoreOp
+public partial class GruNumLayersStackGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [L, N, in]
     {
@@ -3894,7 +3908,7 @@ public partial class GruNumLayersStackMatchesCoreOp
 /// golden (self-generated): the configured layer's output must match the inlined
 /// reference.</summary>
 [Module]
-public partial class GruReverseMatchesCoreOp
+public partial class GruReverseGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [L, N, in]
     {
@@ -3912,7 +3926,7 @@ public partial class GruReverseMatchesCoreOp
 /// inlined reference. Forward-value only (bidirectional BPTT throws AD003 — pinned in
 /// NNLibraryTrainingCoverageTests).</summary>
 [Module]
-public partial class GruBidirectionalMatchesCoreOp
+public partial class GruBidirectionalGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [L, N, in]
     {
@@ -4060,7 +4074,7 @@ public partial class RnnCellClosedFormRelu
 /// genuinely threaded) — frozen forward-value golden (self-generated); the [N, H] output shape is pinned
 /// by the golden's element count. x [N, in], h [N, H].</summary>
 [Module]
-public partial class RnnCellMatchesSeq1Op
+public partial class RnnCellSingleStepGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [N, in]
     {
@@ -4075,11 +4089,12 @@ public partial class RnnCellMatchesSeq1Op
     }
 }
 
-/// <summary>§7-4 (RNNCell) bias on/off: bias:false — frozen forward-value golden (self-generated):
-/// the configured layer's output must match the inlined reference. Both compared against the
-/// matching seeded reference (same W/R; B iff bias).</summary>
+/// <summary>§7-4 (RNNCell) bias:false — frozen forward-value golden (self-generated): the
+/// configured cell's output must match the inlined reference. The bias:true path is value-covered
+/// by the default-arg cell goldens; the init-time bias:true == bias:false relation is retired
+/// (keyed per-site init gives the two call sites distinct weights).</summary>
 [Module]
-public partial class RnnCellBiasOnOff
+public partial class RnnCellNoBiasGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [N, in]
     {
@@ -4215,7 +4230,7 @@ public partial class LstmCellClosedFormGateAnchor
 /// initial_h/initial_c are genuinely threaded) — frozen forward-value golden (self-generated) over BOTH
 /// h' and c'; the [N, H] output shapes are pinned by the golden's element count.</summary>
 [Module]
-public partial class LstmCellMatchesSeq1Op
+public partial class LstmCellSingleStepGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [N, in]
     {
@@ -4232,10 +4247,10 @@ public partial class LstmCellMatchesSeq1Op
     }
 }
 
-/// <summary>§7-4 (LSTMCell) bias on/off: bias:false — frozen forward-value golden (self-generated):
-/// the configured layer's output must match the inlined reference.</summary>
+/// <summary>§7-4 (LSTMCell) bias:false — frozen forward-value golden (self-generated):
+/// the configured cell's output must match the inlined reference.</summary>
 [Module]
-public partial class LstmCellBiasOnOff
+public partial class LstmCellNoBiasGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [N, in]
     {
@@ -4373,7 +4388,7 @@ public partial class GruCellClosedFormLbrFalse
 /// nonzero h (so initial_h is genuinely threaded) — frozen forward-value golden (self-generated); the
 /// [N, H] output shape is pinned by the golden's element count.</summary>
 [Module]
-public partial class GruCellMatchesSeq1Op
+public partial class GruCellSingleStepGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [N, in]
     {
@@ -4388,10 +4403,10 @@ public partial class GruCellMatchesSeq1Op
     }
 }
 
-/// <summary>§7-4 (GRUCell) bias on/off: bias:false — frozen forward-value golden (self-generated):
-/// the configured layer's output must match the inlined reference.</summary>
+/// <summary>§7-4 (GRUCell) bias:false — frozen forward-value golden (self-generated):
+/// the configured cell's output must match the inlined reference.</summary>
 [Module]
-public partial class GruCellBiasOnOff
+public partial class GruCellNoBiasGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [N, in]
     {
@@ -4482,7 +4497,7 @@ public partial class GruCellTrainModel
 // ---------------------------------------------------------------------------
 // Constant + Orthogonal initializer coverage (constant-init / orthogonal-init
 // design §7). Each self-checking [Module] materializes the seeded init graph and
-// asserts on the produced constant, exactly like NNLinearMatchesManualMatMul
+// asserts on the produced constant, exactly like NNLinearMatchesPyTorch
 // exercises KaimingUniform.Init. A trivial 0*x touch folds the runtime input in
 // (the params are input-independent), and the multi-clause value checks use the
 // same NaN-safe ok-counting Within(...) idiom as the loss checks above; the bit
@@ -4557,14 +4572,14 @@ public partial class NNConstantInitMatchesZerosOnes
 // --- Orthogonal: the Björck approximation's convergence quality. Materialize
 // Q = Orthogonal.Init([...]), form the Gram matrix, and assert it ≈ I (built via
 // NN.EyeLike, as NNStaticWrapperWindowEyeDetCheck does). Tolerances are the
-// EMPIRICALLY OBSERVED converged max|G − I| for the seed-19 matrices (probed at
+// EMPIRICALLY OBSERVED converged max|G − I| for the probed matrices (measured at
 // implementation time): [4,4] square 6.46e-3, [4,2] tall 1.19e-7, [2,4] wide
 // 5.96e-8 — i.e. tall/wide converge to ~machine-eps, the square case to ~6.5e-3
 // (15 Björck steps from a Frobenius-normalized seed). The asserted bounds are
 // true (not loosened) bounds just above the observed errors.
 
 /// <summary>[4,4] square Orthogonal: G = Qᵀ·Q ([4,4]) ≈ I_4 — every singular value driven to 1.
-/// Observed converged max|G − I_4| = 6.46e-3 (seed 19); asserted &lt; 1e-2.</summary>
+/// Observed converged max|G − I_4| = 6.46e-3 (probed at implementation time); asserted &lt; 1e-2.</summary>
 [Module]
 public partial class NNOrthogonalSquareGramIsIdentity
 {
@@ -4581,7 +4596,7 @@ public partial class NNOrthogonalSquareGramIsIdentity
 }
 
 /// <summary>[4,2] tall Orthogonal (r&gt;c): G = Qᵀ·Q ([2,2]) ≈ I_2 — columns orthonormal.
-/// Observed converged max|G − I_2| = 1.19e-7 (seed 19); asserted &lt; 1e-5.</summary>
+/// Observed converged max|G − I_2| = 1.19e-7 (probed at implementation time); asserted &lt; 1e-5.</summary>
 [Module]
 public partial class NNOrthogonalTallGramIsIdentity
 {
@@ -4598,7 +4613,7 @@ public partial class NNOrthogonalTallGramIsIdentity
 }
 
 /// <summary>[2,4] wide Orthogonal (r&lt;c): G = Q·Qᵀ ([2,2]) ≈ I_2 — rows orthonormal (exercises the
-/// r&lt;c branch). Observed converged max|G − I_2| = 5.96e-8 (seed 19); asserted &lt; 1e-5.</summary>
+/// r&lt;c branch). Observed converged max|G − I_2| = 5.96e-8 (probed at implementation time); asserted &lt; 1e-5.</summary>
 [Module]
 public partial class NNOrthogonalWideGramIsIdentity
 {

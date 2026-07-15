@@ -48,40 +48,39 @@ public class NNLibraryCoverageTests
     [Fact]
     public void TestLinearAndConvLayersCoverage()
     {
-        Assert.True(AutoTest.AdvancedTestGraph<NNLinearMatchesManualMatMul>(
+        Assert.True(AutoTest.AdvancedTestGraph<NNLinearMatchesPyTorch>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 3L], 0.5f, -1f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<NNConv2dMatchesStaticConv>(
+        Assert.True(AutoTest.AdvancedTestGraph<NNConv2dForwardGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 5L, 5L], 0.1f, -2f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<NNConv1dMatchesStaticConv>(
+        Assert.True(AutoTest.AdvancedTestGraph<NNConv1dForwardGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 7L], 0.25f, -1.5f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<NNConvTranspose2dMatchesStatic>(
+        Assert.True(AutoTest.AdvancedTestGraph<NNConvTranspose2dForwardGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 3L, 3L], 0.3f, -2f)]));
     }
 
     /// <summary>
     /// Bilinear (src/Shorokoo.Modules/Layers/Bilinear.cs, PyTorch nn.Bilinear) forward-value
-    /// coverage, design §7.1–7.3. Each self-checking [Module] (two graph inputs x1, x2) compares
-    /// Bilinear.Call(...) against an INDEPENDENT manual bilinear form — a broadcast Mul + ReduceSum
-    /// Σ_{i,j} x1·A·x2 (NOT a second einsum, so a bug in the "ni,kij,nj->nk" equation cannot hide
-    /// behind itself), re-materializing the SAME seeded RecurrentUniform weight A [out,in1,in2] and
-    /// bias b [out] (both U(±1/√in1)) so the random draws cancel exactly, the NNLinearMatchesManualMatMul
-    /// idiom. Covers §7.1 closed form (useBias:true), §7.2 useBias gating (false == no-bias reference,
-    /// and true − false == exactly b — guarding the IfElse branch; the bias being seeded-uniform, NOT
-    /// Zeros, is load-bearing), and §7.3 batch broadcasting ([B,T,in_k] → output shape [B,T,out]
-    /// asserted == [2,2,2], plus the per-row reference). The rig train-step (§7.4, the first
-    /// Einsum-autodiff module-level check that the rank-3 A moves) is in
+    /// coverage, design §7.1–7.3. Each self-checking [Module] (two graph inputs x1, x2) pins
+    /// Bilinear.Call(...)'s output against a frozen forward-value golden (self-generated at
+    /// master-seed-0). The former manual Σ_{i,j} references re-materialized the layer's A and b
+    /// via second Init calls and were retired with keyed per-parameter init (call sites do not
+    /// share weights); an independent oracle for the "ni,kij,nj->nk" einsum equation is tracked
+    /// with the PyTorch-reference golden migration. Covers §7.1 closed form (useBias:true), §7.2
+    /// useBias gating (per-variant goldens), and §7.3 batch broadcasting ([B,T,in_k] → output
+    /// shape [B,T,out] asserted == [2,2,2], plus the per-row golden). The rig train-step (§7.4,
+    /// the first Einsum-autodiff module-level check that the rank-3 A moves) is in
     /// <see cref="NNLibraryTrainingCoverageTests.TestBilinearTrainStepMovesWeight"/>.
     /// </summary>
     [Fact]
     public void TestBilinearForwardValueCoverage()
     {
         // §7.1 closed form (useBias:true): x1 [2,3], x2 [2,4].
-        Assert.True(AutoTest.AdvancedTestGraph<NNBilinearMatchesManualForm>(
+        Assert.True(AutoTest.AdvancedTestGraph<NNBilinearForwardGolden>(
             hyperparamInputs: [],
             runtimeInputs: [RangeTensor([2L, 3L], 0.5f, -1f), RangeTensor([2L, 4L], 0.3f, -0.5f)]));
 
         // §7.2 useBias gating (false == no-bias ref; true − false == bias b).
-        Assert.True(AutoTest.AdvancedTestGraph<NNBilinearUseBiasFalseAndDiff>(
+        Assert.True(AutoTest.AdvancedTestGraph<NNBilinearUseBiasGoldens>(
             hyperparamInputs: [],
             runtimeInputs: [RangeTensor([2L, 3L], 0.5f, -1f), RangeTensor([2L, 4L], 0.3f, -0.5f)]));
 
@@ -105,31 +104,31 @@ public class NNLibraryCoverageTests
     [Fact]
     public void TestGeneralizedConvLayersCoverage()
     {
-        Assert.True(AutoTest.AdvancedTestGraph<ConvNonSquareKernelMatchesStatic>(
+        Assert.True(AutoTest.AdvancedTestGraph<ConvNonSquareKernelGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 7L, 9L], 0.05f, -2f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<ConvPerAxisStrideDilationMatchesStatic>(
+        Assert.True(AutoTest.AdvancedTestGraph<ConvPerAxisStrideDilationGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 7L, 7L], 0.05f, -1.5f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<ConvAsymmetricPadMatchesStatic>(
+        Assert.True(AutoTest.AdvancedTestGraph<ConvAsymmetricPadGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 5L, 5L], 0.1f, -2f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<ConvAutoPadMatchesStatic>(
+        Assert.True(AutoTest.AdvancedTestGraph<ConvAutoPadGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 6L, 6L], 0.07f, -1f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<ConvGroupsMatchesStatic>(
+        Assert.True(AutoTest.AdvancedTestGraph<ConvGroupsGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 4L, 5L, 5L], 0.05f, -2.5f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<ConvBiasOnOffMatchesZeroBias>(
+        Assert.True(AutoTest.AdvancedTestGraph<ConvNoBiasGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 5L, 5L], 0.1f, -2f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<ConvAliasAndScalarEquivalence>(
+        Assert.True(AutoTest.AdvancedTestGraph<ConvAliasesGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 5L, 5L], 0.1f, -2f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<ConvScalarBroadcastMatchesPerAxis>(
+        Assert.True(AutoTest.AdvancedTestGraph<ConvScalarOverloadGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 5L, 5L], 0.1f, -2f)]));
 
         // ConvTranspose §7-7: output_padding, output_shape, and the 1d/3d rank aliases.
-        Assert.True(AutoTest.AdvancedTestGraph<ConvTransposeOutputPaddingMatchesStatic>(
+        Assert.True(AutoTest.AdvancedTestGraph<ConvTransposeOutputPaddingGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 3L, 3L], 0.3f, -2f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<ConvTransposeOutputShapeMatchesStatic>(
+        Assert.True(AutoTest.AdvancedTestGraph<ConvTransposeOutputShapeGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 3L, 3L], 0.3f, -2f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<ConvTranspose1dMatchesStatic>(
+        Assert.True(AutoTest.AdvancedTestGraph<ConvTranspose1dGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 4L], 0.25f, -1.5f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<ConvTranspose3dMatchesStatic>(
+        Assert.True(AutoTest.AdvancedTestGraph<ConvTranspose3dGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 2L, 2L, 2L], 0.2f, -1f)]));
     }
 
@@ -145,10 +144,10 @@ public class NNLibraryCoverageTests
     [Fact]
     public void TestConvPaddingModesCoverage()
     {
-        Assert.True(AutoTest.AdvancedTestGraph<ConvPaddingModeMatchesHandPad>(
+        Assert.True(AutoTest.AdvancedTestGraph<ConvPaddingModesGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 5L, 5L], 0.1f, -2f)],
             testCsRoundtrip: false, testQuickEngineExecution: false));
-        Assert.True(AutoTest.AdvancedTestGraph<ConvCausalMatchesLeftPadValid>(
+        Assert.True(AutoTest.AdvancedTestGraph<ConvCausalGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 7L], 0.25f, -1.5f)],
             testCsRoundtrip: false, testQuickEngineExecution: false));
     }
@@ -203,9 +202,9 @@ public class NNLibraryCoverageTests
         // §7-2a affine:false == frozen forward reference. Distinct-valued (quadratic) input so the
         // per-slice patterns differ — a linear ramp makes every slice standardize identically, leaving
         // the reference blind to an internal N/C transpose (all slices interchangeable).
-        Assert.True(AutoTest.AdvancedTestGraph<NNInstanceNormAffineFalseMatchesManual>(
+        Assert.True(AutoTest.AdvancedTestGraph<NNInstanceNormAffineFalseGolden>(
             hyperparamInputs: [], runtimeInputs: [CurvedTensor([2L, 3L, 4L, 4L], 0.4f, -3f, 0.05f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<NNGroupNormAffineFalseMatchesManual>(
+        Assert.True(AutoTest.AdvancedTestGraph<NNGroupNormAffineFalseGolden>(
             hyperparamInputs: [], runtimeInputs: [CurvedTensor([2L, 4L, 3L, 3L], 0.7f, -10f, 0.05f)]));
 
         // §7-3 GroupNorm(G=1) ≡ LayerNorm-over-CHW (rank-4).
@@ -235,7 +234,7 @@ public class NNLibraryCoverageTests
         // ratio == 1 edge: train mode is exactly all zeros (never NaN), eval stays identity.
         Assert.True(AutoTest.AdvancedTestGraph<NNDropoutRatioOneAllZeros>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 8L], 0.5f, 1f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<NNEmbeddingMatchesGather>(
+        Assert.True(AutoTest.AdvancedTestGraph<NNEmbeddingForwardGolden>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Int64, [3L], 0L, 1L, 0L)]));
         Assert.True(AutoTest.AdvancedTestGraph<NNLeakyReLUAndELUClosedForm>(
             hyperparamInputs: [],
@@ -246,9 +245,9 @@ public class NNLibraryCoverageTests
     /// Embedding knob coverage (paddingIdx / maxNorm / normType / init choice,
     /// src/Shorokoo.Modules/Layers/Embedding.cs — embedding-knobs design §8 cases
     /// 2–7). Each self-checking module reproduces the masked / clamped lookup by
-    /// hand against the seeded Normal / XavierUniform weight and returns a
+    /// hand against the model's OWN table (read via GetTrainableParam) and returns a
     /// Scalar&lt;bit&gt; driven through AutoTest.AdvancedTestGraph. (§8-1 baseline
-    /// regression — NNEmbeddingMatchesGather, default knobs == plain Gather — runs
+    /// regression — NNEmbeddingForwardGolden, default knobs == plain Gather — runs
     /// in TestDropoutEmbeddingActivationCoverage above; §8-8 train-step is the
     /// rig-based TestEmbeddingPaddingTrainStepMovesWeight.)
     /// </summary>
@@ -297,11 +296,11 @@ public class NNLibraryCoverageTests
     public void TestEmbeddingBagCoverage()
     {
         // §8-1 Sum / Mean / Max vs the independent Gather→Reduce reference.
-        Assert.True(AutoTest.AdvancedTestGraph<NNEmbeddingBagSumMatchesGatherReduce>(
+        Assert.True(AutoTest.AdvancedTestGraph<NNEmbeddingBagSumGolden>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Int64, [2L, 3L], 0L, 1L, 2L, 1L, 3L, 0L)]));
-        Assert.True(AutoTest.AdvancedTestGraph<NNEmbeddingBagMeanMatchesGatherReduce>(
+        Assert.True(AutoTest.AdvancedTestGraph<NNEmbeddingBagMeanGolden>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Int64, [2L, 3L], 0L, 1L, 2L, 1L, 3L, 0L)]));
-        Assert.True(AutoTest.AdvancedTestGraph<NNEmbeddingBagMaxMatchesGatherReduce>(
+        Assert.True(AutoTest.AdvancedTestGraph<NNEmbeddingBagMaxGolden>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Int64, [2L, 3L], 0L, 1L, 2L, 1L, 3L, 0L)]));
 
         // §8-3 paddingIdx:2 zeroes pad rows for Sum (EXACT) — bags contain the pad id 2.
@@ -771,17 +770,16 @@ public class NNLibraryCoverageTests
     /// inlined frozen golden reference (self-generated at master-seed-0 init) on the ORT
     /// backend (RNN has NO QEE step values — design note [2]):
     /// <list type="bullet">
-    ///   <item>§7-2 core-op match (forward, tanh): y AND hN, on [L,N,in] and (batchFirst) [N,L,in];</item>
-    ///   <item>§7-1 single-step recurrence anchor (L=1, h_0=0): y[0]==tanh(W·x_0+b), hN==y[0];</item>
-    ///   <item>§7-3 relu forward-value match (BPTT-throws is a separate Training [Fact]);</item>
-    ///   <item>§7-4 bias on/off ⇒ no-B / concat(bias,zeros) op;</item>
-    ///   <item>§7-5 numLayers:2 ⇒ a hand-built 2-op stack (y + [2,N,H] hN);</item>
-    ///   <item>§7-6 Reverse (trainable) and Bidirectional (forward only) ⇒ the matching op,
-    ///         with bidi y last axis == 2H and hN == [2,N,H];</item>
+    ///   <item>§7-2 forward golden (tanh): y AND hN, on [L,N,in] and (batchFirst) [N,L,in];</item>
+    ///   <item>§7-1 single-step recurrence anchor (L=1, h_0=0): golden on y, hN==y[0] relational;</item>
+    ///   <item>§7-3 relu forward golden (BPTT-throws is a separate Training [Fact]);</item>
+    ///   <item>§7-4 bias:false golden (the former no-B vs concat(bias,zeros) op relation is retired);</item>
+    ///   <item>§7-5 numLayers:2 golden (y + [2,N,H] hN);</item>
+    ///   <item>§7-6 Reverse (trainable) and Bidirectional (forward only) goldens;</item>
     ///   <item>§7-7 batchFirst covered only by the §7-2 batchFirst golden — the relational
     ///         transpose equivalence is retired (keyed per-site init decorrelates the two paths'
-    ///         weights); see RnnMatchesCoreOpBatchFirst;</item>
-    ///   <item>§7-8 state contract: hN == y[-1] == the op's Y_h, shape [D·numLayers,N,H].</item>
+    ///         weights); see RnnBatchFirstGolden;</item>
+    ///   <item>§7-8 state contract (relational, on the layer's own outputs): hN == y[-1], shape [D·numLayers,N,H].</item>
     /// </list>
     /// All shapes have N=2 (batch ≥ 2) so the batch axis is non-degenerate.
     /// </summary>
@@ -789,9 +787,9 @@ public class NNLibraryCoverageTests
     public void TestRecurrentRnnForwardValueCoverage()
     {
         // §7-2 core op (forward, tanh): seq-first and batch-first inputs.
-        Assert.True(AutoTest.AdvancedTestGraph<RnnMatchesCoreOpForwardTanh>(
+        Assert.True(AutoTest.AdvancedTestGraph<RnnBaselineForwardTanhGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 2L, 3L], 0.1f, -1f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<RnnMatchesCoreOpBatchFirst>(
+        Assert.True(AutoTest.AdvancedTestGraph<RnnBatchFirstGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 4L, 3L], 0.1f, -1f)]));
 
         // §7-1 single-step recurrence anchor (L=1, h_0=0).
@@ -799,21 +797,21 @@ public class NNLibraryCoverageTests
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 3L], 0.2f, -0.5f)]));
 
         // §7-3 relu forward-value match.
-        Assert.True(AutoTest.AdvancedTestGraph<RnnReluMatchesCoreOpForward>(
+        Assert.True(AutoTest.AdvancedTestGraph<RnnReluForwardGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 2L, 3L], 0.1f, -1f)]));
 
         // §7-4 bias on/off.
-        Assert.True(AutoTest.AdvancedTestGraph<RnnBiasOnOffMatchesCoreOp>(
+        Assert.True(AutoTest.AdvancedTestGraph<RnnNoBiasGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 2L, 3L], 0.1f, -1f)]));
 
         // §7-5 numLayers:2 stacking.
-        Assert.True(AutoTest.AdvancedTestGraph<RnnNumLayersStackMatchesCoreOp>(
+        Assert.True(AutoTest.AdvancedTestGraph<RnnNumLayersStackGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 2L, 3L], 0.1f, -1f)]));
 
         // §7-6 Reverse (trainable) + Bidirectional (forward only).
-        Assert.True(AutoTest.AdvancedTestGraph<RnnReverseMatchesCoreOp>(
+        Assert.True(AutoTest.AdvancedTestGraph<RnnReverseGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 2L, 3L], 0.1f, -1f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<RnnBidirectionalMatchesCoreOp>(
+        Assert.True(AutoTest.AdvancedTestGraph<RnnBidirectionalGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 2L, 3L], 0.1f, -1f)]));
 
         // §7-8 state contract.
@@ -828,17 +826,17 @@ public class NNLibraryCoverageTests
     /// (self-generated at master-seed-0 init) on the ORT backend (LSTM has NO QEE step
     /// values):
     /// <list type="bullet">
-    ///   <item>§7-1 core-op match (forward): y, hN, cN, on [L,N,in] and (batchFirst) [N,L,in];</item>
-    ///   <item>§7-2 single-step gate anchor (L=1, h_0=c_0=0): closed-form i/o/c̃ from the i,o,f,c
-    ///         gate blocks ⇒ C_1=i⊙c̃, H_1=o⊙tanh(C_1) — pins the gate packing order;</item>
-    ///   <item>§7-3 bias on/off ⇒ no-B / concat(bias,zeros) op;</item>
-    ///   <item>§7-4 numLayers:2 ⇒ a hand-built 2-op stack (y + [2,N,H] hN + [2,N,H] cN);</item>
-    ///   <item>§7-5 Reverse (trainable) and Bidirectional (forward only) ⇒ the matching op,
-    ///         with bidi y last axis == 2H and hN/cN == [2,N,H];</item>
+    ///   <item>§7-1 forward golden: y, hN, cN, on [L,N,in] and (batchFirst) [N,L,in];</item>
+    ///   <item>§7-2 single-step gate anchor (L=1, h_0=c_0=0): golden pinning the closed-form
+    ///         i/o/c̃ gate composition C_1=i⊙c̃, H_1=o⊙tanh(C_1) (the gate packing order);</item>
+    ///   <item>§7-3 bias:false golden (the former no-B vs concat(bias,zeros) op relation is retired);</item>
+    ///   <item>§7-4 numLayers:2 golden (y + [2,N,H] hN + [2,N,H] cN);</item>
+    ///   <item>§7-5 Reverse (trainable) and Bidirectional (forward only) goldens;</item>
     ///   <item>§7-6 batchFirst covered only by the §7-1 batchFirst golden — the relational
     ///         transpose equivalence is retired (keyed per-site init decorrelates the two paths'
-    ///         weights); see LstmMatchesCoreOpBatchFirst;</item>
-    ///   <item>§7-7 state contract: hN == y[-1] == the op's Y_h, cN == the op's Y_c, shape [D·numLayers,N,H].</item>
+    ///         weights); see LstmBatchFirstGolden;</item>
+    ///   <item>§7-7 state contract (relational, on the layer's own outputs): hN == y[-1],
+    ///         cN shape-pinned, shape [D·numLayers,N,H].</item>
     /// </list>
     /// All shapes have N=2 (batch ≥ 2) so the batch axis is non-degenerate.
     /// </summary>
@@ -846,9 +844,9 @@ public class NNLibraryCoverageTests
     public void TestRecurrentLstmForwardValueCoverage()
     {
         // §7-1 core op (forward): seq-first and batch-first inputs.
-        Assert.True(AutoTest.AdvancedTestGraph<LstmMatchesCoreOpForward>(
+        Assert.True(AutoTest.AdvancedTestGraph<LstmBaselineForwardGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 2L, 3L], 0.1f, -1f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<LstmMatchesCoreOpBatchFirst>(
+        Assert.True(AutoTest.AdvancedTestGraph<LstmBatchFirstGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 4L, 3L], 0.1f, -1f)]));
 
         // §7-2 single-step gate anchor (L=1, h_0=c_0=0) — pins the i,o,f,c gate packing.
@@ -856,17 +854,17 @@ public class NNLibraryCoverageTests
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 3L], 0.2f, -0.5f)]));
 
         // §7-3 bias on/off.
-        Assert.True(AutoTest.AdvancedTestGraph<LstmBiasOnOffMatchesCoreOp>(
+        Assert.True(AutoTest.AdvancedTestGraph<LstmNoBiasGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 2L, 3L], 0.1f, -1f)]));
 
         // §7-4 numLayers:2 stacking.
-        Assert.True(AutoTest.AdvancedTestGraph<LstmNumLayersStackMatchesCoreOp>(
+        Assert.True(AutoTest.AdvancedTestGraph<LstmNumLayersStackGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 2L, 3L], 0.1f, -1f)]));
 
         // §7-5 Reverse (trainable) + Bidirectional (forward only).
-        Assert.True(AutoTest.AdvancedTestGraph<LstmReverseMatchesCoreOp>(
+        Assert.True(AutoTest.AdvancedTestGraph<LstmReverseGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 2L, 3L], 0.1f, -1f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<LstmBidirectionalMatchesCoreOp>(
+        Assert.True(AutoTest.AdvancedTestGraph<LstmBidirectionalGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 2L, 3L], 0.1f, -1f)]));
 
         // §7-7 state contract.
@@ -881,19 +879,18 @@ public class NNLibraryCoverageTests
     /// y⊕hN against an inlined frozen golden reference (self-generated at master-seed-0 init)
     /// on the ORT backend (GRU has NO QEE step values):
     /// <list type="bullet">
-    ///   <item>§7-1 core-op match (forward): y, hN, on [L,N,in] and (batchFirst) [N,L,in];</item>
-    ///   <item>§7-2 linearBeforeReset BOTH forms: true vs false DIFFER, and each matches its own-form
-    ///         op (the reset-after default + that the bit is honored — the GRU numeric crux);</item>
-    ///   <item>§7-3 single-step gate anchor (L=1, h_0=0): closed-form z/ĥ from the z,r,h gate blocks
-    ///         ⇒ H_1=(1−z)⊙ĥ — pins the gate packing order;</item>
-    ///   <item>§7-4 bias on/off ⇒ no-B / concat(bias,zeros) op;</item>
-    ///   <item>§7-5 numLayers:2 ⇒ a hand-built 2-op stack (y + [2,N,H] hN);</item>
-    ///   <item>§7-6 Reverse (trainable) and Bidirectional (forward only) ⇒ the matching op,
-    ///         with bidi y last axis == 2H and hN == [2,N,H];</item>
+    ///   <item>§7-1 forward golden: y, hN, on [L,N,in] and (batchFirst) [N,L,in];</item>
+    ///   <item>§7-2 linearBeforeReset BOTH forms: each pinned by its own-form golden (the
+    ///         reset-after default + that the bit is honored — the GRU numeric crux);</item>
+    ///   <item>§7-3 single-step gate anchor (L=1, h_0=0): golden pinning the closed-form
+    ///         z/ĥ gate composition H_1=(1−z)⊙ĥ (the gate packing order);</item>
+    ///   <item>§7-4 bias:false golden (the former no-B vs concat(bias,zeros) op relation is retired);</item>
+    ///   <item>§7-5 numLayers:2 golden (y + [2,N,H] hN);</item>
+    ///   <item>§7-6 Reverse (trainable) and Bidirectional (forward only) goldens;</item>
     ///   <item>§7-7 batchFirst covered only by the §7-1 batchFirst golden — the relational
     ///         transpose equivalence is retired (keyed per-site init decorrelates the two paths'
-    ///         weights); see GruMatchesCoreOpBatchFirst;</item>
-    ///   <item>§7-8 state contract: hN == y[-1] == the op's Y_h, shape [D·numLayers,N,H].</item>
+    ///         weights); see GruBatchFirstGolden;</item>
+    ///   <item>§7-8 state contract (relational, on the layer's own outputs): hN == y[-1], shape [D·numLayers,N,H].</item>
     /// </list>
     /// All shapes have N=2 (batch ≥ 2) so the batch axis is non-degenerate.
     /// </summary>
@@ -901,9 +898,9 @@ public class NNLibraryCoverageTests
     public void TestRecurrentGruForwardValueCoverage()
     {
         // §7-1 core op (forward): seq-first and batch-first inputs.
-        Assert.True(AutoTest.AdvancedTestGraph<GruMatchesCoreOpForward>(
+        Assert.True(AutoTest.AdvancedTestGraph<GruBaselineForwardGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 2L, 3L], 0.1f, -1f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<GruMatchesCoreOpBatchFirst>(
+        Assert.True(AutoTest.AdvancedTestGraph<GruBatchFirstGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 4L, 3L], 0.1f, -1f)]));
 
         // §7-2 linearBeforeReset BOTH forms (the GRU numeric crux) — true vs false differ, each matches its op form.
@@ -915,17 +912,17 @@ public class NNLibraryCoverageTests
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 3L], 0.2f, -0.5f)]));
 
         // §7-4 bias on/off.
-        Assert.True(AutoTest.AdvancedTestGraph<GruBiasOnOffMatchesCoreOp>(
+        Assert.True(AutoTest.AdvancedTestGraph<GruNoBiasGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 2L, 3L], 0.1f, -1f)]));
 
         // §7-5 numLayers:2 stacking.
-        Assert.True(AutoTest.AdvancedTestGraph<GruNumLayersStackMatchesCoreOp>(
+        Assert.True(AutoTest.AdvancedTestGraph<GruNumLayersStackGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 2L, 3L], 0.1f, -1f)]));
 
         // §7-6 Reverse (trainable) + Bidirectional (forward only).
-        Assert.True(AutoTest.AdvancedTestGraph<GruReverseMatchesCoreOp>(
+        Assert.True(AutoTest.AdvancedTestGraph<GruReverseGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 2L, 3L], 0.1f, -1f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<GruBidirectionalMatchesCoreOp>(
+        Assert.True(AutoTest.AdvancedTestGraph<GruBidirectionalGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 2L, 3L], 0.1f, -1f)]));
 
         // §7-8 state contract.
@@ -943,11 +940,12 @@ public class NNLibraryCoverageTests
     /// <list type="bullet">
     ///   <item>§7-1 closed-form anchor with NONZERO h (so R is exercised): RNNCell tanh AND relu;
     ///         LSTMCell i,o,f,c gate algebra (pins the gate packing); GRUCell both lbr forms;</item>
-    ///   <item>§7-2/§7-3 cell ≡ seq=1 reference op + the [N,H] (num_dir-stripped) shape contract;</item>
-    ///   <item>§7-4 bias on/off ⇒ no-B / concat(bias,zeros) seq=1 op;</item>
-    ///   <item>§7-5 STATE THREADING (the defining test): two hand-unrolled cell steps from h_0=0
-    ///         equal the full Recurrent.RNN/LSTM/GRU over the length-2 sequence — the cell really is
-    ///         one step of the scan.</item>
+    ///   <item>§7-2/§7-3 single-step golden + the [N,H] (num_dir-stripped) shape contract;</item>
+    ///   <item>§7-4 bias:false golden;</item>
+    ///   <item>§7-5 STATE THREADING (the defining test): two hand-unrolled cell steps from h_0=0,
+    ///         goldened over BOTH steps' outputs — step 2 consumes step 1's state, so the golden
+    ///         breaks if the cell stops threading. (The former cell ≡ layer-scan relation is
+    ///         retired: keyed per-site init decorrelates the cell and layer call sites.)</item>
     /// </list>
     /// The §7-6 FD grad checks, §7-7 rig smoke and §7-8 relu-cell BPTT throw are Training [Fact]s.
     /// </summary>
@@ -963,10 +961,10 @@ public class NNLibraryCoverageTests
         // (vacuous) golden — this input keeps at least one unit alive.
         Assert.True(AutoTest.AdvancedTestGraph<RnnCellClosedFormRelu>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 3L], 0.5f, 0.5f)]));
-        // §7-2/§7-3 cell ≡ seq=1 op + shape; §7-4 bias on/off; §7-5 state threading.
-        Assert.True(AutoTest.AdvancedTestGraph<RnnCellMatchesSeq1Op>(
+        // §7-2/§7-3 single-step golden + shape; §7-4 bias:false golden; §7-5 state threading.
+        Assert.True(AutoTest.AdvancedTestGraph<RnnCellSingleStepGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 3L], 0.1f, -0.5f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<RnnCellBiasOnOff>(
+        Assert.True(AutoTest.AdvancedTestGraph<RnnCellNoBiasGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 3L], 0.1f, -0.5f)]));
         Assert.True(AutoTest.AdvancedTestGraph<RnnCellStateThreading>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 2L, 3L], 0.1f, -0.6f)]));
@@ -975,9 +973,9 @@ public class NNLibraryCoverageTests
         // §7-1 closed-form i,o,f,c gate anchor (nonzero h AND c — pins the gate packing).
         Assert.True(AutoTest.AdvancedTestGraph<LstmCellClosedFormGateAnchor>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 3L], 0.2f, -0.3f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<LstmCellMatchesSeq1Op>(
+        Assert.True(AutoTest.AdvancedTestGraph<LstmCellSingleStepGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 3L], 0.1f, -0.5f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<LstmCellBiasOnOff>(
+        Assert.True(AutoTest.AdvancedTestGraph<LstmCellNoBiasGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 3L], 0.1f, -0.5f)]));
         Assert.True(AutoTest.AdvancedTestGraph<LstmCellStateThreading>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 2L, 3L], 0.1f, -0.6f)]));
@@ -988,9 +986,9 @@ public class NNLibraryCoverageTests
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 3L], 0.2f, -0.3f)]));
         Assert.True(AutoTest.AdvancedTestGraph<GruCellClosedFormLbrFalse>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 3L], 0.2f, -0.3f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<GruCellMatchesSeq1Op>(
+        Assert.True(AutoTest.AdvancedTestGraph<GruCellSingleStepGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 3L], 0.1f, -0.5f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<GruCellBiasOnOff>(
+        Assert.True(AutoTest.AdvancedTestGraph<GruCellNoBiasGolden>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 3L], 0.1f, -0.5f)]));
         Assert.True(AutoTest.AdvancedTestGraph<GruCellStateThreading>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 2L, 3L], 0.1f, -0.6f)]));
@@ -999,7 +997,7 @@ public class NNLibraryCoverageTests
     /// <summary>
     /// Constant initializer coverage (constant-init design §7). Each self-checking [Module]
     /// materializes the seeded init graph and asserts on the produced constant via
-    /// AutoTest.AdvancedTestGraph, exactly like NNLinearMatchesManualMatMul exercises
+    /// AutoTest.AdvancedTestGraph, exactly like NNLinearMatchesPyTorch exercises
     /// KaimingUniform.Init: Constant fills every element with the supplied scalar (a [2,3]
     /// param == 7); is shape/rank-agnostic and reproduces negatives (a rank-1 [4] bias ==
     /// −2.5, Reduce(Sum) == −10); and specializes Zeros/Ones (Constant(0)==Zeros,

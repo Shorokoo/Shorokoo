@@ -9,10 +9,11 @@ namespace Shorokoo.Tests.Modules;
 // Scalar<bit> so AutoTest.AdvancedTestGraph treats it as a self-checking graph
 // (the bit must be true), keeping the xUnit tests one-liners.
 //
-// The MHA reference check exploits that XavierUniform.Init is seeded: a
-// hand-built reference using the same initializer + shapes materializes the
-// exact same projection weights as the module (same pattern as
-// NNLinearMatchesManualMatMul).
+// Value checks pin frozen forward-value goldens (self-generated at
+// master-seed-0). The former hand-built MHA reference re-created the projection
+// weights via second Init calls and was retired with keyed per-parameter init
+// (call sites do not share weights). Weight-free properties (RoPE identities,
+// causal masking) are still asserted relationally.
 // ---------------------------------------------------------------------------
 
 /// <summary>
@@ -21,7 +22,7 @@ namespace Shorokoo.Tests.Modules;
 /// reference is now the op's own frozen output. Output [1,1,3,2]=6.
 /// </summary>
 [Module]
-public partial class AttnSdpaMatchesManual
+public partial class AttnSdpaForwardGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> qkv)   // [1, 1, L, d]
     {
@@ -63,7 +64,7 @@ public partial class AttnSdpaCausalMasksFuture
 /// frozen forward output.
 /// </summary>
 [Module]
-public partial class MhaMatchesManualReference
+public partial class MhaForwardGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // [N, L, 4]
     {
@@ -212,11 +213,12 @@ public partial class DecoderLayerShapeCheck
 /// <summary>
 /// TransformerDecoderLayer (embedDim 4, numHeads 2, ffnDim 8, NO bias) runs end-to-end on the fixed
 /// tgt [1,3,4] + memory [1,5,4] (Lt != Lm exercises distinct-k/v cross-attention; self-attn causal,
-/// cross-attn non-causal) at MasterSeed=0 and must match the frozen reference. Was a finiteness-only
-/// Sanity.Reasonable check; now a frozen forward-value golden (self-generated). Output [1,3,4]=12.
+/// cross-attn non-causal) at MasterSeed=0 and must match the frozen reference. The former manual
+/// sublayer re-derivation re-created the projection weights via second Init calls and was retired
+/// with keyed per-parameter init; now a frozen forward-value golden (self-generated). Output [1,3,4]=12.
 /// </summary>
 [Module]
-public partial class DecoderLayerMatchesManualNoBias
+public partial class DecoderLayerNoBiasGolden
 {
     public static Scalar<bit> Inline(
         Tensor<float32> tgt,        // [N, Lt, 4]
@@ -233,13 +235,14 @@ public partial class DecoderLayerMatchesManualNoBias
 }
 
 /// <summary>
-/// Same as <see cref="DecoderLayerMatchesManualNoBias"/> but useBias = true (biases are Zeros-init,
+/// Same as <see cref="DecoderLayerNoBiasGolden"/> but useBias = true (biases are Zeros-init,
 /// so this exercises the useBias.IfElse(true) branch and must produce the same output — the frozen
-/// reference below equals the no-bias one). Was a finiteness-only Sanity.Reasonable check; now a
+/// reference below equals the no-bias one — Zeros-init biases are constant, hence keying-independent).
+/// The former manual sublayer re-derivation was retired with keyed per-parameter init; now a
 /// frozen forward-value golden (self-generated).
 /// </summary>
 [Module]
-public partial class DecoderLayerMatchesManualWithBias
+public partial class DecoderLayerWithBiasGolden
 {
     public static Scalar<bit> Inline(
         Tensor<float32> tgt,        // [N, Lt, 4]

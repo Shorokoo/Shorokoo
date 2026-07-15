@@ -7,10 +7,11 @@ namespace Shorokoo.Tests.Modules;
 // Self-checking / training-rig [Module]s for the classic layers added on top
 // of the baseline NN library: Conv3d (NCDHW) and BatchNorm1d ([N, C]).
 //
-// Conv3d is value-checked the same way as NNConv2dMatchesStaticConv: a dynamic
-// SHRK_CONV geometry must equal a hand-built static-attribute NN.Conv with the
-// same geometry and identically-seeded KaimingUniform weights, so it runs
-// through AutoTest.AdvancedTestGraph (returns Scalar<bit>).
+// Conv3d is value-checked the same way as NNConv2dForwardGolden: a frozen
+// forward-value golden (self-generated at master-seed-0), driven through
+// AutoTest.AdvancedTestGraph (returns Scalar<bit>). The former hand-built
+// static-attribute NN.Conv reference relied on re-materializing identical
+// weights and was retired with keyed per-parameter init.
 //
 // BatchNorm1d carries Globals.StateUpdate links (STATE_UPDATE_LINK is not an
 // executable ORT op in the plain inference pipeline), so — like BatchNorm2d —
@@ -23,7 +24,7 @@ namespace Shorokoo.Tests.Modules;
 /// the reference is now the layer's own frozen forward output. Output [1,3,3,3,3]=81 is collapsed
 /// to 19 via SelfCheck.Collapse.</summary>
 [Module]
-public partial class NNConv3dMatchesStaticConv
+public partial class NNConv3dForwardGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {

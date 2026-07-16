@@ -127,7 +127,6 @@ pin is written in (to pin a loop's consumer, write the sparse pin inside that lo
   module body, or one that leads to no id-bearing node — **fails the module build** with an
   `Rng.Pin` error: an inactive pin the author believes is active is exactly the silent
   re-keying the feature exists to prevent.
-- For the same reason, `Rng.Pin` called with **no module build in progress** on the current
-  thread — outside any module body, from another thread (module bodies must not hop threads),
-  or inside a standalone `LoopAPI.Iterate` used to trace a hand-built graph — **throws
-  immediately**: nothing could ever apply the pin.
+- For the same reason, `Rng.Pin` is only valid inside a module body while it is being built:
+  called anywhere else — outside any module body, or from a different thread than the one
+  building the module — it **throws immediately** rather than being silently ignored.

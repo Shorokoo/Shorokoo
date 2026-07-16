@@ -27,9 +27,9 @@ Related: [core-types.md](core-types.md) · [inference.md](inference.md) ·
     through a state initializer's `Init(...)`: `Globals.StateUpdate(state, newValue)`
     throws `InvalidStateUpdateException` (with declaration instructions) when its
     first argument is anything else — a runtime input, a trainable parameter, or a
-    computed tensor. `StateUpdate` must also be called while a module build is in
-    progress (inside the module body being traced, on the same thread) and outside
-    any `LoopAPI.Iterate` body — it throws otherwise.
+    computed tensor. `StateUpdate` is also only valid inside a module body, and not
+    inside a `LoopAPI.Iterate` loop body (register one update per state, after the
+    loop) — it throws otherwise.
 - `Inline` may return a single value or a tuple (multiple outputs).
 - The class must be `partial` so the generator can extend it.
 - The generator is a convenience, not a requirement — see
@@ -369,10 +369,11 @@ new Module<Scalar<float32>, (Tensor<float32>, Tensor<float32>), Tensor<float32>>
 
 ### Constraints and ergonomics differences
 
-- **Static, non-capturing bodies only.** The body is invoked once by reflection to
-  trace the graph and cached by its `MethodInfo`, so a capturing lambda (or a
-  delegate bound to an object instance) is rejected with a descriptive error. Pass
-  varying values as `[Hyper]` parameters or runtime inputs instead.
+- **Static, non-capturing bodies only.** The body is invoked once to build the graph
+  and the result is cached per method, so a capturing lambda (or a delegate bound to
+  an object instance) is rejected with a descriptive error — captured locals would be
+  baked invisibly into the cached graph. Pass varying values as `[Hyper]` parameters
+  or runtime inputs instead.
 - **Flattened parameters.** Like `Inline` methods, bodies take one parameter per
   tensor — tuple-typed parameters are rejected; use the multi-parameter overloads.
 - **No generated typed hyperparameter sets.** The `FooHyperparameters` classes
@@ -403,5 +404,8 @@ new Module<Scalar<float32>, (Tensor<float32>, Tensor<float32>), Tensor<float32>>
 - Do not forget `partial` on the class, or the `static` modifier on `Inline`.
 - Do not use a plain C# `for`/`if` on graph values (`Scalar<int64>`/`Scalar<bit>`) when
   the count/condition is dynamic; use `LoopAPI.Iterate` / `.IfElse`.
+- Do not switch threads inside a module body (`async`/`await`, `Parallel.For`, callbacks
+  run elsewhere): a body is built synchronously on a single thread, and calls like
+  `Globals.StateUpdate` or `Rng.Pin` made from another thread throw.
 - Do not reference the code generator as a normal project reference; it must be an
   analyzer (`OutputItemType="Analyzer"`).

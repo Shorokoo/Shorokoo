@@ -295,9 +295,9 @@ Constraints:
   (relative step `min(lr, 1/√t)`, parameter scaling, RMS update clipping, increasing decay
   `1 − t^τ`) but **not** its row/column factoring — so its second moment is a full param-shaped
   buffer, the **same memory as Adam**, not the sublinear `R + C` footprint. The factoring is not
-  expressible in Shorokoo's single rank-agnostic per-parameter optimizer graph (the
-  factored/unfactored switch is a runtime rank branch whose arms would thread out
-  differently-shaped state, which ONNX `If` cannot return). A user reaching for Adafactor
+  expressible in Shorokoo's single rank-agnostic per-parameter optimizer graph (the state's
+  shape would have to depend on each parameter's rank — see the optimizer notes in
+  [nn-library.md](nn-library.md)). A user reaching for Adafactor
   specifically to save memory gets Adam-sized state; `learningRate` is the **cap** on the
   relative step, not a fixed lr.
 - Prefer the optimizer's generated named set (`<Optimizer>Hyperparameters`); it has the right
@@ -331,8 +331,7 @@ Constraints:
   via an optimizer-owned `[StateInitializer]`'s `Init` and registered with `StateUpdate`.
 - Do not call `Globals.StateUpdate` on inputs, trainable parameters, or computed tensors;
   only state variables (a `[StateInitializer]` `Init` result) are accepted.
-- Do not call `Globals.StateUpdate` outside a module body being traced (it requires a module
-  build in progress and throws otherwise — module bodies must also not hop threads), and do
-  not call it inside a `LoopAPI.Iterate` body (loop bodies are traced multiple times during
-  construction, so per-iteration state updates are undefined and rejected; compute the value
-  in the loop and register the update once, after the loop).
+- Do not call `Globals.StateUpdate` outside a module body (there is no module to attach the
+  update to, so it throws), and do not call it inside a `LoopAPI.Iterate` body — per-iteration
+  state updates are not supported and rejected. Compute the new value inside the loop and
+  register the update once, after the loop, from the loop's final value.

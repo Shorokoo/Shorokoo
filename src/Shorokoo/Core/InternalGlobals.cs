@@ -58,13 +58,15 @@ namespace Shorokoo.Core
         /// <returns>The linked updated state tensor (output of STATE_UPDATE_LINK node)</returns>
         internal static Variable RegisterStateUpdate(Variable original, Variable updated)
         {
-            GraphTrace.EnsureStateUpdateRecordable();
+            // Accessing the registry is the validity gate (module build in progress, call
+            // site outside any LoopAPI.Iterate body) — before the link node is created.
+            var stateUpdates = GraphTrace.StateUpdates;
 
             // Create the STATE_UPDATE_LINK node to track the relationship in the graph
             var linkedUpdated = InternalOp.StateUpdateLink(original, updated);
 
             // Store the pair for later retrieval when wrapping module outputs
-            GraphTrace.RecordStateUpdate(original, linkedUpdated);
+            stateUpdates.Add(original, linkedUpdated);
 
             return linkedUpdated;
         }

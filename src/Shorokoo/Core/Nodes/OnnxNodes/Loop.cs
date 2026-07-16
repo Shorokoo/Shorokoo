@@ -717,14 +717,17 @@ namespace Shorokoo
         /// Gets the interation indices of all outerloop ordered from outermost to innerermost.
         /// </summary>
         internal static ImmutableList<Scalar<int64>> IterationIndices
-            => GraphTrace.CurrentLoopers?.IterationIndices
-                ?? ImmutableList<Scalar<int64>>.Empty;
+            => GraphTrace.IsTracing
+                ? GraphTrace.Loopers.IterationIndices
+                : ImmutableList<Scalar<int64>>.Empty;
 
         internal static (FullInputs newInputs, FullOutputs newOutputs) ProcessNode(Node node)
         {
             // No trace in progress, or no active loop: node creation passes through untouched.
-            var looperStack = GraphTrace.CurrentLoopers;
-            if (looperStack is null || looperStack.Active is not { } active)
+            if (!GraphTrace.IsTracing)
+                return (node.FullInputs, node.FullOutputs);
+            var looperStack = GraphTrace.Loopers;
+            if (looperStack.Active is not { } active)
                 return (node.FullInputs, node.FullOutputs);
 
             var (activeLooper, activeLooperIndex) = active;
@@ -783,10 +786,11 @@ namespace Shorokoo
         {
             // A loop traced inside a module build records into that build's trace. A standalone
             // trace (hand-built graphs, e.g. FastComputationGraph construction in tests) gets its
-            // own isolated trace for the duration of the iteration, so the looper state never
-            // outlives the loop and never bleeds into an unrelated ambient trace.
-            var standalone = GraphTrace.EnterIsolatedIfNone();
-            var looperStack = GraphTrace.CurrentLoopers!;
+            // own isolated trace for the duration of the iteration — disposed when the loop
+            // completes (or its enumerator is abandoned) — so the looper state never outlives
+            // the loop and never bleeds into an unrelated ambient trace.
+            using var standalone = GraphTrace.EnterIsolatedIfNone();
+            var looperStack = GraphTrace.Loopers;
 
             var looper = new Looper(looperStack.Count);
             looperStack.Add(looper);
@@ -835,14 +839,13 @@ namespace Shorokoo
             }
             finally
             {
-                // Always remove the looper from the stack, even if an exception occurred
+                // Always remove the looper from the stack, even if an exception occurred.
+                // (The standalone scope's `using` disposes after this finally, so the
+                // looper is gone before its trace exits.)
                 if (looperStack.Count > looper.LoopDepth && looperStack[looper.LoopDepth] == looper)
                 {
                     looperStack.RemoveAt(looper.LoopDepth);
                 }
-
-                if (standalone is not null)
-                    GraphTrace.Exit(standalone);
             }
         }
 

@@ -168,24 +168,21 @@ namespace Shorokoo.Core
         private void EnsureConvertedSnapshot()
         {
             if (_convertedSnapshotComputed) return;
-            var shield = GraphTrace.EnterIsolated();
-            try
-            {
-                var built = FastComputationGraphConverter.BuildNodes(this.OriginalFastGraph);
-                _inputs = built.inputs;
-                _hyperparamInputs = built.inputs
-                    .Where(x => x.InputType == Shorokoo.Core.Nodes.NodeDefinitions.InputType.Hyperparam)
-                    .ToImmutableArray();
-                _nonHyperparamInputs = built.inputs
-                    .Where(x => x.InputType != Shorokoo.Core.Nodes.NodeDefinitions.InputType.Hyperparam)
-                    .ToImmutableArray();
-                _outputs = built.outputs;
-                _outputRankOverrides = OriginalFastGraph.OutputRankOverrides is null
-                    ? built.outputs.Select(x => x.Rank).ToImmutableArray()
-                    : OriginalFastGraph.OutputRankOverrides.ToImmutableArray();
-                _convertedSnapshotComputed = true;
-            }
-            finally { GraphTrace.Exit(shield); }
+            using var shield = GraphTrace.EnterIsolated();
+
+            var built = FastComputationGraphConverter.BuildNodes(this.OriginalFastGraph);
+            _inputs = built.inputs;
+            _hyperparamInputs = built.inputs
+                .Where(x => x.InputType == Shorokoo.Core.Nodes.NodeDefinitions.InputType.Hyperparam)
+                .ToImmutableArray();
+            _nonHyperparamInputs = built.inputs
+                .Where(x => x.InputType != Shorokoo.Core.Nodes.NodeDefinitions.InputType.Hyperparam)
+                .ToImmutableArray();
+            _outputs = built.outputs;
+            _outputRankOverrides = OriginalFastGraph.OutputRankOverrides is null
+                ? built.outputs.Select(x => x.Rank).ToImmutableArray()
+                : OriginalFastGraph.OutputRankOverrides.ToImmutableArray();
+            _convertedSnapshotComputed = true;
         }
 
         public Function(FastComputationGraph fastGraph, FunctionType functionType, string? defaultName, string? friendlyName,

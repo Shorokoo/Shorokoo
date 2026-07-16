@@ -4,109 +4,98 @@ using System.Diagnostics;
 namespace Shorokoo.Core
 {
     /// <summary>
-    /// The single entry point through which features use the ambient graph-trace state.
-    /// Consumers call the static methods here and nothing else: entering and exiting traces
-    /// (the graph builder, Function's node-rebuild shield, standalone LoopAPI.Iterate),
-    /// recording (Rng.Pin, Globals.StateUpdate), harvesting (the graph builder at build
-    /// exit), and reaching the loop-tracing state (LoopAPI).
+    /// Gatekeeper for the ambient graph-trace state. This class does no work of its own: it
+    /// manages <b>access</b> to the per-trace states and the <b>validity</b> of that access,
+    /// and nothing else. Consumers enter/exit traces through the disposable
+    /// <see cref="Scope"/>s and reach the states through the static properties — whose
+    /// accessors are the single point that validates the context requirements and throws
+    /// when they don't hold. What is then done with a state (recording pins, registering
+    /// state updates, driving loop passes, harvesting) lives entirely at the caller.
     ///
-    /// <para>This is deliberately the one place where the trace state meets its consumers:
-    /// the per-feature usage policies — which calls need a module build, which loop pass
-    /// records, what each misuse throws — are declared here, while the pieces they
-    /// coordinate stay ignorant of each other. <see cref="AmbientScope{TScope}"/> owns the
-    /// scoping mechanics, <see cref="TraceContext"/> is a plain data bag only this class
-    /// touches, and each registry's behavior lives in its feature's file.</para>
+    /// <para><see cref="AmbientScope{TScope}"/> owns the scoping mechanics,
+    /// <see cref="TraceContext"/> is a plain data bag only this class touches, and each
+    /// state's behavior lives in its feature's file.</para>
     /// </summary>
     internal static class GraphTrace
     {
         // ───────────────────────── entering and exiting ─────────────────────────
 
-        /// <summary>Enters the trace for one graph-builder body trace. Harvest with
-        /// <see cref="HarvestStateUpdates"/> / <see cref="HarvestPins"/> after the body
-        /// returns, and pass the handle back to <see cref="Exit"/> in a finally.</summary>
-        internal static TraceContext EnterModuleBuild() => TraceContext.Enter(isModuleBuild: true);
+        /// <summary>
+        /// Disposable handle to an entered trace: <c>using var scope = GraphTrace.Enter…()</c>
+        /// exits the trace at the end of the block, even on exceptions. May wrap "nothing
+        /// entered" (<see cref="EnterIsolatedIfNone"/> when a trace already exists), in which
+        /// case disposing is a no-op.
+        /// </summary>
+        internal readonly struct Scope : IDisposable
+        {
+            private readonly TraceContext? _entered;
+
+            internal Scope(TraceContext? entered) => _entered = entered;
+
+            public void Dispose()
+            {
+                if (_entered is not null)
+                    TraceContext.Exit(_entered);
+            }
+        }
+
+        /// <summary>Enters the trace for one graph-builder body trace; the builder harvests
+        /// <see cref="StateUpdates"/> and <see cref="Pins"/> after the body returns.</summary>
+        internal static Scope EnterModuleBuild() => new Scope(TraceContext.Enter(isModuleBuild: true));
 
         /// <summary>Enters an isolated trace — same loop tracking as any trace, but nothing
         /// records into it and nothing harvests it. Shields internal node rebuilds from an
         /// enclosing trace's loop-pass tracking.</summary>
-        internal static TraceContext EnterIsolated() => TraceContext.Enter(isModuleBuild: false);
+        internal static Scope EnterIsolated() => new Scope(TraceContext.Enter(isModuleBuild: false));
 
         /// <summary>Enters an isolated trace only if no trace is current (a standalone
-        /// LoopAPI.Iterate outside any build); returns null — nothing to exit — when a
-        /// trace is already in progress.</summary>
-        internal static TraceContext? EnterIsolatedIfNone()
-            => TraceContext.Current is null ? EnterIsolated() : null;
+        /// LoopAPI.Iterate outside any build); otherwise the returned scope wraps nothing
+        /// and disposing it is a no-op.</summary>
+        internal static Scope EnterIsolatedIfNone()
+            => new Scope(TraceContext.Current is null ? TraceContext.Enter(isModuleBuild: false) : null);
 
-        /// <summary>Exits a trace entered by one of the Enter methods above.</summary>
-        internal static void Exit(TraceContext trace) => TraceContext.Exit(trace);
+        // ─────────────────────── validated state access ───────────────────────
 
-        // ──────────────── recording (Rng.Pin, Globals.StateUpdate) ────────────────
+        /// <summary>Whether any trace is in progress on the current thread.</summary>
+        internal static bool IsTracing => TraceContext.Current is not null;
 
-        /// <summary>Records positional Rng pins. Requires a module build (throws in
-        /// user-facing terms otherwise); silently skips non-canonical loop passes.</summary>
-        internal static void RecordPins(object[] items)
+        /// <summary>
+        /// The loop-tracing state of the current trace. Requires a trace in progress on the
+        /// current thread — callers on paths where none may exist (node interception) check
+        /// <see cref="IsTracing"/> first.
+        /// </summary>
+        internal static LooperStack Loopers
+            => (TraceContext.Current ?? throw new InvalidOperationException(
+                    "No graph trace is in progress on the current thread.")).Loopers;
+
+        /// <summary>
+        /// The state-update registrations of the current module build. The accessor is the
+        /// validity gate for <c>Globals.StateUpdate</c>: it requires a module build on the
+        /// current thread, and a call site outside any <c>LoopAPI.Iterate</c> body — a loop
+        /// body is traced once per construction pass (up to four times), so an in-loop
+        /// registration would fire repeatedly, mostly against throwaway nodes, and what a
+        /// per-iteration state update should even mean is undefined.
+        /// </summary>
+        internal static StateUpdateRegistry StateUpdates
         {
-            var build = RequireModuleBuild("Rng.Pin");
-            // A loop body is traced multiple times during graph construction; only the
-            // canonical pass builds the surviving nodes. Recording outside it would pin
-            // throwaway nodes.
-            if (!build.Loopers.InCanonicalRecordingScope) return;
-            build.Pins.AddPositional(items);
-        }
-
-        /// <summary>Records sparse (slot-addressed) Rng pins; same contract as
-        /// <see cref="RecordPins"/>.</summary>
-        internal static void RecordSparsePins((int[] path, object item)[] items)
-        {
-            var build = RequireModuleBuild("Rng.Pin");
-            if (!build.Loopers.InCanonicalRecordingScope) return;
-            build.Pins.AddSparse(items);
+            get
+            {
+                var build = RequireModuleBuild("Globals.StateUpdate");
+                if (build.Loopers.InLoopBody)
+                    throw new InvalidOperationException(
+                        "Globals.StateUpdate is not supported inside a LoopAPI.Iterate body. " +
+                        "Compute the new value inside the loop, then register the update " +
+                        "once after the loop, from the loop's final value.");
+                return build.StateUpdates;
+            }
         }
 
         /// <summary>
-        /// Throws unless a state update may be recorded right now: requires a module build,
-        /// and rejects call sites inside a LoopAPI.Iterate body — a loop body is traced once
-        /// per construction pass (up to four times), so an in-loop registration would fire
-        /// repeatedly, mostly against throwaway nodes, and what a per-iteration state update
-        /// should even mean is undefined.
+        /// The pin recordings of the current module build. The accessor is the validity
+        /// gate for <c>Rng.Pin</c>: it requires a module build on the current thread —
+        /// nothing else could ever apply a pin.
         /// </summary>
-        internal static void EnsureStateUpdateRecordable()
-        {
-            var build = RequireModuleBuild("Globals.StateUpdate");
-            if (build.Loopers.InLoopBody)
-                throw new InvalidOperationException(
-                    "Globals.StateUpdate is not supported inside a LoopAPI.Iterate body. " +
-                    "Compute the new value inside the loop, then register the update once " +
-                    "after the loop, from the loop's final value.");
-        }
-
-        /// <summary>Records one state-update pair; <paramref name="linkedUpdated"/> is the
-        /// STATE_UPDATE_LINK output wrapping the user's updated value.</summary>
-        internal static void RecordStateUpdate(Variable original, Variable linkedUpdated)
-            => RequireModuleBuild("Globals.StateUpdate").StateUpdates.Add(original, linkedUpdated);
-
-        // ───────────────── harvest (graph builder, at build exit) ─────────────────
-
-        /// <summary>Harvests (and clears) the linked updated-state tensors registered
-        /// during <paramref name="build"/>, in registration order.</summary>
-        internal static Variable[] HarvestStateUpdates(TraceContext build)
-        {
-            Debug.Assert(build.IsModuleBuild, "Harvesting a trace that is not a module build.");
-            return build.StateUpdates.Take();
-        }
-
-        /// <summary>Harvests (and clears) the pins recorded during <paramref name="build"/>.</summary>
-        internal static (object[] positional, (int[] path, object item)[] sparse) HarvestPins(TraceContext build)
-        {
-            Debug.Assert(build.IsModuleBuild, "Harvesting a trace that is not a module build.");
-            return build.Pins.Take();
-        }
-
-        // ───────────────────────────── loop tracing ─────────────────────────────
-
-        /// <summary>The current trace's loop-tracing state, or null when no trace is in
-        /// progress on the current thread.</summary>
-        internal static LooperStack? CurrentLoopers => TraceContext.Current?.Loopers;
+        internal static RngPinRegistry Pins => RequireModuleBuild("Rng.Pin").Pins;
 
         // ────────────────────────────── internals ──────────────────────────────
 
@@ -134,10 +123,9 @@ namespace Shorokoo.Core
     /// <summary>
     /// The ambient state of one graph trace — pure data, no logic: the loop-tracing state
     /// every trace carries, the registries a module build harvests, and the kind marker.
-    /// Only <see cref="GraphTrace"/> touches this class; every other consumer holds
-    /// instances purely as opaque handles between Enter and Exit. The scoping mechanics
-    /// live in <see cref="AmbientScope{TScope}"/>; each registry's behavior lives in its
-    /// feature's file.
+    /// Only <see cref="GraphTrace"/> touches this class. The scoping mechanics live in
+    /// <see cref="AmbientScope{TScope}"/>; each state's behavior lives in its feature's
+    /// file.
     /// </summary>
     internal sealed class TraceContext : AmbientScope<TraceContext>
     {

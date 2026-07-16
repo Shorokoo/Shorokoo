@@ -53,7 +53,11 @@ public static class Rng
     public static void Pin(params object[] items)
     {
         ArgumentNullException.ThrowIfNull(items);
-        GraphTrace.RecordPins(items);
+        var pins = GraphTrace.Pins;   // validates: module build in progress
+        // A loop body is traced multiple times during graph construction; only the canonical
+        // pass builds the surviving nodes. Recording outside it would pin throwaway nodes.
+        if (!GraphTrace.Loopers.InCanonicalRecordingScope) return;
+        pins.AddPositional(items);
     }
 
     /// <summary>
@@ -90,7 +94,9 @@ public static class Rng
             if (item is null)
                 throw new ArgumentException("Rng.Pin (sparse): pinned item is null.", nameof(items));
         }
-        GraphTrace.RecordSparsePins(items);
+        var pins = GraphTrace.Pins;   // validates: module build in progress
+        if (!GraphTrace.Loopers.InCanonicalRecordingScope) return;
+        pins.AddSparse(items);
     }
 }
 

@@ -104,6 +104,20 @@ public class RngAlgorithmTests
     }
 
     [Fact]
+    public void TestGetFunctionRejectsUnknownAlgorithmForEveryKind()
+    {
+        // An unknown algorithm name must fail loudly for every kind. The split kind remaps
+        // the name to the default (the key tree is algorithm-independent), and that remap
+        // must never launder an unrecognized name into a valid one.
+        foreach (var kind in (string[])[RngAlgorithms.KindSplit, RngAlgorithms.KindUniform, RngAlgorithms.KindNormal])
+        {
+            var ex = Assert.Throws<NotSupportedException>(
+                () => RngAlgorithms.GetFunction("Threefry4x64-Ziggurat.v9", kind));
+            Assert.Contains("Threefry4x64-Ziggurat.v9", ex.Message);
+        }
+    }
+
+    [Fact]
     public void TestRngFunctionsExportNonInlinedWithMetadata()
     {
         var g = (FastComputationGraph)typeof(RngSplitThenDraw)

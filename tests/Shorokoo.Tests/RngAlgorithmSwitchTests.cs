@@ -1,3 +1,4 @@
+using System;
 using System.Linq;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Nodes.NodeDefinitions;
@@ -121,6 +122,33 @@ public class RngAlgorithmSwitchTests
         Assert.Equal(w20, Weight(Rounds20));   // deterministic per algorithm
         Assert.Equal(w13, Weight(Rounds13));
         Assert.NotEqual(w20, w13);             // init noise honors the switched algorithm
+    }
+
+    [Fact]
+    public void TestTamperedCarrierAlgorithmFailsLoudlyAtParamInit()
+    {
+        var g = (FastComputationGraph)typeof(SwitchInitLinear)
+            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var input = TensorData([1L, 3L], 0.1f, 0.2f, 0.3f);
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
+        arch.ApplyRngConfig(Rounds20);
+
+        // A model file written by a newer framework version: the carrier's recorded algorithm
+        // name is one this version does not know.
+        const string newerName = "Threefry4x64-Ziggurat.v9";
+        var carrier = arch.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RNG_KEY_VECTOR);
+        carrier.Attributes = carrier.Attributes.SetAttributes((ShrkAttrRngAlgorithm, newerName));
+        Assert.Equal(newerName, arch.TryGetRngKeyVector()!.Value.algorithm);
+
+        // No-config init trusts the carrier as the identity: an unreadable identity must
+        // throw — never silently re-initialize under a default algorithm while the carrier
+        // keeps reporting the newer name.
+        var ex = Assert.Throws<NotSupportedException>(() => arch.InitializeTrainableParams());
+        Assert.Contains(newerName, ex.Message);
+
+        // The escape hatch for deliberately re-keying an unreadable file: an explicit config
+        // bypasses the carrier decode.
+        Assert.NotEmpty(arch.InitializeTrainableParams(rngConfig: Rounds20).ModelParams);
     }
 
     [Fact]

@@ -1353,7 +1353,7 @@ namespace Shorokoo
 
             // Step 2: derive the target tensor's shape from the model's prediction. Reuse
             // the already-computed paramValuesById via FastApplyModelParamValues — this
-            // rewrites TRAINABLE_PARAM → CONSTANT/MODEL_PARAM_DATA in place without a
+            // rewrites TRAINABLE_PARAM → MODEL_PARAM_DATA in place without a
             // second initializer-execution pass.
             var shapeInferencer = new ShapeInferenceInterpreter(ctx);
             var concreteModel = Shorokoo.Core.Nodes.Processors.Fast.FastApplyModelParamValues.Process(concreteArch, paramValuesById);

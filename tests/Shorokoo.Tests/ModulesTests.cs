@@ -105,7 +105,7 @@ public class ModulesCoverageTests
     /// Coverage for the pre-concretization moduleGraph ONNX save/load path that
     /// the standard <see cref="AutoTest.AdvancedTestGraph{TModule}"/> can't reach
     /// (it roundtrips the concrete model, by which point modules are inlined and
-    /// trainable params are materialized as constants). Driving these modules
+    /// trainable params are materialized as MODEL_PARAM_DATA). Driving these modules
     /// through the moduleGraph roundtrip exercises
     /// <c>OnnxModelReader.BuildFastFunctionInvokeNodeFromProto</c>,
     /// <c>OnnxModelReader.BuildFastTrainableParamNodeFromProto</c>, and the legacy
@@ -179,11 +179,10 @@ public class ModulesCoverageTests
     ///
     /// <para>
     /// The state-initializer modules drive <c>OnnxModelReader.CreateFastInitializers</c>
-    /// and <c>ParseIsTrainableMetadata</c>: state params materialize as
-    /// <c>MODEL_PARAM_DATA</c> nodes (per <c>FastApplyModelParamValues</c> line 49)
-    /// and serialize as ONNX <c>graphProto.Initializers</c> tensors, which the
-    /// trainable-only modules above don't produce (those materialize as inline
-    /// <c>Constant</c> ops instead).
+    /// and <c>ParseIsTrainableMetadata</c>'s <c>false</c> arm: state params
+    /// materialize as non-trainable <c>MODEL_PARAM_DATA</c> nodes (per
+    /// <c>FastApplyModelParamValues</c>) and serialize as ONNX
+    /// <c>graphProto.Initializers</c> tensors alongside the trainable ones.
     /// </para>
     /// </summary>
     [Fact]
@@ -202,6 +201,68 @@ public class ModulesCoverageTests
         AssertSaveLoadOnly<SimplePairSum>(
             hyperparamInputs: [],
             runtimeInputs: []);
+    }
+
+    /// <summary>
+    /// Trainable parameters follow ONNX convention on export (issue #11): a concrete
+    /// model's weights are <c>MODEL_PARAM_DATA</c> nodes flagged trainable, serialized
+    /// as <c>graph.initializer</c> <c>TensorProto</c>s (with trainability + parameter-name
+    /// metadata) — never baked into <c>Constant</c> op-nodes. The export → import
+    /// roundtrip preserves the trainability flag and the parameter names, and executes
+    /// bit-identically.
+    /// </summary>
+    [Fact]
+    public void TestTrainableParamsSerializeAsOnnxInitializers()
+    {
+        var numOut = TensorData(DType.Int64, [], 4L);
+        var input = TensorDataWithSmallVals(DType.Float32, [4L, 4L]);
+        var g = FCLayer.ComputationGraph;   // two trainable params: weights [4,4], bias [4]
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([numOut, input])).ToConcreteModel();
+
+        // Concrete-model form: both weights are trainable MODEL_PARAM_DATA nodes that
+        // kept their parameter-name IdentifierTemplate.
+        var paramNodes = concrete.Nodes
+            .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_DATA).ToArray();
+        Assert.Equal(2, paramNodes.Length);
+        Assert.All(paramNodes, n =>
+        {
+            Assert.True(n.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsTrainable));
+            Assert.False(string.IsNullOrEmpty(n.IdentifierTemplate));
+        });
+
+        // Exported form: the weights are graph initializers carrying IsTrainable=true and
+        // the parameter-name metadata; no Constant op-node holds the [4,4] weight data.
+        var proto = Shorokoo.Core.Factory.FastOnnxModelBuilder.BuildOnnxModel(concrete);
+        var inits = proto.Graph.Initializers
+            .Where(t => t.Name != OnnxOpAttributeNames.ShrkRngKeysTensorName).ToArray();
+        Assert.Equal(2, inits.Length);
+        Assert.All(inits, t =>
+        {
+            Assert.Equal("true", t.MetadataProps
+                .First(p => p.Key == OnnxOpAttributeNames.ShrkMetaIsTrainable).Value);
+            Assert.NotNull(t.MetadataProps
+                .FirstOrDefault(p => p.Key == OnnxOpAttributeNames.ShrkMetaNodeIdentifierTemplate));
+        });
+        Assert.DoesNotContain(proto.Graph.Nodes, n =>
+            n.OpType == OpCodes.CONSTANT
+            && n.Attributes.Any(a => a.T is { Dims.Length: 2 }));
+
+        // Roundtrip: the loaded graph rebuilds trainable MODEL_PARAM_DATA nodes (still
+        // discoverable/retrainable, names intact) and executes bit-identically.
+        var direct = ComputeContext.Default.Execute(concrete, numOut, input)[0]
+            .ToTensorData().AccessRawMemory().ToArray();
+        using var ms = new System.IO.MemoryStream();
+        ProtoBuf.Serializer.Serialize(ms, proto);
+        var reimported = OnnxModelImporter.FromOnnxModelToFastGraph(ms.ToArray());
+        var reParams = reimported.Nodes
+            .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_DATA
+                && (n.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsTrainable) ?? false))
+            .ToArray();
+        Assert.Equal(2, reParams.Length);
+        Assert.All(reParams, n => Assert.False(string.IsNullOrEmpty(n.IdentifierTemplate)));
+        var roundtrip = ComputeContext.Default.Execute(reimported, numOut, input)[0]
+            .ToTensorData().AccessRawMemory().ToArray();
+        Assert.Equal(direct, roundtrip);
     }
 
     /// <summary>

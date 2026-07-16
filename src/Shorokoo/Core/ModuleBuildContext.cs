@@ -98,17 +98,18 @@ namespace Shorokoo.Core
             var context = _current;
             if (context is null)
                 throw new InvalidOperationException(
-                    $"{api} requires a module build in progress, and none is active on the " +
-                    "current thread. Call it inside a module body being traced — a [Module] " +
-                    "Inline method or a codegen-free delegate body. (Builds are thread-affine: " +
-                    "a body that hops threads — async continuations, Parallel.For, callbacks — " +
-                    "cannot record into its build.)");
+                    $"{api} may only be called inside a module body — a [Module] Inline " +
+                    "method or a codegen-free delegate body — and no module body is " +
+                    "executing on the current thread. If the call is written inside a " +
+                    "module body, make sure the body does not switch threads: a body runs " +
+                    "synchronously on a single thread, and code on async continuations, " +
+                    "Parallel.For workers, or other callbacks runs outside the body.");
             if (!context.IsModuleBuild)
                 throw new InvalidOperationException(
-                    $"{api} requires a module build in progress, but the current trace is not " +
-                    "one (e.g. a standalone LoopAPI.Iterate outside any module build). The " +
-                    "record could never be applied to a module, so the call fails loudly " +
-                    "instead of being silently orphaned.");
+                    $"{api} may only be called inside a module body — a [Module] Inline " +
+                    "method or a codegen-free delegate body. This call is inside a " +
+                    "standalone LoopAPI.Iterate loop with no enclosing module body, so " +
+                    "there is no module it could apply to.");
             return context;
         }
 

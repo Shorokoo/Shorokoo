@@ -37,11 +37,9 @@ namespace Shorokoo.Core
             // per-iteration state update should even mean is undefined. Explicitly unsupported.
             if (context.InLoopBody)
                 throw new InvalidOperationException(
-                    "Globals.StateUpdate is not supported inside a LoopAPI.Iterate body: a loop " +
-                    "body is traced multiple times during graph construction, and per-iteration " +
-                    "state-update semantics are undefined. Compute the new value inside the loop " +
-                    "and register the update once at module level, after the loop, from the " +
-                    "loop's final value.");
+                    "Globals.StateUpdate is not supported inside a LoopAPI.Iterate body. " +
+                    "Compute the new value inside the loop, then register the update once " +
+                    "after the loop, from the loop's final value.");
 
             // Create the STATE_UPDATE_LINK node to track the relationship in the graph
             var linkedUpdated = InternalOp.StateUpdateLink(original, updated);

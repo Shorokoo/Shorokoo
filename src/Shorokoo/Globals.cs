@@ -161,9 +161,9 @@ namespace Shorokoo
         /// [StateInitializer] class.
         /// </exception>
         /// <exception cref="InvalidOperationException">
-        /// No module build is in progress on the current thread (the registration could never be
-        /// applied), or the call site is inside a <c>LoopAPI.Iterate</c> body (a loop body is
-        /// traced multiple times during construction; register the update after the loop instead).
+        /// The call is outside a module body (or on a different thread than the one the body
+        /// runs on), or inside a <c>LoopAPI.Iterate</c> body — register the update after the
+        /// loop instead.
         /// </exception>
         public static void StateUpdate<T>(T originalState, T updatedState) where T : IValue
         {

@@ -316,11 +316,11 @@ public class RngPinTests
         // thread-static list) — so both forms throw at the call site instead.
         var positionalEx = Assert.Throws<InvalidOperationException>(
             () => Rng.Pin(new object()));
-        Assert.Contains("module build in progress", positionalEx.Message);
+        Assert.Contains("inside a module body", positionalEx.Message);
 
         var sparseEx = Assert.Throws<InvalidOperationException>(
             () => Rng.Pin(([1], new object())));
-        Assert.Contains("module build in progress", sparseEx.Message);
+        Assert.Contains("inside a module body", sparseEx.Message);
     }
 
     [Fact]
@@ -335,7 +335,7 @@ public class RngPinTests
             LoopAPI.Init(counter);
             counter = counter + Scalar(1L);
             var ex = Assert.Throws<InvalidOperationException>(() => Rng.Pin(new object()));
-            Assert.Contains("module build in progress", ex.Message);
+            Assert.Contains("inside a module body", ex.Message);
         }
     }
 }

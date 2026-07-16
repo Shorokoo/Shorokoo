@@ -453,7 +453,7 @@ public class CodegenFreeModuleTests
     {
         var ex = Assert.Throws<InvalidOperationException>(
             () => Globals.StateUpdate(Scalar(1f), Scalar(2f)));
-        Assert.Contains("module build in progress", ex.Message);
+        Assert.Contains("inside a module body", ex.Message);
     }
 
     /// <summary>

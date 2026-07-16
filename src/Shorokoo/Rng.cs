@@ -37,8 +37,8 @@ namespace Shorokoo;
 /// compiler numbers the graph it was already building. A pin that cannot be resolved to a
 /// node of the module's graph fails the module build — an inactive pin the author believes
 /// is active is exactly the silent re-keying pinning exists to prevent. For the same reason,
-/// a pin invoked with <b>no module build in progress</b> on the current thread throws
-/// immediately: nothing could ever apply it.</para>
+/// a pin invoked <b>outside a module body</b> (or from a different thread than the one the
+/// body runs on) throws immediately.</para>
 /// </summary>
 public static class Rng
 {

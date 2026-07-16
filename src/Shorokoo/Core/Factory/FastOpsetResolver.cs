@@ -187,9 +187,9 @@ namespace Shorokoo.Core.Factory
             bool isParamInitializerFn = node.TargetFunction is not null
                 && (node.TargetFunction.FunctionType == FunctionType.TrainableParamInitializer
                  || node.TargetFunction.FunctionType == FunctionType.StateParamInitializer)
-                && node.OpCode != InternalOpCodes.TRAINABLE_PARAM_REF
-                && node.OpCode != InternalOpCodes.TRAINABLE_PARAM_MODEL_REF
-                && node.OpCode != InternalOpCodes.TRAINABLE_PARAM_ID_REF;
+                && node.OpCode != InternalOpCodes.MODEL_PARAM_REF
+                && node.OpCode != InternalOpCodes.MODEL_PARAM_MODEL_REF
+                && node.OpCode != InternalOpCodes.MODEL_PARAM_ID_REF;
 
             // Write the function-name attribute for any node that carries a TargetFunction
             // whose schema declares the attribute. The previous form restricted this to

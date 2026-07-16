@@ -9,7 +9,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training
     /// <summary>
     /// Discovers all state parameter producer nodes (non-trainable model parameters such as
     /// BatchNorm running stats) in a <see cref="FastComputationGraph"/>. Scans for
-    /// <c>TRAINABLE_PARAM</c>, <c>MODEL_PARAM_DATA</c>, and <c>TRAINABLE_PARAM_ID_REF</c>
+    /// <c>MODEL_PARAM</c>, <c>MODEL_PARAM_DATA</c>, and <c>MODEL_PARAM_ID_REF</c>
     /// nodes whose <c>shrk_is_trainable</c> attribute is false.
     /// </summary>
     internal static class FastDiscoverStateParamsProcessor

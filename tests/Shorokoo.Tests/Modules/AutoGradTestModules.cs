@@ -114,8 +114,8 @@ namespace Shorokoo.Tests.Modules
     /// AutoGrad on a trainable parameter rather than a runtime input. Loss is the sum of
     /// element-wise <c>x * w</c>, so dL/dw = x (element-wise). Self-checking. <c>w</c> is
     /// created via <see cref="InitSimple.Init"/>, so it flows through the trainable-param
-    /// lowering before AutoGrad. Exercises the AutoGrad path on a TRAINABLE_PARAM-rooted
-    /// subgraph and forces the full FastConvertTrainableParamIdRefToTrainableParam →
+    /// lowering before AutoGrad. Exercises the AutoGrad path on a MODEL_PARAM-rooted
+    /// subgraph and forces the full FastConvertModelParamIdRefToModelParam →
     /// FastProcessAutoGradProcessor hand-off.
     /// </summary>
     [Module]

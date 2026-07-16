@@ -394,7 +394,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 bool isRngFeed = fastNode.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
                                  fastNode.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL;
                 Debug.Assert(isRngFeed ||
-                             fastNode.OpCode == InternalOpCodes.TRAINABLE_PARAM_REF ||
+                             fastNode.OpCode == InternalOpCodes.MODEL_PARAM_REF ||
                              fastNode.OpCode == InternalOpCodes.MODULE_SET_HYPERPARAMS);
 
                 if (isRngFeed)
@@ -468,7 +468,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// Navigates from a TRAINABLE_PARAM_REF / MODULE_SET_HYPERPARAMS node backwards
+        /// Navigates from a MODEL_PARAM_REF / MODULE_SET_HYPERPARAMS node backwards
         /// through its iteration-indices input chain (CONCAT → IDENTITY → UNSQUEEZE → LOOP_OPEN)
         /// and returns the TensorKeys of the LOOP_OPEN iteration outputs.
         /// </summary>
@@ -476,11 +476,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             FastNode node, Dictionary<FastNodeKey, FastNode> nodeByKey)
         {
             int inputIndex;
-            if (node.OpCode == InternalOpCodes.TRAINABLE_PARAM_ID_REF ||
-                node.OpCode == InternalOpCodes.TRAINABLE_PARAM_MODEL_REF ||
+            if (node.OpCode == InternalOpCodes.MODEL_PARAM_ID_REF ||
+                node.OpCode == InternalOpCodes.MODEL_PARAM_MODEL_REF ||
                 node.OpCode == InternalOpCodes.MODULE_SET_HYPERPARAMS)
                 inputIndex = 1;
-            else if (node.OpCode == InternalOpCodes.TRAINABLE_PARAM_REF)
+            else if (node.OpCode == InternalOpCodes.MODEL_PARAM_REF)
                 inputIndex = 0;
             else if (node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
                      node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL)
@@ -908,7 +908,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// Native reparenting of a function subgraph to a call site. Updates TRAINABLE_PARAM_REF
+        /// Native reparenting of a function subgraph to a call site. Updates MODEL_PARAM_REF
         /// and MODULE_SET_HYPERPARAMS nodes in the subgraph: prepends the parent model ID,
         /// composes identifier templates, and combines iteration indices.
         /// </summary>
@@ -954,9 +954,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     while (feedInputs.Count < 3) feedInputs.Add(null);
                     feedInputs[2] = combinedFeedIterKey;
                 }
-                else if (node.OpCode == InternalOpCodes.TRAINABLE_PARAM_REF)
+                else if (node.OpCode == InternalOpCodes.MODEL_PARAM_REF)
                 {
-                    // TRAINABLE_PARAM_REF inputs: [iterationIndices, ...initializerParams]
+                    // MODEL_PARAM_REF inputs: [iterationIndices, ...initializerParams]
                     var childIterIndicesKey = node.Inputs[0];
 
                     var combinedIterIndicesKey = CombineIterationIndices(
@@ -1018,8 +1018,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// Native reparenting to a model variable. Converts TRAINABLE_PARAM_REF nodes
-        /// to TRAINABLE_PARAM_MODEL_REF by prepending the model variable as the first input.
+        /// Native reparenting to a model variable. Converts MODEL_PARAM_REF nodes
+        /// to MODEL_PARAM_MODEL_REF by prepending the model variable as the first input.
         /// </summary>
         private static void FastReparentToModelVariable(
             FastComputationGraph subGraph, FastTensorKey modelKey)
@@ -1028,10 +1028,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 var node = subGraph.Nodes[i];
 
-                if (node.OpCode == InternalOpCodes.TRAINABLE_PARAM_REF)
+                if (node.OpCode == InternalOpCodes.MODEL_PARAM_REF)
                 {
-                    // Current TRAINABLE_PARAM_REF inputs: [iterationIndices, ...initializerParams]
-                    // New TRAINABLE_PARAM_MODEL_REF inputs: [model, iterationIndices, ...initializerParams]
+                    // Current MODEL_PARAM_REF inputs: [iterationIndices, ...initializerParams]
+                    // New MODEL_PARAM_MODEL_REF inputs: [model, iterationIndices, ...initializerParams]
                     var currentInputs = node.FullInputs[""];
                     var newInputs = new List<FastTensorKey?> { modelKey };
                     newInputs.AddRange(currentInputs);
@@ -1043,9 +1043,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     dctAttributes[OnnxOpAttributeNames.ShrkAttrRelativeModelId] =
                         modelIdVals.Select(x => (int)x).ToArray();
 
-                    var modelRefAttrDefs = Definitions.NodeDefinitions[InternalOpCodes.TRAINABLE_PARAM_MODEL_REF].AttributeDefs;
+                    var modelRefAttrDefs = Definitions.NodeDefinitions[InternalOpCodes.MODEL_PARAM_MODEL_REF].AttributeDefs;
                     node.Attributes = OnnxCSharpAttributes.FromCSharpVals(dctAttributes, modelRefAttrDefs);
-                    node.OpCode = InternalOpCodes.TRAINABLE_PARAM_MODEL_REF;
+                    node.OpCode = InternalOpCodes.MODEL_PARAM_MODEL_REF;
                     node.FullInputs = new Dictionary<string, List<FastTensorKey?>> { [""] = newInputs };
                 }
                 else if (node.OpCode == InternalOpCodes.MODULE_SET_HYPERPARAMS)
@@ -1194,12 +1194,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     var idTemplate = new ModelParamIdentifierTemplate(fastNode.IdentifierTemplate).ToGeneralizedTemplate();
                     dctBaseModuleTemplates[idTemplate.ModelIdTemplate] = idTemplate;
                 }
-                else if (fastNode.OpCode == InternalOpCodes.TRAINABLE_PARAM_REF)
+                else if (fastNode.OpCode == InternalOpCodes.MODEL_PARAM_REF)
                 {
                     var idTemplate = new ModelParamIdentifierTemplate(fastNode.IdentifierTemplate).ToGeneralizedTemplate();
                     dctFullTemplates[idTemplate.ModelIdTemplate] = idTemplate;
                 }
-                else if (fastNode.OpCode == InternalOpCodes.TRAINABLE_PARAM_MODEL_REF)
+                else if (fastNode.OpCode == InternalOpCodes.MODEL_PARAM_MODEL_REF)
                 {
                     var idTemplate = new ModelParamIdentifierTemplate(fastNode.IdentifierTemplate).ToGeneralizedTemplate();
                     dctRelativeTemplates[idTemplate.ModelIdTemplate] = idTemplate;
@@ -1217,12 +1217,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     }
 
     /// <summary>
-    /// Converts TRAINABLE_PARAM_REF and TRAINABLE_PARAM_MODEL_REF nodes into
-    /// TRAINABLE_PARAM_ID_REF nodes by building model-ID vectors from iteration indices
+    /// Converts MODEL_PARAM_REF and MODEL_PARAM_MODEL_REF nodes into
+    /// MODEL_PARAM_ID_REF nodes by building model-ID vectors from iteration indices
     /// and identifier templates. New CONSTANT, UNSQUEEZE, CONCAT and GET_MODEL_ID FastNodes
     /// are created and inserted in topological order.
     /// </summary>
-    internal static class FastConvertToIdRefTrainableParams
+    internal static class FastConvertToIdRefModelParams
     {
         public static void Process(FastComputationGraph graph)
         {
@@ -1235,15 +1235,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 int newCount = CountUnprocessed(graph);
                 if (newCount >= unprocessedCount)
                     throw new InvalidOperationException(
-                        $"FastConvertToIdRefTrainableParams: no progress. {newCount} TRAINABLE_PARAM_REF/MODEL_REF remain.");
+                        $"FastConvertToIdRefModelParams: no progress. {newCount} MODEL_PARAM_REF/MODEL_REF remain.");
                 unprocessedCount = newCount;
             }
         }
 
         private static int CountUnprocessed(FastComputationGraph graph)
             => graph.Nodes.Count(n =>
-                n.OpCode == InternalOpCodes.TRAINABLE_PARAM_REF ||
-                n.OpCode == InternalOpCodes.TRAINABLE_PARAM_MODEL_REF);
+                n.OpCode == InternalOpCodes.MODEL_PARAM_REF ||
+                n.OpCode == InternalOpCodes.MODEL_PARAM_MODEL_REF);
 
         private static void InternalProcess(FastComputationGraph graph)
         {
@@ -1253,11 +1253,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             foreach (var fastNode in graph.Nodes)
             {
-                if (fastNode.OpCode == InternalOpCodes.TRAINABLE_PARAM_REF)
+                if (fastNode.OpCode == InternalOpCodes.MODEL_PARAM_REF)
                 {
                     ProcessTrainableParamRef(fastNode, nodeByKey, newNodes);
                 }
-                else if (fastNode.OpCode == InternalOpCodes.TRAINABLE_PARAM_MODEL_REF)
+                else if (fastNode.OpCode == InternalOpCodes.MODEL_PARAM_MODEL_REF)
                 {
                     ProcessTrainableParamModelRef(fastNode, nodeByKey, newNodes);
                 }
@@ -1272,7 +1272,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             FastNode fastNode,
             Dictionary<FastNodeKey, FastNode> nodeByKey, List<FastNode> newNodes)
         {
-            // TRAINABLE_PARAM_REF inputs: [iterationIndices, ...initializerParams]
+            // MODEL_PARAM_REF inputs: [iterationIndices, ...initializerParams]
             var inputs = fastNode.Inputs;
             var iterationIndicesKey = inputs[0]; // may be null
 
@@ -1291,17 +1291,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // Build new attributes: remove ShrkAttrLocalModelId, switch to ID_REF defs.
             var dctAttributes = fastNode.Attributes.GetAttributeVals().ToDictionary();
             dctAttributes.Remove(OnnxOpAttributeNames.ShrkAttrLocalModelId);
-            var idRefAttrDefs = Definitions.NodeDefinitions[InternalOpCodes.TRAINABLE_PARAM_ID_REF].AttributeDefs;
+            var idRefAttrDefs = Definitions.NodeDefinitions[InternalOpCodes.MODEL_PARAM_ID_REF].AttributeDefs;
             var newAttributes = OnnxCSharpAttributes.FromCSharpVals(dctAttributes, idRefAttrDefs);
 
-            // TRAINABLE_PARAM_ID_REF inputs: [modelId, iterationIndices, ...initializerParams]
+            // MODEL_PARAM_ID_REF inputs: [modelId, iterationIndices, ...initializerParams]
             var initializerParamKeys = inputs.Skip(1).ToList();
             var newInputs = new List<FastTensorKey?> { fullModelIdKey };
             newInputs.Add(iterationIndicesKey);
             newInputs.AddRange(initializerParamKeys);
 
             // Mutate in place.
-            fastNode.OpCode = InternalOpCodes.TRAINABLE_PARAM_ID_REF;
+            fastNode.OpCode = InternalOpCodes.MODEL_PARAM_ID_REF;
             fastNode.Attributes = newAttributes;
             fastNode.FullInputs = new Dictionary<string, List<FastTensorKey?>> { [""] = newInputs };
         }
@@ -1310,7 +1310,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             FastNode fastNode,
             Dictionary<FastNodeKey, FastNode> nodeByKey, List<FastNode> newNodes)
         {
-            // TRAINABLE_PARAM_MODEL_REF inputs: [model, iterationIndices, ...initializerParams]
+            // MODEL_PARAM_MODEL_REF inputs: [model, iterationIndices, ...initializerParams]
             var inputs = fastNode.Inputs;
             var modelKey = inputs[0]!.Value;
             var iterationIndicesKey = inputs[1];
@@ -1349,17 +1349,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // Build new attributes: remove ShrkAttrRelativeModelId, switch to ID_REF defs.
             var dctAttributes = fastNode.Attributes.GetAttributeVals().ToDictionary();
             dctAttributes.Remove(OnnxOpAttributeNames.ShrkAttrRelativeModelId);
-            var idRefAttrDefs = Definitions.NodeDefinitions[InternalOpCodes.TRAINABLE_PARAM_ID_REF].AttributeDefs;
+            var idRefAttrDefs = Definitions.NodeDefinitions[InternalOpCodes.MODEL_PARAM_ID_REF].AttributeDefs;
             var newAttributes = OnnxCSharpAttributes.FromCSharpVals(dctAttributes, idRefAttrDefs);
 
-            // TRAINABLE_PARAM_ID_REF inputs: [modelId, iterationIndices, ...initializerParams]
+            // MODEL_PARAM_ID_REF inputs: [modelId, iterationIndices, ...initializerParams]
             var initializerParamKeys = inputs.Skip(2).ToList();
             var newInputs = new List<FastTensorKey?> { fullModelIdKey };
             newInputs.Add(iterationIndicesKey);
             newInputs.AddRange(initializerParamKeys);
 
             // Mutate in place.
-            fastNode.OpCode = InternalOpCodes.TRAINABLE_PARAM_ID_REF;
+            fastNode.OpCode = InternalOpCodes.MODEL_PARAM_ID_REF;
             fastNode.Attributes = newAttributes;
             fastNode.IdentifierTemplate = fullTemplate?.ToString();
             fastNode.FullInputs = new Dictionary<string, List<FastTensorKey?>> { [""] = newInputs };
@@ -2567,13 +2567,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     }
 
     /// <summary>
-    /// Converts TRAINABLE_PARAM_ID_REF nodes to TRAINABLE_PARAM nodes.
+    /// Converts MODEL_PARAM_ID_REF nodes to MODEL_PARAM nodes.
     /// Template composition is performed natively on the <see cref="FastComputationGraph"/>.
     /// Model ID extraction runs <see cref="QuickExecutionEngine"/> directly over the
     /// FastComputationGraph — no CG round-trip needed. Node rewriting (step 4 equivalent)
     /// is also implemented natively, avoiding any CG↔FastCG conversion.
     /// </summary>
-    internal static class FastConvertTrainableParamIdRefToTrainableParam
+    internal static class FastConvertModelParamIdRefToModelParam
     {
         public static void Process(
             FastComputationGraph graph,
@@ -2586,7 +2586,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             bool hasIdRef = false;
             for (int i = 0; i < graph.Nodes.Count; i++)
             {
-                if (graph.Nodes[i].OpCode == InternalOpCodes.TRAINABLE_PARAM_ID_REF)
+                if (graph.Nodes[i].OpCode == InternalOpCodes.MODEL_PARAM_ID_REF)
                 {
                     hasIdRef = true;
                     break;
@@ -2633,14 +2633,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var store = engine.Run(graph, initialInputs);
             var candidateModelIdInfos = ExtractModelIdInfosFromStore(graph, store);
 
-            // If QEE couldn't resolve every TRAINABLE_PARAM_ID_REF node's model ID (e.g., the
+            // If QEE couldn't resolve every MODEL_PARAM_ID_REF node's model ID (e.g., the
             // ID flows through ops whose integer data QEE can't track — Sequence ops populated
             // inside loops, etc.), throw the sentinel exception. There is no longer a CG
             // fallback, so callers see a hard failure for these unsupported graph shapes.
             if (!AllIdRefModelIdsResolved(graph, store))
                 throw new FastPipelineUnsupportedException(
-                    "FastConvertTrainableParamIdRefToTrainableParam: QEE could not resolve all " +
-                    "TRAINABLE_PARAM_ID_REF model IDs (integer data unavailable).");
+                    "FastConvertModelParamIdRefToModelParam: QEE could not resolve all " +
+                    "MODEL_PARAM_ID_REF model IDs (integer data unavailable).");
 
             // Runtime random feeds ride the same QEE evaluation: realize each feed's stream ids
             // (the site id with every -1 iteration slot filled per observed loop iteration) so
@@ -2650,7 +2650,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (candidateModelIdInfos.IsEmpty) return;
 
             // Liveness filter: ExtractModelIdInfosFromStore returns every model ID a
-            // TRAINABLE_PARAM_ID_REF node could produce, even ones whose value never reaches
+            // MODEL_PARAM_ID_REF node could produce, even ones whose value never reaches
             // the graph output (e.g. a shortcut Conv param on a BasicBlockS11 call whose
             // `downsample` hyperparam folds the IfElse-gate to the `x` branch — the shortcut
             // Conv is dead but its ID_REF node is still in the graph). Without this filter,
@@ -2687,7 +2687,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // with `affine = false`, where gamma/beta are the graph's ONLY params.
             // NativeConvertTrainableParamIdRef handles dead-only by emitting
             // shape-correct zero CONSTANTs and replacing every surviving
-            // TRAINABLE_PARAM_ID_REF; returning early here would instead leave those
+            // MODEL_PARAM_ID_REF; returning early here would instead leave those
             // dead id-refs in the graph, tripping the forbidden-op validation. Since
             // `candidateModelIdInfos` is non-empty above, this guard only fires when
             // there is genuinely nothing to do.
@@ -2701,7 +2701,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// performs internally. Runs <see cref="QuickExecutionEngine"/> over <paramref name="graph"/>
         /// with the given <paramref name="inputHints"/> bound to graph inputs, then returns one
         /// <see cref="TrainableParamInfo"/> per distinct specific model ID resolved from the
-        /// graph's TRAINABLE_PARAM_ID_REF nodes (including per-iteration values for loops via the
+        /// graph's MODEL_PARAM_ID_REF nodes (including per-iteration values for loops via the
         /// QEE History field). Does not mutate the graph, does not run the liveness filter, and
         /// does not throw if some model IDs are unresolved — callers performing shape-discovery
         /// for default-checkpoint initialization use this entry point.
@@ -2732,7 +2732,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// Returns true iff every TRAINABLE_PARAM_ID_REF node's model-ID input resolves to a
+        /// Returns true iff every MODEL_PARAM_ID_REF node's model-ID input resolves to a
         /// RuntimeTensor whose integer data (or per-iteration history) is available.
         /// </summary>
         private static bool AllIdRefModelIdsResolved(FastComputationGraph graph, Dictionary<FastTensorKey, IRuntimeTensor> store)
@@ -2740,7 +2740,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             for (int i = 0; i < graph.Nodes.Count; i++)
             {
                 var node = graph.Nodes[i];
-                if (node.OpCode != InternalOpCodes.TRAINABLE_PARAM_ID_REF) continue;
+                if (node.OpCode != InternalOpCodes.MODEL_PARAM_ID_REF) continue;
 
                 if (node.Inputs.Count == 0 || node.Inputs[0] is null) return false;
                 if (!store.TryGetValue(node.Inputs[0]!.Value, out var raw)) return false;
@@ -2774,7 +2774,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             var newNodes = new List<FastNode>();
 
-            // --- TRAINABLE_PARAM nodes + CONSTANT initializer params ---
+            // --- MODEL_PARAM nodes + CONSTANT initializer params ---
             var trainableParamKeysByType = liveParamInfos.Concat(deadParamInfos)
                 .Select(x => x.TargetFn.Outputs[0].DType).Distinct()
                 .ToDictionary(x => x, x => new FastTensorKey?[maxSize]);
@@ -2807,13 +2807,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     [OnnxOpAttributeNames.ShrkAttrFunctionName] = paramInfo.TargetFn.DefaultName,
                     [OnnxOpAttributeNames.ShrkAttrDomainName] = (string?)"Functions",
                 };
-                var tpAttrDefs = Definitions.NodeDefinitions[InternalOpCodes.TRAINABLE_PARAM].AttributeDefs;
+                var tpAttrDefs = Definitions.NodeDefinitions[InternalOpCodes.MODEL_PARAM].AttributeDefs;
                 var tpAttrs = OnnxCSharpAttributes.FromCSharpVals(tpAttrVals, tpAttrDefs);
 
                 newNodes.Add(new FastNode
                 {
                     Key = tpKey,
-                    OpCode = InternalOpCodes.TRAINABLE_PARAM,
+                    OpCode = InternalOpCodes.MODEL_PARAM,
                     Attributes = tpAttrs,
                     FullInputs = { [""] = initializerParamKeys },
                     FullOutputs = { [""] = new List<FastTensorKey?> { tpTensorKey } },
@@ -2823,7 +2823,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 trainableParamKeysByType[dtype][index] = tpTensorKey;
             }
 
-            // Dead candidates — emit shape-correct zero CONSTANTs (not TRAINABLE_PARAMs,
+            // Dead candidates — emit shape-correct zero CONSTANTs (not MODEL_PARAMs,
             // so they don't bloat the persisted ModelParamList). Their value is never
             // observed: the SequenceAt result feeds a dead branch whose output the IF
             // discards — only its shape matters, so it broadcasts cleanly with peers.
@@ -2919,7 +2919,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 new Dictionary<string, object?>(),
                 new FastTensorKey?[] { scalar0TK, unsqAxesTK }));
 
-            // --- Per TRAINABLE_PARAM_ID_REF: index computation + SEQUENCE_AT ---
+            // --- Per MODEL_PARAM_ID_REF: index computation + SEQUENCE_AT ---
             // Each ID_REF gets a small graph that's spliced in at the original
             // ID_REF's position so the result is topologically ordered + nested
             // by construction.
@@ -2929,7 +2929,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             foreach (var fastNode in graph.Nodes)
             {
-                if (fastNode.OpCode != InternalOpCodes.TRAINABLE_PARAM_ID_REF) continue;
+                if (fastNode.OpCode != InternalOpCodes.MODEL_PARAM_ID_REF) continue;
 
                 var idRefOutputKey = fastNode.Outputs[0]!.Value;
                 var dtype = fastNode.Attributes.GetDTypeVal(OnnxOpAttributeNames.ShrkAttrDtype)!;
@@ -3005,7 +3005,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 perIdRefReplacements[fastNode.Key] = perReplacement;
             }
 
-            // Splice the new graph: shared nodes (TRAINABLE_PARAMs + sequence
+            // Splice the new graph: shared nodes (MODEL_PARAMs + sequence
             // construction + shared index helpers) go at the front — they have no
             // dependencies on the original graph. Each ID_REF gets replaced
             // in-place by its per-replacement subgraph, which inherits the ID_REF's
@@ -3073,7 +3073,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// Reads all TRAINABLE_PARAM_ID_REF nodes from the QEE store, extracting each unique
+        /// Reads all MODEL_PARAM_ID_REF nodes from the QEE store, extracting each unique
         /// model ID and its corresponding initializer parameter values. The QEE History field
         /// carries per-iteration values from loops, so no graph restructuring is needed.
         /// </summary>
@@ -3085,7 +3085,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             foreach (var node in graph.Nodes)
             {
-                if (node.OpCode != InternalOpCodes.TRAINABLE_PARAM_ID_REF) continue;
+                if (node.OpCode != InternalOpCodes.MODEL_PARAM_ID_REF) continue;
 
                 var fn = node.TargetFunction;
                 if (fn is null) continue;
@@ -3229,7 +3229,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     // Static ModelIds are what makes an architecture concrete: a feed whose
                     // per-iteration stream set cannot be enumerated here would have no static
                     // stream identity, so failure is a hard error — exactly like an
-                    // unresolvable TRAINABLE_PARAM_ID_REF above — never a silent fallback.
+                    // unresolvable MODEL_PARAM_ID_REF above — never a silent fallback.
                     var iterInput = node.Inputs.Count > 2 ? node.Inputs[2] : null;
                     if (iterInput is null || !store.TryGetValue(iterInput.Value, out var raw)
                         || raw is not RuntimeTensor rt)
@@ -3292,7 +3292,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     realized[r].CopyTo(flat, r * idVals.Length);
 
                 // The site's key entity: owns the realized stream set, value materialized
-                // from the bound config at concrete-model time. Top-level like TRAINABLE_PARAM
+                // from the bound config at concrete-model time. Top-level like MODEL_PARAM
                 // nodes — an in-loop feed references it across the loop boundary the same way
                 // an in-loop param reference selects from the top-level param sequence.
                 var keyNodeKey = FastNodeKey.New();
@@ -3845,11 +3845,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// round-trip to handle.
         ///
         /// <para>
-        /// Precondition: no loop body may contain a <c>TRAINABLE_PARAM_REF</c>,
-        /// <c>TRAINABLE_PARAM_ID_REF</c>, <c>TRAINABLE_PARAM_MODEL_REF</c>, or
+        /// Precondition: no loop body may contain a <c>MODEL_PARAM_REF</c>,
+        /// <c>MODEL_PARAM_ID_REF</c>, <c>MODEL_PARAM_MODEL_REF</c>, or
         /// <c>MODULE_SET_HYPERPARAMS</c> node. The full
         /// <see cref="FastComputationGraphExtensions.ToConcreteArchitecture"/> pipeline
-        /// resolves all four into plain <c>TRAINABLE_PARAM</c> (or, for
+        /// resolves all four into plain <c>MODEL_PARAM</c> (or, for
         /// <c>MODULE_SET_HYPERPARAMS</c>, removes the node via
         /// <see cref="FastUnpackModelStruct"/>) before <see cref="FastSimplify"/> calls
         /// in here, so the per-iteration identifier-template / model-id rewrite that
@@ -4145,8 +4145,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             //
             // Without this partitioning, naively cloning every body node N times
             // produces N duplicate copies of nodes whose value never changes —
-            // notably fully-resolved `TRAINABLE_PARAM` nodes placed into the body
-            // by `FastConvertTrainableParamIdRefToTrainableParam`. The resulting
+            // notably fully-resolved `MODEL_PARAM` nodes placed into the body
+            // by `FastConvertModelParamIdRefToModelParam`. The resulting
             // graph has `N * K` trainable-param nodes instead of the expected `K`,
             // breaking downstream accounting in `GetConcreteModelParamInfos`.
             var loopDependentTensors = new HashSet<FastTensorKey>();
@@ -4512,20 +4512,20 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
 
                 // Precondition assert: by the time FastSimplify invokes Process,
-                // FastConvertToIdRefTrainableParams + FastUnpackModelStruct +
-                // FastConvertTrainableParamIdRefToTrainableParam have all run, so the
+                // FastConvertToIdRefModelParams + FastUnpackModelStruct +
+                // FastConvertModelParamIdRefToModelParam have all run, so the
                 // four op-codes that used to drive a per-iteration identifier-template
                 // rewrite here are gone. See the Process docstring for the full chain.
                 foreach (var (_, cloned) in clonedThisIter)
                 {
                     Debug.Assert(
-                        cloned.OpCode != InternalOpCodes.TRAINABLE_PARAM_REF
-                        && cloned.OpCode != InternalOpCodes.TRAINABLE_PARAM_ID_REF
-                        && cloned.OpCode != InternalOpCodes.TRAINABLE_PARAM_MODEL_REF
+                        cloned.OpCode != InternalOpCodes.MODEL_PARAM_REF
+                        && cloned.OpCode != InternalOpCodes.MODEL_PARAM_ID_REF
+                        && cloned.OpCode != InternalOpCodes.MODEL_PARAM_MODEL_REF
                         && cloned.OpCode != InternalOpCodes.MODULE_SET_HYPERPARAMS,
                         $"UnrollOne: cloned body node has OpCode {cloned.OpCode}, but the "
                         + "full ToConcreteArchitecture pipeline rewrites all four "
-                        + "Stage-F op-codes to TRAINABLE_PARAM (or removes them) before "
+                        + "Stage-F op-codes to MODEL_PARAM (or removes them) before "
                         + "FastSimplify runs the unroll.");
                 }
 
@@ -4774,7 +4774,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (IsModelInputOpCode(op) || op == InternalOpCodes.MODEL_PARAM_DATA)
                     continue;
 
-                if (op == InternalOpCodes.TRAINABLE_PARAM
+                if (op == InternalOpCodes.MODEL_PARAM
                     || op.EndsWith("#OPEN") || op.EndsWith("#CLOSE"))
                 {
                     // For IF_OPEN, the condition input drives FoldConstantConditionBranches;
@@ -4948,7 +4948,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// <summary>
     /// Shared helper methods for creating FastNodes (CONSTANT, UNSQUEEZE, CONCAT, Identity)
     /// that mirror the node structures produced by the normal ComputationGraph API.
-    /// Used by <see cref="FastConvertToIdRefTrainableParams"/> and <see cref="FastUnpackModelStruct"/>.
+    /// Used by <see cref="FastConvertToIdRefModelParams"/> and <see cref="FastUnpackModelStruct"/>.
     /// </summary>
     internal static class FastNodeCreationHelpers
     {

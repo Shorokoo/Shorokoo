@@ -66,7 +66,7 @@ public static class TrainingGraphBuilder
     /// <see cref="Shorokoo.Graph.FastComputationGraphExtensions.ToConcreteArchitecture"/>
     /// — which TrainingRig.FromScratch does — those minimal passes are no-ops on the already-
     /// concrete graph, and downstream trainable-param discovery picks up exactly the live
-    /// (post-liveness-filter) TRAINABLE_PARAM nodes.
+    /// (post-liveness-filter) MODEL_PARAM nodes.
     /// </para>
     /// </summary>
     public static FastComputationGraph PrepareForTrainingAsFast(
@@ -92,7 +92,7 @@ public static class TrainingGraphBuilder
         // routed the graph through ToConcreteArchitecture (TrainingRig.FromScratch does
         // this so it can run input-aware liveness filtering once for the whole pipeline),
         // skip ProcessGraphForTrainingOnFast — its first pass, FastApplyIdentifierTemplates,
-        // asserts on the TRAINABLE_PARAM nodes that the concrete-arch pipeline produces.
+        // asserts on the MODEL_PARAM nodes that the concrete-arch pipeline produces.
         var fastGraph = modelGraph.Clone();
         if (!IsAlreadyConcretized(fastGraph))
             ProcessGraphForTrainingOnFast(fastGraph);
@@ -330,7 +330,7 @@ public static class TrainingGraphBuilder
     /// A graph is "concretized" (already through
     /// <see cref="Shorokoo.Graph.FastComputationGraphExtensions.ToConcreteArchitecture"/>)
     /// iff it has no high-level forms left: no MODEL_INVOKE, FUNCTION_INVOKE,
-    /// TRAINABLE_PARAM_REF, or TRAINABLE_PARAM_MODEL_REF nodes. Used to decide whether
+    /// MODEL_PARAM_REF, or MODEL_PARAM_MODEL_REF nodes. Used to decide whether
     /// <see cref="ProcessGraphForTrainingOnFast"/> needs to run.
     /// </summary>
     private static bool IsAlreadyConcretized(FastComputationGraph graph)
@@ -339,9 +339,9 @@ public static class TrainingGraphBuilder
         {
             if (node.OpCode == InternalOpCodes.MODEL_INVOKE
                 || node.OpCode == InternalOpCodes.FUNCTION_INVOKE
-                || node.OpCode == InternalOpCodes.TRAINABLE_PARAM_REF
-                || node.OpCode == InternalOpCodes.TRAINABLE_PARAM_MODEL_REF
-                || node.OpCode == InternalOpCodes.TRAINABLE_PARAM_ID_REF)
+                || node.OpCode == InternalOpCodes.MODEL_PARAM_REF
+                || node.OpCode == InternalOpCodes.MODEL_PARAM_MODEL_REF
+                || node.OpCode == InternalOpCodes.MODEL_PARAM_ID_REF)
                 return false;
         }
         return true;
@@ -352,13 +352,13 @@ public static class TrainingGraphBuilder
         Nodes.Processors.Fast.FastApplyIdentifierTemplates.Process(fastGraph);
         Nodes.Processors.Fast.FastInlineModulesAndFunctions.Process(fastGraph);
         Nodes.Processors.Fast.FastProcessorHelper.RemoveUnreachableNodes(fastGraph);
-        Nodes.Processors.Fast.FastConvertToIdRefTrainableParams.Process(fastGraph);
+        Nodes.Processors.Fast.FastConvertToIdRefModelParams.Process(fastGraph);
         Nodes.Processors.Fast.FastUnpackModelStruct.Process(fastGraph);
         Nodes.Processors.Fast.FastUnpackTensorStructs.Process(fastGraph);
 
         // We intentionally skip ConvertTrainableParamIdRefToTrainableParam (requires execution)
-        // and Simplify (can't handle TRAINABLE_PARAM_ID_REF nodes).
-        // FastReplaceTrainableParamsWithInputProcessor handles TRAINABLE_PARAM_ID_REF directly.
+        // and Simplify (can't handle MODEL_PARAM_ID_REF nodes).
+        // FastReplaceTrainableParamsWithInputProcessor handles MODEL_PARAM_ID_REF directly.
     }
 
     /// <summary>

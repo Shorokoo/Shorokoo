@@ -24,7 +24,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast;
 /// <summary>
 /// Given a <see cref="FastComputationGraph"/>, a list of candidate specific model IDs and
 /// a set of hint inputs, returns the subset of candidate model IDs that actually contribute
-/// to a graph output — i.e. whose corresponding <c>TRAINABLE_PARAM_ID_REF</c> node is
+/// to a graph output — i.e. whose corresponding <c>MODEL_PARAM_ID_REF</c> node is
 /// reachable from the graph outputs through data edges, with IF branches correctly gated
 /// on their (already-folded-to-constant) conditions and LOOP iterations unioned through
 /// scan-variable masks.
@@ -36,7 +36,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast;
 /// </para>
 /// <list type="bullet">
 ///   <item>Default op: <c>mask(output) = OR(mask(inputs))</c>.</item>
-///   <item><c>TRAINABLE_PARAM_ID_REF</c>: adds a one-hot bit for its specific model ID to
+///   <item><c>MODEL_PARAM_ID_REF</c>: adds a one-hot bit for its specific model ID to
 ///     the combined input mask.</item>
 ///   <item><c>IF_CLOSE</c>: <c>mask(output_i) = condMask | Where(cond, thenMask_i, elseMask_i)</c>.
 ///     Because the IF conditions are already folded to CONSTANT booleans by
@@ -230,7 +230,7 @@ internal static partial class FastListAllSpecificModelIdsUsed
             case OpCodes.IF_CLOSE:
                 HandleIfClose(node, ctx);
                 break;
-            case InternalOpCodes.TRAINABLE_PARAM_ID_REF:
+            case InternalOpCodes.MODEL_PARAM_ID_REF:
                 HandleTrainableParamIdRef(node, ctx);
                 break;
             default:
@@ -259,14 +259,14 @@ internal static partial class FastListAllSpecificModelIdsUsed
     }
 }
 
-// PART 2: Default / IF_CLOSE / TRAINABLE_PARAM_ID_REF handlers.
+// PART 2: Default / IF_CLOSE / MODEL_PARAM_ID_REF handlers.
 
 internal static partial class FastListAllSpecificModelIdsUsed
 {
     /// <summary>
     /// Default-op mask: <c>mask(output_i) = OR(mask(inputs))</c>.
     ///
-    /// Handles any op not specifically recognized as LOOP/IF/TRAINABLE_PARAM_ID_REF. If the
+    /// Handles any op not specifically recognized as LOOP/IF/MODEL_PARAM_ID_REF. If the
     /// node has no inputs at all (e.g. CONSTANT, MODEL_TENSOR_INPUT outside the graph inputs
     /// set), all outputs get the empty mask.
     /// </summary>
@@ -295,7 +295,7 @@ internal static partial class FastListAllSpecificModelIdsUsed
     }
 
     /// <summary>
-    /// <c>TRAINABLE_PARAM_ID_REF</c> mask: the union of input masks plus a one-hot bit at
+    /// <c>MODEL_PARAM_ID_REF</c> mask: the union of input masks plus a one-hot bit at
     /// this node's specific model-ID index. Input[0] is the specific model-ID vector, which
     /// we convert to a flat index (right-pad with zeros to the transform vector's length,
     /// multiply element-wise, reduce-sum) and compare against the precomputed <c>indices</c>
@@ -902,7 +902,7 @@ internal static partial class FastListAllSpecificModelIdsUsed
 
     /// <summary>
     /// Prepares the initial-input dictionary passed to QEE. Mirrors the existing logic in
-    /// <see cref="FastConvertTrainableParamIdRefToTrainableParam"/>: for every graph input
+    /// <see cref="FastConvertModelParamIdRefToModelParam"/>: for every graph input
     /// that has a matching entry in <paramref name="inputHints"/>, feed QEE the runtime
     /// tensor so shape-dependent ops inside the graph can evaluate fully.
     /// </summary>

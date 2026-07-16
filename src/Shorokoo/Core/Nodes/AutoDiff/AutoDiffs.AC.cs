@@ -374,7 +374,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // float gradient.
             retval[InternalOpCodes.STATE_UPDATE_LINK] = NullInputGradient;
             retval[InternalOpCodes.WITH_STATE_DEPS] = NullInputGradient;
-            retval[InternalOpCodes.TRAINABLE_PARAM_ID_REF] = NullInputGradient;
+            retval[InternalOpCodes.MODEL_PARAM_ID_REF] = NullInputGradient;
             retval[InternalOpCodes.SEQUENCE_CONCAT] = NullInputGradient;
             retval[InternalOpCodes.SEQUENCE_SLICE] = NullInputGradient;
         }

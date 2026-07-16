@@ -14,8 +14,8 @@ namespace Shorokoo.Core.Nodes.Processors.Training
     /// <summary>
     /// Shared helpers for the Fast-native trainable / state param discovery processors.
     /// Walks <see cref="FastComputationGraph.Nodes"/> in stored (topological) order, filters
-    /// to param-producer ops (<c>TRAINABLE_PARAM</c>, <c>MODEL_PARAM_DATA</c>,
-    /// <c>TRAINABLE_PARAM_ID_REF</c>), and reads dtype / rank / sanitized field name straight
+    /// to param-producer ops (<c>MODEL_PARAM</c>, <c>MODEL_PARAM_DATA</c>,
+    /// <c>MODEL_PARAM_ID_REF</c>), and reads dtype / rank / sanitized field name straight
     /// off each node's attributes — no round-trip to <c>ComputationGraph</c>.
     /// </summary>
     internal static class FastDiscoverParamsHelpers
@@ -26,9 +26,9 @@ namespace Shorokoo.Core.Nodes.Processors.Training
 
             foreach (var node in graph.Nodes)
             {
-                if (node.OpCode != InternalOpCodes.TRAINABLE_PARAM &&
+                if (node.OpCode != InternalOpCodes.MODEL_PARAM &&
                     node.OpCode != InternalOpCodes.MODEL_PARAM_DATA &&
-                    node.OpCode != InternalOpCodes.TRAINABLE_PARAM_ID_REF)
+                    node.OpCode != InternalOpCodes.MODEL_PARAM_ID_REF)
                     continue;
 
                 // Missing attribute → skip (mirrors the CG processor's GetIsTrainable() catch).

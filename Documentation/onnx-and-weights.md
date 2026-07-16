@@ -37,6 +37,19 @@ just far enough to cover them. Models up to opset 26 execute on the bundled
 ONNX Runtime 1.26 — see [limitations.md](limitations.md) for the stamping
 policy.
 
+### Parameters in the exported graph
+
+A concrete model's parameters — trainable weights and state params (e.g.
+BatchNorm running stats) alike — are emitted as `graph.initializer`
+`TensorProto`s, following ONNX convention; they are never baked into
+`Constant` op-nodes. Each initializer carries two Shorokoo metadata props:
+`IsTrainable` (`"true"`/`"false"`) and `IdentifierTemplate` (the parameter's
+name). Initializer *tensor names* are internal ids (`N{k}_T{s}`), so match
+parameters by the `IdentifierTemplate` metadata, not by tensor name.
+Re-importing an exported model rebuilds the parameters with their
+trainability and names intact, so a loaded model remains trainable and its
+weights can be re-bound by name with `ToConcreteModel`.
+
 ## Import from ONNX
 
 ```csharp

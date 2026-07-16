@@ -89,11 +89,11 @@ namespace Shorokoo.Graph
             var identifierTemplatesInfo = FastExtractIdentifierTemplates.Process(fastGraph);
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastExtractIdentifierTemplates");
 
-            FastConvertToIdRefTrainableParams.Process(fastGraph);
+            FastConvertToIdRefModelParams.Process(fastGraph);
             AssertFastGraphDoesNotContainOps(fastGraph,
-                new[] { InternalOpCodes.TRAINABLE_PARAM_REF, InternalOpCodes.TRAINABLE_PARAM_MODEL_REF },
-                "After FastConvertToIdRefTrainableParams");
-            FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastConvertToIdRefTrainableParams");
+                new[] { InternalOpCodes.MODEL_PARAM_REF, InternalOpCodes.MODEL_PARAM_MODEL_REF },
+                "After FastConvertToIdRefModelParams");
+            FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastConvertToIdRefModelParams");
 
             FastUnpackModelStruct.Process(fastGraph);
             AssertFastGraphDoesNotContainOps(fastGraph,
@@ -107,13 +107,13 @@ namespace Shorokoo.Graph
                 "After FastUnpackTensorStructs");
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastUnpackTensorStructs");
 
-            FastConvertTrainableParamIdRefToTrainableParam.Process(
+            FastConvertModelParamIdRefToModelParam.Process(
                 fastGraph, identifierTemplatesInfo, inputHints, computeContext);
             DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterProcessTrainableParameters);
             AssertFastGraphDoesNotContainOps(fastGraph,
-                new[] { InternalOpCodes.TRAINABLE_PARAM_ID_REF },
-                "After FastConvertTrainableParamIdRefToTrainableParam");
-            FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastConvertTrainableParamIdRefToTrainableParam");
+                new[] { InternalOpCodes.MODEL_PARAM_ID_REF },
+                "After FastConvertModelParamIdRefToModelParam");
+            FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastConvertModelParamIdRefToModelParam");
 
             FastSimplify.Process(fastGraph);
             DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterFirstSimplify);
@@ -141,9 +141,9 @@ namespace Shorokoo.Graph
                 InternalOpCodes.MODEL_INVOKE,
                 InternalOpCodes.MODEL_HYPERPARAM,
                 InternalOpCodes.GET_MODEL_ID,
-                InternalOpCodes.TRAINABLE_PARAM_REF,
-                InternalOpCodes.TRAINABLE_PARAM_MODEL_REF,
-                InternalOpCodes.TRAINABLE_PARAM_ID_REF,
+                InternalOpCodes.MODEL_PARAM_REF,
+                InternalOpCodes.MODEL_PARAM_MODEL_REF,
+                InternalOpCodes.MODEL_PARAM_ID_REF,
                 InternalOpCodes.FUNCTION_INVOKE,
                 InternalOpCodes.TENSOR_STRUCT_CREATE,
                 InternalOpCodes.TENSOR_STRUCT_GETFIELD,
@@ -377,7 +377,7 @@ namespace Shorokoo.Graph
         {
             AssertConcreteArchitecture(graph, nameof(GetConcreteModelParamInfos));
             var nodes = FastComputationGraphConverter.BuildNodes(graph).nodesInTopoOrder;
-            var infos = nodes.Where(x => x.OpCode == InternalOpCodes.TRAINABLE_PARAM)
+            var infos = nodes.Where(x => x.OpCode == InternalOpCodes.MODEL_PARAM)
                 .Select(x => new ConcreteModelParamInfo(x))
                 .ToImmutableArray();
             return new ConcreteModelParamInfos(infos);

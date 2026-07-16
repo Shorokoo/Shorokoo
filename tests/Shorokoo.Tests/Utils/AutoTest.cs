@@ -204,7 +204,7 @@ namespace Shorokoo.Tests.Utils
         /// <list type="bullet">
         ///   <item>moduleGraph roundtrip — load-time MODEL_INVOKE / SequenceConstruct
         ///         / FunctionProto reconstruction.</item>
-        ///   <item>concreteArch roundtrip — load-time TRAINABLE_PARAM reconstruction
+        ///   <item>concreteArch roundtrip — load-time MODEL_PARAM reconstruction
         ///         (<c>BuildFastTrainableParamNodeFromProto</c>) because at this
         ///         stage trainable params still carry their initializer-fn
         ///         TargetFunction (not yet materialized as constants).</item>
@@ -241,7 +241,7 @@ namespace Shorokoo.Tests.Utils
             var concreteArch = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([.. allInputs]));
 
             // concreteArch roundtrip: at this stage trainable params still carry their
-            // initializer-fn TargetFunction (the FastConvertTrainableParamIdRefToTrainableParam
+            // initializer-fn TargetFunction (the FastConvertModelParamIdRefToModelParam
             // pass has run but ToConcreteModel hasn't materialized them as constants yet).
             // Saving these triggers FastOpsetResolver's isParamInitializerFn branch which
             // rewrites the opcode to the initializer-fn name; on reload, the function-name

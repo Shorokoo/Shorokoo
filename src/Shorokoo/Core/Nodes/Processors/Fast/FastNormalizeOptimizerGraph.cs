@@ -66,14 +66,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// Authored form (what a <c>[Module]</c> optimizer's <c>Inline</c> produces):
     /// inputs are <c>[hyperparam_0, ..., currentParam, grad]</c> only — optimizer state never
     /// appears in the method signature. Each state tensor is created inside the body by an
-    /// optimizer-owned <c>[StateInitializer]</c>'s <c>Init</c> call (a <c>TRAINABLE_PARAM_REF</c>
+    /// optimizer-owned <c>[StateInitializer]</c>'s <c>Init</c> call (a <c>MODEL_PARAM_REF</c>
     /// node with <c>shrk_is_trainable=false</c>), and its per-step update is registered via
     /// <see cref="Shorokoo.Globals.StateUpdate{T}(T, T)"/> (a <c>STATE_UPDATE_LINK</c> node, with
     /// the module output wrapped in <c>WITH_STATE_DEPS</c>).
     /// </para>
     ///
     /// <para>
-    /// Normalized form: each state's <c>TRAINABLE_PARAM_REF</c> is replaced by a fresh graph
+    /// Normalized form: each state's <c>MODEL_PARAM_REF</c> is replaced by a fresh graph
     /// input appended after <c>grad</c> (so inputs become
     /// <c>[hyperparam_0, ..., currentParam, grad, state_0, ...]</c>), <c>WITH_STATE_DEPS</c>
     /// wrappers are unwrapped, and each state's updated tensor is appended as a graph output in
@@ -109,10 +109,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 switch (node.OpCode)
                 {
-                    case InternalOpCodes.TRAINABLE_PARAM_REF:
-                    case InternalOpCodes.TRAINABLE_PARAM:
-                    case InternalOpCodes.TRAINABLE_PARAM_ID_REF:
-                    case InternalOpCodes.TRAINABLE_PARAM_MODEL_REF:
+                    case InternalOpCodes.MODEL_PARAM_REF:
+                    case InternalOpCodes.MODEL_PARAM:
+                    case InternalOpCodes.MODEL_PARAM_ID_REF:
+                    case InternalOpCodes.MODEL_PARAM_MODEL_REF:
                     case InternalOpCodes.MODEL_PARAM_DATA:
                     {
                         var isTrainable = node.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsTrainable) ?? true;
@@ -124,7 +124,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                                 "[StateInitializer(Ownership = StateOwnership.OptimizerOwned)] initializer for " +
                                 "optimizer state instead.");
 
-                        if (node.OpCode != InternalOpCodes.TRAINABLE_PARAM_REF)
+                        if (node.OpCode != InternalOpCodes.MODEL_PARAM_REF)
                             throw new InvalidOperationException(
                                 $"Optimizer graph contains a '{node.OpCode}' state-parameter node, which is not " +
                                 "supported. Pass the optimizer module's raw ComputationGraph to the TrainingRig " +
@@ -165,7 +165,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             // Pass 2: split off the state-init graph before mutating the main graph. Each state
             // node is rewritten into a FUNCTION_INVOKE of its initializer (dropping the leading
-            // iterationIndices input that TRAINABLE_PARAM_REF carries), the invoke results become
+            // iterationIndices input that MODEL_PARAM_REF carries), the invoke results become
             // the graph outputs, and everything not feeding them is pruned. The initializer-arg
             // subgraphs (e.g. ShapeTensor(currentParam)) stay live, so the graph's inputs remain
             // the optimizer's original [hyperparams..., currentParam, grad].
@@ -196,7 +196,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         functionInvokeAttrDefs);
                     initNode.IdentifierTemplate = null;
 
-                    // TRAINABLE_PARAM_REF inputs are [iterationIndices, ...initializerParams];
+                    // MODEL_PARAM_REF inputs are [iterationIndices, ...initializerParams];
                     // FUNCTION_INVOKE expects just the initializer params. TargetFunction (the
                     // initializer fn) is preserved by the clone.
                     var slots = initNode.FullInputs[""];

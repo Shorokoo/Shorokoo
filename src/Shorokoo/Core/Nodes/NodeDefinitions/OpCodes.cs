@@ -39,10 +39,10 @@ internal static class InternalOpCodes
 
     public const string MODEL_HYPERPARAM = "ShrkModelHyperparam";
 
-    public const string TRAINABLE_PARAM = "#TrainableParam#";
-    public const string TRAINABLE_PARAM_REF = "#TrainableParamRef#";
-    public const string TRAINABLE_PARAM_ID_REF = "#TrainableParamIdRef#";
-    public const string TRAINABLE_PARAM_MODEL_REF = "#TrainableParamModelRef#";
+    public const string MODEL_PARAM = "#ModelParam#";
+    public const string MODEL_PARAM_REF = "#ModelParamRef#";
+    public const string MODEL_PARAM_ID_REF = "#ModelParamIdRef#";
+    public const string MODEL_PARAM_MODEL_REF = "#ModelParamModelRef#";
 
     public const string SEQUENCE_CONCAT = "#SequenceConcat#";
     public const string SEQUENCE_SLICE = "#SequenceSlice#";
@@ -115,7 +115,7 @@ internal static class InternalOpCodes
     public const string SHRK_RNG_KEY_VECTOR = "shrk_RngKeyVector";
 
     /// <summary>
-    /// A feed site's key entity — the param-like counterpart of TRAINABLE_PARAM for runtime
+    /// A feed site's key entity — the param-like counterpart of MODEL_PARAM for runtime
     /// randomness. Created at concretization (one per feed site) carrying the site's structural
     /// identity (site ModelId, realized stream ids, iteration counts); its VALUE — the [N, 2]
     /// int64 key table, one row per grid cell of the site's enumerated iteration space — is

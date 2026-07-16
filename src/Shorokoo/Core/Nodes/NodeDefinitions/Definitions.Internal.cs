@@ -136,7 +136,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("inputModel", "T1", rank: 0)
                 .Output("weightTensor", "T2", rank: "R"),
 
-            Op(TRAINABLE_PARAM)
+            Op(MODEL_PARAM)
                 .Tensor<int64>("T1")
                 .Tensor<AnyLike>("T2", minVariadicCount: 0)
                 .Tensor<AnyLike>("T3")
@@ -150,7 +150,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("initializerParams", "T2")
                 .Output("weightTensor", "T3", rank: "R"),
 
-            Op(TRAINABLE_PARAM_REF)
+            Op(MODEL_PARAM_REF)
                 .Tensor<int64>("T1")
                 .Tensor<AnyLike>("T2", minVariadicCount: 0)
                 .Tensor<AnyLike>("T3")
@@ -165,7 +165,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("initializerParams", "T2")
                 .Output("weightTensor", "T3", rank: "R"),
 
-            Op(TRAINABLE_PARAM_ID_REF)
+            Op(MODEL_PARAM_ID_REF)
                 .Tensor<int64>("T1")
                 .Tensor<AnyLike>("T2", minVariadicCount: 0)
                 .Tensor<AnyLike>("T3")
@@ -179,7 +179,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("initializerParams", "T2")
                 .Output("weightTensor", "T3", rank: "R"),
 
-            Op(TRAINABLE_PARAM_MODEL_REF)
+            Op(MODEL_PARAM_MODEL_REF)
                 .Tensor<IModelVarType>("T1")
                 .Tensor<int64>("T4")
                 .Tensor<AnyLike>("T2", minVariadicCount: 0)

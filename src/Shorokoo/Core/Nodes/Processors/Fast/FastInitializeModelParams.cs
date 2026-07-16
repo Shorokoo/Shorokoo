@@ -19,7 +19,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 {
     /// <summary>
     /// Fast-native port of <c>InitializeModelParams</c>.
-    /// Walks <c>graph</c> for every <c>TRAINABLE_PARAM</c> node, rewrites it
+    /// Walks <c>graph</c> for every <c>MODEL_PARAM</c> node, rewrites it
     /// to a <c>FUNCTION_INVOKE</c> of its initializer <see cref="Function"/> (preserving
     /// the original initializer-param inputs, the output <see cref="FastTensorKey"/>, and
     /// the target function), then runs the resulting graph through
@@ -53,7 +53,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             foreach (var node in workGraph.Nodes)
             {
-                if (node.OpCode != InternalOpCodes.TRAINABLE_PARAM) continue;
+                if (node.OpCode != InternalOpCodes.MODEL_PARAM) continue;
 
                 var dtype = node.Attributes.GetDTypeVal(OnnxOpAttributeNames.ShrkAttrDtype).AssertNotNull();
                 var rank = node.Attributes.GetLongVal(OnnxOpAttributeNames.ShrkAttrRank) ?? -1;
@@ -100,7 +100,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 node.IdentifierTemplate = null;
                 // FullInputs and TargetFunction (the initializer fn) are preserved
                 // unchanged: FUNCTION_INVOKE expects the same variadic input list and
-                // a TargetFunction reference, matching what TRAINABLE_PARAM stored.
+                // a TargetFunction reference, matching what MODEL_PARAM stored.
 
                 var outputKey = node.FullOutputs[""][0]!.Value;
                 collectedModelIds.Add(modelId);

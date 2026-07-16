@@ -230,7 +230,13 @@ namespace Shorokoo.Core.Factory.IR
                     fastGraph.OutputUniqueNames.Add(outputName);
                 }
 
-                Function onnxFunction = new Function(fastGraph, functionType, defaultName: defaultName, friendlyName: friendlyName);
+                Function onnxFunction = new Function(fastGraph, functionType, defaultName: defaultName, friendlyName: friendlyName)
+                {
+                    RngAlgorithm = functionProto.MetadataProps
+                        .FirstOrDefault(x => x.Key == Function.IRRngAlgorithmParamName)?.Value,
+                    RngFunctionKind = functionProto.MetadataProps
+                        .FirstOrDefault(x => x.Key == Function.IRRngFunctionKindParamName)?.Value,
+                };
                 return onnxFunction;
             }
             catch (Function.FunctionNotFoundException)
@@ -716,6 +722,34 @@ namespace Shorokoo.Core.Factory.IR
 
             foreach (var initializer in initializers)
             {
+                // The model's compact RNG key vector rides as a reserved-name initializer —
+                // the file's single carrier representation (the serializer strips the carrier
+                // NodeProto); rebuild the carrier node (SHRK_RNG_KEY_VECTOR) so
+                // TryGetRngKeyVector and key-entity materialization work on the loaded graph.
+                if (initializer.Name == OnnxOpAttributeNames.ShrkRngKeysTensorName)
+                {
+                    var rngAlgorithm = initializer.MetadataProps
+                        .FirstOrDefault(x => x.Key == OnnxOpAttributeNames.ShrkMetaRngAlgorithm)?.Value ?? string.Empty;
+                    var kvDefs = Definitions.NodeDefinitions[InternalOpCodes.SHRK_RNG_KEY_VECTOR].AttributeDefs;
+                    var kvAttrs = OnnxCSharpAttributes.FromCSharpVals(
+                        new Dictionary<string, object?>
+                        {
+                            [OnnxOpAttributeNames.AttrValue] = CreateTensorData(initializer),
+                            [OnnxOpAttributeNames.ShrkAttrRngAlgorithm] = rngAlgorithm,
+                        }, kvDefs);
+                    var kvNodeKey = FastNodeKey.New();
+                    var kvKey = new FastTensorKey(kvNodeKey, 0);
+                    results.Add((initializer, kvKey, new FastNode
+                    {
+                        Key = kvNodeKey,
+                        OpCode = InternalOpCodes.SHRK_RNG_KEY_VECTOR,
+                        Attributes = kvAttrs,
+                        FullOutputs = { [""] = new List<FastTensorKey?> { kvKey } },
+                        FriendlyName = initializer.Name,
+                    }));
+                    continue;
+                }
+
                 var identifierTemplate = initializer.MetadataProps
                     .FirstOrDefault(x => x.Key == ShrkMetaNodeIdentifierTemplate)?.Value;
                 var isTrainableStr = initializer.MetadataProps

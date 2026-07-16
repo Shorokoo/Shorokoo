@@ -16,6 +16,21 @@ namespace Shorokoo.Tests;
 public class ModulesCoverageTests
 {
     [Fact]
+    public void TestStateUpdateSurvivesNestedFirstUseModuleBuild()
+    {
+        // Globals.StateUpdate registers, then the body first-uses StateWipeFreshInit — whose
+        // Function is uncached (it is referenced nowhere else), so its body graph builds
+        // mid-trace. The registered update must survive that nested build: the module graph
+        // carries the STATE_UPDATE_LINK and its outputs are WITH_STATE_DEPS-wrapped. Before the
+        // fix, the nested build's entry-time clear wiped the registration and the wrap was
+        // silently dropped.
+        var graph = (FastComputationGraph)typeof(Modules.StateUpdateSurvivesNestedFirstUseBuild)
+            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        Assert.Contains(graph.Nodes, n => n.OpCode == InternalOpCodes.STATE_UPDATE_LINK);
+        Assert.Contains(graph.Nodes, n => n.OpCode == InternalOpCodes.WITH_STATE_DEPS);
+    }
+
+    [Fact]
     public void TestSimpleAndHyperparamModulesCoverage()
     {
         Assert.True(AutoTest.AdvancedTestGraph<SimplestLayer>(

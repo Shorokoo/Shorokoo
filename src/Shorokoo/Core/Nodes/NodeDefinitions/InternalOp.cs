@@ -323,22 +323,39 @@ internal static partial class InternalOp
     }
 
     /// <summary>
-    /// Creates a tensor filled with random values from a uniform distribution in [low, high).
-    /// Takes shape as a tensor input (dynamic shape support).
-    /// Lowered to ONNX ConstantOfShape + RandomUniformLike before execution.
+    /// A uniform random feed in [low, high) taking its shape as a tensor input (dynamic shape
+    /// support). An id-bearing feed lowers to the keyed deterministic draw under the model's
+    /// RNG identity; a feed without stream identity lowers to ConstantOfShape +
+    /// RandomUniformLike.
     /// </summary>
-    public static Variable RandomUniform(Variable shape, float? high = null, float? low = null, float? seed = null)
-        => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_UNIFORM, [shape], [
-            (AttrHigh, high), (AttrLow, low), (AttrSeed, seed)]);
+    public static Variable RandomUniform(Variable shape, float? high = null, float? low = null, Variable? drawBase = null, Variable? iterationIndices = null)
+        => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_UNIFORM, [shape, drawBase, iterationIndices], [
+            (AttrHigh, high), (AttrLow, low),
+            (ShrkAttrLocalModelId, (long[])[])]);
 
     /// <summary>
-    /// Creates a tensor filled with random values from a normal distribution.
-    /// Takes shape as a tensor input (dynamic shape support).
-    /// Lowered to ONNX ConstantOfShape + RandomNormalLike before execution.
+    /// A normal random feed N(mean, scale) taking its shape as a tensor input; see
+    /// <see cref="RandomUniform(Variable, float?, float?, Variable?, Variable?)"/>.
     /// </summary>
-    public static Variable RandomNormal(Variable shape, float? mean = null, float? scale = null, float? seed = null)
-        => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_NORMAL, [shape], [
-            (AttrMean, mean), (AttrScale, scale), (AttrSeed, seed)]);
+    public static Variable RandomNormal(Variable shape, float? mean = null, float? scale = null, Variable? drawBase = null, Variable? iterationIndices = null)
+        => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_NORMAL, [shape, drawBase, iterationIndices], [
+            (AttrMean, mean), (AttrScale, scale),
+            (ShrkAttrLocalModelId, (long[])[])]);
+
+    /// <summary>Index-based RNG key split under the named algorithm: child = Bijection(key, counter: index).</summary>
+    public static Variable RngSplit(Variable key, Variable index, string algorithm)
+        => NodeBuilder.BuildNodeSingleOut(SHRK_RNG_SPLIT, [key, index], [
+            (ShrkAttrRngAlgorithm, algorithm)]);
+
+    /// <summary>Keyed deterministic uniform draw U(low, high) of dynamic shape under the named algorithm.</summary>
+    public static Variable RngUniform(Variable key, Variable drawBase, Variable shape, Variable low, Variable high, string algorithm)
+        => NodeBuilder.BuildNodeSingleOut(SHRK_RNG_UNIFORM, [key, drawBase, shape, low, high], [
+            (ShrkAttrRngAlgorithm, algorithm)]);
+
+    /// <summary>Keyed deterministic normal draw N(mean, scale) of dynamic shape under the named algorithm.</summary>
+    public static Variable RngNormal(Variable key, Variable drawBase, Variable shape, Variable mean, Variable scale, string algorithm)
+        => NodeBuilder.BuildNodeSingleOut(SHRK_RNG_NORMAL, [key, drawBase, shape, mean, scale], [
+            (ShrkAttrRngAlgorithm, algorithm)]);
 
     /// <summary>
     /// Conv variant whose geometry (pads, strides, dilations, kernel_shape, group) is supplied

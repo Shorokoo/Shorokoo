@@ -673,6 +673,27 @@ namespace Shorokoo
         /// </summary>
         internal static ImmutableList<Scalar<int64>> IterationIndices => LooperStack.Select(x => x.GetLoopIndexVariable()).ToImmutableList();
 
+        /// <summary>
+        /// Whether trace-time actions that must fire <b>exactly once per source occurrence</b>
+        /// (e.g. <see cref="Shorokoo.Rng.Pin(object[])"/>) should record right now. A loop body is
+        /// executed once per construction pass — first (track), second (identify loop vars), third
+        /// (build the real body), fourth (expose outputs) — so a naive record inside a loop body
+        /// would fire up to four times, three of them against throwaway nodes. Only the pass that
+        /// builds the surviving body nodes (the active looper's third pass) is canonical; at module
+        /// level (no active loop) recording is always canonical. Mirrors the active-looper selection
+        /// in <see cref="ProcessNode"/> so the "active" scope — not merely the innermost — is tested.
+        /// </summary>
+        internal static bool InCanonicalRecordingScope
+        {
+            get
+            {
+                if (LooperStack.Count == 0) return true;
+                var activeIdx = LooperStack.FindIndex(x => x.CurrentPass == 0) - 1;
+                if (activeIdx < 0) activeIdx = LooperStack.Count - 1;
+                return LooperStack[activeIdx].CurrentPass == 3;
+            }
+        }
+
         internal static void PushLooperContext()
         {
             LooperContexts.Push(LooperStack);

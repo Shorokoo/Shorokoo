@@ -10,13 +10,46 @@ using static Shorokoo.Globals;
 namespace Shorokoo.Modules.Layers;
 
 /// <summary>
-/// Dropout layer wrapping the ONNX Dropout op, whose <c>ratio</c> and
-/// <c>training_mode</c> are runtime tensor inputs — so both map directly onto
-/// hyperparameters. In training mode each element is zeroed with probability
-/// <c>ratio</c> and survivors are scaled by <c>1/(1-ratio)</c>;
-/// in eval mode the layer is the identity. The mask seed is fixed (42) so
-/// builds are deterministic. The gradient path through a wired training flag
-/// uses the forward mask (plumbed automatically by autograd).
+/// Builds Dropout keep/scale masks from a plain uniform draw (<see cref="Globals.RandomUniform"/>)
+/// instead of the ONNX <c>Dropout</c> op. The draw site is id-bearing, so the mask rides the
+/// keyed deterministic RNG — its stream key folds from the runtime master along this site's
+/// ModelId path under the model's RNG identity (the bound <see cref="RngConfig"/>, or the
+/// default deterministic identity when none is bound), giving every dropout layer instance
+/// its own decorrelated, reproducible, backend-independent stream. One draw per mask element;
+/// survivors scale to <c>1/(1−ratio)</c>, drops to 0; <c>ratio == 1</c> is the exact all-zero
+/// mask (never NaN); eval (<c>training = false</c>) is all-ones (identity).
+/// </summary>
+internal static class DropoutMasking
+{
+    public static Tensor<float32> Mask(Vector<int64> maskShape, Scalar<float32> ratio, Scalar<bit> training)
+    {
+        // Per-step mask freshness needs nothing here: the RNG system owns the drawBase.
+        // Concretization injects one model-global execution counter (state, +1 per step
+        // under the training rig; frozen at 0 in one-shot inference) and wires it into
+        // every feed — see FastInjectRngDrawCounter. The mask's stream is keyed by this
+        // site's ModelId under the model's RNG identity (RngConfig.Default when none is
+        // bound) — there is no per-site seed.
+        var u = RandomUniform(maskShape, low: 0f, high: 1f);
+
+        var keep = (u >= ratio).Cast<float32>();                        // 1 if kept (prob 1−ratio), else 0
+        // ratio == 1 drops everything: keep is all-zero (u < 1 always), but the survivor
+        // rescale keep/(1−ratio) would be 0/0 = NaN — gate it to the exact all-zero mask
+        // instead (PyTorch's p = 1 behavior, and what the ONNX Dropout op produced before
+        // the masks moved in-graph).
+        var scaled = (ratio >= Scalar(1f)).IfElse(
+            TensorFill(maskShape, 0.0f),
+            keep / (Scalar(1f) - ratio));                               // survivors → 1/(1−ratio)
+        return training.IfElse(scaled, TensorFill(maskShape, 1.0f));    // eval → all ones (identity)
+    }
+}
+
+/// <summary>
+/// Elementwise dropout built on an in-graph keyed mask (<see cref="DropoutMasking"/>), with
+/// <c>ratio</c> and <c>training</c> as hyperparameters. In training mode each element is
+/// zeroed with probability <c>ratio</c> and survivors are scaled by <c>1/(1-ratio)</c>
+/// (<c>ratio == 1</c> zeros everything, PyTorch's <c>p = 1</c>); in eval mode the layer is
+/// the identity. The mask is deterministic under the model's RNG identity. The gradient path
+/// through a wired training flag uses the forward mask (plumbed automatically by autograd).
 /// </summary>
 [Module]
 public partial class Dropout
@@ -26,8 +59,7 @@ public partial class Dropout
         [Hyper] Scalar<float32> ratio,
         [Hyper] Scalar<bit> training)
     {
-        var (y, _) = OnnxOp.Dropout(x, ratio, training, seed: 42L);
-        return (Tensor<float32>)y;
+        return x * DropoutMasking.Mask(x.ShapeTensor(), ratio, training);
     }
 }
 
@@ -39,8 +71,8 @@ public partial class Dropout
 /// pair and broadcast over <b>every</b> spatial position, so in training mode an
 /// entire feature map <c>x[n, c, …]</c> is zeroed or rescaled <i>as a unit</i>
 /// (survivors scaled by <c>1/(1-ratio)</c>, inverted dropout); in eval mode
-/// (<c>training = false</c>) the layer is the exact identity. The mask seed is fixed
-/// (42) so builds are deterministic. Dropping whole channels (rather than scattered
+/// (<c>training = false</c>) the layer is the exact identity. The mask is deterministic
+/// under the model's RNG identity. Dropping whole channels (rather than scattered
 /// elements) actually regularizes strongly-correlated conv feature maps, which plain
 /// dropout fails to do. The rank is read in-graph, so one module covers the 1-D
 /// (<c>[N,C,L]</c>), 2-D (<c>[N,C,H,W]</c>) and 3-D (<c>[N,C,D,H,W]</c>) cases; the
@@ -67,13 +99,9 @@ public partial class SpatialDropout
         Vector<int64> maskShape = [n, c];
         maskShape = maskShape.Concat(VectorFill(rank - 2L, 1L));
 
-        // Dropout on a ones tensor of that shape: survivors -> 1/(1-ratio), drops -> 0,
-        // one draw per (sample, channel). Eval (training=false) => identity => all ones.
-        var ones = TensorFill(maskShape, 1.0f);
-        var (mask, _) = OnnxOp.Dropout(ones, ratio, training, seed: 42L);
-
-        // Broadcast the per-channel mask over the spatial dims and apply.
-        return x * (Tensor<float32>)mask;
+        // Mask of that shape (survivors -> 1/(1-ratio), drops -> 0), one draw per (sample,
+        // channel); eval (training=false) => identity => all ones. Broadcast over spatial dims.
+        return x * DropoutMasking.Mask(maskShape, ratio, training);
     }
 }
 
@@ -134,7 +162,7 @@ public partial class Dropout3d
 /// preservation holds <b>in expectation</b> over the mask (a population property), not as
 /// a per-realization identity. In eval mode (<c>training = false</c>) the layer is the
 /// <b>exact</b> identity — gated explicitly, because the affine is not the identity and the
-/// eval mask returns all ones. The mask seed is fixed (42) so builds are deterministic;
+/// eval mask returns all ones. The mask is deterministic under the model's RNG identity;
 /// <c>α'</c> is a baked literal while <c>a</c>, <c>b</c> are computed in-graph from the
 /// runtime <c>ratio</c>.
 /// </summary>
@@ -155,12 +183,11 @@ public partial class AlphaDropout
         Scalar<float32> a = (q + alphaP * alphaP * q * ratio).Sqrt().Reciprocal();
         Scalar<float32> b = -a * (ratio * alphaP);
 
-        // RAW 0/1 keep mask, elementwise (full input shape). OnnxOp.Dropout rescales
+        // RAW 0/1 keep mask, elementwise (full input shape). The in-graph mask rescales
         // survivors to 1/(1−p) and drops to 0; multiplying back by q recovers d ∈ {0,1}.
         // (Eval: r = 1 everywhere ⇒ d = q, unused — the training gate restores identity.)
-        var ones = TensorFill(x.ShapeTensor(), 1.0f);
-        var (r, _) = OnnxOp.Dropout(ones, ratio, training, seed: 42L);
-        Tensor<float32> d = (Tensor<float32>)r * q;
+        var r = DropoutMasking.Mask(x.ShapeTensor(), ratio, training);
+        Tensor<float32> d = r * q;
 
         // Kept → x, dropped → α'; then the affine renorm a·x' + b.
         Tensor<float32> xPrime = x * d + alphaP * (1f - d);
@@ -185,7 +212,7 @@ public partial class AlphaDropout
 /// spatial axis) it degenerates to elementwise <see cref="AlphaDropout"/>, which is the
 /// correct behavior. The moment preservation holds <b>in expectation</b> over the mask. In
 /// eval mode (<c>training = false</c>) the layer is the <b>exact</b> identity (gated
-/// explicitly). The mask seed is fixed (42) so builds are deterministic; <c>α'</c> is a
+/// explicitly). The mask is deterministic under the model's RNG identity; <c>α'</c> is a
 /// baked literal while <c>a</c>, <c>b</c> are computed in-graph from the runtime
 /// <c>ratio</c>.
 /// </summary>
@@ -216,12 +243,11 @@ public partial class FeatureAlphaDropout
         maskShape = maskShape.Concat(VectorFill(rank - 2L, 1L));
 
         // RAW 0/1 keep mask, one draw per (sample, channel), broadcast over the spatial
-        // axes. OnnxOp.Dropout rescales survivors to 1/(1−p) and drops to 0; multiplying
+        // axes. The in-graph mask rescales survivors to 1/(1−p) and drops to 0; multiplying
         // back by q recovers d ∈ {0,1}. (Eval: r = 1 ⇒ d = q, unused — the gate restores
         // identity.)
-        var ones = TensorFill(maskShape, 1.0f);
-        var (r, _) = OnnxOp.Dropout(ones, ratio, training, seed: 42L);
-        Tensor<float32> d = (Tensor<float32>)r * q;
+        var r = DropoutMasking.Mask(maskShape, ratio, training);
+        Tensor<float32> d = r * q;
 
         // Kept → x, dropped → α'; then the affine renorm a·x' + b. The [N,C,1,…,1] mask d
         // broadcasts over the spatial axes in x·d exactly as a spatial-dropout mask does.

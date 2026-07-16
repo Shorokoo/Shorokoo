@@ -87,6 +87,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             foreach (var outputKey in graph.Outputs)
                 EnqueueTensor(outputKey);
 
+            // The model's compact RNG key vector is intentional graph-carried metadata with
+            // no consumers — reachability does not apply to it; keep it alive explicitly.
+            foreach (var node in graph.Nodes)
+                if (node.OpCode == InternalOpCodes.SHRK_RNG_KEY_VECTOR && reachable.Add(node.Key))
+                    worklist.Enqueue(node.Key);
+
             // Graph inputs must keep their producer (MODEL_*INPUT) nodes alive even
             // if no path from any output reaches them — otherwise graph.Inputs ends
             // up referencing a tensor produced by a node that no longer exists.
@@ -246,7 +252,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastApplyIdentifierTemplates
     {
-        public static void Process(FastComputationGraph graph)
+        public static void Process(
+            FastComputationGraph graph,
+            IReadOnlyList<FastNodeKey>? pinnedNodeKeys = null,
+            IReadOnlyList<(int slot, FastNodeKey key)>? slotPinnedNodeKeys = null)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -255,23 +264,166 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             var tensorInfos = FastTensorInfoProcessor.BuildTensorInfoLookup(graph);
 
-            var idPickerEnumerator = FindNextSpot().GetEnumerator();
             var loopModelIds = new Dictionary<FastTensorKey, (ModelId loopModelId, IEnumerator<int> loopContentsModelIdPicker)>();
             var loopDedupeIdsMap = new Dictionary<FastTensorKey, int>();
             var moduleNameDedupeIdMap = new Dictionary<string, int>();
 
-            foreach (var fastNode in graph.Nodes)
-            {
-                if (!fastNode.Attributes.IsAttributeDefined(OnnxOpAttributeNames.ShrkAttrLocalModelId))
-                    continue;
+            // All-or-nothing invariant: every module body graph gets ALL its local ModelIds
+            // assigned right here at body build, so a graph arriving later (concretization,
+            // training assembly) is either fully assigned — this pass is a no-op — or a
+            // hand-built top-level graph with NO ids yet, which gets assigned now. A mixed
+            // graph has no coherent numbering and indicates a broken producer: fail loudly
+            // rather than guess.
+            var orderedTargets = graph.Nodes
+                .Where(n => n.Attributes.IsAttributeDefined(OnnxOpAttributeNames.ShrkAttrLocalModelId))
+                .ToList();
+            int assignedCount = orderedTargets.Count(
+                n => n.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId) is { Length: > 0 });
+            if (assignedCount == orderedTargets.Count)
+                return;   // fully assigned (module graph / re-run): nothing to do
+            if (assignedCount != 0)
+                throw new InvalidOperationException(
+                    "FastApplyIdentifierTemplates: graph has a MIX of assigned and unassigned local " +
+                    $"ModelIds ({assignedCount} of {orderedTargets.Count} id-bearing nodes assigned). " +
+                    "Module body graphs are fully assigned at build; a hand-built top-level graph must " +
+                    "be fully unassigned. Mixing (e.g. appending raw id-bearing nodes — Model()/Init()/" +
+                    "Globals.Random* calls — onto an already-built graph) has no coherent numbering.");
 
-                Debug.Assert(fastNode.OpCode == InternalOpCodes.TRAINABLE_PARAM_REF ||
+            // Rng.Pin: a pinned handle's OwningNode may sit behind Identity wrappers — walk
+            // back to the id-bearing producer. Failing to reach one is a build error (the
+            // pin would be silently inactive).
+            FastNode ResolvePinnedNode(FastNodeKey pinKey, string form)
+            {
+                var key = pinKey;
+                FastNode? candidate = null;
+                for (int hops = 0; hops < 16 && nodeByKey.TryGetValue(key, out candidate); hops++)
+                {
+                    if (candidate.Attributes.IsAttributeDefined(OnnxOpAttributeNames.ShrkAttrLocalModelId))
+                        break;
+                    if (candidate.OpCode == OpCodes.IDENTITY && candidate.Inputs[0] is { } up)
+                    { key = up.FastNodeKey; candidate = null; continue; }
+                    candidate = null;
+                    break;
+                }
+                return candidate ?? throw new InvalidOperationException(
+                    $"Rng.Pin ({form}): a pinned item does not lead to an id-bearing node " +
+                    "(a Model(...) result, an Init(...) parameter, or a Globals.Random* feed). " +
+                    "Graph inputs and derived values have no RNG stream to pin.");
+            }
+
+            // A pin belongs to the SCOPE of its node — its loop-iteration-index path. A
+            // module-level pin lands in the top-level scope; a pin written inside a loop body
+            // lands in that loop's scope. A pin reshapes only the local slots of its own
+            // scope, so the loop's own (top-level) slot is never disturbed by pinning its
+            // interior. (Loop bodies are traced multiple times during construction; Rng.Pin
+            // records only in the canonical pass, so each pin resolves to a surviving node.)
+            var scopeOf = new Dictionary<FastNode, ImmutableArray<FastTensorKey>>();
+            ImmutableArray<FastTensorKey> ScopeOf(FastNode n)
+            {
+                if (!scopeOf.TryGetValue(n, out var s)) scopeOf[n] = s = GetIterationIndices(n, nodeByKey);
+                return s;
+            }
+
+            // Positional pins grouped by scope, in pin order (deduped within a scope).
+            var positionalByScope = new Dictionary<ImmutableArray<FastTensorKey>, List<FastNode>>(ScopeSeqComparer.Instance);
+            if (pinnedNodeKeys is { Count: > 0 })
+                foreach (var pinKey in pinnedNodeKeys)
+                {
+                    var node = ResolvePinnedNode(pinKey, "positional");
+                    var scope = ScopeOf(node);
+                    if (!positionalByScope.TryGetValue(scope, out var list))
+                        positionalByScope[scope] = list = new List<FastNode>();
+                    if (!list.Contains(node)) list.Add(node);
+                }
+
+            // Sparse pins: each pinned node takes an explicit LOCAL slot in its own scope; the
+            // scope's picker reserves those slots so unpinned members fill the gaps.
+            var sparseLocalSlotOf = new Dictionary<FastNode, int>();
+            var reservedByScope = new Dictionary<ImmutableArray<FastTensorKey>, HashSet<int>>(ScopeSeqComparer.Instance);
+            if (slotPinnedNodeKeys is { Count: > 0 })
+                foreach (var (slot, pinKey) in slotPinnedNodeKeys)
+                {
+                    var node = ResolvePinnedNode(pinKey, "sparse");
+                    if (sparseLocalSlotOf.TryGetValue(node, out var prior) && prior != slot)
+                        throw new InvalidOperationException(
+                            $"Rng.Pin (sparse): the same item is pinned to slots [{prior}] and [{slot}].");
+                    sparseLocalSlotOf[node] = slot;
+                    var scope = ScopeOf(node);
+                    if (!reservedByScope.TryGetValue(scope, out var reserved))
+                        reservedByScope[scope] = reserved = new HashSet<int>();
+                    if (!reserved.Add(slot))
+                        throw new InvalidOperationException(
+                            $"Rng.Pin (sparse): slot [{slot}] is pinned more than once in one scope.");
+                }
+
+            // The two pin forms cannot be mixed within ONE scope: the sparse reservations would
+            // shift the positional pins off the first id slots (positional pins take the first
+            // UNRESERVED slots), silently re-keying the very streams the positional pin froze.
+            // Scopes are independent local id spaces, so different scopes of the same module may
+            // freely use different forms (see SiblingNestedLoopsPin coverage).
+            foreach (var scope in positionalByScope.Keys)
+                if (reservedByScope.ContainsKey(scope))
+                    throw new InvalidOperationException(
+                        "Rng.Pin: positional and sparse pins cannot be mixed within one scope — " +
+                        (scope.IsEmpty ? "the module body" : $"a loop body {scope.Length} level(s) deep") +
+                        " has both. The sparse slot reservations would shift the positional pins off " +
+                        "the first id slots, silently re-keying the streams the pin exists to freeze. " +
+                        "Use one form per scope: sparse pins to fix some consumers' slots and leave " +
+                        "the rest untouched, or one positional pin listing ALL the scope's consumers.");
+
+            // Reorder so that within each scope, positionally-pinned members lead (in pin
+            // order), then the scope's remaining consumers — unpinned members and nested loops
+            // — in node order, recursively. Because reordering stays inside each contiguous
+            // scope block, every loop keeps its own top-level slot.
+            if (positionalByScope.Count > 0)
+            {
+                var indexOf = new Dictionary<FastNode, int>();
+                for (int i = 0; i < orderedTargets.Count; i++) indexOf[orderedTargets[i]] = i;
+                orderedTargets = ReorderByScope(
+                    orderedTargets, ImmutableArray<FastTensorKey>.Empty, ScopeOf, positionalByScope, indexOf);
+            }
+
+            // The top-level picker skips top-level sparse slots; each loop's sub-picker skips
+            // that loop's sparse slots (created inside AllocateLoopModelIds from reservedByScope).
+            var topLevelReserved = reservedByScope.TryGetValue(ImmutableArray<FastTensorKey>.Empty, out var tlr) ? tlr : null;
+            var idPickerEnumerator = FindNextSpot(topLevelReserved).GetEnumerator();
+
+            foreach (var fastNode in orderedTargets)
+            {
+
+                bool isRngFeed = fastNode.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
+                                 fastNode.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL;
+                Debug.Assert(isRngFeed ||
+                             fastNode.OpCode == InternalOpCodes.TRAINABLE_PARAM_REF ||
                              fastNode.OpCode == InternalOpCodes.MODULE_SET_HYPERPARAMS);
+
+                if (isRngFeed)
+                {
+                    // Runtime RNG feed sites share the module's id address space (so their
+                    // stream keys ride the same ModelId tree as params/sub-modules) but carry
+                    // no identifier template. Like params, they thread an iteration-indices
+                    // input, so a feed inside a loop takes a slot under the loop's own id
+                    // space (with the -1 iteration placeholder) — its per-iteration streams
+                    // are enumerated at concretization and the runtime iteration index selects
+                    // the stream's key-table row (see FastLowerRandomOps).
+                    var feedIterationIndices = ScopeOf(fastNode);
+                    int? feedLocalSlot = sparseLocalSlotOf.TryGetValue(fastNode, out var fs) ? fs : null;
+                    var feedModelId = AllocateLoopModelIds(
+                        feedIterationIndices, idPickerEnumerator, loopModelIds, feedLocalSlot, reservedByScope);
+                    var dctFeedAttributes = fastNode.Attributes.GetAttributeVals().ToDictionary();
+                    dctFeedAttributes[OnnxOpAttributeNames.ShrkAttrLocalModelId] =
+                        feedModelId.Vals.Select(x => (long)x).ToArray();
+                    fastNode.Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                        dctFeedAttributes, fastNode.Attributes.AttributeDefs);
+                    continue;
+                }
 
                 var toIdentifyKey = fastNode.Outputs[0]!.Value;
 
-                var loopIterationIndices = GetIterationIndices(fastNode, nodeByKey);
-                var modelIdToUse = AllocateLoopModelIds(loopIterationIndices, idPickerEnumerator, loopModelIds);
+                var loopIterationIndices = ScopeOf(fastNode);
+                int? localSlot = sparseLocalSlotOf.TryGetValue(fastNode, out var ls) ? ls : null;
+                ModelId modelIdToUse = AllocateLoopModelIds(
+                    loopIterationIndices, idPickerEnumerator, loopModelIds, localSlot, reservedByScope);
 
                 // Update model ID in attributes.
                 var dctRebuiltAttributes = fastNode.Attributes.GetAttributeVals().ToDictionary();
@@ -330,11 +482,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 inputIndex = 1;
             else if (node.OpCode == InternalOpCodes.TRAINABLE_PARAM_REF)
                 inputIndex = 0;
+            else if (node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
+                     node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL)
+                inputIndex = 2;   // [shape, drawBase, iterationIndices]
             else
                 throw new InvalidOperationException(
                     $"FastApplyIdentifierTemplates: unexpected OpCode '{node.OpCode}'");
 
             var inputs = node.Inputs;
+            if (inputs.Count <= inputIndex)
+                return [];   // node built by an older path with no iteration-indices input
             var iterationIndicesKey = inputs[inputIndex];
             if (iterationIndicesKey is null || iterationIndicesKey.Value.IsEmpty)
                 return [];
@@ -377,10 +534,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         private static ModelId AllocateLoopModelIds(
             ImmutableArray<FastTensorKey> iterationIndices,
             IEnumerator<int> globalScopeIdPicker,
-            Dictionary<FastTensorKey, (ModelId loopModelId, IEnumerator<int> loopContentsModelIdPicker)> loopModelIds)
+            Dictionary<FastTensorKey, (ModelId loopModelId, IEnumerator<int> loopContentsModelIdPicker)> loopModelIds,
+            int? explicitLocalSlot,
+            Dictionary<ImmutableArray<FastTensorKey>, HashSet<int>> reservedByScope)
         {
             if (iterationIndices.Length == 0)
             {
+                // A top-level sparse pin takes its explicit slot; the global picker (created
+                // with the top-level reserved set) skips it for the unpinned members.
+                if (explicitLocalSlot is int topSlot) return new ModelId(topSlot);
                 globalScopeIdPicker.MoveNext();
                 return new ModelId(globalScopeIdPicker.Current);
             }
@@ -388,8 +550,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var parentLoopModelIdPicker = globalScopeIdPicker;
             var parentLoopModelId = new ModelId((int[])[]);
 
-            foreach (var iterationIndex in iterationIndices)
+            for (int level = 0; level < iterationIndices.Length; level++)
             {
+                var iterationIndex = iterationIndices[level];
                 if (loopModelIds.TryGetValue(iterationIndex, out var entry))
                 {
                     (parentLoopModelId, parentLoopModelIdPicker) = entry;
@@ -399,7 +562,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     parentLoopModelIdPicker.MoveNext();
                     var loopModelId = parentLoopModelIdPicker.Current;
                     var currentLoopModelId = new ModelId(parentLoopModelId, new ModelId(loopModelId, -1));
-                    var currentLoopModelIdPicker = FindNextSpot().GetEnumerator();
+                    // This loop's sub-picker skips the local slots pinned inside it (sparse).
+                    var scopePrefix = ImmutableArray.CreateRange(iterationIndices.Take(level + 1));
+                    var reserved = reservedByScope.TryGetValue(scopePrefix, out var r) ? r : null;
+                    var currentLoopModelIdPicker = FindNextSpot(reserved).GetEnumerator();
 
                     loopModelIds[iterationIndex] = (currentLoopModelId, currentLoopModelIdPicker);
 
@@ -408,14 +574,87 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
             }
 
+            if (explicitLocalSlot is int leafSlot) return new ModelId(parentLoopModelId, new ModelId(leafSlot));
             parentLoopModelIdPicker.MoveNext();
             return new ModelId(parentLoopModelId, new ModelId(parentLoopModelIdPicker.Current));
         }
 
-        private static IEnumerable<int> FindNextSpot()
+        private static IEnumerable<int> FindNextSpot(IReadOnlySet<int>? reservedSlots = null)
         {
             for (int spot = 1; ; spot++)
-                yield return spot;
+                if (reservedSlots is null || !reservedSlots.Contains(spot))
+                    yield return spot;
+        }
+
+        /// <summary>Value-equality comparer for a scope path (a sequence of loop iteration-index keys).</summary>
+        private sealed class ScopeSeqComparer : IEqualityComparer<ImmutableArray<FastTensorKey>>
+        {
+            public static readonly ScopeSeqComparer Instance = new();
+            public bool Equals(ImmutableArray<FastTensorKey> a, ImmutableArray<FastTensorKey> b) => a.SequenceEqual(b);
+            public int GetHashCode(ImmutableArray<FastTensorKey> a)
+            {
+                var h = new HashCode();
+                foreach (var k in a) h.Add(k);
+                return h.ToHashCode();
+            }
+        }
+
+        private static bool ScopeStartsWith(ImmutableArray<FastTensorKey> scope, ImmutableArray<FastTensorKey> prefix)
+        {
+            if (scope.Length < prefix.Length) return false;
+            for (int i = 0; i < prefix.Length; i++)
+                if (!scope[i].Equals(prefix[i])) return false;
+            return true;
+        }
+
+        /// <summary>
+        /// Recursively reorders id-bearing targets so that within each scope, positionally-pinned
+        /// members come first (in pin order), then the scope's other consumers — unpinned direct
+        /// members and nested-loop sub-scopes — in original node order. Reordering never crosses a
+        /// scope boundary, so every loop's own (parent-scope) slot is preserved.
+        /// </summary>
+        private static List<FastNode> ReorderByScope(
+            List<FastNode> targets,
+            ImmutableArray<FastTensorKey> scopePath,
+            Func<FastNode, ImmutableArray<FastTensorKey>> scopeOf,
+            Dictionary<ImmutableArray<FastTensorKey>, List<FastNode>> positionalByScope,
+            Dictionary<FastNode, int> indexOf)
+        {
+            // Positionally-pinned direct members of this scope, in pin order.
+            var pinned = positionalByScope.TryGetValue(scopePath, out var p)
+                ? p.Where(n => ScopeSeqComparer.Instance.Equals(scopeOf(n), scopePath)).ToList()
+                : new List<FastNode>();
+            var pinnedSet = new HashSet<FastNode>(pinned);
+
+            // The immediate child scopes present under this scope (one level deeper), taken as
+            // the distinct (scopePath + 1) prefixes of any deeper target — so an empty
+            // intermediate loop (only a nested loop inside) is still discovered.
+            var childScopes = targets
+                .Select(scopeOf)
+                .Where(s => s.Length > scopePath.Length && ScopeStartsWith(s, scopePath))
+                .Select(s => ImmutableArray.CreateRange(s.Take(scopePath.Length + 1)))
+                .Distinct(ScopeSeqComparer.Instance)
+                .ToList();
+
+            // Remaining consumers (unpinned direct members + child scopes) by first-appearance.
+            var consumers = new List<(int idx, FastNode? direct, ImmutableArray<FastTensorKey> child)>();
+            foreach (var n in targets)
+                if (ScopeSeqComparer.Instance.Equals(scopeOf(n), scopePath) && !pinnedSet.Contains(n))
+                    consumers.Add((indexOf[n], n, default));
+            foreach (var cs in childScopes)
+            {
+                int firstIdx = targets.Where(n => ScopeStartsWith(scopeOf(n), cs)).Min(n => indexOf[n]);
+                consumers.Add((firstIdx, null, cs));
+            }
+            consumers.Sort((x, y) => x.idx.CompareTo(y.idx));
+
+            var result = new List<FastNode>(pinned);
+            foreach (var (_, direct, child) in consumers)
+            {
+                if (direct is not null) result.Add(direct);
+                else result.AddRange(ReorderByScope(targets, child, scopeOf, positionalByScope, indexOf));
+            }
+            return result;
         }
     }
 
@@ -455,6 +694,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 bool isModuleCall = fastNode.OpCode == InternalOpCodes.MODEL_INVOKE;
 
                 if (!isFunction && !isModuleCall)
+                {
+                    newNodes.Add(fastNode);
+                    continue;
+                }
+
+                // RNG algorithm functions are deliberately NEVER inlined: they export as ONNX
+                // local FunctionProtos (tagged with algorithm/kind metadata) so a model's
+                // randomness stays identifiable and self-contained. See RngAlgorithms.
+                if (isFunction && fastNode.TargetFunction?.RngFunctionKind is not null)
                 {
                     newNodes.Add(fastNode);
                     continue;
@@ -680,7 +928,33 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 var node = subGraph.Nodes[i];
 
-                if (node.OpCode == InternalOpCodes.TRAINABLE_PARAM_REF)
+                if (node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
+                    node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL)
+                {
+                    // Runtime RNG feed site: prepend the parent path to its ModelId so its
+                    // stream key stays unique per call site (same-object reuse shares the
+                    // parent id, hence the stream), and combine iteration indices like a
+                    // param ref — a feed inside a module called from a loop needs the call
+                    // site's iteration scalars to realize the -1 slots the parent id brings.
+                    // Feed inputs: [shape, drawBase, iterationIndices].
+                    var childFeedIterKey = node.Inputs.Count > 2 ? node.Inputs[2] : null;
+                    var combinedFeedIterKey = CombineIterationIndices(
+                        parentIterIndicesKey, childFeedIterKey,
+                        subGraph, mainGraph, subNodeByKey, nodesToInsert, i);
+
+                    var dctFeedAttributes = node.Attributes.GetAttributeVals().ToDictionary();
+                    var feedIdVals = (long[])dctFeedAttributes[OnnxOpAttributeNames.ShrkAttrLocalModelId]!;
+                    var combinedFeedId = new ModelId(parentModelId, ModelId.FromLongVals(feedIdVals));
+                    dctFeedAttributes[OnnxOpAttributeNames.ShrkAttrLocalModelId] =
+                        combinedFeedId.Vals.Select(x => (long)x).ToArray();
+                    node.Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                        dctFeedAttributes, node.Attributes.AttributeDefs);
+
+                    var feedInputs = node.FullInputs[""];
+                    while (feedInputs.Count < 3) feedInputs.Add(null);
+                    feedInputs[2] = combinedFeedIterKey;
+                }
+                else if (node.OpCode == InternalOpCodes.TRAINABLE_PARAM_REF)
                 {
                     // TRAINABLE_PARAM_REF inputs: [iterationIndices, ...initializerParams]
                     var childIterIndicesKey = node.Inputs[0];
@@ -2368,6 +2642,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     "FastConvertTrainableParamIdRefToTrainableParam: QEE could not resolve all " +
                     "TRAINABLE_PARAM_ID_REF model IDs (integer data unavailable).");
 
+            // Runtime random feeds ride the same QEE evaluation: realize each feed's stream ids
+            // (the site id with every -1 iteration slot filled per observed loop iteration) so
+            // the stream report is static and every stream is addressable by RngConfig.Override.
+            RealizeRngFeedStreams(graph, store);
+
             if (candidateModelIdInfos.IsEmpty) return;
 
             // Liveness filter: ExtractModelIdInfosFromStore returns every model ID a
@@ -2816,8 +3095,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (!store.TryGetValue(inputs[0]!.Value, out var modelIdRaw)) continue;
                 if (modelIdRaw is not RuntimeTensor modelIdRt) continue;
 
-                var modelIdIterations = CollectAllIterations(modelIdRt);
-
                 // Gather all iterations for each initializer param (inputs[2+]).
                 var initParamIterations = new List<List<RuntimeTensor?>>();
                 for (int i = 2; i < inputs.Count; i++)
@@ -2831,15 +3108,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         CollectAllIterations(paramRaw is RuntimeTensor prt ? prt : null));
                 }
 
-                for (int iterIdx = 0; iterIdx < modelIdIterations.Count; iterIdx++)
+                foreach (var (iterIdx, filteredId) in EnumerateIterationIntVectors(modelIdRt))
                 {
-                    var modelIdIter = modelIdIterations[iterIdx];
-                    if (modelIdIter?.IntData is not { } idData) continue;
-
-                    var filteredId = idData.Where(x => x != -2).ToArray();
                     if (filteredId.Length == 0) continue;
                     var modelId = ModelId.FromLongVals(filteredId);
-                    if (result.ContainsKey(modelId)) continue;
 
                     var paramValues = ImmutableArray.CreateBuilder<TensorData>(initParamIterations.Count);
                     bool allAvailable = true;
@@ -2856,6 +3128,20 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     }
                     if (!allAvailable) continue;
 
+                    // Prefer the richest definition for a given model id: a bare reference
+                    // (e.g. IModel.GetTrainableParam, which carries no initializer inputs) must not
+                    // clobber the real parameter definition that supplies the shape + initializer.
+                    // Every real definition — trainable or updateable state — takes a shape input as
+                    // its first initializer input, so a real definition always has >= 1 param value
+                    // while a bare reference always has 0; the >= keeps the real definition on top
+                    // regardless of node order (0 >= 1 is false, so a later real definition overwrites
+                    // an earlier bare reference, and an earlier real definition survives a later bare
+                    // reference). Two id-bearing nodes therefore can never tie a real definition
+                    // against a bare reference at the same length.
+                    if (result.TryGetValue(modelId, out var existing)
+                        && existing.TrainableParamInputParamValues.Length >= paramValues.Count)
+                        continue;
+
                     result[modelId] = new TrainableParamInfo
                     {
                         SpecificModelId = modelId,
@@ -2864,6 +3150,19 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     };
                 }
             }
+
+            // A model id resolved only to bare references (no shape-bearing initializer) has no real
+            // definition in this graph. Because every real definition carries a shape input, such an
+            // entry is empty — do not silently fall back to a bare reference's placeholder initializer
+            // (GetTrainableParam wires the module's FIRST initializer as metadata, possibly the wrong
+            // param's); fail loudly instead.
+            foreach (var info in result.Values)
+                if (info.TrainableParamInputParamValues.IsDefaultOrEmpty)
+                    throw new InvalidOperationException(
+                        $"Trainable-param resolution: model id {info.SpecificModelId} is referenced " +
+                        "(e.g. via IModel.GetTrainableParam) but has no parameter definition in the graph. " +
+                        "Every param initializer supplies a shape input, so a real definition always carries " +
+                        "at least one initializer value; a bare reference cannot stand in for the definition.");
 
             return [.. result.Values];
         }
@@ -2876,6 +3175,149 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     list.Add(h as RuntimeTensor);
             list.Add(rt);
             return list;
+        }
+
+        /// <summary>
+        /// Enumerates a QEE-resolved tensor's per-iteration integer values: one entry per
+        /// loop-history iteration (plus the final value), each with the <c>-2</c> loop-padding
+        /// sentinel filtered out, paired with its iteration ordinal so callers can pair values
+        /// across inputs of the same node. This is the one history walk both realizations ride —
+        /// trainable-param ids (<see cref="ExtractModelIdInfosFromStore"/>) and RNG feed streams
+        /// (<see cref="RealizeRngFeedStreams"/>) must enumerate iterations identically.
+        /// </summary>
+        private static IEnumerable<(int iterIdx, long[] vals)> EnumerateIterationIntVectors(RuntimeTensor? rt)
+        {
+            var iterations = CollectAllIterations(rt);
+            for (int i = 0; i < iterations.Count; i++)
+                if (iterations[i]?.IntData is { } iv)
+                    yield return (i, iv.Where(x => x != -2).ToArray());
+        }
+
+        /// <summary>
+        /// Realizes every SHRK_RANDOM_* feed's stream ids from the QEE store: the site id's
+        /// <c>-1</c> iteration slots are filled per observed loop iteration (the same loop
+        /// history that realizes trainable-param ids), and the site's <b>key entity</b> — a
+        /// <c>SHRK_RNG_KEY_PARAM</c> node carrying the realized stream set (site id, realized ids,
+        /// per-level iteration counts) — is created and wired as the feed's key input. This
+        /// mirrors trainable params exactly: concretization creates the param-like entity
+        /// whose VALUE (the key table) is materialized later from the bound
+        /// <see cref="RngConfig"/> (see <see cref="FastMaterializeRngKeys"/>). A feed whose
+        /// iteration input QEE could not resolve is a hard error: per the concreteness
+        /// contract there is no dynamic stream derivation to fall back to.
+        /// </summary>
+        private static void RealizeRngFeedStreams(
+            FastComputationGraph graph, Dictionary<FastTensorKey, IRuntimeTensor> store)
+        {
+            List<FastNode>? keyNodes = null;
+            foreach (var node in graph.Nodes)
+            {
+                if (node.OpCode != InternalOpCodes.SHRK_RANDOM_UNIFORM &&
+                    node.OpCode != InternalOpCodes.SHRK_RANDOM_NORMAL) continue;
+                var idVals = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId);
+                if (idVals is null || idVals.Length == 0) continue;
+
+                int depth = idVals.Count(v => v == -1);
+                List<long[]> realized;
+                long[] counts;
+                if (depth == 0)
+                {
+                    realized = [[.. idVals.Select(v => (long)v)]];
+                    counts = [];
+                }
+                else
+                {
+                    // Static ModelIds are what makes an architecture concrete: a feed whose
+                    // per-iteration stream set cannot be enumerated here would have no static
+                    // stream identity, so failure is a hard error — exactly like an
+                    // unresolvable TRAINABLE_PARAM_ID_REF above — never a silent fallback.
+                    var iterInput = node.Inputs.Count > 2 ? node.Inputs[2] : null;
+                    if (iterInput is null || !store.TryGetValue(iterInput.Value, out var raw)
+                        || raw is not RuntimeTensor rt)
+                        throw new FastPipelineUnsupportedException(
+                            "RealizeRngFeedStreams: QEE could not resolve the iteration indices " +
+                            $"of the runtime random feed at ModelId [{string.Join(", ", idVals)}] " +
+                            "(integer data unavailable), so its per-iteration RNG streams cannot " +
+                            "be enumerated. A concrete architecture requires a static stream set.");
+
+                    var seen = new HashSet<string>();
+                    var iterVectors = new List<long[]>();
+                    foreach (var (_, clean) in EnumerateIterationIntVectors(rt))
+                    {
+                        // An observed vector that cannot fill the site's iteration slots is a
+                        // corrupted stream inventory, not a zero-trip loop: silently skipping
+                        // it would realize the padded single cell below, whose 1-row key table
+                        // the executing loop then indexes out of range at runtime — an opaque
+                        // backend error far from the cause (and a partially-malformed set
+                        // would under-enumerate, selecting wrong key rows). Hard error, per
+                        // the concreteness contract.
+                        if (clean.Length != depth)
+                            throw new FastPipelineUnsupportedException(
+                                "RealizeRngFeedStreams: the runtime random feed at ModelId " +
+                                $"[{string.Join(", ", idVals)}] observed an iteration-index " +
+                                $"vector of length {clean.Length} where the site has {depth} " +
+                                "iteration slot(s), so its per-iteration RNG streams cannot be " +
+                                "enumerated. A concrete architecture requires a static stream " +
+                                "set — never a silent fallback.");
+                        if (seen.Add(string.Join(",", clean))) iterVectors.Add(clean);
+                    }
+                    // Zero observed iterations (the loop never ran under the concretization
+                    // inputs): realize the single all-zero grid cell as padding so the stream
+                    // set — and the lowering's key table — is never empty. It is a validly
+                    // derived stream; under valid use of the artifact it is simply never drawn.
+                    if (iterVectors.Count == 0) iterVectors.Add(new long[depth]);
+
+                    // Lexicographic iteration order so flat index = Σ iter[j]·stride[j].
+                    iterVectors.Sort((a, b) =>
+                    {
+                        for (int j = 0; j < depth; j++)
+                            if (a[j] != b[j]) return a[j].CompareTo(b[j]);
+                        return 0;
+                    });
+                    counts = new long[depth];
+                    for (int j = 0; j < depth; j++) counts[j] = iterVectors.Max(v => v[j]) + 1;
+
+                    realized = new List<long[]>(iterVectors.Count);
+                    foreach (var iv in iterVectors)
+                    {
+                        var full = new long[idVals.Length];
+                        int k = 0;
+                        for (int i = 0; i < idVals.Length; i++)
+                            full[i] = idVals[i] == -1 ? iv[k++] : idVals[i];
+                        realized.Add(full);
+                    }
+                }
+
+                long[] flat = new long[realized.Count * idVals.Length];
+                for (int r = 0; r < realized.Count; r++)
+                    realized[r].CopyTo(flat, r * idVals.Length);
+
+                // The site's key entity: owns the realized stream set, value materialized
+                // from the bound config at concrete-model time. Top-level like TRAINABLE_PARAM
+                // nodes — an in-loop feed references it across the loop boundary the same way
+                // an in-loop param reference selects from the top-level param sequence.
+                var keyNodeKey = FastNodeKey.New();
+                var keyOut = new FastTensorKey(keyNodeKey, 0);
+                var keyAttrDefs = Definitions.NodeDefinitions[InternalOpCodes.SHRK_RNG_KEY_PARAM].AttributeDefs;
+                (keyNodes ??= []).Add(new FastNode
+                {
+                    Key = keyNodeKey,
+                    OpCode = InternalOpCodes.SHRK_RNG_KEY_PARAM,
+                    Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                        new Dictionary<string, object?>
+                        {
+                            [OnnxOpAttributeNames.ShrkAttrLocalModelId] = idVals.Select(x => (long)x).ToArray(),
+                            [OnnxOpAttributeNames.ShrkAttrRngRealizedIds] = flat,
+                            [OnnxOpAttributeNames.ShrkAttrRngIterCounts] = counts,
+                        }, keyAttrDefs),
+                    FullInputs = new Dictionary<string, List<FastTensorKey?>>(),
+                    FullOutputs = { [""] = new List<FastTensorKey?> { keyOut } },
+                });
+
+                var feedInputs = node.FullInputs[""];
+                while (feedInputs.Count < 4) feedInputs.Add(null);
+                feedInputs[3] = keyOut;
+            }
+            if (keyNodes is not null) graph.Nodes.InsertRange(0, keyNodes);
         }
     }
 

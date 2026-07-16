@@ -47,9 +47,14 @@ like `Zeros.Init([outFeatures])` or `KaimingUniform.Init([outC, inC, k, k])`.
 | `Orthogonal` | (semi-)orthogonal matrix (`QᵀQ ≈ I` / `QQᵀ ≈ I`) | seeded; rank ≥ 2; **Björck/Newton–Schulz approximation** (15 cubic iterations `Y ← 1.5·Y − 0.5·Y·(YᵀY)` from a seeded Gaussian — exact QR/SVD-orthogonal isn't expressible in Shorokoo's op set, cf. `TruncatedNormal`); gain 1; Saxe-2013 dynamical isometry (RNN recurrent matrices, deep stacks); PyTorch `orthogonal_` |
 | `RecurrentUniform` | U(−1/√H, 1/√H), H = `shape[1]` | seeded; PyTorch's `nn.RNN`/`nn.LSTM`/`nn.GRU` default (`k = 1/hidden_size`); reads the hidden dim from axis 1, so it inits recurrent W `[D, H, in]`, R `[D, H, H]`, and bias `[D, H]` alike; used by the `Recurrent` layers |
 
-- **Seeded determinism**: the random initializers use fixed seeds, so every
-  materialization is deterministic — and two parameters of the same shape
-  initialized by the same class receive **identical** values.
+- **Seeded determinism**: the random initializers are stream-keyed — each
+  parameter draws from its own stream, derived from the model's
+  [RNG configuration](rng-configuration.md) (the default identity, master seed 0,
+  when no config is given) and the parameter's place in the model. Every
+  materialization is deterministic and reproducible for a config, and two
+  parameters of the same shape initialized by the same class receive **distinct**
+  values. Bind a different master seed to re-roll everything coherently; no seed
+  ever appears in the model definition.
 - **Fan-in/fan-out** are computed in-graph from the shape vector:
   `fanIn = prod(shape) / shape[0]`, `fanOut = prod(shape) / shape[1]` — the
   PyTorch convention for Linear `[out, in]` and Conv `[outC, inC/g, k...]`
@@ -674,8 +679,11 @@ Dropout.Call(Scalar<float32> ratio, Scalar<bit> training, Tensor<float32> x)
 ```
 
 Training mode zeroes each element with probability `ratio` and scales survivors
-by `1/(1-ratio)`; eval mode is the identity. The mask seed is fixed (42) so
-builds are deterministic; gradients flow through the forward mask automatically.
+by `1/(1-ratio)`; eval mode is the identity. The mask is drawn from the layer's
+own stream under the model's [RNG configuration](rng-configuration.md) —
+deterministic and reproducible for a config (the default identity when none is
+given), varying per training step via the generator's execution counter;
+gradients flow through the forward mask automatically.
 
 ### SpatialDropout
 
@@ -690,8 +698,9 @@ Channel-wise (spatial) dropout over `[N, C, D1..Dn]` (channel = axis 1): one
 Bernoulli draw per `(sample, channel)` drops or rescales the **entire** feature
 map at once (vs `Dropout`'s per-element mask), so whole channels are zeroed or
 scaled by `1/(1-ratio)` together — the regularization for strongly-correlated
-conv feature maps (Tompson et al. 2015). Eval mode is the identity; the mask seed
-is fixed (42). The rank is read in-graph, so `SpatialDropout` is rank-generic; the
+conv feature maps (Tompson et al. 2015). Eval mode is the identity; the mask is
+drawn from the layer's own stream under the model's RNG configuration (see
+`Dropout`). The rank is read in-graph, so `SpatialDropout` is rank-generic; the
 `Dropout1d/2d/3d` aliases (PyTorch names) are thin forwarders naming the per-rank
 forms. On rank-2 `[N, C]` it degenerates to elementwise `Dropout`.
 
@@ -712,7 +721,8 @@ channel-wise twin: one Bernoulli draw per `(sample, channel)` drops a whole feat
 map to `α'` (reusing the `[N, C, 1, …, 1]` mask shape), rank-generic over 1-D/2-D/3-D.
 Both take `(ratio, training)` like `Dropout`; eval mode (`training = false`) is the
 **exact** identity (gated explicitly, since the affine isn't the identity); the mask
-seed is fixed (42).
+is drawn from the layer's own stream under the model's RNG configuration (see
+`Dropout`).
 
 ### Embedding
 

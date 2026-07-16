@@ -99,3 +99,35 @@ public partial class InlineBatchNormWithState
         return y;
     }
 }
+
+/// <summary>Initializer used ONLY by <see cref="StateUpdateSurvivesNestedFirstUseBuild"/>, so its
+/// Function is guaranteed uncached when that module's body traces — forcing a nested graph build
+/// mid-trace.</summary>
+[TrainableParamInitializer]
+public static partial class StateWipeFreshInit
+{
+    public static Tensor<float32> Inline(Vector<int64> shape)
+    {
+        return Globals.TensorFill(shape, 0.25f);
+    }
+}
+
+/// <summary>
+/// State updates registered BEFORE a nested first-use build must survive it. Building a
+/// not-yet-cached sub-module/initializer mid-trace re-enters the graph builder on the same
+/// thread; its entry-time state-update clearing used to wipe the outer body's already-registered
+/// updates, silently dropping the WITH_STATE_DEPS wrap (and cache-order-dependently: a warm
+/// Function cache hid the loss). StateUpdate(counter, ...) then first-use a fresh initializer:
+/// the built graph must still carry the wrap.
+/// </summary>
+[Module]
+public partial class StateUpdateSurvivesNestedFirstUseBuild
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var counter = InitRunningMean.Init(x.ShapeTensor());       // [StateInitializer] state
+        Globals.StateUpdate(counter, counter + Scalar(1f));        // registered now — before the nested build
+        var w = StateWipeFreshInit.Init([Scalar(4L)]);             // FIRST use: nested initializer body build
+        return x + counter + w.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+    }
+}

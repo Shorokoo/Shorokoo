@@ -10,11 +10,11 @@ using static Shorokoo.Globals;
 namespace Shorokoo.Modules.Initializers;
 
 // Additional trainable-parameter initializers beyond the baseline set in
-// Initializers.cs. Shape-only and seeded/deterministic, following the same
+// Initializers.cs. Shape-only and stream-keyed/deterministic, following the same
 // conventions; they reuse the InitializerMath fan-in arithmetic defined there.
 
 /// <summary>
-/// Truncated-normal initializer: standard normal clamped to [-2, 2], seeded
+/// Truncated-normal initializer: standard normal clamped to [-2, 2], stream-keyed
 /// (deterministic). This is an approximation — a true truncated normal resamples
 /// values outside the range, but in-graph rejection sampling is not possible, so
 /// out-of-range draws are clamped to the boundary instead. (Keras/JAX use a
@@ -24,12 +24,12 @@ namespace Shorokoo.Modules.Initializers;
 public static partial class TruncatedNormal
 {
     public static Tensor<float32> Inline(Vector<int64> shape)
-        => Globals.RandomNormal(shape, mean: 0.0f, scale: 1.0f, seed: 17.0f).Clip(-2.0f, 2.0f);
+        => Globals.RandomNormal(shape, mean: 0.0f, scale: 1.0f).Clip(-2.0f, 2.0f);
 }
 
 /// <summary>
 /// Configurable uniform initializer: fills the parameter with i.i.d. draws from
-/// U(low, high), seeded (deterministic). The parameterized generalization of
+/// U(low, high), stream-keyed (deterministic). The parameterized generalization of
 /// <see cref="Uniform"/> (== U(0,1) at the default bounds; <see cref="Uniform"/>
 /// is retained as the fixed default form). Mirrors PyTorch's
 /// <c>nn.init.uniform_(t, a, b)</c> and Keras's <c>RandomUniform(minval, maxval)</c>.
@@ -37,7 +37,7 @@ public static partial class TruncatedNormal
 /// <c>low</c>/<c>high</c> are extra Inline parameters (the
 /// <see cref="Constant"/>/<see cref="RecurrentUniform"/> extra-param precedent),
 /// generating <c>UniformRange.Init(shape, low, high)</c>.
-/// <see cref="Globals.RandomUniform(Vector{int64}, float, float, float?)"/> takes
+/// <see cref="Globals.RandomUniform(Vector{int64}, float, float)"/> takes
 /// LITERAL float bounds, so the range is built in-graph as the affine transform of a
 /// standard U(0,1) draw: u·(high − low) + low — the same fill-times-scalar shape
 /// <see cref="XavierUniform"/> uses, plus a shift. Expects <c>low ≤ high</c>.
@@ -47,18 +47,18 @@ public static partial class UniformRange
 {
     public static Tensor<float32> Inline(Vector<int64> shape, Scalar<float32> low, Scalar<float32> high)
         // standard U(0,1) draw, affine-mapped to [low, high): u·(high − low) + low
-        => Globals.RandomUniform(shape, low: 0.0f, high: 1.0f, seed: 20.0f) * (high - low) + low;
+        => Globals.RandomUniform(shape, low: 0.0f, high: 1.0f) * (high - low) + low;
 }
 
 /// <summary>
 /// Configurable normal initializer: fills the parameter with i.i.d. draws from
-/// N(mean, std) (std = standard deviation), seeded (deterministic). The parameterized
+/// N(mean, std) (std = standard deviation), stream-keyed (deterministic). The parameterized
 /// generalization of <see cref="Normal"/> (== N(0,1) at the defaults; <see cref="Normal"/>
 /// is retained as the fixed default form). Mirrors PyTorch's
 /// <c>nn.init.normal_(t, mean, std)</c> and Keras's <c>RandomNormal(mean, stddev)</c>.
 /// Any rank. <c>mean</c>/<c>std</c> are extra Inline parameters,
 /// generating <c>NormalDist.Init(shape, mean, std)</c>.
-/// <see cref="Globals.RandomNormal(Vector{int64}, float, float, float?)"/> takes LITERAL
+/// <see cref="Globals.RandomNormal(Vector{int64}, float, float)"/> takes LITERAL
 /// float mean/scale, so the distribution is built in-graph as the affine transform of a
 /// standard N(0,1) draw: z·std + mean — the same random-times-scalar shape
 /// <see cref="KaimingNormal"/> uses, plus a shift. Expects <c>std ≥ 0</c>.
@@ -68,12 +68,12 @@ public static partial class NormalDist
 {
     public static Tensor<float32> Inline(Vector<int64> shape, Scalar<float32> mean, Scalar<float32> std)
         // standard N(0,1) draw, affine-mapped to N(mean, std): z·std + mean
-        => Globals.RandomNormal(shape, mean: 0.0f, scale: 1.0f, seed: 21.0f) * std + mean;
+        => Globals.RandomNormal(shape, mean: 0.0f, scale: 1.0f) * std + mean;
 }
 
 /// <summary>
 /// Configurable-gain Xavier/Glorot uniform: U(-a, a) with a = gain·sqrt(6/(fanIn+fanOut)),
-/// seeded (deterministic). The gain-parameterized generalization of <see cref="XavierUniform"/>
+/// stream-keyed (deterministic). The gain-parameterized generalization of <see cref="XavierUniform"/>
 /// — at <c>gain = 1</c> it reproduces <see cref="XavierUniform"/>'s bound exactly (Xavier
 /// bakes gain 1, so there is no √-rebasing here: the base factor is the same
 /// sqrt(6/(fanIn+fanOut)) the default uses). Mirrors PyTorch's
@@ -92,13 +92,13 @@ public static partial class XavierUniformGain
         // Xavier bakes gain 1, so the base factor is the same sqrt(6/(fanIn+fanOut)) the
         // default XavierUniform uses; the runtime gain simply scales it.
         var baseFactor = (6.0f / (InitializerMath.FanIn(shape) + InitializerMath.FanOut(shape))).Sqrt();
-        return Globals.RandomUniform(shape, low: -1.0f, high: 1.0f, seed: 22.0f) * (gain * baseFactor);
+        return Globals.RandomUniform(shape, low: -1.0f, high: 1.0f) * (gain * baseFactor);
     }
 }
 
 /// <summary>
 /// Configurable-gain Xavier/Glorot normal: N(0, std) with std = gain·sqrt(2/(fanIn+fanOut)),
-/// seeded (deterministic). The gain-parameterized generalization of <see cref="XavierNormal"/>
+/// stream-keyed (deterministic). The gain-parameterized generalization of <see cref="XavierNormal"/>
 /// — at <c>gain = 1</c> it reproduces <see cref="XavierNormal"/>'s std exactly (Xavier bakes
 /// gain 1, so the base factor is the same sqrt(2/(fanIn+fanOut)) the default uses). Mirrors
 /// PyTorch's <c>nn.init.xavier_normal_(t, gain)</c>, where <c>gain</c> is a standard-deviation
@@ -112,13 +112,13 @@ public static partial class XavierNormalGain
     public static Tensor<float32> Inline(Vector<int64> shape, Scalar<float32> gain)
     {
         var baseFactor = (2.0f / (InitializerMath.FanIn(shape) + InitializerMath.FanOut(shape))).Sqrt();
-        return Globals.RandomNormal(shape, mean: 0.0f, scale: 1.0f, seed: 23.0f) * (gain * baseFactor);
+        return Globals.RandomNormal(shape, mean: 0.0f, scale: 1.0f) * (gain * baseFactor);
     }
 }
 
 /// <summary>
 /// Configurable-gain Kaiming/He uniform (fan-in mode): U(-b, b) with b = gain·sqrt(3/fanIn),
-/// seeded (deterministic). NOTE the base factor is the bare <b>sqrt(3/fanIn)</b>, NOT the
+/// stream-keyed (deterministic). NOTE the base factor is the bare <b>sqrt(3/fanIn)</b>, NOT the
 /// sqrt(6/fanIn) of the default <see cref="KaimingUniform"/>: that default bakes the ReLU
 /// gain √2 into its bound (<c>sqrt(6/fanIn) = √2·sqrt(3/fanIn)</c>), so once the caller
 /// supplies the gain the √2 must NOT be double-baked. This class therefore uses the bare
@@ -139,13 +139,13 @@ public static partial class KaimingUniformGain
         // KaimingUniform bakes gain √2 (sqrt(6/fanIn) = √2·sqrt(3/fanIn)); the user-supplied
         // gain replaces that, so the √2 must not be double-baked.
         var baseFactor = (3.0f / InitializerMath.FanIn(shape)).Sqrt();
-        return Globals.RandomUniform(shape, low: -1.0f, high: 1.0f, seed: 24.0f) * (gain * baseFactor);
+        return Globals.RandomUniform(shape, low: -1.0f, high: 1.0f) * (gain * baseFactor);
     }
 }
 
 /// <summary>
 /// Configurable-gain Kaiming/He normal (fan-in mode): N(0, std) with std = gain·sqrt(1/fanIn)
-/// (= gain/sqrt(fanIn)), seeded (deterministic). NOTE the base factor is the bare
+/// (= gain/sqrt(fanIn)), stream-keyed (deterministic). NOTE the base factor is the bare
 /// <b>sqrt(1/fanIn)</b>, NOT the sqrt(2/fanIn) of the default <see cref="KaimingNormal"/>:
 /// that default bakes the ReLU gain √2 into its std (<c>sqrt(2/fanIn) = √2·sqrt(1/fanIn)</c>),
 /// so once the caller supplies the gain the √2 must NOT be double-baked. This class uses the
@@ -165,12 +165,12 @@ public static partial class KaimingNormalGain
         // KaimingNormal bakes gain √2 (sqrt(2/fanIn) = √2·sqrt(1/fanIn)); the user-supplied gain
         // replaces that, so the √2 must not be double-baked.
         var baseFactor = (1.0f / InitializerMath.FanIn(shape)).Sqrt();
-        return Globals.RandomNormal(shape, mean: 0.0f, scale: 1.0f, seed: 25.0f) * (gain * baseFactor);
+        return Globals.RandomNormal(shape, mean: 0.0f, scale: 1.0f) * (gain * baseFactor);
     }
 }
 
 /// <summary>
-/// LeCun normal: N(0, std) with std = sqrt(1 / fanIn), seeded (deterministic).
+/// LeCun normal: N(0, std) with std = sqrt(1 / fanIn), stream-keyed (deterministic).
 /// Requires a rank &gt;= 2 shape. The default variance-scaling initializer in
 /// JAX/Flax (<c>lecun_normal</c>), suited to SELU/self-normalizing networks.
 /// </summary>
@@ -180,7 +180,7 @@ public static partial class LeCunNormal
     public static Tensor<float32> Inline(Vector<int64> shape)
     {
         var std = (1.0f / InitializerMath.FanIn(shape)).Sqrt();
-        return Globals.RandomNormal(shape, mean: 0.0f, scale: 1.0f, seed: 18.0f) * std;
+        return Globals.RandomNormal(shape, mean: 0.0f, scale: 1.0f) * std;
     }
 }
 
@@ -198,7 +198,7 @@ public static partial class LeCunNormal
 /// shape-only <c>Det</c>), nor is there a host-side hook to run one off-graph — an
 /// initializer body is built into a computation graph and materialized by graph
 /// evaluation. Instead this runs a fixed number of Björck / Newton–Schulz <i>cubic</i>
-/// iterations <c>Y ← 1.5·Y − 0.5·Y·(Yᵀ·Y)</c> from a seeded Gaussian, using only
+/// iterations <c>Y ← 1.5·Y − 0.5·Y·(Yᵀ·Y)</c> from a stream-keyed Gaussian, using only
 /// matmul + transpose + elementwise ops (all materialize to values). Via the SVD the
 /// map acts on each singular value as <c>σ ↦ 1.5σ − 0.5σ³</c>, whose fixed point is 1
 /// and which converges quadratically for <c>σ ∈ (0, √3)</c>; it therefore drives every
@@ -212,7 +212,7 @@ public static partial class LeCunNormal
 /// (the convergence region). 15 cubic steps is ample given quadratic convergence. For
 /// rank &gt; 2 shapes the trailing dims are flattened to a 2-D <c>[shape[0],
 /// prod(shape[1:])]</c> matrix, orthogonalized, then reshaped back (PyTorch convention).
-/// Seeded (deterministic); gain fixed at 1 (the baseline, like <see cref="Globals"/>'
+/// Stream-keyed (deterministic); gain fixed at 1 (the baseline, like <see cref="Globals"/>'
 /// Xavier/Kaiming inits). Exact QR-orthogonal init isn't expressible in Shorokoo's op set.</para>
 /// </summary>
 [TrainableParamInitializer]
@@ -226,8 +226,8 @@ public static partial class Orthogonal
         Scalar<int64> c = total / r;
         Vector<int64> flatShape = [r, c];
 
-        // Seed: standard Gaussian [r, c] (next free seed; existing inits use 11..18).
-        var y0 = Globals.RandomNormal(flatShape, mean: 0.0f, scale: 1.0f, seed: 19.0f);
+        // Starting point: standard Gaussian [r, c], drawn from the parameter's own stream.
+        var y0 = Globals.RandomNormal(flatShape, mean: 0.0f, scale: 1.0f);
 
         // Frobenius-normalize so σ_max ≤ ‖Y‖_F = 1 < √3 (cubic-iteration convergence region).
         var frob = (y0 * y0).Reduce(ReduceKind.Sum, axes: null, keepDims: false).Sqrt();

@@ -24,7 +24,7 @@ public class AttentionModuleTests
     public void TestScaledDotProductAttentionCoverage()
     {
         // [1, 1, L=3, d=2] with distinct entries → a non-uniform attention pattern.
-        Assert.True(AutoTest.AdvancedTestGraph<AttnSdpaMatchesManual>(
+        Assert.True(AutoTest.AdvancedTestGraph<AttnSdpaForwardGolden>(
             hyperparamInputs: [],
             runtimeInputs: [TensorData(DType.Float32, [1L, 1L, 3L, 2L],
                 0.1f, 0.9f, 0.5f, -0.3f, -0.7f, 0.4f)]));
@@ -39,7 +39,7 @@ public class AttentionModuleTests
     public void TestMultiHeadAttentionCoverage()
     {
         // [N=1, L=3, embedDim=4], distinct entries.
-        Assert.True(AutoTest.AdvancedTestGraph<MhaMatchesManualReference>(
+        Assert.True(AutoTest.AdvancedTestGraph<MhaForwardGolden>(
             hyperparamInputs: [],
             runtimeInputs: [TensorData(DType.Float32, [1L, 3L, 4L],
                 0.1f, 0.2f, -0.3f, 0.4f,
@@ -98,7 +98,7 @@ public class AttentionModuleTests
             ]));
 
         // Structural closed-form re-derivation (Lt != Lm), no bias.
-        Assert.True(AutoTest.AdvancedTestGraph<DecoderLayerMatchesManualNoBias>(
+        Assert.True(AutoTest.AdvancedTestGraph<DecoderLayerNoBiasGolden>(
             hyperparamInputs: [],
             runtimeInputs:
             [
@@ -115,7 +115,7 @@ public class AttentionModuleTests
             ]));
 
         // Same structural closed-form with useBias = true (zero biases added everywhere).
-        Assert.True(AutoTest.AdvancedTestGraph<DecoderLayerMatchesManualWithBias>(
+        Assert.True(AutoTest.AdvancedTestGraph<DecoderLayerWithBiasGolden>(
             hyperparamInputs: [],
             runtimeInputs:
             [

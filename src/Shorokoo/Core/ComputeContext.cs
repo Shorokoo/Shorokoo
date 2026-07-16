@@ -144,8 +144,7 @@ namespace Shorokoo.Runtime
             ProtoBuf.Serializer.Serialize(memoryStream, model);
             var modelData = memoryStream.ToArray();
 
-            var session = CreateSession(modelData,
-                HasOptionalOps(model.Graph) || HasTrainingModeDropout(model.Graph));
+            var session = CreateSession(modelData, HasOptionalOps(model.Graph));
 
             var onnxInputNameByOriginal = new Dictionary<string, string>();
             for (int i = 0; i < originalInputNames.Length && i < session.InputNames.Count; i++)
@@ -273,8 +272,7 @@ namespace Shorokoo.Runtime
             ProtoBuf.Serializer.Serialize(memoryStream, model);
             var modelData = memoryStream.ToArray();
 
-            var session = CreateSession(modelData,
-                HasOptionalOps(model.Graph) || HasTrainingModeDropout(model.Graph));
+            var session = CreateSession(modelData, HasOptionalOps(model.Graph));
 
             var onnxInputNameByOriginal = new Dictionary<string, string>();
             for (int i = 0; i < originalInputNames.Length && i < session.InputNames.Count; i++)
@@ -326,37 +324,6 @@ namespace Shorokoo.Runtime
                     if (attr.G is not null && HasOptionalOps(attr.G)) return true;
                     foreach (var sub in attr.Graphs)
                         if (HasOptionalOps(sub)) return true;
-                }
-            }
-            return false;
-        }
-
-        /// <summary>
-        /// True if the graph (or any subgraph) contains a Dropout node with a connected
-        /// training_mode input (the 3rd input, non-empty). ONNX Runtime's constant-folding
-        /// pass evaluates a Dropout whose data input is provably constant at session-load
-        /// time as the *inference-mode identity* — it does NOT honor the random training-mode
-        /// draw — and bakes an all-true (no-drop) mask. That silently turns any module whose
-        /// mask is built on a constant ones tensor (SpatialDropout's `x * Dropout(ones,…)`,
-        /// the AlphaDropout family) into a no-op. Disabling optimizations skips the fold pass
-        /// so the real (seeded, random) Dropout kernel runs — exactly the
-        /// <see cref="HasOptionalOps"/> precedent above. The check is an over-approximation:
-        /// it also disables opts for *eval*-mode Dropout (which wires a constant-false
-        /// training flag), which is merely a rare perf cost, never a correctness change.
-        /// </summary>
-        private static bool HasTrainingModeDropout(GraphProto graph)
-        {
-            foreach (var node in graph.Nodes)
-            {
-                if (node.OpType == OpCodes.DROPOUT
-                    && node.Inputs.Count > 2
-                    && !string.IsNullOrEmpty(node.Inputs[2]))
-                    return true;
-                foreach (var attr in node.Attributes)
-                {
-                    if (attr.G is not null && HasTrainingModeDropout(attr.G)) return true;
-                    foreach (var sub in attr.Graphs)
-                        if (HasTrainingModeDropout(sub)) return true;
                 }
             }
             return false;

@@ -396,17 +396,26 @@ namespace Shorokoo
         /// Each value's kind decides its wiring: a bare <see cref="float"/> is baked as a constant; a
         /// <see cref="Schedule"/> is applied per step; <see cref="HyperValue.Runtime"/> is supplied manually.
         /// </param>
+        /// <param name="rngConfig">
+        /// Optional RNG configuration. Trainable parameters initialize from per-parameter keyed
+        /// streams and the config is bound to the training-step graph (keying every runtime
+        /// random feed, e.g. Dropout masks), making the whole run's randomness deterministic
+        /// and reproducible from the config's master seed. When <c>null</c>,
+        /// <see cref="RngConfig.Default"/> (master seed 0) is used — "no config" means the
+        /// default deterministic identity, never non-reproducible backend randomness.
+        /// </param>
         /// <returns>A configured TrainingRig ready for training</returns>
         public static TrainingRig FromScratch(
             FastComputationGraph modelGraph,
             FastComputationGraph lossGraph,
             FastComputationGraph optimizerGraph,
             NamedModelParam[] sampleInputs,
-            IOptimizerHyperparameters hyperparameters)
+            IOptimizerHyperparameters hyperparameters,
+            RngConfig? rngConfig = null)
         {
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
             return FromScratchCore(modelGraph, lossGraph, optimizerGraph, sampleInputs,
-                hyperparameters.InOptimizerOrder(), hyperparameters.HyperparameterNames);
+                hyperparameters.InOptimizerOrder(), hyperparameters.HyperparameterNames, rngConfig);
         }
 
         /// <summary>
@@ -422,7 +431,22 @@ namespace Shorokoo
             FastComputationGraph optimizerGraph,
             NamedModelParam[] sampleInputs,
             params HyperValue[] hyperparameters)
-            => FromScratchCore(modelGraph, lossGraph, optimizerGraph, sampleInputs, hyperparameters, names: null);
+            => FromScratchCore(modelGraph, lossGraph, optimizerGraph, sampleInputs, hyperparameters,
+                names: null, rngConfig: null);
+
+        /// <summary>
+        /// Positional-hyperparameter overload with an RNG configuration. The config precedes
+        /// the hyperparameter values because a <c>params</c> array must come last.
+        /// </summary>
+        public static TrainingRig FromScratch(
+            FastComputationGraph modelGraph,
+            FastComputationGraph lossGraph,
+            FastComputationGraph optimizerGraph,
+            NamedModelParam[] sampleInputs,
+            RngConfig? rngConfig,
+            params HyperValue[] hyperparameters)
+            => FromScratchCore(modelGraph, lossGraph, optimizerGraph, sampleInputs, hyperparameters,
+                names: null, rngConfig: rngConfig);
 
         /// <summary>
         /// Convenience overload that accepts a <see cref="ModelParamList"/> for sample inputs,
@@ -435,11 +459,12 @@ namespace Shorokoo
             FastComputationGraph lossGraph,
             FastComputationGraph optimizerGraph,
             ModelParamList sampleInputs,
-            IOptimizerHyperparameters hyperparameters)
+            IOptimizerHyperparameters hyperparameters,
+            RngConfig? rngConfig = null)
         {
             if (sampleInputs is null) throw new ArgumentNullException(nameof(sampleInputs));
             return FromScratch(modelGraph, lossGraph, optimizerGraph,
-                sampleInputs.ModelParams.ToArray(), hyperparameters);
+                sampleInputs.ModelParams.ToArray(), hyperparameters, rngConfig);
         }
 
         /// <summary>
@@ -458,13 +483,31 @@ namespace Shorokoo
                 sampleInputs.ModelParams.ToArray(), hyperparameters);
         }
 
+        /// <summary>
+        /// <see cref="ModelParamList"/> convenience overload with an RNG configuration and
+        /// positional hyperparameter values (the config precedes the <c>params</c> array).
+        /// </summary>
+        public static TrainingRig FromScratch(
+            FastComputationGraph modelGraph,
+            FastComputationGraph lossGraph,
+            FastComputationGraph optimizerGraph,
+            ModelParamList sampleInputs,
+            RngConfig? rngConfig,
+            params HyperValue[] hyperparameters)
+        {
+            if (sampleInputs is null) throw new ArgumentNullException(nameof(sampleInputs));
+            return FromScratch(modelGraph, lossGraph, optimizerGraph,
+                sampleInputs.ModelParams.ToArray(), rngConfig, hyperparameters);
+        }
+
         private static TrainingRig FromScratchCore(
             FastComputationGraph modelGraph,
             FastComputationGraph lossGraph,
             FastComputationGraph optimizerGraph,
             NamedModelParam[] sampleInputs,
             HyperValue[] hyperparameters,
-            IReadOnlyList<string>? names)
+            IReadOnlyList<string>? names,
+            RngConfig? rngConfig)
         {
             if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
             if (lossGraph is null) throw new ArgumentNullException(nameof(lossGraph));
@@ -483,6 +526,10 @@ namespace Shorokoo
 
             var ctx = ComputeContext.Default;
 
+            // No config means the default deterministic identity — the rig's randomness
+            // (init and runtime feeds alike) is always keyed, never backend random ops.
+            rngConfig ??= RngConfig.Default;
+
             // Single ToConcreteArchitecture pass. The resulting concrete arch graph is the
             // shared substrate for both phases below: Phase 1 composes it with loss +
             // autograd + optimizer to build the training-step graph; Phase 2 reads its
@@ -491,9 +538,15 @@ namespace Shorokoo
             // trainable params whose reachability is killed by the sample input shape.
             var concreteArch = modelGraph.ToConcreteArchitecture(new ModelParamList(sampleInputs), ctx);
 
+            // Bind the RNG config at the shared concretization point: binding writes the
+            // config's key-vector carrier and materializes every feed site's key entity —
+            // both ride unchanged through loss composition and autograd into the
+            // training-step graph, where the ONNX-prep lowering wires the keyed draws.
+            concreteArch.ApplyRngConfig(rngConfig);
+
             var rig = new TrainingRig();
             rig.BuildTrainingStepPureGraph(concreteArch, lossGraph, optimizerGraph, hyperparameters, names);
-            rig.InitializeAndOptimize(concreteArch, sampleInputs, ctx);
+            rig.InitializeAndOptimize(concreteArch, sampleInputs, ctx, rngConfig);
             return rig;
         }
 
@@ -1126,7 +1179,7 @@ namespace Shorokoo
             => Train(initialCheckpoint ?? CreateDefaultCheckpoint(), trainingInputs, trainingOutputs, numEpochs, ctx ?? ComputeContext.Default);
 
         /// <summary>
-        /// Returns the default initial checkpoint produced at <see cref="FromScratch(FastComputationGraph, FastComputationGraph, FastComputationGraph, NamedModelParam[], IOptimizerHyperparameters)"/> time.
+        /// Returns the default initial checkpoint produced at <see cref="FromScratch(FastComputationGraph, FastComputationGraph, FastComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?)"/> time.
         /// Trainable parameters and model state were initialized from the model's built-in
         /// initializers, and optimizer state from the optimizer's [StateInitializer]s (run once
         /// per trainable parameter). This is pure packaging — no computation happens here.
@@ -1224,7 +1277,8 @@ namespace Shorokoo
         private void InitializeAndOptimize(
             FastComputationGraph concreteArch,
             NamedModelParam[] sampleInputs,
-            ComputeContext ctx)
+            ComputeContext ctx,
+            RngConfig? rngConfig = null)
         {
             // Step 1: walk concreteArch's TRAINABLE_PARAM nodes in linear order to capture
             // each one's (ModelId, isTrainable). The same linear order is what Phase 1's
@@ -1243,7 +1297,13 @@ namespace Shorokoo
                 (isTrainable ? trainableModelIds : stateModelIds).Add(modelId);
             }
 
-            var paramValuesById = Shorokoo.Core.Nodes.Processors.Fast.FastInitializeModelParams.Process(concreteArch, ctx);
+            // Pass the concrete param infos so keyed per-parameter init actually engages:
+            // FastInitializeModelParams keys init noise only when BOTH rngConfig and paramInfos
+            // are non-null. Without the infos the rig would silently fall back to the legacy
+            // seeded init, ignoring the config's master seed / algorithm for the weights.
+            var paramInfos = rngConfig is null ? null : concreteArch.GetConcreteModelParamInfos();
+            var paramValuesById = Shorokoo.Core.Nodes.Processors.Fast.FastInitializeModelParams.Process(
+                concreteArch, ctx, rngConfig, paramInfos);
 
             if (trainableModelIds.Count != TrainableParamStructDef.Fields.Length)
                 throw new InvalidOperationException(

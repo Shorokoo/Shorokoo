@@ -33,6 +33,14 @@ public class ModuleSourceGenerator : IIncrementalGenerator
         DiagnosticSeverity.Error,
         isEnabledByDefault: true);
 
+    private static readonly DiagnosticDescriptor RngPinAvailable = new(
+        id: "MSG004",
+        title: "RNG streams of this module can be pinned",
+        messageFormat: "Module '{0}' has RNG stream consumers capturable by Rng.Pin. To freeze their stream identities against refactoring, {1}.",
+        category: "SourceGeneration",
+        DiagnosticSeverity.Info,
+        isEnabledByDefault: true);
+
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
         // Add a simple marker to verify the generator is running
@@ -72,6 +80,20 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                 {
                     var generatedCode = GenerateCode(classInfo);
                     spc.AddSource($"{classInfo.ClassName}_V2Generated.cs", SourceText.From(generatedCode, Encoding.UTF8));
+
+                    // Rng.Pin discoverability: for straight-line Inline bodies whose random
+                    // consumers (X.Model(...) / X.Init(...) results) are all captured in
+                    // locals, surface the ready-to-paste pin statement as an Info diagnostic.
+                    if (!classInfo.IsNewStyleInitializer &&
+                        classInfo.Location?.SourceTree?.GetRoot().FindNode(classInfo.Location.SourceSpan)
+                            is ClassDeclarationSyntax classSyntax)
+                    {
+                        var pinSuggestion = TryBuildRngPinSuggestion(classSyntax);
+                        if (pinSuggestion is not null)
+                            spc.ReportDiagnostic(Diagnostic.Create(
+                                RngPinAvailable, classInfo.Location, classInfo.ClassName, pinSuggestion));
+                    }
+
                     
                     // Report warnings for ignored methods (bad format / explicitly ignored)
                     foreach (var fm in classInfo.FullModules)
@@ -98,6 +120,231 @@ public class ModuleSourceGenerator : IIncrementalGenerator
             }
         });
     }
+
+    /// <summary>
+    /// Builds the ready-to-paste <c>Rng.Pin(...)</c> guidance for a module whose RNG stream
+    /// consumers are all provably nameable. Each scope — the <c>Inline</c> body and every
+    /// <c>LoopAPI.Iterate(...)</c> loop body, at any nesting — is pinned independently: the
+    /// nameable <c>X.Model(...)</c> / <c>X.Init(...)</c> / <c>RandomUniform(...)</c> /
+    /// <c>RandomNormal(...)</c> captures directly in that scope take its local id slots in
+    /// source order (a captured feed tensor is pinnable exactly like a captured Init result —
+    /// feeds share the module's id address space), and a nested loop takes one local slot too.
+    /// So the guidance is one compilable <c>Rng.Pin(...)</c> per scope, placed at the end of
+    /// that scope (loop-body pins go inside the loop, where those variables are in scope).
+    /// Within a scope, when a nested loop occupies a local slot the pin uses the <b>sparse</b>
+    /// form so the named items keep their exact slots and the loop's slot is left to be filled
+    /// positionally; otherwise the terse positional form is exact.
+    ///
+    /// <para>Returns null (no diagnostic) for anything not provably capturable in <em>any</em>
+    /// scope: C# control flow (<c>if</c>/<c>for</c>/<c>while</c>/<c>switch</c>/a non-<c>Iterate</c>
+    /// <c>foreach</c>), an existing <c>Rng.Pin</c>, an uncaptured Model/Init/feed, any
+    /// <c>.Call</c> whose receiver is not a counted <c>Recv.Model(...)</c> capture (static
+    /// <c>TypeName.Call</c>, chained <c>Model(...).Call(...)</c>, or an unknown receiver that
+    /// may be a stream-creating helper), or an opaque static-helper call that may create
+    /// streams. A wrong pin silently re-keys, so anything uncertain refuses. (Method-call
+    /// "control flow" like <c>cond.IfElse(...)</c> is an ordinary expression and is fine.)</para>
+    /// </summary>
+    internal static string? TryBuildRngPinSuggestion(ClassDeclarationSyntax classDecl)
+    {
+        var inline = classDecl.Members.OfType<MethodDeclarationSyntax>()
+            .FirstOrDefault(m => m.Identifier.Text == "Inline" && m.Body is not null);
+        if (inline?.Body is null) return null;
+
+        // Already pinned anywhere in the body: no suggestion needed.
+        foreach (var inv in inline.Body.DescendantNodes().OfType<InvocationExpressionSyntax>())
+            if (inv.Expression is MemberAccessExpressionSyntax pinMa &&
+                pinMa.Name.Identifier.Text == "Pin" &&
+                pinMa.Expression is IdentifierNameSyntax { Identifier.Text: "Rng" })
+                return null;
+
+        var scopes = new List<(string placement, string pin)>();
+        var modelCaptures = new HashSet<string>(StringComparer.Ordinal);
+        if (!TryAnalyzeScope(inline.Body.Statements, "at the end of Inline", scopes, modelCaptures, out _))
+            return null;
+        if (scopes.Count == 0) return null;
+
+        if (scopes.Count == 1 && scopes[0].placement == "at the end of Inline")
+            return "paste " + scopes[0].placement + ": " + scopes[0].pin;   // common single-scope case
+
+        return "paste a pin at the end of each scope — " +
+            string.Join(" ", scopes.Select(s => s.placement + ": " + s.pin));
+    }
+
+    /// <summary>
+    /// Recursively analyzes one scope's statements (the module body or a loop body). On success
+    /// appends this scope's compilable <c>Rng.Pin(...)</c> — module scope first, then nested
+    /// scopes in source order — to <paramref name="scopes"/> and reports via
+    /// <paramref name="occupies"/> whether the scope contains any id-bearing consumer (so its
+    /// parent counts it as one local slot). <paramref name="modelCaptures"/> accumulates the
+    /// names of locals captured via <c>Recv.Model(...)</c> — the only receivers a stream-free
+    /// <c>.Call(...)</c> can be proven against (see <see cref="SubtreeHasUnnameableStream"/>);
+    /// each loop body recurses on a copy so sibling scopes never see each other's captures.
+    /// Returns false if anything in this scope (or a nested one) is not provably capturable,
+    /// so the whole suggestion is withheld.
+    /// </summary>
+    private static bool TryAnalyzeScope(
+        IReadOnlyList<StatementSyntax> statements,
+        string placement,
+        List<(string placement, string pin)> scopes,
+        HashSet<string> modelCaptures,
+        out bool occupies)
+    {
+        occupies = false;
+        var pinned = new List<(int slot, string name)>();
+        int slot = 0;
+        bool anyLoopSlot = false;
+        var childScopes = new List<(string placement, string pin)>();
+
+        foreach (var stmt in statements)
+        {
+            switch (stmt)
+            {
+                case LocalDeclarationStatementSyntax decl:
+                    foreach (var v in decl.Declaration.Variables)
+                    {
+                        var init = v.Initializer?.Value;
+                        if (init is InvocationExpressionSyntax inv &&
+                            (IsSimpleModelOrInit(inv) || IsSimpleFeed(inv)))
+                        {
+                            // The receiver is a plain name, but the ARGUMENTS could still create
+                            // streams (a nested Model/Init/feed, static Call, opaque helper) — those
+                            // would be uncounted siblings, so refuse rather than emit a mis-slotting pin.
+                            if (inv.ArgumentList is { } args && SubtreeHasUnnameableStream(args, modelCaptures))
+                                return false;
+                            slot++;
+                            pinned.Add((slot, v.Identifier.Text));
+                            if (inv.Expression is MemberAccessExpressionSyntax { Name.Identifier.Text: "Model" })
+                                modelCaptures.Add(v.Identifier.Text);
+                        }
+                        else if (init is not null && SubtreeHasUnnameableStream(init, modelCaptures))
+                        {
+                            return false;   // uncaptured Model/Init/feed, unproven .Call, opaque helper
+                        }
+                        // else: pure math (ShapeTensor, arithmetic, .Call on a counted model) — 0 slots
+                    }
+                    break;
+
+                case ExpressionStatementSyntax es:
+                    if (SubtreeHasUnnameableStream(es.Expression, modelCaptures)) return false;
+                    break;
+
+                case ReturnStatementSyntax rs:
+                    if (rs.Expression is not null && SubtreeHasUnnameableStream(rs.Expression, modelCaptures)) return false;
+                    break;
+
+                case ForEachStatementSyntax fe when IsLoopApiIterate(fe):
+                    // The Iterate(...) header's arguments could create streams too (a feed or
+                    // Model/Init used to compute the trip count) — scan them, but not the
+                    // Iterate call itself (its uppercase receiver would always trip the check).
+                    if (fe.Expression is InvocationExpressionSyntax iterInv &&
+                        iterInv.ArgumentList is { } iterArgs && SubtreeHasUnnameableStream(iterArgs, modelCaptures))
+                        return false;
+                    var body = fe.Statement is BlockSyntax b
+                        ? (IReadOnlyList<StatementSyntax>)b.Statements
+                        : (StatementSyntax[])[fe.Statement];
+                    if (!TryAnalyzeScope(body, LoopPlacement(fe), childScopes,
+                            new HashSet<string>(modelCaptures, StringComparer.Ordinal), out var childOccupies))
+                        return false;
+                    if (childOccupies) { slot++; anyLoopSlot = true; }
+                    // A loop with no id-bearing content takes no local slot.
+                    break;
+
+                default:
+                    return false;   // C# control flow / unsupported statement
+            }
+        }
+
+        occupies = pinned.Count > 0 || anyLoopSlot;
+
+        if (pinned.Count > 0)
+        {
+            // A nested loop occupying a local slot forces the sparse form so the named items
+            // keep their exact slots; otherwise the terse positional form is exact.
+            var pin = anyLoopSlot
+                ? "Rng.Pin(" + string.Join(", ", pinned.Select(p => "([" + p.slot + "], " + p.name + ")")) + ");"
+                : "Rng.Pin(" + string.Join(", ", pinned.Select(p => p.name)) + ");";
+            scopes.Add((placement, pin));
+        }
+        scopes.AddRange(childScopes);
+        return true;
+    }
+
+    /// <summary>Human-readable placement for a loop-body pin, echoing the loop header.</summary>
+    private static string LoopPlacement(ForEachStatementSyntax fe)
+        => $"inside `foreach (var {fe.Identifier.Text} in {fe.Expression})`";
+
+    /// <summary>A direct top-level capture: <c>Recv.Model(...)</c> / <c>Recv.Init(...)</c> whose
+    /// receiver is a plain dotted name (not a chained invocation).</summary>
+    private static bool IsSimpleModelOrInit(InvocationExpressionSyntax inv)
+    {
+        if (inv.Expression is not MemberAccessExpressionSyntax ma) return false;
+        var name = ma.Name.Identifier.Text;
+        if (name != "Model" && name != "Init") return false;
+        // Receiver must contain no invocation (excludes chained X.Model(...).Call(...) etc.).
+        return !ma.Expression.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>().Any();
+    }
+
+    /// <summary>A direct top-level feed capture: bare <c>RandomUniform(...)</c> /
+    /// <c>RandomNormal(...)</c> (via <c>using static Globals</c>) or the
+    /// <c>Globals.</c>-qualified form. A captured feed tensor is pinnable exactly like a
+    /// captured Init result — feeds share the module's id address space — so it takes a
+    /// local slot instead of refusing the whole suggestion.</summary>
+    private static bool IsSimpleFeed(InvocationExpressionSyntax inv)
+    {
+        if (inv.Expression is IdentifierNameSyntax bare)
+            return bare.Identifier.Text is "RandomUniform" or "RandomNormal";
+        return inv.Expression is MemberAccessExpressionSyntax ma
+            && ma.Name.Identifier.Text is "RandomUniform" or "RandomNormal"
+            && ma.Expression is IdentifierNameSyntax { Identifier.Text: "Globals" };
+    }
+
+    /// <summary>Whether a subtree touches an RNG stream that an end-of-body pin cannot name:
+    /// an (uncaptured) Model/Init call, a runtime feed, any <c>.Call</c> whose receiver is not
+    /// a COUNTED model capture (static <c>TypeName.Call</c> creates an anonymous sub-model;
+    /// a chained or unknown receiver — even a lowercase one — may be a helper whose Call
+    /// creates streams: a lowercase name alone proves nothing), or an opaque uppercase
+    /// static-helper call that may create streams internally. Only <c>m.Call(...)</c> where
+    /// <c>m</c> is in <paramref name="modelCaptures"/> (captured via <c>Recv.Model(...)</c> in
+    /// this analysis) is provably a stream-free re-invocation. Boundary of the syntax-only
+    /// analysis: instance methods with OTHER names on lowercase receivers (tensor math,
+    /// <c>ctx.ContinueWhile</c>) and bare using-static calls other than the feeds are trusted —
+    /// a user helper smuggling stream creation through those shapes is not detectable without
+    /// semantic info.</summary>
+    private static bool SubtreeHasUnnameableStream(SyntaxNode node, HashSet<string> modelCaptures)
+    {
+        foreach (var inv in node.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>())
+        {
+            // Bare feed via `using static Globals`: RandomUniform(...) / RandomNormal(...).
+            if (inv.Expression is IdentifierNameSyntax bare &&
+                (bare.Identifier.Text == "RandomUniform" || bare.Identifier.Text == "RandomNormal"))
+                return true;
+
+            if (inv.Expression is MemberAccessExpressionSyntax ma)
+            {
+                var name = ma.Name.Identifier.Text;
+                if (name is "Model" or "Init" or "RandomUniform" or "RandomNormal") return true;
+                if (name == "Call")
+                {
+                    // Stream-free only when provably re-invoking a model this analysis counted.
+                    if (ma.Expression is IdentifierNameSyntax rcv &&
+                        modelCaptures.Contains(rcv.Identifier.Text))
+                        continue;
+                    return true;
+                }
+                // Opaque uppercase static-helper call (DropoutMasking.Mask, Recurrent.RNN, ...):
+                // may create streams internally — can't name them, so refuse.
+                if (ma.Expression is IdentifierNameSyntax uc && char.IsUpper(uc.Identifier.Text[0]))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool IsIterateInvocation(InvocationExpressionSyntax inv)
+        => inv.Expression is MemberAccessExpressionSyntax ma && ma.Name.Identifier.Text == "Iterate";
+
+    private static bool IsLoopApiIterate(ForEachStatementSyntax fe)
+        => fe.Expression is InvocationExpressionSyntax inv && IsIterateInvocation(inv);
 
     // V2: Partial class with [Module] attribute (both static and non-static)
     private static bool IsPotentialModuleClass(SyntaxNode node)

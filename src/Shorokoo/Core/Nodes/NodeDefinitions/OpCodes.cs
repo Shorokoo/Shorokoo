@@ -91,6 +91,49 @@ internal static class InternalOpCodes
     public const string SHRK_RANDOM_NORMAL = "shrk_RandomNormal";
 
     /// <summary>
+    /// Splits an RNG stream key by index: child = Bijection(key, counter: index) under the
+    /// named algorithm (shrk_rng_algorithm attribute). Key is an int64[2] vector of 32-bit
+    /// words. Index-based random access: computing child i never computes any sibling.
+    /// Lowered at ONNX export to a call of the algorithm's non-inlined "split" function.
+    /// </summary>
+    public const string SHRK_RNG_SPLIT = "shrk_RngSplit";
+
+    /// <summary>
+    /// Keyed deterministic uniform draw U(low, high) of dynamic shape under the named
+    /// algorithm (shrk_rng_algorithm attribute). Inputs: key int64[2], drawBase int64
+    /// scalar (counter high word), shape int64[r], low f32, high f32. Identical values on
+    /// every execution provider and in QEE (ordinary integer/float math, no ONNX random op).
+    /// Lowered at ONNX export to a call of the algorithm's non-inlined "uniform" function.
+    /// </summary>
+    public const string SHRK_RNG_UNIFORM = "shrk_RngUniform";
+
+    /// <summary>
+    /// The model's compact RNG key vector — a single parameter-like int64 tensor carrying the
+    /// randomness state (see RngConfig.BuildKeyVector: master / 3 masters / full expansion).
+    /// Injected by ApplyRngConfig; lowered to a plain CONSTANT at ONNX prep.
+    /// </summary>
+    public const string SHRK_RNG_KEY_VECTOR = "shrk_RngKeyVector";
+
+    /// <summary>
+    /// A feed site's key entity — the param-like counterpart of TRAINABLE_PARAM for runtime
+    /// randomness. Created at concretization (one per feed site) carrying the site's structural
+    /// identity (site ModelId, realized stream ids, iteration counts); its VALUE — the [N, 2]
+    /// int64 key table, one row per grid cell of the site's enumerated iteration space — is
+    /// materialized from the bound <c>RngConfig</c> when the graph becomes a concrete model
+    /// (and re-materialized on re-bind), exactly as a trainable parameter's value is
+    /// materialized by running its initializer. Lowered to a plain CONSTANT at ONNX prep.
+    /// </summary>
+    public const string SHRK_RNG_KEY_PARAM = "shrk_RngKeyParam";
+
+    /// <summary>
+    /// Keyed deterministic normal draw N(mean, scale) of dynamic shape under the named
+    /// algorithm (shrk_rng_algorithm attribute). Inputs: key int64[2], drawBase int64
+    /// scalar, shape int64[r], mean f32, scale f32. See <see cref="SHRK_RNG_UNIFORM"/>.
+    /// Lowered at ONNX export to a call of the algorithm's non-inlined "normal" function.
+    /// </summary>
+    public const string SHRK_RNG_NORMAL = "shrk_RngNormal";
+
+    /// <summary>
     /// Creates a TensorStruct from multiple input IValues.
     /// </summary>
     public const string TENSOR_STRUCT_CREATE = "shrk_TENSOR_STRUCT_CREATE";

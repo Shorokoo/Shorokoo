@@ -7,10 +7,11 @@ namespace Shorokoo.Tests.Modules;
 // Self-checking / training-rig [Module]s for the classic layers added on top
 // of the baseline NN library: Conv3d (NCDHW) and BatchNorm1d ([N, C]).
 //
-// Conv3d is value-checked the same way as NNConv2dMatchesStaticConv: a dynamic
-// SHRK_CONV geometry must equal a hand-built static-attribute NN.Conv with the
-// same geometry and identically-seeded KaimingUniform weights, so it runs
-// through AutoTest.AdvancedTestGraph (returns Scalar<bit>).
+// Conv3d is value-checked the same way as NNConv2dForwardGolden: a frozen
+// forward-value golden (self-generated at master-seed-0), driven through
+// AutoTest.AdvancedTestGraph (returns Scalar<bit>). The former hand-built
+// static-attribute NN.Conv reference relied on re-materializing identical
+// weights and was retired with keyed per-parameter init.
 //
 // BatchNorm1d carries Globals.StateUpdate links (STATE_UPDATE_LINK is not an
 // executable ORT op in the plain inference pipeline), so — like BatchNorm2d —
@@ -18,23 +19,22 @@ namespace Shorokoo.Tests.Modules;
 // models below, not AutoTest.
 // ---------------------------------------------------------------------------
 
-/// <summary>Conv3d (dynamic SHRK_CONV geometry, NCDHW) must equal the static-attribute NN.Conv with identical geometry and weights.</summary>
+/// <summary>Conv3d forward output on RangeTensor([1,2,5,5,5],0.05,-2) at MasterSeed=0 must match the
+/// frozen reference. The old check re-ran Conv against a hand-built static NN.Conv (a tautology);
+/// the reference is now the layer's own frozen forward output. Output [1,3,3,3,3]=81 is collapsed
+/// to 19 via SelfCheck.Collapse.</summary>
 [Module]
-public partial class NNConv3dMatchesStaticConv
+public partial class NNConv3dForwardGolden
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
-        var outChannels = Scalar(3L);
-        var y = Conv3d.Call(outChannels, Scalar(3L), Scalar(2L), Scalar(1L), Scalar(1L), Scalar(1L), Scalar(true), x);
+        var y = Conv3d.Model(Scalar(3L), Scalar(3L), Scalar(2L), Scalar(1L), Scalar(1L), Scalar(1L), Scalar(true)).Call(x);   // [1,3,3,3,3] = 81
 
-        Scalar<int64> inChannels = x.ShapeTensor()[1];
-        var wRef = KaimingUniform.Init([outChannels, inChannels, Scalar(3L), Scalar(3L), Scalar(3L)]);
-        var yRef = NN.Conv(x, wRef, VectorFill(outChannels, 0f), AutoPad.NotSet,
-            dilations: [1L, 1L, 1L], group: 1L, kernelShape: [3L, 3L, 3L],
-            pads: [1L, 1L, 1L, 1L, 1L, 1L], strides: [2L, 2L, 2L]);
+        // REFERENCE: golden — Shorokoo's own forward output, collapsed to 19 (self-generated).
+        var reference = Vector(-2.2050622f, -5.5534472f, 3.2518554f, 5.779654f, 0.47101557f, -0.27055806f, -3.3270457f, 0.16702354f, 1.2823882f, 0.8556348f, -2.5663595f, -6.228979f, 0.60689855f, 5.1870475f, -1.1765716f, -3.8725114f, 1.8714321f, 3.496889f, 2.813375f);
 
-        var diff = (y - yRef).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-        return diff < Scalar(1e-3f) * (Scalar(1f) + yRef.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar());
+        var diff = (SelfCheck.Collapse(y, 81) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        return diff < Scalar(1e-3f);
     }
 }
 

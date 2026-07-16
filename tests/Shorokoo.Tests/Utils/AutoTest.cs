@@ -136,7 +136,8 @@ namespace Shorokoo.Tests.Utils
             bool testOnnxRoundtrip = true,
             bool testCsRoundtrip = true,
             bool testQuickEngineExecution = true,
-            Dictionary<string, DType>? genericTypes = null)
+            Dictionary<string, DType>? genericTypes = null,
+            RngConfig? rngConfig = null)
         {
             var prop = typeof(TModule).GetProperty("ComputationGraph", BindingFlags.Public | BindingFlags.Static)
                 ?? throw new InvalidOperationException(
@@ -144,7 +145,7 @@ namespace Shorokoo.Tests.Utils
             var moduleGraph = (FastComputationGraph)prop.GetValue(null)!;
 
             return AdvancedTestGraph(moduleGraph, hyperparamInputs, runtimeInputs,
-                context, testOnnxRoundtrip, testCsRoundtrip, testQuickEngineExecution, genericTypes);
+                context, testOnnxRoundtrip, testCsRoundtrip, testQuickEngineExecution, genericTypes, rngConfig);
         }
 
         /// <summary>
@@ -160,7 +161,8 @@ namespace Shorokoo.Tests.Utils
             bool testOnnxRoundtrip = true,
             bool testCsRoundtrip = true,
             bool testQuickEngineExecution = true,
-            Dictionary<string, DType>? genericTypes = null)
+            Dictionary<string, DType>? genericTypes = null,
+            RngConfig? rngConfig = null)
         {
             // Generic-method modules build their ComputationGraph with IGenericType placeholder
             // DTypes + leading GENERIC_TYPE_INPUT inputs. Apply the caller-supplied type
@@ -179,7 +181,10 @@ namespace Shorokoo.Tests.Utils
             Array.Copy(runtimeInputs, 0, allInputs, hyperparamInputs.Length, runtimeInputs.Length);
 
             var concreteArch = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([.. allInputs]));
-            var concreteModel = concreteArch.ToConcreteModel();
+            // Deterministic per-parameter init (master seed 0) — same as real models. Closed-form
+            // reference checks reference the layer's realized weights via IModel.GetTrainableParam
+            // rather than re-running an initializer, so they no longer depend on tied init.
+            var concreteModel = concreteArch.ToConcreteModel(rngConfig ?? RngConfig.Default);
 
             return TestGraph(
                 concreteModel,
@@ -244,7 +249,8 @@ namespace Shorokoo.Tests.Utils
             var archData = CompressedFormatUtils.SaveFastGraphToBinary(concreteArch, compressed: true);
             concreteArch = CompressedFormatUtils.LoadFastGraphFromBinary(archData, isCompressed: true);
 
-            var concreteModel = concreteArch.ToConcreteModel();
+            // Deterministic per-parameter init (see AdvancedTestGraph).
+            var concreteModel = concreteArch.ToConcreteModel(RngConfig.Default);
 
             return TestGraph(
                 concreteModel,

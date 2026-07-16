@@ -132,11 +132,6 @@ namespace Shorokoo.Core
                 methodInfo = ResolveGenericMethodWithPlaceholders(methodInfo, out genericConstraints);
             }
 
-            // Clear any leftover state updates from previous invocations to prevent state leakage
-            // This is important because state updates registered outside of a module graph context
-            // should not affect subsequent module/initializer graph builds
-            Shorokoo.Core.InternalGlobals.GetAndClearStateUpdates();
-
             // Modules speak in value handles, not the internal graph node type. (Inputs are validated
             // per-parameter inside CreateInputParams.)
             ModuleHelper.RejectVariableParam(methodInfo.ReturnType);
@@ -144,11 +139,20 @@ namespace Shorokoo.Core
             // Create input parameters based on the method signature
             var fnInputs = ModuleHelper.CreateInputParams(methodInfo.GetParameters());
 
+            // This method re-enters mid-trace whenever the body first-uses a sub-module or
+            // initializer whose Function is not yet cached, so per-trace state is scoped with
+            // push/pop (a destructive clear here would wipe the OUTER body's records): the
+            // looper context, the Rng.Pin recording lists, and the StateUpdate registrations.
+            // Pushing also hands this build empty lists, so records made outside any module
+            // graph context never leak into it.
             LoopAPI.PushLooperContext();
+            Shorokoo.Rng.PushPinScope();
+            Shorokoo.Core.InternalGlobals.PushStateUpdateScope();
             try
             {
                 Variable[] fnOutputs;
                 Variable[] stateUpdates;
+                (object[] positional, (int[] path, object item)[] sparse) rngPins;
                 try
                 {
                     fnOutputs = ModuleHelper.InvokeAndFormat(methodInfo, fnInputs, invokeTarget);
@@ -158,6 +162,7 @@ namespace Shorokoo.Core
                     // Always clear state updates, even if an exception occurred
                     // This prevents state leakage between module invocations
                     stateUpdates = Shorokoo.Core.InternalGlobals.GetAndClearStateUpdates();
+                    rngPins = Shorokoo.Rng.GetAndClearPins();
                 }
 
                 // Check for registered state updates and wrap outputs with WithStateDeps if any exist
@@ -209,6 +214,20 @@ namespace Shorokoo.Core
                 allInputs.AddRange(fnInputVars.Where(IsHyperparamInput));
                 allInputs.AddRange(fnInputVars.Where(v => !IsHyperparamInput(v)));
 
+                // Rng.Pin support: pinned handles (recorded during the body trace) resolve to
+                // graph nodes with no side channel from the conversion — for every
+                // non-duplicated trace node the converter derives its FastNodeKey
+                // deterministically from the trace key (FastNodeKey.FromCgKey), so a pin's key
+                // is recomputable from its OwningNode alone. The one case where that derivation
+                // would lie — the pinned node's key occurring more than once in the traced set
+                // (the same cached inner function inlined multiple times), which the converter
+                // re-keys freshly — cannot arise for pinnable captures (model captures, Init
+                // results, and Random* feeds are created fresh per call site); the guard in the
+                // resolution block below fails the build loudly if it ever does. Resolved pins
+                // are handed to the id-assignment pass — positional pins take the first id
+                // slots in pin order, sparse pins take exactly their named slots (see
+                // Shorokoo.Rng.Pin).
+                bool hasPins = rngPins.positional.Length > 0 || rngPins.sparse.Length > 0;
                 var fastGraph = new FastComputationGraph(
                     [.. allInputs],
                     [.. fnOutputs]);
@@ -226,11 +245,81 @@ namespace Shorokoo.Core
                         .Process(fastGraph, genericIndexToParamName);
                 }
 
-                Shorokoo.Core.Nodes.Processors.Fast.FastApplyIdentifierTemplates.Process(fastGraph);
+                List<Shorokoo.Core.Graph.FastNodeKey>? pinnedKeys = null;
+                List<(int slot, Shorokoo.Core.Graph.FastNodeKey key)>? slotPinnedKeys = null;
+                if (hasPins)
+                {
+                    // Rebuild the reachable-node set the constructor lowered (same visitor,
+                    // same de-duplication) — used only to detect the ambiguous duplicated-key
+                    // case, where resolving by derived key could silently point the pin at
+                    // the wrong inline of a cached function.
+                    var tracedNodes = Visitors
+                        .ReversePreOrder(System.Collections.Immutable.ImmutableArray<Variable>.Empty, fnOutputs)
+                        .Select(x => x.OwningNode)
+                        .Concat(allInputs.Select(x => x.OwningNode))
+                        .Where(n => n is not null)
+                        .Distinct()
+                        .ToArray();
+                    System.Diagnostics.Debug.Assert(tracedNodes.Length == fastGraph.Nodes.Count,
+                        "GraphBuilder pin resolution: the rebuilt traced-node set must match the " +
+                        "constructor's lowering 1:1 — a mismatch means the duplicate-key guard is " +
+                        "checking a different node set than the one the graph was built from.");
+                    var duplicatedKeys = tracedNodes.GroupBy(n => n!.Key)
+                        .Where(g => g.Count() > 1).Select(g => g.Key).ToHashSet();
+
+                    // An unresolvable pin is a build error, not a skip: an inactive pin the
+                    // author believes is active is exactly the silent re-keying Rng.Pin
+                    // exists to prevent.
+                    Shorokoo.Core.Graph.FastNodeKey ResolvePin(object pin, string form)
+                    {
+                        Variable pinVar = pin switch
+                        {
+                            IModel model => model.ModelVariable,
+                            IValue value => value.ToVariable(),
+                            _ => throw new ArgumentException(
+                                $"Rng.Pin ({form}): unsupported item type '{pin?.GetType().Name ?? "null"}' — " +
+                                "pass model objects (X.Model(...)), initializer result tensors, or " +
+                                "Globals.Random* feed tensors."),
+                        };
+                        var srcKey = pinVar.OwningNode.Key;
+                        if (duplicatedKeys.Contains(srcKey))
+                            throw new InvalidOperationException(
+                                $"Rng.Pin ({form}): the pinned item's node occurs more than once in " +
+                                $"module '{methodInfo.DeclaringType?.Name}''s traced graph (a cached " +
+                                "function inlined multiple times), so the pin cannot be resolved " +
+                                "unambiguously and the module build fails instead.");
+                        var pinKey = Shorokoo.Core.Graph.FastNodeKey.FromCgKey(srcKey);
+                        if (fastGraph.FindNode(pinKey) is null)
+                            throw new InvalidOperationException(
+                                $"Rng.Pin ({form}): pinned item of type '{pin.GetType().Name}' does not " +
+                                $"resolve to a node of module '{methodInfo.DeclaringType?.Name}''s graph " +
+                                "— it was created outside this Inline body (or on another thread). The " +
+                                "pin would be silently inactive, so the module build fails instead.");
+                        return pinKey;
+                    }
+
+                    if (rngPins.positional.Length > 0)
+                    {
+                        pinnedKeys = new List<Shorokoo.Core.Graph.FastNodeKey>();
+                        foreach (var pin in rngPins.positional)
+                            pinnedKeys.Add(ResolvePin(pin, "positional"));
+                    }
+                    if (rngPins.sparse.Length > 0)
+                    {
+                        slotPinnedKeys = new List<(int, Shorokoo.Core.Graph.FastNodeKey)>();
+                        foreach (var (path, item) in rngPins.sparse)
+                            slotPinnedKeys.Add((path[0], ResolvePin(item, "sparse")));
+                    }
+                }
+
+                Shorokoo.Core.Nodes.Processors.Fast.FastApplyIdentifierTemplates.Process(
+                    fastGraph, pinnedKeys, slotPinnedKeys);
                 return fastGraph;
             }
             finally
             {
+                Shorokoo.Core.InternalGlobals.PopStateUpdateScope();
+                Shorokoo.Rng.PopPinScope();
                 LoopAPI.PopLooperContext();
             }
         }

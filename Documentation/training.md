@@ -74,10 +74,12 @@ public static TrainingRig FromScratch(
     FastComputationGraph lossGraph,
     FastComputationGraph optimizerGraph,
     NamedModelParam[] sampleInputs,            // names + sample shapes for model inputs
-    IOptimizerHyperparameters hyperparameters); // named set, e.g. new AdamWOptimizerHyperparameters { ... }
+    IOptimizerHyperparameters hyperparameters, // named set, e.g. new AdamWOptimizerHyperparameters { ... }
+    RngConfig? rngConfig = null);              // seeds the run — see "Seeding the run" below
 
 // Lower-level: positional values (a float bakes a constant, a Schedule schedules it):
 //   FromScratch(model, loss, opt, sampleInputs, params HyperValue[] hyperparameters)
+//   FromScratch(model, loss, opt, sampleInputs, rngConfig, params HyperValue[] hyperparameters)
 
 public TrainingCheckpoint CreateDefaultCheckpoint();
 
@@ -114,6 +116,17 @@ Result types:
 
 `TrainingRig`, `TrainingCheckpoint`, `TrainingStepResult`, and `TrainingResult` are in
 namespace `Shorokoo` (covered by `using Shorokoo;`).
+
+### Seeding the run
+
+`rngConfig` binds the run's [RNG configuration](rng-configuration.md): one master
+seed keys parameter initialization and every runtime draw (Dropout masks, in-model
+sampling). Omitted (or `null`), the rig keys under the **default identity** (master
+seed 0) — training is deterministic and reproducible by default. Dropout masks still
+vary per training step (the generator's execution counter advances each step and
+rides the checkpoint, so a resumed run continues exactly). Pass
+`new RngConfig { MasterSeed = … }` to re-roll all streams coherently, or
+`RngConfig.NonDeterministic()` for per-run variation.
 
 ## Save and resume a checkpoint (across process restarts)
 

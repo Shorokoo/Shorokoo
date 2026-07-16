@@ -49,7 +49,7 @@ namespace RetinaNet.Models
     {
         public static Tensor<float32> Inline(Vector<int64> shape)
         {
-            return Globals.RandomNormal(shape, mean: 0.0f, scale: 0.02f, seed: 42.0f);
+            return Globals.RandomNormal(shape, mean: 0.0f, scale: 0.02f);
         }
     }
 

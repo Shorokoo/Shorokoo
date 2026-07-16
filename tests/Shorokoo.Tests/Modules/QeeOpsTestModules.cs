@@ -56,8 +56,8 @@ namespace Shorokoo.Tests.Modules
     {
         public static (Tensor<float32>, Tensor<float32>) Inline(Vector<int64> shape)
         {
-            var srn = (Tensor<float32>)InternalOp.RandomNormal(shape, mean: 0f, scale: 1f, seed: 2f);
-            var sru = (Tensor<float32>)InternalOp.RandomUniform(shape, high: 1f, low: 0f, seed: 3f);
+            var srn = (Tensor<float32>)InternalOp.RandomNormal(shape, mean: 0f, scale: 1f);
+            var sru = (Tensor<float32>)InternalOp.RandomUniform(shape, high: 1f, low: 0f);
             return (srn, sru);
         }
     }

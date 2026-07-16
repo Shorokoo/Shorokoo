@@ -106,7 +106,7 @@ namespace Shorokoo.Tests.Modules
             => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
-    /// <summary>Reshape (0-dims, -1, allowzero on an empty tensor), Flatten (negative axis,
+    /// <summary>Reshape (keepDims copy-dim positions, -1, literal 0 on an empty tensor), Flatten (negative axis,
     /// axis 0, value pass-through), Squeeze (axes input incl. negative + absent), Unsqueeze
     /// (negative axes), Transpose (explicit perm + default reverse, with values), Identity,
     /// Shape (start/end incl. negative + out-of-range clamping), Size.
@@ -126,9 +126,17 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(r.Reshape(Vector(4L, 6L)), Vector(4L, 6L)) +
                 FloatMismatch(Flat(r.Reshape(Vector(4L, 6L))), flat24) +
                 ShapeMismatch(r.Reshape(Vector(2L, -1L)), Vector(2L, 12L)) +
-                // 0 copies the input dim (allowzero unset).
-                ShapeMismatch(r.Reshape(Vector(0L, -1L)), Vector(2L, 12L)) +
-                // allowzero=1: 0 is a real zero dim.
+                // keepDims positions copy the input dim (lowered to a 0 entry with allowzero unset).
+                ShapeMismatch(r.Reshape(Vector(-1L), keepDims: [0]), Vector(2L, 12L)) +
+                FloatMismatch(Flat(r.Reshape(Vector(-1L), keepDims: [0])), flat24) +
+                // keepDims at a middle position, alongside explicit and inferred dims.
+                ShapeMismatch(r.Reshape(Vector(2L, -1L), keepDims: [1]), Vector(2L, 3L, 4L)) +
+                // multiple keepDims positions.
+                ShapeMismatch(r.Reshape(Vector(4L), keepDims: [0, 1]), Vector(2L, 3L, 4L)) +
+                // keepDims: [] is plain ONNX allowzero=0 with the shape unchanged.
+                ShapeMismatch(r.Reshape(Vector(6L, 4L), keepDims: []), Vector(6L, 4L)) +
+                // without keepDims a 0 is a real zero dim (allowzero=1).
+                ShapeMismatch(empty0.Reshape(Vector(0L, 4L)), Vector(0L, 4L)) +
                 ShapeMismatch((Tensor<float32>)OnnxOp.Reshape(empty0, Vector(0L, 4L), allowZero: true), Vector(0L, 4L)) +
                 ShapeMismatch(r.Flatten(2), Vector(6L, 4L)) +
                 FloatMismatch(Flat(r.Flatten(2)), flat24) +

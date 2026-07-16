@@ -61,7 +61,7 @@ existing array directly: `TensorData([1L,3L,224L,224L], myPixelArray)`.
 
 - Arithmetic: `+ - * / % ^ & | << >>`, unary `-`, logical `!`.
 - Comparisons return `Tensor<bit>`: `> >= < <= == !=`.
-- Shape ops: `.Reshape(shape)`, `.Transpose(dims...)`, `.Squeeze(axes)`,
+- Shape ops: `.Reshape(shape, keepDims)` (see below), `.Transpose(dims...)`, `.Squeeze(axes)`,
   `.Unsqueeze(axis)`, `.Expand(shape)`, `.Flatten(axis)`, `.Concat(axis, others...)`,
   `.Slice(start, end, axes, steps)`, `.Pad(mode, pads, val)`, `.Tile(repeats)`.
 - Math/activations: `.Relu()`, `.Sigmoid()`, `.Tanh()`, `.Softmax(axis)`, `.Gelu()`,
@@ -72,6 +72,36 @@ existing array directly: `TensorData([1L,3L,224L,224L], myPixelArray)`.
 - Casts: `.Cast<V>()`.
 - Shape introspection (returns graph values): `.TShape`, `.ShapeTensor(start, end)`,
   `.DimTensor(axis)`, `.SizeTensor(...)`, `.TRank`.
+
+### `Reshape` and copying dimensions from the input
+
+`x.Reshape(newShape)` follows the conventions you know from PyTorch, TensorFlow, and
+NumPy: at most one `-1` entry means "infer this dimension from the element count," and a
+`0` entry is a **literal zero-sized dimension**. This is worth calling out because raw
+ONNX `Reshape` (with its default `allowzero=0`) disagrees: there a `0` means "copy the
+dimension at this position from the input tensor" — a convention ONNX inherited from
+Caffe that trips up users arriving from the eager frameworks.
+
+Shorokoo exposes the copy-dim behavior through the explicit `keepDims` parameter
+instead: list the **output positions** whose dimensions should be copied from the input,
+and omit those entries from `newShape`. The classic batch-preserving flatten of
+`x : [N, C, H, W]` — ONNX `Reshape(x, [0, -1])` — is spelled:
+
+```csharp
+x.Reshape([Scalar(-1L)], keepDims: [0])   // → [N, C·H·W]; N need not be known at build time
+```
+
+`keepDims: [0, 1]` with `newShape = [-1]` similarly yields `[N, C, H·W]`, and so on. The
+kept dimensions are resolved at run time by ONNX Runtime, so they work even when the
+input's dimensions are unknown while the graph is being built (no `.DimTensor(...)`
+plumbing needed).
+
+Lowering: `Reshape` always emits an ONNX `Reshape` node. Without `keepDims` the node
+carries `allowzero=1`, matching the PyTorch reading of `0`; with `keepDims` it carries
+`allowzero=0` and a shape input with `0` at each kept position. Note that ONNX rejects
+combining `-1` with a literal `0` under `allowzero=1`, so a zero-sized dimension and an
+inferred dimension cannot appear in the same plain `Reshape` call — but `-1` combines
+freely with `keepDims`.
 
 ## Higher-level ops (`using static Shorokoo.NN;`)
 

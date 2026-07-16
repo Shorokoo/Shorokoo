@@ -14,7 +14,7 @@
 | `[TrainableParamInitializer]` / `[StateInitializer]` | Attributes for classes that produce trainable weights / non-trainable state. | `defining-models.md` |
 | `Inline` | The `static` method the generator reads to build the graph. | `defining-models.md` |
 | `Model` / `Call` / `ComputationGraph` | Generated members: bind hypers, run on inputs, get the full graph. | `defining-models.md` |
-| `FastComputationGraph` | The internal graph representation that gets executed, exported, or trained. | `inference.md`, `onnx-and-weights.md` |
+| `FastComputationGraph` | The graph representation that gets executed, exported, or trained. | `inference.md`, `onnx-and-weights.md` |
 | `OnnxEngine.Eval` | One-shot: run a graph value and return `TensorData`. | `inference.md` |
 | `ComputeContext` / `CompiledGraph` | Compile a graph once and run it many times. | `inference.md` |
 | `QuickExecutionEngine` | CPU-only interpreter for debugging / shape inference (small tensors only). | `inference.md` |

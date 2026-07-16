@@ -306,4 +306,36 @@ public class RngPinTests
             if (e.Message.Contains("Rng.Pin")) return;
         Assert.Fail($"expected an Rng.Pin build error, got: {ex}");
     }
+
+    [Fact]
+    public void TestPinWithNoModuleBuildInProgressThrows()
+    {
+        // The uniform ModuleBuildContext contract: a pin recorded with no module build in
+        // progress could never be applied — the module the author believes is pinned would
+        // silently re-key on the next refactor (it used to be permanently orphaned in a
+        // thread-static list) — so both forms throw at the call site instead.
+        var positionalEx = Assert.Throws<InvalidOperationException>(
+            () => Rng.Pin(new object()));
+        Assert.Contains("inside a module body", positionalEx.Message);
+
+        var sparseEx = Assert.Throws<InvalidOperationException>(
+            () => Rng.Pin(([1], new object())));
+        Assert.Contains("inside a module body", sparseEx.Message);
+    }
+
+    [Fact]
+    public void TestPinInsideStandaloneLoopTraceThrows()
+    {
+        // A standalone LoopAPI.Iterate (hand-built graph, no module build) traces in an
+        // isolated ModuleBuildContext with no harvester, so a pin recorded there could never
+        // be applied either — same loud failure, on every construction pass.
+        Scalar<int64> counter = Scalar(0L);
+        foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
+        {
+            LoopAPI.Init(counter);
+            counter = counter + Scalar(1L);
+            var ex = Assert.Throws<InvalidOperationException>(() => Rng.Pin(new object()));
+            Assert.Contains("inside a module body", ex.Message);
+        }
+    }
 }

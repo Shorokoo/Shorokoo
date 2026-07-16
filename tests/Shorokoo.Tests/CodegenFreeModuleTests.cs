@@ -86,6 +86,19 @@ public class CodegenFreeModuleTests
         return input * Scalar(2f);
     }
 
+    /// <summary>StateUpdate misuse: registered inside a LoopAPI.Iterate body.</summary>
+    private static Tensor<float32> StateUpdateInsideLoopBody(Tensor<float32> input)
+    {
+        var state = InitBnRunningMean.Init(Vector(1L));
+        var acc = input;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
+        {
+            acc = acc * Scalar(2f);
+            Globals.StateUpdate(state, state + Scalar(1f));
+        }
+        return acc;
+    }
+
     // ───────────────────────────────── helpers ─────────────────────────────────
 
     /// <summary>Concretizes a module graph with the given ordered inputs and executes it.</summary>
@@ -427,5 +440,34 @@ public class CodegenFreeModuleTests
         // The correct pattern still builds, .Vec() Identity included.
         Assert.NotNull(ModuleFactory.ComputationGraph(
             (Func<Tensor<float32>, Tensor<float32>>)StateUpdateThroughVecBody, "CodegenFreeVecState"));
+    }
+
+    /// <summary>
+    /// The uniform ambient-recording contract of <see cref="Shorokoo.Core.ModuleBuildContext"/>:
+    /// <c>Globals.StateUpdate</c> requires a module build in progress. Called with none active,
+    /// the registration could never be harvested into any module's graph (it used to sit in a
+    /// thread-static list forever — neither applied nor rejected), so it throws at the call site.
+    /// </summary>
+    [Fact]
+    public void TestStateUpdateWithNoModuleBuildInProgressThrows()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => Globals.StateUpdate(Scalar(1f), Scalar(2f)));
+        Assert.Contains("inside a module body", ex.Message);
+    }
+
+    /// <summary>
+    /// <c>Globals.StateUpdate</c> inside a <c>LoopAPI.Iterate</c> body is explicitly unsupported:
+    /// a loop body is traced once per construction pass (up to four times), so an in-loop
+    /// registration used to fire repeatedly — mostly against throwaway pass nodes — with
+    /// unspecified semantics. The module build now fails loudly at the call site instead.
+    /// </summary>
+    [Fact]
+    public void TestStateUpdateInsideLoopBodyFailsTheModuleBuild()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            ModuleFactory.ComputationGraph(
+                (Func<Tensor<float32>, Tensor<float32>>)StateUpdateInsideLoopBody));
+        Assert.Contains("LoopAPI.Iterate", ex.Message);
     }
 }

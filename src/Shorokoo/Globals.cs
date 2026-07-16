@@ -160,8 +160,18 @@ namespace Shorokoo
         /// trainable parameter). The message explains how to declare a state variable via a
         /// [StateInitializer] class.
         /// </exception>
+        /// <exception cref="InvalidOperationException">
+        /// The call is outside a module body (or on a different thread than the one the body
+        /// runs on), or inside a <c>LoopAPI.Iterate</c> body — register the update after the
+        /// loop instead.
+        /// </exception>
         public static void StateUpdate<T>(T originalState, T updatedState) where T : IValue
         {
+            // The ambient-recording contract comes first: with no module build in progress the
+            // registration could never be harvested, so fail on that before validating the
+            // target. Touching the registry accessor performs exactly that validation.
+            _ = GraphTrace.StateUpdates;
+
             // Unwrap the user-facing handles to their backing graph-side Variable nodes. A defaulted
             // handle materialises a default node, which then fails the state-variable check below (SU001).
             var originalVar = originalState.ToVariable();

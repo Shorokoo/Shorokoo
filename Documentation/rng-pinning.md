@@ -45,15 +45,15 @@ graph-side tool can substitute for it, because names exist only in source.
 - `Rng.Pin(a, b, c)` is called once, at the end of the module's `Inline` body. Listed items
   take the module-local id slots **in list order** (first item = slot 1). Unlisted consumers
   follow, in node order.
-- Nothing enters the computation graph: the pin only reshapes how the module compiler numbers
-  the graph it was already building.
+- Nothing enters the computation graph: the pin only reshapes how the module's random
+  consumers are numbered.
 - **To freeze a module's current streams before a refactor, list ALL of its random consumers
   in current creation order.** A partial positional pin re-keys the unlisted consumers (they
   move behind the pinned ones).
 - Pinning also stabilizes the pinned items' identifier names (`Linear#0` vs `Linear#1` follow
   slot order), so checkpoint parameter names for pinned items are refactor-stable too.
 - Same model object = same slot = same stream: calling one model object twice draws from one
-  stream (the deliberate weight-sharing-like coupling); independent streams need distinct
+  stream (a weight-sharing-like coupling); independent streams need distinct
   objects.
 
 ## Tooling, and the division of labor
@@ -85,20 +85,16 @@ public static Tensor<float32> Inline(Tensor<float32> x, Scalar<int64> steps)
 }
 ```
 
-The generator *refuses* to emit a suggestion for anything it cannot fully analyze in **any**
-scope: bodies with C# control flow (`if`/`switch`/raw `for`/`while`/a non-`Iterate`
-`foreach`), chained `X.Model(...).Call(...)`, static `X.Call(...)` shortcuts, or opaque helper
-calls that may create streams internally. This is by design — a wrong pin silently changes
-seeds, so no suggestion beats a bad one.
+The generator emits no suggestion for anything it cannot fully analyze in **any** scope:
+bodies with C# control flow (`if`/`switch`/raw `for`/`while`/a non-`Iterate` `foreach`),
+chained `X.Model(...).Call(...)`, static `X.Call(...)` shortcuts, or opaque helper calls
+that may create streams internally.
 
-**The report supplies slots, you supply names.** For bodies the generator refuses, the
-bind-time stream report (`arch.GetRngStreamReport(config)`) describes every slot — ModelId
+**The report supplies slots, you supply names.** For bodies without a generated suggestion,
+the bind-time stream report (`arch.GetRngStreamReport(config)`) describes every slot — ModelId
 path, consumer kind, parameter name, shape, resolved key — and its `EmitPinSkeleton()` emits
-per-scope sparse skeletons with the one thing it cannot know left as a placeholder for you to
-fill in. Attaching a durable source identity to a stream is inherently a source-side act: C#
-is Turing-complete, a loop makes one identifier refer to many consumers, an `if` makes a
-consumer exist conditionally — so any tool that claimed to bind names for you would be
-guessing, and a guessed pin is worse than none.
+per-scope sparse skeletons with one placeholder per slot: fill each in with the variable
+that captured that consumer.
 
 ## The sparse form
 
@@ -124,6 +120,7 @@ pin is written in (to pin a loop's consumer, write the sparse pin inside that lo
   `LoopAPI.Iterate` loop body, which pins support) cannot be referenced by an end-of-scope
   pin; such consumers remain positional.
 - A pin that cannot be resolved — an unsupported item type, a handle created outside the
-  module body, or one that leads to no id-bearing node — **fails the module build** with an
-  `Rng.Pin` error: an inactive pin the author believes is active is exactly the silent
-  re-keying the feature exists to prevent.
+  module body, or one that leads to no id-bearing node — **throws an `Rng.Pin` error**; the
+  module cannot be used until the pin is fixed or removed.
+- `Rng.Pin` is only valid inside a module body: called anywhere else — outside any module
+  body, or from a different thread than the one the body runs on — it **throws**.

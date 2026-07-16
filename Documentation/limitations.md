@@ -28,7 +28,7 @@ loop* cannot be used after the loop. Shorokoo cannot recover the variable's
 initial value (needed for the zero-iteration case) and conservatively rejects
 the graph. Initialize the variable explicitly inside the loop body with
 `LoopAPI.Init(x)` (or read it once, e.g. `OnnxOp.Identity(x)`) before the first
-assignment; the error message walks through both fixes with examples.
+assignment.
 
 ## Current limitations (could be lifted)
 
@@ -40,10 +40,7 @@ re-executing the forward body during the backward pass. Shorokoo's graph-mode
 autodiff currently supports neither, so gradients through dynamic loops are
 rejected with `AutoDiffNotSupportedException`. Loops with a statically known
 trip count can be unrolled (iterate with `LoopAPI.Iterate(n)` where `n` is a
-compile-time constant) and then differentiate normally. Lifting this for the
-general case is believed solvable (ONNX `Scan`/`Loop` bodies are themselves
-graphs, so a backward body can in principle be synthesized) but is not
-implemented.
+compile-time constant) and then differentiate normally.
 
 ### Quick Execution Engine value computation is bounded
 
@@ -73,7 +70,7 @@ type inference: its variadic additional inputs are mapped per-element when
 sequence-typed but broadcast when tensor-typed — indistinguishable at the
 proto level — and the per-output accumulator sequences need a typed
 `SequenceEmpty` seed. The ONNX Runtime execution backend has no `SequenceMap`
-kernel to fall back on either. The importer fails fast with an actionable
+kernel to fall back on either. The importer rejects the model with an
 error. Workaround: express the mapping as an explicit `Loop` over
 `SequenceLength` using `SequenceAt`/`SequenceInsert` (in Shorokoo, build it
 with `LoopAPI`) — that form is fully supported.
@@ -82,22 +79,21 @@ with `LoopAPI`) — that form is fully supported.
 
 Import accepts standard-domain (`ai.onnx`) models from opset 7 through
 opset 26 — the range implemented by the bundled ONNX Runtime 1.26 (which pins
-ONNX 1.21). Export, however, stamps models at the proven **opset-21
-baseline**, and the exporter auto-raises each model's opset stamp only as far
+ONNX 1.21). Export, however, stamps models at the **opset-21 baseline**,
+and the exporter auto-raises each model's opset stamp only as far
 as the post-21 operators actually present in the graph require (e.g. a graph
 containing `Attention` is stamped opset 23; one containing `BitCast`,
 opset 26).
 
-The baseline deliberately stays at 21 rather than 26: the opset stamp selects
+The baseline stays at 21 rather than 26: the opset stamp selects
 kernel versions in ONNX Runtime, and ORT's CPU provider has gaps at the
 bumped versions. For example, the opset-22 respecifications of `GlobalLpPool`
 and `RandomNormalLike` only added bfloat16 to their type constraints, yet ORT
 1.26's CPU provider registers no opset-22 kernels for them — a model
 blanket-stamped at opset ≥ 22 fails to load even though the identical
-opset-21 model runs fine. The baseline can be raised as ORT closes those
-kernel gaps.
+opset-21 model runs fine.
 
-Nothing of substance is lost by the lower stamp: the opset 22–26
+The lower stamp does not reduce coverage: the opset 22–26
 respecifications of pre-existing operators only widen dtype lists (bfloat16
 at 22; float4e2m1 at 23; float8e8m0 at 24; int2/uint2 at 25 — all
 unsupported in Shorokoo, see the dtype section below), plus three new

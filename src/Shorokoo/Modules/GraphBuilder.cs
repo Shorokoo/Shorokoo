@@ -146,20 +146,16 @@ namespace Shorokoo.Core
             // destructive clear here would wipe the OUTER body's records). Entering also
             // hands this build a fresh trace, so no records leak between builds.
             using var buildScope = GraphTrace.EnterModuleBuild();
-            Variable[] fnOutputs;
-            Variable[] stateUpdates;
-            (object[] positional, (int[] path, object item)[] sparse) rngPins;
-            try
-            {
-                fnOutputs = ModuleHelper.InvokeAndFormat(methodInfo, fnInputs, invokeTarget);
-            }
-            finally
-            {
-                // Always harvest, even if an exception occurred — the build scope disposes
-                // at method exit either way, but harvesting here keeps the pairing explicit.
-                stateUpdates = GraphTrace.StateUpdates.Take();
-                rngPins = GraphTrace.Pins.Take();
-            }
+            var fnOutputs = ModuleHelper.InvokeAndFormat(methodInfo, fnInputs, invokeTarget);
+
+            // Harvest only on success. A failed build needs no cleanup — its records die
+            // with its own trace when the build scope disposes (the clear-even-on-exception
+            // harvest this replaced guarded the pre-GraphTrace thread-static registries,
+            // which really could leak into the next build). And the harvest must NOT run on
+            // the exception path: StateUpdateRegistry.Take throws on unresolved in-loop
+            // registrations, which from inside a finally would replace the real failure.
+            var stateUpdates = GraphTrace.StateUpdates.Take();
+            var rngPins = GraphTrace.Pins.Take();
 
             // Check for registered state updates and wrap outputs with WithStateDeps if any exist
             // This ensures state update tensors are included in the graph when outputs are used

@@ -189,6 +189,26 @@ public class CodegenFreeModuleTests
         return input * Scalar(2f);
     }
 
+    /// <summary>
+    /// A loop-construction failure striking after the in-loop StateUpdate has recorded:
+    /// the throw fires on the fourth body trace, i.e. after the canonical (third) pass
+    /// recorded the pending registration but before the loop completes and resolves it.
+    /// </summary>
+    private static Tensor<float32> StateUpdateInLoopThenFourthPassThrowBody(Tensor<float32> input)
+    {
+        var state = InitBnRunningMean.Init(Vector(1L));
+        var acc = state + Scalar(0f);
+        var bodyRuns = 0;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
+        {
+            acc = acc + Scalar(1f);
+            Globals.StateUpdate(state, acc);
+            if (++bodyRuns == 4)
+                throw new FormatException("simulated fourth-pass loop-construction failure");
+        }
+        return input * Scalar(2f);
+    }
+
     // ───────────────────────────────── helpers ─────────────────────────────────
 
     /// <summary>Concretizes a module graph with the given ordered inputs and executes it.</summary>
@@ -573,7 +593,8 @@ public class CodegenFreeModuleTests
         var sugar = Concretize(StateUpdateInLoopCarriedBody, "CodegenFreeInLoopState");
         var afterLoop = Concretize(StateUpdateAfterLoopCarriedBody, "CodegenFreeAfterLoopState");
 
-        foreach (var concrete in new[] { sugar, afterLoop })
+        FastComputationGraph[] variants = [sugar, afterLoop];
+        foreach (var concrete in variants)
         {
             Assert.Equal(1, concrete.GetStateUpdateOutputCount());
             Assert.Equal(0f, StateValue(concrete));
@@ -652,6 +673,22 @@ public class CodegenFreeModuleTests
                 (Func<Tensor<float32>, Tensor<float32>>)StateUpdateInsideLoopBody));
         Assert.Contains("does not surface as a loop output", ex.Message);
         Assert.Contains("LoopAPI.Iterate", ex.Message);
+    }
+
+    /// <summary>
+    /// A failure that strikes after an in-loop StateUpdate has recorded (canonical pass
+    /// done, loop not yet complete) must surface as-is. The unresolved pending
+    /// registration is discarded along with the failed build's trace; it must not be
+    /// re-reported from the harvest as the misleading "never resolved" error, which
+    /// would mask the real exception.
+    /// </summary>
+    [Fact]
+    public void TestLoopConstructionFailureAfterInLoopStateUpdateIsNotMasked()
+    {
+        var ex = Assert.Throws<FormatException>(() =>
+            ModuleFactory.ComputationGraph(
+                (Func<Tensor<float32>, Tensor<float32>>)StateUpdateInLoopThenFourthPassThrowBody));
+        Assert.Equal("simulated fourth-pass loop-construction failure", ex.Message);
     }
 
     /// <summary>

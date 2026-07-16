@@ -169,7 +169,7 @@ namespace Shorokoo
         {
             // The ambient-recording contract comes first: with no module build in progress the
             // registration could never be harvested, so fail on that before validating the target.
-            ModuleBuildContext.RequireModuleBuild("Globals.StateUpdate");
+            GraphTrace.EnsureStateUpdateRecordable();
 
             // Unwrap the user-facing handles to their backing graph-side Variable nodes. A defaulted
             // handle materialises a default node, which then fails the state-variable check below (SU001).

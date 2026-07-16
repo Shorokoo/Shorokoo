@@ -142,10 +142,10 @@ namespace Shorokoo.Core
             // This method re-enters mid-trace whenever the body first-uses a sub-module or
             // initializer whose Function is not yet cached, so all per-trace ambient state —
             // the looper stack, the Rng.Pin recordings, and the StateUpdate registrations —
-            // lives in one ModuleBuildContext entered per build and restored on exit (a
-            // destructive clear here would wipe the OUTER body's records). Entering also hands
-            // this build a fresh context, so no records leak between builds.
-            var buildContext = ModuleBuildContext.Enter();
+            // lives in one ambient trace entered per build and restored on exit (a
+            // destructive clear here would wipe the OUTER body's records). Entering also
+            // hands this build a fresh trace, so no records leak between builds.
+            var buildTrace = GraphTrace.EnterModuleBuild();
             try
             {
                 Variable[] fnOutputs;
@@ -157,10 +157,10 @@ namespace Shorokoo.Core
                 }
                 finally
                 {
-                    // Always harvest, even if an exception occurred — the context is exited
+                    // Always harvest, even if an exception occurred — the trace is exited
                     // below either way, but harvesting here keeps the pairing explicit.
-                    stateUpdates = buildContext.StateUpdates.Take();
-                    rngPins = buildContext.Pins.Take();
+                    stateUpdates = GraphTrace.HarvestStateUpdates(buildTrace);
+                    rngPins = GraphTrace.HarvestPins(buildTrace);
                 }
 
                 // Check for registered state updates and wrap outputs with WithStateDeps if any exist
@@ -316,7 +316,7 @@ namespace Shorokoo.Core
             }
             finally
             {
-                ModuleBuildContext.Exit(buildContext);
+                GraphTrace.Exit(buildTrace);
             }
         }
 

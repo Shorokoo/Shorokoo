@@ -19,10 +19,10 @@ namespace Shorokoo.Core
     /// <summary>
     /// The state-update pairs registered during one module-body trace: a dead-simple
     /// accumulate-then-harvest list. What a state update means lives here, next to
-    /// <see cref="InternalGlobals.RegisterStateUpdate"/>; the ambient
-    /// <see cref="ModuleBuildContext"/> merely carries an instance per trace, and the graph
-    /// builder harvests it with <see cref="Take"/> after the body returns to wrap the module
-    /// outputs with WithStateDeps.
+    /// <see cref="InternalGlobals.RegisterStateUpdate"/>; the ambient trace merely carries
+    /// an instance (see <see cref="GraphTrace"/>), and the graph builder harvests it with
+    /// <see cref="Take"/> after the body returns to wrap the module outputs with
+    /// WithStateDeps.
     /// </summary>
     internal sealed class StateUpdateRegistry
     {
@@ -49,32 +49,22 @@ namespace Shorokoo.Core
         /// <summary>
         /// Registers a state update relationship between an original state tensor and its updated value.
         /// Called by Globals.StateUpdate to track state updates during module execution. The pair is
-        /// recorded on the current <see cref="ModuleBuildContext"/>'s <see cref="StateUpdateRegistry"/>,
-        /// where the graph builder harvests it after the body returns to wrap the module outputs with
-        /// WithStateDeps; with no module build in progress the registration could never be harvested,
-        /// so this throws instead.
+        /// recorded on the current module build (see <see cref="GraphTrace"/>), where the graph builder
+        /// harvests it after the body returns to wrap the module outputs with WithStateDeps; with no
+        /// module build in progress the registration could never be harvested, so this throws instead.
         /// </summary>
         /// <param name="original">The original state tensor from a state initializer</param>
         /// <param name="updated">The computed updated value for the state</param>
         /// <returns>The linked updated state tensor (output of STATE_UPDATE_LINK node)</returns>
         internal static Variable RegisterStateUpdate(Variable original, Variable updated)
         {
-            var context = ModuleBuildContext.RequireModuleBuild("Globals.StateUpdate");
-
-            // A loop body is traced once per construction pass (up to four times), so an in-loop
-            // registration would fire repeatedly — mostly against throwaway nodes — and what a
-            // per-iteration state update should even mean is undefined. Explicitly unsupported.
-            if (context.Loopers.InLoopBody)
-                throw new InvalidOperationException(
-                    "Globals.StateUpdate is not supported inside a LoopAPI.Iterate body. " +
-                    "Compute the new value inside the loop, then register the update once " +
-                    "after the loop, from the loop's final value.");
+            GraphTrace.EnsureStateUpdateRecordable();
 
             // Create the STATE_UPDATE_LINK node to track the relationship in the graph
             var linkedUpdated = InternalOp.StateUpdateLink(original, updated);
 
             // Store the pair for later retrieval when wrapping module outputs
-            context.StateUpdates.Add(original, linkedUpdated);
+            GraphTrace.RecordStateUpdate(original, linkedUpdated);
 
             return linkedUpdated;
         }

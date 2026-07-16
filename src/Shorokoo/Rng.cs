@@ -9,8 +9,8 @@ namespace Shorokoo;
 /// <para><see cref="Pin(object[])"/> freezes the RNG stream identities of a module's random
 /// consumers against code refactoring. It records the listed items (model objects from
 /// <c>X.Model(...)</c>, trainable-param tensors from initializer <c>Init(...)</c> calls,
-/// runtime feed tensors from <c>Globals.Random*</c>) into the current module build's
-/// <see cref="ModuleBuildContext"/>, which the module compiler reads when assigning ModelId
+/// runtime feed tensors from <c>Globals.Random*</c>) into the current module build, which
+/// the module compiler reads when assigning ModelId
 /// slots: <b>listed items take the id slots in list order; unlisted items follow in node
 /// order</b>. Since RNG stream keys fold along
 /// ModelIds, a pinned item's streams no longer depend on its creation position — reorder or
@@ -53,11 +53,7 @@ public static class Rng
     public static void Pin(params object[] items)
     {
         ArgumentNullException.ThrowIfNull(items);
-        var context = ModuleBuildContext.RequireModuleBuild("Rng.Pin");
-        // A loop body is traced multiple times during graph construction; only the canonical
-        // pass builds the surviving nodes. Recording outside it would pin throwaway nodes.
-        if (!context.Loopers.InCanonicalRecordingScope) return;
-        context.Pins.AddPositional(items);
+        GraphTrace.RecordPins(items);
     }
 
     /// <summary>
@@ -94,17 +90,15 @@ public static class Rng
             if (item is null)
                 throw new ArgumentException("Rng.Pin (sparse): pinned item is null.", nameof(items));
         }
-        var context = ModuleBuildContext.RequireModuleBuild("Rng.Pin");
-        if (!context.Loopers.InCanonicalRecordingScope) return;
-        context.Pins.AddSparse(items);
+        GraphTrace.RecordSparsePins(items);
     }
 }
 
 /// <summary>
 /// The pins recorded during one module-body trace: a dead-simple accumulate-then-harvest
-/// pair of lists. What a pin means lives here in <c>Rng.cs</c>; the ambient
-/// <see cref="ModuleBuildContext"/> merely carries an instance per trace, and the graph
-/// builder harvests it with <see cref="Take"/> after the body returns.
+/// pair of lists. What a pin means lives here in <c>Rng.cs</c>; the ambient trace merely
+/// carries an instance (see <see cref="GraphTrace"/>), and the graph builder harvests it
+/// with <see cref="Take"/> after the body returns.
 /// </summary>
 internal sealed class RngPinRegistry
 {

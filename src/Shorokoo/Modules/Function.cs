@@ -162,13 +162,13 @@ namespace Shorokoo.Core
         private ImmutableArray<int?> _outputRankOverrides;
 
         // Materializes the Variable snapshot directly from OriginalFastGraph via
-        // BuildNodes. Shielded from any active outer trace by an isolated
-        // TraceContext: rebuilding nodes fires Node ctors which would otherwise
-        // leak into an enclosing LoopAPI.Iterate body's pass-equality tracking.
+        // BuildNodes. Shielded from any active outer trace by an isolated trace:
+        // rebuilding nodes fires Node ctors which would otherwise leak into an
+        // enclosing LoopAPI.Iterate body's pass-equality tracking.
         private void EnsureConvertedSnapshot()
         {
             if (_convertedSnapshotComputed) return;
-            var shield = TraceContext.EnterIsolated();
+            var shield = GraphTrace.EnterIsolated();
             try
             {
                 var built = FastComputationGraphConverter.BuildNodes(this.OriginalFastGraph);
@@ -185,7 +185,7 @@ namespace Shorokoo.Core
                     : OriginalFastGraph.OutputRankOverrides.ToImmutableArray();
                 _convertedSnapshotComputed = true;
             }
-            finally { TraceContext.Exit(shield); }
+            finally { GraphTrace.Exit(shield); }
         }
 
         public Function(FastComputationGraph fastGraph, FunctionType functionType, string? defaultName, string? friendlyName,

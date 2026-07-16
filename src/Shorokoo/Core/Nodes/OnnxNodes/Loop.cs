@@ -653,8 +653,8 @@ namespace Shorokoo
     /// <summary>
     /// The loop-tracing state of one trace: the in-progress <see cref="Looper"/>s, outermost
     /// first, plus the pass queries derived from them. Everything that understands loop
-    /// passes lives here, next to the machinery that drives them; the enclosing
-    /// <see cref="Shorokoo.Core.TraceContext"/> merely carries an instance.
+    /// passes lives here, next to the machinery that drives them; the ambient trace merely
+    /// carries an instance (see <see cref="Shorokoo.Core.GraphTrace"/>).
     /// </summary>
     internal sealed class LooperStack : IReadOnlyList<Looper>
     {
@@ -708,26 +708,25 @@ namespace Shorokoo
 
     public static class LoopAPI
     {
-        // All trace-time loop state lives in the ambient TraceContext's LooperStack: the
-        // graph builder enters a (module-build) context per body trace, and a standalone
-        // Iterate outside any build enters an isolated context for the duration of the
-        // iteration (see LoopFull).
+        // All trace-time loop state lives in the ambient trace's LooperStack, reached
+        // through GraphTrace: the graph builder enters a (module-build) trace per body
+        // trace, and a standalone Iterate outside any build enters an isolated trace for
+        // the duration of the iteration (see LoopFull).
 
         /// <summary>
         /// Gets the interation indices of all outerloop ordered from outermost to innerermost.
         /// </summary>
         internal static ImmutableList<Scalar<int64>> IterationIndices
-            => TraceContext.Current?.Loopers.IterationIndices
+            => GraphTrace.CurrentLoopers?.IterationIndices
                 ?? ImmutableList<Scalar<int64>>.Empty;
 
         internal static (FullInputs newInputs, FullOutputs newOutputs) ProcessNode(Node node)
         {
             // No trace in progress, or no active loop: node creation passes through untouched.
-            var context = TraceContext.Current;
-            if (context is null || context.Loopers.Active is not { } active)
+            var looperStack = GraphTrace.CurrentLoopers;
+            if (looperStack is null || looperStack.Active is not { } active)
                 return (node.FullInputs, node.FullOutputs);
 
-            var looperStack = context.Loopers;
             var (activeLooper, activeLooperIndex) = active;
 
             // Nodes involved in the creation of the loop, these, in principle are not part of the loop body.
@@ -782,12 +781,12 @@ namespace Shorokoo
 
         private static IEnumerable<(Action<Scalar<bit>> breakWhen, Looper looper, Scalar<int64> iterationIndex)> LoopFull(Scalar<int64>? maxNumIterations)
         {
-            // A loop traced inside a module build records into that build's context. A standalone
+            // A loop traced inside a module build records into that build's trace. A standalone
             // trace (hand-built graphs, e.g. FastComputationGraph construction in tests) gets its
-            // own isolated context for the duration of the iteration, so the looper state never
+            // own isolated trace for the duration of the iteration, so the looper state never
             // outlives the loop and never bleeds into an unrelated ambient trace.
-            var standalone = TraceContext.Current is null ? TraceContext.EnterIsolated() : null;
-            var looperStack = TraceContext.Current!.Loopers;
+            var standalone = GraphTrace.EnterIsolatedIfNone();
+            var looperStack = GraphTrace.CurrentLoopers!;
 
             var looper = new Looper(looperStack.Count);
             looperStack.Add(looper);
@@ -843,7 +842,7 @@ namespace Shorokoo
                 }
 
                 if (standalone is not null)
-                    TraceContext.Exit(standalone);
+                    GraphTrace.Exit(standalone);
             }
         }
 

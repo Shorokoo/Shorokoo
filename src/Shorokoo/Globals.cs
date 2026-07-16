@@ -160,8 +160,17 @@ namespace Shorokoo
         /// trainable parameter). The message explains how to declare a state variable via a
         /// [StateInitializer] class.
         /// </exception>
+        /// <exception cref="InvalidOperationException">
+        /// No module build is in progress on the current thread (the registration could never be
+        /// applied), or the call site is inside a <c>LoopAPI.Iterate</c> body (a loop body is
+        /// traced multiple times during construction; register the update after the loop instead).
+        /// </exception>
         public static void StateUpdate<T>(T originalState, T updatedState) where T : IValue
         {
+            // The ambient-recording contract comes first: with no module build in progress the
+            // registration could never be harvested, so fail on that before validating the target.
+            ModuleBuildContext.RequireModuleBuild("Globals.StateUpdate");
+
             // Unwrap the user-facing handles to their backing graph-side Variable nodes. A defaulted
             // handle materialises a default node, which then fails the state-variable check below (SU001).
             var originalVar = originalState.ToVariable();

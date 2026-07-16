@@ -652,68 +652,28 @@ namespace Shorokoo
 
     public static class LoopAPI
     {
-        // [ThreadStatic] field initializers only run on the thread that first touches the
-        // type, so on every other thread the backing field is null. Use lazy-initialized
-        // properties so each thread gets its own instance on first access.
-        [ThreadStatic]
-        private static List<Looper>? _looperStack;
-        private static List<Looper> LooperStack
-        {
-            get => _looperStack ??= new List<Looper>();
-            set => _looperStack = value;
-        }
-
-        [ThreadStatic]
-        private static Stack<List<Looper>>? _looperContexts;
-        private static Stack<List<Looper>> LooperContexts
-            => _looperContexts ??= new Stack<List<Looper>>();
+        // All trace-time loop state lives on the ambient ModuleBuildContext (one thread-static
+        // slot shared with the Rng.Pin and Globals.StateUpdate registries): the graph builder
+        // enters a context per body trace, and a standalone Iterate outside any build enters an
+        // isolated context for the duration of the iteration (see LoopFull).
 
         /// <summary>
         /// Gets the interation indices of all outerloop ordered from outermost to innerermost.
         /// </summary>
-        internal static ImmutableList<Scalar<int64>> IterationIndices => LooperStack.Select(x => x.GetLoopIndexVariable()).ToImmutableList();
-
-        /// <summary>
-        /// Whether trace-time actions that must fire <b>exactly once per source occurrence</b>
-        /// (e.g. <see cref="Shorokoo.Rng.Pin(object[])"/>) should record right now. A loop body is
-        /// executed once per construction pass — first (track), second (identify loop vars), third
-        /// (build the real body), fourth (expose outputs) — so a naive record inside a loop body
-        /// would fire up to four times, three of them against throwaway nodes. Only the pass that
-        /// builds the surviving body nodes (the active looper's third pass) is canonical; at module
-        /// level (no active loop) recording is always canonical. Mirrors the active-looper selection
-        /// in <see cref="ProcessNode"/> so the "active" scope — not merely the innermost — is tested.
-        /// </summary>
-        internal static bool InCanonicalRecordingScope
-        {
-            get
-            {
-                if (LooperStack.Count == 0) return true;
-                var activeIdx = LooperStack.FindIndex(x => x.CurrentPass == 0) - 1;
-                if (activeIdx < 0) activeIdx = LooperStack.Count - 1;
-                return LooperStack[activeIdx].CurrentPass == 3;
-            }
-        }
-
-        internal static void PushLooperContext()
-        {
-            LooperContexts.Push(LooperStack);
-            LooperStack = new List<Looper>();
-        }
-        internal static void PopLooperContext()
-        {
-            Debug.Assert(LooperStack.Count == 0); // Really shouldn't be popping an active loop.
-            LooperStack = LooperContexts.Pop();
-        }
+        internal static ImmutableList<Scalar<int64>> IterationIndices
+            => ModuleBuildContext.Current is { } context
+                ? context.LooperStack.Select(x => x.GetLoopIndexVariable()).ToImmutableList()
+                : ImmutableList<Scalar<int64>>.Empty;
 
         internal static (FullInputs newInputs, FullOutputs newOutputs) ProcessNode(Node node)
         {
-            // No active loop.
-            if (LooperStack.Count == 0)
+            // No trace in progress, or no active loop: node creation passes through untouched.
+            var context = ModuleBuildContext.Current;
+            if (context is null || context.ActiveLooper is not { } active)
                 return (node.FullInputs, node.FullOutputs);
 
-            var activeIdx = LooperStack.FindIndex(x => x.CurrentPass == 0) - 1;
-            if (activeIdx < 0) activeIdx = LooperStack.Count - 1;
-            var activeL = LooperStack[activeIdx];
+            var looperStack = context.LooperStack;
+            var (activeLooper, activeLooperIndex) = active;
 
             // Nodes involved in the creation of the loop, these, in principle are not part of the loop body.
             if (node.NodeDef.FullNodeOpName == OpCodes.LOOP ||
@@ -730,17 +690,13 @@ namespace Shorokoo
             FullInputs retvalInputs = node.FullInputs;
             FullOutputs retvalOutputs = node.FullOutputs;
 
-            var activeLooperIndex = LooperStack.FindIndex(x => x.CurrentPass == 0) - 1;
-            if (activeLooperIndex < 0) activeLooperIndex = LooperStack.Count - 1;
-
-            var activeLooper = LooperStack[activeLooperIndex];
             if (activeLooper.CurrentPass == 1 && activeLooperIndex > 0)
             {
                 // We process an inner loop's pass 1 at the same time as its outer loop's pass 3.
                 // This enables the inner loop to capture the outer loop's OpenNode outputs used as inputs to nodes
                 // part of the inner loop's body.
-                Debug.Assert(LooperStack.Take(activeLooperIndex).All(x => x.CurrentPass == 3));
-                var outerLooper = LooperStack[activeLooperIndex - 1];
+                Debug.Assert(looperStack.Take(activeLooperIndex).All(x => x.CurrentPass == 3));
+                var outerLooper = looperStack[activeLooperIndex - 1];
                 Debug.Assert(outerLooper.CurrentPass == 3);
                 (retvalInputs, retvalOutputs) = outerLooper.ProcessNode(node, retvalInputs, retvalOutputs);
             }
@@ -750,18 +706,18 @@ namespace Shorokoo
             // a loop is only activated during pass 3 for nodes that do not belong to inner-more loops.
             Debug.Assert(activeLooper.CurrentPass == 1 ||
                         activeLooper.CurrentPass == 2 ||
-                        (activeLooper.CurrentPass == 3 && (activeLooperIndex == LooperStack.Count - 1)) ||
+                        (activeLooper.CurrentPass == 3 && (activeLooperIndex == looperStack.Count - 1)) ||
                         activeLooper.CurrentPass == 4);
 
             // If the current node is in the scope of inner loops of the active loop, then these
             // inner loops should be on pass 0.
-            Debug.Assert(LooperStack.Count <= activeLooperIndex + 1 ||
-                            LooperStack.Skip(activeLooperIndex + 1).All(x => x.CurrentPass == 0));
+            Debug.Assert(looperStack.Count <= activeLooperIndex + 1 ||
+                            looperStack.Skip(activeLooperIndex + 1).All(x => x.CurrentPass == 0));
 
             // If the active loop is inside the scope of outer loops, then these outer loops
             // should on pass 3.
             Debug.Assert(activeLooperIndex == 0 ||
-                        LooperStack.Take(activeLooperIndex).All(x => x.CurrentPass == 3));
+                        looperStack.Take(activeLooperIndex).All(x => x.CurrentPass == 3));
 
 
             (retvalInputs, retvalOutputs) = activeLooper.ProcessNode(node, retvalInputs, retvalOutputs);
@@ -771,13 +727,20 @@ namespace Shorokoo
 
         private static IEnumerable<(Action<Scalar<bit>> breakWhen, Looper looper, Scalar<int64> iterationIndex)> LoopFull(Scalar<int64>? maxNumIterations)
         {
-            var looper = new Looper(LooperStack.Count);
-            LooperStack.Add(looper);
+            // A loop traced inside a module build records into that build's context. A standalone
+            // trace (hand-built graphs, e.g. FastComputationGraph construction in tests) gets its
+            // own isolated context for the duration of the iteration, so the looper state never
+            // outlives the loop and never bleeds into an unrelated ambient trace.
+            var standalone = ModuleBuildContext.Current is null ? ModuleBuildContext.EnterIsolated() : null;
+            var looperStack = ModuleBuildContext.Current!.LooperStack;
+
+            var looper = new Looper(looperStack.Count);
+            looperStack.Add(looper);
 
             try
             {
                 // Do nothing if there is an outer loop that is in its first or second pass.
-                if (looper.LoopDepth != 0 && (LooperStack[looper.LoopDepth - 1].CurrentPass < 3 || LooperStack[looper.LoopDepth - 1].CurrentPass == 4))
+                if (looper.LoopDepth != 0 && (looperStack[looper.LoopDepth - 1].CurrentPass < 3 || looperStack[looper.LoopDepth - 1].CurrentPass == 4))
                 {
                     yield return ((x) => { }, looper, looper.GetLoopIndexVariable());
                 }
@@ -787,42 +750,45 @@ namespace Shorokoo
                     looper.StartFirstPass();
                     looper.SetMaxNumIterations(maxNumIterations);
                     yield return ((x) => { }, looper, looper.GetLoopIndexVariable());
-                    Debug.Assert(LooperStack.Count == looper.LoopDepth + 1);
+                    Debug.Assert(looperStack.Count == looper.LoopDepth + 1);
 
                     // Second pass, identify the loop variables
                     looper.StartSecondPass();
                     yield return ((x) => { }, looper, looper.GetLoopIndexVariable());
-                    Debug.Assert(LooperStack.Count == looper.LoopDepth + 1);
+                    Debug.Assert(looperStack.Count == looper.LoopDepth + 1);
 
                     looper.BuildLoopOpenNode();
 
                     // Third pass, build the actual loop body
                     looper.StartThirdPass();
                     yield return (looper.ContinueWhile, looper, looper.GetLoopIndexVariable());
-                    Debug.Assert(LooperStack.Count == looper.LoopDepth + 1);
+                    Debug.Assert(looperStack.Count == looper.LoopDepth + 1);
 
                     var outerLoopMappings = looper.BuildLoopCloseNode();
                     if (looper.LoopDepth > 0)
-                        LooperStack[looper.LoopDepth - 1].MapInnerLoopCloseNodeOutputsToOuterLoopThirdPassOutputs(outerLoopMappings);
+                        looperStack[looper.LoopDepth - 1].MapInnerLoopCloseNodeOutputsToOuterLoopThirdPassOutputs(outerLoopMappings);
 
                     // Fourth pass, make loop output variables available to the caller.
                     looper.StartFourthPass();
                     yield return ((x) => { }, looper, looper.GetLoopIndexVariable());
-                    Debug.Assert(LooperStack.Count == looper.LoopDepth + 1);
+                    Debug.Assert(looperStack.Count == looper.LoopDepth + 1);
 
                     looper.Terminate();
                 }
 
-                Debug.Assert(LooperStack.Count == looper.LoopDepth + 1);
-                Debug.Assert(LooperStack[looper.LoopDepth] == looper);
+                Debug.Assert(looperStack.Count == looper.LoopDepth + 1);
+                Debug.Assert(looperStack[looper.LoopDepth] == looper);
             }
             finally
             {
                 // Always remove the looper from the stack, even if an exception occurred
-                if (LooperStack.Count > looper.LoopDepth && LooperStack[looper.LoopDepth] == looper)
+                if (looperStack.Count > looper.LoopDepth && looperStack[looper.LoopDepth] == looper)
                 {
-                    LooperStack.RemoveAt(looper.LoopDepth);
+                    looperStack.RemoveAt(looper.LoopDepth);
                 }
+
+                if (standalone is not null)
+                    ModuleBuildContext.Exit(standalone);
             }
         }
 

@@ -27,7 +27,9 @@ Related: [core-types.md](core-types.md) · [inference.md](inference.md) ·
     through a state initializer's `Init(...)`: `Globals.StateUpdate(state, newValue)`
     throws `InvalidStateUpdateException` (with declaration instructions) when its
     first argument is anything else — a runtime input, a trainable parameter, or a
-    computed tensor.
+    computed tensor. `StateUpdate` must also be called while a module build is in
+    progress (inside the module body being traced, on the same thread) and outside
+    any `LoopAPI.Iterate` body — it throws otherwise.
 - `Inline` may return a single value or a tuple (multiple outputs).
 - The class must be `partial` so the generator can extend it.
 - The generator is a convenience, not a requirement — see

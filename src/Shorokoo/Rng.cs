@@ -1,6 +1,5 @@
 using System;
-using System.Collections.Generic;
-using System.Linq;
+using Shorokoo.Core;
 
 namespace Shorokoo;
 
@@ -10,9 +9,10 @@ namespace Shorokoo;
 /// <para><see cref="Pin(object[])"/> freezes the RNG stream identities of a module's random
 /// consumers against code refactoring. It records the listed items (model objects from
 /// <c>X.Model(...)</c>, trainable-param tensors from initializer <c>Init(...)</c> calls,
-/// runtime feed tensors from <c>Globals.Random*</c>) into a trace-time static list that the
-/// module compiler reads when assigning ModelId slots: <b>listed items take the id slots in
-/// list order; unlisted items follow in node order</b>. Since RNG stream keys fold along
+/// runtime feed tensors from <c>Globals.Random*</c>) into the current module build's
+/// <see cref="ModuleBuildContext"/>, which the module compiler reads when assigning ModelId
+/// slots: <b>listed items take the id slots in list order; unlisted items follow in node
+/// order</b>. Since RNG stream keys fold along
 /// ModelIds, a pinned item's streams no longer depend on its creation position — reorder or
 /// move code freely, only the Pin list defines the mapping.</para>
 ///
@@ -36,19 +36,12 @@ namespace Shorokoo;
 /// <para>Nothing here is baked into the computation graph: the pin list only reshapes how the
 /// compiler numbers the graph it was already building. A pin that cannot be resolved to a
 /// node of the module's graph fails the module build — an inactive pin the author believes
-/// is active is exactly the silent re-keying pinning exists to prevent.</para>
+/// is active is exactly the silent re-keying pinning exists to prevent. For the same reason,
+/// a pin invoked with <b>no module build in progress</b> on the current thread throws
+/// immediately: nothing could ever apply it.</para>
 /// </summary>
 public static class Rng
 {
-    [ThreadStatic]
-    private static List<object>? _pins;
-
-    [ThreadStatic]
-    private static List<(int[] path, object item)>? _slotPins;
-
-    [ThreadStatic]
-    private static Stack<(List<object>? pins, List<(int[] path, object item)>? slotPins)>? _pinScopes;
-
     /// <summary>
     /// Pins the RNG stream identities of the listed items to their list positions within the
     /// current scope (first item = first local slot, ...). Call once per scope, at the end of
@@ -60,10 +53,11 @@ public static class Rng
     public static void Pin(params object[] items)
     {
         ArgumentNullException.ThrowIfNull(items);
+        var context = ModuleBuildContext.RequireModuleBuild("Rng.Pin");
         // A loop body is traced multiple times during graph construction; only the canonical
         // pass builds the surviving nodes. Recording outside it would pin throwaway nodes.
-        if (!LoopAPI.InCanonicalRecordingScope) return;
-        (_pins ??= new List<object>()).AddRange(items);
+        if (!context.InCanonicalRecordingScope) return;
+        context.AddPins(items);
     }
 
     /// <summary>
@@ -100,39 +94,8 @@ public static class Rng
             if (item is null)
                 throw new ArgumentException("Rng.Pin (sparse): pinned item is null.", nameof(items));
         }
-        if (!LoopAPI.InCanonicalRecordingScope) return;
-        (_slotPins ??= new List<(int[], object)>()).AddRange(items);
-    }
-
-    /// <summary>Collects and clears the pins recorded during the current body trace (module-compiler side).</summary>
-    internal static (object[] positional, (int[] path, object item)[] sparse) GetAndClearPins()
-    {
-        var pins = _pins;
-        var slotPins = _slotPins;
-        _pins = null;
-        _slotPins = null;
-        return (pins?.ToArray() ?? Array.Empty<object>(),
-                slotPins?.ToArray() ?? Array.Empty<(int[], object)>());
-    }
-
-    /// <summary>
-    /// Opens a fresh pin recording scope for one body trace, saving the current lists. The graph
-    /// builder RE-ENTERS mid-trace whenever a body first-uses a sub-module or initializer whose
-    /// Function is not yet cached; a destructive clear at build entry would silently wipe the
-    /// OUTER body's already-recorded pins (cache-order-dependently). Save/restore keeps every
-    /// build isolated without losing the enclosing trace's records — the same discipline
-    /// <c>LoopAPI.PushLooperContext</c> applies to the looper state across the same re-entrancy.
-    /// </summary>
-    internal static void PushPinScope()
-    {
-        (_pinScopes ??= new Stack<(List<object>?, List<(int[], object)>?)>()).Push((_pins, _slotPins));
-        _pins = null;
-        _slotPins = null;
-    }
-
-    /// <summary>Closes the current pin scope, restoring the enclosing trace's recorded pins.</summary>
-    internal static void PopPinScope()
-    {
-        (_pins, _slotPins) = _pinScopes!.Pop();
+        var context = ModuleBuildContext.RequireModuleBuild("Rng.Pin");
+        if (!context.InCanonicalRecordingScope) return;
+        context.AddSlotPins(items);
     }
 }

@@ -331,3 +331,8 @@ Constraints:
   via an optimizer-owned `[StateInitializer]`'s `Init` and registered with `StateUpdate`.
 - Do not call `Globals.StateUpdate` on inputs, trainable parameters, or computed tensors;
   only state variables (a `[StateInitializer]` `Init` result) are accepted.
+- Do not call `Globals.StateUpdate` outside a module body being traced (it requires a module
+  build in progress and throws otherwise — module bodies must also not hop threads), and do
+  not call it inside a `LoopAPI.Iterate` body (loop bodies are traced multiple times during
+  construction, so per-iteration state updates are undefined and rejected; compute the value
+  in the loop and register the update once, after the loop).

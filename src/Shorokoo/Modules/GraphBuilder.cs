@@ -140,14 +140,12 @@ namespace Shorokoo.Core
             var fnInputs = ModuleHelper.CreateInputParams(methodInfo.GetParameters());
 
             // This method re-enters mid-trace whenever the body first-uses a sub-module or
-            // initializer whose Function is not yet cached, so per-trace state is scoped with
-            // push/pop (a destructive clear here would wipe the OUTER body's records): the
-            // looper context, the Rng.Pin recording lists, and the StateUpdate registrations.
-            // Pushing also hands this build empty lists, so records made outside any module
-            // graph context never leak into it.
-            LoopAPI.PushLooperContext();
-            Shorokoo.Rng.PushPinScope();
-            Shorokoo.Core.InternalGlobals.PushStateUpdateScope();
+            // initializer whose Function is not yet cached, so all per-trace ambient state —
+            // the looper stack, the Rng.Pin recordings, and the StateUpdate registrations —
+            // lives in one ModuleBuildContext entered per build and restored on exit (a
+            // destructive clear here would wipe the OUTER body's records). Entering also hands
+            // this build a fresh context, so no records leak between builds.
+            var buildContext = ModuleBuildContext.EnterModuleBuild();
             try
             {
                 Variable[] fnOutputs;
@@ -159,10 +157,10 @@ namespace Shorokoo.Core
                 }
                 finally
                 {
-                    // Always clear state updates, even if an exception occurred
-                    // This prevents state leakage between module invocations
-                    stateUpdates = Shorokoo.Core.InternalGlobals.GetAndClearStateUpdates();
-                    rngPins = Shorokoo.Rng.GetAndClearPins();
+                    // Always harvest, even if an exception occurred — the context is exited
+                    // below either way, but harvesting here keeps the pairing explicit.
+                    stateUpdates = buildContext.TakeStateUpdates();
+                    rngPins = buildContext.TakePins();
                 }
 
                 // Check for registered state updates and wrap outputs with WithStateDeps if any exist
@@ -318,9 +316,7 @@ namespace Shorokoo.Core
             }
             finally
             {
-                Shorokoo.Core.InternalGlobals.PopStateUpdateScope();
-                Shorokoo.Rng.PopPinScope();
-                LoopAPI.PopLooperContext();
+                ModuleBuildContext.Exit(buildContext);
             }
         }
 

@@ -19,82 +19,37 @@ namespace Shorokoo.Core
     internal static class InternalGlobals
     {
         /// <summary>
-        /// Thread-local storage for state update pairs during module invocation.
-        /// Each pair represents (original state, updated state) registered via StateUpdate.
-        /// </summary>
-        [ThreadStatic]
-        private static List<(Variable original, Variable updated)>? _stateUpdatePairs;
-
-        [ThreadStatic]
-        private static Stack<List<(Variable original, Variable updated)>?>? _stateUpdateScopes;
-
-        /// <summary>
-        /// Gets the current state update pairs collection, creating it if necessary.
-        /// </summary>
-        private static List<(Variable original, Variable updated)> StateUpdatePairs
-            => _stateUpdatePairs ??= new List<(Variable original, Variable updated)>();
-
-        /// <summary>
         /// Registers a state update relationship between an original state tensor and its updated value.
-        /// Called by Globals.StateUpdate to track state updates during module execution.
+        /// Called by Globals.StateUpdate to track state updates during module execution. The pair is
+        /// recorded on the current <see cref="ModuleBuildContext"/>, where the graph builder harvests
+        /// it after the body returns to wrap the module outputs with WithStateDeps; with no module
+        /// build in progress the registration could never be harvested, so this throws instead.
         /// </summary>
         /// <param name="original">The original state tensor from a state initializer</param>
         /// <param name="updated">The computed updated value for the state</param>
         /// <returns>The linked updated state tensor (output of STATE_UPDATE_LINK node)</returns>
         internal static Variable RegisterStateUpdate(Variable original, Variable updated)
         {
-            
+            var context = ModuleBuildContext.RequireModuleBuild("Globals.StateUpdate");
+
+            // A loop body is traced once per construction pass (up to four times), so an in-loop
+            // registration would fire repeatedly — mostly against throwaway nodes — and what a
+            // per-iteration state update should even mean is undefined. Explicitly unsupported.
+            if (context.InLoopBody)
+                throw new InvalidOperationException(
+                    "Globals.StateUpdate is not supported inside a LoopAPI.Iterate body: a loop " +
+                    "body is traced multiple times during graph construction, and per-iteration " +
+                    "state-update semantics are undefined. Compute the new value inside the loop " +
+                    "and register the update once at module level, after the loop, from the " +
+                    "loop's final value.");
+
             // Create the STATE_UPDATE_LINK node to track the relationship in the graph
             var linkedUpdated = InternalOp.StateUpdateLink(original, updated);
-            
+
             // Store the pair for later retrieval when wrapping module outputs
-            StateUpdatePairs.Add((original, linkedUpdated));
-            
+            context.AddStateUpdate(original, linkedUpdated);
+
             return linkedUpdated;
-        }
-
-        /// <summary>
-        /// Retrieves and clears all registered state update pairs for the current module invocation.
-        /// Called after the module's Inline method returns to wrap outputs with WithStateDeps.
-        /// </summary>
-        /// <returns>Array of updated state tensors (the linked versions)</returns>
-        internal static Variable[] GetAndClearStateUpdates()
-        {
-            if (_stateUpdatePairs == null || _stateUpdatePairs.Count == 0)
-                return Array.Empty<Variable>();
-
-            var updates = _stateUpdatePairs.Select(p => p.updated).ToArray();
-            _stateUpdatePairs.Clear();
-            
-            return updates;
-        }
-
-        /// <summary>
-        /// Checks if there are any pending state updates that need to be wrapped.
-        /// </summary>
-        internal static bool HasPendingStateUpdates
-            => _stateUpdatePairs != null && _stateUpdatePairs.Count > 0;
-
-        /// <summary>
-        /// Opens a fresh state-update registration scope for one body trace, saving the current
-        /// list. The graph builder RE-ENTERS mid-trace whenever a body first-uses a sub-module or
-        /// initializer whose Function is not yet cached; a destructive clear at build entry would
-        /// silently drop the OUTER body's already-registered updates — and with them the
-        /// WITH_STATE_DEPS output wrap (cache-order-dependently). Save/restore keeps every build
-        /// isolated without losing the enclosing trace's registrations — the same discipline
-        /// <c>LoopAPI.PushLooperContext</c> and <c>Rng.PushPinScope</c> apply across the same
-        /// re-entrancy.
-        /// </summary>
-        internal static void PushStateUpdateScope()
-        {
-            (_stateUpdateScopes ??= new Stack<List<(Variable, Variable)>?>()).Push(_stateUpdatePairs);
-            _stateUpdatePairs = null;
-        }
-
-        /// <summary>Closes the current state-update scope, restoring the enclosing trace's registrations.</summary>
-        internal static void PopStateUpdateScope()
-        {
-            _stateUpdatePairs = _stateUpdateScopes!.Pop();
         }
 
         // Every kind is now the single non-generic Variable, built directly from the runtime DType +

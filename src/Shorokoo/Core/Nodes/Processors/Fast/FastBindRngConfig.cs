@@ -15,7 +15,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// stream set, writes the config's randomness state as the graph's single
     /// <c>SHRK_RNG_KEY_VECTOR</c> carrier (the recorded identity — see
     /// <see cref="RngConfig.BuildKeyVector"/>), and runs the RNG key initializers
-    /// (<see cref="FastMaterializeRngKeys"/>): every feed site's <c>SHRK_RNG_KEY</c> entity
+    /// (<see cref="FastMaterializeRngKeys"/>): every feed site's <c>SHRK_RNG_KEY_PARAM</c> entity
     /// gets its key-table value materialized from the identity, exactly as trainable
     /// parameters get their values by running their initializers. Re-binding re-runs the key
     /// initializers only — parameter values are untouched — so a concrete model can be
@@ -45,7 +45,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (node.OpCode == OpCodes.LOOP_OPEN) loopDepth++;
                 else if (node.OpCode == OpCodes.LOOP_CLOSE) loopDepth--;
 
-                if (node.OpCode == InternalOpCodes.SHRK_RNG_KEY)
+                if (node.OpCode == InternalOpCodes.SHRK_RNG_KEY_PARAM)
                 {
                     // The site's key entity owns the realized stream set.
                     var siteId = node.Attributes.GetIntsVal(ShrkAttrLocalModelId);

@@ -3197,7 +3197,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// Realizes every SHRK_RANDOM_* feed's stream ids from the QEE store: the site id's
         /// <c>-1</c> iteration slots are filled per observed loop iteration (the same loop
         /// history that realizes trainable-param ids), and the site's <b>key entity</b> — a
-        /// <c>SHRK_RNG_KEY</c> node carrying the realized stream set (site id, realized ids,
+        /// <c>SHRK_RNG_KEY_PARAM</c> node carrying the realized stream set (site id, realized ids,
         /// per-level iteration counts) — is created and wired as the feed's key input. This
         /// mirrors trainable params exactly: concretization creates the param-like entity
         /// whose VALUE (the key table) is materialized later from the bound
@@ -3297,11 +3297,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 // an in-loop param reference selects from the top-level param sequence.
                 var keyNodeKey = FastNodeKey.New();
                 var keyOut = new FastTensorKey(keyNodeKey, 0);
-                var keyAttrDefs = Definitions.NodeDefinitions[InternalOpCodes.SHRK_RNG_KEY].AttributeDefs;
+                var keyAttrDefs = Definitions.NodeDefinitions[InternalOpCodes.SHRK_RNG_KEY_PARAM].AttributeDefs;
                 (keyNodes ??= []).Add(new FastNode
                 {
                     Key = keyNodeKey,
-                    OpCode = InternalOpCodes.SHRK_RNG_KEY,
+                    OpCode = InternalOpCodes.SHRK_RNG_KEY_PARAM,
                     Attributes = OnnxCSharpAttributes.FromCSharpVals(
                         new Dictionary<string, object?>
                         {

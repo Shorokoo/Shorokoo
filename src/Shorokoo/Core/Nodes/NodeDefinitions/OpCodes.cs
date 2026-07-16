@@ -123,7 +123,7 @@ internal static class InternalOpCodes
     /// (and re-materialized on re-bind), exactly as a trainable parameter's value is
     /// materialized by running its initializer. Lowered to a plain CONSTANT at ONNX prep.
     /// </summary>
-    public const string SHRK_RNG_KEY = "shrk_RngKey";
+    public const string SHRK_RNG_KEY_PARAM = "shrk_RngKeyParam";
 
     /// <summary>
     /// Keyed deterministic normal draw N(mean, scale) of dynamic shape under the named

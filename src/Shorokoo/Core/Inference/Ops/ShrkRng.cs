@@ -65,7 +65,7 @@ internal abstract class ShrkRngDrawOpBase : QuickOp
 }
 
 /// <summary>
-/// QEE implementation of SHRK_RNG_KEY (a feed site's key entity): shape/rank propagation
+/// QEE implementation of SHRK_RNG_KEY_PARAM (a feed site's key entity): shape/rank propagation
 /// only — [N, 2] from the site's iteration counts. Deliberately NOT the value even when
 /// materialized: exposing it would let constant folding replace the entity with a plain
 /// CONSTANT mid-pipeline, stripping the structural metadata (site id, realized ids, counts)
@@ -74,7 +74,7 @@ internal abstract class ShrkRngDrawOpBase : QuickOp
 /// </summary>
 internal sealed class ShrkRngKeyOp : QuickOp
 {
-    public override string OpCode => InternalOpCodes.SHRK_RNG_KEY;
+    public override string OpCode => InternalOpCodes.SHRK_RNG_KEY_PARAM;
 
     protected override RuntimeTensor[] Compute(RuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
     {

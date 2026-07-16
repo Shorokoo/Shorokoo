@@ -16,7 +16,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// <summary>
     /// Random-op lowering pass (runs in the ONNX-export pre-passes). Pure wiring: key
     /// DERIVATION does not happen here — a feed site's keys are the VALUE of its
-    /// <c>SHRK_RNG_KEY</c> entity, materialized from the bound <see cref="RngConfig"/> when
+    /// <c>SHRK_RNG_KEY_PARAM</c> entity, materialized from the bound <see cref="RngConfig"/> when
     /// the graph became a concrete model (see <see cref="FastMaterializeRngKeys"/>), exactly
     /// like trainable-parameter values.
     ///
@@ -78,7 +78,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             Dictionary<FastTensorKey, long[]>? countsByKeySource = null;
             foreach (var node in graph.Nodes)
             {
-                if (node.OpCode != InternalOpCodes.SHRK_RNG_KEY) continue;
+                if (node.OpCode != InternalOpCodes.SHRK_RNG_KEY_PARAM) continue;
                 if (node.Attributes.GetTensorVal(AttrValue) is null)
                     FastMaterializeRngKeys.Materialize(node, carrierConfig ?? RngConfig.Default);
                 (countsByKeySource ??= new Dictionary<FastTensorKey, long[]>())
@@ -89,7 +89,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             foreach (var node in graph.Nodes)
             {
-                if (node.OpCode == InternalOpCodes.SHRK_RNG_KEY)
+                if (node.OpCode == InternalOpCodes.SHRK_RNG_KEY_PARAM)
                 {
                     LowerKeyEntityToConstant(node);
                     newNodes.Add(node);
@@ -127,13 +127,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 // A feed without stream identity (no ModelId, or never realized — e.g. inside
                 // an initializer function body): the ONNX fallback — ConstantOfShape +
                 // RandomUniformLike/NormalLike. Every legitimate fallback case carries NO key
-                // input; a feed with a WIRED key input whose SHRK_RNG_KEY entity is missing
+                // input; a feed with a WIRED key input whose SHRK_RNG_KEY_PARAM entity is missing
                 // from the graph was concretized and then corrupted (entity pruned, sliced
                 // graph), and silently lowering it here would turn a keyed site into real
                 // backend randomness.
                 System.Diagnostics.Debug.Assert(keySource is null,
                     $"FastLowerRandomOps: the feed at ModelId [{string.Join(", ", idVals ?? [])}] " +
-                    "has a wired key input but its SHRK_RNG_KEY entity is not in the graph — " +
+                    "has a wired key input but its SHRK_RNG_KEY_PARAM entity is not in the graph — " +
                     "the graph was modified since concretization; lowering it to the ONNX " +
                     "random fallback would silently make a keyed site non-deterministic.");
                 LowerToOnnxRandomLike(node, isUniform, newNodes);
@@ -149,7 +149,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// Rewrites a materialized SHRK_RNG_KEY entity in place to a plain CONSTANT of its
+        /// Rewrites a materialized SHRK_RNG_KEY_PARAM entity in place to a plain CONSTANT of its
         /// key-table value, so every backend treats the keys as ordinary tensor data.
         /// </summary>
         private static void LowerKeyEntityToConstant(FastNode node)

@@ -259,7 +259,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Output("structOutput", "TStruct"),
 
             // SHRK_RANDOM_UNIFORM: a uniform runtime feed with dynamic shape input. An
-            // id-bearing feed is wired at concretization to its SHRK_RNG_KEY entity ("key"
+            // id-bearing feed is wired at concretization to its SHRK_RNG_KEY_PARAM entity ("key"
             // input) and lowers to a keyed deterministic draw selecting its iteration's key
             // row; a feed without stream identity (e.g. inside an initializer function body)
             // lowers to ConstantOfShape + RandomUniformLike.
@@ -292,7 +292,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
 
             // SHRK_RNG_KEY_VECTOR: the model's compact RNG key vector (int64, tiered — see
             // RngConfig.BuildKeyVector) plus the algorithm name: the recorded RNG identity.
-            // Key entities (SHRK_RNG_KEY) materialize their values from it at bind — or at
+            // Key entities (SHRK_RNG_KEY_PARAM) materialize their values from it at bind — or at
             // lowering, for a graph never bound (no config = the default identity). No inputs;
             // lowered to a plain CONSTANT at ONNX prep so every backend treats it as ordinary
             // (unused) data.
@@ -302,14 +302,14 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeString(ShrkAttrRngAlgorithm)
                 .Output("keys", "T1", 1),
 
-            // SHRK_RNG_KEY: a feed site's key entity — the param-like carrier of the site's
+            // SHRK_RNG_KEY_PARAM: a feed site's key entity — the param-like carrier of the site's
             // realized stream set (site ModelId + realized stream ids + iteration counts),
             // whose value ([N, 2] int64 key table over the site's dense iteration grid) is
             // materialized from the bound RngConfig at concrete-model time and re-materialized
             // on re-bind — exactly as a trainable parameter's value comes from running its
             // initializer. Value absent until materialization. Feeds select their iteration's
             // row by runtime index; lowered to a plain CONSTANT at ONNX prep.
-            Op(SHRK_RNG_KEY)
+            Op(SHRK_RNG_KEY_PARAM)
                 .Tensor<int64>("T1")
                 .AttributeTensor(AttrValue, "T1", "R")
                 .AttributeLongs(ShrkAttrLocalModelId)

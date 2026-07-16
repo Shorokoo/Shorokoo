@@ -362,7 +362,7 @@ namespace Shorokoo.Graph
             // under master seed 0 and the feeds draw keyed Threefry. "No config" means the
             // default identity, never the non-reproducible ONNX random fallback.
             if (concrete.TryGetRngKeyVector() is null &&
-                concrete.Nodes.Any(n => n.OpCode == InternalOpCodes.SHRK_RNG_KEY))
+                concrete.Nodes.Any(n => n.OpCode == InternalOpCodes.SHRK_RNG_KEY_PARAM))
                 concrete.ApplyRngConfig(RngConfig.Default);
             return concrete;
         }
@@ -470,11 +470,11 @@ namespace Shorokoo.Graph
             }
 
             // A feed site's realized stream set lives on its key entity (the param-like
-            // SHRK_RNG_KEY node wired at concretization) — index them by output so each
+            // SHRK_RNG_KEY_PARAM node wired at concretization) — index them by output so each
             // feed's rows can be built from its own entity.
             var keyEntityByOutput = new Dictionary<FastTensorKey, FastNode>();
             foreach (var node in graph.Nodes)
-                if (node.OpCode == InternalOpCodes.SHRK_RNG_KEY)
+                if (node.OpCode == InternalOpCodes.SHRK_RNG_KEY_PARAM)
                     keyEntityByOutput[node.Outputs[0]!.Value] = node;
 
             var seenFeedPaths = new HashSet<string>();

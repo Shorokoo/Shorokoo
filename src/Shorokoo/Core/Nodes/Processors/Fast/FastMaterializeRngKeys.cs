@@ -10,7 +10,7 @@ using static Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames;
 namespace Shorokoo.Core.Nodes.Processors.Fast
 {
     /// <summary>
-    /// Runs the RNG key "initializers": materializes every <c>SHRK_RNG_KEY</c> entity's value —
+    /// Runs the RNG key "initializers": materializes every <c>SHRK_RNG_KEY_PARAM</c> entity's value —
     /// the dense [N, 2] int64 key table over the site's enumerated iteration grid, each row the
     /// runtime master folded along the cell's fully realized ModelId path — from the given
     /// <see cref="RngConfig"/>, exactly as <see cref="FastInitializeModelParams"/> materializes
@@ -29,7 +29,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (rngConfig is null) throw new ArgumentNullException(nameof(rngConfig));
 
             foreach (var node in graph.Nodes)
-                if (node.OpCode == InternalOpCodes.SHRK_RNG_KEY)
+                if (node.OpCode == InternalOpCodes.SHRK_RNG_KEY_PARAM)
                     Materialize(node, rngConfig);
         }
 
@@ -45,12 +45,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var idVals = node.Attributes.GetIntsVal(ShrkAttrLocalModelId);
             if (idVals is null || idVals.Length == 0)
                 throw new InvalidOperationException(
-                    "SHRK_RNG_KEY: the key entity carries no site ModelId.");
+                    "SHRK_RNG_KEY_PARAM: the key entity carries no site ModelId.");
             int depth = idVals.Count(v => v == -1);
             var counts = node.Attributes.GetLongsVal(ShrkAttrRngIterCounts) ?? [];
             if (counts.Length != depth)
                 throw new InvalidOperationException(
-                    $"SHRK_RNG_KEY: site ModelId [{string.Join(", ", idVals)}] has {depth} " +
+                    $"SHRK_RNG_KEY_PARAM: site ModelId [{string.Join(", ", idVals)}] has {depth} " +
                     $"iteration slot(s) but carries {counts.Length} iteration count(s) — the " +
                     "site was not realized at concretization.");
 

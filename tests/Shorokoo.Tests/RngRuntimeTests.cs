@@ -116,7 +116,7 @@ public class RngRuntimeTests
     public void TestRngConfigRebindsInPlaceWithoutGraphChange()
     {
         // Re-binding is re-initialization scoped to keys: it replaces the identity carrier
-        // and re-runs the key initializers (each SHRK_RNG_KEY entity's value re-materializes
+        // and re-runs the key initializers (each SHRK_RNG_KEY_PARAM entity's value re-materializes
         // in place — key initializers are pure in the identity, so this is always safe).
         // No node is added or removed and no feed is touched; parameter values would be
         // untouched too (this model has none to re-key).

@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Text;
 using Shorokoo.Onnx;
 using static Shorokoo.Globals;
@@ -46,7 +45,7 @@ namespace Shorokoo.Core.Utils
                 consumed = split;
             }
             pieces.Add(newShape.Slice(Scalar(consumed), Scalar(long.MaxValue)));
-            return pieces[0].Concat(pieces.Skip(1).ToArray());
+            return [.. pieces];
         }
     }
 }

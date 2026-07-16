@@ -44,8 +44,11 @@ namespace Shorokoo.Core
             this.vector = vector;
         }
 
-        public static implicit operator VectorExpressionHelper<T>(Scalar<T> scalar) 
+        public static implicit operator VectorExpressionHelper<T>(Scalar<T> scalar)
              => new VectorExpressionHelper<T>(scalar);
+
+        public static implicit operator VectorExpressionHelper<T>(Vector<T> vector)
+             => new VectorExpressionHelper<T>(vector);
     }
 
     public static class TensorCollectionBuilder

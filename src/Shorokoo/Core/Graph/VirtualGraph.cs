@@ -91,8 +91,8 @@ namespace Shorokoo.Core.Graph
     /// For the variables produced from following nodes, ModelIds are relative to the parent model.
     ///   - MODEL_MODEL_REF
     ///   - MODEL_ID_REF
-    ///   - TRAINABLE_PARAM_MODEL_REF
-    ///   - TRAINABLE_PARAM_ID_REF
+    ///   - MODEL_PARAM_MODEL_REF
+    ///   - MODEL_PARAM_ID_REF
     /// 
     /// For all other variables, ModelIds are relative to the function they are in (or global if in the main graph).
     /// 

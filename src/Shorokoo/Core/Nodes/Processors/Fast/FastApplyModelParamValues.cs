@@ -16,7 +16,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 {
     /// <summary>
     /// Fast-native port of <c>ApplyModelParamValues</c>.
-    /// Replaces every <c>TRAINABLE_PARAM</c> node in <c>graph</c> with a
+    /// Replaces every <c>MODEL_PARAM</c> node in <c>graph</c> with a
     /// <c>MODEL_PARAM_DATA</c> node holding the corresponding value from
     /// <c>paramValues</c>, carrying the original trainability flag. Trainable and
     /// state params alike therefore serialize as ONNX <c>graph.initializer</c>
@@ -39,7 +39,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             foreach (var node in workGraph.Nodes)
             {
-                if (node.OpCode != InternalOpCodes.TRAINABLE_PARAM) continue;
+                if (node.OpCode != InternalOpCodes.MODEL_PARAM) continue;
 
                 var modelIdVals = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId).AssertNotNull();
                 var modelId = new ModelId(modelIdVals);
@@ -65,7 +65,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // Run FastSimplify so the constant-folding / sequence-folding / unrolling
             // pipeline reshapes the graph in the way the CG-side
             // ApplyModelParamValues + RebuildGraph + TopologicalOrder + RepairScopeNesting
-            // pipeline does — without it, the in-place TRAINABLE_PARAM rewrites can leave
+            // pipeline does — without it, the in-place MODEL_PARAM rewrites can leave
             // the rebuilt CG with an empty IF/LOOP body when body-side dependencies cross
             // the new param-data node, breaking ONNX serialization.
             FastSimplify.Process(workGraph);

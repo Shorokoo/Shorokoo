@@ -1130,9 +1130,9 @@ public static class " + modelName + @"
         private string MakeCallFunctionCodeTemplate(Node node, ImmutableDictionary<Node, NodeGenerationInfo> nodeCodeGenerators, ImmutableDictionary<Variable, string> currentNames, ImmutableDictionary<Function, string> functionNames)
         {
             var methodName = functionNames[(node.TargetFunction).AssertNotNull()];
-            var offset =  node.OpName == InternalOpCodes.TRAINABLE_PARAM_REF ? 2
-                        : node.OpName == InternalOpCodes.TRAINABLE_PARAM_ID_REF ? 3
-                        : node.OpName == InternalOpCodes.TRAINABLE_PARAM_MODEL_REF ? 3
+            var offset =  node.OpName == InternalOpCodes.MODEL_PARAM_REF ? 2
+                        : node.OpName == InternalOpCodes.MODEL_PARAM_ID_REF ? 3
+                        : node.OpName == InternalOpCodes.MODEL_PARAM_MODEL_REF ? 3
                         : 1;
 
             var paramsList = string.Join("", node.Inputs.Skip(offset-1).Select((x, i) => $"{{{i + offset}:param}}"));

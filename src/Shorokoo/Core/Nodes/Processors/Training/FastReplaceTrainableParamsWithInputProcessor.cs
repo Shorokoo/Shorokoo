@@ -14,7 +14,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training;
 
 /// <summary>
 /// Fast-native processor that replaces every trainable-parameter producer node
-/// (<c>TRAINABLE_PARAM</c>, <c>MODEL_PARAM_DATA</c>, <c>TRAINABLE_PARAM_ID_REF</c> with
+/// (<c>MODEL_PARAM</c>, <c>MODEL_PARAM_DATA</c>, <c>MODEL_PARAM_ID_REF</c> with
 /// <c>shrk_is_trainable=true</c>) with a per-field <c>TENSOR_STRUCT_GETFIELD</c> consumer
 /// of a single new <c>MODEL_TENSORSTRUCT_INPUT</c>, so the model's baked-in parameters
 /// become an external TensorStruct input suitable for training.
@@ -62,7 +62,7 @@ internal static class FastReplaceTrainableParamsWithInputProcessor
         if (paramInfos.Length == 0)
             throw new InvalidOperationException(
                 "No trainable parameters found in the computation graph. " +
-                "Ensure the graph contains TRAINABLE_PARAM or MODEL_PARAM_DATA nodes marked as trainable.");
+                "Ensure the graph contains MODEL_PARAM or MODEL_PARAM_DATA nodes marked as trainable.");
 
         var structDef = FastBuildTrainableParamStructDefProcessor.Process(paramInfos, "TrainableParams");
         var structDType = DType.GetOrCreateForTensorStruct(structDef);

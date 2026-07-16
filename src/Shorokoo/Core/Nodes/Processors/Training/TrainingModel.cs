@@ -533,7 +533,7 @@ namespace Shorokoo
             // Single ToConcreteArchitecture pass. The resulting concrete arch graph is the
             // shared substrate for both phases below: Phase 1 composes it with loss +
             // autograd + optimizer to build the training-step graph; Phase 2 reads its
-            // TRAINABLE_PARAM nodes to initialize values and to determine prediction shape.
+            // MODEL_PARAM nodes to initialize values and to determine prediction shape.
             // The concrete pass also runs the QEE-backed liveness filter that prunes
             // trainable params whose reachability is killed by the sample input shape.
             var concreteArch = modelGraph.ToConcreteArchitecture(new ModelParamList(sampleInputs), ctx);
@@ -582,7 +582,7 @@ namespace Shorokoo
             // graph is already through ToConcreteArchitecture (done once at FromScratch),
             // so the input-aware liveness filter has already pruned dead-branch trainable
             // params — FastReplaceTrainableParamsWithInputProcessor inside PrepareForTraining
-            // builds the trainable param struct from only the live TRAINABLE_PARAM nodes.
+            // builds the trainable param struct from only the live MODEL_PARAM nodes.
             var fastTraining = TrainingGraphBuilder.PrepareForTrainingAsFast(concreteArch, lossGraph);
 
             // PrepareForTraining's output layout:
@@ -1280,7 +1280,7 @@ namespace Shorokoo
             ComputeContext ctx,
             RngConfig? rngConfig = null)
         {
-            // Step 1: walk concreteArch's TRAINABLE_PARAM nodes in linear order to capture
+            // Step 1: walk concreteArch's MODEL_PARAM nodes in linear order to capture
             // each one's (ModelId, isTrainable). The same linear order is what Phase 1's
             // FastReplaceTrainableParamsWithInputProcessor used to build the param /
             // state struct defs, so this ordering aligns Phase 2 values with Phase 1 fields.
@@ -1290,7 +1290,7 @@ namespace Shorokoo
             var stateModelIds = new List<ModelId>();
             foreach (var node in concreteArch.Nodes)
             {
-                if (node.OpCode != InternalOpCodes.TRAINABLE_PARAM) continue;
+                if (node.OpCode != InternalOpCodes.MODEL_PARAM) continue;
                 var modelIdVals = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId).AssertNotNull();
                 var modelId = new ModelId(modelIdVals);
                 var isTrainable = node.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsTrainable) ?? true;
@@ -1353,7 +1353,7 @@ namespace Shorokoo
 
             // Step 2: derive the target tensor's shape from the model's prediction. Reuse
             // the already-computed paramValuesById via FastApplyModelParamValues — this
-            // rewrites TRAINABLE_PARAM → MODEL_PARAM_DATA in place without a
+            // rewrites MODEL_PARAM → MODEL_PARAM_DATA in place without a
             // second initializer-execution pass.
             var shapeInferencer = new ShapeInferenceInterpreter(ctx);
             var concreteModel = Shorokoo.Core.Nodes.Processors.Fast.FastApplyModelParamValues.Process(concreteArch, paramValuesById);

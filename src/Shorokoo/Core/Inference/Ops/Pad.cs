@@ -22,7 +22,7 @@ namespace Shorokoo.Core.Inference.Ops;
 /// Producing concrete data lets <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastFoldConstants"/>
 /// chase the trainable-param-index lookup chain
 /// (<c>Shape → ReduceProd → Sub → Unsqueeze → Concat → Pad → Mul → ReduceSum</c>) emitted
-/// by <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastConvertTrainableParamIdRefToTrainableParam"/>
+/// by <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastConvertModelParamIdRefToModelParam"/>
 /// all the way down to a single <c>CONSTANT</c>, which in turn lets
 /// <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastFoldSequences"/> short-circuit
 /// the per-DType <c>SEQUENCE_AT(SEQUENCE_CONSTRUCT, idx)</c> trainable-param lookup so

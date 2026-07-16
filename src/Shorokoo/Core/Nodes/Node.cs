@@ -48,10 +48,10 @@ namespace Shorokoo.Core.Nodes
         public TensorData? GetTensorData() => this.NodeDef.OpName != InternalOpCodes.MODEL_PARAM_DATA ? null : Attributes.GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData);
 
         /// <summary>
-        /// Gets the IsTrainable value for MODEL_PARAM_DATA, TRAINABLE_PARAM_X_REF nodes, and function call nodes.
+        /// Gets the IsTrainable value for MODEL_PARAM_DATA, MODEL_PARAM_X_REF nodes, and function call nodes.
         /// Returns true for trainable parameters, false for state parameters.
         /// For function call nodes, derives the value from the FunctionType of the target function.
-        /// Throws if the attribute is not present on MODEL_PARAM_DATA/TRAINABLE_PARAM_X_REF nodes.
+        /// Throws if the attribute is not present on MODEL_PARAM_DATA/MODEL_PARAM_X_REF nodes.
         /// </summary>
         public bool GetIsTrainable()
         {
@@ -64,7 +64,7 @@ namespace Shorokoo.Core.Nodes
                     return false;
             }
             
-            // For MODEL_PARAM_DATA and TRAINABLE_PARAM_X_REF nodes, check the attribute
+            // For MODEL_PARAM_DATA and MODEL_PARAM_X_REF nodes, check the attribute
             var attrVals = this.Attributes.GetAttributeVals();
             if (attrVals.TryGetValue(OnnxOpAttributeNames.ShrkAttrIsTrainable, out var val) && val is bool boolVal)
                 return boolVal;
@@ -89,10 +89,10 @@ namespace Shorokoo.Core.Nodes
 
         /// <summary>
         /// Returns true if this is a model param initializer of any kind.
-        /// This could be a standard module param initializer node (TRAINABLE_PARAM_REF).
+        /// This could be a standard module param initializer node (MODEL_PARAM_REF).
         /// A param initializer applied to a reference model instance:
-        ///  - TRAINABLE_PARAM_MODEL_REF, the reference model instance is identified by a tensor.
-        ///  - TRAINABLE_PARAM_ID_REF, the reference model instance is identified by a model id.
+        ///  - MODEL_PARAM_MODEL_REF, the reference model instance is identified by a tensor.
+        ///  - MODEL_PARAM_ID_REF, the reference model instance is identified by a model id.
         /// 
         /// Or it could be a function call node that calls a model parameter initializer function such as a TrainableParamInitializer or a StateParamInitializer.
         /// 
@@ -102,9 +102,9 @@ namespace Shorokoo.Core.Nodes
         {
             get
             {
-                if (this.NodeDef.OpName == InternalOpCodes.TRAINABLE_PARAM_REF ||
-                    this.NodeDef.OpName == InternalOpCodes.TRAINABLE_PARAM_MODEL_REF ||
-                    this.NodeDef.OpName == InternalOpCodes.TRAINABLE_PARAM_ID_REF)
+                if (this.NodeDef.OpName == InternalOpCodes.MODEL_PARAM_REF ||
+                    this.NodeDef.OpName == InternalOpCodes.MODEL_PARAM_MODEL_REF ||
+                    this.NodeDef.OpName == InternalOpCodes.MODEL_PARAM_ID_REF)
                     Debug.Assert(this.TargetFunction?.FunctionType == FunctionType.TrainableParamInitializer ||
                                  this.TargetFunction?.FunctionType == FunctionType.StateParamInitializer);
 
@@ -205,8 +205,8 @@ namespace Shorokoo.Core.Nodes
 
         public ModelParamIdentifierTemplate? IdentifierTemplate { get; protected set; }
 
-        public bool IsRelativeModelIdOperator => (  OpCode == InternalOpCodes.TRAINABLE_PARAM_MODEL_REF ||
-                                                    OpCode == InternalOpCodes.TRAINABLE_PARAM_ID_REF ||
+        public bool IsRelativeModelIdOperator => (  OpCode == InternalOpCodes.MODEL_PARAM_MODEL_REF ||
+                                                    OpCode == InternalOpCodes.MODEL_PARAM_ID_REF ||
                                                     OpCode == InternalOpCodes.SUBMODEL);
 
         /// <summary>
@@ -308,9 +308,9 @@ namespace Shorokoo.Core.Nodes
                 Debug.Assert(this.Inputs.Length == moduleNode.TargetFunction.HyperparamInputs.Length + 2);
             }
 
-            if (this.NodeDef.OpName == InternalOpCodes.TRAINABLE_PARAM_REF ||
-                this.NodeDef.OpName == InternalOpCodes.TRAINABLE_PARAM_MODEL_REF ||
-                this.NodeDef.OpName == InternalOpCodes.TRAINABLE_PARAM_ID_REF)
+            if (this.NodeDef.OpName == InternalOpCodes.MODEL_PARAM_REF ||
+                this.NodeDef.OpName == InternalOpCodes.MODEL_PARAM_MODEL_REF ||
+                this.NodeDef.OpName == InternalOpCodes.MODEL_PARAM_ID_REF)
                 Debug.Assert(this.TargetFunction?.FunctionType == FunctionType.TrainableParamInitializer ||
                              this.TargetFunction?.FunctionType == FunctionType.StateParamInitializer);
 

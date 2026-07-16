@@ -300,7 +300,7 @@ namespace Shorokoo.Tests.Modules
 
     /// <summary>
     /// Generic module that uses trainable parameters with generic types.
-    /// Tests that TRAINABLE_PARAM_REF operator with generic types is properly specialized.
+    /// Tests that MODEL_PARAM_REF operator with generic types is properly specialized.
     /// </summary>
     [Module]
     public partial class GenericLayerWithTrainableParams
@@ -981,7 +981,7 @@ namespace Shorokoo.Tests.Modules
     /// loop, so its iteration-indices input is non-empty. The submodule's
     /// body contains an inner loop with <c>InitSimple.Init</c> calls, so
     /// when <c>FastInlineModulesAndFunctions.FastReparentToCallSite</c> walks
-    /// the inlined subgraph, each <c>TRAINABLE_PARAM_REF</c>'s child-side
+    /// the inlined subgraph, each <c>MODEL_PARAM_REF</c>'s child-side
     /// iteration-indices input is also non-empty (a <c>CONCAT</c> of the
     /// inner loop's iter scalars).
     ///
@@ -1037,7 +1037,7 @@ namespace Shorokoo.Tests.Modules
     /// <summary>
     /// Plain wrapper over <see cref="HypersLayer"/>.<c>Call</c> with constant
     /// hyperparams. By itself this only exercises the
-    /// <c>TRAINABLE_PARAM_REF</c> arm of
+    /// <c>MODEL_PARAM_REF</c> arm of
     /// <c>FastInlineModulesAndFunctions.FastReparentToCallSite</c> (HypersLayer's
     /// body has the <c>InitSimple.Init</c> trainable param but no nested
     /// MODULE_SET_HYPERPARAMS). Used as the <i>inner</i> level for
@@ -1060,7 +1060,7 @@ namespace Shorokoo.Tests.Modules
     /// <c>MODULE_SET_HYPERPARAMS</c> node for the nested
     /// <see cref="HypersLayer"/> call. Drives the
     /// <c>MODULE_SET_HYPERPARAMS</c> arm at <c>FastProcessors.cs ~L703-727</c>
-    /// — the mirror of the <c>TRAINABLE_PARAM_REF</c> arm at L676-702 hit by
+    /// — the mirror of the <c>MODEL_PARAM_REF</c> arm at L676-702 hit by
     /// <see cref="CallsSimplestModule"/>.
     /// </summary>
     [Module]

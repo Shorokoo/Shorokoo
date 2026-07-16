@@ -8,8 +8,8 @@ namespace Shorokoo.Core.Nodes.Processors.Training
 {
     /// <summary>
     /// Discovers all trainable parameter producer nodes in a <see cref="FastComputationGraph"/>.
-    /// Scans for <c>TRAINABLE_PARAM</c>, <c>MODEL_PARAM_DATA</c>, and
-    /// <c>TRAINABLE_PARAM_ID_REF</c> nodes whose <c>shrk_is_trainable</c> attribute is true.
+    /// Scans for <c>MODEL_PARAM</c>, <c>MODEL_PARAM_DATA</c>, and
+    /// <c>MODEL_PARAM_ID_REF</c> nodes whose <c>shrk_is_trainable</c> attribute is true.
     /// </summary>
     internal static class FastDiscoverTrainableParamsProcessor
     {

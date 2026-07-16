@@ -845,7 +845,7 @@ namespace Shorokoo.Core.Factory.IR
         /// <list type="bullet">
         ///   <item>Ethereal IDENTITY: aliases the output tensor name to its input — no node emitted.</item>
         ///   <item>Function call: routes to <see cref="BuildFastTrainableParamNodeFromProto"/>
-        ///         for initializer functions (TRAINABLE_PARAM) or to
+        ///         for initializer functions (MODEL_PARAM) or to
         ///         <see cref="BuildFastFunctionInvokeNodeFromProto"/> for ordinary function calls.</item>
         ///   <item>Built-in op: <see cref="BuildFastBuiltinNodeFromProto"/>, with OPEN/CLOSE
         ///         handling that walks the same per-graph-attribute fan-out as the CG path.</item>
@@ -883,7 +883,7 @@ namespace Shorokoo.Core.Factory.IR
                 {
                     if ((function.FunctionType == FunctionType.TrainableParamInitializer ||
                          function.FunctionType == FunctionType.StateParamInitializer) &&
-                        definitions.ContainsKey(InternalOpCodes.TRAINABLE_PARAM))
+                        definitions.ContainsKey(InternalOpCodes.MODEL_PARAM))
                     {
                         fastNode = BuildFastTrainableParamNodeFromProto(nodeProto, function, tensorKeys, definitions);
                     }
@@ -907,9 +907,9 @@ namespace Shorokoo.Core.Factory.IR
         }
 
         /// <summary>
-        /// Builds a TRAINABLE_PARAM <see cref="FastNode"/> for a serialized initializer
+        /// Builds a MODEL_PARAM <see cref="FastNode"/> for a serialized initializer
         /// function call. Mirrors the CG path which re-routes initializer-typed function
-        /// invocations to the TRAINABLE_PARAM op code so downstream model-param discovery
+        /// invocations to the MODEL_PARAM op code so downstream model-param discovery
         /// still finds them.
         /// </summary>
         private static FastNode BuildFastTrainableParamNodeFromProto(
@@ -918,7 +918,7 @@ namespace Shorokoo.Core.Factory.IR
             Dictionary<string, FastTensorKey> tensorKeys,
             IReadOnlyDictionary<string, NodeDefinitionResolver> definitions)
         {
-            var resolver = definitions[InternalOpCodes.TRAINABLE_PARAM];
+            var resolver = definitions[InternalOpCodes.MODEL_PARAM];
             var (attrs, nodeDef) = ParseAttributes(nodeProto, resolver);
             var identifierTemplate = nodeProto.MetadataProps.FirstOrDefault(x => x.Key == ShrkMetaNodeIdentifierTemplate)?.Value;
             var stackTrace = nodeProto.MetadataProps.FirstOrDefault(x => x.Key == "StackTrace")?.Value;
@@ -932,7 +932,7 @@ namespace Shorokoo.Core.Factory.IR
             return new FastNode
             {
                 Key = nodeKey,
-                OpCode = InternalOpCodes.TRAINABLE_PARAM,
+                OpCode = InternalOpCodes.MODEL_PARAM,
                 Attributes = attrs,
                 FullInputs = { [""] = inputKeys.ToList() },
                 FullOutputs = { [""] = outputKeys.Select(k => (FastTensorKey?)k).ToList() },

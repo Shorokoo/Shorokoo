@@ -80,7 +80,7 @@ public class FastProcessorsCoverageTests
     /// Drives the <c>MODULE_SET_HYPERPARAMS</c> arm of
     /// <c>FastInlineModulesAndFunctions.FastReparentToCallSite</c>
     /// (~L703-727 of <c>FastProcessors.cs</c>) — the mirror of the
-    /// <c>TRAINABLE_PARAM_REF</c> arm at L676-702 hit by
+    /// <c>MODEL_PARAM_REF</c> arm at L676-702 hit by
     /// <c>CallsSimplestModule</c>. Needs three call levels: the outer
     /// module inlines the middle module, whose body contains the inner
     /// module's <c>MODULE_SET_HYPERPARAMS</c> node that the reparenter

@@ -210,7 +210,7 @@ public class TrainingRigCoverageTests
     /// autograd → optimizer replay → <c>MemoryAwareGraphOptimizer</c>) and
     /// then constructs the default checkpoint. The default checkpoint path
     /// in turn exercises QEE-store-based trainable-param discovery
-    /// (<see cref="Shorokoo.Core.Nodes.Processors.Fast.FastConvertTrainableParamIdRefToTrainableParam.DiscoverTrainableParamInfos"/>).
+    /// (<see cref="Shorokoo.Core.Nodes.Processors.Fast.FastConvertModelParamIdRefToModelParam.DiscoverTrainableParamInfos"/>).
     /// </summary>
     private static void CoverFromScratch(
         FastComputationGraph modelGraph,

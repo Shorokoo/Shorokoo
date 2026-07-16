@@ -178,10 +178,10 @@ namespace Shorokoo
             }
 
             var isParamNode = producer.OpCode
-                is InternalOpCodes.TRAINABLE_PARAM_REF
-                or InternalOpCodes.TRAINABLE_PARAM_MODEL_REF
-                or InternalOpCodes.TRAINABLE_PARAM_ID_REF
-                or InternalOpCodes.TRAINABLE_PARAM
+                is InternalOpCodes.MODEL_PARAM_REF
+                or InternalOpCodes.MODEL_PARAM_MODEL_REF
+                or InternalOpCodes.MODEL_PARAM_ID_REF
+                or InternalOpCodes.MODEL_PARAM
                 or InternalOpCodes.MODEL_PARAM_DATA;
 
             if (!isParamNode)

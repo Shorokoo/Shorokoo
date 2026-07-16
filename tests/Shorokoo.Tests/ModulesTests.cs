@@ -113,7 +113,7 @@ public class ModulesCoverageTests
     /// <c>CreateNodes</c> FunctionProto build path — load-time paths that fire
     /// only when the saved graph still contains <c>FUNCTION_INVOKE</c> /
     /// <c>SEQUENCE_CONSTRUCT</c> with a TargetFunction / unmaterialized
-    /// <c>TRAINABLE_PARAM</c> references. <c>SimpleModelSequence</c> covers the
+    /// <c>MODEL_PARAM</c> references. <c>SimpleModelSequence</c> covers the
     /// SEQUENCE_CONSTRUCT-with-TargetFunction save path
     /// (<c>FastOpsetResolver.Resolve</c> writing <c>ShrkAttrFunctionName</c> for any
     /// node whose schema declares it), and <c>OptionalHypersLayerStraight</c> covers
@@ -157,7 +157,7 @@ public class ModulesCoverageTests
             runtimeInputs: [TensorDataWithSmallVals(DType.Float32, [5L])]));
         // Outer module loops twice, calling LoopLayer (whose body has its own
         // constant-iter LOOP) each time. The inner-loop body builds the inner
-        // TRAINABLE_PARAM_REF's shape vector from function-input hyperparams
+        // MODEL_PARAM_REF's shape vector from function-input hyperparams
         // (independent of the loop-iter scalar), so the function-body reload must
         // keep those nodes inside the OPEN/CLOSE band for nested unrolling to
         // recover all 6 trainable params — exercising internalInitFunction's
@@ -542,7 +542,7 @@ public class ModulesCoverageTests
     /// Test shape: a non-concrete graph from a [Module] that calls another
     /// [Module] (<see cref="CallsSimplestModule"/> →
     /// <c>SimplestLayer.Call(x)</c>) contains a <c>MODEL_INVOKE</c> whose
-    /// function body references a <c>TRAINABLE_PARAM_REF</c> via
+    /// function body references a <c>MODEL_PARAM_REF</c> via
     /// <c>InitSimple</c>. Saving and reloading round-trips the graph through
     /// the ONNX <c>FunctionProto</c> path, exercising the REF-family
     /// attribute emission.
@@ -555,20 +555,20 @@ public class ModulesCoverageTests
         Assert.Contains(moduleGraph.Nodes, n => n.OpCode == InternalOpCodes.MODEL_INVOKE);
 
         // Save the non-concrete graph to ONNX bytes and reload; the reloaded
-        // TRAINABLE_PARAM_REF inside SimplestLayer's nested function body must
+        // MODEL_PARAM_REF inside SimplestLayer's nested function body must
         // carry a non-null TargetFunction.
         var binary = CompressedFormatUtils.SaveFastGraphToBinary(moduleGraph);
         var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(binary);
 
         // The top-level MODEL_INVOKE survives the round-trip — both saver and
         // reader keep this op-code as-is. The SimplestLayer function body
-        // (with the now-correctly-tagged TRAINABLE_PARAM_REF) is held inside
+        // (with the now-correctly-tagged MODEL_PARAM_REF) is held inside
         // the reloaded MODEL_INVOKE's TargetFunction.
         Assert.Contains(reloaded.Nodes, n => n.OpCode == InternalOpCodes.MODEL_INVOKE);
 
         // Running ToConcreteArchitecture on the reloaded graph forces
         // FastInlineModulesAndFunctions to inline the MODEL_INVOKE — this
-        // pulls in SimplestLayer's body, which contains TRAINABLE_PARAM_REF
+        // pulls in SimplestLayer's body, which contains MODEL_PARAM_REF
         // nodes with their TargetFunction wired to InitSimple.
         var sampleInputs = new[] { TensorDataWithSmallVals(DType.Float32, [5L]) };
         var concreteArch = reloaded.ToConcreteArchitecture(reloaded.FromOrderedInputs([.. sampleInputs]));

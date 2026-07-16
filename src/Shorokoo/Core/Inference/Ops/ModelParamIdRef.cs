@@ -12,18 +12,18 @@ using Shorokoo.Core.Nodes.AutoDiff;
 namespace Shorokoo.Core.Inference.Ops;
 
 /// <summary>
-/// Shape inference for the internal #TrainableParamIdRef# op. Inputs are
+/// Shape inference for the internal #ModelParamIdRef# op. Inputs are
 /// [modelIndexId, iterationIndices, ...initializerParams] and the output dtype + shape are
 /// fully known a priori: dtype comes from the ShrkAttrDtype attribute and shape comes from the
 /// first initializer param (inputs[2]) which holds the param's shape vector.
 ///
-/// Without this op QEE would leave TRAINABLE_PARAM_ID_REF outputs shapeless, breaking the
+/// Without this op QEE would leave MODEL_PARAM_ID_REF outputs shapeless, breaking the
 /// downstream Conv/Shape/Gather chains that ExtractModelIdInfosFromStore relies on to capture
 /// every model id.
 /// </summary>
-internal sealed class TrainableParamIdRefOp : QuickOp
+internal sealed class ModelParamIdRefOp : QuickOp
 {
-    public override string OpCode => InternalOpCodes.TRAINABLE_PARAM_ID_REF;
+    public override string OpCode => InternalOpCodes.MODEL_PARAM_ID_REF;
 
     protected override RuntimeTensor[] Compute(RuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
     {

@@ -57,7 +57,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 (Func<Scalar<int64>>)CounterBody);
 
             var refNode = counterGraph.Nodes.Single(
-                n => n.OpCode == InternalOpCodes.TRAINABLE_PARAM_REF);
+                n => n.OpCode == InternalOpCodes.MODEL_PARAM_REF);
             var attrs = refNode.Attributes.GetAttributeVals().ToDictionary();
             attrs[ShrkAttrLocalModelId] = (long[])[counterSlot];
             refNode.Attributes = OnnxCSharpAttributes.FromCSharpVals(attrs, refNode.Attributes.AttributeDefs);

@@ -21,7 +21,8 @@ namespace Shorokoo.Core.Rng;
 ///
 /// <para>A single "draw index" <c>d</c> addresses the stream: each Threefry block
 /// yields two 32-bit words, so <c>d</c> maps to block <c>d/2</c>, word <c>d%2</c> —
-/// giving O(1) random access.</para>
+/// giving O(1) random access. The fill loops run one bijection per block and consume
+/// both words.</para>
 ///
 /// <para>Uniform: low 24 bits × 2⁻²⁴ ∈ [0, 1). Normal: Box–Muller over uniform
 /// pairs (radius = √(−2·ln(1−u₁)) so the log argument is never 0).</para>
@@ -43,22 +44,29 @@ internal sealed class HostRng
         _rounds = rounds;
     }
 
-    /// <summary>The uniform draw in [0, 1) at draw index <paramref name="d"/>.</summary>
-    private float UniformAt(ulong d)
+    /// <summary>The uniform pair in [0, 1)² at draw indices <c>(2·pair, 2·pair + 1)</c>:
+    /// one bijection over block <paramref name="pair"/>, both output words consumed.</summary>
+    private (float Even, float Odd) UniformPairAt(ulong pair)
     {
-        ulong block = _counterBase + (d >> 1);
+        ulong block = _counterBase + pair;
         var (w0, w1) = Threefry2x32.Bijection(
             (uint)(block & 0xFFFFFFFF), (uint)(block >> 32), _k0, _k1, _rounds);
-        uint bits = (d & 1) == 0 ? w0 : w1;
-        return (bits & 0x00FFFFFFu) * TwoPow24Inv;
+        return ((w0 & 0x00FFFFFFu) * TwoPow24Inv, (w1 & 0x00FFFFFFu) * TwoPow24Inv);
     }
 
     /// <summary><paramref name="count"/> i.i.d. draws from U(0, 1).</summary>
     public float[] StandardUniform(long count)
     {
         var result = new float[count];
-        for (long i = 0; i < count; i++)
-            result[i] = UniformAt((ulong)i);
+        long pairs = (count + 1) / 2;
+        for (long p = 0; p < pairs; p++)
+        {
+            var (even, odd) = UniformPairAt((ulong)p);
+            long j = 2 * p;
+            result[j] = even;
+            if (j + 1 < count)
+                result[j + 1] = odd;
+        }
         return result;
     }
 
@@ -69,8 +77,7 @@ internal sealed class HostRng
         long pairs = (count + 1) / 2;
         for (long p = 0; p < pairs; p++)
         {
-            float u1 = UniformAt((ulong)(2 * p));
-            float u2 = UniformAt((ulong)(2 * p + 1));
+            var (u1, u2) = UniformPairAt((ulong)p);
             float radius = MathF.Sqrt(-2.0f * MathF.Log(1.0f - u1)); // 1-u1 ∈ (0,1] ⇒ no log(0)
             float theta = 2.0f * MathF.PI * u2;
             long j = 2 * p;

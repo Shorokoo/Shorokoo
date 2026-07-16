@@ -16,14 +16,43 @@ using System.Text;
 
 namespace Shorokoo.Core
 {
+    /// <summary>
+    /// The state-update pairs registered during one module-body trace: a dead-simple
+    /// accumulate-then-harvest list. What a state update means lives here, next to
+    /// <see cref="InternalGlobals.RegisterStateUpdate"/>; the ambient
+    /// <see cref="ModuleBuildContext"/> merely carries an instance per trace, and the graph
+    /// builder harvests it with <see cref="Take"/> after the body returns to wrap the module
+    /// outputs with WithStateDeps.
+    /// </summary>
+    internal sealed class StateUpdateRegistry
+    {
+        private List<(Variable original, Variable updated)>? _pairs;
+
+        /// <summary>Records one pair; <paramref name="linkedUpdated"/> is the
+        /// STATE_UPDATE_LINK output wrapping the user's updated value.</summary>
+        internal void Add(Variable original, Variable linkedUpdated)
+            => (_pairs ??= new List<(Variable, Variable)>()).Add((original, linkedUpdated));
+
+        /// <summary>Harvests (and clears) the linked updated-state tensors, in registration order.</summary>
+        internal Variable[] Take()
+        {
+            if (_pairs is null || _pairs.Count == 0)
+                return Array.Empty<Variable>();
+            var updates = _pairs.Select(p => p.updated).ToArray();
+            _pairs = null;
+            return updates;
+        }
+    }
+
     internal static class InternalGlobals
     {
         /// <summary>
         /// Registers a state update relationship between an original state tensor and its updated value.
         /// Called by Globals.StateUpdate to track state updates during module execution. The pair is
-        /// recorded on the current <see cref="ModuleBuildContext"/>, where the graph builder harvests
-        /// it after the body returns to wrap the module outputs with WithStateDeps; with no module
-        /// build in progress the registration could never be harvested, so this throws instead.
+        /// recorded on the current <see cref="ModuleBuildContext"/>'s <see cref="StateUpdateRegistry"/>,
+        /// where the graph builder harvests it after the body returns to wrap the module outputs with
+        /// WithStateDeps; with no module build in progress the registration could never be harvested,
+        /// so this throws instead.
         /// </summary>
         /// <param name="original">The original state tensor from a state initializer</param>
         /// <param name="updated">The computed updated value for the state</param>
@@ -35,7 +64,7 @@ namespace Shorokoo.Core
             // A loop body is traced once per construction pass (up to four times), so an in-loop
             // registration would fire repeatedly — mostly against throwaway nodes — and what a
             // per-iteration state update should even mean is undefined. Explicitly unsupported.
-            if (context.InLoopBody)
+            if (context.Loopers.InLoopBody)
                 throw new InvalidOperationException(
                     "Globals.StateUpdate is not supported inside a LoopAPI.Iterate body. " +
                     "Compute the new value inside the loop, then register the update once " +
@@ -45,7 +74,7 @@ namespace Shorokoo.Core
             var linkedUpdated = InternalOp.StateUpdateLink(original, updated);
 
             // Store the pair for later retrieval when wrapping module outputs
-            context.AddStateUpdate(original, linkedUpdated);
+            context.StateUpdates.Add(original, linkedUpdated);
 
             return linkedUpdated;
         }

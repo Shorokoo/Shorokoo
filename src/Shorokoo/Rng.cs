@@ -56,8 +56,8 @@ public static class Rng
         var context = ModuleBuildContext.RequireModuleBuild("Rng.Pin");
         // A loop body is traced multiple times during graph construction; only the canonical
         // pass builds the surviving nodes. Recording outside it would pin throwaway nodes.
-        if (!context.InCanonicalRecordingScope) return;
-        context.AddPins(items);
+        if (!context.Loopers.InCanonicalRecordingScope) return;
+        context.Pins.AddPositional(items);
     }
 
     /// <summary>
@@ -95,7 +95,35 @@ public static class Rng
                 throw new ArgumentException("Rng.Pin (sparse): pinned item is null.", nameof(items));
         }
         var context = ModuleBuildContext.RequireModuleBuild("Rng.Pin");
-        if (!context.InCanonicalRecordingScope) return;
-        context.AddSlotPins(items);
+        if (!context.Loopers.InCanonicalRecordingScope) return;
+        context.Pins.AddSparse(items);
+    }
+}
+
+/// <summary>
+/// The pins recorded during one module-body trace: a dead-simple accumulate-then-harvest
+/// pair of lists. What a pin means lives here in <c>Rng.cs</c>; the ambient
+/// <see cref="ModuleBuildContext"/> merely carries an instance per trace, and the graph
+/// builder harvests it with <see cref="Take"/> after the body returns.
+/// </summary>
+internal sealed class RngPinRegistry
+{
+    private List<object>? _positional;
+    private List<(int[] path, object item)>? _sparse;
+
+    internal void AddPositional(object[] items)
+        => (_positional ??= new List<object>()).AddRange(items);
+
+    internal void AddSparse((int[] path, object item)[] items)
+        => (_sparse ??= new List<(int[], object)>()).AddRange(items);
+
+    /// <summary>Harvests (and clears) the recorded pins.</summary>
+    internal (object[] positional, (int[] path, object item)[] sparse) Take()
+    {
+        var result = (_positional?.ToArray() ?? Array.Empty<object>(),
+                      _sparse?.ToArray() ?? Array.Empty<(int[], object)>());
+        _positional = null;
+        _sparse = null;
+        return result;
     }
 }

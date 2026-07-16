@@ -145,7 +145,7 @@ namespace Shorokoo.Core
             // lives in one ModuleBuildContext entered per build and restored on exit (a
             // destructive clear here would wipe the OUTER body's records). Entering also hands
             // this build a fresh context, so no records leak between builds.
-            var buildContext = ModuleBuildContext.EnterModuleBuild();
+            var buildContext = ModuleBuildContext.Enter();
             try
             {
                 Variable[] fnOutputs;
@@ -159,8 +159,8 @@ namespace Shorokoo.Core
                 {
                     // Always harvest, even if an exception occurred — the context is exited
                     // below either way, but harvesting here keeps the pairing explicit.
-                    stateUpdates = buildContext.TakeStateUpdates();
-                    rngPins = buildContext.TakePins();
+                    stateUpdates = buildContext.StateUpdates.Take();
+                    rngPins = buildContext.Pins.Take();
                 }
 
                 // Check for registered state updates and wrap outputs with WithStateDeps if any exist

@@ -650,29 +650,84 @@ namespace Shorokoo
         }
     }
 
+    /// <summary>
+    /// The loop-tracing state of one trace: the in-progress <see cref="Looper"/>s, outermost
+    /// first, plus the pass queries derived from them. Everything that understands loop
+    /// passes lives here, next to the machinery that drives them; the enclosing
+    /// <see cref="Shorokoo.Core.TraceContext"/> merely carries an instance.
+    /// </summary>
+    internal sealed class LooperStack : IReadOnlyList<Looper>
+    {
+        private readonly List<Looper> _loopers = new List<Looper>();
+
+        public int Count => _loopers.Count;
+        public Looper this[int index] => _loopers[index];
+        public IEnumerator<Looper> GetEnumerator() => _loopers.GetEnumerator();
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+
+        internal void Add(Looper looper) => _loopers.Add(looper);
+        internal void RemoveAt(int index) => _loopers.RemoveAt(index);
+
+        /// <summary>Whether the trace is currently inside a <c>LoopAPI.Iterate</c> body.</summary>
+        internal bool InLoopBody => _loopers.Count > 0;
+
+        /// <summary>
+        /// The looper whose pass currently drives node interception, and its stack index:
+        /// the innermost looper that has started tracing (inner loops sit on the stack at
+        /// pass 0 while an outer loop is mid-pass). Null when no loop is active.
+        /// </summary>
+        internal (Looper looper, int index)? Active
+        {
+            get
+            {
+                if (_loopers.Count == 0) return null;
+                var activeIndex = _loopers.FindIndex(x => x.CurrentPass == 0) - 1;
+                if (activeIndex < 0) activeIndex = _loopers.Count - 1;
+                return (_loopers[activeIndex], activeIndex);
+            }
+        }
+
+        /// <summary>
+        /// Whether trace-time actions that must fire <b>exactly once per source occurrence</b>
+        /// (e.g. <see cref="Shorokoo.Rng.Pin(object[])"/>) should record right now. A loop body
+        /// is executed once per construction pass — first (track), second (identify loop vars),
+        /// third (build the real body), fourth (expose outputs) — so a naive record inside a
+        /// loop body would fire up to four times, three of them against throwaway nodes. Only
+        /// the pass that builds the surviving body nodes (the active looper's third pass) is
+        /// canonical; at module level (no active loop) recording is always canonical. This is
+        /// THE canonical-pass query: every recorder asks here, rather than re-deriving the
+        /// active-looper selection.
+        /// </summary>
+        internal bool InCanonicalRecordingScope
+            => Active is not { } active || active.looper.CurrentPass == 3;
+
+        /// <summary>Iteration-index variables of all in-progress loops, outermost first.</summary>
+        internal ImmutableList<Scalar<int64>> IterationIndices
+            => _loopers.Select(x => x.GetLoopIndexVariable()).ToImmutableList();
+    }
+
     public static class LoopAPI
     {
-        // All trace-time loop state lives on the ambient ModuleBuildContext (one thread-static
-        // slot shared with the Rng.Pin and Globals.StateUpdate registries): the graph builder
-        // enters a context per body trace, and a standalone Iterate outside any build enters an
-        // isolated context for the duration of the iteration (see LoopFull).
+        // All trace-time loop state lives in the ambient TraceContext's LooperStack: the
+        // graph builder enters a (module-build) context per body trace, and a standalone
+        // Iterate outside any build enters an isolated context for the duration of the
+        // iteration (see LoopFull).
 
         /// <summary>
         /// Gets the interation indices of all outerloop ordered from outermost to innerermost.
         /// </summary>
         internal static ImmutableList<Scalar<int64>> IterationIndices
-            => ModuleBuildContext.Current is { } context
-                ? context.LooperStack.Select(x => x.GetLoopIndexVariable()).ToImmutableList()
-                : ImmutableList<Scalar<int64>>.Empty;
+            => TraceContext.Current?.Loopers.IterationIndices
+                ?? ImmutableList<Scalar<int64>>.Empty;
 
         internal static (FullInputs newInputs, FullOutputs newOutputs) ProcessNode(Node node)
         {
             // No trace in progress, or no active loop: node creation passes through untouched.
-            var context = ModuleBuildContext.Current;
-            if (context is null || context.ActiveLooper is not { } active)
+            var context = TraceContext.Current;
+            if (context is null || context.Loopers.Active is not { } active)
                 return (node.FullInputs, node.FullOutputs);
 
-            var looperStack = context.LooperStack;
+            var looperStack = context.Loopers;
             var (activeLooper, activeLooperIndex) = active;
 
             // Nodes involved in the creation of the loop, these, in principle are not part of the loop body.
@@ -731,8 +786,8 @@ namespace Shorokoo
             // trace (hand-built graphs, e.g. FastComputationGraph construction in tests) gets its
             // own isolated context for the duration of the iteration, so the looper state never
             // outlives the loop and never bleeds into an unrelated ambient trace.
-            var standalone = ModuleBuildContext.Current is null ? ModuleBuildContext.EnterIsolated() : null;
-            var looperStack = ModuleBuildContext.Current!.LooperStack;
+            var standalone = TraceContext.Current is null ? TraceContext.EnterIsolated() : null;
+            var looperStack = TraceContext.Current!.Loopers;
 
             var looper = new Looper(looperStack.Count);
             looperStack.Add(looper);
@@ -788,7 +843,7 @@ namespace Shorokoo
                 }
 
                 if (standalone is not null)
-                    ModuleBuildContext.Exit(standalone);
+                    TraceContext.Exit(standalone);
             }
         }
 

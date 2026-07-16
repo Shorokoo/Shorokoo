@@ -15,7 +15,7 @@ Related: [defining-models.md](defining-models.md) · [nn-library.md](nn-library.
   state analog of trainable-parameter initializers) and its per-step update is
   registered via `Globals.StateUpdate(state, newState)`. `StateUpdate` throws
   `InvalidStateUpdateException` if its first argument is not a state variable —
-  a runtime input or a trainable parameter is rejected with instructions.
+  a runtime input or a trainable parameter is rejected.
 
 ## Built-in components
 
@@ -123,8 +123,8 @@ namespace `Shorokoo` (covered by `using Shorokoo;`).
 seed keys parameter initialization and every runtime draw (Dropout masks, in-model
 sampling). Omitted (or `null`), the rig keys under the **default identity** (master
 seed 0) — training is deterministic and reproducible by default. Dropout masks still
-vary per training step (the generator's execution counter advances each step and
-rides the checkpoint, so a resumed run continues exactly). Pass
+vary per training step (the per-step RNG position is saved in the checkpoint, so a
+resumed run continues exactly). Pass
 `new RngConfig { MasterSeed = … }` to re-roll all streams coherently, or
 `RngConfig.NonDeterministic()` for per-run variation.
 
@@ -150,7 +150,7 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
 - `LoadCheckpoint` reconstructs the checkpoint against the rig's own parameter
   and state definitions, so the rig must be built from the **same**
   model/loss/optimizer graphs. Loading a checkpoint from a different model or
-  optimizer throws a clear error rather than silently misbinding.
+  optimizer throws.
 - Because `.Step` is restored, learning-rate **schedules resume from the right
   step** — not from step 0.
 - `TrainingCheckpoint.Load(path, trainableDef, modelStateDef, optimizerStateDef)`
@@ -331,7 +331,6 @@ Constraints:
   via an optimizer-owned `[StateInitializer]`'s `Init` and registered with `StateUpdate`.
 - Do not call `Globals.StateUpdate` on inputs, trainable parameters, or computed tensors;
   only state variables (a `[StateInitializer]` `Init` result) are accepted.
-- Do not call `Globals.StateUpdate` outside a module body (there is no module to attach the
-  update to, so it throws), and do not call it inside a `LoopAPI.Iterate` body — per-iteration
-  state updates are not supported and rejected. Compute the new value inside the loop and
-  register the update once, after the loop, from the loop's final value.
+- Do not call `Globals.StateUpdate` outside a module body, or inside a `LoopAPI.Iterate`
+  body — both throw. Compute the new value inside the loop and register the update once,
+  after the loop, from the loop's final value.

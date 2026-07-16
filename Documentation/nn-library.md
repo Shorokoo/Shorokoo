@@ -113,9 +113,9 @@ Conv3d.Call(outChannels, kernelSize, stride, padding, dilation, groups, useBias,
 ```
 
 **Dynamic conv geometry**: all geometry (kernel size, stride, padding, dilation,
-groups) is hyperparameter-driven. This works because the layers use the
-tensor-geometry `NN.Conv` overload (SHRK_CONV), which carries geometry as int64
-tensor inputs and is lowered to a standard ONNX Conv at concretization. Weight
+groups) is hyperparameter-driven — the layers use the tensor-geometry `NN.Conv`
+overload, which takes geometry as int64 tensor inputs; the exported model
+contains a standard ONNX Conv. Weight
 `[outChannels, inChannels/groups, k(, k)]` is `KaimingUniform`-initialized;
 `inChannels` is read from the input's shape in-graph. These modules cover the
 **square-kernel / symmetric-pad** case; for per-axis geometry, `auto_pad`, or a
@@ -128,8 +128,7 @@ ConvTranspose2d.Call(Scalar<int64> outChannels, Scalar<int64> kernelSize,
                      Scalar<bit> useBias, Tensor<float32> x)
 ```
 
-There is no tensorized ConvTranspose lowering (only Conv has SHRK_CONV), so the
-geometry attributes stay at the ONNX defaults — stride 1, no padding, dilation 1,
+`ConvTranspose2d`'s geometry attributes stay at the ONNX defaults — stride 1, no padding, dilation 1,
 group 1 — with the kernel shape inferred from the (dynamic) weight
 `[inChannels, outChannels, k, k]`. For other stride/padding combinations call
 `NN.ConvTranspose` directly with static attribute values.
@@ -137,7 +136,7 @@ group 1 — with the kernel shape inferred from the (dynamic) weight
 ### Convolution — generalized per-axis helpers
 
 The `[Module]` layers above (`Conv1d/2d/3d`, `ConvTranspose2d`) keep their
-square/cubic, hyperparameter-driven signature for backward compatibility and the
+square/cubic, hyperparameter-driven signature for the
 `Model(...)`/hyperparameter-baking ergonomics — they are the scalar-hyper
 convenience. For the **full ONNX attribute surface** (per-axis kernel/stride/
 padding/dilation, asymmetric padding, `auto_pad`, `groups`, `padding_mode`, and
@@ -192,7 +191,7 @@ Convolution.ConvTranspose(x, outChannels, long[] kernelSize,
 - **`padding_mode`.** `Zeros` uses the conv's own (differentiable) implicit
   padding. `Reflect`/`Replicate`/`Circular` map to `PadMode.Reflect`/`Edge`/`Wrap`
   and are realized by an explicit `Tensor.Pad` over the spatial axes followed by a
-  zero-pad conv. **Caveat (loud):** the `Pad` step for these modes is
+  zero-pad conv. **Caveat:** the `Pad` step for these modes is
   **non-differentiable** — reflect/edge/wrap have no autodiff and no QEE values,
   so they **throw in autodiff**. These modes are **forward / inference-grade
   only**; do not expect to train through the pad stage. `Causal` is **1-D only**
@@ -266,12 +265,12 @@ owns its weight), so the trainable configuration trains end-to-end.
   `hN` stays `[D·numLayers, N, H]`.
 - **Initial state.** The baseline ships a zeroed `h_0` (an omitted op input; ONNX
   zero-fills) — no caller-supplied `initial_h` and no stateful carry-across-calls.
-- **Autodiff caveat (loud).** Only **single-direction (forward or reverse), tanh,
+- **Autodiff caveat.** Only **single-direction (forward or reverse), tanh,
   `layout=0`** RNNs are **trainable**. `RnnNonlinearity.Relu` and
   `RnnDirection.Bidirectional` **build and run for forward inference but throw
-  AD003 in back-propagation through time** — they are intentionally exposed (not
-  gated), documented as **inference-grade**. (Forward and reverse tanh are the
-  trainable corner; relu and bidirectional are not.)
+  AD003 in back-propagation through time** — treat them as **inference-grade**.
+  (Forward and reverse tanh are the trainable corner; relu and bidirectional are
+  not.)
 - **No QEE values.** RNN has no QEE step values, so closed-form / value checks run
   on the **ORT backend**, not the QEE value path.
 
@@ -332,12 +331,12 @@ C_t = f ⊙ C_{t-1} + i ⊙ c̃      H_t = o ⊙ tanh(C_t)
 - **Initial state.** `h_0` **and** `c_0` default to zero (omitted op inputs; ONNX
   zero-fills). Peephole `P` is null. No caller-supplied initial state or stateful
   carry-across-calls.
-- **Autodiff caveat (loud).** Single-direction (forward or reverse), `layout=0`,
-  default-activation LSTM is **trainable** end-to-end through the `TrainingRig` (the
-  rig scheduler fix landed alongside RNN). `RnnDirection.Bidirectional` **builds and
+- **Autodiff caveat.** Single-direction (forward or reverse), `layout=0`,
+  default-activation LSTM is **trainable** end-to-end through the
+  `TrainingRig`. `RnnDirection.Bidirectional` **builds and
   runs for forward inference / ONNX export but throws AD003 in back-propagation
-  through time** — it is intentionally exposed (not gated), documented as
-  **inference-grade**. Peephole, `input_forget`, `clip`, custom activations and
+  through time** — treat it as **inference-grade**. Peephole, `input_forget`,
+  `clip`, custom activations and
   variable-length `sequence_lens` are reachable at the core op but all throw AD003
   in BPTT, so they are **not exposed** by the layer.
 - **No QEE values.** Like RNN, LSTM has no QEE step values — closed-form / value
@@ -416,12 +415,12 @@ H_t = (1 − z) ⊙ ĥ + z ⊙ H_{t-1}     # blend candidate with previous hidde
 - **Initial state.** `h_0` defaults to zero (an omitted op input; ONNX zero-fills);
   there is no cell state. No caller-supplied initial state or stateful
   carry-across-calls.
-- **Autodiff caveat (loud).** Single-direction (forward or reverse), `layout=0`,
-  default-activation GRU is **trainable** end-to-end through the `TrainingRig` (the rig
-  scheduler fix landed alongside RNN), and **both `linearBeforeReset` forms are
+- **Autodiff caveat.** Single-direction (forward or reverse), `layout=0`,
+  default-activation GRU is **trainable** end-to-end through the `TrainingRig`,
+  and **both `linearBeforeReset` forms are
   differentiable**. `RnnDirection.Bidirectional` **builds and runs for forward inference
-  / ONNX export but throws AD003 in back-propagation through time** — it is intentionally
-  exposed (not gated), documented as **inference-grade**. `clip`, custom activations and
+  / ONNX export but throws AD003 in back-propagation through time** — treat it as
+  **inference-grade**. `clip`, custom activations and
   variable-length `sequence_lens` are reachable at the core op but all throw AD003 in
   BPTT, so they are **not exposed** by the layer.
 - **No QEE values.** Like RNN/LSTM, GRU has no QEE step values — closed-form / value
@@ -475,8 +474,7 @@ One rank-generic module covers PyTorch's per-dim `BatchNorm1d/2d/3d` contracts:
 `[N, C, D, H, W]`. The reduction set `{0} ∪ {2..rank-1}` (batch + spatial,
 skipping the channel axis) and the per-channel broadcast shape `[1, C, 1, …, 1]`
 are derived from the input's runtime rank in-graph (the same `Range`-from-rank
-idiom as `LayerNorm`), so the `[N, C, L]` rank-3 form now works — the old
-`BatchNorm1d`'s rank-2-only restriction is lifted.
+idiom as `LayerNorm`), so the `[N, C, L]` rank-3 form is supported.
 
 - `training = true`: normalizes with **batch** statistics (biased variance) and
   EMA-updates the running stats via `Globals.StateUpdate` (ONNX/Keras momentum
@@ -552,18 +550,15 @@ are always created as trainable params but receive zero gradient when
 `affine = false`.
 
 - **`GroupNorm`**: `affine` is a required `[Hyper]` bit, conceptually defaulted
-  **on** at call sites (PyTorch/Keras/Flax default `affine=True`). **Signature
-  change:** `affine` is a new leading bit after `numGroups` — old
-  `GroupNorm.Call(numGroups, epsilon, x)` becomes
+  **on** at call sites (PyTorch/Keras/Flax default `affine=True`); it is the
+  leading bit after `numGroups` —
   `GroupNorm.Call(numGroups, Scalar(true), epsilon, x)`. `C` must be divisible by
   `numGroups`, else the `[N, G, -1]` reshape fails at concretization.
 - **`InstanceNorm`**: `affine` defaults **off** in the `1d/2d/3d` aliases,
   matching PyTorch's `affine=False` InstanceNorm default — the *opposite* of
   GroupNorm's on default — because the canonical (style-transfer) use case
   normalizes without a learnable affine. Pass `affine = true` to the generic
-  `InstanceNorm` to opt in. **Note:** this changes the previous rank-4-only
-  `InstanceNorm2d`, which hardcoded the affine **on**; it is now off by default
-  (a deliberate PyTorch-parity fix), while keeping the same 2-arg `(epsilon, x)`
+  `InstanceNorm` to opt in. The `1d/2d/3d` aliases take the 2-arg `(epsilon, x)`
   call shape. InstanceNorm carries **no** running-stats / momentum machinery —
   its statistics are per-instance and identical at train and eval time, so it
   runs on the plain inference pipeline; for batch/running-stat normalization use
@@ -614,8 +609,8 @@ TransformerDecoderLayer.Call(Scalar<int64> embedDim, Scalar<int64> numHeads,
 ```
 
 All built from autodiff-supported primitives (MatMul / Softmax / Transpose /
-Where), so they train end-to-end — the fused ONNX `Attention` op has no gradient
-rule. `MultiHeadAttention` owns four `XavierUniform` projections (q/k/v/out) with
+Where), so they train end-to-end.
+`MultiHeadAttention` owns four `XavierUniform` projections (q/k/v/out) with
 optional zero biases; the causal mask is a constant gated by the runtime
 `causal` flag. `TransformerEncoderLayer` composes `LayerNorm` + `MultiHeadAttention`
 and a GELU FFN (the FFN uses explicit token-wise MatMuls, since `Linear` would
@@ -744,7 +739,7 @@ Gather over a trainable `[numEmbeddings, embeddingDim]` table, `Normal`-initiali
   down to `maxNorm` (shrink-only; under-cap rows untouched). `normType` is inert
   unless `maxNorm` is set.
 
-**Two intentional divergences from PyTorch** (SSA graphs cannot mutate a weight
+**Two divergences from PyTorch** (SSA graphs cannot mutate a weight
 mid-forward): (1) `maxNorm` is *functional* — Shorokoo clamps the gathered **output**
 rows and never mutates the stored weight (PyTorch renormalizes the weight in place, so
 across training the stored weights diverge; per-forward/inference outputs match for
@@ -761,7 +756,7 @@ The init selector is a compile-time type (not a runtime `[Hyper]`), so it lives 
 plain-C#-argument static helper (the `Recurrent`/`Convolution`/`Pooling` precedent);
 `Embed` defaults to `Normal`, strictly generalizing the module.
 
-**Not exposed (deliberate declines).** `scale_grad_by_freq` and `sparse` are
+**Not exposed.** `scale_grad_by_freq` and `sparse` are
 gradient-only knobs with no forward expression and no Shorokoo IR support (absent from
 Keras and Flax too).
 
@@ -844,10 +839,10 @@ Pooling.MaxUnpool1d / MaxUnpool2d / MaxUnpool3d (...);
 Pooling.Flatten(x, startAxis: 1);  // [N, d1, d2, ...] -> [N, d1*d2*...]
 ```
 
-**The historical scalar `MaxPool2d(x, long kernelSize, …)` / `AvgPool2d(x, long
-kernelSize, …)` signatures are retained verbatim** and coexist with the new
-per-axis `long[]` aliases (C# overload resolution distinguishes `long` from
-`long[]`), so existing `Pooling.MaxPool2d(x, 2)` call sites are unaffected.
+**Both the scalar `MaxPool2d(x, long kernelSize, …)` / `AvgPool2d(x, long
+kernelSize, …)` signatures and the per-axis `long[]` aliases exist** (C# overload
+resolution distinguishes `long` from `long[]`), so `Pooling.MaxPool2d(x, 2)` and
+`Pooling.MaxPool2d(x, [2L, 2L])` both work.
 
 **Defaults & conventions.** `stride` defaults to `kernelSize` (PyTorch/Keras);
 per-axis `stride`/`padding`/`dilation` accept length 1 (broadcast to every axis)
@@ -856,9 +851,8 @@ or length spatialRank, and `padding` may also be length `2*spatialRank`
 order `p` defaults to **2** (L2) and is an **integer** — ONNX has no fractional
 norm, so PyTorch's float `norm_type` is not expressible. `AvgPool`'s
 `countIncludePad` defaults to **false** (divide by the count of real cells),
-matching the historical 2-D helper and **diverging from PyTorch's
-`count_include_pad=True`**; pass `countIncludePad: true` for the PyTorch
-denominator.
+**diverging from PyTorch's `count_include_pad=True`**; pass
+`countIncludePad: true` for the PyTorch denominator.
 
 **Inference-grade backward caveats.** The pools expose their full forward
 attribute surface, but some gradients are restricted:
@@ -874,7 +868,7 @@ attribute surface, but some gradients are restricted:
 **Out of scope.** Adaptive pooling (`AdaptiveAvg/MaxPool*`) beyond the
 `output_size == 1` case — which **is** `GlobalAvgPool2d`/`GlobalMaxPool2d`/
 `GlobalLpPool` — has no general ONNX operator, and fractional (stochastic-window)
-max pooling has no core op; both are deferred.
+max pooling has no core op; both are unsupported.
 
 ## Losses (`Shorokoo.Modules.Losses`)
 

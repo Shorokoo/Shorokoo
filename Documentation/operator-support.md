@@ -2,7 +2,7 @@
 
 Shorokoo supports the standard `ai.onnx` domain up to **opset 26** — the
 maximum implemented by the bundled ONNX Runtime 1.26. Exported models are
-stamped at the proven **opset-21 baseline**; the exporter then auto-raises
+stamped at the **opset-21 baseline**; the exporter then auto-raises
 each model's opset stamp only as far as the post-21 operators actually
 present in the graph require (e.g. a graph containing `RMSNormalization` is
 stamped opset 23; `Attention` is stamped opset 24 because ONNX Runtime's CPU
@@ -22,8 +22,7 @@ columns mean:
   [limitations.md](limitations.md) for the size bound). 🟡 here means values
   are not (or only partially) computed; shape/dtype inference still works.
 - **Gradient** — reverse-mode autodiff. Unsupported attribute combinations on
-  partially supported operators throw `AutoDiffNotSupportedException` instead
-  of silently producing wrong or zero gradients.
+  partially supported operators throw `AutoDiffNotSupportedException`.
 
 Symbols: ✅ full support · 🟡 partial (see the family's notes) · ❌ not
 supported (see notes) · N/A not applicable (non-differentiable output, leaf
@@ -165,8 +164,7 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 
 1. Integer index output — non-differentiable.
 2. Ties share the gradient equally.
-3. The gradient uses prod/x and is NaN when an element is exactly 0 — left
-   deliberately loud rather than silently masked to a wrong zero.
+3. The gradient uses prod/x and is NaN when an element is exactly 0.
 
 ## Shape & data movement
 
@@ -228,7 +226,7 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
     clamping of negative starts/ends.
 14. Values computed for small tensors honoring `largest` (ties resolved to the
     lower index); when `k` is wired but unknown the shape degrades to a bounded
-    rank-only claim rather than guessing.
+    rank-only claim.
 15. Flatten form computes all four outputs for small tensors (both `sorted`
     modes); the `axis` form is shape-only and its unique-count extent stays
     data-dependent (rank-only with bounds).
@@ -253,7 +251,7 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 | MaxUnpool | ✅ | 🟡 [9] | ✅ |
 
 1. Shape/dtype inference only — values are never computed for these heavy
-   operators (by design; use the ONNX Runtime backend for numbers).
+   operators; use the ONNX Runtime backend for numbers.
 2. `ceil_mode=1` throws; everything else (count_include_pad, SAME auto_pad,
    dilations, overlapping windows) is supported.
 3. Backward requires explicit pads (`auto_pad` SAME_UPPER/SAME_LOWER is not
@@ -288,10 +286,7 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 | SoftmaxCrossEntropyLoss | ✅ | 🟡 [5] | ✅ |
 
 1. With `training_mode=1` the node is decomposed into primitive ops at export
-   time. This is deliberate: ONNX Runtime's CPU BatchNormalization training
-   kernel mutates its mean/var input buffers in place, corrupting other
-   consumers of shared tensors; the decomposition avoids that kernel entirely
-   while producing the same results.
+   time, producing the same results as the fused kernel.
 2. Values in inference mode; training mode is shape/dtype only.
 3. Both inference and training modes (batch-stats backward); gradients flowing
    into the running-mean/running-var outputs throw.
@@ -301,8 +296,8 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
    no-drop mask) at session load, and Shorokoo does not guard against it.
    Shorokoo's own dropout layers do not emit the op — masks are built in-graph
    from the keyed RNG feed (see rng-configuration.md) — so this only affects
-   hand-authored graphs and models saved before the in-graph masks. The
-   gradient path (mask-based) throws if the forward mask is unavailable.
+   hand-authored graphs. The gradient path (mask-based) throws if the forward
+   mask is unavailable.
 5. Shape/dtype inference only; values are not computed.
 6. Gradients into the optional Mean/InvStdDev outputs are treated as zero.
 
@@ -341,9 +336,8 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 1. The weight zero point is scalar only; a per-channel 1-D `w_zero_point` is
    not representable in-framework.
 2. Shape/dtype only; values are not computed.
-3. Quantized operators are deliberately non-differentiable — no
-   straight-through estimator is provided, so there is no quantization-aware
-   training path.
+3. Quantized operators are non-differentiable — no straight-through estimator
+   is provided, so there is no quantization-aware training path.
 
 ## Recurrent (RNN family)
 

@@ -143,9 +143,8 @@ var config = new RngConfig { MasterSeed = 42 }
 Every path the stream report lists is a valid override address, including the realized
 per-iteration streams of a loop feed (e.g. `[1, 2, 1]` = iteration 2 of the feed at loop
 slot 1) — overriding one iteration re-seeds that iteration only; sibling iterations keep
-their derived keys. An override that matches no stream fails loudly rather than being
-silently inactive: a `Runtime` override at bind (`ApplyRngConfig`), a `Params` override at
-parameter initialization.
+their derived keys. An override that matches no stream throws: a `Runtime` override at
+bind (`ApplyRngConfig`), a `Params` override at parameter initialization.
 
 Stream ids are realized at `ToConcreteArchitecture` from the input hints, so — like
 trainable params inside loops — a loop feed's streams are enumerated for the hinted trip

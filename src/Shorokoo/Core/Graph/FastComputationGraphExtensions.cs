@@ -398,7 +398,9 @@ namespace Shorokoo.Graph
         /// reproducibly and backend-independently). When <c>null</c>, the graph's bound identity
         /// (the RNG key-vector carrier, algorithm included) is used when one is present — the
         /// carrier is the source of truth for BOTH collections — else
-        /// <see cref="RngConfig.Default"/> (master seed 0).
+        /// <see cref="RngConfig.Default"/> (master seed 0). A carrier naming an unknown
+        /// algorithm (e.g. a model written by a newer framework version) throws rather than
+        /// initializing under a substitute; pass an explicit config to deliberately re-key.
         /// </param>
         /// <returns>The default trainable-parameter values, named.</returns>
         public static ModelParamList InitializeTrainableParams(
@@ -411,7 +413,13 @@ namespace Shorokoo.Graph
             computeContext ??= ComputeContext.Default;
             if (rngConfig is null && graph.TryGetRngKeyVector() is { } carried)
                 rngConfig = RngConfig.FromKeyVector(carried.keyVector,
-                    Core.Rng.RngAlgorithms.TryFromName(carried.algorithm) ?? RngAlgorithm.Threefry2x32);
+                    Core.Rng.RngAlgorithms.TryFromName(carried.algorithm)
+                        ?? throw new System.NotSupportedException(
+                            $"InitializeTrainableParams: the graph's RNG carrier records the unknown " +
+                            $"algorithm '{carried.algorithm}' (likely written by a newer framework " +
+                            "version). Initializing under a substitute algorithm would silently " +
+                            "diverge from the recorded identity; pass an explicit rngConfig to " +
+                            "deliberately re-key the parameters."));
             rngConfig ??= RngConfig.Default;
 
             var paramNamingInfo = graph.GetConcreteModelParamInfos();

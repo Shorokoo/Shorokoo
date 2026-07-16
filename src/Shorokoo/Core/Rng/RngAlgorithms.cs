@@ -75,6 +75,10 @@ internal static class RngAlgorithms
     /// <summary>The named algorithm's function of the given kind (cached; built on first use).</summary>
     public static Function GetFunction(string algorithm, string kind)
     {
+        // Validate the name before any remap: an unknown algorithm must fail loudly for every
+        // kind — the split remap below must never launder an unrecognized name into Default.
+        int rounds = DrawRounds(algorithm);
+
         // The key tree is algorithm-independent: switching the draw algorithm must not re-key
         // any stream, so split (the in-graph key fold) is always the default 20-round Threefry
         // regardless of the configured draw algorithm. Only uniform/normal vary by algorithm.
@@ -84,7 +88,6 @@ internal static class RngAlgorithms
         {
             if (Cache.TryGetValue((algorithm, kind), out var fn)) return fn;
 
-            int rounds = DrawRounds(algorithm);   // validates the algorithm name
             Delegate body = kind switch
             {
                 KindSplit => (Func<Vector<int64>, Scalar<int64>, Vector<int64>>)SplitImpl,

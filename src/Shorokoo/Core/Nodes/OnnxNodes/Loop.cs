@@ -648,6 +648,57 @@ namespace Shorokoo
             foreach (var loopVariable in this.loopVariableByNodeOutputLocation.Values.Where(x => x.OpenNodeInputInitializer is null))
                 loopVariable.InvalidFourthPassOutput.AssertNotNull().IsValid = false;
         }
+
+        /// <summary>
+        /// Translates a variable observed inside this loop's body (during the third pass) to
+        /// its post-loop value, for trace-time recorders that defer an in-body registration
+        /// to after the loop (in-loop <c>Globals.StateUpdate</c>). Only a carried loop
+        /// variable has a well-defined final value — its close-node output, which falls back
+        /// to the initializer when the loop runs zero iterations; every other body value is
+        /// reported by kind rather than guessed at. Callable once the close node is built
+        /// (from the fourth pass on).
+        /// </summary>
+        internal (PostLoopTranslation kind, Variable? postLoop) TranslateToPostLoop(Variable inBody)
+        {
+            var loopVariable =
+                this.thirdPassOutputs.TryGetValue(inBody, out var asThirdPass) ? asThirdPass :
+                this.innerLoopCloseNodeOutputs.TryGetValue(inBody, out var asInnerClose) ? asInnerClose :
+                null;
+
+            if (loopVariable is null)
+            {
+                // Values the loop machinery scopes to a single iteration have no post-loop
+                // meaning: an open-node output is the value at the START of an iteration
+                // (the close output is the value after the last body execution — a different
+                // thing), and the raw open-node outputs cover the iteration index.
+                if (this.openNodeOutputs.ContainsKey(inBody) ||
+                    (this.OpenLoopNode is not null &&
+                     this.OpenLoopNode.Outputs.Any(x => Object.ReferenceEquals(x, inBody))))
+                    return (PostLoopTranslation.LoopScoped, null);
+                return (PostLoopTranslation.External, inBody);
+            }
+
+            if (loopVariable.IsLocalScanVariable)
+                return (PostLoopTranslation.ScanVariable, null);
+            if (loopVariable.CloseNodeOutput is null)
+                return (PostLoopTranslation.NotALoopOutput, null);
+            return (PostLoopTranslation.Translated, loopVariable.CloseNodeOutput);
+        }
+    }
+
+    /// <summary>How <see cref="Looper.TranslateToPostLoop"/> resolved an in-body variable.</summary>
+    internal enum PostLoopTranslation
+    {
+        /// <summary>Not produced inside this loop's body — usable after the loop as-is.</summary>
+        External,
+        /// <summary>A carried loop variable's body value — translated to its close-node output.</summary>
+        Translated,
+        /// <summary>A body value that never surfaces as a loop output (its fourth-pass output is invalidated).</summary>
+        NotALoopOutput,
+        /// <summary>A scanned value — its close output is the stacked per-iteration tensor, not a final value.</summary>
+        ScanVariable,
+        /// <summary>Loop machinery scoped to one iteration (open-node output / iteration index).</summary>
+        LoopScoped,
     }
 
     /// <summary>
@@ -700,6 +751,18 @@ namespace Shorokoo
         /// </summary>
         internal bool InCanonicalRecordingScope
             => Active is not { } active || active.looper.CurrentPass == 3;
+
+        /// <summary>
+        /// The loopers whose bodies enclose the current recording point, outermost first:
+        /// the active looper and its ancestors. A snapshot for deferred in-loop recorders
+        /// (in-loop <c>Globals.StateUpdate</c>) — the <see cref="Looper"/> objects outlive
+        /// their stack entries, so the chain stays walkable at loop termination. Empty when
+        /// no loop is active.
+        /// </summary>
+        internal ImmutableList<Looper> ActiveChain
+            => Active is { } active
+                ? _loopers.Take(active.index + 1).ToImmutableList()
+                : ImmutableList<Looper>.Empty;
 
         /// <summary>Iteration-index variables of all in-progress loops, outermost first.</summary>
         internal ImmutableList<Scalar<int64>> IterationIndices
@@ -847,6 +910,16 @@ namespace Shorokoo
                     looperStack.RemoveAt(looper.LoopDepth);
                 }
             }
+
+            // An in-loop Globals.StateUpdate defers its registration to here — it is sugar
+            // for registering the post-loop value of the updated tensor. Resolution needs
+            // the OUTERMOST loop fully closed (the close-node outputs it translates to must
+            // exist at every nesting level) and its looper off the stack (so the deferred
+            // STATE_UPDATE_LINK nodes are created at module scope instead of being
+            // intercepted as loop-body nodes). Nothing can be pending outside a module
+            // build: recording is gated on one.
+            if (looper.LoopDepth == 0 && GraphTrace.IsModuleBuildTracing)
+                GraphTrace.StateUpdates.ResolvePendingInLoop();
         }
 
         /// <summary>

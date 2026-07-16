@@ -11,6 +11,8 @@ using Shorokoo.Core.Utils;
 using Shorokoo.Onnx;
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
+using System.Diagnostics;
 using System.Linq;
 using System.Text;
 
@@ -27,15 +29,110 @@ namespace Shorokoo.Core
     internal sealed class StateUpdateRegistry
     {
         private List<(Variable original, Variable updated)>? _pairs;
+        private List<(Variable original, Variable updatedInBody, ImmutableList<Looper> loopers)>? _pendingInLoop;
 
         /// <summary>Records one pair; <paramref name="linkedUpdated"/> is the
         /// STATE_UPDATE_LINK output wrapping the user's updated value.</summary>
         internal void Add(Variable original, Variable linkedUpdated)
             => (_pairs ??= new List<(Variable, Variable)>()).Add((original, linkedUpdated));
 
+        /// <summary>
+        /// Records one in-loop registration for deferred resolution. An in-loop
+        /// <c>Globals.StateUpdate(state, v)</c> is sugar for registering the post-loop value
+        /// of <c>v</c>: the STATE_UPDATE_LINK cannot be created at the call site (it would be
+        /// a loop-body node referencing per-iteration values), so the call records the pair
+        /// plus the enclosing loopers (outermost first) and
+        /// <see cref="ResolvePendingInLoop"/> finishes the registration when the outermost
+        /// loop terminates.
+        /// </summary>
+        internal void AddPendingInLoop(Variable original, Variable updatedInBody, ImmutableList<Looper> loopers)
+        {
+            Debug.Assert(loopers.Count > 0);
+            (_pendingInLoop ??= new List<(Variable, Variable, ImmutableList<Looper>)>())
+                .Add((original, updatedInBody, loopers));
+        }
+
+        /// <summary>
+        /// Resolves (and clears) the deferred in-loop registrations: each recorded in-body
+        /// value is translated through its enclosing loopers' loop-variable mappings,
+        /// innermost to outermost (third-pass output → close-node output, composing through
+        /// inner-loop close outputs for nested loops), and the post-loop value is then
+        /// registered exactly as the documented after-the-loop pattern would. Called by the
+        /// loop machinery once the outermost looper has terminated and left the stack — the
+        /// close-node outputs exist and node creation is back at module scope. Throws when a
+        /// recorded value has no well-defined post-loop translation.
+        /// </summary>
+        internal void ResolvePendingInLoop()
+        {
+            if (_pendingInLoop is null)
+                return;
+            var pending = _pendingInLoop;
+            _pendingInLoop = null;
+
+            foreach (var (original, updatedInBody, loopers) in pending)
+            {
+                var updated = updatedInBody;
+                for (int depth = loopers.Count - 1; depth >= 0; depth--)
+                {
+                    // The state variable itself must be a pre-loop value at every depth: a
+                    // state (or a rank cast of it) produced inside the body is per-iteration,
+                    // and a per-iteration state has no per-step identity to update.
+                    if (loopers[depth].TranslateToPostLoop(original).kind != PostLoopTranslation.External)
+                        throw new InvalidOperationException(
+                            "Globals.StateUpdate inside a LoopAPI.Iterate body: the state " +
+                            "variable (first argument) is produced inside the loop body. " +
+                            "Create the state variable — including any rank casts like " +
+                            ".Vec() — before the loop; only the updated value may be " +
+                            "computed inside it.");
+
+                    var (kind, postLoop) = loopers[depth].TranslateToPostLoop(updated);
+                    updated = kind switch
+                    {
+                        PostLoopTranslation.External or PostLoopTranslation.Translated
+                            => postLoop.AssertNotNull(),
+                        PostLoopTranslation.NotALoopOutput => throw new InvalidOperationException(
+                            "Globals.StateUpdate inside a LoopAPI.Iterate body registers the " +
+                            "post-loop value of the updated tensor, but this value does not " +
+                            "surface as a loop output: it is neither carried across iterations " +
+                            "nor otherwise consumed after the loop, so its post-loop value is " +
+                            "undefined (there is none at all when the loop runs zero " +
+                            "iterations). Carry it as a loop variable — assign it to a C# " +
+                            "variable that is initialized before the loop and read in the body " +
+                            "before reassignment (see LoopAPI.Init) — or register the update " +
+                            "after the loop."),
+                        PostLoopTranslation.ScanVariable => throw new InvalidOperationException(
+                            "Globals.StateUpdate inside a LoopAPI.Iterate body registers the " +
+                            "post-loop value of the updated tensor, but this value is a scanned " +
+                            "result (IterationContext.Scan): its post-loop form is the stacked " +
+                            "per-iteration tensor, not a final value, and it is empty when the " +
+                            "loop runs zero iterations. If the stacked tensor really is what " +
+                            "the state should become, register the update after the loop from " +
+                            "the scan result."),
+                        PostLoopTranslation.LoopScoped => throw new InvalidOperationException(
+                            "Globals.StateUpdate inside a LoopAPI.Iterate body registers the " +
+                            "post-loop value of the updated tensor, but this value is scoped to " +
+                            "a single iteration (a loop variable's start-of-iteration value or " +
+                            "the iteration index), so it has no post-loop value. Register the " +
+                            "value assigned during the iteration instead, or register the " +
+                            "update after the loop."),
+                        _ => throw new InvalidOperationException(
+                            $"Unknown post-loop translation kind '{kind}'."),
+                    };
+                }
+
+                Add(original, InternalOp.StateUpdateLink(original, updated));
+            }
+        }
+
         /// <summary>Harvests (and clears) the linked updated-state tensors, in registration order.</summary>
         internal Variable[] Take()
         {
+            if (_pendingInLoop is not null)
+                throw new InvalidOperationException(
+                    "Globals.StateUpdate registrations recorded inside a LoopAPI.Iterate body " +
+                    "were never resolved: the enclosing loop did not run to completion (e.g. " +
+                    "the foreach over LoopAPI.Iterate was exited early with break). Let the " +
+                    "Iterate enumeration complete.");
             if (_pairs is null || _pairs.Count == 0)
                 return Array.Empty<Variable>();
             var updates = _pairs.Select(p => p.updated).ToArray();
@@ -52,23 +149,36 @@ namespace Shorokoo.Core
         /// recorded on the current module build (see <see cref="GraphTrace"/>), where the graph builder
         /// harvests it after the body returns to wrap the module outputs with WithStateDeps; with no
         /// module build in progress the registration could never be harvested, so this throws instead.
+        ///
+        /// <para>Inside a <c>LoopAPI.Iterate</c> body the call is sugar for registering the post-loop
+        /// value of <paramref name="updated"/>: it records exactly once — on the canonical construction
+        /// pass, the same gate <c>Rng.Pin</c> uses, since a loop body is traced once per pass — and
+        /// defers the STATE_UPDATE_LINK to the outermost loop's termination, where the in-body value is
+        /// translated to its close-node output (see
+        /// <see cref="StateUpdateRegistry.ResolvePendingInLoop"/>).</para>
         /// </summary>
         /// <param name="original">The original state tensor from a state initializer</param>
         /// <param name="updated">The computed updated value for the state</param>
-        /// <returns>The linked updated state tensor (output of STATE_UPDATE_LINK node)</returns>
-        internal static Variable RegisterStateUpdate(Variable original, Variable updated)
+        internal static void RegisterStateUpdate(Variable original, Variable updated)
         {
-            // Accessing the registry is the validity gate (module build in progress, call
-            // site outside any LoopAPI.Iterate body) — before the link node is created.
+            // Accessing the registry is the validity gate (module build in progress) —
+            // before any node is created.
             var stateUpdates = GraphTrace.StateUpdates;
+
+            var loopers = GraphTrace.Loopers;
+            if (loopers.InLoopBody)
+            {
+                if (!loopers.InCanonicalRecordingScope)
+                    return;
+                stateUpdates.AddPendingInLoop(original, updated, loopers.ActiveChain);
+                return;
+            }
 
             // Create the STATE_UPDATE_LINK node to track the relationship in the graph
             var linkedUpdated = InternalOp.StateUpdateLink(original, updated);
 
             // Store the pair for later retrieval when wrapping module outputs
             stateUpdates.Add(original, linkedUpdated);
-
-            return linkedUpdated;
         }
 
         // Every kind is now the single non-generic Variable, built directly from the runtime DType +

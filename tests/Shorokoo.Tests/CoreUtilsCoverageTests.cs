@@ -412,16 +412,35 @@ public class CoreUtilsCoverageTests
             Assert.Equal("v1", File.ReadAllText(target));
 
             // A hard crash leaves a stale temp behind (planted here by hand, matching the
-            // staged-name shape). The next successful save of the same target sweeps it;
-            // a temp staged for a *different* target stays.
-            var staleOurs = Path.Combine(dir, ".tmp-state.bin-deadbeef");
-            var staleOther = Path.Combine(dir, ".tmp-other.bin-deadbeef");
+            // staged-name shape ".tmp-<target>-<32-hex-guid>"). The next successful save of the
+            // same target sweeps it — but only precise matches: a temp for a *different* target,
+            // one whose name merely shares this target's as a prefix, and a ".tmp-" file whose
+            // suffix isn't a GUID all survive.
+            var staleOurs   = Path.Combine(dir, $".tmp-state.bin-{Guid.NewGuid():N}");
+            var staleOther  = Path.Combine(dir, $".tmp-other.bin-{Guid.NewGuid():N}");
+            var stalePrefix = Path.Combine(dir, $".tmp-state.bin-2-{Guid.NewGuid():N}"); // target "state.bin-2"
+            var staleNonGuid = Path.Combine(dir, ".tmp-state.bin-notahexguidxxxxxxxxxxx");
             File.WriteAllText(staleOurs, "partial");
             File.WriteAllText(staleOther, "partial");
+            File.WriteAllText(stalePrefix, "partial");
+            File.WriteAllText(staleNonGuid, "partial");
             WriteVia(target, "v2");
             Assert.Equal("v2", File.ReadAllText(target));
             Assert.False(File.Exists(staleOurs));
             Assert.True(File.Exists(staleOther));
+            Assert.True(File.Exists(stalePrefix));
+            Assert.True(File.Exists(staleNonGuid));
+
+            // A concurrent writer's in-flight temp (still held open with a deny-all share) is
+            // never swept: the sweep can't acquire it, so it skips rather than destroying a live
+            // save's data. Simulate the live writer by holding a precise-match temp open.
+            var liveTemp = Path.Combine(dir, $".tmp-state.bin-{Guid.NewGuid():N}");
+            using (new FileStream(liveTemp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                WriteVia(target, "v3");
+                Assert.True(File.Exists(liveTemp)); // held open → skipped
+            }
+            Assert.Equal("v3", File.ReadAllText(target));
         }
         finally { Directory.Delete(dir, recursive: true); }
     }
@@ -549,7 +568,8 @@ public class CoreUtilsCoverageTests
             var keep2 = RetainPolicy.KeepLast(2, "run-*");
             var baseTime = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
             Directory.SetLastWriteTimeUtc(target, baseTime);
-            foreach (var (name, minutes) in new[] { ("run-002", 1), ("run-003", 2) })
+            (string name, int minutes)[] versions = [("run-002", 1), ("run-003", 2)];
+            foreach (var (name, minutes) in versions)
             {
                 var path = Path.Combine(dir, name);
                 AtomicFileWriter.WriteDirectory(

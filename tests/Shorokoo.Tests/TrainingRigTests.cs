@@ -739,7 +739,7 @@ public class TrainingRigCoverageTests
 
             // A stale temp left by a hard-killed save (planted by hand) is swept by the next
             // successful save, which lands v2.
-            var stale = Path.Combine(dir, ".tmp-ckpt.safetensors-deadbeef");
+            var stale = Path.Combine(dir, $".tmp-ckpt.safetensors-{Guid.NewGuid():N}");
             File.WriteAllText(stale, "partial");
             ckptV2.Save(path);
             Assert.Equal(7, rig.LoadCheckpoint(path).Step);

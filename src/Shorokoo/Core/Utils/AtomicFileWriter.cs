@@ -13,8 +13,8 @@ namespace Shorokoo.Core.Utils
     /// A successful commit also removes stale <c>.tmp-</c> siblings left behind by earlier
     /// failed saves of the same target, and — when a <see cref="RetainPolicy"/> is supplied —
     /// prunes older siblings matching the policy's pattern (retain-last-N rotation). Rotation
-    /// and cleanup never fail the save: the new content is already committed, so their
-    /// failures only surface through the warning callback.
+    /// and cleanup never fail the save: the new content is already committed, so their failures
+    /// are surfaced only through the optional <c>onWarning</c> callback (silent if none is given).
     /// </remarks>
     internal static class AtomicFileWriter
     {
@@ -152,13 +152,16 @@ namespace Shorokoo.Core.Utils
         private static void AfterCommit(
             string directory, string targetName, string fullTarget, RetainPolicy? retain, Action<string>? onWarning)
         {
-            onWarning ??= msg => Console.Error.WriteLine(msg);
+            onWarning ??= static _ => { }; // best-effort housekeeping; observe it by passing a callback
 
-            // Our own temp was renamed away, so every remaining ".tmp-<name>-*" sibling is a
-            // leftover from a failed save of this same target.
+            // Our own temp was renamed away, so every remaining sibling shaped exactly like
+            // ".tmp-<targetName>-<32-hex-guid>" is a leftover from a failed save of *this* target.
+            // The strict GUID-suffix match avoids touching a different target whose name shares
+            // this one as a prefix (saving "run" must not sweep "run-2"'s ".tmp-run-2-<guid>").
             foreach (var stale in EnumerateSafely(directory, $"{TempPrefix}{targetName}-*", onWarning))
             {
-                try { DeleteEntry(stale); }
+                if (!IsStagedTempFor(Path.GetFileName(stale), targetName)) continue;
+                try { DeleteAbandonedTemp(stale); }
                 catch (Exception e) { onWarning($"Shorokoo: failed to remove stale temp '{stale}': {e.Message}"); }
             }
 
@@ -199,6 +202,38 @@ namespace Shorokoo.Core.Utils
         {
             if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
             else File.Delete(path);
+        }
+
+        /// <summary>
+        /// True when <paramref name="entryName"/> is exactly a staged sibling for
+        /// <paramref name="targetName"/>: the reserved prefix, the target name, a '-', then a
+        /// 32-character hex GUID (the <see cref="StageName"/> shape). The strict suffix keeps a
+        /// target from matching a differently named one that merely shares its name as a prefix.
+        /// </summary>
+        private static bool IsStagedTempFor(string entryName, string targetName)
+        {
+            string prefix = $"{TempPrefix}{targetName}-";
+            if (!entryName.StartsWith(prefix, StringComparison.Ordinal)) return false;
+            ReadOnlySpan<char> suffix = entryName.AsSpan(prefix.Length);
+            if (suffix.Length != 32) return false;
+            foreach (char c in suffix)
+                if (!char.IsAsciiHexDigit(c)) return false;
+            return true;
+        }
+
+        /// <summary>
+        /// Removes an abandoned staged temp without clobbering one a concurrent writer still
+        /// holds. A file is opened with a deny-all share before deletion (delete-on-close): that
+        /// open succeeds only when no live writer owns it — on Windows, and on Unix where .NET
+        /// maps <see cref="FileShare.None"/> to an advisory <c>flock</c> — so an in-flight save to
+        /// the same target throws here and is skipped rather than losing its data. A directory
+        /// temp can't be probed this way and is removed directly (concurrent directory writes to a
+        /// single target are unsupported).
+        /// </summary>
+        private static void DeleteAbandonedTemp(string path)
+        {
+            if (Directory.Exists(path)) { Directory.Delete(path, recursive: true); return; }
+            using (new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.DeleteOnClose)) { }
         }
 
         private static void FlushFileToDisk(string path)

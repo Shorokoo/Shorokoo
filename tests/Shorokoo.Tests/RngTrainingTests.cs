@@ -95,8 +95,8 @@ public class RngTrainingTests
         // The generator-managed drawBase: the injected RngExecutionCounter is ordinary model
         // state riding the checkpoint, advanced +1 per step — after 3 steps it reads 3, so a
         // resumed run at step 4 draws exactly what the uninterrupted run would. The cast
-        // pins the framework-counter convention: int64 state end-to-end (a float32 counter
-        // would saturate at 2^24 steps and freeze mask variation).
+        // pins the framework-counter convention — int64 state end-to-end (see
+        // FastInjectRngDrawCounter.CounterInit for the saturation rationale).
         var counterField = finalA.ModelState.Fields.Single(f => f.Key.Contains("RngExecutionCounter"));
         var counterValue = ((TensorData<int64>)counterField.Value).AccessMemory()[0];
         Assert.Equal(3L, counterValue);
@@ -160,13 +160,10 @@ public class RngTrainingTests
 
         var (fullLosses, _, _) = TrainLosses(cfg, totalSteps);
 
-        // A second, independent rig trains to step k and checkpoints there.
-        var rigB = BuildDropoutRig(cfg);
+        // A second, independent rig (built inside TrainLosses) trains to step k and
+        // checkpoints there.
+        var (_, _, ckpt) = TrainLosses(cfg, resumeAt);
         var (inputBatch, targetBatch) = MakeBatches();
-        var compiledB = new ComputeContext().Compile(rigB.TrainingStepPureGraph);
-        var ckpt = rigB.CreateDefaultCheckpoint();
-        for (int i = 0; i < resumeAt; i++)
-            ckpt = rigB.TrainStep(ckpt, inputBatch, targetBatch, compiledB).Checkpoint;
 
         var path = Path.Combine(Path.GetTempPath(), $"rng_resume_{Guid.NewGuid():N}.safetensors");
         try
@@ -190,8 +187,9 @@ public class RngTrainingTests
             }
 
             // Bit-exact continuation: the resumed losses ARE the uninterrupted run's steps
-            // k..N — and NOT its steps 0..N−k, which is what a drawBase stuck at zero
-            // (e.g. a counter lost by the checkpoint round-trip) would replay.
+            // k..N. The NotEqual keeps that Equal non-vacuous: it pins that the trajectory
+            // isn't periodic (the opening steps don't repeat at k..N), so per-step mask
+            // variation is real and matching the tail is a genuine resume signal.
             Assert.Equal(fullLosses[resumeAt..], resumedLosses);
             Assert.NotEqual(fullLosses[..(totalSteps - resumeAt)], resumedLosses);
         }

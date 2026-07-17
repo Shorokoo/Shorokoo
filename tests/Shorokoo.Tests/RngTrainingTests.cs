@@ -42,25 +42,34 @@ public class RngTrainingTests
         [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)],
         "Target");
 
-    private static (float[] losses, TrainingRig rig, TrainingCheckpoint finalCheckpoint) TrainLosses(
-        RngConfig? rngConfig, int steps)
+    private static TrainingRig BuildDropoutRig(RngConfig? rngConfig)
     {
         var sample = new NamedModelParam[]
         {
             new TensorDataModelParam("input", ModelParamType.InputParam,
                 TensorData([8L], new float[] { 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f })),
         };
-
-        var rig = TrainingRig.FromScratch(
+        return TrainingRig.FromScratch(
             RngRigDropoutModel.ComputationGraph, L2Loss.ComputationGraph,
             SGDOptimizer.ComputationGraph, sample, rngConfig, 0.05f);
+    }
 
+    private static (TensorDataStruct inputBatch, TensorDataStruct targetBatch) MakeBatches()
+    {
         var inputBatch = new TensorDataStruct(ModelInputDef,
             new Dictionary<string, IData>
                 { { "input", TensorData([8L], new float[] { 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f }) } });
         var targetBatch = new TensorDataStruct(TargetDef,
             new Dictionary<string, IData>
                 { { "targets", TensorData([8L], new float[8]) } });
+        return (inputBatch, targetBatch);
+    }
+
+    private static (float[] losses, TrainingRig rig, TrainingCheckpoint finalCheckpoint) TrainLosses(
+        RngConfig? rngConfig, int steps)
+    {
+        var rig = BuildDropoutRig(rngConfig);
+        var (inputBatch, targetBatch) = MakeBatches();
 
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
@@ -85,10 +94,12 @@ public class RngTrainingTests
 
         // The generator-managed drawBase: the injected RngExecutionCounter is ordinary model
         // state riding the checkpoint, advanced +1 per step — after 3 steps it reads 3, so a
-        // resumed run at step 4 draws exactly what the uninterrupted run would.
+        // resumed run at step 4 draws exactly what the uninterrupted run would. The cast
+        // pins the framework-counter convention: int64 state end-to-end (a float32 counter
+        // would saturate at 2^24 steps and freeze mask variation).
         var counterField = finalA.ModelState.Fields.Single(f => f.Key.Contains("RngExecutionCounter"));
-        var counterValue = ((TensorData<float32>)counterField.Value).AccessMemory()[0];
-        Assert.Equal(3f, counterValue);
+        var counterValue = ((TensorData<int64>)counterField.Value).AccessMemory()[0];
+        Assert.Equal(3L, counterValue);
 
         // The key-vector carrier rides through loss composition and autodiff into the
         // training-step graph — the step graph itself carries the model's RNG identity,
@@ -131,5 +142,59 @@ public class RngTrainingTests
 
         Assert.Equal(w5, w5again);   // deterministic under a fixed master seed
         Assert.NotEqual(w5, w6);     // init weights are keyed by the master seed (not constant)
+    }
+
+    /// <summary>
+    /// The drawBase counter's resume guarantee, pinned end-to-end on a rig that draws runtime
+    /// randomness every step: save a Dropout rig's checkpoint mid-run, resume it in a
+    /// brand-new rig + compiled graph, and the resumed run replays the uninterrupted run's
+    /// remaining steps bit-exactly. Previously this held only by proxy (the counter was
+    /// checked to increment and ride the checkpoint; save/load resume was covered only on a
+    /// randomness-free model).
+    /// </summary>
+    [Fact]
+    public void TestMidRunCheckpointResumeReplaysUninterruptedTrajectoryExactly()
+    {
+        const int totalSteps = 6, resumeAt = 3;
+        var cfg = new RngConfig { MasterSeed = 5 };
+
+        var (fullLosses, _, _) = TrainLosses(cfg, totalSteps);
+
+        // A second, independent rig trains to step k and checkpoints there.
+        var rigB = BuildDropoutRig(cfg);
+        var (inputBatch, targetBatch) = MakeBatches();
+        var compiledB = new ComputeContext().Compile(rigB.TrainingStepPureGraph);
+        var ckpt = rigB.CreateDefaultCheckpoint();
+        for (int i = 0; i < resumeAt; i++)
+            ckpt = rigB.TrainStep(ckpt, inputBatch, targetBatch, compiledB).Checkpoint;
+
+        var path = Path.Combine(Path.GetTempPath(), $"rng_resume_{Guid.NewGuid():N}.safetensors");
+        try
+        {
+            ckpt.Save(path);
+
+            // "Fresh process": a brand-new rig + compiled graph loads the checkpoint. The
+            // int64 drawBase counter rides in ModelState, so the resumed steps draw the
+            // masks of executions k, k+1, … — not 0, 1, … over again.
+            var rigC = BuildDropoutRig(cfg);
+            var compiledC = new ComputeContext().Compile(rigC.TrainingStepPureGraph);
+            var resumed = rigC.LoadCheckpoint(path);
+            Assert.Equal(resumeAt, resumed.Step);
+
+            var resumedLosses = new float[totalSteps - resumeAt];
+            for (int i = 0; i < resumedLosses.Length; i++)
+            {
+                var step = rigC.TrainStep(resumed, inputBatch, targetBatch, compiledC);
+                resumedLosses[i] = step.Loss;
+                resumed = step.Checkpoint;
+            }
+
+            // Bit-exact continuation: the resumed losses ARE the uninterrupted run's steps
+            // k..N — and NOT its steps 0..N−k, which is what a drawBase stuck at zero
+            // (e.g. a counter lost by the checkpoint round-trip) would replay.
+            Assert.Equal(fullLosses[resumeAt..], resumedLosses);
+            Assert.NotEqual(fullLosses[..(totalSteps - resumeAt)], resumedLosses);
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
     }
 }

@@ -12,7 +12,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 {
     /// <summary>
     /// Gives every runtime random feed its generator-managed <c>drawBase</c>: one
-    /// model-global execution counter — a framework-owned state scalar
+    /// model-global execution counter — a framework-owned int64 state scalar
     /// (<c>RngExecutionCounter</c>, initialized 0, advanced +1 per execution via the
     /// ordinary StateUpdate machinery) — wired as the drawBase input of every
     /// <c>SHRK_RANDOM_*</c> feed that has none. Runs at concretization, right after module
@@ -79,16 +79,18 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         private static Scalar<int64> CounterBody()
         {
             var counter = Globals.CallTrainableParamInitializer(
-                (Func<Vector<int64>, Tensor<float32>>)CounterInit, CounterName,
+                (Func<Vector<int64>, Tensor<int64>>)CounterInit, CounterName,
                 isTrainable: false, StateOwnership.ModuleOwned,
-                Globals.Vector(1L)).ToValue<Tensor<float32>>();
-            Globals.StateUpdate(counter, counter + Globals.Scalar(1.0f));
-            return counter.Scalar().Cast<int64>();
+                Globals.Vector(1L)).ToValue<Tensor<int64>>();
+            Globals.StateUpdate(counter, counter + Globals.Scalar(1L));
+            return counter.Scalar();
         }
 
-        // A [1] float32 buffer, like other module-owned state: float32 exactly represents
-        // step counts well past any real run and casts to the int64 drawBase at the sites.
-        private static Tensor<float32> CounterInit(Vector<int64> shape)
-            => Globals.TensorFill(shape, 0.0f);
+        // A [1] int64 buffer: +1 is exact at every step count (a float32 counter saturates
+        // at 2^24, silently freezing per-step mask variation), and the state dtype matches
+        // the int64 drawBase input the sites consume, so no cast sits in between. This is
+        // the convention for framework-injected counters: int64 state, end to end.
+        private static Tensor<int64> CounterInit(Vector<int64> shape)
+            => Globals.TensorFill(shape, 0L);
     }
 }

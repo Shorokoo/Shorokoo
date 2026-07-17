@@ -123,8 +123,8 @@ namespace Shorokoo.Core.Utils
         private const string CompressionZstd = "zstd";
 
         /// <summary>The most Zstd layers any historical (pre-container) .srk layout ever wrapped:
-        /// the retired double-Zstd <c>SaveCompressedArchitecture</c> writer. The v1 shim unwraps
-        /// up to this many, then treats anything still Zstd-framed as corrupt.</summary>
+        /// the retired double-Zstd architecture writer. The v1 shim unwraps up to this many,
+        /// then treats anything still Zstd-framed as corrupt.</summary>
         private const int MaxV1ZstdLayers = 2;
 
         private static readonly JsonSerializerOptions HeaderJsonOptions = new()
@@ -355,8 +355,8 @@ namespace Shorokoo.Core.Utils
         /// removes the header-declared compression layer; corruption and truncation fail
         /// loudly with a message naming <paramref name="origin"/>. For legacy v1 data (no v2
         /// magic) the shim sniffs Zstd framing: bare protobuf, single-Zstd
-        /// (<c>SaveFastGraphToFile</c>) and the retired double-Zstd
-        /// (<c>SaveCompressedArchitecture</c>) layouts all load; the returned header is null.
+        /// (<c>SaveFastGraphToFile</c>) and the retired double-Zstd architecture-writer
+        /// layouts all load; the returned header is null.
         /// </summary>
         /// <param name="data">Raw file/stream bytes.</param>
         /// <param name="origin">Name used in error messages, typically the file path.</param>
@@ -401,7 +401,7 @@ namespace Shorokoo.Core.Utils
 
             // v1 shim: no container. Sniff Zstd framing by content — bare protobuf needs no
             // unwrapping; SaveFastGraphToFile wrote one Zstd layer; the retired
-            // SaveCompressedArchitecture wrote two (the maximum any legacy layout used).
+            // the retired double-Zstd writer wrote two (the maximum any legacy layout used).
             var bytes = data;
             for (int layer = 0; layer < MaxV1ZstdLayers && LooksLikeZstd(bytes); layer++)
                 bytes = DecompressPayload(bytes, origin);

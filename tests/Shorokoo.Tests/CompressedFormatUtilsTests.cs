@@ -57,7 +57,6 @@ public class CompressedFormatUtilsCoverageTests
 
         // ──────────────────────────────────────────────────────────────────
         // Architecture: SaveFastGraphTo{File,Binary} / LoadFastGraphFrom{File,Binary}
-        // SaveCompressedArchitecture[ToStream] / LoadCompressedArchitecture[FromStream]
         // ──────────────────────────────────────────────────────────────────
         var input = InputTensor<float32>("input");
         var output = input + Scalar(1.0f);
@@ -69,9 +68,6 @@ public class CompressedFormatUtilsCoverageTests
         // read — they extract the ONNX payload from any .srk layout by content.
         var zsrkPath = Path.Combine(TempDir, "test_arch.zsrk");
         var zsrkPath2 = Path.Combine(TempDir, "test_arch2.zsrk");
-        // Retired compressed-architecture helpers (obsolete; now emit/read the v2
-        // container — the double-Zstd writer is gone).
-        var doubleWrappedPath = Path.Combine(TempDir, "test_arch_double.zsrk");
         var binPath = Path.Combine(TempDir, "test_arch.bin");
         try
         {
@@ -82,22 +78,6 @@ public class CompressedFormatUtilsCoverageTests
 
             var uncompressedBytes = CompressedFormatUtils.SaveFastGraphToBinary(fastGraph);
             File.WriteAllBytes(binPath, uncompressedBytes);
-
-            // Retired compressed-architecture writers, kept as obsolete shims; the modern
-            // universal loader reads what they produce.
-#pragma warning disable CS0618 // deliberate coverage of the obsolete legacy API
-            CompressedFormatUtils.SaveCompressedArchitecture(doubleWrappedPath, fastGraph);
-            var arch = CompressedFormatUtils.LoadFastGraphFromFile(doubleWrappedPath);
-            Assert.NotEmpty(arch.Nodes);
-
-            using (var ms = new MemoryStream())
-            {
-                CompressedFormatUtils.SaveCompressedArchitectureToStream(ms, fastGraph);
-                ms.Position = 0;
-                var archFromStream = CompressedFormatUtils.LoadCompressedArchitectureFromStream(ms);
-                Assert.NotEmpty(archFromStream.Nodes);
-            }
-#pragma warning restore CS0618
 
             // ──────────────────────────────────────────────────────────────
             // JSON helpers on SaveFastGraphToFile output (single-wrap).
@@ -148,7 +128,6 @@ public class CompressedFormatUtilsCoverageTests
         {
             if (File.Exists(zsrkPath)) File.Delete(zsrkPath);
             if (File.Exists(zsrkPath2)) File.Delete(zsrkPath2);
-            if (File.Exists(doubleWrappedPath)) File.Delete(doubleWrappedPath);
             if (File.Exists(binPath)) File.Delete(binPath);
         }
 
@@ -296,9 +275,9 @@ public class CompressedFormatUtilsCoverageTests
 
     /// <summary>
     /// The three historical v1 layouts — bare protobuf, single-Zstd
-    /// (v1 SaveFastGraphToFile) and double-Zstd (the retired
-    /// SaveCompressedArchitecture writer) — still load through the content-sniffing
-    /// shim, from bytes and from files, regardless of extension.
+    /// (v1 SaveFastGraphToFile) and double-Zstd (the retired architecture writer) —
+    /// still load through the content-sniffing shim, from bytes and from files,
+    /// regardless of extension.
     /// </summary>
     [Fact]
     public void TestSrkV1LegacyLayoutsLoadThroughShim()

@@ -146,21 +146,7 @@ namespace Shorokoo.Core.Utils
 
         #endregion
 
-        #region Compressed Architecture Loading
-
-        /// <summary>
-        /// Stream variant of the retired compressed-architecture loader: reads any .srk
-        /// layout by content. For a file, use <see cref="LoadFastGraphFromFile"/> directly.
-        /// </summary>
-        /// <param name="stream">Stream containing the .srk data</param>
-        /// <returns><see cref="FastComputationGraph"/> loaded from the stream</returns>
-        [Obsolete("Use LoadFastGraphFromBinary (or LoadFastGraphFromFile) — they read every .srk layout by content.")]
-        public static FastComputationGraph LoadCompressedArchitectureFromStream(Stream stream)
-        {
-            using var memoryStream = new MemoryStream();
-            stream.CopyTo(memoryStream);
-            return LoadFastGraphCore(memoryStream.ToArray(), "<.srk stream>", requiredStage: null);
-        }
+        #region Architecture Save / Load
 
         /// <summary>
         /// Serialize <paramref name="graph"/> to a self-describing .srk v2 container
@@ -528,40 +514,6 @@ namespace Shorokoo.Core.Utils
             }
 
             return null;
-        }
-
-        #endregion
-
-        #region Compressed Architecture Saving
-
-        /// <summary>
-        /// Save a <see cref="FastComputationGraph"/> to a compressed architecture file.
-        /// The historical double-Zstd writer is retired: this now writes a standard
-        /// .srk v2 container with a single Zstd layer, exactly like
-        /// <see cref="SaveFastGraphToFile"/> (but honoring <paramref name="filePath"/>
-        /// verbatim, without extension normalization).
-        /// </summary>
-        /// <param name="filePath">Path for the output file</param>
-        /// <param name="graph"><see cref="FastComputationGraph"/> to save</param>
-        /// <param name="compressionLevel">Zstandard compression level (1-22, default: 3)</param>
-        [Obsolete("Use SaveFastGraphToFile — the double-Zstd .zsrk layout is retired; this now writes a standard .srk v2 container.")]
-        public static void SaveCompressedArchitecture(string filePath, FastComputationGraph graph, int compressionLevel = DefaultCompressionLevel)
-        {
-            File.WriteAllBytes(filePath, SaveFastGraphToBinary(graph, compressed: true, compressionLevel));
-        }
-
-        /// <summary>
-        /// Stream variant of <see cref="SaveCompressedArchitecture"/>: writes a standard
-        /// .srk v2 container with a single Zstd layer (double-Zstd writer retired).
-        /// </summary>
-        /// <param name="stream">Stream to write the container to</param>
-        /// <param name="graph"><see cref="FastComputationGraph"/> to save</param>
-        /// <param name="compressionLevel">Zstandard compression level (1-22, default: 3)</param>
-        [Obsolete("Use SaveFastGraphToBinary (or SaveFastGraphToFile) — the double-Zstd .zsrk layout is retired; this now writes a standard .srk v2 container.")]
-        public static void SaveCompressedArchitectureToStream(Stream stream, FastComputationGraph graph, int compressionLevel = DefaultCompressionLevel)
-        {
-            var containerBytes = SaveFastGraphToBinary(graph, compressed: true, compressionLevel);
-            stream.Write(containerBytes, 0, containerBytes.Length);
         }
 
         #endregion

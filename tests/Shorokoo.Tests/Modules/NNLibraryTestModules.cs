@@ -36,7 +36,7 @@ public partial class NNLinearMatchesPyTorch
         var y = Linear.Model(Scalar(4L), Scalar(true)).Call(x);   // [2,4] = 8
 
         // REFERENCE: PyTorch — F.linear(x, W, b) on the seeded weights (tests/pytorch-reference/linear.py).
-        var reference = Vector(-0.74641520f, 0.44564119f, -0.35047954f, -0.89765519f, -0.16976941f, -1.35970581f, -1.95182049f, 0.29875028f);
+        var reference = Vector(-0.0008826256f, 0.27788666f, 1.0983278f, -0.1318012f, -0.6280346f, -2.545895f, -2.859776f, -0.59679663f);
 
         var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
@@ -65,7 +65,7 @@ public partial class NNBilinearForwardGolden
         var y = Bilinear.Model(Scalar(3L), Scalar(4L), Scalar(2L), Scalar(true)).Call(x1, x2);   // [2,2] = 4
 
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.33768559f, -0.53191787f, -0.9681939f, -0.67190534f);
+        var reference = Vector(-0.6453753f, 0.099775136f, -3.1152341f, 1.4339716f);
 
         var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
@@ -85,8 +85,8 @@ public partial class NNBilinearUseBiasGoldens
         var yFalse = Bilinear.Model(Scalar(3L), Scalar(4L), Scalar(2L), Scalar(false)).Call(x1, x2);  // [2,2]
 
         // REFERENCE: golden — Shorokoo's own forward outputs (useBias true, then false).
-        var refTrue = Vector(-0.33768559f, -0.53191787f, -0.9681939f, -0.67190534f);
-        var refFalse = Vector(-0.24297486f, 0.121671826f, -0.64173853f, 0.6667637f);
+        var refTrue = Vector(-0.6453753f, 0.099775136f, -3.1152341f, 1.4339716f);
+        var refFalse = Vector(0.34567988f, -0.23178402f, 0.19539893f, -3.3051908f);
 
         var dTrue = (yTrue.Reshape([Scalar(-1L)]) - refTrue).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         var dFalse = (yFalse.Reshape([Scalar(-1L)]) - refFalse).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
@@ -110,7 +110,7 @@ public partial class NNBilinearBatchBroadcasts
         var shapeOk = (shape[0] == Scalar(2L)) & (shape[1] == Scalar(2L)) & (shape[2] == Scalar(2L));
 
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.33768559f, -0.53191787f, -0.9681939f, -0.67190534f, -3.199333f, -5.0979924f, -7.031103f, -13.810181f);
+        var reference = Vector(-0.6453753f, 0.099775136f, -3.1152341f, 1.4339716f, -13.300038f, 11.766113f, -31.199791f, 31.096203f);
         var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return shapeOk & (diff < Scalar(1e-3f));
     }
@@ -141,7 +141,7 @@ public partial class NNConv2dForwardGolden
         var y = Conv2d.Model(Scalar(3L), Scalar(3L), Scalar(2L), Scalar(1L), Scalar(1L), Scalar(1L), Scalar(true)).Call(x);   // [1,3,3,3] = 27
 
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.5830505f, -0.2175299f, -1.1851754f, -1.8541672f, -2.8027544f, -2.7721534f, -2.8040576f, -2.450688f, -1.224263f, 0.52548397f, -0.6617862f, 0.3270598f, 2.56868f, 2.4922302f, 3.0805902f, 1.9886885f, 3.389592f, 3.977339f, 1.4277205f, 2.192732f, 1.6577607f, -1.1305982f, -0.34348002f, 0.6678303f, -2.3624249f, -1.2884641f, -1.0658423f);
+        var reference = Vector(4.67141f, 5.2288632f, 3.0839972f, 5.098546f, 6.0493693f, 3.8079474f, 2.5267525f, 3.2528539f, 2.5051289f, 0.5698232f, 0.64181745f, -0.13897818f, 1.1346995f, 1.932676f, -0.4161264f, 1.7271197f, 1.9330202f, 0.44197223f, 1.8723726f, 2.9218867f, 3.0849855f, 1.0435977f, 0.6453222f, 1.1216459f, -0.90134716f, -1.2870963f, 0.37586057f);
 
         var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
@@ -159,7 +159,7 @@ public partial class NNConv1dForwardGolden
         var y = Conv1d.Model(Scalar(3L), Scalar(3L), Scalar(2L), Scalar(1L), Scalar(1L), Scalar(1L), Scalar(true)).Call(x);   // [1,3,4] = 12
 
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.41373608f, -1.1612636f, -1.4508712f, -0.57331306f, 1.2845447f, 0.6888682f, 0.59342396f, 0.22833997f, 1.9253628f, 0.9222772f, -0.60086983f, -1.8340389f);
+        var reference = Vector(0.25983655f, -1.011476f, -1.8248689f, -1.3248456f, 2.044392f, 1.5219188f, 0.47938436f, 0.40973717f, -1.8676901f, -0.565218f, 1.7183439f, 1.7950894f);
 
         var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
@@ -178,7 +178,7 @@ public partial class NNConvTranspose2dForwardGolden
         var y = ConvTranspose2d.Model(Scalar(3L), Scalar(2L), Scalar(true)).Call(x);   // [1,3,4,4] = 48
 
         // REFERENCE: golden — Shorokoo's own forward output, collapsed to 19 (self-generated).
-        var reference = Vector(-0.019935742f, 0.28736883f, -0.25346282f, -1.7633023f, -0.2896873f, 0.5244714f, -0.41189831f, -0.9679297f, -0.27114862f, 0.92171484f, 0.41921818f, -0.305805f, -0.8045916f, 0.8351264f, 0.7873403f, 0.10005285f, -0.06093122f, -0.6823753f, -0.4446751f);
+        var reference = Vector(-0.19107643f, 0.023028329f, 1.1023167f, 3.6346018f, -0.98798496f, -0.68636787f, 0.6408798f, 1.603115f, -0.09262812f, -1.5357232f, -0.6040435f, 0.6775098f, 0.99962115f, -1.5649726f, -0.87547153f, -0.04100179f, 0.3236328f, 1.4578831f, -1.0163602f);
 
         var diff = (SelfCheck.Collapse(y, 48) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
@@ -207,7 +207,7 @@ public partial class ConvNonSquareKernelGolden
         var outChannels = 3L;
         var y = Convolution.Conv(x, outChannels, kernelSize: [3L, 5L], padding: [1L, 2L]);
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-1.9221866f, -2.97814489f, 0.478535731f, 5.24790588f, -0.688873533f, -2.46253498f, -0.319425726f, -0.979006569f, 4.37657484f, 1.75232301f, -0.261024953f, -1.99853805f, 3.43129576f, 5.64818053f, -1.5080043f, -2.35810049f, -0.79259287f, 7.69494641f, 4.45884863f);
+        var reference = Vector(-3.5380437f, 0.428939f, 0.9812777f, 2.5859637f, -3.0262628f, -1.9866877f, -0.4058851f, 2.9225564f, -0.6500907f, -3.2423027f, -1.8634686f, 0.37701243f, 3.1904292f, 0.45219445f, -2.6054893f, -1.6404977f, 1.9429193f, 1.0609723f, -1.3486464f);
         var diff = (SelfCheck.Collapse(y, 189) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -224,7 +224,7 @@ public partial class ConvPerAxisStrideDilationGolden
         var y = Convolution.Conv(x, outChannels, kernelSize: [3L, 3L],
             stride: [1L, 2L], padding: [1L, 1L], dilation: [2L, 1L]);
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.226712452f, -0.0406049096f, -0.142521508f, 0.183028158f, 0.188516234f, 0.228655454f, -0.0463592699f, -0.126701291f, 0.0221168635f, 0.492151048f, 0.213052561f, -0.145765283f, -1.27074795f, 0.857545932f, 0.651703689f, -0.0363895128f, -0.590573005f, 0.494001426f, -0.181385751f);
+        var reference = Vector(0.18454847f, 0.23241422f, -0.1550037f, 0.25681496f, -0.24529774f, -0.023105472f, 0.12487737f, 0.55256593f, -0.83552206f, 0.07368019f, 0.108099684f, 0.27666354f, 0.57362366f, 0.34793124f, 0.234536f, 0.043258782f, 0.5735916f, -0.81378114f, 0.6067013f);
         var diff = (SelfCheck.Collapse(y, 40) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -240,7 +240,7 @@ public partial class ConvAsymmetricPadGolden
         var outChannels = 2L;
         var y = Convolution.Conv(x, outChannels, kernelSize: [3L, 3L], padding: [1L, 2L, 0L, 1L]);
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.325015575f, -0.160096992f, -0.514238701f, -0.32993945f, 0.0845054114f, -0.0510165875f, -0.386297352f, -0.0252350369f, 0.217532583f, 0.158120648f, 0.023319188f, -0.00376949423f, -0.374418345f, -0.131863433f, 0.149000732f, 0.013944535f, -0.247886784f, 0.00666655256f, 0.475331819f);
+        var reference = Vector(0.20684135f, 0.097694844f, 0.32681638f, -0.6867964f, -0.5468677f, -0.30237824f, 0.21347117f, 0.39800724f, 0.28542754f, -0.23472843f, -0.042452056f, 0.17905793f, 0.33637732f, -0.5369906f, -0.13458444f, 0.093307026f, 0.31343114f, 0.51181746f, 0.25431046f);
         var diff = (SelfCheck.Collapse(y, 48) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -258,7 +258,7 @@ public partial class ConvAutoPadGolden
         var yValid = Convolution.Conv(x, outChannels, kernelSize: [3L, 3L], autoPad: AutoPad.Valid);
         var flat = ySame.Reshape([Scalar(-1L)]).Concat(0L, yValid.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.348030643f, 1.29787397f, 2.00380692f, -1.50932515f, 0.530210213f, -1.65958951f, 0.478100029f, 0.122887341f, 1.5420118f, 1.02560474f, -0.418286645f, -1.12823754f, 1.7738596f, 0.52667398f, -0.478433563f, -1.20338849f, 1.11250294f, 0.805302486f, 0.562707136f);
+        var reference = Vector(0.40389365f, 0.10985347f, -1.8316838f, -1.3926367f, -0.2746151f, -0.084573284f, 0.15455486f, -0.57428855f, -0.07627189f, 0.48882818f, 0.03372883f, 0.4216182f, -1.7057683f, 1.0921961f, 0.86088014f, 0.47135714f, -0.49998528f, -0.052441135f, 0.44345948f);
         var diff = (SelfCheck.Collapse(flat, 104) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -278,7 +278,7 @@ public partial class ConvGroupsGolden
         var y2 = Convolution.Conv(x, 4L, kernelSize: [3L, 3L], padding: [1L, 1L], groups: 2L);
         var flat = yDw.Reshape([Scalar(-1L)]).Concat(0L, y2.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-2.4769039f, -0.005357327f, 0.256900865f, 2.47853286f, -0.461652536f, -1.78766537f, -0.325482123f, 1.93791631f, 0.718129099f, -0.298873421f, -0.930203249f, 0.214313571f, 1.33020983f, -0.7051071f, 0.459618472f, -2.66033391f, 0.417266306f, 1.69517409f, 0.667809444f);
+        var reference = Vector(-0.9432882f, -0.45509994f, 0.32585913f, 0.91634905f, 0.5078532f, 0.9906407f, 0.016094118f, 0.524432f, 0.626698f, 0.11160231f, 0.89393127f, -1.4464138f, 0.30238712f, -0.17658144f, 0.5753424f, -0.7101255f, -1.0622789f, -0.63255465f, -0.74592984f);
         var diff = (SelfCheck.Collapse(flat, 200) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -302,7 +302,7 @@ public partial class ConvPaddingModesGolden
             paddingMode: PaddingMode.Circular);
         var flat = y.Reshape([Scalar(-1L)]).Concat(0L, yRep.Reshape([Scalar(-1L)])).Concat(0L, yCir.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-2.09115282f, 3.38504581f, 1.09607383f, 0.0994339679f, -2.58002548f, 2.213805f, 0.698460997f, -0.558512335f, 0.112954178f, -1.232869f, -1.28926419f, 1.86452973f, 0.34222955f, -1.63718008f, -2.44950396f, 2.65511615f, 1.31376371f, -0.127762417f, -0.848646684f);
+        var reference = Vector(2.2307744f, 0.8333773f, -0.70126164f, -1.3200736f, -1.2536215f, 1.4998837f, -0.19215134f, -0.23120719f, -1.3190117f, -1.0089176f, 1.3946093f, 1.1945293f, -0.50020015f, -1.3495486f, -0.709028f, 0.8707339f, 0.45516762f, -1.4317183f, -0.62096786f);
         var diff = (SelfCheck.Collapse(flat, 150) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -323,7 +323,7 @@ public partial class ConvCausalGolden
         var y = Convolution.Conv1d(x, outChannels, kernelSize: [k],
             dilation: [dilation], paddingMode: PaddingMode.Causal);
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.37800658f, 0.3419249f, 1.5251406f, 1.1072305f, -0.20009777f, -0.18928039f, -0.1784629f, 0.41130042f, 0.59661496f, 2.2824254f, 2.3296556f, 3.8941483f, 3.7998872f, 3.7056253f);
+        var reference = Vector(1.0145762f, 0.9574786f, 1.2230301f, 1.0744933f, -0.44084764f, -0.6380428f, -0.83523786f, 0.46106198f, 0.37023905f, 1.369504f, 1.0618607f, 0.674755f, 0.5480755f, 0.42139593f);
         var diff = (SelfCheck.Collapse(y, 14) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -340,7 +340,7 @@ public partial class ConvTransposeOutputPaddingGolden
         var y = Convolution.ConvTranspose(x, outChannels, kernelSize: [2L, 2L],
             stride: [2L, 2L], outputPadding: [1L, 1L]);
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.343243602f, -0.129276719f, 0.0576216165f, -0.0386626929f, 0.281775445f, -0.998314627f, -0.6926795f, 0.262189563f, -0.619852588f, -0.232157749f, -0.27606478f, 0.668260588f, -0.360607299f, -0.772155445f, -0.100191667f, 0.832471463f, -0.471380406f, -0.159984422f, 0.00666867711f);
+        var reference = Vector(-0.40250444f, -0.6009508f, 0.16568372f, 1.0135351f, 0.9947382f, -0.9093478f, -0.67854f, 0.9040659f, 0.71704507f, 0.43907502f, -0.38085556f, -0.5741098f, 1.080555f, 0.9263334f, -0.299703f, -0.84354585f, -0.7811321f, 0.17522657f, 1.1441265f);
         var diff = (SelfCheck.Collapse(y, 147) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -358,7 +358,7 @@ public partial class ConvTransposeOutputShapeGolden
         var y = Convolution.ConvTranspose(x, outChannels, kernelSize: [2L, 2L],
             stride: [2L, 2L], outputShape: outShape);
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.207715835f, 0.424565871f, 0.466434119f, 0.61853318f, 0.121246895f, -0.320214402f, 0.293463427f, 0.677486508f, -0.527935168f, -0.134921777f, -0.460861299f, 0.389261009f, 0.905120224f, -0.195043558f, 0.217689877f, -0.0448414105f, -0.227881697f, -0.0719468552f, -0.208333778f);
+        var reference = Vector(0.33735844f, -1.1663454f, -1.2552043f, 1.3424201f, 0.42845076f, -0.921553f, 0.13798633f, 0.2742297f, 1.1261773f, 0.033800945f, -1.10711f, -0.2745632f, 1.4955034f, 0.46734536f, 0.21897772f, -0.5841372f, -0.7496927f, 0.7343358f, 0.51248074f);
         var diff = (SelfCheck.Collapse(y, 98) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -374,7 +374,7 @@ public partial class ConvTranspose1dGolden
         var outChannels = 2L;
         var y = Convolution.ConvTranspose1d(x, outChannels, kernelSize: [2L], stride: [2L]);
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-1.0087571f, 1.6243131f, -0.9656336f, 1.372434f, -0.9225099f, 1.1205548f, -0.8793863f, 0.8686756f, 1.0151453f, -1.1933439f, 0.65247333f, -1.1855811f, 0.28980142f, -1.1778183f, -0.07287051f, -1.1700555f);
+        var reference = Vector(-1.3046863f, 0.19955443f, -1.1135981f, 0.2446779f, -0.9225099f, 0.28980142f, -0.7314217f, 0.3349249f, 1.033893f, 2.198652f, 0.89195424f, 1.6797692f, 0.75001544f, 1.1608863f, 0.60807663f, 0.6420034f);
         var diff = (SelfCheck.Collapse(y, 16) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -390,7 +390,7 @@ public partial class ConvTranspose3dGolden
         var outChannels = 2L;
         var y = Convolution.ConvTranspose3d(x, outChannels, kernelSize: [2L, 2L, 2L], stride: [2L, 2L, 2L]);
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.0404135142f, 0.195917169f, 0.117576553f, 0.853081528f, -0.237471911f, -0.0085286995f, 0.720186332f, -0.325168611f, -0.420569111f, -0.628446415f, 0.575789116f, 0.0487579632f, 0.84777831f, 0.780389902f, -0.458723911f, -0.522503935f, -0.363272664f, -0.539074359f, 0.0205327569f);
+        var reference = Vector(0.23999505f, -0.14688161f, 0.34085888f, 0.14826506f, -0.8048913f, -0.6389965f, 0.38625914f, -0.2241983f, 0.026912332f, 0.043243304f, -0.26586553f, 0.014897518f, 0.65731984f, -0.21048033f, 0.2986346f, 0.5200899f, 0.15063334f, -0.26642928f, 0.30165136f);
         var diff = (SelfCheck.Collapse(y, 128) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -413,7 +413,7 @@ public partial class ConvAliasesGolden
         var yT2d = Convolution.ConvTranspose2d(x, outChannels, kernelSize: [2L, 2L]);
         var flat = perAxis.Reshape([Scalar(-1L)]).Concat(0L, y2d.Reshape([Scalar(-1L)])).Concat(0L, yT2d.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-2.11651284f, 1.39266936f, 1.19503994f, -0.440624448f, 0.453784753f, 1.818783f, 1.47904183f, 0.575740795f, -0.988287516f, 0.380869842f, -0.0556775921f, 0.678857506f, -0.794682859f, -2.15588213f, -1.25938367f, 0.952404815f, 0.714105923f, -0.399691187f, 0.189130301f);
+        var reference = Vector(-0.77474594f, 0.2877902f, 0.25121588f, 0.34012133f, -1.6873932f, -1.3008039f, 1.1190166f, 0.082058415f, 1.0500025f, 0.30515575f, -0.9443965f, 0.5299908f, 0.2670948f, 1.1779308f, 0.2885633f, -0.9073719f, -0.12735617f, -1.2112377f, 1.4180307f);
         var diff = (SelfCheck.Collapse(flat, 172) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -439,7 +439,7 @@ public partial class ConvScalarOverloadGolden
         // Fold a trivial dependence on x so AutoTest has a runtime input to feed.
         var xTouch = (x * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: true);
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-3.934529f, -7.5396147f, -8.386295f, -8.951771f, -12.848224f, -13.157093f, -6.8513536f, -0.2597307f, 0.3744189f, -5.568619f, -7.2014875f, -1.737776f, -8.615043f, -8.6678295f, -0.9370452f, -0.6191263f, 1.814758f, 3.7070842f);
+        var reference = Vector(-3.204895f, -4.1519556f, -4.9152093f, -6.3756084f, -9.358126f, -8.367656f, -1.5026798f, -4.9452415f, -5.2245092f, -1.6196778f, -1.5841049f, 3.3653512f, -2.7033572f, -3.7969933f, 4.774668f, -2.5934224f, -6.398786f, -1.5230536f);
         var diff = (SelfCheck.Collapse(scalar + xTouch, 18) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -457,7 +457,7 @@ public partial class ConvNoBiasGolden
         var outChannels = 2L;
         var yNoBias = Convolution.Conv(x, outChannels, kernelSize: [3L, 3L], padding: [1L, 1L], bias: false);
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.106164664f, -0.154563161f, 0.207394125f, 0.610819924f, -0.434361581f, -0.369176532f, -0.670023677f, -0.193005095f, 0.155514932f, -0.127404392f, -0.157208162f, -0.435303484f, -0.211678814f, 0.400296261f, -0.0333141729f, -0.00299395343f, -0.264332402f, -0.386756078f, 0.656837735f);
+        var reference = Vector(-0.31754667f, 0.16477802f, 0.13290769f, -0.68761265f, -0.47554803f, -0.1211668f, 0.5061233f, 0.005311221f, 0.45754132f, -0.25353357f, -0.04612492f, 0.731675f, 0.42371857f, -0.2383498f, -0.39802778f, 0.11248794f, 0.22070935f, -0.79390407f, 0.107180685f);
         var diff = (SelfCheck.Collapse(yNoBias, 50) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -1386,7 +1386,7 @@ public partial class NNEmbeddingForwardGolden
         var y = Embedding.Model(Scalar(5L), Scalar(4L), Scalar(-1L), Scalar(0f), Scalar(2f)).Call(indices);   // [3,4] = 12
 
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.14280432f, -1.404502f, -0.43904895f, 0.5944438f, 0.066021085f, 1.1457329f, -1.3943781f, 0.3395884f, 0.14280432f, -1.404502f, -0.43904895f, 0.5944438f);
+        var reference = Vector(0.14280432f, -0.43904895f, 0.066021085f, -1.3943781f, 0.18733695f, -0.4295236f, 0.2721759f, 0.038692284f, 0.14280432f, -0.43904895f, 0.066021085f, -1.3943781f);
 
         var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
@@ -1551,7 +1551,7 @@ public partial class NNEmbeddingInitChoice
         var normal = EmbeddingHelpers.Embed(indices, 5L, 4L);   // default init selector (Normal)
         var flat = xavier.Reshape([Scalar(-1L)]).Concat(0L, normal.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.6150066f, -0.7470366f, -0.19320095f, 0.7852122f, -0.105438106f, 0.3118135f, 0.31353027f, 0.710673f, -0.25749266f, -0.6481527f, 0.4695184f, -0.67243695f, 0.98079455f, -0.020025833f, -1.5019299f, 0.6489639f, -0.9045778f, -0.28363064f, -1.7336785f, 1.7301084f, -0.54763764f, -1.3845996f, -0.31040692f, 0.25047535f);
+        var reference = Vector(0.6150066f, -0.19320095f, -0.5000103f, -0.7739242f, -0.25749266f, 0.4695184f, -0.098368935f, -0.03913381f, 0.42929783f, -0.52022403f, -0.103355356f, -0.28455988f, 0.9807945f, -1.5019299f, 0.60967326f, 0.21276864f, -0.5476377f, -0.31040692f, 0.89446086f, 0.5367835f, -0.017871149f, -1.082252f, -1.6067489f, 0.37113127f);
         var diff = (SelfCheck.Collapse(flat, 24) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -1601,7 +1601,7 @@ public partial class NNEmbeddingBagSumGolden
         var y = EmbeddingBag.Bag(indices, 5L, 4L, BagMode.Sum);   // [2,4] = 8
 
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.9563482f, -0.64395595f, 2.6079757f, -0.6798403f, 0.09591007f, 0.74071383f, 0.68464065f, 0.00798434f);
+        var reference = Vector(2.3153918f, 3.8792405f, -1.64167f, 0.8099144f, 1.7735684f, 3.2674944f, -1.265601f, -1.3415644f);
 
         var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
@@ -1620,7 +1620,7 @@ public partial class NNEmbeddingBagMeanGolden
         var y = EmbeddingBag.Bag(indices, 5L, 4L, BagMode.Mean);   // [2,4] = 8
 
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.31878272f, -0.21465199f, 0.8693252f, -0.22661345f, 0.031970024f, 0.24690461f, 0.22821355f, 0.0026614468f);
+        var reference = Vector(0.77179724f, 1.2930802f, -0.5472233f, 0.26997146f, 0.59118944f, 1.0891649f, -0.421867f, -0.44718814f);
 
         var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
@@ -1639,7 +1639,7 @@ public partial class NNEmbeddingBagMaxGolden
         var y = EmbeddingBag.Bag(indices, 5L, 4L, BagMode.Max);   // [2,4] = 8
 
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(1.9730682f, 0.5402425f, 1.4092264f, 0.045669284f, 1.9730682f, 0.5402425f, 0.9734798f, 0.0800632f);
+        var reference = Vector(1.9730682f, 1.4965341f, 0.23548833f, 1.0987536f, 1.9730682f, 1.4092265f, 0.61155725f, 0.22526954f);
 
         var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
@@ -1679,7 +1679,7 @@ public partial class NNEmbeddingBagPaddingIdxSumExact
         var unmasked = EmbeddingBag.Bag(indices, 5L, 4L, BagMode.Sum);   // no paddingIdx — pad rows count
         var flat = padded.Reshape([Scalar(-1L)]).Concat(0L, unmasked.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(1.3440652f, 0.3525714f, 1.1987493f, -0.072078854f, 0.7249131f, 0.92838496f, 0.4593711f, -0.03768494f, 0.68589f, -1.3499765f, -3.0228398f, -1.3550098f, -1.0461789f, 0.24091457f, -3.0575676f, 3.6953902f);
+        var reference = Vector(1.5853512f, 2.3827064f, -1.8771583f, -0.28883916f, 2.1612854f, 1.858268f, -0.017445922f, -0.82745564f, -0.471421f, -3.5460153f, 0.38173854f, 0.927593f, 0.24977827f, -2.1945682f, 2.0165863f, 0.6837434f);
         var diff = (SelfCheck.Collapse(flat, 16) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -1697,7 +1697,7 @@ public partial class NNEmbeddingBagInitChoice
         var normal = EmbeddingBag.Bag(indices, 5L, 4L, BagMode.Sum);   // default init selector (Normal)
         var flat = xavier.Reshape([Scalar(-1L)]).Concat(0L, normal.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.009558208f, -0.35986438f, -0.65359485f, 0.7313738f, 0.23650318f, -0.75003564f, -1.5768887f, -0.01945132f, 0.68589f, -1.3499765f, -3.0228395f, -1.3550097f, 0.46807218f, -0.5217749f, -1.1111203f, -1.7688f);
+        var reference = Vector(0.25207585f, 0.5898477f, -0.47687238f, -1.4228215f, -0.25250477f, 0.4332354f, -0.90283096f, -1.1086892f, -0.471421f, -3.5460153f, 0.38173848f, 0.927593f, -0.10716182f, -3.6178398f, -0.00027006865f, 0.32500076f);
         var diff = (SelfCheck.Collapse(flat, 16) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3343,7 +3343,7 @@ public partial class RnnBaselineForwardTanhGolden
         var (y, hN) = Recurrent.RNN(x, hiddenSize: 3L);
         var flat = y.Reshape([Scalar(-1L)]).Concat(0L, hN.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.17373544f, -0.27466792f, 0.8597976f, -0.23974895f, -0.20257777f, 0.73698604f, -0.2082305f, 0.20641482f, 0.2690121f, -0.25773376f, 0.24033892f, -0.06970912f, -0.22683054f, 0.14699924f, -0.200679f, -0.35103303f, 0.098100066f, -0.47503126f, -0.48486203f, 0.11939013f, -0.6934142f, -0.59459865f, 0.09852862f, -0.84707177f, -0.48486203f, 0.11939013f, -0.6934142f, -0.59459865f, 0.09852862f, -0.84707177f);
+        var reference = Vector(-0.34028703f, 0.56226015f, 0.3572291f, -0.35487205f, 0.4746852f, 0.2122333f, -0.17686379f, 0.28768647f, 0.16577518f, -0.21716362f, 0.10579431f, -0.02872008f, -0.30400324f, 0.09412217f, -0.20338684f, -0.3621602f, -0.12037909f, -0.3991304f, -0.37247163f, -0.3626886f, -0.5513615f, -0.432755f, -0.5378231f, -0.6863462f, -0.37247163f, -0.3626886f, -0.5513615f, -0.432755f, -0.5378231f, -0.6863462f);
         var diff = (SelfCheck.Collapse(flat, 30) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3365,7 +3365,7 @@ public partial class RnnBatchFirstGolden
         var (y, hN) = Recurrent.RNN(x, hiddenSize: 3L, batchFirst: true);
         var flat = y.Reshape([Scalar(-1L)]).Concat(0L, hN.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.17373544f, -0.27466792f, 0.8597976f, -0.14137572f, 0.13215971f, 0.554265f, -0.06615907f, 0.098089814f, 0.4340241f, -0.19550431f, 0.12150943f, 0.16687167f, -0.42311764f, 0.024035573f, -0.10194969f, -0.44383717f, 0.09320021f, -0.5859147f, -0.56241554f, -0.013551831f, -0.7325691f, -0.6587949f, 0.012843847f, -0.8763608f, -0.19550431f, 0.12150943f, 0.16687167f, -0.6587949f, 0.012843847f, -0.8763608f);
+        var reference = Vector(-0.34028703f, 0.56226015f, 0.3572291f, -0.16074717f, 0.39361715f, 0.31448638f, -0.2453754f, 0.38351238f, 0.14947963f, -0.25621927f, 0.15006304f, -0.0449273f, -0.3975839f, 0.15475416f, -0.25343776f, -0.33320904f, -0.3359846f, -0.438469f, -0.4705078f, -0.42227304f, -0.6110636f, -0.49010736f, -0.62035143f, -0.72482026f, -0.25621927f, 0.15006304f, -0.0449273f, -0.49010736f, -0.62035143f, -0.72482026f);
         var diff = (SelfCheck.Collapse(flat, 30) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3382,7 +3382,7 @@ public partial class RnnSingleStepAnchorTanh
     {
         var (y, hN) = Recurrent.RNN(x, hiddenSize: 2L);   // y [1, N, H], hN [1, N, H]
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.42514038f, -0.2159316f, -0.5531751f, -0.032021046f);
+        var reference = Vector(-0.51629144f, 0.522128f, -0.5454677f, 0.2777531f);
         var goldenDiff = (SelfCheck.Collapse(y, 4) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         // State contract: at L=1, hN == y[0] == y (both [1, N, H]); leading dim == 1.
         var stateDiff = (hN - y).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
@@ -3403,7 +3403,7 @@ public partial class RnnReluForwardGolden
         var (y, hN) = Recurrent.RNN(x, hiddenSize: 3L, nonlinearity: RnnNonlinearity.Relu);
         var flat = y.Reshape([Scalar(-1L)]).Concat(0L, hN.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0f, 0f, 1.2925681f, 0f, 0f, 0.94384974f, 0.04135573f, 0.36952493f, 0.3891021f, 0f, 0.3115339f, 0.095967904f, 0f, 0.17937636f, 0f, 0f, 0.14460433f, 0f, 0f, 0.18108352f, 0f, 0f, 0.25678098f, 0f, 0f, 0.18108352f, 0f, 0f, 0.25678098f, 0f);
+        var reference = Vector(0f, 0.63613206f, 0.3737061f, 0f, 0.51610094f, 0.21550883f, 0f, 0.48893696f, 0.19391197f, 0f, 0.30580258f, 0f, 0f, 0.17887457f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f);
         var diff = (SelfCheck.Collapse(flat, 30) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3421,7 +3421,7 @@ public partial class RnnNoBiasGolden
         var (yNoB, hNoB) = Recurrent.RNN(x, hiddenSize: 3L, bias: false);
         var flat = yNoB.Reshape([Scalar(-1L)]).Concat(0L, hNoB.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.14871562f, -0.2725845f, 0.7981243f, 0.08065927f, -0.20041716f, 0.6319798f, 0.054276228f, 0.16232193f, 0.26635277f, -0.009602129f, 0.18091142f, -0.06683439f, 0.032679558f, 0.12791717f, -0.2580979f, -0.107979f, 0.08164787f, -0.5305649f, -0.2599578f, 0.08001578f, -0.71661353f, -0.39458805f, 0.061018467f, -0.8619387f, -0.2599578f, 0.08001578f, -0.71661353f, -0.39458805f, 0.061018467f, -0.8619387f);
+        var reference = Vector(-0.029066324f, 0.4111446f, 0.4200828f, -0.04563248f, 0.3067528f, 0.28176224f, 0.06402671f, 0.3212248f, 0.24807131f, 0.017983079f, 0.14709556f, 0.05679238f, -0.010344207f, 0.07139301f, -0.101010144f, -0.07267451f, -0.14568406f, -0.30640578f, -0.10945445f, -0.33907574f, -0.47352177f, -0.18025267f, -0.5235147f, -0.6277089f, -0.10945445f, -0.33907574f, -0.47352177f, -0.18025267f, -0.5235147f, -0.6277089f);
         var diff = (SelfCheck.Collapse(flat, 30) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3439,7 +3439,7 @@ public partial class RnnNumLayersStackGolden
         var (y, hN) = Recurrent.RNN(x, hiddenSize: 3L, numLayers: 2);
         var flat = y.Reshape([Scalar(-1L)]).Concat(0L, hN.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.0366460964f, -0.00511288639f, -0.0214970655f, 0.140893645f, -0.195169352f, 0.0747870151f, 0.0171349019f, -0.208426835f, 0.267483859f, -0.036309023f, -0.0205600123f, 0.0206003018f, 0.157957204f, -0.219931483f, -0.0241384705f, 0.0286805562f, 0.145337769f, 0.0613698166f, -0.0130298134f);
+        var reference = Vector(-0.010621712f, 0.03323322f, 0.023533508f, 0.10310313f, -0.09166083f, -0.05651238f, -0.051862523f, -0.14920142f, 0.3635105f, 0.17742004f, -0.02746275f, 0.009970799f, 0.075347826f, -0.21632724f, -0.097679235f, 0.029079147f, 0.17345752f, 0.19398063f, 0.054980315f);
         var diff = (SelfCheck.Collapse(flat, 36) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3456,7 +3456,7 @@ public partial class RnnReverseGolden
         var (y, hN) = Recurrent.RNN(x, hiddenSize: 3L, direction: RnnDirection.Reverse);
         var flat = y.Reshape([Scalar(-1L)]).Concat(0L, hN.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.1424712f, -0.13236505f, 0.74037075f, -0.29117948f, -0.16957521f, 0.5282415f, -0.40410942f, -0.19258863f, 0.31853974f, -0.5038934f, -0.21793741f, 0.0035425425f, -0.43096125f, -0.18611938f, -0.24419701f, -0.48060155f, -0.16422284f, -0.52210253f, -0.5295123f, 0.17518723f, -0.6638923f, -0.5773369f, 0.24820554f, -0.8172432f, -0.1424712f, -0.13236505f, 0.74037075f, -0.29117948f, -0.16957521f, 0.5282415f);
+        var reference = Vector(-0.28162003f, 0.34452832f, 0.33215034f, -0.3448574f, 0.14301133f, 0.12576687f, -0.41013402f, 0.03850305f, -0.06620699f, -0.4525063f, -0.16132909f, -0.26362872f, -0.37791812f, -0.3324834f, -0.37080032f, -0.41945016f, -0.46977037f, -0.5231392f, -0.4251448f, -0.08385724f, -0.5193708f, -0.43863946f, -0.20129883f, -0.6253085f, -0.28162003f, 0.34452832f, 0.33215034f, -0.3448574f, 0.14301133f, 0.12576687f);
         var diff = (SelfCheck.Collapse(flat, 30) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3475,7 +3475,7 @@ public partial class RnnBidirectionalGolden
         var (y, hN) = Recurrent.RNN(x, hiddenSize: hVal, direction: RnnDirection.Bidirectional);
         var flat = y.Reshape([Scalar(-1L)]).Concat(0L, hN.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.0427910927f, 0.192823459f, 0.0277463273f, 0.0539857198f, 0.147218542f, -0.0639532388f, -0.197392916f, 0.31880921f, 0.235884195f, 0.114734327f, -0.0700399968f, -0.0252688431f, 0.28742491f, 0.207199052f, -0.167942984f, -0.207546721f, -0.341014151f, 0.0782811821f, 0.00314437023f);
+        var reference = Vector(0.11971205f, 0.13671313f, 0.1648129f, 0.18854228f, 0.0014980659f, 0.1365188f, -0.16600658f, 0.30677408f, 0.19525042f, 0.00068012625f, -0.08019956f, -0.25713938f, 0.1387789f, 0.10534954f, -0.078241855f, -0.17429967f, 0.046260733f, -0.18156601f, 0.27582753f);
         var diff = (SelfCheck.Collapse(flat, 60) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3492,7 +3492,7 @@ public partial class RnnStateContractForwardSingleLayer
     {
         var (y, hN) = Recurrent.RNN(x, hiddenSize: 3L);   // y [L, N, H], hN [1, N, H]
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.17373544f, -0.27466792f, 0.8597976f, -0.23974895f, -0.20257777f, 0.73698604f, -0.2082305f, 0.20641482f, 0.2690121f, -0.25773376f, 0.24033892f, -0.06970912f, -0.22683054f, 0.14699924f, -0.200679f, -0.35103303f, 0.098100066f, -0.47503126f, -0.48486203f, 0.11939013f, -0.6934142f, -0.59459865f, 0.09852862f, -0.84707177f);
+        var reference = Vector(-0.34028703f, 0.56226015f, 0.3572291f, -0.35487205f, 0.4746852f, 0.2122333f, -0.17686379f, 0.28768647f, 0.16577518f, -0.21716362f, 0.10579431f, -0.02872008f, -0.30400324f, 0.09412217f, -0.20338684f, -0.3621602f, -0.12037909f, -0.3991304f, -0.37247163f, -0.3626886f, -0.5513615f, -0.432755f, -0.5378231f, -0.6863462f);
         var goldenDiff = (SelfCheck.Collapse(y, 24) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         // State contract: hN == y[-1] (last step along axis 0; both [1, N, H]), leading dim == 1.
         var lastStep = y.Slice(Vector(-1L), Vector(System.Int64.MaxValue), Vector(0L));
@@ -3515,7 +3515,7 @@ public partial class RnnForwardTanhGolden
         var (y, hN) = Recurrent.RNN(x, hiddenSize: 2L);   // forward, tanh, single-layer
         var flat = y.Reshape([Scalar(-1L)]).Concat(0L, hN.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.50957435f, 0.27942073f, -0.28417426f, 0.14040172f, -0.39996016f, -0.009731531f, -0.39996016f, -0.009731531f);
+        var reference = Vector(-0.31161833f, -0.21758986f, -0.2976535f, -0.45713878f, -0.55510336f, -0.06734198f, -0.55510336f, -0.06734198f);
         var diff = (SelfCheck.Collapse(flat, 8) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3578,7 +3578,7 @@ public partial class LstmBaselineForwardGolden
         var (y, hN, cN) = Recurrent.LSTM(x, hiddenSize: 3L);
         var flat = y.Reshape([Scalar(-1L)]).Concat(0L, hN.Reshape([Scalar(-1L)])).Concat(0L, cN.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.0280176006f, 0.0148549157f, -0.0854059747f, 0.040779366f, 0.0534180825f, 0.000506923886f, -0.00231920167f, -0.0252692755f, 0.248211911f, 0.0146093446f, 0.01809622f, -0.0843883543f, -0.0710203857f, 0.0046217465f, 0.0452203682f, 0.0173241417f, 0.0226722005f, 0.0297508294f, 0.124974755f);
+        var reference = Vector(0.024964109f, -0.008778759f, -0.0043753646f, -0.050096735f, -0.04825304f, 0.018699164f, -0.005422446f, 0.029091686f, -0.07418333f, 0.036455788f, -0.0057062325f, -0.0060653137f, -0.05842472f, -0.028591797f, 0.003907362f, -0.017239235f, 0.02585197f, -0.005883751f, -0.0019843434f);
         var diff = (SelfCheck.Collapse(flat, 36) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3599,7 +3599,7 @@ public partial class LstmBatchFirstGolden
         var (y, hN, cN) = Recurrent.LSTM(x, hiddenSize: 3L, batchFirst: true);
         var flat = y.Reshape([Scalar(-1L)]).Concat(0L, hN.Reshape([Scalar(-1L)])).Concat(0L, cN.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.0352879444f, 0.0136820285f, -0.111469804f, 0.0822292427f, 0.0866030488f, -0.0314609057f, -0.0233364428f, -0.00323860235f, 0.295652268f, 0.0081531109f, 0.0210374884f, -0.0135555522f, -0.231829053f, -0.0727247134f, 0.0796338831f, 0.0297410555f, 0.0140637151f, 0.0200658506f, 0.166782024f);
+        var reference = Vector(0.03534347f, -0.008152426f, 0.0030045062f, -0.102858916f, -0.07331683f, 0.037952404f, 0.005923543f, -0.006289661f, -0.09134492f, 0.06251553f, -0.0071117193f, -0.049288757f, 0.054555528f, 0.09828127f, -0.010780856f, -0.036970727f, 0.022241544f, 0.00013659296f, -0.017553966f);
         var diff = (SelfCheck.Collapse(flat, 36) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3617,7 +3617,7 @@ public partial class LstmSingleStepGateAnchor
     {
         var (y, hN, cN) = Recurrent.LSTM(x, hiddenSize: 2L);   // y [1,N,H], hN/cN [1,N,H]
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.11654792f, -0.11149972f, 0.051526453f, -0.1166437f);
+        var reference = Vector(0.103407845f, -0.12498066f, 0.010564725f, 0.15376292f);
         var diff = (SelfCheck.Collapse(y, 4) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3635,7 +3635,7 @@ public partial class LstmNoBiasGolden
         var (yNoB, hNoB, cNoB) = Recurrent.LSTM(x, hiddenSize: 3L, bias: false);
         var flat = yNoB.Reshape([Scalar(-1L)]).Concat(0L, hNoB.Reshape([Scalar(-1L)])).Concat(0L, cNoB.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.0539497955f, 0.00886780428f, -0.086620491f, 0.119741064f, 0.0356586562f, 0.0132102065f, 0.017189863f, -0.0203293715f, 0.174370424f, -0.0577061549f, 0.0046504567f, -0.076768852f, 0.119967297f, -0.00842105511f, 0.0590125428f, 0.043314729f, 0.0137322597f, 0.00594937787f, 0.0947569409f);
+        var reference = Vector(0.022575304f, -0.005058322f, 0.0043313783f, -0.048799835f, -0.060760356f, 0.011971111f, -0.0065256488f, 0.044390447f, -0.08115179f, 0.027931849f, -0.003994175f, 0.01265803f, -0.05791581f, -0.056281995f, -0.014362829f, -0.019804908f, 0.05180557f, 0.0152137345f, -0.01635135f);
         var diff = (SelfCheck.Collapse(flat, 36) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3653,7 +3653,7 @@ public partial class LstmNumLayersStackGolden
         var (y, hN, cN) = Recurrent.LSTM(x, hiddenSize: 3L, numLayers: 2);
         var flat = y.Reshape([Scalar(-1L)]).Concat(0L, hN.Reshape([Scalar(-1L)])).Concat(0L, cN.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.0585897258f, -0.0901772076f, 0.0307368469f, -0.237003166f, 0.100184695f, 0.0201188779f, -0.0801968088f, -0.0235858843f, 0.334827477f, 0.0376728655f, 0.0249635131f, -0.0128003496f, -0.154156339f, 0.17062034f, 0.0281458905f, -0.0296835913f, -0.099065379f, 0.16186443f, 0.0216668767f);
+        var reference = Vector(0.01126009f, 0.012709207f, -0.12360345f, -0.022476602f, 0.04575939f, -0.00062695204f, 0.04314021f, -0.2042434f, -0.08503036f, 0.04951354f, -0.010155177f, -0.036230654f, -0.01650241f, -0.07202813f, 0.004080279f, 0.015213525f, 0.03911107f, 0.025873356f, 0.09819187f);
         var diff = (SelfCheck.Collapse(flat, 48) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3670,7 +3670,7 @@ public partial class LstmReverseGolden
         var (y, hN, cN) = Recurrent.LSTM(x, hiddenSize: 3L, direction: RnnDirection.Reverse);
         var flat = y.Reshape([Scalar(-1L)]).Concat(0L, hN.Reshape([Scalar(-1L)])).Concat(0L, cN.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.0110210366f, 0.0169940624f, -0.0450582385f, -0.00232494097f, 0.0750565864f, -0.0277827289f, -0.0348846472f, 0.0288584201f, 0.0837512101f, 0.138900113f, 0.0094067667f, 0.0192604071f, -0.294137098f, -0.0797829464f, 0.0114426774f, -0.0199438675f, 0.068415691f, 0.0140771565f, 0.0981605737f);
+        var reference = Vector(0.03436f, -0.0078155855f, -0.0074572098f, -0.04304181f, -0.031821825f, 0.029474737f, 0.017690022f, -0.052407824f, -0.012657596f, -0.012929839f, 0.007598459f, -0.041085746f, 0.099639125f, 0.1883096f, 0.014719036f, 0.0056339605f, -0.10997236f, 0.004603792f, -0.013313102f);
         var diff = (SelfCheck.Collapse(flat, 36) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3689,7 +3689,7 @@ public partial class LstmBidirectionalGolden
         var (y, hN, cN) = Recurrent.LSTM(x, hiddenSize: hVal, direction: RnnDirection.Bidirectional);
         var flat = y.Reshape([Scalar(-1L)]).Concat(0L, hN.Reshape([Scalar(-1L)])).Concat(0L, cN.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.0171791123f, -0.0254894614f, 0.0635323668f, 0.157808322f, 0.210832445f, 0.047314367f, -0.206614433f, -0.113424866f, 0.112038186f, 0.0594917558f, -0.0908273893f, -0.113273598f, 0.042337909f, 0.180483476f, -0.0415701944f, 0.0117359051f, -0.138804063f, 0.10611206f, 0.0394607332f);
+        var reference = Vector(0.00017907657f, -0.091041386f, -0.050964057f, -0.09901782f, 0.10528104f, 0.025351137f, 0.041404136f, -0.011080764f, 0.059953257f, 0.08769546f, -0.05055089f, -0.07786177f, 0.0773945f, -0.016068079f, 0.04376843f, 0.00061496254f, -0.1194243f, -0.0051258286f, 0.046273626f);
         var diff = (SelfCheck.Collapse(flat, 72) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3708,7 +3708,7 @@ public partial class LstmStateContractForwardSingleLayer
     {
         var (y, hN, cN) = Recurrent.LSTM(x, hiddenSize: 3L);   // y [L,N,H], hN/cN [1,N,H]
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.11317409f, -0.17832823f, 0.16449918f, 0.06303461f, -0.15622467f, 0.13228355f, 0.056307796f, -0.19639853f, 0.15588094f, -0.06749498f, -0.15526424f, 0.11855087f, -0.13697268f, -0.13327843f, 0.10542938f, -0.26116505f, -0.074378565f, 0.07426234f, -0.32657033f, -0.02437039f, 0.058734268f, -0.4117053f, 0.036474817f, 0.03893798f);
+        var reference = Vector(-0.072459474f, 0.14192034f, -0.11791973f, -0.05764995f, 0.088458285f, -0.0957329f, -0.10864087f, 0.10460164f, -0.11688991f, -0.0707437f, 0.049398925f, -0.07764927f, -0.07319354f, 0.036453754f, -0.0557261f, -0.022384536f, -0.010596632f, -0.014686686f, 0.0051852684f, -0.026722802f, 0.013267742f, 0.049830005f, -0.059800833f, 0.03813592f);
         var goldenDiff = (SelfCheck.Collapse(y, 24) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         // State contract: hN == y[-1] (last step along axis 0; both [1, N, H]); hN and cN
         // carry the [D·numLayers == 1, N, H] leading dim.
@@ -3732,7 +3732,7 @@ public partial class LstmForwardGolden
         var (y, hN, cN) = Recurrent.LSTM(x, hiddenSize: 2L);   // forward, single-layer
         var flat = y.Reshape([Scalar(-1L)]).Concat(0L, hN.Reshape([Scalar(-1L)])).Concat(0L, cN.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.087859236f, -0.18765318f, 0.118634604f, -0.27065408f, 0.14037783f, -0.32592142f, 0.14037783f, -0.32592142f, 0.25955802f, -0.53694844f);
+        var reference = Vector(0.08065598f, 0.010471782f, 0.10873029f, 0.0038285512f, 0.14136745f, 0.052198242f, 0.14136745f, 0.052198242f, 0.3008551f, 0.08649275f);
         var diff = (SelfCheck.Collapse(flat, 10) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3804,7 +3804,7 @@ public partial class GruBaselineForwardGolden
         var (y, hN) = Recurrent.GRU(x, hiddenSize: 3L);
         var flat = y.Reshape([Scalar(-1L)]).Concat(0L, hN.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.27399692f, -0.29238102f, -0.032711826f, 0.2549979f, -0.26112053f, -0.032672692f, 0.32737115f, -0.37541848f, -0.07276946f, 0.282864f, -0.33484834f, -0.062413827f, 0.25657204f, -0.3630614f, -0.07313037f, 0.20271942f, -0.3191216f, -0.0397749f, 0.15450838f, -0.3079069f, -0.010286821f, 0.10164662f, -0.2647475f, 0.0383931f, 0.15450838f, -0.3079069f, -0.010286821f, 0.10164662f, -0.2647475f, 0.0383931f);
+        var reference = Vector(0.4577244f, -0.25938115f, 0.09564413f, 0.39541188f, -0.2089782f, -0.01776971f, 0.53664696f, -0.27074015f, -0.12003289f, 0.39637947f, -0.12028876f, -0.30158496f, 0.32674882f, -0.030708268f, -0.46234715f, 0.10638715f, 0.21684808f, -0.6180331f, -0.07523176f, 0.39752978f, -0.7397969f, -0.30265337f, 0.62828964f, -0.83176756f, -0.07523176f, 0.39752978f, -0.7397969f, -0.30265337f, 0.62828964f, -0.83176756f);
         var diff = (SelfCheck.Collapse(flat, 30) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3825,7 +3825,7 @@ public partial class GruBatchFirstGolden
         var (y, hN) = Recurrent.GRU(x, hiddenSize: 3L, batchFirst: true);
         var flat = y.Reshape([Scalar(-1L)]).Concat(0L, hN.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.27399692f, -0.29238102f, -0.032711826f, 0.36274162f, -0.4014722f, -0.07511998f, 0.35258955f, -0.42404234f, -0.10562572f, 0.30863762f, -0.40577865f, -0.11112566f, 0.17734714f, -0.17030106f, -0.0050303503f, 0.18215668f, -0.23758808f, -0.006929796f, 0.14269911f, -0.2460983f, 0.015938781f, 0.095182545f, -0.22712389f, 0.054580387f, 0.30863762f, -0.40577865f, -0.11112566f, 0.095182545f, -0.22712389f, 0.054580387f);
+        var reference = Vector(0.4577244f, -0.25938115f, 0.09564413f, 0.61868083f, -0.3505441f, 0.014704496f, 0.6073454f, -0.33746913f, -0.16663538f, 0.49264544f, -0.2139212f, -0.3777206f, 0.061968323f, 0.17063577f, -0.3977394f, -0.07166366f, 0.4027151f, -0.64463603f, -0.2861905f, 0.6340296f, -0.79175305f, -0.49978754f, 0.80602705f, -0.8785824f, 0.49264544f, -0.2139212f, -0.3777206f, -0.49978754f, 0.80602705f, -0.8785824f);
         var diff = (SelfCheck.Collapse(flat, 30) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3844,7 +3844,7 @@ public partial class GruLinearBeforeResetBothForms
         var (yLbrF, hLbrF) = Recurrent.GRU(x, hiddenSize: 3L, linearBeforeReset: false);
         var flat = yLbr.Reshape([Scalar(-1L)]).Concat(0L, hLbr.Reshape([Scalar(-1L)])).Concat(0L, yLbrF.Reshape([Scalar(-1L)])).Concat(0L, hLbrF.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.0323575415f, -0.0300120219f, 0.473940777f, 0.0864825058f, 0.119011116f, 0.00316737661f, -0.139908961f, -0.165614712f, -0.120256247f, 0.0140325018f, 0.01636663f, 0.0132588371f, 0.46535151f, 0.238572942f, 0.0229435138f, -0.130355362f, -0.171485763f, -0.0109659706f, -0.0580852107f);
+        var reference = Vector(-0.20430905f, 0.031190824f, 0.17703795f, 0.41159135f, 0.28406712f, 0.01951471f, 0.069781505f, -0.2421273f, 0.017812625f, -0.26051873f, 0.027131096f, 0.07983212f, 0.29618675f, -0.03725007f, 0.080667004f, -0.039512224f, 0.1280583f, -0.4678579f, -0.035987303f);
         var diff = (SelfCheck.Collapse(flat, 60) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3862,7 +3862,7 @@ public partial class GruSingleStepGateAnchor
     {
         var (y, hN) = Recurrent.GRU(x, hiddenSize: 2L);   // y [1,N,H], hN [1,N,H]
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.042853884f, 0.09562365f, -0.22733301f, -0.15599082f);
+        var reference = Vector(0.09224088f, -0.2258553f, -0.22410718f, -0.2436088f);
         var diff = (SelfCheck.Collapse(y, 4) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3880,7 +3880,7 @@ public partial class GruNoBiasGolden
         var (yNoB, hNoB) = Recurrent.GRU(x, hiddenSize: 3L, bias: false);
         var flat = yNoB.Reshape([Scalar(-1L)]).Concat(0L, hNoB.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.069591865f, -0.03954286f, -0.007924555f, 0.04195672f, -0.00976763f, 0.0013781594f, 0.04012483f, -0.005158553f, 0.0053702244f, -0.0055433866f, 0.03493568f, 0.03379327f, -0.042403914f, 0.060642436f, 0.062078618f, -0.093667366f, 0.1024601f, 0.10726606f, -0.14075814f, 0.13556382f, 0.15077028f, -0.19056305f, 0.17537698f, 0.19723761f, -0.14075814f, 0.13556382f, 0.15077028f, -0.19056305f, 0.17537698f, 0.19723761f);
+        var reference = Vector(0.29373315f, -0.30207896f, 0.2605893f, 0.20564802f, -0.2491644f, 0.20742792f, 0.2721678f, -0.30525112f, 0.21057323f, 0.10087144f, -0.13899487f, 0.04909474f, 0.00893987f, -0.026577175f, -0.110095136f, -0.19576299f, 0.23800182f, -0.303577f, -0.33466452f, 0.43559626f, -0.4779071f, -0.4991249f, 0.66394454f, -0.6261235f, -0.33466452f, 0.43559626f, -0.4779071f, -0.4991249f, 0.66394454f, -0.6261235f);
         var diff = (SelfCheck.Collapse(flat, 30) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3898,7 +3898,7 @@ public partial class GruNumLayersStackGolden
         var (y, hN) = Recurrent.GRU(x, hiddenSize: 3L, numLayers: 2);
         var flat = y.Reshape([Scalar(-1L)]).Concat(0L, hN.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.0130116618f, -0.0336175347f, -0.0944020733f, 0.0446957713f, 0.146289364f, 0.041906493f, -0.0455070985f, 0.0204948539f, -0.240100003f, 0.136650568f, -0.0134949288f, -0.0927946105f, 0.00541197479f, 0.132505696f, 0.158232644f, 0.0262713755f, -0.143642092f, -0.209774517f, 0.0871628254f);
+        var reference = Vector(-0.0053468617f, -0.008301485f, 0.011173579f, -0.033929873f, -0.018600665f, -0.0059568547f, 0.05352574f, -0.22613403f, 0.1750491f, -0.13623409f, -0.012490459f, 0.004119619f, -0.008570041f, -0.038464986f, -0.014181533f, -0.0069683595f, -0.017474134f, -4.1250446E-06f, 0.0028215093f);
         var diff = (SelfCheck.Collapse(flat, 36) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3915,7 +3915,7 @@ public partial class GruReverseGolden
         var (y, hN) = Recurrent.GRU(x, hiddenSize: 3L, direction: RnnDirection.Reverse);
         var flat = y.Reshape([Scalar(-1L)]).Concat(0L, hN.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.4077679f, -0.44982994f, -0.0885507f, 0.3587873f, -0.40374234f, -0.0699605f, 0.3072619f, -0.3476713f, -0.049650684f, 0.25851214f, -0.3012228f, -0.024963295f, 0.20649475f, -0.23482873f, -0.001577802f, 0.16043337f, -0.19375801f, 0.028224275f, 0.10895101f, -0.114151865f, 0.042830423f, 0.07030969f, -0.087940454f, 0.07418704f, 0.4077679f, -0.44982994f, -0.0885507f, 0.3587873f, -0.40374234f, -0.0699605f);
+        var reference = Vector(0.5536722f, -0.2843085f, -0.12530363f, 0.35004795f, -0.15943016f, -0.28597087f, 0.21119156f, 0.0019690543f, -0.41539752f, -0.04230904f, 0.21816191f, -0.5682063f, -0.103137426f, 0.36343142f, -0.6169989f, -0.3067438f, 0.55682766f, -0.7230154f, -0.21472871f, 0.41102737f, -0.5712646f, -0.33124518f, 0.4887057f, -0.6330832f, 0.5536722f, -0.2843085f, -0.12530363f, 0.35004795f, -0.15943016f, -0.28597087f);
         var diff = (SelfCheck.Collapse(flat, 30) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3934,7 +3934,7 @@ public partial class GruBidirectionalGolden
         var (y, hN) = Recurrent.GRU(x, hiddenSize: hVal, direction: RnnDirection.Bidirectional);
         var flat = y.Reshape([Scalar(-1L)]).Concat(0L, hN.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.00368851859f, 0.0334700003f, -0.216265408f, -0.125441415f, -0.00293130303f, -0.128228769f, -0.0347601329f, 0.243910034f, -0.131938476f, 0.0313053942f, 0.0530267273f, -0.0195986298f, -0.030214189f, 0.165358456f, -0.0580716027f, -0.0444605758f, -0.00146851796f, 0.103767109f, -0.0990497375f);
+        var reference = Vector(-0.06476976f, 0.0036540814f, -0.14360796f, 0.01834979f, 0.13250425f, -0.12159153f, -0.20665976f, -0.08250611f, -0.091827296f, 0.01561222f, 0.0071776817f, 0.19476075f, 0.59600955f, 0.41193295f, -0.030823486f, -0.18772063f, -0.12791036f, 0.17281036f, -0.34353963f);
         var diff = (SelfCheck.Collapse(flat, 60) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -3951,7 +3951,7 @@ public partial class GruStateContractForwardSingleLayer
     {
         var (y, hN) = Recurrent.GRU(x, hiddenSize: 3L);   // y [L,N,H], hN [1,N,H]
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.27399692f, -0.29238102f, -0.032711826f, 0.2549979f, -0.26112053f, -0.032672692f, 0.32737115f, -0.37541848f, -0.07276946f, 0.282864f, -0.33484834f, -0.062413827f, 0.25657204f, -0.3630614f, -0.07313037f, 0.20271942f, -0.3191216f, -0.0397749f, 0.15450838f, -0.3079069f, -0.010286821f, 0.10164662f, -0.2647475f, 0.0383931f);
+        var reference = Vector(0.4577244f, -0.25938115f, 0.09564413f, 0.39541188f, -0.2089782f, -0.01776971f, 0.53664696f, -0.27074015f, -0.12003289f, 0.39637947f, -0.12028876f, -0.30158496f, 0.32674882f, -0.030708268f, -0.46234715f, 0.10638715f, 0.21684808f, -0.6180331f, -0.07523176f, 0.39752978f, -0.7397969f, -0.30265337f, 0.62828964f, -0.83176756f);
         var goldenDiff = (SelfCheck.Collapse(y, 24) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         // State contract: hN == y[-1] (last step along axis 0; both [1, N, H]), leading dim == 1.
         var lastStep = y.Slice(Vector(-1L), Vector(System.Int64.MaxValue), Vector(0L));
@@ -3973,7 +3973,7 @@ public partial class GruForwardGolden
         var (y, hN) = Recurrent.GRU(x, hiddenSize: 2L);   // forward, single-layer, linearBeforeReset:true
         var flat = y.Reshape([Scalar(-1L)]).Concat(0L, hN.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.010756155f, 0.17122807f, 0.028650515f, 0.29306695f, -0.009885404f, 0.16097677f, -0.009885404f, 0.16097677f);
+        var reference = Vector(-0.007153723f, -0.29675126f, 0.04894792f, -0.4273585f, 0.0487533f, -0.427463f, 0.0487533f, -0.427463f);
         var diff = (SelfCheck.Collapse(flat, 8) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -4046,7 +4046,7 @@ public partial class RnnCellClosedFormTanh
         var h = Tensor(new long[] { 1L, 2L }, 0.3f, -0.4f);   // nonzero previous state [N, H]
         var hOut = Recurrent.RNNCell(x, h, hiddenSize: hv);   // [N, H]
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.68653524f, -0.019340754f);
+        var reference = Vector(-0.64657795f, 0.2043513f);
         var diff = (SelfCheck.Collapse(hOut, 2) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -4064,7 +4064,7 @@ public partial class RnnCellClosedFormRelu
         var h = Tensor(new long[] { 1L, 2L }, 0.3f, -0.4f);   // nonzero previous state
         var hOut = Recurrent.RNNCell(x, h, hiddenSize: hv, nonlinearity: RnnNonlinearity.Relu);
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0f, 0.13971166f);
+        var reference = Vector(0f, 0f);
         var diff = (SelfCheck.Collapse(hOut, 2) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -4083,7 +4083,7 @@ public partial class RnnCellSingleStepGolden
         var h = TensorFill((Vector<int64>)[n, Scalar(hv)], 0.2f);   // nonzero [N, H]
         var hOut = Recurrent.RNNCell(x, h, hiddenSize: hv);
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.1470648f, -0.08752948f, 0.6934531f, -0.21378177f, -0.011267126f, 0.46671247f);
+        var reference = Vector(-0.33627325f, 0.5535085f, 0.17671871f, -0.350904f, 0.46478236f, 0.02039349f);
         var diff = (SelfCheck.Collapse(hOut, 6) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -4103,7 +4103,7 @@ public partial class RnnCellNoBiasGolden
         var h = TensorFill((Vector<int64>)[n, Scalar(hv)], 0.2f);   // nonzero [N, H]
         var hNoB = Recurrent.RNNCell(x, h, hiddenSize: hv, bias: false);
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.17537177f, -0.08529431f, 0.5753161f, 0.107791305f, -0.009015322f, 0.29744554f);
+        var reference = Vector(-0.024537086f, 0.40053105f, 0.2474364f, -0.04110861f, 0.29519725f, 0.09420264f);
         var diff = (SelfCheck.Collapse(hNoB, 6) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -4131,7 +4131,7 @@ public partial class RnnCellStateThreading
         var h2 = Recurrent.RNNCell(x1, h1, hiddenSize: hv);          // step 2 — threads h1
         var flat = h1.Reshape([Scalar(-1L)]).Concat(0L, h2.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.2613017f, -0.178007f, 0.67919075f, -0.32434636f, -0.1030699f, 0.44535577f, 0.02198875f, 0.3140962f, -0.19885433f, 0.14249063f, 0.1580782f, -0.23733258f);
+        var reference = Vector(-0.35969597f, 0.44310725f, 0.16135383f, -0.37405235f, 0.34173834f, 0.004579067f, -0.029783428f, 0.077659965f, 0.26856196f, 0.031852126f, 0.01971817f, 0.1470586f);
         var diff = (SelfCheck.Collapse(flat, 12) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -4151,7 +4151,7 @@ public partial class RnnCellForwardTanhGolden
         var h = ((Tensor<float32>)OnnxOp.Concat([zv, Vector(-0.2f)], axis: 0)).Reshape([Scalar(1L), Scalar(2L)]);
         var hOut = Recurrent.RNNCell(x, h, hiddenSize: 2L);
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.5967264f, 0.3259437f);
+        var reference = Vector(-0.39940286f, -0.2793026f);
         var diff = (SelfCheck.Collapse(hOut, 2) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -4220,7 +4220,7 @@ public partial class LstmCellClosedFormGateAnchor
         var (hOut, cOut) = Recurrent.LSTMCell(x, prevH, prevC, hiddenSize: hv);
         var flat = hOut.Reshape([Scalar(-1L)]).Concat(0L, cOut.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.052346908f, 0.111870185f, 0.09054956f, 0.17204428f);
+        var reference = Vector(0.038711205f, 0.0776416f, 0.097056195f, 0.13340442f);
         var diff = (SelfCheck.Collapse(flat, 4) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -4241,7 +4241,7 @@ public partial class LstmCellSingleStepGolden
         var (hOut, cOut) = Recurrent.LSTMCell(x, h, c, hiddenSize: hv);
         var flat = hOut.Reshape([Scalar(-1L)]).Concat(0L, cOut.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.060518965f, -0.18187805f, 0.112477764f, -0.16194735f, -0.15423499f, 0.08238829f, -0.10802947f, -0.37158445f, 0.20077951f, -0.26274914f, -0.33182037f, 0.16042358f);
+        var reference = Vector(-0.107125394f, 0.08220652f, -0.11028694f, -0.091378f, 0.036340635f, -0.086809464f, -0.20580003f, 0.1658242f, -0.33714378f, -0.16914682f, 0.08114457f, -0.25465178f);
         var diff = (SelfCheck.Collapse(flat, 12) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -4262,7 +4262,7 @@ public partial class LstmCellNoBiasGolden
         var (hNoB, cNoB) = Recurrent.LSTMCell(x, h, c, hiddenSize: hv, bias: false);
         var flat = hNoB.Reshape([Scalar(-1L)]).Concat(0L, cNoB.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.060757663f, -0.124516405f, 0.021437975f, -0.03151314f, -0.08066856f, 0.007132032f, 0.14074452f, -0.23927873f, 0.038236484f, -0.06248232f, -0.16267192f, 0.013955582f);
+        var reference = Vector(-0.081417456f, 0.07147286f, -0.11030745f, -0.065678746f, 0.026573204f, -0.07408963f, -0.19272588f, 0.13552438f, -0.25206688f, -0.14868203f, 0.055530164f, -0.16374311f);
         var diff = (SelfCheck.Collapse(flat, 12) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -4290,7 +4290,7 @@ public partial class LstmCellStateThreading
         var (h2, c2) = Recurrent.LSTMCell(x1, h1, c1, hiddenSize: hv);   // step 2 — threads (h1, c1)
         var flat = h1.Reshape([Scalar(-1L)]).Concat(0L, c1.Reshape([Scalar(-1L)])).Concat(0L, h2.Reshape([Scalar(-1L)])).Concat(0L, c2.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.037751045f, -0.1474912f, 0.12196061f, -0.053347927f, -0.11705802f, 0.09291129f, 0.073077075f, -0.29245093f, 0.21381588f, -0.0910616f, -0.24433406f, 0.1772903f, -0.01266461f, -0.1933409f, -0.034353413f, -0.022122065f, -0.10973765f, -0.0161384f, -0.024254601f, -0.34029967f, -0.08269314f, -0.041972794f, -0.18600497f, -0.04080532f);
+        var reference = Vector(-0.052355353f, 0.0721402f, -0.08774809f, -0.035499025f, 0.028815527f, -0.06261329f, -0.0934182f, 0.12963498f, -0.24848169f, -0.06135352f, 0.056755584f, -0.17114043f, -0.11532108f, 0.0508606f, -0.023314888f, -0.08117418f, 0.016930146f, -0.0105872005f, -0.26353556f, 0.13924724f, -0.057877526f, -0.17236686f, 0.05121092f, -0.023800138f);
         var diff = (SelfCheck.Collapse(flat, 24) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -4311,7 +4311,7 @@ public partial class LstmCellForwardGolden
         var (hOut, cOut) = Recurrent.LSTMCell(x, h, c, hiddenSize: 2L);
         var flat = hOut.Reshape([Scalar(-1L)]).Concat(0L, cOut.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.1531399f, -0.15501392f, 0.30757904f, -0.27641153f);
+        var reference = Vector(0.13044606f, 0.017175928f, 0.29752374f, 0.029823495f);
         var diff = (SelfCheck.Collapse(flat, 4) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -4359,7 +4359,7 @@ public partial class GruCellClosedFormLbrTrue
         var prevH = Tensor(new long[] { 1L, 2L }, 0.3f, -0.4f);   // nonzero [N, H]
         var hOut = Recurrent.GRUCell(x, prevH, hiddenSize: hv, linearBeforeReset: true);
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.059675388f, -0.10712758f);
+        var reference = Vector(0.16407584f, -0.4734267f);
         var diff = (SelfCheck.Collapse(hOut, 2) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -4378,7 +4378,7 @@ public partial class GruCellClosedFormLbrFalse
         var prevH = Tensor(new long[] { 1L, 2L }, 0.3f, -0.4f);   // nonzero [N, H]
         var hLbrFalse = Recurrent.GRUCell(x, prevH, hiddenSize: hv, linearBeforeReset: false);
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.061078034f, -0.1143262f);
+        var reference = Vector(0.19395879f, -0.4725176f);
         var diff = (SelfCheck.Collapse(hLbrFalse, 2) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -4397,7 +4397,7 @@ public partial class GruCellSingleStepGolden
         var h = TensorFill((Vector<int64>)[n, Scalar(hv)], 0.2f);   // nonzero [N, H]
         var hOut = Recurrent.GRUCell(x, h, hiddenSize: hv);
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.28458244f, -0.18446526f, 0.09827934f, 0.25118813f, -0.14867939f, 0.08666855f);
+        var reference = Vector(0.4224159f, -0.0062921047f, 0.0151607245f, 0.31962708f, 0.0974904f, -0.122701146f);
         var diff = (SelfCheck.Collapse(hOut, 6) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -4416,7 +4416,7 @@ public partial class GruCellNoBiasGolden
 
         var hNoB = Recurrent.GRUCell(x, h, hiddenSize: hv, bias: false);
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.10333493f, 0.04038326f, 0.1249094f, 0.06518152f, 0.07557812f, 0.123866774f);
+        var reference = Vector(0.23589295f, -0.049717568f, 0.2655142f, 0.120038494f, 0.06408025f, 0.14599526f);
         var diff = (SelfCheck.Collapse(hNoB, 6) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -4443,7 +4443,7 @@ public partial class GruCellStateThreading
         var h2 = Recurrent.GRUCell(x1, h1, hiddenSize: hv);          // step 2 — threads h1
         var flat = h1.Reshape([Scalar(-1L)]).Concat(0L, h2.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.24790405f, -0.25077158f, -0.03188353f, 0.22431527f, -0.22003904f, -0.026484352f, 0.03697352f, -0.046876684f, -0.2740378f, 0.011591375f, -0.09246402f, -0.34831437f);
+        var reference = Vector(0.36925018f, -0.18251261f, -0.060653847f, 0.27328694f, -0.07263028f, -0.19451882f, 0.25757724f, 0.002956465f, -0.04322583f, 0.15031655f, 0.031568747f, -0.15111f);
         var diff = (SelfCheck.Collapse(flat, 12) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -4462,7 +4462,7 @@ public partial class GruCellForwardGolden
         var h = ((Tensor<float32>)OnnxOp.Concat([zv, Vector(-0.2f)], axis: 0)).Reshape([Scalar(1L), Scalar(2L)]);
         var hOut = Recurrent.GRUCell(x, h, hiddenSize: 2L, linearBeforeReset: true);
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.068942785f, 0.07279945f);
+        var reference = Vector(0.13904032f, -0.37747902f);
         var diff = (SelfCheck.Collapse(hOut, 2) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }

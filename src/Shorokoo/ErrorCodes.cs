@@ -671,6 +671,31 @@ namespace Shorokoo
 
         #endregion
 
+        #region ONNX External Data Error Codes (XD001-XD010)
+
+        /// <summary>External tensor data present but the model was loaded without a base directory</summary>
+        public const string XD001 = "XD001";
+
+        /// <summary>External tensor data has no 'location' entry</summary>
+        public const string XD002 = "XD002";
+
+        /// <summary>External tensor data location escapes the model's directory</summary>
+        public const string XD003 = "XD003";
+
+        /// <summary>External tensor data file not found</summary>
+        public const string XD004 = "XD004";
+
+        /// <summary>External tensor data offset/length invalid or out of range</summary>
+        public const string XD005 = "XD005";
+
+        /// <summary>External tensor data length does not match the tensor's shape/dtype</summary>
+        public const string XD006 = "XD006";
+
+        /// <summary>Self-contained ONNX export exceeds the protobuf 2 GB message ceiling</summary>
+        public const string XD007 = "XD007";
+
+        #endregion
+
         #region AutoDiff Error Codes (AD001-AD025)
 
         /// <summary>No gradient implementation registered for the op</summary>

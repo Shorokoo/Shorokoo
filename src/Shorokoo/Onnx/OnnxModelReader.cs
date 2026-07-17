@@ -25,30 +25,54 @@ namespace Shorokoo.Onnx
 {
     /// <summary>
     /// Imports serialized ONNX models into <see cref="FastComputationGraph"/>s
-    /// (deserializes the ModelProto, then builds the graph via <c>OnnxModelReader</c>).
+    /// (deserializes the ModelProto, materializes any external tensor data, then builds
+    /// the graph via <c>OnnxModelReader</c>).
+    ///
+    /// <para>
+    /// Models using the standard ONNX external-data mechanism (initializer bytes in a
+    /// side file referenced from <c>TensorProto.external_data</c>) load transparently
+    /// from a file path — <c>location</c> keys resolve against the model file's
+    /// directory. When loading from a stream/bytes, pass
+    /// <c>externalDataDirectory</c>; without it, a model that requires external data
+    /// fails with a clear error (never a silent zero-fill).
+    /// </para>
     /// </summary>
     public static class OnnxModelImporter
     {
-        /// <summary>Imports an ONNX model from a stream.</summary>
-        public static FastComputationGraph FromOnnxModelToFastGraph(Stream inputStream)
+        /// <summary>
+        /// Imports an ONNX model from a stream. <paramref name="externalDataDirectory"/>
+        /// is the directory external-data <c>location</c> keys resolve against; when
+        /// null, a model requiring external data fails loudly.
+        /// </summary>
+        public static FastComputationGraph FromOnnxModelToFastGraph(Stream inputStream, string? externalDataDirectory = null)
         {
             var model = ProtoBuf.Serializer.Deserialize<IR.ModelProto>(inputStream);
+            OnnxExternalData.LoadIntoModel(model, externalDataDirectory);
             var reader = new OnnxModelReader(model);
             return reader.BuildFastComputationGraph();
         }
 
-        /// <summary>Imports an ONNX model from a file path.</summary>
+        /// <summary>
+        /// Imports an ONNX model from a file path. External tensor data (if any)
+        /// resolves against the file's directory.
+        /// </summary>
         public static FastComputationGraph FromOnnxModelToFastGraph(string filePath)
         {
             using var fileReaderStream = File.OpenRead(filePath);
-            return FromOnnxModelToFastGraph(fileReaderStream);
+            return FromOnnxModelToFastGraph(
+                fileReaderStream,
+                Path.GetDirectoryName(Path.GetFullPath(filePath)));
         }
 
-        /// <summary>Imports an ONNX model from in-memory bytes.</summary>
-        public static FastComputationGraph FromOnnxModelToFastGraph(byte[] rawData)
+        /// <summary>
+        /// Imports an ONNX model from in-memory bytes. <paramref name="externalDataDirectory"/>
+        /// is the directory external-data <c>location</c> keys resolve against; when
+        /// null, a model requiring external data fails loudly.
+        /// </summary>
+        public static FastComputationGraph FromOnnxModelToFastGraph(byte[] rawData, string? externalDataDirectory = null)
         {
             using var stream = new MemoryStream(rawData);
-            return FromOnnxModelToFastGraph(stream);
+            return FromOnnxModelToFastGraph(stream, externalDataDirectory);
         }
     }
 }

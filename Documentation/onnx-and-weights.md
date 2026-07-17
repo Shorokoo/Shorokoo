@@ -7,8 +7,11 @@ Related: [inference.md](inference.md) · [core-types.md](core-types.md)
 - A model is a `FastComputationGraph` (from `MyModule.ComputationGraph` or built
   directly). It can be converted to an ONNX `ModelProto`, or saved in Shorokoo's own
   `.srk`/`.zsrk` format.
-- There is no one-call `graph.ToOnnxFile(path)`. Build the `ModelProto`, then
-  serialize it yourself with protobuf.
+- There is no one-call `graph.ToOnnxFile(path)`. Build the `ModelProto`, then save it
+  with `OnnxModelExporter` (or serialize it yourself with protobuf).
+- Models larger than protobuf's 2 GB message ceiling are handled with the standard
+  ONNX **external data** mechanism: `OnnxModelExporter.SaveWithExternalData` on
+  export, and transparent side-file loading on import.
 - Pretrained weights are loaded from `.safetensors` (and compressed `.zsafetensor`).
 
 ## Export to ONNX
@@ -25,7 +28,37 @@ ProtoBuf.Serializer.Serialize(stream, model);   // ProtoBuf = protobuf-net (a tr
 
 `ModelProto` is the protobuf type in `Shorokoo.Core.Factory.IR`; it is serialized with
 protobuf-net's `ProtoBuf.Serializer` (the `ProtoBuf` namespace ships via protobuf-net,
-which the library already depends on).
+which the library already depends on). `OnnxModelExporter.Save(model, path)`
+(namespace `Shorokoo.Onnx`) does the same serialization, plus a clear error — instead
+of a protobuf failure — when the model's tensor data exceeds the 2 GB protobuf message
+ceiling, pointing at the external-data option below.
+
+### Large models: external data
+
+Protobuf caps any single message at 2 GB, so a self-contained `.onnx` cannot hold
+weights approaching that size. The standard ONNX answer is **external data**:
+initializer bytes live in a side file next to the model, and each externalized
+`TensorProto` carries `data_location = EXTERNAL` plus `location`/`offset`/`length`
+entries. Shorokoo supports it on both paths:
+
+```csharp
+using Shorokoo.Onnx;   // OnnxModelExporter, OnnxExternalDataOptions
+
+// Opt-in export mode: initializers of at least SizeThreshold bytes go to
+// "model.onnx.data"; smaller ones stay inline. The .onnx + .onnx.data pair is
+// deterministic (byte-identical across runs for the same ModelProto).
+OnnxModelExporter.SaveWithExternalData(model, "model.onnx");
+OnnxModelExporter.SaveWithExternalData(model, "model.onnx",
+    new OnnxExternalDataOptions { SizeThreshold = 1024, Alignment = 4096 });
+```
+
+- Tensor data is written in initializer order, each tensor aligned to `Alignment`
+  bytes (default 4096) for mmap-friendly access.
+- Self-contained (all-inline) export remains the default and is unchanged; with no
+  initializer at or above the threshold, `SaveWithExternalData` writes no side file
+  and its output is identical to `Save`.
+- The exported pair is standard ONNX — stock onnxruntime loads it directly.
+- The passed `ModelProto` is left unmodified.
 
 `BuildOnnxModel(FastComputationGraph fastGraph, OpSetVersion opset = OPS_21,
 IR_VERSION irVersion = IR_10, bool prepForOnnx = false)` clones the graph (no
@@ -85,6 +118,22 @@ FastComputationGraph g1 = OnnxModelImporter.FromOnnxModelToFastGraph("model.onnx
 FastComputationGraph g2 = OnnxModelImporter.FromOnnxModelToFastGraph(byteArray);
 FastComputationGraph g3 = OnnxModelImporter.FromOnnxModelToFastGraph(stream);
 ```
+
+Models using ONNX external data (the standard layout for large third-party models)
+load transparently from a **file path** — `location` keys resolve against the model
+file's directory, honoring `offset`/`length` slicing. When importing from bytes or a
+stream, pass the directory the side files live in:
+
+```csharp
+FastComputationGraph g = OnnxModelImporter.FromOnnxModelToFastGraph(
+    byteArray, externalDataDirectory: "/path/to/model/dir");
+```
+
+External-data loading fails loudly (naming the tensor and the file) rather than
+zero-filling: a missing side file, a `location` escaping the model's directory, an
+out-of-range `offset`/`length`, a `length` contradicting the tensor's shape/dtype,
+or an external-data model imported from a stream/bytes without
+`externalDataDirectory` all throw a `ModelException`.
 
 ## Save/load Shorokoo graph format (`.srk` / `.zsrk`)
 
@@ -234,4 +283,6 @@ map a `DType` to a SafeTensor dtype string.
 
 ## Anti-patterns
 
-- Do not expect a single export-to-file helper; build the `ModelProto`, then serialize.
+- Do not expect a one-call graph-to-file helper; build the `ModelProto` first, then
+  save it (`OnnxModelExporter.Save` / `SaveWithExternalData`, or serialize it
+  yourself).

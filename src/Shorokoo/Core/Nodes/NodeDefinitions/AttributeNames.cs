@@ -266,27 +266,6 @@ public static class OnnxOpAttributeNames
 
     /// <summary>The named RNG algorithm ("Threefry2x32-BoxMuller.v1") a SHRK_RNG_* op draws with.</summary>
     public const string ShrkAttrRngAlgorithm = "shrk_rng_algorithm";
-
-    /// <summary>
-    /// The feed's REALIZED stream ids, enumerated at concretization by the same QEE pass that
-    /// realizes trainable-param ids: the site's ModelId with every <c>-1</c> iteration slot
-    /// filled per observed loop iteration, flattened (id length × N streams, lexicographic by
-    /// iteration). Present on every id-bearing SHRK_RANDOM_* node of a concrete architecture
-    /// (enumeration failure is a hard concretization error — the concreteness contract);
-    /// makes the stream report static and every stream individually addressable by
-    /// RngConfig.Override. Structural (stage-of-concretization) metadata: never derived from
-    /// an RngConfig — key derivation reads the graph's SHRK_RNG_KEY_VECTOR carrier at lowering.
-    /// </summary>
-    public const string ShrkAttrRngRealizedIds = "shrk_rng_realized_ids";
-
-    /// <summary>
-    /// The per-level iteration counts of the feed's enumerated iteration space (one count per
-    /// <c>-1</c> level of the site id, <c>max observed index + 1</c> each). The lowering sizes
-    /// the feed's dense key table to Π counts and computes the runtime row index as
-    /// Σ iterationIndex[j] · stride[j] with strides the suffix products of these counts.
-    /// Structural metadata, like <see cref="ShrkAttrRngRealizedIds"/>.
-    /// </summary>
-    public const string ShrkAttrRngIterCounts = "shrk_rng_iter_counts";
     public const string ShrkAttrRelativeModelId = "shrk_relative_model_id";
     public const string ShrkAttrInputType = "shrk_input_type";
     public const string ShrkAttrHyperparamIndex = "shrk_hyperparam_index";
@@ -313,10 +292,14 @@ public static class OnnxOpAttributeNames
     public const string ShrkMetaNodeIdentifierTemplate = "IdentifierTemplate";
     public const string ShrkMetaIsTrainable = "IsTrainable";
 
-    /// <summary>Reserved initializer name of the model's compact RNG key vector.</summary>
+    /// <summary>
+    /// LEGACY: the reserved initializer name under which pre-RngSeed files (saved before the
+    /// RNG identity became the ordinary <c>RngSeed</c> parameter at ModelId [0]) carried the
+    /// model's compact RNG key vector. Never written anymore; kept only so <c>ApplyRngConfig</c>
+    /// can recognize such a file — whose key tables are baked constants with nothing left to
+    /// re-key — and fail loudly instead of silently updating a recorded identity.
+    /// </summary>
     public const string ShrkRngKeysTensorName = "shorokoo.rng.keys";
-    /// <summary>Metadata key (initializer + model level) naming the RNG algorithm.</summary>
-    public const string ShrkMetaRngAlgorithm = "shorokoo.rng.algorithm";
     
     // NodeKey metadata - stores the GUID for stable node identification
     public const string ShrkMetaNodeKey = "NodeKey";

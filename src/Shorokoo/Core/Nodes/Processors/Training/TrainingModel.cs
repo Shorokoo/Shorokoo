@@ -539,9 +539,9 @@ namespace Shorokoo
             var concreteArch = modelGraph.ToConcreteArchitecture(new ModelParamList(sampleInputs), ctx);
 
             // Bind the RNG config at the shared concretization point: binding writes the
-            // config's key-vector carrier and materializes every feed site's key entity —
-            // both ride unchanged through loss composition and autograd into the
-            // training-step graph, where the ONNX-prep lowering wires the keyed draws.
+            // config's runtime identity into the RngSeed parameter, which — with the feeds'
+            // key derivation chains — rides unchanged through loss composition and autograd
+            // into the training-step graph, where the ONNX-prep lowering emits the keyed draws.
             concreteArch.ApplyRngConfig(rngConfig);
 
             var rig = new TrainingRig();

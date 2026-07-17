@@ -20,6 +20,9 @@ namespace Shorokoo.Graph
     {
         /// <summary>
         /// All MODEL_PARAM_DATA nodes whose IsTrainable attribute is false (i.e. state params).
+        /// The RngSeed parameter (the model's RNG identity, at reserved ModelId [0]) is
+        /// excluded: it is non-trainable data but not per-step state — it has no state update,
+        /// and including it would break the positional pairing with state-update outputs.
         /// </summary>
         public List<FastNode> GetStateParamDataNodes()
         {
@@ -27,6 +30,9 @@ namespace Shorokoo.Graph
             foreach (var node in this.Nodes)
             {
                 if (node.OpCode != InternalOpCodes.MODEL_PARAM_DATA) continue;
+                if (node.IdentifierTemplate ==
+                        Core.Nodes.Processors.Fast.FastWireRngKeyDerivation.RngSeedIdentifierTemplate)
+                    continue;
                 var isTrainable = node.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsTrainable) ?? false;
                 if (!isTrainable) list.Add(node);
             }

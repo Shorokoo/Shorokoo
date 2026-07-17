@@ -90,7 +90,9 @@ public static class Rng
                     "the pin inside that loop body (with a length-1 local slot), not a multi-level path.");
             if (path[0] < 1)
                 throw new ArgumentException(
-                    $"Rng.Pin (sparse): id slots are 1-based; got {path[0]}.", nameof(items));
+                    $"Rng.Pin (sparse): id slots are 1-based; got {path[0]}. Slot 0 is " +
+                    "reserved at every level for the RngSeed parameter (the model's RNG " +
+                    "identity) and can never be assigned.", nameof(items));
             if (item is null)
                 throw new ArgumentException("Rng.Pin (sparse): pinned item is null.", nameof(items));
         }

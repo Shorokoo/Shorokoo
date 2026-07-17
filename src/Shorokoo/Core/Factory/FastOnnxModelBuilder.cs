@@ -118,43 +118,10 @@ namespace Shorokoo.Core.Factory
             // inputs/outputs so the loader can reconstruct DType identity.
             AddTensorStructMetadata(model, prepFast, tensorInfoLookup);
 
-            // ----- 7. Mirror the model's compact RNG key vector (when a config was bound)
-            // into the ONNX file as a named initializer with per-initializer metadata, plus
-            // model-level metadata_props — the loader rebuilds the carrier node from it.
-            AttachRngKeyVector(model, fastGraph);
-
+            // (The model's RNG identity needs no side channel: it is the ordinary RngSeed
+            // parameter at ModelId [0], serialized as a plain initializer like any other
+            // MODEL_PARAM_DATA and reloaded the same way.)
             return model;
-        }
-
-        private static void AttachRngKeyVector(ModelProto model, FastComputationGraph fastGraph)
-        {
-            var carrier = fastGraph.Nodes.FirstOrDefault(
-                n => n.OpCode == InternalOpCodes.SHRK_RNG_KEY_VECTOR);
-            var data = carrier?.Attributes.GetTensorVal(OnnxOpAttributeNames.AttrValue);
-            if (carrier is null || data is null) return;
-
-            var vec = data.As<int64>().AccessMemory().ToArray();
-            var algorithm = carrier.Attributes.GetStringVal(OnnxOpAttributeNames.ShrkAttrRngAlgorithm) ?? string.Empty;
-
-            var tp = new TensorProto
-            {
-                Name = OnnxOpAttributeNames.ShrkRngKeysTensorName,
-                data_type = (int)TensorProto.DataType.Int64,
-                Dims = [vec.Length],
-                Int64Datas = vec,
-            };
-            tp.MetadataProps.Add(new StringStringEntryProto
-            { Key = OnnxOpAttributeNames.ShrkMetaRngAlgorithm, Value = algorithm });
-            model.Graph.Initializers.Add(tp);
-
-            model.MetadataProps.Add(new StringStringEntryProto
-            { Key = OnnxOpAttributeNames.ShrkMetaRngAlgorithm, Value = algorithm });
-
-            // The initializer is the file's ONE carrier representation: drop the serialized
-            // carrier NodeProto a plain (non-prep) save would otherwise also emit, so a
-            // save→load cycle rebuilds exactly one carrier instead of accumulating
-            // duplicates. (Under prepForOnnx the node was already lowered to a CONSTANT.)
-            model.Graph.Nodes.RemoveAll(n => n.OpType == InternalOpCodes.SHRK_RNG_KEY_VECTOR);
         }
 
         /// <summary>

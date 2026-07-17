@@ -2,7 +2,10 @@ using Shorokoo.Graph;
 using Shorokoo.Core.Graph;
 using Shorokoo.Core.Nodes;
 using Shorokoo.Core.Nodes.NodeDefinitions;
+using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Core.Rng;
+using Shorokoo.Core.Utils;
+using Shorokoo.Onnx;
 using System;
 using System.Linq;
 using System.Collections.Generic;
@@ -11,23 +14,26 @@ using static Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames;
 namespace Shorokoo.Core.Nodes.Processors.Fast
 {
     /// <summary>
-    /// Binds an <see cref="RngConfig"/> to a graph: validates it against the graph's realized
-    /// stream set, writes the config's randomness state as the graph's single
-    /// <c>SHRK_RNG_KEY_VECTOR</c> carrier (the recorded identity — see
-    /// <see cref="RngConfig.BuildKeyVector"/>), and runs the RNG key initializers
-    /// (<see cref="FastMaterializeRngKeys"/>): every feed site's <c>SHRK_RNG_KEY_PARAM</c> entity
-    /// gets its key-table value materialized from the identity, exactly as trainable
-    /// parameters get their values by running their initializers. Re-binding re-runs the key
-    /// initializers only — parameter values are untouched — so a concrete model can be
-    /// re-seeded or switched to another algorithm in place, bit-exactly.
+    /// Binds an <see cref="RngConfig"/> to a graph: <c>ApplyRngConfig</c> <b>is</b> the
+    /// <c>RngSeed</c> parameter's initialization — it validates the config against the graph's
+    /// runtime random surface, then writes the config's encoded runtime identity (see
+    /// <see cref="RngRuntimeIdentity"/>) into the <c>RngSeed</c> parameter at reserved ModelId
+    /// [0] (<c>MODEL_PARAM</c> → <c>MODEL_PARAM_DATA</c>), exactly as <c>ToConcreteModel</c>
+    /// fills weights. Every feed's key is a <c>SHRK_RNG_SPLIT</c> chain rooted at that
+    /// parameter (wired at concretization — see <see cref="FastWireRngKeyDerivation"/>), so
+    /// re-binding — on a freshly built and on a loaded model alike — is a parameter write that
+    /// changes every draw by construction; weights are untouched. Changing the override
+    /// <em>set</em> additionally re-runs the wiring pass (override routing is structural);
+    /// changing override <em>values</em> or the master seed is a pure value write.
     ///
     /// <para>Validation is fail-loud, per the concreteness contract: every id-bearing feed
-    /// must be wired to the key entity created at concretization (see
-    /// <c>ToConcreteArchitecture</c>), a loop-body feed without per-iteration identity is an
-    /// error (a single key would repeat identical values every iteration), and a
-    /// <see cref="RngCollection.Runtime"/> override that matches no realized stream throws
-    /// instead of silently doing nothing. (<see cref="RngCollection.Params"/> overrides are
-    /// validated where they are consumed: parameter initialization.)</para>
+    /// must carry its derivation chain (wired at <c>ToConcreteArchitecture</c>), a loop-body
+    /// feed without per-iteration identity is an error (a single key would repeat identical
+    /// values every iteration), and a <see cref="RngCollection.Runtime"/> override that
+    /// addresses no runtime stream of the graph throws instead of silently doing nothing.
+    /// (<see cref="RngCollection.Params"/> overrides are validated where they are consumed:
+    /// parameter initialization.) A legacy file — saved before the RngSeed representation,
+    /// carrying baked key-table constants with nothing left to re-key — also fails loudly.</para>
     /// </summary>
     internal static class FastBindRngConfig
     {
@@ -36,28 +42,109 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (graph is null) throw new ArgumentNullException(nameof(graph));
             if (rngConfig is null) throw new ArgumentNullException(nameof(rngConfig));
 
-            string algorithmName = RngAlgorithms.NameOf(rngConfig.Algorithm);
-            var realizedPaths = new HashSet<string>();
+            var feeds = ValidateFeeds(graph);
+            var seedNode = FastWireRngKeyDerivation.FindRngSeedNode(graph);
+            var runtimeOverrides = rngConfig.RuntimeOverridesSorted();
 
+            if (seedNode is null)
+            {
+                if (graph.Nodes.Any(n => n.FriendlyName == ShrkRngKeysTensorName))
+                    throw new InvalidOperationException(
+                        "ApplyRngConfig: this graph was loaded from a file saved before the " +
+                        "RNG identity became the RngSeed parameter (it carries the legacy " +
+                        $"'{ShrkRngKeysTensorName}' identity tensor and baked key-table " +
+                        "constants). Its draws cannot be re-keyed — re-binding would update " +
+                        "only the recorded identity while every draw kept the old seed. " +
+                        "Load-and-run of the file is unaffected; to re-key, rebuild the " +
+                        "concrete model from its architecture under the new config.");
+
+                // No runtime random surface at all: binding is a no-op — but an override that
+                // addresses a stream of THIS graph cannot exist, so any Runtime override is
+                // the silent-no-op hazard and must fail loudly.
+                if (runtimeOverrides.Count > 0)
+                    throw new InvalidOperationException(
+                        "RngConfig.Override(Runtime, ...) matches no runtime stream of this graph: " +
+                        string.Join(", ", runtimeOverrides.Select(o => $"[{string.Join(",", o.path)}]")) +
+                        ". This graph has no runtime random feeds.");
+                return;
+            }
+
+            if (feeds.Count > 0)
+            {
+                // Fail-loud override validation: a Runtime override that addresses no feed
+                // site of this graph would otherwise be a silent no-op — exactly the
+                // re-keying hazard explicit seeding exists to prevent. (A site's iteration
+                // slots realize at runtime, so an override addresses a site pattern: static
+                // slots exactly, iteration slots by non-negative index.)
+                var sites = feeds
+                    .Select(f => f.Attributes.GetIntsVal(ShrkAttrLocalModelId)!)
+                    .ToList();
+                var unmatched = runtimeOverrides
+                    .Where(o => !sites.Any(s => FastWireRngKeyDerivation.PathMatchesSite(o.path, s)))
+                    .Select(o => $"[{string.Join(",", o.path)}]")
+                    .ToArray();
+                if (unmatched.Length > 0)
+                    throw new InvalidOperationException(
+                        "RngConfig.Override(Runtime, ...) matches no runtime stream of this graph: " +
+                        string.Join(", ", unmatched) +
+                        ". Available stream paths are listed by GetRngStreamReport(); overrides must " +
+                        "use a reported path exactly.");
+
+                // Structural override routing: if the override SET differs from the one the
+                // chains were wired for, re-run the wiring pass (the orphaned chain nodes are
+                // swept by ordinary reachability). Same set — the common case, including every
+                // seed-only re-bind — leaves the graph untouched.
+                var wiredPaths = CurrentlyWiredOverridePaths(seedNode);
+                var newPaths = runtimeOverrides.Select(o => o.path).ToArray();
+                if (!SamePathSet(wiredPaths, newPaths))
+                {
+                    var identityLayout = RngRuntimeIdentity.Decode(RngRuntimeIdentity.Build(rngConfig));
+                    FastWireRngKeyDerivation.Process(graph,
+                        identityLayout.Overrides.Select(o => (o.Path, o.KeyOffset)).ToArray());
+                    FastProcessorHelper.RemoveUnreachableNodes(graph);
+                }
+            }
+            else
+            {
+                // A loaded (already-lowered) graph: the feeds are baked draw-function calls,
+                // but the symbolic chains and the RngSeed parameter persist — re-binding is a
+                // parameter write that re-keys every draw. What CANNOT change on such a graph
+                // is anything structural: the override set (its routing is wired) and the
+                // algorithm (its draw functions are baked).
+                var current = DecodeCurrentIdentity(seedNode)
+                    ?? throw new InvalidOperationException(
+                        "ApplyRngConfig: the RngSeed parameter carries no identity value on a " +
+                        "graph whose random feeds are already lowered — the graph was modified " +
+                        "since concretization.");
+                if (!current.HasSameOverridePaths(runtimeOverrides.Select(o => o.path).ToArray()))
+                    throw new InvalidOperationException(
+                        "ApplyRngConfig: this graph's random draws are already lowered (a loaded " +
+                        "model), so its override routing is fixed. Re-binding may change seed " +
+                        "values (master or per-stream) but not the override SET; rebuild from " +
+                        "the architecture to change which streams are overridden.");
+                if (current.AlgorithmId != RngRuntimeIdentity.AlgorithmIdOf(rngConfig.Algorithm))
+                    throw new InvalidOperationException(
+                        "ApplyRngConfig: this graph's random draws are already lowered (a loaded " +
+                        "model), so its draw algorithm is baked. Re-binding cannot switch the " +
+                        "algorithm; rebuild from the architecture under the new config.");
+            }
+
+            WriteIdentity(seedNode, RngRuntimeIdentity.Build(rngConfig));
+        }
+
+        /// <summary>
+        /// Validates the graph's feeds and returns the id-bearing ones. A loop-body feed
+        /// without an iteration slot, and an id-bearing feed without its derivation chain,
+        /// are hard errors — never silent fallbacks.
+        /// </summary>
+        private static List<FastNode> ValidateFeeds(FastComputationGraph graph)
+        {
+            var feeds = new List<FastNode>();
             int loopDepth = 0;
             foreach (var node in graph.Nodes)
             {
                 if (node.OpCode == OpCodes.LOOP_OPEN) loopDepth++;
                 else if (node.OpCode == OpCodes.LOOP_CLOSE) loopDepth--;
-
-                if (node.OpCode == InternalOpCodes.SHRK_RNG_KEY_PARAM)
-                {
-                    // The site's key entity owns the realized stream set.
-                    var siteId = node.Attributes.GetIntsVal(ShrkAttrLocalModelId);
-                    var realizedFlat = node.Attributes.GetIntsVal(ShrkAttrRngRealizedIds);
-                    if (siteId is { Length: > 0 } && realizedFlat is { Length: > 0 })
-                    {
-                        int idLen = siteId.Length;
-                        for (int r = 0; r < realizedFlat.Length / idLen; r++)
-                            realizedPaths.Add(string.Join(",", realizedFlat[(r * idLen)..((r + 1) * idLen)]));
-                    }
-                    continue;
-                }
 
                 bool isUniform = node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM;
                 bool isNormal = node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL;
@@ -87,61 +174,57 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (node.Inputs.Count < 4 || node.Inputs[3] is null)
                     throw new InvalidOperationException(
                         $"ApplyRngConfig: the runtime random feed at ModelId [{string.Join(", ", idVals)}] " +
-                        "carries no realized stream ids (no key entity is wired). RNG streams " +
-                        "are enumerated at concretization (ToConcreteArchitecture) — bind the " +
+                        "carries no key derivation chain (no realized stream ids). RNG chains " +
+                        "are wired at concretization (ToConcreteArchitecture) — bind the " +
                         "config to a concrete architecture, concrete model, or training-rig " +
                         "step graph.");
+
+                feeds.Add(node);
             }
-
-            // Fail-loud override validation: a Runtime override that matches no stream of this
-            // graph would otherwise be a silent no-op — exactly the re-keying hazard explicit
-            // seeding exists to prevent.
-            var unmatched = rngConfig.OverrideKeys
-                .Where(k => k.collection == RngCollection.Runtime && !realizedPaths.Contains(k.pathKey))
-                .Select(k => $"[{k.pathKey}]")
-                .ToArray();
-            if (unmatched.Length > 0)
-                throw new InvalidOperationException(
-                    "RngConfig.Override(Runtime, ...) matches no runtime stream of this graph: " +
-                    string.Join(", ", unmatched) +
-                    ". Available stream paths are listed by GetRngStreamReport(); overrides must " +
-                    "use a reported path exactly.");
-
-            InjectKeyVector(graph, rngConfig, algorithmName);
-            FastMaterializeRngKeys.Process(graph, rngConfig);
+            return feeds;
         }
 
-        /// <summary>
-        /// Injects (or replaces) the model's compact RNG key vector — a single parameter-like
-        /// int64 tensor carrying the config's randomness state (see
-        /// <see cref="RngConfig.BuildKeyVector"/>; override records are path-keyed and
-        /// self-describing, so no stream enumeration is stored). Lowered to a plain CONSTANT
-        /// at ONNX prep; re-binding with a different config replaces it.
-        /// </summary>
-        private static void InjectKeyVector(
-            FastComputationGraph graph, RngConfig rngConfig, string algorithmName)
-        {
-            var vector = rngConfig.BuildKeyVector();
-            var data = new OnnxTensorData<int64>(
-                new Shape(vector.Length),
-                Core.Utils.OnnxUtils.CreateTensorValue(new Shape(vector.Length), vector));
+        /// <summary>The override paths the existing chains were wired for: the records of the
+        /// currently bound identity, or none when the parameter is still value-less (the
+        /// architecture-time wiring carries no overrides).</summary>
+        private static int[][] CurrentlyWiredOverridePaths(FastNode seedNode)
+            => DecodeCurrentIdentity(seedNode)?.Overrides.Select(o => o.Path).ToArray()
+               ?? Array.Empty<int[]>();
 
-            graph.Nodes.RemoveAll(n => n.OpCode == InternalOpCodes.SHRK_RNG_KEY_VECTOR);
-            var nodeKey = FastNodeKey.New();
-            var attrDefs = Definitions.NodeDefinitions[InternalOpCodes.SHRK_RNG_KEY_VECTOR].AttributeDefs;
-            graph.Nodes.Add(new FastNode
-            {
-                Key = nodeKey,
-                OpCode = InternalOpCodes.SHRK_RNG_KEY_VECTOR,
-                Attributes = OnnxCSharpAttributes.FromCSharpVals(
-                    new Dictionary<string, object?>
-                    {
-                        [AttrValue] = data,
-                        [ShrkAttrRngAlgorithm] = algorithmName,
-                    }, attrDefs),
-                FullInputs = new Dictionary<string, List<FastTensorKey?>>(),
-                FullOutputs = { [""] = new List<FastTensorKey?> { new FastTensorKey(nodeKey, 0) } },
-            });
+        private static RngRuntimeIdentity? DecodeCurrentIdentity(FastNode seedNode)
+        {
+            if (seedNode.OpCode != InternalOpCodes.MODEL_PARAM_DATA) return null;
+            var data = seedNode.Attributes.GetTensorVal(ShrkAttrTensorData);
+            if (data is null) return null;
+            return RngRuntimeIdentity.Decode(data.As<int64>().AccessMemory().ToArray());
+        }
+
+        private static bool SamePathSet(int[][] a, int[][] b)
+        {
+            if (a.Length != b.Length) return false;
+            var setA = a.Select(p => string.Join(",", p)).ToHashSet();
+            return b.All(p => setA.Contains(string.Join(",", p)));
+        }
+
+        /// <summary>Writes the encoded identity into the RngSeed parameter — the parameter's
+        /// initialization (MODEL_PARAM → MODEL_PARAM_DATA on first bind, a value replacement
+        /// thereafter). Identifier template and output key are preserved, so downstream
+        /// consumers (the chains) stay wired.</summary>
+        private static void WriteIdentity(FastNode seedNode, long[] identity)
+        {
+            var data = new OnnxTensorData<int64>(
+                new Shape(identity.Length),
+                OnnxUtils.CreateTensorValue(new Shape(identity.Length), identity));
+            var attrDefs = Definitions.NodeDefinitions[InternalOpCodes.MODEL_PARAM_DATA].AttributeDefs;
+            seedNode.OpCode = InternalOpCodes.MODEL_PARAM_DATA;
+            seedNode.Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                new Dictionary<string, object?>
+                {
+                    [ShrkAttrTensorData] = data,
+                    [ShrkAttrIsTrainable] = false,
+                }, attrDefs);
+            seedNode.FullInputs = new Dictionary<string, List<FastTensorKey?>>();
+            seedNode.TargetFunction = null;
         }
     }
 }

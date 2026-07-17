@@ -55,6 +55,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 if (node.OpCode != InternalOpCodes.MODEL_PARAM) continue;
 
+                // The RngSeed parameter at reserved ModelId [0] carries the runtime RNG
+                // identity, not a weight: it has no initializer function to run —
+                // ApplyRngConfig is its initialization.
+                if (node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId) is [0])
+                    continue;
+
                 var dtype = node.Attributes.GetDTypeVal(OnnxOpAttributeNames.ShrkAttrDtype).AssertNotNull();
                 var rank = node.Attributes.GetLongVal(OnnxOpAttributeNames.ShrkAttrRank) ?? -1;
                 var modelIdVals = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId).AssertNotNull();

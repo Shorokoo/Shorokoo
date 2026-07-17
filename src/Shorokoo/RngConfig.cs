@@ -185,108 +185,18 @@ public sealed class RngConfig
     internal (uint k0, uint k1) RunMasterKey => SplitWords(RunMasterSeed ?? Fold(MasterSeed, "runtime"));
 
     /// <summary>
-    /// Serializes this config's randomness state as the compact RNG key vector a model carries
-    /// (as a single parameter-like tensor) — the model's persisted <b>source of truth</b> for
-    /// all key derivation. The smallest of three tiers:
-    /// <list type="bullet">
-    ///   <item><b>[1]</b> — the master seed alone, when every key derives from it;</item>
-    ///   <item><b>[3]</b> — master + packed init master + packed run master, when a sub-master
-    ///     was set explicitly but no per-stream override exists;</item>
-    ///   <item><b>[3, C, records…]</b> — the three masters, the override count, then one
-    ///     self-describing record per override: <c>collection (0=Params, 1=Runtime), path
-    ///     length L, the L path elements, seed</c>. Records are keyed by path, never by
-    ///     enumeration order, so decoding needs no stream inventory and no canonical
-    ///     ordering contract; they are nonetheless <em>written</em> in a sorted order so
-    ///     the same config always serializes to the same bytes.</item>
-    /// </list>
-    /// <see cref="FromKeyVector"/> is the exact inverse: the decoded config derives every
-    /// stream key bit-identically to this one. <see cref="SharedKey"/> (debug-only) and
-    /// <see cref="Algorithm"/> are deliberately not encoded — the key tree is
-    /// algorithm-independent, and the algorithm name rides the carrier node's own attribute.
+    /// The <see cref="RngCollection.Runtime"/> overrides in the canonical (sorted-by-path-text)
+    /// record order used by the encoded <c>RngSeed</c> identity (see
+    /// <see cref="Core.Rng.RngRuntimeIdentity"/>) and by the structural chain wiring — one
+    /// deterministic order shared by every consumer, so record offsets computed at wiring time
+    /// match the encoded vector exactly.
     /// </summary>
-    internal long[] BuildKeyVector()
-    {
-        static long Pack((uint k0, uint k1) key) => unchecked((long)(((ulong)key.k1 << 32) | key.k0));
-
-        if (_overrides.Count == 0)
-        {
-            if (InitMasterSeed is null && RunMasterSeed is null)
-                return [unchecked((long)MasterSeed)];
-            return [unchecked((long)MasterSeed), Pack(InitMasterKey), Pack(RunMasterKey)];
-        }
-
-        var vec = new List<long>
-        {
-            unchecked((long)MasterSeed), Pack(InitMasterKey), Pack(RunMasterKey),
-            _overrides.Count,
-        };
-        // Canonical record order (collection, then path text): the dictionary's own
-        // enumeration order is hash-dependent, and the same config should always
-        // serialize to the same bytes.
-        foreach (var ((collection, pathKey), seed) in _overrides
-                     .OrderBy(e => e.Key.collection)
-                     .ThenBy(e => e.Key.pathKey, StringComparer.Ordinal))
-        {
-            var path = pathKey.Split(',');
-            vec.Add(collection == RngCollection.Params ? 0L : 1L);
-            vec.Add(path.Length);
-            foreach (var p in path) vec.Add(long.Parse(p));
-            vec.Add(unchecked((long)seed));
-        }
-        return [.. vec];
-    }
-
-    /// <summary>
-    /// Decodes a key vector produced by <see cref="BuildKeyVector"/> back into a config that
-    /// derives every stream key bit-identically to the originating one — no stream inventory
-    /// needed. Sub-masters decode as explicit seeds (a packed key seed reproduces the packed
-    /// key exactly, since <c>SplitWords</c> inverts the packing); override records restore the
-    /// per-stream seeds by path. <see cref="Algorithm"/> is not carried by the vector — the
-    /// carrier node's attribute is authoritative, so callers reconstructing a full identity
-    /// pass it via <paramref name="algorithm"/>. <see cref="SharedKey"/> is debug-only and
-    /// decodes as default.
-    /// </summary>
-    internal static RngConfig FromKeyVector(
-        long[] keyVector, RngAlgorithm algorithm = RngAlgorithm.Threefry2x32)
-    {
-        if (keyVector is not { Length: >= 1 })
-            throw new ArgumentException("RNG key vector must have at least the master seed.", nameof(keyVector));
-
-        if (keyVector.Length == 1)
-            return new RngConfig { MasterSeed = unchecked((ulong)keyVector[0]), Algorithm = algorithm };
-
-        if (keyVector.Length < 3)
-            throw new ArgumentException(
-                $"Malformed RNG key vector: length {keyVector.Length} (expected 1, 3, or 3 + override records).",
-                nameof(keyVector));
-
-        var cfg = new RngConfig
-        {
-            MasterSeed = unchecked((ulong)keyVector[0]),
-            InitMasterSeed = unchecked((ulong)keyVector[1]),
-            RunMasterSeed = unchecked((ulong)keyVector[2]),
-            Algorithm = algorithm,
-        };
-        if (keyVector.Length == 3) return cfg;
-
-        int i = 3;
-        long count = keyVector[i++];
-        for (long r = 0; r < count; r++)
-        {
-            if (i + 2 > keyVector.Length)
-                throw new ArgumentException("Malformed RNG key vector: truncated override record.", nameof(keyVector));
-            var collection = keyVector[i++] == 0L ? RngCollection.Params : RngCollection.Runtime;
-            int pathLen = checked((int)keyVector[i++]);
-            if (pathLen <= 0 || i + pathLen + 1 > keyVector.Length)
-                throw new ArgumentException("Malformed RNG key vector: truncated override record.", nameof(keyVector));
-            int[] path = new int[pathLen];
-            for (int j = 0; j < pathLen; j++) path[j] = checked((int)keyVector[i++]);
-            cfg = cfg.Override(collection, path, unchecked((ulong)keyVector[i++]));
-        }
-        if (i != keyVector.Length)
-            throw new ArgumentException("Malformed RNG key vector: trailing data after override records.", nameof(keyVector));
-        return cfg;
-    }
+    internal IReadOnlyList<(int[] path, ulong seed)> RuntimeOverridesSorted()
+        => _overrides
+            .Where(e => e.Key.collection == RngCollection.Runtime)
+            .OrderBy(e => e.Key.pathKey, StringComparer.Ordinal)
+            .Select(e => (e.Key.pathKey.Split(',').Select(int.Parse).ToArray(), e.Value))
+            .ToArray();
 
     internal static (uint k0, uint k1) SplitWords(ulong key)
         => ((uint)(key & 0xFFFFFFFF), (uint)(key >> 32));

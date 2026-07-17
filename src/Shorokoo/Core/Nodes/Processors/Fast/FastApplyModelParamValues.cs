@@ -41,6 +41,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 if (node.OpCode != InternalOpCodes.MODEL_PARAM) continue;
 
+                // The RngSeed parameter at reserved ModelId [0] is not a weight — it is
+                // filled by ApplyRngConfig (the caller binds the default identity when no
+                // config was given), never from the trainable-parameter value set.
+                if (node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId) is [0])
+                    continue;
+
                 var modelIdVals = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId).AssertNotNull();
                 var modelId = new ModelId(modelIdVals);
                 var paramValue = paramValues[modelId];
@@ -60,6 +66,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 node.FullInputs = new Dictionary<string, List<FastTensorKey?>>();
                 node.TargetFunction = null;
             }
+
+            // The concrete model remembers its source architecture (in-memory only) — the
+            // parameter inventory needed for in-place re-initialization; see
+            // FastComputationGraphExtensions.ReinitializeTrainableParams.
+            workGraph.SourceArchitecture = graph;
 
             FastProcessorHelper.RemoveUnreachableNodes(workGraph);
             // Run FastSimplify so the constant-folding / sequence-folding / unrolling

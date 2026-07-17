@@ -280,8 +280,7 @@ public class RngReinitializeTests
         // cannot be re-initialized in place and must say so, never silently no-op.
         var model = ConcreteArch().ToConcreteModel(new RngConfig { MasterSeed = 5 });
         var loaded = Shorokoo.Core.Utils.CompressedFormatUtils.LoadFastGraphFromBinary(
-            Shorokoo.Core.Utils.CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true),
-            isCompressed: true);
+            Shorokoo.Core.Utils.CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true));
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
             loaded.ReinitializeTrainableParams(new RngConfig { MasterSeed = 6 }));

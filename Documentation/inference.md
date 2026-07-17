@@ -79,6 +79,12 @@ var results = ComputeContext.Default.Execute(concrete, input);   // params IData
 float[] values = results[0].ToTensorData().As<float32>().AccessMemory<float>().ToArray();
 ```
 
+When the graph comes from a saved `.srk`/`.zsrk` file, you can catch this mismatch
+at load time instead: v2 files record their lowering stage in the header, and
+`LoadFastGraphFromFile(path, requiredStage: SrkGraphStage.ConcreteModel)` refuses a
+module-stage file with a clear stage-mismatch error — see
+[onnx-and-weights.md](onnx-and-weights.md#the-srk-v2-container).
+
 ### The lowering pipeline
 
 Turning a `[Module]`'s `ComputationGraph` into a runnable model is a three-step

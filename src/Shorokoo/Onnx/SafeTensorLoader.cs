@@ -12,7 +12,6 @@ using Shorokoo.Modules;
 using Shorokoo.Graph;
 using Shorokoo.Core.Nodes.OnnxNodes;
 using static Shorokoo.Globals;
-using Shorokoo.Core.Utils;
 using Shorokoo.Core.Inference.Abstractions;
 
 namespace Shorokoo.Onnx
@@ -76,7 +75,6 @@ namespace Shorokoo.Onnx
                 throw new FileNotFoundException($"SafeTensor file not found: {filePath}");
 
             var fileBytes = File.ReadAllBytes(filePath);
-            CompressedFormatUtils.ThrowIfGitLfsPointer(filePath, fileBytes);
             return ParseSafeTensorFile(fileBytes);
         }
 

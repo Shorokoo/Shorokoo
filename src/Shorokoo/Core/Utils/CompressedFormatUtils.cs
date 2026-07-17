@@ -23,7 +23,10 @@ namespace Shorokoo.Core.Utils
     /// Utility class for loading and saving compressed Shorokoo data formats.
     /// Supports:
     /// - .zsafetensor: Zstandard-compressed safetensors files
-    /// - .zsrk: Zstandard-compressed Shorokoo architecture (.bin) files
+    /// - .srk / .zsrk: Shorokoo graph files — written as self-describing v2 containers
+    ///   (see <see cref="SrkFileFormat"/>), loaded by content for every layout (v2 and
+    ///   the three legacy v1 layouts). The extensions are hints for humans only; the
+    ///   header, not the extension, declares the compression.
     /// </summary>
     public static class CompressedFormatUtils
     {
@@ -143,71 +146,107 @@ namespace Shorokoo.Core.Utils
 
         #endregion
 
-        #region Compressed Architecture Loading
+        #region Architecture Save / Load
 
         /// <summary>
-        /// Load a compressed Shorokoo architecture file (.zsrk)
+        /// Serialize <paramref name="graph"/> to a self-describing .srk v2 container
+        /// (see <see cref="SrkFileFormat"/>): the ONNX payload built via
+        /// <see cref="FastOnnxModelBuilder"/>, wrapped in exactly one optional Zstd layer,
+        /// behind a JSON header recording the container version, the graph's lifecycle
+        /// stage, the compression, the payload SHA-256, and producer info.
         /// </summary>
-        /// <param name="filePath">Path to the .zsrk file</param>
-        /// <returns><see cref="FastComputationGraph"/> loaded from the compressed architecture file</returns>
-        public static FastComputationGraph LoadCompressedArchitecture(string filePath)
-        {
-            var decompressedBytes = DecompressFile(filePath);
-            return LoadFastGraphFromBinary(decompressedBytes);
-        }
-
-        /// <summary>
-        /// Load a compressed Shorokoo architecture file (.zsrk) from a stream
-        /// </summary>
-        /// <param name="stream">Stream containing the compressed .zsrk data</param>
-        /// <returns><see cref="FastComputationGraph"/> loaded from the compressed architecture</returns>
-        public static FastComputationGraph LoadCompressedArchitectureFromStream(Stream stream)
-        {
-            var decompressedBytes = DecompressStream(stream);
-            return LoadFastGraphFromBinary(decompressedBytes);
-        }
-
-        /// <summary>
-        /// Serialize <paramref name="graph"/> to ONNX bytes via
-        /// <see cref="FastOnnxModelBuilder"/>, optionally Zstd-compressing the result.
-        /// .zsrk archives produced by <see cref="SaveCompressedArchitecture"/> wrap an
-        /// already-compressed payload (with <paramref name="compressed"/>=true) inside
-        /// another Zstd layer; that outer layer is added by
-        /// <see cref="CompressToFile"/>.
-        /// </summary>
-        public static byte[] SaveFastGraphToBinary(FastComputationGraph graph, bool compressed = true)
+        public static byte[] SaveFastGraphToBinary(
+            FastComputationGraph graph, bool compressed = true, int compressionLevel = DefaultCompressionLevel)
         {
             using var memoryStream = new MemoryStream();
             var model = FastOnnxModelBuilder.BuildOnnxModel(graph);
             Serializer.Serialize(memoryStream, model);
-            var data = memoryStream.ToArray();
-            return compressed ? Compress(data) : data;
+            var onnxBytes = memoryStream.ToArray();
+
+            KeyValuePair<string, long>[] opsets =
+                [.. model.OpsetImports.Select(o => new KeyValuePair<string, long>(o.Domain, o.Version))];
+            return SrkFileFormat.Write(
+                onnxBytes, SrkFileFormat.DetectStage(graph), compressed, compressionLevel,
+                model.IrVersion, opsets);
         }
 
         /// <summary>
-        /// Inverse of <see cref="SaveFastGraphToBinary"/>: deserialize ONNX bytes (with
-        /// optional Zstd decompression) into a <see cref="FastComputationGraph"/> via
-        /// <see cref="OnnxModelImporter"/>.
+        /// Inverse of <see cref="SaveFastGraphToBinary"/>: deserialize .srk bytes into a
+        /// <see cref="FastComputationGraph"/> via <see cref="OnnxModelImporter"/>. The layout
+        /// is decided by content only — v2 containers are validated against their header
+        /// (compression, payload SHA-256), and legacy v1 data (bare protobuf, single- or
+        /// double-Zstd) loads through the content-sniffing shim in
+        /// <see cref="SrkFileFormat.Read"/>.
         /// </summary>
-        public static FastComputationGraph LoadFastGraphFromBinary(byte[] data, bool isCompressed = true)
+        /// <param name="data">.srk bytes (any layout).</param>
+        /// <param name="requiredStage">When set, refuse (with a clear stage-mismatch error)
+        /// data whose graph is not of this <see cref="SrkGraphStage"/> — e.g. reject a
+        /// module-stage graph where a runnable concrete model is required. For v2 data the
+        /// header is checked before the payload is parsed; for v1 data the stage is detected
+        /// from the loaded graph.</param>
+        public static FastComputationGraph LoadFastGraphFromBinary(
+            byte[] data, SrkGraphStage? requiredStage = null)
+            => LoadFastGraphCore(data, origin: "<in-memory .srk data>", requiredStage);
+
+        /// <summary>
+        /// Shared load path: container/shim payload extraction, header-first stage
+        /// enforcement for v2, graph import, and detected-stage enforcement for v1.
+        /// </summary>
+        private static FastComputationGraph LoadFastGraphCore(
+            byte[] data, string origin, SrkGraphStage? requiredStage)
         {
-            if (isCompressed)
-                data = Decompress(data);
-            return OnnxModelImporter.FromOnnxModelToFastGraph(data);
+            var (header, onnxBytes) = SrkFileFormat.Read(data, origin);
+
+            if (header is not null && requiredStage is not null)
+            {
+                var stage = header.TryGetStage() ?? throw new InvalidDataException(
+                    $"'{origin}': the .srk header records the unknown stage '{header.Stage}' " +
+                    "(likely written by a newer Shorokoo version), so the required " +
+                    $"'{SrkFileFormat.StageName(requiredStage.Value)}' stage cannot be verified.");
+                SrkFileFormat.EnforceStage(stage, requiredStage.Value, origin);
+            }
+
+            FastComputationGraph graph;
+            try
+            {
+                graph = OnnxModelImporter.FromOnnxModelToFastGraph(onnxBytes);
+            }
+            catch (Exception e) when (e is ProtoBuf.ProtoException
+                or EndOfStreamException
+                or IndexOutOfRangeException
+                or ArgumentOutOfRangeException
+                or OverflowException
+                or FormatException)
+            {
+                // These are the exceptions the protobuf/ONNX layer raises on malformed payload
+                // bytes — garbage, truncation, or an empty model (e.g. OpsetImports[0] on an
+                // empty ModelProto). Name the file and the cause instead of surfacing a bare
+                // deep-in-the-importer exception. Deliberately NOT catching Exception broadly:
+                // a NullReferenceException/InvalidOperationException/NotSupportedException from a
+                // valid-but-unsupported graph (or a framework bug), and OutOfMemoryException, must
+                // propagate as themselves rather than be mislabeled "corrupt file".
+                throw new InvalidDataException(
+                    $"'{origin}': not a readable Shorokoo graph file — failed to parse the ONNX payload " +
+                    $"({e.GetType().Name}: {e.Message}). The file is corrupt or not a .srk file.", e);
+            }
+
+            if (header is null && requiredStage is not null)
+                SrkFileFormat.EnforceStage(SrkFileFormat.DetectStage(graph), requiredStage.Value, origin);
+
+            return graph;
         }
 
         /// <summary>
         /// Save <paramref name="graph"/> directly to <paramref name="filename"/> as a
-        /// single-Zstd-wrapped ONNX payload. Inverse of
-        /// <see cref="LoadFastGraphFromFile"/>. Note: distinct on-disk format from
-        /// <see cref="SaveCompressedArchitecture"/>, which adds an additional outer
-        /// Zstd layer.
+        /// .srk v2 container (see <see cref="SaveFastGraphToBinary"/>). Inverse of
+        /// <see cref="LoadFastGraphFromFile"/>. With <paramref name="overrideExtension"/>
+        /// the extension is normalized to .zsrk/.srk purely as a hint for humans — the
+        /// extension has no parsing significance; the header records the compression.
         /// </summary>
-        public static string SaveFastGraphToFile(string filename, FastComputationGraph graph, bool compressed = true, bool overrideExtension = true)
+        public static string SaveFastGraphToFile(
+            string filename, FastComputationGraph graph, bool compressed = true,
+            bool overrideExtension = true, int compressionLevel = DefaultCompressionLevel)
         {
-            if (File.Exists(filename))
-                File.Delete(filename);
-
             filename = Path.GetFullPath(filename);
 
             if (overrideExtension)
@@ -218,37 +257,55 @@ namespace Shorokoo.Core.Utils
             if (directoryPath is not null)
                 Directory.CreateDirectory(directoryPath);
 
-            File.WriteAllBytes(filename, SaveFastGraphToBinary(graph, compressed));
+            // Serialize BEFORE touching the destination so a serialization failure never
+            // leaves the target truncated/missing; File.WriteAllBytes overwrites in place.
+            var bytes = SaveFastGraphToBinary(graph, compressed, compressionLevel);
+            File.WriteAllBytes(filename, bytes);
             return filename;
         }
 
         /// <summary>
-        /// Load a <see cref="FastComputationGraph"/> from a file written by
-        /// <see cref="SaveFastGraphToFile"/>. Compression is auto-detected from the
-        /// file extension when <paramref name="isCompressed"/> is <c>null</c>.
+        /// Load a <see cref="FastComputationGraph"/> from a .srk file of any layout —
+        /// the content decides how the file parses, never the extension, so a renamed
+        /// file loads identically. See <see cref="LoadFastGraphFromBinary"/> for the
+        /// layout handling and the <paramref name="requiredStage"/> contract; errors
+        /// name <paramref name="filename"/>.
         /// </summary>
-        public static FastComputationGraph LoadFastGraphFromFile(string filename, bool? isCompressed = null)
+        public static FastComputationGraph LoadFastGraphFromFile(
+            string filename, SrkGraphStage? requiredStage = null)
         {
-            var actualIsCompressed = isCompressed ?? IsCompressedArchitecture(filename);
             var allData = File.ReadAllBytes(filename);
-            ThrowIfGitLfsPointer(filename, allData);
-            return LoadFastGraphFromBinary(allData, actualIsCompressed);
+            return LoadFastGraphCore(allData, filename, requiredStage);
         }
 
         /// <summary>
-        /// Generates a text listing of all node names and tensor names found in a compressed
-        /// architecture file (.zsrk), by deserializing into intermediate JSON objects rather
-        /// than a full <see cref="FastComputationGraph"/>.
+        /// Reads the raw serialized-ONNX payload out of an architecture file of any .srk
+        /// layout (v2 container or legacy v1), by content. Shared by the JSON/introspection
+        /// helpers below, which parse the ModelProto without building a full
+        /// <see cref="FastComputationGraph"/>.
+        /// </summary>
+        private static byte[] ReadArchitecturePayloadFromFile(string filePath)
+        {
+            if (!File.Exists(filePath))
+                throw new FileNotFoundException($"Architecture file not found: {filePath}");
+            var allData = File.ReadAllBytes(filePath);
+            return SrkFileFormat.Read(allData, filePath).OnnxBytes;
+        }
+
+        /// <summary>
+        /// Generates a text listing of all node names and tensor names found in an
+        /// architecture file (any .srk layout), by deserializing into intermediate JSON
+        /// objects rather than a full <see cref="FastComputationGraph"/>.
         ///
         /// The returned string lists all node names first, followed by an empty line, then all
         /// tensor names. Names are listed in the order they are first encountered when scanning
         /// the JSON representation of the file.
         /// </summary>
-        /// <param name="filePath">Path to the .zsrk file</param>
+        /// <param name="filePath">Path to the architecture file (any .srk layout)</param>
         /// <returns>Formatted text listing of node names and tensor names</returns>
         public static string GetNodeAndTensorNameListing(string filePath)
         {
-            var decompressedBytes = DecompressFile(filePath);
+            var decompressedBytes = ReadArchitecturePayloadFromFile(filePath);
 
             // Deserialize to IR.ModelProto — do NOT go all the way to FastComputationGraph
             ModelProto model;
@@ -341,11 +398,11 @@ namespace Shorokoo.Core.Utils
         /// This is primarily useful for diffing two runs of a generation step to identify
         /// which fields or nodes differ between runs.
         /// </summary>
-        /// <param name="filePath">Path to the .zsrk file to convert.</param>
+        /// <param name="filePath">Path to the architecture file (any .srk layout) to convert.</param>
         /// <returns>Pretty-printed JSON string representing the ModelProto.</returns>
         public static string ToJson(string filePath)
         {
-            var decompressedBytes = DecompressFile(filePath);
+            var decompressedBytes = ReadArchitecturePayloadFromFile(filePath);
 
             ModelProto model;
             using (var ms = new MemoryStream(decompressedBytes))
@@ -461,34 +518,6 @@ namespace Shorokoo.Core.Utils
 
         #endregion
 
-        #region Compressed Architecture Saving
-
-        /// <summary>
-        /// Save a <see cref="FastComputationGraph"/> to a compressed architecture file (.zsrk)
-        /// </summary>
-        /// <param name="filePath">Path for the output .zsrk file</param>
-        /// <param name="graph"><see cref="FastComputationGraph"/> to save</param>
-        /// <param name="compressionLevel">Zstandard compression level (1-22, default: 3)</param>
-        public static void SaveCompressedArchitecture(string filePath, FastComputationGraph graph, int compressionLevel = DefaultCompressionLevel)
-        {
-            var uncompressedBytes = SaveFastGraphToBinary(graph);
-            CompressToFile(filePath, uncompressedBytes, compressionLevel);
-        }
-
-        /// <summary>
-        /// Save a <see cref="FastComputationGraph"/> to a compressed architecture stream (.zsrk)
-        /// </summary>
-        /// <param name="stream">Stream to write the compressed data to</param>
-        /// <param name="graph"><see cref="FastComputationGraph"/> to save</param>
-        /// <param name="compressionLevel">Zstandard compression level (1-22, default: 3)</param>
-        public static void SaveCompressedArchitectureToStream(Stream stream, FastComputationGraph graph, int compressionLevel = DefaultCompressionLevel)
-        {
-            var uncompressedBytes = SaveFastGraphToBinary(graph);
-            CompressToStream(stream, uncompressedBytes, compressionLevel);
-        }
-
-        #endregion
-
         #region Generic Compression Utilities
 
         /// <summary>
@@ -502,45 +531,7 @@ namespace Shorokoo.Core.Utils
                 throw new FileNotFoundException($"Compressed file not found: {filePath}");
 
             var compressedBytes = File.ReadAllBytes(filePath);
-            ThrowIfGitLfsPointer(filePath, compressedBytes);
             return Decompress(compressedBytes);
-        }
-
-        /// <summary>
-        /// Magic prefix that marks a file as a Git LFS pointer (rather than the real binary it stands in for).
-        /// See https://github.com/git-lfs/git-lfs/blob/main/docs/spec.md
-        /// </summary>
-        private const string GitLfsPointerPrefix = "version https://git-lfs.github.com/spec/v1";
-
-        /// <summary>
-        /// Returns true if <paramref name="fileBytes"/> look like a Git LFS pointer rather than real content.
-        /// Pointer files are short UTF-8 text beginning with a fixed version line.
-        /// </summary>
-        public static bool IsGitLfsPointer(byte[] fileBytes)
-        {
-            if (fileBytes == null || fileBytes.Length < GitLfsPointerPrefix.Length)
-                return false;
-            // LFS pointer files are small; avoid scanning large binaries.
-            if (fileBytes.Length > 1024)
-                return false;
-            for (int i = 0; i < GitLfsPointerPrefix.Length; i++)
-            {
-                if (fileBytes[i] != (byte)GitLfsPointerPrefix[i])
-                    return false;
-            }
-            return true;
-        }
-
-        /// <summary>
-        /// Throws a clear, actionable error if the bytes are a Git LFS pointer instead of real content.
-        /// </summary>
-        public static void ThrowIfGitLfsPointer(string filePath, byte[] fileBytes)
-        {
-            if (!IsGitLfsPointer(fileBytes))
-                return;
-            throw new InvalidDataException(
-                $"'{filePath}' is a Git LFS pointer, not the actual file content. " +
-                "Install git-lfs and run 'git lfs install && git lfs pull' to download the real file.");
         }
 
         /// <summary>
@@ -562,6 +553,14 @@ namespace Shorokoo.Core.Utils
         /// <param name="compressedBytes">Compressed byte array</param>
         /// <returns>Decompressed byte array</returns>
         public static byte[] Decompress(byte[] compressedBytes)
+            => Decompress((ReadOnlySpan<byte>)compressedBytes);
+
+        /// <summary>
+        /// Decompress Zstandard-compressed bytes from a span, without first copying them into a
+        /// dedicated array — lets callers unwrap a slice of a larger buffer (e.g. a container
+        /// payload) with no intermediate allocation.
+        /// </summary>
+        public static byte[] Decompress(ReadOnlySpan<byte> compressedBytes)
         {
             using var decompressor = new Decompressor();
             return decompressor.Unwrap(compressedBytes).ToArray();
@@ -613,11 +612,10 @@ namespace Shorokoo.Core.Utils
         public static bool IsCompressedSafeTensor(string filePath)
             => filePath.EndsWith(CompressedSafeTensorExtension, StringComparison.OrdinalIgnoreCase);
 
-        /// <summary>
-        /// Determines if a file path is for a compressed architecture file
-        /// </summary>
-        public static bool IsCompressedArchitecture(string filePath)
-            => filePath.EndsWith(CompressedArchitectureExtension, StringComparison.OrdinalIgnoreCase);
+        // Note: there is deliberately no IsCompressedArchitecture(path) helper. A .srk file's
+        // compression is declared in its header, never implied by the .srk/.zsrk extension, so
+        // an extension-based predicate would misrepresent the format contract. Read the header
+        // with SrkFileFormat.TryReadHeaderFromFile when the compression must be known.
 
         #endregion
     }

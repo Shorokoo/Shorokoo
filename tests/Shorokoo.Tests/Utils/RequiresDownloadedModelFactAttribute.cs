@@ -2,12 +2,12 @@ namespace Shorokoo.Tests.Utils;
 
 /// <summary>
 /// Marks a test that needs a model checkpoint a developer downloads manually.
-/// These files are intentionally not committed (they used to be git-lfs golden
-/// weights; see <c>tests/test-data/README.md</c> for the download commands).
+/// These files are intentionally not committed (see <c>tests/test-data/README.md</c>
+/// for the download commands).
 ///
-/// If the checkpoint is missing — or implausibly small, e.g. a stray git-lfs
-/// pointer or a truncated download — the test is <see cref="FactAttribute.Skip"/>ped
-/// with a message that includes the download command, rather than failing.
+/// If the checkpoint is missing — or implausibly small, e.g. a truncated download —
+/// the test is <see cref="FactAttribute.Skip"/>ped with a message that includes the
+/// download command, rather than failing.
 ///
 /// Tests using this attribute are tagged <c>[Trait("Purpose", "Manual")]</c> so the
 /// automated Coverage suite (<c>Purpose=Coverage</c>) never selects them; they run

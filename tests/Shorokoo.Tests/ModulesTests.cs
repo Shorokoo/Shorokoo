@@ -294,7 +294,7 @@ public class ModulesCoverageTests
         Assert.Contains(moduleGraph.Nodes, n => n.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT);
 
         var data = CompressedFormatUtils.SaveFastGraphToBinary(moduleGraph, compressed: true);
-        var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(data, isCompressed: true);
+        var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(data);
         Assert.Contains(reloaded.Nodes, n => n.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT);
         Assert.Equal(moduleGraph.Nodes.Count, reloaded.Nodes.Count);
     }
@@ -381,7 +381,7 @@ public class ModulesCoverageTests
 
         // Save → load.
         var data = CompressedFormatUtils.SaveFastGraphToBinary(graph, compressed: true);
-        var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(data, isCompressed: true);
+        var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(data);
 
         // Post-load: BuildFastFunctionInvokeNodeFromProto produced a fresh
         // FUNCTION_INVOKE FastNode with a rebuilt TargetFunction (same default
@@ -419,7 +419,7 @@ public class ModulesCoverageTests
         }
 
         var data = CompressedFormatUtils.SaveFastGraphToBinary(moduleGraph, compressed: true);
-        moduleGraph = CompressedFormatUtils.LoadFastGraphFromBinary(data, isCompressed: true);
+        moduleGraph = CompressedFormatUtils.LoadFastGraphFromBinary(data);
 
         var allInputs = new System.Collections.Generic.List<TensorData>();
         allInputs.AddRange(hyperparamInputs);
@@ -427,11 +427,11 @@ public class ModulesCoverageTests
 
         var concreteArch = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([.. allInputs]));
         var archData = CompressedFormatUtils.SaveFastGraphToBinary(concreteArch, compressed: true);
-        concreteArch = CompressedFormatUtils.LoadFastGraphFromBinary(archData, isCompressed: true);
+        concreteArch = CompressedFormatUtils.LoadFastGraphFromBinary(archData);
 
         var concreteModel = concreteArch.ToConcreteModel();
         var modelData = CompressedFormatUtils.SaveFastGraphToBinary(concreteModel, compressed: true);
-        var reloadedModel = CompressedFormatUtils.LoadFastGraphFromBinary(modelData, isCompressed: true);
+        var reloadedModel = CompressedFormatUtils.LoadFastGraphFromBinary(modelData);
 
         Assert.NotEmpty(reloadedModel.Nodes);
         Assert.NotEmpty(reloadedModel.Outputs);

@@ -304,7 +304,7 @@ public class RngSeedTransportTests
         Assert.Equal(RngRuntimeIdentity.Build(cfg), arch.TryGetRngSeed());
 
         var data = CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: true);
-        var loaded = CompressedFormatUtils.LoadFastGraphFromBinary(data, isCompressed: true);
+        var loaded = CompressedFormatUtils.LoadFastGraphFromBinary(data);
         var carried = loaded.TryGetRngSeed();
         Assert.NotNull(carried);
         Assert.Equal(arch.TryGetRngSeed(), carried);
@@ -320,7 +320,7 @@ public class RngSeedTransportTests
         // never accumulates duplicates.
         Assert.Equal(1, RngSeedNodeCount(loaded));
         var loaded2 = CompressedFormatUtils.LoadFastGraphFromBinary(
-            CompressedFormatUtils.SaveFastGraphToBinary(loaded, compressed: true), isCompressed: true);
+            CompressedFormatUtils.SaveFastGraphToBinary(loaded, compressed: true));
         Assert.Equal(1, RngSeedNodeCount(loaded2));
         Assert.Equal(carried, loaded2.TryGetRngSeed());
     }
@@ -351,7 +351,7 @@ public class RngSeedTransportTests
         Assert.NotEqual(before, draws20);   // guard: the two algorithms genuinely differ here
 
         var loaded = CompressedFormatUtils.LoadFastGraphFromBinary(
-            CompressedFormatUtils.SaveFastGraphToBinary(m13, compressed: true), isCompressed: true);
+            CompressedFormatUtils.SaveFastGraphToBinary(m13, compressed: true));
 
         var carried = loaded.TryGetRngSeed();
         Assert.NotNull(carried);
@@ -406,7 +406,7 @@ public class RngSeedTransportTests
         var drawsA = Run(modelA);
 
         var loaded = CompressedFormatUtils.LoadFastGraphFromBinary(
-            CompressedFormatUtils.SaveFastGraphToBinary(modelA, compressed: true), isCompressed: true);
+            CompressedFormatUtils.SaveFastGraphToBinary(modelA, compressed: true));
         Assert.Equal(drawsA, Run(loaded));            // load-and-run reproduces seed A
 
         loaded.ApplyRngConfig(seedB);                 // a parameter write on the loaded graph
@@ -416,7 +416,7 @@ public class RngSeedTransportTests
 
         // Round-trip again after the re-bind: the new identity is what persists.
         var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(
-            CompressedFormatUtils.SaveFastGraphToBinary(loaded, compressed: true), isCompressed: true);
+            CompressedFormatUtils.SaveFastGraphToBinary(loaded, compressed: true));
         Assert.Equal(rekeyed, Run(reloaded));
     }
 
@@ -434,7 +434,7 @@ public class RngSeedTransportTests
         var model = g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps]))
             .ToConcreteModel(new RngConfig { MasterSeed = 11 });
         var loaded = CompressedFormatUtils.LoadFastGraphFromBinary(
-            CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true), isCompressed: true);
+            CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true));
 
         var withOverride = new RngConfig { MasterSeed = 11 }
             .Override(RngCollection.Runtime, [1, 1, 1], 42UL);
@@ -465,7 +465,7 @@ public class RngSeedTransportTests
 
         // Strip the new representation down to the legacy shape.
         var legacy = CompressedFormatUtils.LoadFastGraphFromBinary(
-            CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true), isCompressed: true);
+            CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true));
         var seedNode = legacy.Nodes.Single(n =>
             n.IdentifierTemplate == Shorokoo.Core.Nodes.Processors.Fast
                 .FastWireRngKeyDerivation.RngSeedIdentifierTemplate);
@@ -493,7 +493,7 @@ public class RngSeedTransportTests
         Assert.Equal(0, RngSeedNodeCount(model));
         Assert.Null(model.TryGetRngSeed());
         var loaded = CompressedFormatUtils.LoadFastGraphFromBinary(
-            CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true), isCompressed: true);
+            CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true));
         Assert.Equal(0, RngSeedNodeCount(loaded));
         Assert.DoesNotContain(loaded.Nodes, n =>
             n.FriendlyName == OnnxOpAttributeNames.ShrkRngKeysTensorName);

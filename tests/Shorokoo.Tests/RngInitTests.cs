@@ -316,7 +316,7 @@ public class RngReinitializeTests
     {
         // THE pin: initialize under seed A, re-initialize in place under seed B → values
         // change and match a fresh build under seed B bit-exactly (same code path: keyed
-        // host noise per parameter stream).
+        // in-graph draw per parameter stream).
         var seedA = new RngConfig { MasterSeed = 5 };
         var seedB = new RngConfig { MasterSeed = 6 };
 

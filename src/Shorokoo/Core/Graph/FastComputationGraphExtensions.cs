@@ -445,7 +445,7 @@ namespace Shorokoo.Graph
 
         /// <summary>
         /// Re-initializes a <b>concrete model's</b> trainable parameters in place under a new
-        /// RNG identity: re-runs each trainable parameter's initializer with host noise keyed
+        /// RNG identity: re-runs each trainable parameter's initializer with an in-graph draw keyed
         /// by <paramref name="rngConfig"/>'s init collection (validating
         /// <see cref="RngCollection.Params"/> overrides against the parameter inventory
         /// exactly as at first initialization) and overwrites the parameter values — bit-exact
@@ -473,7 +473,7 @@ namespace Shorokoo.Graph
                     "config instead.");
 
             // Freshly initialized values under the new identity — the exact first-init code
-            // path (per-parameter keyed host noise, Params-override validation included), so
+            // path (per-parameter keyed in-graph draw, Params-override validation included), so
             // the result is bit-exact with a fresh build under the same config.
             var paramInfos = arch.GetConcreteModelParamInfos();
             var initialized = FastInitializeModelParams.Process(

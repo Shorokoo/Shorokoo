@@ -82,7 +82,10 @@ namespace Shorokoo.Core.Factory
             OpSetVersion opset = OpSetVersion.OPS_21,
             IR_VERSION irVersion = IR_VERSION.IR_10,
             bool prepForOnnx = false)
-            => BuildOnnxModelCore(fastGraph, opset, irVersion, prepForOnnx, vanillaExport: true);
+            // irVersion is accepted for signature compatibility but currently inert —
+            // the emitted model is always stamped IR_10 (OnnxIRFactory.CreateModel);
+            // tracked in Shorokoo/Shorokoo#50. It is deliberately NOT threaded further.
+            => BuildOnnxModelCore(fastGraph, opset, prepForOnnx, vanillaExport: true);
 
         /// <summary>
         /// Internal-dialect ONNX serialization for Shorokoo's own persistence
@@ -96,14 +99,12 @@ namespace Shorokoo.Core.Factory
         internal static ModelProto BuildInternalOnnxModel(
             FastComputationGraph fastGraph,
             OpSetVersion opset = OpSetVersion.OPS_21,
-            IR_VERSION irVersion = IR_VERSION.IR_10,
             bool prepForOnnx = false)
-            => BuildOnnxModelCore(fastGraph, opset, irVersion, prepForOnnx, vanillaExport: false);
+            => BuildOnnxModelCore(fastGraph, opset, prepForOnnx, vanillaExport: false);
 
         private static ModelProto BuildOnnxModelCore(
             FastComputationGraph fastGraph,
             OpSetVersion opset,
-            IR_VERSION irVersion,
             bool prepForOnnx,
             bool vanillaExport)
         {
@@ -177,7 +178,13 @@ namespace Shorokoo.Core.Factory
             {
                 ThrowIfNotVanillaDialect(model);
                 StampGraphOutputTypes(model.Graph, prepFast, tensorInfoLookup);
-                ApplySignatureIONames(model.Graph, fastGraph.InputUniqueNames, fastGraph.OutputUniqueNames);
+                // Names come from prepFast, not the original fastGraph: the proto's
+                // I/O slots are built positionally from prepFast.Inputs/Outputs, and
+                // any pass that mutates those lists maintains the name lists in
+                // lockstep (the convention every Fast processor follows) — pairing
+                // against the original graph's lists would silently mislabel I/O the
+                // day a pre-pass adds or drops a graph input.
+                ApplySignatureIONames(model.Graph, prepFast.InputUniqueNames, prepFast.OutputUniqueNames);
             }
 
             return model;
@@ -209,6 +216,23 @@ namespace Shorokoo.Core.Factory
             || opType.StartsWith("shrk_", StringComparison.Ordinal);
 
         /// <summary>
+        /// Visits <paramref name="graph"/> and every subgraph nested under it via
+        /// node graph-attributes (Loop/If bodies), in declaration order — the one
+        /// shared traversal behind the vanilla-dialect check and the I/O rename
+        /// passes, so subgraph coverage is fixed in a single place.
+        /// </summary>
+        private static void ForEachGraphRecursive(GraphProto graph, Action<GraphProto> visit)
+        {
+            visit(graph);
+            foreach (var node in graph.Nodes)
+                foreach (var attr in node.Attributes)
+                {
+                    if (attr.G is not null) ForEachGraphRecursive(attr.G, visit);
+                    foreach (var g in attr.Graphs) ForEachGraphRecursive(g, visit);
+                }
+        }
+
+        /// <summary>
         /// Walks every NodeProto in the model — main graph, nested subgraph
         /// attributes, and all FunctionProto bodies — and throws when any node is not
         /// expressible in the vanilla ONNX dialect: a Shorokoo-internal op in the
@@ -220,9 +244,9 @@ namespace Shorokoo.Core.Factory
         {
             var offending = new SortedSet<string>(StringComparer.Ordinal);
 
-            void VisitNodes(IEnumerable<NodeProto> nodes)
+            void CheckGraph(GraphProto graph)
             {
-                foreach (var node in nodes)
+                foreach (var node in graph.Nodes)
                 {
                     var domain = node.Domain;
                     if (domain.Length == 0)
@@ -234,18 +258,18 @@ namespace Shorokoo.Core.Factory
                     {
                         offending.Add($"{domain}:{node.OpType}");
                     }
-
-                    foreach (var attr in node.Attributes)
-                    {
-                        if (attr.G is not null) VisitNodes(attr.G.Nodes);
-                        foreach (var g in attr.Graphs) VisitNodes(g.Nodes);
-                    }
                 }
             }
 
-            VisitNodes(model.Graph.Nodes);
+            ForEachGraphRecursive(model.Graph, CheckGraph);
             foreach (var fn in model.Functions)
-                VisitNodes(fn.Nodes);
+            {
+                // A FunctionProto body is a bare node list; wrap it so the shared
+                // walker also descends into subgraphs nested inside function bodies.
+                var fnBody = new GraphProto();
+                fnBody.Nodes.AddRange(fn.Nodes);
+                ForEachGraphRecursive(fnBody, CheckGraph);
+            }
 
             if (offending.Count == 0) return;
             throw new ModelException(ErrorCodes.FW045, "ONNX export",
@@ -269,8 +293,13 @@ namespace Shorokoo.Core.Factory
             FastComputationGraph prepFast,
             Dictionary<FastTensorKey, FastTensorInfo> tensorInfoLookup)
         {
-            for (int i = 0; i < prepFast.Outputs.Count && i < graph.Outputs.Count; i++)
-                graph.Outputs[i] = CreateSubgraphInputInfo(prepFast.Outputs[i], tensorInfoLookup);
+            // CreateOutputInfos emits exactly one ValueInfoProto per prepFast output;
+            // a mismatch is a builder bug, and silently truncating here would ship
+            // untyped (or wrongly typed) outputs.
+            Debug.Assert(prepFast.Outputs.Count == graph.Outputs.Count,
+                "StampGraphOutputTypes: graph.Outputs must mirror prepFast.Outputs 1:1.");
+            for (int i = 0; i < prepFast.Outputs.Count; i++)
+                graph.Outputs[i] = CreateTypedValueInfo(prepFast.Outputs[i], tensorInfoLookup);
         }
 
         /// <summary>
@@ -325,76 +354,71 @@ namespace Shorokoo.Core.Factory
                 rename[oldName] = Assign(i < inputNames.Count ? inputNames[i] : null, $"input_{i}");
             }
 
-            // slot index → the bridged output's assigned name; the bridge source is
-            // resolved after the rename pass (rename[oldName] is final by then).
-            var bridges = new List<(int Slot, string OldName, string NewName)>();
+            // An output slot whose tensor already got a name (it is also a graph
+            // input, or a duplicate of an earlier output slot) is bridged: its
+            // ValueInfo is renamed here directly — the assigned name can't be a
+            // rename key (Assign refuses every name already in the graph), so the
+            // blanket pass below leaves it alone — and an Identity node feeds it
+            // from the tensor's one real name.
+            var bridges = new List<(string SourceName, string OutputName)>();
             for (int i = 0; i < graph.Outputs.Count; i++)
             {
                 var oldName = graph.Outputs[i].Name;
                 var newName = Assign(i < outputNames.Count ? outputNames[i] : null, $"output_{i}");
-                if (rename.ContainsKey(oldName))
-                    bridges.Add((i, oldName, newName));
+                if (rename.TryGetValue(oldName, out var sourceName))
+                {
+                    bridges.Add((sourceName, newName));
+                    RenameValueInfo(graph.Outputs[i], oldName, newName);
+                }
                 else
                     rename[oldName] = newName;
             }
 
             RenameTensorReferences(graph, rename);
 
-            foreach (var (slot, oldName, newName) in bridges)
-            {
-                var sourceName = rename[oldName];
-                graph.Nodes.Add(MakeNode($"{newName}_identity", OpCodes.IDENTITY, [sourceName], [newName]));
-                RenameValueInfo(graph.Outputs[slot], sourceName, newName);
-            }
+            foreach (var (sourceName, outputName) in bridges)
+                graph.Nodes.Add(MakeNode($"{outputName}_identity", OpCodes.IDENTITY, [sourceName], [outputName]));
         }
 
         /// <summary>Collects every tensor name referenced anywhere in
         /// <paramref name="graph"/> (I/O, value infos, initializers, node edges),
-        /// recursing into subgraph attributes.</summary>
+        /// including its nested subgraphs.</summary>
         private static void CollectTensorNames(GraphProto graph, HashSet<string> names)
-        {
-            foreach (var info in graph.Inputs.Concat(graph.Outputs).Concat(graph.ValueInfoes))
-                names.Add(info.Name);
-            foreach (var init in graph.Initializers)
-                names.Add(init.Name);
-            foreach (var node in graph.Nodes)
+            => ForEachGraphRecursive(graph, g =>
             {
-                foreach (var n in node.Inputs) names.Add(n);
-                foreach (var n in node.Outputs) names.Add(n);
-                foreach (var attr in node.Attributes)
+                foreach (var info in g.Inputs.Concat(g.Outputs).Concat(g.ValueInfoes))
+                    names.Add(info.Name);
+                foreach (var init in g.Initializers)
+                    names.Add(init.Name);
+                foreach (var node in g.Nodes)
                 {
-                    if (attr.G is not null) CollectTensorNames(attr.G, names);
-                    foreach (var g in attr.Graphs) CollectTensorNames(g, names);
+                    foreach (var n in node.Inputs) names.Add(n);
+                    foreach (var n in node.Outputs) names.Add(n);
                 }
-            }
-        }
+            });
 
         /// <summary>Applies the old-name → new-name map to every tensor reference in
         /// <paramref name="graph"/> and its nested subgraphs. Internal names are unique
         /// graph-wide (FastUseUniqueNames), so the blanket rewrite is unambiguous.</summary>
         private static void RenameTensorReferences(GraphProto graph, Dictionary<string, string> rename)
-        {
-            foreach (var info in graph.Inputs.Concat(graph.Outputs).Concat(graph.ValueInfoes))
-                if (rename.TryGetValue(info.Name, out var newName))
-                    RenameValueInfo(info, info.Name, newName);
-            foreach (var init in graph.Initializers)
-                if (rename.TryGetValue(init.Name, out var newName))
-                    init.Name = newName;
-            foreach (var node in graph.Nodes)
+            => ForEachGraphRecursive(graph, g =>
             {
-                for (int i = 0; i < node.Inputs.Count; i++)
-                    if (rename.TryGetValue(node.Inputs[i], out var newName))
-                        node.Inputs[i] = newName;
-                for (int i = 0; i < node.Outputs.Count; i++)
-                    if (rename.TryGetValue(node.Outputs[i], out var newName))
-                        node.Outputs[i] = newName;
-                foreach (var attr in node.Attributes)
+                foreach (var info in g.Inputs.Concat(g.Outputs).Concat(g.ValueInfoes))
+                    if (rename.TryGetValue(info.Name, out var newName))
+                        RenameValueInfo(info, info.Name, newName);
+                foreach (var init in g.Initializers)
+                    if (rename.TryGetValue(init.Name, out var newName))
+                        init.Name = newName;
+                foreach (var node in g.Nodes)
                 {
-                    if (attr.G is not null) RenameTensorReferences(attr.G, rename);
-                    foreach (var g in attr.Graphs) RenameTensorReferences(g, rename);
+                    for (int i = 0; i < node.Inputs.Count; i++)
+                        if (rename.TryGetValue(node.Inputs[i], out var newName))
+                            node.Inputs[i] = newName;
+                    for (int i = 0; i < node.Outputs.Count; i++)
+                        if (rename.TryGetValue(node.Outputs[i], out var newName))
+                            node.Outputs[i] = newName;
                 }
-            }
-        }
+            });
 
         /// <summary>Renames a ValueInfoProto and keeps its symbolic dim params (the
         /// <c>{name}_dim{i}</c> placeholders stamped by <see cref="OnnxIRFactory.CreateDims"/>)
@@ -1197,7 +1221,7 @@ namespace Shorokoo.Core.Factory
 
             var inputInfos = inputKeys
                 .Where(k => k is not null && !k.Value.IsEmpty)
-                .Select(k => CreateSubgraphInputInfo(k!.Value, tensorInfoLookup))
+                .Select(k => CreateTypedValueInfo(k!.Value, tensorInfoLookup))
                 .ToArray();
 
             var outputInfos = outputKeys
@@ -1214,13 +1238,17 @@ namespace Shorokoo.Core.Factory
         }
 
         /// <summary>
-        /// Builds a typed <see cref="ValueInfoProto"/> for a subgraph input,
-        /// pulling dtype/structure/rank from <paramref name="tensorInfoLookup"/>
-        /// when available. Falls back to a name-only ValueInfoProto when the
-        /// lookup has no entry — ONNX type inference will then attempt to
-        /// resolve the type from the surrounding context.
+        /// Builds a typed <see cref="ValueInfoProto"/> for a tensor, pulling
+        /// dtype/structure/rank from <paramref name="tensorInfoLookup"/> when
+        /// available. Falls back to a name-only ValueInfoProto when the lookup has
+        /// no entry — ONNX type inference will then attempt to resolve the type
+        /// from the surrounding context. Two callers with different contracts
+        /// share this: subgraph input declarations (<see cref="AssembleSubgraph"/>,
+        /// where ONNX is permissive) and the user-facing model-boundary outputs
+        /// (<see cref="StampGraphOutputTypes"/>, where the typed form is part of
+        /// the documented export guarantee) — degrade it with both in mind.
         /// </summary>
-        private static ValueInfoProto CreateSubgraphInputInfo(
+        private static ValueInfoProto CreateTypedValueInfo(
             FastTensorKey key,
             Dictionary<FastTensorKey, FastTensorInfo>? tensorInfoLookup)
         {

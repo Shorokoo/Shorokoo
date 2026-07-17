@@ -410,7 +410,7 @@ public class ModulesCoverageTests
 
         // The internal dialect remains available for the same module-stage graph.
         var data = CompressedFormatUtils.SaveFastGraphToBinary(g, compressed: true);
-        var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(data, isCompressed: true);
+        var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(data);
         Assert.Equal(g.Nodes.Count, reloaded.Nodes.Count);
         Assert.Contains(reloaded.Nodes, n => n.OpCode == InternalOpCodes.CREATE_MODULE);
     }

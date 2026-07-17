@@ -6,11 +6,11 @@ using Shorokoo.Runtime;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Coverage tests for the host RNG core (<see cref="Threefry2x32"/>, <see cref="HostRng"/>)
-/// and the <see cref="RngConfig"/> key-derivation surface. The Threefry tests pin the
-/// implementation against the Random123 known-answer vectors; the rest assert the
-/// properties the RNG design relies on — determinism, name-derived independence,
-/// override isolation, and standard-distribution shape.
+/// Coverage tests for the host RNG core (<see cref="Threefry2x32"/>, the bit generator
+/// behind the key folds) and the <see cref="RngConfig"/> key-derivation surface. The
+/// Threefry tests pin the implementation against the Random123 known-answer vectors; the
+/// rest assert the properties the RNG design relies on — determinism, name-derived
+/// independence, and override isolation.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -59,50 +59,6 @@ public class RngCoreTests
         // Distinct counters (same key) and distinct keys (same counter) both diverge.
         Assert.NotEqual(a, Threefry2x32.Bijection(8, 42, 123, 456));
         Assert.NotEqual(a, Threefry2x32.Bijection(7, 42, 124, 456));
-    }
-
-    [Fact]
-    public void TestHostUniformIsInRangeAndDeterministic()
-    {
-        var rng = new HostRng(1, 2);
-        var a = rng.StandardUniform(10_000);
-        var b = new HostRng(1, 2).StandardUniform(10_000);
-        Assert.Equal(a, b);                                   // deterministic for a key
-        Assert.All(a, v => Assert.InRange(v, 0.0f, 0.99999997f)); // [0,1), never 1
-        Assert.InRange(a.Average(), 0.48f, 0.52f);            // ~0.5 mean
-    }
-
-    [Fact]
-    public void TestHostNormalHasStandardMoments()
-    {
-        var z = new HostRng(99, 7).StandardNormal(100_000);
-        double mean = z.Average();
-        double var = z.Select(v => (v - mean) * (v - mean)).Average();
-        Assert.InRange(mean, -0.02, 0.02);                    // ~0 mean
-        Assert.InRange(var, 0.95, 1.05);                      // ~unit variance
-    }
-
-    [Fact]
-    public void TestDistinctKeysGiveIndependentStreams()
-    {
-        var a = new HostRng(1, 0).StandardUniform(4096);
-        var b = new HostRng(2, 0).StandardUniform(4096);
-        // Different keys must not produce the same stream.
-        Assert.NotEqual(a, b);
-        // Correlation between the two streams should be near zero (independent).
-        double ma = a.Average(), mb = b.Average();
-        double cov = a.Zip(b, (x, y) => (x - ma) * (y - mb)).Average();
-        Assert.InRange(cov, -0.01, 0.01);
-    }
-
-    [Fact]
-    public void TestCounterBaseOffsetsTheStream()
-    {
-        // The stream at counterBase=k continues the base stream: block b at base k
-        // equals block b+k at base 0. Two draws per block, so index 2k aligns.
-        var full = new HostRng(5, 6).StandardUniform(64);
-        var shifted = new HostRng(5, 6, counterBase: 3).StandardUniform(8);
-        Assert.Equal(full.Skip(6).Take(8).ToArray(), shifted);
     }
 
     [Fact]

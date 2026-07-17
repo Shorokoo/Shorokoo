@@ -36,8 +36,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             ConcreteModelParamInfos? paramInfos = null)
         {
             // Keyed per-parameter initialization needs BOTH the config and the inventory:
-            // with a config but no inventory, every parameter would silently skip the noise
-            // injection and initialize through its un-keyed initializer function, whose
+            // with a config but no inventory, every parameter would silently skip the keyed
+            // draw substitution and initialize through its un-keyed initializer function, whose
             // in-body draws carry no ModelId and lower through the ONNX fallback to backend
             // randomness — values not derived from the config at all, while the config
             // looks engaged (its override validation below still runs).
@@ -56,8 +56,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var functionInvokeAttrDefs = Definitions.NodeDefinitions[InternalOpCodes.FUNCTION_INVOKE].AttributeDefs;
 
             // Per-parameter initialization RNG: map each parameter's ModelId to its
-            // canonical name + shape so a random initializer draws host noise keyed by
-            // that parameter's own stream (see FastInitRngNoise). Null config disables it.
+            // canonical name + shape so a random initializer draws in-graph keyed noise on
+            // that parameter's own stream (see FastInitKeyedDraws). Null config disables it.
             var infoById = rngConfig is null
                 ? null
                 : paramInfos!.ParamInfos.ToDictionary(x => x.ModelId);
@@ -74,7 +74,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var modelIdVals = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId).AssertNotNull();
                 var modelId = new ModelId(modelIdVals);
 
-                // Replace the (shared) initializer with a per-parameter noise-injected clone
+                // Replace the (shared) initializer with a per-parameter keyed-draw clone
                 // before the node is rewritten to FUNCTION_INVOKE (which preserves TargetFunction).
                 if (infoById is not null)
                 {
@@ -91,21 +91,19 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                             "while the other parameters stay keyed. The inventory must be " +
                             "GetConcreteModelParamInfos() of this same graph.");
 
-                    long elementCount = 1;
-                    foreach (var d in info.Shape.Dims) elementCount *= d;
-                    if (node.TargetFunction is { } initFn && elementCount > 0)
+                    if (node.TargetFunction is { } initFn)
                     {
                         // Stream key = init master folded along the parameter's ModelId path —
                         // the RNG key tree IS the ModelId tree, host-side here (bit-identical
                         // to the in-graph SHRK_RNG_SPLIT chain), so a param's init stream is
                         // reconstructible offline from its ModelId alone.
                         var key = rngConfig!.FoldInitKey(modelId.Vals);
-                        // Init noise uses the configured algorithm's draw round count (the key
+                        // Init draws under the configured algorithm's registry name (the key
                         // itself is algorithm-independent — see RngConfig.FoldInitKey), so a
                         // param's init values switch with the algorithm just like runtime feeds.
-                        var injected = FastInitRngNoise.BuildNoiseInjected(
-                            initFn, key, info.ToShorokooIdString(), elementCount,
-                            Core.Rng.RngAlgorithms.DrawRoundsOf(rngConfig.Algorithm));
+                        var injected = FastInitKeyedDraws.BuildKeyedDraws(
+                            initFn, key, info.ToShorokooIdString(),
+                            Core.Rng.RngAlgorithms.NameOf(rngConfig.Algorithm));
                         if (injected is not null)
                             node.TargetFunction = injected;
                     }

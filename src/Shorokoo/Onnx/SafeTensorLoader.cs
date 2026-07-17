@@ -27,9 +27,15 @@ namespace Shorokoo.Onnx
     public static class SafeTensorLoader
     {
         /// <summary>
-        /// Hugging Face convention default maximum shard size (5 GB) for sharded saving.
+        /// Default maximum shard size (1 GB) for sharded saving. Deliberately below
+        /// the Hugging Face convention of 5 GB: the loader currently materializes
+        /// each file as one byte[], so files of 2 GB or more cannot be read back.
+        /// Streaming shard I/O through a fixed-size buffer (potentially enabling
+        /// direct-to-GPU loading) is tracked in
+        /// https://github.com/Shorokoo/Shorokoo/issues/48; restore the 5 GB
+        /// convention once that lands.
         /// </summary>
-        public const long DefaultMaxShardSizeBytes = 5_000_000_000L;
+        public const long DefaultMaxShardSizeBytes = 1_000_000_000L;
 
         /// <summary>
         /// File-name suffix that marks a sharded-checkpoint index manifest.
@@ -274,10 +280,11 @@ namespace Shorokoo.Onnx
         /// <param name="tensors">List of SafeTensor objects to save</param>
         /// <param name="globalMetadata">Optional global metadata to include</param>
         /// <param name="maxShardSizeBytes">
-        /// Opt-in maximum shard size in bytes (Hugging Face convention default:
-        /// <see cref="DefaultMaxShardSizeBytes"/>). Null (the default) always writes
-        /// a single file; when the total tensor size is at or below the threshold the
-        /// single-file output is byte-for-byte identical to a save without it.
+        /// Opt-in maximum shard size in bytes (default:
+        /// <see cref="DefaultMaxShardSizeBytes"/>, 1 GB). Null (the default) always
+        /// writes a single file; when the total tensor size is at or below the
+        /// threshold the single-file output is byte-for-byte identical to a save
+        /// without it.
         /// </param>
         public static void SaveSafeTensors(string filePath, List<SafeTensor> tensors, Dictionary<string, object>? globalMetadata = null, long? maxShardSizeBytes = null)
         {

@@ -197,8 +197,11 @@ Inconsistent checkpoints fail loudly, naming the offending tensor and file:
 missing shard files, tensors listed in the `weight_map` but absent from their
 shard (and vice versa), and duplicate tensor names across shards.
 
-Sharded **saving** is opt-in via a maximum shard size (the Hugging Face
-convention default is 5 GB, `SafeTensorLoader.DefaultMaxShardSizeBytes`):
+Sharded **saving** is opt-in via a maximum shard size
+(`SafeTensorLoader.DefaultMaxShardSizeBytes` = 1 GB — deliberately below the
+Hugging Face convention of 5 GB, because the loader cannot currently read
+files of 2 GB or more back; see
+[known limitations](limitations.md#safetensors-files--2-gb)):
 
 ```csharp
 SafeTensorLoader.SaveSafeTensors("out/model.safetensors", listOfSafeTensors,

@@ -125,6 +125,16 @@ opset 24), `Float4E2M1` (opset 23), and `Int2`/`UInt2` (opset 25) are not
 supported as tensor element types. `Complex64`/`Complex128` are likewise not
 supported.
 
+### SafeTensors files ≥ 2 GB
+
+`SafeTensorLoader` reads each `.safetensors` file (or shard) into a single
+in-memory `byte[]`, which .NET caps at 2 GB — larger files fail to load with
+an `IOException`. For the same reason, sharded saving defaults to 1 GB shards
+(`DefaultMaxShardSizeBytes`) rather than the Hugging Face-conventional 5 GB.
+Lifting this needs streamed shard I/O through a fixed-size buffer (which would
+also open the door to direct-to-GPU loading); tracked in
+[Shorokoo#48](https://github.com/Shorokoo/Shorokoo/issues/48).
+
 ### Gradient coverage
 
 Most differentiable operators in the supported set (opset 21 plus the

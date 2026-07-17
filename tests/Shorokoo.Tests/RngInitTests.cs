@@ -168,6 +168,105 @@ public class RngInitFrozenDerivationTests
     }
 }
 
+/// <summary>Helper module holding the random draw that <see cref="RngInitNestedDrawInit"/> factors out.</summary>
+[Module]
+public partial class RngInitNestedDrawHelper
+{
+    public static Tensor<float32> Inline(Vector<int64> shape)
+        => RandomUniform(shape, low: -1.0f, high: 1.0f);
+}
+
+/// <summary>
+/// A custom initializer whose random draw is nested inside a called function instead of
+/// inline in its own body — the shape keyed per-parameter initialization cannot intercept.
+/// </summary>
+[TrainableParamInitializer]
+public static partial class RngInitNestedDrawInit
+{
+    public static Tensor<float32> Inline(Vector<int64> shape)
+        => RngInitNestedDrawHelper.Call(shape);
+}
+
+[Module]
+public partial class RngInitNestedDrawLayer
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var w = RngInitNestedDrawInit.Init(x.ShapeTensor());
+        return x * w;
+    }
+}
+
+/// <summary>
+/// Initialization-side draws must never silently escape the keyed scheme into unkeyed
+/// backend randomness — every escape hatch fails loudly instead. Covers the two known
+/// escapes: an initializer whose random draw is nested inside a called function (invisible
+/// to <c>FastInitRngNoise</c>'s top-level scan), and <c>FastInitializeModelParams</c>
+/// invoked with a config but a missing/incomplete parameter inventory (which used to
+/// silently disable the noise injection for all/some parameters while the config's own
+/// override validation still ran and passed).
+/// </summary>
+[Trait("Domain", "Core")]
+[Trait("Purpose", "Coverage")]
+public class RngInitFailLoudTests
+{
+    private static FastComputationGraph ConcreteArch()
+    {
+        var g = RngInitTwoLinears.ComputationGraph;
+        var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
+        return g.ToConcreteArchitecture(g.FromOrderedInputs([sample]));
+    }
+
+    [Fact]
+    public void TestDrawNestedInCalledFunctionFailsInitialization()
+    {
+        // The draw sits in RngInitNestedDrawHelper, called by the initializer body, so the
+        // top-level substitution finds nothing to intercept; the nested draw keeps no
+        // ModelId/key and would resolve through the generic ONNX fallback to real
+        // backend-random, non-reproducible values — with no error and no entry in the RNG
+        // stream report. Keyed initialization must reject it loudly instead.
+        var g = RngInitNestedDrawLayer.ComputationGraph;
+        var sample = TensorData([2L, 2L], 1f, 1f, 1f, 1f);
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([sample]));
+
+        var ex = Assert.Throws<NotSupportedException>(
+            () => arch.InitializeTrainableParams(rngConfig: new RngConfig { MasterSeed = 123 }));
+        Assert.Contains("draws randomness inside the called function", ex.Message);
+        Assert.Contains("RngInitNestedDrawHelper", ex.Message);
+    }
+
+    [Fact]
+    public void TestConfigWithoutInventoryFailsAtEntry()
+    {
+        // A non-null config with paramInfos: null used to silently skip the noise injection
+        // for every parameter — un-keyed initializers, backend randomness — while the
+        // Params-override validation (gated only on the config) still ran, making the
+        // config look engaged. Now the pairing is enforced at entry.
+        var ex = Assert.Throws<ArgumentNullException>(() =>
+            Shorokoo.Core.Nodes.Processors.Fast.FastInitializeModelParams.Process(
+                ConcreteArch(), null, new RngConfig { MasterSeed = 1 }, paramInfos: null));
+        Assert.Contains("without the parameter inventory", ex.Message);
+    }
+
+    [Fact]
+    public void TestParamMissingFromInventoryFailsNamingIt()
+    {
+        // An inventory miss on one parameter used to skip that parameter's noise injection
+        // while its siblings stayed keyed — a silent keyed/un-keyed mix. Now it throws,
+        // naming the parameter (the mirror of the unmatched-override check).
+        var arch = ConcreteArch();
+        var full = arch.GetConcreteModelParamInfos();
+        var missing = full.ParamInfos[0];
+        var partial = new Shorokoo.Core.ConcreteModelParamInfos(full.ParamInfos.RemoveAt(0));
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            Shorokoo.Core.Nodes.Processors.Fast.FastInitializeModelParams.Process(
+                arch, null, new RngConfig { MasterSeed = 1 }, partial));
+        Assert.Contains("missing from the supplied parameter inventory", ex.Message);
+        Assert.Contains($"[{string.Join(", ", missing.ModelId.Vals)}]", ex.Message);
+    }
+}
+
 /// <summary>
 /// In-place trainable-parameter re-initialization
 /// (<c>ReinitializeTrainableParams(rngConfig)</c>): the explicit opt-in that re-runs every

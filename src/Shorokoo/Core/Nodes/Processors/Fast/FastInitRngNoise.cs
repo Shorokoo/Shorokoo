@@ -26,6 +26,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// shape input reshapes it, so no shape inference is needed. The noise already
     /// carries the node's declared distribution (low/high or mean/scale), so the
     /// initializer's downstream scaling math is unchanged.</para>
+    ///
+    /// <para>The substitution scans the initializer's own top-level nodes only — an
+    /// initializer must draw inline in its own body. A draw nested inside a function the
+    /// body calls cannot be intercepted here, and is rejected loudly (see
+    /// <see cref="BuildNoiseInjected"/>) rather than left to lower through the generic
+    /// ONNX fallback into unkeyed, non-reproducible backend randomness.</para>
     /// </summary>
     internal static class FastInitRngNoise
     {
@@ -33,10 +39,26 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// Returns a new initializer <see cref="Function"/> whose random draws are replaced
         /// by host noise keyed by <paramref name="streamName"/>, or <c>null</c> if
         /// <paramref name="fn"/> contains no random ops (the caller then keeps the original).
+        /// Throws if a function called by the initializer body contains a random draw: such
+        /// a draw is invisible to this top-level scan, carries no ModelId or key, and would
+        /// otherwise silently resolve through the ONNX fallback to real backend randomness —
+        /// with no error and no entry in the RNG stream report.
         /// </summary>
         public static Function? BuildNoiseInjected(
             Function fn, (uint k0, uint k1) streamKey, string streamName, long elementCount, int drawRounds = Threefry2x32.Rounds)
         {
+            var nested = fn.ReferencedFunctions.FirstOrDefault(f => f.OriginalFastGraph.Nodes.Any(n =>
+                n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
+                n.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL));
+            if (nested is not null)
+                throw new NotSupportedException(
+                    $"Initializer '{fn.FriendlyName}' of parameter '{streamName}' draws randomness " +
+                    $"inside the called function '{nested.FriendlyName}'. Keyed per-parameter " +
+                    "initialization substitutes random draws at the top level of the initializer's " +
+                    "own body only; a nested draw keeps no parameter key and would fall back to " +
+                    "unkeyed, non-reproducible backend randomness. Move the RandomUniform/" +
+                    "RandomNormal call directly into the initializer's body.");
+
             var body = fn.OriginalFastGraph.Clone();
 
             var (k0, k1) = streamKey;

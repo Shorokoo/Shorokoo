@@ -35,6 +35,20 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             RngConfig? rngConfig = null,
             ConcreteModelParamInfos? paramInfos = null)
         {
+            // Keyed per-parameter initialization needs BOTH the config and the inventory:
+            // with a config but no inventory, every parameter would silently skip the noise
+            // injection and initialize through its un-keyed initializer function, whose
+            // in-body draws carry no ModelId and lower through the ONNX fallback to backend
+            // randomness — values not derived from the config at all, while the config
+            // looks engaged (its override validation below still runs).
+            if (rngConfig is not null && paramInfos is null)
+                throw new System.ArgumentNullException(nameof(paramInfos),
+                    "FastInitializeModelParams: an RngConfig was supplied without the parameter " +
+                    "inventory, but keyed per-parameter initialization needs both — without the " +
+                    "inventory every parameter would silently initialize un-keyed, from backend " +
+                    "randomness not derived from the config. Pass GetConcreteModelParamInfos() " +
+                    "of the same concrete architecture.");
+
             computeContext ??= ComputeContext.Default;
 
             var workGraph = graph.Clone();
@@ -44,9 +58,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // Per-parameter initialization RNG: map each parameter's ModelId to its
             // canonical name + shape so a random initializer draws host noise keyed by
             // that parameter's own stream (see FastInitRngNoise). Null config disables it.
-            var infoById = rngConfig is null || paramInfos is null
+            var infoById = rngConfig is null
                 ? null
-                : paramInfos.ParamInfos.ToDictionary(x => x.ModelId);
+                : paramInfos!.ParamInfos.ToDictionary(x => x.ModelId);
 
             var collectedModelIds = new List<ModelId>();
             var collectedOutputKeys = new List<FastTensorKey>();
@@ -68,12 +82,24 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 // Replace the (shared) initializer with a per-parameter noise-injected clone
                 // before the node is rewritten to FUNCTION_INVOKE (which preserves TargetFunction).
-                if (infoById is not null && node.TargetFunction is { } initFn &&
-                    infoById.TryGetValue(modelId, out var info))
+                if (infoById is not null)
                 {
+                    // The mirror of the unmatched-override check below: a parameter the bound
+                    // config cannot key must fail loudly — skipping just this one would leave
+                    // its initializer un-keyed (backend randomness) while its siblings stay
+                    // keyed, with nothing reporting the mix.
+                    if (!infoById.TryGetValue(modelId, out var info))
+                        throw new System.InvalidOperationException(
+                            "FastInitializeModelParams: the trainable parameter " +
+                            $"'{node.IdentifierTemplate}' at ModelId [{string.Join(", ", modelId.Vals)}] " +
+                            "is missing from the supplied parameter inventory, so it would silently " +
+                            "initialize un-keyed (backend randomness not derived from the RngConfig) " +
+                            "while the other parameters stay keyed. The inventory must be " +
+                            "GetConcreteModelParamInfos() of this same graph.");
+
                     long elementCount = 1;
                     foreach (var d in info.Shape.Dims) elementCount *= d;
-                    if (elementCount > 0)
+                    if (node.TargetFunction is { } initFn && elementCount > 0)
                     {
                         // Stream key = init master folded along the parameter's ModelId path —
                         // the RNG key tree IS the ModelId tree, host-side here (bit-identical

@@ -65,10 +65,6 @@ internal static class RngAlgorithms
         _ => throw new NotSupportedException($"Unknown RNG algorithm '{algorithm}'."),
     };
 
-    /// <summary>The draw bit-generator round count of a configured algorithm — used host-side for
-    /// parameter-init noise so init draws match the same algorithm the runtime feeds use.</summary>
-    public static int DrawRoundsOf(RngAlgorithm algorithm) => DrawRounds(NameOf(algorithm));
-
     private static readonly object Gate = new();
     private static readonly Dictionary<(string algorithm, string kind), Function> Cache = new();
 

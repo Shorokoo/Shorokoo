@@ -127,11 +127,14 @@ public class RngInitTests
 /// The init-value derivation pinned to FROZEN constants — the cross-version seed contract.
 /// Every other init test is relational (the system compared against itself), so a silent
 /// change anywhere in the chain — master → "init" sub-master fold → per-path FoldInitKey →
-/// HostRng (counterBase, draw rounds) → uniform transform → Kaiming scaling — would keep
-/// them all green while breaking every seed anyone has ever shared. These values were
-/// generated once from the implementation that defines the derivation; a red here means
-/// "MasterSeed 123 no longer produces the weights it used to" and must never be fixed by
-/// regenerating the constants without a deliberate, breaking-change decision.
+/// in-graph keyed draw (counter (elementIndex, drawOrdinal), draw rounds) → uniform
+/// transform → Kaiming scaling — would keep them all green while breaking every seed
+/// anyone has ever shared. These values were generated from the implementation that
+/// defines the derivation (regenerated once when init moved from host-precomputed noise
+/// to the in-graph keyed draw — the deliberate breaking change that unified init with the
+/// feed convention); a red here means "MasterSeed 123 no longer produces the weights it
+/// used to" and must never be fixed by regenerating the constants without a deliberate,
+/// breaking-change decision.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -149,10 +152,12 @@ public class RngInitFrozenDerivationTests
     [Fact]
     public void TestInitValuesAreFrozen()
     {
-        // Layer 2: the full materialized values (draw composition: counterBase, rounds,
-        // uniform transform, ordinal scheme, initializer scaling). REFERENCE: golden.
-        float[] expected0 = [0.30900666f, 0.6994194f, 0.08134546f, -0.33324182f, 0.37910292f, 1.0430968f, 1.1605477f, -0.09467988f, 1.2190907f, 0.10304924f, 0.94080746f, -0.7929816f, -0.56461143f, -0.6191869f, 0.02709632f, 0.8262475f];
-        float[] expected1 = [-0.17985144f, -0.28237903f, 0.14574882f, 0.9324704f, 0.6254746f, -0.6462647f, 0.06555341f, 0.7868881f, 0.7384043f, -0.21305309f, -0.88358283f, 0.10607847f, -0.1497983f, -1.006346f, -0.48929685f, 0.80844414f];
+        // Layer 2: the full materialized values (draw composition: counter scheme, rounds,
+        // uniform transform, drawBase ordinal, initializer scaling). REFERENCE: golden.
+        // Exact equality is safe cross-backend: the uniform path is Threefry integer ops
+        // plus IEEE-exact float multiply/add — no transcendental kernels involved.
+        float[] expected0 = [0.30900666f, 0.08134546f, 0.37910292f, 1.1605477f, 1.2190907f, 0.94080746f, -0.56461143f, 0.02709632f, -0.16446105f, -0.3000047f, -0.93130517f, -1.2191538f, -0.33175305f, 0.12972975f, -0.4290138f, -0.24179016f];
+        float[] expected1 = [-0.17985144f, 0.14574882f, 0.6254746f, 0.06555341f, 0.7384043f, -0.88358283f, -0.1497983f, -0.48929685f, -0.62437403f, -0.09688274f, 0.5977061f, -0.290067f, 0.7535605f, 0.69159126f, 1.0088426f, 1.2099534f];
 
         var g = RngInitTwoLinears.ComputationGraph;
         var sample = TensorData([4L, 4L], System.Linq.Enumerable.Repeat(1f, 16).ToArray());
@@ -165,6 +170,114 @@ public class RngInitFrozenDerivationTests
         Assert.Equal(2, ws.Length);
         Assert.Equal(expected0, ws[0]);   // weight at ModelId [1, 1]
         Assert.Equal(expected1, ws[1]);   // weight at ModelId [2, 1]
+    }
+}
+
+/// <summary>Helper module holding the random draw that <see cref="RngInitNestedDrawInit"/> factors out.</summary>
+[Module]
+public partial class RngInitNestedDrawHelper
+{
+    public static Tensor<float32> Inline(Vector<int64> shape)
+        => RandomUniform(shape, low: -1.0f, high: 1.0f);
+}
+
+/// <summary>
+/// A custom initializer whose random draw is nested inside a called function instead of
+/// inline in its own body — keyed per-parameter initialization reaches it by flattening
+/// the initializer body before the noise substitution.
+/// </summary>
+[TrainableParamInitializer]
+public static partial class RngInitNestedDrawInit
+{
+    public static Tensor<float32> Inline(Vector<int64> shape)
+        => RngInitNestedDrawHelper.Call(shape);
+}
+
+[Module]
+public partial class RngInitNestedDrawLayer
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var w = RngInitNestedDrawInit.Init(x.ShapeTensor());
+        return x * w;
+    }
+}
+
+/// <summary>
+/// Initialization-side draws must never silently escape the keyed scheme into unkeyed
+/// backend randomness. A draw factored into a called function is brought into the scheme
+/// by flattening the initializer body before the noise substitution (first test); the
+/// other escape — <c>FastInitializeModelParams</c> invoked with a config but a
+/// missing/incomplete parameter inventory, which used to silently disable the noise
+/// injection for all/some parameters while the config's own override validation still ran
+/// and passed — fails loudly instead.
+/// </summary>
+[Trait("Domain", "Core")]
+[Trait("Purpose", "Coverage")]
+public class RngInitFailLoudTests
+{
+    private static FastComputationGraph ConcreteArch()
+    {
+        var g = RngInitTwoLinears.ComputationGraph;
+        var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
+        return g.ToConcreteArchitecture(g.FromOrderedInputs([sample]));
+    }
+
+    [Fact]
+    public void TestDrawNestedInCalledFunctionIsInlinedAndKeyed()
+    {
+        // The draw sits in RngInitNestedDrawHelper, called by the initializer body. Before
+        // flattening was added, the top-level substitution found nothing to intercept and
+        // the nested draw resolved through the generic ONNX fallback to real
+        // backend-random, non-reproducible values — with no error and no entry in the RNG
+        // stream report. Flattening makes the draw top-level, so it draws keyed noise
+        // by the parameter's own stream like an inline draw.
+        float[] Init(ulong seed)
+        {
+            var g = RngInitNestedDrawLayer.ComputationGraph;
+            var sample = TensorData([2L, 2L], 1f, 1f, 1f, 1f);
+            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([sample]));
+            return arch.InitializeTrainableParams(rngConfig: new RngConfig { MasterSeed = seed })
+                .ModelParams.Single().ToTensorData().As<float32>().AccessMemory().ToArray();
+        }
+
+        var a = Init(123);
+        Assert.Equal(4, a.Length);
+        Assert.All(a, x => Assert.InRange(x, -1.0f, 1.0f));   // the helper's declared U(-1, 1)
+        Assert.True(a.Distinct().Count() > 1);                // not a degenerate fill
+        Assert.Equal(a, Init(123));                           // reproducible for a config
+        Assert.False(a.SequenceEqual(Init(124)));             // derived from the master seed
+    }
+
+    [Fact]
+    public void TestConfigWithoutInventoryFailsAtEntry()
+    {
+        // A non-null config with paramInfos: null used to silently skip the noise injection
+        // for every parameter — un-keyed initializers, backend randomness — while the
+        // Params-override validation (gated only on the config) still ran, making the
+        // config look engaged. Now the pairing is enforced at entry.
+        var ex = Assert.Throws<ArgumentNullException>(() =>
+            Shorokoo.Core.Nodes.Processors.Fast.FastInitializeModelParams.Process(
+                ConcreteArch(), null, new RngConfig { MasterSeed = 1 }, paramInfos: null));
+        Assert.Contains("without the parameter inventory", ex.Message);
+    }
+
+    [Fact]
+    public void TestParamMissingFromInventoryFailsNamingIt()
+    {
+        // An inventory miss on one parameter used to skip that parameter's noise injection
+        // while its siblings stayed keyed — a silent keyed/un-keyed mix. Now it throws,
+        // naming the parameter (the mirror of the unmatched-override check).
+        var arch = ConcreteArch();
+        var full = arch.GetConcreteModelParamInfos();
+        var missing = full.ParamInfos[0];
+        var partial = new Shorokoo.Core.ConcreteModelParamInfos(full.ParamInfos.RemoveAt(0));
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            Shorokoo.Core.Nodes.Processors.Fast.FastInitializeModelParams.Process(
+                arch, null, new RngConfig { MasterSeed = 1 }, partial));
+        Assert.Contains("missing from the supplied parameter inventory", ex.Message);
+        Assert.Contains($"[{string.Join(", ", missing.ModelId.Vals)}]", ex.Message);
     }
 }
 
@@ -203,7 +316,7 @@ public class RngReinitializeTests
     {
         // THE pin: initialize under seed A, re-initialize in place under seed B → values
         // change and match a fresh build under seed B bit-exactly (same code path: keyed
-        // host noise per parameter stream).
+        // in-graph draw per parameter stream).
         var seedA = new RngConfig { MasterSeed = 5 };
         var seedB = new RngConfig { MasterSeed = 6 };
 
@@ -290,7 +403,7 @@ public class RngReinitializeTests
 
 /// <summary>
 /// The two normal-family consumers in one module: a KaimingNormal-initialized [4,4] weight
-/// (host Box–Muller path, run at parameter initialization) and a Globals.RandomNormal feed
+/// (in-graph Box–Muller path, run at parameter initialization) and a Globals.RandomNormal feed
 /// (in-graph Box–Muller path, lowered to the keyed counter RNG). The weight is kept live via
 /// a ×0 term, so with a zero input the module's output equals the feed draw exactly.
 /// </summary>
@@ -311,15 +424,17 @@ public partial class RngNormalBothCollections
 /// <see cref="RngInitFrozenDerivationTests"/>, which pins the uniform family). Every
 /// Box–Muller composition variant (cos↔sin, u₁↔u₂, 1−u₁↔u₁, uniform-to-element pairing)
 /// yields a perfect N(0,1) distribution, so the moments tests can never detect a composition
-/// change: only value pins hold the convention fixed. One Fact covers the host path
-/// (parameter initialization: fold → init sub-master → HostRng pair-packed Box–Muller →
-/// Kaiming scaling) and the in-graph path (runtime feed: RngSeed-rooted split chain →
-/// per-element SHRK lowering → ONNX Ln/Sqrt/Cos kernels), at both round counts. The two paths realize
-/// different sequences BY DESIGN (see HostRng) and are pinned independently, never compared.
-/// Feed values are asserted at 1e-6 (ORT transcendental kernels may drift in the last ULP;
-/// a composition change shifts values by O(1)). A red here means "this seed no longer draws
-/// the normals it used to" and must never be fixed by regenerating the constants without a
-/// deliberate, breaking-change decision.
+/// change: only value pins hold the convention fixed. Both consumers now draw via the same
+/// in-graph keyed lowering (fold → key constant/table → per-element SHRK lowering → ONNX
+/// Ln/Sqrt/Cos kernels): parameter initialization keys off the init sub-master with
+/// drawBase = the draw's ordinal, the runtime feed keys off the runtime sub-master with
+/// drawBase = the execution counter — distinct streams, pinned independently, never
+/// compared. One Fact covers both, at both round counts. All values are asserted at 1e-6
+/// (ORT transcendental kernels may drift in the last ULP across backends; a composition
+/// change shifts values by O(1)). A red here means "this seed no longer draws the normals
+/// it used to" and must never be fixed by regenerating the constants without a deliberate,
+/// breaking-change decision — the init constants were regenerated exactly once, when init
+/// moved from host-precomputed noise to the in-graph keyed draw.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -347,21 +462,23 @@ public class RngNormalFrozenDerivationTests
     public void TestNormalInitAndDrawValuesAreFrozen()
     {
         // REFERENCE: golden — generated once from the implementation that defines the convention.
-        float[] init20 = [0.74819666f, -1.3497522f, 0.58009183f, -0.5437696f, -1.1170965f, 0.33587033f, 0.31675094f, 0.19958028f, 0.16639294f, 0.9580838f, 0.2545579f, -0.76778877f, 0.17528465f, 0.9627476f, -0.8868993f, -0.65395457f];
+        float[] init20 = [0.74819666f, 0.58009183f, -1.1170965f, 0.31675094f, 0.16639294f, 0.25455788f, 0.17528465f, -0.8868993f, 0.49657196f, 0.11392105f, 0.5931792f, 1.6939894f, 1.2556574f, -1.0003626f, 0.94420254f, 0.025948172f];
         float[] feed20 = [-0.21420276f, -0.5717528f, 0.46444735f, -1.0332288f, 0.46397528f, 0.84883124f, 0.6769181f, -0.8103971f, 0.25310147f, 0.33421588f, 0.14988664f, 0.105597205f, -0.270022f, 0.26715103f, -0.052951735f, 0.9648315f];
-        float[] init13 = [0.5342924f, 0.030172912f, 0.969521f, -0.4301536f, -0.5262921f, 0.34364656f, 0.0136166755f, 0.48939812f, 1.076198f, 0.542235f, -0.5106929f, -0.28768054f, -0.63540673f, 0.03363665f, -0.03083078f, 0.53736115f];
+        float[] init13 = [0.5342924f, 0.969521f, -0.526292f, 0.013616675f, 1.076198f, -0.5106929f, -0.63540673f, -0.03083078f, 0.38398474f, -0.46663246f, -0.7689113f, -0.3363507f, -0.41424477f, 0.54753536f, 0.27235922f, -0.5393584f];
         float[] feed13 = [-2.6632779f, -0.93596685f, 1.2713523f, 0.5301773f, -2.0887053f, 0.17946513f, 0.503763f, 0.6912192f, -2.0152493f, -0.9966242f, -0.23023638f, 0.6537417f, 0.16786636f, -0.09063158f, 0.575317f, 1.555586f];
 
         var (i20, f20) = Run(new RngConfig { MasterSeed = 123 });
-        // Host path: exact, like the uniform pin (pure MathF, no backend kernel involved).
-        Assert.Equal(init20, i20);
-        // In-graph path: ORT Ln/Sqrt/Cos kernels — tight tolerance, not bit-equality.
         for (int i = 0; i < 16; i++)
+        {
+            Assert.Equal(init20[i], i20[i], 1e-6f);
             Assert.Equal(feed20[i], f20[i], 1e-6f);
+        }
 
         var (i13, f13) = Run(new RngConfig { MasterSeed = 123, Algorithm = RngAlgorithm.Threefry2x32Rounds13 });
-        Assert.Equal(init13, i13);
         for (int i = 0; i < 16; i++)
+        {
+            Assert.Equal(init13[i], i13[i], 1e-6f);
             Assert.Equal(feed13[i], f13[i], 1e-6f);
+        }
     }
 }

@@ -35,6 +35,20 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             RngConfig? rngConfig = null,
             ConcreteModelParamInfos? paramInfos = null)
         {
+            // Keyed per-parameter initialization needs BOTH the config and the inventory:
+            // with a config but no inventory, every parameter would silently skip the keyed
+            // draw substitution and initialize through its un-keyed initializer function, whose
+            // in-body draws carry no ModelId and lower through the ONNX fallback to backend
+            // randomness — values not derived from the config at all, while the config
+            // looks engaged (its override validation below still runs).
+            if (rngConfig is not null && paramInfos is null)
+                throw new System.ArgumentNullException(nameof(paramInfos),
+                    "FastInitializeModelParams: an RngConfig was supplied without the parameter " +
+                    "inventory, but keyed per-parameter initialization needs both — without the " +
+                    "inventory every parameter would silently initialize un-keyed, from backend " +
+                    "randomness not derived from the config. Pass GetConcreteModelParamInfos() " +
+                    "of the same concrete architecture.");
+
             computeContext ??= ComputeContext.Default;
 
             var workGraph = graph.Clone();
@@ -42,11 +56,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var functionInvokeAttrDefs = Definitions.NodeDefinitions[InternalOpCodes.FUNCTION_INVOKE].AttributeDefs;
 
             // Per-parameter initialization RNG: map each parameter's ModelId to its
-            // canonical name + shape so a random initializer draws host noise keyed by
-            // that parameter's own stream (see FastInitRngNoise). Null config disables it.
-            var infoById = rngConfig is null || paramInfos is null
+            // canonical name + shape so a random initializer draws in-graph keyed noise on
+            // that parameter's own stream (see FastInitKeyedDraws). Null config disables it.
+            var infoById = rngConfig is null
                 ? null
-                : paramInfos.ParamInfos.ToDictionary(x => x.ModelId);
+                : paramInfos!.ParamInfos.ToDictionary(x => x.ModelId);
 
             var collectedModelIds = new List<ModelId>();
             var collectedOutputKeys = new List<FastTensorKey>();
@@ -66,26 +80,36 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var modelIdVals = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId).AssertNotNull();
                 var modelId = new ModelId(modelIdVals);
 
-                // Replace the (shared) initializer with a per-parameter noise-injected clone
+                // Replace the (shared) initializer with a per-parameter keyed-draw clone
                 // before the node is rewritten to FUNCTION_INVOKE (which preserves TargetFunction).
-                if (infoById is not null && node.TargetFunction is { } initFn &&
-                    infoById.TryGetValue(modelId, out var info))
+                if (infoById is not null)
                 {
-                    long elementCount = 1;
-                    foreach (var d in info.Shape.Dims) elementCount *= d;
-                    if (elementCount > 0)
+                    // The mirror of the unmatched-override check below: a parameter the bound
+                    // config cannot key must fail loudly — skipping just this one would leave
+                    // its initializer un-keyed (backend randomness) while its siblings stay
+                    // keyed, with nothing reporting the mix.
+                    if (!infoById.TryGetValue(modelId, out var info))
+                        throw new System.InvalidOperationException(
+                            "FastInitializeModelParams: the trainable parameter " +
+                            $"'{node.IdentifierTemplate}' at ModelId [{string.Join(", ", modelId.Vals)}] " +
+                            "is missing from the supplied parameter inventory, so it would silently " +
+                            "initialize un-keyed (backend randomness not derived from the RngConfig) " +
+                            "while the other parameters stay keyed. The inventory must be " +
+                            "GetConcreteModelParamInfos() of this same graph.");
+
+                    if (node.TargetFunction is { } initFn)
                     {
                         // Stream key = init master folded along the parameter's ModelId path —
                         // the RNG key tree IS the ModelId tree, host-side here (bit-identical
                         // to the in-graph SHRK_RNG_SPLIT chain), so a param's init stream is
                         // reconstructible offline from its ModelId alone.
                         var key = rngConfig!.FoldInitKey(modelId.Vals);
-                        // Init noise uses the configured algorithm's draw round count (the key
+                        // Init draws under the configured algorithm's registry name (the key
                         // itself is algorithm-independent — see RngConfig.FoldInitKey), so a
                         // param's init values switch with the algorithm just like runtime feeds.
-                        var injected = FastInitRngNoise.BuildNoiseInjected(
-                            initFn, key, info.ToShorokooIdString(), elementCount,
-                            Core.Rng.RngAlgorithms.DrawRoundsOf(rngConfig.Algorithm));
+                        var injected = FastInitKeyedDraws.BuildKeyedDraws(
+                            initFn, key, info.ToShorokooIdString(),
+                            Core.Rng.RngAlgorithms.NameOf(rngConfig.Algorithm));
                         if (injected is not null)
                             node.TargetFunction = injected;
                     }

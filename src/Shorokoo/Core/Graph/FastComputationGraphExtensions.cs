@@ -249,9 +249,9 @@ namespace Shorokoo.Graph
         /// <summary>
         /// Binds default weights initialized under the given <see cref="RngConfig"/> — equivalent to
         /// <c>graph.ToConcreteModel(graph.InitializeTrainableParams(rngConfig: rngConfig))</c>.
-        /// Each random initializer draws host noise keyed by its parameter's own stream, so
-        /// same-shape parameters get distinct values and initialization is reproducible and
-        /// backend-independent. Requires a concrete architecture from <see cref="ToConcreteArchitecture"/>.
+        /// Each random initializer draws keyed noise on its parameter's own stream, so
+        /// same-shape parameters get distinct values and initialization is reproducible for
+        /// a config. Requires a concrete architecture from <see cref="ToConcreteArchitecture"/>.
         /// </summary>
         public static FastComputationGraph ToConcreteModel(this FastComputationGraph graph, RngConfig rngConfig)
         {
@@ -395,13 +395,13 @@ namespace Shorokoo.Graph
         /// <param name="namingScheme">Optional scheme for the returned parameter names; defaults to Shorokoo's.</param>
         /// <param name="computeContext">Optional context used to evaluate the initializers.</param>
         /// <param name="rngConfig">
-        /// Optional RNG configuration. Each random initializer draws host-generated noise keyed
-        /// by its parameter's own stream (so same-shape parameters get distinct values,
-        /// reproducibly and backend-independently). When <c>null</c>,
+        /// Optional RNG configuration. Each random initializer draws in-graph keyed noise on
+        /// its parameter's own stream (so same-shape parameters get distinct values,
+        /// reproducibly for a config). When <c>null</c>,
         /// <see cref="RngConfig.Default"/> (master seed 0) is used — under the ALGORITHM the
         /// graph's bound RNG identity records, when one is present, so no-config init draws
         /// with the same bit generator the model's runtime feeds use. The init-collection
-        /// identity itself is never persisted (initialization noise is baked into the weights),
+        /// identity itself is never persisted (initialization runs to concrete weight values),
         /// so re-running initialization under a specific seed takes an explicit config. An
         /// identity recording an unknown algorithm (e.g. a model written by a newer framework
         /// version) throws rather than initializing under a substitute; pass an explicit config
@@ -445,7 +445,7 @@ namespace Shorokoo.Graph
 
         /// <summary>
         /// Re-initializes a <b>concrete model's</b> trainable parameters in place under a new
-        /// RNG identity: re-runs each trainable parameter's initializer with host noise keyed
+        /// RNG identity: re-runs each trainable parameter's initializer with an in-graph draw keyed
         /// by <paramref name="rngConfig"/>'s init collection (validating
         /// <see cref="RngCollection.Params"/> overrides against the parameter inventory
         /// exactly as at first initialization) and overwrites the parameter values — bit-exact
@@ -473,7 +473,7 @@ namespace Shorokoo.Graph
                     "config instead.");
 
             // Freshly initialized values under the new identity — the exact first-init code
-            // path (per-parameter keyed host noise, Params-override validation included), so
+            // path (per-parameter keyed in-graph draw, Params-override validation included), so
             // the result is bit-exact with a fresh build under the same config.
             var paramInfos = arch.GetConcreteModelParamInfos();
             var initialized = FastInitializeModelParams.Process(

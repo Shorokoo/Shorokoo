@@ -23,8 +23,8 @@ namespace Shorokoo.Core.Rng;
 /// <para>Per element <c>i</c> the counter is <c>(i, drawBase)</c>: <c>i</c> (the flat element
 /// index) is the low counter word, <c>drawBase</c> (a per-execution value, e.g. the training
 /// step) the high word, so successive executions draw fresh values while any fixed
-/// <c>(key, drawBase, i)</c> replays exactly. The bit→float and Box–Muller conventions match
-/// <see cref="HostRng"/> (low 24 bits × 2⁻²⁴; radius = √(−2·ln(1−u₁))).</para>
+/// <c>(key, drawBase, i)</c> replays exactly. Bit→float is the low 24 bits × 2⁻²⁴;
+/// the normal transform is Box–Muller with radius = √(−2·ln(1−u₁)).</para>
 /// </summary>
 internal static class RuntimeRng
 {

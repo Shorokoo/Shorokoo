@@ -171,6 +171,47 @@ Save:
 SafeTensorLoader.SaveSafeTensors("out.safetensors", listOfSafeTensors);
 ```
 
+### Sharded checkpoints (Hugging Face multi-file convention)
+
+Large checkpoints on the Hugging Face hub are usually split into shard files
+(`model-00001-of-000NN.safetensors`, …) plus a `model.safetensors.index.json`
+manifest whose `weight_map` maps each tensor name to its shard. All the load
+methods above auto-detect this layout — pass either the index file or the
+directory that contains it, and the union of the shards comes back exactly as
+if it were one file:
+
+```csharp
+ModelParamList weights = SafeTensorLoader.LoadModelParamSet("ckpt/model.safetensors.index.json");
+List<SafeTensor> all = SafeTensorLoader.LoadSafeTensors("ckpt");   // directory holding the index
+```
+
+To load only some tensors, name them; shard files that hold none of the
+requested tensors are never opened:
+
+```csharp
+Dictionary<string, TensorData> some =
+    SafeTensorLoader.LoadTensorDictionary("ckpt", ["head.weight", "head.bias"]);
+```
+
+Inconsistent checkpoints fail loudly, naming the offending tensor and file:
+missing shard files, tensors listed in the `weight_map` but absent from their
+shard (and vice versa), and duplicate tensor names across shards.
+
+Sharded **saving** is opt-in via a maximum shard size (the Hugging Face
+convention default is 5 GB, `SafeTensorLoader.DefaultMaxShardSizeBytes`):
+
+```csharp
+SafeTensorLoader.SaveSafeTensors("out/model.safetensors", listOfSafeTensors,
+    maxShardSizeBytes: SafeTensorLoader.DefaultMaxShardSizeBytes);
+```
+
+When the tensors fit within one shard the output is a single standard file,
+byte-for-byte identical to a save without the parameter. Above the threshold,
+tensors are packed greedily in list order into `model-0000x-of-000NN.safetensors`
+shards next to the given path, plus a `model.safetensors.index.json` manifest;
+each shard is an individually valid safetensors file (readable standalone by any
+safetensors implementation) and carries the global metadata.
+
 Compressed (`.zsafetensor`) variants live in `CompressedFormatUtils`:
 `SaveCompressedSafeTensors`, `LoadCompressedSafeTensors`,
 `SaveCompressedModelParamSet`, `LoadCompressedModelParamSet`.

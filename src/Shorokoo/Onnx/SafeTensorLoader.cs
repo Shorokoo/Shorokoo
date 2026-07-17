@@ -17,10 +17,25 @@ using Shorokoo.Core.Inference.Abstractions;
 namespace Shorokoo.Onnx
 {
     /// <summary>
-    /// Loads SafeTensor files into various Shorokoo data structures
+    /// Loads SafeTensor files into various Shorokoo data structures.
+    /// Supports both single-file checkpoints and the Hugging Face multi-file
+    /// (sharded) convention: shard files named
+    /// <c>model-00001-of-000NN.safetensors</c> plus a
+    /// <c>model.safetensors.index.json</c> manifest whose <c>weight_map</c> maps
+    /// tensor names to shard file names.
     /// </summary>
     public static class SafeTensorLoader
     {
+        /// <summary>
+        /// Hugging Face convention default maximum shard size (5 GB) for sharded saving.
+        /// </summary>
+        public const long DefaultMaxShardSizeBytes = 5_000_000_000L;
+
+        /// <summary>
+        /// File-name suffix that marks a sharded-checkpoint index manifest.
+        /// </summary>
+        public const string ShardIndexSuffix = ".index.json";
+
         /// <summary>
         /// Load a SafeTensor file that contains a single tensor into TensorData
         /// </summary>
@@ -56,7 +71,7 @@ namespace Shorokoo.Onnx
         /// <summary>
         /// Load a SafeTensor file into a Dictionary of tensor names to TensorData
         /// </summary>
-        /// <param name="filePath">Path to the SafeTensor file</param>
+        /// <param name="filePath">Path to the SafeTensor file, shard index, or checkpoint directory</param>
         /// <returns>Dictionary mapping tensor names to TensorData</returns>
         public static Dictionary<string, TensorData> LoadTensorDictionary(string filePath)
         {
@@ -65,24 +80,226 @@ namespace Shorokoo.Onnx
         }
 
         /// <summary>
-        /// Load a SafeTensor file into a List of SafeTensor objects with full metadata
+        /// Load only the named tensors into a Dictionary of tensor names to TensorData.
+        /// For a sharded checkpoint, only the shard files that contain a requested
+        /// tensor are opened.
         /// </summary>
-        /// <param name="filePath">Path to the SafeTensor file</param>
+        /// <param name="filePath">Path to the SafeTensor file, shard index, or checkpoint directory</param>
+        /// <param name="tensorNames">Names of the tensors to load; unknown names fail loudly</param>
+        /// <returns>Dictionary mapping the requested tensor names to TensorData</returns>
+        public static Dictionary<string, TensorData> LoadTensorDictionary(string filePath, IReadOnlyCollection<string> tensorNames)
+        {
+            var tensors = LoadSafeTensors(filePath, tensorNames);
+            return tensors.ToDictionary(t => t.Name, t => t.Data);
+        }
+
+        /// <summary>
+        /// Load a SafeTensor checkpoint into a List of SafeTensor objects with full metadata.
+        /// The path may be a single <c>.safetensors</c> file, a sharded-checkpoint
+        /// index manifest (<c>*.index.json</c>), or a directory containing one such
+        /// manifest; sharded checkpoints load as the union of their shards.
+        /// </summary>
+        /// <param name="filePath">Path to the SafeTensor file, shard index, or checkpoint directory</param>
         /// <returns>List of SafeTensor objects containing tensor data and metadata</returns>
         public static List<SafeTensor> LoadSafeTensors(string filePath)
+            => LoadSafeTensors(filePath, tensorNames: null);
+
+        /// <summary>
+        /// Load a SafeTensor checkpoint, optionally restricted to a named subset of
+        /// tensors. For a sharded checkpoint, only the shard files that contain a
+        /// requested tensor are opened.
+        /// </summary>
+        /// <param name="filePath">Path to the SafeTensor file, shard index, or checkpoint directory</param>
+        /// <param name="tensorNames">Names of the tensors to load, or null for all; unknown names fail loudly</param>
+        /// <returns>List of SafeTensor objects containing tensor data and metadata</returns>
+        public static List<SafeTensor> LoadSafeTensors(string filePath, IReadOnlyCollection<string>? tensorNames)
         {
+            if (TryResolveShardIndex(filePath, out var indexPath))
+                return LoadShardedSafeTensors(indexPath, tensorNames);
+
             if (!File.Exists(filePath))
                 throw new FileNotFoundException($"SafeTensor file not found: {filePath}");
 
             var fileBytes = File.ReadAllBytes(filePath);
-            return ParseSafeTensorFile(fileBytes);
+            var tensors = ParseSafeTensorFile(fileBytes);
+
+            if (tensorNames is null)
+                return tensors;
+
+            var present = new HashSet<string>(tensors.Select(t => t.Name));
+            foreach (var name in tensorNames)
+                if (!present.Contains(name))
+                    throw new KeyNotFoundException($"Tensor '{name}' not found in SafeTensor file '{filePath}'.");
+
+            var requested = new HashSet<string>(tensorNames);
+            return tensors.Where(t => requested.Contains(t.Name)).ToList();
+        }
+
+        /// <summary>
+        /// Resolves <paramref name="path"/> to a sharded-checkpoint index manifest:
+        /// either the path is the manifest itself (<c>*.index.json</c>) or a
+        /// directory containing exactly one <c>*.safetensors.index.json</c>.
+        /// </summary>
+        private static bool TryResolveShardIndex(string path, out string indexPath)
+        {
+            if (Directory.Exists(path))
+            {
+                string[] candidates = [.. Directory.GetFiles(path, "*.safetensors" + ShardIndexSuffix).OrderBy(p => p, StringComparer.Ordinal)];
+                if (candidates.Length == 0)
+                    throw new FileNotFoundException($"Directory '{path}' contains no *.safetensors{ShardIndexSuffix} shard index.");
+                if (candidates.Length > 1)
+                    throw new InvalidOperationException(
+                        $"Directory '{path}' contains {candidates.Length} shard indexes " +
+                        $"({string.Join(", ", candidates.Select(Path.GetFileName))}); pass the index file path explicitly.");
+                indexPath = candidates[0];
+                return true;
+            }
+
+            if (path.EndsWith(ShardIndexSuffix, StringComparison.OrdinalIgnoreCase))
+            {
+                if (!File.Exists(path))
+                    throw new FileNotFoundException($"SafeTensor shard index not found: {path}");
+                indexPath = path;
+                return true;
+            }
+
+            indexPath = string.Empty;
+            return false;
+        }
+
+        /// <summary>
+        /// Load a sharded checkpoint through its index manifest. Shards are opened
+        /// lazily: when <paramref name="tensorNames"/> restricts the load, shard
+        /// files containing none of the requested tensors are never touched.
+        /// </summary>
+        private static List<SafeTensor> LoadShardedSafeTensors(string indexPath, IReadOnlyCollection<string>? tensorNames)
+        {
+            var indexBytes = File.ReadAllBytes(indexPath);
+
+            // Parse weight_map preserving entry order; duplicate keys in the JSON
+            // (the same tensor mapped twice) are surfaced by JsonDocument and rejected.
+            var weightMap = new List<(string Name, string Shard)>();
+            var owningShard = new Dictionary<string, string>();
+            using (var doc = JsonDocument.Parse(indexBytes))
+            {
+                if (!doc.RootElement.TryGetProperty("weight_map", out var mapElement) || mapElement.ValueKind != JsonValueKind.Object)
+                    throw new InvalidOperationException($"SafeTensor shard index '{indexPath}' has no 'weight_map' object.");
+
+                foreach (var entry in mapElement.EnumerateObject())
+                {
+                    if (entry.Value.ValueKind != JsonValueKind.String)
+                        throw new InvalidOperationException($"weight_map entry for tensor '{entry.Name}' in '{indexPath}' is not a shard file name.");
+                    var shard = entry.Value.GetString()!;
+                    if (!owningShard.TryAdd(entry.Name, shard))
+                        throw new InvalidOperationException(
+                            $"Duplicate tensor '{entry.Name}' in the weight_map of '{indexPath}' " +
+                            $"(mapped to both '{owningShard[entry.Name]}' and '{shard}').");
+                    weightMap.Add((entry.Name, shard));
+                }
+            }
+
+            var requested = tensorNames is null ? null : new HashSet<string>(tensorNames);
+            if (requested != null)
+                foreach (var name in requested)
+                    if (!owningShard.ContainsKey(name))
+                        throw new KeyNotFoundException($"Tensor '{name}' is not listed in the weight_map of '{indexPath}'.");
+
+            // Group tensor names by shard, preserving weight_map order.
+            var shardOrder = new List<string>();
+            var mappedByShard = new Dictionary<string, List<string>>();
+            foreach (var (name, shard) in weightMap)
+            {
+                if (!mappedByShard.TryGetValue(shard, out var names))
+                {
+                    names = [];
+                    mappedByShard[shard] = names;
+                    shardOrder.Add(shard);
+                }
+                names.Add(name);
+            }
+
+            var indexDir = Path.GetDirectoryName(Path.GetFullPath(indexPath))!;
+            var loaded = new Dictionary<string, SafeTensor>();
+            foreach (var shard in shardOrder)
+            {
+                var mapped = mappedByShard[shard];
+                if (requested != null && !mapped.Any(requested.Contains))
+                    continue; // no requested tensor lives in this shard — do not touch the file
+
+                var shardPath = Path.Combine(indexDir, shard);
+                if (!File.Exists(shardPath))
+                    throw new FileNotFoundException(
+                        $"Shard file '{shard}' (holding tensor '{mapped[0]}') referenced by '{indexPath}' not found at '{shardPath}'.");
+
+                var shardBytes = File.ReadAllBytes(shardPath);
+                var parsed = ParseSafeTensorFile(shardBytes);
+
+                foreach (var tensor in parsed)
+                {
+                    if (!owningShard.TryGetValue(tensor.Name, out var owner))
+                        throw new InvalidOperationException(
+                            $"Tensor '{tensor.Name}' found in shard '{shard}' is not listed in the weight_map of '{indexPath}'.");
+                    if (!string.Equals(owner, shard, StringComparison.Ordinal))
+                        throw new InvalidOperationException(
+                            $"Duplicate tensor '{tensor.Name}': found in shard '{shard}' but the weight_map of '{indexPath}' assigns it to '{owner}'.");
+                    loaded[tensor.Name] = tensor;
+                }
+
+                foreach (var name in mapped)
+                    if (!loaded.ContainsKey(name))
+                        throw new InvalidOperationException(
+                            $"Tensor '{name}' is listed in the weight_map of '{indexPath}' as stored in shard '{shard}' but is missing from that shard.");
+            }
+
+            // Return in weight_map order, restricted to the requested subset.
+            var result = new List<SafeTensor>();
+            foreach (var (name, _) in weightMap)
+                if ((requested is null || requested.Contains(name)) && loaded.TryGetValue(name, out var tensor))
+                    result.Add(tensor);
+            return result;
         }
 
         /// <summary>
         /// Save SafeTensor objects to a file in SafeTensors format
-        /// (8-byte header length, JSON header, raw tensor data)
+        /// (8-byte header length, JSON header, raw tensor data).
+        /// When <paramref name="maxShardSizeBytes"/> is set and the tensors do not
+        /// fit in a single shard, the checkpoint is written in the Hugging Face
+        /// multi-file convention instead: shard files named
+        /// <c>{name}-00001-of-000NN.safetensors</c> next to <paramref name="filePath"/>
+        /// plus a <c>{name}.safetensors.index.json</c> manifest with a
+        /// <c>weight_map</c> and total-size metadata. Each shard is an individually
+        /// valid safetensors file carrying <paramref name="globalMetadata"/>.
         /// </summary>
-        public static void SaveSafeTensors(string filePath, List<SafeTensor> tensors, Dictionary<string, object>? globalMetadata = null)
+        /// <param name="filePath">Path for the output .safetensors file; shard and index names are derived from it</param>
+        /// <param name="tensors">List of SafeTensor objects to save</param>
+        /// <param name="globalMetadata">Optional global metadata to include</param>
+        /// <param name="maxShardSizeBytes">
+        /// Opt-in maximum shard size in bytes (Hugging Face convention default:
+        /// <see cref="DefaultMaxShardSizeBytes"/>). Null (the default) always writes
+        /// a single file; when the total tensor size is at or below the threshold the
+        /// single-file output is byte-for-byte identical to a save without it.
+        /// </param>
+        public static void SaveSafeTensors(string filePath, List<SafeTensor> tensors, Dictionary<string, object>? globalMetadata = null, long? maxShardSizeBytes = null)
+        {
+            if (maxShardSizeBytes is not null)
+            {
+                if (maxShardSizeBytes <= 0)
+                    throw new ArgumentOutOfRangeException(nameof(maxShardSizeBytes), "Maximum shard size must be positive.");
+                if (TrySaveShardedSafeTensors(filePath, tensors, globalMetadata, maxShardSizeBytes.Value))
+                    return;
+            }
+
+            using var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
+            SaveSafeTensorsToStream(fs, tensors, globalMetadata);
+        }
+
+        /// <summary>
+        /// Writes a sharded checkpoint when the tensors overflow a single shard of
+        /// <paramref name="maxShardSizeBytes"/>; returns false (writing nothing) when
+        /// they fit in one shard so the caller falls back to the standard single file.
+        /// Tensors are packed greedily into shards in list order.
+        /// </summary>
+        private static bool TrySaveShardedSafeTensors(string filePath, List<SafeTensor> tensors, Dictionary<string, object>? globalMetadata, long maxShardSizeBytes)
         {
             if (tensors == null)
                 throw new ArgumentNullException(nameof(tensors));
@@ -90,77 +307,73 @@ namespace Shorokoo.Onnx
             if (tensors.Count == 0)
                 throw new ArgumentException("Cannot save an empty SafeTensor list.", nameof(tensors));
 
-            // Build header object and collect raw tensor byte blobs
-            var header = new Dictionary<string, object>();
-            var tensorBlobs = new List<byte[]>(tensors.Count);
-
-            long currentOffset = 0L;
-
-            foreach (var st in tensors)
+            var sizes = new long[tensors.Count];
+            long totalSize = 0L;
+            for (int i = 0; i < tensors.Count; i++)
             {
+                var st = tensors[i];
                 if (st == null)
                     throw new InvalidOperationException("SafeTensor list contains a null entry.");
-
-                if (string.IsNullOrWhiteSpace(st.Name))
-                    throw new InvalidOperationException("SafeTensor has no valid Name.");
-
-                // An empty shape is the valid SafeTensors encoding of a rank-0 scalar
-                // (product of an empty shape = 1 element); only a null shape is invalid.
-                if (st.Shape == null)
-                    throw new InvalidOperationException($"SafeTensor '{st.Name}' has no valid Shape.");
-
                 if (st.Data == null)
                     throw new InvalidOperationException($"SafeTensor '{st.Name}' has no Data.");
-
-                if (string.IsNullOrWhiteSpace(st.DataType))
-                    throw new InvalidOperationException($"SafeTensor '{st.Name}' has no valid DType.");
-
-                var shape = st.Shape;
-                var dtype = st.DataType.ToUpperInvariant();
-
-                // Flatten and convert tensor to raw bytes
-                var blob = st.Data.AccessRawMemory().ToArray();
-                tensorBlobs.Add(blob);
-
-                long startOffset = currentOffset;
-                long endOffset = startOffset + blob.Length;
-                currentOffset = endOffset;
-
-                // Per-tensor metadata according to SafeTensors spec
-                var tensorMeta = new Dictionary<string, object>
-                {
-                    ["dtype"] = dtype,
-                    ["shape"] = shape,
-                    ["data_offsets"] = new long[] { startOffset, endOffset }
-                };
-
-                // If you have extra metadata on SafeTensor, merge it here.
-                // ASSUMPTION: there is an AdditionalMetadata (Dictionary<string, object>) property.
-                // If your SafeTensor type uses a different name, adjust this block accordingly.
-                if (st.Metadata != null)
-                    foreach (var kv in st.Metadata)
-                        tensorMeta[kv.Key] = kv.Value;
-
-                header[st.Name] = tensorMeta;
+                sizes[i] = st.Data.AccessRawMemory().Length;
+                totalSize += sizes[i];
             }
 
-            if (globalMetadata is not null)
-                header["__metadata__"] = globalMetadata;
+            // Greedy packing in list order: start a new shard when the next tensor
+            // would overflow the current one. A tensor larger than the limit gets a
+            // shard of its own.
+            var shardRanges = new List<(int Start, int Count)>();
+            int rangeStart = 0;
+            long currentSize = 0L;
+            for (int i = 0; i < tensors.Count; i++)
+            {
+                if (i > rangeStart && currentSize + sizes[i] > maxShardSizeBytes)
+                {
+                    shardRanges.Add((rangeStart, i - rangeStart));
+                    rangeStart = i;
+                    currentSize = 0L;
+                }
+                currentSize += sizes[i];
+            }
+            shardRanges.Add((rangeStart, tensors.Count - rangeStart));
 
-            // Serialize header to JSON UTF-8
-            var headerJson = JsonSerializer.Serialize(header);
-            var headerBytes = System.Text.Encoding.UTF8.GetBytes(headerJson);
-            long headerLength = headerBytes.LongLength;
+            if (shardRanges.Count == 1)
+                return false; // fits in one shard — standard single-file output
 
-            // Compose file: [8-byte little-endian header length][header JSON][tensor binary]
-            using var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
+            var fullPath = Path.GetFullPath(filePath);
+            var directory = Path.GetDirectoryName(fullPath)!;
+            var extension = Path.GetExtension(fullPath);
+            if (extension.Length == 0)
+                extension = ".safetensors";
+            var stem = Path.GetFileNameWithoutExtension(fullPath);
 
-            var lengthBytes = BitConverter.GetBytes(headerLength); // little-endian on all common platforms
-            fs.Write(lengthBytes, 0, lengthBytes.Length);
-            fs.Write(headerBytes, 0, headerBytes.Length);
+            string ShardName(int s) => $"{stem}-{s + 1:D5}-of-{shardRanges.Count:D5}{extension}";
 
-            foreach (var blob in tensorBlobs)
-                fs.Write(blob, 0, blob.Length);
+            // Map every tensor to its shard (and reject duplicates) before writing
+            // any file, so a failure never leaves a partial checkpoint behind.
+            var weightMap = new Dictionary<string, string>();
+            for (int s = 0; s < shardRanges.Count; s++)
+            {
+                var (start, count) = shardRanges[s];
+                for (int i = start; i < start + count; i++)
+                    if (!weightMap.TryAdd(tensors[i].Name, ShardName(s)))
+                        throw new InvalidOperationException($"Duplicate tensor name '{tensors[i].Name}'; sharded saving requires unique tensor names.");
+            }
+
+            for (int s = 0; s < shardRanges.Count; s++)
+            {
+                var (start, count) = shardRanges[s];
+                SaveSafeTensors(Path.Combine(directory, ShardName(s)), tensors.GetRange(start, count), globalMetadata);
+            }
+
+            var index = new Dictionary<string, object>
+            {
+                ["metadata"] = new Dictionary<string, object> { ["total_size"] = totalSize },
+                ["weight_map"] = weightMap,
+            };
+            File.WriteAllText(Path.Combine(directory, stem + extension + ShardIndexSuffix), JsonSerializer.Serialize(index));
+            return true;
         }
 
         /// <summary>

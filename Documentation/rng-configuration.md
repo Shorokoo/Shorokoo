@@ -103,13 +103,15 @@ algorithm's functions.
 
 Per-execution variation is carried by a separate **drawBase** counter, not by the key — and
 the RNG system manages it itself: concretization injects one model-global execution counter
-(`RngExecutionCounter`, ordinary model state, initialized 0 and advanced +1 per execution)
-and wires it into every feed. Modules never touch it — `Globals.RandomUniform` is all a
-consumer writes. Under the training rig the counter rides the checkpoint, so Dropout masks
-differ per step and a resumed run at step N draws exactly what the uninterrupted run would;
-in one-shot inference it is baked at 0, so inference stays deterministic and stateless. One
-counter serves all feeds because sites are already decorrelated by their stream keys; it
-costs the checkpoint a single scalar.
+(`RngExecutionCounter`, ordinary model state, an int64 scalar initialized 0 and advanced +1
+per execution) and wires it into every feed. Modules never touch it — `Globals.RandomUniform`
+is all a consumer writes. Under the training rig the counter rides the checkpoint, so Dropout
+masks differ per step and a resumed run at step N draws exactly what the uninterrupted run
+would; in one-shot inference it is baked at 0, so inference stays deterministic and
+stateless. One counter serves all feeds because sites are already decorrelated by their
+stream keys; it costs the checkpoint a single scalar. Framework-managed counters like this
+one are int64 state end-to-end, so incrementing stays exact at any step count — there is no
+float32-style saturation point past which masks would stop varying.
 
 ## Feeds inside loops
 

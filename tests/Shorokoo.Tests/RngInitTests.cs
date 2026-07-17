@@ -210,8 +210,12 @@ public class RngNormalFrozenDerivationTests
         var g = RngNormalBothCollections.ComputationGraph;
         var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
+        // Filter to the float32 weight before casting: the param list also carries the
+        // framework-injected RngExecutionCounter, which is int64 state.
         var init = arch.InitializeTrainableParams(rngConfig: cfg).ModelParams
-            .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
+            .Select(p => p.ToTensorData())
+            .Where(t => t.DType == DType.Float32)
+            .Select(t => t.As<float32>().AccessMemory().ToArray())
             .Single(v => v.Length == 16);
         var concrete = arch.ToConcreteModel(cfg);
         var feed = ComputeContext.Default.Execute(concrete, input)[0]

@@ -59,6 +59,11 @@ namespace Shorokoo.Core
         /// <summary>Whether any trace is in progress on the current thread.</summary>
         internal static bool IsTracing => TraceContext.Current is not null;
 
+        /// <summary>Whether the trace in progress on the current thread (if any) is a module
+        /// build — for hooks that fire on every trace kind (loop termination) but must only
+        /// touch module-build state such as <see cref="StateUpdates"/>.</summary>
+        internal static bool IsModuleBuildTracing => TraceContext.Current?.IsModuleBuild == true;
+
         /// <summary>
         /// The loop-tracing state of the current trace. Requires a trace in progress on the
         /// current thread — callers on paths where none may exist (node interception) check
@@ -71,24 +76,13 @@ namespace Shorokoo.Core
         /// <summary>
         /// The state-update registrations of the current module build. The accessor is the
         /// validity gate for <c>Globals.StateUpdate</c>: it requires a module build on the
-        /// current thread, and a call site outside any <c>LoopAPI.Iterate</c> body — a loop
-        /// body is traced once per construction pass (up to four times), so an in-loop
-        /// registration would fire repeatedly, mostly against throwaway nodes, and what a
-        /// per-iteration state update should even mean is undefined.
+        /// current thread. (Inside a <c>LoopAPI.Iterate</c> body a registration is deferred —
+        /// recorded once on the canonical pass and resolved to the post-loop value when the
+        /// outermost loop terminates — but that is the recorder's business, not this gate's;
+        /// see <see cref="InternalGlobals.RegisterStateUpdate"/>.)
         /// </summary>
         internal static StateUpdateRegistry StateUpdates
-        {
-            get
-            {
-                var build = RequireModuleBuild("Globals.StateUpdate");
-                if (build.Loopers.InLoopBody)
-                    throw new InvalidOperationException(
-                        "Globals.StateUpdate is not supported inside a LoopAPI.Iterate body. " +
-                        "Compute the new value inside the loop, then register the update " +
-                        "once after the loop, from the loop's final value.");
-                return build.StateUpdates;
-            }
-        }
+            => RequireModuleBuild("Globals.StateUpdate").StateUpdates;
 
         /// <summary>
         /// The pin recordings of the current module build. The accessor is the validity

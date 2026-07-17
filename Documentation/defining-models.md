@@ -26,9 +26,12 @@ Related: [core-types.md](core-types.md) · [inference.md](inference.md) ·
     the `TrainingRig` replicates per trainable parameter. State **must** be created
     through a state initializer's `Init(...)`: `Globals.StateUpdate(state, newValue)`
     throws `InvalidStateUpdateException` when its first argument is anything else —
-    a runtime input, a trainable parameter, or a computed tensor. `StateUpdate` is also only valid inside a module body, and not
-    inside a `LoopAPI.Iterate` loop body (register one update per state, after the
-    loop) — it throws otherwise.
+    a runtime input, a trainable parameter, or a computed tensor. `StateUpdate` is
+    also only valid inside a module body — it throws otherwise. Inside a
+    `LoopAPI.Iterate` loop body it registers the post-loop value of the updated
+    tensor (sugar for the after-the-loop registration), which requires the updated
+    value to be a carried loop variable; each state still gets exactly one update
+    per step.
 - `Inline` may return a single value or a tuple (multiple outputs).
 - The class must be `partial` so the generator can extend it.
 - The generator is a convenience, not a requirement — see

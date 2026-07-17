@@ -86,7 +86,11 @@ public class CodegenFreeModuleTests
         return input * Scalar(2f);
     }
 
-    /// <summary>StateUpdate misuse: registered inside a LoopAPI.Iterate body.</summary>
+    /// <summary>
+    /// In-loop StateUpdate misuse: the updated value (<c>state + 1</c>) is recomputed each
+    /// iteration but never carried across iterations nor consumed after the loop, so it does
+    /// not surface as a loop output and has no post-loop value to register.
+    /// </summary>
     private static Tensor<float32> StateUpdateInsideLoopBody(Tensor<float32> input)
     {
         var state = InitBnRunningMean.Init(Vector(1L));
@@ -97,6 +101,112 @@ public class CodegenFreeModuleTests
             Globals.StateUpdate(state, state + Scalar(1f));
         }
         return acc;
+    }
+
+    /// <summary>
+    /// In-loop StateUpdate misuse: the updated value is a scanned result, whose post-loop
+    /// form is the stacked per-iteration tensor rather than a final value.
+    /// </summary>
+    private static Tensor<float32> StateUpdateOnScanInsideLoopBody(Tensor<float32> input)
+    {
+        var state = InitBnRunningMean.Init(Vector(1L));
+        var acc = state + Scalar(0f);
+        foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
+        {
+            acc = acc + Scalar(1f);
+            Globals.StateUpdate(state, ctx.Scan(acc));
+        }
+        return input * Scalar(2f);
+    }
+
+    /// <summary>
+    /// In-loop StateUpdate sugar, happy path: the updated value is a carried loop variable,
+    /// so the call registers its post-loop value. Per execution: state ← state + 10 + 3.
+    /// </summary>
+    private static Tensor<float32> StateUpdateInLoopCarriedBody(Tensor<float32> input)
+    {
+        var state = InitBnRunningMean.Init(Vector(1L));
+        var acc = state + Scalar(10f);
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            acc = acc + Scalar(1f);
+            Globals.StateUpdate(state, acc);
+        }
+        return input * Scalar(2f);
+    }
+
+    /// <summary>
+    /// The documented after-the-loop pattern for the exact loop of
+    /// <see cref="StateUpdateInLoopCarriedBody"/> — the in-loop sugar must produce an
+    /// identically-behaving graph.
+    /// </summary>
+    private static Tensor<float32> StateUpdateAfterLoopCarriedBody(Tensor<float32> input)
+    {
+        var state = InitBnRunningMean.Init(Vector(1L));
+        var acc = state + Scalar(10f);
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            acc = acc + Scalar(1f);
+        }
+        Globals.StateUpdate(state, acc);
+        return input * Scalar(2f);
+    }
+
+    /// <summary>
+    /// In-loop StateUpdate sugar across two nesting levels: the carried value is translated
+    /// through the inner loop's close output to the outer loop's close output.
+    /// Per execution: state ← state + 10 + 2·3.
+    /// </summary>
+    private static Tensor<float32> StateUpdateInNestedLoopBody(Tensor<float32> input)
+    {
+        var state = InitBnRunningMean.Init(Vector(1L));
+        var acc = state + Scalar(10f);
+        foreach (var outerCtx in LoopAPI.Iterate(Scalar(2L)))
+        {
+            foreach (var innerCtx in LoopAPI.Iterate(Scalar(3L)))
+            {
+                acc = acc + Scalar(1f);
+                Globals.StateUpdate(state, acc);
+            }
+        }
+        return input * Scalar(2f);
+    }
+
+    /// <summary>
+    /// In-loop StateUpdate sugar with a loop that runs zero iterations: the carried
+    /// variable's close output falls back to its initializer (per the LoopAPI.Init rules),
+    /// so per execution: state ← state + 10.
+    /// </summary>
+    private static Tensor<float32> StateUpdateInZeroIterationLoopBody(Tensor<float32> input)
+    {
+        var state = InitBnRunningMean.Init(Vector(1L));
+        var acc = state + Scalar(10f);
+        foreach (var ctx in LoopAPI.Iterate(Scalar(0L)))
+        {
+            acc = acc + Scalar(1f);
+            Globals.StateUpdate(state, acc);
+        }
+        return input * Scalar(2f);
+    }
+
+    /// <summary>
+    /// A loop-construction failure striking after the in-loop StateUpdate has recorded:
+    /// the throw fires on the fourth body trace, i.e. after the canonical (third) pass
+    /// recorded the pending registration but before the loop completes and resolves it.
+    /// </summary>
+    private static Tensor<float32> StateUpdateInLoopThenFourthPassThrowBody(Tensor<float32> input)
+    {
+        var state = InitBnRunningMean.Init(Vector(1L));
+        var acc = state + Scalar(0f);
+        var bodyRuns = 0;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
+        {
+            acc = acc + Scalar(1f);
+            Globals.StateUpdate(state, acc);
+            if (++bodyRuns == 4)
+                throw new FormatException("simulated fourth-pass loop-construction failure");
+        }
+        return input * Scalar(2f);
     }
 
     // ───────────────────────────────── helpers ─────────────────────────────────
@@ -115,6 +225,12 @@ public class CodegenFreeModuleTests
     /// <summary>Wraps a constant-fed module output into a no-input graph, concretizes, executes.</summary>
     private static byte[][] ExecuteOutputs(params Variable[] outputs)
         => ExecuteConcretized(new FastComputationGraph([], [.. outputs]));
+
+    /// <summary>Reads the single state param's current scalar value from a concretized graph.</summary>
+    private static float StateValue(FastComputationGraph graph) =>
+        graph.GetStateParamDataNodes()[0].Attributes
+            .GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData)!
+            .As<float32>().AccessMemory()[0];
 
     // ─────────────────────────────────── tests ───────────────────────────────────
 
@@ -457,17 +573,136 @@ public class CodegenFreeModuleTests
     }
 
     /// <summary>
-    /// <c>Globals.StateUpdate</c> inside a <c>LoopAPI.Iterate</c> body is explicitly unsupported:
-    /// a loop body is traced once per construction pass (up to four times), so an in-loop
-    /// registration used to fire repeatedly — mostly against throwaway pass nodes — with
-    /// unspecified semantics. The module build now fails loudly at the call site instead.
+    /// <c>Globals.StateUpdate</c> inside a <c>LoopAPI.Iterate</c> body is sugar for
+    /// registering the post-loop value of the updated tensor. Single loop: the carried
+    /// variable's close-node output is registered, so each execution advances the state by
+    /// the loop's full effect (+10 initializer, +1 × 3 iterations) exactly once — and the
+    /// produced graph behaves identically to the documented after-the-loop pattern.
     /// </summary>
     [Fact]
-    public void TestStateUpdateInsideLoopBodyFailsTheModuleBuild()
+    public void TestStateUpdateInsideLoopRegistersPostLoopValue()
+    {
+        var input = TensorData([4L], new float[] { 1f, 2f, 3f, 4f });
+
+        FastComputationGraph Concretize(Func<Tensor<float32>, Tensor<float32>> body, string name)
+        {
+            var graph = ModuleFactory.ComputationGraph(body, name);
+            return graph.ToConcreteArchitecture(graph.FromOrderedInputs([input])).ToConcreteModel();
+        }
+
+        var sugar = Concretize(StateUpdateInLoopCarriedBody, "CodegenFreeInLoopState");
+        var afterLoop = Concretize(StateUpdateAfterLoopCarriedBody, "CodegenFreeAfterLoopState");
+
+        FastComputationGraph[] variants = [sugar, afterLoop];
+        foreach (var concrete in variants)
+        {
+            Assert.Equal(1, concrete.GetStateUpdateOutputCount());
+            Assert.Equal(0f, StateValue(concrete));
+
+            var (outputs1, updated1) = ComputeContext.Default.ExecuteWithState(concrete, input);
+            Assert.Equal(new float[] { 2f, 4f, 6f, 8f },
+                MemoryMarshal.Cast<byte, float>(outputs1[0].ToTensorData().AccessRawMemory()).ToArray());
+            Assert.Equal(13f, StateValue(updated1));
+
+            // The second step re-reads the updated state: 13 + 10 + 3.
+            var (_, updated2) = ComputeContext.Default.ExecuteWithState(updated1, input);
+            Assert.Equal(26f, StateValue(updated2));
+        }
+    }
+
+    /// <summary>
+    /// In-loop StateUpdate sugar across nested loops: the recorded in-body value is
+    /// translated through the inner loop's close output to the outer loop's close output,
+    /// so each execution advances the state by the whole nest's effect (+10, then +1 × 2·3).
+    /// </summary>
+    [Fact]
+    public void TestStateUpdateInsideNestedLoopsRegistersPostLoopValue()
+    {
+        var moduleGraph = ModuleFactory.ComputationGraph(
+            (Func<Tensor<float32>, Tensor<float32>>)StateUpdateInNestedLoopBody);
+        var input = TensorData([4L], new float[] { 1f, 2f, 3f, 4f });
+        var concrete = moduleGraph
+            .ToConcreteArchitecture(moduleGraph.FromOrderedInputs([input]))
+            .ToConcreteModel();
+
+        Assert.Equal(1, concrete.GetStateUpdateOutputCount());
+        Assert.Equal(0f, StateValue(concrete));
+
+        var (outputs1, updated1) = ComputeContext.Default.ExecuteWithState(concrete, input);
+        Assert.Equal(new float[] { 2f, 4f, 6f, 8f },
+            MemoryMarshal.Cast<byte, float>(outputs1[0].ToTensorData().AccessRawMemory()).ToArray());
+        Assert.Equal(16f, StateValue(updated1));
+
+        var (_, updated2) = ComputeContext.Default.ExecuteWithState(updated1, input);
+        Assert.Equal(32f, StateValue(updated2));
+    }
+
+    /// <summary>
+    /// In-loop StateUpdate sugar when the loop runs zero iterations: the carried variable's
+    /// close output falls back to its pre-loop initializer (the LoopAPI.Init rules), so the
+    /// state advances by +10 per execution — the loop body contributes nothing.
+    /// </summary>
+    [Fact]
+    public void TestStateUpdateInsideZeroIterationLoopUsesCarriedInitializer()
+    {
+        var moduleGraph = ModuleFactory.ComputationGraph(
+            (Func<Tensor<float32>, Tensor<float32>>)StateUpdateInZeroIterationLoopBody);
+        var input = TensorData([4L], new float[] { 1f, 2f, 3f, 4f });
+        var concrete = moduleGraph
+            .ToConcreteArchitecture(moduleGraph.FromOrderedInputs([input]))
+            .ToConcreteModel();
+
+        Assert.Equal(0f, StateValue(concrete));
+        var (_, updated1) = ComputeContext.Default.ExecuteWithState(concrete, input);
+        Assert.Equal(10f, StateValue(updated1));
+        var (_, updated2) = ComputeContext.Default.ExecuteWithState(updated1, input);
+        Assert.Equal(20f, StateValue(updated2));
+    }
+
+    /// <summary>
+    /// In-loop StateUpdate rejection: an updated value that never surfaces as a loop output
+    /// (recomputed each iteration, neither carried nor consumed after the loop) has no
+    /// post-loop value, so the module build fails with an error naming the fix — not the old
+    /// blanket "not supported".
+    /// </summary>
+    [Fact]
+    public void TestStateUpdateInLoopOnUncarriedValueFailsTheModuleBuild()
     {
         var ex = Assert.Throws<InvalidOperationException>(() =>
             ModuleFactory.ComputationGraph(
                 (Func<Tensor<float32>, Tensor<float32>>)StateUpdateInsideLoopBody));
+        Assert.Contains("does not surface as a loop output", ex.Message);
+        Assert.Contains("LoopAPI.Iterate", ex.Message);
+    }
+
+    /// <summary>
+    /// A failure that strikes after an in-loop StateUpdate has recorded (canonical pass
+    /// done, loop not yet complete) must surface as-is. The unresolved pending
+    /// registration is discarded along with the failed build's trace; it must not be
+    /// re-reported from the harvest as the misleading "never resolved" error, which
+    /// would mask the real exception.
+    /// </summary>
+    [Fact]
+    public void TestLoopConstructionFailureAfterInLoopStateUpdateIsNotMasked()
+    {
+        var ex = Assert.Throws<FormatException>(() =>
+            ModuleFactory.ComputationGraph(
+                (Func<Tensor<float32>, Tensor<float32>>)StateUpdateInLoopThenFourthPassThrowBody));
+        Assert.Equal("simulated fourth-pass loop-construction failure", ex.Message);
+    }
+
+    /// <summary>
+    /// In-loop StateUpdate rejection: a scanned result's post-loop form is the stacked
+    /// per-iteration tensor (empty at zero iterations), not a final value, so the module
+    /// build fails rather than defaulting.
+    /// </summary>
+    [Fact]
+    public void TestStateUpdateInLoopOnScannedValueFailsTheModuleBuild()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            ModuleFactory.ComputationGraph(
+                (Func<Tensor<float32>, Tensor<float32>>)StateUpdateOnScanInsideLoopBody));
+        Assert.Contains("scanned", ex.Message);
         Assert.Contains("LoopAPI.Iterate", ex.Message);
     }
 }

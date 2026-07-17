@@ -151,6 +151,16 @@ namespace Shorokoo
         /// 2. Creates a STATE_UPDATE_LINK node connecting the original and updated state tensors
         /// 3. Registers the update pair for later use when wrapping module outputs with WithStateDeps
         /// 4. Ensures that if the module output is used, the state update will be included in the graph
+        ///
+        /// <para>Inside a <c>LoopAPI.Iterate</c> body, the call is sugar for registering the
+        /// post-loop value of <paramref name="updatedState"/> — exactly equivalent to carrying the
+        /// value out of the loop and calling StateUpdate after it. The updated value must therefore
+        /// be a loop-carried variable (assigned in the body and read across iterations, so its final
+        /// value surfaces as a loop output; with zero iterations it falls back to the value the
+        /// variable had before the loop). A value that never leaves the loop, a scanned result, or
+        /// an iteration-scoped value has no well-defined post-loop translation and fails the module
+        /// build. Each state is still updated exactly once per step: an in-loop call is that
+        /// state's one update.</para>
         /// </summary>
         /// <typeparam name="T">The tensor type (must implement Variable)</typeparam>
         /// <param name="originalState">The original state tensor from a state initializer</param>
@@ -162,8 +172,8 @@ namespace Shorokoo
         /// </exception>
         /// <exception cref="InvalidOperationException">
         /// The call is outside a module body (or on a different thread than the one the body
-        /// runs on), or inside a <c>LoopAPI.Iterate</c> body — register the update after the
-        /// loop instead.
+        /// runs on); or the call is inside a <c>LoopAPI.Iterate</c> body and the updated value
+        /// has no well-defined post-loop translation (it is not a carried loop variable).
         /// </exception>
         public static void StateUpdate<T>(T originalState, T updatedState) where T : IValue
         {

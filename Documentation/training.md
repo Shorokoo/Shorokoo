@@ -331,6 +331,12 @@ Constraints:
   via an optimizer-owned `[StateInitializer]`'s `Init` and registered with `StateUpdate`.
 - Do not call `Globals.StateUpdate` on inputs, trainable parameters, or computed tensors;
   only state variables (a `[StateInitializer]` `Init` result) are accepted.
-- Do not call `Globals.StateUpdate` outside a module body, or inside a `LoopAPI.Iterate`
-  body — both throw. Compute the new value inside the loop and register the update once,
-  after the loop, from the loop's final value.
+- Do not call `Globals.StateUpdate` outside a module body — it throws. Inside a
+  `LoopAPI.Iterate` body the call is allowed as sugar for the post-loop registration: it
+  registers the post-loop value of the updated tensor, exactly as if the value were
+  carried out of the loop and registered after it (an in-loop call is that state's one
+  update for the step). This requires the updated value to be a carried loop variable —
+  assigned in the body and read across iterations, so its final value surfaces as a loop
+  output (with zero iterations it falls back to its pre-loop value). A value that never
+  leaves the loop, a scanned result, or an iteration-scoped value (e.g. the iteration
+  index) has no well-defined post-loop value and fails the module build.

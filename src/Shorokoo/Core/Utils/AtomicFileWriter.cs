@@ -11,10 +11,9 @@ namespace Shorokoo.Core.Utils
     /// </summary>
     /// <remarks>
     /// A successful commit also removes stale <c>.tmp-</c> siblings left behind by earlier
-    /// failed saves of the same target, and — when a <see cref="RetainPolicy"/> is supplied —
-    /// prunes older siblings matching the policy's pattern (retain-last-N rotation). Rotation
-    /// and cleanup never fail the save: the new content is already committed, so their failures
-    /// are surfaced only through the optional <c>onWarning</c> callback (silent if none is given).
+    /// failed saves of the same target. This cleanup never fails the save: the new content is
+    /// already committed, so a cleanup failure is surfaced only through the optional
+    /// <c>onWarning</c> callback (silent if none is given).
     /// </remarks>
     internal static class AtomicFileWriter
     {
@@ -47,7 +46,6 @@ namespace Shorokoo.Core.Utils
         internal static void WriteFile(
             string targetPath,
             Action<Stream> writeContent,
-            RetainPolicy? retain = null,
             Action<string>? onWarning = null)
         {
             if (writeContent is null) throw new ArgumentNullException(nameof(writeContent));
@@ -70,7 +68,7 @@ namespace Shorokoo.Core.Utils
                 throw;
             }
 
-            AfterCommit(directory, name, fullTarget, retain, onWarning);
+            AfterCommit(directory, name, onWarning);
         }
 
         /// <summary>
@@ -78,14 +76,12 @@ namespace Shorokoo.Core.Utils
         /// fills a staged <c>.tmp-</c> directory next to <paramref name="targetPath"/>, whose
         /// files are then flushed to disk and the whole directory renamed onto the target.
         /// Because a rename cannot atomically replace a non-empty directory, the target must
-        /// not exist yet — write each version under a fresh name and use a
-        /// <see cref="RetainPolicy"/> to prune old ones. Readers must ignore siblings for
-        /// which <see cref="IsTempName"/> is true.
+        /// not exist yet — write each version under a fresh name. Readers must ignore siblings
+        /// for which <see cref="IsTempName"/> is true.
         /// </summary>
         internal static void WriteDirectory(
             string targetPath,
             Action<string> populate,
-            RetainPolicy? retain = null,
             Action<string>? onWarning = null)
         {
             if (populate is null) throw new ArgumentNullException(nameof(populate));
@@ -93,8 +89,7 @@ namespace Shorokoo.Core.Utils
             if (Directory.Exists(fullTarget) || File.Exists(fullTarget))
                 throw new IOException(
                     $"Cannot atomically write directory '{targetPath}': the target already exists, and a rename " +
-                    "cannot atomically replace a non-empty directory. Write each version under a fresh name and " +
-                    "prune old ones with a retain policy.");
+                    "cannot atomically replace a non-empty directory. Write each version under a fresh name.");
 
             string tempPath = Path.Combine(directory, StageName(name));
             try
@@ -112,7 +107,7 @@ namespace Shorokoo.Core.Utils
                 throw;
             }
 
-            AfterCommit(directory, name, fullTarget, retain, onWarning);
+            AfterCommit(directory, name, onWarning);
         }
 
         /// <summary>
@@ -146,11 +141,10 @@ namespace Shorokoo.Core.Utils
             $"{TempPrefix}{targetName}-{Guid.NewGuid():N}";
 
         /// <summary>
-        /// Post-commit housekeeping: sweep stale temps from earlier failed saves of this target,
-        /// and apply rotation. All best-effort — the commit has already succeeded.
+        /// Post-commit housekeeping: sweep stale temps from earlier failed saves of this target.
+        /// Best-effort — the commit has already succeeded.
         /// </summary>
-        private static void AfterCommit(
-            string directory, string targetName, string fullTarget, RetainPolicy? retain, Action<string>? onWarning)
+        private static void AfterCommit(string directory, string targetName, Action<string>? onWarning)
         {
             onWarning ??= static _ => { }; // best-effort housekeeping; observe it by passing a callback
 
@@ -164,28 +158,6 @@ namespace Shorokoo.Core.Utils
                 try { DeleteAbandonedTemp(stale); }
                 catch (Exception e) { onWarning($"Shorokoo: failed to remove stale temp '{stale}': {e.Message}"); }
             }
-
-            if (retain is null) return;
-            try
-            {
-                // Keep the N most recent siblings matching the pattern; staged temps and files
-                // not matching the pattern are never touched, nor is the entry just committed.
-                var survivors = Directory.EnumerateFileSystemEntries(directory, retain.SearchPattern)
-                    .Where(p => !IsTempName(Path.GetFileName(p)))
-                    .OrderByDescending(File.GetLastWriteTimeUtc)
-                    .ThenByDescending(p => p, StringComparer.Ordinal)
-                    .Skip(retain.Count);
-                foreach (var old in survivors)
-                {
-                    if (string.Equals(Path.GetFullPath(old), fullTarget, StringComparison.Ordinal)) continue;
-                    try { DeleteEntry(old); }
-                    catch (Exception e) { onWarning($"Shorokoo: rotation failed to remove '{old}': {e.Message}"); }
-                }
-            }
-            catch (Exception e)
-            {
-                onWarning($"Shorokoo: rotation failed for pattern '{retain.SearchPattern}' in '{directory}': {e.Message}");
-            }
         }
 
         private static IEnumerable<string> EnumerateSafely(string directory, string pattern, Action<string> onWarning)
@@ -196,12 +168,6 @@ namespace Shorokoo.Core.Utils
                 onWarning($"Shorokoo: failed to scan '{directory}' for '{pattern}': {e.Message}");
                 return [];
             }
-        }
-
-        private static void DeleteEntry(string path)
-        {
-            if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
-            else File.Delete(path);
         }
 
         /// <summary>
@@ -244,43 +210,6 @@ namespace Shorokoo.Core.Utils
                 RandomAccess.FlushToDisk(handle);
             }
             catch { /* durability is best-effort; the content itself is already fully written */ }
-        }
-    }
-
-    /// <summary>
-    /// Opt-in retain-last-N rotation for <see cref="AtomicFileWriter"/>: after a successful
-    /// commit, siblings of the target matching <see cref="SearchPattern"/> are pruned down to
-    /// the <see cref="Count"/> most recent (by last-write time, name as tie-break). Entries
-    /// that do not match the pattern are never touched.
-    /// </summary>
-    internal sealed class RetainPolicy
-    {
-        /// <summary>How many matching siblings survive a commit (including the one just written).</summary>
-        internal int Count { get; }
-
-        /// <summary>
-        /// Wildcard pattern (as accepted by <see cref="Directory.EnumerateFileSystemEntries(string, string)"/>)
-        /// selecting the sibling names that participate in rotation, e.g. <c>"ckpt-*.safetensors"</c>.
-        /// </summary>
-        internal string SearchPattern { get; }
-
-        private RetainPolicy(int count, string searchPattern)
-        {
-            Count = count;
-            SearchPattern = searchPattern;
-        }
-
-        /// <summary>Keeps the <paramref name="count"/> most recent entries matching <paramref name="searchPattern"/>.</summary>
-        internal static RetainPolicy KeepLast(int count, string searchPattern)
-        {
-            if (count < 1)
-                throw new ArgumentOutOfRangeException(nameof(count), count,
-                    "KeepLast must retain at least the checkpoint being written.");
-            if (string.IsNullOrWhiteSpace(searchPattern))
-                throw new ArgumentException("Rotation needs a sibling-name pattern.", nameof(searchPattern));
-            if (searchPattern.Contains(Path.DirectorySeparatorChar) || searchPattern.Contains(Path.AltDirectorySeparatorChar))
-                throw new ArgumentException("Rotation patterns match sibling names only, not paths.", nameof(searchPattern));
-            return new RetainPolicy(count, searchPattern);
         }
     }
 }

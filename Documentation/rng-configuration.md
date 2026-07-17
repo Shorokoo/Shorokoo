@@ -34,8 +34,8 @@ Because the key tree *is* the ModelId tree:
 ## The RNG identity is an ordinary parameter: `RngSeed`
 
 A model's entire runtime RNG identity lives in one ordinary non-trainable parameter,
-**`RngSeed`**, at the reserved ModelId `[0]` (slot 0 is never assigned to anything else, at
-any level). Its value encodes the runtime master key, any per-stream runtime overrides, and
+**`RngSeed`**, at the reserved ModelId `[0]` (slot 0 is never assigned to anything else).
+Its value encodes the runtime master key, any per-stream runtime overrides, and
 the algorithm id. Every feed's key is then **derived in-graph**: a chain of split
 operations rooted at the `RngSeed` parameter, one split per element of the feed's ModelId
 path — the fold described above, spelled out as graph ops.

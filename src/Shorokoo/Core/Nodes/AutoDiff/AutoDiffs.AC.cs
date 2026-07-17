@@ -36,7 +36,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // Use noopWithEmptyAxes=true so that when no axes need reducing (e.g., same-shape
             // operands), the tensor passes through unchanged instead of reducing all axes.
             var summedGrad = NN.Reduce(ReduceKind.Sum, broadcastedInputGrads, axes: axesToReduce, keepDims: true, noOp: true);
-            var finalGrad = summedGrad.Reshape(originalShape, allowZero: true);
+            var finalGrad = summedGrad.Reshape(originalShape);
 
             return finalGrad;
         }

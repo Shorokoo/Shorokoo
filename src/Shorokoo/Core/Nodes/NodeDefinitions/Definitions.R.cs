@@ -342,6 +342,19 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeBool(AttrAllowzero)
                 .Tensor<AnyLike>("T1")
                 .Tensor<int64>("T2")
+
+                // allowzero unset/0 (ONNX default): 0 entries copy input dims. keepDims: []
+                // regenerates allowzero=0 with the shape passed through unchanged.
+                .Constraint(AttrAllowzero, 0)
+                .Input("input", "T1", "R")
+                .Input("shape", "T2", 1)
+                .Output("output", "T1", "R2")
+                .InputTestShapes("input", [[2,3,4],[6,4]])
+                .InputTestValues("shape", [TensorData([2], 12L, 2L), TensorData([3], 3L, 4L, 2L)])
+                .Code("{1:this}.Reshape({2:param}keepDims: [])")
+
+                // allowzero=1: 0 entries are literal — the wrapper's default.
+                .Constraint(AttrAllowzero, 1)
                 .Input("input", "T1", "R")
                 .Input("shape", "T2", 1)
                 .Output("output", "T1", "R2")

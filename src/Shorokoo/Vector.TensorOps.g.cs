@@ -75,9 +75,15 @@ namespace Shorokoo
         public Tensor<T> DepthToSpace(long blockSize, DepthColumnRowMode mode = DepthColumnRowMode.DCR)
             => OnnxOp.DepthToSpace(this, blockSize, mode);
 
-        /// <summary>Reshapes to <paramref name="newShape"/>; a 0 entry copies the corresponding input dimension unless <paramref name="allowZero"/> is true.</summary>
-        public Tensor<T> Reshape(Vector<int64> newShape, bool allowZero = false)
-            => OnnxOp.Reshape(this, newShape, allowZero);
+        /// <summary>Reshapes to <paramref name="newShape"/> (one entry may be -1 to infer that dimension;
+        /// a 0 entry is a literal zero-sized dimension, as in PyTorch). To copy dimensions from the input
+        /// instead, list their output positions in <paramref name="keepDims"/> and omit them from
+        /// <paramref name="newShape"/>: <c>x.Reshape([Scalar(-1L)], keepDims: [0])</c> keeps dimension 0
+        /// and flattens the rest.</summary>
+        public Tensor<T> Reshape(Vector<int64> newShape, int[]? keepDims = null)
+            => keepDims is null
+                ? OnnxOp.Reshape(this, newShape, allowZero: true)
+                : OnnxOp.Reshape(this, ShapeUtils.InsertKeepDimZeros(newShape, keepDims), allowZero: false);
 
         /// <summary>Permutes the dimensions; with no arguments, reverses them.</summary>
         public Tensor<T> Transpose(params long[] newDims)

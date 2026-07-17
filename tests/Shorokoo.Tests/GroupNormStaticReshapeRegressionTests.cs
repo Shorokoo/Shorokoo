@@ -31,6 +31,22 @@ public partial class GroupNormStaticReshapeRepro
     }
 }
 
+// Companion pin for Shorokoo/Shorokoo#12: the copy-dim spelling of the same flatten. The
+// shape input carries a 0 ("copy dim 0 from the input", allowzero unset), so
+// FastComposeContiguousReshapes deliberately declines to compose it — this module pins that
+// ORT's ReshapeFusion also declines such targets and the uncomposed pattern loads and runs.
+// A future ORT that extends the fusion to 0-targets would surface here.
+[Module]
+public partial class GroupNormKeepDimsReshapeRepro
+{
+    public static Scalar<bit> Inline(Tensor<float32> x)   // [2, 4, 3, 3]
+    {
+        var y = GroupNorm.Call(Scalar(2L), Scalar(false), Scalar(1e-5f), x);
+        var flat = y.Reshape([Scalar(-1L)], keepDims: [0]); // shape input [0, -1] → [2, 36]
+        return SelfCheck.Nan(flat) < Scalar(1f);            // finite output => true; self-checking
+    }
+}
+
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
 public class GroupNormStaticReshapeRegressionTests
@@ -62,6 +78,16 @@ public class GroupNormStaticReshapeRegressionTests
     [Fact]
     public void StatefulGroupNormOutputStaticReshapeLoadsAndRuns()
         => Assert.True(AutoTest.AdvancedTestGraph<StatefulGroupNormStaticReshapeRepro>(
+            hyperparamInputs: [], runtimeInputs: [Range([2L, 4L, 3L, 3L], 0.7f, -10f)]));
+
+    /// <summary>
+    /// The copy-dim spelling of the #10 flatten (a 0 entry in the shape input, via keepDims)
+    /// must also load and run: FastComposeContiguousReshapes declines to compose 0-targets, and
+    /// this pins that ORT's ReshapeFusion declines them too (Shorokoo/Shorokoo#12).
+    /// </summary>
+    [Fact]
+    public void GroupNormOutputKeepDimsReshapeLoadsAndRuns()
+        => Assert.True(AutoTest.AdvancedTestGraph<GroupNormKeepDimsReshapeRepro>(
             hyperparamInputs: [], runtimeInputs: [Range([2L, 4L, 3L, 3L], 0.7f, -10f)]));
 }
 

@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -118,9 +117,15 @@ namespace Shorokoo.Core.Utils
         public static ReadOnlySpan<byte> Magic => [(byte)'S', (byte)'R', (byte)'K', CurrentVersion];
 
         private const int MagicLength = 4;
+        private const int MagicPrefixLength = 3;
         private const int HeaderLengthFieldSize = 2;
         private const string CompressionNone = "none";
         private const string CompressionZstd = "zstd";
+
+        /// <summary>The most Zstd layers any historical (pre-container) .srk layout ever wrapped:
+        /// the retired double-Zstd <c>SaveCompressedArchitecture</c> writer. The v1 shim unwraps
+        /// up to this many, then treats anything still Zstd-framed as corrupt.</summary>
+        private const int MaxV1ZstdLayers = 2;
 
         private static readonly JsonSerializerOptions HeaderJsonOptions = new()
         {
@@ -242,7 +247,9 @@ namespace Shorokoo.Core.Utils
                 PayloadSha256 = Sha256Hex(payload),
                 Producer = new SrkProducerInfo
                 {
-                    Shorokoo = ShorokooVersion.Value,
+                    // Same version the ONNX exporter stamps as producer_version — one source of
+                    // truth (Version.cs strips any "+build-metadata"), so the header records e.g. "0.1.0".
+                    Shorokoo = Shorokoo.ShorokooVersion.VersionString,
                     IrVersion = irVersion,
                     Opsets = opsets.ToDictionary(kv => kv.Key, kv => kv.Value),
                 },
@@ -262,15 +269,7 @@ namespace Shorokoo.Core.Utils
             return result;
         }
 
-        private static readonly Lazy<string> ShorokooVersion = new(() =>
-        {
-            var assembly = typeof(SrkFileFormat).Assembly;
-            return assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
-                ?? assembly.GetName().Version?.ToString()
-                ?? string.Empty;
-        });
-
-        private static string Sha256Hex(byte[] payload)
+        private static string Sha256Hex(ReadOnlySpan<byte> payload)
             => Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
 
         #endregion
@@ -281,19 +280,74 @@ namespace Shorokoo.Core.Utils
         public static bool IsSrkV2(byte[] data)
             => data is not null && data.Length >= MagicLength && data.AsSpan(0, MagicLength).SequenceEqual(Magic);
 
+        /// <summary>True when the bytes open with the "SRK" container prefix, whatever the
+        /// trailing major-version byte. A serialized ONNX ModelProto opens with 0x08 and a Zstd
+        /// frame with 0x28, so no legacy v1 layout can collide with this prefix.</summary>
+        private static bool StartsWithMagicPrefix(byte[] data)
+            => data is not null && data.Length >= MagicPrefixLength
+               && data[0] == (byte)'S' && data[1] == (byte)'R' && data[2] == (byte)'K';
+
+        /// <summary>
+        /// Throws when <paramref name="data"/> is an .srk container whose major version this
+        /// build does not understand (the "SRK" prefix is present but the version byte is not
+        /// <see cref="CurrentVersion"/>). This makes a major-version break a clear, pre-header
+        /// error instead of letting the file fall through to the legacy content shim and fail
+        /// obscurely as unparseable protobuf.
+        /// </summary>
+        private static void ThrowIfUnsupportedContainerVersion(byte[] data, string origin)
+        {
+            if (!StartsWithMagicPrefix(data) || IsSrkV2(data))
+                return;
+            int version = data.Length > MagicPrefixLength ? data[MagicPrefixLength] : -1;
+            throw new InvalidDataException(
+                $"'{origin}': .srk container major version {version} is not supported by this Shorokoo " +
+                $"build (supported: {CurrentVersion}). The file was likely written by a newer framework version.");
+        }
+
         /// <summary>
         /// Reads and validates the v2 header without touching the payload. Returns null for
-        /// data without the v2 magic (a legacy v1 file, or not a .srk at all); throws
-        /// <see cref="InvalidDataException"/> for a v2 file whose header is truncated,
-        /// malformed, or of an unsupported major version.
+        /// data without the "SRK" container prefix (a legacy v1 file, or not a .srk at all);
+        /// throws <see cref="InvalidDataException"/> for a v2 file whose header is truncated or
+        /// malformed, or for an .srk container of an unsupported major version.
         /// </summary>
         public static SrkHeader? TryReadHeader(byte[] data, string? origin = null)
-            => IsSrkV2(data) ? ReadHeaderCore(data, origin ?? "<in-memory .srk data>", out _) : null;
+        {
+            origin ??= "<in-memory .srk data>";
+            if (IsSrkV2(data))
+                return ReadHeaderCore(data, origin, out _);
+            ThrowIfUnsupportedContainerVersion(data, origin);
+            return null;
+        }
 
-        /// <summary>File-path convenience over <see cref="TryReadHeader(byte[], string?)"/>;
-        /// error messages name the file.</summary>
+        /// <summary>
+        /// File-path convenience over <see cref="TryReadHeader(byte[], string?)"/> that reads only
+        /// the container prefix and header from disk — never the (potentially multi-GB) payload —
+        /// so identifying/routing a file is cheap. Error messages name the file.
+        /// </summary>
         public static SrkHeader? TryReadHeaderFromFile(string filePath)
-            => TryReadHeader(File.ReadAllBytes(filePath), filePath);
+        {
+            using var stream = File.OpenRead(filePath);
+
+            Span<byte> prefix = stackalloc byte[MagicLength + HeaderLengthFieldSize];
+            int prefixRead = stream.ReadAtLeast(prefix, prefix.Length, throwOnEndOfStream: false);
+            if (prefixRead < prefix.Length)
+                // Too short to be a v2 container; hand what we have to the shared parser, which
+                // returns null for legacy/other data and throws for a truncated SRK container.
+                return TryReadHeader(prefix[..prefixRead].ToArray(), filePath);
+
+            // Legacy v1 / non-.srk data has no header to read; only a container carries one.
+            if (!(prefix[0] == (byte)'S' && prefix[1] == (byte)'R' && prefix[2] == (byte)'K'))
+                return null;
+
+            int headerLen = prefix[MagicLength] | (prefix[MagicLength + 1] << 8);
+            var buf = new byte[prefix.Length + headerLen];
+            prefix.CopyTo(buf);
+            int bodyRead = stream.ReadAtLeast(buf.AsSpan(prefix.Length), headerLen, throwOnEndOfStream: false);
+
+            // Hand exactly magic+length+header (as far as it was read) to the shared parser: it
+            // validates the magic/version, declared length and JSON without needing the payload.
+            return TryReadHeader(bodyRead < headerLen ? buf[..(prefix.Length + bodyRead)] : buf, filePath);
+        }
 
         /// <summary>
         /// Extracts the serialized ONNX model bytes from any .srk layout, deciding by content
@@ -311,10 +365,15 @@ namespace Shorokoo.Core.Utils
             if (data is null) throw new ArgumentNullException(nameof(data));
             origin ??= "<in-memory .srk data>";
 
+            if (data.Length == 0)
+                throw new InvalidDataException($"'{origin}': the file is empty — not a valid .srk file.");
+
             if (IsSrkV2(data))
             {
                 var header = ReadHeaderCore(data, origin, out var payloadOffset);
-                var payload = data.AsSpan(payloadOffset).ToArray();
+                // Hash and (for the compressed case) decompress the payload straight from the
+                // file buffer — no intermediate whole-payload copy for a large model.
+                var payload = data.AsSpan(payloadOffset);
 
                 if (string.IsNullOrEmpty(header.PayloadSha256))
                     throw new InvalidDataException(
@@ -327,7 +386,7 @@ namespace Shorokoo.Core.Utils
 
                 return header.Compression switch
                 {
-                    CompressionNone => (header, payload),
+                    CompressionNone => (header, payload.ToArray()),
                     CompressionZstd => (header, DecompressPayload(payload, origin)),
                     _ => throw new InvalidDataException(
                         $"'{origin}': .srk header declares unsupported compression " +
@@ -336,12 +395,20 @@ namespace Shorokoo.Core.Utils
                 };
             }
 
+            // An .srk container whose major version this build cannot read must fail clearly
+            // here, before the legacy shim mistakes its header bytes for content.
+            ThrowIfUnsupportedContainerVersion(data, origin);
+
             // v1 shim: no container. Sniff Zstd framing by content — bare protobuf needs no
             // unwrapping; SaveFastGraphToFile wrote one Zstd layer; the retired
-            // SaveCompressedArchitecture wrote two.
+            // SaveCompressedArchitecture wrote two (the maximum any legacy layout used).
             var bytes = data;
-            for (int layer = 0; layer < 2 && LooksLikeZstd(bytes); layer++)
+            for (int layer = 0; layer < MaxV1ZstdLayers && LooksLikeZstd(bytes); layer++)
                 bytes = DecompressPayload(bytes, origin);
+            if (LooksLikeZstd(bytes))
+                throw new InvalidDataException(
+                    $"'{origin}': still Zstd-compressed after unwrapping {MaxV1ZstdLayers} layers " +
+                    "(the maximum for any legacy .srk layout) — the file is corrupt or was written by an unsupported tool.");
             return (null, bytes);
         }
 
@@ -372,10 +439,19 @@ namespace Shorokoo.Core.Utils
             if (header is null)
                 throw new InvalidDataException($"'{origin}': corrupt .srk v2 file — the JSON header is null.");
 
+            // srkVersion is required and always >= 1; a 0 means the field was absent (or mis-cased,
+            // so it landed in AdditionalFields), which is a malformed header, not a version skew.
+            if (header.SrkVersion == 0)
+                throw new InvalidDataException(
+                    $"'{origin}': invalid .srk v2 header — required field 'srkVersion' is missing or zero.");
+
             if (header.SrkVersion != CurrentVersion)
                 throw new InvalidDataException(
-                    $"'{origin}': .srk container version {header.SrkVersion} is not supported by this " +
-                    $"Shorokoo build (supported: {CurrentVersion}). The file was likely written by a newer framework version.");
+                    $"'{origin}': .srk container version {header.SrkVersion} is not supported by this Shorokoo " +
+                    $"build (supported: {CurrentVersion}). The file was written by " +
+                    (header.SrkVersion > CurrentVersion
+                        ? "a newer framework version."
+                        : "an older, unsupported framework version."));
 
             return header;
         }
@@ -384,7 +460,7 @@ namespace Shorokoo.Core.Utils
         private static bool LooksLikeZstd(byte[] data)
             => data.Length >= 4 && data[0] == 0x28 && data[1] == 0xB5 && data[2] == 0x2F && data[3] == 0xFD;
 
-        private static byte[] DecompressPayload(byte[] payload, string origin)
+        private static byte[] DecompressPayload(ReadOnlySpan<byte> payload, string origin)
         {
             try
             {

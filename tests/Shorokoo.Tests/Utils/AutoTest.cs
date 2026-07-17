@@ -49,7 +49,7 @@ namespace Shorokoo.Tests.Utils
             if (testOnnxRoundtrip)
             {
                 var data = CompressedFormatUtils.SaveFastGraphToBinary(graph, compressed: true);
-                var onnxRoundtrip = CompressedFormatUtils.LoadFastGraphFromBinary(data, isCompressed: true);
+                var onnxRoundtrip = CompressedFormatUtils.LoadFastGraphFromBinary(data);
                 var resultB = context.Execute(onnxRoundtrip, inputData);
                 onnxResults = resultB.Select(x => x.ToTensorData().AccessRawMemory().ToArray()).ToArray();
             }
@@ -232,7 +232,7 @@ namespace Shorokoo.Tests.Utils
             }
 
             var data = CompressedFormatUtils.SaveFastGraphToBinary(moduleGraph, compressed: true);
-            moduleGraph = CompressedFormatUtils.LoadFastGraphFromBinary(data, isCompressed: true);
+            moduleGraph = CompressedFormatUtils.LoadFastGraphFromBinary(data);
 
             var allInputs = new TensorData[hyperparamInputs.Length + runtimeInputs.Length];
             Array.Copy(hyperparamInputs, 0, allInputs, 0, hyperparamInputs.Length);
@@ -247,7 +247,7 @@ namespace Shorokoo.Tests.Utils
             // rewrites the opcode to the initializer-fn name; on reload, the function-name
             // opcode dispatches into BuildFastTrainableParamNodeFromProto.
             var archData = CompressedFormatUtils.SaveFastGraphToBinary(concreteArch, compressed: true);
-            concreteArch = CompressedFormatUtils.LoadFastGraphFromBinary(archData, isCompressed: true);
+            concreteArch = CompressedFormatUtils.LoadFastGraphFromBinary(archData);
 
             // Deterministic per-parameter init (see AdvancedTestGraph).
             var concreteModel = concreteArch.ToConcreteModel(RngConfig.Default);

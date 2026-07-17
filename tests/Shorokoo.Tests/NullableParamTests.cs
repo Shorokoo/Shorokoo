@@ -157,7 +157,7 @@ public class NullableParamTests
     public void DefaultedHyper_DefaultValue_SurvivesOnnxBinaryRoundtrip()
     {
         var bytes = CompressedFormatUtils.SaveFastGraphToBinary(DefaultedHyperLayer.ComputationGraph, compressed: true);
-        var roundtripped = CompressedFormatUtils.LoadFastGraphFromBinary(bytes, isCompressed: true);
+        var roundtripped = CompressedFormatUtils.LoadFastGraphFromBinary(bytes);
         var hyper = InputsOf(roundtripped).Single(v => v.InputType == InputType.Hyperparam);
         Assert.Equal(3f, hyper.HyperDefaultValue);
     }

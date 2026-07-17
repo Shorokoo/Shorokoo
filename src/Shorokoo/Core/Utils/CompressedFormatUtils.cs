@@ -208,19 +208,14 @@ namespace Shorokoo.Core.Utils
         /// <see cref="SrkFileFormat.Read"/>.
         /// </summary>
         /// <param name="data">.srk bytes (any layout).</param>
-        /// <param name="isCompressed">Legacy hint, no longer consulted — compression is
-        /// detected from the v2 header or, for v1 data, from the Zstd frame magic.</param>
         /// <param name="requiredStage">When set, refuse (with a clear stage-mismatch error)
         /// data whose graph is not of this <see cref="SrkGraphStage"/> — e.g. reject a
         /// module-stage graph where a runnable concrete model is required. For v2 data the
         /// header is checked before the payload is parsed; for v1 data the stage is detected
         /// from the loaded graph.</param>
         public static FastComputationGraph LoadFastGraphFromBinary(
-            byte[] data, bool? isCompressed = null, SrkGraphStage? requiredStage = null)
-        {
-            _ = isCompressed;
-            return LoadFastGraphCore(data, origin: "<in-memory .srk data>", requiredStage);
-        }
+            byte[] data, SrkGraphStage? requiredStage = null)
+            => LoadFastGraphCore(data, origin: "<in-memory .srk data>", requiredStage);
 
         /// <summary>
         /// Shared load path: container/shim payload extraction, header-first stage
@@ -240,7 +235,21 @@ namespace Shorokoo.Core.Utils
                 SrkFileFormat.EnforceStage(stage, requiredStage.Value, origin);
             }
 
-            var graph = OnnxModelImporter.FromOnnxModelToFastGraph(onnxBytes);
+            FastComputationGraph graph;
+            try
+            {
+                graph = OnnxModelImporter.FromOnnxModelToFastGraph(onnxBytes);
+            }
+            catch (Exception e) when (e is not InvalidDataException)
+            {
+                // A v2 payload passed its SHA-256 check, so reaching here means a genuinely
+                // malformed model; v1 data has no integrity field, so this is the catch-all for
+                // corrupt/unrecognized legacy files. Either way, name the file and the cause
+                // instead of surfacing a bare protobuf/index exception from deep in the importer.
+                throw new InvalidDataException(
+                    $"'{origin}': not a readable Shorokoo graph file — failed to parse the ONNX payload " +
+                    $"({e.GetType().Name}: {e.Message}). The file is corrupt or not a .srk file.", e);
+            }
 
             if (header is null && requiredStage is not null)
                 SrkFileFormat.EnforceStage(SrkFileFormat.DetectStage(graph), requiredStage.Value, origin);
@@ -259,9 +268,6 @@ namespace Shorokoo.Core.Utils
             string filename, FastComputationGraph graph, bool compressed = true,
             bool overrideExtension = true, int compressionLevel = DefaultCompressionLevel)
         {
-            if (File.Exists(filename))
-                File.Delete(filename);
-
             filename = Path.GetFullPath(filename);
 
             if (overrideExtension)
@@ -272,7 +278,10 @@ namespace Shorokoo.Core.Utils
             if (directoryPath is not null)
                 Directory.CreateDirectory(directoryPath);
 
-            File.WriteAllBytes(filename, SaveFastGraphToBinary(graph, compressed, compressionLevel));
+            // Serialize BEFORE touching the destination so a serialization failure never
+            // leaves the target truncated/missing; File.WriteAllBytes overwrites in place.
+            var bytes = SaveFastGraphToBinary(graph, compressed, compressionLevel);
+            File.WriteAllBytes(filename, bytes);
             return filename;
         }
 
@@ -284,9 +293,8 @@ namespace Shorokoo.Core.Utils
         /// name <paramref name="filename"/>.
         /// </summary>
         public static FastComputationGraph LoadFastGraphFromFile(
-            string filename, bool? isCompressed = null, SrkGraphStage? requiredStage = null)
+            string filename, SrkGraphStage? requiredStage = null)
         {
-            _ = isCompressed;
             var allData = File.ReadAllBytes(filename);
             return LoadFastGraphCore(allData, filename, requiredStage);
         }
@@ -600,6 +608,14 @@ namespace Shorokoo.Core.Utils
         /// <param name="compressedBytes">Compressed byte array</param>
         /// <returns>Decompressed byte array</returns>
         public static byte[] Decompress(byte[] compressedBytes)
+            => Decompress((ReadOnlySpan<byte>)compressedBytes);
+
+        /// <summary>
+        /// Decompress Zstandard-compressed bytes from a span, without first copying them into a
+        /// dedicated array — lets callers unwrap a slice of a larger buffer (e.g. a container
+        /// payload) with no intermediate allocation.
+        /// </summary>
+        public static byte[] Decompress(ReadOnlySpan<byte> compressedBytes)
         {
             using var decompressor = new Decompressor();
             return decompressor.Unwrap(compressedBytes).ToArray();
@@ -651,11 +667,10 @@ namespace Shorokoo.Core.Utils
         public static bool IsCompressedSafeTensor(string filePath)
             => filePath.EndsWith(CompressedSafeTensorExtension, StringComparison.OrdinalIgnoreCase);
 
-        /// <summary>
-        /// Determines if a file path is for a compressed architecture file
-        /// </summary>
-        public static bool IsCompressedArchitecture(string filePath)
-            => filePath.EndsWith(CompressedArchitectureExtension, StringComparison.OrdinalIgnoreCase);
+        // Note: there is deliberately no IsCompressedArchitecture(path) helper. A .srk file's
+        // compression is declared in its header, never implied by the .srk/.zsrk extension, so
+        // an extension-based predicate would misrepresent the format contract. Read the header
+        // with SrkFileFormat.TryReadHeaderFromFile when the compression must be known.
 
         #endregion
     }

@@ -402,6 +402,13 @@ new Module<Scalar<float32>, (Tensor<float32>, Tensor<float32>), Tensor<float32>>
 - Do not name a `[TrainableParamInitializer]`/`[StateInitializer]` class `Init`;
   the generated `Init(...)` member would collide with the type name (generator
   error `MSG003`).
+- Do not factor a `[TrainableParamInitializer]`'s random draw
+  (`Globals.RandomUniform`/`RandomNormal`) out into a called function or sub-module;
+  draw inline in the initializer's own body. Keyed per-parameter initialization
+  (see [RNG configuration](rng-configuration.md)) substitutes draws at the top level
+  of the initializer body only, so an initializer whose draw is nested inside a
+  callee is rejected at parameter initialization — the nested draw carries no
+  stream key and would otherwise fall back to non-reproducible backend randomness.
 - Do not forget `partial` on the class, or the `static` modifier on `Inline`.
 - Do not use a plain C# `for`/`if` on graph values (`Scalar<int64>`/`Scalar<bit>`) when
   the count/condition is dynamic; use `LoopAPI.Iterate` / `.IfElse`.

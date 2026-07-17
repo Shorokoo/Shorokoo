@@ -1,5 +1,3 @@
-using System.Runtime.InteropServices;
-
 namespace Shorokoo.Core.Utils
 {
     /// <summary>
@@ -148,16 +146,13 @@ namespace Shorokoo.Core.Utils
             $"{TempPrefix}{targetName}-{Guid.NewGuid():N}";
 
         /// <summary>
-        /// Post-commit housekeeping: fsync the directory so the rename itself is durable, sweep
-        /// stale temps from earlier failed saves of this target, and apply rotation. All
-        /// best-effort — the commit has already succeeded.
+        /// Post-commit housekeeping: sweep stale temps from earlier failed saves of this target,
+        /// and apply rotation. All best-effort — the commit has already succeeded.
         /// </summary>
         private static void AfterCommit(
             string directory, string targetName, string fullTarget, RetainPolicy? retain, Action<string>? onWarning)
         {
             onWarning ??= msg => Console.Error.WriteLine(msg);
-
-            TryFsyncDirectory(directory);
 
             // Our own temp was renamed away, so every remaining ".tmp-<name>-*" sibling is a
             // leftover from a failed save of this same target.
@@ -215,34 +210,6 @@ namespace Shorokoo.Core.Utils
             }
             catch { /* durability is best-effort; the content itself is already fully written */ }
         }
-
-        /// <summary>
-        /// Fsyncs the directory so the committed rename survives power loss, where the platform
-        /// supports it (Linux exposes it via fsync(2) on a directory fd; Windows has no
-        /// equivalent and orders metadata itself).
-        /// </summary>
-        private static void TryFsyncDirectory(string directory)
-        {
-            if (!OperatingSystem.IsLinux()) return;
-            int fd = -1;
-            try
-            {
-                fd = open(directory, O_RDONLY | O_DIRECTORY);
-                if (fd >= 0) fsync(fd);
-            }
-            catch { /* best-effort */ }
-            finally
-            {
-                if (fd >= 0) { try { close(fd); } catch { } }
-            }
-        }
-
-        private const int O_RDONLY = 0x0;
-        private const int O_DIRECTORY = 0x10000; // Linux (x86-64/arm64)
-
-        [DllImport("libc", SetLastError = true)] private static extern int open(string pathname, int flags);
-        [DllImport("libc", SetLastError = true)] private static extern int fsync(int fd);
-        [DllImport("libc", SetLastError = true)] private static extern int close(int fd);
     }
 
     /// <summary>

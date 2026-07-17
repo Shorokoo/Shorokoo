@@ -27,9 +27,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// carries the node's declared distribution (low/high or mean/scale), so the
     /// initializer's downstream scaling math is unchanged.</para>
     ///
-    /// <para>The substitution scans the initializer's own top-level nodes only — an
-    /// initializer must draw inline in its own body. A draw nested inside a function the
-    /// body calls cannot be intercepted here, and is rejected loudly (see
+    /// <para>The substitution runs on the initializer's <b>flattened</b> body
+    /// (<see cref="Function.GetFastFlattenedGraph"/>), so a draw factored into a called
+    /// function or sub-module is inlined to the top level and intercepted like an inline
+    /// draw — each inlined call site becomes its own node and its own sub-stream ordinal.
+    /// For every shipping initializer the body contains no calls, so the flattened body is
+    /// node-identical to the original and the frozen value derivation is unchanged. A draw
+    /// inside a call that survives flattening cannot be keyed and is rejected loudly (see
     /// <see cref="BuildNoiseInjected"/>) rather than left to lower through the generic
     /// ONNX fallback into unkeyed, non-reproducible backend randomness.</para>
     /// </summary>
@@ -39,27 +43,44 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// Returns a new initializer <see cref="Function"/> whose random draws are replaced
         /// by host noise keyed by <paramref name="streamName"/>, or <c>null</c> if
         /// <paramref name="fn"/> contains no random ops (the caller then keeps the original).
-        /// Throws if a function called by the initializer body contains a random draw: such
-        /// a draw is invisible to this top-level scan, carries no ModelId or key, and would
-        /// otherwise silently resolve through the ONNX fallback to real backend randomness —
-        /// with no error and no entry in the RNG stream report.
+        /// Draws nested in called functions/sub-modules are reached by flattening the body
+        /// first; a draw inside a call that survives flattening throws, since it carries no
+        /// ModelId or key and would otherwise silently resolve through the ONNX fallback to
+        /// real backend randomness — no error, no entry in the RNG stream report.
         /// </summary>
         public static Function? BuildNoiseInjected(
             Function fn, (uint k0, uint k1) streamKey, string streamName, long elementCount, int drawRounds = Threefry2x32.Rounds)
         {
-            var nested = fn.ReferencedFunctions.FirstOrDefault(f => f.OriginalFastGraph.Nodes.Any(n =>
-                n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
-                n.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL));
+            // Flatten so a draw factored into a called function/sub-module becomes a
+            // top-level node the substitution below can intercept. Shipping initializers
+            // contain no calls, so their flattened body is node-identical to the original.
+            var body = fn.GetFastFlattenedGraph().Clone();
+
+            // Backstop: anything still invoked after flattening (a non-inlinable call, or
+            // a nested parameter definition) must not smuggle a draw past the top-level
+            // scan. Only nodes whose target function actually executes count — inlining
+            // leaves dead ShrkCreateModule metadata behind, which still names the (now
+            // spliced-in) module function.
+            var nested = body.Nodes
+                .Where(n => n.OpCode == InternalOpCodes.FUNCTION_INVOKE ||
+                            n.OpCode == InternalOpCodes.MODEL_INVOKE ||
+                            n.OpCode == InternalOpCodes.MODEL_PARAM ||
+                            n.OpCode == InternalOpCodes.MODEL_PARAM_REF ||
+                            n.OpCode == InternalOpCodes.MODEL_PARAM_ID_REF ||
+                            n.OpCode == InternalOpCodes.MODEL_PARAM_MODEL_REF)
+                .Select(n => n.TargetFunction)
+                .Where(f => f is not null && f.RngFunctionKind is null)
+                .SelectMany(f => f!.ReferencedFunctions.Concat([f]))
+                .FirstOrDefault(f => f!.OriginalFastGraph.Nodes.Any(n =>
+                    n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
+                    n.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL));
             if (nested is not null)
                 throw new NotSupportedException(
                     $"Initializer '{fn.FriendlyName}' of parameter '{streamName}' draws randomness " +
-                    $"inside the called function '{nested.FriendlyName}'. Keyed per-parameter " +
-                    "initialization substitutes random draws at the top level of the initializer's " +
-                    "own body only; a nested draw keeps no parameter key and would fall back to " +
-                    "unkeyed, non-reproducible backend randomness. Move the RandomUniform/" +
-                    "RandomNormal call directly into the initializer's body.");
-
-            var body = fn.OriginalFastGraph.Clone();
+                    $"inside the called function '{nested.FriendlyName}', which could not be inlined. " +
+                    "The nested draw keeps no parameter key and would fall back to unkeyed, " +
+                    "non-reproducible backend randomness. Move the RandomUniform/RandomNormal " +
+                    "call directly into the initializer's body.");
 
             var (k0, k1) = streamKey;
 

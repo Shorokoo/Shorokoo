@@ -6,7 +6,7 @@ namespace Shorokoo.Tests;
 /// <summary>
 /// Opt-in checks against a real, third-party pretrained checkpoint that a developer
 /// downloads manually (kept out of the repo — see <c>tests/test-data/README.md</c>).
-/// These replace the former git-lfs-backed golden-weight parity fixtures.
+/// These replace the former committed golden-weight parity fixtures.
 ///
 /// Tagged <c>Purpose=Manual</c> so the automated Coverage suite skips them; each test
 /// also skips at runtime (via <see cref="RequiresDownloadedModelFactAttribute"/>) when
@@ -34,7 +34,7 @@ public class RealCheckpointTests
     {
         var path = TestDataPaths.Of("models", "resnet18", "resnet18.safetensors");
 
-        // A git-lfs pointer or truncated file throws inside the loader.
+        // A truncated or malformed file throws inside the loader.
         var tensors = SafeTensorLoader.LoadSafeTensors(path);
         var byName = tensors.ToDictionary(t => t.Name);
 

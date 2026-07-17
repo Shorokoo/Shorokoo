@@ -11,8 +11,8 @@
 *.bin binary
 
 # Model checkpoints and tensor archives are large binaries that are NOT stored in
-# git (they were formerly git-lfs). Developers download them manually into
-# tests/test-data/ (see tests/test-data/README.md), where they are git-ignored.
+# the repo. Developers download them manually into
+# tests/test-data/ (see tests/test-data/README.md), where they are ignored.
 # Mark the formats binary so any stray file is never line-ending-munged.
 *.safetensors binary
 *.zsafetensor binary

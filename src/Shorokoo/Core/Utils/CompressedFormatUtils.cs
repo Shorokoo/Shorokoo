@@ -288,7 +288,6 @@ namespace Shorokoo.Core.Utils
         {
             _ = isCompressed;
             var allData = File.ReadAllBytes(filename);
-            ThrowIfGitLfsPointer(filename, allData);
             return LoadFastGraphCore(allData, filename, requiredStage);
         }
 
@@ -303,7 +302,6 @@ namespace Shorokoo.Core.Utils
             if (!File.Exists(filePath))
                 throw new FileNotFoundException($"Architecture file not found: {filePath}");
             var allData = File.ReadAllBytes(filePath);
-            ThrowIfGitLfsPointer(filePath, allData);
             return SrkFileFormat.Read(allData, filePath).OnnxBytes;
         }
 
@@ -580,45 +578,7 @@ namespace Shorokoo.Core.Utils
                 throw new FileNotFoundException($"Compressed file not found: {filePath}");
 
             var compressedBytes = File.ReadAllBytes(filePath);
-            ThrowIfGitLfsPointer(filePath, compressedBytes);
             return Decompress(compressedBytes);
-        }
-
-        /// <summary>
-        /// Magic prefix that marks a file as a Git LFS pointer (rather than the real binary it stands in for).
-        /// See https://github.com/git-lfs/git-lfs/blob/main/docs/spec.md
-        /// </summary>
-        private const string GitLfsPointerPrefix = "version https://git-lfs.github.com/spec/v1";
-
-        /// <summary>
-        /// Returns true if <paramref name="fileBytes"/> look like a Git LFS pointer rather than real content.
-        /// Pointer files are short UTF-8 text beginning with a fixed version line.
-        /// </summary>
-        public static bool IsGitLfsPointer(byte[] fileBytes)
-        {
-            if (fileBytes == null || fileBytes.Length < GitLfsPointerPrefix.Length)
-                return false;
-            // LFS pointer files are small; avoid scanning large binaries.
-            if (fileBytes.Length > 1024)
-                return false;
-            for (int i = 0; i < GitLfsPointerPrefix.Length; i++)
-            {
-                if (fileBytes[i] != (byte)GitLfsPointerPrefix[i])
-                    return false;
-            }
-            return true;
-        }
-
-        /// <summary>
-        /// Throws a clear, actionable error if the bytes are a Git LFS pointer instead of real content.
-        /// </summary>
-        public static void ThrowIfGitLfsPointer(string filePath, byte[] fileBytes)
-        {
-            if (!IsGitLfsPointer(fileBytes))
-                return;
-            throw new InvalidDataException(
-                $"'{filePath}' is a Git LFS pointer, not the actual file content. " +
-                "Install git-lfs and run 'git lfs install && git lfs pull' to download the real file.");
         }
 
         /// <summary>

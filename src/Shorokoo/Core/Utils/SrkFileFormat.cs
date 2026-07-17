@@ -293,11 +293,7 @@ namespace Shorokoo.Core.Utils
         /// <summary>File-path convenience over <see cref="TryReadHeader(byte[], string?)"/>;
         /// error messages name the file.</summary>
         public static SrkHeader? TryReadHeaderFromFile(string filePath)
-        {
-            var data = File.ReadAllBytes(filePath);
-            CompressedFormatUtils.ThrowIfGitLfsPointer(filePath, data);
-            return TryReadHeader(data, filePath);
-        }
+            => TryReadHeader(File.ReadAllBytes(filePath), filePath);
 
         /// <summary>
         /// Extracts the serialized ONNX model bytes from any .srk layout, deciding by content

@@ -4,8 +4,8 @@ This directory holds permanent test fixtures for the Shorokoo test suite,
 organized by domain and purpose.
 
 Small fixtures (parameter-id listings, architecture text/JSON) are committed.
-**Large model checkpoints and tensor archives are not** —
-they used to be git-lfs golden weights and have been removed from the repo.
+**Large model checkpoints and tensor archives are not** — they are kept out of
+the repo entirely.
 Developers download them manually when they want to run the opt-in
 `Purpose=Manual` tests (see [Downloading model checkpoints](#downloading-model-checkpoints)).
 Everything matching `*.safetensors`, `*.zsafetensor`, `*.pth`, `*.pt`, `*.onnx`

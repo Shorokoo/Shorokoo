@@ -204,35 +204,6 @@ public class CompressedFormatUtilsCoverageTests
         }
 
         // ──────────────────────────────────────────────────────────────────
-        // Git LFS pointer detection: IsGitLfsPointer + ThrowIfGitLfsPointer.
-        // ──────────────────────────────────────────────────────────────────
-        var lfsBytes = System.Text.Encoding.UTF8.GetBytes(
-            "version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 123\n");
-        Assert.True(CompressedFormatUtils.IsGitLfsPointer(lfsBytes));
-        // null / short / large branches all return false.
-        Assert.False(CompressedFormatUtils.IsGitLfsPointer(null!));
-        Assert.False(CompressedFormatUtils.IsGitLfsPointer(new byte[10]));
-        Assert.False(CompressedFormatUtils.IsGitLfsPointer(new byte[2000]));
-        // Non-LFS bytes that are long enough to bypass the length guard but
-        // don't match the prefix — drives the for-loop mismatch arm.
-        var nonLfs = new byte[200];
-        for (int i = 0; i < nonLfs.Length; i++) nonLfs[i] = (byte)'a';
-        Assert.False(CompressedFormatUtils.IsGitLfsPointer(nonLfs));
-
-        // ThrowIfGitLfsPointer should throw for an LFS pointer.
-        var lfsPath = Path.Combine(TempDir, "fake.lfs");
-        try
-        {
-            File.WriteAllBytes(lfsPath, lfsBytes);
-            Assert.Throws<InvalidDataException>(
-                () => CompressedFormatUtils.DecompressFile(lfsPath));
-        }
-        finally { if (File.Exists(lfsPath)) File.Delete(lfsPath); }
-
-        // No-throw branch on non-LFS bytes.
-        CompressedFormatUtils.ThrowIfGitLfsPointer("dummy", new byte[] { 1, 2, 3 });
-
-        // ──────────────────────────────────────────────────────────────────
         // Format-detection helpers.
         // ──────────────────────────────────────────────────────────────────
         Assert.True(CompressedFormatUtils.IsCompressedSafeTensor("foo.zsafetensor"));

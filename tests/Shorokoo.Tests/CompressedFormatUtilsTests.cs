@@ -83,11 +83,11 @@ public class CompressedFormatUtilsCoverageTests
             var uncompressedBytes = CompressedFormatUtils.SaveFastGraphToBinary(fastGraph);
             File.WriteAllBytes(binPath, uncompressedBytes);
 
-            // Retired compressed-architecture surface, kept as obsolete shims:
-            // SaveCompressedArchitecture / LoadCompressedArchitecture (+ stream variants).
+            // Retired compressed-architecture writers, kept as obsolete shims; the modern
+            // universal loader reads what they produce.
 #pragma warning disable CS0618 // deliberate coverage of the obsolete legacy API
             CompressedFormatUtils.SaveCompressedArchitecture(doubleWrappedPath, fastGraph);
-            var arch = CompressedFormatUtils.LoadCompressedArchitecture(doubleWrappedPath);
+            var arch = CompressedFormatUtils.LoadFastGraphFromFile(doubleWrappedPath);
             Assert.NotEmpty(arch.Nodes);
 
             using (var ms = new MemoryStream())
@@ -332,12 +332,6 @@ public class CompressedFormatUtilsCoverageTests
                 File.WriteAllBytes(path, bytes);
                 var fromFile = CompressedFormatUtils.LoadFastGraphFromFile(path);
                 Assert.Equal(referenceNodeCount, fromFile.Nodes.Count);
-
-                // The obsolete double-Zstd reader shim routes through the same loader.
-#pragma warning disable CS0618 // deliberate coverage of the obsolete legacy API
-                Assert.Equal(referenceNodeCount,
-                    CompressedFormatUtils.LoadCompressedArchitecture(path).Nodes.Count);
-#pragma warning restore CS0618
 
                 // The JSON introspection helpers accept every layout too.
                 Assert.Contains("Graph", CompressedFormatUtils.ToJson(path));

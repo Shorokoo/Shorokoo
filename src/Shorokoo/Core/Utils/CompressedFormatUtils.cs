@@ -149,23 +149,8 @@ namespace Shorokoo.Core.Utils
         #region Compressed Architecture Loading
 
         /// <summary>
-        /// Load a Shorokoo architecture file. Historically paired with the double-Zstd
-        /// layout of <see cref="SaveCompressedArchitecture"/>; now reads any .srk layout
-        /// (v2 container and all v1 layouts, the double-Zstd one included) by content.
-        /// </summary>
-        /// <param name="filePath">Path to the architecture file</param>
-        /// <returns><see cref="FastComputationGraph"/> loaded from the file</returns>
-        [Obsolete("Use LoadFastGraphFromFile — it reads every .srk layout (v2 container and the three v1 layouts) by content.")]
-        public static FastComputationGraph LoadCompressedArchitecture(string filePath)
-        {
-            if (!File.Exists(filePath))
-                throw new FileNotFoundException($"Compressed file not found: {filePath}");
-            return LoadFastGraphFromFile(filePath);
-        }
-
-        /// <summary>
-        /// Stream variant of <see cref="LoadCompressedArchitecture"/>: reads any .srk
-        /// layout by content.
+        /// Stream variant of the retired compressed-architecture loader: reads any .srk
+        /// layout by content. For a file, use <see cref="LoadFastGraphFromFile"/> directly.
         /// </summary>
         /// <param name="stream">Stream containing the .srk data</param>
         /// <returns><see cref="FastComputationGraph"/> loaded from the stream</returns>
@@ -240,12 +225,20 @@ namespace Shorokoo.Core.Utils
             {
                 graph = OnnxModelImporter.FromOnnxModelToFastGraph(onnxBytes);
             }
-            catch (Exception e) when (e is not InvalidDataException)
+            catch (Exception e) when (e is ProtoBuf.ProtoException
+                or EndOfStreamException
+                or IndexOutOfRangeException
+                or ArgumentOutOfRangeException
+                or OverflowException
+                or FormatException)
             {
-                // A v2 payload passed its SHA-256 check, so reaching here means a genuinely
-                // malformed model; v1 data has no integrity field, so this is the catch-all for
-                // corrupt/unrecognized legacy files. Either way, name the file and the cause
-                // instead of surfacing a bare protobuf/index exception from deep in the importer.
+                // These are the exceptions the protobuf/ONNX layer raises on malformed payload
+                // bytes — garbage, truncation, or an empty model (e.g. OpsetImports[0] on an
+                // empty ModelProto). Name the file and the cause instead of surfacing a bare
+                // deep-in-the-importer exception. Deliberately NOT catching Exception broadly:
+                // a NullReferenceException/InvalidOperationException/NotSupportedException from a
+                // valid-but-unsupported graph (or a framework bug), and OutOfMemoryException, must
+                // propagate as themselves rather than be mislabeled "corrupt file".
                 throw new InvalidDataException(
                     $"'{origin}': not a readable Shorokoo graph file — failed to parse the ONNX payload " +
                     $"({e.GetType().Name}: {e.Message}). The file is corrupt or not a .srk file.", e);

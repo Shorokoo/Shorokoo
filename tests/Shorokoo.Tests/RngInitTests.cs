@@ -178,7 +178,8 @@ public partial class RngInitNestedDrawHelper
 
 /// <summary>
 /// A custom initializer whose random draw is nested inside a called function instead of
-/// inline in its own body — the shape keyed per-parameter initialization cannot intercept.
+/// inline in its own body — keyed per-parameter initialization reaches it by flattening
+/// the initializer body before the noise substitution.
 /// </summary>
 [TrainableParamInitializer]
 public static partial class RngInitNestedDrawInit
@@ -199,12 +200,12 @@ public partial class RngInitNestedDrawLayer
 
 /// <summary>
 /// Initialization-side draws must never silently escape the keyed scheme into unkeyed
-/// backend randomness — every escape hatch fails loudly instead. Covers the two known
-/// escapes: an initializer whose random draw is nested inside a called function (invisible
-/// to <c>FastInitRngNoise</c>'s top-level scan), and <c>FastInitializeModelParams</c>
-/// invoked with a config but a missing/incomplete parameter inventory (which used to
-/// silently disable the noise injection for all/some parameters while the config's own
-/// override validation still ran and passed).
+/// backend randomness. A draw factored into a called function is brought into the scheme
+/// by flattening the initializer body before the noise substitution (first test); the
+/// other escape — <c>FastInitializeModelParams</c> invoked with a config but a
+/// missing/incomplete parameter inventory, which used to silently disable the noise
+/// injection for all/some parameters while the config's own override validation still ran
+/// and passed — fails loudly instead.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -218,21 +219,29 @@ public class RngInitFailLoudTests
     }
 
     [Fact]
-    public void TestDrawNestedInCalledFunctionFailsInitialization()
+    public void TestDrawNestedInCalledFunctionIsInlinedAndKeyed()
     {
-        // The draw sits in RngInitNestedDrawHelper, called by the initializer body, so the
-        // top-level substitution finds nothing to intercept; the nested draw keeps no
-        // ModelId/key and would resolve through the generic ONNX fallback to real
+        // The draw sits in RngInitNestedDrawHelper, called by the initializer body. Before
+        // flattening was added, the top-level substitution found nothing to intercept and
+        // the nested draw resolved through the generic ONNX fallback to real
         // backend-random, non-reproducible values — with no error and no entry in the RNG
-        // stream report. Keyed initialization must reject it loudly instead.
-        var g = RngInitNestedDrawLayer.ComputationGraph;
-        var sample = TensorData([2L, 2L], 1f, 1f, 1f, 1f);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([sample]));
+        // stream report. Flattening makes the draw top-level, so it draws host noise keyed
+        // by the parameter's own stream like an inline draw.
+        float[] Init(ulong seed)
+        {
+            var g = RngInitNestedDrawLayer.ComputationGraph;
+            var sample = TensorData([2L, 2L], 1f, 1f, 1f, 1f);
+            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([sample]));
+            return arch.InitializeTrainableParams(rngConfig: new RngConfig { MasterSeed = seed })
+                .ModelParams.Single().ToTensorData().As<float32>().AccessMemory().ToArray();
+        }
 
-        var ex = Assert.Throws<NotSupportedException>(
-            () => arch.InitializeTrainableParams(rngConfig: new RngConfig { MasterSeed = 123 }));
-        Assert.Contains("draws randomness inside the called function", ex.Message);
-        Assert.Contains("RngInitNestedDrawHelper", ex.Message);
+        var a = Init(123);
+        Assert.Equal(4, a.Length);
+        Assert.All(a, x => Assert.InRange(x, -1.0f, 1.0f));   // the helper's declared U(-1, 1)
+        Assert.True(a.Distinct().Count() > 1);                // not a degenerate fill
+        Assert.Equal(a, Init(123));                           // reproducible for a config
+        Assert.False(a.SequenceEqual(Init(124)));             // derived from the master seed
     }
 
     [Fact]

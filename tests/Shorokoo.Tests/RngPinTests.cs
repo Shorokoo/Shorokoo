@@ -194,7 +194,7 @@ public class RngPinTests
     }
 
     [Fact]
-    public void TestRngStreamReportShowsRealizedLoopFeedStreams()
+    public void TestRngStreamReportShowsLoopFeedSite()
     {
         var g = (FastComputationGraph)typeof(RngRuntimeLoopFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
@@ -205,26 +205,22 @@ public class RngPinTests
         var cfg = new RngConfig { MasterSeed = 3 };
         var report = arch.GetRngStreamReport(cfg);
 
-        // Three streams: the generator's injected drawBase counter state (RngExecutionCounter —
+        // Two streams: the generator's injected drawBase counter state (RngExecutionCounter —
         // a draw-free zero fill, but it occupies an id slot, so the inventory lists it), plus
-        // one REALIZED stream per hinted loop iteration of the feed site [1, -1, 1]. Realized
-        // ids are static and carry the exact per-stream key (no -1 placeholders).
-        Assert.Equal(3, report.Streams.Count);
+        // ONE row for the feed site [1, -1, 1]. The -1 iteration slot stays: the site's
+        // per-iteration streams derive at runtime from the iteration index (an in-graph split
+        // chain), so the realized set is unbounded and no enumeration exists to list; the
+        // per-iteration key for iteration i is the host fold fold(fold(fold(runMaster, 1), i), 1),
+        // addressable by Override at the realized path [1, i, 1].
+        Assert.Equal(2, report.Streams.Count);
         Assert.Contains(report.Streams, s =>
             s.Kind == RngStreamKind.ParamInit && s.Name!.Contains("RngExecutionCounter"));
-        var feeds = report.Streams.Where(s => s.Kind == RngStreamKind.UniformFeed).ToList();
-        Assert.Equal(2, feeds.Count);
-        for (int i = 0; i < 2; i++)
-        {
-            Assert.Equal([1, i, 1], feeds[i].ModelIdPath);
-            Assert.Equal([1, -1, 1], feeds[i].SitePath);
-            // Exact stream key: fold(fold(fold(runMaster, 1), i), 1) — identical to the
-            // key-table row the lowering emits for iteration i.
-            var (k0, k1) = RngConfig.FoldKey(RngConfig.FoldKey(cfg.FoldRunKey([1]), i), 1);
-            Assert.Equal([k0, k1], feeds[i].KeyWords);
-        }
+        var feed = Assert.Single(report.Streams, s => s.Kind == RngStreamKind.UniformFeed);
+        Assert.Equal([1, -1, 1], feed.ModelIdPath);
+        Assert.Null(feed.SitePath);      // the site row is its own site
+        Assert.Null(feed.KeyWords);      // per-iteration keys are runtime-derived, not listable
 
-        // The skeleton still groups the feed under its loop SCOPE [1, -1] with the feed's
+        // The skeleton groups the feed under its loop SCOPE [1, -1] with the feed's
         // local slot (1) — pins address sites, not iterations — and lists it once.
         var skeleton = arch.GetRngStreamReport().EmitPinSkeleton();
         Assert.Contains("// inside the loop body at ModelId path [1, -1]:", skeleton);
@@ -305,6 +301,18 @@ public class RngPinTests
         for (Exception? e = ex; e is not null; e = e.InnerException)
             if (e.Message.Contains("Rng.Pin")) return;
         Assert.Fail($"expected an Rng.Pin build error, got: {ex}");
+    }
+
+    [Fact]
+    public void TestPinToReservedSlotZeroThrows()
+    {
+        // The [0] reservation: ModelId slots are numbered from 1, and slot 0 — at every
+        // level — is the RngSeed parameter (the model's RNG identity). Sparse pins are the
+        // one path that could mint an explicit slot, so a 0 (or negative) slot is rejected
+        // at the call site, naming the reservation.
+        var ex = Assert.Throws<ArgumentException>(() => Rng.Pin(([0], new object())));
+        Assert.Contains("reserved", ex.Message);
+        Assert.Contains("RngSeed", ex.Message);
     }
 
     [Fact]

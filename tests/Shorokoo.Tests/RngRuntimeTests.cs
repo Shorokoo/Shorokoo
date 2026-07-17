@@ -103,7 +103,7 @@ public class RngRuntimeTests
         var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
 
-        Assert.NotNull(concrete.TryGetRngKeyVector());   // the default identity, recorded
+        Assert.NotNull(concrete.TryGetRngSeed());   // the default identity, recorded
 
         var vals = ComputeContext.Default.Execute(concrete, input)[0]
             .ToTensorData().As<float32>().AccessMemory().ToArray();
@@ -115,11 +115,10 @@ public class RngRuntimeTests
     [Fact]
     public void TestRngConfigRebindsInPlaceWithoutGraphChange()
     {
-        // Re-binding is re-initialization scoped to keys: it replaces the identity carrier
-        // and re-runs the key initializers (each SHRK_RNG_KEY_PARAM entity's value re-materializes
-        // in place — key initializers are pure in the identity, so this is always safe).
-        // No node is added or removed and no feed is touched; parameter values would be
-        // untouched too (this model has none to re-key).
+        // Re-binding is the RngSeed parameter's re-initialization: it replaces that one
+        // parameter's value, and every draw's key — a split chain rooted at the parameter —
+        // re-derives from it. No node is added or removed and no feed is touched; parameter
+        // values would be untouched too (this model has none to re-key).
         var g = (FastComputationGraph)typeof(RtLoweredUniform)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());

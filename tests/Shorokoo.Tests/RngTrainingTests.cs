@@ -101,10 +101,10 @@ public class RngTrainingTests
         var counterValue = ((TensorData<int64>)counterField.Value).AccessMemory()[0];
         Assert.Equal(3L, counterValue);
 
-        // The key-vector carrier rides through loss composition and autodiff into the
+        // The RngSeed parameter rides through loss composition and autodiff into the
         // training-step graph — the step graph itself carries the model's RNG identity,
-        // which is what keys its Dropout feeds at lowering.
-        Assert.NotNull(rigA.TrainingStepPureGraph.TryGetRngKeyVector());
+        // which is what its Dropout feeds' key chains derive from.
+        Assert.NotNull(rigA.TrainingStepPureGraph.TryGetRngSeed());
         Assert.Contains(rigA.TrainingStepPureGraph.Nodes, n =>
             n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
 

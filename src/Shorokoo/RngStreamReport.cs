@@ -39,17 +39,19 @@ public sealed class RngStreamInfo
     public IReadOnlyList<long>? Shape { get; init; }
 
     /// <summary>The stream key ([k0, k1] 32-bit words) resolved under the supplied config;
-    /// <c>null</c> when no config was supplied. Runtime rows are realized per-iteration
-    /// streams, so every row carries its exact per-stream key.</summary>
+    /// <c>null</c> when no config was supplied — or when <see cref="ModelIdPath"/> is an
+    /// in-loop feed SITE (a <c>-1</c> iteration slot present): its per-iteration keys derive
+    /// at runtime from the iteration index (iteration <c>i</c>'s key is the runtime master
+    /// folded along the path with <c>i</c> in the slot), so no single key describes the row.</summary>
     public IReadOnlyList<long>? KeyWords { get; init; }
 
     /// <summary>
     /// The stream's SITE id (the ModelId with <c>-1</c> iteration placeholders) when
     /// <see cref="ModelIdPath"/> is a realized per-iteration stream of an in-loop consumer —
-    /// a loop feed's iteration stream or an in-loop parameter's iteration copy; null when the
-    /// path is its own site. Pinning addresses sites, so the pin skeleton groups by this.
-    /// Both consumer kinds carry it the same way: ModelId-based components are treated
-    /// uniformly whether they are parameters or feeds.
+    /// an in-loop parameter's iteration copy; null when the path is its own site (parameters
+    /// outside loops, and every feed row: a loop feed is reported once, as its site, since
+    /// its per-iteration streams are runtime-derived rather than enumerated). Pinning
+    /// addresses sites, so the pin skeleton groups by this.
     /// </summary>
     public IReadOnlyList<int>? SitePath { get; init; }
 

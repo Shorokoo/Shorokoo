@@ -31,6 +31,13 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                     node.OpCode != InternalOpCodes.MODEL_PARAM_ID_REF)
                     continue;
 
+                // The RngSeed parameter at reserved ModelId [0] is the model's RNG identity —
+                // neither a trainable weight nor per-step state. It stays embedded model data
+                // (the key chains read it in place); ApplyRngConfig is its only writer.
+                if (node.IdentifierTemplate ==
+                        Fast.FastWireRngKeyDerivation.RngSeedIdentifierTemplate)
+                    continue;
+
                 // Missing attribute → skip (mirrors the CG processor's GetIsTrainable() catch).
                 var isTrainable = node.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsTrainable);
                 if (isTrainable is null) continue;

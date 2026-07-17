@@ -68,11 +68,10 @@ public partial class RngUnrolledLoopFeed
 }
 
 /// <summary>
-/// In-loop feed keying via the enumerated per-stream key table: a feed under a loop takes the
-/// ModelId <c>[loopSlot, -1, feedSlot]</c>; its per-iteration streams are enumerated at
-/// concretization (the concreteness contract — static stream set), and at ONNX prep the feed
-/// draws from a dense key table with the row selected by the runtime iteration index — so
-/// iteration <c>i</c> draws from the stream
+/// In-loop feed keying via the in-graph derivation chain: a feed under a loop takes the
+/// ModelId <c>[loopSlot, -1, feedSlot]</c>, and its key is a split chain rooted at the
+/// RngSeed parameter with the <b>runtime iteration index</b> entering as the split counter at
+/// the <c>-1</c> position — so iteration <c>i</c> draws from the stream
 /// <c>fold(fold(fold(runMaster, loopSlot), i), feedSlot)</c>, bit-exactly reproducible
 /// host-side, whether the loop survives to runtime or unrolls into constants.
 /// </summary>
@@ -165,8 +164,9 @@ public class RngLoopTests
     public void TestPerIterationOverrideReSeedsExactlyOneStream()
     {
         // Override ITERATION 1 of the loop feed site [1, -1, 1] by its realized stream path.
-        // The lowering resolves every realized stream's key host-side from the carrier
-        // (override-aware) into the per-stream key table it selects from by iteration index.
+        // Override routing is structural: the site's chain selects the record's key words
+        // (at their fixed offset in the identity vector) when the runtime iteration index
+        // matches the record's path, and the folded chain otherwise.
         var cfg = new RngConfig { MasterSeed = 11 };
         cfg = cfg.Override(RngCollection.Runtime, [1, 1, 1], 424242UL);
         var (output, concrete) = RunRuntimeLoop(cfg, steps: 3);
@@ -186,11 +186,44 @@ public class RngLoopTests
     }
 
     [Fact]
+    public void TestRebindWithChangedOverrideSetRewiresInPlace()
+    {
+        // Override routing is structural (an overridden site's chain roots at the record's
+        // offset in the identity vector), so a re-bind that CHANGES the override set re-runs
+        // the wiring pass on the same in-memory model — draws honor the new set exactly, and
+        // removing the override restores the master-derived chain bit-exactly.
+        var cfg = new RngConfig { MasterSeed = 11 };
+        var (baseline, concrete) = RunRuntimeLoop(cfg, steps: 3);
+
+        var x = TensorData([N], XVals);
+        var stepsData = TensorData(Array.Empty<long>(), 3L);
+        float[] Run() => ComputeContext.Default.Execute(concrete, x, stepsData)[0]
+            .ToTensorData().As<float32>().AccessMemory().ToArray();
+
+        var cfgOv = cfg.Override(RngCollection.Runtime, [1, 1, 1], 424242UL);
+        concrete.ApplyRngConfig(cfgOv);
+
+        var expected = (float[])XVals.Clone();
+        for (int i = 0; i < 3; i++)
+        {
+            var key = i == 1
+                ? cfgOv.FoldRunKey([1, 1, 1])
+                : RngConfig.FoldKey(RngConfig.FoldKey(cfgOv.FoldRunKey([1]), i), 1);
+            for (long e = 0; e < N; e++)
+                expected[e] += HostUniform(e, key);
+        }
+        Assert.Equal(expected, Run());
+
+        concrete.ApplyRngConfig(cfg);   // back to no overrides: re-wires again
+        Assert.Equal(baseline, Run());
+    }
+
+    [Fact]
     public void TestSingleIterationLoopOverrideIsHonored()
     {
-        // A loop whose enumerated iteration space has exactly ONE stream: the override must
-        // reach the draw (regression guard — a representation-dispatch bug once dropped the
-        // override precisely when the key table had a single row).
+        // A loop that executes exactly ONE iteration: the override must reach the draw
+        // (regression guard — under the retired key-table representation, a dispatch bug
+        // once dropped the override precisely when the table had a single row).
         var cfg = new RngConfig { MasterSeed = 11 };
         cfg = cfg.Override(RngCollection.Runtime, [1, 0, 1], 99999UL);
         var (output, concrete) = RunRuntimeLoop(cfg, steps: 1);
@@ -223,13 +256,13 @@ public class RngLoopTests
     }
 
     [Fact]
-    public void TestZeroEnumeratedIterationsPadOneCellForParamsAndFeedsAlike()
+    public void TestZeroEnumeratedIterationsBuildAndRunForParamsAndFeedsAlike()
     {
-        // Concretizing with a trip-count hint of 0 means the loop never runs under the hints,
-        // yet the concreteness contract requires a static, non-empty consumer set. BOTH
-        // ModelId-based consumer kinds resolve this the same way: the single all-zero grid
-        // cell is realized as padding — validly derived, never consumed when the executed
-        // iteration count is 0 (the only valid use of this concrete artifact).
+        // Concretizing with a trip-count hint of 0 means the loop never runs under the hints.
+        // Params — whose values must be enumerated and materialized — realize the single
+        // all-zero grid cell as padding (validly derived, never consumed at the only valid
+        // executed iteration count, 0). Feeds need no padding at all: their per-iteration
+        // keys derive at runtime from the iteration index, so the site simply never draws.
         var g = (FastComputationGraph)typeof(RngRuntimeLoopParamAndFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var x = TensorData([N], XVals);
@@ -244,14 +277,15 @@ public class RngLoopTests
         Assert.Equal((int[])[2], paramIds[0]);
         Assert.Equal((int[])[1, 0, 1], paramIds[1]);
 
-        // Feed side: exactly one realized runtime stream, at the padded cell [1, 0, 2].
+        // Feed side: the site row [1, -1, 2], iteration slot intact — per-iteration streams
+        // are runtime-derived, so a zero-trip hint enumerates (and pads) nothing.
         var feedRows = arch.GetRngStreamReport().Streams
             .Where(s => s.Collection == RngCollection.Runtime).ToArray();
         Assert.Single(feedRows);
-        Assert.Equal((int[])[1, 0, 2], feedRows[0].ModelIdPath.ToArray());
+        Assert.Equal((int[])[1, -1, 2], feedRows[0].ModelIdPath.ToArray());
 
         // Initialization succeeds (the padded param materializes like any other) and
-        // executing the valid iteration count — 0 — consumes neither padding cell.
+        // executing the valid iteration count — 0 — draws nothing.
         var concrete = arch.ToConcreteModel(new RngConfig { MasterSeed = 11 });
         var output = ComputeContext.Default.Execute(concrete, x, TensorData(Array.Empty<long>(), 0L))[0]
             .ToTensorData().As<float32>().AccessMemory().ToArray();
@@ -261,13 +295,13 @@ public class RngLoopTests
     [Fact]
     public void TestMalformedIterationVectorsFailConcretizationLoudly()
     {
-        // A feed site whose OBSERVED iteration vectors cannot fill its iteration slots is a
-        // corrupted stream inventory, not a zero-trip loop: realizing it as the padded single
-        // cell would emit a 1-row key table that the executing loop indexes out of range at
-        // runtime — an opaque backend error far from the cause. Pin the fail-loud contract
-        // ("a stream set that cannot be enumerated is a hard build error, never a dynamic
-        // fallback"): concretization itself must throw, naming the site. Corrupt the site id
-        // by adding an iteration slot the loop's counter vector can never fill.
+        // A feed site with more iteration slots than its iteration-indices input supplies is
+        // a corrupted stream identity, not a zero-trip loop: wiring it anyway would derive
+        // keys from indices that never exist at runtime — silently wrong streams. Pin the
+        // fail-loud contract ("a stream set that cannot be derived is a hard build error,
+        // never a dynamic fallback"): concretization itself must throw, naming the site.
+        // Corrupt the site id by adding an iteration slot the loop's counter vector can
+        // never fill.
         var g = ((FastComputationGraph)typeof(RngRuntimeLoopFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!).Clone();
         var feed = g.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);

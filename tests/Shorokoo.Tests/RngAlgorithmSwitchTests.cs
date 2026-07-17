@@ -47,19 +47,20 @@ public class RngAlgorithmSwitchTests
             .ToTensorData().As<float32>().AccessMemory().ToArray();
     }
 
-    /// <summary>The feed's resolved stream key, derived from the graph's carrier — exactly
-    /// what the lowering derives when it emits the keyed draw.</summary>
+    /// <summary>The feed's resolved stream key, derived from the graph's bound RngSeed
+    /// identity — exactly what the feed's in-graph split chain derives at execution.</summary>
     private static long[] ResolvedKey(FastComputationGraph concrete)
     {
         var feed = concrete.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
         var path = feed.Attributes.GetIntsVal(ShrkAttrLocalModelId)!;
-        var decoded = RngConfig.FromKeyVector(concrete.TryGetRngKeyVector()!.Value.keyVector);
+        var decoded = RngRuntimeIdentity.Decode(concrete.TryGetRngSeed()!);
         var (k0, k1) = decoded.FoldRunKey(path);
         return [k0, k1];
     }
 
     private static string BoundAlgorithm(FastComputationGraph concrete)
-        => concrete.TryGetRngKeyVector()!.Value.algorithm;
+        => RngAlgorithms.NameOf(
+            RngRuntimeIdentity.Decode(concrete.TryGetRngSeed()!).Algorithm!.Value);
 
     [Fact]
     public void TestRuntimeFeedDrawSwitchesWithAlgorithmAndStaysDeterministic()
@@ -125,29 +126,37 @@ public class RngAlgorithmSwitchTests
     }
 
     [Fact]
-    public void TestTamperedCarrierAlgorithmFailsLoudlyAtParamInit()
+    public void TestTamperedIdentityAlgorithmFailsLoudlyAtParamInit()
     {
-        var g = (FastComputationGraph)typeof(SwitchInitLinear)
+        // SwitchInitLinear has no runtime feeds, so no RngSeed exists to tamper with; use a
+        // model that carries one (a runtime feed) — no-config init reads its algorithm.
+        var g = (FastComputationGraph)typeof(RtLoweredUniform)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
-        var input = TensorData([1L, 3L], 0.1f, 0.2f, 0.3f);
+        var input = TensorData([4L, 4L], new float[16]);
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
         arch.ApplyRngConfig(Rounds20);
 
-        // A model file written by a newer framework version: the carrier's recorded algorithm
-        // name is one this version does not know.
-        const string newerName = "Threefry4x64-Ziggurat.v9";
-        var carrier = arch.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RNG_KEY_VECTOR);
-        carrier.Attributes = carrier.Attributes.SetAttributes((ShrkAttrRngAlgorithm, newerName));
-        Assert.Equal(newerName, arch.TryGetRngKeyVector()!.Value.algorithm);
+        // A model file written by a newer framework version: the RngSeed identity records an
+        // algorithm id this version does not know.
+        const long newerId = 9999;
+        var identity = arch.TryGetRngSeed()!;
+        identity[Shorokoo.Core.Rng.RngRuntimeIdentity.AlgorithmIdIndex] = newerId;
+        var seedNode = arch.Nodes.Single(n =>
+            n.IdentifierTemplate == Shorokoo.Core.Nodes.Processors.Fast
+                .FastWireRngKeyDerivation.RngSeedIdentifierTemplate);
+        seedNode.Attributes = seedNode.Attributes.SetAttributes(
+            (ShrkAttrTensorData, (object?)Shorokoo.TensorData.Create(
+                new Shape(identity.Length), DType.Int64,
+                Shorokoo.Core.Utils.OnnxUtils.CreateTensorValue(new Shape(identity.Length), identity))));
 
-        // No-config init trusts the carrier as the identity: an unreadable identity must
-        // throw — never silently re-initialize under a default algorithm while the carrier
-        // keeps reporting the newer name.
+        // No-config init trusts the bound identity's algorithm: an unreadable identity must
+        // throw — never silently initialize under a substitute algorithm while the model
+        // keeps reporting the newer id.
         var ex = Assert.Throws<NotSupportedException>(() => arch.InitializeTrainableParams());
-        Assert.Contains(newerName, ex.Message);
+        Assert.Contains(newerId.ToString(), ex.Message);
 
         // The escape hatch for deliberately re-keying an unreadable file: an explicit config
-        // bypasses the carrier decode.
+        // bypasses the identity decode.
         Assert.NotEmpty(arch.InitializeTrainableParams(rngConfig: Rounds20).ModelParams);
     }
 

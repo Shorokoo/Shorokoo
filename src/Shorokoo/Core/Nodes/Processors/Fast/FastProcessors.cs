@@ -87,12 +87,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             foreach (var outputKey in graph.Outputs)
                 EnqueueTensor(outputKey);
 
-            // The model's compact RNG key vector is intentional graph-carried metadata with
-            // no consumers — reachability does not apply to it; keep it alive explicitly.
-            foreach (var node in graph.Nodes)
-                if (node.OpCode == InternalOpCodes.SHRK_RNG_KEY_VECTOR && reachable.Add(node.Key))
-                    worklist.Enqueue(node.Key);
-
             // Graph inputs must keep their producer (MODEL_*INPUT) nodes alive even
             // if no path from any output reaches them — otherwise graph.Inputs ends
             // up referencing a tensor produced by a node that no longer exists.
@@ -403,9 +397,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     // stream keys ride the same ModelId tree as params/sub-modules) but carry
                     // no identifier template. Like params, they thread an iteration-indices
                     // input, so a feed inside a loop takes a slot under the loop's own id
-                    // space (with the -1 iteration placeholder) — its per-iteration streams
-                    // are enumerated at concretization and the runtime iteration index selects
-                    // the stream's key-table row (see FastLowerRandomOps).
+                    // space (with the -1 iteration placeholder) — the runtime iteration index
+                    // enters its key derivation chain as a split counter at that position
+                    // (see FastWireRngKeyDerivation).
                     var feedIterationIndices = ScopeOf(fastNode);
                     int? feedLocalSlot = sparseLocalSlotOf.TryGetValue(fastNode, out var fs) ? fs : null;
                     var feedModelId = AllocateLoopModelIds(
@@ -538,6 +532,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             int? explicitLocalSlot,
             Dictionary<ImmutableArray<FastTensorKey>, HashSet<int>> reservedByScope)
         {
+            // Slot 0 is reserved — recursively, at every level: the single-component path [0]
+            // is the RngSeed parameter (the model's runtime RNG identity), and [k, 0] is
+            // reserved for a sub-model's own. FindNextSpot never yields 0; explicit slots
+            // (sparse Rng.Pin entries) are the one path that could mint one, so guard here.
+            if (explicitLocalSlot is 0 or < 0)
+                throw new InvalidOperationException(
+                    $"Rng.Pin: slot {explicitLocalSlot} cannot be assigned — ModelId slots are " +
+                    "numbered from 1; slot 0 is reserved at every level for the RngSeed " +
+                    "parameter (the model's RNG identity).");
+
             if (iterationIndices.Length == 0)
             {
                 // A top-level sparse pin takes its explicit slot; the global picker (created
@@ -2642,10 +2646,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     "FastConvertModelParamIdRefToModelParam: QEE could not resolve all " +
                     "MODEL_PARAM_ID_REF model IDs (integer data unavailable).");
 
-            // Runtime random feeds ride the same QEE evaluation: realize each feed's stream ids
-            // (the site id with every -1 iteration slot filled per observed loop iteration) so
-            // the stream report is static and every stream is addressable by RngConfig.Override.
-            RealizeRngFeedStreams(graph, store);
+            // Runtime random feeds: create the RngSeed parameter at reserved ModelId [0] (iff
+            // the graph has at least one id-bearing feed) and wire every feed's in-graph key
+            // derivation chain — splits along the ModelId path, with runtime iteration indices
+            // entering as split counters, so no stream enumeration is needed or stored.
+            FastWireRngKeyDerivation.CreateRngSeedAndWireChains(graph);
 
             if (candidateModelIdInfos.IsEmpty) return;
 
@@ -3181,9 +3186,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// Enumerates a QEE-resolved tensor's per-iteration integer values: one entry per
         /// loop-history iteration (plus the final value), each with the <c>-2</c> loop-padding
         /// sentinel filtered out, paired with its iteration ordinal so callers can pair values
-        /// across inputs of the same node. This is the one history walk both realizations ride —
-        /// trainable-param ids (<see cref="ExtractModelIdInfosFromStore"/>) and RNG feed streams
-        /// (<see cref="RealizeRngFeedStreams"/>) must enumerate iterations identically.
+        /// across inputs of the same node. This is the history walk trainable-param id
+        /// realization rides (<see cref="ExtractModelIdInfosFromStore"/>). (RNG feed streams no
+        /// longer enumerate iterations at all: their keys derive in-graph from the runtime
+        /// iteration index — see <see cref="FastWireRngKeyDerivation"/>.)
         /// </summary>
         private static IEnumerable<(int iterIdx, long[] vals)> EnumerateIterationIntVectors(RuntimeTensor? rt)
         {
@@ -3193,132 +3199,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     yield return (i, iv.Where(x => x != -2).ToArray());
         }
 
-        /// <summary>
-        /// Realizes every SHRK_RANDOM_* feed's stream ids from the QEE store: the site id's
-        /// <c>-1</c> iteration slots are filled per observed loop iteration (the same loop
-        /// history that realizes trainable-param ids), and the site's <b>key entity</b> — a
-        /// <c>SHRK_RNG_KEY_PARAM</c> node carrying the realized stream set (site id, realized ids,
-        /// per-level iteration counts) — is created and wired as the feed's key input. This
-        /// mirrors trainable params exactly: concretization creates the param-like entity
-        /// whose VALUE (the key table) is materialized later from the bound
-        /// <see cref="RngConfig"/> (see <see cref="FastMaterializeRngKeys"/>). A feed whose
-        /// iteration input QEE could not resolve is a hard error: per the concreteness
-        /// contract there is no dynamic stream derivation to fall back to.
-        /// </summary>
-        private static void RealizeRngFeedStreams(
-            FastComputationGraph graph, Dictionary<FastTensorKey, IRuntimeTensor> store)
-        {
-            List<FastNode>? keyNodes = null;
-            foreach (var node in graph.Nodes)
-            {
-                if (node.OpCode != InternalOpCodes.SHRK_RANDOM_UNIFORM &&
-                    node.OpCode != InternalOpCodes.SHRK_RANDOM_NORMAL) continue;
-                var idVals = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId);
-                if (idVals is null || idVals.Length == 0) continue;
-
-                int depth = idVals.Count(v => v == -1);
-                List<long[]> realized;
-                long[] counts;
-                if (depth == 0)
-                {
-                    realized = [[.. idVals.Select(v => (long)v)]];
-                    counts = [];
-                }
-                else
-                {
-                    // Static ModelIds are what makes an architecture concrete: a feed whose
-                    // per-iteration stream set cannot be enumerated here would have no static
-                    // stream identity, so failure is a hard error — exactly like an
-                    // unresolvable MODEL_PARAM_ID_REF above — never a silent fallback.
-                    var iterInput = node.Inputs.Count > 2 ? node.Inputs[2] : null;
-                    if (iterInput is null || !store.TryGetValue(iterInput.Value, out var raw)
-                        || raw is not RuntimeTensor rt)
-                        throw new FastPipelineUnsupportedException(
-                            "RealizeRngFeedStreams: QEE could not resolve the iteration indices " +
-                            $"of the runtime random feed at ModelId [{string.Join(", ", idVals)}] " +
-                            "(integer data unavailable), so its per-iteration RNG streams cannot " +
-                            "be enumerated. A concrete architecture requires a static stream set.");
-
-                    var seen = new HashSet<string>();
-                    var iterVectors = new List<long[]>();
-                    foreach (var (_, clean) in EnumerateIterationIntVectors(rt))
-                    {
-                        // An observed vector that cannot fill the site's iteration slots is a
-                        // corrupted stream inventory, not a zero-trip loop: silently skipping
-                        // it would realize the padded single cell below, whose 1-row key table
-                        // the executing loop then indexes out of range at runtime — an opaque
-                        // backend error far from the cause (and a partially-malformed set
-                        // would under-enumerate, selecting wrong key rows). Hard error, per
-                        // the concreteness contract.
-                        if (clean.Length != depth)
-                            throw new FastPipelineUnsupportedException(
-                                "RealizeRngFeedStreams: the runtime random feed at ModelId " +
-                                $"[{string.Join(", ", idVals)}] observed an iteration-index " +
-                                $"vector of length {clean.Length} where the site has {depth} " +
-                                "iteration slot(s), so its per-iteration RNG streams cannot be " +
-                                "enumerated. A concrete architecture requires a static stream " +
-                                "set — never a silent fallback.");
-                        if (seen.Add(string.Join(",", clean))) iterVectors.Add(clean);
-                    }
-                    // Zero observed iterations (the loop never ran under the concretization
-                    // inputs): realize the single all-zero grid cell as padding so the stream
-                    // set — and the lowering's key table — is never empty. It is a validly
-                    // derived stream; under valid use of the artifact it is simply never drawn.
-                    if (iterVectors.Count == 0) iterVectors.Add(new long[depth]);
-
-                    // Lexicographic iteration order so flat index = Σ iter[j]·stride[j].
-                    iterVectors.Sort((a, b) =>
-                    {
-                        for (int j = 0; j < depth; j++)
-                            if (a[j] != b[j]) return a[j].CompareTo(b[j]);
-                        return 0;
-                    });
-                    counts = new long[depth];
-                    for (int j = 0; j < depth; j++) counts[j] = iterVectors.Max(v => v[j]) + 1;
-
-                    realized = new List<long[]>(iterVectors.Count);
-                    foreach (var iv in iterVectors)
-                    {
-                        var full = new long[idVals.Length];
-                        int k = 0;
-                        for (int i = 0; i < idVals.Length; i++)
-                            full[i] = idVals[i] == -1 ? iv[k++] : idVals[i];
-                        realized.Add(full);
-                    }
-                }
-
-                long[] flat = new long[realized.Count * idVals.Length];
-                for (int r = 0; r < realized.Count; r++)
-                    realized[r].CopyTo(flat, r * idVals.Length);
-
-                // The site's key entity: owns the realized stream set, value materialized
-                // from the bound config at concrete-model time. Top-level like MODEL_PARAM
-                // nodes — an in-loop feed references it across the loop boundary the same way
-                // an in-loop param reference selects from the top-level param sequence.
-                var keyNodeKey = FastNodeKey.New();
-                var keyOut = new FastTensorKey(keyNodeKey, 0);
-                var keyAttrDefs = Definitions.NodeDefinitions[InternalOpCodes.SHRK_RNG_KEY_PARAM].AttributeDefs;
-                (keyNodes ??= []).Add(new FastNode
-                {
-                    Key = keyNodeKey,
-                    OpCode = InternalOpCodes.SHRK_RNG_KEY_PARAM,
-                    Attributes = OnnxCSharpAttributes.FromCSharpVals(
-                        new Dictionary<string, object?>
-                        {
-                            [OnnxOpAttributeNames.ShrkAttrLocalModelId] = idVals.Select(x => (long)x).ToArray(),
-                            [OnnxOpAttributeNames.ShrkAttrRngRealizedIds] = flat,
-                            [OnnxOpAttributeNames.ShrkAttrRngIterCounts] = counts,
-                        }, keyAttrDefs),
-                    FullInputs = new Dictionary<string, List<FastTensorKey?>>(),
-                    FullOutputs = { [""] = new List<FastTensorKey?> { keyOut } },
-                });
-
-                var feedInputs = node.FullInputs[""];
-                while (feedInputs.Count < 4) feedInputs.Add(null);
-                feedInputs[3] = keyOut;
-            }
-            if (keyNodes is not null) graph.Nodes.InsertRange(0, keyNodes);
-        }
     }
 
     /// <summary>

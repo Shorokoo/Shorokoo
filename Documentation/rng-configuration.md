@@ -31,30 +31,27 @@ Because the key tree *is* the ModelId tree:
   [`Rng.Pin`](rng-pinning.md) can freeze those against refactoring;
 - changing `MasterSeed` re-randomizes everything at once, coherently.
 
-## Feed keys are parameters of the model
+## The RNG identity is an ordinary parameter: `RngSeed`
 
-A runtime feed mirrors a trainable parameter exactly. Both are ModelId-addressed consumers;
-both have an *initializer*; both get their values when the model becomes concrete. The only
-difference is what the initializer needs: a parameter's initializer takes model tensors, a
-feed's **key initializer** needs nothing but the RNG identity and the site's ModelId — it
-*is* the fold described above.
+A model's entire runtime RNG identity lives in one ordinary non-trainable parameter,
+**`RngSeed`**, at the reserved ModelId `[0]` (slot 0 is never assigned to anything else, at
+any level). Its value encodes the runtime master key, any per-stream runtime overrides, and
+the algorithm id. Every feed's key is then **derived in-graph**: a chain of split
+operations rooted at the `RngSeed` parameter, one split per element of the feed's ModelId
+path — the fold described above, spelled out as graph ops.
 
-- `ToConcreteArchitecture` enumerates each feed site's streams and creates its **key
-  entity** — the param-like carrier of the site's realized stream set — exactly as it
-  realizes the model's parameters.
+- `ToConcreteArchitecture` creates the value-less `RngSeed` parameter (if — and only if —
+  the model has at least one runtime random feed) and wires each feed's derivation chain,
+  exactly as it realizes the model's parameters.
 - Binding a config (`ToConcreteModel(config)` / `ApplyRngConfig`) validates it against the
-  stream inventory, records the identity as a compact **key vector** the model carries as a
-  single parameter-like tensor (master seed, sub-masters, any per-stream overrides, plus
-  the algorithm name), and **runs the key initializers**: every key entity's value — its
-  per-stream key table — is materialized from the identity, the same way parameter values
-  come from running their initializers.
+  model's random surface and **is the `RngSeed` parameter's initialization**: it writes the
+  identity value, the same way `ToConcreteModel` fills weights.
 
 Three properties follow directly:
 
-**Re-binding is re-initialization, scoped to keys.** Because a key initializer is pure in
-the identity, re-running it is always safe: you can change the master seed *after*
-`ToConcreteModel`, on the already-built model — key values re-materialize, trained or
-loaded weights are untouched:
+**Re-binding is a parameter write.** You can change the master seed *after*
+`ToConcreteModel`, on the already-built model — one parameter value changes, every draw
+re-derives from it, trained or loaded weights are untouched:
 
 ```csharp
 var concrete = arch.ToConcreteModel(new RngConfig { MasterSeed = 1 });
@@ -62,27 +59,34 @@ var concrete = arch.ToConcreteModel(new RngConfig { MasterSeed = 1 });
 concrete.ApplyRngConfig(new RngConfig { MasterSeed = 2 });
 ```
 
-Re-applying the original config restores the original draws bit-for-bit.
+Re-applying the original config restores the original draws bit-for-bit — and because the
+saved model keeps the symbolic derivation chains, this holds equally on a **loaded** model:
+load, `ApplyRngConfig`, and every draw is re-keyed by construction.
 
-**Randomness survives save/load.** The identity tensor and the materialized key values ride
-the model file, so a loaded model draws exactly what it drew before saving — no config
-object needed on the loading side.
+**Randomness survives save/load.** `RngSeed` serializes as an ordinary initializer (no
+reserved names, no side channels) and the chains ride the graph, so a loaded model draws
+exactly what it drew before saving — no config object needed on the loading side.
 
 **Training needs nothing special.** The rig binds the concrete architecture at the same
-shared point inference uses, *before* loss composition and autodiff. The identity tensor
-and the key entities ride along into the training-step graph, and the forward and any
-recomputed backward copy of a feed read the same key entity — so e.g. a Dropout's backward
+shared point inference uses, *before* loss composition and autodiff. The `RngSeed`
+parameter and the chains ride along into the training-step graph, and the forward and any
+recomputed backward copy of a feed derive the same key — so e.g. a Dropout's backward
 mask matches its forward mask by construction.
+
+A model with no runtime random feeds carries none of this: no `RngSeed`, no chains,
+nothing RNG-related in its saved form.
 
 ## What a keyed feed lowers to
 
-At ONNX prep the already-materialized keys just get wired: a feed selects its iteration's
-[k0, k1] row from its key entity's table (a plain int64 constant in the exported file) and
-calls the config's **named RNG algorithm** — a versioned set of functions (kinds *split* /
-*uniform* / *normal*) that export as tagged, non-inlined ONNX local `FunctionProto`s. The
-exported model's randomness is therefore deterministic, portable across execution
-providers, and identifiable: you can point at the function in the ONNX file that produced
-any draw — and at the constant that carries its keys.
+At ONNX prep a feed's wired key chain feeds the draw call directly: the chain's splits and
+the draw both lower to calls of the config's **named RNG algorithm** — a versioned set of
+functions (kinds *split* / *uniform* / *normal*) that export as tagged, non-inlined ONNX
+local `FunctionProto`s. `RngSeed` becomes an ordinary initializer, and the runtime's
+session-build constant folding collapses the constant chain segments to literal keys — so
+the per-draw cost is what it always was. The exported model's randomness is therefore
+deterministic, portable across execution providers, and identifiable: you can point at the
+function in the ONNX file that produced any draw — and at the initializer that carries the
+identity it derived from.
 
 ## Choosing the generator
 
@@ -96,10 +100,12 @@ any draw — and at the constant that carries its keys.
 All algorithms **share one key tree**: a stream's key is derived the same way regardless of
 generator, so switching `Algorithm` never reshuffles which stream is which — the same stream
 simply draws different numbers. Both parameter initialization and runtime feeds honor the
-choice. Because binding is replacing the identity tensor, you can switch generators on an
-already-built model the same way you re-seed it (`concrete.ApplyRngConfig(...)` /
-re-materialize for init), and the exported model calls — and is tagged with — the selected
-algorithm's functions.
+choice. Because binding is a parameter write, you can switch generators on an
+already-built (in-memory) model the same way you re-seed it (`concrete.ApplyRngConfig(...)`),
+and the exported model calls — and is tagged with — the selected algorithm's functions. A
+**loaded** model's draw functions are already baked, so on it a re-bind may change seed
+values but not the algorithm (that re-bind fails loudly; rebuild from the architecture
+instead).
 
 Per-execution variation is carried by a separate **drawBase** counter, not by the key — and
 the RNG system manages it itself: concretization injects one model-global execution counter
@@ -116,15 +122,15 @@ float32-style saturation point past which masks would stop varying.
 ## Feeds inside loops
 
 A feed under a loop takes a ModelId with a `-1` iteration slot (exactly like a parameter
-created in a loop): one stream **per iteration**. Its per-iteration streams are enumerated
-at `ToConcreteArchitecture` — a concrete architecture's stream set is static, exactly like
-its parameter set — and at ONNX prep the feed draws from a per-stream **key table** with
-the row selected by the runtime iteration index. Iteration *i*'s stream is simply the one
-at the realized path with `i` in the iteration slot (e.g. `[loopSlot, i, feedSlot]`), its
-key the runtime master folded along that full path — deterministic, resumable, and
-reconstructible offline from the path alone. This works identically whether the loop
-survives to runtime (an ONNX `Loop` selecting a row per iteration) or is unrolled at
-concretization (each copy resolves to the very same key, bit-for-bit).
+created in a loop): one stream **per iteration**. The **runtime iteration index enters the
+feed's key derivation chain as a split counter** at that position, so iteration *i*'s
+stream is simply the one at the realized path with `i` in the iteration slot (e.g.
+`[loopSlot, i, feedSlot]`), its key the runtime master folded along that full path —
+deterministic, resumable, and reconstructible offline from the path alone. No per-iteration
+key storage exists (the derivation is one extra bijection per iteration, negligible next to
+the draw itself), and the streams need no enumeration up front. This works identically
+whether the loop survives to runtime or is unrolled at concretization (each copy resolves
+to the very same key, bit-for-bit).
 
 ## Per-stream overrides
 
@@ -142,24 +148,26 @@ var config = new RngConfig { MasterSeed = 42 }
     .Override(RngCollection.Runtime, [2, 0, 1], 5678);
 ```
 
-Every path the stream report lists is a valid override address, including the realized
-per-iteration streams of a loop feed (e.g. `[1, 2, 1]` = iteration 2 of the feed at loop
-slot 1) — overriding one iteration re-seeds that iteration only; sibling iterations keep
-their derived keys. An override that matches no stream throws: a `Runtime` override at
-bind (`ApplyRngConfig`), a `Params` override at parameter initialization.
+Every stream is a valid override address, including the per-iteration streams of a loop
+feed (e.g. `[1, 2, 1]` = iteration 2 of the feed at loop slot 1) — overriding one iteration
+re-seeds that iteration only; sibling iterations keep their derived keys. An override that
+addresses no stream throws: a `Runtime` override at bind (`ApplyRngConfig`), a `Params`
+override at parameter initialization. A loop feed's override addresses the site pattern —
+static slots exactly, the iteration slot by index — and routes structurally in the feed's
+derivation chain, so it works for any iteration the loop actually executes.
 
-Stream ids are realized at `ToConcreteArchitecture` from the input hints, so — like
-trainable params inside loops — a loop feed's streams are enumerated for the hinted trip
-count: the concrete architecture is only valid for inputs that produce the same model-id
-list (or a subset). Driving a loop past its enumerated iteration space is invalid use of
-the concrete artifact — static ModelIds are what "concrete" means.
+Note that changing an override's **value** (or the master seed) on an already-built model
+is a pure parameter write, while changing the override **set** re-wires the derivation
+chains — fine on an in-memory model, refused (loudly) on a loaded one, whose chains are
+baked.
 
 ## The stream report
 
 `arch.GetRngStreamReport(config)` inventories every stream of a concrete architecture — the
-init stream of each parameter (ModelId path, name, shape, resolved key) and every realized
-runtime stream (path, kind, exact per-iteration key) — and can emit the sparse `Rng.Pin`
-skeleton for freezing streams before a refactor (see
+init stream of each parameter (ModelId path, name, shape, resolved key) and one row per
+runtime feed site (path with `-1` marking an iteration slot; static sites carry their exact
+resolved key, in-loop sites derive per-iteration keys at runtime) — and can emit the sparse
+`Rng.Pin` skeleton for freezing streams before a refactor (see
 [Pinning RNG streams](rng-pinning.md)).
 
 ## Without a config

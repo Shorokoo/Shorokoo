@@ -645,7 +645,10 @@ namespace Shorokoo
         
         /// <summary>Utils operation not implemented</summary>
         public const string FW044 = "FW044";
-        
+
+        /// <summary>ONNX export rejected: the graph carries Shorokoo-internal ops and cannot be expressed in the vanilla ONNX dialect</summary>
+        public const string FW045 = "FW045";
+
         #endregion
 
         #region Utility Error Codes (UT001-UT010)

@@ -266,6 +266,156 @@ public class ModulesCoverageTests
     }
 
     /// <summary>
+    /// User-facing ONNX export (issue #36, defect 1): a concrete model's exported
+    /// graph inputs/outputs carry the model's signature names (never internal
+    /// <c>N{k}_T{s}</c> ids), dtype always stamped, and rank-many symbolic dims where
+    /// the rank is known — all discoverable by a plain (no Shorokoo) ONNX Runtime
+    /// <c>InferenceSession</c>, which also executes the file to the same values as
+    /// Shorokoo's own execution. <c>OnnxModelImporter</c> round-trips the names, and a
+    /// re-export of the re-imported graph keeps them stable.
+    /// </summary>
+    [Fact]
+    public void TestVanillaExportSignatureIONamesAndTypes()
+    {
+        var numOut = TensorData(DType.Int64, [], 4L);
+        var input = TensorDataWithSmallVals(DType.Float32, [4L, 4L]);
+        var g = FCLayer.ComputationGraph;
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([numOut, input])).ToConcreteModel();
+
+        var proto = Shorokoo.Core.Factory.FastOnnxModelBuilder.BuildOnnxModel(concrete);
+
+        // Proto level: I/O names come from the signature, in signature order.
+        string[] inputNames = proto.Graph.Inputs.Select(x => x.Name).ToArray();
+        string[] outputNames = proto.Graph.Outputs.Select(x => x.Name).ToArray();
+        Assert.Equal(concrete.InputUniqueNames.Count, inputNames.Length);
+        Assert.Contains("input", inputNames);
+        Assert.All(inputNames.Concat(outputNames), n =>
+        {
+            Assert.DoesNotContain(":", n);   // not a serialized CG tensor key
+            Assert.DoesNotMatch("^N[0-9]+(_T[0-9]+)?$", n);   // not an internal Fast id
+        });
+
+        using var ms = new System.IO.MemoryStream();
+        ProtoBuf.Serializer.Serialize(ms, proto);
+        var bytes = ms.ToArray();
+
+        // Stock ONNX Runtime (no Shorokoo anywhere): I/O discoverable by name with
+        // dtypes reported. The [Hyper] scalar is a rank-0 int64; the rank-agnostic
+        // Tensor<float32> input stays fully dynamic (no dims stamped), per spec.
+        using var session = new Microsoft.ML.OnnxRuntime.InferenceSession(bytes);
+        Assert.Equal(inputNames, session.InputNames);
+        Assert.Equal(outputNames, session.OutputNames);
+        var tensorInMeta = session.InputMetadata["input"];
+        Assert.Equal(typeof(float), tensorInMeta.ElementType);
+        var hyperName = inputNames.Single(n => n != "input");
+        var hyperMeta = session.InputMetadata[hyperName];
+        Assert.Equal(typeof(long), hyperMeta.ElementType);
+        Assert.Empty(hyperMeta.Dimensions);
+        var outMeta = session.OutputMetadata[outputNames.Single()];
+        Assert.Equal(typeof(float), outMeta.ElementType);
+
+        // The exported file executes in the stock runtime, by input NAME, to the same
+        // values Shorokoo computes for the same concrete model.
+        var direct = ComputeContext.Default.Execute(concrete, numOut, input)[0]
+            .ToTensorData().As<float32>().AccessMemory().ToArray();
+        long[] hyperData = [4L];
+        int[] scalarDims = [];
+        int[] inputDims = [4, 4];
+        var hyperTensor = new Microsoft.ML.OnnxRuntime.Tensors.DenseTensor<long>(hyperData, scalarDims);
+        var inputTensor = new Microsoft.ML.OnnxRuntime.Tensors.DenseTensor<float>(
+            input.As<float32>().AccessMemory().ToArray(), inputDims);
+        List<Microsoft.ML.OnnxRuntime.NamedOnnxValue> feeds = [
+            Microsoft.ML.OnnxRuntime.NamedOnnxValue.CreateFromTensor(hyperName, hyperTensor),
+            Microsoft.ML.OnnxRuntime.NamedOnnxValue.CreateFromTensor("input", inputTensor),
+        ];
+        using var results = session.Run(feeds);
+        var ortOut = results.Single();
+        Assert.Equal(outputNames.Single(), ortOut.Name);
+        Assert.Equal(direct, ortOut.AsEnumerable<float>().ToArray());
+
+        // OnnxModelImporter round-trips the names, and re-exporting keeps them stable.
+        var reimported = OnnxModelImporter.FromOnnxModelToFastGraph(bytes);
+        Assert.Equal(inputNames, reimported.InputUniqueNames);
+        Assert.Equal(outputNames, reimported.OutputUniqueNames);
+        var reexported = Shorokoo.Core.Factory.FastOnnxModelBuilder.BuildOnnxModel(reimported);
+        Assert.Equal(inputNames, reexported.Graph.Inputs.Select(x => x.Name).ToArray());
+        Assert.Equal(outputNames, reexported.Graph.Outputs.Select(x => x.Name).ToArray());
+    }
+
+    /// <summary>
+    /// User-facing ONNX export (issue #36, defect 1): where the rank IS statically
+    /// known, the exported I/O ValueInfos carry rank-many dims — symbolic (dynamic)
+    /// since only the rank is fixed — named after the tensor's exported name; a
+    /// known rank-0 output is stamped as a true scalar (shape present, zero dims).
+    /// Verified both at the proto level and through stock ONNX Runtime metadata.
+    /// </summary>
+    [Fact]
+    public void TestVanillaExportStampsKnownRankDims()
+    {
+        var xs = TensorData([2L], 1f, 5f);
+        var ys = TensorData([2L], 3f, 2f);
+        var g = VectorMinMaxOthersBugPinCheck.ComputationGraph;   // Vector<float32> xs, ys → Scalar<bit>
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([xs, ys])).ToConcreteModel();
+
+        var proto = Shorokoo.Core.Factory.FastOnnxModelBuilder.BuildOnnxModel(concrete);
+
+        // Proto level: each rank-1 input has one symbolic dim named {name}_dim0; the
+        // scalar output is stamped with a present-but-empty shape and the bool dtype.
+        foreach (var name in (string[])["xs", "ys"])
+        {
+            var info = proto.Graph.Inputs.Single(x => x.Name == name);
+            var shape = info.Type.TensorType.Shape;
+            var dim = Assert.Single(shape.Dims);
+            Assert.Equal($"{name}_dim0", dim.DimParam);
+        }
+        var outInfo = proto.Graph.Outputs.Single();
+        Assert.Equal(DType.Bool.ProtoTypeNum, outInfo.Type.TensorType.ElemType);
+        Assert.NotNull(outInfo.Type.TensorType.Shape);
+        Assert.Empty(outInfo.Type.TensorType.Shape.Dims);
+
+        // Stock ONNX Runtime reports the same: rank-1 dynamic inputs, scalar output.
+        using var ms = new System.IO.MemoryStream();
+        ProtoBuf.Serializer.Serialize(ms, proto);
+        using var session = new Microsoft.ML.OnnxRuntime.InferenceSession(ms.ToArray());
+        int[] dynamicRank1 = [-1];
+        Assert.Equal(dynamicRank1, session.InputMetadata["xs"].Dimensions);
+        Assert.Equal(dynamicRank1, session.InputMetadata["ys"].Dimensions);
+        Assert.Equal(typeof(float), session.InputMetadata["xs"].ElementType);
+        var outMeta = session.OutputMetadata[outInfo.Name];
+        Assert.Equal(typeof(bool), outMeta.ElementType);
+        Assert.Empty(outMeta.Dimensions);
+    }
+
+    /// <summary>
+    /// User-facing ONNX export (issue #36, defect 2): a module-stage graph — still
+    /// carrying Shorokoo-internal orchestration ops like <c>ShrkCreateModule</c> /
+    /// <c>ShrkModelInvoke</c> — cannot be expressed in the vanilla dialect, so the
+    /// export fails AT EXPORT TIME with the offending ops named and the fix
+    /// (concretize first) spelled out, instead of silently writing a file that only
+    /// Shorokoo can re-import. Shorokoo's own persistence
+    /// (<c>CompressedFormatUtils</c>, the internal dialect) still accepts the very
+    /// same graph unchanged.
+    /// </summary>
+    [Fact]
+    public void TestModuleStageGraphFailsVanillaExportNamingOffendingOps()
+    {
+        var g = TwoStackLayer.ComputationGraph;
+        Assert.Contains(g.Nodes, n => n.OpCode == InternalOpCodes.CREATE_MODULE);
+
+        var ex = Assert.Throws<ModelException>(
+            () => Shorokoo.Core.Factory.FastOnnxModelBuilder.BuildOnnxModel(g));
+        Assert.Equal(ErrorCodes.FW045, ex.ErrorCode);
+        Assert.Contains(InternalOpCodes.CREATE_MODULE, ex.Message);
+        Assert.Contains("ToConcreteModel", ex.Message);
+
+        // The internal dialect remains available for the same module-stage graph.
+        var data = CompressedFormatUtils.SaveFastGraphToBinary(g, compressed: true);
+        var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(data, isCompressed: true);
+        Assert.Equal(g.Nodes.Count, reloaded.Nodes.Count);
+        Assert.Contains(reloaded.Nodes, n => n.OpCode == InternalOpCodes.CREATE_MODULE);
+    }
+
+    /// <summary>
     /// Drives <c>OnnxModelReader.CreateFastInputTensors</c>'s
     /// <c>GENERIC_TYPE_INPUT</c> branch by saving generic modules' raw
     /// <c>ComputationGraph</c>s without first running

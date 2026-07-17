@@ -14,7 +14,9 @@ namespace Shorokoo.Tests;
 /// <see cref="Helpers"/> dtype sets + attribute-type mapping, and the
 /// <see cref="InferenceBackend"/> deployment-folder discovery fallback (the
 /// OS-derived backend selection, a live ORT execution check, and the multi-backend
-/// CPU-vs-GPU selection policy). Plain xunit facts.
+/// CPU-vs-GPU selection policy), and the <see cref="AtomicFileWriter"/>
+/// temp-and-rename commit protocol (crash-window fault injection, stale-temp sweep,
+/// and the directory shape). Plain xunit facts.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -353,5 +355,179 @@ public class CoreUtilsCoverageTests
         var afterBoth = afterVec.InsertAt(scalarElem, Scalar(0L));
 
         Assert.Equal(DataStructure.Sequence, afterBoth.Structure());
+    }
+
+    // ---- AtomicFileWriter: temp-and-rename commit, stale sweep ----
+
+    /// <summary>Fresh scratch directory for one atomic-writer scenario; deleted by the caller.</summary>
+    private static string NewScratchDir()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"shrk_atomic_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    private static void WriteVia(string path, string content, Action<string>? onWarning = null) =>
+        AtomicFileWriter.WriteFile(
+            path, s => s.Write(System.Text.Encoding.UTF8.GetBytes(content)), onWarning);
+
+    /// <summary>
+    /// The single-file commit protocol: a successful save lands the content with no staged
+    /// <c>.tmp-</c> sibling left behind; a failure injected in the crash window between write
+    /// and rename (and a failure thrown by the content writer itself) leaves the previous
+    /// content untouched at the target; and stale temps planted by a "crashed" earlier save
+    /// are swept on the next successful save of the same target — but temps belonging to a
+    /// different target are not.
+    /// </summary>
+    [Fact]
+    public void TestAtomicFileWriterCrashWindowCoverage()
+    {
+        var dir = NewScratchDir();
+        var target = Path.Combine(dir, "state.bin");
+        try
+        {
+            WriteVia(target, "v1");
+            Assert.Equal("v1", File.ReadAllText(target));
+            Assert.Empty(Directory.GetFileSystemEntries(dir, ".tmp-*"));
+
+            // Crash in the commit window (after write+flush, before rename): the old content
+            // survives and the writer disposes its own staged copy. The hook filters on the
+            // scratch dir so concurrent tests elsewhere are unaffected.
+            AtomicFileWriter.CommitFaultInjection = p =>
+            {
+                if (p.StartsWith(dir, StringComparison.Ordinal)) throw new IOException("injected crash");
+            };
+            try
+            {
+                Assert.Throws<IOException>(() => WriteVia(target, "v2"));
+            }
+            finally { AtomicFileWriter.CommitFaultInjection = null; }
+            Assert.Equal("v1", File.ReadAllText(target));
+            Assert.Empty(Directory.GetFileSystemEntries(dir, ".tmp-*"));
+
+            // A failure inside the content writer behaves the same way.
+            Assert.Throws<InvalidOperationException>(() => AtomicFileWriter.WriteFile(
+                target, _ => throw new InvalidOperationException("writer boom")));
+            Assert.Equal("v1", File.ReadAllText(target));
+
+            // A hard crash leaves a stale temp behind (planted here by hand, matching the
+            // staged-name shape ".tmp-<target>-<32-hex-guid>"). The next successful save of the
+            // same target sweeps it — but only precise matches: a temp for a *different* target,
+            // one whose name merely shares this target's as a prefix, and a ".tmp-" file whose
+            // suffix isn't a GUID all survive.
+            var staleOurs   = Path.Combine(dir, $".tmp-state.bin-{Guid.NewGuid():N}");
+            var staleOther  = Path.Combine(dir, $".tmp-other.bin-{Guid.NewGuid():N}");
+            var stalePrefix = Path.Combine(dir, $".tmp-state.bin-2-{Guid.NewGuid():N}"); // target "state.bin-2"
+            var staleNonGuid = Path.Combine(dir, ".tmp-state.bin-notahexguidxxxxxxxxxxx");
+            File.WriteAllText(staleOurs, "partial");
+            File.WriteAllText(staleOther, "partial");
+            File.WriteAllText(stalePrefix, "partial");
+            File.WriteAllText(staleNonGuid, "partial");
+            WriteVia(target, "v2");
+            Assert.Equal("v2", File.ReadAllText(target));
+            Assert.False(File.Exists(staleOurs));
+            Assert.True(File.Exists(staleOther));
+            Assert.True(File.Exists(stalePrefix));
+            Assert.True(File.Exists(staleNonGuid));
+
+            // A concurrent writer's in-flight temp (still held open with a deny-all share) is
+            // never swept: the sweep can't acquire it, so it skips rather than destroying a live
+            // save's data. Simulate the live writer by holding a precise-match temp open.
+            var liveTemp = Path.Combine(dir, $".tmp-state.bin-{Guid.NewGuid():N}");
+            using (new FileStream(liveTemp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                WriteVia(target, "v3");
+                Assert.True(File.Exists(liveTemp)); // held open → skipped
+            }
+            Assert.Equal("v3", File.ReadAllText(target));
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    /// <summary>
+    /// Up-front validation fails before any data is written: a target whose directory does
+    /// not exist (the staged copy must live in that directory so the commit rename never
+    /// crosses filesystems), an empty path, a path that reuses the reserved staging prefix,
+    /// and a null content writer.
+    /// </summary>
+    [Fact]
+    public void TestAtomicFileWriterValidationCoverage()
+    {
+        var dir = NewScratchDir();
+        try
+        {
+            var missingDir = Path.Combine(dir, "does-not-exist");
+            var ex = Assert.Throws<DirectoryNotFoundException>(
+                () => WriteVia(Path.Combine(missingDir, "state.bin"), "v1"));
+            Assert.Contains("does not exist", ex.Message);
+            Assert.False(Directory.Exists(missingDir));       // nothing was created or written
+
+            Assert.Throws<ArgumentException>(() => WriteVia("", "v1"));
+            Assert.Throws<ArgumentException>(() => WriteVia("   ", "v1"));
+            Assert.Throws<ArgumentException>(() => WriteVia(Path.Combine(dir, ".tmp-state.bin"), "v1"));
+            Assert.Throws<ArgumentNullException>(() => AtomicFileWriter.WriteFile(Path.Combine(dir, "s.bin"), null!));
+            Assert.Empty(Directory.GetFileSystemEntries(dir));
+
+            Assert.True(AtomicFileWriter.IsTempName(".tmp-run-42"));
+            Assert.False(AtomicFileWriter.IsTempName("run-42"));
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    /// <summary>
+    /// The directory shape for container formats: a commit atomically renames the fully
+    /// populated staged directory into place (with its files flushed); the target existing
+    /// beforehand is rejected up front (a rename cannot atomically replace a non-empty
+    /// directory) without invoking the populate callback; and a failure while populating (or in
+    /// the commit window) removes the staged directory.
+    /// </summary>
+    [Fact]
+    public void TestAtomicFileWriterWriteDirectoryCoverage()
+    {
+        var dir = NewScratchDir();
+        try
+        {
+            var target = Path.Combine(dir, "run-001");
+            AtomicFileWriter.WriteDirectory(target, temp =>
+            {
+                File.WriteAllText(Path.Combine(temp, "weights.bin"), "w");
+                Directory.CreateDirectory(Path.Combine(temp, "sub"));
+                File.WriteAllText(Path.Combine(temp, "sub", "meta.json"), "{}");
+            });
+            Assert.Equal("w", File.ReadAllText(Path.Combine(target, "weights.bin")));
+            Assert.Equal("{}", File.ReadAllText(Path.Combine(target, "sub", "meta.json")));
+            Assert.Empty(Directory.GetFileSystemEntries(dir, ".tmp-*"));
+
+            // Existing target: rejected before any staging happens.
+            bool populated = false;
+            Assert.Throws<IOException>(() => AtomicFileWriter.WriteDirectory(target, _ => populated = true));
+            Assert.False(populated);
+
+            // Populate failure and commit-window crash both leave no staged debris and no target.
+            var target2 = Path.Combine(dir, "run-002");
+            Assert.Throws<InvalidOperationException>(() => AtomicFileWriter.WriteDirectory(
+                target2, _ => throw new InvalidOperationException("populate boom")));
+            AtomicFileWriter.CommitFaultInjection = p =>
+            {
+                if (p.StartsWith(dir, StringComparison.Ordinal)) throw new IOException("injected crash");
+            };
+            try
+            {
+                Assert.Throws<IOException>(() => AtomicFileWriter.WriteDirectory(
+                    target2, temp => File.WriteAllText(Path.Combine(temp, "weights.bin"), "w2")));
+            }
+            finally { AtomicFileWriter.CommitFaultInjection = null; }
+            Assert.False(Directory.Exists(target2));
+            Assert.Empty(Directory.GetFileSystemEntries(dir, ".tmp-*"));
+
+            // Fresh-name-per-version pattern: a second distinct target commits alongside the
+            // first, each fully populated, with no staged debris left behind.
+            AtomicFileWriter.WriteDirectory(
+                target2, temp => File.WriteAllText(Path.Combine(temp, "weights.bin"), "w2"));
+            Assert.Equal("w", File.ReadAllText(Path.Combine(target, "weights.bin")));
+            Assert.Equal("w2", File.ReadAllText(Path.Combine(target2, "weights.bin")));
+            Assert.Empty(Directory.GetFileSystemEntries(dir, ".tmp-*"));
+        }
+        finally { Directory.Delete(dir, recursive: true); }
     }
 }

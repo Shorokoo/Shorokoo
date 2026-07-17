@@ -95,6 +95,13 @@ namespace Shorokoo
         /// conventional. Fields must be plain tensors (nested-struct fields are unsupported); rank-0
         /// scalars are fine — they serialize as the SafeTensors empty-shape encoding (e.g. an
         /// optimizer's scalar timestep).
+        ///
+        /// <para>
+        /// The write is atomic: the checkpoint is staged to a temp file in the target directory and
+        /// committed by rename, so a crash or power loss mid-save never corrupts an existing
+        /// checkpoint at <paramref name="filePath"/> — either the old or the new content survives.
+        /// The directory must already exist.
+        /// </para>
         /// </summary>
         public void Save(string filePath)
         {
@@ -109,7 +116,7 @@ namespace Shorokoo
             var marker = Globals.TensorData(new long[] { 2L }, CheckpointFormatVersion, (long)Step);
             tensors.Add(new SafeTensor(CheckpointMarkerName, marker, "I64", new long[] { 2L }));
 
-            SafeTensorLoader.SaveSafeTensors(filePath, tensors);
+            AtomicFileWriter.WriteFile(filePath, stream => SafeTensorLoader.SaveSafeTensorsToStream(stream, tensors));
         }
 
         private static void AppendSection(List<SafeTensor> tensors, string section, TensorDataStruct data)

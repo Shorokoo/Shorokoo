@@ -692,6 +692,69 @@ public class TrainingRigCoverageTests
     }
 
     /// <summary>
+    /// Covers the atomic commit in <see cref="TrainingCheckpoint.Save"/> (via
+    /// <see cref="AtomicFileWriter"/>): a save that dies between writing the staged temp file
+    /// and the rename leaves the previous checkpoint intact and loadable at the target path
+    /// (never a truncated file); the stale temp from the failed save is swept by the next
+    /// successful save; and saving into a directory that does not exist fails up front with a
+    /// clear error instead of writing anywhere.
+    /// </summary>
+    [Fact]
+    public void TestCheckpointSaveAtomicCoverage()
+    {
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph,
+            new NamedModelParam[]
+            {
+                new TensorDataModelParam("input", ModelParamType.InputParam,
+                    TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+            },
+            0.1f);
+        var ckptV1 = rig.CreateDefaultCheckpoint();                       // Step 0
+        var ckptV2 = new TrainingCheckpoint(                              // same tensors, Step 7
+            ckptV1.TrainableParams, ckptV1.ModelState, ckptV1.OptimizerState, step: 7);
+
+        var dir = Path.Combine(Path.GetTempPath(), $"shrk_ckpt_atomic_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var path = Path.Combine(dir, "ckpt.safetensors");
+            ckptV1.Save(path);
+            Assert.Equal(0, rig.LoadCheckpoint(path).Step);
+
+            // Simulated crash between write and rename: Save throws, but the good v1
+            // checkpoint still loads from the target path. The hook filters on this test's
+            // directory so parallel tests saving elsewhere are unaffected.
+            AtomicFileWriter.CommitFaultInjection = p =>
+            {
+                if (p.StartsWith(dir, StringComparison.Ordinal)) throw new IOException("injected crash");
+            };
+            try
+            {
+                Assert.Throws<IOException>(() => ckptV2.Save(path));
+            }
+            finally { AtomicFileWriter.CommitFaultInjection = null; }
+            Assert.Equal(0, rig.LoadCheckpoint(path).Step);
+
+            // A stale temp left by a hard-killed save (planted by hand) is swept by the next
+            // successful save, which lands v2.
+            var stale = Path.Combine(dir, $".tmp-ckpt.safetensors-{Guid.NewGuid():N}");
+            File.WriteAllText(stale, "partial");
+            ckptV2.Save(path);
+            Assert.Equal(7, rig.LoadCheckpoint(path).Step);
+            Assert.False(File.Exists(stale));
+            Assert.Empty(Directory.GetFileSystemEntries(dir, ".tmp-*"));
+
+            // A target in a nonexistent directory is rejected before anything is written.
+            Assert.Throws<DirectoryNotFoundException>(
+                () => ckptV1.Save(Path.Combine(dir, "missing", "ckpt.safetensors")));
+            Assert.False(Directory.Exists(Path.Combine(dir, "missing")));
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    /// <summary>
     /// Dynamic (scheduled / runtime) optimizer hyperparameters: a <see cref="HyperValue"/> that is a
     /// <see cref="Schedule"/> or <see cref="HyperValue.Runtime"/> routes the learning rate as a runtime
     /// input (<see cref="TrainingRig.HyperparamStructDef"/>) instead of a baked constant, so the rig

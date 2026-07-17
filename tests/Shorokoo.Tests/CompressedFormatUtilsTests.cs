@@ -1,6 +1,7 @@
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Factory.IR;
 using Shorokoo.Core.Nodes.Processors.Helpers;
+using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
 
@@ -63,13 +64,13 @@ public class CompressedFormatUtilsCoverageTests
         var graph = new FastComputationGraph([input], [output]);
         var fastGraph = FastComputationGraphConverter.ToFastGraph(graph);
 
-        // SaveFastGraphToFile + matching LoadFastGraphFromFile (single-wrap).
+        // SaveFastGraphToFile + matching LoadFastGraphFromFile (v2 container).
         // .zsrk written this way is also what ToJson / GetNodeAndTensorNameListing
-        // expect — they DecompressFile + Serializer.Deserialize<ModelProto>.
+        // read — they extract the ONNX payload from any .srk layout by content.
         var zsrkPath = Path.Combine(TempDir, "test_arch.zsrk");
         var zsrkPath2 = Path.Combine(TempDir, "test_arch2.zsrk");
-        // Double-wrapped .zsrk (SaveCompressedArchitecture pairs with
-        // LoadCompressedArchitecture which decompresses twice).
+        // Retired compressed-architecture helpers (obsolete; now emit/read the v2
+        // container — the double-Zstd writer is gone).
         var doubleWrappedPath = Path.Combine(TempDir, "test_arch_double.zsrk");
         var binPath = Path.Combine(TempDir, "test_arch.bin");
         try
@@ -82,12 +83,13 @@ public class CompressedFormatUtilsCoverageTests
             var uncompressedBytes = CompressedFormatUtils.SaveFastGraphToBinary(fastGraph);
             File.WriteAllBytes(binPath, uncompressedBytes);
 
-            // Double-wrapped form: SaveCompressedArchitecture / LoadCompressedArchitecture.
+            // Retired compressed-architecture surface, kept as obsolete shims:
+            // SaveCompressedArchitecture / LoadCompressedArchitecture (+ stream variants).
+#pragma warning disable CS0618 // deliberate coverage of the obsolete legacy API
             CompressedFormatUtils.SaveCompressedArchitecture(doubleWrappedPath, fastGraph);
             var arch = CompressedFormatUtils.LoadCompressedArchitecture(doubleWrappedPath);
             Assert.NotEmpty(arch.Nodes);
 
-            // SaveCompressedArchitectureToStream + LoadCompressedArchitectureFromStream.
             using (var ms = new MemoryStream())
             {
                 CompressedFormatUtils.SaveCompressedArchitectureToStream(ms, fastGraph);
@@ -95,6 +97,7 @@ public class CompressedFormatUtilsCoverageTests
                 var archFromStream = CompressedFormatUtils.LoadCompressedArchitectureFromStream(ms);
                 Assert.NotEmpty(archFromStream.Nodes);
             }
+#pragma warning restore CS0618
 
             // ──────────────────────────────────────────────────────────────
             // JSON helpers on SaveFastGraphToFile output (single-wrap).
@@ -236,5 +239,292 @@ public class CompressedFormatUtilsCoverageTests
         Assert.False(CompressedFormatUtils.IsCompressedSafeTensor("foo.safetensors"));
         Assert.True(CompressedFormatUtils.IsCompressedArchitecture("bar.zsrk"));
         Assert.False(CompressedFormatUtils.IsCompressedArchitecture("bar.srk"));
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // .srk v2 container (issue #34): self-describing header, stage marker,
+    // single header-declared compression layer, v1 content-sniffing shim.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// <summary>Builds the same small graph at all three lifecycle stages.</summary>
+    private static (FastComputationGraph Module, FastComputationGraph Arch, FastComputationGraph Model)
+        BuildStageGraphs()
+    {
+        var moduleGraph = ScalarMultiplyModel.ComputationGraph;
+        var arch = moduleGraph.ToConcreteArchitecture(
+            moduleGraph.FromOrderedInputs([TensorData([2], 1.0f, 2.0f)]));
+        var model = arch.ToConcreteModel();
+        return (moduleGraph, arch, model);
+    }
+
+    /// <summary>
+    /// A v2 file round-trips (save → load → identical graph) with and without
+    /// compression for all three stages, and its header records srkVersion, stage,
+    /// compression and producer info. Also covers stage detection itself.
+    /// </summary>
+    [Fact]
+    public void TestSrkV2RoundtripAllStagesAndHeader()
+    {
+        var (moduleGraph, arch, model) = BuildStageGraphs();
+
+        Assert.Equal(SrkGraphStage.Module, SrkFileFormat.DetectStage(moduleGraph));
+        Assert.Equal(SrkGraphStage.ConcreteArchitecture, SrkFileFormat.DetectStage(arch));
+        Assert.Equal(SrkGraphStage.ConcreteModel, SrkFileFormat.DetectStage(model));
+
+        (FastComputationGraph Graph, SrkGraphStage Stage)[] stages =
+            [(moduleGraph, SrkGraphStage.Module),
+             (arch, SrkGraphStage.ConcreteArchitecture),
+             (model, SrkGraphStage.ConcreteModel)];
+        bool[] compressionModes = [true, false];
+
+        foreach (var (graph, stage) in stages)
+        foreach (var compressed in compressionModes)
+        {
+            var bytes = CompressedFormatUtils.SaveFastGraphToBinary(graph, compressed);
+            Assert.True(SrkFileFormat.IsSrkV2(bytes));
+
+            var header = SrkFileFormat.TryReadHeader(bytes);
+            Assert.NotNull(header);
+            Assert.Equal(SrkFileFormat.CurrentVersion, header!.SrkVersion);
+            Assert.Equal(SrkFileFormat.StageName(stage), header.Stage);
+            Assert.Equal(stage, header.TryGetStage());
+            Assert.Equal(compressed ? "zstd" : "none", header.Compression);
+            Assert.False(string.IsNullOrEmpty(header.PayloadSha256));
+            Assert.NotNull(header.Producer);
+            Assert.True(header.Producer!.IrVersion > 0);
+            Assert.NotNull(header.Producer.Opsets);
+            Assert.NotEmpty(header.Producer.Opsets!);
+
+            // The loaded graph comes back at the same lifecycle stage. (Structural
+            // JSON identity does not survive a reload — the importer assigns fresh
+            // node/tensor keys — so graph identity is asserted below by bit-identical
+            // execution of the concrete model instead.)
+            var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(bytes);
+            Assert.NotEmpty(reloaded.Nodes);
+            Assert.Equal(stage, SrkFileFormat.DetectStage(reloaded));
+
+            if (stage == SrkGraphStage.ConcreteModel && compressed)
+            {
+                var input = TensorData([2], 1.0f, 2.0f);
+                var direct = ComputeContext.Default.Execute(graph, input)[0]
+                    .ToTensorData().AccessRawMemory().ToArray();
+                var roundtrip = ComputeContext.Default.Execute(reloaded, input)[0]
+                    .ToTensorData().AccessRawMemory().ToArray();
+                Assert.Equal(direct, roundtrip);
+            }
+        }
+
+        // A reloaded module graph continues through the normal lowering pipeline.
+        var reloadedModule = CompressedFormatUtils.LoadFastGraphFromBinary(
+            CompressedFormatUtils.SaveFastGraphToBinary(moduleGraph));
+        var rearch = reloadedModule.ToConcreteArchitecture(
+            reloadedModule.FromOrderedInputs([TensorData([2], 1.0f, 2.0f)]));
+        Assert.Equal(SrkGraphStage.ConcreteArchitecture, SrkFileFormat.DetectStage(rearch));
+    }
+
+    /// <summary>
+    /// The three historical v1 layouts — bare protobuf, single-Zstd
+    /// (v1 SaveFastGraphToFile) and double-Zstd (the retired
+    /// SaveCompressedArchitecture writer) — still load through the content-sniffing
+    /// shim, from bytes and from files, regardless of extension.
+    /// </summary>
+    [Fact]
+    public void TestSrkV1LegacyLayoutsLoadThroughShim()
+    {
+        var (_, arch, _) = BuildStageGraphs();
+
+        // Reconstruct the exact v1 byte layouts from the v2 payload: the payload of an
+        // uncompressed v2 container IS the bare-protobuf v1 layout the old writers
+        // produced; the old single/double-Zstd layouts wrapped it in 1 / 2 Zstd frames.
+        var v2Bytes = CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: false);
+        var bareProtobuf = SrkFileFormat.Read(v2Bytes).OnnxBytes;
+        var singleZstd = CompressedFormatUtils.Compress(bareProtobuf);
+        var doubleZstd = CompressedFormatUtils.Compress(singleZstd);
+
+        var referenceNodeCount = CompressedFormatUtils.LoadFastGraphFromBinary(v2Bytes).Nodes.Count;
+
+        (string Name, byte[] Bytes)[] layouts =
+            [("bare", bareProtobuf), ("single-zstd", singleZstd), ("double-zstd", doubleZstd)];
+        foreach (var (name, bytes) in layouts)
+        {
+            Assert.Null(SrkFileFormat.TryReadHeader(bytes));
+
+            var fromBinary = CompressedFormatUtils.LoadFastGraphFromBinary(bytes);
+            Assert.Equal(referenceNodeCount, fromBinary.Nodes.Count);
+            Assert.Equal(SrkGraphStage.ConcreteArchitecture, SrkFileFormat.DetectStage(fromBinary));
+
+            // File load with a deliberately "wrong" extension: content decides.
+            var path = Path.Combine(TempDir, $"v1_{name}.zsrk");
+            try
+            {
+                File.WriteAllBytes(path, bytes);
+                var fromFile = CompressedFormatUtils.LoadFastGraphFromFile(path);
+                Assert.Equal(referenceNodeCount, fromFile.Nodes.Count);
+
+                // The obsolete double-Zstd reader shim routes through the same loader.
+#pragma warning disable CS0618 // deliberate coverage of the obsolete legacy API
+                Assert.Equal(referenceNodeCount,
+                    CompressedFormatUtils.LoadCompressedArchitecture(path).Nodes.Count);
+#pragma warning restore CS0618
+
+                // The JSON introspection helpers accept every layout too.
+                Assert.Contains("Graph", CompressedFormatUtils.ToJson(path));
+            }
+            finally { if (File.Exists(path)) File.Delete(path); }
+        }
+    }
+
+    /// <summary>
+    /// A renamed v2 file (wrong or no extension) loads identically — content, not
+    /// extension, decides how the file parses.
+    /// </summary>
+    [Fact]
+    public void TestSrkV2RenamedFileLoadsIdentically()
+    {
+        var (_, arch, _) = BuildStageGraphs();
+
+        var zsrkPath = Path.Combine(TempDir, "renamed_src.zsrk");
+        string[] renamedPaths =
+            [Path.Combine(TempDir, "renamed_copy.srk"),
+             Path.Combine(TempDir, "renamed_copy.bin"),
+             Path.Combine(TempDir, "renamed_copy")];
+        try
+        {
+            CompressedFormatUtils.SaveFastGraphToFile(zsrkPath, arch, compressed: true, overrideExtension: false);
+            var referenceJson = CompressedFormatUtils.ToJson(zsrkPath);
+
+            foreach (var renamed in renamedPaths)
+            {
+                File.Copy(zsrkPath, renamed, overwrite: true);
+                var loaded = CompressedFormatUtils.LoadFastGraphFromFile(renamed);
+                Assert.NotEmpty(loaded.Nodes);
+                Assert.Equal(referenceJson, CompressedFormatUtils.ToJson(renamed));
+            }
+        }
+        finally
+        {
+            if (File.Exists(zsrkPath)) File.Delete(zsrkPath);
+            foreach (var renamed in renamedPaths)
+                if (File.Exists(renamed)) File.Delete(renamed);
+        }
+    }
+
+    /// <summary>Hand-assembles a v2 container around an arbitrary header, for fault injection.</summary>
+    private static byte[] BuildRawSrkContainer(string headerJson, byte[] payload)
+    {
+        var headerBytes = System.Text.Encoding.UTF8.GetBytes(headerJson);
+        var result = new byte[4 + 2 + headerBytes.Length + payload.Length];
+        result[0] = (byte)'S'; result[1] = (byte)'R'; result[2] = (byte)'K'; result[3] = 2;
+        result[4] = (byte)(headerBytes.Length & 0xFF);
+        result[5] = (byte)(headerBytes.Length >> 8);
+        headerBytes.CopyTo(result, 6);
+        payload.CopyTo(result, 6 + headerBytes.Length);
+        return result;
+    }
+
+    private static string Sha256Hex(byte[] payload)
+        => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(payload)).ToLowerInvariant();
+
+    /// <summary>
+    /// Corrupt, truncated and mismatching v2 files fail loudly with a message naming
+    /// the file (or origin) and the failure: payload corruption → SHA-256 mismatch;
+    /// truncation inside the header → truncation error; malformed header JSON,
+    /// unsupported future container version and unknown compression each name the
+    /// offending value.
+    /// </summary>
+    [Fact]
+    public void TestSrkV2CorruptionFailsLoudly()
+    {
+        var (_, arch, _) = BuildStageGraphs();
+        var bytes = CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: true);
+
+        // Payload corruption: flip the last byte → SHA-256 mismatch naming the origin.
+        var corrupt = (byte[])bytes.Clone();
+        corrupt[^1] ^= 0xFF;
+        var corruptPath = Path.Combine(TempDir, "corrupt.zsrk");
+        try
+        {
+            File.WriteAllBytes(corruptPath, corrupt);
+            var ex = Assert.Throws<InvalidDataException>(
+                () => CompressedFormatUtils.LoadFastGraphFromFile(corruptPath));
+            Assert.Contains("SHA-256 mismatch", ex.Message);
+            Assert.Contains(corruptPath, ex.Message);
+        }
+        finally { if (File.Exists(corruptPath)) File.Delete(corruptPath); }
+
+        // Truncated payload → SHA-256 mismatch (truncation detection).
+        var truncated = bytes[..^16];
+        var exTrunc = Assert.Throws<InvalidDataException>(
+            () => CompressedFormatUtils.LoadFastGraphFromBinary(truncated));
+        Assert.Contains("corrupt or truncated", exTrunc.Message);
+
+        // Truncated inside the header → explicit truncation error.
+        var exHeader = Assert.Throws<InvalidDataException>(
+            () => CompressedFormatUtils.LoadFastGraphFromBinary(bytes[..8]));
+        Assert.Contains("truncated", exHeader.Message);
+
+        // Malformed header JSON.
+        byte[] payload = [.. bytes.Skip(6 + (bytes[4] | (bytes[5] << 8)))];
+        var exJson = Assert.Throws<InvalidDataException>(() =>
+            CompressedFormatUtils.LoadFastGraphFromBinary(BuildRawSrkContainer("{not json", payload)));
+        Assert.Contains("header", exJson.Message);
+
+        // Future container version is refused up front.
+        var exVersion = Assert.Throws<InvalidDataException>(() =>
+            CompressedFormatUtils.LoadFastGraphFromBinary(BuildRawSrkContainer(
+                $"{{\"srkVersion\":3,\"stage\":\"concrete-architecture\",\"compression\":\"zstd\",\"payloadSha256\":\"{Sha256Hex(payload)}\"}}",
+                payload)));
+        Assert.Contains("version 3", exVersion.Message);
+
+        // Unknown compression scheme is named in the error.
+        var exCompression = Assert.Throws<InvalidDataException>(() =>
+            CompressedFormatUtils.LoadFastGraphFromBinary(BuildRawSrkContainer(
+                $"{{\"srkVersion\":2,\"stage\":\"concrete-architecture\",\"compression\":\"lz4\",\"payloadSha256\":\"{Sha256Hex(payload)}\"}}",
+                payload)));
+        Assert.Contains("lz4", exCompression.Message);
+    }
+
+    /// <summary>
+    /// Loading a module-stage graph through an API that requires a concrete graph
+    /// produces a clear stage-mismatch error at load time — from the header for v2
+    /// files (before the payload is parsed) and from the detected stage for legacy v1
+    /// data. Matching stages load normally.
+    /// </summary>
+    [Fact]
+    public void TestSrkStageMismatchIsRejectedAtLoadTime()
+    {
+        var (moduleGraph, arch, model) = BuildStageGraphs();
+
+        // v2: header-based refusal, error names both stages.
+        var moduleBytes = CompressedFormatUtils.SaveFastGraphToBinary(moduleGraph);
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            CompressedFormatUtils.LoadFastGraphFromBinary(moduleBytes, requiredStage: SrkGraphStage.ConcreteModel));
+        Assert.Contains("'module'", ex.Message);
+        Assert.Contains("'concrete-model'", ex.Message);
+
+        // File variant names the file.
+        var modulePath = Path.Combine(TempDir, "stage_module.zsrk");
+        try
+        {
+            CompressedFormatUtils.SaveFastGraphToFile(modulePath, moduleGraph, compressed: true, overrideExtension: false);
+            var exFile = Assert.Throws<InvalidOperationException>(() =>
+                CompressedFormatUtils.LoadFastGraphFromFile(modulePath, requiredStage: SrkGraphStage.ConcreteModel));
+            Assert.Contains(modulePath, exFile.Message);
+        }
+        finally { if (File.Exists(modulePath)) File.Delete(modulePath); }
+
+        // v1 shim: no header, stage detected from the loaded graph.
+        var v1ModuleBytes = CompressedFormatUtils.Compress(
+            SrkFileFormat.Read(CompressedFormatUtils.SaveFastGraphToBinary(moduleGraph, compressed: false)).OnnxBytes);
+        Assert.Throws<InvalidOperationException>(() =>
+            CompressedFormatUtils.LoadFastGraphFromBinary(v1ModuleBytes, requiredStage: SrkGraphStage.ConcreteModel));
+
+        // Matching required stages load fine, for all three stages.
+        Assert.NotEmpty(CompressedFormatUtils.LoadFastGraphFromBinary(
+            moduleBytes, requiredStage: SrkGraphStage.Module).Nodes);
+        Assert.NotEmpty(CompressedFormatUtils.LoadFastGraphFromBinary(
+            CompressedFormatUtils.SaveFastGraphToBinary(arch), requiredStage: SrkGraphStage.ConcreteArchitecture).Nodes);
+        Assert.NotEmpty(CompressedFormatUtils.LoadFastGraphFromBinary(
+            CompressedFormatUtils.SaveFastGraphToBinary(model), requiredStage: SrkGraphStage.ConcreteModel).Nodes);
     }
 }

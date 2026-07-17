@@ -70,8 +70,57 @@ FastComputationGraph g = CompressedFormatUtils.LoadFastGraphFromFile("model.zsrk
 byte[] bytes = CompressedFormatUtils.SaveFastGraphToBinary(graph, compressed: true);
 ```
 
-`.zsrk` = Zstandard-compressed; `.srk` = uncompressed. Extension is auto-selected from
-the `compressed` flag.
+`.zsrk` = Zstandard-compressed; `.srk` = uncompressed. The extension is auto-selected
+from the `compressed` flag, but it is only a hint for humans: **how a file parses is
+decided by its content, never by its extension** — a renamed file loads identically.
+
+### The `.srk` v2 container
+
+Every file written today is a self-describing, versioned container:
+
+```
+magic "SRK\x02" | u16 headerLen (little-endian) | JSON header | payload
+```
+
+The payload is the graph serialized as an ONNX `ModelProto` (Shorokoo's internal
+dialect allowed), wrapped in **exactly one** compression layer when the header says
+so. Header fields (add-only across minor revisions; unknown fields are ignored):
+
+```jsonc
+{
+  "srkVersion": 2,
+  "stage": "module" | "concrete-architecture" | "concrete-model",
+  "compression": "none" | "zstd",
+  "payloadSha256": "…",   // lowercase hex SHA-256 of the payload bytes as stored
+  "producer": { "shorokoo": "…", "irVersion": 10, "opsets": { "": 21, "…": 1 } }
+}
+```
+
+- `stage` records where the graph sits in the lowering pipeline (see
+  [inference.md](inference.md#the-lowering-pipeline)), so loaders can refuse a
+  mismatched file up front instead of failing at run time with
+  `No Op registered for ShrkCreateModule`. Pass the optional `requiredStage`
+  argument to enforce it:
+
+  ```csharp
+  // Throws a clear stage-mismatch error if model.zsrk holds a module-stage graph:
+  var g = CompressedFormatUtils.LoadFastGraphFromFile(
+      "model.zsrk", requiredStage: SrkGraphStage.ConcreteModel);
+  ```
+
+- `payloadSha256` makes corruption and truncation fail loudly, with an error naming
+  the file and the failure.
+- `SrkFileFormat.TryReadHeaderFromFile(path)` reads the header (`SrkHeader`) without
+  loading the graph — useful to identify a file cheaply; it returns `null` for
+  pre-container legacy files.
+- `producer` is informational; the payload dialect remains versioned by the embedded
+  ONNX `ir_version`/opsets themselves.
+
+Legacy files from before the container (bare protobuf, single-Zstd, and the retired
+double-Zstd layout of `SaveCompressedArchitecture`) still load — the loader sniffs
+their layout from content. Writers emit v2 only; the `SaveCompressedArchitecture` /
+`LoadCompressedArchitecture` helpers are `[Obsolete]` shims over the v2 writer and
+the universal loader.
 
 ## Load pretrained weights (SafeTensors)
 

@@ -144,6 +144,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             body.Nodes = newNodes;
 
+            // Flattening leaves dead ShrkCreateModule / ShrkModuleSetHyperparams metadata
+            // behind whose TargetFunction still names the (un-rewritten) inlined module.
+            // Prune it: it is unreachable from the initializer's outputs, and leaving it in
+            // would make FastLowerRandomOps recurse into the original module body and trip
+            // on its now-orphaned id-bearing draw (which this pass already keyed at top level).
+            FastProcessorHelper.RemoveUnreachableNodes(body);
+
             // Give the per-parameter initializer a unique name. The original name
             // ("KaimingUniform", ...) is shared across every parameter using that
             // initializer; leaving it unchanged makes ONNX function emission dedupe the

@@ -312,7 +312,7 @@ namespace Shorokoo.Core.Utils
 
         public static string ToJson(this FastComputationGraph fastGraph)
         {
-            var obj = FastOnnxModelBuilder.BuildOnnxModel(fastGraph);
+            var obj = FastOnnxModelBuilder.BuildInternalOnnxModel(fastGraph);
             var graph = obj.Graph;
             foreach (var initializer in graph.Initializers)
                 initializer.ResetRawData();

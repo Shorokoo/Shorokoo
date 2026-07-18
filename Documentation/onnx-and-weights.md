@@ -37,6 +37,32 @@ just far enough to cover them. Models up to opset 26 execute on the bundled
 ONNX Runtime 1.26 — see [limitations.md](limitations.md) for the stamping
 policy.
 
+### The vanilla dialect is a guarantee
+
+`BuildOnnxModel` only ever writes **vanilla ONNX**: every node is a standard
+ONNX op or a call to a `FunctionProto` emitted into the same file, so the model
+loads in any stock ONNX runtime with no Shorokoo involvement. It therefore
+requires a **concrete model** (from `ToConcreteArchitecture` →
+`ToConcreteModel`). Exporting a module-stage graph — one still carrying
+Shorokoo's internal orchestration ops (`ShrkCreateModule`, `ShrkModelInvoke`,
+…) — throws at export time with the offending ops named, instead of writing a
+file that only fails later when a third-party runtime rejects the custom ops.
+Module-stage graphs are persisted with the `.srk`/`.zsrk` format below, which
+uses Shorokoo's internal dialect and is re-imported by Shorokoo only.
+
+### Graph input/output names and shapes
+
+Exported graph inputs and outputs are named from the model's signature — the
+names by which the graph's inputs are addressed in Shorokoo (e.g. `[Hyper]` /
+input parameter names), deduplicated deterministically (`x`, `x_2`, …).
+Unnamed slots fall back to `input_{i}` / `output_{i}`. Every input and output
+`ValueInfoProto` carries its dtype; dimension info is stamped wherever it is
+known — a statically known rank produces that many symbolic (dynamic) dims
+named `{name}_dim{i}`, a known rank-0 value is stamped as a true scalar, and a
+rank-agnostic `Tensor<T>` boundary stays fully dynamic. Tools like Netron or
+`InferenceSession.InputMetadata` therefore see the model's logical signature
+directly, and `OnnxModelImporter` round-trips the names.
+
 ### Parameters in the exported graph
 
 A concrete model's parameters — trainable weights and state params (e.g.
@@ -121,6 +147,12 @@ double-Zstd layout of `SaveCompressedArchitecture`) still load — the loader sn
 their layout from content. Writers emit v2 only; the `SaveCompressedArchitecture` /
 `LoadCompressedArchitecture` helpers are `[Obsolete]` shims over the v2 writer and
 the universal loader.
+
+Unlike `BuildOnnxModel`, this format is Shorokoo's **internal dialect**: it
+accepts any graph — module-stage graphs with their internal ops included —
+keeps internal `N{k}_T{s}` tensor names, and is only loadable by Shorokoo
+(`LoadFastGraphFromFile` / `OnnxModelImporter`). Use it for Shorokoo-to-Shorokoo
+persistence; use `BuildOnnxModel` for anything meant to leave Shorokoo.
 
 ## Load pretrained weights (SafeTensors)
 

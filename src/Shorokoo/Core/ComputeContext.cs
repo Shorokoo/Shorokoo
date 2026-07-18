@@ -132,7 +132,7 @@ namespace Shorokoo.Runtime
         {
             var originalInputNames = ResolveOriginalInputNames(graph);
             return CompileFromModel(
-                () => FastOnnxModelBuilder.BuildOnnxModel(graph, prepForOnnx: true),
+                () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true),
                 originalInputNames);
         }
 
@@ -259,7 +259,7 @@ namespace Shorokoo.Runtime
         {
             var originalInputNames = ResolveOriginalInputNames(graph);
             return RunFromModel(
-                () => FastOnnxModelBuilder.BuildOnnxModel(graph, prepForOnnx: true),
+                () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true),
                 originalInputNames,
                 inputs);
         }

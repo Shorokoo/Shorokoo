@@ -159,7 +159,7 @@ namespace Shorokoo.Core.Utils
             FastComputationGraph graph, bool compressed = true, int compressionLevel = DefaultCompressionLevel)
         {
             using var memoryStream = new MemoryStream();
-            var model = FastOnnxModelBuilder.BuildOnnxModel(graph);
+            var model = FastOnnxModelBuilder.BuildInternalOnnxModel(graph);
             Serializer.Serialize(memoryStream, model);
             var onnxBytes = memoryStream.ToArray();
 

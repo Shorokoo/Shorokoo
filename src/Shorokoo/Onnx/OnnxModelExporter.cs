@@ -57,7 +57,7 @@ namespace Shorokoo.Onnx
             if (model is null) throw new ArgumentNullException(nameof(model));
 
             long totalTensorBytes = OnnxExternalData.EnumerateAllTensors(model)
-                .Sum(t => (long)(t.RawData?.Length ?? 0));
+                .Sum(TensorPayloadBytes);
             if (totalTensorBytes > maxTensorBytes)
                 throw new ModelException(ErrorCodes.XD007, $"model '{filePath}'",
                     $"the model's tensor data totals {totalTensorBytes:N0} bytes, which exceeds the " +
@@ -66,6 +66,25 @@ namespace Shorokoo.Onnx
 
             using var fs = File.Create(filePath);
             ProtoBuf.Serializer.Serialize(fs, model);
+        }
+
+        /// <summary>
+        /// The tensor's serialized payload size: raw_data plus every typed data field
+        /// (a tensor may carry its bytes in float_data/int32_data/int64_data/... instead
+        /// of raw_data — e.g. the RNG key vector initializer uses int64_data), so the
+        /// 2 GB pre-check cannot be bypassed by typed-field storage.
+        /// </summary>
+        private static long TensorPayloadBytes(TensorProto t)
+        {
+            long total = t.RawData?.LongLength ?? 0;
+            total += (long)(t.FloatDatas?.Length ?? 0) * sizeof(float);
+            total += (long)(t.Int32Datas?.Length ?? 0) * sizeof(int);
+            total += (long)(t.Int64Datas?.Length ?? 0) * sizeof(long);
+            total += (long)(t.DoubleDatas?.Length ?? 0) * sizeof(double);
+            total += (long)(t.Uint64Datas?.Length ?? 0) * sizeof(ulong);
+            foreach (var s in t.StringDatas)
+                total += s?.LongLength ?? 0;
+            return total;
         }
 
         /// <summary>
@@ -78,8 +97,9 @@ namespace Shorokoo.Onnx
         /// inline. Tensor data is written in initializer order, each aligned to
         /// <see cref="OnnxExternalDataOptions.Alignment"/>, so the same model produces
         /// byte-identical <c>.onnx</c> + <c>.onnx.data</c> pairs across runs. When no
-        /// initializer reaches the threshold, no side file is written and the output
-        /// equals <see cref="Save(ModelProto, string)"/>.
+        /// initializer reaches the threshold, no side file is written (a stale one from
+        /// a previous save of the same path is removed) and the output equals
+        /// <see cref="Save(ModelProto, string)"/>.
         /// The passed <paramref name="model"/> is left unmodified (externalized tensors
         /// are restored to their inline form before returning).
         /// </summary>
@@ -108,6 +128,10 @@ namespace Shorokoo.Onnx
             if (externalized.Count == 0)
             {
                 Save(model, filePath);
+                // A side file from a previous external save of the same path would now
+                // be orphaned (nothing in the fresh self-contained .onnx references it);
+                // remove it so the directory reflects exactly this save.
+                File.Delete(dataPath);
                 return;
             }
 
@@ -140,6 +164,13 @@ namespace Shorokoo.Onnx
 
                 using var fs = File.Create(fullPath);
                 ProtoBuf.Serializer.Serialize(fs, model);
+            }
+            catch
+            {
+                // Don't leave a partial side file behind on a failed save; cleanup is
+                // best-effort — the original exception is the one that matters.
+                try { File.Delete(dataPath); } catch { }
+                throw;
             }
             finally
             {

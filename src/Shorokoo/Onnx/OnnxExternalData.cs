@@ -196,11 +196,20 @@ namespace Shorokoo.Onnx
                     $"the external_data length {l} (file '{resolved}') does not match the " +
                     $"{expected} bytes implied by the tensor's shape and dtype.");
 
+            if (offset > fileLength)
+                throw new ModelException(ErrorCodes.XD005, tensorInfo,
+                    $"the external_data offset {offset} is out of range for file '{resolved}' " +
+                    $"({fileLength} bytes).");
+
             // Per the ONNX spec, a missing length means "the rest of the file"; when the
             // dtype/shape pin down the exact byte count we use that instead, so a
-            // trailing-slack side file still validates.
+            // trailing-slack side file still validates. The range check is written
+            // subtraction-style: with offset within the file and both operands
+            // non-negative it cannot overflow, whereas `offset + readLength` could wrap
+            // for near-long.MaxValue values from a malformed model and slip past the
+            // check into an opaque allocation failure.
             long readLength = length ?? (expected >= 0 ? expected : fileLength - offset);
-            if (offset + readLength > fileLength)
+            if (readLength > fileLength - offset)
                 throw new ModelException(ErrorCodes.XD005, tensorInfo,
                     $"the external data range [offset {offset}, length {readLength}] is out of range " +
                     $"for file '{resolved}' ({fileLength} bytes).");

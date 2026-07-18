@@ -288,6 +288,16 @@ public class OnnxExternalDataTests
             var parsePath = WriteModel(dir, "parse.onnx", BuildAddModel(wParse));
             var exParse = Assert.Throws<ModelException>(() => OnnxModelImporter.FromOnnxModelToFastGraph(parsePath));
             Assert.Equal(ErrorCodes.XD005, exParse.ErrorCode);
+
+            // Near-long.MaxValue offset: offset + length would overflow a naive
+            // additive range check; must still fail as a loud out-of-range error,
+            // not an opaque allocation/end-of-stream failure.
+            var wHuge = Init("w", FloatElem, [4], null!);
+            MarkExternal(wHuge, "short.bin", offset: long.MaxValue - 8, length: 16);
+            var hugePath = WriteModel(dir, "huge.onnx", BuildAddModel(wHuge));
+            var exHuge = Assert.Throws<ModelException>(() => OnnxModelImporter.FromOnnxModelToFastGraph(hugePath));
+            Assert.Equal(ErrorCodes.XD005, exHuge.ErrorCode);
+            Assert.Contains("'w'", exHuge.Message);
         });
     }
 
@@ -434,6 +444,12 @@ public class OnnxExternalDataTests
             var inlinePath = Path.Combine(dir, "inline.onnx");
             var extPath = Path.Combine(dir, "ext.onnx");
             OnnxModelExporter.Save(proto, inlinePath);
+            // First an external save (threshold 0) so a side file exists, then a
+            // below-threshold re-save of the same path: the now-stale side file must
+            // be removed, and the .onnx must be byte-equal to the inline save.
+            OnnxModelExporter.SaveWithExternalData(proto, extPath,
+                new OnnxExternalDataOptions { SizeThreshold = 0 });
+            Assert.True(File.Exists(extPath + ".data"));
             OnnxModelExporter.SaveWithExternalData(proto, extPath,
                 new OnnxExternalDataOptions { SizeThreshold = 1024 });
 
@@ -454,6 +470,18 @@ public class OnnxExternalDataTests
             var ex = Assert.Throws<ModelException>(() => OnnxModelExporter.Save(proto, path, maxTensorBytes: 8));
             Assert.Equal(ErrorCodes.XD007, ex.ErrorCode);
             Assert.Contains("SaveWithExternalData", ex.Message);
+
+            // Payload stored in a typed data field (int64_data — like the RNG key
+            // vector initializer) instead of raw_data counts against the ceiling too.
+            var typed = new TensorProto
+            { Name = "keys", data_type = Int64Elem, Dims = [4], Int64Datas = [1L, 2L, 3L, 4L] };
+            var g = new GraphProto { Name = "typed" };
+            g.Initializers.Add(typed);
+            g.Nodes.Add(Node("Identity", "id0", ["keys"], ["y"]));
+            g.Outputs.Add(TensorInfo("y", Int64Elem, 4));
+            var exTyped = Assert.Throws<ModelException>(() => OnnxModelExporter.Save(
+                WrapModel(g), Path.Combine(dir, "typed.onnx"), maxTensorBytes: 16));
+            Assert.Equal(ErrorCodes.XD007, exTyped.ErrorCode);
         });
     }
 

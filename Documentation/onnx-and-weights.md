@@ -56,7 +56,8 @@ OnnxModelExporter.SaveWithExternalData(model, "model.onnx",
   bytes (default 4096) for mmap-friendly access.
 - Self-contained (all-inline) export remains the default and is unchanged; with no
   initializer at or above the threshold, `SaveWithExternalData` writes no side file
-  and its output is identical to `Save`.
+  (removing a stale one from a previous save of the same path) and its output is
+  identical to `Save`.
 - The exported pair is standard ONNX — stock onnxruntime loads it directly.
 - The passed `ModelProto` is left unmodified.
 

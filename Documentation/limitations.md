@@ -127,9 +127,9 @@ supported.
 
 ### SafeTensors files ≥ 2 GB
 
-`SafeTensorLoader` reads each `.safetensors` file (or shard) into a single
-in-memory `byte[]`, which .NET caps at 2 GB — larger files fail to load with
-an `IOException`. For the same reason, sharded saving defaults to 1 GB shards
+`SafeTensorLoader` reads each `.safetensors` payload (a single file, a loose
+shard, or a zip-container shard entry) into one in-memory `byte[]`, which
+.NET caps at 2 GB — larger payloads fail to load. For the same reason, sharded saving defaults to 1 GB shards
 (`DefaultMaxShardSizeBytes`) rather than the Hugging Face-conventional 5 GB.
 Lifting this needs streamed shard I/O through a fixed-size buffer (which would
 also open the door to direct-to-GPU loading); tracked in

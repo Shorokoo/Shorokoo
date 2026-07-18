@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Text.Json;
 using Shorokoo;
@@ -19,11 +20,16 @@ namespace Shorokoo.Onnx
 {
     /// <summary>
     /// Loads SafeTensor files into various Shorokoo data structures.
-    /// Supports both single-file checkpoints and the Hugging Face multi-file
-    /// (sharded) convention: shard files named
+    /// Supports single-file checkpoints and sharded checkpoints following the
+    /// Hugging Face multi-file convention: shard files named
     /// <c>model-00001-of-000NN.safetensors</c> plus a
     /// <c>model.safetensors.index.json</c> manifest whose <c>weight_map</c> maps
-    /// tensor names to shard file names.
+    /// tensor names to shard file names. Shorokoo itself writes a sharded
+    /// checkpoint as a single <b>zip container</b> holding those entries (one
+    /// atomically written file; unzipping yields the Hugging Face directory
+    /// layout); loading auto-detects — by content, never by extension — a plain
+    /// safetensors payload, a zip container, an <c>index.json</c> manifest path,
+    /// or a directory holding one (the layout hub checkpoints download as).
     /// </summary>
     public static class SafeTensorLoader
     {
@@ -122,10 +128,13 @@ namespace Shorokoo.Onnx
         public static List<SafeTensor> LoadSafeTensors(string filePath, IReadOnlyCollection<string>? tensorNames)
         {
             if (TryResolveShardIndex(filePath, out var indexPath))
-                return LoadShardedSafeTensors(indexPath, tensorNames);
+                return LoadIndexedSafeTensors(indexPath, tensorNames);
 
             if (!File.Exists(filePath))
                 throw new FileNotFoundException($"SafeTensor file not found: {filePath}");
+
+            if (IsZipContainer(filePath))
+                return LoadZippedSafeTensors(filePath, tensorNames);
 
             var fileBytes = File.ReadAllBytes(filePath);
             var tensors = ParseSafeTensorFile(fileBytes);
@@ -174,14 +183,76 @@ namespace Shorokoo.Onnx
             return false;
         }
 
+        /// <summary>True when the file starts with the zip local-file magic "PK\x03\x04".</summary>
+        private static bool IsZipContainer(string filePath)
+        {
+            Span<byte> magic = stackalloc byte[4];
+            using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            return fs.Read(magic) == 4
+                && magic[0] == (byte)'P' && magic[1] == (byte)'K' && magic[2] == 3 && magic[3] == 4;
+        }
+
         /// <summary>
-        /// Load a sharded checkpoint through its index manifest. Shards are opened
-        /// lazily: when <paramref name="tensorNames"/> restricts the load, shard
-        /// files containing none of the requested tensors are never touched.
+        /// Load a sharded checkpoint laid out as loose files: an index manifest with
+        /// shard files as siblings (the Hugging Face directory layout).
         /// </summary>
-        private static List<SafeTensor> LoadShardedSafeTensors(string indexPath, IReadOnlyCollection<string>? tensorNames)
+        private static List<SafeTensor> LoadIndexedSafeTensors(string indexPath, IReadOnlyCollection<string>? tensorNames)
         {
             var indexBytes = File.ReadAllBytes(indexPath);
+            var indexDir = Path.GetDirectoryName(Path.GetFullPath(indexPath))!;
+            return LoadShardedSafeTensors(
+                indexPath, indexBytes,
+                shard =>
+                {
+                    var shardPath = Path.Combine(indexDir, shard);
+                    return File.Exists(shardPath) ? File.ReadAllBytes(shardPath) : null;
+                },
+                tensorNames);
+        }
+
+        /// <summary>
+        /// Load a sharded checkpoint packaged as a single zip container whose entries
+        /// are the shard files plus the index manifest. Only the entries needed for
+        /// the requested tensors are read.
+        /// </summary>
+        private static List<SafeTensor> LoadZippedSafeTensors(string zipPath, IReadOnlyCollection<string>? tensorNames)
+        {
+            using var zip = ZipFile.OpenRead(zipPath);
+
+            var indexEntries = zip.Entries
+                .Where(e => e.FullName.EndsWith(ShardIndexSuffix, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (indexEntries.Count == 0)
+                throw new InvalidOperationException($"Zip checkpoint '{zipPath}' contains no *{ShardIndexSuffix} shard index entry.");
+            if (indexEntries.Count > 1)
+                throw new InvalidOperationException(
+                    $"Zip checkpoint '{zipPath}' contains {indexEntries.Count} shard index entries " +
+                    $"({string.Join(", ", indexEntries.Select(e => e.FullName))}), expected exactly 1.");
+
+            return LoadShardedSafeTensors(
+                $"{zipPath}::{indexEntries[0].FullName}", ReadEntryBytes(indexEntries[0]),
+                shard => zip.GetEntry(shard) is { } entry ? ReadEntryBytes(entry) : null,
+                tensorNames);
+        }
+
+        private static byte[] ReadEntryBytes(ZipArchiveEntry entry)
+        {
+            using var stream = entry.Open();
+            var bytes = new byte[entry.Length];
+            stream.ReadExactly(bytes);
+            return bytes;
+        }
+
+        /// <summary>
+        /// Load a sharded checkpoint through its index manifest, with shard bytes
+        /// supplied by <paramref name="readShard"/> (loose sibling files or zip
+        /// entries; null means the shard does not exist). Shards are opened lazily:
+        /// when <paramref name="tensorNames"/> restricts the load, shards containing
+        /// none of the requested tensors are never touched.
+        /// </summary>
+        private static List<SafeTensor> LoadShardedSafeTensors(
+            string indexSource, byte[] indexBytes, Func<string, byte[]?> readShard, IReadOnlyCollection<string>? tensorNames)
+        {
 
             // Parse weight_map preserving entry order; duplicate keys in the JSON
             // (the same tensor mapped twice) are surfaced by JsonDocument and rejected.
@@ -190,16 +261,16 @@ namespace Shorokoo.Onnx
             using (var doc = JsonDocument.Parse(indexBytes))
             {
                 if (!doc.RootElement.TryGetProperty("weight_map", out var mapElement) || mapElement.ValueKind != JsonValueKind.Object)
-                    throw new InvalidOperationException($"SafeTensor shard index '{indexPath}' has no 'weight_map' object.");
+                    throw new InvalidOperationException($"SafeTensor shard index '{indexSource}' has no 'weight_map' object.");
 
                 foreach (var entry in mapElement.EnumerateObject())
                 {
                     if (entry.Value.ValueKind != JsonValueKind.String)
-                        throw new InvalidOperationException($"weight_map entry for tensor '{entry.Name}' in '{indexPath}' is not a shard file name.");
+                        throw new InvalidOperationException($"weight_map entry for tensor '{entry.Name}' in '{indexSource}' is not a shard file name.");
                     var shard = entry.Value.GetString()!;
                     if (!owningShard.TryAdd(entry.Name, shard))
                         throw new InvalidOperationException(
-                            $"Duplicate tensor '{entry.Name}' in the weight_map of '{indexPath}' " +
+                            $"Duplicate tensor '{entry.Name}' in the weight_map of '{indexSource}' " +
                             $"(mapped to both '{owningShard[entry.Name]}' and '{shard}').");
                     weightMap.Add((entry.Name, shard));
                 }
@@ -209,7 +280,7 @@ namespace Shorokoo.Onnx
             if (requested != null)
                 foreach (var name in requested)
                     if (!owningShard.ContainsKey(name))
-                        throw new KeyNotFoundException($"Tensor '{name}' is not listed in the weight_map of '{indexPath}'.");
+                        throw new KeyNotFoundException($"Tensor '{name}' is not listed in the weight_map of '{indexSource}'.");
 
             // Group tensor names by shard, preserving weight_map order.
             var shardOrder = new List<string>();
@@ -225,37 +296,35 @@ namespace Shorokoo.Onnx
                 names.Add(name);
             }
 
-            var indexDir = Path.GetDirectoryName(Path.GetFullPath(indexPath))!;
             var loaded = new Dictionary<string, SafeTensor>();
             foreach (var shard in shardOrder)
             {
                 var mapped = mappedByShard[shard];
                 if (requested != null && !mapped.Any(requested.Contains))
-                    continue; // no requested tensor lives in this shard — do not touch the file
+                    continue; // no requested tensor lives in this shard — do not touch it
 
-                var shardPath = Path.Combine(indexDir, shard);
-                if (!File.Exists(shardPath))
+                var shardBytes = readShard(shard);
+                if (shardBytes == null)
                     throw new FileNotFoundException(
-                        $"Shard file '{shard}' (holding tensor '{mapped[0]}') referenced by '{indexPath}' not found at '{shardPath}'.");
+                        $"Shard '{shard}' (holding tensor '{mapped[0]}') referenced by '{indexSource}' was not found.");
 
-                var shardBytes = File.ReadAllBytes(shardPath);
                 var parsed = ParseSafeTensorFile(shardBytes);
 
                 foreach (var tensor in parsed)
                 {
                     if (!owningShard.TryGetValue(tensor.Name, out var owner))
                         throw new InvalidOperationException(
-                            $"Tensor '{tensor.Name}' found in shard '{shard}' is not listed in the weight_map of '{indexPath}'.");
+                            $"Tensor '{tensor.Name}' found in shard '{shard}' is not listed in the weight_map of '{indexSource}'.");
                     if (!string.Equals(owner, shard, StringComparison.Ordinal))
                         throw new InvalidOperationException(
-                            $"Duplicate tensor '{tensor.Name}': found in shard '{shard}' but the weight_map of '{indexPath}' assigns it to '{owner}'.");
+                            $"Duplicate tensor '{tensor.Name}': found in shard '{shard}' but the weight_map of '{indexSource}' assigns it to '{owner}'.");
                     loaded[tensor.Name] = tensor;
                 }
 
                 foreach (var name in mapped)
                     if (!loaded.ContainsKey(name))
                         throw new InvalidOperationException(
-                            $"Tensor '{name}' is listed in the weight_map of '{indexPath}' as stored in shard '{shard}' but is missing from that shard.");
+                            $"Tensor '{name}' is listed in the weight_map of '{indexSource}' as stored in shard '{shard}' but is missing from that shard.");
             }
 
             // Return in weight_map order, restricted to the requested subset.
@@ -270,14 +339,17 @@ namespace Shorokoo.Onnx
         /// Save SafeTensor objects to a file in SafeTensors format
         /// (8-byte header length, JSON header, raw tensor data).
         /// When <paramref name="maxShardSizeBytes"/> is set and the tensors do not
-        /// fit in a single shard, the checkpoint is written in the Hugging Face
-        /// multi-file convention instead: shard files named
-        /// <c>{name}-00001-of-000NN.safetensors</c> next to <paramref name="filePath"/>
-        /// plus a <c>{name}.safetensors.index.json</c> manifest with a
-        /// <c>weight_map</c> and total-size metadata. Each shard is an individually
-        /// valid safetensors file carrying <paramref name="globalMetadata"/>.
+        /// fit in a single shard, the checkpoint is written as a single zip
+        /// container at <paramref name="filePath"/> instead, holding the Hugging
+        /// Face multi-file convention as entries: shard entries named
+        /// <c>{name}-00001-of-000NN.safetensors</c> (each an individually valid
+        /// safetensors file carrying <paramref name="globalMetadata"/>, stored
+        /// uncompressed) plus a <c>{name}.safetensors.index.json</c> manifest with
+        /// a <c>weight_map</c> and total-size metadata — unzipping yields exactly
+        /// the Hugging Face directory layout. Either way the checkpoint is one
+        /// file, written atomically.
         /// </summary>
-        /// <param name="filePath">Path for the output .safetensors file; shard and index names are derived from it</param>
+        /// <param name="filePath">Path for the output file; shard entry and index names are derived from it</param>
         /// <param name="tensors">List of SafeTensor objects to save</param>
         /// <param name="globalMetadata">Optional global metadata to include</param>
         /// <param name="maxShardSizeBytes">
@@ -340,10 +412,11 @@ namespace Shorokoo.Onnx
         }
 
         /// <summary>
-        /// Writes a sharded checkpoint when the tensors overflow a single shard of
-        /// <paramref name="maxShardSizeBytes"/>; returns false (writing nothing) when
-        /// they fit in one shard so the caller falls back to the standard single file.
-        /// Tensors are packed greedily into shards in list order.
+        /// Writes a sharded checkpoint — a single zip container of shard entries
+        /// plus the index manifest — when the tensors overflow a single shard of
+        /// <paramref name="maxShardSizeBytes"/>; returns false (writing nothing)
+        /// when they fit in one shard so the caller falls back to the standard
+        /// single file. Tensors are packed greedily into shards in list order.
         /// </summary>
         private static bool TrySaveShardedSafeTensors(string filePath, List<SafeTensor> tensors, Dictionary<string, object>? globalMetadata, long maxShardSizeBytes)
         {
@@ -377,17 +450,15 @@ namespace Shorokoo.Onnx
             if (shardRanges.Count == 1)
                 return false; // fits in one shard — standard single-file output
 
-            var fullPath = Path.GetFullPath(filePath);
-            var directory = Path.GetDirectoryName(fullPath)!;
-            var extension = Path.GetExtension(fullPath);
+            var extension = Path.GetExtension(filePath);
             if (extension.Length == 0)
                 extension = ".safetensors";
-            var stem = Path.GetFileNameWithoutExtension(fullPath);
+            var stem = Path.GetFileNameWithoutExtension(filePath);
 
             string ShardName(int s) => $"{stem}-{s + 1:D5}-of-{shardRanges.Count:D5}{extension}";
 
-            // Map every tensor to its shard (and reject duplicates) before writing
-            // any file, so a failure never leaves a partial checkpoint behind.
+            // Map every tensor to its shard (and reject duplicates) before any
+            // output is produced.
             var weightMap = new Dictionary<string, string>();
             for (int s = 0; s < shardRanges.Count; s++)
             {
@@ -397,21 +468,33 @@ namespace Shorokoo.Onnx
                         throw new InvalidOperationException($"Duplicate tensor name '{tensors[i].Name}'; sharded saving requires unique tensor names.");
             }
 
-            for (int s = 0; s < shardRanges.Count; s++)
-            {
-                var (start, count) = shardRanges[s];
-                SaveSafeTensors(Path.Combine(directory, ShardName(s)), tensors.GetRange(start, count), globalMetadata);
-            }
-
             var index = new Dictionary<string, object>
             {
                 ["metadata"] = new Dictionary<string, object> { ["total_size"] = totalSize },
                 ["weight_map"] = weightMap,
             };
             var indexBytes = System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(index));
-            AtomicFileWriter.WriteFile(
-                Path.Combine(directory, stem + extension + ShardIndexSuffix),
-                stream => stream.Write(indexBytes, 0, indexBytes.Length));
+
+            // One zip container, committed atomically: shard entries are stored
+            // uncompressed (tensor data doesn't compress; .zsafetensor exists for
+            // that) so each entry's bytes are a standard safetensors file, and the
+            // whole checkpoint is a single file — a failed save leaves the previous
+            // checkpoint untouched, and a re-save replaces it with no stale
+            // shard/index siblings left behind.
+            AtomicFileWriter.WriteFile(filePath, stream =>
+            {
+                using var zip = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true);
+                for (int s = 0; s < shardRanges.Count; s++)
+                {
+                    var (start, count) = shardRanges[s];
+                    var shardEntry = zip.CreateEntry(ShardName(s), CompressionLevel.NoCompression);
+                    using var shardStream = shardEntry.Open();
+                    SaveSafeTensorsToStream(shardStream, tensors.GetRange(start, count), globalMetadata);
+                }
+                var indexEntry = zip.CreateEntry(stem + extension + ShardIndexSuffix, CompressionLevel.NoCompression);
+                using var indexStream = indexEntry.Open();
+                indexStream.Write(indexBytes, 0, indexBytes.Length);
+            });
             return true;
         }
 

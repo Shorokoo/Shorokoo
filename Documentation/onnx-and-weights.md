@@ -176,20 +176,23 @@ a failing save never truncates or corrupts an existing file at the target path.
 
 ### Sharded checkpoints (Hugging Face multi-file convention)
 
-Large checkpoints on the Hugging Face hub are usually split into shard files
+Large checkpoints on the Hugging Face hub are split into shard files
 (`model-00001-of-000NN.safetensors`, …) plus a `model.safetensors.index.json`
 manifest whose `weight_map` maps each tensor name to its shard. All the load
-methods above auto-detect this layout — pass either the index file or the
-directory that contains it, and the union of the shards comes back exactly as
-if it were one file:
+methods above auto-detect the layout **by content, never by extension**: a
+plain safetensors payload, a **zip checkpoint container** (what Shorokoo
+writes — see below), an `index.json` manifest path, or a directory containing
+one (the layout hub checkpoints download as). Sharded checkpoints come back
+as the union of their shards, exactly as if they were one file:
 
 ```csharp
 ModelParamList weights = SafeTensorLoader.LoadModelParamSet("ckpt/model.safetensors.index.json");
-List<SafeTensor> all = SafeTensorLoader.LoadSafeTensors("ckpt");   // directory holding the index
+List<SafeTensor> all = SafeTensorLoader.LoadSafeTensors("ckpt");     // directory holding the index
+List<SafeTensor> zip = SafeTensorLoader.LoadSafeTensors("model.safetensors"); // zip container — auto-sniffed
 ```
 
-To load only some tensors, name them; shard files that hold none of the
-requested tensors are never opened:
+To load only some tensors, name them; shards (files or zip entries) that hold
+none of the requested tensors are never opened:
 
 ```csharp
 Dictionary<string, TensorData> some =
@@ -197,13 +200,13 @@ Dictionary<string, TensorData> some =
 ```
 
 Inconsistent checkpoints fail loudly, naming the offending tensor and file:
-missing shard files, tensors listed in the `weight_map` but absent from their
+missing shards, tensors listed in the `weight_map` but absent from their
 shard (and vice versa), and duplicate tensor names across shards.
 
 Sharded **saving** is opt-in via a maximum shard size
 (`SafeTensorLoader.DefaultMaxShardSizeBytes` = 1 GB — deliberately below the
 Hugging Face convention of 5 GB, because the loader cannot currently read
-files of 2 GB or more back; see
+shards of 2 GB or more back; see
 [known limitations](limitations.md#safetensors-files--2-gb)):
 
 ```csharp
@@ -213,10 +216,16 @@ SafeTensorLoader.SaveSafeTensors("out/model.safetensors", listOfSafeTensors,
 
 When the tensors fit within one shard the output is a single standard file,
 byte-for-byte identical to a save without the parameter. Above the threshold,
-tensors are packed greedily in list order into `model-0000x-of-000NN.safetensors`
-shards next to the given path, plus a `model.safetensors.index.json` manifest;
-each shard is an individually valid safetensors file (readable standalone by any
-safetensors implementation) and carries the global metadata.
+the checkpoint is written as a **single zip container at the given path**:
+tensors are packed greedily in list order into
+`model-0000x-of-000NN.safetensors` entries — each an individually valid
+safetensors file (stored uncompressed, readable standalone by any safetensors
+implementation) carrying the global metadata — plus the
+`model.safetensors.index.json` manifest. Unzipping the container yields
+exactly the Hugging Face multi-file directory layout. A checkpoint is always
+one file, written atomically: a failed save leaves the previous checkpoint
+untouched, and re-saving a path replaces it in place with no stale shard or
+index files left behind to shadow the current weights.
 
 Compressed (`.zsafetensor`) variants live in `CompressedFormatUtils`:
 `SaveCompressedSafeTensors`, `LoadCompressedSafeTensors`,

@@ -171,6 +171,9 @@ Save:
 SafeTensorLoader.SaveSafeTensors("out.safetensors", listOfSafeTensors);
 ```
 
+Saves validate their input up front and write atomically (temp-and-rename), so
+a failing save never truncates or corrupts an existing file at the target path.
+
 ### Sharded checkpoints (Hugging Face multi-file convention)
 
 Large checkpoints on the Hugging Face hub are usually split into shard files

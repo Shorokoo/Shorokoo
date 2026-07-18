@@ -174,6 +174,36 @@ public class SafeTensorShardingCoverageTests
     }
 
     [Fact]
+    public void TestFailedSaveLeavesExistingFileIntact()
+    {
+        var dir = CreateTempDir();
+        try
+        {
+            var path = Path.Combine(dir, "ckpt.safetensors");
+            SafeTensorLoader.SaveSafeTensors(path, [MakeTensor("a", 0f)]);
+            var original = File.ReadAllBytes(path);
+
+            // Invalid input fails before any byte reaches the target: the
+            // existing checkpoint survives a null list, an empty list, and a
+            // null entry, with no staged temp files left behind.
+            Assert.Throws<ArgumentNullException>(() => SafeTensorLoader.SaveSafeTensors(path, null!));
+            Assert.Throws<ArgumentException>(() => SafeTensorLoader.SaveSafeTensors(path, []));
+            Assert.Throws<InvalidOperationException>(
+                () => SafeTensorLoader.SaveSafeTensors(path, [MakeTensor("b", 10f), null!]));
+            Assert.Equal(original, File.ReadAllBytes(path));
+            Assert.Equal([path], Directory.GetFiles(dir));
+
+            // A valid re-save still replaces the content in place.
+            SafeTensorLoader.SaveSafeTensors(path, [MakeTensor("b", 10f)]);
+            Assert.Equal("b", Assert.Single(SafeTensorLoader.LoadSafeTensors(path)).Name);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
     public void TestShardedValidationFailures()
     {
         var dir = CreateTempDir();

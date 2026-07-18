@@ -13,6 +13,7 @@ using Shorokoo.Graph;
 using Shorokoo.Core.Nodes.OnnxNodes;
 using static Shorokoo.Globals;
 using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Utils;
 
 namespace Shorokoo.Onnx
 {
@@ -288,6 +289,11 @@ namespace Shorokoo.Onnx
         /// </param>
         public static void SaveSafeTensors(string filePath, List<SafeTensor> tensors, Dictionary<string, object>? globalMetadata = null, long? maxShardSizeBytes = null)
         {
+            // Validate before touching the filesystem, and write through
+            // AtomicFileWriter (temp-and-rename): a failing save never truncates or
+            // corrupts a previously saved file at the target path.
+            ValidateTensors(tensors);
+
             if (maxShardSizeBytes is not null)
             {
                 if (maxShardSizeBytes <= 0)
@@ -296,8 +302,41 @@ namespace Shorokoo.Onnx
                     return;
             }
 
-            using var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
-            SaveSafeTensorsToStream(fs, tensors, globalMetadata);
+            AtomicFileWriter.WriteFile(filePath, stream => SaveSafeTensorsToStream(stream, tensors, globalMetadata));
+        }
+
+        /// <summary>
+        /// Validates a tensor list before any output is produced — the list itself
+        /// plus every tensor's Name/Shape/Data/DType. Shared by all save paths so
+        /// invalid input fails before a single byte is staged.
+        /// </summary>
+        private static void ValidateTensors(List<SafeTensor> tensors)
+        {
+            if (tensors == null)
+                throw new ArgumentNullException(nameof(tensors));
+
+            if (tensors.Count == 0)
+                throw new ArgumentException("Cannot save an empty SafeTensor list.", nameof(tensors));
+
+            foreach (var st in tensors)
+            {
+                if (st == null)
+                    throw new InvalidOperationException("SafeTensor list contains a null entry.");
+
+                if (string.IsNullOrWhiteSpace(st.Name))
+                    throw new InvalidOperationException("SafeTensor has no valid Name.");
+
+                // An empty shape is the valid SafeTensors encoding of a rank-0 scalar
+                // (product of an empty shape = 1 element); only a null shape is invalid.
+                if (st.Shape == null)
+                    throw new InvalidOperationException($"SafeTensor '{st.Name}' has no valid Shape.");
+
+                if (st.Data == null)
+                    throw new InvalidOperationException($"SafeTensor '{st.Name}' has no Data.");
+
+                if (string.IsNullOrWhiteSpace(st.DataType))
+                    throw new InvalidOperationException($"SafeTensor '{st.Name}' has no valid DType.");
+            }
         }
 
         /// <summary>
@@ -308,22 +347,12 @@ namespace Shorokoo.Onnx
         /// </summary>
         private static bool TrySaveShardedSafeTensors(string filePath, List<SafeTensor> tensors, Dictionary<string, object>? globalMetadata, long maxShardSizeBytes)
         {
-            if (tensors == null)
-                throw new ArgumentNullException(nameof(tensors));
-
-            if (tensors.Count == 0)
-                throw new ArgumentException("Cannot save an empty SafeTensor list.", nameof(tensors));
-
+            // The caller (SaveSafeTensors) has already run ValidateTensors.
             var sizes = new long[tensors.Count];
             long totalSize = 0L;
             for (int i = 0; i < tensors.Count; i++)
             {
-                var st = tensors[i];
-                if (st == null)
-                    throw new InvalidOperationException("SafeTensor list contains a null entry.");
-                if (st.Data == null)
-                    throw new InvalidOperationException($"SafeTensor '{st.Name}' has no Data.");
-                sizes[i] = st.Data.AccessRawMemory().Length;
+                sizes[i] = tensors[i].Data.AccessRawMemory().Length;
                 totalSize += sizes[i];
             }
 
@@ -379,7 +408,10 @@ namespace Shorokoo.Onnx
                 ["metadata"] = new Dictionary<string, object> { ["total_size"] = totalSize },
                 ["weight_map"] = weightMap,
             };
-            File.WriteAllText(Path.Combine(directory, stem + extension + ShardIndexSuffix), JsonSerializer.Serialize(index));
+            var indexBytes = System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(index));
+            AtomicFileWriter.WriteFile(
+                Path.Combine(directory, stem + extension + ShardIndexSuffix),
+                stream => stream.Write(indexBytes, 0, indexBytes.Length));
             return true;
         }
 
@@ -397,11 +429,7 @@ namespace Shorokoo.Onnx
             if (!stream.CanWrite)
                 throw new ArgumentException("Stream must be writable.", nameof(stream));
 
-            if (tensors == null)
-                throw new ArgumentNullException(nameof(tensors));
-
-            if (tensors.Count == 0)
-                throw new ArgumentException("Cannot save an empty SafeTensor list.", nameof(tensors));
+            ValidateTensors(tensors);
 
             // Build header object and collect raw tensor byte blobs
             var header = new Dictionary<string, object>();
@@ -411,23 +439,6 @@ namespace Shorokoo.Onnx
 
             foreach (var st in tensors)
             {
-                if (st == null)
-                    throw new InvalidOperationException("SafeTensor list contains a null entry.");
-
-                if (string.IsNullOrWhiteSpace(st.Name))
-                    throw new InvalidOperationException("SafeTensor has no valid Name.");
-
-                // An empty shape is the valid SafeTensors encoding of a rank-0 scalar
-                // (product of an empty shape = 1 element); only a null shape is invalid.
-                if (st.Shape == null)
-                    throw new InvalidOperationException($"SafeTensor '{st.Name}' has no valid Shape.");
-
-                if (st.Data == null)
-                    throw new InvalidOperationException($"SafeTensor '{st.Name}' has no Data.");
-
-                if (string.IsNullOrWhiteSpace(st.DataType))
-                    throw new InvalidOperationException($"SafeTensor '{st.Name}' has no valid DType.");
-
                 var shape = st.Shape;
                 var dtype = st.DataType.ToUpperInvariant();
 

@@ -62,9 +62,8 @@ namespace Shorokoo.Core
         /// Builds a <see cref="InternalComputationGraph"/> from a MethodInfo (typically the Inline method).
         /// For generic methods, this instantiates the method with concrete types chosen
         /// based on generic type parameter constraints.
-        /// This is the main entry point used by generated code.
         /// </summary>
-        public static InternalComputationGraph BuildInternalComputationGraphFromMethodInfo(MethodInfo methodInfo)
+        internal static InternalComputationGraph BuildInternalComputationGraphFromMethodInfo(MethodInfo methodInfo)
         {
             if (methodInfo == null)
                 throw new ArgumentNullException(nameof(methodInfo));
@@ -82,6 +81,20 @@ namespace Shorokoo.Core
                 BuildInternalComputationGraphFromMethodInfo(methodInfo), Shorokoo.Graph.GraphKind.Module);
 
         /// <summary>
+        /// Builds the readonly, <see cref="Shorokoo.Graph.GraphKind.Module"/>-stamped
+        /// <see cref="Shorokoo.Graph.ComputationGraph"/> from a delegate's underlying method —
+        /// the codegen-free, uncached counterpart of the source generator's
+        /// <c>ComputationGraph</c> property (see also
+        /// <see cref="Shorokoo.Modules.ModuleFactory.ComputationGraph"/> for the cached form).
+        /// The delegate constraints of <see cref="BuildInternalComputationGraphFromDelegate"/> apply.
+        /// </summary>
+        /// <param name="fn">The module body. Parameters must be flattened tensor parameters
+        /// (no tuples); leading hyperparameters are marked with <c>[Hyper]</c>.</param>
+        public static Shorokoo.Graph.ComputationGraph BuildComputationGraphFromDelegate(Delegate fn)
+            => new Shorokoo.Graph.ComputationGraph(
+                BuildInternalComputationGraphFromDelegate(fn), Shorokoo.Graph.GraphKind.Module);
+
+        /// <summary>
         /// Builds a <see cref="InternalComputationGraph"/> from a delegate's underlying method —
         /// the codegen-free equivalent of the source generator's <c>ComputationGraph</c>
         /// property (which routes through <see cref="BuildInternalComputationGraphFromMethodInfo"/>).
@@ -97,7 +110,7 @@ namespace Shorokoo.Core
         /// <param name="fn">The module body. Parameters must be flattened tensor parameters
         /// (no tuples); leading hyperparameters are marked with <c>[Hyper]</c>.</param>
         /// <returns>A freshly built graph (not cached — callers own the instance).</returns>
-        public static InternalComputationGraph BuildInternalComputationGraphFromDelegate(Delegate fn)
+        internal static InternalComputationGraph BuildInternalComputationGraphFromDelegate(Delegate fn)
         {
             if (fn == null)
                 throw new ArgumentNullException(nameof(fn));

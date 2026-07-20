@@ -168,8 +168,8 @@ var concrete = specialized
 var results = ComputeContext.Default.Execute(concrete, input);   // no hyper needed
 ```
 
-`Specialize` matches values to inputs **by name** (against
-`InputUniqueNames`); names with no matching input are ignored. It returns a copy
+`Specialize` matches values to inputs **by name** (against the graph's
+`InputNames`); names with no matching input are ignored. It returns a copy
 and never mutates the original graph, exactly like `ToConcreteArchitecture`.
 This works for any input, not just hypers — but baking a runtime input is
 usually not what you want.

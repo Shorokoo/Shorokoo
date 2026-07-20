@@ -386,7 +386,7 @@ new Module<Scalar<float32>, (Tensor<float32>, Tensor<float32>), Tensor<float32>>
   optional `name:` argument for lambdas or when you want the codegen-style class
   name in exports.
 - Lower-level building blocks are public too if you need them:
-  `GraphBuilder.BuildInternalComputationGraphFromDelegate(...)` (uncached, mutable graph build)
+  `GraphBuilder.BuildComputationGraphFromDelegate(...)` (uncached graph build)
   and the `Module<...>` / `CallbackModule<...>` constructors shown above.
 
 ## Anti-patterns

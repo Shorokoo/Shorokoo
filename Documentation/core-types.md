@@ -11,7 +11,7 @@ Related: [defining-models.md](defining-models.md) · [inference.md](inference.md
     value-struct handles, all implementing the common `IValue` interface.
 - `IValue` — the base interface for any graph value (`Tensor<T>`, `Scalar<T>`,
   `Vector<T>`, and the sequence / optional / struct handles). User-facing code holds
-  `IValue` handles; the framework converts them to the internal graph node as needed.
+  `IValue` handles; the framework wires them into the computation graph as needed.
 - Dtype marker types (used as the generic argument): `bit` (boolean), `int8`,
   `int16`, `int32`, `int64`, `uint8`, `uint16`, `uint32`, `uint64`, `float16`,
   `bfloat16`, `float32`, `float64`. Example: `Tensor<float32>`, `Scalar<int64>`,

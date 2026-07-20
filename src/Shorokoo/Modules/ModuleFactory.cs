@@ -162,10 +162,10 @@ namespace Shorokoo.Modules
             // CreateTargetFunction validates the non-capturing constraint, builds the body graph
             // through the same GraphBuilder machinery the source generator uses, and caches the
             // resulting Function by the body's MethodInfo (shared with FromFunc-created modules).
-            // The clone keeps the cached template isolated from the readonly wrapper's borrow.
+            // The wrapper freezes a copy, so the cached template stays isolated.
             var function = ModuleHelper.CreateTargetFunction(fn, defaultName: name);
             return new Shorokoo.Graph.ComputationGraph(
-                function.OriginalFastGraph.Clone(), Shorokoo.Graph.GraphKind.Module);
+                function.OriginalFastGraph, Shorokoo.Graph.GraphKind.Module);
         }
 
         // ───────────────────────────── validation ─────────────────────────────

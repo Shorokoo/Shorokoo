@@ -1199,4 +1199,27 @@ public class TrainingRigCoverageTests
         Assert.Equal(1, output.Shape.Dims.Length);
         Assert.Equal(1L, output.Shape.Dims[0]);
     }
+
+    /// <summary>
+    /// Issue #54: FromScratch composes three module graphs and refuses anything
+    /// else up front, naming the actual vs required kind — instead of failing
+    /// deep inside lowering.
+    /// </summary>
+    [Fact]
+    public void TestFromScratchRefusesNonModuleGraphs()
+    {
+        var modelGraph = ScalarMultiplyModel.ComputationGraph;
+        var arch = modelGraph.ToConcreteArchitecture(
+            modelGraph.FromOrderedInputs([TensorData([4L], 1f, 2f, 3f, 4f)]));
+
+        var sampleInput = new TensorDataModelParam(
+            "input", ModelParamType.InputParam, TensorData([4L], 1f, 2f, 3f, 4f));
+
+        var ex = Assert.Throws<InvalidOperationException>(() => TrainingRig.FromScratch(
+            arch, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            new NamedModelParam[] { sampleInput }, 0.5f));
+        Assert.Contains("'module'", ex.Message);
+        Assert.Contains("'concrete-architecture'", ex.Message);
+    }
+
 }

@@ -506,4 +506,27 @@ public class OnnxExternalDataTests
             Assert.Equal(expected, results.First().AsEnumerable<float>().ToArray());
         });
     }
+
+    /// <summary>
+    /// Issue #54: SaveWithExternalData applies to concrete models only — it
+    /// externalizes top-level graph initializers, which is complete exactly when
+    /// every weight lives there. A module-stage proto (internal dialect) is
+    /// refused up front with XD008 naming the actual vs required kind.
+    /// </summary>
+    [Fact]
+    public void TestSaveWithExternalDataRequiresConcreteModel()
+    {
+        var moduleProto = FastOnnxModelBuilder.BuildInternalOnnxModel(
+            Shorokoo.Tests.Modules.ScalarMultiplyModel.ComputationGraph.Internal);
+
+        var path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".onnx");
+        var ex = Assert.Throws<ModelException>(
+            () => OnnxModelExporter.SaveWithExternalData(moduleProto, path));
+        Assert.Contains("XD008", ex.Message);
+        Assert.Contains("'concrete-model'", ex.Message);
+        Assert.Contains("'module'", ex.Message);
+        Assert.False(File.Exists(path));
+        Assert.False(File.Exists(path + ".data"));
+    }
+
 }

@@ -633,4 +633,38 @@ public class CompressedFormatUtilsCoverageTests
             () => CompressedFormatUtils.LoadFastGraphFromBinary(triple));
         Assert.Contains("still Zstd-compressed", exTriple.Message);
     }
+
+    private static Tensor<float32> ParamlessDouble(Tensor<float32> x) => x + x;
+
+    /// <summary>
+    /// Issue #54: a parameterless module lowers to a concrete architecture whose
+    /// op-scan classification says "concrete-model" (there are no MODEL_PARAM nodes
+    /// to see), so the stamped kind is the only reliable answer. The writer records
+    /// the stamp in the header and the loader stamps Kind from the header, so the
+    /// kind survives the .srk round-trip even with no op-scan evidence.
+    /// </summary>
+    [Fact]
+    public void TestStampedKindSurvivesSrkRoundtripWithoutOpScanEvidence()
+    {
+        var moduleGraph = ModuleFactory.ComputationGraph(
+            (Func<Tensor<float32>, Tensor<float32>>)ParamlessDouble);
+        Assert.Equal(GraphKind.Module, moduleGraph.Kind);
+
+        var arch = moduleGraph.ToConcreteArchitecture(
+            moduleGraph.FromOrderedInputs([TensorData([2L], 1.0f, 2.0f)]));
+        Assert.Equal(GraphKind.ConcreteArchitecture, arch.Kind);
+        // No trainable params -> op-scanning misclassifies this architecture.
+        Assert.Equal(GraphKind.ConcreteModel, SrkFileFormat.DetectStage(arch.Internal));
+
+        var bytes = CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: false);
+        Assert.Equal(GraphKind.ConcreteArchitecture, SrkFileFormat.TryReadHeader(bytes)!.TryGetStage());
+
+        var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(bytes);
+        Assert.Equal(GraphKind.ConcreteArchitecture, reloaded.Kind);
+
+        // The stamped kind is authoritative on the reloaded graph too: it may
+        // continue the pipeline exactly like the in-memory architecture.
+        Assert.Equal(GraphKind.ConcreteModel, reloaded.ToConcreteModel().Kind);
+    }
+
 }

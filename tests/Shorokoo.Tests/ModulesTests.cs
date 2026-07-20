@@ -881,4 +881,69 @@ public class ModulesCoverageTests
         Assert.Equal(direct, roundtrip);
         Assert.Equal(1, direct[0]);   // the self-check bit itself
     }
+
+    /// <summary>
+    /// Issue #54: the graph kind is stamped by every producing path, checked
+    /// fail-fast by the lowering entry points with an error naming the actual and
+    /// required kinds, and cannot be invalidated through the readonly wrapper —
+    /// conversions between ComputationGraph and InternalComputationGraph copy.
+    /// </summary>
+    [Fact]
+    public void TestGraphKindStampingChecksAndCopySemanticsCoverage()
+    {
+        var sample = TensorData([2L], 1.0f, 2.0f);
+
+        // Stamping along the lowering pipeline.
+        var moduleGraph = ScalarMultiplyModel.ComputationGraph;
+        Assert.Equal(GraphKind.Module, moduleGraph.Kind);
+
+        var arch = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([sample]));
+        Assert.Equal(GraphKind.ConcreteArchitecture, arch.Kind);
+
+        var model = arch.ToConcreteModel();
+        Assert.Equal(GraphKind.ConcreteModel, model.Kind);
+
+        // Specialize preserves the kind (nothing to bake here — empty value set).
+        Assert.Equal(GraphKind.ConcreteModel, model.Specialize(new ModelParamList([])).Kind);
+
+        // Kind checks fail fast, naming the actual and required kinds.
+        var exArch = Assert.Throws<InvalidOperationException>(
+            () => arch.ToConcreteArchitecture(arch.FromOrderedInputs([sample])));
+        Assert.Contains("'module'", exArch.Message);
+        Assert.Contains("'concrete-architecture'", exArch.Message);
+
+        var exModule = Assert.Throws<InvalidOperationException>(() => moduleGraph.ToConcreteModel());
+        Assert.Contains("'concrete-architecture'", exModule.Message);
+        Assert.Contains("'module'", exModule.Message);
+
+        // Re-lowering an already-concrete model is refused too.
+        var exTwice = Assert.Throws<InvalidOperationException>(() => model.ToConcreteModel());
+        Assert.Contains("'concrete-model'", exTwice.Message);
+
+        // The param-query surface is kind-gated the same way.
+        var exInfos = Assert.Throws<InvalidOperationException>(() => moduleGraph.GetConcreteModelParamInfos());
+        Assert.Contains("'concrete-architecture'", exInfos.Message);
+
+        // Conversions copy: mutating a ToInternal() copy never affects the wrapper…
+        var nodeCount = model.Internal.Nodes.Count;
+        var copy = model.ToInternal();
+        copy.Nodes.Clear();
+        Assert.Equal(nodeCount, model.Internal.Nodes.Count);
+
+        // …and FromInternal freezes a copy, so later source mutation cannot
+        // invalidate the stamp behind the frozen wrapper.
+        var source = model.ToInternal();
+        var frozen = ComputationGraph.FromInternal(source, GraphKind.ConcreteModel);
+        source.Nodes.Clear();
+        Assert.Equal(nodeCount, frozen.Internal.Nodes.Count);
+        Assert.Equal(GraphKind.ConcreteModel, frozen.Kind);
+
+        // FromInternal without an explicit kind falls back to op-scan classification.
+        Assert.Equal(GraphKind.ConcreteModel, ComputationGraph.FromInternal(model.ToInternal()).Kind);
+
+        // The kind-stamped model still executes as before.
+        var outputs = ComputeContext.Default.Execute(model, sample);
+        Assert.Single(outputs);
+    }
+
 }

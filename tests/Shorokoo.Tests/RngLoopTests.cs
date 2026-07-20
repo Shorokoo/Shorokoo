@@ -107,8 +107,8 @@ public class RngLoopTests
 
     private static (float[] output, InternalComputationGraph concrete) RunRuntimeLoop(RngConfig cfg, long steps)
     {
-        var g = (InternalComputationGraph)typeof(RngRuntimeLoopFeed)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var g = ((ComputationGraph)typeof(RngRuntimeLoopFeed)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var x = TensorData([N], XVals);
         var stepsData = TensorData(Array.Empty<long>(), steps);
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x, stepsData]))
@@ -142,8 +142,8 @@ public class RngLoopTests
     {
         var cfg = new RngConfig { MasterSeed = 11 };
 
-        var g = (InternalComputationGraph)typeof(RngUnrolledLoopFeed)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var g = ((ComputationGraph)typeof(RngUnrolledLoopFeed)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var x = TensorData([N], XVals);
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel(cfg);
 
@@ -244,8 +244,8 @@ public class RngLoopTests
         // from exactly the same per-iteration streams. (Running MORE would mint stream ids
         // that did not exist at concretization — invalid use of the concrete artifact.)
         var cfg = new RngConfig { MasterSeed = 11 };
-        var g = (InternalComputationGraph)typeof(RngRuntimeLoopFeed)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var g = ((ComputationGraph)typeof(RngRuntimeLoopFeed)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var x = TensorData([N], XVals);
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x, TensorData(Array.Empty<long>(), 3L)]))
             .ToConcreteModel(cfg);
@@ -263,8 +263,8 @@ public class RngLoopTests
         // all-zero grid cell as padding (validly derived, never consumed at the only valid
         // executed iteration count, 0). Feeds need no padding at all: their per-iteration
         // keys derive at runtime from the iteration index, so the site simply never draws.
-        var g = (InternalComputationGraph)typeof(RngRuntimeLoopParamAndFeed)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var g = ((ComputationGraph)typeof(RngRuntimeLoopParamAndFeed)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var x = TensorData([N], XVals);
         var arch = g.ToConcreteArchitecture(
             g.FromOrderedInputs([x, TensorData(Array.Empty<long>(), 0L)]));
@@ -302,8 +302,8 @@ public class RngLoopTests
         // never a dynamic fallback"): concretization itself must throw, naming the site.
         // Corrupt the site id by adding an iteration slot the loop's counter vector can
         // never fill.
-        var g = ((InternalComputationGraph)typeof(RngRuntimeLoopFeed)
-            .GetProperty("ComputationGraph")!.GetValue(null)!).Clone();
+        var g = ((ComputationGraph)typeof(RngRuntimeLoopFeed)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var feed = g.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
         var idVals = feed.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId)!;
         Assert.Contains(-1, idVals);   // guard: the fixture is an in-loop feed as expected

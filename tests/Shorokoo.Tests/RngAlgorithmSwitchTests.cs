@@ -34,8 +34,8 @@ public class RngAlgorithmSwitchTests
 
     private static InternalComputationGraph FeedModel(RngConfig cfg)
     {
-        var g = (InternalComputationGraph)typeof(RtLoweredUniform)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var g = ((ComputationGraph)typeof(RtLoweredUniform)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
         return g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel(cfg);
     }
@@ -108,8 +108,8 @@ public class RngAlgorithmSwitchTests
     [Fact]
     public void TestInitDrawsSwitchWithAlgorithm()
     {
-        var g = (InternalComputationGraph)typeof(SwitchInitLinear)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var g = ((ComputationGraph)typeof(SwitchInitLinear)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([1L, 3L], 0.1f, 0.2f, 0.3f);
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
 
@@ -130,8 +130,8 @@ public class RngAlgorithmSwitchTests
     {
         // SwitchInitLinear has no runtime feeds, so no RngSeed exists to tamper with; use a
         // model that carries one (a runtime feed) — no-config init reads its algorithm.
-        var g = (InternalComputationGraph)typeof(RtLoweredUniform)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var g = ((ComputationGraph)typeof(RtLoweredUniform)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([4L, 4L], new float[16]);
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
         arch.ApplyRngConfig(Rounds20);

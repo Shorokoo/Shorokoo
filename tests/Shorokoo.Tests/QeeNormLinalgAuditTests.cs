@@ -37,7 +37,7 @@ public class QeeNormLinalgAuditTests
     {
         var prop = typeof(TModule).GetProperty("ComputationGraph", BindingFlags.Public | BindingFlags.Static)
             ?? throw new InvalidOperationException($"{typeof(TModule).FullName} has no public static ComputationGraph property");
-        var moduleGraph = (InternalComputationGraph)prop.GetValue(null)!;
+        var moduleGraph = ((ComputationGraph)prop.GetValue(null)!).ToInternal();
         var concreteArch = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([.. runtimeInputs]));
         var concreteModel = concreteArch.ToConcreteModel();
         var qee = new QuickExecutionEngine();

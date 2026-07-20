@@ -44,8 +44,8 @@ public class RngRuntimeTests
 {
     private static float[] RunDraw<TModule>(long rows, long cols)
     {
-        var g = (InternalComputationGraph)typeof(TModule)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var g = ((ComputationGraph)typeof(TModule)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([rows, cols], Enumerable.Repeat(0f, (int)(rows * cols)).ToArray());
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
         var outputs = ComputeContext.Default.Execute(concrete, input);
@@ -98,8 +98,8 @@ public class RngRuntimeTests
         // ONNX random fallback: a concrete model built without any RngConfig carries the
         // default identity, and its feed draws are bit-exactly the host fold of the
         // default runtime master along the feed's ModelId — reconstructible offline.
-        var g = (InternalComputationGraph)typeof(RtLoweredUniform)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var g = ((ComputationGraph)typeof(RtLoweredUniform)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
 
@@ -119,8 +119,8 @@ public class RngRuntimeTests
         // parameter's value, and every draw's key — a split chain rooted at the parameter —
         // re-derives from it. No node is added or removed and no feed is touched; parameter
         // values would be untouched too (this model has none to re-key).
-        var g = (InternalComputationGraph)typeof(RtLoweredUniform)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var g = ((ComputationGraph)typeof(RtLoweredUniform)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input]))
             .ToConcreteModel(new RngConfig { MasterSeed = 1 });

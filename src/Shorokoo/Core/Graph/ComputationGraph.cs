@@ -72,7 +72,7 @@ namespace Shorokoo.Graph
         /// Freezes a <b>deep copy</b> of <paramref name="graph"/> into a readonly
         /// <see cref="ComputationGraph"/> stamped with <paramref name="kind"/> — or,
         /// when no kind is given, with the kind detected by op-scanning
-        /// (<see cref="SrkFileFormat.DetectStage"/>, the fallback classification for
+        /// (<see cref="SrkFileFormat.DetectStage(InternalComputationGraph)"/>, the fallback classification for
         /// graphs that arrive without a stamp).
         /// </summary>
         public static ComputationGraph FromInternal(InternalComputationGraph graph, GraphKind? kind = null)

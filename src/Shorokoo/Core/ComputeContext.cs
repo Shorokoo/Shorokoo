@@ -29,7 +29,7 @@ namespace Shorokoo.Runtime
 
     /// <summary>
     /// A compiled computation graph backed by a Shorokoo inference session.
-    /// Created once via <see cref="ComputeContext.Compile"/>, then invoked repeatedly
+    /// Created once via <see cref="ComputeContext.Compile(ComputationGraph)"/>, then invoked repeatedly
     /// via <see cref="Execute"/> — each call only feeds new data, with zero graph
     /// rebuilding or session creation overhead.
     /// </summary>
@@ -306,7 +306,7 @@ namespace Shorokoo.Runtime
 
         /// <summary>
         /// Executes the graph with pre-built named inputs. Builds the ONNX model and a fresh
-        /// inference session per call (disposed afterwards); use <see cref="Compile"/> for repeated runs.
+        /// inference session per call (disposed afterwards); use <see cref="Compile(ComputationGraph)"/> for repeated runs.
         /// </summary>
         internal NamedModelParam[] Run(InternalComputationGraph graph, params NamedModelParam[] inputs)
         {

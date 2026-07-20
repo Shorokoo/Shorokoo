@@ -59,7 +59,7 @@ namespace Shorokoo.Graph
         /// <summary>
         /// Original <see cref="Variable.UniqueName"/> for each entry in <see cref="Inputs"/>,
         /// captured by <see cref="InternalComputationGraphConverter.ToFastGraph"/> and re-applied
-        /// by <see cref="InternalComputationGraphConverter.ToComputationGraph"/>. Preserves
+        /// when the Variable view is rebuilt. Preserves
         /// human-readable input names across the round-trip.
         /// </summary>
         public List<string?> InputUniqueNames { get; set; } = new();

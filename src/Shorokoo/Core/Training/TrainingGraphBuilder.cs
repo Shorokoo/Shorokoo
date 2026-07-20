@@ -434,11 +434,16 @@ public static class TrainingGraphBuilder
             throw new ArgumentException(
                 $"The 'ComputationGraph' property on '{declaringType.Name}' returned null.",
                 nameof(func));
-        if (rawGraph is not InternalComputationGraph fast)
-            throw new ArgumentException(
+        return rawGraph switch
+        {
+            // The generated property returns the readonly wrapper (a shared cached
+            // instance) — copy, since the training pipeline mutates its working graph.
+            Shorokoo.Graph.ComputationGraph wrapped => wrapped.ToInternal(),
+            InternalComputationGraph fast => fast,
+            _ => throw new ArgumentException(
                 $"The 'ComputationGraph' property on '{declaringType.Name}' returned a value of type " +
-                $"'{rawGraph.GetType().Name}', expected InternalComputationGraph.",
-                nameof(func));
-        return fast;
+                $"'{rawGraph.GetType().Name}', expected ComputationGraph.",
+                nameof(func)),
+        };
     }
 }

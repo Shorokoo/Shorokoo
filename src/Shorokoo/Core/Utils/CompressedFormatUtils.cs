@@ -163,7 +163,7 @@ namespace Shorokoo.Core.Utils
         /// <summary>
         /// Internal-graph form of <see cref="SaveFastGraphToBinary(ComputationGraph, bool, int)"/>.
         /// With no stamped kind available, the header stage falls back to op-scanning
-        /// (<see cref="SrkFileFormat.DetectStage"/>).
+        /// (<see cref="SrkFileFormat.DetectStage(InternalComputationGraph)"/>).
         /// </summary>
         internal static byte[] SaveFastGraphToBinary(
             InternalComputationGraph graph, GraphKind? stage = null, bool compressed = true,
@@ -208,7 +208,7 @@ namespace Shorokoo.Core.Utils
         /// Shared load path: container/shim payload extraction, header-first stage
         /// enforcement for v2, graph import, and detected-stage enforcement for v1.
         /// The returned kind is the header stage when the file carries a known one,
-        /// else the op-scanned fallback (<see cref="SrkFileFormat.DetectStage"/>) —
+        /// else the op-scanned fallback (<see cref="SrkFileFormat.DetectStage(InternalComputationGraph)"/>) —
         /// v1 files and files written by newer framework versions have no usable stamp.
         /// </summary>
         internal static (InternalComputationGraph Graph, GraphKind Kind) LoadFastGraphCore(
@@ -257,7 +257,7 @@ namespace Shorokoo.Core.Utils
 
         /// <summary>
         /// Save <paramref name="graph"/> directly to <paramref name="filename"/> as a
-        /// .srk v2 container (see <see cref="SaveFastGraphToBinary"/>). Inverse of
+        /// .srk v2 container (see <see cref="SaveFastGraphToBinary(ComputationGraph, bool, int)"/>). Inverse of
         /// <see cref="LoadFastGraphFromFile"/>. With <paramref name="overrideExtension"/>
         /// the extension is normalized to .zsrk/.srk purely as a hint for humans — the
         /// extension has no parsing significance; the header records the compression.

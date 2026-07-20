@@ -1029,7 +1029,7 @@ namespace Shorokoo
         /// <param name="checkpoint">Current training state (params, model state, optimizer state, step)</param>
         /// <param name="trainingInput">Training input data as TensorDataStruct</param>
         /// <param name="trainingOutput">Training target data as TensorDataStruct</param>
-        /// <param name="compiled">Compiled training step graph (from <see cref="ComputeContext.Compile"/>)</param>
+        /// <param name="compiled">Compiled training step graph (from <see cref="ComputeContext.Compile(ComputationGraph)"/>)</param>
         /// <returns>Result containing the advanced checkpoint and loss value</returns>
         public TrainingStepResult TrainStep(
             TrainingCheckpoint checkpoint,
@@ -1054,7 +1054,7 @@ namespace Shorokoo
         /// <param name="hyperparams">Values for all dynamic hyperparameters (<see cref="HyperparamStructDef"/> order).</param>
         /// <param name="trainingInput">Training input data as TensorDataStruct</param>
         /// <param name="trainingOutput">Training target data as TensorDataStruct</param>
-        /// <param name="compiled">Compiled training step graph (from <see cref="ComputeContext.Compile"/>)</param>
+        /// <param name="compiled">Compiled training step graph (from <see cref="ComputeContext.Compile(ComputationGraph)"/>)</param>
         /// <returns>Result containing the advanced checkpoint and loss value</returns>
         public TrainingStepResult TrainStep(
             TrainingCheckpoint checkpoint,
@@ -1224,7 +1224,7 @@ namespace Shorokoo
             => Train(initialCheckpoint ?? CreateDefaultCheckpoint(), trainingInputs, trainingOutputs, numEpochs, ctx ?? ComputeContext.Default);
 
         /// <summary>
-        /// Returns the default initial checkpoint produced at <see cref="FromScratch(InternalComputationGraph, InternalComputationGraph, InternalComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?)"/> time.
+        /// Returns the default initial checkpoint produced at <see cref="FromScratch(ComputationGraph, ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?)"/> time.
         /// Trainable parameters and model state were initialized from the model's built-in
         /// initializers, and optimizer state from the optimizer's [StateInitializer]s (run once
         /// per trainable parameter). This is pure packaging — no computation happens here.

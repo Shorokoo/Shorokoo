@@ -28,7 +28,7 @@ namespace Shorokoo.Onnx
     /// (deserializes the ModelProto, materializes any external tensor data, then builds
     /// the graph via <c>OnnxModelReader</c>). Imported data carries no kind stamp, so
     /// the returned graph's <see cref="ComputationGraph.Kind"/> is classified by
-    /// op-scanning (<see cref="Shorokoo.Core.Utils.SrkFileFormat.DetectStage"/>) — the
+    /// op-scanning (<see cref="Shorokoo.Core.Utils.SrkFileFormat.DetectStage(InternalComputationGraph)"/>) — the
     /// sanctioned fallback for foreign/headerless data.
     ///
     /// <para>

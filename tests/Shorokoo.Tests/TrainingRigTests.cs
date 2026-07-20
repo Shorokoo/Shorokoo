@@ -1201,25 +1201,43 @@ public class TrainingRigCoverageTests
     }
 
     /// <summary>
-    /// Issue #54: FromScratch composes three module graphs and refuses anything
-    /// else up front, naming the actual vs required kind — instead of failing
-    /// deep inside lowering.
+    /// Issue #54: FromScratch takes the model as a module graph or an
+    /// already-lowered concrete architecture (the lowering pipeline is idempotent
+    /// on the latter), refuses a weight-filled concrete model up front naming the
+    /// actual vs required kinds, and still requires module graphs in the loss and
+    /// optimizer positions — instead of failing deep inside lowering.
     /// </summary>
     [Fact]
-    public void TestFromScratchRefusesNonModuleGraphs()
+    public void TestFromScratchModelGraphKinds()
     {
+        var sample = TensorData([4L], 1f, 2f, 3f, 4f);
         var modelGraph = ScalarMultiplyModel.ComputationGraph;
-        var arch = modelGraph.ToConcreteArchitecture(
-            modelGraph.FromOrderedInputs([TensorData([4L], 1f, 2f, 3f, 4f)]));
+        var arch = modelGraph.ToConcreteArchitecture(modelGraph.FromOrderedInputs([sample]));
 
-        var sampleInput = new TensorDataModelParam(
-            "input", ModelParamType.InputParam, TensorData([4L], 1f, 2f, 3f, 4f));
+        var sampleInput = new TensorDataModelParam("input", ModelParamType.InputParam, sample);
 
-        var ex = Assert.Throws<InvalidOperationException>(() => TrainingRig.FromScratch(
+        // A pre-concretized architecture is accepted in the model position and
+        // produces a working rig.
+        var rig = TrainingRig.FromScratch(
             arch, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            new NamedModelParam[] { sampleInput }, 0.5f));
-        Assert.Contains("'module'", ex.Message);
-        Assert.Contains("'concrete-architecture'", ex.Message);
+            [sampleInput], 0.5f);
+        Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
+        Assert.Equal(GraphKind.ConcreteModel, rig.TrainingStepPureGraph.Kind);
+        Assert.NotNull(rig.CreateDefaultCheckpoint().TrainableParams);
+
+        // A weight-filled concrete model is refused with the kinds named.
+        var model = arch.ToConcreteModel();
+        var exModel = Assert.Throws<InvalidOperationException>(() => TrainingRig.FromScratch(
+            model, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [sampleInput], 0.5f));
+        Assert.Contains("'concrete-model'", exModel.Message);
+        Assert.Contains("'concrete-architecture'", exModel.Message);
+
+        // The loss (and optimizer) positions still require module graphs.
+        var exLoss = Assert.Throws<InvalidOperationException>(() => TrainingRig.FromScratch(
+            modelGraph, arch, SGDOptimizer.ComputationGraph,
+            [sampleInput], 0.5f));
+        Assert.Contains("'module'", exLoss.Message);
     }
 
 }

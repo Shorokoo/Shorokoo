@@ -65,8 +65,7 @@ namespace Shorokoo
         public ComputationGraph ToInferenceModel(ComputationGraph modelGraph, TensorData exampleInput)
         {
             if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
-            var g = modelGraph.RequireKind(GraphKind.Module, nameof(ToInferenceModel),
-                "Pass the model's module graph (e.g. MyModel.ComputationGraph).");
+            var g = TrainingRig.RequireModelGraphKind(modelGraph, nameof(ToInferenceModel));
             return new ComputationGraph(ToInferenceModelCore(g, exampleInput), GraphKind.ConcreteModel);
         }
 
@@ -535,17 +534,39 @@ namespace Shorokoo
             if (lossGraph is null) throw new ArgumentNullException(nameof(lossGraph));
             if (optimizerGraph is null) throw new ArgumentNullException(nameof(optimizerGraph));
 
-            // Training composes three MODULE graphs; anything else fails deep inside
-            // lowering, so refuse it up front with the actual vs required kind.
-            var model = modelGraph.RequireKind(GraphKind.Module, "TrainingRig.FromScratch (modelGraph)",
-                "Pass the module graphs themselves (e.g. MyModel.ComputationGraph, Losses.L2Loss, " +
-                "Optimizers.Adam); the rig lowers and composes them itself.");
+            // The model position takes a module graph or an already-lowered concrete
+            // architecture (the concretization pipeline is idempotent on the latter, so
+            // callers that lowered once — e.g. to inspect parameters — need not redo it);
+            // a weight-filled concrete model is refused up front. Loss and optimizer are
+            // composed as module bodies and must be module graphs.
+            var model = RequireModelGraphKind(modelGraph, "TrainingRig.FromScratch (modelGraph)");
             lossGraph.RequireKind(GraphKind.Module, "TrainingRig.FromScratch (lossGraph)",
                 "Pass the loss module graph (e.g. Losses.L2Loss).");
             optimizerGraph.RequireKind(GraphKind.Module, "TrainingRig.FromScratch (optimizerGraph)",
                 "Pass the optimizer module graph (e.g. Optimizers.Adam).");
             return FromScratchInternal(model, lossGraph.ToInternal(), optimizerGraph.ToInternal(),
                 sampleInputs, hyperparameters, names, rngConfig);
+        }
+
+        /// <summary>
+        /// The model-graph precondition shared by <see cref="FromScratch(ComputationGraph,
+        /// ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?)"/>
+        /// and <see cref="TrainingCheckpoint.ToInferenceModel"/>: a module graph or an
+        /// already-lowered concrete architecture (both feed the idempotent
+        /// <c>ToConcreteArchitecture</c> pipeline). A weight-filled concrete model is
+        /// refused — its parameters are already materialized as values, so there is
+        /// nothing left to discover or initialize.
+        /// </summary>
+        internal static InternalComputationGraph RequireModelGraphKind(ComputationGraph modelGraph, string operation)
+        {
+            if (modelGraph.Kind is GraphKind.Module or GraphKind.ConcreteArchitecture)
+                return modelGraph.Internal;
+            throw new InvalidOperationException(
+                $"{operation} requires a 'module' or 'concrete-architecture' model graph, but this " +
+                $"graph is a '{Shorokoo.Core.Utils.SrkFileFormat.StageName(modelGraph.Kind)}'. Its " +
+                "parameters are already materialized as values; pass the module graph " +
+                "(e.g. MyModel.ComputationGraph) or its ToConcreteArchitecture result instead. " +
+                Shorokoo.Core.Utils.SrkFileFormat.WithKindRemedyHint);
         }
 
         private static TrainingRig FromScratchInternal(

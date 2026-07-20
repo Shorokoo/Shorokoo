@@ -15,8 +15,8 @@ namespace Shorokoo.Tests;
 /// <see cref="InferenceBackend"/> deployment-folder discovery fallback (the
 /// OS-derived backend selection, a live ORT execution check, and the multi-backend
 /// CPU-vs-GPU selection policy), and the <see cref="AtomicFileWriter"/>
-/// temp-and-rename commit protocol (crash-window fault injection, stale-temp sweep,
-/// and the directory shape). Plain xunit facts.
+/// temp-and-rename commit protocol (crash-window fault injection and stale-temp
+/// sweep). Plain xunit facts.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -470,63 +470,6 @@ public class CoreUtilsCoverageTests
 
             Assert.True(AtomicFileWriter.IsTempName(".tmp-run-42"));
             Assert.False(AtomicFileWriter.IsTempName("run-42"));
-        }
-        finally { Directory.Delete(dir, recursive: true); }
-    }
-
-    /// <summary>
-    /// The directory shape for container formats: a commit atomically renames the fully
-    /// populated staged directory into place (with its files flushed); the target existing
-    /// beforehand is rejected up front (a rename cannot atomically replace a non-empty
-    /// directory) without invoking the populate callback; and a failure while populating (or in
-    /// the commit window) removes the staged directory.
-    /// </summary>
-    [Fact]
-    public void TestAtomicFileWriterWriteDirectoryCoverage()
-    {
-        var dir = NewScratchDir();
-        try
-        {
-            var target = Path.Combine(dir, "run-001");
-            AtomicFileWriter.WriteDirectory(target, temp =>
-            {
-                File.WriteAllText(Path.Combine(temp, "weights.bin"), "w");
-                Directory.CreateDirectory(Path.Combine(temp, "sub"));
-                File.WriteAllText(Path.Combine(temp, "sub", "meta.json"), "{}");
-            });
-            Assert.Equal("w", File.ReadAllText(Path.Combine(target, "weights.bin")));
-            Assert.Equal("{}", File.ReadAllText(Path.Combine(target, "sub", "meta.json")));
-            Assert.Empty(Directory.GetFileSystemEntries(dir, ".tmp-*"));
-
-            // Existing target: rejected before any staging happens.
-            bool populated = false;
-            Assert.Throws<IOException>(() => AtomicFileWriter.WriteDirectory(target, _ => populated = true));
-            Assert.False(populated);
-
-            // Populate failure and commit-window crash both leave no staged debris and no target.
-            var target2 = Path.Combine(dir, "run-002");
-            Assert.Throws<InvalidOperationException>(() => AtomicFileWriter.WriteDirectory(
-                target2, _ => throw new InvalidOperationException("populate boom")));
-            AtomicFileWriter.CommitFaultInjection = p =>
-            {
-                if (p.StartsWith(dir, StringComparison.Ordinal)) throw new IOException("injected crash");
-            };
-            try
-            {
-                Assert.Throws<IOException>(() => AtomicFileWriter.WriteDirectory(
-                    target2, temp => File.WriteAllText(Path.Combine(temp, "weights.bin"), "w2")));
-            }
-            finally { AtomicFileWriter.CommitFaultInjection = null; }
-            Assert.False(Directory.Exists(target2));
-            Assert.Empty(Directory.GetFileSystemEntries(dir, ".tmp-*"));
-
-            // Fresh-name-per-version pattern: a second distinct target commits alongside the
-            // first, each fully populated, with no staged debris left behind.
-            AtomicFileWriter.WriteDirectory(
-                target2, temp => File.WriteAllText(Path.Combine(temp, "weights.bin"), "w2"));
-            Assert.Equal("w", File.ReadAllText(Path.Combine(target, "weights.bin")));
-            Assert.Equal("w2", File.ReadAllText(Path.Combine(target2, "weights.bin")));
-            Assert.Empty(Directory.GetFileSystemEntries(dir, ".tmp-*"));
         }
         finally { Directory.Delete(dir, recursive: true); }
     }

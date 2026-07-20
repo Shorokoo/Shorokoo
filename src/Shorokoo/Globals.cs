@@ -141,30 +141,22 @@ namespace Shorokoo
             "runtime inputs, not state.";
 
         /// <summary>
-        /// Registers an update relationship between an original state tensor and its updated value.
-        /// This allows the system to track state updates and ensure they are not pruned during graph optimization.
+        /// Registers <paramref name="updatedState"/> as the new value of the state variable
+        /// <paramref name="originalState"/>: the state carries the updated value into the next
+        /// step. <paramref name="originalState"/> must be a state variable created by a
+        /// [StateInitializer] class's Init method (throws
+        /// <see cref="InvalidStateUpdateException"/> otherwise), and each state is updated
+        /// exactly once per step. Whenever the module's output is used, the registered update
+        /// runs with it.
         ///
-        /// When called, this method:
-        /// 1. Validates that <paramref name="originalState"/> is a state variable, i.e. was created
-        ///    by a [StateInitializer] class's Init method (throws
-        ///    <see cref="InvalidStateUpdateException"/> otherwise)
-        /// 2. Creates a STATE_UPDATE_LINK node connecting the original and updated state tensors
-        /// 3. Registers the update pair for later use when wrapping module outputs with WithStateDeps
-        /// 4. Ensures that if the module output is used, the state update will be included in the graph
-        ///
-        /// <para>Inside a <c>LoopAPI.Iterate</c> body, the call is sugar for registering the
-        /// post-loop value of <paramref name="updatedState"/> — it registers the same post-loop
-        /// value that carrying the value out of the loop and calling StateUpdate after it would.
-        /// The two forms are behaviorally equivalent (identical registered value, identical
-        /// execution and state trajectory), but the built graph's node order may differ, since
-        /// this sugar creates the update link at loop termination rather than at the
-        /// after-the-loop call site. The updated value must therefore
-        /// be a loop-carried variable (assigned in the body and read across iterations, so its final
-        /// value surfaces as a loop output; with zero iterations it falls back to the value the
-        /// variable had before the loop). A value that never leaves the loop, a scanned result, or
-        /// an iteration-scoped value has no well-defined post-loop translation and fails the module
-        /// build. Each state is still updated exactly once per step: an in-loop call is that
-        /// state's one update.</para>
+        /// <para>Inside a <c>LoopAPI.Iterate</c> body, the call registers the post-loop value of
+        /// <paramref name="updatedState"/> — the value it holds once the loop finishes. The
+        /// updated value must therefore be a carried loop variable (assigned in the body and read
+        /// across iterations, so its final value surfaces as a loop output; with zero iterations
+        /// it falls back to the value the variable had before the loop). A value that never
+        /// leaves the loop, a scanned result, or an iteration-scoped value has no post-loop value
+        /// and fails the module build. An in-loop call is that state's one update for the
+        /// step.</para>
         /// </summary>
         /// <typeparam name="T">The tensor type (must implement Variable)</typeparam>
         /// <param name="originalState">The original state tensor from a state initializer</param>

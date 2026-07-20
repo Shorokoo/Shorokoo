@@ -333,9 +333,12 @@ Constraints:
   only state variables (a `[StateInitializer]` `Init` result) are accepted.
 - Do not call `Globals.StateUpdate` outside a module body — it throws. Inside a
   `LoopAPI.Iterate` body the call is allowed as sugar for the post-loop registration: it
-  registers the post-loop value of the updated tensor, exactly as if the value were
-  carried out of the loop and registered after it (an in-loop call is that state's one
-  update for the step). This requires the updated value to be a carried loop variable —
+  registers the same post-loop value of the updated tensor that carrying the value out
+  of the loop and registering it after would (an in-loop call is that state's one
+  update for the step). The two forms are behaviorally equivalent — identical registered
+  value, identical execution and state trajectory — but the built graph's node order may
+  differ, since the sugar creates the update link at loop termination rather than at the
+  after-the-loop call site. This requires the updated value to be a carried loop variable —
   assigned in the body and read across iterations, so its final value surfaces as a loop
   output (with zero iterations it falls back to its pre-loop value). A value that never
   leaves the loop, a scanned result, or an iteration-scoped value (e.g. the iteration

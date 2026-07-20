@@ -153,8 +153,12 @@ namespace Shorokoo
         /// 4. Ensures that if the module output is used, the state update will be included in the graph
         ///
         /// <para>Inside a <c>LoopAPI.Iterate</c> body, the call is sugar for registering the
-        /// post-loop value of <paramref name="updatedState"/> — exactly equivalent to carrying the
-        /// value out of the loop and calling StateUpdate after it. The updated value must therefore
+        /// post-loop value of <paramref name="updatedState"/> — it registers the same post-loop
+        /// value that carrying the value out of the loop and calling StateUpdate after it would.
+        /// The two forms are behaviorally equivalent (identical registered value, identical
+        /// execution and state trajectory), but the built graph's node order may differ, since
+        /// this sugar creates the update link at loop termination rather than at the
+        /// after-the-loop call site. The updated value must therefore
         /// be a loop-carried variable (assigned in the body and read across iterations, so its final
         /// value surfaces as a loop output; with zero iterations it falls back to the value the
         /// variable had before the loop). A value that never leaves the loop, a scanned result, or

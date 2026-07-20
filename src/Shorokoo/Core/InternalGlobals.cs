@@ -57,7 +57,10 @@ namespace Shorokoo.Core
         /// value is translated through its enclosing loopers' loop-variable mappings,
         /// innermost to outermost (third-pass output → close-node output, composing through
         /// inner-loop close outputs for nested loops), and the post-loop value is then
-        /// registered exactly as the documented after-the-loop pattern would. Called by the
+        /// registered with the same value the documented after-the-loop pattern would register —
+        /// behaviorally equivalent, though the resulting node order in the graph may differ since
+        /// this deferred registration happens at loop termination rather than at the
+        /// after-the-loop call site. Called by the
         /// loop machinery once the outermost looper has terminated and left the stack — the
         /// close-node outputs exist and node creation is back at module scope. Throws when a
         /// recorded value has no well-defined post-loop translation.

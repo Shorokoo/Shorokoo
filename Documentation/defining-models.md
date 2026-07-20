@@ -29,7 +29,8 @@ Related: [core-types.md](core-types.md) · [inference.md](inference.md) ·
     a runtime input, a trainable parameter, or a computed tensor. `StateUpdate` is
     also only valid inside a module body — it throws otherwise. Inside a
     `LoopAPI.Iterate` loop body it registers the post-loop value of the updated
-    tensor (sugar for the after-the-loop registration), which requires the updated
+    tensor (sugar for the after-the-loop registration — behaviorally equivalent,
+    though the built graph's node order may differ), which requires the updated
     value to be a carried loop variable; each state still gets exactly one update
     per step.
 - `Inline` may return a single value or a tuple (multiple outputs).

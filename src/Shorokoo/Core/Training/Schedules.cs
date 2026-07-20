@@ -25,8 +25,22 @@ namespace Shorokoo.Core.Training
     {
         private readonly Func<int, float> _fn;
 
+        /// <summary>
+        /// Structural description of this schedule when it was built from the
+        /// <see cref="Schedules"/> factories and <see cref="Schedule"/> combinators; <c>null</c>
+        /// when it wraps an opaque host function, which cannot be lowered to graph math.
+        /// Consumed by <see cref="ScheduleLowering"/>.
+        /// </summary>
+        internal ScheduleExpr? Expr { get; }
+
         /// <summary>Wraps a step → value function as a schedule.</summary>
-        public Schedule(Func<int, float> fn) => _fn = fn ?? throw new ArgumentNullException(nameof(fn));
+        public Schedule(Func<int, float> fn) : this(fn, expr: null) { }
+
+        internal Schedule(Func<int, float> fn, ScheduleExpr? expr)
+        {
+            _fn = fn ?? throw new ArgumentNullException(nameof(fn));
+            Expr = expr;
+        }
 
         /// <summary>The scheduled value at <paramref name="step"/> (0-based global training step).</summary>
         public float At(int step) => _fn(step);
@@ -38,14 +52,37 @@ namespace Shorokoo.Core.Training
 
         // --- Combinators ---------------------------------------------------------------
 
-        /// <summary>Multiplies every value by <paramref name="factor"/>.</summary>
-        public Schedule Scale(float factor) => new(s => _fn(s) * factor);
+        /// <summary>
+        /// The derived schedule's structural record: <paramref name="make"/> applied to this
+        /// schedule's <see cref="Expr"/>, or <c>null</c> when this schedule is opaque.
+        /// Opaqueness always propagates through combinators, so the guard lives here rather
+        /// than being repeated at each combinator.
+        /// </summary>
+        private ScheduleExpr? Derive(Func<ScheduleExpr, ScheduleExpr> make)
+            => Expr is null ? null : make(Expr);
 
-        /// <summary>Clamps every value to <c>[<paramref name="min"/>, <paramref name="max"/>]</c>.</summary>
-        public Schedule Clamp(float min, float max) => new(s => Math.Clamp(_fn(s), min, max));
+        /// <summary>Multiplies every value by <paramref name="factor"/>.</summary>
+        public Schedule Scale(float factor) => new(s => _fn(s) * factor,
+            Derive(e => new ScheduleExpr.Scale(e, factor)));
+
+        /// <summary>
+        /// Clamps every value to <c>[<paramref name="min"/>, <paramref name="max"/>]</c>;
+        /// <paramref name="min"/> must not exceed <paramref name="max"/>.
+        /// </summary>
+        public Schedule Clamp(float min, float max)
+        {
+            // Rejected eagerly: deferred to Math.Clamp it would throw on every At call, while
+            // the lowered graph's Clip (numpy-style, max wins) would silently produce values
+            // the host contract rejects.
+            if (min > max)
+                throw new ArgumentException($"min ({min}) must not be greater than max ({max}).", nameof(min));
+            return new Schedule(s => Math.Clamp(_fn(s), min, max),
+                Derive(e => new ScheduleExpr.Clamp(e, min, max)));
+        }
 
         /// <summary>Shifts the schedule earlier by <paramref name="steps"/> (value at step <c>s</c> becomes value at <c>s + steps</c>).</summary>
-        public Schedule Shift(int steps) => new(s => _fn(s + steps));
+        public Schedule Shift(int steps) => new(s => _fn(s + steps),
+            Derive(e => new ScheduleExpr.Shift(e, steps)));
 
         /// <summary>
         /// Reinterprets this schedule as epoch-based: the value is held constant within each epoch
@@ -55,7 +92,8 @@ namespace Shorokoo.Core.Training
         public Schedule PerEpoch(int stepsPerEpoch)
         {
             if (stepsPerEpoch < 1) throw new ArgumentOutOfRangeException(nameof(stepsPerEpoch));
-            return new Schedule(s => _fn(s / stepsPerEpoch));
+            return new Schedule(s => _fn(s / stepsPerEpoch),
+                Derive(e => new ScheduleExpr.PerEpoch(e, stepsPerEpoch)));
         }
 
         /// <summary>
@@ -77,7 +115,7 @@ namespace Shorokoo.Core.Training
                     return peak * (startFactor + (1f - startFactor) * t);
                 }
                 return inner(s - warmupSteps);
-            });
+            }, Derive(e => new ScheduleExpr.Warmup(e, warmupSteps, startFactor, peak)));
         }
 
         /// <summary>
@@ -88,7 +126,8 @@ namespace Shorokoo.Core.Training
         {
             if (next is null) throw new ArgumentNullException(nameof(next));
             var inner = _fn;
-            return new Schedule(s => s < atStep ? inner(s) : next._fn(s - atStep));
+            return new Schedule(s => s < atStep ? inner(s) : next._fn(s - atStep),
+                next.Expr is { } nextExpr ? Derive(e => new ScheduleExpr.Then(e, atStep, nextExpr)) : null);
         }
     }
 
@@ -101,7 +140,8 @@ namespace Shorokoo.Core.Training
     public static class Schedules
     {
         /// <summary>Constant value (the trivial schedule); dynamic but unchanging.</summary>
-        public static Schedule Constant(float value) => new(_ => value);
+        public static Schedule Constant(float value) => new(_ => value,
+            new ScheduleExpr.Constant(value));
 
         /// <summary>Linear interpolation from <paramref name="baseValue"/> to <paramref name="finalValue"/> over <paramref name="totalSteps"/> steps (then held).</summary>
         public static Schedule Linear(float baseValue, float finalValue, int totalSteps)
@@ -111,7 +151,7 @@ namespace Shorokoo.Core.Training
             {
                 float prog = Math.Clamp((float)step / totalSteps, 0f, 1f);
                 return baseValue + (finalValue - baseValue) * prog;
-            });
+            }, new ScheduleExpr.Linear(baseValue, finalValue, totalSteps));
         }
 
         /// <summary>Cosine decay from <paramref name="baseValue"/> to ~0 over <paramref name="totalSteps"/> steps.</summary>
@@ -122,7 +162,7 @@ namespace Shorokoo.Core.Training
             {
                 float prog = Math.Clamp((float)step / totalSteps, 0f, 1f);
                 return 0.5f * baseValue * (1f + MathF.Cos(MathF.PI * prog));
-            });
+            }, new ScheduleExpr.Cosine(baseValue, totalSteps));
         }
 
         /// <summary>
@@ -141,12 +181,14 @@ namespace Shorokoo.Core.Training
         public static Schedule StepDecay(float baseValue, int stepSize, float gamma)
         {
             if (stepSize < 1) throw new ArgumentOutOfRangeException(nameof(stepSize));
-            return new Schedule(step => baseValue * MathF.Pow(gamma, step / stepSize));
+            return new Schedule(step => baseValue * MathF.Pow(gamma, step / stepSize),
+                new ScheduleExpr.StepDecay(baseValue, stepSize, gamma));
         }
 
         /// <summary>Exponential decay: <c><paramref name="baseValue"/> · <paramref name="gamma"/>^step</c>.</summary>
         public static Schedule Exponential(float baseValue, float gamma)
-            => new(step => baseValue * MathF.Pow(gamma, step));
+            => new(step => baseValue * MathF.Pow(gamma, step),
+                new ScheduleExpr.Exponential(baseValue, gamma));
 
         /// <summary>
         /// The 1cycle policy (Smith): cosine-anneal up from <c>maxValue / divFactor</c> to
@@ -172,7 +214,7 @@ namespace Shorokoo.Core.Training
                 }
                 float td = Math.Clamp((float)(step - up) / down, 0f, 1f);
                 return final + (maxValue - final) * 0.5f * (1f + MathF.Cos(MathF.PI * td));
-            });
+            }, new ScheduleExpr.OneCycle(initial, maxValue, final, up, down));
         }
     }
 }

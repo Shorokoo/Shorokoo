@@ -52,17 +52,37 @@ namespace Shorokoo.Core.Training
 
         // --- Combinators ---------------------------------------------------------------
 
+        /// <summary>
+        /// The derived schedule's structural record: <paramref name="make"/> applied to this
+        /// schedule's <see cref="Expr"/>, or <c>null</c> when this schedule is opaque.
+        /// Opaqueness always propagates through combinators, so the guard lives here rather
+        /// than being repeated at each combinator.
+        /// </summary>
+        private ScheduleExpr? Derive(Func<ScheduleExpr, ScheduleExpr> make)
+            => Expr is null ? null : make(Expr);
+
         /// <summary>Multiplies every value by <paramref name="factor"/>.</summary>
         public Schedule Scale(float factor) => new(s => _fn(s) * factor,
-            Expr is null ? null : new ScheduleExpr.Scale(Expr, factor));
+            Derive(e => new ScheduleExpr.Scale(e, factor)));
 
-        /// <summary>Clamps every value to <c>[<paramref name="min"/>, <paramref name="max"/>]</c>.</summary>
-        public Schedule Clamp(float min, float max) => new(s => Math.Clamp(_fn(s), min, max),
-            Expr is null ? null : new ScheduleExpr.Clamp(Expr, min, max));
+        /// <summary>
+        /// Clamps every value to <c>[<paramref name="min"/>, <paramref name="max"/>]</c>;
+        /// <paramref name="min"/> must not exceed <paramref name="max"/>.
+        /// </summary>
+        public Schedule Clamp(float min, float max)
+        {
+            // Rejected eagerly: deferred to Math.Clamp it would throw on every At call, while
+            // the lowered graph's Clip (numpy-style, max wins) would silently produce values
+            // the host contract rejects.
+            if (min > max)
+                throw new ArgumentException($"min ({min}) must not be greater than max ({max}).", nameof(min));
+            return new Schedule(s => Math.Clamp(_fn(s), min, max),
+                Derive(e => new ScheduleExpr.Clamp(e, min, max)));
+        }
 
         /// <summary>Shifts the schedule earlier by <paramref name="steps"/> (value at step <c>s</c> becomes value at <c>s + steps</c>).</summary>
         public Schedule Shift(int steps) => new(s => _fn(s + steps),
-            Expr is null ? null : new ScheduleExpr.Shift(Expr, steps));
+            Derive(e => new ScheduleExpr.Shift(e, steps)));
 
         /// <summary>
         /// Reinterprets this schedule as epoch-based: the value is held constant within each epoch
@@ -73,7 +93,7 @@ namespace Shorokoo.Core.Training
         {
             if (stepsPerEpoch < 1) throw new ArgumentOutOfRangeException(nameof(stepsPerEpoch));
             return new Schedule(s => _fn(s / stepsPerEpoch),
-                Expr is null ? null : new ScheduleExpr.PerEpoch(Expr, stepsPerEpoch));
+                Derive(e => new ScheduleExpr.PerEpoch(e, stepsPerEpoch)));
         }
 
         /// <summary>
@@ -95,7 +115,7 @@ namespace Shorokoo.Core.Training
                     return peak * (startFactor + (1f - startFactor) * t);
                 }
                 return inner(s - warmupSteps);
-            }, Expr is null ? null : new ScheduleExpr.Warmup(Expr, warmupSteps, startFactor, peak));
+            }, Derive(e => new ScheduleExpr.Warmup(e, warmupSteps, startFactor, peak)));
         }
 
         /// <summary>
@@ -107,7 +127,7 @@ namespace Shorokoo.Core.Training
             if (next is null) throw new ArgumentNullException(nameof(next));
             var inner = _fn;
             return new Schedule(s => s < atStep ? inner(s) : next._fn(s - atStep),
-                Expr is null || next.Expr is null ? null : new ScheduleExpr.Then(Expr, atStep, next.Expr));
+                next.Expr is { } nextExpr ? Derive(e => new ScheduleExpr.Then(e, atStep, nextExpr)) : null);
         }
     }
 

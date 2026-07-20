@@ -20,7 +20,7 @@ namespace Shorokoo.Tests;
 ///   <item><see cref="ComputeContext"/> (ONNX Runtime CPU) — exact for arithmetic/piecewise
 ///         schedules; schedules whose math includes <c>Cos</c> or <c>Pow</c> get the measured
 ///         transcendental tolerance (<see cref="TranscendentalUlps"/>), the tolerance contract
-///         documented in the spike findings.</item>
+///         measured during the issue #39 spike.</item>
 /// </list>
 /// </summary>
 [Trait("Domain", "Training")]
@@ -61,7 +61,7 @@ public class ScheduleLoweringCoverageTests
         var steps = InputVector<int64>("steps");
         var value = schedule.LowerToGraph(steps);
         var graph = FastComputationGraphConverter.ToFastGraph(new FastComputationGraph([steps], [value]));
-        var input = TensorData(DType.Int64, [probes.Length], [.. probes.Cast<object>()]);
+        var input = TensorData([probes.Length], probes);
 
         var qee = ((TensorData)new QuickExecutionEngine { MaxDataElements = 1 << 22 }
             .Execute(graph, input)[0]).As<float32>().AccessMemory<float>().ToArray();
@@ -297,6 +297,16 @@ public class ScheduleLoweringCoverageTests
         Assert.Throws<InvalidOperationException>(() => opaque.LowerToGraph(step));
     }
 
+    // Bounds-swapped Clamp is rejected at construction: deferred to Math.Clamp it would throw
+    // on every host At call, while the lowered Clip (numpy-style, max wins) would silently
+    // produce values the host contract rejects.
+    [Fact]
+    public void TestClampRejectsSwappedBounds()
+    {
+        Assert.Throws<ArgumentException>(() => Schedules.Constant(0.5f).Clamp(1f, 0.2f));
+        Assert.NotNull(Schedules.Constant(0.5f).Clamp(0.2f, 1f));
+    }
+
     // ───────────────────────────── scalar contract + durability ─────────────────────────────
 
     /// <summary>
@@ -315,7 +325,7 @@ public class ScheduleLoweringCoverageTests
             var step = InputScalar<int64>("step");
             var graph = FastComputationGraphConverter.ToFastGraph(
                 new FastComputationGraph([step], [schedule.LowerToGraph(step)]));
-            float got = new ComputeContext().Execute(graph, TensorData(DType.Int64, [], p))[0]
+            float got = new ComputeContext().Execute(graph, TensorData([], p))[0]
                 .ToTensorData().As<float32>().AccessMemory<float>()[0];
             float expected = schedule.At((int)p);
             long ulps = UlpDistance(expected, got);
@@ -327,7 +337,7 @@ public class ScheduleLoweringCoverageTests
         var s2 = InputScalar<int64>("step");
         var g2 = FastComputationGraphConverter.ToFastGraph(
             new FastComputationGraph([s2], [schedule.LowerToGraph(s2)]));
-        Assert.True(AutoTest.TestGraph(g2, sampleInputs: [TensorData(DType.Int64, [], 123L)],
+        Assert.True(AutoTest.TestGraph(g2, sampleInputs: [TensorData([], 123L)],
             testQuickEngineExecution: true));
     }
 }

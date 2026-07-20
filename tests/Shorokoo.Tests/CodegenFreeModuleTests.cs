@@ -228,7 +228,7 @@ public class CodegenFreeModuleTests
 
     /// <summary>Reads the single state param's current scalar value from a concretized graph.</summary>
     private static float StateValue(ComputationGraph graph) =>
-        graph.Internal.GetStateParamDataNodes()[0].Attributes
+        graph.ToInternal().GetStateParamDataNodes()[0].Attributes
             .GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData)!
             .As<float32>().AccessMemory()[0];
 
@@ -440,8 +440,8 @@ public class CodegenFreeModuleTests
         // [Module] Inline body using state initializers.
         var statefulGraph = ModuleFactory.ComputationGraph(
             (Func<Tensor<float32>, Tensor<float32>>)StatefulBody);
-        Assert.Contains(statefulGraph.Internal.Nodes, n => n.OpCode == InternalOpCodes.STATE_UPDATE_LINK);
-        Assert.Contains(statefulGraph.Internal.Nodes, n => n.OpCode == InternalOpCodes.WITH_STATE_DEPS);
+        Assert.Contains(statefulGraph.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.STATE_UPDATE_LINK);
+        Assert.Contains(statefulGraph.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.WITH_STATE_DEPS);
     }
 
     /// <summary>No-runtime-input body for the <c>CallbackModule&lt;TOut&gt;</c> path.</summary>
@@ -506,12 +506,12 @@ public class CodegenFreeModuleTests
             .ToConcreteArchitecture(moduleGraph.FromOrderedInputs([input]))
             .ToConcreteModel();
 
-        Assert.Equal(1, concrete.Internal.GetStateUpdateOutputCount());
-        var stateNodes = concrete.Internal.GetStateParamDataNodes();
+        Assert.Equal(1, concrete.ToInternal().GetStateUpdateOutputCount());
+        var stateNodes = concrete.ToInternal().GetStateParamDataNodes();
         Assert.Single(stateNodes);
 
         float StateValue(ComputationGraph g) =>
-            g.Internal.GetStateParamDataNodes()[0].Attributes
+            g.ToInternal().GetStateParamDataNodes()[0].Attributes
                 .GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData)!
                 .As<float32>().AccessMemory()[0];
 
@@ -596,7 +596,7 @@ public class CodegenFreeModuleTests
         ComputationGraph[] variants = [sugar, afterLoop];
         foreach (var concrete in variants)
         {
-            Assert.Equal(1, concrete.Internal.GetStateUpdateOutputCount());
+            Assert.Equal(1, concrete.ToInternal().GetStateUpdateOutputCount());
             Assert.Equal(0f, StateValue(concrete));
 
             var (outputs1, updated1) = ComputeContext.Default.ExecuteWithState(concrete, input);
@@ -625,7 +625,7 @@ public class CodegenFreeModuleTests
             .ToConcreteArchitecture(moduleGraph.FromOrderedInputs([input]))
             .ToConcreteModel();
 
-        Assert.Equal(1, concrete.Internal.GetStateUpdateOutputCount());
+        Assert.Equal(1, concrete.ToInternal().GetStateUpdateOutputCount());
         Assert.Equal(0f, StateValue(concrete));
 
         var (outputs1, updated1) = ComputeContext.Default.ExecuteWithState(concrete, input);

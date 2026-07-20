@@ -128,17 +128,26 @@ namespace Shorokoo.Runtime
         /// Compiles the graph into a reusable <see cref="CompiledGraph"/>: the ONNX model and
         /// inference session are built once, so repeated executions only feed new data.
         /// </summary>
-        public CompiledGraph Compile(ComputationGraph graph) => Compile(graph.Internal);
+        public CompiledGraph Compile(ComputationGraph graph)
+        {
+            graph.RequireConcretized("ComputeContext.Compile");
+            return Compile(graph.ToInternal());
+        }
 
         /// <summary>Executes a graph that takes no inputs.</summary>
-        public NamedModelParam[] Execute(ComputationGraph graph) => this.Execute(graph.Internal, []);
+        public NamedModelParam[] Execute(ComputationGraph graph) => this.Execute(graph, []);
 
         /// <summary>
         /// Executes the graph, pairing the inputs positionally with the graph's inputs.
         /// TensorDataStruct inputs are automatically expanded into individual fields.
+        /// Requires a concretized graph — a module graph fails fast with the lowering
+        /// hint instead of dying deep inside session creation.
         /// </summary>
         public NamedModelParam[] Execute(ComputationGraph graph, params IData[] inputs)
-            => this.Execute(graph.Internal, inputs);
+        {
+            graph.RequireConcretized("ComputeContext.Execute");
+            return this.Execute(graph.ToInternal(), inputs);
+        }
 
         /// <summary>
         /// Executes the graph with pre-built named inputs. Builds the ONNX model and a fresh
@@ -146,7 +155,10 @@ namespace Shorokoo.Runtime
         /// for repeated runs.
         /// </summary>
         public NamedModelParam[] Run(ComputationGraph graph, params NamedModelParam[] inputs)
-            => this.Run(graph.Internal, inputs);
+        {
+            graph.RequireConcretized("ComputeContext.Run");
+            return this.Run(graph.ToInternal(), inputs);
+        }
 
         /// <summary>
         /// Executes a graph containing StateUpdate nodes: state-update nodes are lowered to extra
@@ -157,8 +169,11 @@ namespace Shorokoo.Runtime
         public (NamedModelParam[] regularOutputs, ComputationGraph updatedGraph) ExecuteWithState(
             ComputationGraph graph, params TensorData[] inputs)
         {
-            var (regularOutputs, updatedGraph) = ExecuteWithState(graph.Internal, inputs);
-            return (regularOutputs, WrapUpdatedStateGraph(graph, updatedGraph));
+            graph.RequireConcretized("ComputeContext.ExecuteWithState");
+            var (regularOutputs, updatedGraph) = ExecuteWithState(graph.ToInternal(), inputs);
+            // updatedGraph is either the private copy itself (no state params) or a fresh
+            // clone with the new state values — exclusively owned either way.
+            return (regularOutputs, new ComputationGraph(updatedGraph, graph.Kind));
         }
 
         /// <summary>
@@ -168,18 +183,10 @@ namespace Shorokoo.Runtime
         public (NamedModelParam[] regularOutputs, ComputationGraph updatedGraph) ExecuteWithState(
             ComputationGraph graph, params NamedModelParam[] inputs)
         {
-            var (regularOutputs, updatedGraph) = ExecuteWithState(graph.Internal, inputs);
-            return (regularOutputs, WrapUpdatedStateGraph(graph, updatedGraph));
+            graph.RequireConcretized("ComputeContext.ExecuteWithState");
+            var (regularOutputs, updatedGraph) = ExecuteWithState(graph.ToInternal(), inputs);
+            return (regularOutputs, new ComputationGraph(updatedGraph, graph.Kind));
         }
-
-        /// <summary>
-        /// WithUpdatedStates returns the source instance untouched when the graph has no state
-        /// params; only then is the original wrapper reusable — a fresh copy gets a fresh wrapper.
-        /// </summary>
-        private static ComputationGraph WrapUpdatedStateGraph(ComputationGraph source, InternalComputationGraph updated)
-            => ReferenceEquals(updated, source.Internal)
-                ? source
-                : new ComputationGraph(updated, source.Kind);
 
         internal CompiledGraph Compile(InternalComputationGraph graph)
         {

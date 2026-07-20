@@ -238,7 +238,7 @@ public class RngRuntimeIdentityTests
 public class RngSeedTransportTests
 {
     private static int RngSeedNodeCount(ComputationGraph graph)
-        => graph.Internal.Nodes.Count(n =>
+        => graph.ToInternal().Nodes.Count(n =>
             n.IdentifierTemplate == Shorokoo.Core.Nodes.Processors.Fast
                 .FastWireRngKeyDerivation.RngSeedIdentifierTemplate);
 
@@ -452,7 +452,7 @@ public class RngSeedTransportTests
         var loaded = CompressedFormatUtils.LoadFastGraphFromBinary(
             CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true));
         Assert.Equal(0, RngSeedNodeCount(loaded));
-        Assert.DoesNotContain(loaded.Internal.Nodes, n =>
+        Assert.DoesNotContain(loaded.ToInternal().Nodes, n =>
             n.FriendlyName == OnnxOpAttributeNames.ShrkRngKeysTensorName);
 
         model = model.WithRngConfig(new RngConfig { MasterSeed = 8 });   // no-op, no throw

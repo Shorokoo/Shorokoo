@@ -97,7 +97,7 @@ namespace Shorokoo.Core.Factory
                     "(ToConcreteArchitecture -> ToConcreteModel) and export that. Shorokoo's own .srk/.zsrk " +
                     "persistence (CompressedFormatUtils.SaveFastGraphToFile/SaveFastGraphToBinary) accepts every graph kind. " +
                     Shorokoo.Core.Utils.SrkFileFormat.WithKindRemedyHint);
-            return BuildOnnxModelCore(graph.Internal, opset, prepForOnnx, vanillaExport: true, stage: graph.Kind);
+            return BuildOnnxModelCore(graph.ToInternal(), opset, prepForOnnx, vanillaExport: true, stage: graph.Kind);
         }
 
         /// <summary>

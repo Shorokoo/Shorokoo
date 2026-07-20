@@ -25,7 +25,7 @@ namespace Shorokoo.Tests.Utils
         /// <summary>Readonly-graph entry point: TestGraph never mutates, so it borrows the
         /// wrapped internal graph directly.</summary>
         public static bool TestGraph(ComputationGraph graph, ComputeContext? context = null, bool testOnnxRoundtrip = true, bool testCsRoundtrip = true, TensorData[]? sampleInputs = null, bool testQuickEngineExecution = false)
-            => TestGraph(graph.Internal, context, testOnnxRoundtrip, testCsRoundtrip, sampleInputs, testQuickEngineExecution);
+            => TestGraph(graph.ToInternal(), context, testOnnxRoundtrip, testCsRoundtrip, sampleInputs, testQuickEngineExecution);
 
         public static bool TestGraph(InternalComputationGraph graph, ComputeContext? context = null, bool testOnnxRoundtrip = true, bool testCsRoundtrip = true, TensorData[]? sampleInputs = null, bool testQuickEngineExecution = false)
         {
@@ -55,7 +55,7 @@ namespace Shorokoo.Tests.Utils
             {
                 var data = CompressedFormatUtils.SaveFastGraphToBinary(graph, compressed: true);
                 var onnxRoundtrip = CompressedFormatUtils.LoadFastGraphFromBinary(data);
-                var resultB = context.Execute(onnxRoundtrip.Internal, inputData);
+                var resultB = context.Execute(onnxRoundtrip.ToInternal(), inputData);
                 onnxResults = resultB.Select(x => x.ToTensorData().AccessRawMemory().ToArray()).ToArray();
             }
 

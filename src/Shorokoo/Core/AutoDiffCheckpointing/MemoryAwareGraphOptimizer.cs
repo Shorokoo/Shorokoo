@@ -19,7 +19,10 @@ public class GraphOptimizationResult
     /// <summary>
     /// The optimized <see cref="InternalComputationGraph"/> produced by the selected strategy.
     /// </summary>
-    public required InternalComputationGraph OptimizedGraph { get; init; }
+    /// <summary>The winning strategy's rewritten graph. Internal: the rig freezes it
+    /// into the readonly <c>TrainingStepPureGraph</c>; exposing the same instance as
+    /// mutable public state would invalidate that wrapper's kind stamp.</summary>
+    internal InternalComputationGraph OptimizedGraph { get; init; } = null!;
 
     /// <summary>
     /// The evaluation result for the selected strategy.

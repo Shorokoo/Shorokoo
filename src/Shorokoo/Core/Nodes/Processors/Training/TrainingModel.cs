@@ -270,8 +270,12 @@ namespace Shorokoo
         /// </summary>
         public ComputationGraph TrainingStepPureGraph { get; private set; } = null!;
 
-        /// <summary>Mutable form of <see cref="TrainingStepPureGraph"/> the rig itself compiles.</summary>
-        internal InternalComputationGraph TrainingStepPureGraphInternal { get; private set; } = null!;
+        /// <summary>
+        /// Construction-time working graph: built by <c>BuildTrainingStepPureGraph</c>,
+        /// optimized by <c>InitializeAndOptimize</c>, then relinquished into the readonly
+        /// <see cref="TrainingStepPureGraph"/> wrapper (and nulled — the wrapper owns it).
+        /// </summary>
+        private InternalComputationGraph? _trainingStepWorkGraph;
 
         /// <summary>Struct definition for trainable parameters.</summary>
         public TensorStructDef TrainableParamStructDef { get; private set; } = null!;
@@ -291,9 +295,6 @@ namespace Shorokoo
         /// improvement is measurable.
         /// </summary>
         public ComputationGraph PreOptimizationGraph { get; private set; } = null!;
-
-        /// <summary>Mutable form of <see cref="PreOptimizationGraph"/>.</summary>
-        internal InternalComputationGraph PreOptimizationGraphInternal { get; private set; } = null!;
 
         /// <summary>
         /// Compute time + peak memory the <see cref="GraphEvaluator"/> projected for the
@@ -560,13 +561,11 @@ namespace Shorokoo
         internal static InternalComputationGraph RequireModelGraphKind(ComputationGraph modelGraph, string operation)
         {
             if (modelGraph.Kind is GraphKind.Module or GraphKind.ConcreteArchitecture)
-                return modelGraph.Internal;
-            throw new InvalidOperationException(
-                $"{operation} requires a 'module' or 'concrete-architecture' model graph, but this " +
-                $"graph is a '{Shorokoo.Core.Utils.SrkFileFormat.StageName(modelGraph.Kind)}'. Its " +
-                "parameters are already materialized as values; pass the module graph " +
-                "(e.g. MyModel.ComputationGraph) or its ToConcreteArchitecture result instead. " +
-                Shorokoo.Core.Utils.SrkFileFormat.WithKindRemedyHint);
+                return modelGraph.ToInternal();
+            throw new InvalidOperationException(Shorokoo.Core.Utils.SrkFileFormat.KindMismatchMessage(
+                operation, "a 'module' or 'concrete-architecture' model graph", modelGraph.Kind,
+                "Its parameters are already materialized as values; pass the module graph " +
+                "(e.g. MyModel.ComputationGraph) or its ToConcreteArchitecture result instead."));
         }
 
         private static TrainingRig FromScratchInternal(
@@ -957,7 +956,7 @@ namespace Shorokoo
             // Step 10: lower to an executable form. LowerGraph runs its Fast pipeline
             // in place on fastTraining and returns the same graph for the public-facing
             // TrainingStepPureGraph property.
-            TrainingStepPureGraphInternal = LowerGraph(fastTraining);
+            _trainingStepWorkGraph = LowerGraph(fastTraining);
 
             UpdatedParamFieldCount = TrainableParamStructDef.Fields.Length;
             UpdatedStateFieldCount = ModelStateDef.Fields.Length;
@@ -1205,7 +1204,7 @@ namespace Shorokoo
                 throw new ArgumentException("Training inputs and outputs must have the same length.");
             if (numEpochs < 1) throw new ArgumentException("Number of epochs must be at least 1.", nameof(numEpochs));
 
-            var compiled = ctx.Compile(TrainingStepPureGraphInternal);
+            var compiled = ctx.Compile(TrainingStepPureGraph);
             var checkpoint = initialCheckpoint;
             var epochLosses = new float[numEpochs];
 
@@ -1434,7 +1433,7 @@ namespace Shorokoo
             // Step 3: Assemble inputs in TrainingStepPureGraph order.
             // Layout: [param_fields, state_fields, opt_state_fields, hyperparam_fields, model_input_fields, target_fields].
             // Current losses (L2, CE) use a single Tensor target, so target_field_count is 1.
-            var graph = TrainingStepPureGraphInternal;
+            var graph = _trainingStepWorkGraph!;
             const int targetFieldCount = 1;
             var expectedModelInputFields =
                 graph.Inputs.Count
@@ -1485,15 +1484,15 @@ namespace Shorokoo
             var baselineEval = new Shorokoo.Core.AutoDiffCheckpointing.GraphEvaluator().Evaluate(graph, shapeInfo);
             var optimizer = new MemoryAwareGraphOptimizer(shapeInference: shapeInferencer);
             var optResult = optimizer.OptimizeWithShapeInfo(graph, shapeInfo);
-            PreOptimizationGraphInternal = graph;
             PreOptimizationEval = baselineEval;
             OptimizationResult = optResult;
-            TrainingStepPureGraphInternal = optResult.OptimizedGraph;
 
-            // Freeze the public views. The rig never mutates these graphs after this
-            // point (compilation clones), so borrowing without a copy is safe.
-            PreOptimizationGraph = new ComputationGraph(PreOptimizationGraphInternal, GraphKind.ConcreteModel);
-            TrainingStepPureGraph = new ComputationGraph(TrainingStepPureGraphInternal, GraphKind.ConcreteModel);
+            // Freeze the public views: the working graphs are relinquished into the
+            // readonly wrappers, which own them exclusively from here on (the rig
+            // compiles through the wrappers, which copy).
+            PreOptimizationGraph = new ComputationGraph(graph, GraphKind.ConcreteModel);
+            TrainingStepPureGraph = new ComputationGraph(optResult.OptimizedGraph, GraphKind.ConcreteModel);
+            _trainingStepWorkGraph = null;
         }
     }
 }

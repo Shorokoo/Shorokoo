@@ -51,7 +51,7 @@ public partial class RealCheckpointPredictionTests
     public void NamingScheme_BindsEveryCheckpointWeight_AsCompleteBijection()
     {
         var arch = BuildConcreteArchitecture(TensorDataWithDefaultVals(DType.Float32, [1L, 3L, 224L, 224L]));
-        var scheme = TorchvisionResNet18NamingScheme.Create(arch.Internal);
+        var scheme = TorchvisionResNet18NamingScheme.Create(arch.ToInternal());
         var modelIds = arch.GetConcreteModelParamInfos().ModelIds;
 
         var checkpointNames = SafeTensorLoader
@@ -122,7 +122,7 @@ public partial class RealCheckpointPredictionTests
 
         var arch = BuildConcreteArchitecture(input);
         var weights = SafeTensorLoader.LoadModelParamSet(TestDataPaths.Of("models", "resnet18", "resnet18.safetensors"));
-        var concrete = arch.ToConcreteModel(weights, TorchvisionResNet18NamingScheme.Create(arch.Internal));
+        var concrete = arch.ToConcreteModel(weights, TorchvisionResNet18NamingScheme.Create(arch.ToInternal()));
 
         var outputs = new ComputeContext().Execute(concrete,
             TensorData(DType.Int64, [], 1000L),

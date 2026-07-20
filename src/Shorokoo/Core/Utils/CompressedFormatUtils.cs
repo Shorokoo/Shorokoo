@@ -158,7 +158,7 @@ namespace Shorokoo.Core.Utils
         public static byte[] SaveFastGraphToBinary(
             ComputationGraph graph, bool compressed = true, int compressionLevel = DefaultCompressionLevel)
             // The header records the graph's stamped kind — the authoritative stage, no op-scan.
-            => SaveFastGraphToBinary(graph.Internal, graph.Kind, compressed, compressionLevel);
+            => SaveFastGraphToBinary(graph.ToInternal(), graph.Kind, compressed, compressionLevel);
 
         /// <summary>
         /// Internal-graph form of <see cref="SaveFastGraphToBinary(ComputationGraph, bool, int)"/>.
@@ -271,7 +271,7 @@ namespace Shorokoo.Core.Utils
         public static string SaveFastGraphToFile(
             string filename, ComputationGraph graph, bool compressed = true,
             bool overrideExtension = true, int compressionLevel = DefaultCompressionLevel)
-            => SaveFastGraphToFile(filename, graph.Internal, graph.Kind, compressed,
+            => SaveFastGraphToFile(filename, graph.ToInternal(), graph.Kind, compressed,
                 overrideExtension, compressionLevel);
 
         /// <summary>

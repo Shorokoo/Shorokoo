@@ -25,7 +25,7 @@ public class ModulesCoverageTests
         // fix, the nested build's entry-time clear wiped the registration and the wrap was
         // silently dropped.
         var graph = ((ComputationGraph)typeof(Modules.StateUpdateSurvivesNestedFirstUseBuild)
-            .GetProperty("ComputationGraph")!.GetValue(null)!).Internal;
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         Assert.Contains(graph.Nodes, n => n.OpCode == InternalOpCodes.STATE_UPDATE_LINK);
         Assert.Contains(graph.Nodes, n => n.OpCode == InternalOpCodes.WITH_STATE_DEPS);
     }
@@ -221,7 +221,7 @@ public class ModulesCoverageTests
 
         // Concrete-model form: both weights are trainable MODEL_PARAM_DATA nodes that
         // kept their parameter-name IdentifierTemplate.
-        var paramNodes = concrete.Internal.Nodes
+        var paramNodes = concrete.ToInternal().Nodes
             .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_DATA).ToArray();
         Assert.Equal(2, paramNodes.Length);
         Assert.All(paramNodes, n =>
@@ -254,7 +254,7 @@ public class ModulesCoverageTests
         using var ms = new System.IO.MemoryStream();
         ProtoBuf.Serializer.Serialize(ms, proto);
         var reimported = OnnxModelImporter.FromOnnxModel(ms.ToArray());
-        var reParams = reimported.Internal.Nodes
+        var reParams = reimported.ToInternal().Nodes
             .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_DATA
                 && (n.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsTrainable) ?? false))
             .ToArray();
@@ -421,8 +421,8 @@ public class ModulesCoverageTests
         // The internal dialect remains available for the same module-stage graph.
         var data = CompressedFormatUtils.SaveFastGraphToBinary(g, compressed: true);
         var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(data);
-        Assert.Equal(internalGraph.Nodes.Count, reloaded.Internal.Nodes.Count);
-        Assert.Contains(reloaded.Internal.Nodes, n => n.OpCode == InternalOpCodes.CREATE_MODULE);
+        Assert.Equal(internalGraph.Nodes.Count, reloaded.ToInternal().Nodes.Count);
+        Assert.Contains(reloaded.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.CREATE_MODULE);
     }
 
     /// <summary>
@@ -451,12 +451,12 @@ public class ModulesCoverageTests
         var prop = typeof(TModule).GetProperty("ComputationGraph",
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
         var moduleGraph = (ComputationGraph)prop.GetValue(null)!;
-        Assert.Contains(moduleGraph.Internal.Nodes, n => n.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT);
+        Assert.Contains(moduleGraph.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT);
 
         var data = CompressedFormatUtils.SaveFastGraphToBinary(moduleGraph, compressed: true);
         var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(data);
-        Assert.Contains(reloaded.Internal.Nodes, n => n.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT);
-        Assert.Equal(moduleGraph.Internal.Nodes.Count, reloaded.Internal.Nodes.Count);
+        Assert.Contains(reloaded.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT);
+        Assert.Equal(moduleGraph.ToInternal().Nodes.Count, reloaded.ToInternal().Nodes.Count);
     }
 
     /// <summary>
@@ -539,9 +539,9 @@ public class ModulesCoverageTests
         var preInvoke = graph.Nodes.Single(n => n.OpCode == InternalOpCodes.FUNCTION_INVOKE);
         Assert.Same(fn, preInvoke.TargetFunction);
 
-        // Save → load. (.Internal: post-load node inspection only, no mutation.)
+        // Save → load. (.ToInternal(): post-load node inspection only, no mutation.)
         var data = CompressedFormatUtils.SaveFastGraphToBinary(graph, compressed: true);
-        var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(data).Internal;
+        var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(data).ToInternal();
 
         // Post-load: BuildFastFunctionInvokeNodeFromProto produced a fresh
         // FUNCTION_INVOKE FastNode with a rebuilt TargetFunction (same default
@@ -595,8 +595,8 @@ public class ModulesCoverageTests
         var modelData = CompressedFormatUtils.SaveFastGraphToBinary(concreteModel, compressed: true);
         var reloadedModel = CompressedFormatUtils.LoadFastGraphFromBinary(modelData);
 
-        Assert.NotEmpty(reloadedModel.Internal.Nodes);
-        Assert.NotEmpty(reloadedModel.Internal.Outputs);
+        Assert.NotEmpty(reloadedModel.ToInternal().Nodes);
+        Assert.NotEmpty(reloadedModel.ToInternal().Outputs);
     }
 
     /// <summary>
@@ -714,7 +714,7 @@ public class ModulesCoverageTests
     public void TestModuleOnModuleTrainableParamRefFunctionLinkCoverage()
     {
         var moduleGraph = CallsSimplestModule.ComputationGraph;
-        Assert.Contains(moduleGraph.Internal.Nodes, n => n.OpCode == InternalOpCodes.MODEL_INVOKE);
+        Assert.Contains(moduleGraph.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.MODEL_INVOKE);
 
         // Save the non-concrete graph to ONNX bytes and reload; the reloaded
         // MODEL_PARAM_REF inside SimplestLayer's nested function body must
@@ -726,7 +726,7 @@ public class ModulesCoverageTests
         // reader keep this op-code as-is. The SimplestLayer function body
         // (with the now-correctly-tagged MODEL_PARAM_REF) is held inside
         // the reloaded MODEL_INVOKE's TargetFunction.
-        Assert.Contains(reloaded.Internal.Nodes, n => n.OpCode == InternalOpCodes.MODEL_INVOKE);
+        Assert.Contains(reloaded.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.MODEL_INVOKE);
 
         // Running ToConcreteArchitecture on the reloaded graph forces
         // FastInlineModulesAndFunctions to inline the MODEL_INVOKE — this
@@ -737,8 +737,8 @@ public class ModulesCoverageTests
 
         // Inlining + the rest of ToConcreteArchitecture's pipeline must
         // have removed every MODULE_INVOKE / FUNCTION_INVOKE.
-        Assert.DoesNotContain(concreteArch.Internal.Nodes, n => n.OpCode == InternalOpCodes.MODEL_INVOKE);
-        Assert.DoesNotContain(concreteArch.Internal.Nodes, n => n.OpCode == InternalOpCodes.FUNCTION_INVOKE);
+        Assert.DoesNotContain(concreteArch.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.MODEL_INVOKE);
+        Assert.DoesNotContain(concreteArch.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.FUNCTION_INVOKE);
     }
 
 
@@ -761,12 +761,12 @@ public class ModulesCoverageTests
         TensorData[] allHints = [factor, bias, input];
         var concreteArch = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([.. allHints]));
         var model        = concreteArch.ToConcreteModel();
-        int originalInputCount = model.Internal.Inputs.Count;
+        int originalInputCount = model.ToInternal().Inputs.Count;
 
         // Full specialization: bake both hyperparams in.
         var specialized = model.Specialize(model.FromOrderedInputs([factor, bias]));
-        Assert.Equal(originalInputCount - 2, specialized.Internal.Inputs.Count);
-        Assert.Equal(originalInputCount, model.Internal.Inputs.Count); // original unchanged
+        Assert.Equal(originalInputCount - 2, specialized.ToInternal().Inputs.Count);
+        Assert.Equal(originalInputCount, model.ToInternal().Inputs.Count); // original unchanged
 
         var expected = ComputeContext.Default.Execute(model, factor, bias, input)[0].ToTensorData().AccessRawMemory().ToArray();
         var actual   = ComputeContext.Default.Execute(specialized, input)[0].ToTensorData().AccessRawMemory().ToArray();
@@ -777,7 +777,7 @@ public class ModulesCoverageTests
             new TensorDataModelParam(model.InputNames[0]!, ModelParamType.InputParam, factor)
         ]);
         var partial = model.Specialize(partialHints);
-        Assert.Equal(originalInputCount - 1, partial.Internal.Inputs.Count);
+        Assert.Equal(originalInputCount - 1, partial.ToInternal().Inputs.Count);
         var partialActual = ComputeContext.Default.Execute(partial, bias, input)[0].ToTensorData().AccessRawMemory().ToArray();
         Assert.Equal(expected, partialActual);
     }
@@ -810,7 +810,7 @@ public class ModulesCoverageTests
         var concrete = specialized
             .ToConcreteArchitecture(specialized.FromOrderedInputs([input]))
             .ToConcreteModel();
-        Assert.Single(concrete.Internal.Inputs);
+        Assert.Single(concrete.ToInternal().Inputs);
 
         var actual = ComputeContext.Default.Execute(concrete, input)[0].ToTensorData().AccessRawMemory().ToArray();
 
@@ -829,7 +829,7 @@ public class ModulesCoverageTests
         var fcConcrete = fcSpecialized
             .ToConcreteArchitecture(fcSpecialized.FromOrderedInputs([fcInput]))
             .ToConcreteModel();
-        Assert.Single(fcConcrete.Internal.Inputs);
+        Assert.Single(fcConcrete.ToInternal().Inputs);
 
         var fcActual = ComputeContext.Default.Execute(fcConcrete, fcInput)[0].ToTensorData().AccessRawMemory().ToArray();
 
@@ -924,18 +924,25 @@ public class ModulesCoverageTests
         var exInfos = Assert.Throws<InvalidOperationException>(() => moduleGraph.GetConcreteModelParamInfos());
         Assert.Contains("'concrete-architecture'", exInfos.Message);
 
+        // Execution is kind-gated too: a module graph fails fast with the lowering
+        // hint instead of dying deep inside session creation.
+        var exExec = Assert.Throws<InvalidOperationException>(
+            () => ComputeContext.Default.Execute(moduleGraph, sample));
+        Assert.Contains("concretized", exExec.Message);
+        Assert.Contains("'module'", exExec.Message);
+
         // Conversions copy: mutating a ToInternal() copy never affects the wrapper…
-        var nodeCount = model.Internal.Nodes.Count;
+        var nodeCount = model.ToInternal().Nodes.Count;
         var copy = model.ToInternal();
         copy.Nodes.Clear();
-        Assert.Equal(nodeCount, model.Internal.Nodes.Count);
+        Assert.Equal(nodeCount, model.ToInternal().Nodes.Count);
 
         // …and FromInternal freezes a copy, so later source mutation cannot
         // invalidate the stamp behind the frozen wrapper.
         var source = model.ToInternal();
         var frozen = ComputationGraph.FromInternal(source, GraphKind.ConcreteModel);
         source.Nodes.Clear();
-        Assert.Equal(nodeCount, frozen.Internal.Nodes.Count);
+        Assert.Equal(nodeCount, frozen.ToInternal().Nodes.Count);
         Assert.Equal(GraphKind.ConcreteModel, frozen.Kind);
 
         // FromInternal without an explicit kind falls back to op-scan classification.

@@ -261,7 +261,7 @@ public class TrainingRigCoverageTests
 
         // Concretize the inference model + Shorokoo naming scheme (the documented binding flow).
         var hints = new ModelParamList(
-            new[] { new KeyValuePair<string, TensorData>(modelGraph.Internal.Inputs[0].ToString(), TensorData(inputShape, new float[totalElements])) },
+            new[] { new KeyValuePair<string, TensorData>(modelGraph.ToInternal().Inputs[0].ToString(), TensorData(inputShape, new float[totalElements])) },
             ModelParamType.InputParam);
         var ctx = new ComputeContext();
         var concrete = modelGraph.ToConcreteArchitecture(hints, ctx, null);
@@ -1100,9 +1100,9 @@ public class TrainingRigCoverageTests
         Assert.NotNull(Losses.TripletMargin);
         Assert.NotNull(Losses.BinaryFocal);
         // Rig-safe losses always have exactly 2 inputs: (predictions, targets).
-        // (.Internal is a read-only borrow — do not mutate the shared cached graph.)
-        Assert.Equal(2, Losses.L2Loss.Internal.Inputs.Count);
-        Assert.Equal(2, Losses.L1Loss.Internal.Inputs.Count);
+        // (.ToInternal() is a read-only borrow — do not mutate the shared cached graph.)
+        Assert.Equal(2, Losses.L2Loss.ToInternal().Inputs.Count);
+        Assert.Equal(2, Losses.L1Loss.ToInternal().Inputs.Count);
     }
 
     /// <summary>

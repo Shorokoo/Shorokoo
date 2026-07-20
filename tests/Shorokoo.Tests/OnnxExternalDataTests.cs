@@ -517,7 +517,7 @@ public class OnnxExternalDataTests
     public void TestSaveWithExternalDataRequiresConcreteModel()
     {
         var moduleProto = FastOnnxModelBuilder.BuildInternalOnnxModel(
-            Shorokoo.Tests.Modules.ScalarMultiplyModel.ComputationGraph.Internal);
+            Shorokoo.Tests.Modules.ScalarMultiplyModel.ComputationGraph.ToInternal());
 
         var path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".onnx");
         var ex = Assert.Throws<ModelException>(
@@ -534,7 +534,7 @@ public class OnnxExternalDataTests
         var moduleGraph = Shorokoo.Tests.Modules.ScalarMultiplyModel.ComputationGraph;
         var arch = moduleGraph.ToConcreteArchitecture(
             moduleGraph.FromOrderedInputs([TensorData([2L], 1.0f, 2.0f)]));
-        var archProto = FastOnnxModelBuilder.BuildInternalOnnxModel(arch.Internal, stage: arch.Kind);
+        var archProto = FastOnnxModelBuilder.BuildInternalOnnxModel(arch.ToInternal(), stage: arch.Kind);
         var exArch = Assert.Throws<ModelException>(
             () => OnnxModelExporter.SaveWithExternalData(archProto, path));
         Assert.Contains("XD008", exArch.Message);
@@ -544,7 +544,7 @@ public class OnnxExternalDataTests
 
         // Even WITHOUT the tag, the proto op-scan recognizes the serialized form of
         // unmaterialized parameters (calls to initializer-typed functions) and refuses.
-        var untaggedArchProto = FastOnnxModelBuilder.BuildInternalOnnxModel(arch.Internal);
+        var untaggedArchProto = FastOnnxModelBuilder.BuildInternalOnnxModel(arch.ToInternal());
         var exUntagged = Assert.Throws<ModelException>(
             () => OnnxModelExporter.SaveWithExternalData(untaggedArchProto, path));
         Assert.Contains("XD008", exUntagged.Message);

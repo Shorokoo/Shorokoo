@@ -111,6 +111,8 @@ through copies and `.srk` save/load). The steps check it up front:
 `ConcreteArchitecture`, and export/weight-query operations name the actual vs
 required kind in their error when handed the wrong stage — so a mis-ordered
 pipeline fails immediately with a clear message instead of deep inside execution.
+Execution (`ComputeContext.Execute`/`Run`/`Compile` and `QuickExecutionEngine`)
+likewise refuses a module-kind graph up front with the same lowering hint.
 `ComputationGraph`s are **readonly**: operations that used to modify a graph in
 place return a new graph instead (e.g. `WithRngConfig`), so a graph's `Kind` can
 never be invalidated behind your back.

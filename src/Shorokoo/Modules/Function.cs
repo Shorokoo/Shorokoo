@@ -82,13 +82,13 @@ namespace Shorokoo.Core
         /// functions. RNG algorithm functions are never inlined by the function inliner and
         /// export with this tag in their FunctionProto metadata.
         /// </summary>
-        public string? RngAlgorithm { get; internal set; }
+        public string? RngAlgorithm { get; internal init; }
 
         /// <summary>The RNG function kind ("split", "uniform", "normal"), or null. See <see cref="RngAlgorithm"/>.</summary>
-        public string? RngFunctionKind { get; internal set; }
+        public string? RngFunctionKind { get; internal init; }
 
-        public string DefaultName { get; private set; }
-        public string FriendlyName { get; private set; }
+        public string DefaultName { get; }
+        public string FriendlyName { get; }
 
         public string ModelSignatureString => _signatures.Value.modelSignature;
         public string ModuleSignatureString => _signatures.Value.moduleSignature;
@@ -96,7 +96,7 @@ namespace Shorokoo.Core
             => __signatures ??= new Lazy<(string, string)>(() => OriginalFastGraph.GetSignatureStrings());
         private Lazy<(string moduleSignature, string modelSignature)>? __signatures;
 
-        public FunctionType FunctionType { get; private set; }
+        public FunctionType FunctionType { get; }
 
         /// <summary>
         /// For <see cref="Shorokoo.Core.Nodes.OnnxNodes.FunctionType.StateParamInitializer"/> functions,
@@ -106,7 +106,7 @@ namespace Shorokoo.Core
         /// non-state-initializer functions. The TrainingRig uses this to reject module-owned state
         /// inside optimizer graphs and optimizer-owned state inside model graphs.
         /// </summary>
-        public StateOwnership? StateOwnership { get; private set; }
+        public StateOwnership? StateOwnership { get; }
 
         private Function[]? directlyReferencedFunctions = null;
         public Function[] DirectlyReferencedFunctions
@@ -148,7 +148,7 @@ namespace Shorokoo.Core
         /// <summary>
         /// Primary representation of the function body.
         /// </summary>
-        public InternalComputationGraph OriginalFastGraph { get; }
+        internal InternalComputationGraph OriginalFastGraph { get; }
 
         // Cached Variable views derived from a one-shot rebuild of OriginalFastGraph.
         // InternalComputationGraphConverter.BuildNodes reconstructs the underlying
@@ -185,7 +185,7 @@ namespace Shorokoo.Core
             _convertedSnapshotComputed = true;
         }
 
-        public Function(InternalComputationGraph fastGraph, FunctionType functionType, string? defaultName, string? friendlyName,
+        internal Function(InternalComputationGraph fastGraph, FunctionType functionType, string? defaultName, string? friendlyName,
             StateOwnership? stateOwnership = null)
         {
             this.OriginalFastGraph = fastGraph;

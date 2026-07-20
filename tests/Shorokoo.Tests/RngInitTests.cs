@@ -304,7 +304,7 @@ public class RngReinitializeTests
 
     /// <summary>The model's trainable weights, ordered by parameter identity.</summary>
     private static float[][] TrainableWeights(ComputationGraph model)
-        => model.Internal.Nodes
+        => model.ToInternal().Nodes
             .Where(n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_PARAM_DATA
                         && (n.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsTrainable) ?? false))
             .OrderBy(n => n.IdentifierTemplate, StringComparer.Ordinal)

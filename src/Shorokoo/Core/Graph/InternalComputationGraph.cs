@@ -84,7 +84,7 @@ namespace Shorokoo.Graph
         /// only: never serialized, so a loaded model carries none and re-initialization on it
         /// fails loudly. Shared (not deep-copied) across <see cref="Clone"/>.
         /// </summary>
-        public InternalComputationGraph? SourceArchitecture { get; set; }
+        internal InternalComputationGraph? SourceArchitecture { get; set; }
 
         /// <summary>
         /// Empty-graph constructor. Callers populate <see cref="Nodes"/>, <see cref="Inputs"/>,

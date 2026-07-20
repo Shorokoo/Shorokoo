@@ -19,7 +19,7 @@ namespace Shorokoo.Tests;
 public class NullableParamTests
 {
     private static System.Collections.Immutable.ImmutableArray<Variable> InputsOf(ComputationGraph graph)
-        => InternalComputationGraphConverter.BuildNodes(graph.Internal).inputs;
+        => InternalComputationGraphConverter.BuildNodes(graph.ToInternal()).inputs;
 
     private static byte[] Bytes(params float[] values) => TensorData([(long)values.Length], values).AccessRawMemory().ToArray();
 
@@ -29,7 +29,7 @@ public class NullableParamTests
         var concrete = graph
             .ToConcreteArchitecture(graph.FromOrderedInputs([.. shapeHints]))
             .ToConcreteModel();
-        var outputs = new QuickExecutionEngine().Execute(concrete.Internal, runtimeInputs);
+        var outputs = new QuickExecutionEngine().Execute(concrete.ToInternal(), runtimeInputs);
         return ((TensorData)outputs[0]).AccessRawMemory().ToArray();
     }
 
@@ -168,7 +168,7 @@ public class NullableParamTests
         // The defaulted hyper surfaces as a [Hyper] attribute when emitted as a sub-module function
         // (a caller's graph references it). The recorded default is re-written as [Hyper(3f)] rather
         // than a bare [Hyper].
-        var code = new CSharpModelBuilder().BuildFullGraph(DefaultedHyperSupplyCheck.ComputationGraph.Internal, "DefaultedHyperRoundtrip");
+        var code = new CSharpModelBuilder().BuildFullGraph(DefaultedHyperSupplyCheck.ComputationGraph.ToInternal(), "DefaultedHyperRoundtrip");
         Assert.Contains("[Hyper(3f)]", code);
     }
 

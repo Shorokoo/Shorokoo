@@ -2,6 +2,7 @@ using Shorokoo;
 using Shorokoo.Core;
 using Shorokoo.Runtime;
 using Shorokoo.Core.Graph;
+using Shorokoo.Core.Utils;
 using Shorokoo.Modules;
 using System.Collections.Immutable;
 
@@ -10,13 +11,14 @@ namespace Shorokoo.Graph
     /// <summary>
     /// The user-facing operations on a readonly <see cref="ComputationGraph"/> —
     /// architecture lowering, weight binding, RNG configuration, parameter queries,
-    /// C# emission. Each operation first checks <see cref="ComputationGraph.Kind"/>
-    /// and refuses inappropriate inputs with an error naming the actual and required
-    /// kinds, then runs the corresponding pipeline on a mutable copy
+    /// C# emission. Each operation first checks <see cref="Kind"/> and refuses
+    /// inappropriate inputs with an error naming the actual and required kinds, then
+    /// runs the corresponding pipeline on a mutable copy
     /// (<see cref="InternalComputationGraphExtensions"/>) and freezes the result with
-    /// its new kind. A caller-held graph never observes mutation.
+    /// its new kind. The wrapped graph never escapes; a caller-held graph never
+    /// observes mutation.
     /// </summary>
-    public static class ComputationGraphExtensions
+    public sealed partial class ComputationGraph
     {
         private const string LoweringOrderHint =
             "The lowering order is: module graph (e.g. MyModule.ComputationGraph) " +
@@ -27,7 +29,7 @@ namespace Shorokoo.Graph
         /// function, resolves identifier templates, converts trainable-parameter references, unpacks
         /// model/tensor structs, lowers variant ops, and runs autodiff-ready simplification — so that
         /// every trainable parameter becomes visible at the top level. This is the prerequisite step
-        /// for <see cref="ToConcreteModel(ComputationGraph)"/>, <see cref="InitializeTrainableParams"/>,
+        /// for <see cref="ToConcreteModel()"/>, <see cref="InitializeTrainableParams"/>,
         /// and <see cref="GetConcreteModelParamInfos"/>. Requires a
         /// <see cref="GraphKind.Module"/> graph; the result is stamped
         /// <see cref="GraphKind.ConcreteArchitecture"/>.
@@ -35,42 +37,37 @@ namespace Shorokoo.Graph
         /// <para>See <see cref="InternalComputationGraphExtensions.ToConcreteArchitecture"/> for
         /// the concreteness contract (static ModelIds) the returned graph satisfies.</para>
         /// </summary>
-        /// <param name="graph">The module graph to lower (e.g. <c>MyModel.ComputationGraph</c>).</param>
         /// <param name="inputHints">Sample inputs (names + shapes/values) used as shape hints and as
         /// QEE/ORT resolution fallbacks during lowering; build one with <see cref="FromOrderedInputs"/>.</param>
         /// <param name="computeContext">Optional context used to resolve values while lowering.</param>
         /// <param name="debugRequests">Optional hook to dump the graph at each lowering stage.</param>
         /// <returns>A fully inlined, concrete architecture graph.</returns>
-        public static ComputationGraph ToConcreteArchitecture(
-            this ComputationGraph graph,
+        public ComputationGraph ToConcreteArchitecture(
             ModelParamList inputHints,
             ComputeContext? computeContext = null,
             DebugRequests? debugRequests = null)
         {
-            var g = graph.RequireKind(GraphKind.Module, nameof(ToConcreteArchitecture), LoweringOrderHint);
+            RequireKind(GraphKind.Module, nameof(ToConcreteArchitecture), LoweringOrderHint);
             return new ComputationGraph(
-                g.ToConcreteArchitecture(inputHints, computeContext, debugRequests),
+                _graph.ToConcreteArchitecture(inputHints, computeContext, debugRequests),
                 GraphKind.ConcreteArchitecture);
         }
 
         /// <summary>
-        /// Returns a copy of <paramref name="graph"/> with a partial set of inputs replaced by
+        /// Returns a copy of this graph with a partial set of inputs replaced by
         /// constants and the graph constant-folded to specialize those values — typically used to
         /// bake hyperparameters into the graph so they are no longer live inputs. Inputs not listed
         /// in <paramref name="inputValues"/> remain as live graph inputs. The graph's
-        /// <see cref="ComputationGraph.Kind"/> is preserved.
+        /// <see cref="Kind"/> is preserved.
         /// </summary>
-        /// <param name="graph">The graph to specialize (e.g. a concrete model or architecture).</param>
         /// <param name="inputValues">
         /// Values to bake in, matched by name against the graph's input names. Build one with
         /// <see cref="FromOrderedInputs"/> when the names match positional order. Names that have
         /// no corresponding graph input, and non-tensor entries (sequences, structs), are silently
         /// ignored.
         /// </param>
-        public static ComputationGraph Specialize(
-            this ComputationGraph graph,
-            ModelParamList inputValues)
-            => new(graph.Internal.Specialize(inputValues), graph.Kind);
+        public ComputationGraph Specialize(ModelParamList inputValues)
+            => new(_graph.Specialize(inputValues), Kind);
 
         /// <summary>
         /// Binds the architecture's <b>default</b> trainable-parameter values (produced by each
@@ -79,10 +76,10 @@ namespace Shorokoo.Graph
         /// the result is stamped <see cref="GraphKind.ConcreteModel"/>.
         /// </summary>
         /// <returns>A concrete model graph with default weights, ready to execute.</returns>
-        public static ComputationGraph ToConcreteModel(this ComputationGraph graph)
+        public ComputationGraph ToConcreteModel()
         {
-            var g = graph.RequireKind(GraphKind.ConcreteArchitecture, nameof(ToConcreteModel), LoweringOrderHint);
-            return new ComputationGraph(g.ToConcreteModel(), GraphKind.ConcreteModel);
+            RequireKind(GraphKind.ConcreteArchitecture, nameof(ToConcreteModel), LoweringOrderHint);
+            return new ComputationGraph(_graph.ToConcreteModel(), GraphKind.ConcreteModel);
         }
 
         /// <summary>
@@ -92,10 +89,10 @@ namespace Shorokoo.Graph
         /// <see cref="GraphKind.ConcreteArchitecture"/>; the result is stamped
         /// <see cref="GraphKind.ConcreteModel"/> and carries the config's runtime RNG identity.
         /// </summary>
-        public static ComputationGraph ToConcreteModel(this ComputationGraph graph, RngConfig rngConfig)
+        public ComputationGraph ToConcreteModel(RngConfig rngConfig)
         {
-            var g = graph.RequireKind(GraphKind.ConcreteArchitecture, nameof(ToConcreteModel), LoweringOrderHint);
-            return new ComputationGraph(g.ToConcreteModel(rngConfig), GraphKind.ConcreteModel);
+            RequireKind(GraphKind.ConcreteArchitecture, nameof(ToConcreteModel), LoweringOrderHint);
+            return new ComputationGraph(_graph.ToConcreteModel(rngConfig), GraphKind.ConcreteModel);
         }
 
         /// <summary>
@@ -106,16 +103,15 @@ namespace Shorokoo.Graph
         /// <see cref="GraphKind.ConcreteArchitecture"/>; names that do not resolve are silently
         /// dropped. The result is stamped <see cref="GraphKind.ConcreteModel"/>.
         /// </summary>
-        /// <param name="graph">The concrete architecture to bind weights into.</param>
         /// <param name="trainableParamValues">Values to bind (e.g. loaded from a SafeTensors file).</param>
         /// <param name="frameworkId">Naming convention of the value names; defaults to <c>FrameworkId.Shorokoo</c>.</param>
-        public static ComputationGraph ToConcreteModel(
-            this ComputationGraph graph,
+        public ComputationGraph ToConcreteModel(
             ModelParamList trainableParamValues,
             FrameworkId? frameworkId = null)
         {
-            var g = graph.RequireKind(GraphKind.ConcreteArchitecture, nameof(ToConcreteModel), LoweringOrderHint);
-            return new ComputationGraph(g.ToConcreteModel(trainableParamValues, frameworkId), GraphKind.ConcreteModel);
+            RequireKind(GraphKind.ConcreteArchitecture, nameof(ToConcreteModel), LoweringOrderHint);
+            return new ComputationGraph(
+                _graph.ToConcreteModel(trainableParamValues, frameworkId), GraphKind.ConcreteModel);
         }
 
         /// <summary>
@@ -125,16 +121,15 @@ namespace Shorokoo.Graph
         /// <see cref="GraphKind.ConcreteArchitecture"/>; names that do not resolve are silently
         /// dropped. The result is stamped <see cref="GraphKind.ConcreteModel"/>.
         /// </summary>
-        /// <param name="graph">The concrete architecture to bind weights into.</param>
         /// <param name="trainableParamValues">Values to bind.</param>
         /// <param name="namingScheme">Maps each value's name to a graph ModelId.</param>
-        public static ComputationGraph ToConcreteModel(
-            this ComputationGraph graph,
+        public ComputationGraph ToConcreteModel(
             ModelParamList trainableParamValues,
             ModuleParamSetNamingScheme namingScheme)
         {
-            var g = graph.RequireKind(GraphKind.ConcreteArchitecture, nameof(ToConcreteModel), LoweringOrderHint);
-            return new ComputationGraph(g.ToConcreteModel(trainableParamValues, namingScheme), GraphKind.ConcreteModel);
+            RequireKind(GraphKind.ConcreteArchitecture, nameof(ToConcreteModel), LoweringOrderHint);
+            return new ComputationGraph(
+                _graph.ToConcreteModel(trainableParamValues, namingScheme), GraphKind.ConcreteModel);
         }
 
         /// <summary>
@@ -149,17 +144,14 @@ namespace Shorokoo.Graph
         /// reproducible with no config object. Works on any concretized graph (a concrete
         /// architecture, a concrete model, or a training-rig step graph); the kind is preserved.
         /// </summary>
-        public static ComputationGraph WithRngConfig(this ComputationGraph graph, RngConfig rngConfig)
+        public ComputationGraph WithRngConfig(RngConfig rngConfig)
         {
-            if (graph.Kind == GraphKind.Module)
-                throw new System.InvalidOperationException(
-                    $"{nameof(WithRngConfig)} requires a concretized graph (a " +
-                    "'concrete-architecture' or 'concrete-model'), but this graph is a 'module'. " +
-                    "The RNG key-derivation chains it binds to are wired at concretization; " +
-                    "lower the graph with ToConcreteArchitecture(inputHints, ...) first.");
-            var copy = graph.ToInternal();
+            RequireConcretized(nameof(WithRngConfig),
+                "The RNG key-derivation chains it binds to are wired at concretization; " +
+                "lower the graph with ToConcreteArchitecture(inputHints, ...) first.");
+            var copy = _graph.Clone();
             copy.ApplyRngConfig(rngConfig);
-            return new ComputationGraph(copy, graph.Kind);
+            return new ComputationGraph(copy, Kind);
         }
 
         /// <summary>
@@ -167,8 +159,7 @@ namespace Shorokoo.Graph
         /// by <see cref="WithRngConfig"/>; carried through save/load as an ordinary initializer).
         /// Null when the graph has no runtime random surface or no identity is bound yet.
         /// </summary>
-        public static long[]? TryGetRngSeed(this ComputationGraph graph)
-            => graph.Internal.TryGetRngSeed();
+        public long[]? TryGetRngSeed() => _graph.TryGetRngSeed();
 
         /// <summary>
         /// Returns a copy of a <b>concrete model</b> with its trainable parameters re-initialized
@@ -184,12 +175,11 @@ namespace Shorokoo.Graph
         /// inventory is in-memory only (initializers are not persisted), so a loaded model
         /// cannot be re-initialized; rebuild from its architecture instead.</para>
         /// </summary>
-        public static ComputationGraph WithReinitializedTrainableParams(
-            this ComputationGraph graph, RngConfig rngConfig)
+        public ComputationGraph WithReinitializedTrainableParams(RngConfig rngConfig)
         {
-            var _ = graph.RequireKind(GraphKind.ConcreteModel, nameof(WithReinitializedTrainableParams),
+            RequireKind(GraphKind.ConcreteModel, nameof(WithReinitializedTrainableParams),
                 "Only a concrete model carries trainable-parameter values to overwrite.");
-            var copy = graph.ToInternal();
+            var copy = _graph.Clone();
             copy.ReinitializeTrainableParams(rngConfig);
             return new ComputationGraph(copy, GraphKind.ConcreteModel);
         }
@@ -200,33 +190,38 @@ namespace Shorokoo.Graph
         /// Requires a <see cref="GraphKind.ConcreteArchitecture"/> from
         /// <see cref="ToConcreteArchitecture"/>.
         /// </summary>
-        public static ConcreteModelParamInfos GetConcreteModelParamInfos(this ComputationGraph graph)
-            => graph.RequireKind(GraphKind.ConcreteArchitecture, nameof(GetConcreteModelParamInfos), LoweringOrderHint)
-                .GetConcreteModelParamInfos();
+        public ConcreteModelParamInfos GetConcreteModelParamInfos()
+        {
+            RequireKind(GraphKind.ConcreteArchitecture, nameof(GetConcreteModelParamInfos), LoweringOrderHint);
+            return _graph.GetConcreteModelParamInfos();
+        }
 
         /// <summary>
         /// Runs each trainable parameter's initializer to produce its default values, named via the
-        /// given scheme (default: Shorokoo's). This is what <see cref="ToConcreteModel(ComputationGraph)"/>
+        /// given scheme (default: Shorokoo's). This is what <see cref="ToConcreteModel()"/>
         /// binds when called with no values. Requires a <see cref="GraphKind.ConcreteArchitecture"/>.
         /// See <see cref="InternalComputationGraphExtensions.InitializeTrainableParams"/> for the
         /// RNG-config semantics.
         /// </summary>
-        public static ModelParamList InitializeTrainableParams(
-            this ComputationGraph graph,
+        public ModelParamList InitializeTrainableParams(
             ModuleParamSetNamingScheme? namingScheme = null,
             ComputeContext? computeContext = null,
             RngConfig? rngConfig = null)
-            => graph.RequireKind(GraphKind.ConcreteArchitecture, nameof(InitializeTrainableParams), LoweringOrderHint)
-                .InitializeTrainableParams(namingScheme, computeContext, rngConfig);
+        {
+            RequireKind(GraphKind.ConcreteArchitecture, nameof(InitializeTrainableParams), LoweringOrderHint);
+            return _graph.InitializeTrainableParams(namingScheme, computeContext, rngConfig);
+        }
 
         /// <summary>
         /// Builds the <see cref="ModelIdNamingScheme"/> for this concrete architecture's parameters
         /// under Shorokoo's own naming convention — the basis for remapping third-party weight names
         /// onto the graph's parameter ids. Requires a <see cref="GraphKind.ConcreteArchitecture"/>.
         /// </summary>
-        public static ModelIdNamingScheme GetShorokooIdNamingScheme(this ComputationGraph graph)
-            => graph.RequireKind(GraphKind.ConcreteArchitecture, nameof(GetShorokooIdNamingScheme), LoweringOrderHint)
-                .GetShorokooIdNamingScheme();
+        public ModelIdNamingScheme GetShorokooIdNamingScheme()
+        {
+            RequireKind(GraphKind.ConcreteArchitecture, nameof(GetShorokooIdNamingScheme), LoweringOrderHint);
+            return _graph.GetShorokooIdNamingScheme();
+        }
 
         /// <summary>
         /// Builds the RNG stream inventory of a <b>concrete architecture</b>: one entry per
@@ -235,26 +230,25 @@ namespace Shorokoo.Graph
         /// <paramref name="rngConfig"/> is supplied) the resolved stream key. Requires a
         /// <see cref="GraphKind.ConcreteArchitecture"/>.
         /// </summary>
-        public static RngStreamReport GetRngStreamReport(
-            this ComputationGraph graph, RngConfig? rngConfig = null)
-            => graph.RequireKind(GraphKind.ConcreteArchitecture, nameof(GetRngStreamReport), LoweringOrderHint)
-                .GetRngStreamReport(rngConfig);
+        public RngStreamReport GetRngStreamReport(RngConfig? rngConfig = null)
+        {
+            RequireKind(GraphKind.ConcreteArchitecture, nameof(GetRngStreamReport), LoweringOrderHint);
+            return _graph.GetRngStreamReport(rngConfig);
+        }
 
         /// <summary>
         /// Pairs the graph's input names (in declaration order) with the supplied values to produce a
         /// <see cref="ModelParamList"/> of named inputs — the <c>inputHints</c> argument for
         /// <see cref="ToConcreteArchitecture"/>, or the inputs for an <c>Execute</c> call.
         /// </summary>
-        /// <param name="graph">The graph whose input names to pair with the values.</param>
         /// <param name="inputValues">Input values in the same order as the graph's declared inputs.</param>
-        public static ModelParamList FromOrderedInputs(this ComputationGraph graph, ImmutableArray<TensorData> inputValues)
-            => graph.Internal.FromOrderedInputs(inputValues);
+        public ModelParamList FromOrderedInputs(ImmutableArray<TensorData> inputValues)
+            => _graph.FromOrderedInputs(inputValues);
 
         /// <summary>
         /// Emits C# source that rebuilds this graph (via <c>CSharpModelBuilder</c>) and writes it to
         /// <paramref name="filename"/>, creating the target directory and overwriting any existing file.
         /// </summary>
-        public static string SaveToCSharp(this ComputationGraph graph, string filename)
-            => graph.Internal.SaveToCSharp(filename);
+        public string SaveToCSharp(string filename) => _graph.SaveToCSharp(filename);
     }
 }

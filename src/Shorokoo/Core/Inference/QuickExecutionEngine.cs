@@ -70,18 +70,27 @@ public sealed class QuickExecutionEngine
 
     /// <summary>
     /// Readonly-graph overload of <see cref="Run(InternalComputationGraph, TensorData[])"/>.
-    /// Interpretation only reads the graph, so it borrows without a copy.
+    /// Requires a concretized graph and interprets a private copy of it.
     /// </summary>
     public Dictionary<FastTensorKey, IRuntimeTensor> Run(Shorokoo.Graph.ComputationGraph graph, params TensorData[] sampleInputs)
-        => Run(graph.Internal, sampleInputs);
+    {
+        graph.RequireConcretized("QuickExecutionEngine.Run");
+        return Run(graph.ToInternal(), sampleInputs);
+    }
 
     /// <summary>Readonly-graph overload of <see cref="Run(InternalComputationGraph, IData[])"/>.</summary>
     public Dictionary<FastTensorKey, IRuntimeTensor> Run(Shorokoo.Graph.ComputationGraph graph, params IData[] inputs)
-        => Run(graph.Internal, inputs);
+    {
+        graph.RequireConcretized("QuickExecutionEngine.Run");
+        return Run(graph.ToInternal(), inputs);
+    }
 
     /// <summary>Readonly-graph overload of <see cref="Execute(InternalComputationGraph, IData[])"/>.</summary>
     public IData[] Execute(Shorokoo.Graph.ComputationGraph graph, params IData[] inputs)
-        => Execute(graph.Internal, inputs);
+    {
+        graph.RequireConcretized("QuickExecutionEngine.Execute");
+        return Execute(graph.ToInternal(), inputs);
+    }
 
     /// <summary>
     /// Convenience overload that takes <see cref="TensorData"/> samples for each graph input in

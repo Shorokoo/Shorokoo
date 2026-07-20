@@ -340,6 +340,18 @@ namespace Shorokoo.Core.Utils
             "machinery-free graphs), re-stamp the graph with ComputationGraph.WithKind.";
 
         /// <summary>
+        /// The one format for every graph-kind-mismatch error: names the operation, the
+        /// requirement, and the actual kind, then appends the operation-specific hint and
+        /// the shared <see cref="WithKindRemedyHint"/>. Every kind gate routes through
+        /// this (or <see cref="EnforceStage"/> for file loads) so wording cannot drift.
+        /// </summary>
+        internal static string KindMismatchMessage(
+            string operation, string requiredDescription, GraphKind actual, string? hint = null)
+            => $"{operation} requires {requiredDescription}, but this graph is a '{StageName(actual)}'." +
+               (string.IsNullOrEmpty(hint) ? string.Empty : " " + hint) +
+               " " + WithKindRemedyHint;
+
+        /// <summary>
         /// Throws a clear stage-mismatch error naming both stages (and the file, via
         /// <paramref name="origin"/>) when <paramref name="actual"/> differs from
         /// <paramref name="required"/>.

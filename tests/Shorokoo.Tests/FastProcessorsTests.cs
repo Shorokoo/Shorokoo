@@ -160,12 +160,12 @@ public class FastProcessorsCoverageTests
     public void TestTensorStructAsModuleInputCoverage()
     {
         var graph = SimplePairSum.ComputationGraph;
-        Assert.Contains(graph.Internal.Nodes, n => n.OpCode == InternalOpCodes.MODEL_TENSORSTRUCT_INPUT);
+        Assert.Contains(graph.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.MODEL_TENSORSTRUCT_INPUT);
 
         var concreteArch = graph.ToConcreteArchitecture(new ModelParamList());
 
-        Assert.DoesNotContain(concreteArch.Internal.Nodes, n => n.OpCode == InternalOpCodes.MODEL_TENSORSTRUCT_INPUT);
-        Assert.DoesNotContain(concreteArch.Internal.Nodes, n => n.OpCode == InternalOpCodes.TENSOR_STRUCT_CREATE);
-        Assert.DoesNotContain(concreteArch.Internal.Nodes, n => n.OpCode == InternalOpCodes.TENSOR_STRUCT_GETFIELD);
+        Assert.DoesNotContain(concreteArch.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.MODEL_TENSORSTRUCT_INPUT);
+        Assert.DoesNotContain(concreteArch.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.TENSOR_STRUCT_CREATE);
+        Assert.DoesNotContain(concreteArch.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.TENSOR_STRUCT_GETFIELD);
     }
 }

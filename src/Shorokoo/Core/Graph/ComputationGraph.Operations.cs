@@ -162,29 +162,6 @@ namespace Shorokoo.Graph
         public long[]? TryGetRngSeed() => _graph.TryGetRngSeed();
 
         /// <summary>
-        /// Returns a copy of a <b>concrete model</b> with its trainable parameters re-initialized
-        /// under a new RNG identity: re-runs each trainable parameter's initializer with an
-        /// in-graph draw keyed by <paramref name="rngConfig"/>'s init collection and overwrites
-        /// the parameter values — bit-exact with a fresh build under the same config. An explicit
-        /// opt-in: the copy's trained weights are replaced. Model state and the model's runtime
-        /// RNG identity are untouched — re-keying the runtime feeds is a separate, equally
-        /// explicit <see cref="WithRngConfig"/> call.
-        ///
-        /// <para>Fails loudly when the parameter inventory needed for keyed initialization —
-        /// the source architecture with its initializer functions — is unavailable: the
-        /// inventory is in-memory only (initializers are not persisted), so a loaded model
-        /// cannot be re-initialized; rebuild from its architecture instead.</para>
-        /// </summary>
-        public ComputationGraph WithReinitializedTrainableParams(RngConfig rngConfig)
-        {
-            RequireKind(GraphKind.ConcreteModel, nameof(WithReinitializedTrainableParams),
-                "Only a concrete model carries trainable-parameter values to overwrite.");
-            var copy = _graph.Clone();
-            copy.ReinitializeTrainableParams(rngConfig);
-            return new ComputationGraph(copy, GraphKind.ConcreteModel);
-        }
-
-        /// <summary>
         /// Returns metadata (ids and shapes) for every trainable parameter in a <b>concrete
         /// architecture</b> — the inventory used to build naming schemes and bind weights.
         /// Requires a <see cref="GraphKind.ConcreteArchitecture"/> from

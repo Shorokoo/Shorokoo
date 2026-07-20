@@ -64,6 +64,12 @@ Re-applying the original config restores the original draws bit-for-bit — and 
 saved model keeps the symbolic derivation chains, this holds equally on a **loaded** model:
 load, `WithRngConfig`, and every draw is re-keyed by construction.
 
+Re-binding never touches **weights**. To re-initialize the trainable parameters under a
+different seed, hold on to the concrete architecture and rebuild from it —
+`arch.ToConcreteModel(new RngConfig { MasterSeed = … })` — which re-runs every
+parameter's keyed initializer; there is no in-place weight re-initialization on a
+built model (its initializer functions are gone once values are bound).
+
 **Randomness survives save/load.** `RngSeed` serializes as an ordinary initializer (no
 reserved names, no side channels) and the chains ride the graph, so a loaded model draws
 exactly what it drew before saving — no config object needed on the loading side.

@@ -77,16 +77,6 @@ namespace Shorokoo.Graph
         public int?[]? OutputRankOverrides { get; set; }
 
         /// <summary>
-        /// For a concrete model: the concrete architecture it was built from — the parameter
-        /// inventory (initializer functions and their inputs) needed for in-place
-        /// trainable-parameter re-initialization
-        /// (<c>InternalComputationGraphExtensions.ReinitializeTrainableParams</c>). In-memory
-        /// only: never serialized, so a loaded model carries none and re-initialization on it
-        /// fails loudly. Shared (not deep-copied) across <see cref="Clone"/>.
-        /// </summary>
-        internal InternalComputationGraph? SourceArchitecture { get; set; }
-
-        /// <summary>
         /// Empty-graph constructor. Callers populate <see cref="Nodes"/>, <see cref="Inputs"/>,
         /// <see cref="Outputs"/>, etc. directly (used by
         /// <see cref="InternalComputationGraphConverter"/> and the Fast processors).
@@ -162,7 +152,6 @@ namespace Shorokoo.Graph
                 OutputRankOverrides = this.OutputRankOverrides is null
                     ? null
                     : (int?[])this.OutputRankOverrides.Clone(),
-                SourceArchitecture = this.SourceArchitecture,
             };
 
             foreach (var node in this.Nodes)

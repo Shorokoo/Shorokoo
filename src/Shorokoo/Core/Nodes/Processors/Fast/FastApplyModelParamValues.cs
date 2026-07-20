@@ -67,11 +67,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 node.TargetFunction = null;
             }
 
-            // The concrete model remembers its source architecture (in-memory only) — the
-            // parameter inventory needed for in-place re-initialization; see
-            // InternalComputationGraphExtensions.ReinitializeTrainableParams.
-            workGraph.SourceArchitecture = graph;
-
             FastProcessorHelper.RemoveUnreachableNodes(workGraph);
             // Run FastSimplify so the constant-folding / sequence-folding / unrolling
             // pipeline reshapes the graph in the way the CG-side

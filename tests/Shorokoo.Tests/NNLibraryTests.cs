@@ -1119,9 +1119,9 @@ public class NNLibraryTrainingCoverageTests
 {
     /// <summary>Same rig-construction smoke helper as <see cref="TrainingRigCoverageTests"/>.</summary>
     private static void CoverFromScratch(
-        InternalComputationGraph modelGraph,
-        InternalComputationGraph lossGraph,
-        InternalComputationGraph optimizerGraph,
+        ComputationGraph modelGraph,
+        ComputationGraph lossGraph,
+        ComputationGraph optimizerGraph,
         long[] inputShape,
         params HyperValue[] hyperparams)
     {
@@ -1492,7 +1492,7 @@ public class NNLibraryTrainingCoverageTests
     /// state threading (e.g. NAdam's two scalar states step + muProduct, RAdam's Where path through
     /// the autodiff/scheduler) end-to-end, not just construction.</summary>
     private static void CoverTrainStepMovesParam(
-        InternalComputationGraph optimizerGraph, params HyperValue[] hyperparams)
+        ComputationGraph optimizerGraph, params HyperValue[] hyperparams)
     {
         var input = new float[] { 1f, 2f, 3f, 4f };
         var target = new float[] { 0f, 0f, 0f, 0f };
@@ -1529,7 +1529,7 @@ public class NNLibraryTrainingCoverageTests
     /// the (multi-dim) param actually moved. This is the Adafactor rank-agnosticism gate — it
     /// proves the reduce-all RMS(θ)/RMS(U) scalars work over a non-scalar param.</summary>
     private static void CoverTrainStepMovesNonScalarParam(
-        InternalComputationGraph modelGraph, InternalComputationGraph optimizerGraph,
+        ComputationGraph modelGraph, ComputationGraph optimizerGraph,
         long[] inShape, float[] input, float[] target,
         params HyperValue[] hyperparams)
     {
@@ -1899,7 +1899,7 @@ public class NNLibraryTrainingCoverageTests
     /// batch and returns the resulting step (Loss + Checkpoint). Used by the closed-form /
     /// alias-equivalence BatchNorm checks whose models emit a residual against a zero target.</summary>
     private static TrainingStepResult RunResidualStep(
-        InternalComputationGraph modelGraph, long[] inShape, float[] input, long[] outShape, float lr = 0f)
+        ComputationGraph modelGraph, long[] inShape, float[] input, long[] outShape, float lr = 0f)
     {
         var inputData = TensorData(inShape, input);
         var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
@@ -2068,7 +2068,7 @@ public class NNLibraryTrainingCoverageTests
     /// <summary>One train step: per-channel-mean output is ~0 (loss ~0 vs zero targets) and
     /// every ModelState field moves. Shared by the rank-3 / rank-5 group-B checks.</summary>
     private static void AssertTrainNormalizesAndMovesState(
-        InternalComputationGraph modelGraph, long[] inShape, float[] input, long[] outShape)
+        ComputationGraph modelGraph, long[] inShape, float[] input, long[] outShape)
     {
         var inputData = TensorData(inShape, input);
         long outTotal = 1; foreach (var d in outShape) outTotal *= d;
@@ -2236,14 +2236,14 @@ public class NNLibraryTrainingCoverageTests
 
     /// <summary>One train step of a full-output BN model (output shape == input shape);
     /// returns the moved ModelState (flattened).</summary>
-    private static float[] RunTrainAndGetState(InternalComputationGraph modelGraph, long[] inShape, float[] input)
+    private static float[] RunTrainAndGetState(ComputationGraph modelGraph, long[] inShape, float[] input)
         => RunTrainLossAndState(modelGraph, inShape, input, inShape).state;
 
     /// <summary>One train step of a BN model against a ZERO target of shape <paramref name="outShape"/>;
     /// returns (loss, moved ModelState). For a per-channel-mean model, loss ≈ 0 ⇒ the batch-normalized
     /// output is ~zero per-channel mean.</summary>
     private static (float loss, float[] state) RunTrainLossAndState(
-        InternalComputationGraph modelGraph, long[] inShape, float[] input, long[] outShape)
+        ComputationGraph modelGraph, long[] inShape, float[] input, long[] outShape)
     {
         long outTotal = 1; foreach (var d in outShape) outTotal *= d;
         var inputData = TensorData(inShape, input);
@@ -2266,7 +2266,7 @@ public class NNLibraryTrainingCoverageTests
     /// closed form, high when they genuinely differ). Also reports whether the eval pass changed
     /// ModelState (it must NOT, since StateUpdate is gated by training).</summary>
     private static (float matchLoss, float mismatchLoss, bool stateMoved) EvalLossAgainstTargets(
-        InternalComputationGraph modelGraph, long[] inShape, float[] input, float[] injectedState,
+        ComputationGraph modelGraph, long[] inShape, float[] input, float[] injectedState,
         float[] matchTarget, float[] mismatchTarget)
     {
         var inputData = TensorData(inShape, input);
@@ -2539,7 +2539,7 @@ public class NNLibraryTrainingCoverageTests
         var inputData = TensorData([4L, 1L, 4L, 4L], vals);
         var targetData = TensorData([4L], new long[] { 0L, 1L, 0L, 1L });
 
-        void AssertRigTrainsThroughLoss(InternalComputationGraph lossGraph)
+        void AssertRigTrainsThroughLoss(ComputationGraph lossGraph)
         {
             var rig = TrainingRig.FromScratch(
                 NNTinyConvClassifier.ComputationGraph, lossGraph, SGDMomentumOptimizer.ComputationGraph,
@@ -2588,7 +2588,7 @@ public class NNLibraryTrainingCoverageTests
     /// on one fixed batch and returns the final checkpoint, so each analytic check is a
     /// one-liner asserting exact hand-computed post-step values.</summary>
     private static TrainingCheckpoint TrainAnalytic(
-        InternalComputationGraph modelGraph, InternalComputationGraph optimizerGraph, HyperValue[] hypers,
+        ComputationGraph modelGraph, ComputationGraph optimizerGraph, HyperValue[] hypers,
         long[] inShape, float[] input, long[] outShape, float[] target, int steps)
     {
         var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, optimizerGraph,
@@ -3254,7 +3254,7 @@ public class NNLibraryTrainingCoverageTests
     /// <summary>Builds a TrainingRig over a 2-step cell-loop model + L2Loss + SGD, runs one TrainStep on a
     /// fixed [L=2,N=4,in=2] batch with a zero [N=4,2] target, and asserts a finite loss and ≥1 owned
     /// W/R/bias param moved. The cell models own their W/R/bias via RecurrentUniform inside the user loop.</summary>
-    private static void CoverCellTrainStep(InternalComputationGraph modelGraph)
+    private static void CoverCellTrainStep(ComputationGraph modelGraph)
     {
         var inVals = Enumerable.Range(0, 2 * 4 * 2).Select(i => 0.1f * i - 0.7f).ToArray();
         var inputData = TensorData([2L, 4L, 2L], inVals);

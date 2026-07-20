@@ -83,7 +83,9 @@ public class ScanSequenceMapTests
     {
         using var ms = new MemoryStream();
         ProtoBuf.Serializer.Serialize(ms, model);
-        return OnnxModelImporter.FromOnnxModelToFastGraph(ms.ToArray());
+        // Internal-graph importer: these tests inspect graph.Nodes/Outputs and
+        // drive the internal-typed Execute/QEE.Run overloads.
+        return OnnxModelImporter.FromOnnxModelToInternalGraph(ms.ToArray());
     }
 
     /// <summary>

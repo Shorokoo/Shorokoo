@@ -105,7 +105,7 @@ public class RngTrainingTests
         // training-step graph — the step graph itself carries the model's RNG identity,
         // which is what its Dropout feeds' key chains derive from.
         Assert.NotNull(rigA.TrainingStepPureGraph.TryGetRngSeed());
-        Assert.Contains(rigA.TrainingStepPureGraph.Nodes, n =>
+        Assert.Contains(rigA.TrainingStepPureGraphInternal.Nodes, n =>
             n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
 
         // Same master seed -> bit-identical trajectory across independent rig builds.

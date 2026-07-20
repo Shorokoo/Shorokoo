@@ -130,7 +130,7 @@ public class OnnxExternalDataTests
         finally { Directory.Delete(dir, recursive: true); }
     }
 
-    private static float[] RunAddModel(InternalComputationGraph fast)
+    private static float[] RunAddModel(ComputationGraph fast)
     {
         IData[] inputs = [TensorData(DType.Float32, [4L], 1f, 2f, 3f, 4f)];
         var results = ComputeContext.Default.Execute(fast, inputs);
@@ -153,8 +153,8 @@ public class OnnxExternalDataTests
             MarkExternal(wExt, "weights.bin", offset: 0, length: 16);
             var externalPath = WriteModel(dir, "external.onnx", BuildAddModel(wExt));
 
-            var inlineOut = RunAddModel(OnnxModelImporter.FromOnnxModelToFastGraph(inlinePath));
-            var externalOut = RunAddModel(OnnxModelImporter.FromOnnxModelToFastGraph(externalPath));
+            var inlineOut = RunAddModel(OnnxModelImporter.FromOnnxModel(inlinePath));
+            var externalOut = RunAddModel(OnnxModelImporter.FromOnnxModel(externalPath));
             Assert.Equal(inlineOut, externalOut);
         });
     }
@@ -183,8 +183,8 @@ public class OnnxExternalDataTests
                 Init("w", FloatElem, [4], FloatBytes(wVals)),
                 Init("b", FloatElem, [4], FloatBytes(bVals))));
 
-            var inlineOut = RunAddModel(OnnxModelImporter.FromOnnxModelToFastGraph(inlinePath));
-            var externalOut = RunAddModel(OnnxModelImporter.FromOnnxModelToFastGraph(externalPath));
+            var inlineOut = RunAddModel(OnnxModelImporter.FromOnnxModel(inlinePath));
+            var externalOut = RunAddModel(OnnxModelImporter.FromOnnxModel(externalPath));
             Assert.Equal(inlineOut, externalOut);
         });
     }
@@ -219,7 +219,7 @@ public class OnnxExternalDataTests
             g.Outputs.Add(TensorInfo("y2", Float16Elem, 2));
             var path = WriteModel(dir, "dtypes.onnx", WrapModel(g));
 
-            var fast = OnnxModelImporter.FromOnnxModelToFastGraph(path);
+            var fast = OnnxModelImporter.FromOnnxModel(path);
             var results = ComputeContext.Default.Execute(fast);
             Assert.Equal(LongBytes(iVals), results[0].ToTensorData().AccessRawMemory().ToArray());
             Assert.Equal(hBytes, results[1].ToTensorData().AccessRawMemory().ToArray());
@@ -235,7 +235,7 @@ public class OnnxExternalDataTests
             MarkExternal(wExt, "missing.bin", offset: 0, length: 16);
             var path = WriteModel(dir, "external.onnx", BuildAddModel(wExt));
 
-            var ex = Assert.Throws<ModelException>(() => OnnxModelImporter.FromOnnxModelToFastGraph(path));
+            var ex = Assert.Throws<ModelException>(() => OnnxModelImporter.FromOnnxModel(path));
             Assert.Equal(ErrorCodes.XD004, ex.ErrorCode);
             Assert.Contains("'w'", ex.Message);
             Assert.Contains("missing.bin", ex.Message);
@@ -251,7 +251,7 @@ public class OnnxExternalDataTests
             MarkExternal(wExt, "../escape.bin", offset: 0, length: 16);
             var path = WriteModel(dir, "traversal.onnx", BuildAddModel(wExt));
 
-            var ex = Assert.Throws<ModelException>(() => OnnxModelImporter.FromOnnxModelToFastGraph(path));
+            var ex = Assert.Throws<ModelException>(() => OnnxModelImporter.FromOnnxModel(path));
             Assert.Equal(ErrorCodes.XD003, ex.ErrorCode);
             Assert.Contains("'w'", ex.Message);
 
@@ -259,7 +259,7 @@ public class OnnxExternalDataTests
             MarkExternal(wAbs, Path.Combine(Path.GetTempPath(), "abs.bin"), offset: 0, length: 16);
             var absPath = WriteModel(dir, "absolute.onnx", BuildAddModel(wAbs));
 
-            var exAbs = Assert.Throws<ModelException>(() => OnnxModelImporter.FromOnnxModelToFastGraph(absPath));
+            var exAbs = Assert.Throws<ModelException>(() => OnnxModelImporter.FromOnnxModel(absPath));
             Assert.Equal(ErrorCodes.XD003, exAbs.ErrorCode);
         });
     }
@@ -275,7 +275,7 @@ public class OnnxExternalDataTests
             var wRange = Init("w", FloatElem, [4], null!);
             MarkExternal(wRange, "short.bin", offset: 8, length: 16);
             var rangePath = WriteModel(dir, "range.onnx", BuildAddModel(wRange));
-            var exRange = Assert.Throws<ModelException>(() => OnnxModelImporter.FromOnnxModelToFastGraph(rangePath));
+            var exRange = Assert.Throws<ModelException>(() => OnnxModelImporter.FromOnnxModel(rangePath));
             Assert.Equal(ErrorCodes.XD005, exRange.ErrorCode);
             Assert.Contains("'w'", exRange.Message);
             Assert.Contains("short.bin", exRange.Message);
@@ -286,7 +286,7 @@ public class OnnxExternalDataTests
             wParse.ExternalDatas.Add(new StringStringEntryProto { Key = "location", Value = "short.bin" });
             wParse.ExternalDatas.Add(new StringStringEntryProto { Key = "offset", Value = "not-a-number" });
             var parsePath = WriteModel(dir, "parse.onnx", BuildAddModel(wParse));
-            var exParse = Assert.Throws<ModelException>(() => OnnxModelImporter.FromOnnxModelToFastGraph(parsePath));
+            var exParse = Assert.Throws<ModelException>(() => OnnxModelImporter.FromOnnxModel(parsePath));
             Assert.Equal(ErrorCodes.XD005, exParse.ErrorCode);
 
             // Near-long.MaxValue offset: offset + length would overflow a naive
@@ -295,7 +295,7 @@ public class OnnxExternalDataTests
             var wHuge = Init("w", FloatElem, [4], null!);
             MarkExternal(wHuge, "short.bin", offset: long.MaxValue - 8, length: 16);
             var hugePath = WriteModel(dir, "huge.onnx", BuildAddModel(wHuge));
-            var exHuge = Assert.Throws<ModelException>(() => OnnxModelImporter.FromOnnxModelToFastGraph(hugePath));
+            var exHuge = Assert.Throws<ModelException>(() => OnnxModelImporter.FromOnnxModel(hugePath));
             Assert.Equal(ErrorCodes.XD005, exHuge.ErrorCode);
             Assert.Contains("'w'", exHuge.Message);
         });
@@ -312,7 +312,7 @@ public class OnnxExternalDataTests
             MarkExternal(wExt, "w.bin", offset: 0, length: 12);
             var path = WriteModel(dir, "mismatch.onnx", BuildAddModel(wExt));
 
-            var ex = Assert.Throws<ModelException>(() => OnnxModelImporter.FromOnnxModelToFastGraph(path));
+            var ex = Assert.Throws<ModelException>(() => OnnxModelImporter.FromOnnxModel(path));
             Assert.Equal(ErrorCodes.XD006, ex.ErrorCode);
             Assert.Contains("'w'", ex.Message);
             Assert.Contains("16", ex.Message);
@@ -332,12 +332,12 @@ public class OnnxExternalDataTests
             var bytes = ms.ToArray();
 
             // No base directory: loud failure, no silent zero-fill.
-            var ex = Assert.Throws<ModelException>(() => OnnxModelImporter.FromOnnxModelToFastGraph(bytes));
+            var ex = Assert.Throws<ModelException>(() => OnnxModelImporter.FromOnnxModel(bytes));
             Assert.Equal(ErrorCodes.XD001, ex.ErrorCode);
             Assert.Contains("'w'", ex.Message);
 
             // Same bytes with the directory supplied: loads and executes.
-            var fast = OnnxModelImporter.FromOnnxModelToFastGraph(bytes, externalDataDirectory: dir);
+            var fast = OnnxModelImporter.FromOnnxModel(bytes, externalDataDirectory: dir);
             float[] expected = [2f, 4f, 6f, 8f];
             Assert.Equal(expected, RunAddModel(fast));
         });
@@ -384,7 +384,7 @@ public class OnnxExternalDataTests
             });
 
             // Export-with-external-data → import round-trips bit-exactly.
-            var reimported = OnnxModelImporter.FromOnnxModelToFastGraph(path);
+            var reimported = OnnxModelImporter.FromOnnxModel(path);
             var roundtrip = ComputeContext.Default.Execute(reimported, numOut, input)[0]
                 .ToTensorData().AccessRawMemory().ToArray();
             Assert.Equal(direct, roundtrip);
@@ -429,8 +429,8 @@ public class OnnxExternalDataTests
 
             // The externalized pair still evaluates like the inline proto.
             var inlinePath = WriteModel(dir, "inline.onnx", proto);
-            var inlineOut = RunAddModel(OnnxModelImporter.FromOnnxModelToFastGraph(inlinePath));
-            var externalOut = RunAddModel(OnnxModelImporter.FromOnnxModelToFastGraph(path1));
+            var inlineOut = RunAddModel(OnnxModelImporter.FromOnnxModel(inlinePath));
+            var externalOut = RunAddModel(OnnxModelImporter.FromOnnxModel(path1));
             Assert.Equal(inlineOut, externalOut);
         });
     }

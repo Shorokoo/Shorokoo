@@ -30,7 +30,7 @@ public partial class RealCheckpointPredictionTests
         "with tests/test-data/models/resnet18/make-sample-input.py";
 
     // ResNet18.ComputationGraph declares inputs in this order; the image is last.
-    private static InternalComputationGraph BuildConcreteArchitecture(TensorData inputHint)
+    private static ComputationGraph BuildConcreteArchitecture(TensorData inputHint)
         => ResNet18.ComputationGraph.ToConcreteArchitecture(ResNet18.ComputationGraph.FromOrderedInputs([
             TensorData(DType.Int64, [], 1000L),   // numClasses
             TensorData(DType.Float32, [], 0.9f),  // bnMomentum (unused at inference)
@@ -51,7 +51,7 @@ public partial class RealCheckpointPredictionTests
     public void NamingScheme_BindsEveryCheckpointWeight_AsCompleteBijection()
     {
         var arch = BuildConcreteArchitecture(TensorDataWithDefaultVals(DType.Float32, [1L, 3L, 224L, 224L]));
-        var scheme = TorchvisionResNet18NamingScheme.Create(arch);
+        var scheme = TorchvisionResNet18NamingScheme.Create(arch.Internal);
         var modelIds = arch.GetConcreteModelParamInfos().ModelIds;
 
         var checkpointNames = SafeTensorLoader
@@ -122,7 +122,7 @@ public partial class RealCheckpointPredictionTests
 
         var arch = BuildConcreteArchitecture(input);
         var weights = SafeTensorLoader.LoadModelParamSet(TestDataPaths.Of("models", "resnet18", "resnet18.safetensors"));
-        var concrete = arch.ToConcreteModel(weights, TorchvisionResNet18NamingScheme.Create(arch));
+        var concrete = arch.ToConcreteModel(weights, TorchvisionResNet18NamingScheme.Create(arch.Internal));
 
         var outputs = new ComputeContext().Execute(concrete,
             TensorData(DType.Int64, [], 1000L),

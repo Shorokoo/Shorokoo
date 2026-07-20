@@ -38,21 +38,21 @@ public class CSharpModelBuilderCoverageTests
     {
         // Module-call codegen — CREATE_MODULE / MODULE_SET_HYPERPARAMS / MODEL_INVOKE
         // handlers + MakeCallFunctionCodeTemplate + GetModuleAwareTypeDefString overloads.
-        AssertCodegens(CallsHypersLayer.ComputationGraph, "HypersLayer");
+        AssertCodegens(CallsHypersLayer.ComputationGraph.ToInternal(), "HypersLayer");
         // TensorStruct codegen — MakeTensorStructCreateNode + MakeTensorStructGetFieldNode
         // (now emitting canonical InternalOp.TensorStructCreate / TensorStructGetField).
-        AssertCodegens(TensorStructLoopCarry.ComputationGraph,
+        AssertCodegens(TensorStructLoopCarry.ComputationGraph.ToInternal(),
             "InternalOp.TensorStructCreate", "InternalOp.TensorStructGetField");
         // Sequence ops over struct sequences — InferSequenceElementRankFromTensor
         // SEQUENCE_CONSTRUCT / IDENTITY tracebacks (when SequenceAt output rank is unknown).
-        AssertCodegens(SequenceOpsOnStructs.ComputationGraph);
+        AssertCodegens(SequenceOpsOnStructs.ComputationGraph.ToInternal());
         // Per-DType constant arms of MakeConstantNode (Float64 / Int16 / Int32 /
         // UInt16 / UInt32 / UInt64 / Bool plus the <4 vs >=4 collection-expression split).
         AssertCodegens(BuildConstantBranchesGraph(),
             "1.5d", "6UL", "true", "(short[])", "(ushort[])", "(uint[])", "EmptyVector<int32>");
         // StateParamInitializer arm of BuildMethodCode (the mirror of the
         // TrainableParamInitializer branch covered by every InitSimple use).
-        AssertCodegens(BatchNormWithStateUpdate.ComputationGraph,
+        AssertCodegens(BatchNormWithStateUpdate.ComputationGraph.ToInternal(),
             "[StateInitializer]", "isTrainable: false");
         // low_op keyword wraps inlined inputs in parens for precedence — only
         // fires when the input's producer has an inline expression (non-constant).

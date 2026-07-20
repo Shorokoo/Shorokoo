@@ -48,7 +48,9 @@ public class Opset26ImportAttrTests
     {
         using var ms = new MemoryStream();
         ProtoBuf.Serializer.Serialize(ms, model);
-        return OnnxModelImporter.FromOnnxModelToFastGraph(ms.ToArray());
+        // Internal-graph importer: these tests read graph internals (fast.Outputs)
+        // and drive the internal-typed Execute/QEE.Run overloads.
+        return OnnxModelImporter.FromOnnxModelToInternalGraph(ms.ToArray());
     }
 
     private static ModelProto WrapModel(GraphProto graph, long opset)

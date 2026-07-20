@@ -213,9 +213,9 @@ public class TrainingRigCoverageTests
     /// (<see cref="Shorokoo.Core.Nodes.Processors.Fast.FastConvertModelParamIdRefToModelParam.DiscoverTrainableParamInfos"/>).
     /// </summary>
     private static void CoverFromScratch(
-        InternalComputationGraph modelGraph,
-        InternalComputationGraph lossGraph,
-        InternalComputationGraph optimizerGraph,
+        ComputationGraph modelGraph,
+        ComputationGraph lossGraph,
+        ComputationGraph optimizerGraph,
         long[] inputShape,
         params HyperValue[] hyperparams)
     {
@@ -243,9 +243,9 @@ public class TrainingRigCoverageTests
     /// <c>ToConcreteModel</c> throw <c>KeyNotFoundException</c>).
     /// </summary>
     private static void CoverCheckpointRebind(
-        InternalComputationGraph modelGraph,
-        InternalComputationGraph lossGraph,
-        InternalComputationGraph optimizerGraph,
+        ComputationGraph modelGraph,
+        ComputationGraph lossGraph,
+        ComputationGraph optimizerGraph,
         long[] inputShape,
         params HyperValue[] hyperparams)
     {
@@ -261,7 +261,7 @@ public class TrainingRigCoverageTests
 
         // Concretize the inference model + Shorokoo naming scheme (the documented binding flow).
         var hints = new ModelParamList(
-            new[] { new KeyValuePair<string, TensorData>(modelGraph.Inputs[0].ToString(), TensorData(inputShape, new float[totalElements])) },
+            new[] { new KeyValuePair<string, TensorData>(modelGraph.Internal.Inputs[0].ToString(), TensorData(inputShape, new float[totalElements])) },
             ModelParamType.InputParam);
         var ctx = new ComputeContext();
         var concrete = modelGraph.ToConcreteArchitecture(hints, ctx, null);
@@ -464,12 +464,14 @@ public class TrainingRigCoverageTests
         Assert.NotNull(stepResult.Checkpoint.OptimizerState);
         Assert.True(float.IsFinite(stepResult.Loss));
 
-        // FastTrainingGraphs is a plain container exposed by the public surface;
-        // its constructor and three getters are otherwise unreachable.
+        // FastTrainingGraphs is a plain container (internal, reachable via
+        // InternalsVisibleTo); its constructor and three getters are otherwise
+        // unreachable. It is typed on the mutable internal graph, so hand it
+        // safe deep copies of the shared cached module graphs.
         var graphs = new FastTrainingGraphs(
-            ScalarMultiplyModel.ComputationGraph,
-            L2Loss.ComputationGraph,
-            SGDOptimizer.ComputationGraph);
+            ScalarMultiplyModel.ComputationGraph.ToInternal(),
+            L2Loss.ComputationGraph.ToInternal(),
+            SGDOptimizer.ComputationGraph.ToInternal());
         Assert.NotNull(graphs.ModelGraph);
         Assert.NotNull(graphs.LossGraph);
         Assert.NotNull(graphs.OptimizerGraph);
@@ -1007,7 +1009,10 @@ public class TrainingRigCoverageTests
     [Fact]
     public void TestParamDiscoveryRequiresConcreteArchitecture()
     {
-        var moduleGraph = CallsSimplestModule.ComputationGraph;
+        // Use a mutable deep copy so the internal (op-scan-guarded) extensions are
+        // exercised directly — the public ComputationGraph extensions would reject the
+        // module-kind graph on its Kind stamp before the discovery guard ever ran.
+        var moduleGraph = CallsSimplestModule.ComputationGraph.ToInternal();
         Assert.Contains(moduleGraph.Nodes, n =>
             n.OpCode == InternalOpCodes.MODEL_INVOKE || n.OpCode == InternalOpCodes.FUNCTION_INVOKE);
 
@@ -1029,8 +1034,8 @@ public class TrainingRigCoverageTests
     public void TestTrainingLoopCoverage()
     {
         var trainingGraph = TrainingGraphBuilder.PrepareForTrainingAsFast(
-            ScalarMultiplyModel.ComputationGraph,
-            L2Loss.ComputationGraph);
+            ScalarMultiplyModel.ComputationGraph.ToInternal(),
+            L2Loss.ComputationGraph.ToInternal());
 
         var lowered = TrainingLoop.LowerTrainingGraph(trainingGraph);
         Assert.NotNull(lowered);
@@ -1048,7 +1053,8 @@ public class TrainingRigCoverageTests
     [Fact]
     public void TestTrainingGraphBuilderFuncOverloadCoverage()
     {
-        var modelGraph = ScalarMultiplyModel.ComputationGraph;
+        // PrepareForTrainingAsFast is typed on the mutable internal graph.
+        var modelGraph = ScalarMultiplyModel.ComputationGraph.ToInternal();
 
         // Happy path: Func referencing a [Module]'s Inline method.
         Func<Tensor<float32>, Tensor<float32>, Scalar<float32>> lossFunc = L2Loss.Inline;
@@ -1094,8 +1100,9 @@ public class TrainingRigCoverageTests
         Assert.NotNull(Losses.TripletMargin);
         Assert.NotNull(Losses.BinaryFocal);
         // Rig-safe losses always have exactly 2 inputs: (predictions, targets).
-        Assert.Equal(2, Losses.L2Loss.Inputs.Count);
-        Assert.Equal(2, Losses.L1Loss.Inputs.Count);
+        // (.Internal is a read-only borrow — do not mutate the shared cached graph.)
+        Assert.Equal(2, Losses.L2Loss.Internal.Inputs.Count);
+        Assert.Equal(2, Losses.L1Loss.Internal.Inputs.Count);
     }
 
     /// <summary>
@@ -1121,7 +1128,7 @@ public class TrainingRigCoverageTests
     }
 
     /// <summary>
-    /// Verifies the <see cref="TrainingRig.FromScratch(InternalComputationGraph,InternalComputationGraph,InternalComputationGraph,ModelParamList,IOptimizerHyperparameters)"/>
+    /// Verifies the <see cref="TrainingRig.FromScratch(ComputationGraph,ComputationGraph,ComputationGraph,ModelParamList,HyperValue[])"/>
     /// overload, the <see cref="TrainingRig.InputDef"/> and <see cref="TrainingRig.TargetDef"/> properties,
     /// and <see cref="TensorStructDef.FromOrderedData"/> — covering all the convenience APIs
     /// added to clean up training call sites.

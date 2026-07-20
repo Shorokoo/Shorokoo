@@ -149,7 +149,7 @@ public class TrainingPerfBaselineTests
         };
     }
 
-    private static double MeasureThroughput(InternalComputationGraph baseGraph, TensorData exampleInput)
+    private static double MeasureThroughput(ComputationGraph baseGraph, TensorData exampleInput)
     {
         var ctx = new ComputeContext();
         var rig = TrainingRig.FromScratch(

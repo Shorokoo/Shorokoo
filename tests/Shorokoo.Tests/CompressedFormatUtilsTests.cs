@@ -72,9 +72,9 @@ public class CompressedFormatUtilsCoverageTests
         try
         {
             CompressedFormatUtils.SaveFastGraphToFile(zsrkPath, fastGraph);
-            var loaded = CompressedFormatUtils.LoadFastGraphFromFile(zsrkPath).ToComputationGraph();
-            Assert.Equal(graph.InputTensors.Count(), loaded.InputTensors.Count());
-            Assert.Equal(graph.OutputTensors.Count(), loaded.OutputTensors.Count());
+            var loaded = CompressedFormatUtils.LoadFastGraphFromFile(zsrkPath);
+            Assert.Equal(graph.InputTensors.Count(), loaded.Internal.InputTensors.Count());
+            Assert.Equal(graph.OutputTensors.Count(), loaded.Internal.OutputTensors.Count());
 
             var uncompressedBytes = CompressedFormatUtils.SaveFastGraphToBinary(fastGraph);
             File.WriteAllBytes(binPath, uncompressedBytes);
@@ -195,7 +195,7 @@ public class CompressedFormatUtilsCoverageTests
     // ──────────────────────────────────────────────────────────────────────
 
     /// <summary>Builds the same small graph at all three lifecycle stages.</summary>
-    private static (InternalComputationGraph Module, InternalComputationGraph Arch, InternalComputationGraph Model)
+    private static (ComputationGraph Module, ComputationGraph Arch, ComputationGraph Model)
         BuildStageGraphs()
     {
         var moduleGraph = ScalarMultiplyModel.ComputationGraph;
@@ -215,11 +215,12 @@ public class CompressedFormatUtilsCoverageTests
     {
         var (moduleGraph, arch, model) = BuildStageGraphs();
 
-        Assert.Equal(GraphKind.Module, SrkFileFormat.DetectStage(moduleGraph));
-        Assert.Equal(GraphKind.ConcreteArchitecture, SrkFileFormat.DetectStage(arch));
-        Assert.Equal(GraphKind.ConcreteModel, SrkFileFormat.DetectStage(model));
+        // Op-scan detection agrees with the stamped kind at every stage.
+        Assert.Equal(GraphKind.Module, SrkFileFormat.DetectStage(moduleGraph.Internal));
+        Assert.Equal(GraphKind.ConcreteArchitecture, SrkFileFormat.DetectStage(arch.Internal));
+        Assert.Equal(GraphKind.ConcreteModel, SrkFileFormat.DetectStage(model.Internal));
 
-        (InternalComputationGraph Graph, GraphKind Stage)[] stages =
+        (ComputationGraph Graph, GraphKind Stage)[] stages =
             [(moduleGraph, GraphKind.Module),
              (arch, GraphKind.ConcreteArchitecture),
              (model, GraphKind.ConcreteModel)];
@@ -251,8 +252,9 @@ public class CompressedFormatUtilsCoverageTests
             // node/tensor keys — so graph identity is asserted below by bit-identical
             // execution of the concrete model instead.)
             var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(bytes);
-            Assert.NotEmpty(reloaded.Nodes);
-            Assert.Equal(stage, SrkFileFormat.DetectStage(reloaded));
+            Assert.NotEmpty(reloaded.Internal.Nodes);
+            Assert.Equal(stage, reloaded.Kind);
+            Assert.Equal(stage, SrkFileFormat.DetectStage(reloaded.Internal));
 
             if (stage == GraphKind.ConcreteModel && compressed)
             {
@@ -270,7 +272,8 @@ public class CompressedFormatUtilsCoverageTests
             CompressedFormatUtils.SaveFastGraphToBinary(moduleGraph));
         var rearch = reloadedModule.ToConcreteArchitecture(
             reloadedModule.FromOrderedInputs([TensorData([2], 1.0f, 2.0f)]));
-        Assert.Equal(GraphKind.ConcreteArchitecture, SrkFileFormat.DetectStage(rearch));
+        Assert.Equal(GraphKind.ConcreteArchitecture, rearch.Kind);
+        Assert.Equal(GraphKind.ConcreteArchitecture, SrkFileFormat.DetectStage(rearch.Internal));
     }
 
     /// <summary>
@@ -292,7 +295,7 @@ public class CompressedFormatUtilsCoverageTests
         var singleZstd = CompressedFormatUtils.Compress(bareProtobuf);
         var doubleZstd = CompressedFormatUtils.Compress(singleZstd);
 
-        var referenceNodeCount = CompressedFormatUtils.LoadFastGraphFromBinary(v2Bytes).Nodes.Count;
+        var referenceNodeCount = CompressedFormatUtils.LoadFastGraphFromBinary(v2Bytes).Internal.Nodes.Count;
 
         (string Name, byte[] Bytes)[] layouts =
             [("bare", bareProtobuf), ("single-zstd", singleZstd), ("double-zstd", doubleZstd)];
@@ -301,8 +304,8 @@ public class CompressedFormatUtilsCoverageTests
             Assert.Null(SrkFileFormat.TryReadHeader(bytes));
 
             var fromBinary = CompressedFormatUtils.LoadFastGraphFromBinary(bytes);
-            Assert.Equal(referenceNodeCount, fromBinary.Nodes.Count);
-            Assert.Equal(GraphKind.ConcreteArchitecture, SrkFileFormat.DetectStage(fromBinary));
+            Assert.Equal(referenceNodeCount, fromBinary.Internal.Nodes.Count);
+            Assert.Equal(GraphKind.ConcreteArchitecture, SrkFileFormat.DetectStage(fromBinary.Internal));
 
             // File load with a deliberately "wrong" extension: content decides.
             var path = Path.Combine(TempDir, $"v1_{name}.zsrk");
@@ -310,7 +313,7 @@ public class CompressedFormatUtilsCoverageTests
             {
                 File.WriteAllBytes(path, bytes);
                 var fromFile = CompressedFormatUtils.LoadFastGraphFromFile(path);
-                Assert.Equal(referenceNodeCount, fromFile.Nodes.Count);
+                Assert.Equal(referenceNodeCount, fromFile.Internal.Nodes.Count);
 
                 // The JSON introspection helpers accept every layout too.
                 Assert.Contains("Graph", CompressedFormatUtils.ToJson(path));
@@ -342,7 +345,7 @@ public class CompressedFormatUtilsCoverageTests
             {
                 File.Copy(zsrkPath, renamed, overwrite: true);
                 var loaded = CompressedFormatUtils.LoadFastGraphFromFile(renamed);
-                Assert.NotEmpty(loaded.Nodes);
+                Assert.NotEmpty(loaded.Internal.Nodes);
                 Assert.Equal(referenceJson, CompressedFormatUtils.ToJson(renamed));
             }
         }
@@ -516,11 +519,11 @@ public class CompressedFormatUtilsCoverageTests
 
         // Matching required stages load fine, for all three stages.
         Assert.NotEmpty(CompressedFormatUtils.LoadFastGraphFromBinary(
-            moduleBytes, requiredStage: GraphKind.Module).Nodes);
+            moduleBytes, requiredStage: GraphKind.Module).Internal.Nodes);
         Assert.NotEmpty(CompressedFormatUtils.LoadFastGraphFromBinary(
-            CompressedFormatUtils.SaveFastGraphToBinary(arch), requiredStage: GraphKind.ConcreteArchitecture).Nodes);
+            CompressedFormatUtils.SaveFastGraphToBinary(arch), requiredStage: GraphKind.ConcreteArchitecture).Internal.Nodes);
         Assert.NotEmpty(CompressedFormatUtils.LoadFastGraphFromBinary(
-            CompressedFormatUtils.SaveFastGraphToBinary(model), requiredStage: GraphKind.ConcreteModel).Nodes);
+            CompressedFormatUtils.SaveFastGraphToBinary(model), requiredStage: GraphKind.ConcreteModel).Internal.Nodes);
     }
 
     /// <summary>
@@ -547,7 +550,7 @@ public class CompressedFormatUtilsCoverageTests
             Assert.True(File.Exists(onnxPath), "SaveFastGraphToFile deleted the caller's unrelated .onnx file");
             Assert.Equal(sentinel, File.ReadAllBytes(onnxPath));
             Assert.True(File.Exists(zsrkPath));
-            Assert.NotEmpty(CompressedFormatUtils.LoadFastGraphFromFile(zsrkPath).Nodes);
+            Assert.NotEmpty(CompressedFormatUtils.LoadFastGraphFromFile(zsrkPath).Internal.Nodes);
         }
         finally
         {

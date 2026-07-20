@@ -42,8 +42,10 @@ public class TrainingGraphBuilderQuickTests
     [Fact]
     public void PrepareForTraining_GraphOverload_ProducesCorrectStructure()
     {
-        var modelGraph = SimplestLayer.ComputationGraph;
-        var lossGraph = SimpleSumSquaredLoss.ComputationGraph;
+        // PrepareForTrainingAsFast is typed on the mutable internal graph; hand it
+        // deep copies of the shared cached module graphs.
+        var modelGraph = SimplestLayer.ComputationGraph.ToInternal();
+        var lossGraph = SimpleSumSquaredLoss.ComputationGraph.ToInternal();
 
         var trainingGraph = TrainingGraphBuilder.PrepareForTrainingAsFast(modelGraph, lossGraph);
 
@@ -75,7 +77,7 @@ public class TrainingGraphBuilderQuickTests
             ImmutableArray.Create<Variable>(input),
             ImmutableArray.Create(output));
 
-        var lossGraph = SimpleSumSquaredLoss.ComputationGraph;
+        var lossGraph = SimpleSumSquaredLoss.ComputationGraph.ToInternal();
 
         Assert.Throws<InvalidOperationException>(() =>
             TrainingGraphBuilder.PrepareForTrainingAsFast(modelGraph, lossGraph));
@@ -92,7 +94,7 @@ public class TrainingGraphBuilderQuickTests
     [Fact]
     public void PrepareForTraining_FuncOverload_ProducesCorrectStructure()
     {
-        var modelGraph = SimplestLayer.ComputationGraph;
+        var modelGraph = SimplestLayer.ComputationGraph.ToInternal();
 
         Func<Tensor<float32>, Tensor<float32>, Scalar<float32>> lossFunc = SimpleSumSquaredLoss.Inline;
 
@@ -118,7 +120,7 @@ public class TrainingGraphBuilderQuickTests
     [Fact]
     public void PrepareForTraining_NonModuleFunc_Throws()
     {
-        var modelGraph = SimplestLayer.ComputationGraph;
+        var modelGraph = SimplestLayer.ComputationGraph.ToInternal();
 
         // A lambda is not a module Inline method — its method name won't be "Inline"
         Func<Tensor<float32>, Tensor<float32>, Scalar<float32>> notAModule =
@@ -135,7 +137,7 @@ public class TrainingGraphBuilderQuickTests
     [Fact]
     public void PrepareForTraining_NullModelGraph_Throws()
     {
-        var lossGraph = SimpleSumSquaredLoss.ComputationGraph;
+        var lossGraph = SimpleSumSquaredLoss.ComputationGraph.ToInternal();
         Assert.Throws<ArgumentNullException>(() =>
             TrainingGraphBuilder.PrepareForTrainingAsFast(null!, lossGraph));
     }
@@ -143,7 +145,7 @@ public class TrainingGraphBuilderQuickTests
     [Fact]
     public void PrepareForTraining_NullLossGraph_Throws()
     {
-        var modelGraph = SimplestLayer.ComputationGraph;
+        var modelGraph = SimplestLayer.ComputationGraph.ToInternal();
         Assert.Throws<ArgumentNullException>(() =>
             TrainingGraphBuilder.PrepareForTrainingAsFast(modelGraph, (InternalComputationGraph)null!));
     }
@@ -151,7 +153,7 @@ public class TrainingGraphBuilderQuickTests
     [Fact]
     public void PrepareForTraining_NullLossFunc_Throws()
     {
-        var modelGraph = SimplestLayer.ComputationGraph;
+        var modelGraph = SimplestLayer.ComputationGraph.ToInternal();
         Assert.Throws<ArgumentNullException>(() =>
             TrainingGraphBuilder.PrepareForTrainingAsFast<Tensor<float32>, Scalar<float32>>(modelGraph, null!));
     }

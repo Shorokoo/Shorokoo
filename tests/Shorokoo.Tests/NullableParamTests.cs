@@ -18,18 +18,18 @@ namespace Shorokoo.Tests;
 [Trait("Purpose", "Coverage")]
 public class NullableParamTests
 {
-    private static System.Collections.Immutable.ImmutableArray<Variable> InputsOf(InternalComputationGraph graph)
-        => InternalComputationGraphConverter.BuildNodes(graph).inputs;
+    private static System.Collections.Immutable.ImmutableArray<Variable> InputsOf(ComputationGraph graph)
+        => InternalComputationGraphConverter.BuildNodes(graph.Internal).inputs;
 
     private static byte[] Bytes(params float[] values) => TensorData([(long)values.Length], values).AccessRawMemory().ToArray();
 
     /// <summary>Concretizes (tensor shape hints stand in for optional inputs) and executes via the optional-aware QEE.</summary>
-    private static byte[] RunWithOptionals(InternalComputationGraph graph, TensorData[] shapeHints, params IData[] runtimeInputs)
+    private static byte[] RunWithOptionals(ComputationGraph graph, TensorData[] shapeHints, params IData[] runtimeInputs)
     {
         var concrete = graph
             .ToConcreteArchitecture(graph.FromOrderedInputs([.. shapeHints]))
             .ToConcreteModel();
-        var outputs = new QuickExecutionEngine().Execute(concrete, runtimeInputs);
+        var outputs = new QuickExecutionEngine().Execute(concrete.Internal, runtimeInputs);
         return ((TensorData)outputs[0]).AccessRawMemory().ToArray();
     }
 
@@ -168,7 +168,7 @@ public class NullableParamTests
         // The defaulted hyper surfaces as a [Hyper] attribute when emitted as a sub-module function
         // (a caller's graph references it). The recorded default is re-written as [Hyper(3f)] rather
         // than a bare [Hyper].
-        var code = new CSharpModelBuilder().BuildFullGraph(DefaultedHyperSupplyCheck.ComputationGraph, "DefaultedHyperRoundtrip");
+        var code = new CSharpModelBuilder().BuildFullGraph(DefaultedHyperSupplyCheck.ComputationGraph.Internal, "DefaultedHyperRoundtrip");
         Assert.Contains("[Hyper(3f)]", code);
     }
 

@@ -212,7 +212,7 @@ public class CodegenFreeModuleTests
     // ───────────────────────────────── helpers ─────────────────────────────────
 
     /// <summary>Concretizes a module graph with the given ordered inputs and executes it.</summary>
-    private static byte[][] ExecuteConcretized(InternalComputationGraph moduleGraph, params TensorData[] inputs)
+    private static byte[][] ExecuteConcretized(ComputationGraph moduleGraph, params TensorData[] inputs)
     {
         var concreteModel = moduleGraph
             .ToConcreteArchitecture(moduleGraph.FromOrderedInputs([.. inputs]))
@@ -224,11 +224,11 @@ public class CodegenFreeModuleTests
 
     /// <summary>Wraps a constant-fed module output into a no-input graph, concretizes, executes.</summary>
     private static byte[][] ExecuteOutputs(params Variable[] outputs)
-        => ExecuteConcretized(new InternalComputationGraph([], [.. outputs]));
+        => ExecuteConcretized(new InternalComputationGraph([], [.. outputs]).ToComputationGraph(GraphKind.Module));
 
     /// <summary>Reads the single state param's current scalar value from a concretized graph.</summary>
-    private static float StateValue(InternalComputationGraph graph) =>
-        graph.GetStateParamDataNodes()[0].Attributes
+    private static float StateValue(ComputationGraph graph) =>
+        graph.Internal.GetStateParamDataNodes()[0].Attributes
             .GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData)!
             .As<float32>().AccessMemory()[0];
 
@@ -440,8 +440,8 @@ public class CodegenFreeModuleTests
         // [Module] Inline body using state initializers.
         var statefulGraph = ModuleFactory.ComputationGraph(
             (Func<Tensor<float32>, Tensor<float32>>)StatefulBody);
-        Assert.Contains(statefulGraph.Nodes, n => n.OpCode == InternalOpCodes.STATE_UPDATE_LINK);
-        Assert.Contains(statefulGraph.Nodes, n => n.OpCode == InternalOpCodes.WITH_STATE_DEPS);
+        Assert.Contains(statefulGraph.Internal.Nodes, n => n.OpCode == InternalOpCodes.STATE_UPDATE_LINK);
+        Assert.Contains(statefulGraph.Internal.Nodes, n => n.OpCode == InternalOpCodes.WITH_STATE_DEPS);
     }
 
     /// <summary>No-runtime-input body for the <c>CallbackModule&lt;TOut&gt;</c> path.</summary>
@@ -488,7 +488,7 @@ public class CodegenFreeModuleTests
 
     /// <summary>
     /// Executes the stateful delegate-built graph through
-    /// <see cref="ComputeContext.ExecuteWithState(InternalComputationGraph, TensorData[])"/>,
+    /// <see cref="ComputeContext.ExecuteWithState(ComputationGraph, TensorData[])"/>,
     /// covering the Fast state pipeline end-to-end: <c>FastLowerStateUpdateNodes</c>
     /// (STATE_UPDATE_LINK/WITH_STATE_DEPS → IDENTITY + extra state outputs) and the
     /// <c>InternalComputationGraph</c> state surface (<c>GetStateParamDataNodes</c> /
@@ -506,12 +506,12 @@ public class CodegenFreeModuleTests
             .ToConcreteArchitecture(moduleGraph.FromOrderedInputs([input]))
             .ToConcreteModel();
 
-        Assert.Equal(1, concrete.GetStateUpdateOutputCount());
-        var stateNodes = concrete.GetStateParamDataNodes();
+        Assert.Equal(1, concrete.Internal.GetStateUpdateOutputCount());
+        var stateNodes = concrete.Internal.GetStateParamDataNodes();
         Assert.Single(stateNodes);
 
-        float StateValue(InternalComputationGraph g) =>
-            g.GetStateParamDataNodes()[0].Attributes
+        float StateValue(ComputationGraph g) =>
+            g.Internal.GetStateParamDataNodes()[0].Attributes
                 .GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData)!
                 .As<float32>().AccessMemory()[0];
 
@@ -584,7 +584,7 @@ public class CodegenFreeModuleTests
     {
         var input = TensorData([4L], new float[] { 1f, 2f, 3f, 4f });
 
-        InternalComputationGraph Concretize(Func<Tensor<float32>, Tensor<float32>> body, string name)
+        ComputationGraph Concretize(Func<Tensor<float32>, Tensor<float32>> body, string name)
         {
             var graph = ModuleFactory.ComputationGraph(body, name);
             return graph.ToConcreteArchitecture(graph.FromOrderedInputs([input])).ToConcreteModel();
@@ -593,10 +593,10 @@ public class CodegenFreeModuleTests
         var sugar = Concretize(StateUpdateInLoopCarriedBody, "CodegenFreeInLoopState");
         var afterLoop = Concretize(StateUpdateAfterLoopCarriedBody, "CodegenFreeAfterLoopState");
 
-        InternalComputationGraph[] variants = [sugar, afterLoop];
+        ComputationGraph[] variants = [sugar, afterLoop];
         foreach (var concrete in variants)
         {
-            Assert.Equal(1, concrete.GetStateUpdateOutputCount());
+            Assert.Equal(1, concrete.Internal.GetStateUpdateOutputCount());
             Assert.Equal(0f, StateValue(concrete));
 
             var (outputs1, updated1) = ComputeContext.Default.ExecuteWithState(concrete, input);
@@ -625,7 +625,7 @@ public class CodegenFreeModuleTests
             .ToConcreteArchitecture(moduleGraph.FromOrderedInputs([input]))
             .ToConcreteModel();
 
-        Assert.Equal(1, concrete.GetStateUpdateOutputCount());
+        Assert.Equal(1, concrete.Internal.GetStateUpdateOutputCount());
         Assert.Equal(0f, StateValue(concrete));
 
         var (outputs1, updated1) = ComputeContext.Default.ExecuteWithState(concrete, input);

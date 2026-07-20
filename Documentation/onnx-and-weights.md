@@ -129,6 +129,12 @@ ComputationGraph g2 = OnnxModelImporter.FromOnnxModel(byteArray);
 ComputationGraph g3 = OnnxModelImporter.FromOnnxModel(stream);
 ```
 
+Models written by Shorokoo carry a graph-kind metadata tag (`shrk_graph_kind` in
+the model's metadata props), so an imported graph's `Kind` is the kind it was
+saved with. Foreign models have no tag and are classified by op-scanning. A tag
+that is structurally impossible for the model's content (a hand-edited or
+corrupt file) fails the import loudly.
+
 Models using ONNX external data (the standard layout for large third-party models)
 load transparently from a **file path** — `location` keys resolve against the model
 file's directory, honoring `offset`/`length` slicing. When importing from bytes or a

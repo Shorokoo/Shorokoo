@@ -82,6 +82,28 @@ namespace Shorokoo.Graph
         }
 
         /// <summary>
+        /// Returns this graph re-stamped as <paramref name="kind"/> — the escape hatch for
+        /// graphs whose stamp is missing or wrong (a legacy file whose header predates the
+        /// stamp, a foreign import classified by op-scanning). The target kind must be
+        /// valid for the graph's content, checked structurally
+        /// (<see cref="SrkFileFormat.DescribeKindViolation"/>): a module must not have
+        /// initialized model parameters; a concrete architecture additionally needs a
+        /// statically known parameter space and no initialized parameters (the RngSeed
+        /// identity excepted); a concrete model needs every parameter statically known and
+        /// initialized. Throws naming the violated requirement otherwise. Both wrappers
+        /// share the same readonly-held graph; no copy is made.
+        /// </summary>
+        public ComputationGraph WithKind(GraphKind kind)
+        {
+            if (kind == Kind) return this;
+            if (SrkFileFormat.DescribeKindViolation(_graph, kind) is { } violation)
+                throw new System.InvalidOperationException(
+                    $"Cannot re-stamp this '{SrkFileFormat.StageName(Kind)}' graph as " +
+                    $"'{SrkFileFormat.StageName(kind)}': {violation}");
+            return new ComputationGraph(_graph, kind);
+        }
+
+        /// <summary>
         /// Fail-fast kind check for user-facing operations: throws when <see cref="Kind"/>
         /// is not <paramref name="required"/>, naming the operation and both kinds;
         /// returns the borrowed internal graph (read-only — see <see cref="Internal"/>)

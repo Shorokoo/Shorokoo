@@ -119,8 +119,9 @@ namespace Shorokoo.Onnx
 
             // Concrete models only: externalization covers exactly the top-level graph
             // initializers, which is complete when — and only when — all weights live
-            // there. A ModelProto carries no stamped kind, so classify by op scan.
-            var stage = SrkFileFormat.DetectStage(model);
+            // there. Shorokoo-written models carry the graph-kind metadata tag; only
+            // untagged (foreign) protos fall back to op-scan classification.
+            var stage = SrkFileFormat.TryReadKindTag(model) ?? SrkFileFormat.DetectStage(model);
             if (stage != GraphKind.ConcreteModel)
                 throw new ModelException(ErrorCodes.XD008, $"model '{filePath}'",
                     $"SaveWithExternalData requires a '{SrkFileFormat.StageName(GraphKind.ConcreteModel)}' " +

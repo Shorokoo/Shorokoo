@@ -667,4 +667,44 @@ public class CompressedFormatUtilsCoverageTests
         Assert.Equal(GraphKind.ConcreteModel, reloaded.ToConcreteModel().Kind);
     }
 
+
+    /// <summary>
+    /// The graph kind rides ONNX serialization as a model metadata tag, so a graph
+    /// reloads as the kind it was saved with even as a bare ONNX payload — including
+    /// exactly the graphs op-scanning misclassifies (machinery-free module bodies and
+    /// parameterless architectures both scan as concrete-model). A tag that is
+    /// structurally impossible for the content fails loudly instead of stamping a lie.
+    /// </summary>
+    [Fact]
+    public void TestGraphKindMetadataTagRoundtripsThroughOnnx()
+    {
+        var moduleGraph = ModuleFactory.ComputationGraph(
+            (Func<Tensor<float32>, Tensor<float32>>)ParamlessDouble);
+        var arch = moduleGraph.ToConcreteArchitecture(
+            moduleGraph.FromOrderedInputs([TensorData([2L], 1.0f, 2.0f)]));
+
+        (ComputationGraph Graph, GraphKind Kind)[] cases =
+            [(moduleGraph, GraphKind.Module), (arch, GraphKind.ConcreteArchitecture)];
+        foreach (var (graph, kind) in cases)
+        {
+            var proto = FastOnnxModelBuilder.BuildInternalOnnxModel(graph.Internal, stage: graph.Kind);
+            using var ms = new MemoryStream();
+            ProtoBuf.Serializer.Serialize(ms, proto);
+            var reloaded = OnnxModelImporter.FromOnnxModel(ms.ToArray());
+            Assert.Equal(kind, reloaded.Kind);
+            // The tag is doing the work: op-scanning the same content misclassifies it.
+            Assert.Equal(GraphKind.ConcreteModel, SrkFileFormat.DetectStage(reloaded.Internal));
+        }
+
+        // Impossible tag: module machinery tagged concrete-model is refused at import.
+        var lyingProto = FastOnnxModelBuilder.BuildInternalOnnxModel(
+            ScalarMultiplyModel.ComputationGraph.Internal, stage: GraphKind.ConcreteModel);
+        using var lyingMs = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(lyingMs, lyingProto);
+        var ex = Assert.Throws<InvalidDataException>(
+            () => OnnxModelImporter.FromOnnxModel(lyingMs.ToArray()));
+        Assert.Contains("shrk_graph_kind", ex.Message);
+        Assert.Contains("module-stage op", ex.Message);
+    }
+
 }

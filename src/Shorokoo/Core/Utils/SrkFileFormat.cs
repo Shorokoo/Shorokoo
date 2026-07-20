@@ -181,6 +181,85 @@ namespace Shorokoo.Core.Utils
         }
 
         /// <summary>
+        /// Reads the graph-kind metadata tag (<see cref="Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkMetaGraphKind"/>)
+        /// stamped into a serialized model by the ONNX builders, so a saved graph can be
+        /// reloaded as the same kind. Null when the model carries no (recognizable) tag —
+        /// foreign models, or files written before the tag existed.
+        /// </summary>
+        internal static GraphKind? TryReadKindTag(Shorokoo.Core.Factory.IR.ModelProto model)
+        {
+            if (model is null) throw new ArgumentNullException(nameof(model));
+            foreach (var prop in model.MetadataProps)
+                if (prop.Key == OnnxOpAttributeNames.ShrkMetaGraphKind)
+                    return TryParseStageName(prop.Value);
+            return null;
+        }
+
+        /// <summary>
+        /// Checks whether <paramref name="kind"/> is a valid stamp for the graph's content.
+        /// Returns null when valid, else a sentence naming the violated requirement:
+        /// <list type="bullet">
+        /// <item><see cref="GraphKind.Module"/> — must not have initialized model parameters.</item>
+        /// <item><see cref="GraphKind.ConcreteArchitecture"/> — parameter number and shapes must be
+        /// statically known (no module-stage ops), and no model parameter may be initialized.</item>
+        /// <item><see cref="GraphKind.ConcreteModel"/> — parameters must be statically known
+        /// (no module-stage ops) and every parameter initialized (no unmaterialized
+        /// <c>MODEL_PARAM</c> nodes).</item>
+        /// </list>
+        /// </summary>
+        internal static string? DescribeKindViolation(InternalComputationGraph graph, GraphKind kind)
+        {
+            if (graph is null) throw new ArgumentNullException(nameof(graph));
+
+            // The RngSeed identity parameter at reserved ModelId [0] is not a weight
+            // (binding an RNG config IS its initialization, legitimate from architecture
+            // stage on), so it never counts as an "initialized model parameter" here.
+            int moduleOps = 0, uninitializedParams = 0, initializedParams = 0;
+            foreach (var node in graph.Nodes)
+            {
+                if (ModuleStageOps.Contains(node.OpCode) ||
+                    node.OpCode.StartsWith(InternalOpCodes.SUBMODEL, StringComparison.Ordinal))
+                    moduleOps++;
+                else if (node.OpCode == InternalOpCodes.MODEL_PARAM)
+                    uninitializedParams++;
+                else if (node.OpCode == InternalOpCodes.MODEL_PARAM_DATA &&
+                         node.IdentifierTemplate !=
+                             Shorokoo.Core.Nodes.Processors.Fast.FastWireRngKeyDerivation.RngSeedIdentifierTemplate)
+                    initializedParams++;
+            }
+
+            switch (kind)
+            {
+                case GraphKind.Module:
+                    if (initializedParams > 0)
+                        return $"a module graph cannot have initialized model parameters, " +
+                               $"but this graph carries {initializedParams} initialized parameter(s).";
+                    return null;
+
+                case GraphKind.ConcreteArchitecture:
+                    if (moduleOps > 0)
+                        return "a concrete architecture's parameter number and shapes must be statically " +
+                               $"known, but this graph still contains {moduleOps} module-stage op(s).";
+                    if (initializedParams > 0)
+                        return "a concrete architecture must not have initialized model parameters, " +
+                               $"but this graph carries {initializedParams} initialized parameter(s).";
+                    return null;
+
+                case GraphKind.ConcreteModel:
+                    if (moduleOps > 0)
+                        return "a concrete model's parameters must be statically known, " +
+                               $"but this graph still contains {moduleOps} module-stage op(s).";
+                    if (uninitializedParams > 0)
+                        return "a concrete model must have all model parameters initialized, " +
+                               $"but this graph carries {uninitializedParams} unmaterialized parameter(s).";
+                    return null;
+
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(kind), kind, null);
+            }
+        }
+
+        /// <summary>
         /// Op-scan classification of a serialized model: the <see cref="DetectStage(InternalComputationGraph)"/>
         /// rules applied to a <see cref="Shorokoo.Core.Factory.IR.ModelProto"/>'s main graph, nested
         /// subgraph attributes, and function bodies. Used where only the serialized artifact exists

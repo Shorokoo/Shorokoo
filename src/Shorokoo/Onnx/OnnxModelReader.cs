@@ -26,10 +26,12 @@ namespace Shorokoo.Onnx
     /// <summary>
     /// Imports serialized ONNX models into <see cref="ComputationGraph"/>s
     /// (deserializes the ModelProto, materializes any external tensor data, then builds
-    /// the graph via <c>OnnxModelReader</c>). Imported data carries no kind stamp, so
-    /// the returned graph's <see cref="ComputationGraph.Kind"/> is classified by
-    /// op-scanning (<see cref="Shorokoo.Core.Utils.SrkFileFormat.DetectStage(InternalComputationGraph)"/>) — the
-    /// sanctioned fallback for foreign/headerless data.
+    /// the graph via <c>OnnxModelReader</c>). Models written by Shorokoo carry a
+    /// graph-kind metadata tag, so the returned graph's
+    /// <see cref="ComputationGraph.Kind"/> reloads as the kind it was saved with;
+    /// untagged (foreign) models are classified by op-scanning
+    /// (<see cref="Shorokoo.Core.Utils.SrkFileFormat.DetectStage(InternalComputationGraph)"/>) — the
+    /// sanctioned fallback for data that arrives without a stamp.
     ///
     /// <para>
     /// Models using the standard ONNX external-data mechanism (initializer bytes in a
@@ -48,14 +50,18 @@ namespace Shorokoo.Onnx
         /// null, a model requiring external data fails loudly.
         /// </summary>
         public static ComputationGraph FromOnnxModel(Stream inputStream, string? externalDataDirectory = null)
-            => Wrap(FromOnnxModelToInternalGraph(inputStream, externalDataDirectory));
+            => Wrap(FromOnnxModelWithKindTag(inputStream, externalDataDirectory));
 
         /// <summary>
         /// Imports an ONNX model from a file path. External tensor data (if any)
         /// resolves against the file's directory.
         /// </summary>
         public static ComputationGraph FromOnnxModel(string filePath)
-            => Wrap(FromOnnxModelToInternalGraph(filePath));
+        {
+            using var fileReaderStream = File.OpenRead(filePath);
+            return Wrap(FromOnnxModelWithKindTag(
+                fileReaderStream, Path.GetDirectoryName(Path.GetFullPath(filePath))));
+        }
 
         /// <summary>
         /// Imports an ONNX model from in-memory bytes. <paramref name="externalDataDirectory"/>
@@ -63,19 +69,45 @@ namespace Shorokoo.Onnx
         /// null, a model requiring external data fails loudly.
         /// </summary>
         public static ComputationGraph FromOnnxModel(byte[] rawData, string? externalDataDirectory = null)
-            => Wrap(FromOnnxModelToInternalGraph(rawData, externalDataDirectory));
+        {
+            using var stream = new MemoryStream(rawData);
+            return Wrap(FromOnnxModelWithKindTag(stream, externalDataDirectory));
+        }
 
-        private static ComputationGraph Wrap(InternalComputationGraph graph)
-            => new(graph, Shorokoo.Core.Utils.SrkFileFormat.DetectStage(graph));
+        private static ComputationGraph Wrap((InternalComputationGraph Graph, Shorokoo.Graph.GraphKind? TaggedKind) import)
+            => new(import.Graph,
+                import.TaggedKind ?? Shorokoo.Core.Utils.SrkFileFormat.DetectStage(import.Graph));
 
-        /// <summary>Internal-graph form of <see cref="FromOnnxModel(Stream, string?)"/>.</summary>
-        internal static InternalComputationGraph FromOnnxModelToInternalGraph(Stream inputStream, string? externalDataDirectory = null)
+        /// <summary>
+        /// Internal-graph import that also surfaces the graph-kind metadata tag the
+        /// Shorokoo ONNX builders stamp into the model (null for untagged/foreign
+        /// models). A tag that is structurally impossible for the imported content
+        /// (per <see cref="Shorokoo.Core.Utils.SrkFileFormat.DescribeKindViolation"/>)
+        /// fails loudly — the file is corrupt or written by an incompatible tool.
+        /// </summary>
+        internal static (InternalComputationGraph Graph, Shorokoo.Graph.GraphKind? TaggedKind)
+            FromOnnxModelWithKindTag(Stream inputStream, string? externalDataDirectory = null)
         {
             var model = ProtoBuf.Serializer.Deserialize<IR.ModelProto>(inputStream);
             OnnxExternalData.LoadIntoModel(model, externalDataDirectory);
+            var taggedKind = Shorokoo.Core.Utils.SrkFileFormat.TryReadKindTag(model);
             var reader = new OnnxModelReader(model);
-            return reader.BuildInternalComputationGraph();
+            var graph = reader.BuildInternalComputationGraph();
+
+            if (taggedKind is { } kind &&
+                Shorokoo.Core.Utils.SrkFileFormat.DescribeKindViolation(graph, kind) is { } violation)
+                throw new InvalidDataException(
+                    $"the model's '{Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkMetaGraphKind}' " +
+                    $"metadata declares kind '{Shorokoo.Core.Utils.SrkFileFormat.StageName(kind)}', but the " +
+                    $"graph content is incompatible: {violation} " +
+                    "The file is corrupt or was written by an incompatible tool.");
+
+            return (graph, taggedKind);
         }
+
+        /// <summary>Internal-graph form of <see cref="FromOnnxModel(Stream, string?)"/>.</summary>
+        internal static InternalComputationGraph FromOnnxModelToInternalGraph(Stream inputStream, string? externalDataDirectory = null)
+            => FromOnnxModelWithKindTag(inputStream, externalDataDirectory).Graph;
 
         /// <summary>Internal-graph form of <see cref="FromOnnxModel(string)"/>.</summary>
         internal static InternalComputationGraph FromOnnxModelToInternalGraph(string filePath)

@@ -527,6 +527,20 @@ public class OnnxExternalDataTests
         Assert.Contains("'module'", ex.Message);
         Assert.False(File.Exists(path));
         Assert.False(File.Exists(path + ".data"));
+
+        // A concrete ARCHITECTURE is refused via its graph-kind metadata tag. Op-scanning
+        // alone cannot catch this case: serialization rewrites MODEL_PARAM nodes to
+        // encoded initializer-function calls, so the proto scan sees no parameter marker.
+        var moduleGraph = Shorokoo.Tests.Modules.ScalarMultiplyModel.ComputationGraph;
+        var arch = moduleGraph.ToConcreteArchitecture(
+            moduleGraph.FromOrderedInputs([TensorData([2L], 1.0f, 2.0f)]));
+        var archProto = FastOnnxModelBuilder.BuildInternalOnnxModel(arch.Internal, stage: arch.Kind);
+        var exArch = Assert.Throws<ModelException>(
+            () => OnnxModelExporter.SaveWithExternalData(archProto, path));
+        Assert.Contains("XD008", exArch.Message);
+        Assert.Contains("'concrete-architecture'", exArch.Message);
+        Assert.False(File.Exists(path));
+        Assert.False(File.Exists(path + ".data"));
     }
 
 }

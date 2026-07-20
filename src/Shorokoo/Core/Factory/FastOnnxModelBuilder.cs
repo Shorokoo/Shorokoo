@@ -96,7 +96,7 @@ namespace Shorokoo.Core.Factory
                     $"'{Shorokoo.Core.Utils.SrkFileFormat.StageName(graph.Kind)}'. Lower the graph first " +
                     "(ToConcreteArchitecture -> ToConcreteModel) and export that. Shorokoo's own .srk/.zsrk " +
                     "persistence (CompressedFormatUtils.SaveFastGraphToFile/SaveFastGraphToBinary) accepts every graph kind.");
-            return BuildOnnxModelCore(graph.Internal, opset, prepForOnnx, vanillaExport: true);
+            return BuildOnnxModelCore(graph.Internal, opset, prepForOnnx, vanillaExport: true, stage: graph.Kind);
         }
 
         /// <summary>
@@ -125,14 +125,16 @@ namespace Shorokoo.Core.Factory
         internal static ModelProto BuildInternalOnnxModel(
             InternalComputationGraph fastGraph,
             OpSetVersion opset = OpSetVersion.OPS_21,
-            bool prepForOnnx = false)
-            => BuildOnnxModelCore(fastGraph, opset, prepForOnnx, vanillaExport: false);
+            bool prepForOnnx = false,
+            Shorokoo.Graph.GraphKind? stage = null)
+            => BuildOnnxModelCore(fastGraph, opset, prepForOnnx, vanillaExport: false, stage: stage);
 
         private static ModelProto BuildOnnxModelCore(
             InternalComputationGraph fastGraph,
             OpSetVersion opset,
             bool prepForOnnx,
-            bool vanillaExport)
+            bool vanillaExport,
+            Shorokoo.Graph.GraphKind? stage = null)
         {
             if (fastGraph is null) throw new ArgumentNullException(nameof(fastGraph));
 
@@ -191,6 +193,17 @@ namespace Shorokoo.Core.Factory
             // ----- 6. Attach TensorStructDef metadata for any struct-typed
             // inputs/outputs so the loader can reconstruct DType identity.
             AddTensorStructMetadata(model, prepFast, tensorInfoLookup);
+
+            // ----- 6b. Stamp the graph kind into the model metadata when the caller
+            // knows it, so a serialized graph reloads as the same kind instead of
+            // being re-classified by op-scanning (which cannot see e.g. MODEL_PARAM
+            // nodes — they serialize as encoded initializer-function calls).
+            if (stage is { } s)
+                model.MetadataProps.Add(new StringStringEntryProto
+                {
+                    Key = OnnxOpAttributeNames.ShrkMetaGraphKind,
+                    Value = Shorokoo.Core.Utils.SrkFileFormat.StageName(s),
+                });
 
             // (The model's RNG identity needs no side channel: it is the ordinary RngSeed
             // parameter at ModelId [0], serialized as a plain initializer like any other

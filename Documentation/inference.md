@@ -115,6 +115,14 @@ pipeline fails immediately with a clear message instead of deep inside execution
 place return a new graph instead (e.g. `WithRngConfig`), so a graph's `Kind` can
 never be invalidated behind your back.
 
+If a graph arrives with the wrong kind — a legacy file saved before the kind
+existed, or a foreign import that op-scanning misjudged — re-stamp it with
+**`WithKind(kind)`**. The target kind is validated against the graph's content
+(a module must not have initialized parameters; a concrete architecture
+additionally needs a statically known parameter space; a concrete model needs
+every parameter initialized), so a stamp that would lie about the graph is
+refused with an error naming the violated requirement.
+
 ## Running a `[Module]` with `[Hyper]` parameters
 
 A module's `ComputationGraph` lists its `[Hyper]` parameters as graph inputs

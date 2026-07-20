@@ -946,4 +946,56 @@ public class ModulesCoverageTests
         Assert.Single(outputs);
     }
 
+
+    private static Tensor<float32> MachineryFreeBody(Tensor<float32> x) => x + x;
+
+    /// <summary>
+    /// WithKind re-stamps a graph when the target kind is structurally valid for its
+    /// content, and refuses impossible stamps naming the violated requirement. The
+    /// valid path is the escape hatch for op-scan misclassification: a machinery-free
+    /// module body op-scans as concrete-model, and WithKind restores the true kind.
+    /// </summary>
+    [Fact]
+    public void TestWithKindReStampValidationCoverage()
+    {
+        var sample = TensorData([2L], 1.0f, 2.0f);
+        var moduleGraph = ScalarMultiplyModel.ComputationGraph;
+        var arch = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([sample]));
+        var model = arch.ToConcreteModel();
+
+        // Same-kind re-stamp is the identity.
+        Assert.Same(moduleGraph, moduleGraph.WithKind(GraphKind.Module));
+
+        // Valid: an architecture carries no initialized parameters, so Module is legal.
+        Assert.Equal(GraphKind.Module, arch.WithKind(GraphKind.Module).Kind);
+
+        // Invalid: a module graph's parameter space is not statically known…
+        var exToArch = Assert.Throws<InvalidOperationException>(
+            () => moduleGraph.WithKind(GraphKind.ConcreteArchitecture));
+        Assert.Contains("module-stage op", exToArch.Message);
+
+        // …an architecture's parameters are not initialized…
+        var exToModel = Assert.Throws<InvalidOperationException>(
+            () => arch.WithKind(GraphKind.ConcreteModel));
+        Assert.Contains("unmaterialized", exToModel.Message);
+
+        // …and a concrete model's parameters ARE initialized, so neither earlier kind fits.
+        var exBackToArch = Assert.Throws<InvalidOperationException>(
+            () => model.WithKind(GraphKind.ConcreteArchitecture));
+        Assert.Contains("initialized", exBackToArch.Message);
+        var exBackToModule = Assert.Throws<InvalidOperationException>(
+            () => model.WithKind(GraphKind.Module));
+        Assert.Contains("initialized", exBackToModule.Message);
+
+        // Misclassification escape hatch: a machinery-free module body op-scans as
+        // concrete-model when no stamp is available; WithKind(Module) makes it lowerable.
+        var misStamped = ComputationGraph.FromInternal(
+            ModuleFactory.ComputationGraph((Func<Tensor<float32>, Tensor<float32>>)MachineryFreeBody)
+                .ToInternal());
+        Assert.Equal(GraphKind.ConcreteModel, misStamped.Kind);
+        var reStamped = misStamped.WithKind(GraphKind.Module);
+        var relowered = reStamped.ToConcreteArchitecture(reStamped.FromOrderedInputs([sample]));
+        Assert.Equal(GraphKind.ConcreteArchitecture, relowered.Kind);
+    }
+
 }

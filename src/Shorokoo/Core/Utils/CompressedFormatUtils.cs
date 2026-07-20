@@ -169,15 +169,19 @@ namespace Shorokoo.Core.Utils
             InternalComputationGraph graph, GraphKind? stage = null, bool compressed = true,
             int compressionLevel = DefaultCompressionLevel)
         {
+            var resolvedStage = stage ?? SrkFileFormat.DetectStage(graph);
             using var memoryStream = new MemoryStream();
-            var model = FastOnnxModelBuilder.BuildInternalOnnxModel(graph);
+            // The stage rides in the payload's metadata too (not just this container's
+            // header), so the graph reloads as the same kind even when the payload
+            // travels as a bare ONNX model.
+            var model = FastOnnxModelBuilder.BuildInternalOnnxModel(graph, stage: resolvedStage);
             Serializer.Serialize(memoryStream, model);
             var onnxBytes = memoryStream.ToArray();
 
             KeyValuePair<string, long>[] opsets =
                 [.. model.OpsetImports.Select(o => new KeyValuePair<string, long>(o.Domain, o.Version))];
             return SrkFileFormat.Write(
-                onnxBytes, stage ?? SrkFileFormat.DetectStage(graph), compressed, compressionLevel,
+                onnxBytes, resolvedStage, compressed, compressionLevel,
                 model.IrVersion, opsets);
         }
 
@@ -226,9 +230,11 @@ namespace Shorokoo.Core.Utils
             }
 
             InternalComputationGraph graph;
+            GraphKind? taggedKind;
             try
             {
-                graph = OnnxModelImporter.FromOnnxModelToInternalGraph(onnxBytes);
+                using var onnxStream = new MemoryStream(onnxBytes);
+                (graph, taggedKind) = OnnxModelImporter.FromOnnxModelWithKindTag(onnxStream);
             }
             catch (Exception e) when (e is ProtoBuf.ProtoException
                 or EndOfStreamException
@@ -252,7 +258,7 @@ namespace Shorokoo.Core.Utils
             if (header is null && requiredStage is not null)
                 SrkFileFormat.EnforceStage(SrkFileFormat.DetectStage(graph), requiredStage.Value, origin);
 
-            return (graph, header?.TryGetStage() ?? SrkFileFormat.DetectStage(graph));
+            return (graph, header?.TryGetStage() ?? taggedKind ?? SrkFileFormat.DetectStage(graph));
         }
 
         /// <summary>

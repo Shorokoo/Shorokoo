@@ -38,7 +38,7 @@ public class AutoDiffCheckpointingCoverageTests
         var branch2 = OnnxOp.Add(activation, bias2);
         var final = OnnxOp.Add(branch1, branch2);
 
-        var graph = new FastComputationGraph(
+        var graph = new InternalComputationGraph(
             ImmutableArray.Create<Variable>(input, weights, bias1, bias2),
             ImmutableArray.Create((Variable)final));
 
@@ -129,7 +129,7 @@ public class AutoDiffCheckpointingCoverageTests
             mode: null, nearestMode: null);
         var randomLike = OnnxOp.RandomNormalLike(x, seed: 11f);
 
-        var graph = new FastComputationGraph(
+        var graph = new InternalComputationGraph(
             [x, w, convBias, deconvBias, a, b, scale, bias, mean, variance, v],
             [conv, deconv, gemm, einsum, maxPool, avgPool, globalLp, globalMax, globalAvg,
              bn, lrn, det, topVals, topIdx, resized, randomLike]);
@@ -187,7 +187,7 @@ public class AutoDiffCheckpointingCoverageTests
         var constInt = OnnxOp.Constant(7L);    // value_int branch
         var constFloat = OnnxOp.Constant(2.5f); // value_float branch
 
-        var graph = new FastComputationGraph(
+        var graph = new InternalComputationGraph(
             [x, v],
             [det, topVals, topIdx, constTensor, constInt, constFloat]);
 

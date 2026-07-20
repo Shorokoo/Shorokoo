@@ -63,7 +63,7 @@ internal sealed class LoopCloseOp : QuickOp
     }
 
     public override (IRuntimeTensor[] results, bool loopBack) Execute(
-        FastNode node, FastComputationGraph graph, Dictionary<FastNodeKey, FastNode> nodeByKey,
+        FastNode node, InternalComputationGraph graph, Dictionary<FastNodeKey, FastNode> nodeByKey,
         Dictionary<FastTensorKey, IRuntimeTensor> store, int maxDataElements)
     {
         FastNode? openNode = null;

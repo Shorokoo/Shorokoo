@@ -22,7 +22,7 @@ using static Shorokoo.Core.Nodes.NodeDefinitions.OpCodes;
 namespace Shorokoo.Core.AutoDiffCheckpointing;
 
 /// <summary>
-/// Runs shape inference on a concrete <see cref="FastComputationGraph"/> by first
+/// Runs shape inference on a concrete <see cref="InternalComputationGraph"/> by first
 /// executing the graph through the <see cref="QuickExecutionEngine"/> (pure C#) and
 /// then falling back to ONNX Runtime per-node execution only for tensors whose shape
 /// QEE could not resolve.
@@ -35,7 +35,7 @@ namespace Shorokoo.Core.AutoDiffCheckpointing;
 ///
 /// <para>
 /// The caller declares which tensor keys are actually needed via the
-/// <c>requiredKeys</c> parameter on <see cref="Infer(FastComputationGraph, IReadOnlyCollection{FastTensorKey}?, TensorData[])"/>;
+/// <c>requiredKeys</c> parameter on <see cref="Infer(InternalComputationGraph, IReadOnlyCollection{FastTensorKey}?, TensorData[])"/>;
 /// only those drive the ORT fallback. The convenience overload defaults to "every output
 /// tensor of every node" so existing callers (which iterate the whole graph) continue
 /// to receive shapes for everything.
@@ -60,14 +60,14 @@ internal class ShapeInferenceInterpreter
 
     /// <summary>
     /// Convenience overload: infers shapes for every output tensor of every node in
-    /// the graph. See <see cref="Infer(FastComputationGraph, IReadOnlyCollection{FastTensorKey}?, TensorData[])"/>
+    /// the graph. See <see cref="Infer(InternalComputationGraph, IReadOnlyCollection{FastTensorKey}?, TensorData[])"/>
     /// for the explicit form.
     /// </summary>
-    public ShapeInferenceResult Infer(FastComputationGraph graph, params TensorData[] sampleInputs)
+    public ShapeInferenceResult Infer(InternalComputationGraph graph, params TensorData[] sampleInputs)
         => Infer(graph, requiredKeys: null, sampleInputs);
 
     /// <summary>
-    /// Runs shape inference on a concrete <see cref="FastComputationGraph"/> using the
+    /// Runs shape inference on a concrete <see cref="InternalComputationGraph"/> using the
     /// provided sample inputs.
     /// </summary>
     /// <param name="graph">A concrete computation graph (post-ToConcreteArchitecture/ToConcreteModel).</param>
@@ -79,7 +79,7 @@ internal class ShapeInferenceInterpreter
     /// <param name="sampleInputs">Sample input tensor data, one per graph input, in order.</param>
     /// <returns>Shape inference results containing per-tensor shape information.</returns>
     public ShapeInferenceResult Infer(
-        FastComputationGraph graph,
+        InternalComputationGraph graph,
         IReadOnlyCollection<FastTensorKey>? requiredKeys,
         params TensorData[] sampleInputs)
     {
@@ -192,7 +192,7 @@ internal class ShapeInferenceInterpreter
         return new TensorShapeInfo(r.Shape, r.DType, data);
     }
 
-    private static List<FastTensorKey> CollectAllOutputKeys(FastComputationGraph graph)
+    private static List<FastTensorKey> CollectAllOutputKeys(InternalComputationGraph graph)
     {
         var keys = new List<FastTensorKey>();
         foreach (var node in graph.Nodes)
@@ -201,7 +201,7 @@ internal class ShapeInferenceInterpreter
         return keys;
     }
 
-    private static FastNode? TryFindProducer(FastComputationGraph graph, FastTensorKey key)
+    private static FastNode? TryFindProducer(InternalComputationGraph graph, FastTensorKey key)
     {
         // Linear scan; nothing in the optimization stack calls Infer in a hot loop so
         // building a producer map up front is unnecessary unless many keys are missing.
@@ -257,9 +257,9 @@ internal class ShapeInferenceInterpreter
 
     private void ExecuteNode(FastNode node, Dictionary<FastTensorKey, TensorShapeInfo> tensorStore)
     {
-        // Build a tiny FastComputationGraph: [N CONSTANT nodes] → [op clone] → outputs.
+        // Build a tiny InternalComputationGraph: [N CONSTANT nodes] → [op clone] → outputs.
         var inputs = node.Inputs;
-        var miniGraph = new FastComputationGraph();
+        var miniGraph = new InternalComputationGraph();
         var constantOutputKeys = new FastTensorKey?[inputs.Count];
 
         for (int i = 0; i < inputs.Count; i++)

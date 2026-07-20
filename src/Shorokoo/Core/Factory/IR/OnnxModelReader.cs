@@ -38,7 +38,7 @@ namespace Shorokoo.Core.Factory.IR
     }
 
     /// <summary>
-    /// ONNX IR loader. The public entry point <see cref="BuildFastComputationGraph"/>
+    /// ONNX IR loader. The public entry point <see cref="BuildInternalComputationGraph"/>
     /// runs two passes:
     /// <list type="number">
     ///   <item>Each <see cref="FunctionProto"/> is reified as a <see cref="Function"/>
@@ -47,7 +47,7 @@ namespace Shorokoo.Core.Factory.IR
     ///         <see cref="EnumerateNodesInProtoOrder"/> + <see cref="CreateFastNodes"/>
     ///         to materialize FastNodes directly.</item>
     ///   <item>The top-level <see cref="GraphProto"/> goes through the same FastCG
-    ///         pipeline via <see cref="internalBuildFastComputationGraph"/>.</item>
+    ///         pipeline via <see cref="internalBuildInternalComputationGraph"/>.</item>
     /// </list>
     /// A post-pass <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastUnPrepFromOnnx"/>
     /// undoes the close-input identity wrapping that the saver inserted.
@@ -63,7 +63,7 @@ namespace Shorokoo.Core.Factory.IR
             this.OpSetVersion = (OpSetVersion)model.OpsetImports[0].Version;
         }
 
-        public FastComputationGraph BuildFastComputationGraph()
+        public InternalComputationGraph BuildInternalComputationGraph()
         {
             // Lower control-flow ops Shorokoo doesn't execute natively (Scan → Loop)
             // and reject unsupported ones (SequenceMap) with an actionable error,
@@ -73,7 +73,7 @@ namespace Shorokoo.Core.Factory.IR
             var tensorStructDefs = ParseTensorStructMetadata(this.model);
 
             var (functions, onnxNameToFunction) = internalBuildFunctions(this.model.Functions, this.OpSetVersion, tensorStructDefs);
-            var fastGraph = internalBuildFastComputationGraph(this.model.Graph, functions, onnxNameToFunction, this.OpSetVersion, tensorStructDefs);
+            var fastGraph = internalBuildInternalComputationGraph(this.model.Graph, functions, onnxNameToFunction, this.OpSetVersion, tensorStructDefs);
             Shorokoo.Core.Nodes.Processors.Fast.FastUnPrepFromOnnx.Process(fastGraph);
             return fastGraph;
         }
@@ -209,7 +209,7 @@ namespace Shorokoo.Core.Factory.IR
                 // inputs are function-input hyperparams) above their enclosing LOOP_OPEN,
                 // breaking downstream OPEN/CLOSE-band passes like
                 // FastFoldConstantIterationLoops.
-                var fastGraph = new FastComputationGraph();
+                var fastGraph = new InternalComputationGraph();
                 var tensorKeys = new Dictionary<string, FastTensorKey>();
 
                 var infosByName = functionProto.ValueInfoes.ToDictionary(x => x.Name, x => x);
@@ -454,14 +454,14 @@ namespace Shorokoo.Core.Factory.IR
         /// by reference (each <see cref="Function"/> internally maintains both CG and
         /// FastCG views).
         /// </summary>
-        private static FastComputationGraph internalBuildFastComputationGraph(
+        private static InternalComputationGraph internalBuildInternalComputationGraph(
             GraphProto graphProto,
             Function[] functions,
             Dictionary<string, Function> onnxNameToFunction,
             OpSetVersion opset,
             ImmutableDictionary<int, TensorStructDef>? tensorStructDefs = null)
         {
-            var fastGraph = new FastComputationGraph();
+            var fastGraph = new InternalComputationGraph();
             var functionsMap = onnxNameToFunction.ToImmutableDictionary();
 
             var tensorKeys = new Dictionary<string, FastTensorKey>();
@@ -829,7 +829,7 @@ namespace Shorokoo.Core.Factory.IR
         /// </list>
         /// </summary>
         private static void CreateFastNodes(
-            FastComputationGraph fastGraph,
+            InternalComputationGraph fastGraph,
             IEnumerable<TempNode> tempNodes,
             Dictionary<string, FastTensorKey> tensorKeys,
             IReadOnlyDictionary<string, Function> functionsMap,
@@ -932,7 +932,7 @@ namespace Shorokoo.Core.Factory.IR
         {
             var attrDefs = Definitions.NodeDefinitions[InternalOpCodes.FUNCTION_INVOKE].AttributeDefs;
             var fastFnGraph = function.OriginalFastGraph;
-            var fnOutputs = FastComputationGraphConverter.BuildNodes(fastFnGraph).outputs;
+            var fnOutputs = InternalComputationGraphConverter.BuildNodes(fastFnGraph).outputs;
             var fnRankOverrides = fastFnGraph.OutputRankOverrides is null
                 ? fnOutputs.Select(x => (int?)x.Rank).ToImmutableArray()
                 : fastFnGraph.OutputRankOverrides.ToImmutableArray();

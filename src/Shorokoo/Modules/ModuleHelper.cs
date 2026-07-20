@@ -63,7 +63,7 @@ namespace Shorokoo.Core
             }
         }
 
-        private static Function StoreCachedSignature(string signature, FastComputationGraph graph)
+        private static Function StoreCachedSignature(string signature, InternalComputationGraph graph)
         {
             lock (targetFunctionCache)
             {
@@ -205,7 +205,7 @@ namespace Shorokoo.Core
                                 (int?)null).ToArray();
 
 
-            var graph = new FastComputationGraph([.. hyperparamInputs, .. inputInputs], [..outputVariables], [..rankOverrides]);
+            var graph = new InternalComputationGraph([.. hyperparamInputs, .. inputInputs], [..outputVariables], [..rankOverrides]);
 
             return StoreCachedSignature(signature, graph);
         }
@@ -267,7 +267,7 @@ namespace Shorokoo.Core
             // Use the factored GraphBuilder code to build the function body in its
             // primary FastCG form. The Function ctor stores it directly; the legacy
             // CG view is materialized lazily on demand.
-            var fastGraph = GraphBuilder.BuildFastComputationGraphFromMethod(methodToBuild, invokeTarget);
+            var fastGraph = GraphBuilder.BuildInternalComputationGraphFromMethod(methodToBuild, invokeTarget);
 
             var fnType = FunctionType.Module;
             if (isStateParamInitializer)

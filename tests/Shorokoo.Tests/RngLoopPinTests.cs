@@ -67,7 +67,7 @@ public class RngLoopPinTests
 {
     private static (long slot1Out, long slot3Out, bool hasLoopSlot) Slots<TModule>()
     {
-        var g = (FastComputationGraph)typeof(TModule)
+        var g = (InternalComputationGraph)typeof(TModule)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var input = TensorData([1L, 4L], 0.1f, 0.2f, 0.3f, 0.4f);
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));

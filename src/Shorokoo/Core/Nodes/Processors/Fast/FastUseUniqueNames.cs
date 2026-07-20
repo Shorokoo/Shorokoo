@@ -35,7 +35,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <summary>
         /// Rewrite the graph using a fresh per-graph counter starting at 1.
         /// </summary>
-        public static void Process(FastComputationGraph graph)
+        public static void Process(InternalComputationGraph graph)
         {
             int counter = 0;
             ProcessWithCounter(graph, ref counter);
@@ -48,23 +48,23 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// functions).
         /// </summary>
         /// <summary>
-        /// Same as <see cref="Process(FastComputationGraph)"/> but returns the
+        /// Same as <see cref="Process(InternalComputationGraph)"/> but returns the
         /// <c>oldKey → newKey</c> map. Useful when the caller has additional
         /// data structures (e.g. tensor info lookups) keyed by old keys that
         /// also need rewriting.
         /// </summary>
-        public static Dictionary<FastNodeKey, FastNodeKey> ProcessAndReturnMap(FastComputationGraph graph)
+        public static Dictionary<FastNodeKey, FastNodeKey> ProcessAndReturnMap(InternalComputationGraph graph)
         {
             int counter = 0;
             return ProcessWithCounterAndReturnMap(graph, ref counter);
         }
 
-        public static void ProcessWithCounter(FastComputationGraph graph, ref int counter)
+        public static void ProcessWithCounter(InternalComputationGraph graph, ref int counter)
         {
             ProcessWithCounterAndReturnMap(graph, ref counter);
         }
 
-        public static Dictionary<FastNodeKey, FastNodeKey> ProcessWithCounterAndReturnMap(FastComputationGraph graph, ref int counter)
+        public static Dictionary<FastNodeKey, FastNodeKey> ProcessWithCounterAndReturnMap(InternalComputationGraph graph, ref int counter)
         {
             // Pass 1: assign fresh sequential keys and FriendlyNames; remember
             // the old → new key mapping for the rewrite pass.

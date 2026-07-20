@@ -40,7 +40,7 @@ internal class Rematerializer
     /// <summary>
     /// Applies rematerialization to the graph.
     /// </summary>
-    public FastComputationGraph Apply(FastComputationGraph graph, ShapeInferenceResult shapeInfo)
+    public InternalComputationGraph Apply(InternalComputationGraph graph, ShapeInferenceResult shapeInfo)
     {
         var currentGraph = graph;
         var currentShapeInfo = shapeInfo;
@@ -207,8 +207,8 @@ internal class Rematerializer
     /// Returns the modified graph and a mapping from new tensor keys to the original
     /// tensor keys they replicate.
     /// </summary>
-    private static (FastComputationGraph graph, Dictionary<FastTensorKey, FastTensorKey> tensorMapping) ApplyRematerialization(
-        FastComputationGraph graph, HashSet<FastTensorKey> replayedTensors)
+    private static (InternalComputationGraph graph, Dictionary<FastTensorKey, FastTensorKey> tensorMapping) ApplyRematerialization(
+        InternalComputationGraph graph, HashSet<FastTensorKey> replayedTensors)
     {
         var copy = graph.Clone();
 

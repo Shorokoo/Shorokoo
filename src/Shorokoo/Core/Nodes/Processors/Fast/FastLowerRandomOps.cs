@@ -36,7 +36,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastLowerRandomOps
     {
-        public static void Process(FastComputationGraph graph)
+        public static void Process(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -45,7 +45,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         private static void ProcessGraph(
-            FastComputationGraph graph, Dictionary<Function, Function> functionRemap)
+            InternalComputationGraph graph, Dictionary<Function, Function> functionRemap)
         {
             // Lower every Function reachable from this graph first (memoized per Function instance).
             foreach (var node in graph.Nodes)
@@ -171,7 +171,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 defaultName: fn.DefaultName, friendlyName: fn.FriendlyName);
         }
 
-        private static bool HasRandomOps(FastComputationGraph graph) =>
+        private static bool HasRandomOps(InternalComputationGraph graph) =>
             graph.Nodes.Any(node =>
                 node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
                 node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||

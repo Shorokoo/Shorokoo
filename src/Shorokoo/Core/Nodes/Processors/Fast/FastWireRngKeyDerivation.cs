@@ -51,13 +51,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// architecture, a <c>MODEL_PARAM_DATA</c> holding the identity vector once bound.
         /// Null when the graph has no runtime random surface (or predates concretization).
         /// </summary>
-        public static FastNode? FindRngSeedNode(FastComputationGraph graph)
+        public static FastNode? FindRngSeedNode(InternalComputationGraph graph)
             => graph.Nodes.FirstOrDefault(n =>
                 (n.OpCode == InternalOpCodes.MODEL_PARAM || n.OpCode == InternalOpCodes.MODEL_PARAM_DATA)
                 && n.IdentifierTemplate == RngSeedIdentifierTemplate);
 
         /// <summary>The id-bearing runtime random feeds (the graph's runtime RNG sites).</summary>
-        public static IEnumerable<FastNode> IdBearingFeeds(FastComputationGraph graph)
+        public static IEnumerable<FastNode> IdBearingFeeds(InternalComputationGraph graph)
             => graph.Nodes.Where(n =>
                 (n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
                  n.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL) &&
@@ -70,7 +70,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// has at least one id-bearing runtime feed: a model without random computation carries
         /// no <c>RngSeed</c>, no chains, and nothing RNG-related — persisted or otherwise.
         /// </summary>
-        public static void CreateRngSeedAndWireChains(FastComputationGraph graph)
+        public static void CreateRngSeedAndWireChains(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
             if (!IdBearingFeeds(graph).Any()) return;
@@ -111,7 +111,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// producer while leaving the vector itself intact.
         /// </summary>
         public static void Process(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             IReadOnlyList<(int[] path, int keyOffset)> overrideRecords,
             bool validateStructure = false)
         {

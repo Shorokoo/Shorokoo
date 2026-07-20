@@ -156,7 +156,7 @@ namespace Shorokoo.Core.Utils
         /// stage, the compression, the payload SHA-256, and producer info.
         /// </summary>
         public static byte[] SaveFastGraphToBinary(
-            FastComputationGraph graph, bool compressed = true, int compressionLevel = DefaultCompressionLevel)
+            InternalComputationGraph graph, bool compressed = true, int compressionLevel = DefaultCompressionLevel)
         {
             using var memoryStream = new MemoryStream();
             var model = FastOnnxModelBuilder.BuildInternalOnnxModel(graph);
@@ -172,7 +172,7 @@ namespace Shorokoo.Core.Utils
 
         /// <summary>
         /// Inverse of <see cref="SaveFastGraphToBinary"/>: deserialize .srk bytes into a
-        /// <see cref="FastComputationGraph"/> via <see cref="OnnxModelImporter"/>. The layout
+        /// <see cref="InternalComputationGraph"/> via <see cref="OnnxModelImporter"/>. The layout
         /// is decided by content only — v2 containers are validated against their header
         /// (compression, payload SHA-256), and legacy v1 data (bare protobuf, single- or
         /// double-Zstd) loads through the content-sniffing shim in
@@ -180,20 +180,20 @@ namespace Shorokoo.Core.Utils
         /// </summary>
         /// <param name="data">.srk bytes (any layout).</param>
         /// <param name="requiredStage">When set, refuse (with a clear stage-mismatch error)
-        /// data whose graph is not of this <see cref="SrkGraphStage"/> — e.g. reject a
+        /// data whose graph is not of this <see cref="GraphKind"/> — e.g. reject a
         /// module-stage graph where a runnable concrete model is required. For v2 data the
         /// header is checked before the payload is parsed; for v1 data the stage is detected
         /// from the loaded graph.</param>
-        public static FastComputationGraph LoadFastGraphFromBinary(
-            byte[] data, SrkGraphStage? requiredStage = null)
+        public static InternalComputationGraph LoadFastGraphFromBinary(
+            byte[] data, GraphKind? requiredStage = null)
             => LoadFastGraphCore(data, origin: "<in-memory .srk data>", requiredStage);
 
         /// <summary>
         /// Shared load path: container/shim payload extraction, header-first stage
         /// enforcement for v2, graph import, and detected-stage enforcement for v1.
         /// </summary>
-        private static FastComputationGraph LoadFastGraphCore(
-            byte[] data, string origin, SrkGraphStage? requiredStage)
+        private static InternalComputationGraph LoadFastGraphCore(
+            byte[] data, string origin, GraphKind? requiredStage)
         {
             var (header, onnxBytes) = SrkFileFormat.Read(data, origin);
 
@@ -206,7 +206,7 @@ namespace Shorokoo.Core.Utils
                 SrkFileFormat.EnforceStage(stage, requiredStage.Value, origin);
             }
 
-            FastComputationGraph graph;
+            InternalComputationGraph graph;
             try
             {
                 graph = OnnxModelImporter.FromOnnxModelToFastGraph(onnxBytes);
@@ -244,7 +244,7 @@ namespace Shorokoo.Core.Utils
         /// extension has no parsing significance; the header records the compression.
         /// </summary>
         public static string SaveFastGraphToFile(
-            string filename, FastComputationGraph graph, bool compressed = true,
+            string filename, InternalComputationGraph graph, bool compressed = true,
             bool overrideExtension = true, int compressionLevel = DefaultCompressionLevel)
         {
             filename = Path.GetFullPath(filename);
@@ -265,14 +265,14 @@ namespace Shorokoo.Core.Utils
         }
 
         /// <summary>
-        /// Load a <see cref="FastComputationGraph"/> from a .srk file of any layout —
+        /// Load a <see cref="InternalComputationGraph"/> from a .srk file of any layout —
         /// the content decides how the file parses, never the extension, so a renamed
         /// file loads identically. See <see cref="LoadFastGraphFromBinary"/> for the
         /// layout handling and the <paramref name="requiredStage"/> contract; errors
         /// name <paramref name="filename"/>.
         /// </summary>
-        public static FastComputationGraph LoadFastGraphFromFile(
-            string filename, SrkGraphStage? requiredStage = null)
+        public static InternalComputationGraph LoadFastGraphFromFile(
+            string filename, GraphKind? requiredStage = null)
         {
             var allData = File.ReadAllBytes(filename);
             return LoadFastGraphCore(allData, filename, requiredStage);
@@ -282,7 +282,7 @@ namespace Shorokoo.Core.Utils
         /// Reads the raw serialized-ONNX payload out of an architecture file of any .srk
         /// layout (v2 container or legacy v1), by content. Shared by the JSON/introspection
         /// helpers below, which parse the ModelProto without building a full
-        /// <see cref="FastComputationGraph"/>.
+        /// <see cref="InternalComputationGraph"/>.
         /// </summary>
         private static byte[] ReadArchitecturePayloadFromFile(string filePath)
         {
@@ -295,7 +295,7 @@ namespace Shorokoo.Core.Utils
         /// <summary>
         /// Generates a text listing of all node names and tensor names found in an
         /// architecture file (any .srk layout), by deserializing into intermediate JSON
-        /// objects rather than a full <see cref="FastComputationGraph"/>.
+        /// objects rather than a full <see cref="InternalComputationGraph"/>.
         ///
         /// The returned string lists all node names first, followed by an empty line, then all
         /// tensor names. Names are listed in the order they are first encountered when scanning
@@ -307,7 +307,7 @@ namespace Shorokoo.Core.Utils
         {
             var decompressedBytes = ReadArchitecturePayloadFromFile(filePath);
 
-            // Deserialize to IR.ModelProto — do NOT go all the way to FastComputationGraph
+            // Deserialize to IR.ModelProto — do NOT go all the way to InternalComputationGraph
             ModelProto model;
             using (var ms = new MemoryStream(decompressedBytes))
             {

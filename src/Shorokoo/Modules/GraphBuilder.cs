@@ -59,23 +59,23 @@ namespace Shorokoo.Core
         };
 
         /// <summary>
-        /// Builds a <see cref="FastComputationGraph"/> from a MethodInfo (typically the Inline method).
+        /// Builds a <see cref="InternalComputationGraph"/> from a MethodInfo (typically the Inline method).
         /// For generic methods, this instantiates the method with concrete types chosen
         /// based on generic type parameter constraints.
         /// This is the main entry point used by generated code.
         /// </summary>
-        public static FastComputationGraph BuildFastComputationGraphFromMethodInfo(MethodInfo methodInfo)
+        public static InternalComputationGraph BuildInternalComputationGraphFromMethodInfo(MethodInfo methodInfo)
         {
             if (methodInfo == null)
                 throw new ArgumentNullException(nameof(methodInfo));
 
-            return BuildFastComputationGraphFromMethod(methodInfo);
+            return BuildInternalComputationGraphFromMethod(methodInfo);
         }
 
         /// <summary>
-        /// Builds a <see cref="FastComputationGraph"/> from a delegate's underlying method —
+        /// Builds a <see cref="InternalComputationGraph"/> from a delegate's underlying method —
         /// the codegen-free equivalent of the source generator's <c>ComputationGraph</c>
-        /// property (which routes through <see cref="BuildFastComputationGraphFromMethodInfo"/>).
+        /// property (which routes through <see cref="BuildInternalComputationGraphFromMethodInfo"/>).
         ///
         /// <para>The delegate must be a static method group or a non-capturing
         /// (<c>static</c>) lambda: the body is invoked once by reflection to trace the graph,
@@ -88,23 +88,23 @@ namespace Shorokoo.Core
         /// <param name="fn">The module body. Parameters must be flattened tensor parameters
         /// (no tuples); leading hyperparameters are marked with <c>[Hyper]</c>.</param>
         /// <returns>A freshly built graph (not cached — callers own the instance).</returns>
-        public static FastComputationGraph BuildFastComputationGraphFromDelegate(Delegate fn)
+        public static InternalComputationGraph BuildInternalComputationGraphFromDelegate(Delegate fn)
         {
             if (fn == null)
                 throw new ArgumentNullException(nameof(fn));
 
             ModuleHelper.EnsureNonCapturingDelegate(fn.Target, fn.Method.Name);
-            return BuildFastComputationGraphFromMethod(fn.Method, fn.Target);
+            return BuildInternalComputationGraphFromMethod(fn.Method, fn.Target);
         }
 
         /// <summary>
-        /// Core method to build a <see cref="FastComputationGraph"/> from a MethodInfo,
+        /// Core method to build a <see cref="InternalComputationGraph"/> from a MethodInfo,
         /// handling generic type resolution. For generic methods, this uses IGenericType
         /// placeholders to preserve generic type information through the graph building process.
         /// <paramref name="invokeTarget"/> is the reflection-invoke receiver: null for static
         /// methods, or the delegate's bound target for compiler-generated lambda methods.
         /// </summary>
-        internal static FastComputationGraph BuildFastComputationGraphFromMethod(MethodInfo methodInfo, object? invokeTarget = null)
+        internal static InternalComputationGraph BuildInternalComputationGraphFromMethod(MethodInfo methodInfo, object? invokeTarget = null)
         {
             if (methodInfo == null)
                 throw new ArgumentNullException(nameof(methodInfo));
@@ -220,7 +220,7 @@ namespace Shorokoo.Core
             // slots in pin order, sparse pins take exactly their named slots (see
             // Shorokoo.Rng.Pin).
             bool hasPins = rngPins.positional.Length > 0 || rngPins.sparse.Length > 0;
-            var fastGraph = new FastComputationGraph(
+            var fastGraph = new InternalComputationGraph(
                 [.. allInputs],
                 [.. fnOutputs]);
 

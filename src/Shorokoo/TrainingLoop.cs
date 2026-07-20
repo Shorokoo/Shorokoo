@@ -7,7 +7,7 @@ namespace Shorokoo;
 
 /// <summary>
 /// Lowers a high-level training graph (produced by
-/// <see cref="Shorokoo.Core.Training.TrainingGraphBuilder.PrepareForTrainingAsFast(FastComputationGraph, FastComputationGraph)"/>)
+/// <see cref="Shorokoo.Core.Training.TrainingGraphBuilder.PrepareForTrainingAsFast(InternalComputationGraph, InternalComputationGraph)"/>)
 /// into an autograd-flattened executable form, for use by the
 /// AutoDiffCheckpointing tests that score graph-optimization strategies.
 ///
@@ -26,7 +26,7 @@ public static class TrainingLoop
     /// into an executable graph by expanding struct outputs, unpacking struct
     /// inputs, simplifying, then running the Fast-native autograd processor.
     /// </summary>
-    public static FastComputationGraph LowerTrainingGraph(FastComputationGraph highLevelGraph)
+    public static InternalComputationGraph LowerTrainingGraph(InternalComputationGraph highLevelGraph)
     {
         if (highLevelGraph is null) throw new ArgumentNullException(nameof(highLevelGraph));
 

@@ -23,7 +23,7 @@ namespace Shorokoo
         public static TensorData[] Eval(Variable[] outputs)
         {
 
-            var graph = new Shorokoo.Graph.FastComputationGraph([], [.. outputs]);
+            var graph = new Shorokoo.Graph.InternalComputationGraph([], [.. outputs]);
 
             var ctx = new ComputeContext();
             var results = ctx.Execute(graph).Select(x => x.ToTensorData()).ToArray();

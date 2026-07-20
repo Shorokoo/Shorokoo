@@ -175,7 +175,7 @@ namespace Shorokoo.Core.Factory.CSharpFactory
             return GetTypeDefString(tensor);
         }
 
-        public MethodInfo BuildMethod(FastComputationGraph fastGraph, string modelName)
+        public MethodInfo BuildMethod(InternalComputationGraph fastGraph, string modelName)
         {
             var code = BuildFullGraph(fastGraph, modelName);
             // Create a syntax tree from the generated code
@@ -219,7 +219,7 @@ namespace Shorokoo.Core.Factory.CSharpFactory
             }
         }
 
-        public Func<TResult> BuildLambda<TResult>(FastComputationGraph fastGraph, string modelName)
+        public Func<TResult> BuildLambda<TResult>(InternalComputationGraph fastGraph, string modelName)
         {
             var method = BuildMethod(fastGraph, modelName);
             try
@@ -232,21 +232,21 @@ namespace Shorokoo.Core.Factory.CSharpFactory
             }
         }
 
-        public Func<T1, TResult> BuildLambda<T1, TResult>(FastComputationGraph fastGraph, string modelName)
+        public Func<T1, TResult> BuildLambda<T1, TResult>(InternalComputationGraph fastGraph, string modelName)
         {
             var method = BuildMethod(fastGraph, modelName);
             return (Func<T1, TResult>)Delegate.CreateDelegate(typeof(Func<T1, TResult>), method);
         }
 
-        public Func<T1, T2, TResult> BuildLambda<T1, T2, TResult>(FastComputationGraph fastGraph, string modelName)
+        public Func<T1, T2, TResult> BuildLambda<T1, T2, TResult>(InternalComputationGraph fastGraph, string modelName)
         {
             var method = BuildMethod(fastGraph, modelName);
             return (Func<T1, T2, TResult>)Delegate.CreateDelegate(typeof(Func<T1, T2, TResult>), method);
         }
 
-        public string BuildFullGraph(FastComputationGraph fastGraph, string modelName)
+        public string BuildFullGraph(InternalComputationGraph fastGraph, string modelName)
         {
-            var functions = FastComputationGraphConverter.FunctionsPostOrder(fastGraph);
+            var functions = InternalComputationGraphConverter.FunctionsPostOrder(fastGraph);
             var functionNames = functions.ToImmutableDictionary(x => x, x => x.FriendlyName);
             var mainMethod = BuildMethodCode(fastGraph, "BuildComputationGraph", functionNames, targetFunction: null);
             var referencedMethods = functions.Select(x => BuildMethodCode(x.OriginalFastGraph, x.FriendlyName, functionNames, x)).ToList();
@@ -291,13 +291,13 @@ public static class " + modelName + @"
 
 
 
-        public string BuildMethodCode(FastComputationGraph fastGraph, string methodName, ImmutableDictionary<Function, string> functionNames, Function? targetFunction)
+        public string BuildMethodCode(InternalComputationGraph fastGraph, string methodName, ImmutableDictionary<Function, string> functionNames, Function? targetFunction)
         {
             // Rebuild the Node/Variable view of the graph without paying for a full
             // ComputationGraph wrapper (validation, topo-sort, function discovery, etc.).
             // The codegen below is structured around Node identity and Variable metadata,
             // which the converter produces directly.
-            var (topologicalOrderNodes, graphInputs, graphOutputs, _) = FastComputationGraphConverter.BuildNodes(fastGraph);
+            var (topologicalOrderNodes, graphInputs, graphOutputs, _) = InternalComputationGraphConverter.BuildNodes(fastGraph);
 
             var variableNames = new Dictionary<Variable, string>();
             var nodeCodeGenerators = new Dictionary<Node, NodeGenerationInfo>();

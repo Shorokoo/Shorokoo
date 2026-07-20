@@ -44,7 +44,7 @@ public class RngRuntimeTests
 {
     private static float[] RunDraw<TModule>(long rows, long cols)
     {
-        var g = (FastComputationGraph)typeof(TModule)
+        var g = (InternalComputationGraph)typeof(TModule)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var input = TensorData([rows, cols], Enumerable.Repeat(0f, (int)(rows * cols)).ToArray());
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
@@ -98,7 +98,7 @@ public class RngRuntimeTests
         // ONNX random fallback: a concrete model built without any RngConfig carries the
         // default identity, and its feed draws are bit-exactly the host fold of the
         // default runtime master along the feed's ModelId — reconstructible offline.
-        var g = (FastComputationGraph)typeof(RtLoweredUniform)
+        var g = (InternalComputationGraph)typeof(RtLoweredUniform)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
@@ -119,7 +119,7 @@ public class RngRuntimeTests
         // parameter's value, and every draw's key — a split chain rooted at the parameter —
         // re-derives from it. No node is added or removed and no feed is touched; parameter
         // values would be untouched too (this model has none to re-key).
-        var g = (FastComputationGraph)typeof(RtLoweredUniform)
+        var g = (InternalComputationGraph)typeof(RtLoweredUniform)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input]))
@@ -152,7 +152,7 @@ public class RngRuntimeTests
         var parentKey = Vector(1L, 2L);
         var split = Shorokoo.Core.Nodes.NodeDefinitions.InternalOp.RngSplit(
             parentKey, Scalar(7L), Shorokoo.Core.Rng.RngAlgorithms.Default);
-        var g = new FastComputationGraph([], [split]);
+        var g = new InternalComputationGraph([], [split]);
 
         var childWords = ComputeContext.Default.Execute(g)[0]
             .ToTensorData().As<int64>().AccessMemory().ToArray();

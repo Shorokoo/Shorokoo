@@ -7,7 +7,7 @@ using System.Collections.Immutable;
 namespace Shorokoo.Core.AutoDiffCheckpointing;
 
 /// <summary>
-/// Contains the complete shape inference results for a <see cref="FastComputationGraph"/>.
+/// Contains the complete shape inference results for a <see cref="InternalComputationGraph"/>.
 /// Provides per-tensor shape information and summary statistics about
 /// maximum tensor sizes encountered during inference.
 /// </summary>

@@ -1058,19 +1058,19 @@ public class ModuleSourceGenerator : IIncrementalGenerator
 
         sb.AppendLine();
         
-        // ComputationGraph property - constructs FastComputationGraph by passing method info
+        // ComputationGraph property - constructs InternalComputationGraph by passing method info
         // This is non-generic and constructs the graph directly without using Module.
         // The property is still named ComputationGraph for backwards source-compat, but its
-        // type is FastComputationGraph so consumers can use the Fast processor pipeline
+        // type is InternalComputationGraph so consumers can use the Fast processor pipeline
         // directly. Consumers that still want the legacy ComputationGraph form should call
-        // FastComputationGraphConverter.ToComputationGraph(...) on the result.
+        // InternalComputationGraphConverter.ToComputationGraph(...) on the result.
         //
         // Returns a deep clone of a cached template each call. The Fast processors mutate
         // graphs in place (FastChangeGenericTypeSpecialization.Process rewrites node.Attributes,
         // etc.), and node identity is preserved through ToComputationGraph/ToFastGraph round-trips,
         // so handing out the cached instance would let one caller's mutations leak into the next.
-        sb.AppendLine($"        private static Shorokoo.Graph.FastComputationGraph? _computationGraphTemplate;")
-          .AppendLine($"        public static Shorokoo.Graph.FastComputationGraph ComputationGraph")
+        sb.AppendLine($"        private static Shorokoo.Graph.InternalComputationGraph? _computationGraphTemplate;")
+          .AppendLine($"        public static Shorokoo.Graph.InternalComputationGraph ComputationGraph")
           .AppendLine("        {")
           .AppendLine("            get")
           .AppendLine("            {")
@@ -1079,7 +1079,7 @@ public class ModuleSourceGenerator : IIncrementalGenerator
           .AppendLine($"                    var methodInfo = typeof({className}).GetMethod(nameof(Inline));")
           .AppendLine("                    if (methodInfo == null)")
           .AppendLine($"                        throw new System.InvalidOperationException(\"Could not find Inline method on {className}\");")
-          .AppendLine("                    _computationGraphTemplate = Shorokoo.Core.GraphBuilder.BuildFastComputationGraphFromMethodInfo(methodInfo);")
+          .AppendLine("                    _computationGraphTemplate = Shorokoo.Core.GraphBuilder.BuildInternalComputationGraphFromMethodInfo(methodInfo);")
           .AppendLine("                }")
           .AppendLine("                return _computationGraphTemplate.Clone();")
           .AppendLine("            }")

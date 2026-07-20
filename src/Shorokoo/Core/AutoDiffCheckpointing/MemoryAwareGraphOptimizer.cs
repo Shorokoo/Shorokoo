@@ -17,9 +17,9 @@ public class GraphOptimizationResult
     public required string StrategyName { get; init; }
 
     /// <summary>
-    /// The optimized <see cref="FastComputationGraph"/> produced by the selected strategy.
+    /// The optimized <see cref="InternalComputationGraph"/> produced by the selected strategy.
     /// </summary>
-    public required FastComputationGraph OptimizedGraph { get; init; }
+    public required InternalComputationGraph OptimizedGraph { get; init; }
 
     /// <summary>
     /// The evaluation result for the selected strategy.
@@ -29,7 +29,7 @@ public class GraphOptimizationResult
     /// <summary>
     /// All strategies that were evaluated, ordered by effectiveness.
     /// </summary>
-    public required IReadOnlyList<(string Name, GraphEvaluationResult Evaluation, FastComputationGraph Graph)> AllStrategies { get; init; }
+    public required IReadOnlyList<(string Name, GraphEvaluationResult Evaluation, InternalComputationGraph Graph)> AllStrategies { get; init; }
 
     public override string ToString()
         => $"Strategy={StrategyName}, Compute={Evaluation.TotalComputeTime:F2}, " +
@@ -37,7 +37,7 @@ public class GraphOptimizationResult
 }
 
 /// <summary>
-/// Optimizes a <see cref="FastComputationGraph"/> for the compute–memory tradeoff by
+/// Optimizes a <see cref="InternalComputationGraph"/> for the compute–memory tradeoff by
 /// combining memory-aware scheduling (<see cref="MemoryAwareScheduler"/>) with
 /// rematerialization (<see cref="Rematerializer"/>). The optimizer evaluates two
 /// alternating strategies — <c>RematReorder</c> and <c>ReorderRemat</c> — and selects
@@ -81,7 +81,7 @@ internal class MemoryAwareGraphOptimizer
     /// <summary>
     /// Finds the best optimization strategy for the given graph.
     /// </summary>
-    public GraphOptimizationResult Optimize(FastComputationGraph graph, params TensorData[] sampleInputs)
+    public GraphOptimizationResult Optimize(InternalComputationGraph graph, params TensorData[] sampleInputs)
     {
         var shapeInfo = _shapeInference.Infer(graph, sampleInputs);
         return OptimizeWithShapeInfo(graph, shapeInfo);
@@ -90,21 +90,21 @@ internal class MemoryAwareGraphOptimizer
     /// <summary>
     /// Optimizes with pre-computed shape inference results.
     /// </summary>
-    public GraphOptimizationResult OptimizeWithShapeInfo(FastComputationGraph graph, ShapeInferenceResult shapeInfo)
+    public GraphOptimizationResult OptimizeWithShapeInfo(InternalComputationGraph graph, ShapeInferenceResult shapeInfo)
     {
         var scheduler = new MemoryAwareScheduler();
         var rematerializer = new Rematerializer(
             _computeFactor, _memoryFactor, _maxRematerializationIterations, _evaluator);
 
-        FastComputationGraph Remat(FastComputationGraph g) => rematerializer.Apply(g, shapeInfo);
-        FastComputationGraph Reorder(FastComputationGraph g) => scheduler.Reorder(g, shapeInfo);
+        InternalComputationGraph Remat(InternalComputationGraph g) => rematerializer.Apply(g, shapeInfo);
+        InternalComputationGraph Reorder(InternalComputationGraph g) => scheduler.Reorder(g, shapeInfo);
 
         var baselineEval = _evaluator.Evaluate(graph, shapeInfo);
 
         var s1 = RunAlternatingStrategy("RematReorder", graph, baselineEval, shapeInfo, Remat, Reorder);
         var s2 = RunAlternatingStrategy("ReorderRemat", graph, baselineEval, shapeInfo, Reorder, Remat);
 
-        var strategies = new List<(string Name, GraphEvaluationResult Evaluation, FastComputationGraph Graph)>
+        var strategies = new List<(string Name, GraphEvaluationResult Evaluation, InternalComputationGraph Graph)>
         {
             s1, s2,
         };
@@ -120,13 +120,13 @@ internal class MemoryAwareGraphOptimizer
         };
     }
 
-    private (string Name, GraphEvaluationResult Evaluation, FastComputationGraph Graph) RunAlternatingStrategy(
+    private (string Name, GraphEvaluationResult Evaluation, InternalComputationGraph Graph) RunAlternatingStrategy(
         string name,
-        FastComputationGraph initialGraph,
+        InternalComputationGraph initialGraph,
         GraphEvaluationResult initialEval,
         ShapeInferenceResult shapeInfo,
-        Func<FastComputationGraph, FastComputationGraph> firstPass,
-        Func<FastComputationGraph, FastComputationGraph> secondPass)
+        Func<InternalComputationGraph, InternalComputationGraph> firstPass,
+        Func<InternalComputationGraph, InternalComputationGraph> secondPass)
     {
         var currentGraph = initialGraph;
         var currentEval = initialEval;
@@ -147,8 +147,8 @@ internal class MemoryAwareGraphOptimizer
     }
 
     private bool TryApply(
-        Func<FastComputationGraph, FastComputationGraph> pass,
-        ref FastComputationGraph currentGraph,
+        Func<InternalComputationGraph, InternalComputationGraph> pass,
+        ref InternalComputationGraph currentGraph,
         ref GraphEvaluationResult currentEval,
         ref double currentMetric,
         ShapeInferenceResult shapeInfo)
@@ -171,7 +171,7 @@ internal class MemoryAwareGraphOptimizer
     /// <summary>
     /// Evaluates a single graph configuration without trying different strategies.
     /// </summary>
-    public GraphEvaluationResult EvaluateGraph(FastComputationGraph graph, params TensorData[] sampleInputs)
+    public GraphEvaluationResult EvaluateGraph(InternalComputationGraph graph, params TensorData[] sampleInputs)
     {
         var shapeInfo = _shapeInference.Infer(graph, sampleInputs);
         return _evaluator.Evaluate(graph, shapeInfo);

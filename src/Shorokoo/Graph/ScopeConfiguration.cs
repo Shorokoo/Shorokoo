@@ -5,7 +5,7 @@ namespace Shorokoo.Graph
 {
     /// <summary>
     /// How aggressively a scope should claim free (optional) nodes when
-    /// <see cref="FastComputationGraph.ConfigureScopes"/> reorders the graph.
+    /// <see cref="InternalComputationGraph.ConfigureScopes"/> reorders the graph.
     /// </summary>
     public enum ScopeSize
     {
@@ -34,7 +34,7 @@ namespace Shorokoo.Graph
         /// <summary>
         /// No preference. Only valid when no nested-scope conflict mixes kinds —
         /// i.e. when every nested-tension pair shares its kind.
-        /// <see cref="FastComputationGraph.ConfigureScopes"/> throws if this
+        /// <see cref="InternalComputationGraph.ConfigureScopes"/> throws if this
         /// assumption is violated.
         /// </summary>
         None,

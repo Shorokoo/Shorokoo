@@ -128,7 +128,7 @@ namespace Shorokoo.Runtime
         /// Compiles the graph into a reusable <see cref="CompiledGraph"/>: the ONNX model and
         /// inference session are built once, so repeated executions only feed new data.
         /// </summary>
-        public CompiledGraph Compile(FastComputationGraph graph)
+        public CompiledGraph Compile(InternalComputationGraph graph)
         {
             var originalInputNames = ResolveOriginalInputNames(graph);
             return CompileFromModel(
@@ -153,7 +153,7 @@ namespace Shorokoo.Runtime
             return new CompiledGraph(session, onnxInputNameByOriginal, originalInputNames);
         }
 
-        private static string[] ResolveOriginalInputNames(FastComputationGraph graph)
+        private static string[] ResolveOriginalInputNames(InternalComputationGraph graph)
         {
             var names = new string[graph.Inputs.Count];
             for (int i = 0; i < graph.Inputs.Count; i++)
@@ -169,7 +169,7 @@ namespace Shorokoo.Runtime
         /// </summary>
         public TensorData[] Eval(Variable[] outputs)
         {
-            var graph = new FastComputationGraph([], [.. outputs]);
+            var graph = new InternalComputationGraph([], [.. outputs]);
             var results = this.Execute(graph).Select(x => x.ToTensorData()).ToArray();
 
             return results;
@@ -197,13 +197,13 @@ namespace Shorokoo.Runtime
         }
 
         /// <summary>Executes a graph that takes no inputs.</summary>
-        public NamedModelParam[] Execute(FastComputationGraph graph) => this.Execute(graph, []);
+        public NamedModelParam[] Execute(InternalComputationGraph graph) => this.Execute(graph, []);
 
         /// <summary>
         /// Executes the graph, pairing the inputs positionally with the graph's inputs.
         /// TensorDataStruct inputs are automatically expanded into individual fields.
         /// </summary>
-        public NamedModelParam[] Execute(FastComputationGraph graph, params IData[] inputs)
+        public NamedModelParam[] Execute(InternalComputationGraph graph, params IData[] inputs)
         {
             var expandedInputs = ExpandStructInputs(inputs);
 
@@ -255,7 +255,7 @@ namespace Shorokoo.Runtime
         /// Executes the graph with pre-built named inputs. Builds the ONNX model and a fresh
         /// inference session per call (disposed afterwards); use <see cref="Compile"/> for repeated runs.
         /// </summary>
-        public NamedModelParam[] Run(FastComputationGraph graph, params NamedModelParam[] inputs)
+        public NamedModelParam[] Run(InternalComputationGraph graph, params NamedModelParam[] inputs)
         {
             var originalInputNames = ResolveOriginalInputNames(graph);
             return RunFromModel(
@@ -350,7 +350,7 @@ namespace Shorokoo.Runtime
         /// outputs, and the resulting state values are folded back into a copy of the graph.
         /// Returns the regular outputs plus the state-updated graph for the next call.
         /// </summary>
-        public (NamedModelParam[] regularOutputs, FastComputationGraph updatedGraph) ExecuteWithState(FastComputationGraph graph, params TensorData[] inputs)
+        public (NamedModelParam[] regularOutputs, InternalComputationGraph updatedGraph) ExecuteWithState(InternalComputationGraph graph, params TensorData[] inputs)
         {
             var loweredGraph = LowerStateUpdateNodesOnFast(graph);
             var allOutputs = this.Execute(loweredGraph, inputs);
@@ -359,16 +359,16 @@ namespace Shorokoo.Runtime
 
         /// <summary>
         /// Named-input overload of
-        /// <see cref="ExecuteWithState(FastComputationGraph, TensorData[])"/>.
+        /// <see cref="ExecuteWithState(InternalComputationGraph, TensorData[])"/>.
         /// </summary>
-        public (NamedModelParam[] regularOutputs, FastComputationGraph updatedGraph) ExecuteWithState(FastComputationGraph graph, params NamedModelParam[] inputs)
+        public (NamedModelParam[] regularOutputs, InternalComputationGraph updatedGraph) ExecuteWithState(InternalComputationGraph graph, params NamedModelParam[] inputs)
         {
             var loweredGraph = LowerStateUpdateNodesOnFast(graph);
             var allOutputs = this.Run(loweredGraph, inputs);
             return ProcessExecuteWithStateResults(graph, allOutputs);
         }
 
-        private static FastComputationGraph LowerStateUpdateNodesOnFast(FastComputationGraph graph)
+        private static InternalComputationGraph LowerStateUpdateNodesOnFast(InternalComputationGraph graph)
         {
             var hasStateNodes = graph.Nodes.Any(n =>
                 n.OpCode == InternalOpCodes.WITH_STATE_DEPS ||
@@ -380,7 +380,7 @@ namespace Shorokoo.Runtime
             return clone;
         }
 
-        private (NamedModelParam[] regularOutputs, FastComputationGraph updatedGraph) ProcessExecuteWithStateResults(FastComputationGraph graph, NamedModelParam[] allOutputs)
+        private (NamedModelParam[] regularOutputs, InternalComputationGraph updatedGraph) ProcessExecuteWithStateResults(InternalComputationGraph graph, NamedModelParam[] allOutputs)
         {
             var stateUpdateOutputCount = graph.GetStateUpdateOutputCount();
 
@@ -438,7 +438,7 @@ namespace Shorokoo.Runtime
         /// <summary>Executes the subgraph with <paramref name="inputData"/> and returns the output values.</summary>
         public TensorData[] With(TensorData[] inputData)
         {
-            var graph = new FastComputationGraph([..this.inputs], [..this.outputs]);
+            var graph = new InternalComputationGraph([..this.inputs], [..this.outputs]);
             return ComputeContext.Default.Execute(graph, inputData).Select(x => x.ToTensorData()).ToArray();
         }
     }

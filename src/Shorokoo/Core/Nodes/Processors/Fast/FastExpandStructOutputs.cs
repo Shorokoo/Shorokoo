@@ -12,7 +12,7 @@ using Shorokoo.Core.Nodes.Processors.AutoGrad;
 namespace Shorokoo.Core.Nodes.Processors.Fast
 {
     /// <summary>
-    /// Expands every <see cref="FastComputationGraph.Outputs"/> entry whose producing node
+    /// Expands every <see cref="InternalComputationGraph.Outputs"/> entry whose producing node
     /// emits a TensorStruct value (i.e. its <c>AttrDtype</c> has a non-null
     /// <see cref="DType.TensorStructDef"/>) into one TENSOR_STRUCT_GETFIELD output per
     /// field of the struct, in field-order.
@@ -20,12 +20,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// <para>
     /// Mirrors the CG-side <c>ExpandStructOutputs</c> helpers used by training-graph lowering.
     /// Mutates <c>graph</c> in place: appends new GETFIELD nodes to
-    /// <see cref="FastComputationGraph.Nodes"/> and rebuilds <see cref="FastComputationGraph.Outputs"/>.
+    /// <see cref="InternalComputationGraph.Nodes"/> and rebuilds <see cref="InternalComputationGraph.Outputs"/>.
     /// </para>
     /// </summary>
     internal static class FastExpandStructOutputs
     {
-        public static void Process(FastComputationGraph graph)
+        public static void Process(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 

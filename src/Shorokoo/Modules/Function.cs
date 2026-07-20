@@ -148,10 +148,10 @@ namespace Shorokoo.Core
         /// <summary>
         /// Primary representation of the function body.
         /// </summary>
-        public FastComputationGraph OriginalFastGraph { get; }
+        public InternalComputationGraph OriginalFastGraph { get; }
 
         // Cached Variable views derived from a one-shot rebuild of OriginalFastGraph.
-        // FastComputationGraphConverter.BuildNodes reconstructs the underlying
+        // InternalComputationGraphConverter.BuildNodes reconstructs the underlying
         // Node/Variable objects without wrapping them in a ComputationGraph; the
         // resulting inputs/outputs are stored here and Function never holds a CG handle.
         private bool _convertedSnapshotComputed;
@@ -170,7 +170,7 @@ namespace Shorokoo.Core
             if (_convertedSnapshotComputed) return;
             using var shield = GraphTrace.EnterIsolated();
 
-            var built = FastComputationGraphConverter.BuildNodes(this.OriginalFastGraph);
+            var built = InternalComputationGraphConverter.BuildNodes(this.OriginalFastGraph);
             _inputs = built.inputs;
             _hyperparamInputs = built.inputs
                 .Where(x => x.InputType == Shorokoo.Core.Nodes.NodeDefinitions.InputType.Hyperparam)
@@ -185,7 +185,7 @@ namespace Shorokoo.Core
             _convertedSnapshotComputed = true;
         }
 
-        public Function(FastComputationGraph fastGraph, FunctionType functionType, string? defaultName, string? friendlyName,
+        public Function(InternalComputationGraph fastGraph, FunctionType functionType, string? defaultName, string? friendlyName,
             StateOwnership? stateOwnership = null)
         {
             this.OriginalFastGraph = fastGraph;
@@ -282,7 +282,7 @@ namespace Shorokoo.Core
             }
         }
 
-        private Shorokoo.Graph.FastComputationGraph? fastFlattenedGraph = null;
+        private Shorokoo.Graph.InternalComputationGraph? fastFlattenedGraph = null;
         /// <summary>
         /// Returns a FastCG representation of this function's body with every
         /// inlinable <c>MODEL_INVOKE</c> / <c>FUNCTION_INVOKE</c> recursively expanded;
@@ -297,12 +297,12 @@ namespace Shorokoo.Core
         /// on the result. Sub-function flattening recurses through this same method,
         /// so no <c>ComputationGraph</c>-side inliner is invoked.
         ///
-        /// Callers must <see cref="Shorokoo.Graph.FastComputationGraph.Clone"/> the
+        /// Callers must <see cref="Shorokoo.Graph.InternalComputationGraph.Clone"/> the
         /// returned graph (and re-key it) before splicing it into a parent graph, to
         /// avoid both aliasing the cache and NodeKey collisions when the same function
         /// is inlined at multiple call sites.
         /// </summary>
-        internal Shorokoo.Graph.FastComputationGraph GetFastFlattenedGraph()
+        internal Shorokoo.Graph.InternalComputationGraph GetFastFlattenedGraph()
         {
             if (this.fastFlattenedGraph is null)
             {

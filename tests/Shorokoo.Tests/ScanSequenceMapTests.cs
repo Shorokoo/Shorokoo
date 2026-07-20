@@ -79,7 +79,7 @@ public class ScanSequenceMapTests
         return model;
     }
 
-    private static FastComputationGraph Import(ModelProto model)
+    private static InternalComputationGraph Import(ModelProto model)
     {
         using var ms = new MemoryStream();
         ProtoBuf.Serializer.Serialize(ms, model);

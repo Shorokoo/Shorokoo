@@ -102,7 +102,7 @@ namespace Shorokoo.Core
 
         /// <summary>
         /// Override this variable's UniqueName. Used by
-        /// <see cref="Shorokoo.Graph.FastComputationGraphConverter.ToComputationGraph"/>
+        /// <see cref="Shorokoo.Graph.InternalComputationGraphConverter.ToComputationGraph"/>
         /// to restore original graph-input/output names after a Fast↔CG roundtrip.
         /// </summary>
         internal void SetUniqueName(string? name)

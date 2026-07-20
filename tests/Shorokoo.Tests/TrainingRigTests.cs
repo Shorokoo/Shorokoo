@@ -213,9 +213,9 @@ public class TrainingRigCoverageTests
     /// (<see cref="Shorokoo.Core.Nodes.Processors.Fast.FastConvertModelParamIdRefToModelParam.DiscoverTrainableParamInfos"/>).
     /// </summary>
     private static void CoverFromScratch(
-        FastComputationGraph modelGraph,
-        FastComputationGraph lossGraph,
-        FastComputationGraph optimizerGraph,
+        InternalComputationGraph modelGraph,
+        InternalComputationGraph lossGraph,
+        InternalComputationGraph optimizerGraph,
         long[] inputShape,
         params HyperValue[] hyperparams)
     {
@@ -243,9 +243,9 @@ public class TrainingRigCoverageTests
     /// <c>ToConcreteModel</c> throw <c>KeyNotFoundException</c>).
     /// </summary>
     private static void CoverCheckpointRebind(
-        FastComputationGraph modelGraph,
-        FastComputationGraph lossGraph,
-        FastComputationGraph optimizerGraph,
+        InternalComputationGraph modelGraph,
+        InternalComputationGraph lossGraph,
+        InternalComputationGraph optimizerGraph,
         long[] inputShape,
         params HyperValue[] hyperparams)
     {
@@ -1039,7 +1039,7 @@ public class TrainingRigCoverageTests
 
     /// <summary>
     /// Covers the <c>Func</c>-loss overload of
-    /// <see cref="TrainingGraphBuilder.PrepareForTrainingAsFast{TOut,TLoss}(FastComputationGraph, Func{TOut,TOut,TLoss})"/>
+    /// <see cref="TrainingGraphBuilder.PrepareForTrainingAsFast{TOut,TLoss}(InternalComputationGraph, Func{TOut,TOut,TLoss})"/>
     /// and its companion reflection helper
     /// <see cref="TrainingGraphBuilder.ExtractFastGraphFromDelegate"/>, plus
     /// the three argument-validation error paths. These are otherwise only
@@ -1121,7 +1121,7 @@ public class TrainingRigCoverageTests
     }
 
     /// <summary>
-    /// Verifies the <see cref="TrainingRig.FromScratch(FastComputationGraph,FastComputationGraph,FastComputationGraph,ModelParamList,IOptimizerHyperparameters)"/>
+    /// Verifies the <see cref="TrainingRig.FromScratch(InternalComputationGraph,InternalComputationGraph,InternalComputationGraph,ModelParamList,IOptimizerHyperparameters)"/>
     /// overload, the <see cref="TrainingRig.InputDef"/> and <see cref="TrainingRig.TargetDef"/> properties,
     /// and <see cref="TensorStructDef.FromOrderedData"/> — covering all the convenience APIs
     /// added to clean up training call sites.

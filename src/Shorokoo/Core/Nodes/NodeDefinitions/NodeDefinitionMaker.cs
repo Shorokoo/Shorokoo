@@ -81,7 +81,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
         public ImmutableDictionary<string, TensorData?[]> InputTestValues { get; } = ImmutableDictionary<string, TensorData?[]>.Empty;
         public ImmutableDictionary<string, object?[]> AttributeTestValues { get; } = ImmutableDictionary<string, object?[]>.Empty;
         public ImmutableDictionary<string, long[]> VariadicTestCounts { get; } = ImmutableDictionary<string, long[]>.Empty;
-        public Func<ImmutableList<FastComputationGraph>>? FnTestGraphMaker { get; } = null;
+        public Func<ImmutableList<InternalComputationGraph>>? FnTestGraphMaker { get; } = null;
         public string? CodeTemplate { get; }
         public bool IsOpenNode { get; }
         public bool IsCloseNode { get; }
@@ -99,7 +99,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             Dictionary<string, TensorData?[]>? inputTestValues = null,
             Dictionary<string, object?[]>? attributeTestValues = null,
             Dictionary<string, long[]>? variadicTestCounts = null,
-            Func<ImmutableList<FastComputationGraph>>? fnTestGraphMaker = null)
+            Func<ImmutableList<InternalComputationGraph>>? fnTestGraphMaker = null)
         {
             OpName = name;
             TypeDefs = typeDefs.ToImmutableDictionary();
@@ -358,7 +358,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
         private Dictionary<string, TensorData?[]> inputTestValues = new();
         private Dictionary<string, object?[]> attributeTestValues = new();
         private Dictionary<string, long[]> variadicTestCounts = new();
-        private Func<ImmutableList<FastComputationGraph>>? fnTestGraphMaker = null;
+        private Func<ImmutableList<InternalComputationGraph>>? fnTestGraphMaker = null;
         private string? codeTemplate;
         private bool? isGraphOpen = null;
 
@@ -617,7 +617,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             variadicTestCounts[variadicDefName] = count;
             return this;
         }
-        public NodeDefinitionMaker TestGraph(Func<ImmutableList<FastComputationGraph>> fnTestGraphMaker)
+        public NodeDefinitionMaker TestGraph(Func<ImmutableList<InternalComputationGraph>> fnTestGraphMaker)
         {
             this.fnTestGraphMaker = fnTestGraphMaker;
             return this;

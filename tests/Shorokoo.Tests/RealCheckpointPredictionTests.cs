@@ -30,7 +30,7 @@ public partial class RealCheckpointPredictionTests
         "with tests/test-data/models/resnet18/make-sample-input.py";
 
     // ResNet18.ComputationGraph declares inputs in this order; the image is last.
-    private static FastComputationGraph BuildConcreteArchitecture(TensorData inputHint)
+    private static InternalComputationGraph BuildConcreteArchitecture(TensorData inputHint)
         => ResNet18.ComputationGraph.ToConcreteArchitecture(ResNet18.ComputationGraph.FromOrderedInputs([
             TensorData(DType.Int64, [], 1000L),   // numClasses
             TensorData(DType.Float32, [], 0.9f),  // bnMomentum (unused at inference)

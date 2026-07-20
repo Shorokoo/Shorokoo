@@ -56,7 +56,7 @@ namespace Shorokoo.Graph
             _debugPoints = debugPoints.ToImmutableDictionary();
         }
 
-        public void PrintDebug(FastComputationGraph graph, GraphCreationPoint point)
+        public void PrintDebug(InternalComputationGraph graph, GraphCreationPoint point)
         {
             if (_debugPoints.TryGetValue(point, out var filepath))
             {

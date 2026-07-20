@@ -145,7 +145,7 @@ namespace Shorokoo.Modules
         // ───────────────────────────── computation graph ─────────────────────────────
 
         /// <summary>
-        /// Returns the module body's <see cref="FastComputationGraph"/> — the codegen-free
+        /// Returns the module body's <see cref="InternalComputationGraph"/> — the codegen-free
         /// equivalent of the source-generated static <c>ComputationGraph</c> property, suitable
         /// for <c>TrainingRig.FromScratch</c>, ONNX export, and the concretization pipeline.
         /// Like the generated property, the underlying build is cached (per body
@@ -154,7 +154,7 @@ namespace Shorokoo.Modules
         /// </summary>
         /// <param name="fn">The module body (static method group or non-capturing lambda, flattened parameters).</param>
         /// <param name="name">Optional module name used if the body wasn't already built/cached.</param>
-        public static FastComputationGraph ComputationGraph(Delegate fn, string? name = null)
+        public static InternalComputationGraph ComputationGraph(Delegate fn, string? name = null)
         {
             if (fn is null)
                 throw new ArgumentNullException(nameof(fn));

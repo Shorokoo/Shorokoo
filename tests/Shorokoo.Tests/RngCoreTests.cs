@@ -237,7 +237,7 @@ public class RngRuntimeIdentityTests
 [Trait("Purpose", "Coverage")]
 public class RngSeedTransportTests
 {
-    private static int RngSeedNodeCount(FastComputationGraph graph)
+    private static int RngSeedNodeCount(InternalComputationGraph graph)
         => graph.Nodes.Count(n =>
             n.IdentifierTemplate == Shorokoo.Core.Nodes.Processors.Fast
                 .FastWireRngKeyDerivation.RngSeedIdentifierTemplate);
@@ -245,7 +245,7 @@ public class RngSeedTransportTests
     [Fact]
     public void TestRngSeedIdentityRoundTripsWithoutDuplication()
     {
-        var g = (FastComputationGraph)typeof(RngRuntimeLoopFeed)
+        var g = (InternalComputationGraph)typeof(RngRuntimeLoopFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var x = TensorData([8L], new float[8]);
         var steps = TensorData(System.Array.Empty<long>(), 2L);
@@ -291,14 +291,14 @@ public class RngSeedTransportTests
         // and pin both: the id decodes exactly, and the loaded model still draws 13-round
         // values (equal to its own pre-save draws, different from a default-algorithm model
         // under the same seed).
-        var g = (FastComputationGraph)typeof(RngRuntimeLoopFeed)
+        var g = (InternalComputationGraph)typeof(RngRuntimeLoopFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var x = TensorData([8L], new float[8]);
         var steps = TensorData(System.Array.Empty<long>(), 2L);
 
-        FastComputationGraph Concrete(RngConfig cfg) =>
+        InternalComputationGraph Concrete(RngConfig cfg) =>
             g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps])).ToConcreteModel(cfg);
-        float[] Run(FastComputationGraph m) => ComputeContext.Default.Execute(m, x, steps)[0]
+        float[] Run(InternalComputationGraph m) => ComputeContext.Default.Execute(m, x, steps)[0]
             .ToTensorData().As<float32>().AccessMemory().ToArray();
 
         var m13 = Concrete(new RngConfig { MasterSeed = 11, Algorithm = RngAlgorithm.Threefry2x32Rounds13 });
@@ -322,7 +322,7 @@ public class RngSeedTransportTests
     [Fact]
     public void TestRebindingReplacesTheIdentityValue()
     {
-        var g = (FastComputationGraph)typeof(RngRuntimeLoopFeed)
+        var g = (InternalComputationGraph)typeof(RngRuntimeLoopFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var x = TensorData([8L], new float[8]);
         var steps = TensorData(System.Array.Empty<long>(), 2L);
@@ -345,14 +345,14 @@ public class RngSeedTransportTests
         // a parameter write that re-keys every draw by construction — the divergence class
         // where a loaded model's recorded identity updated while the draws kept the old seed
         // is structurally impossible.
-        var g = (FastComputationGraph)typeof(RngRuntimeLoopFeed)
+        var g = (InternalComputationGraph)typeof(RngRuntimeLoopFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var x = TensorData([8L], new float[8]);
         var steps = TensorData(System.Array.Empty<long>(), 2L);
 
-        FastComputationGraph Concrete(RngConfig cfg) =>
+        InternalComputationGraph Concrete(RngConfig cfg) =>
             g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps])).ToConcreteModel(cfg);
-        float[] Run(FastComputationGraph m) => ComputeContext.Default.Execute(m, x, steps)[0]
+        float[] Run(InternalComputationGraph m) => ComputeContext.Default.Execute(m, x, steps)[0]
             .ToTensorData().As<float32>().AccessMemory().ToArray();
 
         var seedA = new RngConfig { MasterSeed = 11 };
@@ -383,7 +383,7 @@ public class RngSeedTransportTests
         // parameter write), but the override SET's routing and the draw algorithm are
         // structural — changing either on a loaded graph must fail loudly, never silently
         // half-apply.
-        var g = (FastComputationGraph)typeof(RngRuntimeLoopFeed)
+        var g = (InternalComputationGraph)typeof(RngRuntimeLoopFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var x = TensorData([8L], new float[8]);
         var steps = TensorData(System.Array.Empty<long>(), 2L);
@@ -413,7 +413,7 @@ public class RngSeedTransportTests
         // must throw naming the situation (the old behavior silently updated only the
         // recorded identity). Simulate the loaded shape: no feeds, no RngSeed, the legacy
         // reserved-name tensor present as an ordinary data node.
-        var g = (FastComputationGraph)typeof(RtLoweredUniform)
+        var g = (InternalComputationGraph)typeof(RtLoweredUniform)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var input = TensorData([4L, 4L], new float[16]);
         var model = g.ToConcreteArchitecture(g.FromOrderedInputs([input]))
@@ -440,7 +440,7 @@ public class RngSeedTransportTests
         // A model with no runtime random feeds contains no RngSeed param, no chains, and
         // nothing RNG-related in its saved form; binding a config to it is a harmless no-op —
         // but a Runtime override, which can match nothing, still fails loudly.
-        var g = (FastComputationGraph)typeof(RngInitTwoLinears)
+        var g = (InternalComputationGraph)typeof(RngInitTwoLinears)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
         var model = g.ToConcreteArchitecture(g.FromOrderedInputs([sample]))
@@ -468,7 +468,7 @@ public class RngSeedTransportTests
         // The concreteness contract at bind: an id-bearing feed without its key derivation
         // chain (a graph that never went through ToConcreteArchitecture) fails loudly.
         var draw = RandomUniform(Vector(4L), 0f, 1f);
-        var graph = new FastComputationGraph([], [draw]);
+        var graph = new InternalComputationGraph([], [draw]);
         var feed = graph.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
         feed.Attributes = feed.Attributes.SetAttributes(
             (OnnxOpAttributeNames.ShrkAttrLocalModelId, (long[])[1]));

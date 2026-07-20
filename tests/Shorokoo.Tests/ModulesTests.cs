@@ -24,7 +24,7 @@ public class ModulesCoverageTests
         // carries the STATE_UPDATE_LINK and its outputs are WITH_STATE_DEPS-wrapped. Before the
         // fix, the nested build's entry-time clear wiped the registration and the wrap was
         // silently dropped.
-        var graph = (FastComputationGraph)typeof(Modules.StateUpdateSurvivesNestedFirstUseBuild)
+        var graph = (InternalComputationGraph)typeof(Modules.StateUpdateSurvivesNestedFirstUseBuild)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         Assert.Contains(graph.Nodes, n => n.OpCode == InternalOpCodes.STATE_UPDATE_LINK);
         Assert.Contains(graph.Nodes, n => n.OpCode == InternalOpCodes.WITH_STATE_DEPS);
@@ -440,7 +440,7 @@ public class ModulesCoverageTests
     {
         var prop = typeof(TModule).GetProperty("ComputationGraph",
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
-        var moduleGraph = (FastComputationGraph)prop.GetValue(null)!;
+        var moduleGraph = (InternalComputationGraph)prop.GetValue(null)!;
         Assert.Contains(moduleGraph.Nodes, n => n.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT);
 
         var data = CompressedFormatUtils.SaveFastGraphToBinary(moduleGraph, compressed: true);
@@ -520,7 +520,7 @@ public class ModulesCoverageTests
         var callResult = fn.Call(input);
         var output = (Tensor<float32>)callResult[0];
 
-        var graph = new FastComputationGraph(
+        var graph = new InternalComputationGraph(
             System.Collections.Immutable.ImmutableArray.Create<Shorokoo.Core.Variable>(input),
             System.Collections.Immutable.ImmutableArray.Create<Shorokoo.Core.Variable>(output));
 
@@ -559,7 +559,7 @@ public class ModulesCoverageTests
     {
         var prop = typeof(TModule).GetProperty("ComputationGraph",
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
-        var moduleGraph = (FastComputationGraph)prop.GetValue(null)!;
+        var moduleGraph = (InternalComputationGraph)prop.GetValue(null)!;
 
         if (moduleGraph.Nodes.Any(n => n.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT))
         {
@@ -590,7 +590,7 @@ public class ModulesCoverageTests
     /// <summary>
     /// Generic <c>[Module]</c> coverage. Building a generic-method module's
     /// <c>ComputationGraph</c> routes through
-    /// <see cref="Shorokoo.Modules.GraphBuilder.BuildFastComputationGraphFromMethod"/> →
+    /// <see cref="Shorokoo.Modules.GraphBuilder.BuildInternalComputationGraphFromMethod"/> →
     /// <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastConvertPlaceholderGenericTypesToDefaultGenericTypes.Process"/>,
     /// which rewrites <c>IGenericType1..8</c> placeholder DTypes on DType / DTypes / Tensor
     /// attributes to default concrete-typed DTypes carrying the source generic-param name.
@@ -731,7 +731,7 @@ public class ModulesCoverageTests
 
 
     /// <summary>
-    /// Coverage for <see cref="FastComputationGraphExtensions.Specialize"/>: bakes a
+    /// Coverage for <see cref="InternalComputationGraphExtensions.Specialize"/>: bakes a
     /// partial set of named input values into constants and runs
     /// <c>FastSimplify</c> to fold them through the graph. Verifies full
     /// specialization removes all named inputs, partial specialization removes only

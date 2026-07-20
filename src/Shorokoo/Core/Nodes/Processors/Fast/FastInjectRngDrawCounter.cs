@@ -33,7 +33,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     {
         public const string CounterName = "RngExecutionCounter";
 
-        public static void Process(FastComputationGraph graph)
+        public static void Process(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -53,7 +53,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             // Trace the counter subgraph with the real machinery (state init + StateUpdate +
             // WithStateDeps output wrapping), then re-slot its param into the host id space.
-            var counterGraph = GraphBuilder.BuildFastComputationGraphFromDelegate(
+            var counterGraph = GraphBuilder.BuildInternalComputationGraphFromDelegate(
                 (Func<Scalar<int64>>)CounterBody);
 
             var refNode = counterGraph.Nodes.Single(

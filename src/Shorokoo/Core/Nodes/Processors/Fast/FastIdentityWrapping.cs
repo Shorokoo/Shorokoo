@@ -19,7 +19,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastIdentityWrapping
     {
-        public static void WrapCloseInputs(FastComputationGraph graph)
+        public static void WrapCloseInputs(InternalComputationGraph graph)
         {
             // We're inserting nodes into graph.Nodes mid-iteration, so collect
             // the (closeIndex → list-of-new-identities) pairs first and apply

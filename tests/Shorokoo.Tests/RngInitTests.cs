@@ -33,7 +33,7 @@ public partial class RngInitTwoLinears
 [Trait("Purpose", "Coverage")]
 public class RngInitTests
 {
-    private static FastComputationGraph ConcreteArch()
+    private static InternalComputationGraph ConcreteArch()
     {
         var g = RngInitTwoLinears.ComputationGraph;
         var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
@@ -216,7 +216,7 @@ public partial class RngInitNestedDrawLayer
 [Trait("Purpose", "Coverage")]
 public class RngInitFailLoudTests
 {
-    private static FastComputationGraph ConcreteArch()
+    private static InternalComputationGraph ConcreteArch()
     {
         var g = RngInitTwoLinears.ComputationGraph;
         var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
@@ -294,7 +294,7 @@ public class RngInitFailLoudTests
 [Trait("Purpose", "Coverage")]
 public class RngReinitializeTests
 {
-    private static FastComputationGraph ConcreteArch()
+    private static InternalComputationGraph ConcreteArch()
     {
         var g = RngInitTwoLinears.ComputationGraph;
         var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
@@ -302,7 +302,7 @@ public class RngReinitializeTests
     }
 
     /// <summary>The model's trainable weights, ordered by parameter identity.</summary>
-    private static float[][] TrainableWeights(FastComputationGraph model)
+    private static float[][] TrainableWeights(InternalComputationGraph model)
         => model.Nodes
             .Where(n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_PARAM_DATA
                         && (n.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsTrainable) ?? false))

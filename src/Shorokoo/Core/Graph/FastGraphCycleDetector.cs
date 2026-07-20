@@ -8,7 +8,7 @@ using Shorokoo.Core.Nodes.Processors.Helpers;
 namespace Shorokoo.Core.Graph
 {
     /// <summary>
-    /// Cycle detection helpers for <see cref="FastComputationGraph"/>. A ComputationGraph is a
+    /// Cycle detection helpers for <see cref="InternalComputationGraph"/>. A ComputationGraph is a
     /// DAG by construction; a cycle always indicates a bug in a graph transformation. These
     /// helpers are meant to be sprinkled through the pipeline to bisect the stage that
     /// introduced a bad edge.
@@ -20,7 +20,7 @@ namespace Shorokoo.Core.Graph
         /// cycle in traversal order (with the first node repeated at the end to close the loop),
         /// or null if the graph is acyclic.
         /// </summary>
-        public static List<FastNodeKey>? FindCycle(FastComputationGraph graph)
+        public static List<FastNodeKey>? FindCycle(InternalComputationGraph graph)
         {
             var producer = new Dictionary<FastTensorKey, FastNode>();
             foreach (var node in graph.Nodes)
@@ -84,14 +84,14 @@ namespace Shorokoo.Core.Graph
         /// the offending node keys and the <paramref name="context"/> label to make it easy to
         /// identify which pipeline stage introduced the bad edge.
         /// </summary>
-        public static void AssertAcyclic(FastComputationGraph graph, string context)
+        public static void AssertAcyclic(InternalComputationGraph graph, string context)
         {
             var cycle = FindCycle(graph);
             if (cycle is null) return;
 
             var detail = string.Join(" -> ", cycle);
             throw new System.InvalidOperationException(
-                $"Circular reference detected in FastComputationGraph at [{context}]. " +
+                $"Circular reference detected in InternalComputationGraph at [{context}]. " +
                 $"Cycle: {detail}");
         }
 

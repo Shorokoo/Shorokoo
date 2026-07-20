@@ -22,7 +22,7 @@ namespace Shorokoo.Tests.Utils
                         .SelectMany(tupleToArray)];
         }
 
-        public static bool TestGraph(FastComputationGraph graph, ComputeContext? context = null, bool testOnnxRoundtrip = true, bool testCsRoundtrip = true, TensorData[]? sampleInputs = null, bool testQuickEngineExecution = false)
+        public static bool TestGraph(InternalComputationGraph graph, ComputeContext? context = null, bool testOnnxRoundtrip = true, bool testCsRoundtrip = true, TensorData[]? sampleInputs = null, bool testQuickEngineExecution = false)
         {
 
             byte[][] originalResults;
@@ -71,7 +71,7 @@ namespace Shorokoo.Tests.Utils
                                 (csharpResults is IValue[] arrayOut) ? arrayOut :
                                 tupleToArray(csharpResults); // Treat it as a tuple.
 
-                var csRoundtrip = new FastComputationGraph([], [.. csharpOutputs.Select(o => o.ToVariable())]);
+                var csRoundtrip = new InternalComputationGraph([], [.. csharpOutputs.Select(o => o.ToVariable())]);
                 var resultC = context.Execute(csRoundtrip);
                 csResults = resultC.Select(x => x.ToTensorData().AccessRawMemory().ToArray()).ToArray();
             }
@@ -100,7 +100,7 @@ namespace Shorokoo.Tests.Utils
         /// Used as an extra validation layer alongside the ONNX/CS roundtrips so coverage tests
         /// exercise the QEE op path on the same module graphs the ONNX path runs.
         /// </summary>
-        private static bool RunQuickEngineExecution(FastComputationGraph graph, TensorData[]? sampleInputs)
+        private static bool RunQuickEngineExecution(InternalComputationGraph graph, TensorData[]? sampleInputs)
         {
             var qee = new QuickExecutionEngine();
             var store = sampleInputs is null
@@ -142,7 +142,7 @@ namespace Shorokoo.Tests.Utils
             var prop = typeof(TModule).GetProperty("ComputationGraph", BindingFlags.Public | BindingFlags.Static)
                 ?? throw new InvalidOperationException(
                     $"{typeof(TModule).FullName} has no public static ComputationGraph property");
-            var moduleGraph = (FastComputationGraph)prop.GetValue(null)!;
+            var moduleGraph = (InternalComputationGraph)prop.GetValue(null)!;
 
             return AdvancedTestGraph(moduleGraph, hyperparamInputs, runtimeInputs,
                 context, testOnnxRoundtrip, testCsRoundtrip, testQuickEngineExecution, genericTypes, rngConfig);
@@ -154,7 +154,7 @@ namespace Shorokoo.Tests.Utils
         /// e.g. codegen-free modules built via <see cref="Shorokoo.Modules.ModuleFactory"/>.
         /// </summary>
         public static bool AdvancedTestGraph(
-            FastComputationGraph moduleGraph,
+            InternalComputationGraph moduleGraph,
             TensorData[] hyperparamInputs,
             TensorData[] runtimeInputs,
             ComputeContext? context = null,
@@ -222,7 +222,7 @@ namespace Shorokoo.Tests.Utils
             var prop = typeof(TModule).GetProperty("ComputationGraph", BindingFlags.Public | BindingFlags.Static)
                 ?? throw new InvalidOperationException(
                     $"{typeof(TModule).FullName} has no public static ComputationGraph property");
-            var moduleGraph = (FastComputationGraph)prop.GetValue(null)!;
+            var moduleGraph = (InternalComputationGraph)prop.GetValue(null)!;
 
             if (moduleGraph.Nodes.Any(n => n.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT))
             {

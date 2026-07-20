@@ -26,7 +26,7 @@ internal sealed class SplitOp : QuickOp
 
     public override (IRuntimeTensor[] results, bool loopBack) Execute(
         FastNode node,
-        FastComputationGraph graph,
+        InternalComputationGraph graph,
         Dictionary<FastNodeKey, FastNode> nodeByKey,
         Dictionary<FastTensorKey, IRuntimeTensor> store,
         int maxDataElements)

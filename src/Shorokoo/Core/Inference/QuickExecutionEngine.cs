@@ -17,7 +17,7 @@ using Shorokoo.Core.Nodes.AutoDiff;
 namespace Shorokoo.Core.Inference;
 
 /// <summary>
-/// Interprets a Shorokoo <see cref="FastComputationGraph"/> by walking it node-by-node and invoking
+/// Interprets a Shorokoo <see cref="InternalComputationGraph"/> by walking it node-by-node and invoking
 /// a dedicated operator for each node. Every tensor produced by the graph is kept until the
 /// end — nothing is evicted — so callers have full visibility into every intermediate tensor's
 /// shape/dtype and, when small, its values.
@@ -73,7 +73,7 @@ public sealed class QuickExecutionEngine
     /// order. Each sample is converted into a <see cref="RuntimeTensor"/> (respecting the size
     /// threshold) and bound to the matching graph input.
     /// </summary>
-    public Dictionary<FastTensorKey, IRuntimeTensor> Run(FastComputationGraph graph, params TensorData[] sampleInputs)
+    public Dictionary<FastTensorKey, IRuntimeTensor> Run(InternalComputationGraph graph, params TensorData[] sampleInputs)
     {
         var graphInputs = graph.Inputs;
         if (sampleInputs.Length != graphInputs.Count)
@@ -91,7 +91,7 @@ public sealed class QuickExecutionEngine
     /// and/or <see cref="OptionalTensorData"/>) for each graph input in order, binding each to the
     /// matching graph input.
     /// </summary>
-    public Dictionary<FastTensorKey, IRuntimeTensor> Run(FastComputationGraph graph, params IData[] inputs)
+    public Dictionary<FastTensorKey, IRuntimeTensor> Run(InternalComputationGraph graph, params IData[] inputs)
     {
         var graphInputs = graph.Inputs;
         if (inputs.Length != graphInputs.Count)
@@ -110,7 +110,7 @@ public sealed class QuickExecutionEngine
     /// <see cref="OptionalTensorData"/> (present or absent); this is the optional-aware,
     /// pure-managed counterpart of the ONNX-Runtime <c>ComputeContext.Execute</c> path.
     /// </summary>
-    public IData[] Execute(FastComputationGraph graph, params IData[] inputs)
+    public IData[] Execute(InternalComputationGraph graph, params IData[] inputs)
     {
         var store = Run(graph, inputs);
         var outputs = new IData[graph.Outputs.Count];
@@ -127,12 +127,12 @@ public sealed class QuickExecutionEngine
     }
 
     /// <summary>
-    /// Runs the engine across the given <see cref="FastComputationGraph"/>: walks nodes in topo
+    /// Runs the engine across the given <see cref="InternalComputationGraph"/>: walks nodes in topo
     /// order, dispatches each to its <see cref="OpRegistry"/>-registered operator, and returns
     /// the populated tensor store keyed by <see cref="FastTensorKey"/>.
     /// </summary>
     public Dictionary<FastTensorKey, IRuntimeTensor> Run(
-        FastComputationGraph graph,
+        InternalComputationGraph graph,
         Dictionary<FastTensorKey, IRuntimeTensor>? initialInputs = null)
     {
         var store = new Dictionary<FastTensorKey, IRuntimeTensor>();
@@ -159,7 +159,7 @@ public sealed class QuickExecutionEngine
     /// that index" — used by LOOP_CLOSE on a loop-back.
     /// </summary>
     internal int? ProcessNode(
-        FastNode node, int nodeIndex, FastComputationGraph graph,
+        FastNode node, int nodeIndex, InternalComputationGraph graph,
         Dictionary<FastNodeKey, FastNode> nodeByKey,
         Dictionary<FastTensorKey, IRuntimeTensor> store)
     {
@@ -294,7 +294,7 @@ public sealed class QuickExecutionEngine
     }
 
     /// <summary>
-    /// FastComputationGraph placeholder writer for ops that couldn't run: the tensors we produce
+    /// InternalComputationGraph placeholder writer for ops that couldn't run: the tensors we produce
     /// have no known dtype or rank (this info used to come from the graph's TensorInfos side
     /// dictionary, but QEE no longer reads from it). Downstream ops that tolerate invalid
     /// dtype/shape inputs will keep progressing; those that don't will fall back into this same

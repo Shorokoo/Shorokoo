@@ -52,7 +52,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// the time the close visits).</summary>
         private readonly Dictionary<FastNodeKey, int> _loopOpenOriginalVariadicCounts = new();
 
-        public FastModelStructContext(FastComputationGraph graph)
+        public FastModelStructContext(InternalComputationGraph graph)
         {
             NodeByKey = FastProcessorHelper.BuildNodeByKey(graph);
         }

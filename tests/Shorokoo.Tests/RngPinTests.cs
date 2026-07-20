@@ -112,7 +112,7 @@ public class RngPinTests
 {
     private static (long firstParamOutFeatures, float[] output) Probe<TModule>()
     {
-        var g = (FastComputationGraph)typeof(TModule)
+        var g = (InternalComputationGraph)typeof(TModule)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var input = TensorData([1L, 4L], 0.1f, 0.2f, 0.3f, 0.4f);
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
@@ -161,7 +161,7 @@ public class RngPinTests
     [Fact]
     public void TestRngStreamReportDescribesStreamsAndEmitsPinSkeleton()
     {
-        var g = (FastComputationGraph)typeof(PinBaselineTwoLinears)
+        var g = (InternalComputationGraph)typeof(PinBaselineTwoLinears)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var input = TensorData([1L, 4L], 0.1f, 0.2f, 0.3f, 0.4f);
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
@@ -196,7 +196,7 @@ public class RngPinTests
     [Fact]
     public void TestRngStreamReportShowsLoopFeedSite()
     {
-        var g = (FastComputationGraph)typeof(RngRuntimeLoopFeed)
+        var g = (InternalComputationGraph)typeof(RngRuntimeLoopFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var x = TensorData([8L], new float[8]);
         var steps = TensorData(System.Array.Empty<long>(), 2L);
@@ -235,7 +235,7 @@ public class RngPinTests
         // loop-body scope at their local slots. Previously an in-loop param — whose
         // realized ModelId carries no -1 — was mis-slotted to module scope under the
         // loop's own slot (an unusable handle) and its sibling iterations were dropped.
-        var g = (FastComputationGraph)typeof(RngRuntimeLoopParamAndFeed)
+        var g = (InternalComputationGraph)typeof(RngRuntimeLoopParamAndFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var x = TensorData([8L], new float[8]);
         var steps = TensorData(System.Array.Empty<long>(), 2L);

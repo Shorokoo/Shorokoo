@@ -10,7 +10,7 @@ namespace Shorokoo.Tests;
 
 /// <summary>
 /// Coverage-purpose parity tests for the codegen-free module path
-/// (<see cref="ModuleFactory"/> / <c>GraphBuilder.BuildFastComputationGraphFromDelegate</c>):
+/// (<see cref="ModuleFactory"/> / <c>GraphBuilder.BuildInternalComputationGraphFromDelegate</c>):
 /// the same small models are built once from a <c>[Module]</c> class and once from a plain
 /// delegate, and must execute identically; the delegate-built graphs must also train through
 /// <see cref="TrainingRig"/>, export to ONNX via <c>FastOnnxModelBuilder</c>, and survive the
@@ -212,7 +212,7 @@ public class CodegenFreeModuleTests
     // ───────────────────────────────── helpers ─────────────────────────────────
 
     /// <summary>Concretizes a module graph with the given ordered inputs and executes it.</summary>
-    private static byte[][] ExecuteConcretized(FastComputationGraph moduleGraph, params TensorData[] inputs)
+    private static byte[][] ExecuteConcretized(InternalComputationGraph moduleGraph, params TensorData[] inputs)
     {
         var concreteModel = moduleGraph
             .ToConcreteArchitecture(moduleGraph.FromOrderedInputs([.. inputs]))
@@ -224,10 +224,10 @@ public class CodegenFreeModuleTests
 
     /// <summary>Wraps a constant-fed module output into a no-input graph, concretizes, executes.</summary>
     private static byte[][] ExecuteOutputs(params Variable[] outputs)
-        => ExecuteConcretized(new FastComputationGraph([], [.. outputs]));
+        => ExecuteConcretized(new InternalComputationGraph([], [.. outputs]));
 
     /// <summary>Reads the single state param's current scalar value from a concretized graph.</summary>
-    private static float StateValue(FastComputationGraph graph) =>
+    private static float StateValue(InternalComputationGraph graph) =>
         graph.GetStateParamDataNodes()[0].Attributes
             .GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData)!
             .As<float32>().AccessMemory()[0];
@@ -488,10 +488,10 @@ public class CodegenFreeModuleTests
 
     /// <summary>
     /// Executes the stateful delegate-built graph through
-    /// <see cref="ComputeContext.ExecuteWithState(FastComputationGraph, TensorData[])"/>,
+    /// <see cref="ComputeContext.ExecuteWithState(InternalComputationGraph, TensorData[])"/>,
     /// covering the Fast state pipeline end-to-end: <c>FastLowerStateUpdateNodes</c>
     /// (STATE_UPDATE_LINK/WITH_STATE_DEPS → IDENTITY + extra state outputs) and the
-    /// <c>FastComputationGraph</c> state surface (<c>GetStateParamDataNodes</c> /
+    /// <c>InternalComputationGraph</c> state surface (<c>GetStateParamDataNodes</c> /
     /// <c>GetStateUpdateOutputCount</c> / <c>WithUpdatedStates</c>). The state starts at 0
     /// (InitBnRunningMean) and increments by 1 per execution while the main output stays
     /// input * 2.
@@ -510,7 +510,7 @@ public class CodegenFreeModuleTests
         var stateNodes = concrete.GetStateParamDataNodes();
         Assert.Single(stateNodes);
 
-        float StateValue(FastComputationGraph g) =>
+        float StateValue(InternalComputationGraph g) =>
             g.GetStateParamDataNodes()[0].Attributes
                 .GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData)!
                 .As<float32>().AccessMemory()[0];
@@ -584,7 +584,7 @@ public class CodegenFreeModuleTests
     {
         var input = TensorData([4L], new float[] { 1f, 2f, 3f, 4f });
 
-        FastComputationGraph Concretize(Func<Tensor<float32>, Tensor<float32>> body, string name)
+        InternalComputationGraph Concretize(Func<Tensor<float32>, Tensor<float32>> body, string name)
         {
             var graph = ModuleFactory.ComputationGraph(body, name);
             return graph.ToConcreteArchitecture(graph.FromOrderedInputs([input])).ToConcreteModel();
@@ -593,7 +593,7 @@ public class CodegenFreeModuleTests
         var sugar = Concretize(StateUpdateInLoopCarriedBody, "CodegenFreeInLoopState");
         var afterLoop = Concretize(StateUpdateAfterLoopCarriedBody, "CodegenFreeAfterLoopState");
 
-        FastComputationGraph[] variants = [sugar, afterLoop];
+        InternalComputationGraph[] variants = [sugar, afterLoop];
         foreach (var concrete in variants)
         {
             Assert.Equal(1, concrete.GetStateUpdateOutputCount());

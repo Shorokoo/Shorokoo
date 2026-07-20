@@ -11,26 +11,6 @@ using Shorokoo.Graph;
 
 namespace Shorokoo.Core.Utils
 {
-    /// <summary>
-    /// The lifecycle stage of a serialized graph. Recorded in the .srk v2 header so a
-    /// loader can route or refuse a file at load time instead of failing deep inside
-    /// execution (e.g. <c>No Op registered for ShrkCreateModule</c>).
-    /// </summary>
-    public enum SrkGraphStage
-    {
-        /// <summary>A pre-lowering module graph: still contains module/function
-        /// invocation machinery (<c>ShrkModelInvoke</c> etc.).</summary>
-        Module,
-
-        /// <summary>A lowered architecture from <c>ToConcreteArchitecture</c>: every
-        /// trainable parameter is visible at top level but values are not yet
-        /// materialized (parameters still carry their initializer functions).</summary>
-        ConcreteArchitecture,
-
-        /// <summary>A weight-filled, runnable graph from <c>ToConcreteModel</c>.</summary>
-        ConcreteModel,
-    }
-
     /// <summary>Producer metadata recorded in the .srk v2 header (informational; the
     /// payload dialect remains versioned by the embedded ONNX model itself).</summary>
     public sealed class SrkProducerInfo
@@ -88,11 +68,11 @@ namespace Shorokoo.Core.Utils
 
         /// <summary>Parses <see cref="Stage"/>; null when the name is missing or unknown
         /// (e.g. a stage introduced by a newer framework version).</summary>
-        public SrkGraphStage? TryGetStage() => SrkFileFormat.TryParseStageName(Stage);
+        public GraphKind? TryGetStage() => SrkFileFormat.TryParseStageName(Stage);
     }
 
     /// <summary>
-    /// The .srk v2 self-describing container for serialized <see cref="FastComputationGraph"/>s:
+    /// The .srk v2 self-describing container for serialized <see cref="InternalComputationGraph"/>s:
     ///
     /// <code>magic "SRK\x02" | u16 headerLen (little-endian) | JSON header | payload</code>
     ///
@@ -135,20 +115,20 @@ namespace Shorokoo.Core.Utils
         #region Stage names and detection
 
         /// <summary>Canonical header name of a stage ("module", "concrete-architecture", "concrete-model").</summary>
-        public static string StageName(SrkGraphStage stage) => stage switch
+        public static string StageName(GraphKind stage) => stage switch
         {
-            SrkGraphStage.Module => "module",
-            SrkGraphStage.ConcreteArchitecture => "concrete-architecture",
-            SrkGraphStage.ConcreteModel => "concrete-model",
+            GraphKind.Module => "module",
+            GraphKind.ConcreteArchitecture => "concrete-architecture",
+            GraphKind.ConcreteModel => "concrete-model",
             _ => throw new ArgumentOutOfRangeException(nameof(stage), stage, null),
         };
 
         /// <summary>Inverse of <see cref="StageName"/>; null for unknown or missing names.</summary>
-        public static SrkGraphStage? TryParseStageName(string? name) => name switch
+        public static GraphKind? TryParseStageName(string? name) => name switch
         {
-            "module" => SrkGraphStage.Module,
-            "concrete-architecture" => SrkGraphStage.ConcreteArchitecture,
-            "concrete-model" => SrkGraphStage.ConcreteModel,
+            "module" => GraphKind.Module,
+            "concrete-architecture" => GraphKind.ConcreteArchitecture,
+            "concrete-model" => GraphKind.ConcreteModel,
             _ => null,
         };
 
@@ -178,13 +158,13 @@ namespace Shorokoo.Core.Utils
 
         /// <summary>
         /// Classifies a graph's lifecycle stage from its content: module machinery present →
-        /// <see cref="SrkGraphStage.Module"/>; unmaterialized trainable parameters
-        /// (<c>MODEL_PARAM</c> nodes) present → <see cref="SrkGraphStage.ConcreteArchitecture"/>;
-        /// otherwise <see cref="SrkGraphStage.ConcreteModel"/>. This is what the writer records
+        /// <see cref="GraphKind.Module"/>; unmaterialized trainable parameters
+        /// (<c>MODEL_PARAM</c> nodes) present → <see cref="GraphKind.ConcreteArchitecture"/>;
+        /// otherwise <see cref="GraphKind.ConcreteModel"/>. This is what the writer records
         /// in the header, and what the v1 shim falls back to when enforcing a required stage on
         /// a header-less legacy file.
         /// </summary>
-        public static SrkGraphStage DetectStage(FastComputationGraph graph)
+        public static GraphKind DetectStage(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -192,12 +172,12 @@ namespace Shorokoo.Core.Utils
             {
                 if (ModuleStageOps.Contains(node.OpCode) ||
                     node.OpCode.StartsWith(InternalOpCodes.SUBMODEL, StringComparison.Ordinal))
-                    return SrkGraphStage.Module;
+                    return GraphKind.Module;
             }
 
             return graph.Nodes.Any(n => n.OpCode == InternalOpCodes.MODEL_PARAM)
-                ? SrkGraphStage.ConcreteArchitecture
-                : SrkGraphStage.ConcreteModel;
+                ? GraphKind.ConcreteArchitecture
+                : GraphKind.ConcreteModel;
         }
 
         /// <summary>
@@ -205,11 +185,11 @@ namespace Shorokoo.Core.Utils
         /// <paramref name="origin"/>) when <paramref name="actual"/> differs from
         /// <paramref name="required"/>.
         /// </summary>
-        internal static void EnforceStage(SrkGraphStage actual, SrkGraphStage required, string origin)
+        internal static void EnforceStage(GraphKind actual, GraphKind required, string origin)
         {
             if (actual == required) return;
 
-            var hint = actual == SrkGraphStage.Module
+            var hint = actual == GraphKind.Module
                 ? " A module-stage graph cannot execute; lower it first with " +
                   "ToConcreteArchitecture(...) (and ToConcreteModel(...) for a runnable model), then save that."
                 : string.Empty;
@@ -229,7 +209,7 @@ namespace Shorokoo.Core.Utils
         /// </summary>
         internal static byte[] Write(
             byte[] onnxBytes,
-            SrkGraphStage stage,
+            GraphKind stage,
             bool compress,
             int compressionLevel,
             long irVersion,

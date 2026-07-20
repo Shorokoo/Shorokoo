@@ -8,7 +8,7 @@ using Shorokoo.Core.Nodes.Processors.Helpers;
 namespace Shorokoo.Core.Graph
 {
     /// <summary>
-    /// Globally unique identifier for a node in a <see cref="FastComputationGraph"/>.
+    /// Globally unique identifier for a node in a <see cref="InternalComputationGraph"/>.
     /// Wraps a <see cref="UInt128"/>, which is the same width (16 bytes) as a
     /// <see cref="Guid"/>, so a <see cref="FastNodeKey"/> can be losslessly converted
     /// to and from the CG-side <see cref="Shorokoo.Graph.NodeKey"/> by reinterpreting
@@ -18,7 +18,7 @@ namespace Shorokoo.Core.Graph
     /// The string form is <c>"N{Id}"</c> (decimal), matching the naming convention
     /// produced by <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastUseUniqueNames"/>: when a Fast graph is built from a
     /// CG that has been through <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastUseUniqueNames"/> with the
-    /// <see cref="FastComputationGraphConverter.ToFastGraph(FastComputationGraph, bool)"/>
+    /// <see cref="InternalComputationGraphConverter.ToFastGraph(InternalComputationGraph, bool)"/>
     /// <c>useSequentialIds</c> flag, each node's <see cref="Id"/> is the small
     /// integer counter (1, 2, …) and <see cref="ToString"/> reproduces
     /// <c>"N1"</c>, <c>"N2"</c>, … directly.
@@ -89,7 +89,7 @@ namespace Shorokoo.Core.Graph
     }
 
     /// <summary>
-    /// Globally unique identifier for a tensor in a <see cref="FastComputationGraph"/>.
+    /// Globally unique identifier for a tensor in a <see cref="InternalComputationGraph"/>.
     /// Composed of the producing node's <see cref="FastNodeKey"/> plus an output index.
     /// Losslessly convertible to/from <see cref="Shorokoo.Graph.TensorKey"/>.
     ///

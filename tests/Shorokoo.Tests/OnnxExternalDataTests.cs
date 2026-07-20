@@ -130,7 +130,7 @@ public class OnnxExternalDataTests
         finally { Directory.Delete(dir, recursive: true); }
     }
 
-    private static float[] RunAddModel(FastComputationGraph fast)
+    private static float[] RunAddModel(InternalComputationGraph fast)
     {
         IData[] inputs = [TensorData(DType.Float32, [4L], 1f, 2f, 3f, 4f)];
         var results = ComputeContext.Default.Execute(fast, inputs);

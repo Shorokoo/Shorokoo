@@ -31,7 +31,7 @@ public partial class SimpleSumSquaredLoss
 [Trait("Purpose", "Coverage")]
 public class TrainingGraphBuilderQuickTests
 {
-    #region PrepareForTrainingAsFast with FastComputationGraph Loss Overload
+    #region PrepareForTrainingAsFast with InternalComputationGraph Loss Overload
 
     /// <summary>
     /// Verifies that PrepareForTrainingAsFast produces a high-level graph with correct structure:
@@ -71,7 +71,7 @@ public class TrainingGraphBuilderQuickTests
         // A simple identity-like model with no trainable params
         var input = Globals.InputTensor<float32>("input", rank: 1);
         var output = OnnxOp.Identity(input, null);
-        var modelGraph = new FastComputationGraph(
+        var modelGraph = new InternalComputationGraph(
             ImmutableArray.Create<Variable>(input),
             ImmutableArray.Create(output));
 
@@ -87,7 +87,7 @@ public class TrainingGraphBuilderQuickTests
 
     /// <summary>
     /// Verifies that PrepareForTrainingAsFast with a Func delegate correctly extracts the
-    /// FastComputationGraph from the module and produces a valid high-level training graph.
+    /// InternalComputationGraph from the module and produces a valid high-level training graph.
     /// </summary>
     [Fact]
     public void PrepareForTraining_FuncOverload_ProducesCorrectStructure()
@@ -145,7 +145,7 @@ public class TrainingGraphBuilderQuickTests
     {
         var modelGraph = SimplestLayer.ComputationGraph;
         Assert.Throws<ArgumentNullException>(() =>
-            TrainingGraphBuilder.PrepareForTrainingAsFast(modelGraph, (FastComputationGraph)null!));
+            TrainingGraphBuilder.PrepareForTrainingAsFast(modelGraph, (InternalComputationGraph)null!));
     }
 
     [Fact]

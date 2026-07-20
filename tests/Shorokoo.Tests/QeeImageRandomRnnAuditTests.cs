@@ -49,11 +49,11 @@ public class QeeImageRandomRnnAuditTests
     }
 
     private static Dictionary<FastTensorKey, IRuntimeTensor> QeeRun<TModule>(
-        TensorData[] runtimeInputs, out FastComputationGraph concreteModel)
+        TensorData[] runtimeInputs, out InternalComputationGraph concreteModel)
     {
         var prop = typeof(TModule).GetProperty("ComputationGraph", BindingFlags.Public | BindingFlags.Static)
             ?? throw new InvalidOperationException($"{typeof(TModule).FullName} has no public static ComputationGraph property");
-        var moduleGraph = (FastComputationGraph)prop.GetValue(null)!;
+        var moduleGraph = (InternalComputationGraph)prop.GetValue(null)!;
         var concreteArch = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([.. runtimeInputs]));
         concreteModel = concreteArch.ToConcreteModel();
         var qee = new QuickExecutionEngine();

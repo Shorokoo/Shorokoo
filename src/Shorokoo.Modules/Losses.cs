@@ -17,57 +17,57 @@ public static class Losses
 {
 
     /// <summary>Mean squared error — <c>mean((predictions - targets)²)</c>.</summary>
-    public static FastComputationGraph L2Loss          => global::Shorokoo.Modules.Losses.L2Loss.ComputationGraph;
+    public static InternalComputationGraph L2Loss          => global::Shorokoo.Modules.Losses.L2Loss.ComputationGraph;
 
     /// <summary>Mean absolute error — <c>mean(|predictions - targets|)</c>.</summary>
-    public static FastComputationGraph L1Loss          => global::Shorokoo.Modules.Losses.L1Loss.ComputationGraph;
+    public static InternalComputationGraph L1Loss          => global::Shorokoo.Modules.Losses.L1Loss.ComputationGraph;
 
     /// <summary>Softmax cross-entropy. Targets are class indices (int64).</summary>
-    public static FastComputationGraph CrossEntropy    => global::Shorokoo.Modules.Losses.CrossEntropyLoss.ComputationGraph;
+    public static InternalComputationGraph CrossEntropy    => global::Shorokoo.Modules.Losses.CrossEntropyLoss.ComputationGraph;
 
     /// <summary>Binary cross-entropy over probabilities in [0, 1].</summary>
-    public static FastComputationGraph BCE             => global::Shorokoo.Modules.Losses.BCELoss.ComputationGraph;
+    public static InternalComputationGraph BCE             => global::Shorokoo.Modules.Losses.BCELoss.ComputationGraph;
 
     /// <summary>Binary cross-entropy applied to raw logits (numerically stable).</summary>
-    public static FastComputationGraph BCEWithLogits   => global::Shorokoo.Modules.Losses.BCEWithLogitsLoss.ComputationGraph;
+    public static InternalComputationGraph BCEWithLogits   => global::Shorokoo.Modules.Losses.BCEWithLogitsLoss.ComputationGraph;
 
     /// <summary>
     /// Smooth L1 (Huber with delta = 1). L2 for small errors, L1 for large ones.
     /// Rig-safe (no hyperparameter input).
     /// </summary>
-    public static FastComputationGraph SmoothL1        => global::Shorokoo.Modules.Losses.SmoothL1Loss.ComputationGraph;
+    public static InternalComputationGraph SmoothL1        => global::Shorokoo.Modules.Losses.SmoothL1Loss.ComputationGraph;
 
     /// <summary>
     /// Huber loss with a runtime <c>delta</c> hyperparameter. Requires 3 inputs
     /// (predictions, targets, delta) — not directly rig-safe; use <see cref="SmoothL1"/>
     /// for delta = 1, or wrap in a 2-input module with a fixed delta.
     /// </summary>
-    public static FastComputationGraph Huber           => global::Shorokoo.Modules.Losses.HuberLoss.ComputationGraph;
+    public static InternalComputationGraph Huber           => global::Shorokoo.Modules.Losses.HuberLoss.ComputationGraph;
 
     /// <summary>Hinge loss for binary classification.</summary>
-    public static FastComputationGraph Hinge           => global::Shorokoo.Modules.Losses.HingeLoss.ComputationGraph;
+    public static InternalComputationGraph Hinge           => global::Shorokoo.Modules.Losses.HingeLoss.ComputationGraph;
 
     /// <summary>Squared hinge loss.</summary>
-    public static FastComputationGraph SquaredHinge    => global::Shorokoo.Modules.Losses.SquaredHingeLoss.ComputationGraph;
+    public static InternalComputationGraph SquaredHinge    => global::Shorokoo.Modules.Losses.SquaredHingeLoss.ComputationGraph;
 
     /// <summary>Kullback-Leibler divergence.</summary>
-    public static FastComputationGraph KLDiv           => global::Shorokoo.Modules.Losses.KLDivLoss.ComputationGraph;
+    public static InternalComputationGraph KLDiv           => global::Shorokoo.Modules.Losses.KLDivLoss.ComputationGraph;
 
     /// <summary>Negative log-likelihood loss.</summary>
-    public static FastComputationGraph NLL             => global::Shorokoo.Modules.Losses.NLLLoss.ComputationGraph;
+    public static InternalComputationGraph NLL             => global::Shorokoo.Modules.Losses.NLLLoss.ComputationGraph;
 
     /// <summary>Poisson negative log-likelihood loss.</summary>
-    public static FastComputationGraph PoissonNLL      => global::Shorokoo.Modules.Losses.PoissonNLLLoss.ComputationGraph;
+    public static InternalComputationGraph PoissonNLL      => global::Shorokoo.Modules.Losses.PoissonNLLLoss.ComputationGraph;
 
     /// <summary>Log-cosh loss — smooth approximation of MAE.</summary>
-    public static FastComputationGraph LogCosh         => global::Shorokoo.Modules.Losses.LogCoshLoss.ComputationGraph;
+    public static InternalComputationGraph LogCosh         => global::Shorokoo.Modules.Losses.LogCoshLoss.ComputationGraph;
 
     /// <summary>Cosine embedding loss.</summary>
-    public static FastComputationGraph CosineEmbedding => global::Shorokoo.Modules.Losses.CosineEmbeddingLoss.ComputationGraph;
+    public static InternalComputationGraph CosineEmbedding => global::Shorokoo.Modules.Losses.CosineEmbeddingLoss.ComputationGraph;
 
     /// <summary>Triplet margin loss.</summary>
-    public static FastComputationGraph TripletMargin   => global::Shorokoo.Modules.Losses.TripletMarginLoss.ComputationGraph;
+    public static InternalComputationGraph TripletMargin   => global::Shorokoo.Modules.Losses.TripletMarginLoss.ComputationGraph;
 
     /// <summary>Binary focal loss for class-imbalanced problems.</summary>
-    public static FastComputationGraph BinaryFocal     => global::Shorokoo.Modules.Losses.BinaryFocalLoss.ComputationGraph;
+    public static InternalComputationGraph BinaryFocal     => global::Shorokoo.Modules.Losses.BinaryFocalLoss.ComputationGraph;
 }

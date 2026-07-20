@@ -33,7 +33,7 @@ internal sealed class IfCloseOp : QuickOp
     public override string OpCode => OpCodes.IF_CLOSE;
 
     public override (IRuntimeTensor[] results, bool loopBack) Execute(
-        FastNode node, FastComputationGraph graph, Dictionary<FastNodeKey, FastNode> nodeByKey,
+        FastNode node, InternalComputationGraph graph, Dictionary<FastNodeKey, FastNode> nodeByKey,
         Dictionary<FastTensorKey, IRuntimeTensor> store, int maxDataElements)
     {
         var ownInputs = GatherInputs(node.Inputs, store);

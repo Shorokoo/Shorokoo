@@ -17,8 +17,8 @@ using System.Linq;
 namespace Shorokoo.Core.Nodes.Processors.Training
 {
     /// <summary>
-    /// Fast-native rewrite step used by <see cref="Shorokoo.Core.Training.TrainingGraphBuilder.PrepareForTrainingAsFast(FastComputationGraph, FastComputationGraph)"/>.
-    /// Mutates the supplied <see cref="FastComputationGraph"/> in place: every model input producer node is replaced
+    /// Fast-native rewrite step used by <see cref="Shorokoo.Core.Training.TrainingGraphBuilder.PrepareForTrainingAsFast(InternalComputationGraph, InternalComputationGraph)"/>.
+    /// Mutates the supplied <see cref="InternalComputationGraph"/> in place: every model input producer node is replaced
     /// (via key remap) by the matching <c>TENSOR_STRUCT_GETFIELD</c> output of a
     /// <c>model_inputs</c> struct input; every non-trainable param node is replaced by the
     /// matching <c>TENSOR_STRUCT_GETFIELD</c> output of a <c>model_state</c> struct input;
@@ -51,7 +51,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training
         }
 
         public static ProcessResult Process(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             FastNodeKey[] originalModelInputNodeKeys,
             FastTensorKey[] modelInputFieldKeys,
             FastTensorKey modelInputStructInputKey,
@@ -260,7 +260,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training
             return key;
         }
 
-        private static string? LookupInputName(FastComputationGraph graph, FastTensorKey inputKey)
+        private static string? LookupInputName(InternalComputationGraph graph, FastTensorKey inputKey)
         {
             for (int i = 0; i < graph.Nodes.Count; i++)
             {

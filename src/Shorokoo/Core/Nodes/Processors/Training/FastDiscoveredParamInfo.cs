@@ -11,7 +11,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training
 {
     /// <summary>
     /// Fast-side info about a single trainable or state parameter discovered in a
-    /// <see cref="FastComputationGraph"/> by <see cref="FastDiscoverTrainableParamsProcessor"/>
+    /// <see cref="InternalComputationGraph"/> by <see cref="FastDiscoverTrainableParamsProcessor"/>
     /// or <see cref="FastDiscoverStateParamsProcessor"/>. All metadata is read directly off
     /// <see cref="FastNode.Attributes"/> — no round-trip to <c>ComputationGraph</c>
     /// is performed.

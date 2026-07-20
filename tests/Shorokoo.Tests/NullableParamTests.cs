@@ -18,13 +18,13 @@ namespace Shorokoo.Tests;
 [Trait("Purpose", "Coverage")]
 public class NullableParamTests
 {
-    private static System.Collections.Immutable.ImmutableArray<Variable> InputsOf(FastComputationGraph graph)
-        => FastComputationGraphConverter.BuildNodes(graph).inputs;
+    private static System.Collections.Immutable.ImmutableArray<Variable> InputsOf(InternalComputationGraph graph)
+        => InternalComputationGraphConverter.BuildNodes(graph).inputs;
 
     private static byte[] Bytes(params float[] values) => TensorData([(long)values.Length], values).AccessRawMemory().ToArray();
 
     /// <summary>Concretizes (tensor shape hints stand in for optional inputs) and executes via the optional-aware QEE.</summary>
-    private static byte[] RunWithOptionals(FastComputationGraph graph, TensorData[] shapeHints, params IData[] runtimeInputs)
+    private static byte[] RunWithOptionals(InternalComputationGraph graph, TensorData[] shapeHints, params IData[] runtimeInputs)
     {
         var concrete = graph
             .ToConcreteArchitecture(graph.FromOrderedInputs([.. shapeHints]))

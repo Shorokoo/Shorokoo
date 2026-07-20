@@ -10,12 +10,12 @@ namespace Shorokoo.Core.AutoDiffCheckpointing;
 
 /// <summary>
 /// Result of a backprop optimization pass, containing the optimized
-/// <see cref="FastComputationGraph"/> and its evaluation metrics.
+/// <see cref="InternalComputationGraph"/> and its evaluation metrics.
 /// </summary>
 internal class BackpropOptimizationResult
 {
-    /// <summary>The optimized <see cref="FastComputationGraph"/>.</summary>
-    public required FastComputationGraph OptimizedGraph { get; init; }
+    /// <summary>The optimized <see cref="InternalComputationGraph"/>.</summary>
+    public required InternalComputationGraph OptimizedGraph { get; init; }
 
     /// <summary>
     /// The combined metric score for the optimized graph
@@ -66,7 +66,7 @@ internal class SimpleBackpropOptimizer
     /// <summary>
     /// Optimizes the given graph using iterative replay and returns the result.
     /// </summary>
-    public BackpropOptimizationResult Optimize(FastComputationGraph graph, ShapeInferenceResult shapeInfo)
+    public BackpropOptimizationResult Optimize(InternalComputationGraph graph, ShapeInferenceResult shapeInfo)
     {
         var optimizedGraph = BuildOptimizedGraph(graph, shapeInfo);
 
@@ -81,7 +81,7 @@ internal class SimpleBackpropOptimizer
         };
     }
 
-    private FastComputationGraph BuildOptimizedGraph(FastComputationGraph graph, ShapeInferenceResult shapeInfo)
+    private InternalComputationGraph BuildOptimizedGraph(InternalComputationGraph graph, ShapeInferenceResult shapeInfo)
     {
         var baseEval = _evaluator.Evaluate(graph, shapeInfo);
         var replayedTensors = IdentifyTensorsToReplay(graph.Nodes, shapeInfo, baseEval);
@@ -99,8 +99,8 @@ internal class SimpleBackpropOptimizer
     /// Returns <paramref name="graph"/> unchanged (same reference) when no recomputation
     /// nodes were actually inserted.
     /// </summary>
-    internal static FastComputationGraph ApplyReplayTransformation(
-        FastComputationGraph graph, HashSet<FastTensorKey> replayedTensors)
+    internal static InternalComputationGraph ApplyReplayTransformation(
+        InternalComputationGraph graph, HashSet<FastTensorKey> replayedTensors)
     {
         // Map: replayed tensor key → its producer node (read off the source graph)
         var tensorProducerNode = new Dictionary<FastTensorKey, FastNode>();

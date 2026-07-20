@@ -9,7 +9,7 @@ using System.Linq;
 namespace Shorokoo.Core.AutoDiffCheckpointing;
 
 /// <summary>
-/// Reorders a <see cref="FastComputationGraph"/>'s topological order to minimize peak memory usage.
+/// Reorders a <see cref="InternalComputationGraph"/>'s topological order to minimize peak memory usage.
 ///
 /// The default topological order is determined by node creation order, which often
 /// produces suboptimal memory usage: tensors produced early but consumed late create
@@ -30,8 +30,8 @@ internal class MemoryAwareScheduler
     /// Reorders the given graph's nodes to minimize peak memory, based on the
     /// provided shape information for tensor sizes.
     /// </summary>
-    /// <returns>A new <see cref="FastComputationGraph"/> with the same nodes in a memory-optimized order.</returns>
-    public FastComputationGraph Reorder(FastComputationGraph graph, ShapeInferenceResult shapeInfo)
+    /// <returns>A new <see cref="InternalComputationGraph"/> with the same nodes in a memory-optimized order.</returns>
+    public InternalComputationGraph Reorder(InternalComputationGraph graph, ShapeInferenceResult shapeInfo)
     {
         var nodes = graph.Nodes;
         if (nodes.Count <= 2)
@@ -188,7 +188,7 @@ internal class MemoryAwareScheduler
         // Crucially we don't seed with graph.Inputs even though those tensor keys are
         // "available externally" — every graph-input key is also the output of a
         // MODEL_TENSOR_INPUT node in graph.Nodes, and downstream code that compiles the
-        // reordered graph (FastComputationGraphConverter) requires strict producer-then-
+        // reordered graph (InternalComputationGraphConverter) requires strict producer-then-
         // consumer ordering: each consumer's input tensors must already appear as some
         // earlier node's output in the linear order. Seeding with graph.Inputs would let
         // a consumer be picked before its MODEL_TENSOR_INPUT producer, producing a graph

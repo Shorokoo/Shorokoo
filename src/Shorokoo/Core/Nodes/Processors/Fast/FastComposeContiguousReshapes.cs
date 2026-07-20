@@ -35,7 +35,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastComposeContiguousReshapes
     {
-        public static void Process(FastComputationGraph graph)
+        public static void Process(InternalComputationGraph graph)
         {
             var nodeByKey = graph.Nodes.ToDictionary(n => n.Key);
 

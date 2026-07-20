@@ -10,7 +10,7 @@ using System.Linq;
 namespace Shorokoo.Core.AutoDiffCheckpointing;
 
 /// <summary>
-/// Evaluates a <see cref="FastComputationGraph"/>'s performance by walking through nodes in
+/// Evaluates a <see cref="InternalComputationGraph"/>'s performance by walking through nodes in
 /// execution order, tracking cumulative compute time and peak memory usage.
 ///
 /// Memory tracking:
@@ -30,9 +30,9 @@ internal class GraphEvaluator
     }
 
     /// <summary>
-    /// Evaluates the given <see cref="FastComputationGraph"/> using shape inference data.
+    /// Evaluates the given <see cref="InternalComputationGraph"/> using shape inference data.
     /// </summary>
-    public GraphEvaluationResult Evaluate(FastComputationGraph graph, ShapeInferenceResult shapeInfo)
+    public GraphEvaluationResult Evaluate(InternalComputationGraph graph, ShapeInferenceResult shapeInfo)
     {
         var nodes = graph.Nodes;
 

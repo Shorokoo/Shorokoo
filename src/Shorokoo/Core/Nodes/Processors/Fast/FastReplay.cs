@@ -9,10 +9,10 @@ using Shorokoo.Core.Nodes.Processors.AutoGrad;
 namespace Shorokoo.Core.Nodes.Processors.Fast
 {
     /// <summary>
-    /// Inlines a source <see cref="FastComputationGraph"/> into a target graph by cloning the
+    /// Inlines a source <see cref="InternalComputationGraph"/> into a target graph by cloning the
     /// source's non-input nodes (with fresh keys), remapping every reference to a source-input
     /// key onto a caller-provided <see cref="FastTensorKey"/>, and appending the cloned nodes
-    /// to <see cref="FastComputationGraph.Nodes"/>.
+    /// to <see cref="InternalComputationGraph.Nodes"/>.
     ///
     /// <para>
     /// Replaces the CG-side <c>ReplayLossGraph</c> in <c>TrainingGraphBuilder</c> and
@@ -25,14 +25,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <summary>
         /// Splices a clone of <paramref name="source"/> into <paramref name="target"/>:
         /// every node of <paramref name="source"/> except its input-producing nodes is cloned,
-        /// re-keyed, and appended to <paramref name="target"/>.<see cref="FastComputationGraph.Nodes"/>.
+        /// re-keyed, and appended to <paramref name="target"/>.<see cref="InternalComputationGraph.Nodes"/>.
         /// References to <paramref name="source"/>'s input keys are rewritten to point at the
         /// matching entry of <paramref name="mappedInputs"/>.
         /// </summary>
         /// <param name="target">Graph to splice cloned nodes into. Mutated in place.</param>
         /// <param name="source">Graph whose body to clone. Not modified.</param>
         /// <param name="mappedInputs">
-        /// One entry per <paramref name="source"/>.<see cref="FastComputationGraph.Inputs"/>;
+        /// One entry per <paramref name="source"/>.<see cref="InternalComputationGraph.Inputs"/>;
         /// each entry is the <see cref="FastTensorKey"/> in <paramref name="target"/> that the
         /// corresponding source input should resolve to.
         /// </param>
@@ -43,8 +43,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// the rekeyed body-node output keys.
         /// </returns>
         public static FastTensorKey[] ReplayInto(
-            FastComputationGraph target,
-            FastComputationGraph source,
+            InternalComputationGraph target,
+            InternalComputationGraph source,
             FastTensorKey[] mappedInputs)
         {
             if (target is null) throw new ArgumentNullException(nameof(target));

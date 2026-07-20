@@ -24,7 +24,7 @@ using IR = Shorokoo.Core.Factory.IR;
 namespace Shorokoo.Onnx
 {
     /// <summary>
-    /// Imports serialized ONNX models into <see cref="FastComputationGraph"/>s
+    /// Imports serialized ONNX models into <see cref="InternalComputationGraph"/>s
     /// (deserializes the ModelProto, materializes any external tensor data, then builds
     /// the graph via <c>OnnxModelReader</c>).
     ///
@@ -44,19 +44,19 @@ namespace Shorokoo.Onnx
         /// is the directory external-data <c>location</c> keys resolve against; when
         /// null, a model requiring external data fails loudly.
         /// </summary>
-        public static FastComputationGraph FromOnnxModelToFastGraph(Stream inputStream, string? externalDataDirectory = null)
+        public static InternalComputationGraph FromOnnxModelToFastGraph(Stream inputStream, string? externalDataDirectory = null)
         {
             var model = ProtoBuf.Serializer.Deserialize<IR.ModelProto>(inputStream);
             OnnxExternalData.LoadIntoModel(model, externalDataDirectory);
             var reader = new OnnxModelReader(model);
-            return reader.BuildFastComputationGraph();
+            return reader.BuildInternalComputationGraph();
         }
 
         /// <summary>
         /// Imports an ONNX model from a file path. External tensor data (if any)
         /// resolves against the file's directory.
         /// </summary>
-        public static FastComputationGraph FromOnnxModelToFastGraph(string filePath)
+        public static InternalComputationGraph FromOnnxModelToFastGraph(string filePath)
         {
             using var fileReaderStream = File.OpenRead(filePath);
             return FromOnnxModelToFastGraph(
@@ -69,7 +69,7 @@ namespace Shorokoo.Onnx
         /// is the directory external-data <c>location</c> keys resolve against; when
         /// null, a model requiring external data fails loudly.
         /// </summary>
-        public static FastComputationGraph FromOnnxModelToFastGraph(byte[] rawData, string? externalDataDirectory = null)
+        public static InternalComputationGraph FromOnnxModelToFastGraph(byte[] rawData, string? externalDataDirectory = null)
         {
             using var stream = new MemoryStream(rawData);
             return FromOnnxModelToFastGraph(stream, externalDataDirectory);

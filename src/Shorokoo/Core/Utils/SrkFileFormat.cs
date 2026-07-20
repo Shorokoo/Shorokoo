@@ -330,11 +330,6 @@ namespace Shorokoo.Core.Utils
         }
 
         /// <summary>
-        /// Throws a clear stage-mismatch error naming both stages (and the file, via
-        /// <paramref name="origin"/>) when <paramref name="actual"/> differs from
-        /// <paramref name="required"/>.
-        /// </summary>
-        /// <summary>
         /// Shared remedy sentence for kind/stage-mismatch errors: unstamped data is
         /// classified by op-scanning, which cannot tell a machinery-free module body or
         /// a parameterless architecture from a concrete model — the validated re-stamp
@@ -344,6 +339,11 @@ namespace Shorokoo.Core.Utils
             "If the stamp itself is wrong (op-scanning of unstamped data can misjudge " +
             "machinery-free graphs), re-stamp the graph with ComputationGraph.WithKind.";
 
+        /// <summary>
+        /// Throws a clear stage-mismatch error naming both stages (and the file, via
+        /// <paramref name="origin"/>) when <paramref name="actual"/> differs from
+        /// <paramref name="required"/>.
+        /// </summary>
         internal static void EnforceStage(GraphKind actual, GraphKind required, string origin)
         {
             if (actual == required) return;

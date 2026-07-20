@@ -69,6 +69,21 @@ public sealed class QuickExecutionEngine
     private readonly List<FastLoopFrame> _fastLoopStack = new();
 
     /// <summary>
+    /// Readonly-graph overload of <see cref="Run(InternalComputationGraph, TensorData[])"/>.
+    /// Interpretation only reads the graph, so it borrows without a copy.
+    /// </summary>
+    public Dictionary<FastTensorKey, IRuntimeTensor> Run(Shorokoo.Graph.ComputationGraph graph, params TensorData[] sampleInputs)
+        => Run(graph.Internal, sampleInputs);
+
+    /// <summary>Readonly-graph overload of <see cref="Run(InternalComputationGraph, IData[])"/>.</summary>
+    public Dictionary<FastTensorKey, IRuntimeTensor> Run(Shorokoo.Graph.ComputationGraph graph, params IData[] inputs)
+        => Run(graph.Internal, inputs);
+
+    /// <summary>Readonly-graph overload of <see cref="Execute(InternalComputationGraph, IData[])"/>.</summary>
+    public IData[] Execute(Shorokoo.Graph.ComputationGraph graph, params IData[] inputs)
+        => Execute(graph.Internal, inputs);
+
+    /// <summary>
     /// Convenience overload that takes <see cref="TensorData"/> samples for each graph input in
     /// order. Each sample is converted into a <see cref="RuntimeTensor"/> (respecting the size
     /// threshold) and bound to the matching graph input.

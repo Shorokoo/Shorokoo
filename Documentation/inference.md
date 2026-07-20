@@ -70,7 +70,7 @@ using Shorokoo.Runtime;   // ComputeContext
 using static Shorokoo.Globals;
 
 var input    = TensorData([4L], 1f, 2f, 3f, 4f);   // the actual input data
-var graph    = MyLayer.ComputationGraph;            // generated FastComputationGraph
+var graph    = MyLayer.ComputationGraph;            // readonly ComputationGraph (kind: Module)
 var concrete = graph
     .ToConcreteArchitecture(graph.FromOrderedInputs([input]))
     .ToConcreteModel();
@@ -81,7 +81,7 @@ float[] values = results[0].ToTensorData().As<float32>().AccessMemory<float>().T
 
 When the graph comes from a saved `.srk`/`.zsrk` file, you can catch this mismatch
 at load time instead: v2 files record their lowering stage in the header, and
-`LoadFastGraphFromFile(path, requiredStage: SrkGraphStage.ConcreteModel)` refuses a
+`LoadFastGraphFromFile(path, requiredStage: GraphKind.ConcreteModel)` refuses a
 module-stage file with a clear stage-mismatch error — see
 [onnx-and-weights.md](onnx-and-weights.md#the-srk-v2-container).
 
@@ -102,6 +102,18 @@ pipeline, applied in order:
 
 The simple example above has no hypers to bake, so it skips straight to step 2.
 The next section shows step 1 in use.
+
+Every `ComputationGraph` carries a reliable **`Kind`** property saying where it
+sits in this pipeline — `GraphKind.Module`, `GraphKind.ConcreteArchitecture`, or
+`GraphKind.ConcreteModel` — stamped by the step that produced it (and preserved
+through copies and `.srk` save/load). The steps check it up front:
+`ToConcreteArchitecture` requires a `Module` graph, `ToConcreteModel` a
+`ConcreteArchitecture`, and export/weight-query operations name the actual vs
+required kind in their error when handed the wrong stage — so a mis-ordered
+pipeline fails immediately with a clear message instead of deep inside execution.
+`ComputationGraph`s are **readonly**: operations that used to modify a graph in
+place return a new graph instead (e.g. `WithRngConfig`), so a graph's `Kind` can
+never be invalidated behind your back.
 
 ## Running a `[Module]` with `[Hyper]` parameters
 
@@ -168,7 +180,7 @@ usually not what you want.
 
 ```csharp
 var ctx      = new ComputeContext();
-var compiled = ctx.Compile(graph);                 // graph: FastComputationGraph
+var compiled = ctx.Compile(graph);                 // graph: ComputationGraph
 var r1 = compiled.Execute(inputData1);             // params IData[]
 var r2 = compiled.Execute(inputData2);             // reuses the session
 ```

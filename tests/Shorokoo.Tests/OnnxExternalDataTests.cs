@@ -541,6 +541,16 @@ public class OnnxExternalDataTests
         Assert.Contains("'concrete-architecture'", exArch.Message);
         Assert.False(File.Exists(path));
         Assert.False(File.Exists(path + ".data"));
+
+        // Even WITHOUT the tag, the proto op-scan recognizes the serialized form of
+        // unmaterialized parameters (calls to initializer-typed functions) and refuses.
+        var untaggedArchProto = FastOnnxModelBuilder.BuildInternalOnnxModel(arch.Internal);
+        var exUntagged = Assert.Throws<ModelException>(
+            () => OnnxModelExporter.SaveWithExternalData(untaggedArchProto, path));
+        Assert.Contains("XD008", exUntagged.Message);
+        Assert.Contains("'concrete-architecture'", exUntagged.Message);
+        Assert.False(File.Exists(path));
+        Assert.False(File.Exists(path + ".data"));
     }
 
 }

@@ -214,11 +214,19 @@ namespace Shorokoo.Core.Utils
             // The RngSeed identity parameter at reserved ModelId [0] is not a weight
             // (binding an RNG config IS its initialization, legitimate from architecture
             // stage on), so it never counts as an "initialized model parameter" here.
+            //
+            // A FUNCTION_INVOKE that calls a plain Function is executable content, not
+            // module machinery — a reimported concrete model legitimately carries such
+            // calls (e.g. the RNG draw functions emitted at export). Only calls whose
+            // target is module-typed (or unresolved) mark the graph as module-stage.
             int moduleOps = 0, uninitializedParams = 0, initializedParams = 0;
             foreach (var node in graph.Nodes)
             {
-                if (ModuleStageOps.Contains(node.OpCode) ||
-                    node.OpCode.StartsWith(InternalOpCodes.SUBMODEL, StringComparison.Ordinal))
+                bool isModuleOp = node.OpCode == InternalOpCodes.FUNCTION_INVOKE
+                    ? node.TargetFunction is not { FunctionType: Shorokoo.Core.Nodes.OnnxNodes.FunctionType.Function }
+                    : ModuleStageOps.Contains(node.OpCode) ||
+                      node.OpCode.StartsWith(InternalOpCodes.SUBMODEL, StringComparison.Ordinal);
+                if (isModuleOp)
                     moduleOps++;
                 else if (node.OpCode == InternalOpCodes.MODEL_PARAM)
                     uninitializedParams++;
@@ -270,6 +278,19 @@ namespace Shorokoo.Core.Utils
         {
             if (model is null) throw new ArgumentNullException(nameof(model));
 
+            // Serialization rewrites MODEL_PARAM nodes and function invokes into calls
+            // to "Functions"-domain FunctionProtos, so those in-memory opcodes are not
+            // visible on the wire. Recover them from the function metadata: a call to an
+            // initializer-typed function IS a serialized unmaterialized parameter, and a
+            // call to a module-typed function is module machinery. Calls to plain
+            // Function-typed functions stay unclassified — vanilla concrete-model
+            // exports legitimately contain them.
+            var fnTypeByName = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var fn in model.Functions)
+                foreach (var prop in fn.MetadataProps)
+                    if (prop.Key == Shorokoo.Core.Function.IRFunctionTypeParamName)
+                        fnTypeByName[fn.Name] = prop.Value;
+
             bool sawModelParam = false;
             bool sawModuleOp = false;
 
@@ -282,6 +303,15 @@ namespace Shorokoo.Core.Utils
                         sawModuleOp = true;
                     else if (node.OpType == InternalOpCodes.MODEL_PARAM)
                         sawModelParam = true;
+                    else if (fnTypeByName.TryGetValue(node.OpType, out var fnType))
+                    {
+                        if (fnType == nameof(Shorokoo.Core.Nodes.OnnxNodes.FunctionType.TrainableParamInitializer) ||
+                            fnType == nameof(Shorokoo.Core.Nodes.OnnxNodes.FunctionType.StateParamInitializer))
+                            sawModelParam = true;
+                        else if (fnType == nameof(Shorokoo.Core.Nodes.OnnxNodes.FunctionType.Module) ||
+                                 fnType == nameof(Shorokoo.Core.Nodes.OnnxNodes.FunctionType.ModuleSignature))
+                            sawModuleOp = true;
+                    }
 
                     foreach (var attr in node.Attributes)
                     {
@@ -304,6 +334,16 @@ namespace Shorokoo.Core.Utils
         /// <paramref name="origin"/>) when <paramref name="actual"/> differs from
         /// <paramref name="required"/>.
         /// </summary>
+        /// <summary>
+        /// Shared remedy sentence for kind/stage-mismatch errors: unstamped data is
+        /// classified by op-scanning, which cannot tell a machinery-free module body or
+        /// a parameterless architecture from a concrete model — the validated re-stamp
+        /// is the way out when the stamp itself is what's wrong.
+        /// </summary>
+        internal const string WithKindRemedyHint =
+            "If the stamp itself is wrong (op-scanning of unstamped data can misjudge " +
+            "machinery-free graphs), re-stamp the graph with ComputationGraph.WithKind.";
+
         internal static void EnforceStage(GraphKind actual, GraphKind required, string origin)
         {
             if (actual == required) return;
@@ -314,7 +354,9 @@ namespace Shorokoo.Core.Utils
                 : string.Empty;
             throw new InvalidOperationException(
                 $"'{origin}' contains a '{StageName(actual)}'-stage graph, but a " +
-                $"'{StageName(required)}'-stage graph is required here.{hint}");
+                $"'{StageName(required)}'-stage graph is required here.{hint}" +
+                " If the file's recorded stage is wrong, load it without requiredStage and " +
+                "re-stamp the graph with ComputationGraph.WithKind.");
         }
 
         #endregion

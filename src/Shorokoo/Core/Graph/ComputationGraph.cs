@@ -115,7 +115,8 @@ namespace Shorokoo.Graph
             throw new System.InvalidOperationException(
                 $"{operation} requires a '{SrkFileFormat.StageName(required)}' graph, but this graph " +
                 $"is a '{SrkFileFormat.StageName(Kind)}'." +
-                (hint is null ? string.Empty : " " + hint));
+                (hint is null ? string.Empty : " " + hint) +
+                " " + SrkFileFormat.WithKindRemedyHint);
         }
     }
 }

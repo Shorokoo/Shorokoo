@@ -95,7 +95,8 @@ namespace Shorokoo.Core.Factory
                     "graph exports to vanilla ONNX that any external runtime can load, but this graph is a " +
                     $"'{Shorokoo.Core.Utils.SrkFileFormat.StageName(graph.Kind)}'. Lower the graph first " +
                     "(ToConcreteArchitecture -> ToConcreteModel) and export that. Shorokoo's own .srk/.zsrk " +
-                    "persistence (CompressedFormatUtils.SaveFastGraphToFile/SaveFastGraphToBinary) accepts every graph kind.");
+                    "persistence (CompressedFormatUtils.SaveFastGraphToFile/SaveFastGraphToBinary) accepts every graph kind. " +
+                    Shorokoo.Core.Utils.SrkFileFormat.WithKindRemedyHint);
             return BuildOnnxModelCore(graph.Internal, opset, prepForOnnx, vanillaExport: true, stage: graph.Kind);
         }
 

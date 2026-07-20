@@ -128,7 +128,60 @@ namespace Shorokoo.Runtime
         /// Compiles the graph into a reusable <see cref="CompiledGraph"/>: the ONNX model and
         /// inference session are built once, so repeated executions only feed new data.
         /// </summary>
-        public CompiledGraph Compile(InternalComputationGraph graph)
+        public CompiledGraph Compile(ComputationGraph graph) => Compile(graph.Internal);
+
+        /// <summary>Executes a graph that takes no inputs.</summary>
+        public NamedModelParam[] Execute(ComputationGraph graph) => this.Execute(graph.Internal, []);
+
+        /// <summary>
+        /// Executes the graph, pairing the inputs positionally with the graph's inputs.
+        /// TensorDataStruct inputs are automatically expanded into individual fields.
+        /// </summary>
+        public NamedModelParam[] Execute(ComputationGraph graph, params IData[] inputs)
+            => this.Execute(graph.Internal, inputs);
+
+        /// <summary>
+        /// Executes the graph with pre-built named inputs. Builds the ONNX model and a fresh
+        /// inference session per call (disposed afterwards); use <see cref="Compile(ComputationGraph)"/>
+        /// for repeated runs.
+        /// </summary>
+        public NamedModelParam[] Run(ComputationGraph graph, params NamedModelParam[] inputs)
+            => this.Run(graph.Internal, inputs);
+
+        /// <summary>
+        /// Executes a graph containing StateUpdate nodes: state-update nodes are lowered to extra
+        /// outputs, and the resulting state values are folded back into a copy of the graph.
+        /// Returns the regular outputs plus the state-updated graph (same
+        /// <see cref="ComputationGraph.Kind"/>) for the next call. The input graph is unchanged.
+        /// </summary>
+        public (NamedModelParam[] regularOutputs, ComputationGraph updatedGraph) ExecuteWithState(
+            ComputationGraph graph, params TensorData[] inputs)
+        {
+            var (regularOutputs, updatedGraph) = ExecuteWithState(graph.Internal, inputs);
+            return (regularOutputs, WrapUpdatedStateGraph(graph, updatedGraph));
+        }
+
+        /// <summary>
+        /// Named-input overload of
+        /// <see cref="ExecuteWithState(ComputationGraph, TensorData[])"/>.
+        /// </summary>
+        public (NamedModelParam[] regularOutputs, ComputationGraph updatedGraph) ExecuteWithState(
+            ComputationGraph graph, params NamedModelParam[] inputs)
+        {
+            var (regularOutputs, updatedGraph) = ExecuteWithState(graph.Internal, inputs);
+            return (regularOutputs, WrapUpdatedStateGraph(graph, updatedGraph));
+        }
+
+        /// <summary>
+        /// WithUpdatedStates returns the source instance untouched when the graph has no state
+        /// params; only then is the original wrapper reusable — a fresh copy gets a fresh wrapper.
+        /// </summary>
+        private static ComputationGraph WrapUpdatedStateGraph(ComputationGraph source, InternalComputationGraph updated)
+            => ReferenceEquals(updated, source.Internal)
+                ? source
+                : new ComputationGraph(updated, source.Kind);
+
+        internal CompiledGraph Compile(InternalComputationGraph graph)
         {
             var originalInputNames = ResolveOriginalInputNames(graph);
             return CompileFromModel(
@@ -197,13 +250,13 @@ namespace Shorokoo.Runtime
         }
 
         /// <summary>Executes a graph that takes no inputs.</summary>
-        public NamedModelParam[] Execute(InternalComputationGraph graph) => this.Execute(graph, []);
+        internal NamedModelParam[] Execute(InternalComputationGraph graph) => this.Execute(graph, []);
 
         /// <summary>
         /// Executes the graph, pairing the inputs positionally with the graph's inputs.
         /// TensorDataStruct inputs are automatically expanded into individual fields.
         /// </summary>
-        public NamedModelParam[] Execute(InternalComputationGraph graph, params IData[] inputs)
+        internal NamedModelParam[] Execute(InternalComputationGraph graph, params IData[] inputs)
         {
             var expandedInputs = ExpandStructInputs(inputs);
 
@@ -255,7 +308,7 @@ namespace Shorokoo.Runtime
         /// Executes the graph with pre-built named inputs. Builds the ONNX model and a fresh
         /// inference session per call (disposed afterwards); use <see cref="Compile"/> for repeated runs.
         /// </summary>
-        public NamedModelParam[] Run(InternalComputationGraph graph, params NamedModelParam[] inputs)
+        internal NamedModelParam[] Run(InternalComputationGraph graph, params NamedModelParam[] inputs)
         {
             var originalInputNames = ResolveOriginalInputNames(graph);
             return RunFromModel(
@@ -350,7 +403,7 @@ namespace Shorokoo.Runtime
         /// outputs, and the resulting state values are folded back into a copy of the graph.
         /// Returns the regular outputs plus the state-updated graph for the next call.
         /// </summary>
-        public (NamedModelParam[] regularOutputs, InternalComputationGraph updatedGraph) ExecuteWithState(InternalComputationGraph graph, params TensorData[] inputs)
+        internal (NamedModelParam[] regularOutputs, InternalComputationGraph updatedGraph) ExecuteWithState(InternalComputationGraph graph, params TensorData[] inputs)
         {
             var loweredGraph = LowerStateUpdateNodesOnFast(graph);
             var allOutputs = this.Execute(loweredGraph, inputs);
@@ -361,7 +414,7 @@ namespace Shorokoo.Runtime
         /// Named-input overload of
         /// <see cref="ExecuteWithState(InternalComputationGraph, TensorData[])"/>.
         /// </summary>
-        public (NamedModelParam[] regularOutputs, InternalComputationGraph updatedGraph) ExecuteWithState(InternalComputationGraph graph, params NamedModelParam[] inputs)
+        internal (NamedModelParam[] regularOutputs, InternalComputationGraph updatedGraph) ExecuteWithState(InternalComputationGraph graph, params NamedModelParam[] inputs)
         {
             var loweredGraph = LowerStateUpdateNodesOnFast(graph);
             var allOutputs = this.Run(loweredGraph, inputs);

@@ -57,7 +57,7 @@ namespace Shorokoo.Graph
         /// <param name="computeContext">Optional context used to resolve values while lowering.</param>
         /// <param name="debugRequests">Optional hook to dump the graph at each lowering stage.</param>
         /// <returns>A fully inlined, concrete architecture graph.</returns>
-        public static InternalComputationGraph ToConcreteArchitecture(
+        internal static InternalComputationGraph ToConcreteArchitecture(
             this InternalComputationGraph graph,
             ModelParamList inputHints,
             ComputeContext? computeContext = null,
@@ -174,7 +174,7 @@ namespace Shorokoo.Graph
         /// A new, constant-folded graph with the named inputs replaced by constants and removed
         /// from the graph's input list.
         /// </returns>
-        public static InternalComputationGraph Specialize(
+        internal static InternalComputationGraph Specialize(
             this InternalComputationGraph graph,
             ModelParamList inputValues)
         {
@@ -240,7 +240,7 @@ namespace Shorokoo.Graph
         /// architecture from <see cref="ToConcreteArchitecture"/>.
         /// </summary>
         /// <returns>A concrete model graph with default weights, ready to execute.</returns>
-        public static InternalComputationGraph ToConcreteModel(this InternalComputationGraph graph)
+        internal static InternalComputationGraph ToConcreteModel(this InternalComputationGraph graph)
         {
             var defaultTrainableParams = graph.InitializeTrainableParams();
             return graph.ToConcreteModel(defaultTrainableParams);
@@ -253,7 +253,7 @@ namespace Shorokoo.Graph
         /// same-shape parameters get distinct values and initialization is reproducible for
         /// a config. Requires a concrete architecture from <see cref="ToConcreteArchitecture"/>.
         /// </summary>
-        public static InternalComputationGraph ToConcreteModel(this InternalComputationGraph graph, RngConfig rngConfig)
+        internal static InternalComputationGraph ToConcreteModel(this InternalComputationGraph graph, RngConfig rngConfig)
         {
             var defaultTrainableParams = graph.InitializeTrainableParams(rngConfig: rngConfig);
             var concrete = graph.ToConcreteModel(defaultTrainableParams);
@@ -274,7 +274,7 @@ namespace Shorokoo.Graph
         /// object. Works on any graph concretized by <c>ToConcreteArchitecture</c>: a concrete
         /// architecture, a concrete model, or a training-rig step graph.
         /// </summary>
-        public static void ApplyRngConfig(this InternalComputationGraph graph, RngConfig rngConfig)
+        internal static void ApplyRngConfig(this InternalComputationGraph graph, RngConfig rngConfig)
             => FastBindRngConfig.Process(graph, rngConfig);
 
         /// <summary>
@@ -283,7 +283,7 @@ namespace Shorokoo.Graph
         /// initializer). Null when the graph has no runtime random surface or no identity is
         /// bound yet. See <c>Core.Rng.RngRuntimeIdentity</c> for the encoding.
         /// </summary>
-        public static long[]? TryGetRngSeed(this InternalComputationGraph graph)
+        internal static long[]? TryGetRngSeed(this InternalComputationGraph graph)
         {
             var node = FastWireRngKeyDerivation.FindRngSeedNode(graph);
             if (node is null || node.OpCode != InternalOpCodes.MODEL_PARAM_DATA) return null;
@@ -303,7 +303,7 @@ namespace Shorokoo.Graph
         /// <param name="trainableParamValues">Values to bind (e.g. loaded from a SafeTensors file).</param>
         /// <param name="frameworkId">Naming convention of the value names; defaults to <c>FrameworkId.Shorokoo</c>.</param>
         /// <returns>A concrete model graph with the supplied weights bound by name.</returns>
-        public static InternalComputationGraph ToConcreteModel(
+        internal static InternalComputationGraph ToConcreteModel(
             this InternalComputationGraph graph,
             ModelParamList trainableParamValues,
             FrameworkId? frameworkId = null)
@@ -332,7 +332,7 @@ namespace Shorokoo.Graph
         /// <param name="trainableParamValues">Values to bind.</param>
         /// <param name="namingScheme">Maps each value's name to a graph ModelId.</param>
         /// <returns>A concrete model graph with the supplied weights bound by name.</returns>
-        public static InternalComputationGraph ToConcreteModel(
+        internal static InternalComputationGraph ToConcreteModel(
             this InternalComputationGraph graph,
             ModelParamList trainableParamValues,
             ModuleParamSetNamingScheme namingScheme)
@@ -370,7 +370,7 @@ namespace Shorokoo.Graph
         /// concrete architecture from <see cref="ToConcreteArchitecture"/> (throws otherwise, because
         /// parameters nested inside un-inlined sub-functions would be missed).
         /// </summary>
-        public static ConcreteModelParamInfos GetConcreteModelParamInfos(this InternalComputationGraph graph)
+        internal static ConcreteModelParamInfos GetConcreteModelParamInfos(this InternalComputationGraph graph)
         {
             AssertConcreteArchitecture(graph, nameof(GetConcreteModelParamInfos));
             var nodes = InternalComputationGraphConverter.BuildNodes(graph).nodesInTopoOrder;
@@ -408,7 +408,7 @@ namespace Shorokoo.Graph
         /// to deliberately re-key.
         /// </param>
         /// <returns>The default trainable-parameter values, named.</returns>
-        public static ModelParamList InitializeTrainableParams(
+        internal static ModelParamList InitializeTrainableParams(
             this InternalComputationGraph graph,
             ModuleParamSetNamingScheme? namingScheme = null,
             ComputeContext? computeContext = null,
@@ -459,7 +459,7 @@ namespace Shorokoo.Graph
         /// inventory is in-memory only (initializers are not persisted), so a loaded model
         /// cannot be re-initialized in place; rebuild from its architecture instead.</para>
         /// </summary>
-        public static void ReinitializeTrainableParams(
+        internal static void ReinitializeTrainableParams(
             this InternalComputationGraph graph, RngConfig rngConfig)
         {
             if (rngConfig is null) throw new System.ArgumentNullException(nameof(rngConfig));
@@ -518,7 +518,7 @@ namespace Shorokoo.Graph
         /// under Shorokoo's own naming convention — the basis for remapping third-party weight names
         /// onto the graph's parameter ids.
         /// </summary>
-        public static ModelIdNamingScheme GetShorokooIdNamingScheme(this InternalComputationGraph graph)
+        internal static ModelIdNamingScheme GetShorokooIdNamingScheme(this InternalComputationGraph graph)
             => ModelIdNamingScheme.CreateShorokooNamingScheme(graph.GetConcreteModelParamInfos());
 
         /// <summary>
@@ -529,7 +529,7 @@ namespace Shorokoo.Graph
         /// emits the sparse <c>Rng.Pin</c> skeleton (see <see cref="RngStreamReport.EmitPinSkeleton"/>).
         /// Requires a concrete architecture from <see cref="ToConcreteArchitecture"/>.
         /// </summary>
-        public static RngStreamReport GetRngStreamReport(
+        internal static RngStreamReport GetRngStreamReport(
             this InternalComputationGraph graph, RngConfig? rngConfig = null)
         {
             var streams = new List<RngStreamInfo>();
@@ -609,7 +609,7 @@ namespace Shorokoo.Graph
         /// <param name="graph">The graph whose input names to pair with the values.</param>
         /// <param name="inputValues">Input values in the same order as the graph's declared inputs.</param>
         /// <returns>The inputs as a named <see cref="ModelParamList"/>.</returns>
-        public static ModelParamList FromOrderedInputs(this InternalComputationGraph graph, ImmutableArray<TensorData> inputValues)
+        internal static ModelParamList FromOrderedInputs(this InternalComputationGraph graph, ImmutableArray<TensorData> inputValues)
         {
             return new ModelParamList(graph.InputUniqueNames.Zip(inputValues)
                 .Select(x => new TensorDataModelParam(x.First.AssertNotNull(), ModelParamType.InputParam, x.Second)));
@@ -664,7 +664,7 @@ namespace Shorokoo.Graph
         /// <param name="graph">The graph to emit as C#.</param>
         /// <param name="filename">Destination path for the generated C# file.</param>
         /// <returns>The path written (same as <paramref name="filename"/>).</returns>
-        public static string SaveToCSharp(this InternalComputationGraph graph, string filename)
+        internal static string SaveToCSharp(this InternalComputationGraph graph, string filename)
         {
             if (File.Exists(filename))
                 File.Delete(filename);

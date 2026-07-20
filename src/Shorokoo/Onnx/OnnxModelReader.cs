@@ -24,9 +24,12 @@ using IR = Shorokoo.Core.Factory.IR;
 namespace Shorokoo.Onnx
 {
     /// <summary>
-    /// Imports serialized ONNX models into <see cref="InternalComputationGraph"/>s
+    /// Imports serialized ONNX models into <see cref="ComputationGraph"/>s
     /// (deserializes the ModelProto, materializes any external tensor data, then builds
-    /// the graph via <c>OnnxModelReader</c>).
+    /// the graph via <c>OnnxModelReader</c>). Imported data carries no kind stamp, so
+    /// the returned graph's <see cref="ComputationGraph.Kind"/> is classified by
+    /// op-scanning (<see cref="Shorokoo.Core.Utils.SrkFileFormat.DetectStage"/>) — the
+    /// sanctioned fallback for foreign/headerless data.
     ///
     /// <para>
     /// Models using the standard ONNX external-data mechanism (initializer bytes in a
@@ -44,7 +47,29 @@ namespace Shorokoo.Onnx
         /// is the directory external-data <c>location</c> keys resolve against; when
         /// null, a model requiring external data fails loudly.
         /// </summary>
-        public static InternalComputationGraph FromOnnxModelToFastGraph(Stream inputStream, string? externalDataDirectory = null)
+        public static ComputationGraph FromOnnxModel(Stream inputStream, string? externalDataDirectory = null)
+            => Wrap(FromOnnxModelToInternalGraph(inputStream, externalDataDirectory));
+
+        /// <summary>
+        /// Imports an ONNX model from a file path. External tensor data (if any)
+        /// resolves against the file's directory.
+        /// </summary>
+        public static ComputationGraph FromOnnxModel(string filePath)
+            => Wrap(FromOnnxModelToInternalGraph(filePath));
+
+        /// <summary>
+        /// Imports an ONNX model from in-memory bytes. <paramref name="externalDataDirectory"/>
+        /// is the directory external-data <c>location</c> keys resolve against; when
+        /// null, a model requiring external data fails loudly.
+        /// </summary>
+        public static ComputationGraph FromOnnxModel(byte[] rawData, string? externalDataDirectory = null)
+            => Wrap(FromOnnxModelToInternalGraph(rawData, externalDataDirectory));
+
+        private static ComputationGraph Wrap(InternalComputationGraph graph)
+            => new(graph, Shorokoo.Core.Utils.SrkFileFormat.DetectStage(graph));
+
+        /// <summary>Internal-graph form of <see cref="FromOnnxModel(Stream, string?)"/>.</summary>
+        internal static InternalComputationGraph FromOnnxModelToInternalGraph(Stream inputStream, string? externalDataDirectory = null)
         {
             var model = ProtoBuf.Serializer.Deserialize<IR.ModelProto>(inputStream);
             OnnxExternalData.LoadIntoModel(model, externalDataDirectory);
@@ -52,27 +77,20 @@ namespace Shorokoo.Onnx
             return reader.BuildInternalComputationGraph();
         }
 
-        /// <summary>
-        /// Imports an ONNX model from a file path. External tensor data (if any)
-        /// resolves against the file's directory.
-        /// </summary>
-        public static InternalComputationGraph FromOnnxModelToFastGraph(string filePath)
+        /// <summary>Internal-graph form of <see cref="FromOnnxModel(string)"/>.</summary>
+        internal static InternalComputationGraph FromOnnxModelToInternalGraph(string filePath)
         {
             using var fileReaderStream = File.OpenRead(filePath);
-            return FromOnnxModelToFastGraph(
+            return FromOnnxModelToInternalGraph(
                 fileReaderStream,
                 Path.GetDirectoryName(Path.GetFullPath(filePath)));
         }
 
-        /// <summary>
-        /// Imports an ONNX model from in-memory bytes. <paramref name="externalDataDirectory"/>
-        /// is the directory external-data <c>location</c> keys resolve against; when
-        /// null, a model requiring external data fails loudly.
-        /// </summary>
-        public static InternalComputationGraph FromOnnxModelToFastGraph(byte[] rawData, string? externalDataDirectory = null)
+        /// <summary>Internal-graph form of <see cref="FromOnnxModel(byte[], string?)"/>.</summary>
+        internal static InternalComputationGraph FromOnnxModelToInternalGraph(byte[] rawData, string? externalDataDirectory = null)
         {
             using var stream = new MemoryStream(rawData);
-            return FromOnnxModelToFastGraph(stream, externalDataDirectory);
+            return FromOnnxModelToInternalGraph(stream, externalDataDirectory);
         }
     }
 }

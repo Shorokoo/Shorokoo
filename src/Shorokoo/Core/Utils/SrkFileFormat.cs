@@ -181,6 +181,46 @@ namespace Shorokoo.Core.Utils
         }
 
         /// <summary>
+        /// Op-scan classification of a serialized model: the <see cref="DetectStage(InternalComputationGraph)"/>
+        /// rules applied to a <see cref="Shorokoo.Core.Factory.IR.ModelProto"/>'s main graph, nested
+        /// subgraph attributes, and function bodies. Used where only the serialized artifact exists
+        /// (e.g. the <c>SaveWithExternalData</c> concrete-model gate) — a ModelProto carries no
+        /// stamped kind.
+        /// </summary>
+        internal static GraphKind DetectStage(Shorokoo.Core.Factory.IR.ModelProto model)
+        {
+            if (model is null) throw new ArgumentNullException(nameof(model));
+
+            bool sawModelParam = false;
+            bool sawModuleOp = false;
+
+            void ScanNodes(IEnumerable<Shorokoo.Core.Factory.IR.NodeProto> nodes)
+            {
+                foreach (var node in nodes)
+                {
+                    if (ModuleStageOps.Contains(node.OpType) ||
+                        node.OpType.StartsWith(InternalOpCodes.SUBMODEL, StringComparison.Ordinal))
+                        sawModuleOp = true;
+                    else if (node.OpType == InternalOpCodes.MODEL_PARAM)
+                        sawModelParam = true;
+
+                    foreach (var attr in node.Attributes)
+                    {
+                        if (attr.G is not null) ScanNodes(attr.G.Nodes);
+                        foreach (var g in attr.Graphs) ScanNodes(g.Nodes);
+                    }
+                }
+            }
+
+            if (model.Graph is not null) ScanNodes(model.Graph.Nodes);
+            foreach (var fn in model.Functions) ScanNodes(fn.Nodes);
+
+            return sawModuleOp ? GraphKind.Module
+                : sawModelParam ? GraphKind.ConcreteArchitecture
+                : GraphKind.ConcreteModel;
+        }
+
+        /// <summary>
         /// Throws a clear stage-mismatch error naming both stages (and the file, via
         /// <paramref name="origin"/>) when <paramref name="actual"/> differs from
         /// <paramref name="required"/>.

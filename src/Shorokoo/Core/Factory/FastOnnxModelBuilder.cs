@@ -51,7 +51,8 @@ namespace Shorokoo.Core.Factory
     {
         /// <summary>
         /// Build an externally loadable ("vanilla" dialect) ONNX <see cref="ModelProto"/>
-        /// from a concrete <see cref="InternalComputationGraph"/>. The input graph is not
+        /// from a <see cref="Shorokoo.Graph.GraphKind.ConcreteModel"/>-kind
+        /// <see cref="Shorokoo.Graph.ComputationGraph"/>. The input graph is not
         /// mutated — all pre-passes run on a clone.
         ///
         /// <para>
@@ -78,6 +79,31 @@ namespace Shorokoo.Core.Factory
         /// </para>
         /// </summary>
         public static ModelProto BuildOnnxModel(
+            Shorokoo.Graph.ComputationGraph graph,
+            OpSetVersion opset = OpSetVersion.OPS_21,
+            IR_VERSION irVersion = IR_VERSION.IR_10,
+            bool prepForOnnx = false)
+        {
+            if (graph is null) throw new ArgumentNullException(nameof(graph));
+            // The reliable-kind form of the FW045 gate: only a concrete model can satisfy
+            // the vanilla-dialect guarantee, so refuse everything else up front. The
+            // op-scanning check in ThrowIfNotVanillaDialect stays as the emission-side
+            // backstop (it also covers internal-graph callers with no stamped kind).
+            if (graph.Kind != Shorokoo.Graph.GraphKind.ConcreteModel)
+                throw new ModelException(ErrorCodes.FW045, "ONNX export",
+                    $"only a '{Shorokoo.Core.Utils.SrkFileFormat.StageName(Shorokoo.Graph.GraphKind.ConcreteModel)}' " +
+                    "graph exports to vanilla ONNX that any external runtime can load, but this graph is a " +
+                    $"'{Shorokoo.Core.Utils.SrkFileFormat.StageName(graph.Kind)}'. Lower the graph first " +
+                    "(ToConcreteArchitecture -> ToConcreteModel) and export that. Shorokoo's own .srk/.zsrk " +
+                    "persistence (CompressedFormatUtils.SaveFastGraphToFile/SaveFastGraphToBinary) accepts every graph kind.");
+            return BuildOnnxModelCore(graph.Internal, opset, prepForOnnx, vanillaExport: true);
+        }
+
+        /// <summary>
+        /// Internal-graph form of <see cref="BuildOnnxModel"/> for callers below the
+        /// readonly wrapper (no stamped kind — the vanilla-dialect op scan is the gate).
+        /// </summary>
+        internal static ModelProto BuildOnnxModel(
             InternalComputationGraph fastGraph,
             OpSetVersion opset = OpSetVersion.OPS_21,
             IR_VERSION irVersion = IR_VERSION.IR_10,

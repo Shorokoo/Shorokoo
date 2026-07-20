@@ -73,6 +73,15 @@ namespace Shorokoo.Core
         }
 
         /// <summary>
+        /// Builds the readonly, <see cref="Shorokoo.Graph.GraphKind.Module"/>-stamped
+        /// <see cref="Shorokoo.Graph.ComputationGraph"/> for an <c>Inline</c> method — the
+        /// entry point behind the source-generated static <c>ComputationGraph</c> property.
+        /// </summary>
+        public static Shorokoo.Graph.ComputationGraph BuildComputationGraphFromMethodInfo(MethodInfo methodInfo)
+            => new Shorokoo.Graph.ComputationGraph(
+                BuildInternalComputationGraphFromMethodInfo(methodInfo), Shorokoo.Graph.GraphKind.Module);
+
+        /// <summary>
         /// Builds a <see cref="InternalComputationGraph"/> from a delegate's underlying method —
         /// the codegen-free equivalent of the source generator's <c>ComputationGraph</c>
         /// property (which routes through <see cref="BuildInternalComputationGraphFromMethodInfo"/>).

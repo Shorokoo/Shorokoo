@@ -62,7 +62,15 @@ namespace Shorokoo
         /// Builds a concrete inference model from this checkpoint's trained weights in one call,
         /// encapsulating the full <c>ToConcreteArchitecture → weights → ToConcreteModel</c> pipeline.
         /// </summary>
-        public InternalComputationGraph ToInferenceModel(InternalComputationGraph modelGraph, TensorData exampleInput)
+        public ComputationGraph ToInferenceModel(ComputationGraph modelGraph, TensorData exampleInput)
+        {
+            if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
+            var g = modelGraph.RequireKind(GraphKind.Module, nameof(ToInferenceModel),
+                "Pass the model's module graph (e.g. MyModel.ComputationGraph).");
+            return new ComputationGraph(ToInferenceModelCore(g, exampleInput), GraphKind.ConcreteModel);
+        }
+
+        internal InternalComputationGraph ToInferenceModelCore(InternalComputationGraph modelGraph, TensorData exampleInput)
         {
             if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
             if (exampleInput is null) throw new ArgumentNullException(nameof(exampleInput));
@@ -257,10 +265,14 @@ namespace Shorokoo
     public class TrainingRig
     {
         /// <summary>
-        /// The lowered, executable computation graph for one training step.
+        /// The lowered, executable computation graph for one training step
+        /// (stamped <see cref="GraphKind.ConcreteModel"/> — fully lowered and runnable).
         /// Contains no embedded state — all state flows through inputs/outputs.
         /// </summary>
-        public InternalComputationGraph TrainingStepPureGraph { get; private set; } = null!;
+        public ComputationGraph TrainingStepPureGraph { get; private set; } = null!;
+
+        /// <summary>Mutable form of <see cref="TrainingStepPureGraph"/> the rig itself compiles.</summary>
+        internal InternalComputationGraph TrainingStepPureGraphInternal { get; private set; } = null!;
 
         /// <summary>Struct definition for trainable parameters.</summary>
         public TensorStructDef TrainableParamStructDef { get; private set; } = null!;
@@ -279,7 +291,10 @@ namespace Shorokoo
         /// ran. Held alongside <see cref="OptimizationResult"/> so the per-strategy
         /// improvement is measurable.
         /// </summary>
-        public InternalComputationGraph PreOptimizationGraph { get; private set; } = null!;
+        public ComputationGraph PreOptimizationGraph { get; private set; } = null!;
+
+        /// <summary>Mutable form of <see cref="PreOptimizationGraph"/>.</summary>
+        internal InternalComputationGraph PreOptimizationGraphInternal { get; private set; } = null!;
 
         /// <summary>
         /// Compute time + peak memory the <see cref="GraphEvaluator"/> projected for the
@@ -413,9 +428,9 @@ namespace Shorokoo
         /// </param>
         /// <returns>A configured TrainingRig ready for training</returns>
         public static TrainingRig FromScratch(
-            InternalComputationGraph modelGraph,
-            InternalComputationGraph lossGraph,
-            InternalComputationGraph optimizerGraph,
+            ComputationGraph modelGraph,
+            ComputationGraph lossGraph,
+            ComputationGraph optimizerGraph,
             NamedModelParam[] sampleInputs,
             IOptimizerHyperparameters hyperparameters,
             RngConfig? rngConfig = null)
@@ -433,9 +448,9 @@ namespace Shorokoo
         /// graph fields fall back to <c>hyperparam_{i}</c> names since no names are supplied.
         /// </summary>
         public static TrainingRig FromScratch(
-            InternalComputationGraph modelGraph,
-            InternalComputationGraph lossGraph,
-            InternalComputationGraph optimizerGraph,
+            ComputationGraph modelGraph,
+            ComputationGraph lossGraph,
+            ComputationGraph optimizerGraph,
             NamedModelParam[] sampleInputs,
             params HyperValue[] hyperparameters)
             => FromScratchCore(modelGraph, lossGraph, optimizerGraph, sampleInputs, hyperparameters,
@@ -446,9 +461,9 @@ namespace Shorokoo
         /// the hyperparameter values because a <c>params</c> array must come last.
         /// </summary>
         public static TrainingRig FromScratch(
-            InternalComputationGraph modelGraph,
-            InternalComputationGraph lossGraph,
-            InternalComputationGraph optimizerGraph,
+            ComputationGraph modelGraph,
+            ComputationGraph lossGraph,
+            ComputationGraph optimizerGraph,
             NamedModelParam[] sampleInputs,
             RngConfig? rngConfig,
             params HyperValue[] hyperparameters)
@@ -462,9 +477,9 @@ namespace Shorokoo
         /// without constructing <see cref="TensorDataModelParam"/> objects by hand.
         /// </summary>
         public static TrainingRig FromScratch(
-            InternalComputationGraph modelGraph,
-            InternalComputationGraph lossGraph,
-            InternalComputationGraph optimizerGraph,
+            ComputationGraph modelGraph,
+            ComputationGraph lossGraph,
+            ComputationGraph optimizerGraph,
             ModelParamList sampleInputs,
             IOptimizerHyperparameters hyperparameters,
             RngConfig? rngConfig = null)
@@ -479,9 +494,9 @@ namespace Shorokoo
         /// with positional hyperparameter values.
         /// </summary>
         public static TrainingRig FromScratch(
-            InternalComputationGraph modelGraph,
-            InternalComputationGraph lossGraph,
-            InternalComputationGraph optimizerGraph,
+            ComputationGraph modelGraph,
+            ComputationGraph lossGraph,
+            ComputationGraph optimizerGraph,
             ModelParamList sampleInputs,
             params HyperValue[] hyperparameters)
         {
@@ -495,9 +510,9 @@ namespace Shorokoo
         /// positional hyperparameter values (the config precedes the <c>params</c> array).
         /// </summary>
         public static TrainingRig FromScratch(
-            InternalComputationGraph modelGraph,
-            InternalComputationGraph lossGraph,
-            InternalComputationGraph optimizerGraph,
+            ComputationGraph modelGraph,
+            ComputationGraph lossGraph,
+            ComputationGraph optimizerGraph,
             ModelParamList sampleInputs,
             RngConfig? rngConfig,
             params HyperValue[] hyperparameters)
@@ -508,9 +523,9 @@ namespace Shorokoo
         }
 
         private static TrainingRig FromScratchCore(
-            InternalComputationGraph modelGraph,
-            InternalComputationGraph lossGraph,
-            InternalComputationGraph optimizerGraph,
+            ComputationGraph modelGraph,
+            ComputationGraph lossGraph,
+            ComputationGraph optimizerGraph,
             NamedModelParam[] sampleInputs,
             HyperValue[] hyperparameters,
             IReadOnlyList<string>? names,
@@ -519,6 +534,29 @@ namespace Shorokoo
             if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
             if (lossGraph is null) throw new ArgumentNullException(nameof(lossGraph));
             if (optimizerGraph is null) throw new ArgumentNullException(nameof(optimizerGraph));
+
+            // Training composes three MODULE graphs; anything else fails deep inside
+            // lowering, so refuse it up front with the actual vs required kind.
+            var model = modelGraph.RequireKind(GraphKind.Module, "TrainingRig.FromScratch (modelGraph)",
+                "Pass the module graphs themselves (e.g. MyModel.ComputationGraph, Losses.L2Loss, " +
+                "Optimizers.Adam); the rig lowers and composes them itself.");
+            lossGraph.RequireKind(GraphKind.Module, "TrainingRig.FromScratch (lossGraph)",
+                "Pass the loss module graph (e.g. Losses.L2Loss).");
+            optimizerGraph.RequireKind(GraphKind.Module, "TrainingRig.FromScratch (optimizerGraph)",
+                "Pass the optimizer module graph (e.g. Optimizers.Adam).");
+            return FromScratchInternal(model, lossGraph.ToInternal(), optimizerGraph.ToInternal(),
+                sampleInputs, hyperparameters, names, rngConfig);
+        }
+
+        private static TrainingRig FromScratchInternal(
+            InternalComputationGraph modelGraph,
+            InternalComputationGraph lossGraph,
+            InternalComputationGraph optimizerGraph,
+            NamedModelParam[] sampleInputs,
+            HyperValue[] hyperparameters,
+            IReadOnlyList<string>? names,
+            RngConfig? rngConfig)
+        {
             if (sampleInputs is null) throw new ArgumentNullException(nameof(sampleInputs));
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
             if (names is not null && names.Count != hyperparameters.Length)
@@ -898,7 +936,7 @@ namespace Shorokoo
             // Step 10: lower to an executable form. LowerGraph runs its Fast pipeline
             // in place on fastTraining and returns the same graph for the public-facing
             // TrainingStepPureGraph property.
-            TrainingStepPureGraph = LowerGraph(fastTraining);
+            TrainingStepPureGraphInternal = LowerGraph(fastTraining);
 
             UpdatedParamFieldCount = TrainableParamStructDef.Fields.Length;
             UpdatedStateFieldCount = ModelStateDef.Fields.Length;
@@ -1146,7 +1184,7 @@ namespace Shorokoo
                 throw new ArgumentException("Training inputs and outputs must have the same length.");
             if (numEpochs < 1) throw new ArgumentException("Number of epochs must be at least 1.", nameof(numEpochs));
 
-            var compiled = ctx.Compile(TrainingStepPureGraph);
+            var compiled = ctx.Compile(TrainingStepPureGraphInternal);
             var checkpoint = initialCheckpoint;
             var epochLosses = new float[numEpochs];
 
@@ -1375,7 +1413,7 @@ namespace Shorokoo
             // Step 3: Assemble inputs in TrainingStepPureGraph order.
             // Layout: [param_fields, state_fields, opt_state_fields, hyperparam_fields, model_input_fields, target_fields].
             // Current losses (L2, CE) use a single Tensor target, so target_field_count is 1.
-            var graph = TrainingStepPureGraph;
+            var graph = TrainingStepPureGraphInternal;
             const int targetFieldCount = 1;
             var expectedModelInputFields =
                 graph.Inputs.Count
@@ -1426,10 +1464,15 @@ namespace Shorokoo
             var baselineEval = new Shorokoo.Core.AutoDiffCheckpointing.GraphEvaluator().Evaluate(graph, shapeInfo);
             var optimizer = new MemoryAwareGraphOptimizer(shapeInference: shapeInferencer);
             var optResult = optimizer.OptimizeWithShapeInfo(graph, shapeInfo);
-            PreOptimizationGraph = graph;
+            PreOptimizationGraphInternal = graph;
             PreOptimizationEval = baselineEval;
             OptimizationResult = optResult;
-            TrainingStepPureGraph = optResult.OptimizedGraph;
+            TrainingStepPureGraphInternal = optResult.OptimizedGraph;
+
+            // Freeze the public views. The rig never mutates these graphs after this
+            // point (compilation clones), so borrowing without a copy is safe.
+            PreOptimizationGraph = new ComputationGraph(PreOptimizationGraphInternal, GraphKind.ConcreteModel);
+            TrainingStepPureGraph = new ComputationGraph(TrainingStepPureGraphInternal, GraphKind.ConcreteModel);
         }
     }
 }

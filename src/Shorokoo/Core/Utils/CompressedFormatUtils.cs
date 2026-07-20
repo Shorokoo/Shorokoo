@@ -156,7 +156,18 @@ namespace Shorokoo.Core.Utils
         /// stage, the compression, the payload SHA-256, and producer info.
         /// </summary>
         public static byte[] SaveFastGraphToBinary(
-            InternalComputationGraph graph, bool compressed = true, int compressionLevel = DefaultCompressionLevel)
+            ComputationGraph graph, bool compressed = true, int compressionLevel = DefaultCompressionLevel)
+            // The header records the graph's stamped kind — the authoritative stage, no op-scan.
+            => SaveFastGraphToBinary(graph.Internal, graph.Kind, compressed, compressionLevel);
+
+        /// <summary>
+        /// Internal-graph form of <see cref="SaveFastGraphToBinary(ComputationGraph, bool, int)"/>.
+        /// With no stamped kind available, the header stage falls back to op-scanning
+        /// (<see cref="SrkFileFormat.DetectStage"/>).
+        /// </summary>
+        internal static byte[] SaveFastGraphToBinary(
+            InternalComputationGraph graph, GraphKind? stage = null, bool compressed = true,
+            int compressionLevel = DefaultCompressionLevel)
         {
             using var memoryStream = new MemoryStream();
             var model = FastOnnxModelBuilder.BuildInternalOnnxModel(graph);
@@ -166,13 +177,15 @@ namespace Shorokoo.Core.Utils
             KeyValuePair<string, long>[] opsets =
                 [.. model.OpsetImports.Select(o => new KeyValuePair<string, long>(o.Domain, o.Version))];
             return SrkFileFormat.Write(
-                onnxBytes, SrkFileFormat.DetectStage(graph), compressed, compressionLevel,
+                onnxBytes, stage ?? SrkFileFormat.DetectStage(graph), compressed, compressionLevel,
                 model.IrVersion, opsets);
         }
 
         /// <summary>
-        /// Inverse of <see cref="SaveFastGraphToBinary"/>: deserialize .srk bytes into a
-        /// <see cref="InternalComputationGraph"/> via <see cref="OnnxModelImporter"/>. The layout
+        /// Inverse of <see cref="SaveFastGraphToBinary(ComputationGraph, bool, int)"/>:
+        /// deserialize .srk bytes into a <see cref="ComputationGraph"/> via
+        /// <see cref="OnnxModelImporter"/>, stamped with the header stage (or, for
+        /// unstamped v1/foreign data, the op-scanned kind). The layout
         /// is decided by content only — v2 containers are validated against their header
         /// (compression, payload SHA-256), and legacy v1 data (bare protobuf, single- or
         /// double-Zstd) loads through the content-sniffing shim in
@@ -184,15 +197,21 @@ namespace Shorokoo.Core.Utils
         /// module-stage graph where a runnable concrete model is required. For v2 data the
         /// header is checked before the payload is parsed; for v1 data the stage is detected
         /// from the loaded graph.</param>
-        public static InternalComputationGraph LoadFastGraphFromBinary(
+        public static ComputationGraph LoadFastGraphFromBinary(
             byte[] data, GraphKind? requiredStage = null)
-            => LoadFastGraphCore(data, origin: "<in-memory .srk data>", requiredStage);
+        {
+            var (graph, kind) = LoadFastGraphCore(data, origin: "<in-memory .srk data>", requiredStage);
+            return new ComputationGraph(graph, kind);
+        }
 
         /// <summary>
         /// Shared load path: container/shim payload extraction, header-first stage
         /// enforcement for v2, graph import, and detected-stage enforcement for v1.
+        /// The returned kind is the header stage when the file carries a known one,
+        /// else the op-scanned fallback (<see cref="SrkFileFormat.DetectStage"/>) —
+        /// v1 files and files written by newer framework versions have no usable stamp.
         /// </summary>
-        private static InternalComputationGraph LoadFastGraphCore(
+        internal static (InternalComputationGraph Graph, GraphKind Kind) LoadFastGraphCore(
             byte[] data, string origin, GraphKind? requiredStage)
         {
             var (header, onnxBytes) = SrkFileFormat.Read(data, origin);
@@ -209,7 +228,7 @@ namespace Shorokoo.Core.Utils
             InternalComputationGraph graph;
             try
             {
-                graph = OnnxModelImporter.FromOnnxModelToFastGraph(onnxBytes);
+                graph = OnnxModelImporter.FromOnnxModelToInternalGraph(onnxBytes);
             }
             catch (Exception e) when (e is ProtoBuf.ProtoException
                 or EndOfStreamException
@@ -233,7 +252,7 @@ namespace Shorokoo.Core.Utils
             if (header is null && requiredStage is not null)
                 SrkFileFormat.EnforceStage(SrkFileFormat.DetectStage(graph), requiredStage.Value, origin);
 
-            return graph;
+            return (graph, header?.TryGetStage() ?? SrkFileFormat.DetectStage(graph));
         }
 
         /// <summary>
@@ -244,8 +263,20 @@ namespace Shorokoo.Core.Utils
         /// extension has no parsing significance; the header records the compression.
         /// </summary>
         public static string SaveFastGraphToFile(
-            string filename, InternalComputationGraph graph, bool compressed = true,
+            string filename, ComputationGraph graph, bool compressed = true,
             bool overrideExtension = true, int compressionLevel = DefaultCompressionLevel)
+            => SaveFastGraphToFile(filename, graph.Internal, graph.Kind, compressed,
+                overrideExtension, compressionLevel);
+
+        /// <summary>
+        /// Internal-graph form of
+        /// <see cref="SaveFastGraphToFile(string, ComputationGraph, bool, bool, int)"/>; the
+        /// header stage is <paramref name="stage"/> when given, else op-scanned.
+        /// </summary>
+        internal static string SaveFastGraphToFile(
+            string filename, InternalComputationGraph graph, GraphKind? stage = null,
+            bool compressed = true, bool overrideExtension = true,
+            int compressionLevel = DefaultCompressionLevel)
         {
             filename = Path.GetFullPath(filename);
 
@@ -259,23 +290,24 @@ namespace Shorokoo.Core.Utils
 
             // Serialize BEFORE touching the destination so a serialization failure never
             // leaves the target truncated/missing; File.WriteAllBytes overwrites in place.
-            var bytes = SaveFastGraphToBinary(graph, compressed, compressionLevel);
+            var bytes = SaveFastGraphToBinary(graph, stage, compressed, compressionLevel);
             File.WriteAllBytes(filename, bytes);
             return filename;
         }
 
         /// <summary>
-        /// Load a <see cref="InternalComputationGraph"/> from a .srk file of any layout —
+        /// Load a <see cref="ComputationGraph"/> from a .srk file of any layout —
         /// the content decides how the file parses, never the extension, so a renamed
         /// file loads identically. See <see cref="LoadFastGraphFromBinary"/> for the
         /// layout handling and the <paramref name="requiredStage"/> contract; errors
         /// name <paramref name="filename"/>.
         /// </summary>
-        public static InternalComputationGraph LoadFastGraphFromFile(
+        public static ComputationGraph LoadFastGraphFromFile(
             string filename, GraphKind? requiredStage = null)
         {
             var allData = File.ReadAllBytes(filename);
-            return LoadFastGraphCore(allData, filename, requiredStage);
+            var (graph, kind) = LoadFastGraphCore(allData, filename, requiredStage);
+            return new ComputationGraph(graph, kind);
         }
 
         /// <summary>

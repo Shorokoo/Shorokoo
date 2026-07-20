@@ -49,7 +49,13 @@ namespace Shorokoo.Graph
     {
         public static InternalComputationGraph ToFastGraph(this InternalComputationGraph graph) => graph;
 
-        public static InternalComputationGraph ToComputationGraph(this InternalComputationGraph graph) => graph;
+        /// <summary>
+        /// Freezes a deep copy of the graph into a readonly <see cref="ComputationGraph"/>.
+        /// Alias for <see cref="ComputationGraph.FromInternal"/>: the kind is stamped from
+        /// <paramref name="kind"/> when given, else detected by op-scanning.
+        /// </summary>
+        public static ComputationGraph ToComputationGraph(this InternalComputationGraph graph, GraphKind? kind = null)
+            => ComputationGraph.FromInternal(graph, kind);
 
         /// <summary>
         /// .Length alias on a <c>List&lt;FastTensorKey&gt;</c> for legacy callers that
@@ -87,11 +93,5 @@ namespace Shorokoo.Graph
         public static InternalComputationGraph ToFastGraph(InternalComputationGraph graph, bool useSequentialIds = false)
             => graph;
 
-        /// <summary>
-        /// Identity overload of <c>ToComputationGraph</c> for callers that already
-        /// hold a <see cref="InternalComputationGraph"/>. The FastCG → CG bridge is gone.
-        /// </summary>
-        public static InternalComputationGraph ToComputationGraph(InternalComputationGraph graph)
-            => graph;
     }
 }

@@ -757,6 +757,92 @@ public class TrainingRigCoverageTests
     }
 
     /// <summary>
+    /// <see cref="Checkpoint.Inspect"/> (issue #57) recognizes <see cref="TrainingCheckpoint.Save"/>
+    /// output via the marker tensor and reports the checkpoint format version, the global step, and
+    /// the per-section tensor listing — all matching what was written, from the SafeTensors header
+    /// plus the marker's 16 bytes only (tensor payloads are never loaded). A SafeTensors file
+    /// without the marker inspects as plain <see cref="ArtifactKind.SafeTensors"/>, not as a
+    /// checkpoint.
+    /// </summary>
+    [Fact]
+    public void TestCheckpointInspectRecognizesSavedCheckpoint()
+    {
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDMomentumOptimizer.ComputationGraph,
+            new NamedModelParam[]
+            {
+                new TensorDataModelParam("input", ModelParamType.InputParam,
+                    TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+            },
+            0.5f, 0.9f);
+        var ckpt0 = rig.CreateDefaultCheckpoint();
+        var ckpt = new TrainingCheckpoint(                       // same tensors, at step 5
+            ckpt0.TrainableParams, ckpt0.ModelState, ckpt0.OptimizerState, step: 5);
+
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_inspect_{Guid.NewGuid():N}.safetensors");
+        try
+        {
+            ckpt.Save(path);
+            var result = Checkpoint.Inspect(path);
+
+            Assert.Equal(ArtifactKind.TrainingCheckpoint, result.Kind);
+            Assert.Empty(result.Observations);
+            Assert.NotNull(result.SafeTensors);   // a checkpoint is a SafeTensors file
+            Assert.Null(result.Srk);
+
+            var info = result.TrainingCheckpoint!;
+            Assert.Equal(1, info.FormatVersion);
+            Assert.Equal(5, info.Step);
+
+            // Per-section listing matches the rig's struct defs field-for-field (names with
+            // the section prefix stripped; SGD-momentum carries per-param velocity state,
+            // ScalarMultiply has no model state).
+            string[] sectionNames = ["trainable", "model_state", "opt_state"];
+            Assert.Equal(sectionNames.Length, info.Sections.Count);
+            foreach (var section in sectionNames)
+                Assert.Contains(section, info.Sections.Keys);
+            Assert.Equal(
+                rig.TrainableParamStructDef.Fields.Select(f => f.Name),
+                info.Sections["trainable"].Select(t => t.Name));
+            Assert.Equal(
+                rig.ModelStateDef.Fields.Select(f => f.Name),
+                info.Sections["model_state"].Select(t => t.Name));
+            Assert.Equal(
+                rig.OptimizerStateDef.Fields.Select(f => f.Name),
+                info.Sections["opt_state"].Select(t => t.Name));
+            Assert.NotEmpty(info.Sections["opt_state"]);
+
+            // The listed metadata matches the written tensors.
+            var trainableField = rig.TrainableParamStructDef.Fields[0];
+            var written = (TensorData)ckpt.TrainableParams.Fields[trainableField.Name];
+            var listed = info.Sections["trainable"].Single(t => t.Name == trainableField.Name);
+            Assert.Equal(written.Shape.Dims, listed.Shape);
+            Assert.Equal("F32", listed.DType);
+
+            var text = result.ToString();
+            Assert.Contains("training checkpoint", text);
+            Assert.Contains("global step: 5", text);
+
+            // Without the marker, the same tensors inspect as plain SafeTensors weights.
+            var plainPath = Path.Combine(Path.GetTempPath(), $"shrk_inspect_plain_{Guid.NewGuid():N}.safetensors");
+            try
+            {
+                var plainTensors = new List<SafeTensor>
+                {
+                    new SafeTensor(trainableField.Name, written,
+                        SafeTensorLoader.DTypeToSafeTensorDType(written.DType), written.Shape.Dims),
+                };
+                SafeTensorLoader.SaveSafeTensors(plainPath, plainTensors);
+                Assert.Equal(ArtifactKind.SafeTensors, Checkpoint.Inspect(plainPath).Kind);
+                Assert.Null(Checkpoint.Inspect(plainPath).TrainingCheckpoint);
+            }
+            finally { if (File.Exists(plainPath)) File.Delete(plainPath); }
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    /// <summary>
     /// Dynamic (scheduled / runtime) optimizer hyperparameters: a <see cref="HyperValue"/> that is a
     /// <see cref="Schedule"/> or <see cref="HyperValue.Runtime"/> routes the learning rate as a runtime
     /// input (<see cref="TrainingRig.HyperparamStructDef"/>) instead of a baked constant, so the rig

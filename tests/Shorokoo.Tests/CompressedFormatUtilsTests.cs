@@ -633,6 +633,222 @@ public class CompressedFormatUtilsCoverageTests
         Assert.Contains("still Zstd-compressed", exTriple.Message);
     }
 
+    // ──────────────────────────────────────────────────────────────────────
+    // Checkpoint.Inspect (issue #57): identify and summarize artifacts from
+    // headers/prefixes only, never loading tensor payloads.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Inspect identifies .srk graph files of every layout. v2 containers (compressed and
+    /// uncompressed, i.e. SaveFastGraphToFile's two modes) report the header metadata that
+    /// was written — stage, compression, producer, payload hash. Legacy v1 layouts are
+    /// sniffed with bounded reads. A corrupt payload does not disturb inspection (payload
+    /// bytes are never read — the same file fails a full load on its hash check), and
+    /// corrupt headers / future versions yield structured results instead of exceptions.
+    /// </summary>
+    [Fact]
+    public void TestCheckpointInspectSrkArtifacts()
+    {
+        var (_, arch, _) = BuildStageGraphs();
+
+        // v2 round-trip, compressed and uncompressed.
+        bool[] compressionModes = [true, false];
+        foreach (var compressed in compressionModes)
+        {
+            var path = Path.Combine(TempDir, $"inspect_{compressed}.zsrk");
+            try
+            {
+                CompressedFormatUtils.SaveFastGraphToFile(path, arch, compressed, overrideExtension: false);
+                var result = Checkpoint.Inspect(path);
+
+                Assert.Equal(ArtifactKind.SrkGraph, result.Kind);
+                Assert.Equal(path, result.FilePath);
+                Assert.Equal(new FileInfo(path).Length, result.FileSizeBytes);
+                Assert.NotNull(result.Srk);
+                Assert.Null(result.SafeTensors);
+                Assert.Null(result.TrainingCheckpoint);
+                Assert.Empty(result.Observations);
+
+                var header = result.Srk!.Header;
+                Assert.NotNull(header);
+                Assert.Equal(SrkFileFormat.CurrentVersion, header!.SrkVersion);
+                Assert.Equal(GraphKind.ConcreteArchitecture, header.TryGetStage());
+                Assert.Equal(compressed ? "zstd" : "none", header.Compression);
+                Assert.False(string.IsNullOrEmpty(header.PayloadSha256));
+                Assert.Equal(Shorokoo.ShorokooVersion.VersionString, header.Producer!.Shorokoo);
+                Assert.Null(result.Srk.LegacyLayout);
+                Assert.True(result.Srk.PayloadSizeBytes > 0);
+
+                var text = result.ToString();
+                Assert.Contains("concrete-architecture", text);
+                Assert.Contains(compressed ? "zstd" : "none", text);
+
+                // Corrupt the payload's last byte: a full load fails on the SHA-256 check,
+                // but Inspect — which never touches payload bytes — still reads the header.
+                var corrupt = File.ReadAllBytes(path);
+                corrupt[^1] ^= 0xFF;
+                var corruptPath = Path.Combine(TempDir, $"inspect_corrupt_{compressed}.zsrk");
+                try
+                {
+                    File.WriteAllBytes(corruptPath, corrupt);
+                    Assert.Throws<InvalidDataException>(
+                        () => CompressedFormatUtils.LoadFastGraphFromFile(corruptPath));
+                    var corruptResult = Checkpoint.Inspect(corruptPath);
+                    Assert.Equal(ArtifactKind.SrkGraph, corruptResult.Kind);
+                    Assert.Equal(header.PayloadSha256, corruptResult.Srk!.Header!.PayloadSha256);
+                }
+                finally { if (File.Exists(corruptPath)) File.Delete(corruptPath); }
+            }
+            finally { if (File.Exists(path)) File.Delete(path); }
+        }
+
+        // Legacy v1 layouts: bare protobuf, single-Zstd, double-Zstd.
+        var v2Bytes = CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: false);
+        var bare = SrkFileFormat.Read(v2Bytes).OnnxBytes;
+        (string ExpectedLayout, byte[] Bytes)[] legacy =
+            [("bare ONNX protobuf", bare),
+             ("single-Zstd", CompressedFormatUtils.Compress(bare)),
+             ("double-Zstd", CompressedFormatUtils.Compress(CompressedFormatUtils.Compress(bare)))];
+        foreach (var (expectedLayout, bytes) in legacy)
+        {
+            var path = Path.Combine(TempDir, "inspect_v1.srk");
+            try
+            {
+                File.WriteAllBytes(path, bytes);
+                var result = Checkpoint.Inspect(path);
+                Assert.Equal(ArtifactKind.SrkGraph, result.Kind);
+                Assert.Null(result.Srk!.Header);
+                Assert.Equal(expectedLayout, result.Srk.LegacyLayout);
+                Assert.Equal(bytes.Length, result.Srk.PayloadSizeBytes);
+                Assert.Contains("legacy", result.ToString());
+            }
+            finally { if (File.Exists(path)) File.Delete(path); }
+        }
+
+        // A future container version and a truncated container yield structured results
+        // with an observation naming the problem — never an exception.
+        var future = (byte[])v2Bytes.Clone();
+        future[3] = 3;
+        (string Name, byte[] Bytes)[] damaged =
+            [("future", future), ("truncated", v2Bytes[..5])];
+        foreach (var (name, bytes) in damaged)
+        {
+            var path = Path.Combine(TempDir, $"inspect_{name}.srk");
+            try
+            {
+                File.WriteAllBytes(path, bytes);
+                var result = Checkpoint.Inspect(path);
+                Assert.Equal(ArtifactKind.SrkGraph, result.Kind);
+                Assert.Null(result.Srk!.Header);
+                Assert.Null(result.Srk.LegacyLayout);
+                Assert.Contains(result.Observations, o => o.Contains("header is not readable"));
+            }
+            finally { if (File.Exists(path)) File.Delete(path); }
+        }
+
+        // Garbage and empty files: the structured "not recognized" outcome, no exception.
+        var garbagePath = Path.Combine(TempDir, "inspect_garbage.bin");
+        var emptyPath = Path.Combine(TempDir, "inspect_empty.bin");
+        try
+        {
+            var garbage = new byte[64];
+            Array.Fill(garbage, (byte)0x77);
+            File.WriteAllBytes(garbagePath, garbage);
+            var garbageResult = Checkpoint.Inspect(garbagePath);
+            Assert.Equal(ArtifactKind.NotRecognized, garbageResult.Kind);
+            Assert.NotEmpty(garbageResult.Observations);
+            Assert.Contains("not recognized", garbageResult.ToString());
+
+            File.WriteAllBytes(emptyPath, []);
+            var emptyResult = Checkpoint.Inspect(emptyPath);
+            Assert.Equal(ArtifactKind.NotRecognized, emptyResult.Kind);
+            Assert.Contains(emptyResult.Observations, o => o.Contains("empty"));
+        }
+        finally
+        {
+            if (File.Exists(garbagePath)) File.Delete(garbagePath);
+            if (File.Exists(emptyPath)) File.Delete(emptyPath);
+        }
+
+        // A missing file is the one thing that still throws.
+        Assert.Throws<FileNotFoundException>(
+            () => Checkpoint.Inspect(Path.Combine(TempDir, "inspect_nope.srk")));
+    }
+
+    /// <summary>
+    /// Inspect identifies SaveSafeTensors output from the 8-byte length prefix + JSON
+    /// header alone: the tensor listing (name, dtype, shape, byte size) and total payload
+    /// size match what was written, a rank-0 scalar reports its empty shape, and the cheap
+    /// sanity observations fire — declared extents past the end of a truncated file, and
+    /// trailing bytes beyond the declared data.
+    /// </summary>
+    [Fact]
+    public void TestCheckpointInspectSafeTensorsArtifacts()
+    {
+        var t1 = TensorData([2, 3], 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f);
+        var t2 = TensorData([3], 7.0f, 8.0f, 9.0f);
+        var scalar = TensorData([], 42.0f);
+        var tensors = new List<SafeTensor>
+        {
+            new SafeTensor("tensor1", t1, "F32", t1.Shape.Dims),
+            new SafeTensor("tensor2", t2, "F32", t2.Shape.Dims),
+            new SafeTensor("scalar", scalar, "F32", scalar.Shape.Dims),
+        };
+
+        var path = Path.Combine(TempDir, "inspect_weights.safetensors");
+        var truncatedPath = Path.Combine(TempDir, "inspect_weights_truncated.safetensors");
+        var trailingPath = Path.Combine(TempDir, "inspect_weights_trailing.safetensors");
+        try
+        {
+            SafeTensorLoader.SaveSafeTensors(path, tensors);
+            var result = Checkpoint.Inspect(path);
+
+            Assert.Equal(ArtifactKind.SafeTensors, result.Kind);
+            Assert.Null(result.Srk);
+            Assert.Null(result.TrainingCheckpoint);
+            Assert.Empty(result.Observations);
+
+            var st = result.SafeTensors!;
+            Assert.True(st.HeaderSizeBytes > 0);
+            Assert.Equal(3, st.Tensors.Count);
+            Assert.Equal(6 * 4 + 3 * 4 + 4, st.TotalTensorBytes);
+
+            var byName = st.Tensors.ToDictionary(t => t.Name);
+            long[] expectedShape1 = [2, 3];
+            long[] expectedShape2 = [3];
+            Assert.Equal("F32", byName["tensor1"].DType);
+            Assert.Equal(expectedShape1, byName["tensor1"].Shape);
+            Assert.Equal(24, byName["tensor1"].ByteSize);
+            Assert.Equal(expectedShape2, byName["tensor2"].Shape);
+            Assert.Empty(byName["scalar"].Shape);   // rank-0 scalar: empty shape, 4 bytes
+            Assert.Equal(4, byName["scalar"].ByteSize);
+
+            var text = result.ToString();
+            Assert.Contains("SafeTensors", text);
+            Assert.Contains("tensor1: F32[2, 3], 24 bytes", text);
+
+            // Truncation: declared extents point past the end of the file → observation,
+            // still recognized, no exception.
+            var bytes = File.ReadAllBytes(path);
+            File.WriteAllBytes(truncatedPath, bytes[..^8]);
+            var truncated = Checkpoint.Inspect(truncatedPath);
+            Assert.Equal(ArtifactKind.SafeTensors, truncated.Kind);
+            Assert.Contains(truncated.Observations, o => o.Contains("past the end"));
+
+            // Trailing bytes beyond the declared data → observation.
+            File.WriteAllBytes(trailingPath, [.. bytes, 0, 0, 0, 0]);
+            var trailing = Checkpoint.Inspect(trailingPath);
+            Assert.Equal(ArtifactKind.SafeTensors, trailing.Kind);
+            Assert.Contains(trailing.Observations, o => o.Contains("trailing"));
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (File.Exists(truncatedPath)) File.Delete(truncatedPath);
+            if (File.Exists(trailingPath)) File.Delete(trailingPath);
+        }
+    }
+
     private static Tensor<float32> ParamlessDouble(Tensor<float32> x) => x + x;
 
     /// <summary>

@@ -205,7 +205,8 @@ so. Header fields (add-only across minor revisions; unknown fields are ignored):
   the file and the failure.
 - `SrkFileFormat.TryReadHeaderFromFile(path)` reads the header (`SrkHeader`) without
   loading the graph — useful to identify a file cheaply; it returns `null` for
-  pre-container legacy files.
+  pre-container legacy files. For a format-agnostic version of the same idea, see
+  [`Checkpoint.Inspect`](#identify-and-summarize-a-file-checkpointinspect).
 - `producer` is informational; the payload dialect remains versioned by the embedded
   ONNX `ir_version`/opsets themselves.
 
@@ -241,6 +242,50 @@ SafeTensorLoader.SaveSafeTensors("out.safetensors", listOfSafeTensors);
 Compressed (`.zsafetensor`) variants live in `CompressedFormatUtils`:
 `SaveCompressedSafeTensors`, `LoadCompressedSafeTensors`,
 `SaveCompressedModelParamSet`, `LoadCompressedModelParamSet`.
+
+## Identify and summarize a file (`Checkpoint.Inspect`)
+
+`Checkpoint.Inspect(path)` (namespace `Shorokoo`) answers "what is this file?"
+**without loading it**: it identifies any Shorokoo-produced artifact and
+summarizes its contents from headers/prefixes only, so inspecting a multi-GB
+file is fast and cheap.
+
+```csharp
+ArtifactInspection result = Checkpoint.Inspect("run.safetensors");
+Console.WriteLine(result);          // human-readable multi-line summary
+switch (result.Kind)
+{
+    case ArtifactKind.SrkGraph:           /* result.Srk */                          break;
+    case ArtifactKind.SafeTensors:        /* result.SafeTensors */                  break;
+    case ArtifactKind.TrainingCheckpoint: /* result.TrainingCheckpoint (+ .SafeTensors) */ break;
+    case ArtifactKind.NotRecognized:      /* result.Observations say what was seen */ break;
+}
+```
+
+Recognized formats and what is reported:
+
+| `Kind` | Recognized by | Reported |
+|---|---|---|
+| `SrkGraph` | `.srk` v2 magic (or a sniffed legacy v1 layout) | the v2 header — format version, lifecycle stage, compression, payload SHA-256, producer (`result.Srk.Header`, an `SrkHeader`); legacy files report the sniffed layout instead (`result.Srk.LegacyLayout`) |
+| `SafeTensors` | 8-byte header-length prefix + valid JSON header | tensor listing (name, dtype, shape, byte size), total payload size, `__metadata__` (`result.SafeTensors`) |
+| `TrainingCheckpoint` | the `__shorokoo_checkpoint__` marker tensor in a SafeTensors header | checkpoint format version, global step, and the per-section (`trainable` / `model_state` / `opt_state`) tensor listing (`result.TrainingCheckpoint`); `result.SafeTensors` is populated too |
+| `NotRecognized` | anything else | a structured result — **never an exception** for unrecognized or corrupt content; only a missing file throws |
+
+- Reads are bounded to headers and prefixes; tensor payload bytes are never
+  materialized. The one exception is a checkpoint's 16-byte marker (the format
+  version and step live there). Because the payload is untouched, `Inspect` also
+  succeeds on a file whose payload is corrupt — it reports the header while a
+  full load would fail the SHA-256 check.
+- `result.Observations` lists cheap sanity findings visible from the header
+  alone, e.g. declared tensor extents pointing past the end of the file
+  (truncation), trailing bytes beyond the declared data, or an unreadable /
+  future-version container header.
+- `.onnx` files are out of scope (standard ONNX tooling covers them). A bare
+  serialized ONNX model is byte-identical to the legacy v1 `.srk` layout, so
+  such a file reports as a legacy `SrkGraph` with an observation noting the
+  ambiguity.
+- There is no console I/O in the library — `ToString()` on the result (and on
+  each listed tensor) formats the summary; printing is up to you.
 
 ## Bind loaded weights into a model (for inference)
 

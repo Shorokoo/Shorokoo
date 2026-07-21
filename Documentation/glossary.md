@@ -41,4 +41,5 @@
 | naming scheme (`ModelIdNamingScheme` / `SimplePatternNamingScheme`) | Maps third-party (e.g. PyTorch) parameter names onto Shorokoo's, so loaded weights bind; built with the format or pattern DSL. | `param-naming-format-dsl.md`, `param-naming-pattern-dsl.md` |
 | `DebugRequests` | Saves graph snapshots at chosen points of `ToConcreteArchitecture` lowering, as compilable C#. | `debugging.md` |
 | `.srk` / `.zsrk` | Shorokoo's own (un)compressed graph file format. | `onnx-and-weights.md` |
+| `.skpt` / `Checkpoint` | Shorokoo's single-file checkpoint container (a STORED zip with a `config.json` manifest); `Checkpoint.From(...).Save(...)` / `Checkpoint.Load` save and reload a concrete model with its weights. | `skpt-checkpoints.md` |
 | backend / execution provider | The loaded platform assembly (`LinuxCPU`/`LinuxGPU`/`WinCPU`/`WinGPU`) that runs ORT. | `inference.md` |

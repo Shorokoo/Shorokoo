@@ -75,7 +75,7 @@ public class CSharpModelBuilderCoverageTests
             var x = InputScalar<float32>("x");
             var y = x + x;
             var graph = new InternalComputationGraph([x], [y]);
-            var fastGraph = InternalComputationGraphConverter.ToFastGraph(graph);
+            var fastGraph = (graph);
             var lambda = new CSharpModelBuilder().BuildLambda<Scalar<float32>, Scalar<float32>>(fastGraph, "OneArgModel");
             Assert.NotNull(lambda(x));
         }
@@ -85,7 +85,7 @@ public class CSharpModelBuilderCoverageTests
             var y = InputScalar<float32>("y");
             var z = x + y;
             var graph = new InternalComputationGraph([x, y], [z]);
-            var fastGraph = InternalComputationGraphConverter.ToFastGraph(graph);
+            var fastGraph = (graph);
             var lambda = new CSharpModelBuilder().BuildLambda<Scalar<float32>, Scalar<float32>, Scalar<float32>>(fastGraph, "TwoArgModel");
             Assert.NotNull(lambda(x, y));
         }
@@ -182,7 +182,7 @@ public class CSharpModelBuilderCoverageTests
     }
 
     private static InternalComputationGraph ToFastGraph(InternalComputationGraph graph)
-        => InternalComputationGraphConverter.ToFastGraph(graph);
+        => (graph);
 
     // ────────────────────────────────────────────────────────────────────────
     // Static-method branches: GetTypeDefString. Drives the ITensorStruct arms

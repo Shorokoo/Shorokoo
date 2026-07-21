@@ -61,7 +61,7 @@ public class CompressedFormatUtilsCoverageTests
         var input = InputTensor<float32>("input");
         var output = input + Scalar(1.0f);
         var graph = new InternalComputationGraph([input], [output]);
-        var fastGraph = InternalComputationGraphConverter.ToFastGraph(graph);
+        var fastGraph = (graph);
 
         // SaveFastGraphToFile + matching LoadFastGraphFromFile (v2 container).
         // .zsrk written this way is also what ToJson / GetNodeAndTensorNameListing
@@ -107,8 +107,7 @@ public class CompressedFormatUtilsCoverageTests
             // and FindFirstJsonDiff returns the first differing line.
             var input2 = InputTensor<float32>("input");
             var output2 = input2 * Scalar(2.0f);
-            var graph2 = InternalComputationGraphConverter.ToFastGraph(
-                new InternalComputationGraph([input2], [output2]));
+            var graph2 = (new InternalComputationGraph([input2], [output2]));
             CompressedFormatUtils.SaveFastGraphToFile(zsrkPath2, graph2);
 
             Assert.True(CompressedFormatUtils.CompareJson(zsrkPath, zsrkPath));

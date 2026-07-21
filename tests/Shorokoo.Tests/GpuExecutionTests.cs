@@ -41,7 +41,7 @@ public class GpuExecutionTests
         var graph = new InternalComputationGraph([a, b], [c]);
         var ctx = new ComputeContext();
         var results = ctx.Execute(
-            InternalComputationGraphConverter.ToFastGraph(graph),
+            (graph),
             TensorData([], left),
             TensorData([], right));
 

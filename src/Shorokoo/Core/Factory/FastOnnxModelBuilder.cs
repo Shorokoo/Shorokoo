@@ -81,7 +81,6 @@ namespace Shorokoo.Core.Factory
         public static ModelProto BuildOnnxModel(
             Shorokoo.Graph.ComputationGraph graph,
             OpSetVersion opset = OpSetVersion.OPS_21,
-            IR_VERSION irVersion = IR_VERSION.IR_10,
             bool prepForOnnx = false)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
@@ -101,7 +100,7 @@ namespace Shorokoo.Core.Factory
         }
 
         /// <summary>
-        /// Internal-graph form of <see cref="BuildOnnxModel(Shorokoo.Graph.ComputationGraph, OpSetVersion, IR_VERSION, bool)"/> for callers below the
+        /// Internal-graph form of <see cref="BuildOnnxModel(Shorokoo.Graph.ComputationGraph, OpSetVersion, bool)"/> for callers below the
         /// readonly wrapper (no stamped kind — the vanilla-dialect op scan is the gate).
         /// </summary>
         internal static ModelProto BuildOnnxModel(
@@ -121,7 +120,7 @@ namespace Shorokoo.Core.Factory
         /// names and module-stage graphs serialize their Shorokoo-internal ops
         /// unchecked. Files produced this way are re-importable only by
         /// <see cref="Shorokoo.Onnx.OnnxModelImporter"/>; use
-        /// <see cref="BuildOnnxModel(Shorokoo.Graph.ComputationGraph, OpSetVersion, IR_VERSION, bool)"/> for anything meant to leave Shorokoo.
+        /// <see cref="BuildOnnxModel(Shorokoo.Graph.ComputationGraph, OpSetVersion, bool)"/> for anything meant to leave Shorokoo.
         /// </summary>
         internal static ModelProto BuildInternalOnnxModel(
             InternalComputationGraph fastGraph,

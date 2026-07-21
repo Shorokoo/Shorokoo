@@ -68,7 +68,7 @@ parameters is refused up front (`XD008`) with the actual vs required kind named.
 - The passed `ModelProto` is left unmodified.
 
 `BuildOnnxModel(ComputationGraph graph, OpSetVersion opset = OPS_21,
-IR_VERSION irVersion = IR_10, bool prepForOnnx = false)` requires a
+bool prepForOnnx = false)` requires a
 `GraphKind.ConcreteModel` graph — anything else fails fast with `FW045` naming the
 actual and required kinds (only a concrete model can satisfy the vanilla-ONNX
 guarantee). It clones the graph (no mutation), lowers it for ONNX, and emits

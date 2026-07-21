@@ -18,7 +18,7 @@ namespace Shorokoo.Core.Graph
     /// The string form is <c>"N{Id}"</c> (decimal), matching the naming convention
     /// produced by <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastUseUniqueNames"/>: when a Fast graph is built from a
     /// CG that has been through <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastUseUniqueNames"/> with the
-    /// <see cref="InternalComputationGraphConverter.ToFastGraph(InternalComputationGraph, bool)"/>
+    /// <see cref="InternalComputationGraphConverter.PopulateFromNodes"/>
     /// <c>useSequentialIds</c> flag, each node's <see cref="Id"/> is the small
     /// integer counter (1, 2, …) and <see cref="ToString"/> reproduces
     /// <c>"N1"</c>, <c>"N2"</c>, … directly.

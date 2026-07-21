@@ -541,7 +541,7 @@ public class ModulesCoverageTests
 
         // Save → load. (.ToInternal(): post-load node inspection only, no mutation.)
         var data = CompressedFormatUtils.SaveFastGraphToBinary(graph, compressed: true);
-        var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(data).ToInternal();
+        var reloaded = CompressedFormatUtils.LoadFastGraphCore(data, "<roundtrip>", null).Graph;
 
         // Post-load: BuildFastFunctionInvokeNodeFromProto produced a fresh
         // FUNCTION_INVOKE FastNode with a rebuilt TargetFunction (same default
@@ -581,7 +581,7 @@ public class ModulesCoverageTests
         }
 
         var data = CompressedFormatUtils.SaveFastGraphToBinary(moduleGraph, compressed: true);
-        moduleGraph = CompressedFormatUtils.LoadFastGraphFromBinary(data).ToInternal();
+        moduleGraph = CompressedFormatUtils.LoadFastGraphCore(data, "<roundtrip>", null).Graph;
 
         var allInputs = new System.Collections.Generic.List<TensorData>();
         allInputs.AddRange(hyperparamInputs);
@@ -589,7 +589,7 @@ public class ModulesCoverageTests
 
         var concreteArch = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([.. allInputs]));
         var archData = CompressedFormatUtils.SaveFastGraphToBinary(concreteArch, compressed: true);
-        concreteArch = CompressedFormatUtils.LoadFastGraphFromBinary(archData).ToInternal();
+        concreteArch = CompressedFormatUtils.LoadFastGraphCore(archData, "<roundtrip>", null).Graph;
 
         var concreteModel = concreteArch.ToConcreteModel();
         var modelData = CompressedFormatUtils.SaveFastGraphToBinary(concreteModel, compressed: true);

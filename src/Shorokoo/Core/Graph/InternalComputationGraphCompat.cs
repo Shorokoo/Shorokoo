@@ -47,8 +47,6 @@ namespace Shorokoo.Graph
     /// </summary>
     public static class InternalComputationGraphCompat
     {
-        public static InternalComputationGraph ToFastGraph(this InternalComputationGraph graph) => graph;
-
         /// <summary>
         /// Freezes a deep copy of the graph into a readonly <see cref="ComputationGraph"/>.
         /// Alias for <see cref="ComputationGraph.FromInternal"/>: the kind is stamped from
@@ -56,12 +54,6 @@ namespace Shorokoo.Graph
         /// </summary>
         public static ComputationGraph ToComputationGraph(this InternalComputationGraph graph, GraphKind? kind = null)
             => ComputationGraph.FromInternal(graph, kind);
-
-        /// <summary>
-        /// .Length alias on a <c>List&lt;FastTensorKey&gt;</c> for legacy callers that
-        /// used to read .Length on the Variable[] form of Inputs/Outputs.
-        /// </summary>
-        public static int Length(this System.Collections.Generic.List<FastTensorKey> list) => list.Count;
 
         public static ImmutableArray<Variable> GetHyperparamInputs(this InternalComputationGraph graph)
             => graph.InputTensors
@@ -84,14 +76,4 @@ namespace Shorokoo.Graph
                 .ToImmutableArray();
     }
 
-    public static partial class InternalComputationGraphConverter
-    {
-        /// <summary>
-        /// Identity overload of <c>ToFastGraph</c> for callers that already hold a
-        /// <see cref="InternalComputationGraph"/>. The CG → FastCG bridge is gone.
-        /// </summary>
-        public static InternalComputationGraph ToFastGraph(InternalComputationGraph graph, bool useSequentialIds = false)
-            => graph;
-
-    }
 }

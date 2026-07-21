@@ -638,7 +638,8 @@ namespace Shorokoo
             // into the explicit multi-output convention [updated_param, updated_state_0, ...]
             // expected by the replay loop. The split-off state-init graph computes the initial
             // state values (per trainable parameter) in InitializeAndOptimize.
-            var optimizerFastGraph = optimizerGraph.Clone();
+            // FromScratchInternal hands in an owned thawed copy — normalize it in place.
+            var optimizerFastGraph = optimizerGraph;
             var optimizerInfo = Shorokoo.Core.Nodes.Processors.Fast.FastNormalizeOptimizerGraph.Process(optimizerFastGraph);
             _optimizerStateInitGraph = optimizerInfo.StateInitGraph;
             _hyperparamSeedValues = hyperparameters.Select(h => h.InitialValue).ToArray();

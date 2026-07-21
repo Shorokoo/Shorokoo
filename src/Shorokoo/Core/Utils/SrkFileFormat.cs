@@ -133,31 +133,9 @@ namespace Shorokoo.Core.Utils
         };
 
         /// <summary>
-        /// Ops whose presence marks a graph as still module-stage (pre-lowering). This is the
-        /// union of the internal ops that <c>ToConcreteArchitecture</c> guarantees are gone from
-        /// its output plus the module-machinery ops that only ever exist before lowering.
-        /// </summary>
-        private static readonly HashSet<string> ModuleStageOps =
-        [
-            InternalOpCodes.MODULE_SET_HYPERPARAMS,
-            InternalOpCodes.MODEL_INVOKE,
-            InternalOpCodes.FUNCTION_INVOKE,
-            InternalOpCodes.MODEL_HYPERPARAM,
-            InternalOpCodes.GET_MODEL_ID,
-            InternalOpCodes.NEW_MODEL_LIKE,
-            InternalOpCodes.CREATE_MODULE,
-            InternalOpCodes.MODEL_PARAM_REF,
-            InternalOpCodes.MODEL_PARAM_MODEL_REF,
-            InternalOpCodes.MODEL_PARAM_ID_REF,
-            InternalOpCodes.TENSOR_STRUCT_CREATE,
-            InternalOpCodes.TENSOR_STRUCT_GETFIELD,
-            InternalOpCodes.MODEL_TENSORSTRUCT_INPUT,
-            InternalOpCodes.AUTO_GRAD,
-            InternalOpCodes.GENERIC_TYPE_INPUT,
-        ];
-
-        /// <summary>
-        /// Classifies a graph's lifecycle stage from its content: module machinery present →
+        /// Classifies a graph's lifecycle stage from its content: module machinery
+        /// (<see cref="InternalOpCodes.ModuleStageOps"/> — the same canonical inventory whose
+        /// absence <c>ToConcreteArchitecture</c> asserts on its output) present →
         /// <see cref="GraphKind.Module"/>; unmaterialized trainable parameters
         /// (<c>MODEL_PARAM</c> nodes) present → <see cref="GraphKind.ConcreteArchitecture"/>;
         /// otherwise <see cref="GraphKind.ConcreteModel"/>. This is what the writer records
@@ -170,8 +148,7 @@ namespace Shorokoo.Core.Utils
 
             foreach (var node in graph.Nodes)
             {
-                if (ModuleStageOps.Contains(node.OpCode) ||
-                    node.OpCode.StartsWith(InternalOpCodes.SUBMODEL, StringComparison.Ordinal))
+                if (InternalOpCodes.IsModuleStageOp(node.OpCode))
                     return GraphKind.Module;
             }
 
@@ -224,8 +201,7 @@ namespace Shorokoo.Core.Utils
             {
                 bool isModuleOp = node.OpCode == InternalOpCodes.FUNCTION_INVOKE
                     ? node.TargetFunction is not { FunctionType: Shorokoo.Core.Nodes.OnnxNodes.FunctionType.Function }
-                    : ModuleStageOps.Contains(node.OpCode) ||
-                      node.OpCode.StartsWith(InternalOpCodes.SUBMODEL, StringComparison.Ordinal);
+                    : InternalOpCodes.IsModuleStageOp(node.OpCode);
                 if (isModuleOp)
                     moduleOps++;
                 else if (node.OpCode == InternalOpCodes.MODEL_PARAM)
@@ -298,8 +274,7 @@ namespace Shorokoo.Core.Utils
             {
                 foreach (var node in nodes)
                 {
-                    if (ModuleStageOps.Contains(node.OpType) ||
-                        node.OpType.StartsWith(InternalOpCodes.SUBMODEL, StringComparison.Ordinal))
+                    if (InternalOpCodes.IsModuleStageOp(node.OpType))
                         sawModuleOp = true;
                     else if (node.OpType == InternalOpCodes.MODEL_PARAM)
                         sawModelParam = true;

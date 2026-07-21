@@ -106,11 +106,9 @@ namespace Shorokoo.Core.Factory
         internal static ModelProto BuildOnnxModel(
             InternalComputationGraph fastGraph,
             OpSetVersion opset = OpSetVersion.OPS_21,
-            IR_VERSION irVersion = IR_VERSION.IR_10,
             bool prepForOnnx = false)
-            // irVersion is accepted for signature compatibility but currently inert —
-            // the emitted model is always stamped IR_10 (OnnxIRFactory.CreateModel);
-            // tracked in Shorokoo/Shorokoo#50. It is deliberately NOT threaded further.
+            // The emitted model is always stamped IR_10 (OnnxIRFactory.CreateModel);
+            // there is deliberately no irVersion parameter to suggest otherwise.
             => BuildOnnxModelCore(fastGraph, opset, prepForOnnx, vanillaExport: true);
 
         /// <summary>
@@ -232,35 +230,27 @@ namespace Shorokoo.Core.Factory
         // ----------- vanilla-dialect guarantee -----------
 
         /// <summary>
-        /// Every op code the framework defines for internal orchestration
-        /// (module/function structure, param references, RNG feeds, …). Emitting any
-        /// of these as a default-domain NodeProto makes the file Shorokoo-only.
-        /// </summary>
-        private static readonly HashSet<string> InternalOnlyOpTypes = typeof(InternalOpCodes)
-            .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
-            .Where(f => f.IsLiteral && f.FieldType == typeof(string))
-            .Select(f => (string)f.GetRawConstantValue()!)
-            .ToHashSet(StringComparer.Ordinal);
-
-        /// <summary>
-        /// True when <paramref name="opType"/> is a Shorokoo-internal op rather than a
-        /// standard ONNX op: either a known <see cref="InternalOpCodes"/> constant or a
-        /// name following the internal conventions (<c>Shrk*</c>, <c>shrk_*</c>, or a
-        /// <c>#</c>-delimited marker), none of which exist in the standard op set.
+        /// True when <paramref name="opType"/> (a default-domain NodeProto op type) is a
+        /// Shorokoo-internal op rather than a standard ONNX op. Registry-owned: an op is
+        /// vanilla exactly when it is a registered non-internal definition
+        /// (<see cref="Definitions.VanillaOpNames"/>); everything else — internal
+        /// registrations and any op the registry does not know — fails closed as internal,
+        /// so a future internal op with a plain, convention-free name cannot slip through
+        /// the vanilla-dialect guarantee.
         /// </summary>
         private static bool IsInternalOpType(string opType)
-            => InternalOnlyOpTypes.Contains(opType)
-            || opType.Contains('#')
-            || opType.StartsWith("Shrk", StringComparison.Ordinal)
-            || opType.StartsWith("shrk_", StringComparison.Ordinal);
+            => !Definitions.VanillaOpNames.Contains(opType);
 
         /// <summary>
         /// Visits <paramref name="graph"/> and every subgraph nested under it via
         /// node graph-attributes (Loop/If bodies), in declaration order — the one
-        /// shared traversal behind the vanilla-dialect check and the I/O rename
-        /// passes, so subgraph coverage is fixed in a single place.
+        /// shared traversal behind the vanilla-dialect check, the I/O rename and
+        /// proto-lowering passes, and <c>ComputeContext</c>'s optional-op scan, so
+        /// subgraph coverage is fixed in a single place. A visit may rewrite the
+        /// graph's node list in place: nested subgraphs are enumerated only after
+        /// their parent graph's visit returns.
         /// </summary>
-        private static void ForEachGraphRecursive(GraphProto graph, Action<GraphProto> visit)
+        internal static void ForEachGraphRecursive(GraphProto graph, Action<GraphProto> visit)
         {
             visit(graph);
             foreach (var node in graph.Nodes)
@@ -556,12 +546,13 @@ namespace Shorokoo.Core.Factory
         private static void LowerUpsampleToResize(GraphProto graph)
         {
             if (graph is null) return;
+            ForEachGraphRecursive(graph, LowerUpsampleToResizeInGraph);
+        }
+
+        private static void LowerUpsampleToResizeInGraph(GraphProto graph)
+        {
             foreach (var node in graph.Nodes)
             {
-                foreach (var attr in node.Attributes)
-                    if (attr.G is not null)
-                        LowerUpsampleToResize(attr.G);
-
                 if (node.OpType != OpCodes.UPSAMPLE)
                     continue;
 
@@ -689,13 +680,15 @@ namespace Shorokoo.Core.Factory
             GraphProto graph, Dictionary<string, TensorMeta> tensorMetaByName)
         {
             if (graph is null) return;
+            ForEachGraphRecursive(graph, g => LowerTrainingBatchNormalizationInGraph(g, tensorMetaByName));
+        }
+
+        private static void LowerTrainingBatchNormalizationInGraph(
+            GraphProto graph, Dictionary<string, TensorMeta> tensorMetaByName)
+        {
             for (int i = 0; i < graph.Nodes.Count; i++)
             {
                 var node = graph.Nodes[i];
-
-                foreach (var attr in node.Attributes)
-                    if (attr.G is not null)
-                        LowerTrainingBatchNormalization(attr.G, tensorMetaByName);
 
                 if (node.OpType != OpCodes.BATCH_NORMALIZATION)
                     continue;

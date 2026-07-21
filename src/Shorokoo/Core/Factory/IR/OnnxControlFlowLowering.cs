@@ -74,6 +74,12 @@ namespace Shorokoo.Core.Factory.IR
         private static bool IsDefaultDomain(string? domain)
             => string.IsNullOrEmpty(domain) || domain == "ai.onnx";
 
+        // Deliberately NOT on FastOnnxModelBuilder.ForEachGraphRecursive (the shared
+        // GraphProto walker): this pass needs child-first ordering (a nested Scan must be
+        // lowered before its enclosing node is rewritten), operates on bare node lists so
+        // it can also rewrite FunctionProto bodies, and threads a ref counter — none of
+        // which the parent-first Action<GraphProto> walker can express. It already covers
+        // both attr.G and attr.Graphs.
         private static void LowerNodeList(List<NodeProto> nodes, long opset, ref int uid)
         {
             for (int i = 0; i < nodes.Count; i++)

@@ -31,13 +31,21 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
         public bool IsCloseNode => VariantDefinitions[0].IsCloseNode;
         public bool IsGraphNode => VariantDefinitions[0].IsGraphNode;
 
+        /// <summary>Shorokoo-internal orchestration op (registered by
+        /// <c>Definitions.GetInternalMakers</c>) as opposed to a standard ONNX op. Emitting an
+        /// internal op as a default-domain NodeProto makes a file Shorokoo-only; the
+        /// vanilla-dialect export guarantee is enforced from this flag via
+        /// <see cref="Definitions.VanillaOpNames"/>.</summary>
+        public bool IsInternal { get; }
+
         public bool HasDefaultVariant { get; } = true;
 
-        public NodeDefinitionResolver(string definitionName, string opName, ImmutableList<NodeDefAttributeDef> attributeDefs, ImmutableList<NodeDefinition> variants)
+        public NodeDefinitionResolver(string definitionName, string opName, ImmutableList<NodeDefAttributeDef> attributeDefs, ImmutableList<NodeDefinition> variants, bool isInternal)
         {
             this.OpName = opName;
             this.AttributeDefs = attributeDefs;
             this.VariantDefinitions = variants;
+            this.IsInternal = isInternal;
         }
 
         public NodeDefinition Resolve(OnnxProtoAttributes attributes)
@@ -361,10 +369,24 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
         private Func<ImmutableList<InternalComputationGraph>>? fnTestGraphMaker = null;
         private string? codeTemplate;
         private bool? isGraphOpen = null;
+        private bool isInternalOp = false;
 
         public NodeDefinitionMaker Op(string opName)
         {
             this.opName = opName;
+            return this;
+        }
+
+        /// <summary>
+        /// Marks this definition as a Shorokoo-internal op
+        /// (<see cref="NodeDefinitionResolver.IsInternal"/>) even though it is registered among
+        /// the standard-op makers — for internal machinery colocated with the standard op it
+        /// serves (e.g. the loop-variable helpers next to <c>Loop</c>). Definitions from
+        /// <c>Definitions.GetInternalMakers</c> are marked internal wholesale and don't need this.
+        /// </summary>
+        public NodeDefinitionMaker Internal()
+        {
+            this.isInternalOp = true;
             return this;
         }
 
@@ -857,11 +879,11 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             return this;
         }
 
-        public NodeDefinitionResolver Finish()
+        public NodeDefinitionResolver Finish(bool isInternal = false)
         {
             createVariant();
             Debug.Assert(opName is not null);
-            return new NodeDefinitionResolver(definitionName ?? opName, opName, attributeDefs.ToImmutableList(), variantDefinitions.ToImmutableList());
+            return new NodeDefinitionResolver(definitionName ?? opName, opName, attributeDefs.ToImmutableList(), variantDefinitions.ToImmutableList(), isInternal || isInternalOp);
         }
     }
 }

@@ -173,8 +173,12 @@ namespace Shorokoo.Core.Utils
             using var memoryStream = new MemoryStream();
             // The stage rides in the payload's metadata too (not just this container's
             // header), so the graph reloads as the same kind even when the payload
-            // travels as a bare ONNX model.
-            var model = FastOnnxModelBuilder.BuildInternalOnnxModel(graph, stage: resolvedStage);
+            // travels as a bare ONNX model. Persistence must be faithful, so the
+            // execution lowerings are disabled: a saved graph keeps its
+            // STATE_UPDATE_LINK / WITH_STATE_DEPS machinery, state initializers, and
+            // SHRK_RANDOM_* / SHRK_RNG_* feed ops verbatim.
+            var model = FastOnnxModelBuilder.BuildInternalOnnxModel(
+                graph, stage: resolvedStage, applyExecutionLowerings: false);
             Serializer.Serialize(memoryStream, model);
             var onnxBytes = memoryStream.ToArray();
 

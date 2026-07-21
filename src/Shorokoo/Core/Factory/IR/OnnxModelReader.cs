@@ -230,7 +230,26 @@ namespace Shorokoo.Core.Factory.IR
                     fastGraph.OutputUniqueNames.Add(outputName);
                 }
 
-                Function onnxFunction = new Function(fastGraph, functionType, defaultName: defaultName, friendlyName: friendlyName)
+                // State-initializer ownership rides FunctionProto metadata; absent (e.g. files
+                // written before the tag existed) falls back to the constructor default,
+                // ModuleOwned. An explicitly present but unknown value fails loudly rather than
+                // silently re-tagging optimizer state as module state.
+                var ownershipName = functionProto.MetadataProps
+                    .FirstOrDefault(x => x.Key == Function.IRStateOwnershipParamName)?.Value;
+                StateOwnership? stateOwnership = null;
+                if (ownershipName is not null)
+                {
+                    if (!Enum.TryParse<StateOwnership>(ownershipName, out var parsedOwnership))
+                        throw new System.IO.InvalidDataException(
+                            $"Function '{defaultName}': metadata '{Function.IRStateOwnershipParamName}' has " +
+                            $"unknown value '{ownershipName}' (expected " +
+                            $"'{StateOwnership.ModuleOwned}' or '{StateOwnership.OptimizerOwned}'). " +
+                            "The file was likely written by a newer framework version.");
+                    stateOwnership = parsedOwnership;
+                }
+
+                Function onnxFunction = new Function(fastGraph, functionType, defaultName: defaultName, friendlyName: friendlyName,
+                    stateOwnership)
                 {
                     RngAlgorithm = functionProto.MetadataProps
                         .FirstOrDefault(x => x.Key == Function.IRRngAlgorithmParamName)?.Value,

@@ -106,11 +106,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
             else
             {
-                // A loaded (already-lowered) graph: the feeds are baked draw-function calls,
-                // but the symbolic chains and the RngSeed parameter persist — re-binding is a
-                // parameter write that re-keys every draw. What CANNOT change on such a graph
-                // is anything structural: the override set (its routing is wired) and the
-                // algorithm (its draw functions are baked).
+                // An already-lowered graph — e.g. a file saved before .srk persistence kept
+                // the feed ops verbatim (current saves preserve them, so freshly written
+                // files re-enter the feeds branch above on reload): the feeds are baked
+                // draw-function calls, but the symbolic chains and the RngSeed parameter
+                // persist — re-binding is a parameter write that re-keys every draw. What
+                // CANNOT change on such a graph is anything structural: the override set
+                // (its routing is wired) and the algorithm (its draw functions are baked).
                 var current = DecodeCurrentIdentity(seedNode)
                     ?? throw new InvalidOperationException(
                         "ApplyRngConfig: the RngSeed parameter carries no identity value on a " +

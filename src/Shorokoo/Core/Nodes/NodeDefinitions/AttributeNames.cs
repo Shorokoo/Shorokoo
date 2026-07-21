@@ -311,5 +311,16 @@ public static class OnnxOpAttributeNames
     /// <summary>Model-level metadata prop carrying the graph's <c>GraphKind</c> (canonical
     /// stage name, e.g. "concrete-model") so a serialized graph reloads as the same kind.</summary>
     public const string ShrkMetaGraphKind = "shrk_graph_kind";
+
+    /// <summary>Model-level metadata prop carrying the graph's signature input names
+    /// (<c>InternalComputationGraph.InputUniqueNames</c>) as a positional JSON string array.
+    /// Written on internal-dialect exports, whose graph-I/O ValueInfos must keep the raw
+    /// <c>N{k}_T{s}</c> tensor ids (the loader parses node/tensor keys out of them), so the
+    /// human-readable signature names ride a side channel instead of a rename.</summary>
+    public const string ShrkMetaInputNames = "shrk_input_names";
+
+    /// <summary>Model-level metadata prop carrying the graph's signature output names
+    /// (<c>InternalComputationGraph.OutputUniqueNames</c>); see <see cref="ShrkMetaInputNames"/>.</summary>
+    public const string ShrkMetaOutputNames = "shrk_output_names";
 }
 

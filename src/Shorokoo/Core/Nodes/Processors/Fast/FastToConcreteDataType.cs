@@ -57,7 +57,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     var concreteFast = ProcessTopLevelGraph(specializedFn.OriginalFastGraph.Clone(), concreteFunctions);
                     var concreteFunction = new Function(concreteFast, specializedFn.FunctionType,
                         defaultName: specializedFn.DefaultName,
-                        friendlyName: specializedFn.FriendlyName);
+                        friendlyName: specializedFn.FriendlyName,
+                        stateOwnership: specializedFn.StateOwnership);
                     concreteFunctions[(genericFn, argsKey)] = concreteFunction;
                 }
             }
@@ -108,7 +109,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var specializedFunction = new Function(
                     specializedFast, fn.FunctionType,
                     defaultName: fn.DefaultName,
-                    friendlyName: fn.FriendlyName);
+                    friendlyName: fn.FriendlyName,
+                    stateOwnership: fn.StateOwnership);
 
                 specializedFunctions[(fn, specialization.argsKey)] = specializedFunction;
 

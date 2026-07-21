@@ -120,19 +120,33 @@ namespace Shorokoo.Core.Factory
         /// <see cref="Shorokoo.Onnx.OnnxModelImporter"/>; use
         /// <see cref="BuildOnnxModel(Shorokoo.Graph.ComputationGraph, OpSetVersion, bool)"/> for anything meant to leave Shorokoo.
         /// </summary>
+        /// <param name="fastGraph">The graph to serialize.</param>
+        /// <param name="opset">Default-domain opset stamp (raised as required).</param>
+        /// <param name="prepForOnnx">Run the ONNX-executability prep pass.</param>
+        /// <param name="stage">Graph kind to stamp into the model metadata, when known.</param>
+        /// <param name="applyExecutionLowerings">Run the semantics-narrowing execution
+        /// lowerings: <c>STATE_UPDATE_LINK</c> / <c>WITH_STATE_DEPS</c> → Identity (one-shot
+        /// inference) and the <c>SHRK_RANDOM_*</c> / <c>SHRK_RNG_*</c> feed lowering to draw
+        /// functions / ONNX random fallbacks. The execution-session and export paths need
+        /// them; persistence (.srk) passes false — a saved graph must keep its state
+        /// machinery and its runtime-feed ops verbatim, or a reloaded module/architecture
+        /// would silently lose state semantics or keyed-RNG identity.</param>
         internal static ModelProto BuildInternalOnnxModel(
             InternalComputationGraph fastGraph,
             OpSetVersion opset = OpSetVersion.OPS_21,
             bool prepForOnnx = false,
-            Shorokoo.Graph.GraphKind? stage = null)
-            => BuildOnnxModelCore(fastGraph, opset, prepForOnnx, vanillaExport: false, stage: stage);
+            Shorokoo.Graph.GraphKind? stage = null,
+            bool applyExecutionLowerings = true)
+            => BuildOnnxModelCore(fastGraph, opset, prepForOnnx, vanillaExport: false, stage: stage,
+                applyExecutionLowerings: applyExecutionLowerings);
 
         private static ModelProto BuildOnnxModelCore(
             InternalComputationGraph fastGraph,
             OpSetVersion opset,
             bool prepForOnnx,
             bool vanillaExport,
-            Shorokoo.Graph.GraphKind? stage = null)
+            Shorokoo.Graph.GraphKind? stage = null,
+            bool applyExecutionLowerings = true)
         {
             if (fastGraph is null) throw new ArgumentNullException(nameof(fastGraph));
 
@@ -141,7 +155,7 @@ namespace Shorokoo.Core.Factory
 
             // ----- 2. Run the Fast pre-passes in place. Capture the rename map
             // so we can also remap the tensor-info lookup we'll build below.
-            var tensorInfoLookup = RunPrePassesAndBuildLookup(prepFast, prepForOnnx);
+            var tensorInfoLookup = RunPrePassesAndBuildLookup(prepFast, prepForOnnx, applyExecutionLowerings);
 
             // Reorder so each IF body has then-block nodes positionally first
             // and else-block nodes positionally second. The Fast back-walk used
@@ -168,7 +182,7 @@ namespace Shorokoo.Core.Factory
             // a FunctionProto for each.
             var functions = CollectFunctionsPostOrder(prepFast);
             var functionProtos = functions
-                .Select(fn => BuildFunctionProto(fn, opset, prepForOnnx))
+                .Select(fn => BuildFunctionProto(fn, opset, prepForOnnx, applyExecutionLowerings))
                 .ToArray();
 
             var model = (ModelProto)OnnxIRFactory.CreateModel(graphProto, functionProtos, opset);
@@ -206,6 +220,27 @@ namespace Shorokoo.Core.Factory
             // (The model's RNG identity needs no side channel: it is the ordinary RngSeed
             // parameter at ModelId [0], serialized as a plain initializer like any other
             // MODEL_PARAM_DATA and reloaded the same way.)
+
+            // ----- 6c. Internal dialect only: the graph-I/O ValueInfos must keep their
+            // raw N{k}_T{s} tensor ids (the loader parses node/tensor keys out of them),
+            // so the human-readable signature names ride model metadata instead — the
+            // loader restores them into Input/OutputUniqueNames positionally. Names come
+            // from prepFast for the same lockstep reason ApplySignatureIONames uses it.
+            if (!vanillaExport)
+            {
+                if (prepFast.InputUniqueNames.Count > 0)
+                    model.MetadataProps.Add(new StringStringEntryProto
+                    {
+                        Key = OnnxOpAttributeNames.ShrkMetaInputNames,
+                        Value = System.Text.Json.JsonSerializer.Serialize(prepFast.InputUniqueNames),
+                    });
+                if (prepFast.OutputUniqueNames.Count > 0)
+                    model.MetadataProps.Add(new StringStringEntryProto
+                    {
+                        Key = OnnxOpAttributeNames.ShrkMetaOutputNames,
+                        Value = System.Text.Json.JsonSerializer.Serialize(prepFast.OutputUniqueNames),
+                    });
+            }
 
             // ----- 7. User-facing export only: enforce the vanilla dialect, then
             // finish the model boundary — typed graph outputs and signature-derived
@@ -950,11 +985,11 @@ namespace Shorokoo.Core.Factory
         /// Runs every Fast pre-pass on <paramref name="graph"/> in the canonical
         /// pre-pass order. Mutates the graph in place.
         /// </summary>
-        private static void RunPrePasses(InternalComputationGraph graph, bool prepForOnnx)
+        private static void RunPrePasses(InternalComputationGraph graph, bool prepForOnnx, bool applyExecutionLowerings)
         {
             FastLowerAttributeTensorOps.Process(graph);
-            FastLowerStateUpdateLinksForInference.Process(graph);
-            FastLowerRandomOps.Process(graph);
+            if (applyExecutionLowerings) FastLowerStateUpdateLinksForInference.Process(graph);
+            if (applyExecutionLowerings) FastLowerRandomOps.Process(graph);
             FastAddIdentityForOuterScopeValues.Process(graph);
             if (prepForOnnx) FastPrepForOnnx.Process(graph);
             FastStripCallStacks.Process(graph);
@@ -972,11 +1007,11 @@ namespace Shorokoo.Core.Factory
         /// then remapped through the rename map.
         /// </summary>
         private static Dictionary<FastTensorKey, FastTensorInfo> RunPrePassesAndBuildLookup(
-            InternalComputationGraph graph, bool prepForOnnx)
+            InternalComputationGraph graph, bool prepForOnnx, bool applyExecutionLowerings)
         {
             FastLowerAttributeTensorOps.Process(graph);
-            FastLowerStateUpdateLinksForInference.Process(graph);
-            FastLowerRandomOps.Process(graph);
+            if (applyExecutionLowerings) FastLowerStateUpdateLinksForInference.Process(graph);
+            if (applyExecutionLowerings) FastLowerRandomOps.Process(graph);
             FastAddIdentityForOuterScopeValues.Process(graph);
             if (prepForOnnx) FastPrepForOnnx.Process(graph);
             FastStripCallStacks.Process(graph);
@@ -1033,14 +1068,15 @@ namespace Shorokoo.Core.Factory
 
         // ----------- function emission -----------
 
-        private static FunctionProto BuildFunctionProto(Function function, OpSetVersion opset, bool prepForOnnx)
+        private static FunctionProto BuildFunctionProto(
+            Function function, OpSetVersion opset, bool prepForOnnx, bool applyExecutionLowerings)
         {
             // Clone the function's primary Fast body and run the same pre-passes
             // on the copy. The function's body has its own ONNX-name namespace,
             // so the per-graph counter inside FastUseUniqueNames restarts at 1
             // for each function — matches how ONNX FunctionProtos are scoped.
             var fnFast = function.OriginalFastGraph.Clone();
-            RunPrePasses(fnFast, prepForOnnx);
+            RunPrePasses(fnFast, prepForOnnx, applyExecutionLowerings);
             fnFast.ConfigureScopes(ScopeSize.Maximal, ScopeSize.Maximal, ScopePriority.Loop);
 
             var fnGraphProto = BuildGraphProto(
@@ -1075,6 +1111,13 @@ namespace Shorokoo.Core.Factory
                 };
                 fnProto.MetadataProps.Add(typeMeta);
             }
+
+            if (function.StateOwnership is { } stateOwnership)
+                fnProto.MetadataProps.Add(new StringStringEntryProto
+                {
+                    Key = Function.IRStateOwnershipParamName,
+                    Value = stateOwnership.ToString(),
+                });
 
             var nameMeta = new StringStringEntryProto
             {

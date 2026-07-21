@@ -90,7 +90,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             ProcessGraph(bodyFast, sampleInputs: null, compute, functionRemap);
 
             functionRemap[fn] = new Function(bodyFast, fn.FunctionType,
-                defaultName: fn.DefaultName, friendlyName: fn.FriendlyName);
+                defaultName: fn.DefaultName, friendlyName: fn.FriendlyName, fn.StateOwnership);
         }
 
         private static bool HasVariantOps(InternalComputationGraph graph) =>

@@ -15,6 +15,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// the initial state value and the update computation is dropped. This makes graphs with
     /// module-owned state (Dropout's draw counter, BatchNorm running stats) executable on the
     /// plain inference path without behavioral change.
+    ///
+    /// <para>Runs on the execution-session and vanilla-export paths only. Internal .srk
+    /// persistence disables it (<c>lowerStateLinksForInference: false</c>): a saved graph
+    /// must keep its state machinery, or reloading a module/architecture would silently drop
+    /// state initializers and update computations.</para>
     /// </summary>
     internal static class FastLowerStateUpdateLinksForInference
     {

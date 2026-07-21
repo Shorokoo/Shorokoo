@@ -29,41 +29,6 @@ using Shorokoo.Core.Nodes.OnnxNodes;
 
 namespace Shorokoo.Core.Graph
 {
-    internal enum GraphKind
-    {
-        /// <summary>
-        /// A model architecture describes a specific kind of inference structure. It can be low-level like a Conv layer. Or high level like a transorfmer architecture.
-        /// It is characterized by the following:
-        ///  - May require trainable parameters
-        ///  - The shape of trainable parameters may depend on not yet specified values of architecture parameters (e.g. kernel size for Conv)
-        ///  
-        /// Model Architecture aren't intented to be used in inference, they are still structured to allow for inference.
-        /// It's inputs are the architecture parameters followed by the model inputs.
-        /// It's ouputs are the resulting inferred contents using default initializers for weights (typically initialized to random values which typically would produce random outputs)
-        /// </summary>
-        ModelArchitecture,
-
-        /// <summary>
-        /// A model architecture whose only unspecified hyperparameters are inferable from the input parameters to the model.
-        /// </summary>
-        ReadyArchitecture,
-
-        /// <summary>
-        /// A model architecture whose trainable parameter shapes are known.
-        /// 
-        /// Similarto model architectures, concrete Architecture aren't intended to be used for inference. However, unlike model architectures they can be used for training.
-        /// </summary>
-        ConcreteArchitecture,
-
-        /// <summary>
-        /// A concrete architecture whose trainable parameter values are known.
-        /// 
-        /// Can be used for fine tuning or inference. Can also represent a training checkpoint.
-        /// </summary>
-        ConcreteModel
-    }
-
-
     public record FrameworkId
     {
         public string Name { get; }

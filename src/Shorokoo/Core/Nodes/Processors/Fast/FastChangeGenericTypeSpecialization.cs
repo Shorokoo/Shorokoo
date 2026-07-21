@@ -26,7 +26,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// specialized DType (still tagged with the same param name).
     /// Mutates the graph in place.
     ///
-    /// Because <see cref="FastComputationGraph"/> does not store per-tensor types,
+    /// Because <see cref="InternalComputationGraph"/> does not store per-tensor types,
     /// this is purely an attribute rewrite — there is no per-tensor type re-inference
     /// step like the CG version's <c>reinferTypes</c>. Downstream type information
     /// is reconstructed when (or if) the FastCG is later converted back to a
@@ -35,7 +35,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     internal static class FastChangeGenericTypeSpecialization
     {
         public static void Process(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             Dictionary<string, DType> typeSpecializations)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));

@@ -82,13 +82,13 @@ namespace Shorokoo.Core
         /// functions. RNG algorithm functions are never inlined by the function inliner and
         /// export with this tag in their FunctionProto metadata.
         /// </summary>
-        public string? RngAlgorithm { get; internal set; }
+        public string? RngAlgorithm { get; internal init; }
 
         /// <summary>The RNG function kind ("split", "uniform", "normal"), or null. See <see cref="RngAlgorithm"/>.</summary>
-        public string? RngFunctionKind { get; internal set; }
+        public string? RngFunctionKind { get; internal init; }
 
-        public string DefaultName { get; private set; }
-        public string FriendlyName { get; private set; }
+        public string DefaultName { get; }
+        public string FriendlyName { get; }
 
         public string ModelSignatureString => _signatures.Value.modelSignature;
         public string ModuleSignatureString => _signatures.Value.moduleSignature;
@@ -96,7 +96,7 @@ namespace Shorokoo.Core
             => __signatures ??= new Lazy<(string, string)>(() => OriginalFastGraph.GetSignatureStrings());
         private Lazy<(string moduleSignature, string modelSignature)>? __signatures;
 
-        public FunctionType FunctionType { get; private set; }
+        public FunctionType FunctionType { get; }
 
         /// <summary>
         /// For <see cref="Shorokoo.Core.Nodes.OnnxNodes.FunctionType.StateParamInitializer"/> functions,
@@ -106,7 +106,7 @@ namespace Shorokoo.Core
         /// non-state-initializer functions. The TrainingRig uses this to reject module-owned state
         /// inside optimizer graphs and optimizer-owned state inside model graphs.
         /// </summary>
-        public StateOwnership? StateOwnership { get; private set; }
+        public StateOwnership? StateOwnership { get; }
 
         private Function[]? directlyReferencedFunctions = null;
         public Function[] DirectlyReferencedFunctions
@@ -146,12 +146,26 @@ namespace Shorokoo.Core
         internal ImmutableArray<int?> OutputRankOverrides { get { EnsureConvertedSnapshot(); return _outputRankOverrides; } }
 
         /// <summary>
-        /// Primary representation of the function body.
+        /// Primary representation of the function body: the frozen (immutable)
+        /// <see cref="Shorokoo.Graph.ComputationGraph"/>, stamped
+        /// <see cref="Shorokoo.Graph.GraphKind.Module"/>. Because functions reference
+        /// other functions only through node <c>TargetFunction</c>s — whose bodies are
+        /// frozen the same way at their own construction — the whole reachable body
+        /// chain is immutable with no recursive freezing step.
         /// </summary>
-        public FastComputationGraph OriginalFastGraph { get; }
+        internal Shorokoo.Graph.ComputationGraph Body { get; }
+
+        /// <summary>
+        /// A fresh, fully mutable copy of the body, thawed from <see cref="Body"/> on
+        /// <b>every access</b> — the caller owns the returned graph outright and may
+        /// mutate it freely. (The per-access thaw cost, and the mutable↔immutable
+        /// round trips it implies in the passes, are tracked as a deferred
+        /// performance topic on the issue tracker.)
+        /// </summary>
+        internal InternalComputationGraph OriginalFastGraph => Body.ToInternal();
 
         // Cached Variable views derived from a one-shot rebuild of OriginalFastGraph.
-        // FastComputationGraphConverter.BuildNodes reconstructs the underlying
+        // InternalComputationGraphConverter.BuildNodes reconstructs the underlying
         // Node/Variable objects without wrapping them in a ComputationGraph; the
         // resulting inputs/outputs are stored here and Function never holds a CG handle.
         private bool _convertedSnapshotComputed;
@@ -170,7 +184,8 @@ namespace Shorokoo.Core
             if (_convertedSnapshotComputed) return;
             using var shield = GraphTrace.EnterIsolated();
 
-            var built = FastComputationGraphConverter.BuildNodes(this.OriginalFastGraph);
+            var body = this.OriginalFastGraph;
+            var built = InternalComputationGraphConverter.BuildNodes(body);
             _inputs = built.inputs;
             _hyperparamInputs = built.inputs
                 .Where(x => x.InputType == Shorokoo.Core.Nodes.NodeDefinitions.InputType.Hyperparam)
@@ -179,16 +194,18 @@ namespace Shorokoo.Core
                 .Where(x => x.InputType != Shorokoo.Core.Nodes.NodeDefinitions.InputType.Hyperparam)
                 .ToImmutableArray();
             _outputs = built.outputs;
-            _outputRankOverrides = OriginalFastGraph.OutputRankOverrides is null
+            _outputRankOverrides = body.OutputRankOverrides is null
                 ? built.outputs.Select(x => x.Rank).ToImmutableArray()
-                : OriginalFastGraph.OutputRankOverrides.ToImmutableArray();
+                : body.OutputRankOverrides.ToImmutableArray();
             _convertedSnapshotComputed = true;
         }
 
-        public Function(FastComputationGraph fastGraph, FunctionType functionType, string? defaultName, string? friendlyName,
+        internal Function(InternalComputationGraph fastGraph, FunctionType functionType, string? defaultName, string? friendlyName,
             StateOwnership? stateOwnership = null)
         {
-            this.OriginalFastGraph = fastGraph;
+            // Freeze the body immediately: the builder keeps ownership of its mutable
+            // graph, and this Function never holds a mutable reference to it.
+            this.Body = new Shorokoo.Graph.ComputationGraph(fastGraph, Shorokoo.Graph.GraphKind.Module);
             this.FunctionType = functionType;
             this.DefaultName = defaultName ?? friendlyName ?? "UnnamedFunction";
             this.FriendlyName = friendlyName ?? defaultName ?? "UnnamedFunction";
@@ -282,7 +299,7 @@ namespace Shorokoo.Core
             }
         }
 
-        private Shorokoo.Graph.FastComputationGraph? fastFlattenedGraph = null;
+        private Shorokoo.Graph.ComputationGraph? flattenedBody = null;
         /// <summary>
         /// Returns a FastCG representation of this function's body with every
         /// inlinable <c>MODEL_INVOKE</c> / <c>FUNCTION_INVOKE</c> recursively expanded;
@@ -297,22 +314,26 @@ namespace Shorokoo.Core
         /// on the result. Sub-function flattening recurses through this same method,
         /// so no <c>ComputationGraph</c>-side inliner is invoked.
         ///
-        /// Callers must <see cref="Shorokoo.Graph.FastComputationGraph.Clone"/> the
-        /// returned graph (and re-key it) before splicing it into a parent graph, to
-        /// avoid both aliasing the cache and NodeKey collisions when the same function
-        /// is inlined at multiple call sites.
+        /// The flattened result is cached frozen (immutable); every call thaws a
+        /// fresh mutable copy, so the caller owns the returned graph outright —
+        /// though it must still be re-keyed before splicing into a parent graph to
+        /// avoid NodeKey collisions when the same function is inlined at multiple
+        /// call sites.
         /// </summary>
-        internal Shorokoo.Graph.FastComputationGraph GetFastFlattenedGraph()
+        internal Shorokoo.Graph.InternalComputationGraph GetFastFlattenedGraph()
         {
-            if (this.fastFlattenedGraph is null)
+            if (this.flattenedBody is null)
             {
-                var fast = this.OriginalFastGraph.Clone();
+                var fast = this.OriginalFastGraph;
                 Shorokoo.Core.Nodes.Processors.Fast.FastInlineModulesAndFunctions.Process(fast);
-                this.fastFlattenedGraph = fast;
+                this.flattenedBody = new Shorokoo.Graph.ComputationGraph(fast, Shorokoo.Graph.GraphKind.Module);
             }
 
-            Debug.Assert(this.fastFlattenedGraph.Inputs.Count == this.OriginalFastGraph.Inputs.Count);
-            return this.fastFlattenedGraph;
+            var thawed = this.flattenedBody.ToInternal();
+            // Flattening must preserve the body's input arity.
+            Debug.Assert(thawed.Inputs.Count == this.Body.InputNames.Count,
+                "GetFastFlattenedGraph: flattening changed the input count.");
+            return thawed;
         }
 
     }

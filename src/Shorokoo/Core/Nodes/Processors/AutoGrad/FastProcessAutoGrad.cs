@@ -65,7 +65,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         /// the AUTO_GRAD nodes, runs <see cref="FastProcessorHelper.RemoveUnreachableNodes"/>
         /// and <see cref="FastProcessorHelper.EnsureTopologicalOrder"/>, then returns.
         /// </summary>
-        public static void Process(FastComputationGraph graph)
+        public static void Process(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -83,7 +83,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             System.Diagnostics.Debug.Assert(graph.IsLinearOrderValid(), "graph.IsLinearOrderValid()");
         }
 
-        private static void ProcessOne(FastComputationGraph graph, FastNode autoGradNode)
+        private static void ProcessOne(InternalComputationGraph graph, FastNode autoGradNode)
         {
             // AUTO_GRAD inputs: [loss, ...params]; outputs: [grad_param_0, grad_param_1, ...]
             var allInputs = autoGradNode.Inputs;
@@ -152,7 +152,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             //    sub-expressions between different params' gradients only emit one FastNode
             //    (otherwise two splices would produce duplicate FastNodeKeys via FromCgKey
             //    for the same Variable Node).
-            // 3. Lower the gradient Variable subgraph via the standard FastComputationGraph
+            // 3. Lower the gradient Variable subgraph via the standard InternalComputationGraph
             //    constructor, with externalInputKeys mapping each fresh stand-in Variable to
             //    the host-graph FastTensorKey it represents. The constructor sorts by
             //    OrderingHintNumber, drops the stand-in MODEL_TENSOR_INPUT nodes, and emits
@@ -164,10 +164,10 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
                 .ToImmutableArray();
 
             var newNodes = new List<FastNode>();
-            FastComputationGraph? fastGradGraph = null;
+            InternalComputationGraph? fastGradGraph = null;
             if (!gradHeads.IsEmpty)
             {
-                fastGradGraph = new FastComputationGraph(
+                fastGradGraph = new InternalComputationGraph(
                     standIns, gradHeads, externalInputKeys: freshInputBacking);
                 newNodes.AddRange(fastGradGraph.Nodes);
             }
@@ -223,7 +223,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         // ------------------------------------------------------------------------------------
 
         private static List<FastNode> ComputeForwardTopoOrder(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             FastNode lossProducer,
             HashSet<FastTensorKey> paramKeySet,
             Dictionary<FastTensorKey, FastNode> producerByOutput,
@@ -264,7 +264,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         // ------------------------------------------------------------------------------------
 
         private static HashSet<FastNodeKey> ComputeParamDependentNodes(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             HashSet<FastTensorKey> paramKeySet,
             Dictionary<FastTensorKey, FastNode> producerByOutput)
         {
@@ -451,7 +451,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         // ------------------------------------------------------------------------------------
 
         private static void RewireConsumers(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             Dictionary<FastTensorKey, FastTensorKey> keyMappings)
         {
             if (keyMappings.Count == 0) return;
@@ -475,7 +475,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             }
         }
 
-        private static Dictionary<FastTensorKey, FastNode> BuildProducerByOutputMap(FastComputationGraph graph)
+        private static Dictionary<FastTensorKey, FastNode> BuildProducerByOutputMap(InternalComputationGraph graph)
         {
             var map = new Dictionary<FastTensorKey, FastNode>();
             foreach (var node in graph.Nodes)

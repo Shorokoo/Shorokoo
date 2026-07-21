@@ -57,8 +57,8 @@ public class RngAlgorithmTests
 {
     private static float[] RunDraw<TModule>(long rows, long cols)
     {
-        var g = (FastComputationGraph)typeof(TModule)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var g = ((ComputationGraph)typeof(TModule)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([rows, cols], Enumerable.Repeat(0f, (int)(rows * cols)).ToArray());
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
         var outputs = ComputeContext.Default.Execute(concrete, input);
@@ -120,8 +120,8 @@ public class RngAlgorithmTests
     [Fact]
     public void TestRngFunctionsExportNonInlinedWithMetadata()
     {
-        var g = (FastComputationGraph)typeof(RngSplitThenDraw)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var g = ((ComputationGraph)typeof(RngSplitThenDraw)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([2L, 2L], 0f, 0f, 0f, 0f);
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
 

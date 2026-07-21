@@ -4,9 +4,10 @@ Related: [inference.md](inference.md) · [core-types.md](core-types.md)
 
 ## Facts
 
-- A model is a `FastComputationGraph` (from `MyModule.ComputationGraph` or built
-  directly). It can be converted to an ONNX `ModelProto`, or saved in Shorokoo's own
-  `.srk`/`.zsrk` format.
+- A model is a `ComputationGraph` (from `MyModule.ComputationGraph` or one of the
+  lowering steps). Every graph carries a reliable `Kind` (`GraphKind.Module` /
+  `ConcreteArchitecture` / `ConcreteModel`) stamped where it was produced. It can be
+  converted to an ONNX `ModelProto`, or saved in Shorokoo's own `.srk`/`.zsrk` format.
 - There is no one-call `graph.ToOnnxFile(path)`. Build the `ModelProto`, then save it
   with `OnnxModelExporter` (or serialize it yourself with protobuf).
 - Models larger than protobuf's 2 GB message ceiling are handled with the standard
@@ -21,7 +22,7 @@ using System.IO;
 using Shorokoo.Core.Factory;      // FastOnnxModelBuilder
 using Shorokoo.Core.Factory.IR;   // ModelProto
 
-ModelProto model = FastOnnxModelBuilder.BuildOnnxModel(graph);  // graph: FastComputationGraph
+ModelProto model = FastOnnxModelBuilder.BuildOnnxModel(graph);  // graph: ComputationGraph, kind ConcreteModel
 using var stream = File.Create("model.onnx");
 ProtoBuf.Serializer.Serialize(stream, model);   // ProtoBuf = protobuf-net (a transitive dependency)
 ```
@@ -52,6 +53,11 @@ OnnxModelExporter.SaveWithExternalData(model, "model.onnx",
     new OnnxExternalDataOptions { SizeThreshold = 1024, Alignment = 4096 });
 ```
 
+`SaveWithExternalData` applies to **concrete models only**: it externalizes the
+top-level graph initializers, which is complete exactly when every weight lives
+there. A model that still contains module-stage machinery or unmaterialized
+parameters is refused up front (`XD008`) with the actual vs required kind named.
+
 - Tensor data is written in initializer order, each tensor aligned to `Alignment`
   bytes (default 4096) for mmap-friendly access.
 - Self-contained (all-inline) export remains the default and is unchanged; with no
@@ -61,9 +67,12 @@ OnnxModelExporter.SaveWithExternalData(model, "model.onnx",
 - The exported pair is standard ONNX — stock onnxruntime loads it directly.
 - The passed `ModelProto` is left unmodified.
 
-`BuildOnnxModel(FastComputationGraph fastGraph, OpSetVersion opset = OPS_21,
-IR_VERSION irVersion = IR_10, bool prepForOnnx = false)` clones the graph (no
-mutation), lowers it for ONNX, and emits nodes, subgraphs, and functions.
+`BuildOnnxModel(ComputationGraph graph, OpSetVersion opset = OPS_21,
+bool prepForOnnx = false)` requires a
+`GraphKind.ConcreteModel` graph — anything else fails fast with `FW045` naming the
+actual and required kinds (only a concrete model can satisfy the vanilla-ONNX
+guarantee). It clones the graph (no mutation), lowers it for ONNX, and emits
+nodes, subgraphs, and functions.
 The default `OPS_21` is the export **baseline**: if the graph (including
 function bodies) contains operators introduced after opset 21 (e.g.
 `Attention`, opset 23), the model's `opset_import` is raised automatically
@@ -115,10 +124,16 @@ weights can be re-bound by name with `ToConcreteModel`.
 ```csharp
 using Shorokoo.Onnx;   // OnnxModelImporter
 
-FastComputationGraph g1 = OnnxModelImporter.FromOnnxModelToFastGraph("model.onnx");
-FastComputationGraph g2 = OnnxModelImporter.FromOnnxModelToFastGraph(byteArray);
-FastComputationGraph g3 = OnnxModelImporter.FromOnnxModelToFastGraph(stream);
+ComputationGraph g1 = OnnxModelImporter.FromOnnxModel("model.onnx");
+ComputationGraph g2 = OnnxModelImporter.FromOnnxModel(byteArray);
+ComputationGraph g3 = OnnxModelImporter.FromOnnxModel(stream);
 ```
+
+Models written by Shorokoo carry a graph-kind metadata tag (`shrk_graph_kind` in
+the model's metadata props), so an imported graph's `Kind` is the kind it was
+saved with. Foreign models have no tag and are classified by op-scanning. A tag
+that is structurally impossible for the model's content (a hand-edited or
+corrupt file) fails the import loudly.
 
 Models using ONNX external data (the standard layout for large third-party models)
 load transparently from a **file path** — `location` keys resolve against the model
@@ -126,7 +141,7 @@ file's directory, honoring `offset`/`length` slicing. When importing from bytes 
 stream, pass the directory the side files live in:
 
 ```csharp
-FastComputationGraph g = OnnxModelImporter.FromOnnxModelToFastGraph(
+ComputationGraph g = OnnxModelImporter.FromOnnxModel(
     byteArray, externalDataDirectory: "/path/to/model/dir");
 ```
 
@@ -142,7 +157,7 @@ With `CompressedFormatUtils`:
 
 ```csharp
 string path = CompressedFormatUtils.SaveFastGraphToFile("model.zsrk", graph);     // compressed
-FastComputationGraph g = CompressedFormatUtils.LoadFastGraphFromFile("model.zsrk");
+ComputationGraph g = CompressedFormatUtils.LoadFastGraphFromFile("model.zsrk");
 byte[] bytes = CompressedFormatUtils.SaveFastGraphToBinary(graph, compressed: true);
 ```
 
@@ -172,16 +187,18 @@ so. Header fields (add-only across minor revisions; unknown fields are ignored):
 }
 ```
 
-- `stage` records where the graph sits in the lowering pipeline (see
-  [inference.md](inference.md#the-lowering-pipeline)), so loaders can refuse a
-  mismatched file up front instead of failing at run time with
-  `No Op registered for ShrkCreateModule`. Pass the optional `requiredStage`
-  argument to enforce it:
+- `stage` records the graph's `GraphKind` (see
+  [inference.md](inference.md#the-lowering-pipeline)). The writer records the
+  graph's **stamped** kind (`graph.Kind`), and the loader stamps the loaded
+  graph's `Kind` from the header (falling back to op-scan classification for
+  legacy/foreign data), so loaders can refuse a mismatched file up front instead
+  of failing at run time with `No Op registered for ShrkCreateModule`. Pass the
+  optional `requiredStage` argument to enforce it:
 
   ```csharp
   // Throws a clear stage-mismatch error if model.zsrk holds a module-stage graph:
   var g = CompressedFormatUtils.LoadFastGraphFromFile(
-      "model.zsrk", requiredStage: SrkGraphStage.ConcreteModel);
+      "model.zsrk", requiredStage: GraphKind.ConcreteModel);
   ```
 
 - `payloadSha256` makes corruption and truncation fail loudly, with an error naming
@@ -242,11 +259,11 @@ ModelParamList weights = SafeTensorLoader.LoadModelParamSet("weights.safetensors
 // Lower the module graph to a concrete architecture first. This inlines sub-modules so the
 // trainable parameters are visible at the top level; pass sample inputs as shape hints.
 var input = TensorData([1L, 3L, 224L, 224L], myPixelFloatArray);
-FastComputationGraph arch = MyModel.ComputationGraph.ToConcreteArchitecture(
-    MyModel.ComputationGraph.FromOrderedInputs([input]));
+ComputationGraph arch = MyModel.ComputationGraph.ToConcreteArchitecture(
+    MyModel.ComputationGraph.FromOrderedInputs([input]));  // arch.Kind == GraphKind.ConcreteArchitecture
 
 // Bind by parameter name into a concrete (weight-filled) graph:
-FastComputationGraph concrete = arch.ToConcreteModel(weights);
+ComputationGraph concrete = arch.ToConcreteModel(weights);  // concrete.Kind == GraphKind.ConcreteModel
 
 // Run it. Execute takes IData[] inputs (TensorData implements IData) and returns
 // NamedModelParam[]; read each output via ToTensorData().AccessMemory().
@@ -261,9 +278,9 @@ Notes:
   input list; skip it when the model has no inputs to hardcode. See
   [inference.md](inference.md#the-lowering-pipeline).
 - `ToConcreteModel`, `InitializeTrainableParams`, and `GetConcreteModelParamInfos` require a
-  concrete architecture graph from `ToConcreteArchitecture`. Called on a raw `MyModel.ComputationGraph`
-  whose sub-modules are not inlined, they throw, because the trainable parameters are still nested
-  inside sub-functions.
+  graph whose `Kind` is `GraphKind.ConcreteArchitecture` (from `ToConcreteArchitecture`) and check
+  it first. Called on a raw `MyModel.ComputationGraph` (kind `Module`), they fail fast naming the
+  actual and required kinds — the trainable parameters would still be nested inside sub-functions.
 - `ToConcreteModel()` with no argument fills defaults (equivalent to
   `arch.ToConcreteModel(arch.InitializeTrainableParams())`).
 - Binding is **by name**. The default uses Shorokoo's naming scheme; weights exported

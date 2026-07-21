@@ -17,7 +17,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// <summary>
     /// Per-op handlers for SEQUENCE_* nodes whose element / input dtype is
     /// <see cref="DType.Model"/>. Each handler translates a single op into parallel
-    /// per-field SEQUENCE_* nodes on the FastComputationGraph, keeping the unpack
+    /// per-field SEQUENCE_* nodes on the InternalComputationGraph, keeping the unpack
     /// state in <see cref="FastModelStructContext"/> in sync. Works for any hp field
     /// layout (Tensor / Optional / Sequence) — the per-field SEQUENCE_* we emit just
     /// carry whichever tensor keys the Model struct stores for that field.

@@ -13,7 +13,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastStripCallStacks
     {
-        public static void Process(FastComputationGraph graph)
+        public static void Process(InternalComputationGraph graph)
         {
             foreach (var node in graph.Nodes)
                 node.StackTrace = null;

@@ -15,11 +15,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 {
     /// <summary>
     /// Fast version of the state-update lowering pass. Operates directly on a
-    /// <see cref="FastComputationGraph"/>:
+    /// <see cref="InternalComputationGraph"/>:
     /// <list type="number">
     ///   <item>Each <c>STATE_UPDATE_LINK(originalState, updatedState)</c> is rewritten to
     ///         <c>IDENTITY(updatedState)</c>. Its output tensor (the linked updated state) is
-    ///         appended to <see cref="FastComputationGraph.Outputs"/> so the executor can
+    ///         appended to <see cref="InternalComputationGraph.Outputs"/> so the executor can
     ///         retrieve the new state value.</item>
     ///   <item>Each <c>WITH_STATE_DEPS(mainOutput, ...stateDeps)</c> is rewritten to
     ///         <c>IDENTITY(mainOutput)</c>. The state-dep inputs are dropped.</item>
@@ -29,7 +29,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastLowerStateUpdateNodes
     {
-        public static void Process(FastComputationGraph graph)
+        public static void Process(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 

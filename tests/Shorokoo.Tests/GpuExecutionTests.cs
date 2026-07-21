@@ -38,10 +38,10 @@ public class GpuExecutionTests
         var b = InputScalar<float32>();
         var c = a + b;
 
-        var graph = new FastComputationGraph([a, b], [c]);
+        var graph = new InternalComputationGraph([a, b], [c]);
         var ctx = new ComputeContext();
         var results = ctx.Execute(
-            FastComputationGraphConverter.ToFastGraph(graph),
+            (graph),
             TensorData([], left),
             TensorData([], right));
 

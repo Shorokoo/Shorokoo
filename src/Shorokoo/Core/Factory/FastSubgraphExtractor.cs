@@ -16,7 +16,7 @@ namespace Shorokoo.Core.Factory
 {
     /// <summary>
     /// Helpers for the Fast ONNX builder that turn the implicit subgraph membership of a
-    /// <see cref="FastComputationGraph"/> (where IF/LOOP bodies are just the positional
+    /// <see cref="InternalComputationGraph"/> (where IF/LOOP bodies are just the positional
     /// band between an open node and its matching close node) into explicit per-branch
     /// node lists.
     ///
@@ -55,7 +55,7 @@ namespace Shorokoo.Core.Factory
         /// unmatched open nodes or close nodes whose <c>GraphOpenNodeKey</c> doesn't
         /// resolve to a node in the graph.
         /// </summary>
-        public static ScopeIndex BuildScopeIndex(FastComputationGraph graph)
+        public static ScopeIndex BuildScopeIndex(InternalComputationGraph graph)
         {
             var keyToIndex = new Dictionary<FastNodeKey, int>();
             for (int i = 0; i < graph.Nodes.Count; i++)
@@ -120,7 +120,7 @@ namespace Shorokoo.Core.Factory
         /// mean the graph is malformed).
         /// </exception>
         public static (List<int> thenIdxs, List<int> elseIdxs) BifurcateIfBody(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             ScopeIndex scopeIndex,
             int ifOpenIdx,
             int ifCloseIdx)

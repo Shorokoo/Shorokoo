@@ -14,13 +14,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 {
     /// <summary>
     /// Builds <see cref="FastTensorInfo"/> metadata (dtype, structure, rank, unique name,
-    /// owning module function) for tensors in a <see cref="FastComputationGraph"/>.
+    /// owning module function) for tensors in a <see cref="InternalComputationGraph"/>.
     ///
     /// <para>
     /// <see cref="FastNode"/> stores op codes, attributes, and tensor-key references but not
     /// per-tensor metadata. To produce that metadata this processor rebuilds the equivalent
     /// <see cref="Variable"/>s via
-    /// <see cref="FastComputationGraphConverter.BuildTensorMapping"/> — the Variable
+    /// <see cref="InternalComputationGraphConverter.BuildTensorMapping"/> — the Variable
     /// factories are the canonical source of dtype/structure/rank propagation rules, and
     /// <see cref="Variable.UniqueName"/> / <see cref="Variable.ModuleFn"/> are intrinsic
     /// to that side of the model. No <c>ComputationGraph</c> is constructed; we
@@ -33,11 +33,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// Returns a dictionary mapping every <see cref="FastTensorKey"/> in
         /// <paramref name="graph"/> to its <see cref="FastTensorInfo"/>.
         /// </summary>
-        public static Dictionary<FastTensorKey, FastTensorInfo> BuildTensorInfoLookup(FastComputationGraph graph)
+        public static Dictionary<FastTensorKey, FastTensorInfo> BuildTensorInfoLookup(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
-            var tensorMapping = FastComputationGraphConverter.BuildTensorMapping(graph);
+            var tensorMapping = InternalComputationGraphConverter.BuildTensorMapping(graph);
 
             var lookup = new Dictionary<FastTensorKey, FastTensorInfo>(tensorMapping.Count);
             foreach (var (key, variable) in tensorMapping)
@@ -53,7 +53,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// Throws if the key is not produced by any node (including close-node connecting
         /// tensors) in the graph.
         /// </summary>
-        public static FastTensorInfo GetTensorInfo(FastComputationGraph graph, FastTensorKey key)
+        public static FastTensorInfo GetTensorInfo(InternalComputationGraph graph, FastTensorKey key)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -68,7 +68,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// Try-variant of <see cref="GetTensorInfo"/>. Returns false and sets
         /// <paramref name="info"/> to null when the key cannot be resolved in the graph.
         /// </summary>
-        public static bool TryGetTensorInfo(FastComputationGraph graph, FastTensorKey key, out FastTensorInfo? info)
+        public static bool TryGetTensorInfo(InternalComputationGraph graph, FastTensorKey key, out FastTensorInfo? info)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -78,7 +78,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 return false;
             }
 
-            var tensorMapping = FastComputationGraphConverter.BuildTensorMapping(graph);
+            var tensorMapping = InternalComputationGraphConverter.BuildTensorMapping(graph);
             if (tensorMapping.TryGetValue(key, out var variable) && variable is not null)
             {
                 info = BuildTensorInfo(key, variable);

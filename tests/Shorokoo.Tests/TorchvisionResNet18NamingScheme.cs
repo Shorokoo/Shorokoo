@@ -35,10 +35,10 @@ public static class TorchvisionResNet18NamingScheme
 
     /// <summary>
     /// Builds the naming scheme for a concrete ResNet18 architecture graph (the output of
-    /// <see cref="FastComputationGraphExtensions.ToConcreteArchitecture"/>). Bind weights with
+    /// <see cref="InternalComputationGraphExtensions.ToConcreteArchitecture"/>). Bind weights with
     /// <c>arch.ToConcreteModel(weights, scheme)</c>.
     /// </summary>
-    public static SimplePatternNamingScheme Create(FastComputationGraph concreteArch)
+    public static SimplePatternNamingScheme Create(InternalComputationGraph concreteArch)
     {
         var shorokooIdScheme =
             ModuleParamSetNamingScheme.CreateShorokooNamingScheme(concreteArch.GetConcreteModelParamInfos());

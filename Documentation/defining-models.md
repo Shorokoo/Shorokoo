@@ -47,7 +47,7 @@ For `[Module] class Foo` with `Inline(I x, [Hyper] H h) -> O`:
 | `Foo.Model(h)` | Bind hyperparameters; returns a reusable `Model` you can `.Call(...)` many times. |
 | `Foo.Model(h).Call(x)` | Build the subgraph for input `x`. |
 | `Foo.Call(h, x)` | Shortcut for `Foo.Model(h).Call(x)`. The combined shortcut keeps hyperparameters first (then inputs); only the `Inline` source signature is inputs-first. |
-| `Foo.ComputationGraph` | The full `FastComputationGraph` (used for export and training). |
+| `Foo.ComputationGraph` | The readonly `ComputationGraph` (kind `Module`; used for export and training). |
 | `FooHyperparameters` | Generated **only when every `[Hyper]` is a scalar `float32`** (the optimizer-shaped case): a named, init-only set implementing `IOptimizerHyperparameters`, with defaults from `[Hyper(default)]`. See [training.md](training.md). |
 
 For `[TrainableParamInitializer] class ConstInit` with `Inline(Vector<int64> shape)`:
@@ -386,7 +386,7 @@ new Module<Scalar<float32>, (Tensor<float32>, Tensor<float32>), Tensor<float32>>
   optional `name:` argument for lambdas or when you want the codegen-style class
   name in exports.
 - Lower-level building blocks are public too if you need them:
-  `GraphBuilder.BuildFastComputationGraphFromDelegate(...)` (uncached graph build)
+  `GraphBuilder.BuildComputationGraphFromDelegate(...)` (uncached graph build)
   and the `Module<...>` / `CallbackModule<...>` constructors shown above.
 
 ## Anti-patterns

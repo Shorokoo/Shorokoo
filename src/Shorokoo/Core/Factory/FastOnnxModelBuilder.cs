@@ -21,7 +21,7 @@ namespace Shorokoo.Core.Factory
 {
     /// <summary>
     /// Builds an ONNX <see cref="ModelProto"/> directly from a
-    /// <see cref="FastComputationGraph"/>. Runs the standard pre-passes, then
+    /// <see cref="InternalComputationGraph"/>. Runs the standard pre-passes, then
     /// walks the graph emitting protos. Every step works against
     /// <see cref="FastNode"/>/<see cref="FastNodeKey"/>/<see cref="FastTensorKey"/>
     /// — never an <see cref="Variable"/>.
@@ -51,7 +51,8 @@ namespace Shorokoo.Core.Factory
     {
         /// <summary>
         /// Build an externally loadable ("vanilla" dialect) ONNX <see cref="ModelProto"/>
-        /// from a concrete <see cref="FastComputationGraph"/>. The input graph is not
+        /// from a <see cref="Shorokoo.Graph.GraphKind.ConcreteModel"/>-kind
+        /// <see cref="Shorokoo.Graph.ComputationGraph"/>. The input graph is not
         /// mutated — all pre-passes run on a clone.
         ///
         /// <para>
@@ -68,8 +69,8 @@ namespace Shorokoo.Core.Factory
         ///
         /// <para>
         /// Graph inputs and outputs are named from the graph's signature
-        /// (<see cref="FastComputationGraph.InputUniqueNames"/> /
-        /// <see cref="FastComputationGraph.OutputUniqueNames"/>), deduplicated
+        /// (<see cref="InternalComputationGraph.InputUniqueNames"/> /
+        /// <see cref="InternalComputationGraph.OutputUniqueNames"/>), deduplicated
         /// deterministically; unnamed slots fall back to <c>input_{i}</c> /
         /// <c>output_{i}</c>. Dtypes are always stamped on the I/O ValueInfos, and
         /// dimensions are stamped wherever they are known (known rank → per-dim
@@ -78,7 +79,32 @@ namespace Shorokoo.Core.Factory
         /// </para>
         /// </summary>
         public static ModelProto BuildOnnxModel(
-            FastComputationGraph fastGraph,
+            Shorokoo.Graph.ComputationGraph graph,
+            OpSetVersion opset = OpSetVersion.OPS_21,
+            bool prepForOnnx = false)
+        {
+            if (graph is null) throw new ArgumentNullException(nameof(graph));
+            // The reliable-kind form of the FW045 gate: only a concrete model can satisfy
+            // the vanilla-dialect guarantee, so refuse everything else up front. The
+            // op-scanning check in ThrowIfNotVanillaDialect stays as the emission-side
+            // backstop (it also covers internal-graph callers with no stamped kind).
+            if (graph.Kind != Shorokoo.Graph.GraphKind.ConcreteModel)
+                throw new ModelException(ErrorCodes.FW045, "ONNX export",
+                    $"only a '{Shorokoo.Core.Utils.SrkFileFormat.StageName(Shorokoo.Graph.GraphKind.ConcreteModel)}' " +
+                    "graph exports to vanilla ONNX that any external runtime can load, but this graph is a " +
+                    $"'{Shorokoo.Core.Utils.SrkFileFormat.StageName(graph.Kind)}'. Lower the graph first " +
+                    "(ToConcreteArchitecture -> ToConcreteModel) and export that. Shorokoo's own .srk/.zsrk " +
+                    "persistence (CompressedFormatUtils.SaveFastGraphToFile/SaveFastGraphToBinary) accepts every graph kind. " +
+                    Shorokoo.Core.Utils.SrkFileFormat.WithKindRemedyHint);
+            return BuildOnnxModelCore(graph.ToInternal(), opset, prepForOnnx, vanillaExport: true, stage: graph.Kind);
+        }
+
+        /// <summary>
+        /// Internal-graph form of <see cref="BuildOnnxModel(Shorokoo.Graph.ComputationGraph, OpSetVersion, bool)"/> for callers below the
+        /// readonly wrapper (no stamped kind — the vanilla-dialect op scan is the gate).
+        /// </summary>
+        internal static ModelProto BuildOnnxModel(
+            InternalComputationGraph fastGraph,
             OpSetVersion opset = OpSetVersion.OPS_21,
             IR_VERSION irVersion = IR_VERSION.IR_10,
             bool prepForOnnx = false)
@@ -94,19 +120,21 @@ namespace Shorokoo.Core.Factory
         /// names and module-stage graphs serialize their Shorokoo-internal ops
         /// unchecked. Files produced this way are re-importable only by
         /// <see cref="Shorokoo.Onnx.OnnxModelImporter"/>; use
-        /// <see cref="BuildOnnxModel"/> for anything meant to leave Shorokoo.
+        /// <see cref="BuildOnnxModel(Shorokoo.Graph.ComputationGraph, OpSetVersion, bool)"/> for anything meant to leave Shorokoo.
         /// </summary>
         internal static ModelProto BuildInternalOnnxModel(
-            FastComputationGraph fastGraph,
+            InternalComputationGraph fastGraph,
             OpSetVersion opset = OpSetVersion.OPS_21,
-            bool prepForOnnx = false)
-            => BuildOnnxModelCore(fastGraph, opset, prepForOnnx, vanillaExport: false);
+            bool prepForOnnx = false,
+            Shorokoo.Graph.GraphKind? stage = null)
+            => BuildOnnxModelCore(fastGraph, opset, prepForOnnx, vanillaExport: false, stage: stage);
 
         private static ModelProto BuildOnnxModelCore(
-            FastComputationGraph fastGraph,
+            InternalComputationGraph fastGraph,
             OpSetVersion opset,
             bool prepForOnnx,
-            bool vanillaExport)
+            bool vanillaExport,
+            Shorokoo.Graph.GraphKind? stage = null)
         {
             if (fastGraph is null) throw new ArgumentNullException(nameof(fastGraph));
 
@@ -165,6 +193,17 @@ namespace Shorokoo.Core.Factory
             // ----- 6. Attach TensorStructDef metadata for any struct-typed
             // inputs/outputs so the loader can reconstruct DType identity.
             AddTensorStructMetadata(model, prepFast, tensorInfoLookup);
+
+            // ----- 6b. Stamp the graph kind into the model metadata when the caller
+            // knows it, so a serialized graph reloads as the same kind instead of
+            // being re-classified by op-scanning (which cannot see e.g. MODEL_PARAM
+            // nodes — they serialize as encoded initializer-function calls).
+            if (stage is { } s)
+                model.MetadataProps.Add(new StringStringEntryProto
+                {
+                    Key = OnnxOpAttributeNames.ShrkMetaGraphKind,
+                    Value = Shorokoo.Core.Utils.SrkFileFormat.StageName(s),
+                });
 
             // (The model's RNG identity needs no side channel: it is the ordinary RngSeed
             // parameter at ModelId [0], serialized as a plain initializer like any other
@@ -290,7 +329,7 @@ namespace Shorokoo.Core.Factory
         /// </summary>
         private static void StampGraphOutputTypes(
             GraphProto graph,
-            FastComputationGraph prepFast,
+            InternalComputationGraph prepFast,
             Dictionary<FastTensorKey, FastTensorInfo> tensorInfoLookup)
         {
             // CreateOutputInfos emits exactly one ValueInfoProto per prepFast output;
@@ -445,7 +484,7 @@ namespace Shorokoo.Core.Factory
         /// </summary>
         private static void AddTensorStructMetadata(
             ModelProto model,
-            FastComputationGraph fast,
+            InternalComputationGraph fast,
             Dictionary<FastTensorKey, FastTensorInfo> tensorInfoLookup)
         {
             var seen = new HashSet<DType>();
@@ -485,7 +524,7 @@ namespace Shorokoo.Core.Factory
         }
 
         private static void CollectStructDTypesFromGraph(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             Dictionary<FastTensorKey, FastTensorInfo> infoLookup,
             HashSet<DType> seen)
         {
@@ -918,7 +957,7 @@ namespace Shorokoo.Core.Factory
         /// Runs every Fast pre-pass on <paramref name="graph"/> in the canonical
         /// pre-pass order. Mutates the graph in place.
         /// </summary>
-        private static void RunPrePasses(FastComputationGraph graph, bool prepForOnnx)
+        private static void RunPrePasses(InternalComputationGraph graph, bool prepForOnnx)
         {
             FastLowerAttributeTensorOps.Process(graph);
             FastLowerStateUpdateLinksForInference.Process(graph);
@@ -940,7 +979,7 @@ namespace Shorokoo.Core.Factory
         /// then remapped through the rename map.
         /// </summary>
         private static Dictionary<FastTensorKey, FastTensorInfo> RunPrePassesAndBuildLookup(
-            FastComputationGraph graph, bool prepForOnnx)
+            InternalComputationGraph graph, bool prepForOnnx)
         {
             FastLowerAttributeTensorOps.Process(graph);
             FastLowerStateUpdateLinksForInference.Process(graph);
@@ -978,12 +1017,12 @@ namespace Shorokoo.Core.Factory
         /// references, in post order so callee functions land in the result
         /// before the functions that call them.
         /// </summary>
-        private static List<Function> CollectFunctionsPostOrder(FastComputationGraph graph)
+        private static List<Function> CollectFunctionsPostOrder(InternalComputationGraph graph)
         {
             var seen = new HashSet<Function>(ReferenceEqualityComparer.Instance);
             var result = new List<Function>();
 
-            void Visit(FastComputationGraph g)
+            void Visit(InternalComputationGraph g)
             {
                 foreach (var node in g.Nodes)
                 {
@@ -1078,7 +1117,7 @@ namespace Shorokoo.Core.Factory
         /// </summary>
         private static GraphProto BuildGraphProto(
             string graphName,
-            FastComputationGraph fastGraph,
+            InternalComputationGraph fastGraph,
             OpSetVersion opset,
             bool isFunction,
             Dictionary<FastTensorKey, FastTensorInfo>? tensorInfoLookup = null)
@@ -1209,7 +1248,7 @@ namespace Shorokoo.Core.Factory
             IReadOnlyList<FastTensorKey?> inputKeys,
             IReadOnlyList<FastTensorKey?> outputKeys,
             Dictionary<int, NodeProto> protoByIndex,
-            FastComputationGraph fastGraph,
+            InternalComputationGraph fastGraph,
             Dictionary<FastTensorKey, FastTensorInfo>? tensorInfoLookup)
         {
             var nodes = new List<NodeProto>(bodyIdxs.Count);
@@ -1288,7 +1327,7 @@ namespace Shorokoo.Core.Factory
 
         // ----------- boundary-proto collection -----------
 
-        private static TensorProto[] CreateInitializerTensors(FastComputationGraph fastGraph)
+        private static TensorProto[] CreateInitializerTensors(InternalComputationGraph fastGraph)
         {
             var list = new List<TensorProto>();
             foreach (var node in fastGraph.Nodes)
@@ -1301,7 +1340,7 @@ namespace Shorokoo.Core.Factory
             return list.ToArray();
         }
 
-        private static ValueInfoProto[] CreateInputInfos(FastComputationGraph fastGraph)
+        private static ValueInfoProto[] CreateInputInfos(InternalComputationGraph fastGraph)
         {
             // Map graph-input keys back to their producing node so we can read
             // dtype/rank/structure off the node's attributes.
@@ -1327,7 +1366,7 @@ namespace Shorokoo.Core.Factory
             return infos.ToArray();
         }
 
-        private static ValueInfoProto[] CreateOutputInfos(FastComputationGraph fastGraph)
+        private static ValueInfoProto[] CreateOutputInfos(InternalComputationGraph fastGraph)
         {
             var infos = new ValueInfoProto[fastGraph.Outputs.Count];
             for (int i = 0; i < fastGraph.Outputs.Count; i++)

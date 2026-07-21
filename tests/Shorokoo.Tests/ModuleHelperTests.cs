@@ -221,7 +221,7 @@ public class ModuleHelperCoverageTests
         // ──────────────────────────────────────────────────────────────────
         var graph = GenericRecordSum.ComputationGraph;
         Assert.NotNull(graph);
-        Assert.NotEmpty(graph.Nodes);
+        Assert.NotEmpty(graph.ToInternal().Nodes);
 
         // ──────────────────────────────────────────────────────────────────
         // ExtractGenericTypeArgsFromType — non-generic null + generic non-null

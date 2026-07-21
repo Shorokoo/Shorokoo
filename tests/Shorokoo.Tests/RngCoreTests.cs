@@ -227,7 +227,7 @@ public class RngRuntimeIdentityTests
 }
 
 /// <summary>
-/// The identity transport: ApplyRngConfig writes the runtime identity into the ordinary
+/// The identity transport: WithRngConfig writes the runtime identity into the ordinary
 /// <c>RngSeed</c> parameter at reserved ModelId [0] — serialized as a plain initializer with
 /// no reserved-name handling; it survives save/load bit-exactly and without duplication, the
 /// loaded model's randomness is reproducible with no config object, and re-binding a LOADED
@@ -237,15 +237,15 @@ public class RngRuntimeIdentityTests
 [Trait("Purpose", "Coverage")]
 public class RngSeedTransportTests
 {
-    private static int RngSeedNodeCount(FastComputationGraph graph)
-        => graph.Nodes.Count(n =>
+    private static int RngSeedNodeCount(ComputationGraph graph)
+        => graph.ToInternal().Nodes.Count(n =>
             n.IdentifierTemplate == Shorokoo.Core.Nodes.Processors.Fast
                 .FastWireRngKeyDerivation.RngSeedIdentifierTemplate);
 
     [Fact]
     public void TestRngSeedIdentityRoundTripsWithoutDuplication()
     {
-        var g = (FastComputationGraph)typeof(RngRuntimeLoopFeed)
+        var g = (ComputationGraph)typeof(RngRuntimeLoopFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var x = TensorData([8L], new float[8]);
         var steps = TensorData(System.Array.Empty<long>(), 2L);
@@ -253,7 +253,7 @@ public class RngSeedTransportTests
 
         var cfg = new RngConfig { MasterSeed = 11 };
         cfg = cfg.Override(RngCollection.Runtime, [1, 1, 1], seed: 424242UL);
-        arch.ApplyRngConfig(cfg);
+        arch = arch.WithRngConfig(cfg);
 
         // Exactly one RngSeed parameter, holding the encoded identity.
         Assert.Equal(1, RngSeedNodeCount(arch));
@@ -291,14 +291,14 @@ public class RngSeedTransportTests
         // and pin both: the id decodes exactly, and the loaded model still draws 13-round
         // values (equal to its own pre-save draws, different from a default-algorithm model
         // under the same seed).
-        var g = (FastComputationGraph)typeof(RngRuntimeLoopFeed)
+        var g = (ComputationGraph)typeof(RngRuntimeLoopFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var x = TensorData([8L], new float[8]);
         var steps = TensorData(System.Array.Empty<long>(), 2L);
 
-        FastComputationGraph Concrete(RngConfig cfg) =>
+        ComputationGraph Concrete(RngConfig cfg) =>
             g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps])).ToConcreteModel(cfg);
-        float[] Run(FastComputationGraph m) => ComputeContext.Default.Execute(m, x, steps)[0]
+        float[] Run(ComputationGraph m) => ComputeContext.Default.Execute(m, x, steps)[0]
             .ToTensorData().As<float32>().AccessMemory().ToArray();
 
         var m13 = Concrete(new RngConfig { MasterSeed = 11, Algorithm = RngAlgorithm.Threefry2x32Rounds13 });
@@ -322,16 +322,16 @@ public class RngSeedTransportTests
     [Fact]
     public void TestRebindingReplacesTheIdentityValue()
     {
-        var g = (FastComputationGraph)typeof(RngRuntimeLoopFeed)
+        var g = (ComputationGraph)typeof(RngRuntimeLoopFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var x = TensorData([8L], new float[8]);
         var steps = TensorData(System.Array.Empty<long>(), 2L);
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps]));
 
-        arch.ApplyRngConfig(new RngConfig { MasterSeed = 11 });
+        arch = arch.WithRngConfig(new RngConfig { MasterSeed = 11 });
         Assert.Equal(RngRuntimeIdentity.Build(new RngConfig { MasterSeed = 11 }), arch.TryGetRngSeed());
 
-        arch.ApplyRngConfig(new RngConfig { MasterSeed = 12 });
+        arch = arch.WithRngConfig(new RngConfig { MasterSeed = 12 });
         Assert.Equal(RngRuntimeIdentity.Build(new RngConfig { MasterSeed = 12 }), arch.TryGetRngSeed());
         Assert.Equal(1, RngSeedNodeCount(arch));
     }
@@ -339,20 +339,20 @@ public class RngSeedTransportTests
     [Fact]
     public void TestRebindAfterSaveLoadRekeysEveryDraw()
     {
-        // THE re-bind-after-load pin: bind seed A -> save -> load -> ApplyRngConfig(B) ->
+        // THE re-bind-after-load pin: bind seed A -> save -> load -> WithRngConfig(B) ->
         // every draw changes AND matches a model bound to B directly. With the identity as an
         // ordinary parameter and keys derived in-graph from it, re-binding a loaded model is
         // a parameter write that re-keys every draw by construction — the divergence class
         // where a loaded model's recorded identity updated while the draws kept the old seed
         // is structurally impossible.
-        var g = (FastComputationGraph)typeof(RngRuntimeLoopFeed)
+        var g = (ComputationGraph)typeof(RngRuntimeLoopFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var x = TensorData([8L], new float[8]);
         var steps = TensorData(System.Array.Empty<long>(), 2L);
 
-        FastComputationGraph Concrete(RngConfig cfg) =>
+        ComputationGraph Concrete(RngConfig cfg) =>
             g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps])).ToConcreteModel(cfg);
-        float[] Run(FastComputationGraph m) => ComputeContext.Default.Execute(m, x, steps)[0]
+        float[] Run(ComputationGraph m) => ComputeContext.Default.Execute(m, x, steps)[0]
             .ToTensorData().As<float32>().AccessMemory().ToArray();
 
         var seedA = new RngConfig { MasterSeed = 11 };
@@ -365,7 +365,7 @@ public class RngSeedTransportTests
             CompressedFormatUtils.SaveFastGraphToBinary(modelA, compressed: true));
         Assert.Equal(drawsA, Run(loaded));            // load-and-run reproduces seed A
 
-        loaded.ApplyRngConfig(seedB);                 // a parameter write on the loaded graph
+        loaded = loaded.WithRngConfig(seedB);         // a parameter write on the loaded graph
         var rekeyed = Run(loaded);
         Assert.NotEqual(drawsA, rekeyed);             // every draw changed
         Assert.Equal(Run(Concrete(seedB)), rekeyed);  // and matches a direct seed-B model
@@ -383,7 +383,7 @@ public class RngSeedTransportTests
         // parameter write), but the override SET's routing and the draw algorithm are
         // structural — changing either on a loaded graph must fail loudly, never silently
         // half-apply.
-        var g = (FastComputationGraph)typeof(RngRuntimeLoopFeed)
+        var g = (ComputationGraph)typeof(RngRuntimeLoopFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var x = TensorData([8L], new float[8]);
         var steps = TensorData(System.Array.Empty<long>(), 2L);
@@ -395,11 +395,11 @@ public class RngSeedTransportTests
         var withOverride = new RngConfig { MasterSeed = 11 }
             .Override(RngCollection.Runtime, [1, 1, 1], 42UL);
         var ex1 = Assert.Throws<System.InvalidOperationException>(
-            () => loaded.ApplyRngConfig(withOverride));
+            () => loaded.WithRngConfig(withOverride));
         Assert.Contains("override SET", ex1.Message);
 
         var ex2 = Assert.Throws<System.InvalidOperationException>(
-            () => loaded.ApplyRngConfig(new RngConfig
+            () => loaded.WithRngConfig(new RngConfig
             { MasterSeed = 11, Algorithm = RngAlgorithm.Threefry2x32Rounds13 }));
         Assert.Contains("algorithm", ex2.Message);
     }
@@ -413,15 +413,16 @@ public class RngSeedTransportTests
         // must throw naming the situation (the old behavior silently updated only the
         // recorded identity). Simulate the loaded shape: no feeds, no RngSeed, the legacy
         // reserved-name tensor present as an ordinary data node.
-        var g = (FastComputationGraph)typeof(RtLoweredUniform)
+        var g = (ComputationGraph)typeof(RtLoweredUniform)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var input = TensorData([4L, 4L], new float[16]);
         var model = g.ToConcreteArchitecture(g.FromOrderedInputs([input]))
             .ToConcreteModel(new RngConfig { MasterSeed = 1 });
 
-        // Strip the new representation down to the legacy shape.
+        // Strip the new representation down to the legacy shape (mutating node surgery, so
+        // work on a mutable copy of the loaded graph).
         var legacy = CompressedFormatUtils.LoadFastGraphFromBinary(
-            CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true));
+            CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true)).ToInternal();
         var seedNode = legacy.Nodes.Single(n =>
             n.IdentifierTemplate == Shorokoo.Core.Nodes.Processors.Fast
                 .FastWireRngKeyDerivation.RngSeedIdentifierTemplate);
@@ -440,7 +441,7 @@ public class RngSeedTransportTests
         // A model with no runtime random feeds contains no RngSeed param, no chains, and
         // nothing RNG-related in its saved form; binding a config to it is a harmless no-op —
         // but a Runtime override, which can match nothing, still fails loudly.
-        var g = (FastComputationGraph)typeof(RngInitTwoLinears)
+        var g = (ComputationGraph)typeof(RngInitTwoLinears)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
         var model = g.ToConcreteArchitecture(g.FromOrderedInputs([sample]))
@@ -451,13 +452,13 @@ public class RngSeedTransportTests
         var loaded = CompressedFormatUtils.LoadFastGraphFromBinary(
             CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true));
         Assert.Equal(0, RngSeedNodeCount(loaded));
-        Assert.DoesNotContain(loaded.Nodes, n =>
+        Assert.DoesNotContain(loaded.ToInternal().Nodes, n =>
             n.FriendlyName == OnnxOpAttributeNames.ShrkRngKeysTensorName);
 
-        model.ApplyRngConfig(new RngConfig { MasterSeed = 8 });   // no-op, no throw
+        model = model.WithRngConfig(new RngConfig { MasterSeed = 8 });   // no-op, no throw
 
         var ex = Assert.Throws<System.InvalidOperationException>(
-            () => model.ApplyRngConfig(new RngConfig { MasterSeed = 8 }
+            () => model.WithRngConfig(new RngConfig { MasterSeed = 8 }
                 .Override(RngCollection.Runtime, [1], 1UL)));
         Assert.Contains("matches no runtime stream", ex.Message);
     }
@@ -468,7 +469,7 @@ public class RngSeedTransportTests
         // The concreteness contract at bind: an id-bearing feed without its key derivation
         // chain (a graph that never went through ToConcreteArchitecture) fails loudly.
         var draw = RandomUniform(Vector(4L), 0f, 1f);
-        var graph = new FastComputationGraph([], [draw]);
+        var graph = new InternalComputationGraph([], [draw]);
         var feed = graph.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
         feed.Attributes = feed.Attributes.SetAttributes(
             (OnnxOpAttributeNames.ShrkAttrLocalModelId, (long[])[1]));

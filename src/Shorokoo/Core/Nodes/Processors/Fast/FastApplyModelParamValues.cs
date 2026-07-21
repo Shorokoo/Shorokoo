@@ -29,8 +29,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastApplyModelParamValues
     {
-        public static FastComputationGraph Process(
-            FastComputationGraph graph,
+        public static InternalComputationGraph Process(
+            InternalComputationGraph graph,
             ImmutableDictionary<ModelId, TensorData> paramValues)
         {
             var workGraph = graph.Clone();
@@ -66,11 +66,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 node.FullInputs = new Dictionary<string, List<FastTensorKey?>>();
                 node.TargetFunction = null;
             }
-
-            // The concrete model remembers its source architecture (in-memory only) — the
-            // parameter inventory needed for in-place re-initialization; see
-            // FastComputationGraphExtensions.ReinitializeTrainableParams.
-            workGraph.SourceArchitecture = graph;
 
             FastProcessorHelper.RemoveUnreachableNodes(workGraph);
             // Run FastSimplify so the constant-folding / sequence-folding / unrolling

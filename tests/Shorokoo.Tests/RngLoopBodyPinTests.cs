@@ -169,8 +169,8 @@ public class RngLoopBodyPinTests
     // Concretize and return each trainable param's (full ModelId, shape).
     private static (int[] id, long[] shape)[] Params<TModule>()
     {
-        var g = (FastComputationGraph)typeof(TModule)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var g = ((ComputationGraph)typeof(TModule)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([1L, 4L], 0.1f, 0.2f, 0.3f, 0.4f);
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
         return arch.GetConcreteModelParamInfos().ParamInfos

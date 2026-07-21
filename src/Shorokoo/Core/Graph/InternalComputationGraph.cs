@@ -35,10 +35,10 @@ namespace Shorokoo.Graph
     /// <see cref="FastTensorKey"/> only. Per-tensor metadata is built on demand via
     /// <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastTensorInfoProcessor.BuildTensorInfoLookup"/>.
     ///
-    /// Use <see cref="FastComputationGraphConverter"/> for higher-level helpers
+    /// Use <see cref="InternalComputationGraphConverter"/> for higher-level helpers
     /// (BuildNodes, BuildTensorMapping, LocalFunctions, FunctionsPostOrder).
     /// </summary>
-    public partial class FastComputationGraph
+    public partial class InternalComputationGraph
     {
         /// <summary>
         /// All nodes in the graph, in the same topological order as the source
@@ -58,9 +58,8 @@ namespace Shorokoo.Graph
 
         /// <summary>
         /// Original <see cref="Variable.UniqueName"/> for each entry in <see cref="Inputs"/>,
-        /// captured by <see cref="FastComputationGraphConverter.ToFastGraph"/> and re-applied
-        /// by <see cref="FastComputationGraphConverter.ToComputationGraph"/>. Preserves
-        /// human-readable input names across the round-trip.
+        /// captured when the graph is built and re-applied when the Variable view is
+        /// rebuilt. Preserves human-readable input names across the round-trip.
         /// </summary>
         public List<string?> InputUniqueNames { get; set; } = new();
 
@@ -77,24 +76,14 @@ namespace Shorokoo.Graph
         public int?[]? OutputRankOverrides { get; set; }
 
         /// <summary>
-        /// For a concrete model: the concrete architecture it was built from — the parameter
-        /// inventory (initializer functions and their inputs) needed for in-place
-        /// trainable-parameter re-initialization
-        /// (<c>FastComputationGraphExtensions.ReinitializeTrainableParams</c>). In-memory
-        /// only: never serialized, so a loaded model carries none and re-initialization on it
-        /// fails loudly. Shared (not deep-copied) across <see cref="Clone"/>.
-        /// </summary>
-        public FastComputationGraph? SourceArchitecture { get; set; }
-
-        /// <summary>
         /// Empty-graph constructor. Callers populate <see cref="Nodes"/>, <see cref="Inputs"/>,
         /// <see cref="Outputs"/>, etc. directly (used by
-        /// <see cref="FastComputationGraphConverter"/> and the Fast processors).
+        /// <see cref="InternalComputationGraphConverter"/> and the Fast processors).
         /// </summary>
-        public FastComputationGraph() { }
+        public InternalComputationGraph() { }
 
         /// <summary>
-        /// Builds a <see cref="FastComputationGraph"/> directly from an
+        /// Builds a <see cref="InternalComputationGraph"/> directly from an
         /// <see cref="Variable"/>-shaped graph. Walks back from <paramref name="outputs"/>
         /// to collect every reachable <see cref="Node"/>, sorts by
         /// <see cref="Node.OrderingHintNumber"/> (each Node's monotonic creation counter,
@@ -111,7 +100,7 @@ namespace Shorokoo.Graph
         /// listed in this map are dropped from <see cref="Nodes"/>; their host keys
         /// take the corresponding slots in <see cref="Inputs"/>.</para>
         /// </summary>
-        public FastComputationGraph(
+        public InternalComputationGraph(
             ImmutableArray<Variable> inputs,
             ImmutableArray<Variable> outputs,
             ImmutableArray<int?>? outputRankOverrides = null,
@@ -128,7 +117,7 @@ namespace Shorokoo.Graph
                                       .ToImmutableArray();
 
             var ranks = outputRankOverrides?.ToArray() ?? outputs.Select(x => x.Rank).ToArray();
-            FastComputationGraphConverter.PopulateFromNodes(
+            InternalComputationGraphConverter.PopulateFromNodes(
                 this, orderedNodes, inputs, outputs, ranks,
                 useSequentialIds: false, externalInputKeys: externalInputKeys);
             Debug.Assert(IsLinearOrderValid(), "IsLinearOrderValid()");
@@ -146,14 +135,14 @@ namespace Shorokoo.Graph
         }
 
         /// <summary>
-        /// Produces a deep copy of this <see cref="FastComputationGraph"/>. The returned graph
+        /// Produces a deep copy of this <see cref="InternalComputationGraph"/>. The returned graph
         /// shares no mutable state with the source - nodes and input/output lists are all
         /// duplicated. Immutable/value-typed values (<see cref="OnnxCSharpAttributes"/>,
         /// <see cref="FastTensorKey"/>, <see cref="FastNodeKey"/>, <see cref="Function"/>) are shared.
         /// </summary>
-        public FastComputationGraph Clone()
+        public InternalComputationGraph Clone()
         {
-            var copy = new FastComputationGraph
+            var copy = new InternalComputationGraph
             {
                 Inputs = new List<FastTensorKey>(this.Inputs),
                 Outputs = new List<FastTensorKey>(this.Outputs),
@@ -162,7 +151,6 @@ namespace Shorokoo.Graph
                 OutputRankOverrides = this.OutputRankOverrides is null
                     ? null
                     : (int?[])this.OutputRankOverrides.Clone(),
-                SourceArchitecture = this.SourceArchitecture,
             };
 
             foreach (var node in this.Nodes)
@@ -196,10 +184,10 @@ namespace Shorokoo.Graph
 
         /// <summary>
         /// Replaces this graph's state with the contents of <paramref name="other"/>. Used by
-        /// the Fast* processors to "write back" a new graph onto an existing FastComputationGraph
+        /// the Fast* processors to "write back" a new graph onto an existing InternalComputationGraph
         /// reference so that callers holding the reference see the mutation.
         /// </summary>
-        public void CopyFrom(FastComputationGraph other)
+        public void CopyFrom(InternalComputationGraph other)
         {
             if (other is null) throw new System.ArgumentNullException(nameof(other));
 
@@ -218,7 +206,7 @@ namespace Shorokoo.Graph
         /// </summary>
         internal (string moduleSignature, string modelSignature) GetSignatureStrings()
         {
-            var tensorMapping = FastComputationGraphConverter.BuildTensorMapping(this);
+            var tensorMapping = InternalComputationGraphConverter.BuildTensorMapping(this);
 
             var actualInputs = this.Inputs
                 .Where(k => this.FindNode(k.FastNodeKey) is { } node && node.OpCode != InternalOpCodes.GENERIC_TYPE_INPUT)
@@ -280,13 +268,13 @@ namespace Shorokoo.Graph
                 {
                     if (openStack.Count == 0)
                     {
-                        error = $"FastComputationGraph: unmatched close node at index {i} ({nd.OpCode}).";
+                        error = $"InternalComputationGraph: unmatched close node at index {i} ({nd.OpCode}).";
                         return false;
                     }
                     var topIdx = openStack.Pop();
                     if (Nodes[topIdx].Key != nd.GraphOpenNodeKey)
                     {
-                        error = $"FastComputationGraph: non-nesting open/close at index {i} ({nd.OpCode}): scopes overlap.";
+                        error = $"InternalComputationGraph: non-nesting open/close at index {i} ({nd.OpCode}): scopes overlap.";
                         return false;
                     }
                     scopes.Add((topIdx, i));
@@ -294,7 +282,7 @@ namespace Shorokoo.Graph
             }
             if (openStack.Count > 0)
             {
-                error = "FastComputationGraph: unmatched open node — scope is missing its close.";
+                error = "InternalComputationGraph: unmatched open node — scope is missing its close.";
                 return false;
             }
 
@@ -324,7 +312,7 @@ namespace Shorokoo.Graph
 
                         if (srcIdx >= i)
                         {
-                            error = $"FastComputationGraph: node #{i} ({node.OpCode}) consumes output of node #{srcIdx} which appears later in graph.Nodes.";
+                            error = $"InternalComputationGraph: node #{i} ({node.OpCode}) consumes output of node #{srcIdx} which appears later in graph.Nodes.";
                             return false;
                         }
 
@@ -338,7 +326,7 @@ namespace Shorokoo.Graph
                             if (s.CloseIdx == i && node.GraphOpenNodeKey is FastNodeKey ck &&
                                 Nodes[s.OpenIdx].Key == ck) continue;
 
-                            error = $"FastComputationGraph: node #{i} ({node.OpCode}) consumes output of node #{srcIdx} which sits inside scope ({Nodes[s.OpenIdx].OpCode} #{s.OpenIdx} … #{s.CloseIdx}) that doesn't enclose the consumer — sibling/inner-scope reference.";
+                            error = $"InternalComputationGraph: node #{i} ({node.OpCode}) consumes output of node #{srcIdx} which sits inside scope ({Nodes[s.OpenIdx].OpCode} #{s.OpenIdx} … #{s.CloseIdx}) that doesn't enclose the consumer — sibling/inner-scope reference.";
                             return false;
                         }
                     }
@@ -347,7 +335,7 @@ namespace Shorokoo.Graph
                 if (node.GraphOpenNodeKey is FastNodeKey openKey && !openKey.IsEmpty &&
                     nodeKeyToIndex.TryGetValue(openKey, out var openIdx) && openIdx >= i)
                 {
-                    error = $"FastComputationGraph: close node #{i} ({node.OpCode}) precedes its open node #{openIdx}.";
+                    error = $"InternalComputationGraph: close node #{i} ({node.OpCode}) precedes its open node #{openIdx}.";
                     return false;
                 }
             }

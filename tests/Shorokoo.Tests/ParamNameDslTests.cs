@@ -219,7 +219,7 @@ public class ParamNameDslCoverageTests
     {
         var model = LoopLayer.Model(Scalar(10L), Scalar(3L));
         var output = model.Call(Vector(1f, 2f, 3f, 4f, 5f));
-        var arch = new FastComputationGraph([], [output]).ToConcreteArchitecture(new ModelParamList());
+        var arch = new InternalComputationGraph([], [output]).ToConcreteArchitecture(new ModelParamList());
         var infos = arch.GetConcreteModelParamInfos();
         // 1 outer + 3 loop-body params.
         Assert.Equal(4, infos.ParamInfos.Length);

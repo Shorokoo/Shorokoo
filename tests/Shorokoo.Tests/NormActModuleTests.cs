@@ -179,7 +179,7 @@ public class NormActTrainingCoverageTests
 
     /// <summary>One SGD step of <paramref name="modelGraph"/> + L2Loss against a zero target:
     /// asserts the loss is finite and at least one trainable param moved.</summary>
-    private static void AssertTrainsAndMovesAParam(FastComputationGraph modelGraph, long[] inShape, float[] input)
+    private static void AssertTrainsAndMovesAParam(ComputationGraph modelGraph, long[] inShape, float[] input)
     {
         var inputData = TensorData(inShape, input);
         long rows = inShape[0];

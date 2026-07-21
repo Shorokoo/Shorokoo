@@ -32,15 +32,15 @@ public class RngAlgorithmSwitchTests
     private static readonly RngConfig Rounds20 = new() { MasterSeed = 5, Algorithm = RngAlgorithm.Threefry2x32 };
     private static readonly RngConfig Rounds13 = new() { MasterSeed = 5, Algorithm = RngAlgorithm.Threefry2x32Rounds13 };
 
-    private static FastComputationGraph FeedModel(RngConfig cfg)
+    private static InternalComputationGraph FeedModel(RngConfig cfg)
     {
-        var g = (FastComputationGraph)typeof(RtLoweredUniform)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var g = ((ComputationGraph)typeof(RtLoweredUniform)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
         return g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel(cfg);
     }
 
-    private static float[] RunFeed(FastComputationGraph concrete)
+    private static float[] RunFeed(InternalComputationGraph concrete)
     {
         var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
         return ComputeContext.Default.Execute(concrete, input)[0]
@@ -49,7 +49,7 @@ public class RngAlgorithmSwitchTests
 
     /// <summary>The feed's resolved stream key, derived from the graph's bound RngSeed
     /// identity — exactly what the feed's in-graph split chain derives at execution.</summary>
-    private static long[] ResolvedKey(FastComputationGraph concrete)
+    private static long[] ResolvedKey(InternalComputationGraph concrete)
     {
         var feed = concrete.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
         var path = feed.Attributes.GetIntsVal(ShrkAttrLocalModelId)!;
@@ -58,7 +58,7 @@ public class RngAlgorithmSwitchTests
         return [k0, k1];
     }
 
-    private static string BoundAlgorithm(FastComputationGraph concrete)
+    private static string BoundAlgorithm(InternalComputationGraph concrete)
         => RngAlgorithms.NameOf(
             RngRuntimeIdentity.Decode(concrete.TryGetRngSeed()!).Algorithm!.Value);
 
@@ -108,8 +108,8 @@ public class RngAlgorithmSwitchTests
     [Fact]
     public void TestInitDrawsSwitchWithAlgorithm()
     {
-        var g = (FastComputationGraph)typeof(SwitchInitLinear)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var g = ((ComputationGraph)typeof(SwitchInitLinear)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([1L, 3L], 0.1f, 0.2f, 0.3f);
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
 
@@ -130,8 +130,8 @@ public class RngAlgorithmSwitchTests
     {
         // SwitchInitLinear has no runtime feeds, so no RngSeed exists to tamper with; use a
         // model that carries one (a runtime feed) — no-config init reads its algorithm.
-        var g = (FastComputationGraph)typeof(RtLoweredUniform)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var g = ((ComputationGraph)typeof(RtLoweredUniform)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([4L, 4L], new float[16]);
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
         arch.ApplyRngConfig(Rounds20);

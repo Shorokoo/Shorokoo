@@ -14,7 +14,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastPrepForOnnx
     {
-        public static void Process(FastComputationGraph graph)
+        public static void Process(InternalComputationGraph graph)
         {
             FastComposeContiguousReshapes.Process(graph);
             FastIdentityWrapping.WrapCloseInputs(graph);

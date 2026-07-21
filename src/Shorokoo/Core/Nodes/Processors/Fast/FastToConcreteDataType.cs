@@ -21,7 +21,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 {
     /// <summary>
     /// Fast equivalent of <c>ToConcreteDataTypeProcessor</c>.
-    /// Converts a specialized generic <see cref="FastComputationGraph"/> to a fully concrete
+    /// Converts a specialized generic <see cref="InternalComputationGraph"/> to a fully concrete
     /// graph by:
     /// <list type="number">
     /// <item>Building specialized variants of every reachable generic <see cref="Function"/>,
@@ -33,13 +33,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// <item>Applying the same concretization pass to a clone of the top-level graph.</item>
     /// </list>
     ///
-    /// Returns a fresh <see cref="FastComputationGraph"/>; the input is not mutated. Because
+    /// Returns a fresh <see cref="InternalComputationGraph"/>; the input is not mutated. Because
     /// Fast tensors don't carry per-tensor types, no re-inference step is required — type
     /// information is reconstructed at the next FastCG → CG boundary.
     /// </summary>
     internal static class FastToConcreteDataType
     {
-        public static FastComputationGraph Process(FastComputationGraph graph)
+        public static InternalComputationGraph Process(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -65,7 +65,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return ProcessTopLevelGraph(graph.Clone(), concreteFunctions);
         }
 
-        private static Dictionary<Function, Dictionary<string, Function>> PrepareSpecializedFunctions(FastComputationGraph graph)
+        private static Dictionary<Function, Dictionary<string, Function>> PrepareSpecializedFunctions(InternalComputationGraph graph)
         {
             var specializedFunctions = new Dictionary<(Function, string), Function>();
             var requiredSpecializations = new Dictionary<Function, HashSet<(FastNode refNode, string argsKey)>>();
@@ -133,8 +133,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 g => g.ToDictionary(y => y.Key.Item2, y => y.Value));
         }
 
-        private static FastComputationGraph ProcessTopLevelGraph(
-            FastComputationGraph graph,
+        private static InternalComputationGraph ProcessTopLevelGraph(
+            InternalComputationGraph graph,
             Dictionary<(Function genericFn, string argsKey), Function> concreteFunctions)
         {
             // Identify GENERIC_TYPE_INPUT nodes (and the input keys they produce) so they
@@ -228,7 +228,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 node.TargetFunction = concrete;
         }
 
-        private static IEnumerable<Function> EnumerateGenericFunctionsPostOrder(FastComputationGraph graph)
+        private static IEnumerable<Function> EnumerateGenericFunctionsPostOrder(InternalComputationGraph graph)
         {
             // Mirrors ComputationGraph.FunctionsPostOrlder but walks via FastCG. Each function's
             // dependencies are the distinct TargetFunctions in its OriginalFastGraph nodes.
@@ -262,10 +262,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return result;
         }
 
-        private static IEnumerable<Function> LocalFunctions(FastComputationGraph graph) =>
+        private static IEnumerable<Function> LocalFunctions(InternalComputationGraph graph) =>
             graph.Nodes.Select(n => n.TargetFunction).NotNulls().Distinct();
 
-        private static IEnumerable<(FastNode refNode, string argsKey)> EnumerateGenericCallSites(FastComputationGraph graph)
+        private static IEnumerable<(FastNode refNode, string argsKey)> EnumerateGenericCallSites(InternalComputationGraph graph)
         {
             foreach (var node in graph.Nodes)
             {

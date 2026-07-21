@@ -38,10 +38,10 @@ public static class TrainingGraphBuilder
     /// <typeparam name="TLoss">The loss output type (e.g., Scalar&lt;float32&gt;)</typeparam>
     /// <param name="modelGraph">The computation graph for the model (from a module's ComputationGraph property)</param>
     /// <param name="lossFunction">A Func referencing a loss module's Inline method (2 inputs → 1 output)</param>
-    /// <returns>A high-level <see cref="FastComputationGraph"/> containing AutoGrad nodes, with inputs
+    /// <returns>A high-level <see cref="InternalComputationGraph"/> containing AutoGrad nodes, with inputs
     /// [model_inputs..., targets, param_struct] and outputs [loss, gradient_struct]</returns>
-    public static FastComputationGraph PrepareForTrainingAsFast<TOut, TLoss>(
-        FastComputationGraph modelGraph,
+    public static InternalComputationGraph PrepareForTrainingAsFast<TOut, TLoss>(
+        InternalComputationGraph modelGraph,
         Func<TOut, TOut, TLoss> lossFunction)
         where TOut : IValue
         where TLoss : IValue
@@ -55,7 +55,7 @@ public static class TrainingGraphBuilder
 
     /// <summary>
     /// Prepares a model for training by composing it with a loss function and automatic
-    /// differentiation. Returns a high-level <see cref="FastComputationGraph"/> containing
+    /// differentiation. Returns a high-level <see cref="InternalComputationGraph"/> containing
     /// <c>AUTO_GRAD</c> nodes, with inputs [model_inputs_struct, targets, param_struct,
     /// state_struct?] and outputs [loss, gradient_struct, state_struct].
     ///
@@ -63,15 +63,15 @@ public static class TrainingGraphBuilder
     /// <paramref name="modelGraph"/> may be in raw or already-concrete form. When raw, the
     /// legacy minimal-processing path runs (no input-aware liveness filter). When the caller
     /// has pre-routed the graph through
-    /// <see cref="Shorokoo.Graph.FastComputationGraphExtensions.ToConcreteArchitecture"/>
+    /// <see cref="Shorokoo.Graph.InternalComputationGraphExtensions.ToConcreteArchitecture"/>
     /// — which TrainingRig.FromScratch does — those minimal passes are no-ops on the already-
     /// concrete graph, and downstream trainable-param discovery picks up exactly the live
     /// (post-liveness-filter) MODEL_PARAM nodes.
     /// </para>
     /// </summary>
-    public static FastComputationGraph PrepareForTrainingAsFast(
-        FastComputationGraph modelGraph,
-        FastComputationGraph lossGraph)
+    public static InternalComputationGraph PrepareForTrainingAsFast(
+        InternalComputationGraph modelGraph,
+        InternalComputationGraph lossGraph)
     {
         if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
         if (lossGraph is null) throw new ArgumentNullException(nameof(lossGraph));
@@ -87,7 +87,7 @@ public static class TrainingGraphBuilder
                 nameof(lossGraph));
 
         // Step 1+2: Process model graph for training and replace trainable params with a
-        // TensorStruct input — both passes happen on a single FastComputationGraph that
+        // TensorStruct input — both passes happen on a single InternalComputationGraph that
         // becomes the host graph for the rest of this function. If the caller has already
         // routed the graph through ToConcreteArchitecture (TrainingRig.FromScratch does
         // this so it can run input-aware liveness filtering once for the whole pipeline),
@@ -296,7 +296,7 @@ public static class TrainingGraphBuilder
         return fastGraph;
     }
 
-    private static Dictionary<FastTensorKey, FastNode> BuildProducerByOutputMap(FastComputationGraph graph)
+    private static Dictionary<FastTensorKey, FastNode> BuildProducerByOutputMap(InternalComputationGraph graph)
     {
         var map = new Dictionary<FastTensorKey, FastNode>();
         foreach (var node in graph.Nodes)
@@ -313,7 +313,7 @@ public static class TrainingGraphBuilder
         return map;
     }
 
-    private static string? LookupInputName(FastComputationGraph graph, FastTensorKey inputKey)
+    private static string? LookupInputName(InternalComputationGraph graph, FastTensorKey inputKey)
     {
         for (int i = 0; i < graph.Inputs.Count; i++)
             if (graph.Inputs[i] == inputKey)
@@ -328,12 +328,12 @@ public static class TrainingGraphBuilder
     /// </summary>
     /// <summary>
     /// A graph is "concretized" (already through
-    /// <see cref="Shorokoo.Graph.FastComputationGraphExtensions.ToConcreteArchitecture"/>)
+    /// <see cref="Shorokoo.Graph.InternalComputationGraphExtensions.ToConcreteArchitecture"/>)
     /// iff it has no high-level forms left: no MODEL_INVOKE, FUNCTION_INVOKE,
     /// MODEL_PARAM_REF, or MODEL_PARAM_MODEL_REF nodes. Used to decide whether
     /// <see cref="ProcessGraphForTrainingOnFast"/> needs to run.
     /// </summary>
-    private static bool IsAlreadyConcretized(FastComputationGraph graph)
+    private static bool IsAlreadyConcretized(InternalComputationGraph graph)
     {
         foreach (var node in graph.Nodes)
         {
@@ -347,7 +347,7 @@ public static class TrainingGraphBuilder
         return true;
     }
 
-    private static void ProcessGraphForTrainingOnFast(FastComputationGraph fastGraph)
+    private static void ProcessGraphForTrainingOnFast(InternalComputationGraph fastGraph)
     {
         Nodes.Processors.Fast.FastApplyIdentifierTemplates.Process(fastGraph);
         Nodes.Processors.Fast.FastInlineModulesAndFunctions.Process(fastGraph);
@@ -365,7 +365,7 @@ public static class TrainingGraphBuilder
     /// Reads the dtype, rank and (optional) friendly name for the i-th input of a Fast graph
     /// directly from the producing MODEL_TENSOR_INPUT node.
     /// </summary>
-    private static (DType type, int? rank, string? name) ResolveFastInputDef(FastComputationGraph graph, int index)
+    private static (DType type, int? rank, string? name) ResolveFastInputDef(InternalComputationGraph graph, int index)
     {
         var inputKey = graph.Inputs[index];
         FastNode? producer = null;
@@ -400,7 +400,7 @@ public static class TrainingGraphBuilder
     /// <summary>
     /// Reads a module's source-generated <c>ComputationGraph</c> static property reflectively.
     /// </summary>
-    internal static FastComputationGraph ExtractFastGraphFromDelegate(Delegate func)
+    internal static InternalComputationGraph ExtractFastGraphFromDelegate(Delegate func)
     {
         if (func is null) throw new ArgumentNullException(nameof(func));
 
@@ -434,11 +434,16 @@ public static class TrainingGraphBuilder
             throw new ArgumentException(
                 $"The 'ComputationGraph' property on '{declaringType.Name}' returned null.",
                 nameof(func));
-        if (rawGraph is not FastComputationGraph fast)
-            throw new ArgumentException(
+        return rawGraph switch
+        {
+            // The generated property returns the readonly wrapper (a shared cached
+            // instance) — copy, since the training pipeline mutates its working graph.
+            Shorokoo.Graph.ComputationGraph wrapped => wrapped.ToInternal(),
+            InternalComputationGraph fast => fast,
+            _ => throw new ArgumentException(
                 $"The 'ComputationGraph' property on '{declaringType.Name}' returned a value of type " +
-                $"'{rawGraph.GetType().Name}', expected FastComputationGraph.",
-                nameof(func));
-        return fast;
+                $"'{rawGraph.GetType().Name}', expected ComputationGraph.",
+                nameof(func)),
+        };
     }
 }

@@ -127,7 +127,7 @@ namespace Shorokoo.Onnx
                     "the tensor's data is stored externally (data_location=EXTERNAL), but the model was " +
                     "loaded from a stream/bytes with no base directory to resolve external files against. " +
                     "Load the model from a file path, or pass the externalDataDirectory argument of " +
-                    "OnnxModelImporter.FromOnnxModelToFastGraph.");
+                    "OnnxModelImporter.FromOnnxModel.");
 
             string? location = null;
             long offset = 0;

@@ -24,7 +24,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <paramref name="structDefinition"/>. Returns the struct's output <see cref="FastTensorKey"/>.
         /// </summary>
         public static FastTensorKey PackGradients(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             TensorStructDef structDefinition,
             FastTensorKey[] gradientKeys)
         {

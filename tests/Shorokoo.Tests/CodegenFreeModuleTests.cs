@@ -10,7 +10,7 @@ namespace Shorokoo.Tests;
 
 /// <summary>
 /// Coverage-purpose parity tests for the codegen-free module path
-/// (<see cref="ModuleFactory"/> / <c>GraphBuilder.BuildFastComputationGraphFromDelegate</c>):
+/// (<see cref="ModuleFactory"/> / <c>GraphBuilder.BuildInternalComputationGraphFromDelegate</c>):
 /// the same small models are built once from a <c>[Module]</c> class and once from a plain
 /// delegate, and must execute identically; the delegate-built graphs must also train through
 /// <see cref="TrainingRig"/>, export to ONNX via <c>FastOnnxModelBuilder</c>, and survive the
@@ -212,7 +212,7 @@ public class CodegenFreeModuleTests
     // ───────────────────────────────── helpers ─────────────────────────────────
 
     /// <summary>Concretizes a module graph with the given ordered inputs and executes it.</summary>
-    private static byte[][] ExecuteConcretized(FastComputationGraph moduleGraph, params TensorData[] inputs)
+    private static byte[][] ExecuteConcretized(ComputationGraph moduleGraph, params TensorData[] inputs)
     {
         var concreteModel = moduleGraph
             .ToConcreteArchitecture(moduleGraph.FromOrderedInputs([.. inputs]))
@@ -224,11 +224,11 @@ public class CodegenFreeModuleTests
 
     /// <summary>Wraps a constant-fed module output into a no-input graph, concretizes, executes.</summary>
     private static byte[][] ExecuteOutputs(params Variable[] outputs)
-        => ExecuteConcretized(new FastComputationGraph([], [.. outputs]));
+        => ExecuteConcretized(new InternalComputationGraph([], [.. outputs]).ToComputationGraph(GraphKind.Module));
 
     /// <summary>Reads the single state param's current scalar value from a concretized graph.</summary>
-    private static float StateValue(FastComputationGraph graph) =>
-        graph.GetStateParamDataNodes()[0].Attributes
+    private static float StateValue(ComputationGraph graph) =>
+        graph.ToInternal().GetStateParamDataNodes()[0].Attributes
             .GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData)!
             .As<float32>().AccessMemory()[0];
 
@@ -440,8 +440,8 @@ public class CodegenFreeModuleTests
         // [Module] Inline body using state initializers.
         var statefulGraph = ModuleFactory.ComputationGraph(
             (Func<Tensor<float32>, Tensor<float32>>)StatefulBody);
-        Assert.Contains(statefulGraph.Nodes, n => n.OpCode == InternalOpCodes.STATE_UPDATE_LINK);
-        Assert.Contains(statefulGraph.Nodes, n => n.OpCode == InternalOpCodes.WITH_STATE_DEPS);
+        Assert.Contains(statefulGraph.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.STATE_UPDATE_LINK);
+        Assert.Contains(statefulGraph.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.WITH_STATE_DEPS);
     }
 
     /// <summary>No-runtime-input body for the <c>CallbackModule&lt;TOut&gt;</c> path.</summary>
@@ -488,10 +488,10 @@ public class CodegenFreeModuleTests
 
     /// <summary>
     /// Executes the stateful delegate-built graph through
-    /// <see cref="ComputeContext.ExecuteWithState(FastComputationGraph, TensorData[])"/>,
+    /// <see cref="ComputeContext.ExecuteWithState(ComputationGraph, TensorData[])"/>,
     /// covering the Fast state pipeline end-to-end: <c>FastLowerStateUpdateNodes</c>
     /// (STATE_UPDATE_LINK/WITH_STATE_DEPS → IDENTITY + extra state outputs) and the
-    /// <c>FastComputationGraph</c> state surface (<c>GetStateParamDataNodes</c> /
+    /// <c>InternalComputationGraph</c> state surface (<c>GetStateParamDataNodes</c> /
     /// <c>GetStateUpdateOutputCount</c> / <c>WithUpdatedStates</c>). The state starts at 0
     /// (InitBnRunningMean) and increments by 1 per execution while the main output stays
     /// input * 2.
@@ -506,12 +506,12 @@ public class CodegenFreeModuleTests
             .ToConcreteArchitecture(moduleGraph.FromOrderedInputs([input]))
             .ToConcreteModel();
 
-        Assert.Equal(1, concrete.GetStateUpdateOutputCount());
-        var stateNodes = concrete.GetStateParamDataNodes();
+        Assert.Equal(1, concrete.ToInternal().GetStateUpdateOutputCount());
+        var stateNodes = concrete.ToInternal().GetStateParamDataNodes();
         Assert.Single(stateNodes);
 
-        float StateValue(FastComputationGraph g) =>
-            g.GetStateParamDataNodes()[0].Attributes
+        float StateValue(ComputationGraph g) =>
+            g.ToInternal().GetStateParamDataNodes()[0].Attributes
                 .GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData)!
                 .As<float32>().AccessMemory()[0];
 
@@ -584,7 +584,7 @@ public class CodegenFreeModuleTests
     {
         var input = TensorData([4L], new float[] { 1f, 2f, 3f, 4f });
 
-        FastComputationGraph Concretize(Func<Tensor<float32>, Tensor<float32>> body, string name)
+        ComputationGraph Concretize(Func<Tensor<float32>, Tensor<float32>> body, string name)
         {
             var graph = ModuleFactory.ComputationGraph(body, name);
             return graph.ToConcreteArchitecture(graph.FromOrderedInputs([input])).ToConcreteModel();
@@ -593,10 +593,10 @@ public class CodegenFreeModuleTests
         var sugar = Concretize(StateUpdateInLoopCarriedBody, "CodegenFreeInLoopState");
         var afterLoop = Concretize(StateUpdateAfterLoopCarriedBody, "CodegenFreeAfterLoopState");
 
-        FastComputationGraph[] variants = [sugar, afterLoop];
+        ComputationGraph[] variants = [sugar, afterLoop];
         foreach (var concrete in variants)
         {
-            Assert.Equal(1, concrete.GetStateUpdateOutputCount());
+            Assert.Equal(1, concrete.ToInternal().GetStateUpdateOutputCount());
             Assert.Equal(0f, StateValue(concrete));
 
             var (outputs1, updated1) = ComputeContext.Default.ExecuteWithState(concrete, input);
@@ -625,7 +625,7 @@ public class CodegenFreeModuleTests
             .ToConcreteArchitecture(moduleGraph.FromOrderedInputs([input]))
             .ToConcreteModel();
 
-        Assert.Equal(1, concrete.GetStateUpdateOutputCount());
+        Assert.Equal(1, concrete.ToInternal().GetStateUpdateOutputCount());
         Assert.Equal(0f, StateValue(concrete));
 
         var (outputs1, updated1) = ComputeContext.Default.ExecuteWithState(concrete, input);

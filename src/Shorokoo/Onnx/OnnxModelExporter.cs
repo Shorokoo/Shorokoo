@@ -4,6 +4,8 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using Shorokoo.Core.Factory.IR;
+using Shorokoo.Core.Utils;
+using Shorokoo.Graph;
 
 namespace Shorokoo.Onnx
 {
@@ -114,6 +116,19 @@ namespace Shorokoo.Onnx
             if (options.Alignment < 1)
                 throw new ArgumentOutOfRangeException(nameof(options), options.Alignment,
                     "Alignment must be at least 1.");
+
+            // Concrete models only: externalization covers exactly the top-level graph
+            // initializers, which is complete when — and only when — all weights live
+            // there. Shorokoo-written models carry the graph-kind metadata tag; only
+            // untagged (foreign) protos fall back to op-scan classification.
+            var stage = SrkFileFormat.TryReadKindTag(model) ?? SrkFileFormat.DetectStage(model);
+            if (stage != GraphKind.ConcreteModel)
+                throw new ModelException(ErrorCodes.XD008, $"model '{filePath}'",
+                    $"SaveWithExternalData requires a '{SrkFileFormat.StageName(GraphKind.ConcreteModel)}' " +
+                    $"graph, but this model is a '{SrkFileFormat.StageName(stage)}'. It externalizes only " +
+                    "top-level graph initializers — complete exactly when every weight lives there, i.e. " +
+                    "for a concrete model. Lower the graph first (ToConcreteArchitecture -> ToConcreteModel), " +
+                    "build the ONNX model from that, then save it.");
 
             var fullPath = Path.GetFullPath(filePath);
             var dataFileName = Path.GetFileName(fullPath) + ".data";

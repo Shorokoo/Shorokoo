@@ -22,7 +22,12 @@ namespace Shorokoo.Tests.Utils
                         .SelectMany(tupleToArray)];
         }
 
-        public static bool TestGraph(FastComputationGraph graph, ComputeContext? context = null, bool testOnnxRoundtrip = true, bool testCsRoundtrip = true, TensorData[]? sampleInputs = null, bool testQuickEngineExecution = false)
+        /// <summary>Readonly-graph entry point: TestGraph never mutates, so it borrows the
+        /// wrapped internal graph directly.</summary>
+        public static bool TestGraph(ComputationGraph graph, ComputeContext? context = null, bool testOnnxRoundtrip = true, bool testCsRoundtrip = true, TensorData[]? sampleInputs = null, bool testQuickEngineExecution = false)
+            => TestGraph(graph.ToInternal(), context, testOnnxRoundtrip, testCsRoundtrip, sampleInputs, testQuickEngineExecution);
+
+        public static bool TestGraph(InternalComputationGraph graph, ComputeContext? context = null, bool testOnnxRoundtrip = true, bool testCsRoundtrip = true, TensorData[]? sampleInputs = null, bool testQuickEngineExecution = false)
         {
 
             byte[][] originalResults;
@@ -50,7 +55,7 @@ namespace Shorokoo.Tests.Utils
             {
                 var data = CompressedFormatUtils.SaveFastGraphToBinary(graph, compressed: true);
                 var onnxRoundtrip = CompressedFormatUtils.LoadFastGraphFromBinary(data);
-                var resultB = context.Execute(onnxRoundtrip, inputData);
+                var resultB = context.Execute(onnxRoundtrip.ToInternal(), inputData);
                 onnxResults = resultB.Select(x => x.ToTensorData().AccessRawMemory().ToArray()).ToArray();
             }
 
@@ -71,7 +76,7 @@ namespace Shorokoo.Tests.Utils
                                 (csharpResults is IValue[] arrayOut) ? arrayOut :
                                 tupleToArray(csharpResults); // Treat it as a tuple.
 
-                var csRoundtrip = new FastComputationGraph([], [.. csharpOutputs.Select(o => o.ToVariable())]);
+                var csRoundtrip = new InternalComputationGraph([], [.. csharpOutputs.Select(o => o.ToVariable())]);
                 var resultC = context.Execute(csRoundtrip);
                 csResults = resultC.Select(x => x.ToTensorData().AccessRawMemory().ToArray()).ToArray();
             }
@@ -100,7 +105,7 @@ namespace Shorokoo.Tests.Utils
         /// Used as an extra validation layer alongside the ONNX/CS roundtrips so coverage tests
         /// exercise the QEE op path on the same module graphs the ONNX path runs.
         /// </summary>
-        private static bool RunQuickEngineExecution(FastComputationGraph graph, TensorData[]? sampleInputs)
+        private static bool RunQuickEngineExecution(InternalComputationGraph graph, TensorData[]? sampleInputs)
         {
             var qee = new QuickExecutionEngine();
             var store = sampleInputs is null
@@ -142,7 +147,7 @@ namespace Shorokoo.Tests.Utils
             var prop = typeof(TModule).GetProperty("ComputationGraph", BindingFlags.Public | BindingFlags.Static)
                 ?? throw new InvalidOperationException(
                     $"{typeof(TModule).FullName} has no public static ComputationGraph property");
-            var moduleGraph = (FastComputationGraph)prop.GetValue(null)!;
+            var moduleGraph = (ComputationGraph)prop.GetValue(null)!;
 
             return AdvancedTestGraph(moduleGraph, hyperparamInputs, runtimeInputs,
                 context, testOnnxRoundtrip, testCsRoundtrip, testQuickEngineExecution, genericTypes, rngConfig);
@@ -154,7 +159,21 @@ namespace Shorokoo.Tests.Utils
         /// e.g. codegen-free modules built via <see cref="Shorokoo.Modules.ModuleFactory"/>.
         /// </summary>
         public static bool AdvancedTestGraph(
-            FastComputationGraph moduleGraph,
+            ComputationGraph moduleGraph,
+            TensorData[] hyperparamInputs,
+            TensorData[] runtimeInputs,
+            ComputeContext? context = null,
+            bool testOnnxRoundtrip = true,
+            bool testCsRoundtrip = true,
+            bool testQuickEngineExecution = true,
+            Dictionary<string, DType>? genericTypes = null,
+            RngConfig? rngConfig = null)
+            // Copy: the generic-type specialization below mutates the module graph in place.
+            => AdvancedTestGraph(moduleGraph.ToInternal(), hyperparamInputs, runtimeInputs,
+                context, testOnnxRoundtrip, testCsRoundtrip, testQuickEngineExecution, genericTypes, rngConfig);
+
+        public static bool AdvancedTestGraph(
+            InternalComputationGraph moduleGraph,
             TensorData[] hyperparamInputs,
             TensorData[] runtimeInputs,
             ComputeContext? context = null,
@@ -222,7 +241,7 @@ namespace Shorokoo.Tests.Utils
             var prop = typeof(TModule).GetProperty("ComputationGraph", BindingFlags.Public | BindingFlags.Static)
                 ?? throw new InvalidOperationException(
                     $"{typeof(TModule).FullName} has no public static ComputationGraph property");
-            var moduleGraph = (FastComputationGraph)prop.GetValue(null)!;
+            var moduleGraph = ((ComputationGraph)prop.GetValue(null)!).ToInternal();
 
             if (moduleGraph.Nodes.Any(n => n.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT))
             {
@@ -232,7 +251,7 @@ namespace Shorokoo.Tests.Utils
             }
 
             var data = CompressedFormatUtils.SaveFastGraphToBinary(moduleGraph, compressed: true);
-            moduleGraph = CompressedFormatUtils.LoadFastGraphFromBinary(data);
+            moduleGraph = CompressedFormatUtils.LoadFastGraphCore(data, "<roundtrip>", null).Graph;
 
             var allInputs = new TensorData[hyperparamInputs.Length + runtimeInputs.Length];
             Array.Copy(hyperparamInputs, 0, allInputs, 0, hyperparamInputs.Length);
@@ -247,7 +266,7 @@ namespace Shorokoo.Tests.Utils
             // rewrites the opcode to the initializer-fn name; on reload, the function-name
             // opcode dispatches into BuildFastTrainableParamNodeFromProto.
             var archData = CompressedFormatUtils.SaveFastGraphToBinary(concreteArch, compressed: true);
-            concreteArch = CompressedFormatUtils.LoadFastGraphFromBinary(archData);
+            concreteArch = CompressedFormatUtils.LoadFastGraphCore(archData, "<roundtrip>", null).Graph;
 
             // Deterministic per-parameter init (see AdvancedTestGraph).
             var concreteModel = concreteArch.ToConcreteModel(RngConfig.Default);

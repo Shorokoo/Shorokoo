@@ -22,8 +22,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// <summary>
     /// Fast-graph counterparts of the processors used by
     /// <c>ComputationGraph.ToConcreteArchitecture</c>. Each <c>Process</c> method
-    /// takes a <see cref="FastComputationGraph"/> and mutates it in place. Processors are
-    /// implemented natively on <see cref="FastComputationGraph"/>.
+    /// takes a <see cref="InternalComputationGraph"/> and mutates it in place. Processors are
+    /// implemented natively on <see cref="InternalComputationGraph"/>.
     /// </summary>
     internal static class FastProcessorHelper
     {
@@ -32,7 +32,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// entries. This handles LOOP_OPEN carry variables whose output TensorKeys have a
         /// FastNodeKey different from the LOOP_OPEN's own Key.
         /// </summary>
-        public static Dictionary<FastNodeKey, FastNode> BuildNodeByKey(FastComputationGraph graph)
+        public static Dictionary<FastNodeKey, FastNode> BuildNodeByKey(InternalComputationGraph graph)
         {
             var nodeByKey = new Dictionary<FastNodeKey, FastNode>(graph.Nodes.Count);
             foreach (var n in graph.Nodes)
@@ -47,19 +47,19 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// Thin wrapper around <see cref="FastComputationGraph.IsLinearOrderValid"/>.
+        /// Thin wrapper around <see cref="InternalComputationGraph.IsLinearOrderValid"/>.
         /// Kept as a separate name so existing pass call sites read the way they did
         /// when this was a Kahn re-sort.
         /// </summary>
-        public static void EnsureTopologicalOrder(FastComputationGraph graph)
+        public static void EnsureTopologicalOrder(InternalComputationGraph graph)
             => System.Diagnostics.Debug.Assert(graph.IsLinearOrderValid(), "graph.IsLinearOrderValid()");
 
         /// <summary>
-        /// Removes nodes from <see cref="FastComputationGraph.Nodes"/> that are not
+        /// Removes nodes from <see cref="InternalComputationGraph.Nodes"/> that are not
         /// reachable from the graph's outputs. This cleans up dead nodes left behind
         /// by native in-place processors that disconnect nodes without removing them.
         /// </summary>
-        public static void RemoveUnreachableNodes(FastComputationGraph graph)
+        public static void RemoveUnreachableNodes(InternalComputationGraph graph)
         {
             // Build output FastTensorKey → FastNodeKey mapping.
             var tensorToNodeKey = new Dictionary<FastTensorKey, FastNodeKey>();
@@ -113,14 +113,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// Re-keys all nodes and tensor keys in a <see cref="FastComputationGraph"/> so that
+        /// Re-keys all nodes and tensor keys in a <see cref="InternalComputationGraph"/> so that
         /// every node and tensor key is globally unique. Necessary because
         /// <see cref="Function.GetFastFlattenedGraph"/> is cached and shared across call
         /// sites, so cloning it multiple times produces subgraphs with identical keys.
         /// Without re-keying, inserting the same function's subgraph more than once causes
         /// key collisions.
         /// </summary>
-        public static void RekeySubgraph(FastComputationGraph sub)
+        public static void RekeySubgraph(InternalComputationGraph sub)
         {
             // Phase 1: assign new NodeKeys and build the mapping.
             var nodeKeyMap = new Dictionary<FastNodeKey, FastNodeKey>();
@@ -247,7 +247,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     internal static class FastApplyIdentifierTemplates
     {
         public static void Process(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             IReadOnlyList<FastNodeKey>? pinnedNodeKeys = null,
             IReadOnlyList<(int slot, FastNodeKey key)>? slotPinnedNodeKeys = null)
         {
@@ -664,7 +664,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
     /// <summary>
     /// Native fast-graph implementation of <c>InlineModulesAndFunctions</c>.
-    /// The main graph stays as <see cref="FastComputationGraph"/> throughout and no
+    /// The main graph stays as <see cref="InternalComputationGraph"/> throughout and no
     /// <c>ComputationGraph</c> round-trip occurs. Function subgraphs are
     /// obtained from <see cref="Function.GetFastFlattenedGraph"/>, which recursively
     /// invokes this pass on sub-function bodies and caches the result.
@@ -676,13 +676,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastInlineModulesAndFunctions
     {
-        public static void Process(FastComputationGraph graph)
+        public static void Process(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
             while (ProcessOnePass(graph)) { }
         }
 
-        private static bool ProcessOnePass(FastComputationGraph graph)
+        private static bool ProcessOnePass(InternalComputationGraph graph)
         {
             var nodeByKey = FastProcessorHelper.BuildNodeByKey(graph);
 
@@ -712,7 +712,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     continue;
                 }
 
-                FastComputationGraph subFastGraph;
+                InternalComputationGraph subFastGraph;
                 var hyperparamNodeKeys = new List<FastTensorKey?>();
 
                 if (isFunction)
@@ -917,11 +917,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// composes identifier templates, and combines iteration indices.
         /// </summary>
         private static void FastReparentToCallSite(
-            FastComputationGraph subGraph,
+            InternalComputationGraph subGraph,
             ModelParamIdentifierTemplate parentIdTemplate,
             ModelId parentModelId,
             FastTensorKey? parentIterIndicesKey,
-            FastComputationGraph mainGraph)
+            InternalComputationGraph mainGraph)
         {
             var subNodeByKey = new Dictionary<FastNodeKey, FastNode>(subGraph.Nodes.Count);
             foreach (var n in subGraph.Nodes) subNodeByKey[n.Key] = n;
@@ -1026,7 +1026,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// to MODEL_PARAM_MODEL_REF by prepending the model variable as the first input.
         /// </summary>
         private static void FastReparentToModelVariable(
-            FastComputationGraph subGraph, FastTensorKey modelKey)
+            InternalComputationGraph subGraph, FastTensorKey modelKey)
         {
             for (int i = 0; i < subGraph.Nodes.Count; i++)
             {
@@ -1073,7 +1073,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// </summary>
         private static FastTensorKey? CombineIterationIndices(
             FastTensorKey? parentKey, FastTensorKey? childKey,
-            FastComputationGraph subGraph, FastComputationGraph mainGraph,
+            InternalComputationGraph subGraph, InternalComputationGraph mainGraph,
             Dictionary<FastNodeKey, FastNode> subNodeByKey,
             List<(int, FastNode)> nodesToInsert, int currentIndex)
         {
@@ -1115,7 +1115,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// the key directly) appends the key itself so the new CONCAT references it as
         /// a single scalar slot.
         /// </summary>
-        private static void AppendIterIndexInputs(FastTensorKey key, FastComputationGraph graph, List<FastTensorKey?> dest)
+        private static void AppendIterIndexInputs(FastTensorKey key, InternalComputationGraph graph, List<FastTensorKey?> dest)
         {
             foreach (var n in graph.Nodes)
             {
@@ -1130,7 +1130,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             dest.Add(key);
         }
 
-        private static void AppendIterIndexInputs(FastTensorKey key, FastComputationGraph graph,
+        private static void AppendIterIndexInputs(FastTensorKey key, InternalComputationGraph graph,
             Dictionary<FastNodeKey, FastNode> nodeByKey, List<FastTensorKey?> dest)
         {
             if (nodeByKey.TryGetValue(key.FastNodeKey, out var n) && n.OpCode == OpCodes.CONCAT)
@@ -1141,7 +1141,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             dest.Add(key);
         }
 
-        private static bool IsEmptyConstantVector(FastTensorKey key, FastComputationGraph graph)
+        private static bool IsEmptyConstantVector(FastTensorKey key, InternalComputationGraph graph)
         {
             // Check via tensor info or by finding the producing node in the graph
             for (int i = 0; i < graph.Nodes.Count; i++)
@@ -1156,7 +1156,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return false;
         }
 
-        private static bool IsEmptyConstantVector(FastTensorKey key, FastComputationGraph graph, Dictionary<FastNodeKey, FastNode> nodeByKey)
+        private static bool IsEmptyConstantVector(FastTensorKey key, InternalComputationGraph graph, Dictionary<FastNodeKey, FastNode> nodeByKey)
         {
             if (!nodeByKey.TryGetValue(key.FastNodeKey, out var node)) return false;
             if (node.OpCode != OpCodes.CONSTANT) return false;
@@ -1179,7 +1179,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             public readonly ImmutableDictionary<ModelId, ModelParamIdentifierTemplate> RelativeModuleTemplates { get; init; }
         }
 
-        public static IdentifierTemplateInfos Process(FastComputationGraph graph)
+        public static IdentifierTemplateInfos Process(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -1228,7 +1228,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastConvertToIdRefModelParams
     {
-        public static void Process(FastComputationGraph graph)
+        public static void Process(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -1244,12 +1244,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
         }
 
-        private static int CountUnprocessed(FastComputationGraph graph)
+        private static int CountUnprocessed(InternalComputationGraph graph)
             => graph.Nodes.Count(n =>
                 n.OpCode == InternalOpCodes.MODEL_PARAM_REF ||
                 n.OpCode == InternalOpCodes.MODEL_PARAM_MODEL_REF);
 
-        private static void InternalProcess(FastComputationGraph graph)
+        private static void InternalProcess(InternalComputationGraph graph)
         {
             var nodeByKey = FastProcessorHelper.BuildNodeByKey(graph);
 
@@ -1383,7 +1383,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     }
 
     /// <summary>
-    /// Unpacks the Model struct entirely on <see cref="FastComputationGraph"/>:
+    /// Unpacks the Model struct entirely on <see cref="InternalComputationGraph"/>:
     /// MODULE_SET_HYPERPARAMS / MODEL_HYPERPARAM / GET_MODEL_ID / IDENTITY for Model
     /// pass-through, plus per-field parallel SEQUENCE_* and LOOP_OPEN / LOOP_CLOSE /
     /// IF_CLOSE expansion for Model tensors carried through sequences and control flow.
@@ -1393,7 +1393,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastUnpackModelStruct
     {
-        public static void Process(FastComputationGraph graph)
+        public static void Process(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -1673,7 +1673,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         private static void ApplyRemapAndCommit(
-            FastComputationGraph graph, FastModelStructContext ctx, List<FastNode> finalNodes)
+            InternalComputationGraph graph, FastModelStructContext ctx, List<FastNode> finalNodes)
         {
             // Resolve transitive remap chains: if A→B and B→C, collapse to A→C.
             foreach (var key in ctx.Remap.Keys.ToList())
@@ -1707,7 +1707,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     }
 
     /// <summary>
-    /// Lowers TensorStruct operations on a <see cref="FastComputationGraph"/>, handling:
+    /// Lowers TensorStruct operations on a <see cref="InternalComputationGraph"/>, handling:
     /// <list type="bullet">
     ///   <item><c>MODEL_TENSORSTRUCT_INPUT</c> (B2a): expanded into per-field
     ///     <c>MODEL_TENSOR_INPUT</c> nodes.</item>
@@ -1728,13 +1728,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastUnpackTensorStructs
     {
-        public static void Process(FastComputationGraph graph)
+        public static void Process(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
             // Op-code-only pre-scan. A graph that is entirely TensorStruct-free can skip
             // both the native pass and the expensive BuildTensorInfoLookup (which itself
-            // round-trips via FastComputationGraphConverter.ToComputationGraph). The three
+            // round-trips via InternalComputationGraphConverter.ToComputationGraph). The three
             // op codes below are the only ways a TensorStruct can enter the graph:
             //   - TENSOR_STRUCT_CREATE / TENSOR_STRUCT_GETFIELD produce / consume one,
             //   - MODEL_TENSORSTRUCT_INPUT is a TensorStruct graph input.
@@ -2572,15 +2572,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
     /// <summary>
     /// Converts MODEL_PARAM_ID_REF nodes to MODEL_PARAM nodes.
-    /// Template composition is performed natively on the <see cref="FastComputationGraph"/>.
+    /// Template composition is performed natively on the <see cref="InternalComputationGraph"/>.
     /// Model ID extraction runs <see cref="QuickExecutionEngine"/> directly over the
-    /// FastComputationGraph — no CG round-trip needed. Node rewriting (step 4 equivalent)
+    /// InternalComputationGraph — no CG round-trip needed. Node rewriting (step 4 equivalent)
     /// is also implemented natively, avoiding any CG↔FastCG conversion.
     /// </summary>
     internal static class FastConvertModelParamIdRefToModelParam
     {
         public static void Process(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             FastExtractIdentifierTemplates.IdentifierTemplateInfos identifierTemplatesInfo,
             ModelParamList inputHints,
             ComputeContext? computeContext = null)
@@ -2663,7 +2663,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // that inflate the serialized model.
             //
             // Uses the native fast-graph port of `ListAllSpecificModelIdsUsed` — builds a
-            // parallel mask-computation subgraph on the FastComputationGraph, runs it
+            // parallel mask-computation subgraph on the InternalComputationGraph, runs it
             // through QEE, and reads back the set of live model IDs. Replaces a prior
             // CG round-trip through `FastProcessorHelper.Apply` that allocated enough
             // intermediate CG state to crash the testhost on big models.
@@ -2712,7 +2712,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// for default-checkpoint initialization use this entry point.
         /// </summary>
         public static ImmutableArray<TrainableParamInfo> DiscoverTrainableParamInfos(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             ModelParamList? inputHints = null)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
@@ -2740,7 +2740,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// Returns true iff every MODEL_PARAM_ID_REF node's model-ID input resolves to a
         /// RuntimeTensor whose integer data (or per-iteration history) is available.
         /// </summary>
-        private static bool AllIdRefModelIdsResolved(FastComputationGraph graph, Dictionary<FastTensorKey, IRuntimeTensor> store)
+        private static bool AllIdRefModelIdsResolved(InternalComputationGraph graph, Dictionary<FastTensorKey, IRuntimeTensor> store)
         {
             for (int i = 0; i < graph.Nodes.Count; i++)
             {
@@ -2764,7 +2764,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         private static void NativeConvertTrainableParamIdRef(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             ImmutableArray<TrainableParamInfo> liveParamInfos,
             ImmutableArray<TrainableParamInfo> deadParamInfos,
             IdTemplateInfos idTemplateInfos)
@@ -3083,7 +3083,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// carries per-iteration values from loops, so no graph restructuring is needed.
         /// </summary>
         private static ImmutableArray<TrainableParamInfo> ExtractModelIdInfosFromStore(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             Dictionary<FastTensorKey, IRuntimeTensor> store)
         {
             var result = new Dictionary<ModelId, TrainableParamInfo>();
@@ -3206,7 +3206,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// <see cref="FastFoldConstantConditionBranches"/>,
     /// <see cref="FastFoldSequences"/>, and
     /// <see cref="FastFoldConstantIterationLoops"/> — four pure
-    /// <see cref="FastComputationGraph"/> passes, no <c>ComputationGraph</c>
+    /// <see cref="InternalComputationGraph"/> passes, no <c>ComputationGraph</c>
     /// round-trip anywhere.
     /// <para>
     /// Native equivalents cover every fold case the (now-deleted) CG Simplify
@@ -3218,7 +3218,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastSimplify
     {
-        public static void Process(FastComputationGraph graph, ComputeContext? context = null)
+        public static void Process(InternalComputationGraph graph, ComputeContext? context = null)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -3310,17 +3310,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// Folds every <c>IF_OPEN</c> / <c>IF_CLOSE</c> pair whose condition input is produced by
     /// a <c>CONSTANT</c> node. The winning branch's input tensor keys are spliced
     /// into every consumer of the <c>IF_CLOSE</c>'s outputs (and into
-    /// <see cref="FastComputationGraph.Outputs"/> when applicable); the
+    /// <see cref="InternalComputationGraph.Outputs"/> when applicable); the
     /// <c>IF_OPEN</c> / <c>IF_CLOSE</c> nodes themselves and the losing branch's
     /// now-unreachable body are then dropped from
-    /// <see cref="FastComputationGraph.Nodes"/>.
+    /// <see cref="InternalComputationGraph.Nodes"/>.
     /// </summary>
     internal static class FastFoldConstantConditionBranches
     {
         /// <summary>
         /// Runs one folding pass. Returns true if any IF was folded.
         /// </summary>
-        public static bool Process(FastComputationGraph graph)
+        public static bool Process(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -3453,7 +3453,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <summary>
         /// Runs one folding pass. Returns true if any sequence consumer was folded.
         /// </summary>
-        public static bool Process(FastComputationGraph graph)
+        public static bool Process(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -3728,7 +3728,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// Precondition: no loop body may contain a <c>MODEL_PARAM_REF</c>,
         /// <c>MODEL_PARAM_ID_REF</c>, <c>MODEL_PARAM_MODEL_REF</c>, or
         /// <c>MODULE_SET_HYPERPARAMS</c> node. The full
-        /// <see cref="FastComputationGraphExtensions.ToConcreteArchitecture"/> pipeline
+        /// <see cref="InternalComputationGraphExtensions.ToConcreteArchitecture"/> pipeline
         /// resolves all four into plain <c>MODEL_PARAM</c> (or, for
         /// <c>MODULE_SET_HYPERPARAMS</c>, removes the node via
         /// <see cref="FastUnpackModelStruct"/>) before <see cref="FastSimplify"/> calls
@@ -3737,7 +3737,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <see cref="UnrollOne"/> asserts this invariant on every cloned body node.
         /// </para>
         /// </summary>
-        public static bool Process(FastComputationGraph graph)
+        public static bool Process(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -3831,7 +3831,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         private static bool IsEligibleForNativeUnroll(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             FastNode openNode, int openIdx,
             FastNode closeNode, int closeIdx,
             Dictionary<FastTensorKey, FastNode> producerByOutput)
@@ -3992,7 +3992,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         private static void UnrollOne(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             FastNode openNode, int openIdx,
             FastNode closeNode, int closeIdx,
             long iterCount)
@@ -4580,7 +4580,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             graph.Nodes = spliced;
         }
 
-        private static void ApplyRemapToGraph(FastComputationGraph graph, Dictionary<FastTensorKey, FastTensorKey> remap)
+        private static void ApplyRemapToGraph(InternalComputationGraph graph, Dictionary<FastTensorKey, FastTensorKey> remap)
         {
             if (remap.Count == 0) return;
 
@@ -4624,7 +4624,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     }
 
     /// <summary>
-    /// Native FastComputationGraph constant folding. Uses
+    /// Native InternalComputationGraph constant folding. Uses
     /// <see cref="QuickExecutionEngine"/> in-process to evaluate the constant subgraph;
     /// constants the engine cannot resolve are simply left unfolded (so the outer
     /// Simplify loop converges on the next iteration once nothing changes).
@@ -4635,7 +4635,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// Runs one folding pass over <paramref name="graph"/>. Returns true if any
         /// constant was folded into a CONSTANT node.
         /// </summary>
-        public static bool Process(FastComputationGraph graph)
+        public static bool Process(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -4715,7 +4715,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // MODEL_PARAM_DATA is excluded from constants — but include for safety).
             // Running QEE on this subgraph avoids touching the thousands of non-constant
             // ops (Conv, MatMul, …) in the full graph.
-            var subgraph = new FastComputationGraph
+            var subgraph = new InternalComputationGraph
             {
                 Nodes = constantProducingNodes,
             };

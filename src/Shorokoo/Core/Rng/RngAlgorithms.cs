@@ -99,7 +99,7 @@ internal static class RngAlgorithms
             // Sanitized, stable ONNX-safe name; the pretty algorithm name rides the metadata.
             var tag = algorithm == Threefry2x32x13BoxMullerV1 ? "Threefry2x32_13_BoxMuller_v1" : "Threefry2x32_BoxMuller_v1";
             var name = "ShrkRng_" + tag + "_" + kind;
-            var graph = GraphBuilder.BuildFastComputationGraphFromDelegate(body);
+            var graph = GraphBuilder.BuildInternalComputationGraphFromDelegate(body);
             fn = new Function(graph, FunctionType.Function, name, name)
             {
                 RngAlgorithm = algorithm,

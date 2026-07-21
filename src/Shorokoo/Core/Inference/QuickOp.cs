@@ -47,7 +47,7 @@ internal abstract class QuickOp
     /// </summary>
     public virtual (IRuntimeTensor[] results, bool loopBack) Execute(
         FastNode node,
-        FastComputationGraph graph,
+        InternalComputationGraph graph,
         Dictionary<FastNodeKey, FastNode> nodeByKey,
         Dictionary<FastTensorKey, IRuntimeTensor> store,
         int maxDataElements)

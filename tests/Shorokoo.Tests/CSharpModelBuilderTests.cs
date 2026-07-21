@@ -38,21 +38,21 @@ public class CSharpModelBuilderCoverageTests
     {
         // Module-call codegen — CREATE_MODULE / MODULE_SET_HYPERPARAMS / MODEL_INVOKE
         // handlers + MakeCallFunctionCodeTemplate + GetModuleAwareTypeDefString overloads.
-        AssertCodegens(CallsHypersLayer.ComputationGraph, "HypersLayer");
+        AssertCodegens(CallsHypersLayer.ComputationGraph.ToInternal(), "HypersLayer");
         // TensorStruct codegen — MakeTensorStructCreateNode + MakeTensorStructGetFieldNode
         // (now emitting canonical InternalOp.TensorStructCreate / TensorStructGetField).
-        AssertCodegens(TensorStructLoopCarry.ComputationGraph,
+        AssertCodegens(TensorStructLoopCarry.ComputationGraph.ToInternal(),
             "InternalOp.TensorStructCreate", "InternalOp.TensorStructGetField");
         // Sequence ops over struct sequences — InferSequenceElementRankFromTensor
         // SEQUENCE_CONSTRUCT / IDENTITY tracebacks (when SequenceAt output rank is unknown).
-        AssertCodegens(SequenceOpsOnStructs.ComputationGraph);
+        AssertCodegens(SequenceOpsOnStructs.ComputationGraph.ToInternal());
         // Per-DType constant arms of MakeConstantNode (Float64 / Int16 / Int32 /
         // UInt16 / UInt32 / UInt64 / Bool plus the <4 vs >=4 collection-expression split).
         AssertCodegens(BuildConstantBranchesGraph(),
             "1.5d", "6UL", "true", "(short[])", "(ushort[])", "(uint[])", "EmptyVector<int32>");
         // StateParamInitializer arm of BuildMethodCode (the mirror of the
         // TrainableParamInitializer branch covered by every InitSimple use).
-        AssertCodegens(BatchNormWithStateUpdate.ComputationGraph,
+        AssertCodegens(BatchNormWithStateUpdate.ComputationGraph.ToInternal(),
             "[StateInitializer]", "isTrainable: false");
         // low_op keyword wraps inlined inputs in parens for precedence — only
         // fires when the input's producer has an inline expression (non-constant).
@@ -74,8 +74,8 @@ public class CSharpModelBuilderCoverageTests
         {
             var x = InputScalar<float32>("x");
             var y = x + x;
-            var graph = new FastComputationGraph([x], [y]);
-            var fastGraph = FastComputationGraphConverter.ToFastGraph(graph);
+            var graph = new InternalComputationGraph([x], [y]);
+            var fastGraph = (graph);
             var lambda = new CSharpModelBuilder().BuildLambda<Scalar<float32>, Scalar<float32>>(fastGraph, "OneArgModel");
             Assert.NotNull(lambda(x));
         }
@@ -84,8 +84,8 @@ public class CSharpModelBuilderCoverageTests
             var x = InputScalar<float32>("x");
             var y = InputScalar<float32>("y");
             var z = x + y;
-            var graph = new FastComputationGraph([x, y], [z]);
-            var fastGraph = FastComputationGraphConverter.ToFastGraph(graph);
+            var graph = new InternalComputationGraph([x, y], [z]);
+            var fastGraph = (graph);
             var lambda = new CSharpModelBuilder().BuildLambda<Scalar<float32>, Scalar<float32>, Scalar<float32>>(fastGraph, "TwoArgModel");
             Assert.NotNull(lambda(x, y));
         }
@@ -94,7 +94,7 @@ public class CSharpModelBuilderCoverageTests
     // ---- helpers ----
 
     /// <summary>Runs BuildFullGraph and asserts every substring in <paramref name="containsAll"/> appears in the result.</summary>
-    private static void AssertCodegens(FastComputationGraph graph, params string[] containsAll)
+    private static void AssertCodegens(InternalComputationGraph graph, params string[] containsAll)
     {
         var code = new CSharpModelBuilder().BuildFullGraph(graph, "CovTest");
         Assert.NotNull(code);
@@ -102,7 +102,7 @@ public class CSharpModelBuilderCoverageTests
             Assert.Contains(s, code);
     }
 
-    private static FastComputationGraph BuildConstantBranchesGraph()
+    private static InternalComputationGraph BuildConstantBranchesGraph()
     {
         var outputs = new Variable[]
         {
@@ -120,10 +120,10 @@ public class CSharpModelBuilderCoverageTests
             Vector(7L, 8L),                             // int64 vector
             EmptyVector<int32>(),                       // empty-vector branch
         };
-        return ToFastGraph(new FastComputationGraph([], ImmutableArray.Create(outputs)));
+        return ToFastGraph(new InternalComputationGraph([], ImmutableArray.Create(outputs)));
     }
 
-    private static FastComputationGraph BuildLowOpInlinedGraph()
+    private static InternalComputationGraph BuildLowOpInlinedGraph()
     {
         var x = InputScalar<float32>("x");
         var y = InputScalar<float32>("y");
@@ -131,18 +131,18 @@ public class CSharpModelBuilderCoverageTests
         // (x*y) + (y*z) — each multiply is non-constant so its result is available
         // for inlining when fed into the outer add (where low_op wraps it in parens).
         var result = (x * y) + (y * z);
-        return ToFastGraph(new FastComputationGraph([x, y, z], [result]));
+        return ToFastGraph(new InternalComputationGraph([x, y, z], [result]));
     }
 
-    private static FastComputationGraph BuildBigConstantGraph()
+    private static InternalComputationGraph BuildBigConstantGraph()
     {
         // 200 floats × 4 bytes = 800 bytes > 500 byte threshold → MakeConstantNode
         // returns null and the standard Constant code template fires.
         var bigVec = Enumerable.Range(0, 200).Select(i => (float)i).ToArray();
-        return ToFastGraph(new FastComputationGraph([], [Vector(bigVec)]));
+        return ToFastGraph(new InternalComputationGraph([], [Vector(bigVec)]));
     }
 
-    private static FastComputationGraph BuildSequenceRankInferGraph()
+    private static InternalComputationGraph BuildSequenceRankInferGraph()
     {
         var rankedElem = InputTensor<float32>("ranked", rank: 2);
         var unrankedElem = InputTensor<float32>("unranked");
@@ -163,12 +163,12 @@ public class CSharpModelBuilderCoverageTests
         seq3 = OnnxOp.Identity(seq3, rank: null);
         var atIdentity = OnnxOp.SequenceAt(seq3, Scalar(0L));
 
-        return ToFastGraph(new FastComputationGraph(
+        return ToFastGraph(new InternalComputationGraph(
             [rankedElem, unrankedElem],
             ImmutableArray.Create<Variable>(atInsert, atErase, atIdentity)));
     }
 
-    private static FastComputationGraph BuildScanLoopGraph()
+    private static InternalComputationGraph BuildScanLoopGraph()
     {
         Vector<float32>? scannedScalar = null;
         Tensor<float32>? scannedTensor = null;
@@ -178,11 +178,11 @@ public class CSharpModelBuilderCoverageTests
             scannedTensor = ctx.Scan(Vector(1.0f, 2.0f));
             ctx.Break(ctx.IterationIndex >= Scalar(10L));
         }
-        return ToFastGraph(new FastComputationGraph([], [scannedScalar!, scannedTensor!]));
+        return ToFastGraph(new InternalComputationGraph([], [scannedScalar!, scannedTensor!]));
     }
 
-    private static FastComputationGraph ToFastGraph(FastComputationGraph graph)
-        => FastComputationGraphConverter.ToFastGraph(graph);
+    private static InternalComputationGraph ToFastGraph(InternalComputationGraph graph)
+        => (graph);
 
     // ────────────────────────────────────────────────────────────────────────
     // Static-method branches: GetTypeDefString. Drives the ITensorStruct arms
@@ -238,7 +238,7 @@ public class CSharpModelBuilderCoverageTests
     [Fact]
     public void TestConstantUnsupportedDtypesFallback()
     {
-        var graph = new FastComputationGraph(
+        var graph = new InternalComputationGraph(
             [],
             [
                 Scalar((sbyte)1),                                 // int8 → unsupported
@@ -274,7 +274,7 @@ public class CSharpModelBuilderCoverageTests
             Scalar(70.0f), Scalar(80.0f), Scalar(90.0f),
         };
         var results = FrameworkOps.IfElse(cond, t, f);
-        var graph = new FastComputationGraph([cond], ImmutableArray.Create(results));
+        var graph = new InternalComputationGraph([cond], ImmutableArray.Create(results));
         var code = new CSharpModelBuilder().BuildFullGraph(ToFastGraph(graph), "CovTest");
         // Array-result form: var <arr> = Ops.IfElse(cond, [...], [...]); then
         // individual `var x_i = (<TypeDef>)<arr>[i];` lines bind the per-output names.
@@ -302,7 +302,7 @@ public class CSharpModelBuilderCoverageTests
             LoopAPI.Init(counter);
             counter = counter + Scalar(1L);
         }
-        var graph = new FastComputationGraph([], [counter]);
+        var graph = new InternalComputationGraph([], [counter]);
         var code = new CSharpModelBuilder().BuildFullGraph(ToFastGraph(graph), "CovTest");
         Assert.Contains("LoopAPI.Iterate(", code);
     }
@@ -324,7 +324,7 @@ public class CSharpModelBuilderCoverageTests
             LoopAPI.Init(accum);
             accum = accum + Scalar(1.0f);
         }
-        var graph = new FastComputationGraph([], [accum]);
+        var graph = new InternalComputationGraph([], [accum]);
         var code = new CSharpModelBuilder().BuildFullGraph(ToFastGraph(graph), "CovTest");
         Assert.Contains("LoopAPI.Iterate", code);
     }
@@ -347,7 +347,7 @@ public class CSharpModelBuilderCoverageTests
             finalIdx = ctx.IterationIndex;
             ctx.Break(ctx.IterationIndex >= Scalar(0L));
         }
-        var graph = new FastComputationGraph([], ImmutableArray.Create<Variable>(scanned!, finalIdx!));
+        var graph = new InternalComputationGraph([], ImmutableArray.Create<Variable>(scanned!, finalIdx!));
         var code = new CSharpModelBuilder().BuildFullGraph(ToFastGraph(graph), "CovTest");
         // finalIdx is declared inside the foreach but consumed by the return
         // expression at outer scope; codegen must emit a forward declaration.
@@ -368,7 +368,7 @@ public class CSharpModelBuilderCoverageTests
         var x2 = InputTensor<float32>("x2", rank: 4);  // typical pool input (N,C,H,W)
         var pooled = OnnxOp.AveragePool(x2, autoPad: null, ceilMode: null, countIncludePad: null,
             dilations: null, kernelShape: new long[] { 2, 2 }, pads: null, strides: null);
-        var graph = new FastComputationGraph([x2], [pooled]);
+        var graph = new InternalComputationGraph([x2], [pooled]);
         var code = new CSharpModelBuilder().BuildFullGraph(ToFastGraph(graph), "CovTest");
         Assert.Contains("AveragePool(", code);
         Assert.Contains(".float32().Tensor()", code);
@@ -376,7 +376,7 @@ public class CSharpModelBuilderCoverageTests
         var x1 = InputTensor<float32>("x1", rank: 1);
         var lpPooled = OnnxOp.LpPool(x1, autoPad: null, ceilMode: null, kernelShape: new long[] { 1 },
             p: null, pads: null, strides: null, dilations: null);
-        var g1 = new FastComputationGraph([x1], [lpPooled]);
+        var g1 = new InternalComputationGraph([x1], [lpPooled]);
         var code1 = new CSharpModelBuilder().BuildFullGraph(ToFastGraph(g1), "CovTest");
         Assert.Contains("LpPool(", code1);
         Assert.Contains(".float32().Vec()", code1);
@@ -392,7 +392,7 @@ public class CSharpModelBuilderCoverageTests
     {
         var shape = Vector(2L, 3L);
         var filled = OnnxOp.ConstantOfShape(shape, TensorData(DType.Float32, new long[] { 1 }, 7.0f));
-        var graph = new FastComputationGraph([], [filled]);
+        var graph = new InternalComputationGraph([], [filled]);
         var code = new CSharpModelBuilder().BuildFullGraph(ToFastGraph(graph), "CovTest");
         // ConstantOfShape's standard code template lowers to Tensor<T>.Fill(...).
         Assert.Contains(".Fill(", code);
@@ -418,7 +418,7 @@ public class CSharpModelBuilderCoverageTests
             OpCodes.CONSTANT, [],
             new object?[] { OnnxOpAttributeNames.AttrValueInts, new long[] { 10L, 20L, 30L } });
 
-        var graph = new FastComputationGraph(
+        var graph = new InternalComputationGraph(
             [], ImmutableArray.Create<Variable>(floats, ints));
         var code = new CSharpModelBuilder().BuildFullGraph(ToFastGraph(graph), "CovTest");
         Assert.Contains("Vector(", code);
@@ -446,7 +446,7 @@ public class CSharpModelBuilderCoverageTests
         var s3 = OnnxOp.Identity(s2, rank: null);
         var deepAt = OnnxOp.SequenceAt(s3, Scalar(0L));
 
-        var graph = new FastComputationGraph(
+        var graph = new InternalComputationGraph(
             [InputTensor<float32>("eltIn", rank: 2)],
             [deepAt]);
         var code = new CSharpModelBuilder().BuildFullGraph(ToFastGraph(graph), "CovTest");

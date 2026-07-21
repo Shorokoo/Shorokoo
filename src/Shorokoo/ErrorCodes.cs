@@ -694,6 +694,9 @@ namespace Shorokoo
         /// <summary>Self-contained ONNX export exceeds the protobuf 2 GB message ceiling</summary>
         public const string XD007 = "XD007";
 
+        /// <summary>SaveWithExternalData called on a graph that is not a concrete model</summary>
+        public const string XD008 = "XD008";
+
         #endregion
 
         #region AutoDiff Error Codes (AD001-AD025)

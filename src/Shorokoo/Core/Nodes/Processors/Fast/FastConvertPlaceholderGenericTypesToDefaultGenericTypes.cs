@@ -32,7 +32,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastConvertPlaceholderGenericTypesToDefaultGenericTypes
     {
-        public static void Process(FastComputationGraph graph, Dictionary<int, string> genericIndexToParamName)
+        public static void Process(InternalComputationGraph graph, Dictionary<int, string> genericIndexToParamName)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
             if (genericIndexToParamName.Count == 0) return;

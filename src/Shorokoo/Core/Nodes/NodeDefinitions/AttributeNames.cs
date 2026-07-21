@@ -307,5 +307,9 @@ public static class OnnxOpAttributeNames
     // TensorStruct metadata prefix - used to store TensorStructDef in model metadata
     // Format: "shrk_tensorstruct_{ProtoTypeNum}" -> JSON representation of TensorStructDef
     public const string ShrkMetaTensorStructDefPrefix = "shrk_tensorstruct_";
+
+    /// <summary>Model-level metadata prop carrying the graph's <c>GraphKind</c> (canonical
+    /// stage name, e.g. "concrete-model") so a serialized graph reloads as the same kind.</summary>
+    public const string ShrkMetaGraphKind = "shrk_graph_kind";
 }
 

@@ -35,7 +35,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// parameter, binding that parameter's initial value (and a zero gradient). Null when
         /// <see cref="StateCount"/> is 0.
         /// </summary>
-        public FastComputationGraph? StateInitGraph { get; }
+        public InternalComputationGraph? StateInitGraph { get; }
 
         /// <summary>Element type of each state tensor, in state order.</summary>
         public DType[] StateDTypes { get; }
@@ -46,7 +46,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         internal NormalizedOptimizerGraphInfo(
             int hyperparamCount,
             int stateCount,
-            FastComputationGraph? stateInitGraph,
+            InternalComputationGraph? stateInitGraph,
             DType[] stateDTypes,
             int?[] stateRanks)
         {
@@ -59,7 +59,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     }
 
     /// <summary>
-    /// Normalizes an optimizer <see cref="FastComputationGraph"/> from its authored form into the
+    /// Normalizes an optimizer <see cref="InternalComputationGraph"/> from its authored form into the
     /// explicit input/output convention the TrainingRig's per-parameter replay loop expects.
     ///
     /// <para>
@@ -89,7 +89,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastNormalizeOptimizerGraph
     {
-        public static NormalizedOptimizerGraphInfo Process(FastComputationGraph graph)
+        public static NormalizedOptimizerGraphInfo Process(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
             if (graph.Inputs.Count < 2)
@@ -169,7 +169,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // the graph outputs, and everything not feeding them is pruned. The initializer-arg
             // subgraphs (e.g. ShapeTensor(currentParam)) stay live, so the graph's inputs remain
             // the optimizer's original [hyperparams..., currentParam, grad].
-            FastComputationGraph? stateInitGraph = null;
+            InternalComputationGraph? stateInitGraph = null;
             if (stateNodes.Count > 0)
             {
                 stateInitGraph = graph.Clone();
@@ -381,10 +381,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// hyperparameter seed values, then the parameter's initial value, then a zero gradient)
         /// and returns the initial state values in state order. Mirrors
         /// <see cref="FastInitializeModelParams"/>: inputs are baked as constants and the
-        /// initializer FUNCTION_INVOKEs run through <see cref="ComputeContext.Run(FastComputationGraph, NamedModelParam[])"/>.
+        /// initializer FUNCTION_INVOKEs run through <see cref="ComputeContext.Run(InternalComputationGraph, NamedModelParam[])"/>.
         /// </summary>
         internal static TensorData[] RunStateInitGraph(
-            FastComputationGraph stateInitGraph,
+            InternalComputationGraph stateInitGraph,
             ComputeContext computeContext,
             TensorData[] boundInputs)
         {

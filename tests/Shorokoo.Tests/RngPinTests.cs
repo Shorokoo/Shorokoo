@@ -112,8 +112,8 @@ public class RngPinTests
 {
     private static (long firstParamOutFeatures, float[] output) Probe<TModule>()
     {
-        var g = (FastComputationGraph)typeof(TModule)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var g = ((ComputationGraph)typeof(TModule)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([1L, 4L], 0.1f, 0.2f, 0.3f, 0.4f);
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
 
@@ -161,8 +161,8 @@ public class RngPinTests
     [Fact]
     public void TestRngStreamReportDescribesStreamsAndEmitsPinSkeleton()
     {
-        var g = (FastComputationGraph)typeof(PinBaselineTwoLinears)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var g = ((ComputationGraph)typeof(PinBaselineTwoLinears)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([1L, 4L], 0.1f, 0.2f, 0.3f, 0.4f);
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
 
@@ -196,8 +196,8 @@ public class RngPinTests
     [Fact]
     public void TestRngStreamReportShowsLoopFeedSite()
     {
-        var g = (FastComputationGraph)typeof(RngRuntimeLoopFeed)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var g = ((ComputationGraph)typeof(RngRuntimeLoopFeed)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var x = TensorData([8L], new float[8]);
         var steps = TensorData(System.Array.Empty<long>(), 2L);
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps]));
@@ -235,8 +235,8 @@ public class RngPinTests
         // loop-body scope at their local slots. Previously an in-loop param — whose
         // realized ModelId carries no -1 — was mis-slotted to module scope under the
         // loop's own slot (an unusable handle) and its sibling iterations were dropped.
-        var g = (FastComputationGraph)typeof(RngRuntimeLoopParamAndFeed)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
+        var g = ((ComputationGraph)typeof(RngRuntimeLoopParamAndFeed)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var x = TensorData([8L], new float[8]);
         var steps = TensorData(System.Array.Empty<long>(), 2L);
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps]));

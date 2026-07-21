@@ -119,7 +119,7 @@ namespace Shorokoo
             if (ctx == null)
                 ctx = new ComputeContext();
 
-            var graph = new Shorokoo.Graph.FastComputationGraph([], [this]);
+            var graph = new Shorokoo.Graph.InternalComputationGraph([], [this]);
 
             return ctx.Execute(graph)[0].ToTensorData();
         }

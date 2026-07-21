@@ -62,7 +62,14 @@ namespace Shorokoo
         /// Builds a concrete inference model from this checkpoint's trained weights in one call,
         /// encapsulating the full <c>ToConcreteArchitecture → weights → ToConcreteModel</c> pipeline.
         /// </summary>
-        public FastComputationGraph ToInferenceModel(FastComputationGraph modelGraph, TensorData exampleInput)
+        public ComputationGraph ToInferenceModel(ComputationGraph modelGraph, TensorData exampleInput)
+        {
+            if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
+            var g = TrainingRig.RequireModelGraphKind(modelGraph, nameof(ToInferenceModel));
+            return new ComputationGraph(ToInferenceModelCore(g, exampleInput), GraphKind.ConcreteModel);
+        }
+
+        internal InternalComputationGraph ToInferenceModelCore(InternalComputationGraph modelGraph, TensorData exampleInput)
         {
             if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
             if (exampleInput is null) throw new ArgumentNullException(nameof(exampleInput));
@@ -257,10 +264,18 @@ namespace Shorokoo
     public class TrainingRig
     {
         /// <summary>
-        /// The lowered, executable computation graph for one training step.
+        /// The lowered, executable computation graph for one training step
+        /// (stamped <see cref="GraphKind.ConcreteModel"/> — fully lowered and runnable).
         /// Contains no embedded state — all state flows through inputs/outputs.
         /// </summary>
-        public FastComputationGraph TrainingStepPureGraph { get; private set; } = null!;
+        public ComputationGraph TrainingStepPureGraph { get; private set; } = null!;
+
+        /// <summary>
+        /// Construction-time working graph: built by <c>BuildTrainingStepPureGraph</c>,
+        /// optimized by <c>InitializeAndOptimize</c>, then relinquished into the readonly
+        /// <see cref="TrainingStepPureGraph"/> wrapper (and nulled — the wrapper owns it).
+        /// </summary>
+        private InternalComputationGraph? _trainingStepWorkGraph;
 
         /// <summary>Struct definition for trainable parameters.</summary>
         public TensorStructDef TrainableParamStructDef { get; private set; } = null!;
@@ -279,7 +294,7 @@ namespace Shorokoo
         /// ran. Held alongside <see cref="OptimizationResult"/> so the per-strategy
         /// improvement is measurable.
         /// </summary>
-        public FastComputationGraph PreOptimizationGraph { get; private set; } = null!;
+        public ComputationGraph PreOptimizationGraph { get; private set; } = null!;
 
         /// <summary>
         /// Compute time + peak memory the <see cref="GraphEvaluator"/> projected for the
@@ -372,7 +387,7 @@ namespace Shorokoo
         /// <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastNormalizeOptimizerGraph"/> from the
         /// optimizer's [StateInitializer] Init calls. Null for stateless optimizers.
         /// </summary>
-        private FastComputationGraph? _optimizerStateInitGraph;
+        private InternalComputationGraph? _optimizerStateInitGraph;
 
         /// <summary>
         /// Hyperparameter seed values (a schedule's step-0 value, or the baked constant), in
@@ -393,7 +408,7 @@ namespace Shorokoo
         /// killed by the sample input shape (e.g. inside a folded-out IfElse branch), and
         /// shape inference of the lowered training-step graph.
         /// </summary>
-        /// <param name="modelGraph">The model's FastComputationGraph (typically a source-generated module's static graph property)</param>
+        /// <param name="modelGraph">The model's InternalComputationGraph (typically a source-generated module's static graph property)</param>
         /// <param name="lossGraph">The loss function's computation graph (2 inputs: predictions, targets; 1 output: loss)</param>
         /// <param name="optimizerGraph">The optimizer's computation graph (inputs: hyperparams + param + grad; outputs: updated_param). Optimizer state is created inside the module body via optimizer-owned [StateInitializer] Init calls and updated via Globals.StateUpdate — never declared in the signature.</param>
         /// <param name="sampleInputs">Sample model inputs (one per model graph input) used to resolve parameter shapes and seed shape inference. Only the shapes matter, not the values.</param>
@@ -413,9 +428,9 @@ namespace Shorokoo
         /// </param>
         /// <returns>A configured TrainingRig ready for training</returns>
         public static TrainingRig FromScratch(
-            FastComputationGraph modelGraph,
-            FastComputationGraph lossGraph,
-            FastComputationGraph optimizerGraph,
+            ComputationGraph modelGraph,
+            ComputationGraph lossGraph,
+            ComputationGraph optimizerGraph,
             NamedModelParam[] sampleInputs,
             IOptimizerHyperparameters hyperparameters,
             RngConfig? rngConfig = null)
@@ -433,9 +448,9 @@ namespace Shorokoo
         /// graph fields fall back to <c>hyperparam_{i}</c> names since no names are supplied.
         /// </summary>
         public static TrainingRig FromScratch(
-            FastComputationGraph modelGraph,
-            FastComputationGraph lossGraph,
-            FastComputationGraph optimizerGraph,
+            ComputationGraph modelGraph,
+            ComputationGraph lossGraph,
+            ComputationGraph optimizerGraph,
             NamedModelParam[] sampleInputs,
             params HyperValue[] hyperparameters)
             => FromScratchCore(modelGraph, lossGraph, optimizerGraph, sampleInputs, hyperparameters,
@@ -446,9 +461,9 @@ namespace Shorokoo
         /// the hyperparameter values because a <c>params</c> array must come last.
         /// </summary>
         public static TrainingRig FromScratch(
-            FastComputationGraph modelGraph,
-            FastComputationGraph lossGraph,
-            FastComputationGraph optimizerGraph,
+            ComputationGraph modelGraph,
+            ComputationGraph lossGraph,
+            ComputationGraph optimizerGraph,
             NamedModelParam[] sampleInputs,
             RngConfig? rngConfig,
             params HyperValue[] hyperparameters)
@@ -462,9 +477,9 @@ namespace Shorokoo
         /// without constructing <see cref="TensorDataModelParam"/> objects by hand.
         /// </summary>
         public static TrainingRig FromScratch(
-            FastComputationGraph modelGraph,
-            FastComputationGraph lossGraph,
-            FastComputationGraph optimizerGraph,
+            ComputationGraph modelGraph,
+            ComputationGraph lossGraph,
+            ComputationGraph optimizerGraph,
             ModelParamList sampleInputs,
             IOptimizerHyperparameters hyperparameters,
             RngConfig? rngConfig = null)
@@ -479,9 +494,9 @@ namespace Shorokoo
         /// with positional hyperparameter values.
         /// </summary>
         public static TrainingRig FromScratch(
-            FastComputationGraph modelGraph,
-            FastComputationGraph lossGraph,
-            FastComputationGraph optimizerGraph,
+            ComputationGraph modelGraph,
+            ComputationGraph lossGraph,
+            ComputationGraph optimizerGraph,
             ModelParamList sampleInputs,
             params HyperValue[] hyperparameters)
         {
@@ -495,9 +510,9 @@ namespace Shorokoo
         /// positional hyperparameter values (the config precedes the <c>params</c> array).
         /// </summary>
         public static TrainingRig FromScratch(
-            FastComputationGraph modelGraph,
-            FastComputationGraph lossGraph,
-            FastComputationGraph optimizerGraph,
+            ComputationGraph modelGraph,
+            ComputationGraph lossGraph,
+            ComputationGraph optimizerGraph,
             ModelParamList sampleInputs,
             RngConfig? rngConfig,
             params HyperValue[] hyperparameters)
@@ -508,9 +523,9 @@ namespace Shorokoo
         }
 
         private static TrainingRig FromScratchCore(
-            FastComputationGraph modelGraph,
-            FastComputationGraph lossGraph,
-            FastComputationGraph optimizerGraph,
+            ComputationGraph modelGraph,
+            ComputationGraph lossGraph,
+            ComputationGraph optimizerGraph,
             NamedModelParam[] sampleInputs,
             HyperValue[] hyperparameters,
             IReadOnlyList<string>? names,
@@ -519,6 +534,49 @@ namespace Shorokoo
             if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
             if (lossGraph is null) throw new ArgumentNullException(nameof(lossGraph));
             if (optimizerGraph is null) throw new ArgumentNullException(nameof(optimizerGraph));
+
+            // The model position takes a module graph or an already-lowered concrete
+            // architecture (the concretization pipeline is idempotent on the latter, so
+            // callers that lowered once — e.g. to inspect parameters — need not redo it);
+            // a weight-filled concrete model is refused up front. Loss and optimizer are
+            // composed as module bodies and must be module graphs.
+            var model = RequireModelGraphKind(modelGraph, "TrainingRig.FromScratch (modelGraph)");
+            lossGraph.RequireKind(GraphKind.Module, "TrainingRig.FromScratch (lossGraph)",
+                "Pass the loss module graph (e.g. Losses.L2Loss).");
+            optimizerGraph.RequireKind(GraphKind.Module, "TrainingRig.FromScratch (optimizerGraph)",
+                "Pass the optimizer module graph (e.g. Optimizers.Adam).");
+            return FromScratchInternal(model, lossGraph.ToInternal(), optimizerGraph.ToInternal(),
+                sampleInputs, hyperparameters, names, rngConfig);
+        }
+
+        /// <summary>
+        /// The model-graph precondition shared by <see cref="FromScratch(ComputationGraph,
+        /// ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?)"/>
+        /// and <see cref="TrainingCheckpoint.ToInferenceModel"/>: a module graph or an
+        /// already-lowered concrete architecture (both feed the idempotent
+        /// <c>ToConcreteArchitecture</c> pipeline). A weight-filled concrete model is
+        /// refused — its parameters are already materialized as values, so there is
+        /// nothing left to discover or initialize.
+        /// </summary>
+        internal static InternalComputationGraph RequireModelGraphKind(ComputationGraph modelGraph, string operation)
+        {
+            if (modelGraph.Kind is GraphKind.Module or GraphKind.ConcreteArchitecture)
+                return modelGraph.ToInternal();
+            throw new InvalidOperationException(Shorokoo.Core.Utils.SrkFileFormat.KindMismatchMessage(
+                operation, "a 'module' or 'concrete-architecture' model graph", modelGraph.Kind,
+                "Its parameters are already materialized as values; pass the module graph " +
+                "(e.g. MyModel.ComputationGraph) or its ToConcreteArchitecture result instead."));
+        }
+
+        private static TrainingRig FromScratchInternal(
+            InternalComputationGraph modelGraph,
+            InternalComputationGraph lossGraph,
+            InternalComputationGraph optimizerGraph,
+            NamedModelParam[] sampleInputs,
+            HyperValue[] hyperparameters,
+            IReadOnlyList<string>? names,
+            RngConfig? rngConfig)
+        {
             if (sampleInputs is null) throw new ArgumentNullException(nameof(sampleInputs));
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
             if (names is not null && names.Count != hyperparameters.Length)
@@ -568,9 +626,9 @@ namespace Shorokoo
         /// 5. Lower to an executable graph (expand structs, process autograd, simplify)
         /// </summary>
         private void BuildTrainingStepPureGraph(
-            FastComputationGraph concreteArch,
-            FastComputationGraph lossGraph,
-            FastComputationGraph optimizerGraph,
+            InternalComputationGraph concreteArch,
+            InternalComputationGraph lossGraph,
+            InternalComputationGraph optimizerGraph,
             HyperValue[] hyperparameters,
             IReadOnlyList<string>? hyperparamNames)
         {
@@ -580,7 +638,8 @@ namespace Shorokoo
             // into the explicit multi-output convention [updated_param, updated_state_0, ...]
             // expected by the replay loop. The split-off state-init graph computes the initial
             // state values (per trainable parameter) in InitializeAndOptimize.
-            var optimizerFastGraph = optimizerGraph.Clone();
+            // FromScratchInternal hands in an owned thawed copy — normalize it in place.
+            var optimizerFastGraph = optimizerGraph;
             var optimizerInfo = Shorokoo.Core.Nodes.Processors.Fast.FastNormalizeOptimizerGraph.Process(optimizerFastGraph);
             _optimizerStateInitGraph = optimizerInfo.StateInitGraph;
             _hyperparamSeedValues = hyperparameters.Select(h => h.InitialValue).ToArray();
@@ -898,14 +957,14 @@ namespace Shorokoo
             // Step 10: lower to an executable form. LowerGraph runs its Fast pipeline
             // in place on fastTraining and returns the same graph for the public-facing
             // TrainingStepPureGraph property.
-            TrainingStepPureGraph = LowerGraph(fastTraining);
+            _trainingStepWorkGraph = LowerGraph(fastTraining);
 
             UpdatedParamFieldCount = TrainableParamStructDef.Fields.Length;
             UpdatedStateFieldCount = ModelStateDef.Fields.Length;
             UpdatedOptimizerStateFieldCount = OptimizerStateDef.Fields.Length;
         }
 
-        private static Dictionary<FastTensorKey, FastNode> BuildProducerByOutputMap(FastComputationGraph graph)
+        private static Dictionary<FastTensorKey, FastNode> BuildProducerByOutputMap(InternalComputationGraph graph)
         {
             var map = new Dictionary<FastTensorKey, FastNode>();
             foreach (var node in graph.Nodes)
@@ -923,7 +982,7 @@ namespace Shorokoo
         }
 
         private static TensorStructDef? ReadStructDefFromInput(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             Dictionary<FastTensorKey, FastNode> producerByOutput,
             FastTensorKey inputKey)
         {
@@ -947,7 +1006,7 @@ namespace Shorokoo
         /// loop over trainable parameters (e.g. ResNet residual stacks) must be flattened before
         /// the autograd pass runs.
         /// </summary>
-        private static FastComputationGraph LowerGraph(FastComputationGraph fast)
+        private static InternalComputationGraph LowerGraph(InternalComputationGraph fast)
         {
             // Expand TensorStruct outputs into individual field outputs.
             Shorokoo.Core.Nodes.Processors.Fast.FastExpandStructOutputs.Process(fast);
@@ -991,7 +1050,7 @@ namespace Shorokoo
         /// <param name="checkpoint">Current training state (params, model state, optimizer state, step)</param>
         /// <param name="trainingInput">Training input data as TensorDataStruct</param>
         /// <param name="trainingOutput">Training target data as TensorDataStruct</param>
-        /// <param name="compiled">Compiled training step graph (from <see cref="ComputeContext.Compile"/>)</param>
+        /// <param name="compiled">Compiled training step graph (from <see cref="ComputeContext.Compile(ComputationGraph)"/>)</param>
         /// <returns>Result containing the advanced checkpoint and loss value</returns>
         public TrainingStepResult TrainStep(
             TrainingCheckpoint checkpoint,
@@ -1016,7 +1075,7 @@ namespace Shorokoo
         /// <param name="hyperparams">Values for all dynamic hyperparameters (<see cref="HyperparamStructDef"/> order).</param>
         /// <param name="trainingInput">Training input data as TensorDataStruct</param>
         /// <param name="trainingOutput">Training target data as TensorDataStruct</param>
-        /// <param name="compiled">Compiled training step graph (from <see cref="ComputeContext.Compile"/>)</param>
+        /// <param name="compiled">Compiled training step graph (from <see cref="ComputeContext.Compile(ComputationGraph)"/>)</param>
         /// <returns>Result containing the advanced checkpoint and loss value</returns>
         public TrainingStepResult TrainStep(
             TrainingCheckpoint checkpoint,
@@ -1186,7 +1245,7 @@ namespace Shorokoo
             => Train(initialCheckpoint ?? CreateDefaultCheckpoint(), trainingInputs, trainingOutputs, numEpochs, ctx ?? ComputeContext.Default);
 
         /// <summary>
-        /// Returns the default initial checkpoint produced at <see cref="FromScratch(FastComputationGraph, FastComputationGraph, FastComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?)"/> time.
+        /// Returns the default initial checkpoint produced at <see cref="FromScratch(ComputationGraph, ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?)"/> time.
         /// Trainable parameters and model state were initialized from the model's built-in
         /// initializers, and optimizer state from the optimizer's [StateInitializer]s (run once
         /// per trainable parameter). This is pure packaging — no computation happens here.
@@ -1282,7 +1341,7 @@ namespace Shorokoo
         /// graph.
         /// </summary>
         private void InitializeAndOptimize(
-            FastComputationGraph concreteArch,
+            InternalComputationGraph concreteArch,
             NamedModelParam[] sampleInputs,
             ComputeContext ctx,
             RngConfig? rngConfig = null)
@@ -1375,7 +1434,7 @@ namespace Shorokoo
             // Step 3: Assemble inputs in TrainingStepPureGraph order.
             // Layout: [param_fields, state_fields, opt_state_fields, hyperparam_fields, model_input_fields, target_fields].
             // Current losses (L2, CE) use a single Tensor target, so target_field_count is 1.
-            var graph = TrainingStepPureGraph;
+            var graph = _trainingStepWorkGraph!;
             const int targetFieldCount = 1;
             var expectedModelInputFields =
                 graph.Inputs.Count
@@ -1426,10 +1485,15 @@ namespace Shorokoo
             var baselineEval = new Shorokoo.Core.AutoDiffCheckpointing.GraphEvaluator().Evaluate(graph, shapeInfo);
             var optimizer = new MemoryAwareGraphOptimizer(shapeInference: shapeInferencer);
             var optResult = optimizer.OptimizeWithShapeInfo(graph, shapeInfo);
-            PreOptimizationGraph = graph;
             PreOptimizationEval = baselineEval;
             OptimizationResult = optResult;
-            TrainingStepPureGraph = optResult.OptimizedGraph;
+
+            // Freeze the public views: the working graphs are relinquished into the
+            // readonly wrappers, which own them exclusively from here on (the rig
+            // compiles through the wrappers, which copy).
+            PreOptimizationGraph = new ComputationGraph(graph, GraphKind.ConcreteModel);
+            TrainingStepPureGraph = new ComputationGraph(optResult.OptimizedGraph, GraphKind.ConcreteModel);
+            _trainingStepWorkGraph = null;
         }
     }
 }

@@ -70,9 +70,9 @@ Each hyperparameter property is a `HyperValue`; its *kind* — not a separate fl
 
 ```csharp
 public static TrainingRig FromScratch(
-    FastComputationGraph modelGraph,
-    FastComputationGraph lossGraph,
-    FastComputationGraph optimizerGraph,
+    ComputationGraph modelGraph,      // GraphKind.Module, or a ToConcreteArchitecture result
+    ComputationGraph lossGraph,       // kind must be GraphKind.Module
+    ComputationGraph optimizerGraph,  // kind must be GraphKind.Module
     NamedModelParam[] sampleInputs,            // names + sample shapes for model inputs
     IOptimizerHyperparameters hyperparameters, // named set, e.g. new AdamWOptimizerHyperparameters { ... }
     RngConfig? rngConfig = null);              // seeds the run — see "Seeding the run" below

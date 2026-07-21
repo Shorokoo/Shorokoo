@@ -28,14 +28,14 @@ namespace Shorokoo.Graph
     /// drives the FastCG processor pipeline directly; the legacy CG wrapper is
     /// never materialized.
     /// </summary>
-    public static class FastComputationGraphExtensions
+    public static class InternalComputationGraphExtensions
     {
         /// <summary>
         /// Lowers a module graph to a <b>concrete architecture</b>: inlines every sub-module and
         /// function, resolves identifier templates, converts trainable-parameter references, unpacks
         /// model/tensor structs, lowers variant ops, and runs autodiff-ready simplification — so that
         /// every trainable parameter becomes visible at the top level. This is the prerequisite step
-        /// for <see cref="ToConcreteModel(FastComputationGraph)"/>, <see cref="InitializeTrainableParams"/>,
+        /// for <see cref="ToConcreteModel(InternalComputationGraph)"/>, <see cref="InitializeTrainableParams"/>,
         /// and <see cref="GetConcreteModelParamInfos"/>.
         ///
         /// <para><b>The concreteness contract: static ModelIds.</b> After this call, every
@@ -57,8 +57,8 @@ namespace Shorokoo.Graph
         /// <param name="computeContext">Optional context used to resolve values while lowering.</param>
         /// <param name="debugRequests">Optional hook to dump the graph at each lowering stage.</param>
         /// <returns>A fully inlined, concrete architecture graph.</returns>
-        public static FastComputationGraph ToConcreteArchitecture(
-            this FastComputationGraph graph,
+        internal static InternalComputationGraph ToConcreteArchitecture(
+            this InternalComputationGraph graph,
             ModelParamList inputHints,
             ComputeContext? computeContext = null,
             DebugRequests? debugRequests = null)
@@ -165,7 +165,7 @@ namespace Shorokoo.Graph
         /// <param name="graph">The graph to specialize (e.g. a concrete model or architecture).</param>
         /// <param name="inputValues">
         /// Values to bake in, matched by name against
-        /// <see cref="FastComputationGraph.InputUniqueNames"/>. Build one with
+        /// <see cref="InternalComputationGraph.InputUniqueNames"/>. Build one with
         /// <see cref="FromOrderedInputs"/> when the names match positional order. Names that have
         /// no corresponding graph input, and non-tensor entries (sequences, structs), are silently
         /// ignored.
@@ -174,8 +174,8 @@ namespace Shorokoo.Graph
         /// A new, constant-folded graph with the named inputs replaced by constants and removed
         /// from the graph's input list.
         /// </returns>
-        public static FastComputationGraph Specialize(
-            this FastComputationGraph graph,
+        internal static InternalComputationGraph Specialize(
+            this InternalComputationGraph graph,
             ModelParamList inputValues)
         {
             var fastGraph = graph.Clone();
@@ -240,7 +240,7 @@ namespace Shorokoo.Graph
         /// architecture from <see cref="ToConcreteArchitecture"/>.
         /// </summary>
         /// <returns>A concrete model graph with default weights, ready to execute.</returns>
-        public static FastComputationGraph ToConcreteModel(this FastComputationGraph graph)
+        internal static InternalComputationGraph ToConcreteModel(this InternalComputationGraph graph)
         {
             var defaultTrainableParams = graph.InitializeTrainableParams();
             return graph.ToConcreteModel(defaultTrainableParams);
@@ -253,7 +253,7 @@ namespace Shorokoo.Graph
         /// same-shape parameters get distinct values and initialization is reproducible for
         /// a config. Requires a concrete architecture from <see cref="ToConcreteArchitecture"/>.
         /// </summary>
-        public static FastComputationGraph ToConcreteModel(this FastComputationGraph graph, RngConfig rngConfig)
+        internal static InternalComputationGraph ToConcreteModel(this InternalComputationGraph graph, RngConfig rngConfig)
         {
             var defaultTrainableParams = graph.InitializeTrainableParams(rngConfig: rngConfig);
             var concrete = graph.ToConcreteModel(defaultTrainableParams);
@@ -274,7 +274,7 @@ namespace Shorokoo.Graph
         /// object. Works on any graph concretized by <c>ToConcreteArchitecture</c>: a concrete
         /// architecture, a concrete model, or a training-rig step graph.
         /// </summary>
-        public static void ApplyRngConfig(this FastComputationGraph graph, RngConfig rngConfig)
+        internal static void ApplyRngConfig(this InternalComputationGraph graph, RngConfig rngConfig)
             => FastBindRngConfig.Process(graph, rngConfig);
 
         /// <summary>
@@ -283,7 +283,7 @@ namespace Shorokoo.Graph
         /// initializer). Null when the graph has no runtime random surface or no identity is
         /// bound yet. See <c>Core.Rng.RngRuntimeIdentity</c> for the encoding.
         /// </summary>
-        public static long[]? TryGetRngSeed(this FastComputationGraph graph)
+        internal static long[]? TryGetRngSeed(this InternalComputationGraph graph)
         {
             var node = FastWireRngKeyDerivation.FindRngSeedNode(graph);
             if (node is null || node.OpCode != InternalOpCodes.MODEL_PARAM_DATA) return null;
@@ -303,8 +303,8 @@ namespace Shorokoo.Graph
         /// <param name="trainableParamValues">Values to bind (e.g. loaded from a SafeTensors file).</param>
         /// <param name="frameworkId">Naming convention of the value names; defaults to <c>FrameworkId.Shorokoo</c>.</param>
         /// <returns>A concrete model graph with the supplied weights bound by name.</returns>
-        public static FastComputationGraph ToConcreteModel(
-            this FastComputationGraph graph,
+        internal static InternalComputationGraph ToConcreteModel(
+            this InternalComputationGraph graph,
             ModelParamList trainableParamValues,
             FrameworkId? frameworkId = null)
         {
@@ -332,8 +332,8 @@ namespace Shorokoo.Graph
         /// <param name="trainableParamValues">Values to bind.</param>
         /// <param name="namingScheme">Maps each value's name to a graph ModelId.</param>
         /// <returns>A concrete model graph with the supplied weights bound by name.</returns>
-        public static FastComputationGraph ToConcreteModel(
-            this FastComputationGraph graph,
+        internal static InternalComputationGraph ToConcreteModel(
+            this InternalComputationGraph graph,
             ModelParamList trainableParamValues,
             ModuleParamSetNamingScheme namingScheme)
         {
@@ -370,10 +370,10 @@ namespace Shorokoo.Graph
         /// concrete architecture from <see cref="ToConcreteArchitecture"/> (throws otherwise, because
         /// parameters nested inside un-inlined sub-functions would be missed).
         /// </summary>
-        public static ConcreteModelParamInfos GetConcreteModelParamInfos(this FastComputationGraph graph)
+        internal static ConcreteModelParamInfos GetConcreteModelParamInfos(this InternalComputationGraph graph)
         {
             AssertConcreteArchitecture(graph, nameof(GetConcreteModelParamInfos));
-            var nodes = FastComputationGraphConverter.BuildNodes(graph).nodesInTopoOrder;
+            var nodes = InternalComputationGraphConverter.BuildNodes(graph).nodesInTopoOrder;
             var infos = nodes.Where(x => x.OpCode == InternalOpCodes.MODEL_PARAM)
                 // The RngSeed parameter at reserved ModelId [0] is the model's RNG identity,
                 // not a weight: it has no initializer to run, no name to bind values by, and
@@ -387,7 +387,7 @@ namespace Shorokoo.Graph
 
         /// <summary>
         /// Runs each trainable parameter's initializer to produce its default values, named via the
-        /// given scheme (default: Shorokoo's). This is what <see cref="ToConcreteModel(FastComputationGraph)"/>
+        /// given scheme (default: Shorokoo's). This is what <see cref="ToConcreteModel(InternalComputationGraph)"/>
         /// binds when called with no values. Requires a concrete architecture from
         /// <see cref="ToConcreteArchitecture"/>.
         /// </summary>
@@ -408,8 +408,8 @@ namespace Shorokoo.Graph
         /// to deliberately re-key.
         /// </param>
         /// <returns>The default trainable-parameter values, named.</returns>
-        public static ModelParamList InitializeTrainableParams(
-            this FastComputationGraph graph,
+        internal static ModelParamList InitializeTrainableParams(
+            this InternalComputationGraph graph,
             ModuleParamSetNamingScheme? namingScheme = null,
             ComputeContext? computeContext = null,
             RngConfig? rngConfig = null)
@@ -444,81 +444,11 @@ namespace Shorokoo.Graph
         }
 
         /// <summary>
-        /// Re-initializes a <b>concrete model's</b> trainable parameters in place under a new
-        /// RNG identity: re-runs each trainable parameter's initializer with an in-graph draw keyed
-        /// by <paramref name="rngConfig"/>'s init collection (validating
-        /// <see cref="RngCollection.Params"/> overrides against the parameter inventory
-        /// exactly as at first initialization) and overwrites the parameter values — bit-exact
-        /// with a fresh build under the same config. An explicit opt-in: it overwrites trained
-        /// weights. Model state (e.g. the RNG execution counter) and the model's runtime RNG
-        /// identity are untouched — re-keying the runtime feeds is a separate, equally explicit
-        /// <see cref="ApplyRngConfig"/> call.
-        ///
-        /// <para>Fails loudly when the parameter inventory needed for keyed initialization —
-        /// the source architecture with its initializer functions — is unavailable: the
-        /// inventory is in-memory only (initializers are not persisted), so a loaded model
-        /// cannot be re-initialized in place; rebuild from its architecture instead.</para>
-        /// </summary>
-        public static void ReinitializeTrainableParams(
-            this FastComputationGraph graph, RngConfig rngConfig)
-        {
-            if (rngConfig is null) throw new System.ArgumentNullException(nameof(rngConfig));
-            var arch = graph.SourceArchitecture
-                ?? throw new System.InvalidOperationException(
-                    "ReinitializeTrainableParams: this graph carries no parameter inventory " +
-                    "for keyed initialization (no source architecture with initializer " +
-                    "functions). The inventory is in-memory only — a loaded model cannot be " +
-                    "re-initialized in place. Rebuild the concrete model from its " +
-                    "architecture (ToConcreteArchitecture + ToConcreteModel) under the new " +
-                    "config instead.");
-
-            // Freshly initialized values under the new identity — the exact first-init code
-            // path (per-parameter keyed in-graph draw, Params-override validation included), so
-            // the result is bit-exact with a fresh build under the same config.
-            var paramInfos = arch.GetConcreteModelParamInfos();
-            var initialized = FastInitializeModelParams.Process(
-                arch, ComputeContext.Default, rngConfig, paramInfos);
-
-            // Index this model's parameter-data nodes by their specific ModelId.
-            var dataNodesById = new Dictionary<ModelId, FastNode>();
-            foreach (var node in graph.Nodes)
-            {
-                if (node.OpCode != InternalOpCodes.MODEL_PARAM_DATA) continue;
-                if (node.IdentifierTemplate is not { } template) continue;
-                var parsed = new ModelParamIdentifierTemplate(template);
-                dataNodesById[parsed.SpecificModelId] = node;
-            }
-
-            var trainableIds = paramInfos.ParamInfos
-                .Where(p => dataNodesById.TryGetValue(p.ModelId, out var n)
-                            && (n.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsTrainable) ?? false))
-                .Select(p => p.ModelId)
-                .ToList();
-            if (trainableIds.Count == 0)
-                throw new System.InvalidOperationException(
-                    "ReinitializeTrainableParams: no trainable parameter of the source " +
-                    "architecture resolves to a trainable MODEL_PARAM_DATA node of this graph " +
-                    "— this graph is not a concrete model of that architecture.");
-
-            var dataAttrDefs = Definitions.NodeDefinitions[InternalOpCodes.MODEL_PARAM_DATA].AttributeDefs;
-            foreach (var id in trainableIds)
-            {
-                var node = dataNodesById[id];
-                node.Attributes = OnnxCSharpAttributes.FromCSharpVals(
-                    new Dictionary<string, object?>
-                    {
-                        [OnnxOpAttributeNames.ShrkAttrTensorData] = initialized[id],
-                        [OnnxOpAttributeNames.ShrkAttrIsTrainable] = true,
-                    }, dataAttrDefs);
-            }
-        }
-
-        /// <summary>
         /// Builds the <see cref="ModelIdNamingScheme"/> for this concrete architecture's parameters
         /// under Shorokoo's own naming convention — the basis for remapping third-party weight names
         /// onto the graph's parameter ids.
         /// </summary>
-        public static ModelIdNamingScheme GetShorokooIdNamingScheme(this FastComputationGraph graph)
+        internal static ModelIdNamingScheme GetShorokooIdNamingScheme(this InternalComputationGraph graph)
             => ModelIdNamingScheme.CreateShorokooNamingScheme(graph.GetConcreteModelParamInfos());
 
         /// <summary>
@@ -529,8 +459,8 @@ namespace Shorokoo.Graph
         /// emits the sparse <c>Rng.Pin</c> skeleton (see <see cref="RngStreamReport.EmitPinSkeleton"/>).
         /// Requires a concrete architecture from <see cref="ToConcreteArchitecture"/>.
         /// </summary>
-        public static RngStreamReport GetRngStreamReport(
-            this FastComputationGraph graph, RngConfig? rngConfig = null)
+        internal static RngStreamReport GetRngStreamReport(
+            this InternalComputationGraph graph, RngConfig? rngConfig = null)
         {
             var streams = new List<RngStreamInfo>();
 
@@ -609,33 +539,33 @@ namespace Shorokoo.Graph
         /// <param name="graph">The graph whose input names to pair with the values.</param>
         /// <param name="inputValues">Input values in the same order as the graph's declared inputs.</param>
         /// <returns>The inputs as a named <see cref="ModelParamList"/>.</returns>
-        public static ModelParamList FromOrderedInputs(this FastComputationGraph graph, ImmutableArray<TensorData> inputValues)
+        internal static ModelParamList FromOrderedInputs(this InternalComputationGraph graph, ImmutableArray<TensorData> inputValues)
         {
             return new ModelParamList(graph.InputUniqueNames.Zip(inputValues)
                 .Select(x => new TensorDataModelParam(x.First.AssertNotNull(), ModelParamType.InputParam, x.Second)));
         }
 
         /// <summary>Returns every node of the graph in topological (dependency) order.</summary>
-        public static ImmutableArray<Node> GetAllNodes(this FastComputationGraph graph)
-            => FastComputationGraphConverter.BuildNodes(graph).nodesInTopoOrder;
+        public static ImmutableArray<Node> GetAllNodes(this InternalComputationGraph graph)
+            => InternalComputationGraphConverter.BuildNodes(graph).nodesInTopoOrder;
 
         /// <summary>
         /// Returns the nodes that link a state variable to its per-step updated value — i.e. the
         /// <c>Globals.StateUpdate(state, newValue)</c> registrations in the graph.
         /// </summary>
-        public static ImmutableArray<Node> GetStateUpdateLinkNodes(this FastComputationGraph graph)
+        public static ImmutableArray<Node> GetStateUpdateLinkNodes(this InternalComputationGraph graph)
             => graph.GetAllNodes().Where(x => x.IsStateUpdateLink).ToImmutableArray();
 
         /// <summary>Returns the nodes carrying state dependencies (those threaded through state updates).</summary>
-        public static ImmutableArray<Node> GetWithStateDepsNodes(this FastComputationGraph graph)
+        public static ImmutableArray<Node> GetWithStateDepsNodes(this InternalComputationGraph graph)
             => graph.GetAllNodes().Where(x => x.IsWithStateDeps).ToImmutableArray();
 
         /// <summary>The number of state-update outputs in the graph (one per <c>StateUpdate</c> registration).</summary>
-        public static int GetStateUpdateOutputCount(this FastComputationGraph graph)
+        public static int GetStateUpdateOutputCount(this InternalComputationGraph graph)
             => graph.GetStateUpdateLinkNodes().Length;
 
         /// <summary>Returns each state update as an <c>(original, updated)</c> variable pair.</summary>
-        public static ImmutableArray<(Variable original, Variable updated)> GetStateUpdatePairs(this FastComputationGraph graph)
+        public static ImmutableArray<(Variable original, Variable updated)> GetStateUpdatePairs(this InternalComputationGraph graph)
             => graph.GetStateUpdateLinkNodes()
                 .Select(node => (original: node.Inputs[0]!, updated: node.Inputs[1]!))
                 .ToImmutableArray();
@@ -643,14 +573,14 @@ namespace Shorokoo.Graph
         /// <summary>Returns the non-trainable model-parameter data nodes (e.g. state buffers),
         /// excluding trainable parameters — and the RngSeed parameter (the model's RNG
         /// identity, at reserved ModelId [0]), which is non-trainable data but not state.</summary>
-        public static ImmutableArray<Node> GetStateParamDataNodes(this FastComputationGraph graph)
+        public static ImmutableArray<Node> GetStateParamDataNodes(this InternalComputationGraph graph)
             => graph.GetAllNodes()
                 .Where(x => x.IsModelParamData && !x.GetIsTrainable()
                     && x.IdentifierTemplate?.ToString() != FastWireRngKeyDerivation.RngSeedIdentifierTemplate)
                 .ToImmutableArray();
 
         /// <summary>Returns the distinct model-parameter identifier templates referenced by the graph.</summary>
-        public static ImmutableArray<ModelParamIdentifierTemplate> GetModelParamIdentifierTemplates(this FastComputationGraph graph)
+        public static ImmutableArray<ModelParamIdentifierTemplate> GetModelParamIdentifierTemplates(this InternalComputationGraph graph)
             => graph.GetAllNodes()
                 .Select(x => x.IdentifierTemplate)
                 .NotNulls()
@@ -664,7 +594,7 @@ namespace Shorokoo.Graph
         /// <param name="graph">The graph to emit as C#.</param>
         /// <param name="filename">Destination path for the generated C# file.</param>
         /// <returns>The path written (same as <paramref name="filename"/>).</returns>
-        public static string SaveToCSharp(this FastComputationGraph graph, string filename)
+        internal static string SaveToCSharp(this InternalComputationGraph graph, string filename)
         {
             if (File.Exists(filename))
                 File.Delete(filename);
@@ -685,7 +615,7 @@ namespace Shorokoo.Graph
             return filename;
         }
 
-        private static void DebugPrintFast(FastComputationGraph fastGraph, DebugRequests? debugRequests, GraphCreationPoint point)
+        private static void DebugPrintFast(InternalComputationGraph fastGraph, DebugRequests? debugRequests, GraphCreationPoint point)
         {
             if (debugRequests is null) return;
             debugRequests.PrintDebug(fastGraph, point);
@@ -697,7 +627,7 @@ namespace Shorokoo.Graph
         /// inside sub-functions and would be silently missed, so require a concrete architecture
         /// (produced by <see cref="ToConcreteArchitecture"/>) instead of returning an empty set.
         /// </summary>
-        private static void AssertConcreteArchitecture(FastComputationGraph graph, string operation)
+        private static void AssertConcreteArchitecture(InternalComputationGraph graph, string operation)
         {
             var invokeOps = new HashSet<string> { InternalOpCodes.MODEL_INVOKE, InternalOpCodes.FUNCTION_INVOKE };
             var invokeCount = graph.Nodes.Count(n => invokeOps.Contains(n.OpCode));
@@ -711,14 +641,14 @@ namespace Shorokoo.Graph
                 + "first, then run this on the returned graph.");
         }
 
-        private static void AssertFastGraphDoesNotContainOps(FastComputationGraph fastGraph, string[] forbiddenOps, string stageName)
+        private static void AssertFastGraphDoesNotContainOps(InternalComputationGraph fastGraph, string[] forbiddenOps, string stageName)
         {
             var forbiddenSet = new HashSet<string>(forbiddenOps);
             var found = fastGraph.Nodes.Where(n => forbiddenSet.Contains(n.OpCode)).ToList();
             if (found.Count == 0) return;
 
             var errorMsg = new System.Text.StringBuilder();
-            errorMsg.AppendLine($"FastComputationGraph: {stageName} left forbidden ops in the graph:");
+            errorMsg.AppendLine($"InternalComputationGraph: {stageName} left forbidden ops in the graph:");
             foreach (var node in found.Take(10))
                 errorMsg.AppendLine($"  {node.OpCode} (Key={node.Key})");
             if (found.Count > 10)

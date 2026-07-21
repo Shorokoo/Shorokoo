@@ -6,7 +6,7 @@ using Shorokoo.Graph;
 
 namespace Shorokoo.Graph
 {
-    public partial class FastComputationGraph
+    public partial class InternalComputationGraph
     {
         /// <summary>
         /// Reorders <see cref="Nodes"/> so that, for every (LOOP_OPEN, LOOP_CLOSE)

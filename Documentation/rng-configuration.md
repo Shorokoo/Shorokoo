@@ -43,7 +43,7 @@ path — the fold described above, spelled out as graph ops.
 - `ToConcreteArchitecture` creates the value-less `RngSeed` parameter (if — and only if —
   the model has at least one runtime random feed) and wires each feed's derivation chain,
   exactly as it realizes the model's parameters.
-- Binding a config (`ToConcreteModel(config)` / `ApplyRngConfig`) validates it against the
+- Binding a config (`ToConcreteModel(config)` / `WithRngConfig`) validates it against the
   model's random surface and **is the `RngSeed` parameter's initialization**: it writes the
   identity value, the same way `ToConcreteModel` fills weights.
 
@@ -55,13 +55,20 @@ re-derives from it, trained or loaded weights are untouched:
 
 ```csharp
 var concrete = arch.ToConcreteModel(new RngConfig { MasterSeed = 1 });
-// ... later: same model object, different randomness — exact, not approximate.
-concrete.ApplyRngConfig(new RngConfig { MasterSeed = 2 });
+// ... later: same weights, different randomness — exact, not approximate.
+// (ComputationGraphs are readonly: WithRngConfig returns the re-keyed copy.)
+concrete = concrete.WithRngConfig(new RngConfig { MasterSeed = 2 });
 ```
 
 Re-applying the original config restores the original draws bit-for-bit — and because the
 saved model keeps the symbolic derivation chains, this holds equally on a **loaded** model:
-load, `ApplyRngConfig`, and every draw is re-keyed by construction.
+load, `WithRngConfig`, and every draw is re-keyed by construction.
+
+Re-binding never touches **weights**. To re-initialize the trainable parameters under a
+different seed, hold on to the concrete architecture and rebuild from it —
+`arch.ToConcreteModel(new RngConfig { MasterSeed = … })` — which re-runs every
+parameter's keyed initializer; there is no in-place weight re-initialization on a
+built model (its initializer functions are gone once values are bound).
 
 **Randomness survives save/load.** `RngSeed` serializes as an ordinary initializer (no
 reserved names, no side channels) and the chains ride the graph, so a loaded model draws
@@ -101,7 +108,7 @@ All algorithms **share one key tree**: a stream's key is derived the same way re
 generator, so switching `Algorithm` never reshuffles which stream is which — the same stream
 simply draws different numbers. Both parameter initialization and runtime feeds honor the
 choice. Because binding is a parameter write, you can switch generators on an
-already-built (in-memory) model the same way you re-seed it (`concrete.ApplyRngConfig(...)`),
+already-built (in-memory) model the same way you re-seed it (`concrete = concrete.WithRngConfig(...)`),
 and the exported model calls — and is tagged with — the selected algorithm's functions. A
 **loaded** model's draw functions are already baked, so on it a re-bind may change seed
 values but not the algorithm (that re-bind fails loudly; rebuild from the architecture
@@ -151,7 +158,7 @@ var config = new RngConfig { MasterSeed = 42 }
 Every stream is a valid override address, including the per-iteration streams of a loop
 feed (e.g. `[1, 2, 1]` = iteration 2 of the feed at loop slot 1) — overriding one iteration
 re-seeds that iteration only; sibling iterations keep their derived keys. An override that
-addresses no stream throws: a `Runtime` override at bind (`ApplyRngConfig`), a `Params`
+addresses no stream throws: a `Runtime` override at bind (`WithRngConfig`), a `Params`
 override at parameter initialization. A loop feed's override addresses the site pattern —
 static slots exactly, the iteration slot by index — and routes structurally in the feed's
 derivation chain, so it works for any iteration the loop actually executes.

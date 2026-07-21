@@ -22,7 +22,7 @@ using Shorokoo.Core.Nodes.Processors.AutoGrad;
 namespace Shorokoo.Core.Nodes.Processors.Fast;
 
 /// <summary>
-/// Given a <see cref="FastComputationGraph"/>, a list of candidate specific model IDs and
+/// Given a <see cref="InternalComputationGraph"/>, a list of candidate specific model IDs and
 /// a set of hint inputs, returns the subset of candidate model IDs that actually contribute
 /// to a graph output — i.e. whose corresponding <c>MODEL_PARAM_ID_REF</c> node is
 /// reachable from the graph outputs through data edges, with IF branches correctly gated
@@ -72,7 +72,7 @@ internal static partial class FastListAllSpecificModelIdsUsed
     private const int MaxMaskVectorLength = 1_000_000;
 
     public static ImmutableArray<ModelId> Process(
-        FastComputationGraph graph,
+        InternalComputationGraph graph,
         ModelParamList inputHints,
         ImmutableArray<ModelId> candidateModelIds)
     {
@@ -212,7 +212,7 @@ internal static partial class FastListAllSpecificModelIdsUsed
     /// <summary>
     /// Dispatch table: pick the right handler based on the node's op code.
     /// </summary>
-    private static void DispatchNode(FastNode node, MaskBuildContext ctx, FastComputationGraph graph)
+    private static void DispatchNode(FastNode node, MaskBuildContext ctx, InternalComputationGraph graph)
     {
         switch (node.OpCode)
         {

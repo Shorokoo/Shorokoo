@@ -12,11 +12,11 @@ using Shorokoo.Graph;
 namespace Shorokoo.Graph
 {
     /// <summary>
-    /// State-update helpers on <see cref="FastComputationGraph"/>: the
+    /// State-update helpers on <see cref="InternalComputationGraph"/>: the
     /// <c>GetStateParamDataNodes</c> / <c>GetStateUpdateOutputCount</c> /
     /// <c>WithUpdatedStates</c> surface used to execute a Fast graph with state.
     /// </summary>
-    public partial class FastComputationGraph
+    public partial class InternalComputationGraph
     {
         /// <summary>
         /// All MODEL_PARAM_DATA nodes whose IsTrainable attribute is false (i.e. state params).
@@ -52,11 +52,11 @@ namespace Shorokoo.Graph
         }
 
         /// <summary>
-        /// Returns a new <see cref="FastComputationGraph"/> with each state-param node's
+        /// Returns a new <see cref="InternalComputationGraph"/> with each state-param node's
         /// <c>ShrkAttrTensorData</c> replaced by the corresponding entry in
         /// <paramref name="tensorDatas"/>.
         /// </summary>
-        public FastComputationGraph WithUpdatedStates(TensorData[] tensorDatas)
+        public InternalComputationGraph WithUpdatedStates(TensorData[] tensorDatas)
         {
             var stateParamNodes = GetStateParamDataNodes();
 

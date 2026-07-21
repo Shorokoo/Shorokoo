@@ -23,7 +23,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training
     /// <para>
     /// Evaluation strategy: try the <see cref="QuickExecutionEngine"/> first on a
     /// cloned, pruned resolver graph, and fall back to
-    /// <see cref="ComputeContext.Execute(FastComputationGraph)"/> (ONNX Runtime)
+    /// <see cref="ComputeContext.Execute(InternalComputationGraph)"/> (ONNX Runtime)
     /// for any iter-count key QEE couldn't produce. The QEE-first path keeps the
     /// common case (Add / Sub / Mul of constants, Shape-of-input-arithmetic, etc.)
     /// entirely in pure C# and avoids the per-call cost of building an ORT
@@ -32,7 +32,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training
     /// </summary>
     internal static class FastFoldLoopIterationCountsToConstantsProcessor
     {
-        public static void Process(FastComputationGraph graph, ComputeContext compute)
+        public static void Process(InternalComputationGraph graph, ComputeContext compute)
         {
             var nodesByKey = new Dictionary<FastNodeKey, FastNode>(graph.Nodes.Count);
             foreach (var n in graph.Nodes) nodesByKey[n.Key] = n;
@@ -127,7 +127,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training
         /// keys.
         /// </summary>
         private static TensorData[] ResolveIterCountValues(
-            FastComputationGraph resolverGraph,
+            InternalComputationGraph resolverGraph,
             List<FastTensorKey> iterCountKeys,
             ComputeContext compute)
         {

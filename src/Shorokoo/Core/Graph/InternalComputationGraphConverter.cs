@@ -19,12 +19,12 @@ namespace Shorokoo.Graph
 {
     /// <summary>
     /// FastCG-only helpers: build Variable / Node views of a
-    /// <see cref="FastComputationGraph"/>, walk it for Functions, and populate a fresh
+    /// <see cref="InternalComputationGraph"/>, walk it for Functions, and populate a fresh
     /// FastCG from a topologically-ordered Node sequence (used by the FastCG
     /// constructor). All operations stay within the FastCG / Node / Variable triangle —
     /// no <c>ComputationGraph</c> wrapper is materialized.
     /// </summary>
-    public static partial class FastComputationGraphConverter
+    public static partial class InternalComputationGraphConverter
     {
         /// <summary>
         /// Matches names produced by <c>FastUseUniqueNames</c>: a literal "N" followed
@@ -38,11 +38,11 @@ namespace Shorokoo.Graph
         /// Populates an empty <paramref name="fastGraph"/> by lowering the provided
         /// topologically-ordered <see cref="Node"/> sequence to <see cref="FastNode"/>s
         /// and wiring up <paramref name="inputs"/> / <paramref name="outputs"/>. Used by
-        /// the <see cref="FastComputationGraph(System.Collections.Immutable.ImmutableArray{Variable}, System.Collections.Immutable.ImmutableArray{Variable}, System.Collections.Immutable.ImmutableArray{int?}?, IReadOnlyDictionary{Variable, FastTensorKey}?)"/>
+        /// the <see cref="InternalComputationGraph(System.Collections.Immutable.ImmutableArray{Variable}, System.Collections.Immutable.ImmutableArray{Variable}, System.Collections.Immutable.ImmutableArray{int?}?, IReadOnlyDictionary{Variable, FastTensorKey}?)"/>
         /// constructor.
         /// </summary>
         internal static void PopulateFromNodes(
-            FastComputationGraph fastGraph,
+            InternalComputationGraph fastGraph,
             IEnumerable<Node> topologicalOrderNodes,
             IEnumerable<Variable> inputs,
             IEnumerable<Variable> outputs,
@@ -86,7 +86,7 @@ namespace Shorokoo.Graph
                     assignedKey = ParseSequentialKey(node);
                     if (!usedFastIds!.Add(assignedKey.Id))
                         throw new InvalidOperationException(
-                            $"FastComputationGraphConverter: useSequentialIds requires unique N{{i}} names but '{node.FriendlyName}' is reused.");
+                            $"InternalComputationGraphConverter: useSequentialIds requires unique N{{i}} names but '{node.FriendlyName}' is reused.");
                 }
                 else
                 {
@@ -194,11 +194,11 @@ namespace Shorokoo.Graph
             var name = node.FriendlyName;
             if (string.IsNullOrEmpty(name))
                 throw new InvalidOperationException(
-                    $"FastComputationGraphConverter: useSequentialIds requires every node to have an N{{i}} FriendlyName, but Node {node.Key} has none. Run UseUniqueNames before converting.");
+                    $"InternalComputationGraphConverter: useSequentialIds requires every node to have an N{{i}} FriendlyName, but Node {node.Key} has none. Run UseUniqueNames before converting.");
             var m = SequentialNamePattern.Match(name);
             if (!m.Success)
                 throw new InvalidOperationException(
-                    $"FastComputationGraphConverter: useSequentialIds requires every node's FriendlyName to match ^N\\d+$, but Node {node.Key} has FriendlyName='{name}'. Run UseUniqueNames before converting.");
+                    $"InternalComputationGraphConverter: useSequentialIds requires every node's FriendlyName to match ^N\\d+$, but Node {node.Key} has FriendlyName='{name}'. Run UseUniqueNames before converting.");
             return new FastNodeKey(UInt128.Parse(m.Groups[1].ValueSpan));
         }
 
@@ -209,7 +209,7 @@ namespace Shorokoo.Graph
         /// need per-tensor Variable metadata (dtype, structure, rank, unique name,
         /// owning module function).
         /// </summary>
-        public static Dictionary<FastTensorKey, Variable> BuildTensorMapping(FastComputationGraph fastGraph)
+        public static Dictionary<FastTensorKey, Variable> BuildTensorMapping(InternalComputationGraph fastGraph)
         {
             if (fastGraph is null) throw new ArgumentNullException(nameof(fastGraph));
             return BuildNodesAndTensorMap(fastGraph).tensorsByKey;
@@ -225,7 +225,7 @@ namespace Shorokoo.Graph
                        ImmutableArray<Variable> inputs,
                        ImmutableArray<Variable> outputs,
                        Dictionary<FastTensorKey, Variable> tensorMapping)
-            BuildNodes(FastComputationGraph fastGraph)
+            BuildNodes(InternalComputationGraph fastGraph)
         {
             if (fastGraph is null) throw new ArgumentNullException(nameof(fastGraph));
             var built = BuildNodesAndTensorMap(fastGraph);
@@ -238,7 +238,7 @@ namespace Shorokoo.Graph
         /// each function's <see cref="Function.OriginalFastGraph"/>) in dependency
         /// post-order: if function A calls B, B precedes A.
         /// </summary>
-        public static ImmutableArray<Function> FunctionsPostOrder(FastComputationGraph fastGraph)
+        public static ImmutableArray<Function> FunctionsPostOrder(InternalComputationGraph fastGraph)
         {
             if (fastGraph is null) throw new ArgumentNullException(nameof(fastGraph));
 
@@ -283,7 +283,7 @@ namespace Shorokoo.Graph
         /// Direct (non-transitive) Function references in <paramref name="fastGraph"/>:
         /// distinct <see cref="FastNode.TargetFunction"/> values in topological node order.
         /// </summary>
-        public static ImmutableArray<Function> LocalFunctions(FastComputationGraph fastGraph)
+        public static ImmutableArray<Function> LocalFunctions(InternalComputationGraph fastGraph)
         {
             if (fastGraph is null) throw new ArgumentNullException(nameof(fastGraph));
             return fastGraph.Nodes.Select(n => n.TargetFunction).NotNulls().Distinct().ToImmutableArray();
@@ -293,7 +293,7 @@ namespace Shorokoo.Graph
                         Dictionary<FastTensorKey, Variable> tensorsByKey,
                         ImmutableArray<Variable> inputs,
                         ImmutableArray<Variable> outputs)
-            BuildNodesAndTensorMap(FastComputationGraph fastGraph)
+            BuildNodesAndTensorMap(InternalComputationGraph fastGraph)
         {
             // Map from the stored FastTensorKey to the freshly-created Variable we built while
             // rebuilding nodes in topological order.
@@ -321,8 +321,8 @@ namespace Shorokoo.Graph
                         if (k is null || k.Value.IsEmpty) return (Variable?)null;
                         if (!tensorsByKey.TryGetValue(k.Value, out var found))
                             throw new InvalidOperationException(
-                                $"FastComputationGraphConverter: tensor {k.Value} referenced by node '{fastNode.OpCode}' (Key={fastNode.Key}) was not produced by any earlier node. " +
-                                "Make sure FastComputationGraph.Nodes is in topological order.");
+                                $"InternalComputationGraphConverter: tensor {k.Value} referenced by node '{fastNode.OpCode}' (Key={fastNode.Key}) was not produced by any earlier node. " +
+                                "Make sure InternalComputationGraph.Nodes is in topological order.");
                         return (Variable?)found;
                     }).ToArray());
 
@@ -366,11 +366,11 @@ namespace Shorokoo.Graph
                     {
                         if (!inferredOutputs.TryGetValue(kvp.Key, out var inferredSlots))
                             throw new InvalidOperationException(
-                                $"FastComputationGraphConverter: type inference produced no outputs for group '{kvp.Key}' of node '{fastNode.OpCode}' (Key={fastNode.Key}).");
+                                $"InternalComputationGraphConverter: type inference produced no outputs for group '{kvp.Key}' of node '{fastNode.OpCode}' (Key={fastNode.Key}).");
 
                         if (inferredSlots.Length != kvp.Value.Count)
                             throw new InvalidOperationException(
-                                $"FastComputationGraphConverter: type inference produced {inferredSlots.Length} output(s) in group '{kvp.Key}' of node '{fastNode.OpCode}' (Key={fastNode.Key}) but the FastNode has {kvp.Value.Count}.");
+                                $"InternalComputationGraphConverter: type inference produced {inferredSlots.Length} output(s) in group '{kvp.Key}' of node '{fastNode.OpCode}' (Key={fastNode.Key}) but the FastNode has {kvp.Value.Count}.");
 
                         return inferredSlots;
                     });
@@ -435,7 +435,7 @@ namespace Shorokoo.Graph
             {
                 if (!nodesByKey.TryGetValue(openKey, out var resolvedOpen))
                     throw new InvalidOperationException(
-                        $"FastComputationGraphConverter: close node '{closeNode.OpCode}' (Key={closeNode.Key}) references open node {openKey} which was not found in the graph.");
+                        $"InternalComputationGraphConverter: close node '{closeNode.OpCode}' (Key={closeNode.Key}) references open node {openKey} which was not found in the graph.");
                 closeNode.GraphOpenNode = resolvedOpen;
                 closeNode.ConnectingTensor = resolvedOpen.ConnectingTensor;
             }
@@ -444,7 +444,7 @@ namespace Shorokoo.Graph
             {
                 if (tensorsByKey.TryGetValue(key, out var v)) return v;
                 throw new InvalidOperationException(
-                    $"FastComputationGraphConverter: {role} tensor {key} was not produced by any node in the graph.");
+                    $"InternalComputationGraphConverter: {role} tensor {key} was not produced by any node in the graph.");
             }
 
             var inputs = fastGraph.Inputs.Select(k => LookupGraphTensor(k, "input")).ToImmutableArray();

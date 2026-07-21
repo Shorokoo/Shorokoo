@@ -50,7 +50,7 @@ namespace Shorokoo.Core.Graph
         /// Returns the producer node for each <see cref="FastTensorKey"/> in <paramref name="graph"/>'s
         /// nodes (keyed by output tensor key).
         /// </summary>
-        public static System.Collections.Generic.Dictionary<FastTensorKey, FastNode> BuildProducerByOutputMap(this FastComputationGraph graph)
+        public static System.Collections.Generic.Dictionary<FastTensorKey, FastNode> BuildProducerByOutputMap(this InternalComputationGraph graph)
         {
             var map = new System.Collections.Generic.Dictionary<FastTensorKey, FastNode>();
             foreach (var node in graph.Nodes)

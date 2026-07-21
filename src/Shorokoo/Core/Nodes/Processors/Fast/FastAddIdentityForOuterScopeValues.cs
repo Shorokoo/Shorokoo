@@ -23,14 +23,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     ///
     /// <para>
     /// This processor mutates <c>graph</c> in place — new Identity
-    /// FastNodes are inserted into <see cref="FastComputationGraph.Nodes"/> just
+    /// FastNodes are inserted into <see cref="InternalComputationGraph.Nodes"/> just
     /// before each close node, and the close node's <see cref="FastNode.FullInputs"/>
     /// slots are rewritten in place.
     /// </para>
     /// </summary>
     internal static class FastAddIdentityForOuterScopeValues
     {
-        public static void Process(FastComputationGraph graph)
+        public static void Process(InternalComputationGraph graph)
         {
             FastIdentityWrapping.WrapCloseInputs(graph);
         }

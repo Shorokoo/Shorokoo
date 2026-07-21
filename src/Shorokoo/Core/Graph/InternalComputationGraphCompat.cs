@@ -1,0 +1,79 @@
+using Shorokoo.Graph;
+using Shorokoo.Core.Graph;
+using Shorokoo.Core;
+using Shorokoo.Core.Nodes.NodeDefinitions;
+using Shorokoo.Core.Nodes;
+using Shorokoo.Core.Nodes.OnnxNodes;
+using Shorokoo.Modules;
+using Shorokoo.Core.Utils;
+using Shorokoo.Onnx;
+using System;
+using System.Collections.Immutable;
+using System.Linq;
+using Shorokoo.Core.Nodes.Processors.Helpers;
+
+namespace Shorokoo.Graph
+{
+    /// <summary>
+    /// Compatibility shims for legacy <c>ComputationGraph</c> property accessors.
+    /// New code should prefer the direct FastCG API (<see cref="InternalComputationGraph.Inputs"/>,
+    /// <see cref="InternalComputationGraph.Outputs"/>, <see cref="InternalComputationGraphConverter.BuildNodes"/>,
+    /// <see cref="InternalComputationGraphConverter.FunctionsPostOrder"/>). Each property re-builds
+    /// the Variable / Node view on every access.
+    /// </summary>
+    public partial class InternalComputationGraph
+    {
+        public ImmutableArray<Node> TopologicalOrderNodes
+            => InternalComputationGraphConverter.BuildNodes(this).nodesInTopoOrder;
+
+        public ImmutableArray<Variable> InputTensors
+            => InternalComputationGraphConverter.BuildNodes(this).inputs;
+
+        public ImmutableArray<Variable> OutputTensors
+            => InternalComputationGraphConverter.BuildNodes(this).outputs;
+
+        public ImmutableArray<Function> FunctionsPostOrlder
+            => InternalComputationGraphConverter.FunctionsPostOrder(this);
+
+        // Note: `LocalFunctions` shadows the static helper as an instance property.
+        // Prefer `InternalComputationGraphConverter.LocalFunctions(graph)` in new code.
+        public ImmutableArray<Function> LocalFunctions
+            => InternalComputationGraphConverter.LocalFunctions(this);
+    }
+
+    /// <summary>
+    /// Identity-passthrough extensions for callers that used to round-trip via
+    /// <c>InternalComputationGraphConverter.ToFastGraph</c> / <c>ToComputationGraph</c>.
+    /// </summary>
+    public static class InternalComputationGraphCompat
+    {
+        /// <summary>
+        /// Freezes a deep copy of the graph into a readonly <see cref="ComputationGraph"/>.
+        /// Alias for <see cref="ComputationGraph.FromInternal"/>: the kind is stamped from
+        /// <paramref name="kind"/> when given, else detected by op-scanning.
+        /// </summary>
+        public static ComputationGraph ToComputationGraph(this InternalComputationGraph graph, GraphKind? kind = null)
+            => ComputationGraph.FromInternal(graph, kind);
+
+        public static ImmutableArray<Variable> GetHyperparamInputs(this InternalComputationGraph graph)
+            => graph.InputTensors
+                .Where(x => x.OwningNode.Attributes.GetEnumVal<InputType>(OnnxOpAttributeNames.ShrkAttrInputType) == InputType.Hyperparam)
+                .ToImmutableArray();
+
+        public static ImmutableArray<Variable> GetNonHyperparamInputs(this InternalComputationGraph graph)
+            => graph.InputTensors
+                .Where(x => x.OwningNode.Attributes.GetEnumVal<InputType>(OnnxOpAttributeNames.ShrkAttrInputType) != InputType.Hyperparam)
+                .ToImmutableArray();
+
+        /// <summary>
+        /// Tensors emitted by <see cref="InternalComputationGraph.Nodes"/> in topological order
+        /// (one Variable per output slot). Mirrors the deleted CG property.
+        /// </summary>
+        public static ImmutableArray<Variable> TopologicalOrderTensors(this InternalComputationGraph graph)
+            => InternalComputationGraphConverter.BuildNodes(graph).nodesInTopoOrder
+                .SelectMany(n => n.Outputs)
+                .NotNulls()
+                .ToImmutableArray();
+    }
+
+}

@@ -37,7 +37,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastBindRngConfig
     {
-        public static void Process(FastComputationGraph graph, RngConfig rngConfig)
+        public static void Process(InternalComputationGraph graph, RngConfig rngConfig)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
             if (rngConfig is null) throw new ArgumentNullException(nameof(rngConfig));
@@ -137,7 +137,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// without an iteration slot, and an id-bearing feed without its derivation chain,
         /// are hard errors — never silent fallbacks.
         /// </summary>
-        private static List<FastNode> ValidateFeeds(FastComputationGraph graph)
+        private static List<FastNode> ValidateFeeds(InternalComputationGraph graph)
         {
             var feeds = new List<FastNode>();
             int loopDepth = 0;

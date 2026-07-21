@@ -23,14 +23,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// to a <c>FUNCTION_INVOKE</c> of its initializer <see cref="Function"/> (preserving
     /// the original initializer-param inputs, the output <see cref="FastTensorKey"/>, and
     /// the target function), then runs the resulting graph through
-    /// <see cref="ComputeContext.Run(FastComputationGraph, NamedModelParam[])"/> with each
+    /// <see cref="ComputeContext.Run(InternalComputationGraph, NamedModelParam[])"/> with each
     /// initializer's output as a graph output. The decoded results are returned as a
     /// <see cref="ModelId"/> → <see cref="TensorData"/> dictionary.
     /// </summary>
     internal static class FastInitializeModelParams
     {
         public static ImmutableDictionary<ModelId, TensorData> Process(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             ComputeContext? computeContext,
             RngConfig? rngConfig = null,
             ConcreteModelParamInfos? paramInfos = null)

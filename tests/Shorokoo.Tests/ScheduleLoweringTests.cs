@@ -60,7 +60,7 @@ public class ScheduleLoweringCoverageTests
 
         var steps = InputVector<int64>("steps");
         var value = schedule.LowerToGraph(steps);
-        var graph = FastComputationGraphConverter.ToFastGraph(new FastComputationGraph([steps], [value]));
+        var graph = (new InternalComputationGraph([steps], [value]));
         var input = TensorData([probes.Length], probes);
 
         var qee = ((TensorData)new QuickExecutionEngine { MaxDataElements = 1 << 22 }
@@ -323,8 +323,7 @@ public class ScheduleLoweringCoverageTests
         foreach (long p in probes)
         {
             var step = InputScalar<int64>("step");
-            var graph = FastComputationGraphConverter.ToFastGraph(
-                new FastComputationGraph([step], [schedule.LowerToGraph(step)]));
+            var graph = (new InternalComputationGraph([step], [schedule.LowerToGraph(step)]));
             float got = new ComputeContext().Execute(graph, TensorData([], p))[0]
                 .ToTensorData().As<float32>().AccessMemory<float>()[0];
             float expected = schedule.At((int)p);
@@ -335,8 +334,7 @@ public class ScheduleLoweringCoverageTests
         }
 
         var s2 = InputScalar<int64>("step");
-        var g2 = FastComputationGraphConverter.ToFastGraph(
-            new FastComputationGraph([s2], [schedule.LowerToGraph(s2)]));
+        var g2 = (new InternalComputationGraph([s2], [schedule.LowerToGraph(s2)]));
         Assert.True(AutoTest.TestGraph(g2, sampleInputs: [TensorData([], 123L)],
             testQuickEngineExecution: true));
     }

@@ -7,11 +7,11 @@ namespace Shorokoo.Core.Nodes.Processors.Training
     /// </summary>
     internal class FastTrainingGraphs
     {
-        public FastComputationGraph ModelGraph { get; }
-        public FastComputationGraph LossGraph { get; }
-        public FastComputationGraph OptimizerGraph { get; }
+        public InternalComputationGraph ModelGraph { get; }
+        public InternalComputationGraph LossGraph { get; }
+        public InternalComputationGraph OptimizerGraph { get; }
 
-        public FastTrainingGraphs(FastComputationGraph modelGraph, FastComputationGraph lossGraph, FastComputationGraph optimizerGraph)
+        public FastTrainingGraphs(InternalComputationGraph modelGraph, InternalComputationGraph lossGraph, InternalComputationGraph optimizerGraph)
         {
             ModelGraph = modelGraph;
             LossGraph = lossGraph;

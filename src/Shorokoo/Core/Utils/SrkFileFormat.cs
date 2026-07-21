@@ -11,26 +11,6 @@ using Shorokoo.Graph;
 
 namespace Shorokoo.Core.Utils
 {
-    /// <summary>
-    /// The lifecycle stage of a serialized graph. Recorded in the .srk v2 header so a
-    /// loader can route or refuse a file at load time instead of failing deep inside
-    /// execution (e.g. <c>No Op registered for ShrkCreateModule</c>).
-    /// </summary>
-    public enum SrkGraphStage
-    {
-        /// <summary>A pre-lowering module graph: still contains module/function
-        /// invocation machinery (<c>ShrkModelInvoke</c> etc.).</summary>
-        Module,
-
-        /// <summary>A lowered architecture from <c>ToConcreteArchitecture</c>: every
-        /// trainable parameter is visible at top level but values are not yet
-        /// materialized (parameters still carry their initializer functions).</summary>
-        ConcreteArchitecture,
-
-        /// <summary>A weight-filled, runnable graph from <c>ToConcreteModel</c>.</summary>
-        ConcreteModel,
-    }
-
     /// <summary>Producer metadata recorded in the .srk v2 header (informational; the
     /// payload dialect remains versioned by the embedded ONNX model itself).</summary>
     public sealed class SrkProducerInfo
@@ -88,11 +68,11 @@ namespace Shorokoo.Core.Utils
 
         /// <summary>Parses <see cref="Stage"/>; null when the name is missing or unknown
         /// (e.g. a stage introduced by a newer framework version).</summary>
-        public SrkGraphStage? TryGetStage() => SrkFileFormat.TryParseStageName(Stage);
+        public GraphKind? TryGetStage() => SrkFileFormat.TryParseStageName(Stage);
     }
 
     /// <summary>
-    /// The .srk v2 self-describing container for serialized <see cref="FastComputationGraph"/>s:
+    /// The .srk v2 self-describing container for serialized <see cref="InternalComputationGraph"/>s:
     ///
     /// <code>magic "SRK\x02" | u16 headerLen (little-endian) | JSON header | payload</code>
     ///
@@ -135,20 +115,20 @@ namespace Shorokoo.Core.Utils
         #region Stage names and detection
 
         /// <summary>Canonical header name of a stage ("module", "concrete-architecture", "concrete-model").</summary>
-        public static string StageName(SrkGraphStage stage) => stage switch
+        public static string StageName(GraphKind stage) => stage switch
         {
-            SrkGraphStage.Module => "module",
-            SrkGraphStage.ConcreteArchitecture => "concrete-architecture",
-            SrkGraphStage.ConcreteModel => "concrete-model",
+            GraphKind.Module => "module",
+            GraphKind.ConcreteArchitecture => "concrete-architecture",
+            GraphKind.ConcreteModel => "concrete-model",
             _ => throw new ArgumentOutOfRangeException(nameof(stage), stage, null),
         };
 
         /// <summary>Inverse of <see cref="StageName"/>; null for unknown or missing names.</summary>
-        public static SrkGraphStage? TryParseStageName(string? name) => name switch
+        public static GraphKind? TryParseStageName(string? name) => name switch
         {
-            "module" => SrkGraphStage.Module,
-            "concrete-architecture" => SrkGraphStage.ConcreteArchitecture,
-            "concrete-model" => SrkGraphStage.ConcreteModel,
+            "module" => GraphKind.Module,
+            "concrete-architecture" => GraphKind.ConcreteArchitecture,
+            "concrete-model" => GraphKind.ConcreteModel,
             _ => null,
         };
 
@@ -178,13 +158,13 @@ namespace Shorokoo.Core.Utils
 
         /// <summary>
         /// Classifies a graph's lifecycle stage from its content: module machinery present →
-        /// <see cref="SrkGraphStage.Module"/>; unmaterialized trainable parameters
-        /// (<c>MODEL_PARAM</c> nodes) present → <see cref="SrkGraphStage.ConcreteArchitecture"/>;
-        /// otherwise <see cref="SrkGraphStage.ConcreteModel"/>. This is what the writer records
+        /// <see cref="GraphKind.Module"/>; unmaterialized trainable parameters
+        /// (<c>MODEL_PARAM</c> nodes) present → <see cref="GraphKind.ConcreteArchitecture"/>;
+        /// otherwise <see cref="GraphKind.ConcreteModel"/>. This is what the writer records
         /// in the header, and what the v1 shim falls back to when enforcing a required stage on
         /// a header-less legacy file.
         /// </summary>
-        public static SrkGraphStage DetectStage(FastComputationGraph graph)
+        public static GraphKind DetectStage(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -192,30 +172,203 @@ namespace Shorokoo.Core.Utils
             {
                 if (ModuleStageOps.Contains(node.OpCode) ||
                     node.OpCode.StartsWith(InternalOpCodes.SUBMODEL, StringComparison.Ordinal))
-                    return SrkGraphStage.Module;
+                    return GraphKind.Module;
             }
 
             return graph.Nodes.Any(n => n.OpCode == InternalOpCodes.MODEL_PARAM)
-                ? SrkGraphStage.ConcreteArchitecture
-                : SrkGraphStage.ConcreteModel;
+                ? GraphKind.ConcreteArchitecture
+                : GraphKind.ConcreteModel;
         }
+
+        /// <summary>
+        /// Reads the graph-kind metadata tag (<see cref="Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkMetaGraphKind"/>)
+        /// stamped into a serialized model by the ONNX builders, so a saved graph can be
+        /// reloaded as the same kind. Null when the model carries no (recognizable) tag —
+        /// foreign models, or files written before the tag existed.
+        /// </summary>
+        internal static GraphKind? TryReadKindTag(Shorokoo.Core.Factory.IR.ModelProto model)
+        {
+            if (model is null) throw new ArgumentNullException(nameof(model));
+            foreach (var prop in model.MetadataProps)
+                if (prop.Key == OnnxOpAttributeNames.ShrkMetaGraphKind)
+                    return TryParseStageName(prop.Value);
+            return null;
+        }
+
+        /// <summary>
+        /// Checks whether <paramref name="kind"/> is a valid stamp for the graph's content.
+        /// Returns null when valid, else a sentence naming the violated requirement:
+        /// <list type="bullet">
+        /// <item><see cref="GraphKind.Module"/> — must not have initialized model parameters.</item>
+        /// <item><see cref="GraphKind.ConcreteArchitecture"/> — parameter number and shapes must be
+        /// statically known (no module-stage ops), and no model parameter may be initialized.</item>
+        /// <item><see cref="GraphKind.ConcreteModel"/> — parameters must be statically known
+        /// (no module-stage ops) and every parameter initialized (no unmaterialized
+        /// <c>MODEL_PARAM</c> nodes).</item>
+        /// </list>
+        /// </summary>
+        internal static string? DescribeKindViolation(InternalComputationGraph graph, GraphKind kind)
+        {
+            if (graph is null) throw new ArgumentNullException(nameof(graph));
+
+            // The RngSeed identity parameter at reserved ModelId [0] is not a weight
+            // (binding an RNG config IS its initialization, legitimate from architecture
+            // stage on), so it never counts as an "initialized model parameter" here.
+            //
+            // A FUNCTION_INVOKE that calls a plain Function is executable content, not
+            // module machinery — a reimported concrete model legitimately carries such
+            // calls (e.g. the RNG draw functions emitted at export). Only calls whose
+            // target is module-typed (or unresolved) mark the graph as module-stage.
+            int moduleOps = 0, uninitializedParams = 0, initializedParams = 0;
+            foreach (var node in graph.Nodes)
+            {
+                bool isModuleOp = node.OpCode == InternalOpCodes.FUNCTION_INVOKE
+                    ? node.TargetFunction is not { FunctionType: Shorokoo.Core.Nodes.OnnxNodes.FunctionType.Function }
+                    : ModuleStageOps.Contains(node.OpCode) ||
+                      node.OpCode.StartsWith(InternalOpCodes.SUBMODEL, StringComparison.Ordinal);
+                if (isModuleOp)
+                    moduleOps++;
+                else if (node.OpCode == InternalOpCodes.MODEL_PARAM)
+                    uninitializedParams++;
+                else if (node.OpCode == InternalOpCodes.MODEL_PARAM_DATA &&
+                         node.IdentifierTemplate !=
+                             Shorokoo.Core.Nodes.Processors.Fast.FastWireRngKeyDerivation.RngSeedIdentifierTemplate)
+                    initializedParams++;
+            }
+
+            switch (kind)
+            {
+                case GraphKind.Module:
+                    if (initializedParams > 0)
+                        return $"a module graph cannot have initialized model parameters, " +
+                               $"but this graph carries {initializedParams} initialized parameter(s).";
+                    return null;
+
+                case GraphKind.ConcreteArchitecture:
+                    if (moduleOps > 0)
+                        return "a concrete architecture's parameter number and shapes must be statically " +
+                               $"known, but this graph still contains {moduleOps} module-stage op(s).";
+                    if (initializedParams > 0)
+                        return "a concrete architecture must not have initialized model parameters, " +
+                               $"but this graph carries {initializedParams} initialized parameter(s).";
+                    return null;
+
+                case GraphKind.ConcreteModel:
+                    if (moduleOps > 0)
+                        return "a concrete model's parameters must be statically known, " +
+                               $"but this graph still contains {moduleOps} module-stage op(s).";
+                    if (uninitializedParams > 0)
+                        return "a concrete model must have all model parameters initialized, " +
+                               $"but this graph carries {uninitializedParams} unmaterialized parameter(s).";
+                    return null;
+
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(kind), kind, null);
+            }
+        }
+
+        /// <summary>
+        /// Op-scan classification of a serialized model: the <see cref="DetectStage(InternalComputationGraph)"/>
+        /// rules applied to a <see cref="Shorokoo.Core.Factory.IR.ModelProto"/>'s main graph, nested
+        /// subgraph attributes, and function bodies. Used where only the serialized artifact exists
+        /// (e.g. the <c>SaveWithExternalData</c> concrete-model gate) — a ModelProto carries no
+        /// stamped kind.
+        /// </summary>
+        internal static GraphKind DetectStage(Shorokoo.Core.Factory.IR.ModelProto model)
+        {
+            if (model is null) throw new ArgumentNullException(nameof(model));
+
+            // Serialization rewrites MODEL_PARAM nodes and function invokes into calls
+            // to "Functions"-domain FunctionProtos, so those in-memory opcodes are not
+            // visible on the wire. Recover them from the function metadata: a call to an
+            // initializer-typed function IS a serialized unmaterialized parameter, and a
+            // call to a module-typed function is module machinery. Calls to plain
+            // Function-typed functions stay unclassified — vanilla concrete-model
+            // exports legitimately contain them.
+            var fnTypeByName = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var fn in model.Functions)
+                foreach (var prop in fn.MetadataProps)
+                    if (prop.Key == Shorokoo.Core.Function.IRFunctionTypeParamName)
+                        fnTypeByName[fn.Name] = prop.Value;
+
+            bool sawModelParam = false;
+            bool sawModuleOp = false;
+
+            void ScanNodes(IEnumerable<Shorokoo.Core.Factory.IR.NodeProto> nodes)
+            {
+                foreach (var node in nodes)
+                {
+                    if (ModuleStageOps.Contains(node.OpType) ||
+                        node.OpType.StartsWith(InternalOpCodes.SUBMODEL, StringComparison.Ordinal))
+                        sawModuleOp = true;
+                    else if (node.OpType == InternalOpCodes.MODEL_PARAM)
+                        sawModelParam = true;
+                    else if (fnTypeByName.TryGetValue(node.OpType, out var fnType))
+                    {
+                        if (fnType == nameof(Shorokoo.Core.Nodes.OnnxNodes.FunctionType.TrainableParamInitializer) ||
+                            fnType == nameof(Shorokoo.Core.Nodes.OnnxNodes.FunctionType.StateParamInitializer))
+                            sawModelParam = true;
+                        else if (fnType == nameof(Shorokoo.Core.Nodes.OnnxNodes.FunctionType.Module) ||
+                                 fnType == nameof(Shorokoo.Core.Nodes.OnnxNodes.FunctionType.ModuleSignature))
+                            sawModuleOp = true;
+                    }
+
+                    foreach (var attr in node.Attributes)
+                    {
+                        if (attr.G is not null) ScanNodes(attr.G.Nodes);
+                        foreach (var g in attr.Graphs) ScanNodes(g.Nodes);
+                    }
+                }
+            }
+
+            if (model.Graph is not null) ScanNodes(model.Graph.Nodes);
+            foreach (var fn in model.Functions) ScanNodes(fn.Nodes);
+
+            return sawModuleOp ? GraphKind.Module
+                : sawModelParam ? GraphKind.ConcreteArchitecture
+                : GraphKind.ConcreteModel;
+        }
+
+        /// <summary>
+        /// Shared remedy sentence for kind/stage-mismatch errors: unstamped data is
+        /// classified by op-scanning, which cannot tell a machinery-free module body or
+        /// a parameterless architecture from a concrete model — the validated re-stamp
+        /// is the way out when the stamp itself is what's wrong.
+        /// </summary>
+        internal const string WithKindRemedyHint =
+            "If the stamp itself is wrong (op-scanning of unstamped data can misjudge " +
+            "machinery-free graphs), re-stamp the graph with ComputationGraph.WithKind.";
+
+        /// <summary>
+        /// The one format for every graph-kind-mismatch error: names the operation, the
+        /// requirement, and the actual kind, then appends the operation-specific hint and
+        /// the shared <see cref="WithKindRemedyHint"/>. Every kind gate routes through
+        /// this (or <see cref="EnforceStage"/> for file loads) so wording cannot drift.
+        /// </summary>
+        internal static string KindMismatchMessage(
+            string operation, string requiredDescription, GraphKind actual, string? hint = null)
+            => $"{operation} requires {requiredDescription}, but this graph is a '{StageName(actual)}'." +
+               (string.IsNullOrEmpty(hint) ? string.Empty : " " + hint) +
+               " " + WithKindRemedyHint;
 
         /// <summary>
         /// Throws a clear stage-mismatch error naming both stages (and the file, via
         /// <paramref name="origin"/>) when <paramref name="actual"/> differs from
         /// <paramref name="required"/>.
         /// </summary>
-        internal static void EnforceStage(SrkGraphStage actual, SrkGraphStage required, string origin)
+        internal static void EnforceStage(GraphKind actual, GraphKind required, string origin)
         {
             if (actual == required) return;
 
-            var hint = actual == SrkGraphStage.Module
+            var hint = actual == GraphKind.Module
                 ? " A module-stage graph cannot execute; lower it first with " +
                   "ToConcreteArchitecture(...) (and ToConcreteModel(...) for a runnable model), then save that."
                 : string.Empty;
             throw new InvalidOperationException(
                 $"'{origin}' contains a '{StageName(actual)}'-stage graph, but a " +
-                $"'{StageName(required)}'-stage graph is required here.{hint}");
+                $"'{StageName(required)}'-stage graph is required here.{hint}" +
+                " If the file's recorded stage is wrong, load it without requiredStage and " +
+                "re-stamp the graph with ComputationGraph.WithKind.");
         }
 
         #endregion
@@ -229,7 +382,7 @@ namespace Shorokoo.Core.Utils
         /// </summary>
         internal static byte[] Write(
             byte[] onnxBytes,
-            SrkGraphStage stage,
+            GraphKind stage,
             bool compress,
             int compressionLevel,
             long irVersion,

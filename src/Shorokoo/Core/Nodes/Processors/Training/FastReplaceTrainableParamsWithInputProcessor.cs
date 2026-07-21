@@ -21,10 +21,10 @@ namespace Shorokoo.Core.Nodes.Processors.Training;
 ///
 /// <para>
 /// Mutates <c>graph</c> in place: removes the original param-producer nodes,
-/// inserts the new input + per-field GETFIELD nodes at the front of <see cref="FastComputationGraph.Nodes"/>,
+/// inserts the new input + per-field GETFIELD nodes at the front of <see cref="InternalComputationGraph.Nodes"/>,
 /// rewires every consumer (and graph output) that referenced an original param's
 /// <see cref="FastTensorKey"/> to the matching GETFIELD output, and adds the struct input to
-/// <see cref="FastComputationGraph.Inputs"/>.
+/// <see cref="InternalComputationGraph.Inputs"/>.
 /// </para>
 /// </summary>
 internal static class FastReplaceTrainableParamsWithInputProcessor
@@ -53,7 +53,7 @@ internal static class FastReplaceTrainableParamsWithInputProcessor
         }
     }
 
-    public static ProcessResult Process(FastComputationGraph graph)
+    public static ProcessResult Process(InternalComputationGraph graph)
     {
         if (graph is null) throw new ArgumentNullException(nameof(graph));
 

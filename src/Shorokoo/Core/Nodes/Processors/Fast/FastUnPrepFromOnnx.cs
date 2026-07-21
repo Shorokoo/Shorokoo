@@ -26,7 +26,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastUnPrepFromOnnx
     {
-        public static void Process(FastComputationGraph graph)
+        public static void Process(InternalComputationGraph graph)
         {
             // Collect referenced functions in post order (callees first) so that
             // when we rebuild a function, every function its body references has
@@ -59,7 +59,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// to reference the wrapped input directly when the producer is a plain
         /// (no <c>InternalAttrRank</c>) <c>IDENTITY</c>.
         /// </summary>
-        private static void StripCloseInputIdentities(FastComputationGraph graph)
+        private static void StripCloseInputIdentities(InternalComputationGraph graph)
         {
             // Producer lookup: tensor key → the node that emits it. Built once per
             // graph; identity producers are looked up by their output key when we
@@ -109,7 +109,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// at the corresponding new <see cref="Function"/> instance. Used both on
         /// each function-body clone and on the main graph after the rebuild loop.
         /// </summary>
-        private static void RemapTargetFunctions(FastComputationGraph graph, Dictionary<Function, Function> oldToNew)
+        private static void RemapTargetFunctions(InternalComputationGraph graph, Dictionary<Function, Function> oldToNew)
         {
             if (oldToNew.Count == 0) return;
             foreach (var node in graph.Nodes)
@@ -126,12 +126,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// references, in post order (callees before callers). Mirrors the
         /// equivalent walk in <c>FastOnnxModelBuilder</c>.
         /// </summary>
-        private static List<Function> CollectFunctionsPostOrder(FastComputationGraph graph)
+        private static List<Function> CollectFunctionsPostOrder(InternalComputationGraph graph)
         {
             var seen = new HashSet<Function>(ReferenceEqualityComparer.Instance);
             var result = new List<Function>();
 
-            void Visit(FastComputationGraph g)
+            void Visit(InternalComputationGraph g)
             {
                 foreach (var node in g.Nodes)
                 {

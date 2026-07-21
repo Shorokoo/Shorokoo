@@ -33,7 +33,7 @@ public partial class RngInitTwoLinears
 [Trait("Purpose", "Coverage")]
 public class RngInitTests
 {
-    private static FastComputationGraph ConcreteArch()
+    private static ComputationGraph ConcreteArch()
     {
         var g = RngInitTwoLinears.ComputationGraph;
         var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
@@ -216,11 +216,12 @@ public partial class RngInitNestedDrawLayer
 [Trait("Purpose", "Coverage")]
 public class RngInitFailLoudTests
 {
-    private static FastComputationGraph ConcreteArch()
+    // Returns a mutable graph: these tests drive the Fast processor directly.
+    private static InternalComputationGraph ConcreteArch()
     {
         var g = RngInitTwoLinears.ComputationGraph;
         var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
-        return g.ToConcreteArchitecture(g.FromOrderedInputs([sample]));
+        return g.ToConcreteArchitecture(g.FromOrderedInputs([sample])).ToInternal();
     }
 
     [Fact]
@@ -278,126 +279,6 @@ public class RngInitFailLoudTests
                 arch, null, new RngConfig { MasterSeed = 1 }, partial));
         Assert.Contains("missing from the supplied parameter inventory", ex.Message);
         Assert.Contains($"[{string.Join(", ", missing.ModelId.Vals)}]", ex.Message);
-    }
-}
-
-/// <summary>
-/// In-place trainable-parameter re-initialization
-/// (<c>ReinitializeTrainableParams(rngConfig)</c>): the explicit opt-in that re-runs every
-/// trainable parameter's initializer under a new identity and overwrites the values on the
-/// concrete model — the params-collection half of "re-binding is re-initialization" (the
-/// runtime half being <c>ApplyRngConfig</c>). Bit-exact with a fresh build under the same
-/// config; model state and the runtime identity stay untouched; fails loudly when the
-/// parameter inventory (the in-memory source architecture) is unavailable.
-/// </summary>
-[Trait("Domain", "Core")]
-[Trait("Purpose", "Coverage")]
-public class RngReinitializeTests
-{
-    private static FastComputationGraph ConcreteArch()
-    {
-        var g = RngInitTwoLinears.ComputationGraph;
-        var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
-        return g.ToConcreteArchitecture(g.FromOrderedInputs([sample]));
-    }
-
-    /// <summary>The model's trainable weights, ordered by parameter identity.</summary>
-    private static float[][] TrainableWeights(FastComputationGraph model)
-        => model.Nodes
-            .Where(n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_PARAM_DATA
-                        && (n.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsTrainable) ?? false))
-            .OrderBy(n => n.IdentifierTemplate, StringComparer.Ordinal)
-            .Select(n => n.Attributes.GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData)!
-                .As<float32>().AccessMemory().ToArray())
-            .ToArray();
-
-    [Fact]
-    public void TestReinitializeMatchesFreshBuildBitExactly()
-    {
-        // THE pin: initialize under seed A, re-initialize in place under seed B → values
-        // change and match a fresh build under seed B bit-exactly (same code path: keyed
-        // in-graph draw per parameter stream).
-        var seedA = new RngConfig { MasterSeed = 5 };
-        var seedB = new RngConfig { MasterSeed = 6 };
-
-        var model = ConcreteArch().ToConcreteModel(seedA);
-        var weightsA = TrainableWeights(model);
-
-        model.ReinitializeTrainableParams(seedB);
-
-        var weightsB = TrainableWeights(model);
-        Assert.Equal(weightsA.Length, weightsB.Length);
-        for (int i = 0; i < weightsA.Length; i++)
-            Assert.False(weightsA[i].SequenceEqual(weightsB[i]), $"param {i} unchanged");
-
-        var freshB = TrainableWeights(ConcreteArch().ToConcreteModel(seedB));
-        Assert.Equal(freshB.Length, weightsB.Length);
-        for (int i = 0; i < freshB.Length; i++)
-            Assert.Equal(freshB[i], weightsB[i]);   // bit-exact
-    }
-
-    [Fact]
-    public void TestReinitializeHonorsParamsOverridesAndValidatesThem()
-    {
-        // RngCollection.Params overrides validate against the inventory exactly as at first
-        // initialization: a matched override re-seeds exactly that parameter; an unmatched
-        // one fails loudly.
-        var arch = ConcreteArch();
-        var firstWeightPath = arch.GetConcreteModelParamInfos().ParamInfos
-            .Single(p => p.Shape.Dims.SequenceEqual((long[])[4, 4]) && p.ModelId.Vals[0] == 1)
-            .ModelId.Vals.ToArray();
-
-        var seed = new RngConfig { MasterSeed = 5 };
-        var model = ConcreteArch().ToConcreteModel(seed);
-        var baseline = TrainableWeights(ConcreteArch().ToConcreteModel(seed));
-
-        model.ReinitializeTrainableParams(
-            seed.Override(RngCollection.Params, firstWeightPath, 4242UL));
-        var overridden = TrainableWeights(model);
-        Assert.False(baseline[0].SequenceEqual(overridden[0]));   // re-seeded
-        Assert.Equal(baseline[1], overridden[1]);                 // untouched
-
-        var ex = Assert.Throws<InvalidOperationException>(() =>
-            model.ReinitializeTrainableParams(
-                seed.Override(RngCollection.Params, [9, 9, 9], 1UL)));
-        Assert.Contains("matches no trainable parameter", ex.Message);
-    }
-
-    [Fact]
-    public void TestReinitializeLeavesRuntimeIdentityAndDrawsUntouched()
-    {
-        // Re-initialization is the params-collection half only: the runtime identity (the
-        // RngSeed parameter) and every feed draw stay exactly as bound — re-keying the
-        // runtime side is a separate, equally explicit ApplyRngConfig call.
-        var g = RngNormalBothCollections.ComputationGraph;
-        var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
-        var seedA = new RngConfig { MasterSeed = 123 };
-        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel(seedA);
-
-        float[] Run() => ComputeContext.Default.Execute(model, input)[0]
-            .ToTensorData().As<float32>().AccessMemory().ToArray();
-
-        var identityBefore = model.TryGetRngSeed();
-        var drawsBefore = Run();   // = the feed draw (the weight term is multiplied by 0)
-
-        model.ReinitializeTrainableParams(new RngConfig { MasterSeed = 456 });
-
-        Assert.Equal(identityBefore, model.TryGetRngSeed());   // identity untouched
-        Assert.Equal(drawsBefore, Run());                      // feed draws untouched
-    }
-
-    [Fact]
-    public void TestReinitializeOnLoadedModelFailsLoudly()
-    {
-        // The parameter inventory (initializer functions) is in-memory only — a loaded model
-        // cannot be re-initialized in place and must say so, never silently no-op.
-        var model = ConcreteArch().ToConcreteModel(new RngConfig { MasterSeed = 5 });
-        var loaded = Shorokoo.Core.Utils.CompressedFormatUtils.LoadFastGraphFromBinary(
-            Shorokoo.Core.Utils.CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true));
-
-        var ex = Assert.Throws<InvalidOperationException>(() =>
-            loaded.ReinitializeTrainableParams(new RngConfig { MasterSeed = 6 }));
-        Assert.Contains("re-initialized in place", ex.Message);
     }
 }
 

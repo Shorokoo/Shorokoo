@@ -310,7 +310,7 @@ namespace Shorokoo.Core.Utils
             => InferenceBackend.Factory.CreateTensorFromRawBytes(
                 (ShorokooTensorElementType)(int)type.ProtoTypeNum, data, (long[])shape);
 
-        public static string ToJson(this FastComputationGraph fastGraph)
+        public static string ToJson(this InternalComputationGraph fastGraph)
         {
             var obj = FastOnnxModelBuilder.BuildInternalOnnxModel(fastGraph);
             var graph = obj.Graph;

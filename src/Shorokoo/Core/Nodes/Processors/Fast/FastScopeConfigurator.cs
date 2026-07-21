@@ -14,15 +14,15 @@ using Shorokoo.Core.Nodes.Processors.AutoGrad;
 namespace Shorokoo.Core.Nodes.Processors.Fast
 {
     /// <summary>
-    /// Implementation of <see cref="FastComputationGraph.ConfigureScopes"/>.
+    /// Implementation of <see cref="InternalComputationGraph.ConfigureScopes"/>.
     ///
     /// Scope membership in the Fast pipeline is positional: a non-boundary node
-    /// is "in scope S" iff its index in <see cref="FastComputationGraph.Nodes"/>
+    /// is "in scope S" iff its index in <see cref="InternalComputationGraph.Nodes"/>
     /// falls between S's <c>OPEN</c> and <c>CLOSE</c>. This class assigns each
     /// node a per-scope MustIn / MustOut / Free status from the graph's data
     /// flow, applies caller-supplied size preferences to the Free entries,
     /// resolves cross-kind nested-scope size disagreements via priority, then
-    /// rewrites <see cref="FastComputationGraph.Nodes"/> to honor the decisions
+    /// rewrites <see cref="InternalComputationGraph.Nodes"/> to honor the decisions
     /// while preserving topological order.
     /// </summary>
     internal static class FastScopeConfigurator
@@ -42,7 +42,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         public static void Configure(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             ScopeSize loopSize,
             ScopeSize ifSize,
             ScopePriority priority)
@@ -73,7 +73,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         // -- Step 1 -----------------------------------------------------------
 
-        private static List<Scope> CollectScopes(FastComputationGraph graph)
+        private static List<Scope> CollectScopes(InternalComputationGraph graph)
         {
             var scopes = new List<Scope>();
             var stack = new Stack<int>();
@@ -130,7 +130,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         private static (Dictionary<int, HashSet<FastNodeKey>> fwd,
                         Dictionary<int, HashSet<FastNodeKey>> bwd)
-            BuildReachSets(FastComputationGraph graph, List<Scope> scopes)
+            BuildReachSets(InternalComputationGraph graph, List<Scope> scopes)
         {
             var producer = new Dictionary<FastTensorKey, FastNode>();
             foreach (var n in graph.Nodes)
@@ -238,7 +238,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         // input slots; elseReach[S] similarly. LOOP scopes get empty sets here.
         private static (Dictionary<int, HashSet<FastNodeKey>> thenReach,
                         Dictionary<int, HashSet<FastNodeKey>> elseReach)
-            BuildIfBranchReachSets(FastComputationGraph graph, List<Scope> scopes)
+            BuildIfBranchReachSets(InternalComputationGraph graph, List<Scope> scopes)
         {
             var producer = new Dictionary<FastTensorKey, FastNode>();
             foreach (var n in graph.Nodes)
@@ -318,7 +318,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         // -- Step 5 -----------------------------------------------------------
 
         private static Dictionary<FastNodeKey, NodeStatus[]> ClassifyNodes(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             List<Scope> scopes,
             Dictionary<int, HashSet<FastNodeKey>> fwd,
             Dictionary<int, HashSet<FastNodeKey>> bwd,
@@ -393,7 +393,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         // -- Step 6 -----------------------------------------------------------
 
         private static Dictionary<FastNodeKey, bool[]> ApplySizeAndPriority(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             List<Scope> scopes,
             Dictionary<FastNodeKey, NodeStatus[]> status,
             ScopeSize loopSize,
@@ -471,7 +471,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         // -- Step 7 -----------------------------------------------------------
 
         private static List<FastNode> Reorder(
-            FastComputationGraph graph, List<Scope> scopes,
+            InternalComputationGraph graph, List<Scope> scopes,
             Dictionary<FastNodeKey, bool[]> decision)
         {
             var result = new List<FastNode>(graph.Nodes.Count);
@@ -539,7 +539,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         // to the else-branch. Topological order within each branch is preserved
         // by stable partitioning.
         private static List<FastNode> ReorderIfBranches(
-            FastComputationGraph graph, List<Scope> scopes,
+            InternalComputationGraph graph, List<Scope> scopes,
             Dictionary<int, HashSet<FastNodeKey>> thenReach,
             Dictionary<int, HashSet<FastNodeKey>> elseReach)
         {

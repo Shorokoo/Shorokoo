@@ -848,7 +848,7 @@ namespace Shorokoo
         private static IEnumerable<(Action<Scalar<bit>> breakWhen, Looper looper, Scalar<int64> iterationIndex)> LoopFull(Scalar<int64>? maxNumIterations)
         {
             // A loop traced inside a module build records into that build's trace. A standalone
-            // trace (hand-built graphs, e.g. FastComputationGraph construction in tests) gets its
+            // trace (hand-built graphs, e.g. InternalComputationGraph construction in tests) gets its
             // own isolated trace for the duration of the iteration — disposed when the loop
             // completes (or its enumerator is abandoned) — so the looper state never outlives
             // the loop and never bleeds into an unrelated ambient trace.

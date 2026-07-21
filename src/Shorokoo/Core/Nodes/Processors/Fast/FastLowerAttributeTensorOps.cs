@@ -24,7 +24,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// <list type="number">
     /// <item>Constant-fold: run <see cref="QuickExecutionEngine"/> on an input-free pruned clone.</item>
     /// <item>QEE with the supplied <see cref="ModelParamList"/> sample inputs bound.</item>
-    /// <item>ONNX Runtime (<see cref="ComputeContext.Execute(FastComputationGraph, IData[])"/>) with the samples bound.</item>
+    /// <item>ONNX Runtime (<see cref="ComputeContext.Execute(InternalComputationGraph, IData[])"/>) with the samples bound.</item>
     /// </list>
     /// Because this pass runs after the <c>FastSimplify</c> that already constant-folds and unrolls
     /// loops, compile-time-constant and loop-derived geometry is already resolved by strategy 1;
@@ -37,7 +37,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     internal static class FastLowerAttributeTensorOps
     {
         public static void Process(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             ModelParamList? sampleInputs = null,
             ComputeContext? compute = null)
         {
@@ -47,7 +47,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         private static void ProcessGraph(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             ModelParamList? sampleInputs,
             ComputeContext compute,
             Dictionary<Function, Function> functionRemap)
@@ -93,13 +93,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 defaultName: fn.DefaultName, friendlyName: fn.FriendlyName);
         }
 
-        private static bool HasVariantOps(FastComputationGraph graph) =>
+        private static bool HasVariantOps(InternalComputationGraph graph) =>
             graph.Nodes.Any(node => AttributeTensorOpRegistry.Specs.ContainsKey(node.OpCode));
 
         private static void LowerNode(
             FastNode node,
             AttributeTensorSpec spec,
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             ModelParamList? sampleInputs,
             ComputeContext compute)
         {
@@ -164,7 +164,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         private static TensorData[] ResolveKeys(
-            FastComputationGraph graph,
+            InternalComputationGraph graph,
             List<FastTensorKey> keys,
             ModelParamList? sampleInputs,
             ComputeContext compute,
@@ -220,7 +220,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         private static void TryResolveWithQee(
-            FastComputationGraph resolver, List<FastTensorKey> keys, TensorData?[] resolved, TensorData[]? samples)
+            InternalComputationGraph resolver, List<FastTensorKey> keys, TensorData?[] resolved, TensorData[]? samples)
         {
             try
             {
@@ -243,7 +243,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         private static void TryResolveWithOrt(
-            FastComputationGraph resolver, List<FastTensorKey> keys, TensorData?[] resolved,
+            InternalComputationGraph resolver, List<FastTensorKey> keys, TensorData?[] resolved,
             TensorData[] samples, ComputeContext compute)
         {
             var results = compute.Execute(resolver, samples);
@@ -257,7 +257,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// Returns null if any input slot has no matching sample (so the sample-based strategies
         /// are skipped and the caller relies on constant folding).
         /// </summary>
-        private static TensorData[]? OrderSamples(FastComputationGraph resolver, ModelParamList sampleInputs)
+        private static TensorData[]? OrderSamples(InternalComputationGraph resolver, ModelParamList sampleInputs)
         {
             var byName = new Dictionary<string, TensorData>();
             foreach (var p in sampleInputs.ModelParams)

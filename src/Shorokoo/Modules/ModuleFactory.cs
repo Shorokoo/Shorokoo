@@ -145,16 +145,15 @@ namespace Shorokoo.Modules
         // ───────────────────────────── computation graph ─────────────────────────────
 
         /// <summary>
-        /// Returns the module body's <see cref="FastComputationGraph"/> — the codegen-free
-        /// equivalent of the source-generated static <c>ComputationGraph</c> property, suitable
-        /// for <c>TrainingRig.FromScratch</c>, ONNX export, and the concretization pipeline.
-        /// Like the generated property, the underlying build is cached (per body
-        /// <see cref="MethodInfo"/>) and a fresh clone is returned on every call, so callers may
-        /// freely mutate the result.
+        /// Returns the module body's readonly, <see cref="Shorokoo.Graph.GraphKind.Module"/>-stamped
+        /// <see cref="Shorokoo.Graph.ComputationGraph"/> — the codegen-free equivalent of the
+        /// source-generated static <c>ComputationGraph</c> property, suitable for
+        /// <c>TrainingRig.FromScratch</c>, ONNX export, and the concretization pipeline.
+        /// The underlying build is cached (per body <see cref="MethodInfo"/>).
         /// </summary>
         /// <param name="fn">The module body (static method group or non-capturing lambda, flattened parameters).</param>
         /// <param name="name">Optional module name used if the body wasn't already built/cached.</param>
-        public static FastComputationGraph ComputationGraph(Delegate fn, string? name = null)
+        public static Shorokoo.Graph.ComputationGraph ComputationGraph(Delegate fn, string? name = null)
         {
             if (fn is null)
                 throw new ArgumentNullException(nameof(fn));
@@ -163,8 +162,10 @@ namespace Shorokoo.Modules
             // CreateTargetFunction validates the non-capturing constraint, builds the body graph
             // through the same GraphBuilder machinery the source generator uses, and caches the
             // resulting Function by the body's MethodInfo (shared with FromFunc-created modules).
+            // The Function's Body IS the frozen, Module-stamped graph — hand it out directly,
+            // exactly like the source-generated property hands out its cached wrapper.
             var function = ModuleHelper.CreateTargetFunction(fn, defaultName: name);
-            return function.OriginalFastGraph.Clone();
+            return function.Body;
         }
 
         // ───────────────────────────── validation ─────────────────────────────

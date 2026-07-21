@@ -449,6 +449,62 @@ public class CompressedFormatUtilsCoverageTests
     }
 
     /// <summary>
+    /// A truncated .safetensors file fails loudly with a diagnostic naming truncation and
+    /// the declared vs. actual byte counts, at every cut point: inside the tensor data
+    /// (ST003), inside the JSON header (ST002), and before the 8-byte length field (ST001).
+    /// File-path loads name the offending file in the message; the untruncated bytes still
+    /// parse (the checks are prefix/length-only and cost the valid path nothing).
+    /// </summary>
+    [Fact]
+    public void TestSafeTensorTruncationFailsLoudly()
+    {
+        var tensors = new List<SafeTensor>
+        {
+            new("w", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }), "F32", new long[] { 4L }),
+            new("b", TensorData([2L], new float[] { 5f, 6f }), "F32", new long[] { 2L }),
+        };
+        using var stream = new MemoryStream();
+        SafeTensorLoader.SaveSafeTensorsToStream(stream, tensors);
+        var bytes = stream.ToArray();
+
+        // The intact buffer parses; truncation checks must not disturb the valid path.
+        Assert.Equal(2, SafeTensorLoader.ParseSafeTensorBytes(bytes).Count);
+
+        // Cut inside the tensor data → the affected tensor's declared range vs. the actual length.
+        var exData = Assert.Throws<ModelException>(() => SafeTensorLoader.ParseSafeTensorBytes(bytes[..^4]));
+        Assert.Equal(ErrorCodes.ST003, exData.ErrorCode);
+        Assert.Contains("truncated", exData.Message);
+        Assert.Contains("'b'", exData.Message);
+        Assert.Contains($"{bytes.Length} bytes", exData.Message);       // declared (required) size
+        Assert.Contains($"{bytes.Length - 4} bytes", exData.Message);   // actual size
+
+        // Cut inside the JSON header → declared header length vs. the bytes that follow.
+        long headerLen = BitConverter.ToInt64(bytes, 0);
+        var exHeader = Assert.Throws<ModelException>(() => SafeTensorLoader.ParseSafeTensorBytes(bytes[..10]));
+        Assert.Equal(ErrorCodes.ST002, exHeader.ErrorCode);
+        Assert.Contains("truncated", exHeader.Message);
+        Assert.Contains($"declares {headerLen} bytes", exHeader.Message);
+        Assert.Contains("only 2 byte(s)", exHeader.Message);
+
+        // Cut before the length field even completes.
+        var exTiny = Assert.Throws<ModelException>(() => SafeTensorLoader.ParseSafeTensorBytes(bytes[..5]));
+        Assert.Equal(ErrorCodes.ST001, exTiny.ErrorCode);
+        Assert.Contains("truncated", exTiny.Message);
+
+        // File-path load: the error names the offending file.
+        var truncPath = Path.Combine(TempDir, "truncated.safetensors");
+        try
+        {
+            File.WriteAllBytes(truncPath, bytes[..^4]);
+            var exFile = Assert.Throws<ModelException>(() => SafeTensorLoader.LoadSafeTensors(truncPath));
+            Assert.Equal(ErrorCodes.ST003, exFile.ErrorCode);
+            Assert.Contains(truncPath, exFile.Message);
+            Assert.Contains("truncated", exFile.Message);
+        }
+        finally { if (File.Exists(truncPath)) File.Delete(truncPath); }
+    }
+
+    /// <summary>
     /// The header-peek API reads a real v2 header (identifying stage/compression/producer)
     /// and returns null for legacy v1 data that carries no container header.
     /// </summary>

@@ -75,7 +75,7 @@ namespace Shorokoo.Onnx
                 throw new FileNotFoundException($"SafeTensor file not found: {filePath}");
 
             var fileBytes = File.ReadAllBytes(filePath);
-            return ParseSafeTensorFile(fileBytes);
+            return ParseSafeTensorFile(fileBytes, filePath);
         }
 
         /// <summary>
@@ -260,7 +260,7 @@ namespace Shorokoo.Onnx
         /// <returns>List of SafeTensor objects</returns>
         public static List<SafeTensor> ParseSafeTensorBytes(byte[] fileBytes)
         {
-            return ParseSafeTensorFile(fileBytes);
+            return ParseSafeTensorFile(fileBytes, "<in-memory SafeTensor data>");
         }
 
         /// <summary>
@@ -287,20 +287,33 @@ namespace Shorokoo.Onnx
         }
 
         /// <summary>
-        /// Parse SafeTensor file format and return list of SafeTensor objects
+        /// Parse SafeTensor file format and return list of SafeTensor objects. The declared
+        /// header length and every tensor's data_offsets range are validated against the actual
+        /// byte count up front, so a truncated file (interrupted download/copy, disk full, …)
+        /// fails with a <see cref="ModelException"/> naming truncation and the declared vs.
+        /// actual sizes instead of an incidental parse error.
         /// </summary>
         /// <param name="fileBytes">Raw bytes of the SafeTensor file</param>
+        /// <param name="origin">Name used in error messages, typically the file path</param>
         /// <returns>List of SafeTensor objects</returns>
-        private static List<SafeTensor> ParseSafeTensorFile(byte[] fileBytes)
+        private static List<SafeTensor> ParseSafeTensorFile(byte[] fileBytes, string origin)
         {
             if (fileBytes.Length < 8)
-                throw new InvalidOperationException("File too short to be a valid SafeTensor file");
+                throw new ModelException(ErrorCodes.ST001, $"SafeTensor file '{origin}'",
+                    $"the file is only {fileBytes.Length} byte(s) — too short to hold the 8-byte " +
+                    "SafeTensors header-length field. The file is truncated or not a SafeTensors file.");
 
             // Read header length (first 8 bytes, little-endian)
             long headerLength = BitConverter.ToInt64(fileBytes, 0);
 
-            if (headerLength <= 0 || headerLength > fileBytes.Length - 8)
+            if (headerLength <= 0)
                 throw new InvalidOperationException($"Invalid header length: {headerLength}");
+
+            if (headerLength > fileBytes.Length - 8)
+                throw new ModelException(ErrorCodes.ST002, $"SafeTensor file '{origin}'",
+                    $"truncated SafeTensor file — the header declares {headerLength} bytes of JSON header, " +
+                    $"but only {fileBytes.Length - 8} byte(s) follow the length field (the file has " +
+                    $"{fileBytes.Length} bytes). The file was likely cut short by an interrupted download or copy.");
 
             // Read header JSON
             var headerBytes = new byte[headerLength];
@@ -326,10 +339,10 @@ namespace Shorokoo.Onnx
 
                 try
                 {
-                    var safeTensor = ParseTensorMetadata(tensorName, tensorMeta, fileBytes, dataOffset);
+                    var safeTensor = ParseTensorMetadata(tensorName, tensorMeta, fileBytes, dataOffset, origin);
                     result.Add(safeTensor);
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (ex is not ShorokooException)
                 {
                     throw new InvalidOperationException($"Failed to parse tensor '{tensorName}': {ex.Message}", ex);
                 }
@@ -341,7 +354,8 @@ namespace Shorokoo.Onnx
         /// <summary>
         /// Parse metadata for a single tensor and create SafeTensor object
         /// </summary>
-        private static SafeTensor ParseTensorMetadata(string tensorName, object tensorMeta, byte[] fileBytes, long dataOffset)
+        private static SafeTensor ParseTensorMetadata(
+            string tensorName, object tensorMeta, byte[] fileBytes, long dataOffset, string origin)
         {
             try
             {
@@ -361,19 +375,21 @@ namespace Shorokoo.Onnx
                 // Extract dtype
                 var dtype = ExtractDataType(metaDict);
 
+                if (startOffset < 0 || endOffset < startOffset)
+                    throw new InvalidOperationException(
+                        $"Tensor '{tensorName}' has invalid data_offsets [{startOffset}, {endOffset})");
+
+                if (dataOffset + endOffset > fileBytes.Length)
+                    throw new ModelException(ErrorCodes.ST003, $"SafeTensor file '{origin}'",
+                        $"truncated SafeTensor file — tensor '{tensorName}' declares data_offsets " +
+                        $"[{startOffset}, {endOffset}), which requires the file to hold " +
+                        $"{dataOffset + endOffset} bytes, but the file has {fileBytes.Length} bytes. " +
+                        "The file was likely cut short by an interrupted download or copy.");
+
                 // Extract tensor data
                 var dataSize = (int)(endOffset - startOffset);
                 var tensorData = new byte[dataSize];
-                var actualStart = dataOffset + startOffset;
-
-                if (actualStart + dataSize <= fileBytes.Length)
-                {
-                    Array.Copy(fileBytes, actualStart, tensorData, 0, dataSize);
-                }
-                else
-                {
-                    throw new InvalidOperationException($"Tensor data extends beyond file bounds for tensor '{tensorName}'");
-                }
+                Array.Copy(fileBytes, dataOffset + startOffset, tensorData, 0, dataSize);
 
                 // Create TensorData based on dtype using the working Globals.TensorData methods
                 var tensorDataObj = CreateTensorFromRawBytes(dtype, shape, tensorData);
@@ -387,7 +403,7 @@ namespace Shorokoo.Onnx
 
                 return new SafeTensor(tensorName, tensorDataObj, dtype, shape, additionalMetadata);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not ShorokooException)
             {
                 throw new InvalidOperationException($"Failed to parse tensor metadata for '{tensorName}': {ex.Message}", ex.InnerException ?? ex);
             }

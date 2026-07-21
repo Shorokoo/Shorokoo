@@ -232,6 +232,13 @@ TensorData single = SafeTensorLoader.LoadSingleTensor("bias.safetensors");
 List<SafeTensor> all = SafeTensorLoader.LoadSafeTensors("weights.safetensors");
 ```
 
+A truncated file (interrupted download or copy, disk full) is refused up front with an
+error naming truncation, the file, and the declared vs. actual byte counts: the declared
+header length and every tensor's `data_offsets` range are validated against the actual
+file length before any tensor is materialized. Training checkpoints
+(`TrainingRig.LoadCheckpoint`) share this loader, so a truncated checkpoint fails the
+same way, naming the checkpoint path.
+
 Save:
 
 ```csharp

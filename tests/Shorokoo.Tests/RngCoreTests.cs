@@ -377,31 +377,37 @@ public class RngSeedTransportTests
     }
 
     [Fact]
-    public void TestRebindOnLoadedModelCannotChangeOverrideSetOrAlgorithm()
+    public void TestRebindOnLoadedModelSupportsOverrideSetAndAlgorithmChanges()
     {
-        // A loaded model's draws are baked function calls: seed VALUES re-key freely (the
-        // parameter write), but the override SET's routing and the draw algorithm are
-        // structural — changing either on a loaded graph must fail loudly, never silently
-        // half-apply.
+        // Since .srk persistence stopped lowering the SHRK_RANDOM_* feeds (issue #59 —
+        // saved graphs keep the feed ops and their key-derivation chains verbatim), a
+        // loaded model is no longer "baked": re-binding may change not only seed VALUES
+        // but also the override SET (the routing is re-wired) and the draw algorithm —
+        // and the result must be bit-identical to a model built under that config
+        // directly. (Files written by pre-#59 versions still carry lowered draw-function
+        // calls and keep the fail-loud structural-rebind guard in FastBindRngConfig.)
         var g = (ComputationGraph)typeof(RngRuntimeLoopFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var x = TensorData([8L], new float[8]);
         var steps = TensorData(System.Array.Empty<long>(), 2L);
-        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps]))
-            .ToConcreteModel(new RngConfig { MasterSeed = 11 });
+
+        ComputationGraph Concrete(RngConfig cfg) =>
+            g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps])).ToConcreteModel(cfg);
+        float[] Run(ComputationGraph m) => ComputeContext.Default.Execute(m, x, steps)[0]
+            .ToTensorData().As<float32>().AccessMemory().ToArray();
+
         var loaded = CompressedFormatUtils.LoadFastGraphFromBinary(
-            CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true));
+            CompressedFormatUtils.SaveFastGraphToBinary(
+                Concrete(new RngConfig { MasterSeed = 11 }), compressed: true));
 
         var withOverride = new RngConfig { MasterSeed = 11 }
             .Override(RngCollection.Runtime, [1, 1, 1], 42UL);
-        var ex1 = Assert.Throws<System.InvalidOperationException>(
-            () => loaded.WithRngConfig(withOverride));
-        Assert.Contains("override SET", ex1.Message);
+        Assert.Equal(Run(Concrete(withOverride)), Run(loaded.WithRngConfig(withOverride)));
 
-        var ex2 = Assert.Throws<System.InvalidOperationException>(
-            () => loaded.WithRngConfig(new RngConfig
-            { MasterSeed = 11, Algorithm = RngAlgorithm.Threefry2x32Rounds13 }));
-        Assert.Contains("algorithm", ex2.Message);
+        var otherAlg = new RngConfig { MasterSeed = 11, Algorithm = RngAlgorithm.Threefry2x32Rounds13 };
+        Assert.Equal(Run(Concrete(otherAlg)), Run(loaded.WithRngConfig(otherAlg)));
+        Assert.NotEqual(Run(Concrete(new RngConfig { MasterSeed = 11 })),
+            Run(loaded.WithRngConfig(otherAlg)));
     }
 
     [Fact]

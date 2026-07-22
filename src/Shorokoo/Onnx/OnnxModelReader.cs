@@ -94,6 +94,8 @@ namespace Shorokoo.Onnx
             var reader = new OnnxModelReader(model);
             var graph = reader.BuildInternalComputationGraph();
 
+            RestoreSignatureIONames(model, graph);
+
             if (taggedKind is { } kind &&
                 Shorokoo.Core.Utils.SrkFileFormat.DescribeKindViolation(graph, kind) is { } violation)
                 throw new InvalidDataException(
@@ -103,6 +105,42 @@ namespace Shorokoo.Onnx
                     "The file is corrupt or was written by an incompatible tool.");
 
             return (graph, taggedKind);
+        }
+
+        /// <summary>
+        /// Restores the graph's human-readable signature I/O names from the
+        /// <c>shrk_input_names</c> / <c>shrk_output_names</c> model metadata written by
+        /// internal-dialect exports (whose graph-I/O ValueInfos must keep raw
+        /// <c>N{k}_T{s}</c> tensor ids). Applied only when a list parses and its length
+        /// matches the reconstructed graph's I/O count; otherwise (foreign models, files
+        /// written before the tag existed) the proto names stand.
+        /// </summary>
+        private static void RestoreSignatureIONames(IR.ModelProto model, InternalComputationGraph graph)
+        {
+            foreach (var prop in model.MetadataProps)
+            {
+                var target = prop.Key switch
+                {
+                    OnnxOpAttributeNames.ShrkMetaInputNames => graph.InputUniqueNames,
+                    OnnxOpAttributeNames.ShrkMetaOutputNames => graph.OutputUniqueNames,
+                    _ => null,
+                };
+                if (target is null) continue;
+
+                List<string?>? names;
+                try
+                {
+                    names = System.Text.Json.JsonSerializer.Deserialize<List<string?>>(prop.Value);
+                }
+                catch (System.Text.Json.JsonException)
+                {
+                    continue;
+                }
+                if (names is null || names.Count != target.Count) continue;
+
+                target.Clear();
+                target.AddRange(names);
+            }
         }
 
         /// <summary>Internal-graph form of <see cref="FromOnnxModel(Stream, string?)"/>.</summary>

@@ -376,17 +376,13 @@ namespace Shorokoo.Runtime
 
         private static bool HasOptionalOps(GraphProto graph)
         {
-            foreach (var node in graph.Nodes)
+            var found = false;
+            FastOnnxModelBuilder.ForEachGraphRecursive(graph, g =>
             {
-                if (node.OpType.StartsWith("Optional", StringComparison.Ordinal)) return true;
-                foreach (var attr in node.Attributes)
-                {
-                    if (attr.G is not null && HasOptionalOps(attr.G)) return true;
-                    foreach (var sub in attr.Graphs)
-                        if (HasOptionalOps(sub)) return true;
-                }
-            }
-            return false;
+                found = found || g.Nodes.Any(node =>
+                    node.OpType.StartsWith("Optional", StringComparison.Ordinal));
+            });
+            return found;
         }
 
         /// <summary>Lifts concrete tensor data into graph variables.</summary>

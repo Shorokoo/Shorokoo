@@ -92,6 +92,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Output("scannedVariables", "ScanVariables?", rankPlusOne: "RScans"),
 
             Op(LOOP_FAKE_INPUT)
+                .Internal()
                 .Any<AnyLike>("T")
                 .AttributeDType(AttrDtype, "T")
                 .AttributeLong(InternalAttrRank, "R")
@@ -99,11 +100,13 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Output("output", "T", "R"),
 
             Op(LOOP_SCAN_VARIABLE)
+                .Internal()
                 .Tensor<AnyLike>("scan")
                 .Input("scannee", "scan", "R")
                 .Output("scanned", "scan", rankPlusOne: "R"),
 
             Op(LOOP_INDEX_VARIABLE)
+                .Internal()
                 .Tensor<int64>("IterNum")
                 .Output("zombie", "IterNum", rank: 0),
 

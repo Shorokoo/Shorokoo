@@ -129,6 +129,53 @@ internal static class InternalOpCodes
     /// before autograd/execution/ONNX export. <c>auto_pad</c> stays a static attribute.
     /// </summary>
     public const string SHRK_CONV = "shrk_Conv";
+
+    /// <summary>
+    /// The canonical module-stage (pre-lowering) op inventory: the module-machinery ops
+    /// that only ever exist before <c>ToConcreteArchitecture</c> lowering, so their presence
+    /// marks a graph as still module-stage. Membership is queried through
+    /// <see cref="IsModuleStageOp"/>, which also covers the name-prefixed
+    /// <see cref="SUBMODEL"/> family.
+    ///
+    /// <para>This is the single source of truth for "module-stage machinery": the
+    /// <c>ToConcreteArchitecture</c> final graph validation asserts every op here is gone
+    /// from its output, and <c>SrkFileFormat.DetectStage</c> stamps the persistent
+    /// <c>.srk</c> v2 <c>stage</c> header from the same set — consuming one definition keeps
+    /// the lowering guarantee and the stage stamp from drifting apart. When adding a new
+    /// internal op that is lowered away by <c>ToConcreteArchitecture</c>, add it here.</para>
+    ///
+    /// <para>Deliberately excluded: the input markers
+    /// (<see cref="MODEL_OPTIONAL_INPUT"/>/<see cref="MODEL_TENSOR_INPUT"/>/<see cref="MODEL_SEQUENCE_INPUT"/>),
+    /// parameter nodes (<see cref="MODEL_PARAM"/>/<see cref="MODEL_PARAM_DATA"/>), state links
+    /// (<see cref="STATE_UPDATE_LINK"/>/<see cref="WITH_STATE_DEPS"/>), sequence helpers and the
+    /// <c>shrk_*</c> runtime feeds — all of which legitimately survive into concrete-stage
+    /// graphs — and <see cref="SHRK_CONV"/>, which is pre-lowering-only but is a computation
+    /// variant, not module machinery (a graph's stage is defined by its module structure).</para>
+    /// </summary>
+    public static readonly ImmutableHashSet<string> ModuleStageOps =
+    [
+        MODULE_SET_HYPERPARAMS,
+        MODEL_INVOKE,
+        FUNCTION_INVOKE,
+        MODEL_HYPERPARAM,
+        GET_MODEL_ID,
+        NEW_MODEL_LIKE,
+        CREATE_MODULE,
+        MODEL_PARAM_REF,
+        MODEL_PARAM_MODEL_REF,
+        MODEL_PARAM_ID_REF,
+        TENSOR_STRUCT_CREATE,
+        TENSOR_STRUCT_GETFIELD,
+        MODEL_TENSORSTRUCT_INPUT,
+        AUTO_GRAD,
+        GENERIC_TYPE_INPUT,
+    ];
+
+    /// <summary>True when <paramref name="opCode"/> is module-stage machinery: a member of
+    /// <see cref="ModuleStageOps"/> or one of the name-prefixed <see cref="SUBMODEL"/> ops.</summary>
+    public static bool IsModuleStageOp(string opCode)
+        => ModuleStageOps.Contains(opCode)
+        || opCode.StartsWith(SUBMODEL, StringComparison.Ordinal);
 }
 
 internal static class OpCodes

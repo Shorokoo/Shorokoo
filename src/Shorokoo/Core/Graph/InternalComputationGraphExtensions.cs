@@ -135,22 +135,11 @@ namespace Shorokoo.Graph
             DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.FinalGraph);
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastSimplify #2");
 
-            var allInternalOps = new[]
-            {
-                InternalOpCodes.MODULE_SET_HYPERPARAMS,
-                InternalOpCodes.MODEL_INVOKE,
-                InternalOpCodes.MODEL_HYPERPARAM,
-                InternalOpCodes.GET_MODEL_ID,
-                InternalOpCodes.MODEL_PARAM_REF,
-                InternalOpCodes.MODEL_PARAM_MODEL_REF,
-                InternalOpCodes.MODEL_PARAM_ID_REF,
-                InternalOpCodes.FUNCTION_INVOKE,
-                InternalOpCodes.TENSOR_STRUCT_CREATE,
-                InternalOpCodes.TENSOR_STRUCT_GETFIELD,
-                InternalOpCodes.AUTO_GRAD,
-            };
             FastProcessorHelper.RemoveUnreachableNodes(fastGraph);
-            AssertFastGraphDoesNotContainOps(fastGraph, allInternalOps, "Fast final graph validation");
+            // The lowering guarantee and the .srk stage stamp share one definition: the output
+            // must contain none of the canonical module-stage ops (InternalOpCodes.ModuleStageOps)
+            // that SrkFileFormat.DetectStage classifies a module graph by.
+            AssertFastGraphDoesNotContainOps(fastGraph, InternalOpCodes.IsModuleStageOp, "Fast final graph validation");
 
             return fastGraph;
         }
@@ -623,28 +612,33 @@ namespace Shorokoo.Graph
 
         /// <summary>
         /// Trainable-parameter discovery only sees the graph's top-level nodes. On a graph that
-        /// still contains <c>MODEL_INVOKE</c>/<c>FUNCTION_INVOKE</c> nodes the parameters are nested
-        /// inside sub-functions and would be silently missed, so require a concrete architecture
-        /// (produced by <see cref="ToConcreteArchitecture"/>) instead of returning an empty set.
+        /// still contains module-stage machinery (<see cref="InternalOpCodes.ModuleStageOps"/> —
+        /// most commonly un-inlined <c>MODEL_INVOKE</c>/<c>FUNCTION_INVOKE</c> nodes) the
+        /// parameters are nested inside sub-functions or not yet converted to <c>MODEL_PARAM</c>
+        /// nodes and would be silently missed, so require a concrete architecture (produced by
+        /// <see cref="ToConcreteArchitecture"/>) instead of returning an incomplete set.
         /// </summary>
         private static void AssertConcreteArchitecture(InternalComputationGraph graph, string operation)
         {
-            var invokeOps = new HashSet<string> { InternalOpCodes.MODEL_INVOKE, InternalOpCodes.FUNCTION_INVOKE };
-            var invokeCount = graph.Nodes.Count(n => invokeOps.Contains(n.OpCode));
-            if (invokeCount == 0) return;
+            var moduleOps = graph.Nodes.Where(n => InternalOpCodes.IsModuleStageOp(n.OpCode)).ToList();
+            if (moduleOps.Count == 0) return;
 
             throw new System.InvalidOperationException(
                 $"{operation} requires a concrete architecture graph, but this graph still contains "
-                + $"{invokeCount} un-inlined module/function invocation(s) "
-                + $"({InternalOpCodes.MODEL_INVOKE}/{InternalOpCodes.FUNCTION_INVOKE}). Its trainable parameters "
-                + "are nested inside sub-functions and would be missed. Call ToConcreteArchitecture(inputHints, ...) "
+                + $"{moduleOps.Count} module-stage op(s) (e.g. {moduleOps[0].OpCode}). Its trainable parameters "
+                + "are not statically enumerable and would be missed. Call ToConcreteArchitecture(inputHints, ...) "
                 + "first, then run this on the returned graph.");
         }
 
         private static void AssertFastGraphDoesNotContainOps(InternalComputationGraph fastGraph, string[] forbiddenOps, string stageName)
         {
             var forbiddenSet = new HashSet<string>(forbiddenOps);
-            var found = fastGraph.Nodes.Where(n => forbiddenSet.Contains(n.OpCode)).ToList();
+            AssertFastGraphDoesNotContainOps(fastGraph, forbiddenSet.Contains, stageName);
+        }
+
+        private static void AssertFastGraphDoesNotContainOps(InternalComputationGraph fastGraph, System.Func<string, bool> isForbidden, string stageName)
+        {
+            var found = fastGraph.Nodes.Where(n => isForbidden(n.OpCode)).ToList();
             if (found.Count == 0) return;
 
             var errorMsg = new System.Text.StringBuilder();

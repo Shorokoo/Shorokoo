@@ -106,11 +106,9 @@ namespace Shorokoo.Core.Factory
         internal static ModelProto BuildOnnxModel(
             InternalComputationGraph fastGraph,
             OpSetVersion opset = OpSetVersion.OPS_21,
-            IR_VERSION irVersion = IR_VERSION.IR_10,
             bool prepForOnnx = false)
-            // irVersion is accepted for signature compatibility but currently inert —
-            // the emitted model is always stamped IR_10 (OnnxIRFactory.CreateModel);
-            // tracked in Shorokoo/Shorokoo#50. It is deliberately NOT threaded further.
+            // The emitted model is always stamped IR_10 (OnnxIRFactory.CreateModel);
+            // there is deliberately no irVersion parameter to suggest otherwise.
             => BuildOnnxModelCore(fastGraph, opset, prepForOnnx, vanillaExport: true);
 
         /// <summary>
@@ -122,19 +120,33 @@ namespace Shorokoo.Core.Factory
         /// <see cref="Shorokoo.Onnx.OnnxModelImporter"/>; use
         /// <see cref="BuildOnnxModel(Shorokoo.Graph.ComputationGraph, OpSetVersion, bool)"/> for anything meant to leave Shorokoo.
         /// </summary>
+        /// <param name="fastGraph">The graph to serialize.</param>
+        /// <param name="opset">Default-domain opset stamp (raised as required).</param>
+        /// <param name="prepForOnnx">Run the ONNX-executability prep pass.</param>
+        /// <param name="stage">Graph kind to stamp into the model metadata, when known.</param>
+        /// <param name="applyExecutionLowerings">Run the semantics-narrowing execution
+        /// lowerings: <c>STATE_UPDATE_LINK</c> / <c>WITH_STATE_DEPS</c> → Identity (one-shot
+        /// inference) and the <c>SHRK_RANDOM_*</c> / <c>SHRK_RNG_*</c> feed lowering to draw
+        /// functions / ONNX random fallbacks. The execution-session and export paths need
+        /// them; persistence (.srk) passes false — a saved graph must keep its state
+        /// machinery and its runtime-feed ops verbatim, or a reloaded module/architecture
+        /// would silently lose state semantics or keyed-RNG identity.</param>
         internal static ModelProto BuildInternalOnnxModel(
             InternalComputationGraph fastGraph,
             OpSetVersion opset = OpSetVersion.OPS_21,
             bool prepForOnnx = false,
-            Shorokoo.Graph.GraphKind? stage = null)
-            => BuildOnnxModelCore(fastGraph, opset, prepForOnnx, vanillaExport: false, stage: stage);
+            Shorokoo.Graph.GraphKind? stage = null,
+            bool applyExecutionLowerings = true)
+            => BuildOnnxModelCore(fastGraph, opset, prepForOnnx, vanillaExport: false, stage: stage,
+                applyExecutionLowerings: applyExecutionLowerings);
 
         private static ModelProto BuildOnnxModelCore(
             InternalComputationGraph fastGraph,
             OpSetVersion opset,
             bool prepForOnnx,
             bool vanillaExport,
-            Shorokoo.Graph.GraphKind? stage = null)
+            Shorokoo.Graph.GraphKind? stage = null,
+            bool applyExecutionLowerings = true)
         {
             if (fastGraph is null) throw new ArgumentNullException(nameof(fastGraph));
 
@@ -143,7 +155,7 @@ namespace Shorokoo.Core.Factory
 
             // ----- 2. Run the Fast pre-passes in place. Capture the rename map
             // so we can also remap the tensor-info lookup we'll build below.
-            var tensorInfoLookup = RunPrePassesAndBuildLookup(prepFast, prepForOnnx);
+            var tensorInfoLookup = RunPrePassesAndBuildLookup(prepFast, prepForOnnx, applyExecutionLowerings);
 
             // Reorder so each IF body has then-block nodes positionally first
             // and else-block nodes positionally second. The Fast back-walk used
@@ -170,7 +182,7 @@ namespace Shorokoo.Core.Factory
             // a FunctionProto for each.
             var functions = CollectFunctionsPostOrder(prepFast);
             var functionProtos = functions
-                .Select(fn => BuildFunctionProto(fn, opset, prepForOnnx))
+                .Select(fn => BuildFunctionProto(fn, opset, prepForOnnx, applyExecutionLowerings))
                 .ToArray();
 
             var model = (ModelProto)OnnxIRFactory.CreateModel(graphProto, functionProtos, opset);
@@ -209,6 +221,27 @@ namespace Shorokoo.Core.Factory
             // parameter at ModelId [0], serialized as a plain initializer like any other
             // MODEL_PARAM_DATA and reloaded the same way.)
 
+            // ----- 6c. Internal dialect only: the graph-I/O ValueInfos must keep their
+            // raw N{k}_T{s} tensor ids (the loader parses node/tensor keys out of them),
+            // so the human-readable signature names ride model metadata instead — the
+            // loader restores them into Input/OutputUniqueNames positionally. Names come
+            // from prepFast for the same lockstep reason ApplySignatureIONames uses it.
+            if (!vanillaExport)
+            {
+                if (prepFast.InputUniqueNames.Count > 0)
+                    model.MetadataProps.Add(new StringStringEntryProto
+                    {
+                        Key = OnnxOpAttributeNames.ShrkMetaInputNames,
+                        Value = System.Text.Json.JsonSerializer.Serialize(prepFast.InputUniqueNames),
+                    });
+                if (prepFast.OutputUniqueNames.Count > 0)
+                    model.MetadataProps.Add(new StringStringEntryProto
+                    {
+                        Key = OnnxOpAttributeNames.ShrkMetaOutputNames,
+                        Value = System.Text.Json.JsonSerializer.Serialize(prepFast.OutputUniqueNames),
+                    });
+            }
+
             // ----- 7. User-facing export only: enforce the vanilla dialect, then
             // finish the model boundary — typed graph outputs and signature-derived
             // I/O names. The internal dialect (.srk persistence, execution pipeline)
@@ -232,35 +265,27 @@ namespace Shorokoo.Core.Factory
         // ----------- vanilla-dialect guarantee -----------
 
         /// <summary>
-        /// Every op code the framework defines for internal orchestration
-        /// (module/function structure, param references, RNG feeds, …). Emitting any
-        /// of these as a default-domain NodeProto makes the file Shorokoo-only.
-        /// </summary>
-        private static readonly HashSet<string> InternalOnlyOpTypes = typeof(InternalOpCodes)
-            .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
-            .Where(f => f.IsLiteral && f.FieldType == typeof(string))
-            .Select(f => (string)f.GetRawConstantValue()!)
-            .ToHashSet(StringComparer.Ordinal);
-
-        /// <summary>
-        /// True when <paramref name="opType"/> is a Shorokoo-internal op rather than a
-        /// standard ONNX op: either a known <see cref="InternalOpCodes"/> constant or a
-        /// name following the internal conventions (<c>Shrk*</c>, <c>shrk_*</c>, or a
-        /// <c>#</c>-delimited marker), none of which exist in the standard op set.
+        /// True when <paramref name="opType"/> (a default-domain NodeProto op type) is a
+        /// Shorokoo-internal op rather than a standard ONNX op. Registry-owned: an op is
+        /// vanilla exactly when it is a registered non-internal definition
+        /// (<see cref="Definitions.VanillaOpNames"/>); everything else — internal
+        /// registrations and any op the registry does not know — fails closed as internal,
+        /// so a future internal op with a plain, convention-free name cannot slip through
+        /// the vanilla-dialect guarantee.
         /// </summary>
         private static bool IsInternalOpType(string opType)
-            => InternalOnlyOpTypes.Contains(opType)
-            || opType.Contains('#')
-            || opType.StartsWith("Shrk", StringComparison.Ordinal)
-            || opType.StartsWith("shrk_", StringComparison.Ordinal);
+            => !Definitions.VanillaOpNames.Contains(opType);
 
         /// <summary>
         /// Visits <paramref name="graph"/> and every subgraph nested under it via
         /// node graph-attributes (Loop/If bodies), in declaration order — the one
-        /// shared traversal behind the vanilla-dialect check and the I/O rename
-        /// passes, so subgraph coverage is fixed in a single place.
+        /// shared traversal behind the vanilla-dialect check, the I/O rename and
+        /// proto-lowering passes, and <c>ComputeContext</c>'s optional-op scan, so
+        /// subgraph coverage is fixed in a single place. A visit may rewrite the
+        /// graph's node list in place: nested subgraphs are enumerated only after
+        /// their parent graph's visit returns.
         /// </summary>
-        private static void ForEachGraphRecursive(GraphProto graph, Action<GraphProto> visit)
+        internal static void ForEachGraphRecursive(GraphProto graph, Action<GraphProto> visit)
         {
             visit(graph);
             foreach (var node in graph.Nodes)
@@ -556,12 +581,13 @@ namespace Shorokoo.Core.Factory
         private static void LowerUpsampleToResize(GraphProto graph)
         {
             if (graph is null) return;
+            ForEachGraphRecursive(graph, LowerUpsampleToResizeInGraph);
+        }
+
+        private static void LowerUpsampleToResizeInGraph(GraphProto graph)
+        {
             foreach (var node in graph.Nodes)
             {
-                foreach (var attr in node.Attributes)
-                    if (attr.G is not null)
-                        LowerUpsampleToResize(attr.G);
-
                 if (node.OpType != OpCodes.UPSAMPLE)
                     continue;
 
@@ -689,13 +715,15 @@ namespace Shorokoo.Core.Factory
             GraphProto graph, Dictionary<string, TensorMeta> tensorMetaByName)
         {
             if (graph is null) return;
+            ForEachGraphRecursive(graph, g => LowerTrainingBatchNormalizationInGraph(g, tensorMetaByName));
+        }
+
+        private static void LowerTrainingBatchNormalizationInGraph(
+            GraphProto graph, Dictionary<string, TensorMeta> tensorMetaByName)
+        {
             for (int i = 0; i < graph.Nodes.Count; i++)
             {
                 var node = graph.Nodes[i];
-
-                foreach (var attr in node.Attributes)
-                    if (attr.G is not null)
-                        LowerTrainingBatchNormalization(attr.G, tensorMetaByName);
 
                 if (node.OpType != OpCodes.BATCH_NORMALIZATION)
                     continue;
@@ -957,11 +985,11 @@ namespace Shorokoo.Core.Factory
         /// Runs every Fast pre-pass on <paramref name="graph"/> in the canonical
         /// pre-pass order. Mutates the graph in place.
         /// </summary>
-        private static void RunPrePasses(InternalComputationGraph graph, bool prepForOnnx)
+        private static void RunPrePasses(InternalComputationGraph graph, bool prepForOnnx, bool applyExecutionLowerings)
         {
             FastLowerAttributeTensorOps.Process(graph);
-            FastLowerStateUpdateLinksForInference.Process(graph);
-            FastLowerRandomOps.Process(graph);
+            if (applyExecutionLowerings) FastLowerStateUpdateLinksForInference.Process(graph);
+            if (applyExecutionLowerings) FastLowerRandomOps.Process(graph);
             FastAddIdentityForOuterScopeValues.Process(graph);
             if (prepForOnnx) FastPrepForOnnx.Process(graph);
             FastStripCallStacks.Process(graph);
@@ -979,11 +1007,11 @@ namespace Shorokoo.Core.Factory
         /// then remapped through the rename map.
         /// </summary>
         private static Dictionary<FastTensorKey, FastTensorInfo> RunPrePassesAndBuildLookup(
-            InternalComputationGraph graph, bool prepForOnnx)
+            InternalComputationGraph graph, bool prepForOnnx, bool applyExecutionLowerings)
         {
             FastLowerAttributeTensorOps.Process(graph);
-            FastLowerStateUpdateLinksForInference.Process(graph);
-            FastLowerRandomOps.Process(graph);
+            if (applyExecutionLowerings) FastLowerStateUpdateLinksForInference.Process(graph);
+            if (applyExecutionLowerings) FastLowerRandomOps.Process(graph);
             FastAddIdentityForOuterScopeValues.Process(graph);
             if (prepForOnnx) FastPrepForOnnx.Process(graph);
             FastStripCallStacks.Process(graph);
@@ -1040,14 +1068,15 @@ namespace Shorokoo.Core.Factory
 
         // ----------- function emission -----------
 
-        private static FunctionProto BuildFunctionProto(Function function, OpSetVersion opset, bool prepForOnnx)
+        private static FunctionProto BuildFunctionProto(
+            Function function, OpSetVersion opset, bool prepForOnnx, bool applyExecutionLowerings)
         {
             // Clone the function's primary Fast body and run the same pre-passes
             // on the copy. The function's body has its own ONNX-name namespace,
             // so the per-graph counter inside FastUseUniqueNames restarts at 1
             // for each function — matches how ONNX FunctionProtos are scoped.
             var fnFast = function.OriginalFastGraph.Clone();
-            RunPrePasses(fnFast, prepForOnnx);
+            RunPrePasses(fnFast, prepForOnnx, applyExecutionLowerings);
             fnFast.ConfigureScopes(ScopeSize.Maximal, ScopeSize.Maximal, ScopePriority.Loop);
 
             var fnGraphProto = BuildGraphProto(
@@ -1082,6 +1111,13 @@ namespace Shorokoo.Core.Factory
                 };
                 fnProto.MetadataProps.Add(typeMeta);
             }
+
+            if (function.StateOwnership is { } stateOwnership)
+                fnProto.MetadataProps.Add(new StringStringEntryProto
+                {
+                    Key = Function.IRStateOwnershipParamName,
+                    Value = stateOwnership.ToString(),
+                });
 
             var nameMeta = new StringStringEntryProto
             {

@@ -1027,6 +1027,185 @@ public class CompressedFormatUtilsCoverageTests
     }
 
 
+    // ──────────────────────────────────────────────────────────────────────
+    // Module-stage .srk round-trip fidelity audit (issue #59).
+    //
+    // The construct inventory, and where each construct's save → load coverage
+    // lives:
+    //
+    //  1. Optional/absent tensor arguments on module-stage ops — the absent
+    //     optional model slot of MODEL_PARAM_MODEL_REF (every top-level
+    //     initializer call, e.g. ScalarMultiplyModel), the absent optional
+    //     "key" input of the SHRK_RANDOM_* runtime feeds (pre-concretization),
+    //     and an OptionalTensor model input (MODEL_OPTIONAL_INPUT,
+    //     NullableBiasLayer): TestModuleStageSrkRoundTripStructuralFidelity
+    //     (the structure descriptor records the null-slot pattern of every
+    //     node) + TestModuleStageSrkRoundTripLoweredExecutionMatches.
+    //  2. State-initializer ownership tags (StateOwnership.ModuleOwned /
+    //     OptimizerOwned on StateParamInitializer functions):
+    //     TestModuleStageSrkRoundTripPreservesStateInitializerOwnership.
+    //  3. Struct definitions and struct-typed values — a TensorStruct model
+    //     input (MODEL_TENSORSTRUCT_INPUT + TensorStructDef metadata,
+    //     SimplePairSum) and TENSOR_STRUCT_CREATE / TENSOR_STRUCT_GETFIELD
+    //     values (TensorStructLoopCarry): structural fidelity + lowered
+    //     execution below; the load-side arch pipeline is additionally covered
+    //     by ModulesTests.TestModuleGraphSaveLoadOnlyCoverage.
+    //  4. Loop/scope structure with module-stage ops inside loop bodies —
+    //     MODEL_PARAM_MODEL_REF in nested LOOP bands (TrainablesInBothLoopLevels)
+    //     and TENSOR_STRUCT_CREATE/GETFIELD in a loop band (TensorStructLoopCarry):
+    //     structural fidelity + lowered execution below.
+    //  5. RNG-related module-stage constructs — a runtime feed inside a loop
+    //     body (RngRuntimeLoopFeed; at module stage the feed has no key-derivation
+    //     chain yet, so the optional key slot is absent) and random trainable-param
+    //     initializers (RngInitTwoLinears): lowered execution equality below
+    //     proves the reloaded module derives the same keyed streams (RngSeed at
+    //     ModelId [0], split chains) and draws identical values.
+    //  6. Generic-typed module graphs (GENERIC_TYPE_INPUT placeholders,
+    //     GenericRecordSumCaller pre-specialization): structural fidelity below.
+    //  7. Sub-module invocation machinery (MODEL_INVOKE / SUBMODEL# /
+    //     CREATE_MODULE / MODULE_SET_HYPERPARAMS / MODEL_HYPERPARAM /
+    //     FUNCTION_INVOKE): structural fidelity + lowered execution below;
+    //     end-to-end also ModulesTests.TestModuleGraphOnnxRoundtripCoverage.
+    //  8. Hyperparameter defaults ([Hyper(v)] → ShrkAttrDefaultValue):
+    //     NullableParamTests.DefaultedHyper_DefaultValue_SurvivesOnnxBinaryRoundtrip
+    //     (pre-existing pin); DefaultedHyperLayer also rides the structural set.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Order-independent structure descriptor of a module graph: per-node
+    /// opcode + per-input-slot present/absent pattern (multiset), plus the graph
+    /// I/O signature names. Node/tensor keys are freshly assigned on load, so the
+    /// descriptor deliberately excludes them; execution equality (below) covers
+    /// value-level semantics the descriptor abstracts away.
+    /// </summary>
+    private static string DescribeModuleGraphStructure(ComputationGraph graph)
+    {
+        var g = graph.ToInternal();
+        var nodeLines = g.Nodes
+            .Select(n => $"{n.OpCode}({string.Join(",", n.Inputs.Select(k => k is null ? "-" : "x"))})")
+            .OrderBy(x => x, StringComparer.Ordinal);
+        return $"inputs=[{string.Join(",", g.InputUniqueNames)}] outputs=[{string.Join(",", g.OutputUniqueNames)}]\n"
+             + string.Join("\n", nodeLines);
+    }
+
+    /// <summary>
+    /// Saves a module graph to .srk, asserts the header stamps the module stage,
+    /// reloads, and asserts (a) the reloaded graph is stamped Module, (b) its
+    /// structure descriptor is unchanged, and (c) a second save → load → save is a
+    /// byte-level fixed point — so nothing the first load produced is lost or
+    /// mutated by another cycle. Returns the reloaded graph.
+    /// </summary>
+    private static ComputationGraph AssertModuleStageSrkRoundTrip(ComputationGraph moduleGraph)
+    {
+        Assert.Equal(GraphKind.Module, moduleGraph.Kind);
+        var bytes = CompressedFormatUtils.SaveFastGraphToBinary(moduleGraph, compressed: false);
+        Assert.Equal(GraphKind.Module, SrkFileFormat.TryReadHeader(bytes)!.TryGetStage());
+
+        var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(bytes);
+        Assert.Equal(GraphKind.Module, reloaded.Kind);
+        Assert.Equal(DescribeModuleGraphStructure(moduleGraph), DescribeModuleGraphStructure(reloaded));
+
+        var bytes2 = CompressedFormatUtils.SaveFastGraphToBinary(reloaded, compressed: false);
+        var bytes3 = CompressedFormatUtils.SaveFastGraphToBinary(
+            CompressedFormatUtils.LoadFastGraphFromBinary(bytes2), compressed: false);
+        Assert.True(bytes2.SequenceEqual(bytes3),
+            "save → load → save is not a fixed point: a load/save cycle keeps changing the serialized module graph.");
+        return reloaded;
+    }
+
+    /// <summary>
+    /// Issue #59 construct inventory, structural leg: every inventoried module-level
+    /// construct survives save → load with an unchanged structure descriptor (see the
+    /// inventory comment above for the construct ↔ fixture mapping).
+    /// </summary>
+    [Fact]
+    public void TestModuleStageSrkRoundTripStructuralFidelity()
+    {
+        ComputationGraph[] moduleGraphs =
+        [
+            ScalarMultiplyModel.ComputationGraph,            // absent optional model slot on MODEL_PARAM_MODEL_REF
+            ScalarMultiplyWithBatchNormModel.ComputationGraph, // module-owned state initializers
+            StepCountingSgdOptimizer.ComputationGraph,       // optimizer-owned state initializer + defaulted hyper
+            NullableBiasLayer.ComputationGraph,              // MODEL_OPTIONAL_INPUT (optional model input)
+            DefaultedHyperLayer.ComputationGraph,            // [Hyper(3f)] default on MODEL_TENSOR_INPUT
+            SimplePairSum.ComputationGraph,                  // MODEL_TENSORSTRUCT_INPUT + TENSOR_STRUCT_GETFIELD
+            TensorStructLoopCarry.ComputationGraph,          // TENSOR_STRUCT_CREATE/GETFIELD inside a LOOP band
+            TrainablesInBothLoopLevels.ComputationGraph,     // MODEL_PARAM_MODEL_REF in nested LOOP bodies
+            RngRuntimeLoopFeed.ComputationGraph,             // SHRK_RANDOM_UNIFORM feed (absent key) in a LOOP body
+            RngInitTwoLinears.ComputationGraph,              // sub-module invokes + random param initializers
+            GenericRecordSumCaller.ComputationGraph,         // GENERIC_TYPE_INPUT + struct-typed sub-module call
+        ];
+        foreach (var moduleGraph in moduleGraphs)
+            AssertModuleStageSrkRoundTrip(moduleGraph);
+    }
+
+    /// <summary>
+    /// Issue #59 construct inventory, execution leg: for every lowerable fixture,
+    /// the original and the reloaded module graph lower to concrete models that
+    /// execute bit-identically (same inputs, same RngConfig — covering keyed init
+    /// draws, runtime feeds and loop unrolling on both sides).
+    /// </summary>
+    [Fact]
+    public void TestModuleStageSrkRoundTripLoweredExecutionMatches()
+    {
+        var x23 = TensorData([2L, 3L], 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f);
+        var x44 = TensorData([4L, 4L],
+            [.. Enumerable.Range(0, 16).Select(i => 0.25f * i - 2.0f)]);
+
+        (ComputationGraph Module, TensorData[] Inputs)[] cases =
+        [
+            (ScalarMultiplyModel.ComputationGraph, [TensorData([2L], 1.0f, 2.0f)]),
+            (TrainablesInBothLoopLevels.ComputationGraph, [x23]),
+            (TensorStructLoopCarry.ComputationGraph,
+                [TensorData(DType.Float32, [], 1.5f), TensorData(DType.Float32, [], -0.5f)]),
+            (NullableBiasLayer.ComputationGraph, [x23, x23]),
+            (RngRuntimeLoopFeed.ComputationGraph, [x23, TensorData(DType.Int64, [], 3L)]),
+            (RngInitTwoLinears.ComputationGraph, [x44]),
+        ];
+
+        foreach (var (moduleGraph, inputs) in cases)
+        {
+            var reloaded = AssertModuleStageSrkRoundTrip(moduleGraph);
+
+            byte[] Run(ComputationGraph module)
+            {
+                var model = module
+                    .ToConcreteArchitecture(module.FromOrderedInputs([.. inputs]))
+                    .ToConcreteModel(RngConfig.Default);
+                return ComputeContext.Default.Execute(model, inputs)[0]
+                    .ToTensorData().AccessRawMemory().ToArray();
+            }
+
+            Assert.Equal(Run(moduleGraph), Run(reloaded));
+        }
+    }
+
+    /// <summary>
+    /// Issue #59, construct 2: the StateOwnership tag of a state-initializer function
+    /// survives save → load at module stage — an OptimizerOwned initializer must not
+    /// silently reload as the ModuleOwned default (the TrainingRig's ownership checks
+    /// branch on it), and ModuleOwned must stay ModuleOwned.
+    /// </summary>
+    [Fact]
+    public void TestModuleStageSrkRoundTripPreservesStateInitializerOwnership()
+    {
+        (ComputationGraph Module, StateOwnership Expected)[] cases =
+        [
+            (StepCountingSgdOptimizer.ComputationGraph, StateOwnership.OptimizerOwned),
+            (ScalarMultiplyWithBatchNormModel.ComputationGraph, StateOwnership.ModuleOwned),
+        ];
+        foreach (var (moduleGraph, expected) in cases)
+        {
+            var reloaded = AssertModuleStageSrkRoundTrip(moduleGraph);
+            var stateInits = reloaded.ToInternal().Nodes
+                .Select(n => n.TargetFunction)
+                .Where(fn => fn is { FunctionType: FunctionType.StateParamInitializer })
+                .ToArray();
+            Assert.NotEmpty(stateInits);
+            Assert.All(stateInits, fn => Assert.Equal(expected, fn!.StateOwnership));
+        }
+    }
+
     /// <summary>
     /// The graph kind rides ONNX serialization as a model metadata tag, so a graph
     /// reloads as the kind it was saved with even as a bare ONNX payload — including

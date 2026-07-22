@@ -66,6 +66,16 @@ namespace Shorokoo.Core
         public const string IRDefaultValue = "DefaultValue";
 
         /// <summary>
+        /// Metadata property on FunctionProto: who updates the state a
+        /// <see cref="Shorokoo.Core.Nodes.OnnxNodes.FunctionType.StateParamInitializer"/> creates
+        /// ("ModuleOwned" / "OptimizerOwned", the <see cref="Shorokoo.Modules.StateOwnership"/>
+        /// names). Present only on state-initializer functions; when absent (including files
+        /// written before the tag existed) the reader falls back to the constructor default,
+        /// <see cref="Shorokoo.Modules.StateOwnership.ModuleOwned"/>.
+        /// </summary>
+        public const string IRStateOwnershipParamName = "StateOwnership";
+
+        /// <summary>
         /// Metadata property on FunctionProto: the named RNG algorithm this function belongs to
         /// (e.g. "Threefry2x32-BoxMuller.v1"). Present only on RNG algorithm functions.
         /// </summary>

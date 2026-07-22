@@ -31,7 +31,9 @@ namespace Shorokoo
     /// mid-save never corrupts an existing checkpoint. See <see cref="SkptFileFormat"/>
     /// for the container layout and manifest schema.
     /// </summary>
-    public static class Checkpoint
+    // Partial: Checkpoint.Inspect (read-only artifact identification) lives in
+    // ArtifactInspection.cs — one Checkpoint facade, two concerns.
+    public static partial class Checkpoint
     {
         /// <summary>
         /// Starts a checkpoint of <paramref name="concreteModel"/>. The graph must be a

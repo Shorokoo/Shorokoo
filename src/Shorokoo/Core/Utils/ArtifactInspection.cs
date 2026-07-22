@@ -25,6 +25,13 @@ namespace Shorokoo
         /// <summary>A SafeTensors file written by <see cref="TrainingCheckpoint.Save"/>, recognized
         /// via its <c>__shorokoo_checkpoint__</c> marker tensor.</summary>
         TrainingCheckpoint,
+
+        /// <summary>A Zstd-compressed SafeTensors archive (.zsafetensor), as written by
+        /// <see cref="CompressedFormatUtils.SaveCompressedSafeTensors"/>: a Zstd frame whose
+        /// decompressed content is a SafeTensors file. Recognized by stream-decompressing the
+        /// 8-byte length prefix and the JSON header only — the tensor payload is never
+        /// decompressed.</summary>
+        CompressedSafeTensors,
     }
 
     /// <summary>One tensor as declared in a SafeTensors header: name, dtype, shape and payload size —
@@ -157,8 +164,10 @@ namespace Shorokoo
         /// <summary>Graph-container details; non-null iff <see cref="Kind"/> is <see cref="ArtifactKind.SrkGraph"/>.</summary>
         public SrkArtifactInfo? Srk { get; }
 
-        /// <summary>SafeTensors details; non-null for both <see cref="ArtifactKind.SafeTensors"/> and
-        /// <see cref="ArtifactKind.TrainingCheckpoint"/> (a checkpoint is a SafeTensors file).</summary>
+        /// <summary>SafeTensors details; non-null for <see cref="ArtifactKind.SafeTensors"/>,
+        /// <see cref="ArtifactKind.TrainingCheckpoint"/> (a checkpoint is a SafeTensors file), and
+        /// <see cref="ArtifactKind.CompressedSafeTensors"/> (read through the compression layer
+        /// from the decompressed header; sizes describe the decompressed content).</summary>
         public SafeTensorsArtifactInfo? SafeTensors { get; }
 
         /// <summary>Checkpoint details; non-null iff <see cref="Kind"/> is <see cref="ArtifactKind.TrainingCheckpoint"/>.</summary>
@@ -199,6 +208,7 @@ namespace Shorokoo
                 ArtifactKind.SrkGraph => "Shorokoo graph (.srk container, header not readable)",
                 ArtifactKind.SafeTensors => "SafeTensors weights file",
                 ArtifactKind.TrainingCheckpoint => "Shorokoo training checkpoint (SafeTensors)",
+                ArtifactKind.CompressedSafeTensors => "Zstd-compressed SafeTensors archive (.zsafetensor)",
                 _ => "not recognized as a Shorokoo artifact",
             });
             sb.Append("  file size: ").Append(FileSizeBytes).AppendLine(" bytes");
@@ -242,7 +252,8 @@ namespace Shorokoo
             else if (SafeTensors is { } st)
             {
                 sb.Append("  tensors (").Append(st.Tensors.Count).Append("), total data ")
-                  .Append(st.TotalTensorBytes).AppendLine(" bytes:");
+                  .Append(st.TotalTensorBytes)
+                  .AppendLine(Kind == ArtifactKind.CompressedSafeTensors ? " bytes decompressed:" : " bytes:");
                 AppendTensorList(sb, st.Tensors, indent: "    ");
             }
 
@@ -266,9 +277,10 @@ namespace Shorokoo
     /// <summary>
     /// Read-only inspection of Shorokoo-produced files: <see cref="Inspect"/> identifies what a
     /// file is and summarizes its contents from headers/prefixes only — tensor payloads are never
-    /// loaded, so inspecting a multi-GB file is fast and cheap.
+    /// loaded, so inspecting a multi-GB file is fast and cheap. (Partial: the .skpt save/load
+    /// entry points live in Checkpoint.cs — one <c>Checkpoint</c> facade, two concerns.)
     /// </summary>
-    public static class Checkpoint
+    public static partial class Checkpoint
     {
         // SafeTensors caps its JSON header at 100 MB; anything declaring more is not a
         // SafeTensors file (and bounds our header read).
@@ -284,7 +296,9 @@ namespace Shorokoo
         /// Identifies <paramref name="filePath"/> and summarizes its contents without loading
         /// tensor data. Recognized formats: .srk graph files (the v2 container by its header;
         /// the legacy v1 layouts by content sniffing), SafeTensors weights files (header only),
-        /// and training checkpoints written by <see cref="TrainingCheckpoint.Save"/> (via the
+        /// Zstd-compressed SafeTensors archives (.zsafetensor; the length prefix and JSON header
+        /// are stream-decompressed, the tensor payload never), and training checkpoints written
+        /// by <see cref="TrainingCheckpoint.Save"/> (via the
         /// checkpoint marker; the marker's 16 bytes are the only payload bytes ever read).
         /// Anything else — including corrupt or truncated headers — yields a structured
         /// <see cref="ArtifactKind.NotRecognized"/> (or partially-detailed) result with
@@ -435,6 +449,16 @@ namespace Shorokoo
                 stream.Position = 0;
                 using var ds = new DecompressionStream(stream);
                 innerRead = ds.ReadAtLeast(inner, inner.Length, throwOnEndOfStream: false);
+
+                // .zsafetensor probe — deliberately BEFORE the legacy-.srk classification:
+                // it is the more specific format, and recognizing it first eliminates the
+                // residual ambiguity class where a SafeTensors 8-byte header-length prefix
+                // imitates the opening bytes of a serialized ONNX model. The decompression
+                // stream sits right after the 8 prefix bytes, so the probe can continue
+                // reading the (bounded) JSON header sequentially.
+                if (innerRead == 8
+                    && TryInspectCompressedSafeTensors(filePath, ds, fileLen, inner, observations) is { } zst)
+                    return zst;
             }
             catch (Exception e) when (e is ZstdException or InvalidDataException or EndOfStreamException)
             {
@@ -457,6 +481,81 @@ namespace Shorokoo
                 safeTensors: null, trainingCheckpoint: null, observations);
         }
 
+        // ---- Zstd-compressed SafeTensors archive (.zsafetensor) ----
+
+        /// <summary>
+        /// Probes whether the Zstd frame's decompressed content is a SafeTensors file (a
+        /// .zsafetensor archive, as written by
+        /// <see cref="CompressedFormatUtils.SaveCompressedSafeTensors"/>). <paramref name="ds"/>
+        /// is positioned just past the 8 decompressed prefix bytes (<paramref name="innerPrefix"/>);
+        /// when the prefix declares a plausible header length, the probe stream-decompresses
+        /// exactly the JSON header — bounded by <see cref="MaxSafeTensorsHeaderBytes"/>, like the
+        /// uncompressed path — and never the tensor payload. Returns null when the content is not
+        /// a compressed SafeTensors archive (so the legacy-.srk sniff proceeds), or a final
+        /// result: recognized <see cref="ArtifactKind.CompressedSafeTensors"/>, or NotRecognized
+        /// for a frame that positively declared a SafeTensors header but could not deliver it.
+        ///
+        /// Note the prefix declares a *decompressed* extent, so the uncompressed path's
+        /// declared-length-vs-file-size checks do not transfer: the compressed file size has no
+        /// fixed relation to the decompressed content, and only header-internal consistency is
+        /// verifiable here without decompressing the payload.
+        /// </summary>
+        private static ArtifactInspection? TryInspectCompressedSafeTensors(
+            string filePath, DecompressionStream ds, long fileLen,
+            byte[] innerPrefix, List<string> observations)
+        {
+            long headerLen = BitConverter.ToInt64(innerPrefix, 0);
+            if (headerLen <= 0 || headerLen > MaxSafeTensorsHeaderBytes)
+                return null;
+
+            var headerBytes = new byte[headerLen];
+            int headerRead;
+            try
+            {
+                headerRead = ds.ReadAtLeast(headerBytes, headerBytes.Length, throwOnEndOfStream: false);
+            }
+            catch (Exception e) when (e is ZstdException or InvalidDataException or EndOfStreamException)
+            {
+                return NotRecognized(filePath, fileLen, observations,
+                    $"a Zstd frame whose decompressed content declares a plausible SafeTensors header " +
+                    $"({headerLen} bytes) but fails to decompress that far — a corrupt or truncated " +
+                    $".zsafetensor archive? ({e.Message})");
+            }
+
+            if (headerRead < headerLen)
+                return NotRecognized(filePath, fileLen, observations,
+                    $"a Zstd frame whose decompressed content declares a SafeTensors header of " +
+                    $"{headerLen} bytes but ends after {headerRead} of them — a truncated " +
+                    ".zsafetensor archive or foreign compressed data.");
+
+            if (ParseSafeTensorsHeader(headerBytes) is not { } parsed)
+                return null;
+
+            observations.AddRange(parsed.Observations);
+
+            // A checkpoint saved compressed: the marker is visible in the header, but its
+            // 16-byte [version, step] payload sits at its declared offset inside the
+            // compressed tensor data (TrainingCheckpoint.Save writes it last). Reaching it
+            // through the non-seekable Zstd stream would mean decompressing everything before
+            // it — not a bounded header read — so the archive keeps the CompressedSafeTensors
+            // kind and the observation says what more is known and why it stops there.
+            int markerIndex = parsed.Tensors.FindIndex(
+                t => t.Name == TrainingCheckpoint.CheckpointMarkerName);
+            if (markerIndex >= 0)
+                observations.Add(
+                    $"the archive's header carries a '{TrainingCheckpoint.CheckpointMarkerName}' " +
+                    "marker — a Shorokoo training checkpoint stored compressed — but the marker's " +
+                    $"version/step payload sits {parsed.Tensors[markerIndex].DataStartOffset} bytes " +
+                    "into the compressed tensor data, beyond Inspect's bounded header-only reads; " +
+                    "decompress the archive (CompressedFormatUtils.LoadCompressedSafeTensors) to " +
+                    "read them.");
+
+            return new ArtifactInspection(filePath, fileLen, ArtifactKind.CompressedSafeTensors,
+                srk: null,
+                new SafeTensorsArtifactInfo(headerLen, parsed.Tensors, parsed.MaxEnd, parsed.GlobalMetadata),
+                trainingCheckpoint: null, observations);
+        }
+
         // ---- SafeTensors / training checkpoint ----
 
         private static ArtifactInspection? TryInspectSafeTensors(
@@ -471,6 +570,46 @@ namespace Shorokoo
             if (stream.ReadAtLeast(headerBytes, headerBytes.Length, throwOnEndOfStream: false) < headerLen)
                 return null;
 
+            if (ParseSafeTensorsHeader(headerBytes) is not { } parsed)
+                return null;
+
+            // Compare in subtracted form: fileLen - dataStart >= 0 is guaranteed by the
+            // headerLen bound above, so a hostile huge maxEnd cannot wrap the comparison
+            // (dataStart + maxEnd could). These checks are specific to the uncompressed
+            // layout, where the declared extents and the file size share a coordinate
+            // system — they do not transfer to the .zsafetensor path.
+            long dataStart = 8 + headerLen;
+            long dataBytesInFile = fileLen - dataStart;
+            observations.AddRange(parsed.Observations);
+            if (parsed.MaxEnd > dataBytesInFile)
+                observations.Add($"declared tensor data extends {parsed.MaxEnd - dataBytesInFile} bytes " +
+                    "past the end of the file — the file is truncated or corrupt.");
+            else if (dataBytesInFile > parsed.MaxEnd)
+                observations.Add($"the file has {dataBytesInFile - parsed.MaxEnd} trailing bytes beyond " +
+                    "the declared tensor data.");
+
+            var safeTensorsInfo = new SafeTensorsArtifactInfo(
+                headerLen, parsed.Tensors, parsed.MaxEnd, parsed.GlobalMetadata);
+
+            var checkpoint = TryReadCheckpointMarker(
+                stream, fileLen, dataStart, parsed.Tensors, observations);
+            return new ArtifactInspection(filePath, fileLen,
+                checkpoint is null ? ArtifactKind.SafeTensors : ArtifactKind.TrainingCheckpoint,
+                srk: null, safeTensorsInfo, checkpoint, observations);
+        }
+
+        /// <summary>
+        /// Parses SafeTensors JSON header bytes into the tensor listing — shared by the plain
+        /// (<see cref="TryInspectSafeTensors"/>) and Zstd-compressed
+        /// (<see cref="TryInspectCompressedSafeTensors"/>) paths. Returns null when the bytes
+        /// are not a SafeTensors header. The returned observations cover header-internal
+        /// consistency only (invalid data_offsets extents); how the declared extents relate to
+        /// what the file actually holds is layout-specific, so those checks stay with the
+        /// callers.
+        /// </summary>
+        private static (List<InspectedTensorInfo> Tensors, Dictionary<string, string>? GlobalMetadata,
+            long MaxEnd, List<string> Observations)? ParseSafeTensorsHeader(byte[] headerBytes)
+        {
             JsonDocument doc;
             try
             {
@@ -547,26 +686,7 @@ namespace Shorokoo
                     maxEnd = Math.Max(maxEnd, end);
                 }
 
-                // Compare in subtracted form: fileLen - dataStart >= 0 is guaranteed by the
-                // headerLen bound above, so a hostile huge maxEnd cannot wrap the comparison
-                // (dataStart + maxEnd could).
-                long dataStart = 8 + headerLen;
-                long dataBytesInFile = fileLen - dataStart;
-                if (maxEnd > dataBytesInFile)
-                    stObservations.Add($"declared tensor data extends {maxEnd - dataBytesInFile} bytes " +
-                        "past the end of the file — the file is truncated or corrupt.");
-                else if (dataBytesInFile > maxEnd)
-                    stObservations.Add($"the file has {dataBytesInFile - maxEnd} trailing bytes beyond " +
-                        "the declared tensor data.");
-                observations.AddRange(stObservations);
-
-                var safeTensorsInfo = new SafeTensorsArtifactInfo(headerLen, tensors, maxEnd, globalMetadata);
-
-                var checkpoint = TryReadCheckpointMarker(
-                    stream, fileLen, dataStart, tensors, observations);
-                return new ArtifactInspection(filePath, fileLen,
-                    checkpoint is null ? ArtifactKind.SafeTensors : ArtifactKind.TrainingCheckpoint,
-                    srk: null, safeTensorsInfo, checkpoint, observations);
+                return (tensors, globalMetadata, maxEnd, stObservations);
             }
         }
 

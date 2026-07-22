@@ -1702,6 +1702,45 @@ public class CompressedFormatUtilsCoverageTests
             foreach (var (paramId, bytes) in originalWeights)
                 Assert.Equal(bytes, loadedWeights[paramId]);
             Assert.Equal(ExecuteToBytes(model, numOut, input), ExecuteToBytes(loaded, numOut, input));
+
+            // Back-compat: a checkpoint whose model definition carries materialized
+            // zero placeholders without the values-elided marker — the shape every
+            // .skpt written before the marker existed has — still loads and binds
+            // identically. (Synthesized by re-stripping with full zero tensors and
+            // splicing the entry + its manifest hash into the archive.)
+            var legacyPath = Path.Combine(TempDir, "legacy-zero-placeholders.skpt");
+            try
+            {
+                var legacyGraph = model.ToInternal().Clone();
+                foreach (var node in legacyGraph.Nodes)
+                {
+                    if (node.OpCode != InternalOpCodes.MODEL_PARAM_DATA
+                        || !originalWeights.ContainsKey(node.IdentifierTemplate ?? "")) continue;
+                    var data = node.GetTensorData()!;
+                    node.Attributes = node.Attributes.SetAttributes(
+                        (OnnxOpAttributeNames.ShrkAttrTensorData,
+                         (object?)TensorDataWithDefaultVals(data.DType, data.Shape.Dims)));
+                }
+                var legacyModelBytes = CompressedFormatUtils.SaveFastGraphToBinary(
+                    legacyGraph, GraphKind.ConcreteModel, compressed: true);
+                var legacyConfig = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
+                legacyConfig["models"]!["model"]!["sha256"] = SkptFileFormat.Sha256Hex(legacyModelBytes);
+                RewriteSkpt(legacyPath, entries.Select(e => (e.Key, e.Key switch
+                {
+                    SkptFileFormat.ConfigEntryName =>
+                        System.Text.Encoding.UTF8.GetBytes(legacyConfig.ToJsonString()),
+                    SkptFileFormat.ModelEntryPath => legacyModelBytes,
+                    _ => e.Value,
+                })).ToList());
+                var legacyLoaded = Checkpoint.Load(legacyPath);
+                var legacyWeights = WeightBytesByParam(legacyLoaded);
+                Assert.Equal(originalWeights.Count, legacyWeights.Count);
+                foreach (var (paramId, bytes) in originalWeights)
+                    Assert.Equal(bytes, legacyWeights[paramId]);
+                Assert.Equal(ExecuteToBytes(model, numOut, input),
+                    ExecuteToBytes(legacyLoaded, numOut, input));
+            }
+            finally { if (File.Exists(legacyPath)) File.Delete(legacyPath); }
         }
         finally { if (File.Exists(path)) File.Delete(path); }
     }

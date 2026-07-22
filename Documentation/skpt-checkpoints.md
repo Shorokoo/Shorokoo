@@ -99,6 +99,17 @@ observations flag manifest/archive mismatches, compressed entries where STORED
 is expected, and unknown manifest keys. See the inspection section in
 [onnx-and-weights.md](onnx-and-weights.md#identify-and-summarize-a-file-checkpointinspect).
 
+
+A foreign `.safetensors` file (e.g. PyTorch/timm weights) lands as a native
+checkpoint in one call — the strict safetensors import (see
+[onnx-and-weights.md](onnx-and-weights.md#weight-exchange-with-naming-schemes-exportsafetensors--importsafetensors))
+followed by this same writer:
+
+```csharp
+ComputationGraph model = Checkpoint.ImportSafeTensorsToCheckpoint(
+    arch, "foreign.safetensors", "model.skpt", scheme);
+```
+
 ## Container layout
 
 ```

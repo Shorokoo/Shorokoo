@@ -250,6 +250,87 @@ Compressed (`.zsafetensor`) variants live in `CompressedFormatUtils`:
 `SaveCompressedSafeTensors`, `LoadCompressedSafeTensors`,
 `SaveCompressedModelParamSet`, `LoadCompressedModelParamSet`.
 
+## Weight exchange with naming schemes (`ExportSafeTensors` / `ImportSafeTensors`)
+
+`SafeTensorLoader` above is the raw tensor-file layer: it moves tensors, knows
+nothing about models, and leaves name matching to you. The **model-level
+boundary** lives on `Checkpoint` (namespace `Shorokoo`, the same class as the
+[.skpt save/load](skpt-checkpoints.md) entry points):
+
+```csharp
+using Shorokoo;        // Checkpoint
+using Shorokoo.Core;   // naming schemes
+
+// Export: concrete model → standard .safetensors (canonical names by default).
+Checkpoint.ExportSafeTensors(model, "weights.safetensors");
+Checkpoint.ExportSafeTensors(model, "weights.safetensors", scheme);   // PyTorch/timm names
+
+// Import: concrete architecture + .safetensors → concrete model, strictly checked.
+ComputationGraph m1 = Checkpoint.ImportSafeTensors(arch, "weights.safetensors");
+ComputationGraph m2 = Checkpoint.ImportSafeTensors(arch, "foreign.safetensors", scheme);
+
+// One-call native landing: foreign safetensors → .skpt checkpoint (+ the bound model).
+ComputationGraph m3 = Checkpoint.ImportSafeTensorsToCheckpoint(
+    arch, "foreign.safetensors", "model.skpt", scheme);
+```
+
+- `ExportSafeTensors` requires a **concrete model** (`GraphKind.ConcreteModel`)
+  and writes every weight parameter to a single plain safetensors file (the RNG
+  identity parameter is model definition, not a weight, and is not exported).
+  The write is atomic; the output loads in any safetensors implementation.
+- `ImportSafeTensors` requires a **concrete architecture** (the unbound stage
+  weights bind into) and returns the bound concrete model. The binding is the
+  standard `ToConcreteModel(weights, scheme)` path — what import adds is
+  **strictness**. Where `ToConcreteModel` silently drops names that do not
+  resolve, import fails loudly, naming the offending tensor, on:
+  - a source tensor that maps to no parameter (a training-checkpoint file is
+    recognized by its marker and redirected to `TrainingRig.LoadCheckpoint`);
+  - a required parameter with no source tensor (or one the scheme fails to name);
+  - two source tensors mapping to one parameter (an ambiguous scheme);
+  - a dtype or shape mismatch after mapping.
+
+  All validation runs before any binding, so a failed import never yields a
+  partially bound model. Truncated/corrupt files are refused by the loader's
+  declared-vs-actual size checks, naming the file. A safetensors `__metadata__`
+  block is ignored (it is metadata, not a tensor).
+- `ImportSafeTensorsToCheckpoint` performs the same import and lands the result
+  as a native `.skpt` via the standard
+  `Checkpoint.From(model).WithModel().WithWeights().Save(...)` writer (atomic;
+  nothing is written when the import fails).
+
+### Naming
+
+With **no scheme**, tensors carry the parameters' **canonical Shorokoo ids**
+(e.g. `TrainableParam#0.FCLayer#0.InitSimple#0`) — export and import are exact
+mirrors, so `ExportSafeTensors(model, path)` → `ImportSafeTensors(arch, path)`
+reproduces the model bit-identically.
+
+With a **scheme**, the mapping is applied at the boundary in both directions:
+
+```csharp
+SimplePatternScheme[] patterns =
+[
+    new SimplePatternScheme("TrainableParam#0.FCLayer#0.InitSimple#0", "fc.weight"),
+    new SimplePatternScheme("TrainableParam#0.FCLayer#0.InitSimple#1", "fc.bias"),
+];
+var scheme = new SimplePatternNamingScheme(
+    patterns, arch.GetShorokooIdNamingScheme(), ModuleParamSetNamingScheme.PyTorchFrameworkId);
+
+Checkpoint.ExportSafeTensors(model, "torch.safetensors", scheme);  // writes fc.weight / fc.bias
+var bound = Checkpoint.ImportSafeTensors(arch, "torch.safetensors", scheme);
+```
+
+Both DSLs work for **import**: the
+[pattern DSL](param-naming-pattern-dsl.md) (`SimplePatternNamingScheme`) and the
+[ModelId format DSL](param-naming-format-dsl.md) (`ModelIdNamingScheme`).
+**Export with a scheme** needs the canonical-id → name direction, which only the
+pattern DSL provides (its patterns are written against canonical id strings —
+`ModuleParamSetNamingScheme.ToName(string)`); a plain `ModelIdNamingScheme` maps
+ModelIds, which a bound model no longer carries, and is refused with
+`NotSupportedException`. Export also refuses — naming the parameters — a scheme
+that leaves any weight unnamed or maps two weights to one tensor name, so
+weights are never silently dropped or overwritten.
+
 ## Identify and summarize a file (`Checkpoint.Inspect`)
 
 `Checkpoint.Inspect(path)` (namespace `Shorokoo`) answers "what is this file?"
@@ -358,6 +439,9 @@ Notes:
   Two DSLs build the remapping scheme: the
   [ModelId format DSL](param-naming-format-dsl.md) (`ModelIdNamingScheme`) and the
   [pattern DSL](param-naming-pattern-dsl.md) (`SimplePatternNamingScheme`).
+- Prefer `Checkpoint.ImportSafeTensors` (above) when the file is supposed to cover the
+  model exactly: it runs the same binding but fails loudly on unmatched or mismatched
+  tensors instead of silently dropping them.
 
 A `SafeTensor` exposes `.Name`, `.Data` (`TensorData`), `.DataType` (e.g. `"F32"`,
 `"I64"`), `.Shape`, and `.Metadata`. Use `SafeTensorLoader.DTypeToSafeTensorDType` to

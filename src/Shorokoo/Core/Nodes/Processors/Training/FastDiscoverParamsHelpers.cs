@@ -105,10 +105,13 @@ namespace Shorokoo.Core.Nodes.Processors.Training
 
         /// <summary>
         /// Pulls the dot-joined parts segment out of an <c>"[ModelId]:parts..."</c> string,
-        /// matching <see cref="ModelParamIdentifierTemplate.ToTemplateString"/> on the CG side.
-        /// Returns the input unchanged if it isn't in the bracketed form.
+        /// matching <see cref="ModelParamIdentifierTemplate.ToTemplateString"/> on the CG side —
+        /// the parameter's canonical Shorokoo name (what
+        /// <see cref="ModuleParamSetNamingScheme.ToName(ModelId)"/> produces under the canonical
+        /// scheme). Shared with <c>Checkpoint.ExportSafeTensors</c>, which names exported
+        /// tensors canonically. Returns the input unchanged if it isn't in the bracketed form.
         /// </summary>
-        private static string ExtractTemplateString(string identifierTemplate)
+        public static string ExtractTemplateString(string identifierTemplate)
         {
             var idx = identifierTemplate.IndexOf("]:", StringComparison.Ordinal);
             if (idx < 0) return identifierTemplate;

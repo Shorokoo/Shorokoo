@@ -417,6 +417,14 @@ namespace Shorokoo.Core
             return this.toName(shorokooParam.ToShorokooIdString());
         }
 
+        /// <summary>
+        /// Translates a canonical Shorokoo parameter id string (e.g.
+        /// <c>TrainableParam#0.FCLayer#0.InitSimple#0</c>) to this scheme's name by matching the
+        /// patterns directly — the natural direction for this scheme, whose patterns are written
+        /// against canonical id strings. Returns null when no pattern matches the id.
+        /// </summary>
+        public override string? ToName(string shorokooId) => this.toName(shorokooId);
+
         public override ModelId? ToModelId(string paramName, ImmutableArray<ModelId> candidates)
         {
             if (dctReverseCache is not null && dctReverseCache.TryGetValue(paramName, out var modelId))
@@ -501,6 +509,24 @@ namespace Shorokoo.Core
         public abstract string? ToName(ModelId modelId);
 
         public abstract string? ToName(ConcreteModelParamInfo shorokooParam);
+
+        /// <summary>
+        /// Translates a parameter's <b>canonical Shorokoo id string</b> (the name a concrete
+        /// model's parameters carry — what <see cref="CreateShorokooNamingScheme"/> produces for
+        /// the parameter's ModelId) to this scheme's name, returning null when no rule of the
+        /// scheme covers the id. This is the direction weight <b>export from a concrete model</b>
+        /// needs: a bound model carries canonical id strings but no ModelIds, so schemes keyed on
+        /// ModelIds (e.g. a plain <see cref="ModelIdNamingScheme"/>) cannot translate from the
+        /// string form and throw <see cref="NotSupportedException"/> — use a
+        /// <see cref="SimplePatternNamingScheme"/> (whose patterns are written against canonical
+        /// id strings) where this direction is required.
+        /// </summary>
+        public virtual string? ToName(string shorokooId)
+            => throw new NotSupportedException(
+                $"{GetType().Name} cannot translate a canonical Shorokoo parameter id string to a " +
+                "name: it maps ModelIds, which a bound concrete model no longer carries. Use a " +
+                "SimplePatternNamingScheme (patterns over canonical id strings) for this direction, " +
+                "or pass no scheme to keep canonical names.");
 
         public abstract ModelId? ToModelId(string paramName, ImmutableArray<ModelId> candidatess);
 

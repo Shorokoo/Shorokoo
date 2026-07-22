@@ -34,9 +34,14 @@ namespace Shorokoo
     /// mid-save never corrupts an existing checkpoint. See <see cref="SkptFileFormat"/>
     /// for the container layout and manifest schema. (The read-only <see cref="Inspect"/>
     /// facility lives in the other half of this partial class, in ArtifactInspection.cs.)
+    ///
+    /// The safetensors boundary lives here too: <c>ExportSafeTensors</c> writes a model's
+    /// weights to a standard .safetensors file and <c>ImportSafeTensors</c> binds a foreign
+    /// .safetensors file onto an architecture (see <c>Checkpoint.SafeTensors.cs</c>).
     /// </summary>
     // Partial: Checkpoint.Inspect (read-only artifact identification) lives in
-    // ArtifactInspection.cs — one Checkpoint facade, two concerns.
+    // ArtifactInspection.cs and the safetensors weight-exchange boundary in
+    // Checkpoint.SafeTensors.cs — one Checkpoint facade, three concerns.
     public static partial class Checkpoint
     {
         /// <summary>
@@ -439,7 +444,7 @@ namespace Shorokoo
                     "model definition + weights. Call .WithModel().WithWeights() before Save.");
 
             var source = _model.ToInternal();
-            var weightNodes = CollectWeightNodes(source);
+            var weightNodes = CollectWeightNodes(source, "Checkpoint.Save");
 
             var tensors = new List<SafeTensor>(weightNodes.Count);
             var tensorRefs = new Dictionary<string, SkptTensorRef>(StringComparer.Ordinal);
@@ -527,9 +532,10 @@ namespace Shorokoo
         /// The model's weight parameters: every MODEL_PARAM_DATA node except the RNG identity
         /// parameter (which is model definition, not a weight, and stays embedded). Each must
         /// carry a unique, non-empty identifier — it names the tensor in the checkpoint — and
-        /// its tensor data.
+        /// its tensor data. <paramref name="operation"/> names the caller in errors
+        /// (<c>Checkpoint.Save</c> and <c>Checkpoint.ExportSafeTensors</c> share this walk).
         /// </summary>
-        private static List<FastNode> CollectWeightNodes(InternalComputationGraph graph)
+        internal static List<FastNode> CollectWeightNodes(InternalComputationGraph graph, string operation)
         {
             var nodes = new List<FastNode>();
             var seenIds = new HashSet<string>(StringComparer.Ordinal);
@@ -542,15 +548,15 @@ namespace Shorokoo
 
                 if (string.IsNullOrEmpty(node.IdentifierTemplate))
                     throw new InvalidOperationException(
-                        "Checkpoint.Save: a model parameter carries no identifier, so its tensor " +
+                        $"{operation}: a model parameter carries no identifier, so its tensor " +
                         "cannot be named in the checkpoint.");
                 if (!seenIds.Add(node.IdentifierTemplate))
                     throw new InvalidOperationException(
-                        $"Checkpoint.Save: two model parameters share the identifier " +
+                        $"{operation}: two model parameters share the identifier " +
                         $"'{node.IdentifierTemplate}'; parameter identifiers must be unique to map tensors.");
                 if (node.GetTensorData() is null)
                     throw new InvalidOperationException(
-                        $"Checkpoint.Save: parameter '{node.IdentifierTemplate}' carries no tensor data; " +
+                        $"{operation}: parameter '{node.IdentifierTemplate}' carries no tensor data; " +
                         "a concrete model must have every parameter materialized.");
 
                 nodes.Add(node);

@@ -65,6 +65,60 @@ var loaded = Persistence.Load("model.skpt");   // decompression is transparent
 Loading honors each entry's manifest-declared compression; nothing changes on the
 read side of the API.
 
+## Provenance metadata
+
+A checkpoint records its **producer** (framework version) and **creation time**
+automatically. You can attach your own **provenance metadata** on top — a
+free-form `string → string` bag written into the manifest, so the checkpoint is
+self-documenting for reproducibility. It is cheap to write at save time and
+impossible to reconstruct later.
+
+```csharp
+Persistence.From(concreteModel)
+    .WithModel()
+    .WithWeights()
+    .WithMetadata(
+        gitCommit: "9f3c1ba",
+        datasetId: "imagenet-1k@v2",
+        runName:   "nightly-run-42",
+        license:   "Apache-2.0")
+    .Save("model.skpt");
+```
+
+Four well-known keys — git commit, dataset id, run name, license — are surfaced
+as named parameters; any other pairs go in the map argument, and calls
+accumulate:
+
+```csharp
+.WithMetadata(new Dictionary<string, string> { ["experiment"] = "ablation-7" },
+              gitCommit: "9f3c1ba")
+```
+
+`Persistence.Inspect` echoes the metadata back (in its own section, distinct from
+the auto producer/created fields):
+
+```csharp
+var info = Persistence.Inspect("model.skpt");
+foreach (var (key, value) in info.Skpt!.UserMetadata ?? new Dictionary<string, string>())
+    Console.WriteLine($"{key} = {value}");
+```
+
+What provenance metadata **is and is not**:
+
+- **Purely informational.** It never affects manifest identity checks or weight
+  binding — `Persistence.Load` ignores it entirely, so a checkpoint loads and
+  binds identically with or without it. It is trusted only as far as its writer:
+  Shorokoo does not sign, interpret, or validate the values (a git commit is not
+  checked to exist), and nothing is auto-populated from the environment — you
+  supply every value.
+- **Add-only, like the rest of the manifest.** A reader tolerates keys it does
+  not know. The values are stored verbatim; the human-readable inspection output
+  sanitizes control characters for display only, so a value can never forge a
+  line in the summary — but the structured `UserMetadata` property keeps it raw.
+- **Absent by default.** Supply none and the manifest's `userMetadata` key is
+  simply not written — the output is byte-for-byte identical to a checkpoint
+  saved without provenance.
+
 ## Compressed data entries: the trade-off
 
 Compression is a per-entry, opt-in trade of **size against range-readability**:
@@ -91,8 +145,9 @@ Compression is a per-entry, opt-in trade of **size against range-readability**:
 ## Inspecting a .skpt
 
 `Persistence.Inspect("model.skpt")` identifies the container and summarizes its
-manifest — whole-archive metadata, the model and data registries, the
-mapping-set names — reading only the zip central directory and `config.json`,
+manifest — whole-archive metadata (producer, creation time, and any
+[user provenance metadata](#provenance-metadata)), the model and data registries,
+the mapping-set names — reading only the zip central directory and `config.json`,
 never the tensor data. The recorded per-entry sha256s are reported as written
 but not verified (a full `Persistence.Load` verifies them), and cheap sanity
 observations flag manifest/archive mismatches, compressed entries where STORED
@@ -144,6 +199,15 @@ model.skpt
   "skptVersion": 1,                       // format major version
   "createdUtc": "2026-07-21T13:32:39Z",
   "producer": { "shorokoo": "0.1.0" },    // framework version that wrote the file
+
+  // Optional user-supplied provenance metadata (omitted entirely when none is given).
+  // Purely descriptive: it wires nothing and never affects load.
+  "userMetadata": {
+    "gitCommit": "9f3c1ba",
+    "datasetId": "imagenet-1k@v2",
+    "runName": "nightly-run-42",
+    "license": "Apache-2.0"
+  },
 
   // Model registry: per model, where its definition lives and how it is encoded.
   "models": {

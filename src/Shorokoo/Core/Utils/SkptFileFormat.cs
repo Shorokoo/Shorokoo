@@ -128,6 +128,16 @@ namespace Shorokoo.Core.Utils
         [JsonPropertyName("producer")]
         public SkptProducerInfo? Producer { get; set; }
 
+        /// <summary>Optional, user-supplied provenance metadata (git commit, dataset id, run
+        /// name, license, and arbitrary key/value pairs) recorded at save time. Purely
+        /// informational — trusted only as far as its writer: it never affects manifest
+        /// identity checks or weight binding, and its keys are add-only like the rest of the
+        /// manifest. Absent (null, and omitted from the JSON) unless the saver supplied it,
+        /// so a checkpoint written without metadata is byte-identical to one from a build
+        /// that predates this field.</summary>
+        [JsonPropertyName("userMetadata")]
+        public Dictionary<string, string>? UserMetadata { get; set; }
+
         /// <summary>Model registry: model key → serialized model definition.</summary>
         [JsonPropertyName("models")]
         public Dictionary<string, SkptModelEntry>? Models { get; set; }
@@ -200,6 +210,22 @@ namespace Shorokoo.Core.Utils
 
         /// <summary>Name of the (only, for now) tensor mapping set.</summary>
         internal const string DefaultMappingSetName = "default";
+
+        /// <summary>Well-known user-metadata key: the source-control commit the checkpoint
+        /// was produced from (see <see cref="SkptManifest.UserMetadata"/>).</summary>
+        public const string MetadataGitCommitKey = "gitCommit";
+
+        /// <summary>Well-known user-metadata key: an identifier of the training/evaluation
+        /// dataset (see <see cref="SkptManifest.UserMetadata"/>).</summary>
+        public const string MetadataDatasetIdKey = "datasetId";
+
+        /// <summary>Well-known user-metadata key: the name of the run that produced the
+        /// checkpoint (see <see cref="SkptManifest.UserMetadata"/>).</summary>
+        public const string MetadataRunNameKey = "runName";
+
+        /// <summary>Well-known user-metadata key: the checkpoint's license
+        /// (see <see cref="SkptManifest.UserMetadata"/>).</summary>
+        public const string MetadataLicenseKey = "license";
 
         private static readonly JsonSerializerOptions ManifestJsonOptions = new()
         {

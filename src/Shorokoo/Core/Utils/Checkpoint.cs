@@ -165,7 +165,7 @@ namespace Shorokoo
 
         /// <summary>
         /// Resolves the model's "default" tensor mapping set and injects each mapped tensor
-        /// into its parameter node (the graph carries dtype/shape-true zero placeholders where
+        /// into its parameter node (the graph carries dtype/shape-true placeholders where
         /// weights were stripped at save time). Every parameter must be mapped and every
         /// mapping entry must land on a parameter — a mismatch means the checkpoint does not
         /// belong to this model definition, and fails loudly naming the parameter.
@@ -424,9 +424,10 @@ namespace Shorokoo
         /// Saves the checkpoint as a single .skpt file. The write is atomic (staged to a temp
         /// file beside <paramref name="filePath"/> and committed by rename), so a crash
         /// mid-save never corrupts an existing checkpoint; the target's directory must already
-        /// exist. The model definition is stored with its weight tensors stripped to zero
-        /// placeholders — the weights live once, in the checkpoint's data tree — and the RNG
-        /// identity parameter (part of the model's definition, not a weight) stays embedded.
+        /// exist. The model definition is stored with its weight tensors stripped to
+        /// metadata-only placeholders — the weights live once, in the checkpoint's data tree —
+        /// and the RNG identity parameter (part of the model's definition, not a weight)
+        /// stays embedded.
         /// </summary>
         public void Save(string filePath)
         {
@@ -559,11 +560,12 @@ namespace Shorokoo
 
         /// <summary>
         /// Returns a copy of the graph with each weight parameter's tensor replaced by a
-        /// dtype/shape-true zero placeholder (the same clone-and-swap
-        /// <see cref="InternalComputationGraph.WithUpdatedStates"/> uses). The placeholders
-        /// keep the serialized definition a valid concrete model — and Zstd inside the .srk
-        /// payload collapses them to almost nothing — while the real bytes live once, in the
-        /// checkpoint's data tree.
+        /// dtype/shape-true <see cref="WeightPlaceholderTensorData"/> (the same
+        /// clone-and-swap <see cref="InternalComputationGraph.WithUpdatedStates"/> uses).
+        /// The placeholders are metadata-only — no values array is ever allocated, so
+        /// stripping adds no per-weight peak memory — and serialize as empty,
+        /// values-elided initializers that keep the definition a loadable concrete model,
+        /// while the real bytes live once, in the checkpoint's data tree.
         /// </summary>
         private static InternalComputationGraph StripWeights(
             InternalComputationGraph graph, List<FastNode> weightNodes)
@@ -579,7 +581,7 @@ namespace Shorokoo
                 var clonedNode = stripped.Nodes[indexByKey[node.Key]];
                 clonedNode.Attributes = clonedNode.Attributes.SetAttributes(
                     (OnnxOpAttributeNames.ShrkAttrTensorData,
-                     (object?)Globals.TensorDataWithDefaultVals(data.DType, data.Shape.Dims)));
+                     (object?)new WeightPlaceholderTensorData(data.Shape, data.DType)));
             }
             return stripped;
         }

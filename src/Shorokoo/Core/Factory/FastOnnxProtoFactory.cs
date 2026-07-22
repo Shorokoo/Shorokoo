@@ -112,13 +112,27 @@ namespace Shorokoo.Core.Factory
                 ?? throw new InvalidOperationException(
                     $"FastOnnxProtoFactory.CreateInitializer: MODEL_PARAM_DATA node has no {OnnxOpAttributeNames.ShrkAttrIsTrainable} attribute.");
 
-            return OnnxIRFactory.CreateTensor(
+            // A weights-stripped placeholder (checkpoint model definition) carries no
+            // values: emit a dims/dtype-true initializer with an empty payload plus the
+            // values-elided marker, so serialization never materializes a full-size
+            // zero buffer and the reader reconstructs the placeholder as metadata-only.
+            bool valuesElided = data is WeightPlaceholderTensorData;
+            var tensor = OnnxIRFactory.CreateTensor(
                 dims: data.Shape.Dims,
                 name: outputKey.ToString(),
                 type: data.DType,
                 identifierTemplate: paramDataNode.IdentifierTemplate,
                 isTrainable: isTrainable,
-                data: data.AccessRawMemory().ToArray());
+                data: valuesElided ? [] : data.AccessRawMemory().ToArray());
+            if (valuesElided)
+            {
+                tensor.MetadataProps.Add(new StringStringEntryProto
+                {
+                    Key = OnnxOpAttributeNames.ShrkMetaValuesElided,
+                    Value = "true",
+                });
+            }
+            return tensor;
         }
 
         // ------------------------- node proto -------------------------

@@ -370,6 +370,27 @@ namespace Shorokoo.Core.Factory.IR
             }
         }
 
+        /// <summary>
+        /// TensorData for an initializer proto: a metadata-only
+        /// <see cref="WeightPlaceholderTensorData"/> when the proto carries the
+        /// values-elided marker (a checkpoint model definition saved with its weights
+        /// stripped — the real bytes live in the checkpoint's data tree and are bound
+        /// back after load), else the fully materialized tensor.
+        /// </summary>
+        private static TensorData CreateInitializerTensorData(TensorProto initializer)
+        {
+            var elided = initializer.MetadataProps
+                .FirstOrDefault(x => x.Key == ShrkMetaValuesElided)?.Value;
+            if (elided is null)
+                return CreateTensorData(initializer);
+            if (elided != "true")
+                throw new InvalidOperationException(
+                    $"Invalid value '{elided}' for '{ShrkMetaValuesElided}' metadata. Expected 'true'.");
+
+            Shape shape = initializer.Dims is { Length: > 0 } dims ? dims : (long[])[];
+            return new WeightPlaceholderTensorData(shape, (DType)initializer.data_type);
+        }
+
         private static TensorData CreateTensorData(TensorProto tensorProto)
         {
             byte[] rawDataBytes;
@@ -751,7 +772,7 @@ namespace Shorokoo.Core.Factory.IR
                 var isTrainableStr = initializer.MetadataProps
                     .FirstOrDefault(x => x.Key == ShrkMetaIsTrainable)?.Value;
                 var isTrainable = ParseIsTrainableMetadata(isTrainableStr);
-                var tensorData = CreateTensorData(initializer);
+                var tensorData = CreateInitializerTensorData(initializer);
 
                 var attrs = OnnxCSharpAttributes.FromCSharpVals(
                     new Dictionary<string, object?>

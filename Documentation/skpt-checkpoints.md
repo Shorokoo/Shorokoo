@@ -111,9 +111,10 @@ model.skpt
 ```
 
 - `models/model.srk` is the model **definition**: a valid `.srk` v2 concrete-model
-  file in which each weight tensor is replaced by a zero placeholder of the same
-  dtype/shape (the `.srk` payload is Zstd-compressed internally, so placeholders cost
-  almost nothing). The model's RNG identity parameter is part of the definition — not
+  file in which each weight tensor is replaced by a placeholder of the same
+  dtype/shape whose values are elided (an empty, marker-tagged initializer payload) —
+  placeholders cost almost nothing on disk and no weight-sized allocation in memory.
+  The model's RNG identity parameter is part of the definition — not
   a weight — and stays embedded, so a reloaded model reproduces the original's
   randomness (see [rng-configuration.md](rng-configuration.md)).
 - `data/weights.safetensors` holds the real weight bytes once, as a plain

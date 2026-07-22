@@ -1588,9 +1588,10 @@ public class CompressedFormatUtilsCoverageTests
     /// The .skpt acceptance round-trip: a concrete model saves to a single file that is a
     /// standard zip of STORED-only entries (data payload 64-byte aligned), whose manifest
     /// wires model → format/stage/hash and parameters → data tensors; the weights entry is
-    /// byte-identical to the model's parameters while the model entry carries only zero
-    /// placeholders (no duplicated weight bytes); and loading rebinds the weights into a
-    /// concrete model that executes bit-identically to the original.
+    /// byte-identical to the model's parameters while the model entry carries only
+    /// metadata-only placeholders (no duplicated weight bytes, no materialized zero
+    /// buffers); and loading rebinds the weights into a concrete model that executes
+    /// bit-identically to the original.
     /// </summary>
     [Fact]
     public void TestSkptRoundTripConcreteModel()
@@ -1655,11 +1656,42 @@ public class CompressedFormatUtilsCoverageTests
                 Assert.Equal(bytes, storedTensors[mapping[paramId].Tensor!]);
 
             // The model entry is definition-only: a loadable concrete model whose weight
-            // parameters are zero placeholders — the real bytes live once, in the data tree.
+            // parameters are dtype/shape-true metadata-only placeholders — the real bytes
+            // live once, in the data tree, and neither save nor load materializes a
+            // weight-sized buffer for a placeholder (issue #69): its storage is elided
+            // entirely, so accessing its values fails loudly.
             var strippedDefinition = CompressedFormatUtils.LoadFastGraphFromBinary(
                 entries[SkptFileFormat.ModelEntryPath], GraphKind.ConcreteModel);
-            Assert.All(WeightBytesByParam(strippedDefinition).Values,
-                bytes => Assert.All(bytes, b => Assert.Equal(0, b)));
+            var originalParams = model.ToInternal().Nodes
+                .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_DATA)
+                .ToDictionary(n => n.IdentifierTemplate!, n => n.GetTensorData()!, StringComparer.Ordinal);
+            var strippedWeightParams = strippedDefinition.ToInternal().Nodes
+                .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_DATA
+                    && n.IdentifierTemplate !=
+                        Shorokoo.Core.Nodes.Processors.Fast.FastWireRngKeyDerivation.RngSeedIdentifierTemplate)
+                .ToList();
+            Assert.Equal(originalWeights.Count, strippedWeightParams.Count);
+            foreach (var param in strippedWeightParams)
+            {
+                var placeholder = Assert.IsType<WeightPlaceholderTensorData>(param.GetTensorData());
+                var original = originalParams[param.IdentifierTemplate!];
+                Assert.Equal(original.DType.ToIVarType(), placeholder.DType.ToIVarType());
+                Assert.Equal(original.Shape.Dims, placeholder.Shape.Dims);
+                var exElided = Assert.Throws<InvalidOperationException>(
+                    () => { placeholder.AccessRawMemory(); });
+                Assert.Contains("placeholder", exElided.Message);
+            }
+            // Stripping touches exactly the weight parameters: the stripped definition
+            // declares the same parameter set as the original, and any non-weight
+            // parameter (e.g. an RNG identity, when the model carries one) stays
+            // embedded with real values, never a placeholder.
+            var strippedAllParams = strippedDefinition.ToInternal().Nodes
+                .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_DATA)
+                .ToList();
+            Assert.Equal(originalParams.Count, strippedAllParams.Count);
+            Assert.All(
+                strippedAllParams.Where(n => !originalWeights.ContainsKey(n.IdentifierTemplate!)),
+                n => Assert.IsNotType<WeightPlaceholderTensorData>(n.GetTensorData()));
 
             // Load: a runnable concrete model, weights bound byte-identically, and
             // bit-identical execution on the sample input.
@@ -1670,6 +1702,45 @@ public class CompressedFormatUtilsCoverageTests
             foreach (var (paramId, bytes) in originalWeights)
                 Assert.Equal(bytes, loadedWeights[paramId]);
             Assert.Equal(ExecuteToBytes(model, numOut, input), ExecuteToBytes(loaded, numOut, input));
+
+            // Back-compat: a checkpoint whose model definition carries materialized
+            // zero placeholders without the values-elided marker — the shape every
+            // .skpt written before the marker existed has — still loads and binds
+            // identically. (Synthesized by re-stripping with full zero tensors and
+            // splicing the entry + its manifest hash into the archive.)
+            var legacyPath = Path.Combine(TempDir, "legacy-zero-placeholders.skpt");
+            try
+            {
+                var legacyGraph = model.ToInternal().Clone();
+                foreach (var node in legacyGraph.Nodes)
+                {
+                    if (node.OpCode != InternalOpCodes.MODEL_PARAM_DATA
+                        || !originalWeights.ContainsKey(node.IdentifierTemplate ?? "")) continue;
+                    var data = node.GetTensorData()!;
+                    node.Attributes = node.Attributes.SetAttributes(
+                        (OnnxOpAttributeNames.ShrkAttrTensorData,
+                         (object?)TensorDataWithDefaultVals(data.DType, data.Shape.Dims)));
+                }
+                var legacyModelBytes = CompressedFormatUtils.SaveFastGraphToBinary(
+                    legacyGraph, GraphKind.ConcreteModel, compressed: true);
+                var legacyConfig = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
+                legacyConfig["models"]!["model"]!["sha256"] = SkptFileFormat.Sha256Hex(legacyModelBytes);
+                RewriteSkpt(legacyPath, entries.Select(e => (e.Key, e.Key switch
+                {
+                    SkptFileFormat.ConfigEntryName =>
+                        System.Text.Encoding.UTF8.GetBytes(legacyConfig.ToJsonString()),
+                    SkptFileFormat.ModelEntryPath => legacyModelBytes,
+                    _ => e.Value,
+                })).ToList());
+                var legacyLoaded = Checkpoint.Load(legacyPath);
+                var legacyWeights = WeightBytesByParam(legacyLoaded);
+                Assert.Equal(originalWeights.Count, legacyWeights.Count);
+                foreach (var (paramId, bytes) in originalWeights)
+                    Assert.Equal(bytes, legacyWeights[paramId]);
+                Assert.Equal(ExecuteToBytes(model, numOut, input),
+                    ExecuteToBytes(legacyLoaded, numOut, input));
+            }
+            finally { if (File.Exists(legacyPath)) File.Delete(legacyPath); }
         }
         finally { if (File.Exists(path)) File.Delete(path); }
     }

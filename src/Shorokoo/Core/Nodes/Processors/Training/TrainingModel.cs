@@ -87,11 +87,13 @@ namespace Shorokoo
         // The three sections share one SafeTensors file; each field is namespaced as
         // "<section>/<fieldName>". A Shorokoo field name never contains '/', so the split
         // is unambiguous and the '/'-free marker tensor below can't be mistaken for a field.
-        private const string TrainableSection = "trainable";
-        private const string ModelStateSection = "model_state";
-        private const string OptimizerStateSection = "opt_state";
-        private const string CheckpointMarkerName = "__shorokoo_checkpoint__"; // int64[2] = [version, step]
-        private const long CheckpointFormatVersion = 1;
+        // Internal (not private) so Checkpoint.Inspect recognizes checkpoints by the same
+        // marker/section names the writer uses — one definition, no drift.
+        internal const string TrainableSection = "trainable";
+        internal const string ModelStateSection = "model_state";
+        internal const string OptimizerStateSection = "opt_state";
+        internal const string CheckpointMarkerName = "__shorokoo_checkpoint__"; // int64[2] = [version, step]
+        internal const long CheckpointFormatVersion = 1;
 
         /// <summary>
         /// Saves this checkpoint to a single SafeTensors file so training can resume across process

@@ -156,6 +156,9 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
 - `TrainingCheckpoint.Load(path, trainableDef, modelStateDef, optimizerStateDef)`
   is the lower-level static form if you hold the struct defs without a rig;
   `rig.LoadCheckpoint(path)` just passes the rig's defs to it.
+- To see what a checkpoint file holds (step, per-section tensor listing) without
+  loading it — or to identify an unknown file — use `Checkpoint.Inspect(path)`;
+  see [onnx-and-weights.md](onnx-and-weights.md#identify-and-summarize-a-file-checkpointinspect).
 
 ## Types used by the training API
 

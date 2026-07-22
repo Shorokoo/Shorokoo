@@ -1098,6 +1098,161 @@ public class CompressedFormatUtilsCoverageTests
         }
     }
 
+    /// <summary>
+    /// Inspect positively identifies .zsafetensor archives (issue #70): the frame's inner
+    /// 8-byte length prefix and JSON header are stream-decompressed — bounded reads, never
+    /// the tensor payload — and parsed with the shared SafeTensors header logic. Covers:
+    /// a real SaveCompressedSafeTensors round-trip recognized with the correct tensor
+    /// listing and metadata; proof the payload is untouched (an archive whose compressed
+    /// tail is chopped off still inspects, while a full load fails); a compressed training
+    /// checkpoint reporting the archive kind plus an observation instead of version/step
+    /// (the marker payload is not boundedly reachable through the non-seekable stream);
+    /// and corrupt/truncated compressed files yielding structured non-throwing results.
+    /// </summary>
+    [Fact]
+    public void TestCheckpointInspectCompressedSafeTensorsArtifacts()
+    {
+        var paths = new List<string>();
+        string NextPath(string name)
+        {
+            var p = Path.Combine(TempDir, name);
+            paths.Add(p);
+            return p;
+        }
+
+        try
+        {
+            // Real round-trip: written by the actual saver, recognized with the full
+            // tensor listing and the __metadata__ entries, no observations.
+            var t1 = TensorData([2, 3], 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f);
+            var t2 = TensorData([3], 7.0f, 8.0f, 9.0f);
+            var zPath = NextPath("inspect_weights.zsafetensor");
+            CompressedFormatUtils.SaveCompressedSafeTensors(zPath, new List<SafeTensor>
+            {
+                new SafeTensor("tensor1", t1, "F32", t1.Shape.Dims),
+                new SafeTensor("tensor2", t2, "F32", t2.Shape.Dims),
+            }, new Dictionary<string, object> { ["format"] = "shorokoo-test" });
+
+            var result = Checkpoint.Inspect(zPath);
+            Assert.Equal(ArtifactKind.CompressedSafeTensors, result.Kind);
+            Assert.Equal(zPath, result.FilePath);
+            Assert.Equal(new FileInfo(zPath).Length, result.FileSizeBytes);
+            Assert.Null(result.Srk);
+            Assert.Null(result.TrainingCheckpoint);
+            Assert.Empty(result.Observations);
+
+            var st = result.SafeTensors!;
+            Assert.True(st.HeaderSizeBytes > 0);
+            Assert.Equal(2, st.Tensors.Count);
+            Assert.Equal(6 * 4 + 3 * 4, st.TotalTensorBytes);
+            var byName = st.Tensors.ToDictionary(t => t.Name);
+            long[] expectedShape1 = [2, 3];
+            Assert.Equal("F32", byName["tensor1"].DType);
+            Assert.Equal(expectedShape1, byName["tensor1"].Shape);
+            Assert.Equal(24, byName["tensor1"].ByteSize);
+            Assert.Equal("shorokoo-test", st.GlobalMetadata!["format"]);
+
+            var text = result.ToString();
+            Assert.Contains("Zstd-compressed SafeTensors archive", text);
+            Assert.Contains("tensor1: F32[2, 3], 24 bytes", text);
+
+            // Payload untouched: an incompressible multi-block payload whose compressed
+            // tail is chopped off. A full load fails on the broken frame, but Inspect —
+            // which decompresses only the prefix + header from the intact leading blocks —
+            // still recognizes the archive. (Zstd blocks hold at most 128 KB decompressed,
+            // so a ~1.2 MB payload guarantees the header and the chopped tail sit in
+            // different blocks.)
+            var bigValues = new float[300_000];
+            uint seed = 1;
+            for (int i = 0; i < bigValues.Length; i++)
+            {
+                seed = seed * 747796405u + 2891336453u;   // cheap PCG-ish, incompressible
+                bigValues[i] = BitConverter.UInt32BitsToSingle((seed >> 9) | 0x3F800000u);
+            }
+            var big = TensorData([300_000L], bigValues);
+            var bigPath = NextPath("inspect_big.zsafetensor");
+            CompressedFormatUtils.SaveCompressedSafeTensors(bigPath, new List<SafeTensor>
+            {
+                new SafeTensor("big", big, "F32", big.Shape.Dims),
+            });
+            var bigBytes = File.ReadAllBytes(bigPath);
+            Assert.True(bigBytes.Length > 256 * 1024);   // really multi-block
+            var choppedPath = NextPath("inspect_big_chopped.zsafetensor");
+            File.WriteAllBytes(choppedPath, bigBytes[..^64]);
+            Assert.ThrowsAny<Exception>(
+                () => CompressedFormatUtils.LoadCompressedSafeTensors(choppedPath));
+            var chopped = Checkpoint.Inspect(choppedPath);
+            Assert.Equal(ArtifactKind.CompressedSafeTensors, chopped.Kind);
+            Assert.Equal("big", Assert.Single(chopped.SafeTensors!.Tensors).Name);
+            Assert.Equal(300_000L * 4, chopped.SafeTensors.TotalTensorBytes);
+
+            // A checkpoint saved compressed: the marker is visible in the header, but its
+            // [version, step] payload sits inside the compressed tensor data, beyond the
+            // bounded header read — the archive kind is reported, TrainingCheckpoint stays
+            // null, and an observation says why.
+            var w = TensorData([2L], 1.0f, 2.0f);
+            var ckptPath = NextPath("inspect_ckpt.zsafetensor");
+            CompressedFormatUtils.SaveCompressedSafeTensors(ckptPath, new List<SafeTensor>
+            {
+                new SafeTensor("trainable/w", w, "F32", w.Shape.Dims),
+                new SafeTensor("__shorokoo_checkpoint__", TensorData([2L], 1L, 7L), "I64", [2L]),
+            });
+            var ckpt = Checkpoint.Inspect(ckptPath);
+            Assert.Equal(ArtifactKind.CompressedSafeTensors, ckpt.Kind);
+            Assert.Null(ckpt.TrainingCheckpoint);
+            Assert.Contains(ckpt.SafeTensors!.Tensors, t => t.Name == "__shorokoo_checkpoint__");
+            Assert.Contains(ckpt.Observations,
+                o => o.Contains("__shorokoo_checkpoint__") && o.Contains("bounded"));
+
+            // A Zstd frame truncated to its first bytes fails to decompress → structured
+            // NotRecognized, no exception.
+            var stubPath = NextPath("inspect_stub.zsafetensor");
+            File.WriteAllBytes(stubPath, bigBytes[..5]);
+            var stub = Checkpoint.Inspect(stubPath);
+            Assert.Equal(ArtifactKind.NotRecognized, stub.Kind);
+            Assert.Contains(stub.Observations, o => o.Contains("Zstd frame"));
+
+            // A frame that decompresses cleanly but ends inside its declared SafeTensors
+            // header (the compressed analogue of a truncated header) → structured
+            // NotRecognized naming the truncation.
+            byte[] shortDecl = [.. BitConverter.GetBytes(1000L), 0x7B, 0x22, 0x74];
+            var shortPath = NextPath("inspect_short.zsafetensor");
+            File.WriteAllBytes(shortPath, CompressedFormatUtils.Compress(shortDecl));
+            var shortResult = Checkpoint.Inspect(shortPath);
+            Assert.Equal(ArtifactKind.NotRecognized, shortResult.Kind);
+            Assert.Contains(shortResult.Observations, o => o.Contains("ends after"));
+
+            // Amplification guard: a small file declaring a near-cap (99 MB) header must
+            // yield the same structured result without the declaration costing 99 MB of
+            // allocation — the header buffer grows with what the stream delivers (here
+            // 200 KB), which also exercises the growth path across block boundaries.
+            var hugeDecl = new byte[8 + 200_000];
+            BitConverter.GetBytes(99_000_000L).CopyTo(hugeDecl, 0);
+            var hugePath = NextPath("inspect_huge_decl.zsafetensor");
+            File.WriteAllBytes(hugePath, CompressedFormatUtils.Compress(hugeDecl));
+            var hugeResult = Checkpoint.Inspect(hugePath);
+            Assert.Equal(ArtifactKind.NotRecognized, hugeResult.Kind);
+            Assert.Contains(hugeResult.Observations, o => o.Contains("ends after 200000"));
+
+            // The .zsafetensor probe must not disturb legacy-.srk recognition: a
+            // single-Zstd legacy graph still sniffs as such (its decompressed prefix
+            // never declares a plausible header length).
+            var (_, arch, _) = BuildStageGraphs();
+            var bare = SrkFileFormat.Read(
+                CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: false)).OnnxBytes;
+            var legacyPath = NextPath("inspect_legacy_single.srk");
+            File.WriteAllBytes(legacyPath, CompressedFormatUtils.Compress(bare));
+            var legacy = Checkpoint.Inspect(legacyPath);
+            Assert.Equal(ArtifactKind.SrkGraph, legacy.Kind);
+            Assert.Equal("single-Zstd", legacy.Srk!.LegacyLayout);
+        }
+        finally
+        {
+            foreach (var p in paths)
+                if (File.Exists(p)) File.Delete(p);
+        }
+    }
+
     private static Tensor<float32> ParamlessDouble(Tensor<float32> x) => x + x;
 
     /// <summary>

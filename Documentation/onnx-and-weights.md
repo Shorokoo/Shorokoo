@@ -265,6 +265,7 @@ switch (result.Kind)
     case ArtifactKind.SrkGraph:           /* result.Srk */                          break;
     case ArtifactKind.SafeTensors:        /* result.SafeTensors */                  break;
     case ArtifactKind.TrainingCheckpoint: /* result.TrainingCheckpoint (+ .SafeTensors) */ break;
+    case ArtifactKind.CompressedSafeTensors: /* result.SafeTensors (decompressed header) */ break;
     case ArtifactKind.NotRecognized:      /* result.Observations say what was seen */ break;
 }
 ```
@@ -276,6 +277,7 @@ Recognized formats and what is reported:
 | `SrkGraph` | `.srk` v2 magic (or a sniffed legacy v1 layout) | the v2 header — format version, lifecycle stage, compression, payload SHA-256, producer (`result.Srk.Header`, an `SrkHeader`); legacy files report the sniffed layout instead (`result.Srk.LegacyLayout`) |
 | `SafeTensors` | 8-byte header-length prefix + valid JSON header | tensor listing (name, dtype, shape, byte size), total payload size, `__metadata__` (`result.SafeTensors`) |
 | `TrainingCheckpoint` | the `__shorokoo_checkpoint__` marker tensor in a SafeTensors header | checkpoint format version, global step, and the per-section (`trainable` / `model_state` / `opt_state`) tensor listing (`result.TrainingCheckpoint`); `result.SafeTensors` is populated too |
+| `CompressedSafeTensors` | Zstd frame magic whose decompressed content starts with a valid SafeTensors length prefix + JSON header (`.zsafetensor`, written by `CompressedFormatUtils.SaveCompressedSafeTensors`) | the same details as `SafeTensors` (`result.SafeTensors`), read by stream-decompressing only the prefix and header — the tensor payload is never decompressed; sizes describe the decompressed content |
 | `NotRecognized` | anything else | a structured result — **content problems never throw**; a missing file and I/O errors (permissions, disk) do |
 
 - Reads are bounded to headers and prefixes; tensor payload bytes are never
@@ -286,7 +288,15 @@ Recognized formats and what is reported:
 - `result.Observations` lists cheap sanity findings visible from the header
   alone, e.g. declared tensor extents pointing past the end of the file
   (truncation), trailing bytes beyond the declared data, or an unreadable /
-  future-version container header.
+  future-version container header. Through the compression layer of a
+  `.zsafetensor` only header-internal checks apply — a compressed file's size
+  has no fixed relation to the decompressed extents, so truncation of the
+  tensor payload is not detectable from the header.
+- A `.zsafetensor` that contains the `__shorokoo_checkpoint__` marker (a
+  training checkpoint saved compressed) reports `CompressedSafeTensors`, not
+  `TrainingCheckpoint`: the marker's version/step payload sits inside the
+  compressed tensor data, beyond `Inspect`'s bounded header-only reads. An
+  observation notes the marker and suggests decompressing to inspect fully.
 - `.onnx` files are out of scope (standard ONNX tooling covers them). A bare
   serialized ONNX model is byte-identical to the legacy v1 `.srk` layout, so
   such a file reports as a legacy `SrkGraph` with an observation noting the

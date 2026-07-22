@@ -2326,6 +2326,14 @@ public class CompressedFormatUtilsCoverageTests
             Assert.Equal(originalWeights, CanonicalWeightBytes(importedCanonical));
             Assert.Equal(direct, ExecuteToBytes(importedCanonical, numOut, input));
 
+            // A __metadata__ block is metadata, not a tensor — a file carrying one imports
+            // unchanged (it must not trip the unmapped-source-tensor check).
+            var withMetadata = SafeTensorLoader.LoadSafeTensors(canonicalPath);
+            SafeTensorLoader.SaveSafeTensors(canonicalPath, withMetadata,
+                new Dictionary<string, object> { ["format"] = "pt", ["producer"] = "unit-test" });
+            var importedWithMetadata = Checkpoint.ImportSafeTensors(arch, canonicalPath);
+            Assert.Equal(direct, ExecuteToBytes(importedWithMetadata, numOut, input));
+
             // ── PyTorch-style names via a naming scheme ────────────────────
             var scheme = BuildFcTorchScheme(arch);
             Checkpoint.ExportSafeTensors(model, torchPath, scheme);

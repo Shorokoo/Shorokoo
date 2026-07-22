@@ -86,8 +86,10 @@ namespace Shorokoo
                 if (paramIdByName.TryGetValue(name, out var otherParam))
                     throw new InvalidOperationException(
                         $"Checkpoint.ExportSafeTensors: parameters '{otherParam}' and '{paramId}' " +
-                        $"both map to tensor name '{name}' under the naming scheme; exported " +
-                        "tensor names must be unique or one weight would silently overwrite the other.");
+                        $"both map to exported tensor name '{name}'" +
+                        (namingScheme is null ? "" : " under the naming scheme") +
+                        "; exported tensor names must be unique or one weight would silently " +
+                        "overwrite the other.");
                 paramIdByName[name] = paramId;
 
                 var data = node.GetTensorData()!;

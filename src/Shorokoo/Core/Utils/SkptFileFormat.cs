@@ -85,11 +85,15 @@ namespace Shorokoo.Core.Utils
         [JsonPropertyName("format")]
         public string? Format { get; set; }
 
-        /// <summary>Compression of the entry's bytes; "none" is the only value written today.</summary>
+        /// <summary>Compression of the entry's bytes: "none" (default) or "zstd" (a single
+        /// Zstd layer inside the STORED zip bytes, mirroring .srk v2's header-declared
+        /// compression). Always taken from here, never inferred from the entry's extension.</summary>
         [JsonPropertyName("compression")]
         public string? Compression { get; set; }
 
-        /// <summary>Lowercase hex SHA-256 of the entry's bytes as stored in the archive.</summary>
+        /// <summary>Lowercase hex SHA-256 of the entry's bytes as stored in the archive —
+        /// for a compressed entry, the compressed bytes. Integrity is thus checkable
+        /// without decompressing, mirroring .srk v2's payloadSha256.</summary>
         [JsonPropertyName("sha256")]
         public string? Sha256 { get; set; }
 
@@ -149,9 +153,11 @@ namespace Shorokoo.Core.Utils
     /// the zip central directory — bound together by a single config.json manifest
     /// (<see cref="SkptManifest"/>). Data-tree entry payloads are additionally aligned to
     /// <see cref="DataAlignment"/> bytes within the file so future memory-mapped/range reads
-    /// stay possible. This class owns the container constants, the manifest schema
-    /// (de)serialization, and the STORED zip writer; the save/load entry points live on
-    /// <see cref="Shorokoo.Checkpoint"/>.
+    /// stay possible. A data entry may opt into a single Zstd layer inside its STORED bytes,
+    /// declared by the manifest's per-entry compression field — such an entry is not
+    /// range-readable and skips the alignment. This class owns the container constants,
+    /// the manifest schema (de)serialization, and the STORED zip writer; the save/load
+    /// entry points live on <see cref="Shorokoo.Checkpoint"/>.
     /// </summary>
     public static class SkptFileFormat
     {
@@ -178,6 +184,10 @@ namespace Shorokoo.Core.Utils
 
         /// <summary>Data compression name for uncompressed payloads.</summary>
         public const string CompressionNone = "none";
+
+        /// <summary>Data compression name for Zstd-compressed payloads (one Zstd layer
+        /// inside the entry's STORED zip bytes; the zip framing itself stays method 0).</summary>
+        public const string CompressionZstd = "zstd";
 
         /// <summary>Alignment (bytes) of data-tree entry payloads within the archive.</summary>
         public const int DataAlignment = 64;
@@ -226,6 +236,15 @@ namespace Shorokoo.Core.Utils
         /// <summary>Lowercase hex SHA-256, as recorded in manifest sha256 fields.</summary>
         internal static string Sha256Hex(ReadOnlySpan<byte> data)
             => Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant();
+
+        /// <summary>
+        /// Whether the bytes open with the Zstd frame magic (28 B5 2F FD, little-endian
+        /// 0xFD2FB528). Used to cross-check a data entry's stored bytes against its
+        /// manifest-declared compression — never to decide the compression itself, which
+        /// only ever comes from the manifest.
+        /// </summary>
+        internal static bool LooksLikeZstdFrame(ReadOnlySpan<byte> data)
+            => data.Length >= 4 && data[0] == 0x28 && data[1] == 0xB5 && data[2] == 0x2F && data[3] == 0xFD;
 
         #region STORED zip writer
 

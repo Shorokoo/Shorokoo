@@ -292,6 +292,13 @@ public static class OnnxOpAttributeNames
     public const string ShrkMetaNodeIdentifierTemplate = "IdentifierTemplate";
     public const string ShrkMetaIsTrainable = "IsTrainable";
 
+    /// <summary>Initializer-level metadata marker ("true") recording that the tensor's
+    /// values were deliberately elided — the initializer carries dims/dtype with an empty
+    /// payload. Written for weights-stripped checkpoint model definitions; the reader
+    /// reconstructs a metadata-only <see cref="Shorokoo.WeightPlaceholderTensorData"/>
+    /// instead of materializing a zero buffer.</summary>
+    public const string ShrkMetaValuesElided = "ValuesElided";
+
     /// <summary>
     /// LEGACY: the reserved initializer name under which pre-RngSeed files (saved before the
     /// RNG identity became the ordinary <c>RngSeed</c> parameter at ModelId [0]) carried the

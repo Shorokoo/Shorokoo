@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using Shorokoo.Core;
 using Shorokoo.Core.Graph;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Core.Utils;
@@ -12,22 +13,26 @@ using Shorokoo.Onnx;
 namespace Shorokoo
 {
     /// <summary>
-    /// Save/load entry points for .skpt checkpoints — Shorokoo's native single-file
-    /// checkpoint container. A .skpt is a standard zip archive whose entries are all
+    /// The single entry point for getting Shorokoo models and weights on and off disk:
+    /// native <c>.skpt</c> checkpoints, weight interchange (safetensors), training-run
+    /// checkpoints, and read-only artifact inspection.
+    ///
+    /// <para>Its primary job is the native <c>.skpt</c> container — Shorokoo's single-file
+    /// checkpoint. A .skpt is a standard zip archive whose entries are all
     /// STORED (uncompressed), wired together by a single config.json manifest; this
     /// version saves and loads an inference checkpoint of a concrete model (model
-    /// definition + weights) with bit-identical execution on round-trip. Data-tree
+    /// definition + weights) with bit-identical execution on round-trip.</para> Data-tree
     /// entries may opt into Zstd compression inside their STORED bytes via
     /// <see cref="CheckpointBuilder.WithZstdCompressedData"/>; the manifest records it
     /// per entry and <see cref="Load"/> decompresses transparently.
     ///
     /// <code>
-    /// Checkpoint.From(concreteModel)
+    /// Persistence.From(concreteModel)
     ///     .WithModel()
     ///     .WithWeights()
     ///     .Save("model.skpt");
     ///
-    /// var loaded = Checkpoint.Load("model.skpt");   // concrete model, weights bound
+    /// var loaded = Persistence.Load("model.skpt");   // concrete model, weights bound
     /// </code>
     ///
     /// The write is atomic (staged to a temp file and committed by rename), so a crash
@@ -37,12 +42,14 @@ namespace Shorokoo
     ///
     /// The safetensors boundary lives here too: <c>ExportSafeTensors</c> writes a model's
     /// weights to a standard .safetensors file and <c>ImportSafeTensors</c> binds a foreign
-    /// .safetensors file onto an architecture (see <c>Checkpoint.SafeTensors.cs</c>).
+    /// .safetensors file onto an architecture (see <c>Persistence.SafeTensors.cs</c>).
+    /// Training-run state routes through <see cref="SaveTrainingCheckpoint"/> /
+    /// <see cref="LoadTrainingCheckpoint"/>.
     /// </summary>
-    // Partial: Checkpoint.Inspect (read-only artifact identification) lives in
+    // Partial: Persistence.Inspect (read-only artifact identification) lives in
     // ArtifactInspection.cs and the safetensors weight-exchange boundary in
-    // Checkpoint.SafeTensors.cs — one Checkpoint facade, three concerns.
-    public static partial class Checkpoint
+    // Persistence.SafeTensors.cs — one Persistence facade, several persistence concerns.
+    public static partial class Persistence
     {
         /// <summary>
         /// Starts a checkpoint of <paramref name="concreteModel"/>. The graph must be a
@@ -56,7 +63,7 @@ namespace Shorokoo
             if (concreteModel is null) throw new ArgumentNullException(nameof(concreteModel));
             if (concreteModel.Kind != GraphKind.ConcreteModel)
                 throw new InvalidOperationException(SrkFileFormat.KindMismatchMessage(
-                    "Checkpoint.From", "a 'concrete-model' graph", concreteModel.Kind,
+                    "Persistence.From", "a 'concrete-model' graph", concreteModel.Kind,
                     "Lower the graph with ToConcreteArchitecture(inputHints, ...).ToConcreteModel(...) first."));
             return new CheckpointBuilder(concreteModel);
         }
@@ -94,6 +101,39 @@ namespace Shorokoo
 
             return new ComputationGraph(graph, GraphKind.ConcreteModel);
         }
+
+        // ---- Training checkpoints ----
+        // Training-run state (trainable params, model + optimizer state, global step) persists
+        // through this same facade. Today it lands in the self-contained sectioned-safetensors
+        // format that TrainingCheckpoint owns; folding training state into the .skpt container
+        // (so the whole rig round-trips through From/Load) is future work. Routing it through
+        // Persistence keeps one entry point for every save/load while that migration happens.
+
+        /// <summary>
+        /// Saves a <see cref="TrainingCheckpoint"/> — trainable parameters, model state, optimizer
+        /// state and the global step — so a training run can resume across process restarts.
+        /// Delegates to <see cref="TrainingCheckpoint.Save"/>; the write is atomic (temp file +
+        /// rename). A <c>.safetensors</c> extension is conventional.
+        /// </summary>
+        public static void SaveTrainingCheckpoint(TrainingCheckpoint checkpoint, string filePath)
+        {
+            if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
+            checkpoint.Save(filePath);
+        }
+
+        /// <summary>
+        /// Loads a <see cref="TrainingCheckpoint"/> saved by <see cref="SaveTrainingCheckpoint"/>,
+        /// reconstructing its sections against the given struct defs (which pin the expected shapes,
+        /// so a checkpoint from a different model or optimizer fails loudly). Delegates to
+        /// <see cref="TrainingCheckpoint.Load"/>. To resume a whole rig, prefer
+        /// <see cref="TrainingRig.LoadCheckpoint"/>, which supplies these defs from the rig.
+        /// </summary>
+        public static TrainingCheckpoint LoadTrainingCheckpoint(
+            string filePath,
+            TensorStructDef trainableParamDef,
+            TensorStructDef modelStateDef,
+            TensorStructDef optimizerStateDef)
+            => TrainingCheckpoint.Load(filePath, trainableParamDef, modelStateDef, optimizerStateDef);
 
         private static ZipArchive OpenArchive(Stream stream, string filePath)
         {
@@ -373,7 +413,7 @@ namespace Shorokoo
     }
 
     /// <summary>
-    /// Builder for a .skpt checkpoint, started by <see cref="Checkpoint.From"/>. Select what
+    /// Builder for a .skpt checkpoint, started by <see cref="Persistence.From"/>. Select what
     /// the checkpoint contains — this Shorokoo version writes exactly one shape, the inference
     /// checkpoint <see cref="WithModel"/> + <see cref="WithWeights"/> — then commit it to disk
     /// with <see cref="Save"/>.
@@ -440,11 +480,11 @@ namespace Shorokoo
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
             if (!_withModel || !_withWeights)
                 throw new InvalidOperationException(
-                    "Checkpoint.Save: this Shorokoo version writes exactly one checkpoint shape — " +
+                    "Persistence.Save: this Shorokoo version writes exactly one checkpoint shape — " +
                     "model definition + weights. Call .WithModel().WithWeights() before Save.");
 
             var source = _model.ToInternal();
-            var weightNodes = CollectWeightNodes(source, "Checkpoint.Save");
+            var weightNodes = CollectWeightNodes(source, "Persistence.Save");
 
             var tensors = new List<SafeTensor>(weightNodes.Count);
             var tensorRefs = new Dictionary<string, SkptTensorRef>(StringComparer.Ordinal);
@@ -533,7 +573,7 @@ namespace Shorokoo
         /// parameter (which is model definition, not a weight, and stays embedded). Each must
         /// carry a unique, non-empty identifier — it names the tensor in the checkpoint — and
         /// its tensor data. <paramref name="operation"/> names the caller in errors
-        /// (<c>Checkpoint.Save</c> and <c>Checkpoint.ExportSafeTensors</c> share this walk).
+        /// (<c>Persistence.Save</c> and <c>Persistence.ExportSafeTensors</c> share this walk).
         /// </summary>
         internal static List<FastNode> CollectWeightNodes(InternalComputationGraph graph, string operation)
         {

@@ -210,7 +210,7 @@ namespace Shorokoo
         public long? DeclaredSizeBytes { get; }
 
         /// <summary>The recorded SHA-256 of the entry's bytes — reported exactly as recorded,
-        /// never verified by Inspect (a full <see cref="Checkpoint.Load"/> verifies it).</summary>
+        /// never verified by Inspect (a full <see cref="Persistence.Load"/> verifies it).</summary>
         public string? Sha256 { get; }
 
         internal SkptDataSummary(
@@ -278,13 +278,13 @@ namespace Shorokoo
     }
 
     /// <summary>
-    /// Result of <see cref="Checkpoint.Inspect"/>: what the file is (<see cref="Kind"/>), the
+    /// Result of <see cref="Persistence.Inspect"/>: what the file is (<see cref="Kind"/>), the
     /// per-kind details (exactly the properties matching the kind are non-null), and cheap
     /// sanity <see cref="Observations"/> visible from the header alone.
     /// </summary>
     public sealed class ArtifactInspection
     {
-        /// <summary>The inspected file's path, as passed to <see cref="Checkpoint.Inspect"/>.</summary>
+        /// <summary>The inspected file's path, as passed to <see cref="Persistence.Inspect"/>.</summary>
         public string FilePath { get; }
 
         /// <summary>Total size of the file in bytes.</summary>
@@ -302,7 +302,7 @@ namespace Shorokoo
         /// from the decompressed header; sizes describe the decompressed content).</summary>
         public SafeTensorsArtifactInfo? SafeTensors { get; }
 
-        /// <summary>Checkpoint details; non-null iff <see cref="Kind"/> is <see cref="ArtifactKind.TrainingCheckpoint"/>.</summary>
+        /// <summary>Training-checkpoint details; non-null iff <see cref="Kind"/> is <see cref="ArtifactKind.TrainingCheckpoint"/>.</summary>
         public TrainingCheckpointArtifactInfo? TrainingCheckpoint { get; }
 
         /// <summary>.skpt container details; non-null iff <see cref="Kind"/> is
@@ -458,9 +458,9 @@ namespace Shorokoo
     /// Read-only inspection of Shorokoo-produced files: <see cref="Inspect"/> identifies what a
     /// file is and summarizes its contents from headers/prefixes only — tensor payloads are never
     /// loaded, so inspecting a multi-GB file is fast and cheap. (Partial: the .skpt save/load
-    /// entry points live in Checkpoint.cs — one <c>Checkpoint</c> facade, two concerns.)
+    /// entry points live in Persistence.cs — one <c>Persistence</c> facade, three concerns.)
     /// </summary>
-    public static partial class Checkpoint
+    public static partial class Persistence
     {
         // SafeTensors caps its JSON header at 100 MB; anything declaring more is not a
         // SafeTensors file (and bounds our header read).
@@ -730,7 +730,7 @@ namespace Shorokoo
                 observations.Add("required manifest field 'skptVersion' is missing or zero.");
             else if (manifest.SkptVersion != SkptFileFormat.CurrentVersion)
                 observations.Add($".skpt version {manifest.SkptVersion} is not the version this " +
-                    $"build reads ({SkptFileFormat.CurrentVersion}); Checkpoint.Load would refuse " +
+                    $"build reads ({SkptFileFormat.CurrentVersion}); Persistence.Load would refuse " +
                     "the file" + (manifest.SkptVersion > SkptFileFormat.CurrentVersion
                         ? " (likely written by a newer Shorokoo version)." : "."));
 

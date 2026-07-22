@@ -21,7 +21,7 @@ namespace Shorokoo
     /// offending tensor. <see cref="ImportSafeTensorsToCheckpoint"/> lands the imported
     /// result straight in a native .skpt in one call.
     /// </summary>
-    public static partial class Checkpoint
+    public static partial class Persistence
     {
         /// <summary>
         /// Exports the model's weights to a single standard .safetensors file. The graph must
@@ -56,15 +56,15 @@ namespace Shorokoo
                 throw new ArgumentException("SafeTensors path cannot be null or empty.", nameof(filePath));
             if (concreteModel.Kind != GraphKind.ConcreteModel)
                 throw new InvalidOperationException(SrkFileFormat.KindMismatchMessage(
-                    "Checkpoint.ExportSafeTensors", "a 'concrete-model' graph", concreteModel.Kind,
+                    "Persistence.ExportSafeTensors", "a 'concrete-model' graph", concreteModel.Kind,
                     "Only a weight-filled concrete model has weight tensors to export. Lower the " +
                     "graph with ToConcreteArchitecture(inputHints, ...).ToConcreteModel(...) first."));
 
             var weightNodes = CheckpointBuilder.CollectWeightNodes(
-                concreteModel.ToInternal(), "Checkpoint.ExportSafeTensors");
+                concreteModel.ToInternal(), "Persistence.ExportSafeTensors");
             if (weightNodes.Count == 0)
                 throw new InvalidOperationException(
-                    "Checkpoint.ExportSafeTensors: the model has no weight parameters — there is " +
+                    "Persistence.ExportSafeTensors: the model has no weight parameters — there is " +
                     "nothing to export.");
 
             var tensors = new List<SafeTensor>(weightNodes.Count);
@@ -79,13 +79,13 @@ namespace Shorokoo
                 var name = namingScheme is null ? paramId : namingScheme.ToName(paramId);
                 if (string.IsNullOrEmpty(name))
                     throw new InvalidOperationException(
-                        $"Checkpoint.ExportSafeTensors: parameter '{paramId}' maps to no tensor " +
+                        $"Persistence.ExportSafeTensors: parameter '{paramId}' maps to no tensor " +
                         "name under the naming scheme — every weight must be named to be " +
                         "exported. Add a rule covering it, or pass no scheme to export canonical " +
                         "Shorokoo names.");
                 if (paramIdByName.TryGetValue(name, out var otherParam))
                     throw new InvalidOperationException(
-                        $"Checkpoint.ExportSafeTensors: parameters '{otherParam}' and '{paramId}' " +
+                        $"Persistence.ExportSafeTensors: parameters '{otherParam}' and '{paramId}' " +
                         $"both map to exported tensor name '{name}'" +
                         (namingScheme is null ? "" : " under the naming scheme") +
                         "; exported tensor names must be unique or one weight would silently " +
@@ -141,7 +141,7 @@ namespace Shorokoo
                 throw new ArgumentException("SafeTensors path cannot be null or empty.", nameof(filePath));
             if (concreteArchitecture.Kind != GraphKind.ConcreteArchitecture)
                 throw new InvalidOperationException(SrkFileFormat.KindMismatchMessage(
-                    "Checkpoint.ImportSafeTensors", "a 'concrete-architecture' graph",
+                    "Persistence.ImportSafeTensors", "a 'concrete-architecture' graph",
                     concreteArchitecture.Kind,
                     "Import binds the file's tensors onto unbound parameters. Lower a module " +
                     "graph with ToConcreteArchitecture(inputHints, ...) first; a weight-filled " +
@@ -211,7 +211,7 @@ namespace Shorokoo
                         $"'{filePath}': the file contains two tensors named '{tensor.Name}' — " +
                         "safetensors names must be unique.");
 
-                // (d) Dtype/shape must match after mapping — same comparison Checkpoint.Load
+                // (d) Dtype/shape must match after mapping — same comparison Persistence.Load
                 // applies when rebinding a .skpt.
                 if (info.DType.ToIVarType() != tensor.Data.DType.ToIVarType()
                     || !info.Shape.Dims.SequenceEqual(tensor.Data.Shape.Dims))
@@ -253,7 +253,7 @@ namespace Shorokoo
         /// <see cref="ImportSafeTensors(ComputationGraph, string, ModuleParamSetNamingScheme?)"/>,
         /// including all fail-loud mapping checks) and lands the bound result as a native .skpt
         /// checkpoint in one call, via the standard
-        /// <c>Checkpoint.From(model).WithModel().WithWeights().Save(...)</c> writer — so
+        /// <c>Persistence.From(model).WithModel().WithWeights().Save(...)</c> writer — so
         /// "foreign safetensors → native checkpoint" is a single step. The .skpt write is
         /// atomic; nothing is written when the import fails. Returns the bound concrete model
         /// (the same graph <see cref="Load"/> reproduces from the written checkpoint).

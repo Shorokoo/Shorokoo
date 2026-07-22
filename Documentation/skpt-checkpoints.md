@@ -6,7 +6,7 @@ Related: [onnx-and-weights.md](onnx-and-weights.md) · [training.md](training.md
 
 - A `.skpt` file is Shorokoo's native checkpoint container: **one file** holding a
   model definition and its weights, reloadable as a runnable model with
-  `Checkpoint.Load`. There is no loose-directory form.
+  `Persistence.Load`. There is no loose-directory form.
 - The file is a **standard zip archive** — any unzip tool can list and extract its
   entries — whose entries are all **STORED** (uncompressed), so tensor data remains
   range-readable through the zip central directory. Data payloads are 64-byte aligned
@@ -30,22 +30,22 @@ Related: [onnx-and-weights.md](onnx-and-weights.md) · [training.md](training.md
 ## Save and load
 
 ```csharp
-using Shorokoo;   // Checkpoint
+using Shorokoo;   // Persistence
 
 // graph: a ComputationGraph of kind ConcreteModel — fully lowered, weights materialized.
-Checkpoint.From(concreteModel)
+Persistence.From(concreteModel)
     .WithModel()      // include the model definition
     .WithWeights()    // include the weights
     .Save("model.skpt");
 
-var loaded = Checkpoint.Load("model.skpt");   // ConcreteModel, weights bound
+var loaded = Persistence.Load("model.skpt");   // ConcreteModel, weights bound
 var outputs = ComputeContext.Default.Execute(loaded, inputs);
 ```
 
 Round-trip is exact: the loaded model's weight bytes are identical to the saved
 model's, and execution on the same inputs is bit-identical.
 
-`Checkpoint.From` requires a `GraphKind.ConcreteModel`; lower a module graph with
+`Persistence.From` requires a `GraphKind.ConcreteModel`; lower a module graph with
 `ToConcreteArchitecture(inputHints, ...).ToConcreteModel(...)` first. This version
 requires both `.WithModel()` and `.WithWeights()` — the builder shape exists so later
 versions can add contents without changing the call pattern.
@@ -53,13 +53,13 @@ versions can add contents without changing the call pattern.
 To shrink the file, opt into per-entry Zstd compression of the data tree:
 
 ```csharp
-Checkpoint.From(concreteModel)
+Persistence.From(concreteModel)
     .WithModel()
     .WithWeights()
     .WithZstdCompressedData()       // optional level 1–22, default 3
     .Save("model.skpt");
 
-var loaded = Checkpoint.Load("model.skpt");   // decompression is transparent
+var loaded = Persistence.Load("model.skpt");   // decompression is transparent
 ```
 
 Loading honors each entry's manifest-declared compression; nothing changes on the
@@ -90,11 +90,11 @@ Compression is a per-entry, opt-in trade of **size against range-readability**:
 
 ## Inspecting a .skpt
 
-`Checkpoint.Inspect("model.skpt")` identifies the container and summarizes its
+`Persistence.Inspect("model.skpt")` identifies the container and summarizes its
 manifest — whole-archive metadata, the model and data registries, the
 mapping-set names — reading only the zip central directory and `config.json`,
 never the tensor data. The recorded per-entry sha256s are reported as written
-but not verified (a full `Checkpoint.Load` verifies them), and cheap sanity
+but not verified (a full `Persistence.Load` verifies them), and cheap sanity
 observations flag manifest/archive mismatches, compressed entries where STORED
 is expected, and unknown manifest keys. See the inspection section in
 [onnx-and-weights.md](onnx-and-weights.md#identify-and-summarize-a-file-checkpointinspect).
@@ -106,7 +106,7 @@ checkpoint in one call — the strict safetensors import (see
 followed by this same writer:
 
 ```csharp
-ComputationGraph model = Checkpoint.ImportSafeTensorsToCheckpoint(
+ComputationGraph model = Persistence.ImportSafeTensorsToCheckpoint(
     arch, "foreign.safetensors", "model.skpt", scheme);
 ```
 

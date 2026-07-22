@@ -791,7 +791,7 @@ public class TrainingRigCoverageTests
     }
 
     /// <summary>
-    /// <see cref="Checkpoint.Inspect"/> (issue #57) recognizes <see cref="TrainingCheckpoint.Save"/>
+    /// <see cref="Persistence.Inspect"/> (issue #57) recognizes <see cref="TrainingCheckpoint.Save"/>
     /// output via the marker tensor and reports the checkpoint format version, the global step, and
     /// the per-section tensor listing — all matching what was written, from the SafeTensors header
     /// plus the marker's 16 bytes only (tensor payloads are never loaded). A SafeTensors file
@@ -818,7 +818,7 @@ public class TrainingRigCoverageTests
         try
         {
             ckpt.Save(path);
-            var result = Checkpoint.Inspect(path);
+            var result = Persistence.Inspect(path);
 
             Assert.Equal(ArtifactKind.TrainingCheckpoint, result.Kind);
             Assert.Empty(result.Observations);
@@ -868,8 +868,8 @@ public class TrainingRigCoverageTests
                         SafeTensorLoader.DTypeToSafeTensorDType(written.DType), written.Shape.Dims),
                 };
                 SafeTensorLoader.SaveSafeTensors(plainPath, plainTensors);
-                Assert.Equal(ArtifactKind.SafeTensors, Checkpoint.Inspect(plainPath).Kind);
-                Assert.Null(Checkpoint.Inspect(plainPath).TrainingCheckpoint);
+                Assert.Equal(ArtifactKind.SafeTensors, Persistence.Inspect(plainPath).Kind);
+                Assert.Null(Persistence.Inspect(plainPath).TrainingCheckpoint);
             }
             finally { if (File.Exists(plainPath)) File.Delete(plainPath); }
         }

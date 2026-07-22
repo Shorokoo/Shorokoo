@@ -741,7 +741,7 @@ public class CompressedFormatUtilsCoverageTests
     }
 
     // ──────────────────────────────────────────────────────────────────────
-    // Checkpoint.Inspect (issue #57): identify and summarize artifacts from
+    // Persistence.Inspect (issue #57): identify and summarize artifacts from
     // headers/prefixes only, never loading tensor payloads.
     // ──────────────────────────────────────────────────────────────────────
 
@@ -766,7 +766,7 @@ public class CompressedFormatUtilsCoverageTests
             try
             {
                 CompressedFormatUtils.SaveFastGraphToFile(path, arch, compressed, overrideExtension: false);
-                var result = Checkpoint.Inspect(path);
+                var result = Persistence.Inspect(path);
 
                 Assert.Equal(ArtifactKind.SrkGraph, result.Kind);
                 Assert.Equal(path, result.FilePath);
@@ -800,7 +800,7 @@ public class CompressedFormatUtilsCoverageTests
                     File.WriteAllBytes(corruptPath, corrupt);
                     Assert.Throws<InvalidDataException>(
                         () => CompressedFormatUtils.LoadFastGraphFromFile(corruptPath));
-                    var corruptResult = Checkpoint.Inspect(corruptPath);
+                    var corruptResult = Persistence.Inspect(corruptPath);
                     Assert.Equal(ArtifactKind.SrkGraph, corruptResult.Kind);
                     Assert.Equal(header.PayloadSha256, corruptResult.Srk!.Header!.PayloadSha256);
                 }
@@ -822,7 +822,7 @@ public class CompressedFormatUtilsCoverageTests
             try
             {
                 File.WriteAllBytes(path, bytes);
-                var result = Checkpoint.Inspect(path);
+                var result = Persistence.Inspect(path);
                 Assert.Equal(ArtifactKind.SrkGraph, result.Kind);
                 Assert.Null(result.Srk!.Header);
                 Assert.Equal(expectedLayout, result.Srk.LegacyLayout);
@@ -847,7 +847,7 @@ public class CompressedFormatUtilsCoverageTests
             try
             {
                 File.WriteAllBytes(path, bytes);
-                var result = Checkpoint.Inspect(path);
+                var result = Persistence.Inspect(path);
                 Assert.Equal(ArtifactKind.SrkGraph, result.Kind);
                 Assert.Null(result.Srk!.Header);
                 Assert.Null(result.Srk.LegacyLayout);
@@ -865,13 +865,13 @@ public class CompressedFormatUtilsCoverageTests
             var garbage = new byte[64];
             Array.Fill(garbage, (byte)0x77);
             File.WriteAllBytes(garbagePath, garbage);
-            var garbageResult = Checkpoint.Inspect(garbagePath);
+            var garbageResult = Persistence.Inspect(garbagePath);
             Assert.Equal(ArtifactKind.NotRecognized, garbageResult.Kind);
             Assert.NotEmpty(garbageResult.Observations);
             Assert.Contains("not recognized", garbageResult.ToString());
 
             File.WriteAllBytes(emptyPath, []);
-            var emptyResult = Checkpoint.Inspect(emptyPath);
+            var emptyResult = Persistence.Inspect(emptyPath);
             Assert.Equal(ArtifactKind.NotRecognized, emptyResult.Kind);
             Assert.Contains(emptyResult.Observations, o => o.Contains("empty"));
         }
@@ -883,7 +883,7 @@ public class CompressedFormatUtilsCoverageTests
 
         // A missing file is the one thing that still throws.
         Assert.Throws<FileNotFoundException>(
-            () => Checkpoint.Inspect(Path.Combine(TempDir, "inspect_nope.srk")));
+            () => Persistence.Inspect(Path.Combine(TempDir, "inspect_nope.srk")));
     }
 
     /// <summary>
@@ -912,7 +912,7 @@ public class CompressedFormatUtilsCoverageTests
         try
         {
             SafeTensorLoader.SaveSafeTensors(path, tensors);
-            var result = Checkpoint.Inspect(path);
+            var result = Persistence.Inspect(path);
 
             Assert.Equal(ArtifactKind.SafeTensors, result.Kind);
             Assert.Null(result.Srk);
@@ -942,13 +942,13 @@ public class CompressedFormatUtilsCoverageTests
             // still recognized, no exception.
             var bytes = File.ReadAllBytes(path);
             File.WriteAllBytes(truncatedPath, bytes[..^8]);
-            var truncated = Checkpoint.Inspect(truncatedPath);
+            var truncated = Persistence.Inspect(truncatedPath);
             Assert.Equal(ArtifactKind.SafeTensors, truncated.Kind);
             Assert.Contains(truncated.Observations, o => o.Contains("past the end"));
 
             // Trailing bytes beyond the declared data → observation.
             File.WriteAllBytes(trailingPath, [.. bytes, 0, 0, 0, 0]);
-            var trailing = Checkpoint.Inspect(trailingPath);
+            var trailing = Persistence.Inspect(trailingPath);
             Assert.Equal(ArtifactKind.SafeTensors, trailing.Kind);
             Assert.Contains(trailing.Observations, o => o.Contains("trailing"));
         }
@@ -1009,7 +1009,7 @@ public class CompressedFormatUtilsCoverageTests
             }
             var overflowMarkerPath = NextPath("hostile_marker_offset.safetensors");
             File.WriteAllBytes(overflowMarkerPath, BuildRawSafeTensors(markerHeader, new byte[32]));
-            var overflowMarker = Checkpoint.Inspect(overflowMarkerPath);
+            var overflowMarker = Persistence.Inspect(overflowMarkerPath);
             Assert.Equal(ArtifactKind.SafeTensors, overflowMarker.Kind);
             Assert.Null(overflowMarker.TrainingCheckpoint);
             Assert.Contains(overflowMarker.Observations, o => o.Contains("malformed"));
@@ -1020,7 +1020,7 @@ public class CompressedFormatUtilsCoverageTests
             File.WriteAllBytes(hugeEndPath, BuildRawSafeTensors(
                 "{\"t\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,9223372036854775800]}}",
                 new byte[8]));
-            var hugeEnd = Checkpoint.Inspect(hugeEndPath);
+            var hugeEnd = Persistence.Inspect(hugeEndPath);
             Assert.Equal(ArtifactKind.SafeTensors, hugeEnd.Kind);
             Assert.Contains(hugeEnd.Observations, o => o.Contains("past the end"));
             Assert.DoesNotContain(hugeEnd.Observations, o => o.Contains("trailing"));
@@ -1032,7 +1032,7 @@ public class CompressedFormatUtilsCoverageTests
                 "{\"a\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[10,2]}," +
                 "\"b\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[-9223372036854775808,8]}}",
                 new byte[16]));
-            var badExtent = Checkpoint.Inspect(badExtentPath);
+            var badExtent = Persistence.Inspect(badExtentPath);
             Assert.Equal(ArtifactKind.SafeTensors, badExtent.Kind);
             Assert.Equal(2, badExtent.Observations.Count(o => o.Contains("invalid extent")));
             Assert.All(badExtent.SafeTensors!.Tensors, t => Assert.Equal(0, t.ByteSize));
@@ -1042,7 +1042,7 @@ public class CompressedFormatUtilsCoverageTests
             File.WriteAllBytes(wrongDtypePath, BuildRawSafeTensors(
                 "{\"__shorokoo_checkpoint__\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,16]}}",
                 new byte[16]));
-            var wrongDtype = Checkpoint.Inspect(wrongDtypePath);
+            var wrongDtype = Persistence.Inspect(wrongDtypePath);
             Assert.Equal(ArtifactKind.SafeTensors, wrongDtype.Kind);
             Assert.Null(wrongDtype.TrainingCheckpoint);
             Assert.Contains(wrongDtype.Observations, o => o.Contains("malformed"));
@@ -1058,7 +1058,7 @@ public class CompressedFormatUtilsCoverageTests
                 new SafeTensor("stray", w, "F32", w.Shape.Dims),
                 new SafeTensor("__shorokoo_checkpoint__", TensorData([2L], 99L, 3L), "I64", [2L]),
             });
-            var futureCkpt = Checkpoint.Inspect(futureCkptPath);
+            var futureCkpt = Persistence.Inspect(futureCkptPath);
             Assert.Equal(ArtifactKind.TrainingCheckpoint, futureCkpt.Kind);
             Assert.Equal(99, futureCkpt.TrainingCheckpoint!.FormatVersion);
             Assert.Equal(3, futureCkpt.TrainingCheckpoint.Step);
@@ -1077,7 +1077,7 @@ public class CompressedFormatUtilsCoverageTests
             {
                 var p = NextPath(name);
                 File.WriteAllBytes(p, CompressedFormatUtils.Compress(inner));
-                var r = Checkpoint.Inspect(p);
+                var r = Persistence.Inspect(p);
                 Assert.Equal(ArtifactKind.NotRecognized, r.Kind);
                 Assert.Contains(r.Observations, o => o.Contains("Zstd frame"));
             }
@@ -1087,7 +1087,7 @@ public class CompressedFormatUtilsCoverageTests
             SafeTensorLoader.SaveSafeTensors(metaPath,
                 new List<SafeTensor> { new SafeTensor("w", w, "F32", w.Shape.Dims) },
                 new Dictionary<string, object> { ["format"] = "shorokoo-test" });
-            var meta = Checkpoint.Inspect(metaPath);
+            var meta = Persistence.Inspect(metaPath);
             Assert.Equal(ArtifactKind.SafeTensors, meta.Kind);
             Assert.Equal("shorokoo-test", meta.SafeTensors!.GlobalMetadata!["format"]);
         }
@@ -1133,7 +1133,7 @@ public class CompressedFormatUtilsCoverageTests
                 new SafeTensor("tensor2", t2, "F32", t2.Shape.Dims),
             }, new Dictionary<string, object> { ["format"] = "shorokoo-test" });
 
-            var result = Checkpoint.Inspect(zPath);
+            var result = Persistence.Inspect(zPath);
             Assert.Equal(ArtifactKind.CompressedSafeTensors, result.Kind);
             Assert.Equal(zPath, result.FilePath);
             Assert.Equal(new FileInfo(zPath).Length, result.FileSizeBytes);
@@ -1181,7 +1181,7 @@ public class CompressedFormatUtilsCoverageTests
             File.WriteAllBytes(choppedPath, bigBytes[..^64]);
             Assert.ThrowsAny<Exception>(
                 () => CompressedFormatUtils.LoadCompressedSafeTensors(choppedPath));
-            var chopped = Checkpoint.Inspect(choppedPath);
+            var chopped = Persistence.Inspect(choppedPath);
             Assert.Equal(ArtifactKind.CompressedSafeTensors, chopped.Kind);
             Assert.Equal("big", Assert.Single(chopped.SafeTensors!.Tensors).Name);
             Assert.Equal(300_000L * 4, chopped.SafeTensors.TotalTensorBytes);
@@ -1197,7 +1197,7 @@ public class CompressedFormatUtilsCoverageTests
                 new SafeTensor("trainable/w", w, "F32", w.Shape.Dims),
                 new SafeTensor("__shorokoo_checkpoint__", TensorData([2L], 1L, 7L), "I64", [2L]),
             });
-            var ckpt = Checkpoint.Inspect(ckptPath);
+            var ckpt = Persistence.Inspect(ckptPath);
             Assert.Equal(ArtifactKind.CompressedSafeTensors, ckpt.Kind);
             Assert.Null(ckpt.TrainingCheckpoint);
             Assert.Contains(ckpt.SafeTensors!.Tensors, t => t.Name == "__shorokoo_checkpoint__");
@@ -1208,7 +1208,7 @@ public class CompressedFormatUtilsCoverageTests
             // NotRecognized, no exception.
             var stubPath = NextPath("inspect_stub.zsafetensor");
             File.WriteAllBytes(stubPath, bigBytes[..5]);
-            var stub = Checkpoint.Inspect(stubPath);
+            var stub = Persistence.Inspect(stubPath);
             Assert.Equal(ArtifactKind.NotRecognized, stub.Kind);
             Assert.Contains(stub.Observations, o => o.Contains("Zstd frame"));
 
@@ -1218,7 +1218,7 @@ public class CompressedFormatUtilsCoverageTests
             byte[] shortDecl = [.. BitConverter.GetBytes(1000L), 0x7B, 0x22, 0x74];
             var shortPath = NextPath("inspect_short.zsafetensor");
             File.WriteAllBytes(shortPath, CompressedFormatUtils.Compress(shortDecl));
-            var shortResult = Checkpoint.Inspect(shortPath);
+            var shortResult = Persistence.Inspect(shortPath);
             Assert.Equal(ArtifactKind.NotRecognized, shortResult.Kind);
             Assert.Contains(shortResult.Observations, o => o.Contains("ends after"));
 
@@ -1230,7 +1230,7 @@ public class CompressedFormatUtilsCoverageTests
             BitConverter.GetBytes(99_000_000L).CopyTo(hugeDecl, 0);
             var hugePath = NextPath("inspect_huge_decl.zsafetensor");
             File.WriteAllBytes(hugePath, CompressedFormatUtils.Compress(hugeDecl));
-            var hugeResult = Checkpoint.Inspect(hugePath);
+            var hugeResult = Persistence.Inspect(hugePath);
             Assert.Equal(ArtifactKind.NotRecognized, hugeResult.Kind);
             Assert.Contains(hugeResult.Observations, o => o.Contains("ends after 200000"));
 
@@ -1242,7 +1242,7 @@ public class CompressedFormatUtilsCoverageTests
                 CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: false)).OnnxBytes;
             var legacyPath = NextPath("inspect_legacy_single.srk");
             File.WriteAllBytes(legacyPath, CompressedFormatUtils.Compress(bare));
-            var legacy = Checkpoint.Inspect(legacyPath);
+            var legacy = Persistence.Inspect(legacyPath);
             Assert.Equal(ArtifactKind.SrkGraph, legacy.Kind);
             Assert.Equal("single-Zstd", legacy.Srk!.LegacyLayout);
         }
@@ -1600,7 +1600,7 @@ public class CompressedFormatUtilsCoverageTests
         var path = Path.Combine(TempDir, "roundtrip.skpt");
         try
         {
-            Checkpoint.From(model).WithModel().WithWeights().Save(path);
+            Persistence.From(model).WithModel().WithWeights().Save(path);
 
             var originalWeights = WeightBytesByParam(model);
             Assert.Equal(2, originalWeights.Count);
@@ -1695,7 +1695,7 @@ public class CompressedFormatUtilsCoverageTests
 
             // Load: a runnable concrete model, weights bound byte-identically, and
             // bit-identical execution on the sample input.
-            var loaded = Checkpoint.Load(path);
+            var loaded = Persistence.Load(path);
             Assert.Equal(GraphKind.ConcreteModel, loaded.Kind);
             var loadedWeights = WeightBytesByParam(loaded);
             Assert.Equal(originalWeights.Count, loadedWeights.Count);
@@ -1732,7 +1732,7 @@ public class CompressedFormatUtilsCoverageTests
                     SkptFileFormat.ModelEntryPath => legacyModelBytes,
                     _ => e.Value,
                 })).ToList());
-                var legacyLoaded = Checkpoint.Load(legacyPath);
+                var legacyLoaded = Persistence.Load(legacyPath);
                 var legacyWeights = WeightBytesByParam(legacyLoaded);
                 Assert.Equal(originalWeights.Count, legacyWeights.Count);
                 foreach (var (paramId, bytes) in originalWeights)
@@ -1756,26 +1756,26 @@ public class CompressedFormatUtilsCoverageTests
         var (model, numOut, input) = BuildSkptModel();
 
         // Only a concrete model can start a checkpoint.
-        var exKind = Assert.Throws<InvalidOperationException>(() => Checkpoint.From(FCLayer.ComputationGraph));
+        var exKind = Assert.Throws<InvalidOperationException>(() => Persistence.From(FCLayer.ComputationGraph));
         Assert.Contains("concrete-model", exKind.Message);
 
         // This version writes exactly one shape: model + weights, both selected.
         var incompletePath = Path.Combine(TempDir, "incomplete.skpt");
-        var exNone = Assert.Throws<InvalidOperationException>(() => Checkpoint.From(model).Save(incompletePath));
+        var exNone = Assert.Throws<InvalidOperationException>(() => Persistence.From(model).Save(incompletePath));
         Assert.Contains("WithModel", exNone.Message);
-        Assert.Throws<InvalidOperationException>(() => Checkpoint.From(model).WithModel().Save(incompletePath));
-        Assert.Throws<InvalidOperationException>(() => Checkpoint.From(model).WithWeights().Save(incompletePath));
+        Assert.Throws<InvalidOperationException>(() => Persistence.From(model).WithModel().Save(incompletePath));
+        Assert.Throws<InvalidOperationException>(() => Persistence.From(model).WithWeights().Save(incompletePath));
         Assert.False(File.Exists(incompletePath));
 
         // The atomic writer stages in the target's directory, so it must exist up front.
-        Assert.Throws<DirectoryNotFoundException>(() => Checkpoint.From(model).WithModel().WithWeights()
+        Assert.Throws<DirectoryNotFoundException>(() => Persistence.From(model).WithModel().WithWeights()
             .Save(Path.Combine(TempDir, "no-such-dir", "model.skpt")));
 
         // A simulated crash between staging and commit leaves the existing checkpoint intact.
         var path = Path.Combine(TempDir, "atomic.skpt");
         try
         {
-            Checkpoint.From(model).WithModel().WithWeights().Save(path);
+            Persistence.From(model).WithModel().WithWeights().Save(path);
             var committed = File.ReadAllBytes(path);
 
             AtomicFileWriter.CommitFaultInjection = tempPath =>
@@ -1784,12 +1784,12 @@ public class CompressedFormatUtilsCoverageTests
             };
             try
             {
-                Assert.Throws<IOException>(() => Checkpoint.From(model).WithModel().WithWeights().Save(path));
+                Assert.Throws<IOException>(() => Persistence.From(model).WithModel().WithWeights().Save(path));
             }
             finally { AtomicFileWriter.CommitFaultInjection = null; }
 
             Assert.Equal(committed, File.ReadAllBytes(path));
-            var loaded = Checkpoint.Load(path);
+            var loaded = Persistence.Load(path);
             Assert.Equal(ExecuteToBytes(model, numOut, input), ExecuteToBytes(loaded, numOut, input));
         }
         finally { if (File.Exists(path)) File.Delete(path); }
@@ -1810,7 +1810,7 @@ public class CompressedFormatUtilsCoverageTests
         var tamperedPath = Path.Combine(TempDir, "tampered.skpt");
         try
         {
-            Checkpoint.From(model).WithModel().WithWeights().Save(path);
+            Persistence.From(model).WithModel().WithWeights().Save(path);
             var entries = ReadZipEntries(path);
             var direct = ExecuteToBytes(model, numOut, input);
             List<(string Name, byte[] Data)> Without(string name) =>
@@ -1821,17 +1821,17 @@ public class CompressedFormatUtilsCoverageTests
 
             // Not a zip at all.
             File.WriteAllBytes(tamperedPath, [1, 2, 3, 4]);
-            var exNotZip = Assert.Throws<InvalidDataException>(() => Checkpoint.Load(tamperedPath));
+            var exNotZip = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
             Assert.Contains("zip", exNotZip.Message);
 
             // A zip without the manifest is not a checkpoint.
             RewriteSkpt(tamperedPath, Without(SkptFileFormat.ConfigEntryName));
-            var exNoConfig = Assert.Throws<InvalidDataException>(() => Checkpoint.Load(tamperedPath));
+            var exNoConfig = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
             Assert.Contains(SkptFileFormat.ConfigEntryName, exNoConfig.Message);
 
             // A manifest referencing a missing entry names the entry.
             RewriteSkpt(tamperedPath, Without(SkptFileFormat.WeightsEntryPath));
-            var exMissing = Assert.Throws<InvalidDataException>(() => Checkpoint.Load(tamperedPath));
+            var exMissing = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
             Assert.Contains(SkptFileFormat.WeightsEntryPath, exMissing.Message);
 
             // A tampered entry fails its SHA-256 check, naming the entry.
@@ -1843,7 +1843,7 @@ public class CompressedFormatUtilsCoverageTests
                 return (e.Key, copy);
             }).ToList();
             RewriteSkpt(tamperedPath, flipped);
-            var exSha = Assert.Throws<InvalidDataException>(() => Checkpoint.Load(tamperedPath));
+            var exSha = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
             Assert.Contains("SHA-256", exSha.Message);
             Assert.Contains(SkptFileFormat.WeightsEntryPath, exSha.Message);
 
@@ -1857,13 +1857,13 @@ public class CompressedFormatUtilsCoverageTests
                 .First().Key;
             config["tensorMappings"]!["model"]!["default"]!["tensors"]![firstParam]!["futureRefKey"] = 1;
             RewriteSkpt(tamperedPath, WithConfig(config.ToJsonString()));
-            Assert.Equal(direct, ExecuteToBytes(Checkpoint.Load(tamperedPath), numOut, input));
+            Assert.Equal(direct, ExecuteToBytes(Persistence.Load(tamperedPath), numOut, input));
 
             // A future major version is refused with a clear message.
             var futureConfig = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
             futureConfig["skptVersion"] = SkptFileFormat.CurrentVersion + 1;
             RewriteSkpt(tamperedPath, WithConfig(futureConfig.ToJsonString()));
-            var exVersion = Assert.Throws<InvalidDataException>(() => Checkpoint.Load(tamperedPath));
+            var exVersion = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
             Assert.Contains("newer framework version", exVersion.Message);
 
             // A mapping missing one of the model's parameters names the parameter.
@@ -1871,7 +1871,7 @@ public class CompressedFormatUtilsCoverageTests
             ((JsonObject)missingParamConfig["tensorMappings"]!["model"]!["default"]!["tensors"]!)
                 .Remove(firstParam);
             RewriteSkpt(tamperedPath, WithConfig(missingParamConfig.ToJsonString()));
-            var exUnmapped = Assert.Throws<InvalidDataException>(() => Checkpoint.Load(tamperedPath));
+            var exUnmapped = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
             Assert.Contains(firstParam, exUnmapped.Message);
 
             // A mapping entry for a parameter the model does not declare names the stray.
@@ -1879,7 +1879,7 @@ public class CompressedFormatUtilsCoverageTests
             strayConfig["tensorMappings"]!["model"]!["default"]!["tensors"]!["not_a_real_param"] =
                 new JsonObject { ["data"] = "weights", ["tensor"] = "not_a_real_param" };
             RewriteSkpt(tamperedPath, WithConfig(strayConfig.ToJsonString()));
-            var exStray = Assert.Throws<InvalidDataException>(() => Checkpoint.Load(tamperedPath));
+            var exStray = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
             Assert.Contains("not_a_real_param", exStray.Message);
         }
         finally
@@ -1929,8 +1929,8 @@ public class CompressedFormatUtilsCoverageTests
         var zstdPath = Path.Combine(TempDir, "zstd-on.skpt");
         try
         {
-            Checkpoint.From(model).WithModel().WithWeights().Save(plainPath);
-            Checkpoint.From(model).WithModel().WithWeights().WithZstdCompressedData().Save(zstdPath);
+            Persistence.From(model).WithModel().WithWeights().Save(plainPath);
+            Persistence.From(model).WithModel().WithWeights().WithZstdCompressedData().Save(zstdPath);
 
             // Both files stay standard zips (read via the BCL, not our writer) with the same
             // entry set, and every entry remains method-0 STORED — the Zstd layer lives
@@ -1974,7 +1974,7 @@ public class CompressedFormatUtilsCoverageTests
             // entry's zero placeholders.
             var originalWeights = WeightBytesByParam(model);
             Assert.All(originalWeights.Values, bytes => Assert.Contains(bytes, b => b != 0));
-            var loaded = Checkpoint.Load(zstdPath);
+            var loaded = Persistence.Load(zstdPath);
             var loadedWeights = WeightBytesByParam(loaded);
             Assert.Equal(originalWeights.Count, loadedWeights.Count);
             foreach (var (paramId, bytes) in originalWeights)
@@ -1983,9 +1983,9 @@ public class CompressedFormatUtilsCoverageTests
 
             // An out-of-range compression level is rejected up front.
             Assert.Throws<ArgumentOutOfRangeException>(() =>
-                Checkpoint.From(model).WithZstdCompressedData(compressionLevel: 0));
+                Persistence.From(model).WithZstdCompressedData(compressionLevel: 0));
             Assert.Throws<ArgumentOutOfRangeException>(() =>
-                Checkpoint.From(model).WithZstdCompressedData(compressionLevel: 23));
+                Persistence.From(model).WithZstdCompressedData(compressionLevel: 23));
         }
         finally
         {
@@ -2010,8 +2010,8 @@ public class CompressedFormatUtilsCoverageTests
         var tamperedPath = Path.Combine(TempDir, "mismatch-tampered.skpt");
         try
         {
-            Checkpoint.From(model).WithModel().WithWeights().Save(plainPath);
-            Checkpoint.From(model).WithModel().WithWeights().WithZstdCompressedData().Save(zstdPath);
+            Persistence.From(model).WithModel().WithWeights().Save(plainPath);
+            Persistence.From(model).WithModel().WithWeights().WithZstdCompressedData().Save(zstdPath);
             var plainEntries = ReadZipEntries(plainPath);
             var zstdEntries = ReadZipEntries(zstdPath);
 
@@ -2026,7 +2026,7 @@ public class CompressedFormatUtilsCoverageTests
             var rawAsZstd = JsonNode.Parse(plainEntries[SkptFileFormat.ConfigEntryName])!;
             rawAsZstd["data"]!["weights"]!["compression"] = SkptFileFormat.CompressionZstd;
             RewriteWith(plainEntries, rawAsZstd.ToJsonString());
-            var exRaw = Assert.Throws<InvalidDataException>(() => Checkpoint.Load(tamperedPath));
+            var exRaw = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
             Assert.Contains(SkptFileFormat.WeightsEntryPath, exRaw.Message);
             Assert.Contains("not a Zstd frame", exRaw.Message);
 
@@ -2035,7 +2035,7 @@ public class CompressedFormatUtilsCoverageTests
             var zstdAsRaw = JsonNode.Parse(zstdEntries[SkptFileFormat.ConfigEntryName])!;
             zstdAsRaw["data"]!["weights"]!["compression"] = SkptFileFormat.CompressionNone;
             RewriteWith(zstdEntries, zstdAsRaw.ToJsonString());
-            var exZstd = Assert.Throws<InvalidDataException>(() => Checkpoint.Load(tamperedPath));
+            var exZstd = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
             Assert.Contains(SkptFileFormat.WeightsEntryPath, exZstd.Message);
             Assert.Contains("Zstd frame", exZstd.Message);
 
@@ -2043,7 +2043,7 @@ public class CompressedFormatUtilsCoverageTests
             var unknown = JsonNode.Parse(plainEntries[SkptFileFormat.ConfigEntryName])!;
             unknown["data"]!["weights"]!["compression"] = "lz4";
             RewriteWith(plainEntries, unknown.ToJsonString());
-            var exUnknown = Assert.Throws<InvalidDataException>(() => Checkpoint.Load(tamperedPath));
+            var exUnknown = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
             Assert.Contains("lz4", exUnknown.Message);
             Assert.Contains("unsupported compression", exUnknown.Message);
 
@@ -2056,7 +2056,7 @@ public class CompressedFormatUtilsCoverageTests
             var corrupt = JsonNode.Parse(zstdEntries[SkptFileFormat.ConfigEntryName])!;
             corrupt["data"]!["weights"]!["sha256"] = SkptFileFormat.Sha256Hex(truncated);
             RewriteWith(zstdEntries, corrupt.ToJsonString(), truncated);
-            var exCorrupt = Assert.Throws<InvalidDataException>(() => Checkpoint.Load(tamperedPath));
+            var exCorrupt = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
             Assert.Contains(SkptFileFormat.WeightsEntryPath, exCorrupt.Message);
             Assert.Contains("Zstd-decompress", exCorrupt.Message);
         }
@@ -2069,7 +2069,7 @@ public class CompressedFormatUtilsCoverageTests
     }
 
     /// <summary>
-    /// Checkpoint.Inspect recognizes the .skpt container (issue #73): a checkpoint written
+    /// Persistence.Inspect recognizes the .skpt container (issue #73): a checkpoint written
     /// by the Save path inspects to SkptCheckpoint with the manifest's whole-archive
     /// metadata, model and data registries (sha256 reported as recorded, never verified)
     /// and mapping-set names — reading only the zip central directory plus config.json, so
@@ -2088,7 +2088,7 @@ public class CompressedFormatUtilsCoverageTests
         var variantPath = Path.Combine(TempDir, "inspect_variant.skpt");
         try
         {
-            Checkpoint.From(model).WithModel().WithWeights().Save(path);
+            Persistence.From(model).WithModel().WithWeights().Save(path);
             var entries = ReadZipEntries(path);
             var manifest = SkptFileFormat.ParseManifest(entries[SkptFileFormat.ConfigEntryName], path);
             List<(string Name, byte[] Data)> WithConfig(string configJson) =>
@@ -2097,7 +2097,7 @@ public class CompressedFormatUtilsCoverageTests
 
             // The clean checkpoint: new kind, whole-archive metadata, both registries and
             // the mapping-set names all match what Save wrote; no observations.
-            var result = Checkpoint.Inspect(path);
+            var result = Persistence.Inspect(path);
             Assert.Equal(ArtifactKind.SkptCheckpoint, result.Kind);
             Assert.Equal(path, result.FilePath);
             Assert.Equal(new FileInfo(path).Length, result.FileSizeBytes);
@@ -2150,8 +2150,8 @@ public class CompressedFormatUtilsCoverageTests
                 .Single(h => h.Name == SkptFileFormat.WeightsEntryPath);
             fileBytes[weightsHeader.DataOffset + weightsHeader.Size - 1] ^= 0xFF;
             File.WriteAllBytes(variantPath, fileBytes);
-            Assert.Throws<InvalidDataException>(() => Checkpoint.Load(variantPath));
-            var corrupt = Checkpoint.Inspect(variantPath);
+            Assert.Throws<InvalidDataException>(() => Persistence.Load(variantPath));
+            var corrupt = Persistence.Inspect(variantPath);
             Assert.Equal(ArtifactKind.SkptCheckpoint, corrupt.Kind);
             Assert.Empty(corrupt.Observations);
             Assert.Equal(dataSummary.Sha256, Assert.Single(corrupt.Skpt!.DataEntries).Sha256);
@@ -2161,7 +2161,7 @@ public class CompressedFormatUtilsCoverageTests
             var mismatched = entries.Where(e => e.Key != SkptFileFormat.WeightsEntryPath)
                 .Select(e => (e.Key, e.Value)).Append(("data/stray.bin", new byte[16])).ToList();
             RewriteSkpt(variantPath, mismatched);
-            var mismatch = Checkpoint.Inspect(variantPath);
+            var mismatch = Persistence.Inspect(variantPath);
             Assert.Equal(ArtifactKind.SkptCheckpoint, mismatch.Kind);
             Assert.Contains(mismatch.Observations,
                 o => o.Contains(SkptFileFormat.WeightsEntryPath) && o.Contains("no such entry"));
@@ -2174,7 +2174,7 @@ public class CompressedFormatUtilsCoverageTests
             futureConfig["futureTopLevelKey"] = "??";
             futureConfig["skptVersion"] = SkptFileFormat.CurrentVersion + 1;
             RewriteSkpt(variantPath, WithConfig(futureConfig.ToJsonString()));
-            var future = Checkpoint.Inspect(variantPath);
+            var future = Persistence.Inspect(variantPath);
             Assert.Equal(ArtifactKind.SkptCheckpoint, future.Kind);
             Assert.Equal(SkptFileFormat.CurrentVersion + 1, future.Skpt!.SkptVersion);
             Assert.Contains(future.Observations, o => o.Contains("futureTopLevelKey"));
@@ -2191,7 +2191,7 @@ public class CompressedFormatUtilsCoverageTests
                     s.Write(data);
                 }
             }
-            var storedViolation = Checkpoint.Inspect(variantPath);
+            var storedViolation = Persistence.Inspect(variantPath);
             Assert.Equal(ArtifactKind.SkptCheckpoint, storedViolation.Kind);
             Assert.Contains(storedViolation.Observations, o => o.Contains("expected STORED"));
 
@@ -2199,7 +2199,7 @@ public class CompressedFormatUtilsCoverageTests
             // missing models / data / mapping sets.
             RewriteSkpt(variantPath, [(SkptFileFormat.ConfigEntryName,
                 System.Text.Encoding.UTF8.GetBytes("{\"format\":\"skpt\",\"skptVersion\":1}"))]);
-            var empty = Checkpoint.Inspect(variantPath);
+            var empty = Persistence.Inspect(variantPath);
             Assert.Equal(ArtifactKind.SkptCheckpoint, empty.Kind);
             Assert.Contains(empty.Observations, o => o.Contains("no models"));
             Assert.Contains(empty.Observations, o => o.Contains("no data entries"));
@@ -2209,31 +2209,31 @@ public class CompressedFormatUtilsCoverageTests
             // that is not JSON — structured NotRecognized every time, never an exception.
             RewriteSkpt(variantPath,
                 [("readme.txt", System.Text.Encoding.UTF8.GetBytes("just a zip"))]);
-            var noConfig = Checkpoint.Inspect(variantPath);
+            var noConfig = Persistence.Inspect(variantPath);
             Assert.Equal(ArtifactKind.NotRecognized, noConfig.Kind);
             Assert.Contains(noConfig.Observations, o => o.Contains(SkptFileFormat.ConfigEntryName));
 
             RewriteSkpt(variantPath, [(SkptFileFormat.ConfigEntryName,
                 System.Text.Encoding.UTF8.GetBytes("{\"name\":\"some-other-tool\"}"))]);
-            var foreign = Checkpoint.Inspect(variantPath);
+            var foreign = Persistence.Inspect(variantPath);
             Assert.Equal(ArtifactKind.NotRecognized, foreign.Kind);
             Assert.Contains(foreign.Observations, o => o.Contains("format"));
 
             RewriteSkpt(variantPath, [(SkptFileFormat.ConfigEntryName,
                 System.Text.Encoding.UTF8.GetBytes("not json at all"))]);
-            var badJson = Checkpoint.Inspect(variantPath);
+            var badJson = Persistence.Inspect(variantPath);
             Assert.Equal(ArtifactKind.NotRecognized, badJson.Kind);
             Assert.Contains(badJson.Observations, o => o.Contains("not a readable"));
 
             // Truncated and garbage files with a zip signature: structured NotRecognized.
             File.WriteAllBytes(variantPath, File.ReadAllBytes(path)[..40]);
-            var truncated = Checkpoint.Inspect(variantPath);
+            var truncated = Persistence.Inspect(variantPath);
             Assert.Equal(ArtifactKind.NotRecognized, truncated.Kind);
             Assert.Contains(truncated.Observations, o => o.Contains("not readable"));
 
             byte[] garbageZip = [0x50, 0x4B, 0x03, 0x04, 0xDE, 0xAD, 0xBE, 0xEF];
             File.WriteAllBytes(variantPath, garbageZip);
-            var garbage = Checkpoint.Inspect(variantPath);
+            var garbage = Persistence.Inspect(variantPath);
             Assert.Equal(ArtifactKind.NotRecognized, garbage.Kind);
             Assert.NotEmpty(garbage.Observations);
         }
@@ -2313,7 +2313,7 @@ public class CompressedFormatUtilsCoverageTests
                 originalWeights.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
 
             // ── Canonical names (no scheme) ────────────────────────────────
-            Checkpoint.ExportSafeTensors(model, canonicalPath);
+            Persistence.ExportSafeTensors(model, canonicalPath);
             var storedCanonical = SafeTensorLoader.LoadSafeTensors(canonicalPath)
                 .ToDictionary(t => t.Name, t => t.Data.AccessRawMemory().ToArray(), StringComparer.Ordinal);
             Assert.Equal(originalWeights.Keys.OrderBy(k => k, StringComparer.Ordinal),
@@ -2321,7 +2321,7 @@ public class CompressedFormatUtilsCoverageTests
             foreach (var (paramId, bytes) in originalWeights)
                 Assert.Equal(bytes, storedCanonical[paramId]);
 
-            var importedCanonical = Checkpoint.ImportSafeTensors(arch, canonicalPath);
+            var importedCanonical = Persistence.ImportSafeTensors(arch, canonicalPath);
             Assert.Equal(GraphKind.ConcreteModel, importedCanonical.Kind);
             Assert.Equal(originalWeights, CanonicalWeightBytes(importedCanonical));
             Assert.Equal(direct, ExecuteToBytes(importedCanonical, numOut, input));
@@ -2331,12 +2331,12 @@ public class CompressedFormatUtilsCoverageTests
             var withMetadata = SafeTensorLoader.LoadSafeTensors(canonicalPath);
             SafeTensorLoader.SaveSafeTensors(canonicalPath, withMetadata,
                 new Dictionary<string, object> { ["format"] = "pt", ["producer"] = "unit-test" });
-            var importedWithMetadata = Checkpoint.ImportSafeTensors(arch, canonicalPath);
+            var importedWithMetadata = Persistence.ImportSafeTensors(arch, canonicalPath);
             Assert.Equal(direct, ExecuteToBytes(importedWithMetadata, numOut, input));
 
             // ── PyTorch-style names via a naming scheme ────────────────────
             var scheme = BuildFcTorchScheme(arch);
-            Checkpoint.ExportSafeTensors(model, torchPath, scheme);
+            Persistence.ExportSafeTensors(model, torchPath, scheme);
             var storedTorch = SafeTensorLoader.LoadSafeTensors(torchPath)
                 .ToDictionary(t => t.Name, t => t.Data.AccessRawMemory().ToArray(), StringComparer.Ordinal);
             Assert.Equal(["fc.bias", "fc.weight"],
@@ -2344,7 +2344,7 @@ public class CompressedFormatUtilsCoverageTests
             Assert.Equal(originalWeights[FcWeightsId], storedTorch["fc.weight"]);
             Assert.Equal(originalWeights[FcBiasId], storedTorch["fc.bias"]);
 
-            var importedTorch = Checkpoint.ImportSafeTensors(arch, torchPath, scheme);
+            var importedTorch = Persistence.ImportSafeTensors(arch, torchPath, scheme);
             Assert.Equal(originalWeights, CanonicalWeightBytes(importedTorch));
             Assert.Equal(direct, ExecuteToBytes(importedTorch, numOut, input));
 
@@ -2357,7 +2357,7 @@ public class CompressedFormatUtilsCoverageTests
             ];
             var formatScheme = new ModelIdNamingScheme(
                 formats, ModuleParamSetNamingScheme.PyTorchFrameworkId);
-            var importedFormat = Checkpoint.ImportSafeTensors(arch, torchPath, formatScheme);
+            var importedFormat = Persistence.ImportSafeTensors(arch, torchPath, formatScheme);
             Assert.Equal(originalWeights, CanonicalWeightBytes(importedFormat));
             Assert.Equal(direct, ExecuteToBytes(importedFormat, numOut, input));
         }
@@ -2384,7 +2384,7 @@ public class CompressedFormatUtilsCoverageTests
         var badPath = Path.Combine(TempDir, "exchange_bad.safetensors");
         try
         {
-            Checkpoint.ExportSafeTensors(model, path);
+            Persistence.ExportSafeTensors(model, path);
             var good = SafeTensorLoader.LoadSafeTensors(path);
             const string weightsId = FcWeightsId;
             const string biasId = FcBiasId;
@@ -2393,20 +2393,20 @@ public class CompressedFormatUtilsCoverageTests
             var withStray = good.ToList();
             withStray.Add(new SafeTensor("not.a.param", TensorData([2L], 1f, 2f), "F32", [2L]));
             SafeTensorLoader.SaveSafeTensors(badPath, withStray);
-            var exStray = Assert.Throws<InvalidDataException>(() => Checkpoint.ImportSafeTensors(arch, badPath));
+            var exStray = Assert.Throws<InvalidDataException>(() => Persistence.ImportSafeTensors(arch, badPath));
             Assert.Contains("not.a.param", exStray.Message);
             Assert.Contains(badPath, exStray.Message);
 
             // A required parameter with no source tensor names the parameter.
             SafeTensorLoader.SaveSafeTensors(badPath, good.Where(t => t.Name != biasId).ToList());
-            var exMissing = Assert.Throws<InvalidDataException>(() => Checkpoint.ImportSafeTensors(arch, badPath));
+            var exMissing = Assert.Throws<InvalidDataException>(() => Persistence.ImportSafeTensors(arch, badPath));
             Assert.Contains(biasId, exMissing.Message);
 
             // A dtype mismatch after mapping names the tensor and both dtypes.
             var wrongDtype = good.Select(t => t.Name != weightsId ? t
                 : new SafeTensor(t.Name, TensorDataWithSmallVals(DType.Int64, [4L, 4L]), "I64", [4L, 4L])).ToList();
             SafeTensorLoader.SaveSafeTensors(badPath, wrongDtype);
-            var exDtype = Assert.Throws<InvalidDataException>(() => Checkpoint.ImportSafeTensors(arch, badPath));
+            var exDtype = Assert.Throws<InvalidDataException>(() => Persistence.ImportSafeTensors(arch, badPath));
             Assert.Contains(weightsId, exDtype.Message);
             Assert.Contains("dtype", exDtype.Message);
 
@@ -2414,7 +2414,7 @@ public class CompressedFormatUtilsCoverageTests
             var wrongShape = good.Select(t => t.Name != weightsId ? t
                 : new SafeTensor(t.Name, TensorDataWithSmallVals(DType.Float32, [2L, 8L]), "F32", [2L, 8L])).ToList();
             SafeTensorLoader.SaveSafeTensors(badPath, wrongShape);
-            var exShape = Assert.Throws<InvalidDataException>(() => Checkpoint.ImportSafeTensors(arch, badPath));
+            var exShape = Assert.Throws<InvalidDataException>(() => Persistence.ImportSafeTensors(arch, badPath));
             Assert.Contains(weightsId, exShape.Message);
             Assert.Contains("[2,8]", exShape.Message);
             Assert.Contains("[4,4]", exShape.Message);
@@ -2428,7 +2428,7 @@ public class CompressedFormatUtilsCoverageTests
             var ambiguous = new SimplePatternNamingScheme(
                 colliding, arch.GetShorokooIdNamingScheme(), ModuleParamSetNamingScheme.PyTorchFrameworkId);
             var exAmbiguous = Assert.Throws<InvalidDataException>(
-                () => Checkpoint.ImportSafeTensors(arch, path, ambiguous));
+                () => Persistence.ImportSafeTensors(arch, path, ambiguous));
             Assert.Contains(weightsId, exAmbiguous.Message);
             Assert.Contains(biasId, exAmbiguous.Message);
             Assert.Contains("fc.same", exAmbiguous.Message);
@@ -2445,25 +2445,25 @@ public class CompressedFormatUtilsCoverageTests
             SafeTensorLoader.SaveSafeTensors(badPath,
                 [new SafeTensor("fc.weight", weightsOnly.Data, weightsOnly.DataType, weightsOnly.Shape)]);
             var exUncovered = Assert.Throws<InvalidDataException>(
-                () => Checkpoint.ImportSafeTensors(arch, badPath, partialScheme));
+                () => Persistence.ImportSafeTensors(arch, badPath, partialScheme));
             Assert.Contains(biasId, exUncovered.Message);
             Assert.Contains("naming scheme", exUncovered.Message);
 
             // A training checkpoint is recognized by its marker and redirected.
             SafeTensorLoader.SaveSafeTensors(badPath,
                 [new SafeTensor("__shorokoo_checkpoint__", TensorData([2L], 1L, 0L), "I64", [2L])]);
-            var exCheckpoint = Assert.Throws<InvalidDataException>(() => Checkpoint.ImportSafeTensors(arch, badPath));
+            var exCheckpoint = Assert.Throws<InvalidDataException>(() => Persistence.ImportSafeTensors(arch, badPath));
             Assert.Contains("training checkpoint", exCheckpoint.Message);
 
             // Kind gates: import takes a concrete architecture, export a concrete model.
             var exImportKind = Assert.Throws<InvalidOperationException>(
-                () => Checkpoint.ImportSafeTensors(FCLayer.ComputationGraph, path));
+                () => Persistence.ImportSafeTensors(FCLayer.ComputationGraph, path));
             Assert.Contains("concrete-architecture", exImportKind.Message);
             var exImportModel = Assert.Throws<InvalidOperationException>(
-                () => Checkpoint.ImportSafeTensors(model, path));
+                () => Persistence.ImportSafeTensors(model, path));
             Assert.Contains("concrete-architecture", exImportModel.Message);
             var exExportKind = Assert.Throws<InvalidOperationException>(
-                () => Checkpoint.ExportSafeTensors(arch, badPath));
+                () => Persistence.ExportSafeTensors(arch, badPath));
             Assert.Contains("concrete-model", exExportKind.Message);
         }
         finally
@@ -2494,7 +2494,7 @@ public class CompressedFormatUtilsCoverageTests
         var partialScheme = new SimplePatternNamingScheme(
             partial, arch.GetShorokooIdNamingScheme(), ModuleParamSetNamingScheme.PyTorchFrameworkId);
         var exGap = Assert.Throws<InvalidOperationException>(
-            () => Checkpoint.ExportSafeTensors(model, path, partialScheme));
+            () => Persistence.ExportSafeTensors(model, path, partialScheme));
         Assert.Contains(biasId, exGap.Message);
 
         // Name collision after remapping → refused naming both parameters and the name.
@@ -2505,7 +2505,7 @@ public class CompressedFormatUtilsCoverageTests
         var collidingScheme = new SimplePatternNamingScheme(
             colliding, arch.GetShorokooIdNamingScheme(), ModuleParamSetNamingScheme.PyTorchFrameworkId);
         var exCollision = Assert.Throws<InvalidOperationException>(
-            () => Checkpoint.ExportSafeTensors(model, path, collidingScheme));
+            () => Persistence.ExportSafeTensors(model, path, collidingScheme));
         Assert.Contains(weightsId, exCollision.Message);
         Assert.Contains(biasId, exCollision.Message);
         Assert.Contains("fc.same", exCollision.Message);
@@ -2515,7 +2515,7 @@ public class CompressedFormatUtilsCoverageTests
         var modelIdScheme = new ModelIdNamingScheme(
             [new ModelIdFormat(format: "x")], ModuleParamSetNamingScheme.PyTorchFrameworkId);
         Assert.Throws<NotSupportedException>(
-            () => Checkpoint.ExportSafeTensors(model, path, modelIdScheme));
+            () => Persistence.ExportSafeTensors(model, path, modelIdScheme));
 
         // No failed attempt above committed a file.
         Assert.False(File.Exists(path));
@@ -2537,15 +2537,15 @@ public class CompressedFormatUtilsCoverageTests
         try
         {
             var scheme = BuildFcTorchScheme(arch);
-            Checkpoint.ExportSafeTensors(model, torchPath, scheme);
+            Persistence.ExportSafeTensors(model, torchPath, scheme);
 
-            var imported = Checkpoint.ImportSafeTensorsToCheckpoint(arch, torchPath, skptPath, scheme);
+            var imported = Persistence.ImportSafeTensorsToCheckpoint(arch, torchPath, skptPath, scheme);
             Assert.Equal(GraphKind.ConcreteModel, imported.Kind);
 
             var direct = ExecuteToBytes(model, numOut, input);
             Assert.Equal(direct, ExecuteToBytes(imported, numOut, input));
 
-            var reloaded = Checkpoint.Load(skptPath);
+            var reloaded = Persistence.Load(skptPath);
             Assert.Equal(GraphKind.ConcreteModel, reloaded.Kind);
             Assert.Equal(WeightBytesByParam(model), WeightBytesByParam(reloaded));
             Assert.Equal(direct, ExecuteToBytes(reloaded, numOut, input));
@@ -2560,7 +2560,7 @@ public class CompressedFormatUtilsCoverageTests
             var partialScheme = new SimplePatternNamingScheme(
                 partial, arch.GetShorokooIdNamingScheme(), ModuleParamSetNamingScheme.PyTorchFrameworkId);
             Assert.Throws<InvalidDataException>(
-                () => Checkpoint.ImportSafeTensorsToCheckpoint(arch, torchPath, skptPath, partialScheme));
+                () => Persistence.ImportSafeTensorsToCheckpoint(arch, torchPath, skptPath, partialScheme));
             Assert.Equal(committed, File.ReadAllBytes(skptPath));
         }
         finally

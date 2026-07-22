@@ -206,7 +206,7 @@ so. Header fields (add-only across minor revisions; unknown fields are ignored):
 - `SrkFileFormat.TryReadHeaderFromFile(path)` reads the header (`SrkHeader`) without
   loading the graph — useful to identify a file cheaply; it returns `null` for
   pre-container legacy files. For a format-agnostic version of the same idea, see
-  [`Checkpoint.Inspect`](#identify-and-summarize-a-file-checkpointinspect).
+  [`Persistence.Inspect`](#identify-and-summarize-a-file-checkpointinspect).
 - `producer` is informational; the payload dialect remains versioned by the embedded
   ONNX `ir_version`/opsets themselves.
 
@@ -254,23 +254,23 @@ Compressed (`.zsafetensor`) variants live in `CompressedFormatUtils`:
 
 `SafeTensorLoader` above is the raw tensor-file layer: it moves tensors, knows
 nothing about models, and leaves name matching to you. The **model-level
-boundary** lives on `Checkpoint` (namespace `Shorokoo`, the same class as the
+boundary** lives on `Persistence` (namespace `Shorokoo`, the same class as the
 [.skpt save/load](skpt-checkpoints.md) entry points):
 
 ```csharp
-using Shorokoo;        // Checkpoint
+using Shorokoo;        // Persistence
 using Shorokoo.Core;   // naming schemes
 
 // Export: concrete model → standard .safetensors (canonical names by default).
-Checkpoint.ExportSafeTensors(model, "weights.safetensors");
-Checkpoint.ExportSafeTensors(model, "weights.safetensors", scheme);   // PyTorch/timm names
+Persistence.ExportSafeTensors(model, "weights.safetensors");
+Persistence.ExportSafeTensors(model, "weights.safetensors", scheme);   // PyTorch/timm names
 
 // Import: concrete architecture + .safetensors → concrete model, strictly checked.
-ComputationGraph m1 = Checkpoint.ImportSafeTensors(arch, "weights.safetensors");
-ComputationGraph m2 = Checkpoint.ImportSafeTensors(arch, "foreign.safetensors", scheme);
+ComputationGraph m1 = Persistence.ImportSafeTensors(arch, "weights.safetensors");
+ComputationGraph m2 = Persistence.ImportSafeTensors(arch, "foreign.safetensors", scheme);
 
 // One-call native landing: foreign safetensors → .skpt checkpoint (+ the bound model).
-ComputationGraph m3 = Checkpoint.ImportSafeTensorsToCheckpoint(
+ComputationGraph m3 = Persistence.ImportSafeTensorsToCheckpoint(
     arch, "foreign.safetensors", "model.skpt", scheme);
 ```
 
@@ -295,7 +295,7 @@ ComputationGraph m3 = Checkpoint.ImportSafeTensorsToCheckpoint(
   block is ignored (it is metadata, not a tensor).
 - `ImportSafeTensorsToCheckpoint` performs the same import and lands the result
   as a native `.skpt` via the standard
-  `Checkpoint.From(model).WithModel().WithWeights().Save(...)` writer (atomic;
+  `Persistence.From(model).WithModel().WithWeights().Save(...)` writer (atomic;
   nothing is written when the import fails).
 
 ### Naming
@@ -316,8 +316,8 @@ SimplePatternScheme[] patterns =
 var scheme = new SimplePatternNamingScheme(
     patterns, arch.GetShorokooIdNamingScheme(), ModuleParamSetNamingScheme.PyTorchFrameworkId);
 
-Checkpoint.ExportSafeTensors(model, "torch.safetensors", scheme);  // writes fc.weight / fc.bias
-var bound = Checkpoint.ImportSafeTensors(arch, "torch.safetensors", scheme);
+Persistence.ExportSafeTensors(model, "torch.safetensors", scheme);  // writes fc.weight / fc.bias
+var bound = Persistence.ImportSafeTensors(arch, "torch.safetensors", scheme);
 ```
 
 Both DSLs work for **import**: the
@@ -331,15 +331,15 @@ ModelIds, which a bound model no longer carries, and is refused with
 that leaves any weight unnamed or maps two weights to one tensor name, so
 weights are never silently dropped or overwritten.
 
-## Identify and summarize a file (`Checkpoint.Inspect`)
+## Identify and summarize a file (`Persistence.Inspect`)
 
-`Checkpoint.Inspect(path)` (namespace `Shorokoo`) answers "what is this file?"
+`Persistence.Inspect(path)` (namespace `Shorokoo`) answers "what is this file?"
 **without loading it**: it identifies any Shorokoo-produced artifact and
 summarizes its contents from headers/prefixes only, so inspecting a multi-GB
 file is fast and cheap.
 
 ```csharp
-ArtifactInspection result = Checkpoint.Inspect("run.safetensors");
+ArtifactInspection result = Persistence.Inspect("run.safetensors");
 Console.WriteLine(result);          // human-readable multi-line summary
 switch (result.Kind)
 {
@@ -367,7 +367,7 @@ Recognized formats and what is reported:
   materialized. The one exception is a checkpoint's 16-byte marker (the format
   version and step live there). For a `.skpt`, only the zip central directory
   and the `config.json` entry are read — the recorded per-entry sha256s are
-  reported as written, never checked (a full `Checkpoint.Load` verifies them).
+  reported as written, never checked (a full `Persistence.Load` verifies them).
   Because the payload is untouched, `Inspect` also succeeds on a file whose
   payload is corrupt — it reports the header while a full load would fail the
   SHA-256 check.
@@ -439,7 +439,7 @@ Notes:
   Two DSLs build the remapping scheme: the
   [ModelId format DSL](param-naming-format-dsl.md) (`ModelIdNamingScheme`) and the
   [pattern DSL](param-naming-pattern-dsl.md) (`SimplePatternNamingScheme`).
-- Prefer `Checkpoint.ImportSafeTensors` (above) when the file is supposed to cover the
+- Prefer `Persistence.ImportSafeTensors` (above) when the file is supposed to cover the
   model exactly: it runs the same binding but fails loudly on unmatched or mismatched
   tensors instead of silently dropping them.
 

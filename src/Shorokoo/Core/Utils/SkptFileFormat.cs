@@ -157,7 +157,7 @@ namespace Shorokoo.Core.Utils
     /// declared by the manifest's per-entry compression field — such an entry is not
     /// range-readable and skips the alignment. This class owns the container constants,
     /// the manifest schema (de)serialization, and the STORED zip writer; the save/load
-    /// entry points live on <see cref="Shorokoo.Checkpoint"/>.
+    /// entry points live on <see cref="Shorokoo.Persistence"/>.
     /// </summary>
     public static class SkptFileFormat
     {

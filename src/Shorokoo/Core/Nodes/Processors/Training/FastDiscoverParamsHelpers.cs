@@ -108,7 +108,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training
         /// matching <see cref="ModelParamIdentifierTemplate.ToTemplateString"/> on the CG side —
         /// the parameter's canonical Shorokoo name (what
         /// <see cref="ModuleParamSetNamingScheme.ToName(ModelId)"/> produces under the canonical
-        /// scheme). Shared with <c>Checkpoint.ExportSafeTensors</c>, which names exported
+        /// scheme). Shared with <c>Persistence.ExportSafeTensors</c>, which names exported
         /// tensors canonically. Returns the input unchanged if it isn't in the bracketed form.
         /// </summary>
         public static string ExtractTemplateString(string identifierTemplate)

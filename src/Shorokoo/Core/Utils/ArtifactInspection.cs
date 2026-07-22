@@ -210,7 +210,7 @@ namespace Shorokoo
         public long? DeclaredSizeBytes { get; }
 
         /// <summary>The recorded SHA-256 of the entry's bytes — reported exactly as recorded,
-        /// never verified by Inspect (a full <see cref="Persistence.Load"/> verifies it).</summary>
+        /// never verified by Inspect (a full <see cref="Persistence.Load(string)"/> verifies it).</summary>
         public string? Sha256 { get; }
 
         internal SkptDataSummary(
@@ -258,7 +258,7 @@ namespace Shorokoo
         /// <see cref="CreatedUtc"/> fields. Reported exactly as recorded — values are preserved
         /// raw here (control characters included); only <see cref="ArtifactInspection.ToString"/>
         /// sanitizes them for display. Trusted as far as its writer: Inspect never interprets or
-        /// validates it, and it never affects a <see cref="Persistence.Load"/>.</summary>
+        /// validates it, and it never affects a <see cref="Persistence.Load(string)"/>.</summary>
         public IReadOnlyDictionary<string, string>? UserMetadata { get; }
 
         /// <summary>The model registry, in manifest order.</summary>
@@ -774,7 +774,7 @@ namespace Shorokoo
         /// mismatches in both directions, STORED-expectation violations, unknown manifest
         /// keys, empty trees, and version/field anomalies. sha256 values are carried exactly
         /// as recorded — verifying them needs full entry reads, which is
-        /// <see cref="Load"/>'s job, not Inspect's.
+        /// <see cref="Load(string)"/>'s job, not Inspect's.
         /// </summary>
         private static SkptArtifactInfo SummarizeSkptManifest(
             SkptManifest manifest,

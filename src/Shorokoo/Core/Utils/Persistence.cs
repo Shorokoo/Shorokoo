@@ -24,7 +24,7 @@ namespace Shorokoo
     /// definition + weights) with bit-identical execution on round-trip.</para> Data-tree
     /// entries may opt into Zstd compression inside their STORED bytes via
     /// <see cref="CheckpointBuilder.WithZstdCompressedData"/>; the manifest records it
-    /// per entry and <see cref="Load"/> decompresses transparently.
+    /// per entry and <see cref="Load(string)"/> decompresses transparently.
     ///
     /// <code>
     /// Persistence.From(concreteModel)
@@ -55,7 +55,7 @@ namespace Shorokoo
         /// Starts a checkpoint of <paramref name="concreteModel"/>. The graph must be a
         /// <see cref="GraphKind.ConcreteModel"/> — fully lowered, every parameter
         /// materialized. Select the contents with <see cref="CheckpointBuilder.WithModel"/> and
-        /// <see cref="CheckpointBuilder.WithWeights"/>, then commit with
+        /// <see cref="CheckpointBuilder.WithWeights()"/>, then commit with
         /// <see cref="CheckpointBuilder.Save"/>.
         /// </summary>
         public static CheckpointBuilder From(ComputationGraph concreteModel)
@@ -69,20 +69,34 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Loads a .skpt checkpoint saved by <see cref="CheckpointBuilder.Save"/>: reads the
-        /// manifest, verifies every referenced entry's SHA-256 (always over the stored bytes,
-        /// so a compressed entry is integrity-checked without decompressing), removes each
-        /// data entry's manifest-declared compression layer, loads the model definition and
-        /// binds the checkpoint's weights back onto its parameters. Returns the runnable
-        /// <see cref="GraphKind.ConcreteModel"/>. A manifest referencing a missing entry,
-        /// an entry failing its SHA-256 check, a manifest/stored compression mismatch, or a
-        /// weight that does not match its parameter fails loudly naming the entry; unknown
-        /// manifest keys are ignored (the format's keys are add-only across minor revisions).
+        /// Loads a .skpt checkpoint saved by <see cref="CheckpointBuilder.Save"/>, binding the
+        /// <c>default</c> tensor mapping set. See <see cref="Load(string, string)"/> to select
+        /// another set (e.g. <c>ema</c>).
         /// </summary>
         public static ComputationGraph Load(string filePath)
+            => Load(filePath, SkptFileFormat.DefaultMappingSetName);
+
+        /// <summary>
+        /// Loads a .skpt checkpoint saved by <see cref="CheckpointBuilder.Save"/>, binding the
+        /// named tensor mapping <paramref name="set"/>: reads the manifest, verifies every
+        /// referenced entry's SHA-256 (always over the stored bytes, so a compressed entry is
+        /// integrity-checked without decompressing), removes each data entry's manifest-declared
+        /// compression layer, loads the model definition and binds the selected set's weights
+        /// back onto its parameters. A checkpoint may carry several sets over shared data (e.g.
+        /// <c>default</c> raw weights and an <c>ema</c> smoothed set); pass the set's name to
+        /// pick one. Returns the runnable <see cref="GraphKind.ConcreteModel"/>. An unknown set
+        /// name fails loudly, listing the sets the file declares. A manifest referencing a
+        /// missing entry, an entry failing its SHA-256 check, a manifest/stored compression
+        /// mismatch, or a weight that does not match its parameter likewise fails loudly naming
+        /// the entry; unknown manifest keys are ignored (the format's keys are add-only across
+        /// minor revisions).
+        /// </summary>
+        public static ComputationGraph Load(string filePath, string set)
         {
             if (string.IsNullOrWhiteSpace(filePath))
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
+            if (string.IsNullOrWhiteSpace(set))
+                throw new ArgumentException("Mapping set name cannot be null or empty.", nameof(set));
 
             var fileBytes = File.ReadAllBytes(filePath);
             using var fileStream = new MemoryStream(fileBytes, writable: false);
@@ -97,7 +111,7 @@ namespace Shorokoo
 
             var (modelKey, modelEntry) = SingleModel(manifest, filePath);
             var graph = LoadModelDefinition(archive, modelKey, modelEntry, filePath);
-            BindWeights(archive, manifest, modelKey, graph, filePath);
+            BindWeights(archive, manifest, modelKey, set, graph, filePath);
 
             return new ComputationGraph(graph, GraphKind.ConcreteModel);
         }
@@ -209,14 +223,15 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Resolves the model's "default" tensor mapping set and injects each mapped tensor
-        /// into its parameter node (the graph carries dtype/shape-true placeholders where
-        /// weights were stripped at save time). Every parameter must be mapped and every
+        /// Resolves the model's <paramref name="setName"/> tensor mapping set and injects each
+        /// mapped tensor into its parameter node (the graph carries dtype/shape-true placeholders
+        /// where weights were stripped at save time). Every parameter must be mapped and every
         /// mapping entry must land on a parameter — a mismatch means the checkpoint does not
-        /// belong to this model definition, and fails loudly naming the parameter.
+        /// belong to this model definition, and fails loudly naming the parameter. An unknown
+        /// <paramref name="setName"/> fails loudly, listing the sets the manifest declares.
         /// </summary>
         private static void BindWeights(
-            ZipArchive archive, SkptManifest manifest, string modelKey,
+            ZipArchive archive, SkptManifest manifest, string modelKey, string setName,
             InternalComputationGraph graph, string filePath)
         {
             if (manifest.TensorMappings is null
@@ -224,11 +239,15 @@ namespace Shorokoo
                 || mappingSets is null)
                 throw new InvalidDataException(
                     $"'{filePath}': the .skpt manifest has no tensor mappings for model '{modelKey}'.");
-            if (!mappingSets.TryGetValue(SkptFileFormat.DefaultMappingSetName, out var mappingSet)
-                || mappingSet is null)
+            if (!mappingSets.TryGetValue(setName, out var mappingSet) || mappingSet is null)
+            {
+                var available = mappingSets.Keys.Count == 0
+                    ? "<none>"
+                    : string.Join(", ", mappingSets.Keys.OrderBy(k => k, StringComparer.Ordinal));
                 throw new InvalidDataException(
-                    $"'{filePath}': model '{modelKey}' has no '{SkptFileFormat.DefaultMappingSetName}' " +
-                    "tensor mapping set — this Shorokoo build binds the default set.");
+                    $"'{filePath}': model '{modelKey}' has no '{setName}' tensor mapping set. " +
+                    $"Available sets: {available}.");
+            }
             var tensorRefs = mappingSet.Tensors ?? new Dictionary<string, SkptTensorRef>();
 
             var tensorsByDataKey = new Dictionary<string, Dictionary<string, TensorData>>(StringComparer.Ordinal);
@@ -248,7 +267,7 @@ namespace Shorokoo
                         "cannot resolve its weights in the checkpoint.");
                 if (!tensorRefs.TryGetValue(paramId, out var tensorRef) || tensorRef is null)
                     throw new InvalidDataException(
-                        $"'{filePath}': the '{SkptFileFormat.DefaultMappingSetName}' mapping of model " +
+                        $"'{filePath}': the '{setName}' mapping of model " +
                         $"'{modelKey}' has no entry for parameter '{paramId}'. Does the checkpoint " +
                         "belong to this model?");
                 unboundRefs.Remove(paramId);
@@ -275,7 +294,7 @@ namespace Shorokoo
 
             if (unboundRefs.Count > 0)
                 throw new InvalidDataException(
-                    $"'{filePath}': the '{SkptFileFormat.DefaultMappingSetName}' mapping of model " +
+                    $"'{filePath}': the '{setName}' mapping of model " +
                     $"'{modelKey}' maps parameter '{unboundRefs.First()}' " +
                     (unboundRefs.Count > 1 ? $"(and {unboundRefs.Count - 1} more) " : string.Empty) +
                     "which the model definition does not declare. Does the checkpoint belong to this model?");
@@ -415,7 +434,7 @@ namespace Shorokoo
     /// <summary>
     /// Builder for a .skpt checkpoint, started by <see cref="Persistence.From"/>. Select what
     /// the checkpoint contains — this Shorokoo version writes exactly one shape, the inference
-    /// checkpoint <see cref="WithModel"/> + <see cref="WithWeights"/> — then commit it to disk
+    /// checkpoint <see cref="WithModel"/> + <see cref="WithWeights()"/> — then commit it to disk
     /// with <see cref="Save"/>.
     /// </summary>
     public sealed class CheckpointBuilder
@@ -425,6 +444,7 @@ namespace Shorokoo
         private bool _withWeights;
         private int? _zstdDataCompressionLevel;
         private Dictionary<string, string>? _userMetadata;
+        private readonly List<(string Name, IReadOnlyDictionary<string, TensorData> Values)> _extraSets = new();
 
         internal CheckpointBuilder(ComputationGraph model) => _model = model;
 
@@ -435,11 +455,63 @@ namespace Shorokoo
             return this;
         }
 
-        /// <summary>Includes the model's weights (stored as a safetensors data entry) in the checkpoint.</summary>
+        /// <summary>Includes the model's weights (stored as a safetensors data entry) in the
+        /// checkpoint, as the <c>default</c> tensor mapping set (bound by the parameterless
+        /// <see cref="Persistence.Load(string)"/>).</summary>
         public CheckpointBuilder WithWeights()
         {
             _withWeights = true;
             return this;
+        }
+
+        /// <summary>
+        /// Attaches an additional named weight set <paramref name="setName"/> (e.g. <c>ema</c>)
+        /// over the same model parameters, selectable at load time with
+        /// <see cref="Persistence.Load(string, string)"/>. <paramref name="values"/> maps each of
+        /// the model's weight-parameter identifiers to that set's tensor, and must cover exactly
+        /// the model's weight parameters (the same set the <c>default</c> weights span), each with
+        /// a matching dtype and shape. Sets share data: a tensor byte-identical to one already
+        /// stored (by the default set or an earlier additional set) is referenced, not stored
+        /// again; only a set's genuinely distinct tensors are written, into its own
+        /// <c>data/&lt;setName&gt;.safetensors</c> entry. Computing the weights (e.g. an EMA) is
+        /// the caller's concern; this only carries and selects the parallel versions.
+        /// <paramref name="setName"/> must be a non-empty identifier over
+        /// <c>[A-Za-z0-9._-]</c>, distinct from the reserved <c>default</c> set and the
+        /// <c>weights</c> data key, and not repeated. Requires <see cref="WithWeights()"/>.
+        /// </summary>
+        public CheckpointBuilder WithWeights(string setName, IReadOnlyDictionary<string, TensorData> values)
+        {
+            if (string.IsNullOrWhiteSpace(setName))
+                throw new ArgumentException("Weight set name cannot be null or empty.", nameof(setName));
+            if (setName == SkptFileFormat.DefaultMappingSetName)
+                throw new ArgumentException(
+                    $"'{SkptFileFormat.DefaultMappingSetName}' is the reserved name of the model's own " +
+                    "weight set (written by WithWeights()); name the additional set something else.",
+                    nameof(setName));
+            if (setName == SkptFileFormat.DefaultDataKey)
+                throw new ArgumentException(
+                    $"'{SkptFileFormat.DefaultDataKey}' is reserved for the default weights data entry; " +
+                    "name the additional set something else.", nameof(setName));
+            if (!IsValidSetName(setName))
+                throw new ArgumentException(
+                    $"Weight set name '{setName}' must be a non-empty identifier over [A-Za-z0-9._-] " +
+                    "(it names an archive entry).", nameof(setName));
+            if (_extraSets.Any(s => s.Name == setName))
+                throw new ArgumentException($"Weight set '{setName}' is already attached.", nameof(setName));
+            if (values is null) throw new ArgumentNullException(nameof(values));
+            if (values.Count == 0)
+                throw new ArgumentException($"Weight set '{setName}' carries no tensors.", nameof(values));
+
+            _extraSets.Add((setName, values));
+            return this;
+        }
+
+        private static bool IsValidSetName(string name)
+        {
+            foreach (var c in name)
+                if (!(char.IsAsciiLetterOrDigit(c) || c is '.' or '_' or '-'))
+                    return false;
+            return true;
         }
 
         /// <summary>
@@ -471,7 +543,7 @@ namespace Shorokoo
         /// the manifest's dedicated <c>userMetadata</c> key. This is descriptive, reproducibility
         /// metadata — "cheap to write at save time, impossible to reconstruct later" — echoed
         /// back by <see cref="Persistence.Inspect"/>; it is trusted only as far as its writer and
-        /// never affects load: <see cref="Persistence.Load"/> ignores it entirely, binding a
+        /// never affects load: <see cref="Persistence.Load(string)"/> ignores it entirely, binding a
         /// checkpoint identically with or without it. Nothing here is interpreted or validated
         /// (a git commit is not checked to exist) and nothing is auto-populated from the
         /// environment — the caller supplies every value.
@@ -572,16 +644,118 @@ namespace Shorokoo
             var modelBytes = CompressedFormatUtils.SaveFastGraphToBinary(
                 StripWeights(source, weightNodes), GraphKind.ConcreteModel, compressed: true);
 
-            // Opt-in Zstd on the weights data entry: the stored bytes carry one Zstd layer
-            // (the zip framing stays STORED), the manifest records compression "zstd" and a
-            // sha256 of the stored (compressed) bytes, and the entry skips the 64-byte
-            // alignment — a compressed entry cannot be mmap/range-read anyway.
-            var weightsStoredBytes = weightsBytes;
-            var weightsCompression = SkptFileFormat.CompressionNone;
-            if (_zstdDataCompressionLevel is int zstdLevel)
+            // Encodes one safetensors data-entry payload for storage: opt-in Zstd wraps the
+            // bytes in a single Zstd layer (the zip framing stays STORED, the manifest records
+            // compression "zstd" and a sha256 of the stored/compressed bytes, and the entry
+            // skips the 64-byte alignment a compressed entry cannot use); otherwise the bytes
+            // are STORED verbatim and aligned. Applied uniformly to every data-tree entry.
+            (byte[] Stored, string Compression, bool Align) EncodeDataEntry(byte[] rawBytes)
+                => _zstdDataCompressionLevel is int level
+                    ? (CompressedFormatUtils.Compress(rawBytes, level), SkptFileFormat.CompressionZstd, false)
+                    : (rawBytes, SkptFileFormat.CompressionNone, true);
+
+            var (weightsStoredBytes, weightsCompression, weightsAlign) = EncodeDataEntry(weightsBytes);
+
+            var dataEntries = new Dictionary<string, SkptDataEntry>(StringComparer.Ordinal)
             {
-                weightsStoredBytes = CompressedFormatUtils.Compress(weightsBytes, zstdLevel);
-                weightsCompression = SkptFileFormat.CompressionZstd;
+                [SkptFileFormat.DefaultDataKey] = new SkptDataEntry
+                {
+                    Entry = SkptFileFormat.WeightsEntryPath,
+                    Format = SkptFileFormat.DataFormatSafeTensors,
+                    Compression = weightsCompression,
+                    Sha256 = SkptFileFormat.Sha256Hex(weightsStoredBytes),
+                },
+            };
+            var mappingSets = new Dictionary<string, SkptMappingSet>(StringComparer.Ordinal)
+            {
+                [SkptFileFormat.DefaultMappingSetName] = new SkptMappingSet { Tensors = tensorRefs },
+            };
+            // Body entries after the manifest: the model definition, the default weights entry,
+            // and one entry per additional set that has genuinely distinct tensors. config.json
+            // is prepended once the manifest below is complete, keeping the default-only file
+            // byte-identical to the single-set output.
+            var bodyEntries = new List<SkptFileFormat.ZipEntrySpec>
+            {
+                new(SkptFileFormat.ModelEntryPath, modelBytes, Align: false),
+                new(SkptFileFormat.WeightsEntryPath, weightsStoredBytes, Align: weightsAlign),
+            };
+
+            // Content-addressed dedup index over the data already stored: an additional set's
+            // tensor byte-identical (dtype, shape, raw bytes) to one here is referenced, never
+            // stored again. Seeded with the default set's tensors (the "weights" entry); each
+            // newly stored additional-set tensor is added, so later sets share with earlier ones.
+            var storedByContent = new Dictionary<string, (string DataKey, string Tensor)>(StringComparer.Ordinal);
+            if (_extraSets.Count > 0)
+                foreach (var node in weightNodes)
+                    storedByContent.TryAdd(ContentKey(node.GetTensorData()!),
+                        (SkptFileFormat.DefaultDataKey, node.IdentifierTemplate!));
+
+            foreach (var (setName, values) in _extraSets)
+            {
+                var setRefs = new Dictionary<string, SkptTensorRef>(StringComparer.Ordinal);
+                var newTensors = new List<SafeTensor>();
+                var extraKeys = new HashSet<string>(values.Keys, StringComparer.Ordinal);
+                foreach (var node in weightNodes)
+                {
+                    var paramId = node.IdentifierTemplate!;
+                    if (!values.TryGetValue(paramId, out var value) || value is null)
+                        throw new InvalidOperationException(
+                            $"Persistence.Save: weight set '{setName}' has no entry for parameter " +
+                            $"'{paramId}'; an additional set must cover every model weight parameter " +
+                            "(the same parameters the default weights span).");
+                    extraKeys.Remove(paramId);
+
+                    var modelData = node.GetTensorData()!;
+                    if (value.DType.ToIVarType() != modelData.DType.ToIVarType()
+                        || !value.Shape.Dims.SequenceEqual(modelData.Shape.Dims))
+                        throw new InvalidOperationException(
+                            $"Persistence.Save: weight set '{setName}' tensor for parameter '{paramId}' " +
+                            $"(dtype {value.DType}, shape [{string.Join(",", value.Shape.Dims)}]) does not " +
+                            $"match the model parameter (dtype {modelData.DType}, shape " +
+                            $"[{string.Join(",", modelData.Shape.Dims)}]).");
+
+                    var contentKey = ContentKey(value);
+                    if (storedByContent.TryGetValue(contentKey, out var existing))
+                    {
+                        setRefs[paramId] = new SkptTensorRef { Data = existing.DataKey, Tensor = existing.Tensor };
+                    }
+                    else
+                    {
+                        newTensors.Add(new SafeTensor(paramId, value,
+                            SafeTensorLoader.DTypeToSafeTensorDType(value.DType), value.Shape.Dims));
+                        setRefs[paramId] = new SkptTensorRef { Data = setName, Tensor = paramId };
+                        storedByContent[contentKey] = (setName, paramId);
+                    }
+                }
+                if (extraKeys.Count > 0)
+                    throw new InvalidOperationException(
+                        $"Persistence.Save: weight set '{setName}' maps parameter '{extraKeys.First()}'" +
+                        (extraKeys.Count > 1 ? $" (and {extraKeys.Count - 1} more)" : string.Empty) +
+                        ", which the model does not declare as a weight parameter.");
+
+                mappingSets[setName] = new SkptMappingSet { Tensors = setRefs };
+
+                // A set fully shared with already-stored data adds no data entry — its mapping
+                // references the existing entries. Only its distinct tensors are written.
+                if (newTensors.Count > 0)
+                {
+                    byte[] setBytes;
+                    using (var buffer = new MemoryStream())
+                    {
+                        SafeTensorLoader.SaveSafeTensorsToStream(buffer, newTensors);
+                        setBytes = buffer.ToArray();
+                    }
+                    var (setStored, setCompression, setAlign) = EncodeDataEntry(setBytes);
+                    var setEntryPath = $"data/{setName}.safetensors";
+                    dataEntries[setName] = new SkptDataEntry
+                    {
+                        Entry = setEntryPath,
+                        Format = SkptFileFormat.DataFormatSafeTensors,
+                        Compression = setCompression,
+                        Sha256 = SkptFileFormat.Sha256Hex(setStored),
+                    };
+                    bodyEntries.Add(new(setEntryPath, setStored, Align: setAlign));
+                }
             }
 
             var manifest = new SkptManifest
@@ -605,33 +779,28 @@ namespace Shorokoo
                 },
                 TensorMappings = new Dictionary<string, Dictionary<string, SkptMappingSet>>
                 {
-                    [SkptFileFormat.DefaultModelKey] = new Dictionary<string, SkptMappingSet>
-                    {
-                        [SkptFileFormat.DefaultMappingSetName] = new SkptMappingSet { Tensors = tensorRefs },
-                    },
+                    [SkptFileFormat.DefaultModelKey] = mappingSets,
                 },
-                Data = new Dictionary<string, SkptDataEntry>
-                {
-                    [SkptFileFormat.DefaultDataKey] = new SkptDataEntry
-                    {
-                        Entry = SkptFileFormat.WeightsEntryPath,
-                        Format = SkptFileFormat.DataFormatSafeTensors,
-                        Compression = weightsCompression,
-                        Sha256 = SkptFileFormat.Sha256Hex(weightsStoredBytes),
-                    },
-                },
+                Data = dataEntries,
             };
 
-            SkptFileFormat.ZipEntrySpec[] entries =
-            [
+            var entries = new List<SkptFileFormat.ZipEntrySpec>(bodyEntries.Count + 1)
+            {
                 new(SkptFileFormat.ConfigEntryName, SkptFileFormat.SerializeManifest(manifest), Align: false),
-                new(SkptFileFormat.ModelEntryPath, modelBytes, Align: false),
-                new(SkptFileFormat.WeightsEntryPath, weightsStoredBytes,
-                    Align: _zstdDataCompressionLevel is null),
-            ];
+            };
+            entries.AddRange(bodyEntries);
             AtomicFileWriter.WriteFile(filePath,
                 stream => SkptFileFormat.WriteStoredZip(stream, entries, DateTime.UtcNow));
         }
+
+        /// <summary>
+        /// Content-addressed key for tensor dedup across mapping sets: dtype + shape + a SHA-256
+        /// of the raw bytes, so two tensors share a key exactly when a load would bind identical
+        /// bytes into an identically-shaped parameter.
+        /// </summary>
+        private static string ContentKey(TensorData data)
+            => $"{data.DType}|{string.Join(",", data.Shape.Dims)}|" +
+               SkptFileFormat.Sha256Hex(data.AccessRawMemory());
 
         /// <summary>
         /// The model's weight parameters: every MODEL_PARAM_DATA node except the RNG identity

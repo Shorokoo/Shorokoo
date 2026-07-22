@@ -2439,6 +2439,196 @@ public class CompressedFormatUtilsCoverageTests
         }
     }
 
+    /// <summary>The model's weight tensors (TensorData) keyed by parameter identifier,
+    /// excluding the RNG identity parameter — the values an additional set is built over.</summary>
+    private static Dictionary<string, TensorData> WeightDataByParam(ComputationGraph model)
+        => model.ToInternal().Nodes
+            .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_DATA
+                && n.IdentifierTemplate !=
+                    Shorokoo.Core.Nodes.Processors.Fast.FastWireRngKeyDerivation.RngSeedIdentifierTemplate)
+            .ToDictionary(n => n.IdentifierTemplate!, n => n.GetTensorData()!, StringComparer.Ordinal);
+
+    /// <summary>
+    /// Multiple named mapping sets over shared data (issue #86): a checkpoint carries a
+    /// <c>default</c> set (the model's raw weights) plus an additional <c>ema</c> set whose
+    /// tensors bind to the same parameters, one byte-identical to the default (shared, stored
+    /// once) and one distinct (stored once, in the set's own data entry). config.json records
+    /// both sets; the default set's model and weights entries stay byte-unchanged by the extra
+    /// set (so a default-only save is byte-identical to the single-set output); a shared data
+    /// item is not duplicated in the data tree; <c>Load(path)</c> binds default while
+    /// <c>Load(path, "ema")</c> binds ema, each correctly; selecting an absent set fails loud
+    /// naming the available sets; and Inspect lists every set present. The builder also rejects
+    /// a malformed additional set up front (reserved name, incomplete or stray parameter).
+    /// </summary>
+    [Fact]
+    public void TestSkptNamedMappingSetsSharedData()
+    {
+        var (model, numOut, input) = BuildSkptModel();
+        var path = Path.Combine(TempDir, "named-sets.skpt");
+        var defaultOnlyPath = Path.Combine(TempDir, "named-sets-default-only.skpt");
+        try
+        {
+            // Build the ema set over the model's parameters: the largest parameter (weights
+            // [4,4]) gets a distinct pattern; the other (bias [4]) is left byte-identical to
+            // the default, so it must be shared rather than stored twice.
+            var modelData = WeightDataByParam(model);
+            Assert.Equal(2, modelData.Count);
+            var distinctId = modelData
+                .OrderByDescending(kv => kv.Value.Shape.Dims.Aggregate(1L, (a, d) => a * d))
+                .First().Key;
+            var sharedId = modelData.Keys.Single(k => k != distinctId);
+
+            var emaValues = new Dictionary<string, TensorData>(StringComparer.Ordinal);
+            foreach (var (id, data) in modelData)
+            {
+                if (id == distinctId)
+                {
+                    var dims = data.Shape.Dims;
+                    var vals = new float[dims.Aggregate(1L, (a, d) => a * d)];
+                    for (int i = 0; i < vals.Length; i++) vals[i] = 2.0f + i * 0.5f;
+                    emaValues[id] = TensorData(dims, vals);
+                }
+                else
+                {
+                    emaValues[id] = data;   // identical bytes → shared data item
+                }
+            }
+            // The distinct ema tensor must differ from the model's own, or "load ema" could not
+            // be told apart from "load default".
+            Assert.NotEqual(modelData[distinctId].AccessRawMemory().ToArray(),
+                emaValues[distinctId].AccessRawMemory().ToArray());
+
+            Persistence.From(model).WithModel().WithWeights()
+                .WithWeights("ema", emaValues).Save(path);
+            Persistence.From(model).WithModel().WithWeights().Save(defaultOnlyPath);
+
+            // The archive carries the default entries plus exactly one extra data entry for the
+            // ema set's distinct tensor; a default-only save carries only the default three.
+            var entries = ReadZipEntries(path);
+            var defaultOnlyEntries = ReadZipEntries(defaultOnlyPath);
+            const string emaEntryPath = "data/ema.safetensors";
+            Assert.Equal(
+                new[] { SkptFileFormat.ConfigEntryName, SkptFileFormat.ModelEntryPath,
+                        SkptFileFormat.WeightsEntryPath, emaEntryPath }
+                    .OrderBy(n => n, StringComparer.Ordinal),
+                entries.Keys.OrderBy(n => n, StringComparer.Ordinal));
+            Assert.Equal(
+                new[] { SkptFileFormat.ConfigEntryName, SkptFileFormat.ModelEntryPath,
+                        SkptFileFormat.WeightsEntryPath }
+                    .OrderBy(n => n, StringComparer.Ordinal),
+                defaultOnlyEntries.Keys.OrderBy(n => n, StringComparer.Ordinal));
+
+            // The extra set leaves the default output byte-unchanged: the model definition and
+            // the default weights entry are byte-identical to the default-only save (the shared
+            // bias bytes live once, in the untouched weights entry).
+            Assert.Equal(defaultOnlyEntries[SkptFileFormat.ModelEntryPath],
+                entries[SkptFileFormat.ModelEntryPath]);
+            Assert.Equal(defaultOnlyEntries[SkptFileFormat.WeightsEntryPath],
+                entries[SkptFileFormat.WeightsEntryPath]);
+
+            // No duplication: the ema data entry holds ONLY the distinct tensor — the shared
+            // bias is absent from it (it is referenced back into the weights entry).
+            var emaStored = SafeTensorLoader.ParseSafeTensorBytes(entries[emaEntryPath])
+                .ToDictionary(t => t.Name, t => t.Data.AccessRawMemory().ToArray(), StringComparer.Ordinal);
+            Assert.Equal(new[] { distinctId }, emaStored.Keys.ToArray());
+            Assert.DoesNotContain(sharedId, emaStored.Keys);
+
+            // config.json records both sets; the ema mapping shares the bias (data "weights")
+            // and points the distinct weight tensor at its own "ema" data entry.
+            var manifest = SkptFileFormat.ParseManifest(entries[SkptFileFormat.ConfigEntryName], path);
+            var sets = manifest.TensorMappings!["model"];
+            Assert.Equal(new[] { "default", "ema" }, sets.Keys.ToArray());
+            Assert.Equal(2, manifest.Data!.Count);
+            Assert.Equal(emaEntryPath, manifest.Data["ema"].Entry);
+            var emaRefs = sets["ema"].Tensors!;
+            Assert.Equal(SkptFileFormat.DefaultDataKey, emaRefs[sharedId].Data);
+            Assert.Equal(sharedId, emaRefs[sharedId].Tensor);
+            Assert.Equal("ema", emaRefs[distinctId].Data);
+            Assert.Equal(distinctId, emaRefs[distinctId].Tensor);
+
+            // Load default: the raw weights bind, both parameters equal to the model's originals.
+            var originalBytes = WeightBytesByParam(model);
+            var loadedDefault = WeightBytesByParam(Persistence.Load(path));
+            Assert.Equal(originalBytes.Count, loadedDefault.Count);
+            foreach (var (id, bytes) in originalBytes)
+                Assert.Equal(bytes, loadedDefault[id]);
+
+            // Load ema: the distinct tensor binds the ema bytes, the shared one binds the same
+            // bias as default — proving correct per-set selection over shared data. The
+            // parameterless overload is unchanged (still default), and executes bit-identically.
+            var loadedEma = WeightBytesByParam(Persistence.Load(path, "ema"));
+            Assert.Equal(emaValues[distinctId].AccessRawMemory().ToArray(), loadedEma[distinctId]);
+            Assert.Equal(originalBytes[sharedId], loadedEma[sharedId]);
+            Assert.NotEqual(loadedDefault[distinctId], loadedEma[distinctId]);
+            Assert.Equal(ExecuteToBytes(model, numOut, input),
+                ExecuteToBytes(Persistence.Load(path, "default"), numOut, input));
+
+            // Selecting an absent set fails loud, naming the requested set and the available ones.
+            var exAbsent = Assert.Throws<InvalidDataException>(() => Persistence.Load(path, "nope"));
+            Assert.Contains("nope", exAbsent.Message);
+            Assert.Contains("default", exAbsent.Message);
+            Assert.Contains("ema", exAbsent.Message);
+
+            // Inspect lists every set present (issue #73), not just default.
+            var inspected = Persistence.Inspect(path);
+            Assert.Equal(ArtifactKind.SkptCheckpoint, inspected.Kind);
+            Assert.Equal(new[] { "default", "ema" }, inspected.Skpt!.MappingSetNames.ToArray());
+            Assert.Contains("mapping sets: default, ema", inspected.ToString());
+
+            // A set fully shared with the default weights adds NO data entry — every tensor is
+            // referenced back into the "weights" entry — yet still loads correctly.
+            var sharedOnlyPath = Path.Combine(TempDir, "named-sets-shared-only.skpt");
+            try
+            {
+                Persistence.From(model).WithModel().WithWeights()
+                    .WithWeights("shadow", modelData).Save(sharedOnlyPath);
+                var sharedEntries = ReadZipEntries(sharedOnlyPath);
+                Assert.DoesNotContain("data/shadow.safetensors", sharedEntries.Keys);
+                Assert.Equal(defaultOnlyEntries.Keys.OrderBy(n => n, StringComparer.Ordinal),
+                    sharedEntries.Keys.OrderBy(n => n, StringComparer.Ordinal));
+                var sharedManifest = SkptFileFormat.ParseManifest(
+                    sharedEntries[SkptFileFormat.ConfigEntryName], sharedOnlyPath);
+                Assert.Equal(new[] { "default", "shadow" },
+                    sharedManifest.TensorMappings!["model"].Keys.ToArray());
+                Assert.Equal(new[] { SkptFileFormat.DefaultDataKey }, sharedManifest.Data!.Keys.ToArray());
+                Assert.All(sharedManifest.TensorMappings["model"]["shadow"].Tensors!.Values,
+                    r => Assert.Equal(SkptFileFormat.DefaultDataKey, r.Data));
+                var shadowBytes = WeightBytesByParam(Persistence.Load(sharedOnlyPath, "shadow"));
+                foreach (var (id, bytes) in originalBytes)
+                    Assert.Equal(bytes, shadowBytes[id]);
+            }
+            finally { if (File.Exists(sharedOnlyPath)) File.Delete(sharedOnlyPath); }
+
+            // Builder validation: reserved names, an incomplete set, and a stray parameter all
+            // fail up front before any file is written.
+            Assert.Throws<ArgumentException>(() =>
+                Persistence.From(model).WithWeights("default", emaValues));
+            Assert.Throws<ArgumentException>(() =>
+                Persistence.From(model).WithWeights("weights", emaValues));
+            Assert.Throws<ArgumentException>(() =>
+                Persistence.From(model).WithWeights("bad/name", emaValues));
+            var incompletePath = Path.Combine(TempDir, "named-sets-incomplete.skpt");
+            var missing = new Dictionary<string, TensorData>(StringComparer.Ordinal)
+                { [distinctId] = emaValues[distinctId] };
+            var exMissing = Assert.Throws<InvalidOperationException>(() =>
+                Persistence.From(model).WithModel().WithWeights()
+                    .WithWeights("ema", missing).Save(incompletePath));
+            Assert.Contains(sharedId, exMissing.Message);
+            var stray = new Dictionary<string, TensorData>(emaValues, StringComparer.Ordinal)
+                { ["not_a_real_param"] = emaValues[distinctId] };
+            var exStray = Assert.Throws<InvalidOperationException>(() =>
+                Persistence.From(model).WithModel().WithWeights()
+                    .WithWeights("ema", stray).Save(incompletePath));
+            Assert.Contains("not_a_real_param", exStray.Message);
+            Assert.False(File.Exists(incompletePath));
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (File.Exists(defaultOnlyPath)) File.Delete(defaultOnlyPath);
+        }
+    }
+
     // ──────────────────────────────────────────────────────────────────────
     // SafeTensors weight exchange (issue #74): ExportSafeTensors writes a
     // model's weights to a standard .safetensors file (canonical names or a

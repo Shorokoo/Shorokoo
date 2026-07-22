@@ -256,7 +256,7 @@ namespace Shorokoo
         /// <c>Persistence.From(model).WithModel().WithWeights().Save(...)</c> writer — so
         /// "foreign safetensors → native checkpoint" is a single step. The .skpt write is
         /// atomic; nothing is written when the import fails. Returns the bound concrete model
-        /// (the same graph <see cref="Load"/> reproduces from the written checkpoint).
+        /// (the same graph <see cref="Load(string)"/> reproduces from the written checkpoint).
         /// </summary>
         /// <param name="concreteArchitecture">The architecture to bind onto.</param>
         /// <param name="safeTensorsPath">Path of the .safetensors file to import.</param>

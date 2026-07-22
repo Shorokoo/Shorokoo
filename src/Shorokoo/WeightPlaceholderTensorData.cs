@@ -10,7 +10,7 @@ namespace Shorokoo
     /// materializes a full-size zero buffer per weight — and the ONNX reader
     /// reconstructs one when an initializer carries the values-elided marker
     /// (<see cref="Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkMetaValuesElided"/>).
-    /// <see cref="Persistence.Load"/> replaces every placeholder with the checkpoint's
+    /// <see cref="Persistence.Load(string)"/> replaces every placeholder with the checkpoint's
     /// real tensor before the model is returned; reading a placeholder's values is a
     /// bug and fails loudly.
     /// </summary>

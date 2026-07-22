@@ -72,7 +72,7 @@ namespace Shorokoo
                 ?? throw new InvalidDataException(
                     $"'{filePath}' is not a .skpt checkpoint — the archive contains no " +
                     $"'{SkptFileFormat.ConfigEntryName}' manifest.");
-            var manifest = SkptFileFormat.ParseManifest(ReadEntryBytes(configEntry), filePath);
+            var manifest = SkptFileFormat.ParseManifest(ReadEntryBytes(configEntry, filePath), filePath);
             ValidateManifestIdentity(manifest, filePath);
 
             var (modelKey, modelEntry) = SingleModel(manifest, filePath);
@@ -102,8 +102,9 @@ namespace Shorokoo
                     $"'{filePath}': '{SkptFileFormat.ConfigEntryName}' does not declare format " +
                     $"'{SkptFileFormat.FormatName}' (found '{manifest.Format}') — not a .skpt checkpoint.");
 
-            // skptVersion is required and >= 1; 0 means the field was absent (or mis-typed, so
-            // it landed in AdditionalFields), which is a malformed manifest, not version skew.
+            // skptVersion is required and >= 1; 0 means the field was absent from the JSON,
+            // which is a malformed manifest, not version skew. (A present-but-wrong-typed
+            // value would already have failed in ParseManifest.)
             if (manifest.SkptVersion == 0)
                 throw new InvalidDataException(
                     $"'{filePath}': invalid .skpt manifest — required field 'skptVersion' is missing or zero.");
@@ -275,13 +276,21 @@ namespace Shorokoo
                 ?? throw new InvalidDataException(
                     $"'{filePath}': the manifest references entry '{entryPath}' (for {role}), " +
                     "but the archive contains no such entry.");
-            return ReadEntryBytes(entry);
+            return ReadEntryBytes(entry, filePath);
         }
 
-        private static byte[] ReadEntryBytes(ZipArchiveEntry entry)
+        private static byte[] ReadEntryBytes(ZipArchiveEntry entry, string filePath)
         {
+            // entry.Length is the uncompressed size declared in the archive's directory; a
+            // corrupt or hostile file can declare up to ~4 GiB. Reject oversize entries with
+            // the loader's usual named error rather than letting the (int) cast below throw a
+            // context-free OverflowException. This .skpt version reads in-memory entries only.
+            if (entry.Length > int.MaxValue)
+                throw new InvalidDataException(
+                    $"'{filePath}': entry '{entry.FullName}' declares an uncompressed size of {entry.Length} " +
+                    "bytes, which exceeds the maximum this .skpt version reads.");
             using var entryStream = entry.Open();
-            using var buffer = new MemoryStream(checked((int)entry.Length));
+            using var buffer = new MemoryStream((int)entry.Length);
             entryStream.CopyTo(buffer);
             return buffer.ToArray();
         }

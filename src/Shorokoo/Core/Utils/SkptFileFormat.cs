@@ -272,10 +272,6 @@ namespace Shorokoo.Core.Utils
                 var nameBytes = Encoding.ASCII.GetBytes(entry.Name);
                 if (nameBytes.Length != entry.Name.Length)
                     throw new ArgumentException($"Zip entry name '{entry.Name}' is not ASCII.", nameof(entries));
-                if ((uint)entry.Data.Length >= uint.MaxValue)
-                    throw new NotSupportedException(
-                        $"Zip entry '{entry.Name}' is {entry.Data.Length} bytes; entries at or beyond 4 GiB " +
-                        "need Zip64, which this .skpt version does not write.");
 
                 int extraLength = 0;
                 if (entry.Align)
@@ -314,6 +310,20 @@ namespace Shorokoo.Core.Utils
             }
 
             long centralDirectoryOffset = offset;
+            // Local-header offsets and the central-directory offset are stored as 32-bit
+            // fields (a header offset is always < centralDirectoryOffset, so this one check
+            // bounds them all). Beyond 4 GiB the format needs Zip64, which this version does
+            // not write — fail loudly here rather than silently truncate an offset and emit a
+            // corrupt archive. The count field is likewise 16-bit.
+            if (centralDirectoryOffset > uint.MaxValue)
+                throw new NotSupportedException(
+                    $"The .skpt archive would be {centralDirectoryOffset} bytes; archives at or beyond " +
+                    "4 GiB need Zip64, which this .skpt version does not write.");
+            if (records.Count > ushort.MaxValue)
+                throw new NotSupportedException(
+                    $"The .skpt archive has {records.Count} entries; more than {ushort.MaxValue} need Zip64, " +
+                    "which this .skpt version does not write.");
+
             foreach (var (entry, nameBytes, crc, headerOffset) in records)
             {
                 writer.Write(CentralDirectoryHeaderSignature);

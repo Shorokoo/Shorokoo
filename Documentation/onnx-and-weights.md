@@ -269,7 +269,7 @@ Recognized formats and what is reported:
 | `SrkGraph` | `.srk` v2 magic (or a sniffed legacy v1 layout) | the v2 header — format version, lifecycle stage, compression, payload SHA-256, producer (`result.Srk.Header`, an `SrkHeader`); legacy files report the sniffed layout instead (`result.Srk.LegacyLayout`) |
 | `SafeTensors` | 8-byte header-length prefix + valid JSON header | tensor listing (name, dtype, shape, byte size), total payload size, `__metadata__` (`result.SafeTensors`) |
 | `TrainingCheckpoint` | the `__shorokoo_checkpoint__` marker tensor in a SafeTensors header | checkpoint format version, global step, and the per-section (`trainable` / `model_state` / `opt_state`) tensor listing (`result.TrainingCheckpoint`); `result.SafeTensors` is populated too |
-| `NotRecognized` | anything else | a structured result — **never an exception** for unrecognized or corrupt content; only a missing file throws |
+| `NotRecognized` | anything else | a structured result — **content problems never throw**; a missing file and I/O errors (permissions, disk) do |
 
 - Reads are bounded to headers and prefixes; tensor payload bytes are never
   materialized. The one exception is a checkpoint's 16-byte marker (the format

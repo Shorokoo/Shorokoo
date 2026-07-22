@@ -281,8 +281,9 @@ namespace Shorokoo
         /// checkpoint marker; the marker's 16 bytes are the only payload bytes ever read).
         /// Anything else — including corrupt or truncated headers — yields a structured
         /// <see cref="ArtifactKind.NotRecognized"/> (or partially-detailed) result with
-        /// observations rather than an exception; only a missing file throws
-        /// (<see cref="FileNotFoundException"/>).
+        /// observations rather than an exception: content problems never throw. A missing
+        /// file (<see cref="FileNotFoundException"/>) and I/O errors (permissions, disk)
+        /// do.
         /// </summary>
         public static ArtifactInspection Inspect(string filePath)
         {
@@ -310,10 +311,9 @@ namespace Shorokoo
             if (prefixRead == 8 && TryInspectSafeTensors(filePath, stream, fileLen, prefix, observations) is { } st)
                 return st;
 
-            // A serialized ONNX ModelProto opens with field 1 (ir_version) as a small varint:
-            // 0x08 then a single-byte value — the bare-protobuf legacy v1 .srk layout. The
-            // encoding is a plain ONNX model's too; content cannot tell the two apart.
-            if (prefixRead >= 2 && prefix[0] == 0x08 && (prefix[1] & 0x80) == 0)
+            // The bare-protobuf legacy v1 .srk layout — the encoding is a plain ONNX
+            // model's too; content cannot tell the two apart.
+            if (LooksLikeOnnxModelProto(prefix.AsSpan(0, prefixRead)))
             {
                 observations.Add("a bare serialized ONNX model is indistinguishable from a plain " +
                     ".onnx file by content; if this is a .onnx export, use standard ONNX tooling instead.");
@@ -338,6 +338,22 @@ namespace Shorokoo
         /// <summary>Zstd frame magic: 28 B5 2F FD.</summary>
         private static bool LooksLikeZstd(ReadOnlySpan<byte> data)
             => data.Length >= 4 && data[0] == 0x28 && data[1] == 0xB5 && data[2] == 0x2F && data[3] == 0xFD;
+
+        /// <summary>
+        /// A serialized ONNX ModelProto opens with field 1 (ir_version) as a small varint —
+        /// 0x08 then a single non-zero byte — followed by the next field's protobuf tag.
+        /// Requiring that follow-on byte to be a valid tag (field number ≥ 1, wire type
+        /// 0/1/2/5) keeps near-misses from matching — e.g. a Zstd-compressed SafeTensors
+        /// file whose 8-byte header-length prefix happens to start 08 xx 00.
+        /// </summary>
+        private static bool LooksLikeOnnxModelProto(ReadOnlySpan<byte> data)
+        {
+            if (data.Length < 3 || data[0] != 0x08) return false;
+            if (data[1] == 0 || (data[1] & 0x80) != 0) return false;   // ir_version: single-byte varint ≥ 1
+            int fieldNumber = data[2] >> 3;
+            int wireType = data[2] & 0x7;
+            return fieldNumber >= 1 && wireType is 0 or 1 or 2 or 5;
+        }
 
         // ---- .srk container ("SRK" prefix present) ----
 
@@ -419,7 +435,7 @@ namespace Shorokoo
             }
 
             string? layout =
-                innerRead >= 2 && inner[0] == 0x08 && (inner[1] & 0x80) == 0 ? "single-Zstd"
+                LooksLikeOnnxModelProto(inner.AsSpan(0, innerRead)) ? "single-Zstd"
                 : innerRead >= 4 && LooksLikeZstd(inner) ? "double-Zstd"
                 : null;
             if (layout is null)
@@ -510,19 +526,30 @@ namespace Shorokoo
                         return null;
                     }
 
-                    if (end < start)
-                        stObservations.Add($"tensor '{prop.Name}' declares a negative extent " +
+                    // A crafted start/end pair can wrap end - start even when end >= start,
+                    // so flag both orderings-gone-wrong and the wrapped difference, and clamp
+                    // the reported size to keep the listing sane.
+                    long size = unchecked(end - start);
+                    if (start < 0 || end < start || size < 0)
+                    {
+                        stObservations.Add($"tensor '{prop.Name}' declares an invalid extent " +
                             $"(data_offsets [{start}, {end}]).");
-                    tensors.Add(new InspectedTensorInfo(prop.Name, dtypeEl.GetString()!, shape, end - start, start));
+                        size = 0;
+                    }
+                    tensors.Add(new InspectedTensorInfo(prop.Name, dtypeEl.GetString()!, shape, size, start));
                     maxEnd = Math.Max(maxEnd, end);
                 }
 
+                // Compare in subtracted form: fileLen - dataStart >= 0 is guaranteed by the
+                // headerLen bound above, so a hostile huge maxEnd cannot wrap the comparison
+                // (dataStart + maxEnd could).
                 long dataStart = 8 + headerLen;
-                if (dataStart + maxEnd > fileLen)
-                    stObservations.Add($"declared tensor data extends {dataStart + maxEnd - fileLen} bytes " +
+                long dataBytesInFile = fileLen - dataStart;
+                if (maxEnd > dataBytesInFile)
+                    stObservations.Add($"declared tensor data extends {maxEnd - dataBytesInFile} bytes " +
                         "past the end of the file — the file is truncated or corrupt.");
-                else if (fileLen > dataStart + maxEnd)
-                    stObservations.Add($"the file has {fileLen - dataStart - maxEnd} trailing bytes beyond " +
+                else if (dataBytesInFile > maxEnd)
+                    stObservations.Add($"the file has {dataBytesInFile - maxEnd} trailing bytes beyond " +
                         "the declared tensor data.");
                 observations.AddRange(stObservations);
 
@@ -547,9 +574,12 @@ namespace Shorokoo
             if (markerIndex < 0)
                 return null;
 
+            // Bounds in subtracted form (fileLen - 16 cannot underflow for any file large
+            // enough to hold a marker entry): markerStart + 16 could wrap past the check
+            // for a crafted offset near long.MaxValue.
             var marker = tensors[markerIndex];
             long markerStart = dataStart + marker.DataStartOffset;
-            if (marker.DType != "I64" || marker.ByteSize < 16 || markerStart < dataStart || markerStart + 16 > fileLen)
+            if (marker.DType != "I64" || marker.ByteSize < 16 || markerStart < dataStart || markerStart > fileLen - 16)
             {
                 observations.Add($"the file carries a '{TrainingCheckpoint.CheckpointMarkerName}' marker, " +
                     "but it is malformed — not a readable Shorokoo training checkpoint.");
@@ -557,8 +587,20 @@ namespace Shorokoo
             }
 
             var markerBytes = new byte[16];
-            stream.Position = markerStart;
-            stream.ReadExactly(markerBytes);
+            try
+            {
+                stream.Position = markerStart;
+                stream.ReadExactly(markerBytes);
+            }
+            // Belt-and-braces: the guard above bounds the read, but a seek/read that still
+            // fails must degrade to the malformed-marker result, not escape Inspect.
+            catch (Exception e) when (e is IOException or EndOfStreamException)
+            {
+                observations.Add($"the file carries a '{TrainingCheckpoint.CheckpointMarkerName}' marker, " +
+                    $"but it is malformed and could not be read ({e.Message}) — not a readable Shorokoo " +
+                    "training checkpoint.");
+                return null;
+            }
             long version = BitConverter.ToInt64(markerBytes, 0);
             long step = BitConverter.ToInt64(markerBytes, 8);
 

@@ -1818,4 +1818,183 @@ public class CompressedFormatUtilsCoverageTests
         }
     }
 
+    /// <summary>Builds a concrete FCLayer model (32 output features, [32,32] input) whose
+    /// weight tensors are overwritten with a deterministic repeating non-zero pattern —
+    /// large enough and compressible enough that Zstd reliably shrinks the data entry,
+    /// and distinct from the zero placeholders the model entry stores.</summary>
+    private static (ComputationGraph Model, TensorData NumOut, TensorData Input) BuildCompressibleSkptModel()
+    {
+        var numOut = TensorData(DType.Int64, [], 32L);
+        var input = TensorDataWithSmallVals(DType.Float32, [32L, 32L]);
+        var g = FCLayer.ComputationGraph;   // two trainable params: weights [32,32], bias [32]
+        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([numOut, input])).ToConcreteModel();
+        foreach (var node in model.ToInternal().Nodes)
+        {
+            if (node.OpCode != InternalOpCodes.MODEL_PARAM_DATA) continue;
+            if (node.IdentifierTemplate ==
+                    Shorokoo.Core.Nodes.Processors.Fast.FastWireRngKeyDerivation.RngSeedIdentifierTemplate)
+                continue;
+            var dims = node.GetTensorData()!.Shape.Dims;
+            var vals = new float[dims.Aggregate(1L, (a, d) => a * d)];
+            for (int i = 0; i < vals.Length; i++) vals[i] = 1.0f + i % 8 * 0.25f;
+            node.Attributes = node.Attributes.SetAttributes(
+                (OnnxOpAttributeNames.ShrkAttrTensorData, (object?)TensorData(dims, vals)));
+        }
+        return (model, numOut, input);
+    }
+
+    /// <summary>
+    /// Opt-in per-entry Zstd compression (issue #75): .WithZstdCompressedData() shrinks the
+    /// weights data entry, records compression "zstd" and a stored-bytes (compressed) sha256
+    /// in the manifest, leaves config.json / models/*.srk and the STORED zip framing
+    /// untouched (the file still reads through the BCL zip reader), keeps the default save
+    /// byte-equivalent to the feature-less output, and round-trips bit-identically.
+    /// </summary>
+    [Fact]
+    public void TestSkptZstdCompressedDataRoundTrip()
+    {
+        var (model, numOut, input) = BuildCompressibleSkptModel();
+        var plainPath = Path.Combine(TempDir, "zstd-plain.skpt");
+        var zstdPath = Path.Combine(TempDir, "zstd-on.skpt");
+        try
+        {
+            Checkpoint.From(model).WithModel().WithWeights().Save(plainPath);
+            Checkpoint.From(model).WithModel().WithWeights().WithZstdCompressedData().Save(zstdPath);
+
+            // Both files stay standard zips (read via the BCL, not our writer) with the same
+            // entry set, and every entry remains method-0 STORED — the Zstd layer lives
+            // inside the data entry's bytes, not in the zip framing.
+            var plainEntries = ReadZipEntries(plainPath);
+            var zstdEntries = ReadZipEntries(zstdPath);
+            Assert.Equal(plainEntries.Keys.OrderBy(n => n, StringComparer.Ordinal),
+                zstdEntries.Keys.OrderBy(n => n, StringComparer.Ordinal));
+            var zstdFileBytes = File.ReadAllBytes(zstdPath);
+            Assert.All(ParseLocalZipHeaders(zstdFileBytes), h => Assert.Equal(0, h.Method));
+
+            // Compression touches only the weights data entry: models/*.srk is byte-identical
+            // across the two saves, and decompressing the compressed entry yields exactly the
+            // default save's uncompressed entry — the default output is byte-unchanged by the
+            // feature (its own layout is pinned by TestSkptRoundTripConcreteModel).
+            Assert.Equal(plainEntries[SkptFileFormat.ModelEntryPath],
+                zstdEntries[SkptFileFormat.ModelEntryPath]);
+            var storedWeights = zstdEntries[SkptFileFormat.WeightsEntryPath];
+            Assert.True(SkptFileFormat.LooksLikeZstdFrame(storedWeights));
+            Assert.Equal(plainEntries[SkptFileFormat.WeightsEntryPath],
+                CompressedFormatUtils.Decompress(storedWeights));
+
+            // Compressible data: the compressed entry — and the whole file — is smaller.
+            Assert.True(storedWeights.Length < plainEntries[SkptFileFormat.WeightsEntryPath].Length);
+            Assert.True(zstdFileBytes.Length < new FileInfo(plainPath).Length);
+
+            // Manifest: compression is recorded per entry ("none" by default, "zstd" when
+            // opted in — never inferred from the entry name), and the compressed entry's
+            // sha256 covers the stored (compressed) bytes, so integrity checking does not
+            // require decompression.
+            var plainData = Assert.Single(
+                SkptFileFormat.ParseManifest(plainEntries[SkptFileFormat.ConfigEntryName], plainPath).Data!).Value;
+            Assert.Equal(SkptFileFormat.CompressionNone, plainData.Compression);
+            var zstdData = Assert.Single(
+                SkptFileFormat.ParseManifest(zstdEntries[SkptFileFormat.ConfigEntryName], zstdPath).Data!).Value;
+            Assert.Equal(SkptFileFormat.CompressionZstd, zstdData.Compression);
+            Assert.Equal(SkptFileFormat.Sha256Hex(storedWeights), zstdData.Sha256);
+
+            // Round-trip: weights bound byte-identically and bit-identical execution. The
+            // pattern weights are non-zero, so byte-identity cannot pass via the model
+            // entry's zero placeholders.
+            var originalWeights = WeightBytesByParam(model);
+            Assert.All(originalWeights.Values, bytes => Assert.Contains(bytes, b => b != 0));
+            var loaded = Checkpoint.Load(zstdPath);
+            var loadedWeights = WeightBytesByParam(loaded);
+            Assert.Equal(originalWeights.Count, loadedWeights.Count);
+            foreach (var (paramId, bytes) in originalWeights)
+                Assert.Equal(bytes, loadedWeights[paramId]);
+            Assert.Equal(ExecuteToBytes(model, numOut, input), ExecuteToBytes(loaded, numOut, input));
+
+            // An out-of-range compression level is rejected up front.
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                Checkpoint.From(model).WithZstdCompressedData(compressionLevel: 0));
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                Checkpoint.From(model).WithZstdCompressedData(compressionLevel: 23));
+        }
+        finally
+        {
+            if (File.Exists(plainPath)) File.Delete(plainPath);
+            if (File.Exists(zstdPath)) File.Delete(zstdPath);
+        }
+    }
+
+    /// <summary>
+    /// A manifest/stored compression mismatch fails loud naming the entry, in both
+    /// directions: an entry declared "zstd" whose stored bytes are raw, an entry declared
+    /// "none" whose stored bytes are a Zstd frame, an unknown compression name, and a
+    /// declared-zstd entry whose frame is corrupt past its magic (with a matching sha256,
+    /// so the failure comes from decompression, not the integrity check).
+    /// </summary>
+    [Fact]
+    public void TestSkptCompressionMismatchFailsLoud()
+    {
+        var (model, _, _) = BuildCompressibleSkptModel();
+        var plainPath = Path.Combine(TempDir, "mismatch-plain.skpt");
+        var zstdPath = Path.Combine(TempDir, "mismatch-zstd.skpt");
+        var tamperedPath = Path.Combine(TempDir, "mismatch-tampered.skpt");
+        try
+        {
+            Checkpoint.From(model).WithModel().WithWeights().Save(plainPath);
+            Checkpoint.From(model).WithModel().WithWeights().WithZstdCompressedData().Save(zstdPath);
+            var plainEntries = ReadZipEntries(plainPath);
+            var zstdEntries = ReadZipEntries(zstdPath);
+
+            void RewriteWith(Dictionary<string, byte[]> source, string configJson, byte[]? weights = null)
+                => RewriteSkpt(tamperedPath, source.Select(e => (e.Key,
+                    e.Key == SkptFileFormat.ConfigEntryName ? System.Text.Encoding.UTF8.GetBytes(configJson)
+                    : e.Key == SkptFileFormat.WeightsEntryPath && weights is not null ? weights
+                    : e.Value)).ToList());
+
+            // Declared "zstd", stored raw: the sha256 still matches the raw stored bytes, so
+            // the mismatch is caught by the framing cross-check, naming the entry.
+            var rawAsZstd = JsonNode.Parse(plainEntries[SkptFileFormat.ConfigEntryName])!;
+            rawAsZstd["data"]!["weights"]!["compression"] = SkptFileFormat.CompressionZstd;
+            RewriteWith(plainEntries, rawAsZstd.ToJsonString());
+            var exRaw = Assert.Throws<InvalidDataException>(() => Checkpoint.Load(tamperedPath));
+            Assert.Contains(SkptFileFormat.WeightsEntryPath, exRaw.Message);
+            Assert.Contains("not a Zstd frame", exRaw.Message);
+
+            // Declared "none", stored compressed: fails loud naming the entry instead of
+            // feeding a Zstd frame to the safetensors parser.
+            var zstdAsRaw = JsonNode.Parse(zstdEntries[SkptFileFormat.ConfigEntryName])!;
+            zstdAsRaw["data"]!["weights"]!["compression"] = SkptFileFormat.CompressionNone;
+            RewriteWith(zstdEntries, zstdAsRaw.ToJsonString());
+            var exZstd = Assert.Throws<InvalidDataException>(() => Checkpoint.Load(tamperedPath));
+            Assert.Contains(SkptFileFormat.WeightsEntryPath, exZstd.Message);
+            Assert.Contains("Zstd frame", exZstd.Message);
+
+            // An unknown compression name is refused as unsupported (future-format skew).
+            var unknown = JsonNode.Parse(plainEntries[SkptFileFormat.ConfigEntryName])!;
+            unknown["data"]!["weights"]!["compression"] = "lz4";
+            RewriteWith(plainEntries, unknown.ToJsonString());
+            var exUnknown = Assert.Throws<InvalidDataException>(() => Checkpoint.Load(tamperedPath));
+            Assert.Contains("lz4", exUnknown.Message);
+            Assert.Contains("unsupported compression", exUnknown.Message);
+
+            // A corrupt Zstd frame (truncated past the magic) with a recomputed, matching
+            // sha256: the integrity check passes and decompression fails loud, naming the
+            // entry — never returning garbage bytes.
+            var truncated = zstdEntries[SkptFileFormat.WeightsEntryPath]
+                .Take(zstdEntries[SkptFileFormat.WeightsEntryPath].Length / 2).ToArray();
+            Assert.True(SkptFileFormat.LooksLikeZstdFrame(truncated));
+            var corrupt = JsonNode.Parse(zstdEntries[SkptFileFormat.ConfigEntryName])!;
+            corrupt["data"]!["weights"]!["sha256"] = SkptFileFormat.Sha256Hex(truncated);
+            RewriteWith(zstdEntries, corrupt.ToJsonString(), truncated);
+            var exCorrupt = Assert.Throws<InvalidDataException>(() => Checkpoint.Load(tamperedPath));
+            Assert.Contains(SkptFileFormat.WeightsEntryPath, exCorrupt.Message);
+            Assert.Contains("Zstd-decompress", exCorrupt.Message);
+        }
+        finally
+        {
+            if (File.Exists(plainPath)) File.Delete(plainPath);
+            if (File.Exists(zstdPath)) File.Delete(zstdPath);
+            if (File.Exists(tamperedPath)) File.Delete(tamperedPath);
+        }
+    }
+
 }

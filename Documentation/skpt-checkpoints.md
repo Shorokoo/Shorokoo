@@ -11,6 +11,11 @@ Related: [onnx-and-weights.md](onnx-and-weights.md) · [training.md](training.md
   entries — whose entries are all **STORED** (uncompressed), so tensor data remains
   range-readable through the zip central directory. Data payloads are 64-byte aligned
   inside the file.
+- Data entries can **opt into Zstd compression** (`.WithZstdCompressedData()`): the zip
+  framing stays STORED, and a single Zstd layer lives inside the entry's bytes, declared
+  per entry in the manifest (`compression: "zstd"`). The default remains uncompressed —
+  and byte-for-byte identical to output without the option. See
+  [the compression trade-off](#compressed-data-entries-the-trade-off).
 - A single `config.json` manifest is the **only source of wiring**: entries never
   reference each other; every mapping (model → serialization format, parameter →
   stored tensor, data entry → storage format) lives in the manifest.
@@ -44,6 +49,44 @@ model's, and execution on the same inputs is bit-identical.
 `ToConcreteArchitecture(inputHints, ...).ToConcreteModel(...)` first. This version
 requires both `.WithModel()` and `.WithWeights()` — the builder shape exists so later
 versions can add contents without changing the call pattern.
+
+To shrink the file, opt into per-entry Zstd compression of the data tree:
+
+```csharp
+Checkpoint.From(concreteModel)
+    .WithModel()
+    .WithWeights()
+    .WithZstdCompressedData()       // optional level 1–22, default 3
+    .Save("model.skpt");
+
+var loaded = Checkpoint.Load("model.skpt");   // decompression is transparent
+```
+
+Loading honors each entry's manifest-declared compression; nothing changes on the
+read side of the API.
+
+## Compressed data entries: the trade-off
+
+Compression is a per-entry, opt-in trade of **size against range-readability**:
+
+- An uncompressed (default) data entry is STORED verbatim and 64-byte aligned, so a
+  future reader can memory-map or range-read the tensor bytes straight out of the file
+  through the zip central directory.
+- A Zstd-compressed entry is smaller on disk but must be decompressed in full before
+  any tensor in it can be read — it **forfeits mmap/range reads**, and therefore also
+  skips the 64-byte alignment (alignment would buy nothing).
+- Compression is recorded **only in the manifest** (`compression: "zstd"` in the
+  entry's data-registry record), never inferred from an entry's file extension — the
+  same rule `.srk` v2 follows with its header. The entry's manifest `sha256` covers
+  the **stored (compressed) bytes**, so integrity checking never requires
+  decompression.
+- `config.json` and `models/*.srk` are never compressed by the option (the `.srk`
+  payload is already Zstd-compressed internally), and the zip framing itself stays
+  STORED — any unzip tool still lists and extracts every entry; a compressed data
+  entry extracts to a `.zst`-decodable byte stream.
+- A manifest/stored mismatch — an entry marked `"zstd"` whose bytes are not a Zstd
+  frame, or one marked `"none"` whose bytes are — fails loudly on load, naming the
+  entry.
 
 ## Container layout
 
@@ -107,8 +150,8 @@ model.skpt
     "weights": {
       "entry": "data/weights.safetensors",
       "format": "safetensors",
-      "compression": "none",
-      "sha256": "734485…"
+      "compression": "none",              // "none" or "zstd"; never inferred from the name
+      "sha256": "734485…"                 // hash of the entry's bytes as stored (compressed)
     }
   }
 }
@@ -126,9 +169,10 @@ Rules:
 
 ## Current limits
 
-- One model per file, the `default` mapping set only, uncompressed data entries only.
+- One model per file, the `default` mapping set only.
 - Data entries are bounded by the in-memory safetensors path — checkpoints with ≥ 2 GB
-  of tensor data in a single entry are not yet supported.
+  of tensor data in a single entry are not yet supported (compressed or not; the bound
+  applies to both the stored and the decompressed bytes).
 - Training state (optimizer/scheduler, constituent models of a rig) is not stored;
   for training resume across process restarts, use `TrainingCheckpoint.Save` /
   `TrainingRig.LoadCheckpoint` (see [training.md](training.md)).

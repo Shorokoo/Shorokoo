@@ -16,7 +16,10 @@ namespace Shorokoo
     /// checkpoint container. A .skpt is a standard zip archive whose entries are all
     /// STORED (uncompressed), wired together by a single config.json manifest; this
     /// version saves and loads an inference checkpoint of a concrete model (model
-    /// definition + weights) with bit-identical execution on round-trip.
+    /// definition + weights) with bit-identical execution on round-trip. Data-tree
+    /// entries may opt into Zstd compression inside their STORED bytes via
+    /// <see cref="CheckpointBuilder.WithZstdCompressedData"/>; the manifest records it
+    /// per entry and <see cref="Load"/> decompresses transparently.
     ///
     /// <code>
     /// Checkpoint.From(concreteModel)
@@ -54,12 +57,14 @@ namespace Shorokoo
 
         /// <summary>
         /// Loads a .skpt checkpoint saved by <see cref="CheckpointBuilder.Save"/>: reads the
-        /// manifest, verifies every referenced entry's SHA-256, loads the model definition and
+        /// manifest, verifies every referenced entry's SHA-256 (always over the stored bytes,
+        /// so a compressed entry is integrity-checked without decompressing), removes each
+        /// data entry's manifest-declared compression layer, loads the model definition and
         /// binds the checkpoint's weights back onto its parameters. Returns the runnable
         /// <see cref="GraphKind.ConcreteModel"/>. A manifest referencing a missing entry,
-        /// an entry failing its SHA-256 check, or a weight that does not match its parameter
-        /// fails loudly naming the entry; unknown manifest keys are ignored (the format's
-        /// keys are add-only across minor revisions).
+        /// an entry failing its SHA-256 check, a manifest/stored compression mismatch, or a
+        /// weight that does not match its parameter fails loudly naming the entry; unknown
+        /// manifest keys are ignored (the format's keys are add-only across minor revisions).
         /// </summary>
         public static ComputationGraph Load(string filePath)
         {
@@ -257,19 +262,69 @@ namespace Shorokoo
                     $"'{filePath}': data entry '{dataKey}' uses unsupported storage format " +
                     $"'{dataEntry.Format}' (supported: '{SkptFileFormat.DataFormatSafeTensors}'). " +
                     "The file was likely written by a newer framework version.");
-            if (dataEntry.Compression is not null && dataEntry.Compression != SkptFileFormat.CompressionNone)
-                throw new InvalidDataException(
-                    $"'{filePath}': data entry '{dataKey}' declares unsupported compression " +
-                    $"'{dataEntry.Compression}' (supported: '{SkptFileFormat.CompressionNone}'). " +
-                    "The file was likely written by a newer framework version.");
-
-            var dataBytes = ReadEntry(archive, dataEntry.Entry, $"data entry '{dataKey}'", filePath);
-            VerifySha256(dataBytes, dataEntry.Sha256, dataEntry.Entry, filePath);
+            var storedBytes = ReadEntry(archive, dataEntry.Entry, $"data entry '{dataKey}'", filePath);
+            // The manifest sha256 covers the entry's bytes as stored in the archive — for a
+            // compressed entry, the compressed bytes — so integrity is checked here, before
+            // and without decompression (mirroring .srk v2's payloadSha256 semantics).
+            VerifySha256(storedBytes, dataEntry.Sha256, dataEntry.Entry, filePath);
+            var dataBytes = DecodeDataEntryPayload(storedBytes, dataEntry, dataKey, filePath);
 
             var tensors = SafeTensorLoader.ParseSafeTensorBytes(dataBytes)
                 .ToDictionary(t => t.Name, t => t.Data, StringComparer.Ordinal);
             tensorsByDataKey[dataKey] = tensors;
             return tensors;
+        }
+
+        /// <summary>
+        /// Removes a data entry's manifest-declared compression layer (none today for
+        /// "none", one Zstd layer for "zstd"). The declared compression is cross-checked
+        /// against the stored bytes' framing, so a manifest/stored mismatch in either
+        /// direction fails loudly naming the entry instead of feeding garbage to the
+        /// safetensors parser. The Zstd-frame sniff cannot misfire on a genuine
+        /// uncompressed payload: every supported data format is safetensors, whose first
+        /// 8 bytes are a little-endian header length, and the Zstd magic in bytes 0–3
+        /// would put that length beyond the 2 GiB entry cap enforced on read.
+        /// </summary>
+        private static byte[] DecodeDataEntryPayload(
+            byte[] storedBytes, SkptDataEntry dataEntry, string dataKey, string filePath)
+        {
+            switch (dataEntry.Compression ?? SkptFileFormat.CompressionNone)
+            {
+                case SkptFileFormat.CompressionNone:
+                    if (SkptFileFormat.LooksLikeZstdFrame(storedBytes))
+                        throw new InvalidDataException(
+                            $"'{filePath}': data entry '{dataKey}' ('{dataEntry.Entry}') declares compression " +
+                            $"'{SkptFileFormat.CompressionNone}' but its stored bytes are a Zstd frame — " +
+                            "the manifest and the stored entry disagree; the checkpoint is corrupt or was modified.");
+                    return storedBytes;
+
+                case SkptFileFormat.CompressionZstd:
+                    if (!SkptFileFormat.LooksLikeZstdFrame(storedBytes))
+                        throw new InvalidDataException(
+                            $"'{filePath}': data entry '{dataKey}' ('{dataEntry.Entry}') declares compression " +
+                            $"'{SkptFileFormat.CompressionZstd}' but its stored bytes are not a Zstd frame — " +
+                            "the manifest and the stored entry disagree; the checkpoint is corrupt or was modified.");
+                    try
+                    {
+                        // ZstdSharp allocates from the frame's declared content size, capped at
+                        // 2 GiB — the same bound ReadEntryBytes enforces on stored entries — so a
+                        // hostile frame cannot demand an unbounded allocation.
+                        return CompressedFormatUtils.Decompress(storedBytes);
+                    }
+                    catch (Exception e)
+                    {
+                        throw new InvalidDataException(
+                            $"'{filePath}': failed to Zstd-decompress data entry '{dataKey}' " +
+                            $"('{dataEntry.Entry}') — the checkpoint is corrupt or was modified. ({e.Message})", e);
+                    }
+
+                default:
+                    throw new InvalidDataException(
+                        $"'{filePath}': data entry '{dataKey}' declares unsupported compression " +
+                        $"'{dataEntry.Compression}' (supported: '{SkptFileFormat.CompressionNone}', " +
+                        $"'{SkptFileFormat.CompressionZstd}'). " +
+                        "The file was likely written by a newer framework version.");
+            }
         }
 
         private static byte[] ReadEntry(ZipArchive archive, string entryPath, string role, string filePath)
@@ -322,6 +377,7 @@ namespace Shorokoo
         private readonly ComputationGraph _model;
         private bool _withModel;
         private bool _withWeights;
+        private int? _zstdDataCompressionLevel;
 
         internal CheckpointBuilder(ComputationGraph model) => _model = model;
 
@@ -336,6 +392,30 @@ namespace Shorokoo
         public CheckpointBuilder WithWeights()
         {
             _withWeights = true;
+            return this;
+        }
+
+        /// <summary>
+        /// Opt-in: Zstd-compress the checkpoint's data-tree entries (the weights entry, in
+        /// this version's single checkpoint shape), recording <c>compression: "zstd"</c> in
+        /// each compressed entry's data-registry record. The zip framing stays STORED — the
+        /// Zstd layer lives inside the entry's bytes, mirroring how .srk v2 declares
+        /// compression in its header. The manifest sha256 covers the stored (compressed)
+        /// bytes, so integrity checking never needs decompression. The trade: a compressed
+        /// entry is smaller on disk but forfeits memory-mapped/range reads, so it also skips
+        /// the 64-byte payload alignment uncompressed data entries carry. The manifest and
+        /// model entries (config.json, models/*.srk) are never compressed by this option,
+        /// and without it the output is byte-for-byte the uncompressed default.
+        /// </summary>
+        /// <param name="compressionLevel">Zstandard compression level (1–22, default
+        /// <see cref="CompressedFormatUtils.DefaultCompressionLevel"/>).</param>
+        public CheckpointBuilder WithZstdCompressedData(
+            int compressionLevel = CompressedFormatUtils.DefaultCompressionLevel)
+        {
+            if (compressionLevel is < 1 or > 22)
+                throw new ArgumentOutOfRangeException(nameof(compressionLevel), compressionLevel,
+                    "Zstandard compression level must be between 1 and 22.");
+            _zstdDataCompressionLevel = compressionLevel;
             return this;
         }
 
@@ -383,6 +463,18 @@ namespace Shorokoo
             var modelBytes = CompressedFormatUtils.SaveFastGraphToBinary(
                 StripWeights(source, weightNodes), GraphKind.ConcreteModel, compressed: true);
 
+            // Opt-in Zstd on the weights data entry: the stored bytes carry one Zstd layer
+            // (the zip framing stays STORED), the manifest records compression "zstd" and a
+            // sha256 of the stored (compressed) bytes, and the entry skips the 64-byte
+            // alignment — a compressed entry cannot be mmap/range-read anyway.
+            var weightsStoredBytes = weightsBytes;
+            var weightsCompression = SkptFileFormat.CompressionNone;
+            if (_zstdDataCompressionLevel is int zstdLevel)
+            {
+                weightsStoredBytes = CompressedFormatUtils.Compress(weightsBytes, zstdLevel);
+                weightsCompression = SkptFileFormat.CompressionZstd;
+            }
+
             var manifest = new SkptManifest
             {
                 Format = SkptFileFormat.FormatName,
@@ -412,8 +504,8 @@ namespace Shorokoo
                     {
                         Entry = SkptFileFormat.WeightsEntryPath,
                         Format = SkptFileFormat.DataFormatSafeTensors,
-                        Compression = SkptFileFormat.CompressionNone,
-                        Sha256 = SkptFileFormat.Sha256Hex(weightsBytes),
+                        Compression = weightsCompression,
+                        Sha256 = SkptFileFormat.Sha256Hex(weightsStoredBytes),
                     },
                 },
             };
@@ -422,7 +514,8 @@ namespace Shorokoo
             [
                 new(SkptFileFormat.ConfigEntryName, SkptFileFormat.SerializeManifest(manifest), Align: false),
                 new(SkptFileFormat.ModelEntryPath, modelBytes, Align: false),
-                new(SkptFileFormat.WeightsEntryPath, weightsBytes, Align: true),
+                new(SkptFileFormat.WeightsEntryPath, weightsStoredBytes,
+                    Align: _zstdDataCompressionLevel is null),
             ];
             AtomicFileWriter.WriteFile(filePath,
                 stream => SkptFileFormat.WriteStoredZip(stream, entries, DateTime.UtcNow));

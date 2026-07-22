@@ -694,6 +694,40 @@ public class TrainingRigCoverageTests
     }
 
     /// <summary>
+    /// Covers the truncated-checkpoint diagnostic inherited from the SafeTensors loader:
+    /// a checkpoint file cut short (interrupted download/copy, disk full) is refused by
+    /// <see cref="TrainingRig.LoadCheckpoint"/> with an error naming truncation, the declared
+    /// vs. actual byte counts, and the checkpoint path — not an incidental parse failure.
+    /// </summary>
+    [Fact]
+    public void TestCheckpointLoadTruncatedFailsLoudlyCoverage()
+    {
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph,
+            [
+                new TensorDataModelParam("input", ModelParamType.InputParam,
+                    TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+            ],
+            0.1f);
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_ckpt_trunc_{Guid.NewGuid():N}.safetensors");
+        try
+        {
+            rig.CreateDefaultCheckpoint().Save(path);
+            var full = File.ReadAllBytes(path);
+            File.WriteAllBytes(path, full[..^8]);   // cut mid-tensor-data, as an interrupted copy would
+
+            var ex = Assert.Throws<ModelException>(() => rig.LoadCheckpoint(path));
+            Assert.Equal(ErrorCodes.ST003, ex.ErrorCode);
+            Assert.Contains("truncated", ex.Message);
+            Assert.Contains(path, ex.Message);                       // the checkpoint path surfaces
+            Assert.Contains($"{full.Length} bytes", ex.Message);     // declared (required) size
+            Assert.Contains($"{full.Length - 8} bytes", ex.Message); // actual size
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    /// <summary>
     /// Covers the atomic commit in <see cref="TrainingCheckpoint.Save"/> (via
     /// <see cref="AtomicFileWriter"/>): a save that dies between writing the staged temp file
     /// and the rename leaves the previous checkpoint intact and loadable at the target path

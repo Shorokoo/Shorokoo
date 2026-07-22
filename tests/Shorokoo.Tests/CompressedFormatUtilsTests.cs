@@ -451,6 +451,111 @@ public class CompressedFormatUtilsCoverageTests
     }
 
     /// <summary>
+    /// A truncated .safetensors file fails loudly with a diagnostic naming truncation and
+    /// the declared vs. actual byte counts, at every cut point: inside the tensor data
+    /// (ST003), inside the JSON header (ST002), and before the 8-byte length field (ST001).
+    /// File-path loads name the offending file in the message; the untruncated bytes still
+    /// parse (the checks are prefix/length-only and cost the valid path nothing).
+    /// </summary>
+    [Fact]
+    public void TestSafeTensorTruncationFailsLoudly()
+    {
+        var tensors = new List<SafeTensor>
+        {
+            new("w", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }), "F32", [4L]),
+            new("b", TensorData([2L], new float[] { 5f, 6f }), "F32", [2L]),
+        };
+        using var stream = new MemoryStream();
+        SafeTensorLoader.SaveSafeTensorsToStream(stream, tensors);
+        var bytes = stream.ToArray();
+
+        // The intact buffer parses; truncation checks must not disturb the valid path.
+        Assert.Equal(2, SafeTensorLoader.ParseSafeTensorBytes(bytes).Count);
+
+        // Cut inside the tensor data → the affected tensor's declared range vs. the actual length.
+        var exData = Assert.Throws<ModelException>(() => SafeTensorLoader.ParseSafeTensorBytes(bytes[..^4]));
+        Assert.Equal(ErrorCodes.ST003, exData.ErrorCode);
+        Assert.Contains("truncated", exData.Message);
+        Assert.Contains("'b'", exData.Message);
+        Assert.Contains($"{bytes.Length} bytes", exData.Message);       // declared (required) size
+        Assert.Contains($"{bytes.Length - 4} bytes", exData.Message);   // actual size
+
+        // Cut inside the JSON header → declared header length vs. the bytes that follow.
+        long headerLen = BitConverter.ToInt64(bytes, 0);
+        var exHeader = Assert.Throws<ModelException>(() => SafeTensorLoader.ParseSafeTensorBytes(bytes[..10]));
+        Assert.Equal(ErrorCodes.ST002, exHeader.ErrorCode);
+        Assert.Contains("truncated", exHeader.Message);
+        Assert.Contains($"declares {headerLen} bytes", exHeader.Message);
+        Assert.Contains("only 2 byte(s)", exHeader.Message);
+
+        // Cut before the length field even completes.
+        var exTiny = Assert.Throws<ModelException>(() => SafeTensorLoader.ParseSafeTensorBytes(bytes[..5]));
+        Assert.Equal(ErrorCodes.ST001, exTiny.ErrorCode);
+        Assert.Contains("truncated", exTiny.Message);
+
+        // File-path load: the error names the offending file.
+        var truncPath = Path.Combine(TempDir, "truncated.safetensors");
+        try
+        {
+            File.WriteAllBytes(truncPath, bytes[..^4]);
+            var exFile = Assert.Throws<ModelException>(() => SafeTensorLoader.LoadSafeTensors(truncPath));
+            Assert.Equal(ErrorCodes.ST003, exFile.ErrorCode);
+            Assert.Contains(truncPath, exFile.Message);
+            Assert.Contains("truncated", exFile.Message);
+        }
+        finally { if (File.Exists(truncPath)) File.Delete(truncPath); }
+
+        // Compressed (.zsafetensor) load of truncated content: the error still names the
+        // file the caller passed, not an in-memory placeholder.
+        var zPath = Path.Combine(TempDir, "truncated.zsafetensor");
+        try
+        {
+            CompressedFormatUtils.CompressToFile(zPath, bytes[..^4]);
+            var exZ = Assert.Throws<ModelException>(() => CompressedFormatUtils.LoadCompressedSafeTensors(zPath));
+            Assert.Equal(ErrorCodes.ST003, exZ.ErrorCode);
+            Assert.Contains(zPath, exZ.Message);
+            Assert.Contains("truncated", exZ.Message);
+        }
+        finally { if (File.Exists(zPath)) File.Delete(zPath); }
+    }
+
+    /// <summary>
+    /// A tensor entry missing a required metadata field (shape / data_offsets / dtype) is
+    /// refused loudly. The loader previously fabricated defaults ([1] / [0, 4) / F32), which
+    /// let a corrupt header validate against invented offsets and load garbage silently.
+    /// </summary>
+    [Fact]
+    public void TestSafeTensorMissingMetadataFailsLoudly()
+    {
+        static byte[] Build(string headerJson, int payloadBytes)
+        {
+            var headerBytes = System.Text.Encoding.UTF8.GetBytes(headerJson);
+            return [.. BitConverter.GetBytes((long)headerBytes.Length), .. headerBytes, .. new byte[payloadBytes]];
+        }
+
+        var noOffsets = Build("{\"w\":{\"dtype\":\"F32\",\"shape\":[1]}}", 4);
+        var exOffsets = Assert.Throws<InvalidOperationException>(
+            () => SafeTensorLoader.ParseSafeTensorBytes(noOffsets));
+        Assert.Contains("data_offsets", exOffsets.Message);
+        Assert.Contains("'w'", exOffsets.Message);
+
+        var noDtype = Build("{\"w\":{\"shape\":[1],\"data_offsets\":[0,4]}}", 4);
+        var exDtype = Assert.Throws<InvalidOperationException>(
+            () => SafeTensorLoader.ParseSafeTensorBytes(noDtype));
+        Assert.Contains("dtype", exDtype.Message);
+
+        var noShape = Build("{\"w\":{\"dtype\":\"F32\",\"data_offsets\":[0,4]}}", 4);
+        var exShape = Assert.Throws<InvalidOperationException>(
+            () => SafeTensorLoader.ParseSafeTensorBytes(noShape));
+        Assert.Contains("shape", exShape.Message);
+
+        // A rank-0 scalar's empty shape ("shape": []) is valid, not "missing" — it must load.
+        var scalar = Build("{\"s\":{\"dtype\":\"F32\",\"shape\":[],\"data_offsets\":[0,4]}}", 4);
+        var loaded = SafeTensorLoader.ParseSafeTensorBytes(scalar);
+        Assert.Empty(loaded.Single().Data.Shape.Dims);
+    }
+
+    /// <summary>
     /// The header-peek API reads a real v2 header (identifying stage/compression/producer)
     /// and returns null for legacy v1 data that carries no container header.
     /// </summary>

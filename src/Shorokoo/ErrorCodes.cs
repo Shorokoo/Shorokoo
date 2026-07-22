@@ -713,5 +713,18 @@ namespace Shorokoo
         public const string AD003 = "AD003";
 
         #endregion
+
+        #region SafeTensors Load Error Codes (ST001-ST010)
+
+        /// <summary>SafeTensor file shorter than the 8-byte header-length field — truncated or not a SafeTensors file</summary>
+        public const string ST001 = "ST001";
+
+        /// <summary>SafeTensor file truncated inside the JSON header: the declared header length exceeds the bytes actually present</summary>
+        public const string ST002 = "ST002";
+
+        /// <summary>SafeTensor file truncated inside the tensor data: a tensor's declared data_offsets range extends beyond the actual file length</summary>
+        public const string ST003 = "ST003";
+
+        #endregion
     }
 }

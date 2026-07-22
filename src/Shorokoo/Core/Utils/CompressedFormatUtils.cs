@@ -58,7 +58,7 @@ namespace Shorokoo.Core.Utils
         public static ModelParamList LoadCompressedModelParamSet(string filePath, ModelParamType paramType = ModelParamType.TrainableParam)
         {
             var decompressedBytes = DecompressFile(filePath);
-            var tensors = SafeTensorLoader.ParseSafeTensorBytes(decompressedBytes);
+            var tensors = SafeTensorLoader.ParseSafeTensorBytes(decompressedBytes, filePath);
             var paramDict = tensors.ToDictionary(t => t.Name, t => t.Data);
             return new ModelParamList(paramDict, paramType);
         }
@@ -71,7 +71,7 @@ namespace Shorokoo.Core.Utils
         public static List<SafeTensor> LoadCompressedSafeTensors(string filePath)
         {
             var decompressedBytes = DecompressFile(filePath);
-            return SafeTensorLoader.ParseSafeTensorBytes(decompressedBytes);
+            return SafeTensorLoader.ParseSafeTensorBytes(decompressedBytes, filePath);
         }
 
         /// <summary>

@@ -331,6 +331,66 @@ ModelIds, which a bound model no longer carries, and is refused with
 that leaves any weight unnamed or maps two weights to one tensor name, so
 weights are never silently dropped or overwritten.
 
+## ONNX model exchange (`ExportOnnx` / `ImportOnnx`)
+
+The ONNX mirror of the safetensors boundary: `ExportOnnx` writes a concrete model
+to a standard, externally-loadable `.onnx`, and `ImportOnnx` turns a foreign
+vanilla `.onnx` back into a native, runnable `ComputationGraph` (and, in one call,
+a native `.skpt`).
+
+```csharp
+// Export: concrete model → standard vanilla .onnx (loads in any ONNX runtime).
+Persistence.ExportOnnx(model, "model.onnx");
+
+// Import: foreign vanilla .onnx → native runnable ComputationGraph.
+ComputationGraph g = Persistence.ImportOnnx("foreign.onnx");
+ComputationGraph gRenamed = Persistence.ImportOnnx("foreign.onnx", scheme);
+
+// One-call native landing: foreign .onnx → .skpt checkpoint (+ the imported model).
+ComputationGraph landed = Persistence.ImportOnnxToCheckpoint("foreign.onnx", "model.skpt");
+```
+
+- `ExportOnnx` requires a **concrete model** (`GraphKind.ConcreteModel`) and writes
+  **vanilla ONNX** — every node a standard op or emitted function call — so the file
+  loads in any conforming runtime. A graph carrying Shorokoo-internal ops is refused,
+  naming them. The write is atomic. (It is the `Persistence`-facade wrapper over
+  [`FastOnnxModelBuilder.BuildOnnxModel`](#export-to-onnx); use that directly when you
+  need the `ModelProto`.)
+- `ImportOnnx` builds the graph through the existing ONNX reader, so it composes with
+  ONNX **external data** (a `.data` side file resolves against the model file's
+  directory, exactly as [`OnnxModelImporter`](#import-from-onnx)). At the boundary each
+  foreign initializer — which vanilla ONNX carries as a plain constant — is **promoted
+  to a canonical Shorokoo parameter** so the model can be named, checkpointed and
+  reloaded natively: its identifier becomes `[k]:TrainableParam#0.name#0`, where `name`
+  is the ONNX initializer name by default, or the scheme's translation of it when a
+  `namingScheme` is given. A Shorokoo-produced `.onnx` already carries canonical
+  identifiers, which are kept as-is.
+- `ImportOnnxToCheckpoint` performs the same import and lands the result straight in a
+  native `.skpt` via the container writer (see [.skpt](skpt-checkpoints.md)); the write
+  is atomic, so a failed import leaves any existing checkpoint untouched.
+
+Importing vanilla ONNX is **lossy by design**: the vanilla dialect drops a concrete
+model's module structure and hyper defaults, so `ExportOnnx` → `ImportOnnx` reproduces
+the model's **inference values**, not its structure (the outputs match on any input).
+For a structural round-trip, use the native `.skpt` container (`Persistence.From` /
+`Persistence.Load`).
+
+`ImportOnnx` **fails loudly**, naming the op and the file, on a construct the reader
+cannot ingest (an op outside the vanilla ONNX dialect Shorokoo reads, or a node in an
+unknown domain); a truncated or garbage file fails loudly naming the file. Two
+initializers that resolve to one canonical name are refused, naming both, so no weight
+can silently overwrite another. (A Shorokoo **internal-dialect** `.onnx` — the payload
+inside `.srk` — is not a vanilla model; load it with `Persistence.Load` /
+`CompressedFormatUtils`, not `ImportOnnx`.)
+
+The `namingScheme` is the same `ModuleParamSetNamingScheme` surface `ImportSafeTensors`
+takes; for `ImportOnnx` it translates each foreign initializer **name string** to the
+canonical Shorokoo name used as the parameter identifier, so the
+[pattern DSL](param-naming-pattern-dsl.md) (`SimplePatternNamingScheme`, whose patterns
+match name strings) is the tool here — a plain
+[`ModelIdNamingScheme`](param-naming-format-dsl.md) maps ModelIds, which a freshly
+imported ONNX graph does not carry, so it leaves the ONNX names unchanged.
+
 ## Identify and summarize a file (`Persistence.Inspect`)
 
 `Persistence.Inspect(path)` (namespace `Shorokoo`) answers "what is this file?"

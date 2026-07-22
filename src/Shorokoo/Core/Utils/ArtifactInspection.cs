@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
@@ -32,6 +33,10 @@ namespace Shorokoo
         /// 8-byte length prefix and the JSON header only — the tensor payload is never
         /// decompressed.</summary>
         CompressedSafeTensors,
+
+        /// <summary>A .skpt checkpoint container (written by <see cref="CheckpointBuilder.Save"/>):
+        /// a STORED zip archive wired by a root config.json manifest.</summary>
+        SkptCheckpoint,
     }
 
     /// <summary>One tensor as declared in a SafeTensors header: name, dtype, shape and payload size —
@@ -145,6 +150,133 @@ namespace Shorokoo
         }
     }
 
+    /// <summary>One model in an inspected .skpt manifest's model registry — manifest metadata
+    /// only, the model definition entry itself is never read.</summary>
+    public sealed class SkptModelSummary
+    {
+        /// <summary>The model's key in the manifest's model registry (e.g. "model").</summary>
+        public string Key { get; }
+
+        /// <summary>Archive path of the serialized model definition (e.g. "models/model.srk"),
+        /// or null when the manifest names none.</summary>
+        public string? EntryPath { get; }
+
+        /// <summary>Serialization format of the entry ("srk2" for files written today).</summary>
+        public string? Format { get; }
+
+        /// <summary>Lifecycle stage of the serialized graph, in .srk stage-name form
+        /// ("concrete-model" for files written today).</summary>
+        public string? Stage { get; }
+
+        /// <summary>The recorded SHA-256 of the entry's bytes — the model's graph hash in this
+        /// format version. Reported exactly as recorded, never verified by Inspect.</summary>
+        public string? GraphHash { get; }
+
+        internal SkptModelSummary(string key, string? entryPath, string? format, string? stage, string? graphHash)
+        {
+            Key = key;
+            EntryPath = entryPath;
+            Format = format;
+            Stage = stage;
+            GraphHash = graphHash;
+        }
+
+        /// <summary>"model: models/model.srk (srk2, stage concrete-model), graph hash 6824…".</summary>
+        public override string ToString()
+            => $"{Key}: {EntryPath ?? "<no entry>"} ({Format ?? "<unrecorded>"}, " +
+               $"stage {Stage ?? "<unrecorded>"}), graph hash {GraphHash ?? "<unrecorded>"}";
+    }
+
+    /// <summary>One data entry in an inspected .skpt manifest's data registry — manifest and
+    /// central-directory metadata only, the payload itself is never read.</summary>
+    public sealed class SkptDataSummary
+    {
+        /// <summary>The entry's key in the manifest's data registry (e.g. "weights").</summary>
+        public string Key { get; }
+
+        /// <summary>Archive path of the data payload (e.g. "data/weights.safetensors"),
+        /// or null when the manifest names none.</summary>
+        public string? EntryPath { get; }
+
+        /// <summary>Storage format ("safetensors" for files written today).</summary>
+        public string? Format { get; }
+
+        /// <summary>Compression of the entry's bytes ("none" for files written today).</summary>
+        public string? Compression { get; }
+
+        /// <summary>Uncompressed size the zip central directory declares for the entry, or null
+        /// when the manifest names no entry or the archive lacks it. Declared only — no payload
+        /// bytes are read to confirm it.</summary>
+        public long? DeclaredSizeBytes { get; }
+
+        /// <summary>The recorded SHA-256 of the entry's bytes — reported exactly as recorded,
+        /// never verified by Inspect (a full <see cref="Checkpoint.Load"/> verifies it).</summary>
+        public string? Sha256 { get; }
+
+        internal SkptDataSummary(
+            string key, string? entryPath, string? format, string? compression,
+            long? declaredSizeBytes, string? sha256)
+        {
+            Key = key;
+            EntryPath = entryPath;
+            Format = format;
+            Compression = compression;
+            DeclaredSizeBytes = declaredSizeBytes;
+            Sha256 = sha256;
+        }
+
+        /// <summary>"weights: data/weights.safetensors (safetensors, compression none),
+        /// 1184 bytes declared, sha256 7344… (unverified)".</summary>
+        public override string ToString()
+            => $"{Key}: {EntryPath ?? "<no entry>"} ({Format ?? "<unrecorded>"}, " +
+               $"compression {Compression ?? "<unrecorded>"}), " +
+               (DeclaredSizeBytes is { } size ? $"{size} bytes declared, " : "size unknown, ") +
+               $"sha256 {Sha256 ?? "<unrecorded>"} (unverified)";
+    }
+
+    /// <summary>Details of a <see cref="ArtifactKind.SkptCheckpoint"/> artifact, read from the
+    /// zip central directory and the config.json manifest alone — no other entry is opened,
+    /// and no tensor payload is touched.</summary>
+    public sealed class SkptArtifactInfo
+    {
+        /// <summary>Format identifier from the manifest; always "skpt" (recognition requires it).</summary>
+        public string? FormatName { get; }
+
+        /// <summary>Manifest major version (skptVersion); 0 when the field is missing —
+        /// see the observations.</summary>
+        public int SkptVersion { get; }
+
+        /// <summary>Version of the Shorokoo framework that wrote the file, or null when unrecorded.</summary>
+        public string? Producer { get; }
+
+        /// <summary>Creation time as recorded (ISO-8601 UTC), or null when unrecorded.</summary>
+        public string? CreatedUtc { get; }
+
+        /// <summary>The model registry, in manifest order.</summary>
+        public IReadOnlyList<SkptModelSummary> Models { get; }
+
+        /// <summary>The data registry, in manifest order.</summary>
+        public IReadOnlyList<SkptDataSummary> DataEntries { get; }
+
+        /// <summary>Distinct tensor-mapping-set names across all models (e.g. "default"),
+        /// in manifest order.</summary>
+        public IReadOnlyList<string> MappingSetNames { get; }
+
+        internal SkptArtifactInfo(
+            string? formatName, int skptVersion, string? producer, string? createdUtc,
+            IReadOnlyList<SkptModelSummary> models, IReadOnlyList<SkptDataSummary> dataEntries,
+            IReadOnlyList<string> mappingSetNames)
+        {
+            FormatName = formatName;
+            SkptVersion = skptVersion;
+            Producer = producer;
+            CreatedUtc = createdUtc;
+            Models = models;
+            DataEntries = dataEntries;
+            MappingSetNames = mappingSetNames;
+        }
+    }
+
     /// <summary>
     /// Result of <see cref="Checkpoint.Inspect"/>: what the file is (<see cref="Kind"/>), the
     /// per-kind details (exactly the properties matching the kind are non-null), and cheap
@@ -173,6 +305,10 @@ namespace Shorokoo
         /// <summary>Checkpoint details; non-null iff <see cref="Kind"/> is <see cref="ArtifactKind.TrainingCheckpoint"/>.</summary>
         public TrainingCheckpointArtifactInfo? TrainingCheckpoint { get; }
 
+        /// <summary>.skpt container details; non-null iff <see cref="Kind"/> is
+        /// <see cref="ArtifactKind.SkptCheckpoint"/>.</summary>
+        public SkptArtifactInfo? Skpt { get; }
+
         /// <summary>Cheap sanity observations visible from the header alone — e.g. declared tensor
         /// extents pointing past the end of the file, or an unreadable container header. Empty
         /// for a clean file.</summary>
@@ -189,6 +325,19 @@ namespace Shorokoo
             Srk = srk;
             SafeTensors = safeTensors;
             TrainingCheckpoint = trainingCheckpoint;
+            Observations = observations;
+        }
+
+        /// <summary>Constructor for .skpt results: exactly the <see cref="Skpt"/> details are
+        /// populated (a separate overload so .skpt support stays additive to the general one).</summary>
+        internal ArtifactInspection(
+            string filePath, long fileSizeBytes, ArtifactKind kind,
+            SkptArtifactInfo skpt, IReadOnlyList<string> observations)
+        {
+            FilePath = filePath;
+            FileSizeBytes = fileSizeBytes;
+            Kind = kind;
+            Skpt = skpt;
             Observations = observations;
         }
 
@@ -209,6 +358,7 @@ namespace Shorokoo
                 ArtifactKind.SafeTensors => "SafeTensors weights file",
                 ArtifactKind.TrainingCheckpoint => "Shorokoo training checkpoint (SafeTensors)",
                 ArtifactKind.CompressedSafeTensors => "Zstd-compressed SafeTensors archive (.zsafetensor)",
+                ArtifactKind.SkptCheckpoint => "Shorokoo checkpoint container (.skpt)",
                 _ => "not recognized as a Shorokoo artifact",
             });
             sb.Append("  file size: ").Append(FileSizeBytes).AppendLine(" bytes");
@@ -236,6 +386,25 @@ namespace Shorokoo
                 {
                     sb.AppendLine("  no header: legacy layouts record no stage/compression/producer metadata");
                 }
+            }
+
+            if (Skpt is { } skpt)
+            {
+                sb.Append("  skpt version: ").Append(skpt.SkptVersion)
+                  .Append(", created: ").Append(skpt.CreatedUtc ?? "<unrecorded>")
+                  .Append(", producer: Shorokoo ").AppendLine(skpt.Producer ?? "<unknown>");
+
+                sb.Append("  models (").Append(skpt.Models.Count).AppendLine("):");
+                AppendItemList(sb, skpt.Models, indent: "    ");
+                sb.Append("  data entries (").Append(skpt.DataEntries.Count)
+                  .AppendLine("; sha256 recorded, not verified):");
+                AppendItemList(sb, skpt.DataEntries, indent: "    ");
+                sb.Append("  mapping sets: ").AppendLine(skpt.MappingSetNames.Count == 0
+                    ? "<none>"
+                    : string.Join(", ", skpt.MappingSetNames.Take(MaxListedTensors))
+                      + (skpt.MappingSetNames.Count > MaxListedTensors
+                          ? $", … and {skpt.MappingSetNames.Count - MaxListedTensors} more"
+                          : string.Empty));
             }
 
             if (TrainingCheckpoint is { } ckpt)
@@ -272,6 +441,17 @@ namespace Shorokoo
                 sb.Append(indent).Append("… and ").Append(tensors.Count - MaxListedTensors)
                   .AppendLine(" more");
         }
+
+        /// <summary>Prints each item's ToString on its own indented line, eliding past
+        /// <see cref="MaxListedTensors"/> — the same shape as the tensor listings.</summary>
+        private static void AppendItemList<T>(StringBuilder sb, IReadOnlyList<T> items, string indent)
+        {
+            foreach (var item in items.Take(MaxListedTensors))
+                sb.Append(indent).AppendLine(item!.ToString());
+            if (items.Count > MaxListedTensors)
+                sb.Append(indent).Append("… and ").Append(items.Count - MaxListedTensors)
+                  .AppendLine(" more");
+        }
     }
 
     /// <summary>
@@ -297,9 +477,12 @@ namespace Shorokoo
         /// tensor data. Recognized formats: .srk graph files (the v2 container by its header;
         /// the legacy v1 layouts by content sniffing), SafeTensors weights files (header only),
         /// Zstd-compressed SafeTensors archives (.zsafetensor; the length prefix and JSON header
-        /// are stream-decompressed, the tensor payload never), and training checkpoints written
+        /// are stream-decompressed, the tensor payload never), training checkpoints written
         /// by <see cref="TrainingCheckpoint.Save"/> (via the
-        /// checkpoint marker; the marker's 16 bytes are the only payload bytes ever read).
+        /// checkpoint marker; the marker's 16 bytes are the only payload bytes ever read),
+        /// and .skpt checkpoint containers written by <see cref="CheckpointBuilder.Save"/>
+        /// (a zip archive with a root config.json manifest — only the zip central directory
+        /// and the manifest entry are read; recorded sha256s are reported, never verified).
         /// Anything else — including corrupt or truncated headers — yields a structured
         /// <see cref="ArtifactKind.NotRecognized"/> (or partially-detailed) result with
         /// observations rather than an exception: content problems never throw. A missing
@@ -326,6 +509,9 @@ namespace Shorokoo
             if (prefixRead >= 3 && prefix[0] == (byte)'S' && prefix[1] == (byte)'R' && prefix[2] == (byte)'K')
                 return InspectSrkContainer(filePath, stream, fileLen, prefix, prefixRead, observations);
 
+            if (prefixRead >= 4 && LooksLikeZipArchive(prefix))
+                return InspectZipArchive(filePath, stream, fileLen, observations);
+
             if (prefixRead >= 4 && LooksLikeZstd(prefix))
                 return InspectZstdFrame(filePath, stream, fileLen, observations);
 
@@ -346,7 +532,8 @@ namespace Shorokoo
 
             return NotRecognized(filePath, fileLen, observations,
                 $"the file starts with bytes {Convert.ToHexString(prefix.AsSpan(0, Math.Min(prefixRead, 4)))}, " +
-                "matching no format Shorokoo writes (.srk container, legacy .srk layout, or SafeTensors).");
+                "matching no format Shorokoo writes (.srk container, legacy .srk layout, " +
+                "SafeTensors, or .skpt zip container).");
         }
 
         private static ArtifactInspection NotRecognized(
@@ -433,6 +620,240 @@ namespace Shorokoo
             return new ArtifactInspection(filePath, fileLen, ArtifactKind.SrkGraph,
                 new SrkArtifactInfo(header, legacyLayout: null, payloadSize),
                 safeTensors: null, trainingCheckpoint: null, observations);
+        }
+
+        // ---- Zip archive (.skpt container) ----
+
+        /// <summary>Caps the config.json read of a .skpt candidate (the same bound as the
+        /// SafeTensors header): a manifest declaring more is not something Shorokoo wrote,
+        /// and a hostile declared size cannot force a huge allocation.</summary>
+        private const long MaxSkptManifestBytes = MaxSafeTensorsHeaderBytes;
+
+        /// <summary>The most per-entry archive observations (STORED violations, unreferenced
+        /// entries) reported per category before eliding the rest — a hostile central
+        /// directory can declare hundreds of thousands of entries.</summary>
+        private const int MaxZipEntryObservations = 20;
+
+        /// <summary>Zip signatures a .skpt candidate can open with: a local file header
+        /// (PK\3\4) or, for an entry-less archive, the end-of-central-directory record (PK\5\6).</summary>
+        private static bool LooksLikeZipArchive(ReadOnlySpan<byte> data)
+            => data.Length >= 4 && data[0] == (byte)'P' && data[1] == (byte)'K'
+               && ((data[2] == 3 && data[3] == 4) || (data[2] == 5 && data[3] == 6));
+
+        private static ArtifactInspection InspectZipArchive(
+            string filePath, FileStream stream, long fileLen, List<string> observations)
+        {
+            // Bounded read by construction: opening a ZipArchive in Read mode parses only the
+            // end-of-central-directory record and the central directory, and the only entry
+            // ever opened is config.json (capped below). Tensor payloads are never touched —
+            // which is also why every recorded sha256 is reported unverified.
+            List<(string Name, long Length, long CompressedLength)> zipEntries;
+            byte[] configBytes;
+            int configCount = 0;
+            try
+            {
+                stream.Position = 0;
+                using var archive = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true);
+                ZipArchiveEntry? configEntry = null;
+                zipEntries = new List<(string, long, long)>(archive.Entries.Count);
+                foreach (var entry in archive.Entries)
+                {
+                    zipEntries.Add((entry.FullName, entry.Length, entry.CompressedLength));
+                    if (entry.FullName == SkptFileFormat.ConfigEntryName)
+                    {
+                        configCount++;
+                        configEntry ??= entry;
+                    }
+                }
+
+                if (configEntry is null)
+                    return NotRecognized(filePath, fileLen, observations,
+                        $"a zip archive with no root '{SkptFileFormat.ConfigEntryName}' manifest — " +
+                        "not a .skpt checkpoint (and no other Shorokoo format is zip-based).");
+                // A negative declared size (a hostile zip64 length read back as a negative
+                // long) must be rejected here too, or the allocation below would throw.
+                if (configEntry.Length is < 0 or > MaxSkptManifestBytes)
+                    return NotRecognized(filePath, fileLen, observations,
+                        $"a zip archive whose '{SkptFileFormat.ConfigEntryName}' declares " +
+                        $"{configEntry.Length} bytes — not a readable .skpt manifest.");
+
+                // A truncated entry yields fewer bytes than declared; the manifest parse
+                // below then reports it as unreadable rather than anything throwing here.
+                var buf = new byte[(int)configEntry.Length];
+                using var entryStream = configEntry.Open();
+                int read = entryStream.ReadAtLeast(buf, buf.Length, throwOnEndOfStream: false);
+                configBytes = read == buf.Length ? buf : buf[..read];
+            }
+            catch (InvalidDataException e)
+            {
+                return NotRecognized(filePath, fileLen, observations,
+                    "a zip-signature file whose archive structure is not readable — truncated " +
+                    $"or corrupt ({e.Message}).");
+            }
+
+            SkptManifest manifest;
+            try
+            {
+                manifest = SkptFileFormat.ParseManifest(configBytes, filePath);
+            }
+            catch (InvalidDataException e)
+            {
+                return NotRecognized(filePath, fileLen, observations,
+                    $"a zip archive whose '{SkptFileFormat.ConfigEntryName}' is not a readable " +
+                    $"manifest ({e.Message}).");
+            }
+
+            if (manifest.Format != SkptFileFormat.FormatName)
+                return NotRecognized(filePath, fileLen, observations,
+                    $"a zip archive with a '{SkptFileFormat.ConfigEntryName}' entry, but it declares " +
+                    $"format '{manifest.Format ?? "<none>"}' rather than '{SkptFileFormat.FormatName}' — " +
+                    "a zip, not a .skpt checkpoint.");
+
+            return new ArtifactInspection(filePath, fileLen, ArtifactKind.SkptCheckpoint,
+                SummarizeSkptManifest(manifest, zipEntries, configCount, observations), observations);
+        }
+
+        /// <summary>
+        /// Builds the .skpt summary from the parsed manifest plus the zip central-directory
+        /// listing, adding the cheap sanity observations along the way: manifest/archive
+        /// mismatches in both directions, STORED-expectation violations, unknown manifest
+        /// keys, empty trees, and version/field anomalies. sha256 values are carried exactly
+        /// as recorded — verifying them needs full entry reads, which is
+        /// <see cref="Load"/>'s job, not Inspect's.
+        /// </summary>
+        private static SkptArtifactInfo SummarizeSkptManifest(
+            SkptManifest manifest,
+            List<(string Name, long Length, long CompressedLength)> zipEntries,
+            int configCount, List<string> observations)
+        {
+            if (manifest.SkptVersion == 0)
+                observations.Add("required manifest field 'skptVersion' is missing or zero.");
+            else if (manifest.SkptVersion != SkptFileFormat.CurrentVersion)
+                observations.Add($".skpt version {manifest.SkptVersion} is not the version this " +
+                    $"build reads ({SkptFileFormat.CurrentVersion}); Checkpoint.Load would refuse " +
+                    "the file" + (manifest.SkptVersion > SkptFileFormat.CurrentVersion
+                        ? " (likely written by a newer Shorokoo version)." : "."));
+
+            if (configCount > 1)
+                observations.Add($"the archive contains {configCount} entries named " +
+                    $"'{SkptFileFormat.ConfigEntryName}'; only the first was read.");
+
+            // Declared (uncompressed) sizes by entry name, from the central directory alone.
+            var declaredSizes = new Dictionary<string, long>(StringComparer.Ordinal);
+            foreach (var (name, length, _) in zipEntries)
+                declaredSizes.TryAdd(name, length);
+            var referenced = new HashSet<string>(StringComparer.Ordinal)
+                { SkptFileFormat.ConfigEntryName };
+
+            var unknownKeys = new List<string>();
+            void CollectUnknown(string where, Dictionary<string, JsonElement>? bag)
+            {
+                if (bag is null) return;
+                foreach (var key in bag.Keys)
+                    unknownKeys.Add($"'{key}' ({where})");
+            }
+            CollectUnknown("top level", manifest.AdditionalFields);
+            CollectUnknown("producer", manifest.Producer?.AdditionalFields);
+
+            var models = new List<SkptModelSummary>();
+            foreach (var (key, m) in manifest.Models ?? new())
+            {
+                models.Add(new SkptModelSummary(key, m?.Entry, m?.Format, m?.Stage, m?.Sha256));
+                CollectUnknown($"model '{key}'", m?.AdditionalFields);
+                if (string.IsNullOrEmpty(m?.Entry))
+                    observations.Add($"the manifest's model '{key}' names no archive entry.");
+                else if (!declaredSizes.ContainsKey(m.Entry))
+                    observations.Add($"the manifest's model '{key}' references entry '{m.Entry}', " +
+                        "but the archive has no such entry.");
+                else
+                    referenced.Add(m.Entry);
+                if (m is not null && m.Format != SkptFileFormat.ModelFormatSrk2)
+                    observations.Add($"model '{key}' uses the unknown serialization format " +
+                        $"'{m.Format ?? "<none>"}' (likely written by a newer Shorokoo version).");
+                if (m?.Stage is not null && SrkFileFormat.TryParseStageName(m.Stage) is null)
+                    observations.Add($"model '{key}' records the unknown stage '{m.Stage}' " +
+                        "(likely written by a newer Shorokoo version).");
+                if (string.IsNullOrEmpty(m?.Sha256))
+                    observations.Add($"the manifest records no sha256 for model '{key}' — " +
+                        "required by .skpt version 1.");
+            }
+
+            var dataEntries = new List<SkptDataSummary>();
+            foreach (var (key, d) in manifest.Data ?? new())
+            {
+                long? declaredSize = d?.Entry is { } entryPath
+                    && declaredSizes.TryGetValue(entryPath, out var size) ? size : null;
+                dataEntries.Add(new SkptDataSummary(
+                    key, d?.Entry, d?.Format, d?.Compression, declaredSize, d?.Sha256));
+                CollectUnknown($"data entry '{key}'", d?.AdditionalFields);
+                if (string.IsNullOrEmpty(d?.Entry))
+                    observations.Add($"the manifest's data entry '{key}' names no archive entry.");
+                else if (!declaredSizes.ContainsKey(d.Entry))
+                    observations.Add($"the manifest's data entry '{key}' references entry " +
+                        $"'{d.Entry}', but the archive has no such entry.");
+                else
+                    referenced.Add(d.Entry);
+                if (d is not null && d.Format != SkptFileFormat.DataFormatSafeTensors)
+                    observations.Add($"data entry '{key}' uses the unknown storage format " +
+                        $"'{d.Format ?? "<none>"}' (likely written by a newer Shorokoo version).");
+                if (d?.Compression is not null && d.Compression != SkptFileFormat.CompressionNone)
+                    observations.Add($"data entry '{key}' declares the unknown compression " +
+                        $"'{d.Compression}' (likely written by a newer Shorokoo version).");
+                if (string.IsNullOrEmpty(d?.Sha256))
+                    observations.Add($"the manifest records no sha256 for data entry '{key}' — " +
+                        "required by .skpt version 1.");
+            }
+
+            var mappingSetNames = new List<string>();
+            foreach (var (modelKey, sets) in manifest.TensorMappings ?? new())
+            {
+                if (manifest.Models is null || !manifest.Models.ContainsKey(modelKey))
+                    observations.Add($"tensor mappings cover model '{modelKey}', which the model " +
+                        "registry does not declare.");
+                foreach (var (setName, set) in sets ?? new())
+                {
+                    if (!mappingSetNames.Contains(setName))
+                        mappingSetNames.Add(setName);
+                    CollectUnknown($"mapping set '{modelKey}/{setName}'", set?.AdditionalFields);
+                }
+            }
+
+            if (models.Count == 0)
+                observations.Add("the manifest declares no models.");
+            if (dataEntries.Count == 0)
+                observations.Add("the manifest declares no data entries.");
+            if (mappingSetNames.Count == 0)
+                observations.Add("the manifest declares no tensor mapping sets.");
+
+            if (unknownKeys.Count > 0)
+                observations.Add("the manifest carries unknown key(s) — tolerated, keys are " +
+                    "add-only across minor revisions: " + string.Join(", ", unknownKeys.Take(8)) +
+                    (unknownKeys.Count > 8 ? $", … and {unknownKeys.Count - 8} more." : "."));
+
+            int storedViolations = 0, unreferenced = 0;
+            foreach (var (name, length, compressedLength) in zipEntries)
+            {
+                // Method 0 (STORED) always stores exactly the declared size, so a size
+                // mismatch proves a compressed entry. (An entry that compressed to exactly
+                // its own size would slip through — the check stays central-directory-cheap.)
+                if (compressedLength != length && ++storedViolations <= MaxZipEntryObservations)
+                    observations.Add($"archive entry '{name}' is compressed ({compressedLength} " +
+                        $"bytes stored for {length} declared) — .skpt entries are expected " +
+                        "STORED (uncompressed).");
+                if (!referenced.Contains(name) && !name.EndsWith("/", StringComparison.Ordinal)
+                    && ++unreferenced <= MaxZipEntryObservations)
+                    observations.Add($"archive entry '{name}' is not referenced by the manifest.");
+            }
+            if (storedViolations > MaxZipEntryObservations)
+                observations.Add($"… and {storedViolations - MaxZipEntryObservations} more " +
+                    "compressed entries.");
+            if (unreferenced > MaxZipEntryObservations)
+                observations.Add($"… and {unreferenced - MaxZipEntryObservations} more entries " +
+                    "not referenced by the manifest.");
+
+            return new SkptArtifactInfo(
+                manifest.Format, manifest.SkptVersion, manifest.Producer?.Shorokoo,
+                manifest.CreatedUtc, models, dataEntries, mappingSetNames);
         }
 
         // ---- Zstd frame (legacy v1 compressed layouts) ----

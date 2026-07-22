@@ -88,6 +88,17 @@ Compression is a per-entry, opt-in trade of **size against range-readability**:
   frame, or one marked `"none"` whose bytes are — fails loudly on load, naming the
   entry.
 
+## Inspecting a .skpt
+
+`Checkpoint.Inspect("model.skpt")` identifies the container and summarizes its
+manifest — whole-archive metadata, the model and data registries, the
+mapping-set names — reading only the zip central directory and `config.json`,
+never the tensor data. The recorded per-entry sha256s are reported as written
+but not verified (a full `Checkpoint.Load` verifies them), and cheap sanity
+observations flag manifest/archive mismatches, compressed entries where STORED
+is expected, and unknown manifest keys. See the inspection section in
+[onnx-and-weights.md](onnx-and-weights.md#identify-and-summarize-a-file-checkpointinspect).
+
 ## Container layout
 
 ```

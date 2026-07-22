@@ -1,3 +1,5 @@
+using System.IO.Compression;
+using System.Text.Json.Nodes;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Factory.IR;
 using Shorokoo.Core.Nodes.Processors.Helpers;
@@ -1062,6 +1064,319 @@ public class CompressedFormatUtilsCoverageTests
             () => OnnxModelImporter.FromOnnxModel(lyingMs.ToArray()));
         Assert.Contains("shrk_graph_kind", ex.Message);
         Assert.Contains("module-stage op", ex.Message);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // .skpt single-file checkpoint container (issue #58): STORED zip +
+    // config.json manifest, concrete-model save/load with execution parity.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// <summary>Builds a small concrete FCLayer model plus the sample inputs to execute it.</summary>
+    private static (ComputationGraph Model, TensorData NumOut, TensorData Input) BuildSkptModel()
+    {
+        var numOut = TensorData(DType.Int64, [], 4L);
+        var input = TensorDataWithSmallVals(DType.Float32, [4L, 4L]);
+        var g = FCLayer.ComputationGraph;   // two trainable params: weights [4,4], bias [4]
+        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([numOut, input])).ToConcreteModel();
+        return (model, numOut, input);
+    }
+
+    private static byte[] ExecuteToBytes(ComputationGraph model, TensorData numOut, TensorData input)
+        => ComputeContext.Default.Execute(model, numOut, input)[0]
+            .ToTensorData().AccessRawMemory().ToArray();
+
+    /// <summary>The model's weight tensors (raw bytes) keyed by parameter identifier,
+    /// excluding the RNG identity parameter — the set a .skpt stores in its data tree.</summary>
+    private static Dictionary<string, byte[]> WeightBytesByParam(ComputationGraph model)
+        => model.ToInternal().Nodes
+            .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_DATA
+                && n.IdentifierTemplate !=
+                    Shorokoo.Core.Nodes.Processors.Fast.FastWireRngKeyDerivation.RngSeedIdentifierTemplate)
+            .ToDictionary(
+                n => n.IdentifierTemplate!,
+                n => n.GetTensorData()!.AccessRawMemory().ToArray(),
+                StringComparer.Ordinal);
+
+    /// <summary>Extracts every archive entry through the BCL zip reader — an implementation
+    /// independent of the .skpt writer, so success doubles as a standard-zip check.</summary>
+    private static Dictionary<string, byte[]> ReadZipEntries(string path)
+    {
+        using var archive = ZipFile.OpenRead(path);
+        var result = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        foreach (var entry in archive.Entries)
+        {
+            using var entryStream = entry.Open();
+            using var buffer = new MemoryStream();
+            entryStream.CopyTo(buffer);
+            result[entry.FullName] = buffer.ToArray();
+        }
+        return result;
+    }
+
+    /// <summary>Rebuilds a .skpt archive from raw entries (for tamper/corruption cases),
+    /// re-aligning data-tree entries the way the real writer does.</summary>
+    private static void RewriteSkpt(string path, IReadOnlyList<(string Name, byte[] Data)> entries)
+    {
+        using var stream = File.Create(path);
+        SkptFileFormat.WriteStoredZip(
+            stream,
+            entries.Select(e => new SkptFileFormat.ZipEntrySpec(
+                e.Name, e.Data, e.Name.StartsWith("data/", StringComparison.Ordinal))).ToList(),
+            DateTime.UtcNow);
+    }
+
+    /// <summary>Walks the raw local file headers of a zip (no library involved), returning
+    /// each entry's name, compression method, absolute payload offset and stored size.</summary>
+    private static List<(string Name, ushort Method, long DataOffset, uint Size)> ParseLocalZipHeaders(byte[] zip)
+    {
+        var headers = new List<(string, ushort, long, uint)>();
+        int offset = 0;
+        while (offset + 30 <= zip.Length && BitConverter.ToUInt32(zip, offset) == 0x04034b50)
+        {
+            ushort method = BitConverter.ToUInt16(zip, offset + 8);
+            uint size = BitConverter.ToUInt32(zip, offset + 18);
+            ushort nameLength = BitConverter.ToUInt16(zip, offset + 26);
+            ushort extraLength = BitConverter.ToUInt16(zip, offset + 28);
+            string name = System.Text.Encoding.ASCII.GetString(zip, offset + 30, nameLength);
+            long dataOffset = offset + 30 + nameLength + extraLength;
+            headers.Add((name, method, dataOffset, size));
+            offset = (int)(dataOffset + size);
+        }
+        return headers;
+    }
+
+    /// <summary>
+    /// The .skpt acceptance round-trip: a concrete model saves to a single file that is a
+    /// standard zip of STORED-only entries (data payload 64-byte aligned), whose manifest
+    /// wires model → format/stage/hash and parameters → data tensors; the weights entry is
+    /// byte-identical to the model's parameters while the model entry carries only zero
+    /// placeholders (no duplicated weight bytes); and loading rebinds the weights into a
+    /// concrete model that executes bit-identically to the original.
+    /// </summary>
+    [Fact]
+    public void TestSkptRoundTripConcreteModel()
+    {
+        var (model, numOut, input) = BuildSkptModel();
+        var path = Path.Combine(TempDir, "roundtrip.skpt");
+        try
+        {
+            Checkpoint.From(model).WithModel().WithWeights().Save(path);
+
+            var originalWeights = WeightBytesByParam(model);
+            Assert.Equal(2, originalWeights.Count);
+            // Default-initialized FCLayer weights are non-zero, so the byte-identity and
+            // placeholder assertions below cannot pass vacuously.
+            Assert.Contains(originalWeights.Values, bytes => bytes.Any(b => b != 0));
+
+            // Standard zip, exactly the documented entries (read via the BCL, not our writer).
+            var entries = ReadZipEntries(path);
+            string[] expectedEntries =
+                [SkptFileFormat.ConfigEntryName, SkptFileFormat.WeightsEntryPath, SkptFileFormat.ModelEntryPath];
+            Assert.Equal(expectedEntries.OrderBy(n => n, StringComparer.Ordinal),
+                entries.Keys.OrderBy(n => n, StringComparer.Ordinal));
+
+            // All entries STORED; the data payload starts 64-byte aligned and verbatim.
+            var fileBytes = File.ReadAllBytes(path);
+            var localHeaders = ParseLocalZipHeaders(fileBytes);
+            Assert.Equal(entries.Count, localHeaders.Count);
+            Assert.All(localHeaders, h => Assert.Equal(0, h.Method));
+            var weightsHeader = localHeaders.Single(h => h.Name == SkptFileFormat.WeightsEntryPath);
+            Assert.Equal(0L, weightsHeader.DataOffset % SkptFileFormat.DataAlignment);
+            Assert.Equal(entries[SkptFileFormat.WeightsEntryPath],
+                fileBytes.AsSpan((int)weightsHeader.DataOffset, (int)weightsHeader.Size).ToArray());
+
+            // The manifest is the wiring: format/version identity, model registry entry
+            // (srk2, concrete-model, entry hash), data registry entry (safetensors,
+            // uncompressed, entry hash), and the default mapping set covering every parameter.
+            var manifest = SkptFileFormat.ParseManifest(entries[SkptFileFormat.ConfigEntryName], path);
+            Assert.Equal(SkptFileFormat.FormatName, manifest.Format);
+            Assert.Equal(SkptFileFormat.CurrentVersion, manifest.SkptVersion);
+            Assert.False(string.IsNullOrEmpty(manifest.CreatedUtc));
+            Assert.Equal(Shorokoo.ShorokooVersion.VersionString, manifest.Producer?.Shorokoo);
+            var modelEntry = Assert.Single(manifest.Models!).Value;
+            Assert.Equal(SkptFileFormat.ModelEntryPath, modelEntry.Entry);
+            Assert.Equal(SkptFileFormat.ModelFormatSrk2, modelEntry.Format);
+            Assert.Equal(SrkFileFormat.StageName(GraphKind.ConcreteModel), modelEntry.Stage);
+            Assert.Equal(SkptFileFormat.Sha256Hex(entries[SkptFileFormat.ModelEntryPath]), modelEntry.Sha256);
+            var dataEntry = Assert.Single(manifest.Data!).Value;
+            Assert.Equal(SkptFileFormat.WeightsEntryPath, dataEntry.Entry);
+            Assert.Equal(SkptFileFormat.DataFormatSafeTensors, dataEntry.Format);
+            Assert.Equal(SkptFileFormat.CompressionNone, dataEntry.Compression);
+            Assert.Equal(SkptFileFormat.Sha256Hex(entries[SkptFileFormat.WeightsEntryPath]), dataEntry.Sha256);
+            var mapping = manifest.TensorMappings!["model"]["default"].Tensors!;
+            Assert.Equal(originalWeights.Keys.OrderBy(k => k, StringComparer.Ordinal),
+                mapping.Keys.OrderBy(k => k, StringComparer.Ordinal));
+            Assert.All(mapping.Values, r => Assert.Equal("weights", r.Data));
+
+            // The weights entry is plain safetensors holding byte-identical tensors.
+            var storedTensors = SafeTensorLoader.ParseSafeTensorBytes(entries[SkptFileFormat.WeightsEntryPath])
+                .ToDictionary(t => t.Name, t => t.Data.AccessRawMemory().ToArray(), StringComparer.Ordinal);
+            Assert.Equal(originalWeights.Count, storedTensors.Count);
+            foreach (var (paramId, bytes) in originalWeights)
+                Assert.Equal(bytes, storedTensors[mapping[paramId].Tensor!]);
+
+            // The model entry is definition-only: a loadable concrete model whose weight
+            // parameters are zero placeholders — the real bytes live once, in the data tree.
+            var strippedDefinition = CompressedFormatUtils.LoadFastGraphFromBinary(
+                entries[SkptFileFormat.ModelEntryPath], GraphKind.ConcreteModel);
+            Assert.All(WeightBytesByParam(strippedDefinition).Values,
+                bytes => Assert.All(bytes, b => Assert.Equal(0, b)));
+
+            // Load: a runnable concrete model, weights bound byte-identically, and
+            // bit-identical execution on the sample input.
+            var loaded = Checkpoint.Load(path);
+            Assert.Equal(GraphKind.ConcreteModel, loaded.Kind);
+            var loadedWeights = WeightBytesByParam(loaded);
+            Assert.Equal(originalWeights.Count, loadedWeights.Count);
+            foreach (var (paramId, bytes) in originalWeights)
+                Assert.Equal(bytes, loadedWeights[paramId]);
+            Assert.Equal(ExecuteToBytes(model, numOut, input), ExecuteToBytes(loaded, numOut, input));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    /// <summary>
+    /// The builder admits exactly the supported checkpoint shape (concrete model in,
+    /// .WithModel().WithWeights() selected), and Save commits atomically: a crash in the
+    /// commit window leaves the previous checkpoint bytes untouched and loadable.
+    /// </summary>
+    [Fact]
+    public void TestSkptBuilderGatesAndAtomicSave()
+    {
+        var (model, numOut, input) = BuildSkptModel();
+
+        // Only a concrete model can start a checkpoint.
+        var exKind = Assert.Throws<InvalidOperationException>(() => Checkpoint.From(FCLayer.ComputationGraph));
+        Assert.Contains("concrete-model", exKind.Message);
+
+        // This version writes exactly one shape: model + weights, both selected.
+        var incompletePath = Path.Combine(TempDir, "incomplete.skpt");
+        var exNone = Assert.Throws<InvalidOperationException>(() => Checkpoint.From(model).Save(incompletePath));
+        Assert.Contains("WithModel", exNone.Message);
+        Assert.Throws<InvalidOperationException>(() => Checkpoint.From(model).WithModel().Save(incompletePath));
+        Assert.Throws<InvalidOperationException>(() => Checkpoint.From(model).WithWeights().Save(incompletePath));
+        Assert.False(File.Exists(incompletePath));
+
+        // The atomic writer stages in the target's directory, so it must exist up front.
+        Assert.Throws<DirectoryNotFoundException>(() => Checkpoint.From(model).WithModel().WithWeights()
+            .Save(Path.Combine(TempDir, "no-such-dir", "model.skpt")));
+
+        // A simulated crash between staging and commit leaves the existing checkpoint intact.
+        var path = Path.Combine(TempDir, "atomic.skpt");
+        try
+        {
+            Checkpoint.From(model).WithModel().WithWeights().Save(path);
+            var committed = File.ReadAllBytes(path);
+
+            AtomicFileWriter.CommitFaultInjection = tempPath =>
+            {
+                if (tempPath.Contains("atomic.skpt")) throw new IOException("simulated commit crash");
+            };
+            try
+            {
+                Assert.Throws<IOException>(() => Checkpoint.From(model).WithModel().WithWeights().Save(path));
+            }
+            finally { AtomicFileWriter.CommitFaultInjection = null; }
+
+            Assert.Equal(committed, File.ReadAllBytes(path));
+            var loaded = Checkpoint.Load(path);
+            Assert.Equal(ExecuteToBytes(model, numOut, input), ExecuteToBytes(loaded, numOut, input));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    /// <summary>
+    /// Load-side contract of the manifest: unknown keys anywhere are ignored (keys are
+    /// add-only), while real faults fail loudly naming the offender — a non-zip file, a
+    /// missing manifest, a manifest referencing a missing entry, an entry failing its
+    /// SHA-256, an unsupported future version, and a tensor mapping that does not match
+    /// the model's parameters.
+    /// </summary>
+    [Fact]
+    public void TestSkptLoadValidationAndUnknownKeyTolerance()
+    {
+        var (model, numOut, input) = BuildSkptModel();
+        var path = Path.Combine(TempDir, "validation.skpt");
+        var tamperedPath = Path.Combine(TempDir, "tampered.skpt");
+        try
+        {
+            Checkpoint.From(model).WithModel().WithWeights().Save(path);
+            var entries = ReadZipEntries(path);
+            var direct = ExecuteToBytes(model, numOut, input);
+            List<(string Name, byte[] Data)> Without(string name) =>
+                entries.Where(e => e.Key != name).Select(e => (e.Key, e.Value)).ToList();
+            List<(string Name, byte[] Data)> WithConfig(string configJson) =>
+                entries.Select(e => (e.Key, e.Key == SkptFileFormat.ConfigEntryName
+                    ? System.Text.Encoding.UTF8.GetBytes(configJson) : e.Value)).ToList();
+
+            // Not a zip at all.
+            File.WriteAllBytes(tamperedPath, [1, 2, 3, 4]);
+            var exNotZip = Assert.Throws<InvalidDataException>(() => Checkpoint.Load(tamperedPath));
+            Assert.Contains("zip", exNotZip.Message);
+
+            // A zip without the manifest is not a checkpoint.
+            RewriteSkpt(tamperedPath, Without(SkptFileFormat.ConfigEntryName));
+            var exNoConfig = Assert.Throws<InvalidDataException>(() => Checkpoint.Load(tamperedPath));
+            Assert.Contains(SkptFileFormat.ConfigEntryName, exNoConfig.Message);
+
+            // A manifest referencing a missing entry names the entry.
+            RewriteSkpt(tamperedPath, Without(SkptFileFormat.WeightsEntryPath));
+            var exMissing = Assert.Throws<InvalidDataException>(() => Checkpoint.Load(tamperedPath));
+            Assert.Contains(SkptFileFormat.WeightsEntryPath, exMissing.Message);
+
+            // A tampered entry fails its SHA-256 check, naming the entry.
+            var flipped = entries.Select(e =>
+            {
+                if (e.Key != SkptFileFormat.WeightsEntryPath) return (e.Key, e.Value);
+                var copy = e.Value.ToArray();
+                copy[^1] ^= 0xFF;
+                return (e.Key, copy);
+            }).ToList();
+            RewriteSkpt(tamperedPath, flipped);
+            var exSha = Assert.Throws<InvalidDataException>(() => Checkpoint.Load(tamperedPath));
+            Assert.Contains("SHA-256", exSha.Message);
+            Assert.Contains(SkptFileFormat.WeightsEntryPath, exSha.Message);
+
+            // Unknown keys at every level are ignored: the manifest's keys are add-only.
+            var config = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
+            config["futureTopLevelKey"] = "ignored";
+            config["models"]!["model"]!["futureModelKey"] = 42;
+            config["data"]!["weights"]!["futureDataKey"] = true;
+            config["tensorMappings"]!["model"]!["default"]!["futureSetKey"] = "ignored";
+            var firstParam = ((JsonObject)config["tensorMappings"]!["model"]!["default"]!["tensors"]!)
+                .First().Key;
+            config["tensorMappings"]!["model"]!["default"]!["tensors"]![firstParam]!["futureRefKey"] = 1;
+            RewriteSkpt(tamperedPath, WithConfig(config.ToJsonString()));
+            Assert.Equal(direct, ExecuteToBytes(Checkpoint.Load(tamperedPath), numOut, input));
+
+            // A future major version is refused with a clear message.
+            var futureConfig = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
+            futureConfig["skptVersion"] = SkptFileFormat.CurrentVersion + 1;
+            RewriteSkpt(tamperedPath, WithConfig(futureConfig.ToJsonString()));
+            var exVersion = Assert.Throws<InvalidDataException>(() => Checkpoint.Load(tamperedPath));
+            Assert.Contains("newer framework version", exVersion.Message);
+
+            // A mapping missing one of the model's parameters names the parameter.
+            var missingParamConfig = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
+            ((JsonObject)missingParamConfig["tensorMappings"]!["model"]!["default"]!["tensors"]!)
+                .Remove(firstParam);
+            RewriteSkpt(tamperedPath, WithConfig(missingParamConfig.ToJsonString()));
+            var exUnmapped = Assert.Throws<InvalidDataException>(() => Checkpoint.Load(tamperedPath));
+            Assert.Contains(firstParam, exUnmapped.Message);
+
+            // A mapping entry for a parameter the model does not declare names the stray.
+            var strayConfig = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
+            strayConfig["tensorMappings"]!["model"]!["default"]!["tensors"]!["not_a_real_param"] =
+                new JsonObject { ["data"] = "weights", ["tensor"] = "not_a_real_param" };
+            RewriteSkpt(tamperedPath, WithConfig(strayConfig.ToJsonString()));
+            var exStray = Assert.Throws<InvalidDataException>(() => Checkpoint.Load(tamperedPath));
+            Assert.Contains("not_a_real_param", exStray.Message);
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (File.Exists(tamperedPath)) File.Delete(tamperedPath);
+        }
     }
 
 }

@@ -1,6 +1,6 @@
 # ONNX export/import and weights
 
-Related: [inference.md](inference.md) · [core-types.md](core-types.md)
+Related: [inference.md](inference.md) · [core-types.md](core-types.md) · [skpt-checkpoints.md](skpt-checkpoints.md)
 
 ## Facts
 

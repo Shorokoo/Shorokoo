@@ -2244,4 +2244,330 @@ public class CompressedFormatUtilsCoverageTests
         }
     }
 
+    // ──────────────────────────────────────────────────────────────────────
+    // SafeTensors weight exchange (issue #74): ExportSafeTensors writes a
+    // model's weights to a standard .safetensors file (canonical names or a
+    // naming scheme); ImportSafeTensors binds a foreign .safetensors onto a
+    // concrete architecture with strict fail-loud mapping checks; the
+    // one-call .skpt landing reuses the container writer.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// <summary>The two canonical FCLayer parameter ids (weights [4,4] and bias [4]) —
+    /// what the canonical naming scheme produces for the architecture's two params.</summary>
+    private const string FcWeightsId = "TrainableParam#0.InitSimple#0";
+    private const string FcBiasId = "TrainableParam#0.InitSimple#1";
+
+    /// <summary>Builds the FCLayer architecture + concrete model + sample inputs the
+    /// safetensors exchange tests share.</summary>
+    private static (ComputationGraph Arch, ComputationGraph Model, TensorData NumOut, TensorData Input)
+        BuildSafeTensorsExchangeModel()
+    {
+        var numOut = TensorData(DType.Int64, [], 4L);
+        var input = TensorDataWithSmallVals(DType.Float32, [4L, 4L]);
+        var g = FCLayer.ComputationGraph;
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([numOut, input]));
+        return (arch, arch.ToConcreteModel(), numOut, input);
+    }
+
+    /// <summary>The model's weight bytes keyed by <b>canonical</b> parameter name — the
+    /// graph nodes carry the serialized "[ModelId]:parts" identifier; the canonical name
+    /// (what export writes and naming schemes match) is the parts portion.</summary>
+    private static Dictionary<string, byte[]> CanonicalWeightBytes(ComputationGraph model)
+        => WeightBytesByParam(model).ToDictionary(
+            kv => kv.Key[(kv.Key.IndexOf("]:", StringComparison.Ordinal) + 2)..],
+            kv => kv.Value, StringComparer.Ordinal);
+
+    /// <summary>A PyTorch-style naming scheme for the FCLayer architecture: the two
+    /// canonical parameter ids map to torch-conventional <c>fc.weight</c> / <c>fc.bias</c>.</summary>
+    private static SimplePatternNamingScheme BuildFcTorchScheme(ComputationGraph arch)
+    {
+        SimplePatternScheme[] patterns =
+        [
+            new SimplePatternScheme(FcWeightsId, "fc.weight"),
+            new SimplePatternScheme(FcBiasId, "fc.bias"),
+        ];
+        return new SimplePatternNamingScheme(
+            patterns, arch.GetShorokooIdNamingScheme(), ModuleParamSetNamingScheme.PyTorchFrameworkId);
+    }
+
+    /// <summary>
+    /// The export → import acceptance round-trip, in both naming modes. Canonical:
+    /// ExportSafeTensors writes one tensor per weight parameter under its canonical
+    /// Shorokoo id, byte-identical to the model's weights, into a plain safetensors
+    /// file (read back with the independent loader); ImportSafeTensors binds it onto
+    /// the architecture and the imported model executes bit-identically. Scheme: the
+    /// same round-trip through PyTorch-style names (fc.weight / fc.bias) with the
+    /// scheme applied at both boundaries.
+    /// </summary>
+    [Fact]
+    public void TestSafeTensorsExportImportRoundTrip()
+    {
+        var (arch, model, numOut, input) = BuildSafeTensorsExchangeModel();
+        var canonicalPath = Path.Combine(TempDir, "exchange_canonical.safetensors");
+        var torchPath = Path.Combine(TempDir, "exchange_torch.safetensors");
+        try
+        {
+            var originalWeights = CanonicalWeightBytes(model);
+            var direct = ExecuteToBytes(model, numOut, input);
+            Assert.Equal([FcWeightsId, FcBiasId],
+                originalWeights.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
+
+            // ── Canonical names (no scheme) ────────────────────────────────
+            Checkpoint.ExportSafeTensors(model, canonicalPath);
+            var storedCanonical = SafeTensorLoader.LoadSafeTensors(canonicalPath)
+                .ToDictionary(t => t.Name, t => t.Data.AccessRawMemory().ToArray(), StringComparer.Ordinal);
+            Assert.Equal(originalWeights.Keys.OrderBy(k => k, StringComparer.Ordinal),
+                storedCanonical.Keys.OrderBy(k => k, StringComparer.Ordinal));
+            foreach (var (paramId, bytes) in originalWeights)
+                Assert.Equal(bytes, storedCanonical[paramId]);
+
+            var importedCanonical = Checkpoint.ImportSafeTensors(arch, canonicalPath);
+            Assert.Equal(GraphKind.ConcreteModel, importedCanonical.Kind);
+            Assert.Equal(originalWeights, CanonicalWeightBytes(importedCanonical));
+            Assert.Equal(direct, ExecuteToBytes(importedCanonical, numOut, input));
+
+            // A __metadata__ block is metadata, not a tensor — a file carrying one imports
+            // unchanged (it must not trip the unmapped-source-tensor check).
+            var withMetadata = SafeTensorLoader.LoadSafeTensors(canonicalPath);
+            SafeTensorLoader.SaveSafeTensors(canonicalPath, withMetadata,
+                new Dictionary<string, object> { ["format"] = "pt", ["producer"] = "unit-test" });
+            var importedWithMetadata = Checkpoint.ImportSafeTensors(arch, canonicalPath);
+            Assert.Equal(direct, ExecuteToBytes(importedWithMetadata, numOut, input));
+
+            // ── PyTorch-style names via a naming scheme ────────────────────
+            var scheme = BuildFcTorchScheme(arch);
+            Checkpoint.ExportSafeTensors(model, torchPath, scheme);
+            var storedTorch = SafeTensorLoader.LoadSafeTensors(torchPath)
+                .ToDictionary(t => t.Name, t => t.Data.AccessRawMemory().ToArray(), StringComparer.Ordinal);
+            Assert.Equal(["fc.bias", "fc.weight"],
+                storedTorch.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
+            Assert.Equal(originalWeights[FcWeightsId], storedTorch["fc.weight"]);
+            Assert.Equal(originalWeights[FcBiasId], storedTorch["fc.bias"]);
+
+            var importedTorch = Checkpoint.ImportSafeTensors(arch, torchPath, scheme);
+            Assert.Equal(originalWeights, CanonicalWeightBytes(importedTorch));
+            Assert.Equal(direct, ExecuteToBytes(importedTorch, numOut, input));
+
+            // The ModelId format DSL binds at the import boundary too: the same torch-named
+            // file imports under a ModelIdNamingScheme keyed on the params' ModelIds ([1]/[2]).
+            ModelIdFormat[] formats =
+            [
+                new ModelIdFormat(match: "[1]", format: "fc.weight"),
+                new ModelIdFormat(match: "[2]", format: "fc.bias"),
+            ];
+            var formatScheme = new ModelIdNamingScheme(
+                formats, ModuleParamSetNamingScheme.PyTorchFrameworkId);
+            var importedFormat = Checkpoint.ImportSafeTensors(arch, torchPath, formatScheme);
+            Assert.Equal(originalWeights, CanonicalWeightBytes(importedFormat));
+            Assert.Equal(direct, ExecuteToBytes(importedFormat, numOut, input));
+        }
+        finally
+        {
+            if (File.Exists(canonicalPath)) File.Delete(canonicalPath);
+            if (File.Exists(torchPath)) File.Delete(torchPath);
+        }
+    }
+
+    /// <summary>
+    /// Import fails loudly, naming the offending tensor, on every mapping-mismatch
+    /// class: a source tensor that maps to no parameter (with a dedicated hint when the
+    /// file is a training checkpoint), a required parameter with no source tensor, a
+    /// dtype mismatch, a shape mismatch, an ambiguous scheme mapping two parameters to
+    /// one name, and a scheme that fails to name a required parameter. Kind gates
+    /// refuse the wrong graph stage up front, and validation always precedes binding.
+    /// </summary>
+    [Fact]
+    public void TestImportSafeTensorsFailsLoudOnMappingMismatches()
+    {
+        var (arch, model, _, _) = BuildSafeTensorsExchangeModel();
+        var path = Path.Combine(TempDir, "exchange_good.safetensors");
+        var badPath = Path.Combine(TempDir, "exchange_bad.safetensors");
+        try
+        {
+            Checkpoint.ExportSafeTensors(model, path);
+            var good = SafeTensorLoader.LoadSafeTensors(path);
+            const string weightsId = FcWeightsId;
+            const string biasId = FcBiasId;
+
+            // A source tensor mapping to nothing names the tensor (and the file).
+            var withStray = good.ToList();
+            withStray.Add(new SafeTensor("not.a.param", TensorData([2L], 1f, 2f), "F32", [2L]));
+            SafeTensorLoader.SaveSafeTensors(badPath, withStray);
+            var exStray = Assert.Throws<InvalidDataException>(() => Checkpoint.ImportSafeTensors(arch, badPath));
+            Assert.Contains("not.a.param", exStray.Message);
+            Assert.Contains(badPath, exStray.Message);
+
+            // A required parameter with no source tensor names the parameter.
+            SafeTensorLoader.SaveSafeTensors(badPath, good.Where(t => t.Name != biasId).ToList());
+            var exMissing = Assert.Throws<InvalidDataException>(() => Checkpoint.ImportSafeTensors(arch, badPath));
+            Assert.Contains(biasId, exMissing.Message);
+
+            // A dtype mismatch after mapping names the tensor and both dtypes.
+            var wrongDtype = good.Select(t => t.Name != weightsId ? t
+                : new SafeTensor(t.Name, TensorDataWithSmallVals(DType.Int64, [4L, 4L]), "I64", [4L, 4L])).ToList();
+            SafeTensorLoader.SaveSafeTensors(badPath, wrongDtype);
+            var exDtype = Assert.Throws<InvalidDataException>(() => Checkpoint.ImportSafeTensors(arch, badPath));
+            Assert.Contains(weightsId, exDtype.Message);
+            Assert.Contains("dtype", exDtype.Message);
+
+            // A shape mismatch after mapping names the tensor and both shapes.
+            var wrongShape = good.Select(t => t.Name != weightsId ? t
+                : new SafeTensor(t.Name, TensorDataWithSmallVals(DType.Float32, [2L, 8L]), "F32", [2L, 8L])).ToList();
+            SafeTensorLoader.SaveSafeTensors(badPath, wrongShape);
+            var exShape = Assert.Throws<InvalidDataException>(() => Checkpoint.ImportSafeTensors(arch, badPath));
+            Assert.Contains(weightsId, exShape.Message);
+            Assert.Contains("[2,8]", exShape.Message);
+            Assert.Contains("[4,4]", exShape.Message);
+
+            // A scheme mapping two parameters onto one source name is ambiguous —
+            // refused naming both parameters, before any tensor lookup can pick one.
+            SimplePatternScheme[] colliding =
+            [
+                new SimplePatternScheme("TrainableParam#0.InitSimple#{p}", "fc.same"),
+            ];
+            var ambiguous = new SimplePatternNamingScheme(
+                colliding, arch.GetShorokooIdNamingScheme(), ModuleParamSetNamingScheme.PyTorchFrameworkId);
+            var exAmbiguous = Assert.Throws<InvalidDataException>(
+                () => Checkpoint.ImportSafeTensors(arch, path, ambiguous));
+            Assert.Contains(weightsId, exAmbiguous.Message);
+            Assert.Contains(biasId, exAmbiguous.Message);
+            Assert.Contains("fc.same", exAmbiguous.Message);
+
+            // A scheme covering only some parameters names the uncovered one — even when
+            // every tensor the file does carry maps cleanly.
+            SimplePatternScheme[] partial =
+            [
+                new SimplePatternScheme(weightsId, "fc.weight"),
+            ];
+            var partialScheme = new SimplePatternNamingScheme(
+                partial, arch.GetShorokooIdNamingScheme(), ModuleParamSetNamingScheme.PyTorchFrameworkId);
+            var weightsOnly = good.Single(t => t.Name == weightsId);
+            SafeTensorLoader.SaveSafeTensors(badPath,
+                [new SafeTensor("fc.weight", weightsOnly.Data, weightsOnly.DataType, weightsOnly.Shape)]);
+            var exUncovered = Assert.Throws<InvalidDataException>(
+                () => Checkpoint.ImportSafeTensors(arch, badPath, partialScheme));
+            Assert.Contains(biasId, exUncovered.Message);
+            Assert.Contains("naming scheme", exUncovered.Message);
+
+            // A training checkpoint is recognized by its marker and redirected.
+            SafeTensorLoader.SaveSafeTensors(badPath,
+                [new SafeTensor("__shorokoo_checkpoint__", TensorData([2L], 1L, 0L), "I64", [2L])]);
+            var exCheckpoint = Assert.Throws<InvalidDataException>(() => Checkpoint.ImportSafeTensors(arch, badPath));
+            Assert.Contains("training checkpoint", exCheckpoint.Message);
+
+            // Kind gates: import takes a concrete architecture, export a concrete model.
+            var exImportKind = Assert.Throws<InvalidOperationException>(
+                () => Checkpoint.ImportSafeTensors(FCLayer.ComputationGraph, path));
+            Assert.Contains("concrete-architecture", exImportKind.Message);
+            var exImportModel = Assert.Throws<InvalidOperationException>(
+                () => Checkpoint.ImportSafeTensors(model, path));
+            Assert.Contains("concrete-architecture", exImportModel.Message);
+            var exExportKind = Assert.Throws<InvalidOperationException>(
+                () => Checkpoint.ExportSafeTensors(arch, badPath));
+            Assert.Contains("concrete-model", exExportKind.Message);
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (File.Exists(badPath)) File.Delete(badPath);
+        }
+    }
+
+    /// <summary>
+    /// Export-side fail-loud checks: a scheme that leaves a parameter unnamed refuses
+    /// the export naming the parameter (weights are never silently dropped); two
+    /// parameters colliding on one exported name are refused naming both; and a
+    /// ModelId-keyed scheme — which cannot translate the canonical id strings a bound
+    /// model carries — is refused with the supported alternative named. A failed
+    /// export writes nothing (the atomic writer never commits).
+    /// </summary>
+    [Fact]
+    public void TestExportSafeTensorsFailsLoudOnSchemeGaps()
+    {
+        var (arch, model, _, _) = BuildSafeTensorsExchangeModel();
+        var path = Path.Combine(TempDir, "exchange_export_fail.safetensors");
+        const string weightsId = FcWeightsId;
+        const string biasId = FcBiasId;
+
+        // Scheme gap: the bias has no rule → refused naming the parameter.
+        SimplePatternScheme[] partial = [new SimplePatternScheme(weightsId, "fc.weight")];
+        var partialScheme = new SimplePatternNamingScheme(
+            partial, arch.GetShorokooIdNamingScheme(), ModuleParamSetNamingScheme.PyTorchFrameworkId);
+        var exGap = Assert.Throws<InvalidOperationException>(
+            () => Checkpoint.ExportSafeTensors(model, path, partialScheme));
+        Assert.Contains(biasId, exGap.Message);
+
+        // Name collision after remapping → refused naming both parameters and the name.
+        SimplePatternScheme[] colliding =
+        [
+            new SimplePatternScheme("TrainableParam#0.InitSimple#{p}", "fc.same"),
+        ];
+        var collidingScheme = new SimplePatternNamingScheme(
+            colliding, arch.GetShorokooIdNamingScheme(), ModuleParamSetNamingScheme.PyTorchFrameworkId);
+        var exCollision = Assert.Throws<InvalidOperationException>(
+            () => Checkpoint.ExportSafeTensors(model, path, collidingScheme));
+        Assert.Contains(weightsId, exCollision.Message);
+        Assert.Contains(biasId, exCollision.Message);
+        Assert.Contains("fc.same", exCollision.Message);
+
+        // A ModelId-keyed scheme cannot run in the export direction: a bound model
+        // carries canonical id strings, not ModelIds.
+        var modelIdScheme = new ModelIdNamingScheme(
+            [new ModelIdFormat(format: "x")], ModuleParamSetNamingScheme.PyTorchFrameworkId);
+        Assert.Throws<NotSupportedException>(
+            () => Checkpoint.ExportSafeTensors(model, path, modelIdScheme));
+
+        // No failed attempt above committed a file.
+        Assert.False(File.Exists(path));
+    }
+
+    /// <summary>
+    /// The one-call native landing: ImportSafeTensorsToCheckpoint imports a foreign
+    /// (PyTorch-named) safetensors file under a scheme and writes the bound result
+    /// straight to a .skpt via the standard container writer. The returned model, the
+    /// reloaded checkpoint, and the original model all execute bit-identically, and
+    /// the checkpoint's weights are byte-identical to the source tensors.
+    /// </summary>
+    [Fact]
+    public void TestImportSafeTensorsToCheckpointRoundTrip()
+    {
+        var (arch, model, numOut, input) = BuildSafeTensorsExchangeModel();
+        var torchPath = Path.Combine(TempDir, "exchange_landing.safetensors");
+        var skptPath = Path.Combine(TempDir, "exchange_landing.skpt");
+        try
+        {
+            var scheme = BuildFcTorchScheme(arch);
+            Checkpoint.ExportSafeTensors(model, torchPath, scheme);
+
+            var imported = Checkpoint.ImportSafeTensorsToCheckpoint(arch, torchPath, skptPath, scheme);
+            Assert.Equal(GraphKind.ConcreteModel, imported.Kind);
+
+            var direct = ExecuteToBytes(model, numOut, input);
+            Assert.Equal(direct, ExecuteToBytes(imported, numOut, input));
+
+            var reloaded = Checkpoint.Load(skptPath);
+            Assert.Equal(GraphKind.ConcreteModel, reloaded.Kind);
+            Assert.Equal(WeightBytesByParam(model), WeightBytesByParam(reloaded));
+            Assert.Equal(direct, ExecuteToBytes(reloaded, numOut, input));
+
+            // A failed import lands nothing: reusing the paths with a scheme gap leaves
+            // the previously written checkpoint bytes untouched.
+            var committed = File.ReadAllBytes(skptPath);
+            SimplePatternScheme[] partial =
+            [
+                new SimplePatternScheme(FcWeightsId, "fc.weight"),
+            ];
+            var partialScheme = new SimplePatternNamingScheme(
+                partial, arch.GetShorokooIdNamingScheme(), ModuleParamSetNamingScheme.PyTorchFrameworkId);
+            Assert.Throws<InvalidDataException>(
+                () => Checkpoint.ImportSafeTensorsToCheckpoint(arch, torchPath, skptPath, partialScheme));
+            Assert.Equal(committed, File.ReadAllBytes(skptPath));
+        }
+        finally
+        {
+            if (File.Exists(torchPath)) File.Delete(torchPath);
+            if (File.Exists(skptPath)) File.Delete(skptPath);
+        }
+    }
+
 }

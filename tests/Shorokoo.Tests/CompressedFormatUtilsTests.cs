@@ -1997,4 +1997,180 @@ public class CompressedFormatUtilsCoverageTests
         }
     }
 
+    /// <summary>
+    /// Checkpoint.Inspect recognizes the .skpt container (issue #73): a checkpoint written
+    /// by the Save path inspects to SkptCheckpoint with the manifest's whole-archive
+    /// metadata, model and data registries (sha256 reported as recorded, never verified)
+    /// and mapping-set names — reading only the zip central directory plus config.json, so
+    /// a corrupt tensor payload does not disturb inspection (the same payload-untouched
+    /// technique as the .srk corruption case). Cheap sanity observations fire on
+    /// manifest/archive mismatches in both directions, unknown keys, a future version,
+    /// STORED-expectation violations and empty trees; and a non-.skpt zip, a foreign
+    /// config.json, a garbage manifest and a truncated archive all yield structured
+    /// NotRecognized results — never an exception.
+    /// </summary>
+    [Fact]
+    public void TestCheckpointInspectSkptArtifacts()
+    {
+        var (model, _, _) = BuildSkptModel();
+        var path = Path.Combine(TempDir, "inspect.skpt");
+        var variantPath = Path.Combine(TempDir, "inspect_variant.skpt");
+        try
+        {
+            Checkpoint.From(model).WithModel().WithWeights().Save(path);
+            var entries = ReadZipEntries(path);
+            var manifest = SkptFileFormat.ParseManifest(entries[SkptFileFormat.ConfigEntryName], path);
+            List<(string Name, byte[] Data)> WithConfig(string configJson) =>
+                entries.Select(e => (e.Key, e.Key == SkptFileFormat.ConfigEntryName
+                    ? System.Text.Encoding.UTF8.GetBytes(configJson) : e.Value)).ToList();
+
+            // The clean checkpoint: new kind, whole-archive metadata, both registries and
+            // the mapping-set names all match what Save wrote; no observations.
+            var result = Checkpoint.Inspect(path);
+            Assert.Equal(ArtifactKind.SkptCheckpoint, result.Kind);
+            Assert.Equal(path, result.FilePath);
+            Assert.Equal(new FileInfo(path).Length, result.FileSizeBytes);
+            Assert.Null(result.Srk);
+            Assert.Null(result.SafeTensors);
+            Assert.Null(result.TrainingCheckpoint);
+            Assert.Empty(result.Observations);
+
+            var skpt = result.Skpt!;
+            Assert.NotNull(skpt);
+            Assert.Equal(SkptFileFormat.FormatName, skpt.FormatName);
+            Assert.Equal(SkptFileFormat.CurrentVersion, skpt.SkptVersion);
+            Assert.Equal(manifest.CreatedUtc, skpt.CreatedUtc);
+            Assert.Equal(Shorokoo.ShorokooVersion.VersionString, skpt.Producer);
+
+            var modelSummary = Assert.Single(skpt.Models);
+            Assert.Equal("model", modelSummary.Key);
+            Assert.Equal(SkptFileFormat.ModelEntryPath, modelSummary.EntryPath);
+            Assert.Equal(SkptFileFormat.ModelFormatSrk2, modelSummary.Format);
+            Assert.Equal(SrkFileFormat.StageName(GraphKind.ConcreteModel), modelSummary.Stage);
+            Assert.Equal(SkptFileFormat.Sha256Hex(entries[SkptFileFormat.ModelEntryPath]),
+                modelSummary.GraphHash);
+
+            var dataSummary = Assert.Single(skpt.DataEntries);
+            Assert.Equal("weights", dataSummary.Key);
+            Assert.Equal(SkptFileFormat.WeightsEntryPath, dataSummary.EntryPath);
+            Assert.Equal(SkptFileFormat.DataFormatSafeTensors, dataSummary.Format);
+            Assert.Equal(SkptFileFormat.CompressionNone, dataSummary.Compression);
+            Assert.Equal(entries[SkptFileFormat.WeightsEntryPath].LongLength,
+                dataSummary.DeclaredSizeBytes);
+            Assert.Equal(SkptFileFormat.Sha256Hex(entries[SkptFileFormat.WeightsEntryPath]),
+                dataSummary.Sha256);
+
+            string[] expectedSets = ["default"];
+            Assert.Equal(expectedSets, skpt.MappingSetNames);
+
+            // ToString renders the model + data inventory.
+            var text = result.ToString();
+            Assert.Contains(".skpt", text);
+            Assert.Contains(SkptFileFormat.ModelEntryPath, text);
+            Assert.Contains(SkptFileFormat.WeightsEntryPath, text);
+            Assert.Contains("unverified", text);
+            Assert.Contains("mapping sets: default", text);
+
+            // Payload untouched: corrupt one byte inside the weights payload — a full load
+            // fails its SHA-256 check, but Inspect (which never reads payload bytes) returns
+            // the same clean summary, recorded hash included.
+            var fileBytes = File.ReadAllBytes(path);
+            var weightsHeader = ParseLocalZipHeaders(fileBytes)
+                .Single(h => h.Name == SkptFileFormat.WeightsEntryPath);
+            fileBytes[weightsHeader.DataOffset + weightsHeader.Size - 1] ^= 0xFF;
+            File.WriteAllBytes(variantPath, fileBytes);
+            Assert.Throws<InvalidDataException>(() => Checkpoint.Load(variantPath));
+            var corrupt = Checkpoint.Inspect(variantPath);
+            Assert.Equal(ArtifactKind.SkptCheckpoint, corrupt.Kind);
+            Assert.Empty(corrupt.Observations);
+            Assert.Equal(dataSummary.Sha256, Assert.Single(corrupt.Skpt!.DataEntries).Sha256);
+
+            // Manifest/archive mismatches in both directions are observed; the file still
+            // inspects as a .skpt.
+            var mismatched = entries.Where(e => e.Key != SkptFileFormat.WeightsEntryPath)
+                .Select(e => (e.Key, e.Value)).Append(("data/stray.bin", new byte[16])).ToList();
+            RewriteSkpt(variantPath, mismatched);
+            var mismatch = Checkpoint.Inspect(variantPath);
+            Assert.Equal(ArtifactKind.SkptCheckpoint, mismatch.Kind);
+            Assert.Contains(mismatch.Observations,
+                o => o.Contains(SkptFileFormat.WeightsEntryPath) && o.Contains("no such entry"));
+            Assert.Contains(mismatch.Observations,
+                o => o.Contains("data/stray.bin") && o.Contains("not referenced"));
+            Assert.Null(Assert.Single(mismatch.Skpt!.DataEntries).DeclaredSizeBytes);
+
+            // Unknown manifest keys and a future version are observations, not failures.
+            var futureConfig = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
+            futureConfig["futureTopLevelKey"] = "??";
+            futureConfig["skptVersion"] = SkptFileFormat.CurrentVersion + 1;
+            RewriteSkpt(variantPath, WithConfig(futureConfig.ToJsonString()));
+            var future = Checkpoint.Inspect(variantPath);
+            Assert.Equal(ArtifactKind.SkptCheckpoint, future.Kind);
+            Assert.Equal(SkptFileFormat.CurrentVersion + 1, future.Skpt!.SkptVersion);
+            Assert.Contains(future.Observations, o => o.Contains("futureTopLevelKey"));
+            Assert.Contains(future.Observations,
+                o => o.Contains($"version {SkptFileFormat.CurrentVersion + 1}"));
+
+            // STORED-expectation violation: the same entries written deflated (via the BCL
+            // writer) still inspect as a .skpt, with observations naming compressed entries.
+            using (var deflated = new ZipArchive(File.Create(variantPath), ZipArchiveMode.Create))
+            {
+                foreach (var (name, data) in entries)
+                {
+                    using var s = deflated.CreateEntry(name, CompressionLevel.SmallestSize).Open();
+                    s.Write(data);
+                }
+            }
+            var storedViolation = Checkpoint.Inspect(variantPath);
+            Assert.Equal(ArtifactKind.SkptCheckpoint, storedViolation.Kind);
+            Assert.Contains(storedViolation.Observations, o => o.Contains("expected STORED"));
+
+            // Empty trees: a bare identity-only manifest inspects with observations for the
+            // missing models / data / mapping sets.
+            RewriteSkpt(variantPath, [(SkptFileFormat.ConfigEntryName,
+                System.Text.Encoding.UTF8.GetBytes("{\"format\":\"skpt\",\"skptVersion\":1}"))]);
+            var empty = Checkpoint.Inspect(variantPath);
+            Assert.Equal(ArtifactKind.SkptCheckpoint, empty.Kind);
+            Assert.Contains(empty.Observations, o => o.Contains("no models"));
+            Assert.Contains(empty.Observations, o => o.Contains("no data entries"));
+            Assert.Contains(empty.Observations, o => o.Contains("no tensor mapping sets"));
+
+            // Non-.skpt zips: no config.json, a foreign tool's config.json, and a manifest
+            // that is not JSON — structured NotRecognized every time, never an exception.
+            RewriteSkpt(variantPath,
+                [("readme.txt", System.Text.Encoding.UTF8.GetBytes("just a zip"))]);
+            var noConfig = Checkpoint.Inspect(variantPath);
+            Assert.Equal(ArtifactKind.NotRecognized, noConfig.Kind);
+            Assert.Contains(noConfig.Observations, o => o.Contains(SkptFileFormat.ConfigEntryName));
+
+            RewriteSkpt(variantPath, [(SkptFileFormat.ConfigEntryName,
+                System.Text.Encoding.UTF8.GetBytes("{\"name\":\"some-other-tool\"}"))]);
+            var foreign = Checkpoint.Inspect(variantPath);
+            Assert.Equal(ArtifactKind.NotRecognized, foreign.Kind);
+            Assert.Contains(foreign.Observations, o => o.Contains("format"));
+
+            RewriteSkpt(variantPath, [(SkptFileFormat.ConfigEntryName,
+                System.Text.Encoding.UTF8.GetBytes("not json at all"))]);
+            var badJson = Checkpoint.Inspect(variantPath);
+            Assert.Equal(ArtifactKind.NotRecognized, badJson.Kind);
+            Assert.Contains(badJson.Observations, o => o.Contains("not a readable"));
+
+            // Truncated and garbage files with a zip signature: structured NotRecognized.
+            File.WriteAllBytes(variantPath, File.ReadAllBytes(path)[..40]);
+            var truncated = Checkpoint.Inspect(variantPath);
+            Assert.Equal(ArtifactKind.NotRecognized, truncated.Kind);
+            Assert.Contains(truncated.Observations, o => o.Contains("not readable"));
+
+            byte[] garbageZip = [0x50, 0x4B, 0x03, 0x04, 0xDE, 0xAD, 0xBE, 0xEF];
+            File.WriteAllBytes(variantPath, garbageZip);
+            var garbage = Checkpoint.Inspect(variantPath);
+            Assert.Equal(ArtifactKind.NotRecognized, garbage.Kind);
+            Assert.NotEmpty(garbage.Observations);
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (File.Exists(variantPath)) File.Delete(variantPath);
+        }
+    }
+
 }

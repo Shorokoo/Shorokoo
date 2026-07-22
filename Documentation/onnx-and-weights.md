@@ -266,6 +266,7 @@ switch (result.Kind)
     case ArtifactKind.SafeTensors:        /* result.SafeTensors */                  break;
     case ArtifactKind.TrainingCheckpoint: /* result.TrainingCheckpoint (+ .SafeTensors) */ break;
     case ArtifactKind.CompressedSafeTensors: /* result.SafeTensors (decompressed header) */ break;
+    case ArtifactKind.SkptCheckpoint:     /* result.Skpt */                         break;
     case ArtifactKind.NotRecognized:      /* result.Observations say what was seen */ break;
 }
 ```
@@ -278,20 +279,26 @@ Recognized formats and what is reported:
 | `SafeTensors` | 8-byte header-length prefix + valid JSON header | tensor listing (name, dtype, shape, byte size), total payload size, `__metadata__` (`result.SafeTensors`) |
 | `TrainingCheckpoint` | the `__shorokoo_checkpoint__` marker tensor in a SafeTensors header | checkpoint format version, global step, and the per-section (`trainable` / `model_state` / `opt_state`) tensor listing (`result.TrainingCheckpoint`); `result.SafeTensors` is populated too |
 | `CompressedSafeTensors` | Zstd frame magic whose decompressed content starts with a valid SafeTensors length prefix + JSON header (`.zsafetensor`, written by `CompressedFormatUtils.SaveCompressedSafeTensors`) | the same details as `SafeTensors` (`result.SafeTensors`), read by stream-decompressing only the prefix and header — the tensor payload is never decompressed; sizes describe the decompressed content |
-| `NotRecognized` | anything else | a structured result — **content problems never throw**; a missing file and I/O errors (permissions, disk) do |
+| `SkptCheckpoint` | a zip archive with a root `config.json` manifest declaring format `"skpt"` (see [skpt-checkpoints.md](skpt-checkpoints.md)) | whole-archive metadata (`.skpt` version, created time, producer), the model registry (per model: entry path, format, stage, graph hash), the data registry (per entry: storage format, compression, declared size, recorded sha256 — reported **unverified**), and the mapping-set names (`result.Skpt`) |
+| `NotRecognized` | anything else — including a zip without a readable `skpt` manifest | a structured result — **content problems never throw**; a missing file and I/O errors (permissions, disk) do |
 
 - Reads are bounded to headers and prefixes; tensor payload bytes are never
   materialized. The one exception is a checkpoint's 16-byte marker (the format
-  version and step live there). Because the payload is untouched, `Inspect` also
-  succeeds on a file whose payload is corrupt — it reports the header while a
-  full load would fail the SHA-256 check.
+  version and step live there). For a `.skpt`, only the zip central directory
+  and the `config.json` entry are read — the recorded per-entry sha256s are
+  reported as written, never checked (a full `Checkpoint.Load` verifies them).
+  Because the payload is untouched, `Inspect` also succeeds on a file whose
+  payload is corrupt — it reports the header while a full load would fail the
+  SHA-256 check.
 - `result.Observations` lists cheap sanity findings visible from the header
   alone, e.g. declared tensor extents pointing past the end of the file
-  (truncation), trailing bytes beyond the declared data, or an unreadable /
-  future-version container header. Through the compression layer of a
-  `.zsafetensor` only header-internal checks apply — a compressed file's size
-  has no fixed relation to the decompressed extents, so truncation of the
-  tensor payload is not detectable from the header.
+  (truncation), trailing bytes beyond the declared data, an unreadable /
+  future-version container header, or — for a `.skpt` — a manifest entry with
+  no matching archive entry (and vice versa), a compressed entry where STORED
+  is expected, unknown manifest keys, and empty registries. Through the
+  compression layer of a `.zsafetensor` only header-internal checks apply — a
+  compressed file's size has no fixed relation to the decompressed extents, so
+  truncation of the tensor payload is not detectable from the header.
 - A `.zsafetensor` that contains the `__shorokoo_checkpoint__` marker (a
   training checkpoint saved compressed) reports `CompressedSafeTensors`, not
   `TrainingCheckpoint`: the marker's version/step payload sits inside the

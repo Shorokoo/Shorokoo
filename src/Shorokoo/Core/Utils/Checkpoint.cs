@@ -32,7 +32,8 @@ namespace Shorokoo
     ///
     /// The write is atomic (staged to a temp file and committed by rename), so a crash
     /// mid-save never corrupts an existing checkpoint. See <see cref="SkptFileFormat"/>
-    /// for the container layout and manifest schema.
+    /// for the container layout and manifest schema. (The read-only <see cref="Inspect"/>
+    /// facility lives in the other half of this partial class, in ArtifactInspection.cs.)
     /// </summary>
     // Partial: Checkpoint.Inspect (read-only artifact identification) lives in
     // ArtifactInspection.cs — one Checkpoint facade, two concerns.

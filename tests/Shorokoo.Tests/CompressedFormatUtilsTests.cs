@@ -719,7 +719,10 @@ public class CompressedFormatUtilsCoverageTests
                 Assert.Equal(ArtifactKind.SrkGraph, result.Kind);
                 Assert.Null(result.Srk!.Header);
                 Assert.Equal(expectedLayout, result.Srk.LegacyLayout);
-                Assert.Equal(bytes.Length, result.Srk.PayloadSizeBytes);
+                Assert.Equal((long?)bytes.Length, result.Srk.PayloadSizeBytes);
+                // Every sniffed legacy layout carries the same no-header observation,
+                // however it was detected (bare protobuf or Zstd-wrapped).
+                Assert.Contains(result.Observations, o => o.Contains("record no stage"));
                 Assert.Contains("legacy", result.ToString());
             }
             finally { if (File.Exists(path)) File.Delete(path); }
@@ -741,6 +744,7 @@ public class CompressedFormatUtilsCoverageTests
                 Assert.Equal(ArtifactKind.SrkGraph, result.Kind);
                 Assert.Null(result.Srk!.Header);
                 Assert.Null(result.Srk.LegacyLayout);
+                Assert.Null(result.Srk.PayloadSizeBytes);   // unknown, no longer a 0 sentinel
                 Assert.Contains(result.Observations, o => o.Contains("header is not readable"));
             }
             finally { if (File.Exists(path)) File.Delete(path); }

@@ -48,7 +48,7 @@ namespace Shorokoo
         /// internally so the checkpoint-marker read can locate its 16 bytes.</summary>
         internal long DataStartOffset { get; }
 
-        internal InspectedTensorInfo(string name, string dtype, long[] shape, long byteSize, long dataStartOffset = 0)
+        internal InspectedTensorInfo(string name, string dtype, long[] shape, long byteSize, long dataStartOffset)
         {
             Name = name;
             DType = dtype;
@@ -74,11 +74,11 @@ namespace Shorokoo
         public string? LegacyLayout { get; }
 
         /// <summary>Size of the payload as stored in the file (after compression): everything
-        /// following the v2 header, or the whole file for a legacy layout. Zero when unknown
+        /// following the v2 header, or the whole file for a legacy layout. Null when unknown
         /// (unreadable header).</summary>
-        public long PayloadSizeBytes { get; }
+        public long? PayloadSizeBytes { get; }
 
-        internal SrkArtifactInfo(SrkHeader? header, string? legacyLayout, long payloadSizeBytes)
+        internal SrkArtifactInfo(SrkHeader? header, string? legacyLayout, long? payloadSizeBytes)
         {
             Header = header;
             LegacyLayout = legacyLayout;
@@ -209,7 +209,8 @@ namespace Shorokoo
                 {
                     sb.Append("  stage: ").AppendLine(h.Stage ?? "<unrecorded>");
                     sb.Append("  compression: ").AppendLine(h.Compression ?? "<unrecorded>");
-                    sb.Append("  payload: ").Append(Srk.PayloadSizeBytes).Append(" bytes as stored, sha256 ")
+                    // A parsed header always comes with a known payload size.
+                    sb.Append("  payload: ").Append(Srk.PayloadSizeBytes!.Value).Append(" bytes as stored, sha256 ")
                       .AppendLine(h.PayloadSha256 ?? "<unrecorded>");
                     if (h.Producer is { } p)
                     {
@@ -273,6 +274,12 @@ namespace Shorokoo
         // SafeTensors file (and bounds our header read).
         private const long MaxSafeTensorsHeaderBytes = 100_000_000;
 
+        /// <summary>Shared observation for every sniffed legacy v1 layout, so the
+        /// Observations collection reads the same however the layout was detected.</summary>
+        private const string LegacyNoHeaderObservation =
+            "legacy pre-container .srk layouts record no stage/compression/producer " +
+            "header; loading the file is the only way to learn more.";
+
         /// <summary>
         /// Identifies <paramref name="filePath"/> and summarizes its contents without loading
         /// tensor data. Recognized formats: .srk graph files (the v2 container by its header;
@@ -315,6 +322,7 @@ namespace Shorokoo
             // model's too; content cannot tell the two apart.
             if (LooksLikeOnnxModelProto(prefix.AsSpan(0, prefixRead)))
             {
+                observations.Add(LegacyNoHeaderObservation);
                 observations.Add("a bare serialized ONNX model is indistinguishable from a plain " +
                     ".onnx file by content; if this is a .onnx export, use standard ONNX tooling instead.");
                 return new ArtifactInspection(filePath, fileLen, ArtifactKind.SrkGraph,
@@ -366,7 +374,7 @@ namespace Shorokoo
             // major version, truncation, malformed JSON) to observations: Inspect never throws
             // on content.
             SrkHeader? header = null;
-            long payloadSize = 0;
+            long? payloadSize = null;
             try
             {
                 if (prefixRead < 6)
@@ -404,7 +412,7 @@ namespace Shorokoo
             catch (InvalidDataException e)
             {
                 header = null;
-                payloadSize = 0;
+                payloadSize = null;
                 observations.Add($"the container header is not readable: {e.Message}");
             }
 
@@ -443,8 +451,7 @@ namespace Shorokoo
                     "a Zstd frame whose decompressed content is not a serialized ONNX model — " +
                     "possibly a .zsafetensor archive or foreign compressed data.");
 
-            observations.Add("legacy pre-container .srk layouts record no stage/compression/producer " +
-                "header; loading the file is the only way to learn more.");
+            observations.Add(LegacyNoHeaderObservation);
             return new ArtifactInspection(filePath, fileLen, ArtifactKind.SrkGraph,
                 new SrkArtifactInfo(header: null, layout, fileLen),
                 safeTensors: null, trainingCheckpoint: null, observations);
@@ -624,7 +631,7 @@ namespace Shorokoo
                     .. tensors
                         .Where(t => t.Name.StartsWith(prefix, StringComparison.Ordinal))
                         .Select(t => new InspectedTensorInfo(
-                            t.Name.Substring(prefix.Length), t.DType, t.Shape, t.ByteSize)),
+                            t.Name.Substring(prefix.Length), t.DType, t.Shape, t.ByteSize, t.DataStartOffset)),
                 ];
             }
 

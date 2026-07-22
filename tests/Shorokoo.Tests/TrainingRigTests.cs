@@ -705,11 +705,10 @@ public class TrainingRigCoverageTests
         var rig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
             SGDOptimizer.ComputationGraph,
-            new NamedModelParam[]
-            {
+            [
                 new TensorDataModelParam("input", ModelParamType.InputParam,
                     TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
-            },
+            ],
             0.1f);
         var path = Path.Combine(Path.GetTempPath(), $"shrk_ckpt_trunc_{Guid.NewGuid():N}.safetensors");
         try

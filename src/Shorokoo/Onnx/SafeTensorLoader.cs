@@ -264,6 +264,19 @@ namespace Shorokoo.Onnx
         }
 
         /// <summary>
+        /// Parse SafeTensor bytes, naming <paramref name="origin"/> (typically the source file
+        /// path) in any error — use this when the bytes were read or decompressed from a file,
+        /// so truncation/corruption diagnostics point at the file the caller passed.
+        /// </summary>
+        /// <param name="fileBytes">Raw bytes of the SafeTensor file</param>
+        /// <param name="origin">Name used in error messages, typically the file path</param>
+        /// <returns>List of SafeTensor objects</returns>
+        public static List<SafeTensor> ParseSafeTensorBytes(byte[] fileBytes, string origin)
+        {
+            return ParseSafeTensorFile(fileBytes, origin);
+        }
+
+        /// <summary>
         /// Convert a Shorokoo DType to the SafeTensor dtype string format
         /// </summary>
         /// <param name="dtype">Shorokoo DType</param>
@@ -379,11 +392,14 @@ namespace Shorokoo.Onnx
                     throw new InvalidOperationException(
                         $"Tensor '{tensorName}' has invalid data_offsets [{startOffset}, {endOffset})");
 
-                if (dataOffset + endOffset > fileBytes.Length)
+                // Unsigned sum: both terms are non-negative longs, so this cannot overflow the
+                // way a signed dataOffset + endOffset could for an absurd corrupt endOffset.
+                ulong requiredBytes = (ulong)dataOffset + (ulong)endOffset;
+                if (requiredBytes > (ulong)fileBytes.Length)
                     throw new ModelException(ErrorCodes.ST003, $"SafeTensor file '{origin}'",
                         $"truncated SafeTensor file — tensor '{tensorName}' declares data_offsets " +
                         $"[{startOffset}, {endOffset}), which requires the file to hold " +
-                        $"{dataOffset + endOffset} bytes, but the file has {fileBytes.Length} bytes. " +
+                        $"{requiredBytes} bytes, but the file has {fileBytes.Length} bytes. " +
                         "The file was likely cut short by an interrupted download or copy.");
 
                 // Extract tensor data
@@ -410,7 +426,9 @@ namespace Shorokoo.Onnx
         }
 
         /// <summary>
-        /// Extract shape array from metadata dictionary
+        /// Extract shape array from metadata dictionary. An empty array is the valid encoding of
+        /// a rank-0 scalar; only a missing or unparsable field is rejected — silently defaulting
+        /// would let a corrupt header load garbage.
         /// </summary>
         private static long[] ExtractShape(Dictionary<string, object> metaDict)
         {
@@ -421,11 +439,14 @@ namespace Shorokoo.Onnx
                 if (shapeParsed != null)
                     return shapeParsed;
             }
-            return new long[] { 1 }; // Default fallback
+            throw new InvalidOperationException(
+                "Tensor metadata is missing a valid 'shape' field — the header is corrupt or not SafeTensors.");
         }
 
         /// <summary>
-        /// Extract data offsets from metadata dictionary
+        /// Extract data offsets from metadata dictionary. A missing or unparsable field is
+        /// rejected — silently defaulting would make the truncation checks validate fabricated
+        /// offsets and load garbage from a corrupt header.
         /// </summary>
         private static (long startOffset, long endOffset) ExtractDataOffsets(Dictionary<string, object> metaDict)
         {
@@ -438,19 +459,24 @@ namespace Shorokoo.Onnx
                     return (offsetsParsed[0], offsetsParsed[1]);
                 }
             }
-            return (0L, 4L); // Default 1 float
+            throw new InvalidOperationException(
+                "Tensor metadata is missing a valid 'data_offsets' field (expected [begin, end]) — " +
+                "the header is corrupt or not SafeTensors.");
         }
 
         /// <summary>
-        /// Extract data type from metadata dictionary
+        /// Extract data type from metadata dictionary; a missing field is rejected rather than
+        /// silently defaulted (the payload would be reinterpreted under the wrong dtype).
         /// </summary>
         private static string ExtractDataType(Dictionary<string, object> metaDict)
         {
-            if (metaDict.TryGetValue("dtype", out var dtypeObj))
+            if (metaDict.TryGetValue("dtype", out var dtypeObj) &&
+                dtypeObj.ToString() is { Length: > 0 } dtype)
             {
-                return dtypeObj.ToString() ?? "F32";
+                return dtype;
             }
-            return "F32"; // Default
+            throw new InvalidOperationException(
+                "Tensor metadata is missing a valid 'dtype' field — the header is corrupt or not SafeTensors.");
         }
 
         /// <summary>

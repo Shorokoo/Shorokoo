@@ -460,8 +460,8 @@ public class CompressedFormatUtilsCoverageTests
     {
         var tensors = new List<SafeTensor>
         {
-            new("w", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }), "F32", new long[] { 4L }),
-            new("b", TensorData([2L], new float[] { 5f, 6f }), "F32", new long[] { 2L }),
+            new("w", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }), "F32", [4L]),
+            new("b", TensorData([2L], new float[] { 5f, 6f }), "F32", [2L]),
         };
         using var stream = new MemoryStream();
         SafeTensorLoader.SaveSafeTensorsToStream(stream, tensors);
@@ -502,6 +502,55 @@ public class CompressedFormatUtilsCoverageTests
             Assert.Contains("truncated", exFile.Message);
         }
         finally { if (File.Exists(truncPath)) File.Delete(truncPath); }
+
+        // Compressed (.zsafetensor) load of truncated content: the error still names the
+        // file the caller passed, not an in-memory placeholder.
+        var zPath = Path.Combine(TempDir, "truncated.zsafetensor");
+        try
+        {
+            CompressedFormatUtils.CompressToFile(zPath, bytes[..^4]);
+            var exZ = Assert.Throws<ModelException>(() => CompressedFormatUtils.LoadCompressedSafeTensors(zPath));
+            Assert.Equal(ErrorCodes.ST003, exZ.ErrorCode);
+            Assert.Contains(zPath, exZ.Message);
+            Assert.Contains("truncated", exZ.Message);
+        }
+        finally { if (File.Exists(zPath)) File.Delete(zPath); }
+    }
+
+    /// <summary>
+    /// A tensor entry missing a required metadata field (shape / data_offsets / dtype) is
+    /// refused loudly. The loader previously fabricated defaults ([1] / [0, 4) / F32), which
+    /// let a corrupt header validate against invented offsets and load garbage silently.
+    /// </summary>
+    [Fact]
+    public void TestSafeTensorMissingMetadataFailsLoudly()
+    {
+        static byte[] Build(string headerJson, int payloadBytes)
+        {
+            var headerBytes = System.Text.Encoding.UTF8.GetBytes(headerJson);
+            return [.. BitConverter.GetBytes((long)headerBytes.Length), .. headerBytes, .. new byte[payloadBytes]];
+        }
+
+        var noOffsets = Build("{\"w\":{\"dtype\":\"F32\",\"shape\":[1]}}", 4);
+        var exOffsets = Assert.Throws<InvalidOperationException>(
+            () => SafeTensorLoader.ParseSafeTensorBytes(noOffsets));
+        Assert.Contains("data_offsets", exOffsets.Message);
+        Assert.Contains("'w'", exOffsets.Message);
+
+        var noDtype = Build("{\"w\":{\"shape\":[1],\"data_offsets\":[0,4]}}", 4);
+        var exDtype = Assert.Throws<InvalidOperationException>(
+            () => SafeTensorLoader.ParseSafeTensorBytes(noDtype));
+        Assert.Contains("dtype", exDtype.Message);
+
+        var noShape = Build("{\"w\":{\"dtype\":\"F32\",\"data_offsets\":[0,4]}}", 4);
+        var exShape = Assert.Throws<InvalidOperationException>(
+            () => SafeTensorLoader.ParseSafeTensorBytes(noShape));
+        Assert.Contains("shape", exShape.Message);
+
+        // A rank-0 scalar's empty shape ("shape": []) is valid, not "missing" — it must load.
+        var scalar = Build("{\"s\":{\"dtype\":\"F32\",\"shape\":[],\"data_offsets\":[0,4]}}", 4);
+        var loaded = SafeTensorLoader.ParseSafeTensorBytes(scalar);
+        Assert.Empty(loaded.Single().Data.Shape.Dims);
     }
 
     /// <summary>

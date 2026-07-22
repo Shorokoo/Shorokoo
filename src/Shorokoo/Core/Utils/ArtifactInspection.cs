@@ -252,6 +252,15 @@ namespace Shorokoo
         /// <summary>Creation time as recorded (ISO-8601 UTC), or null when unrecorded.</summary>
         public string? CreatedUtc { get; }
 
+        /// <summary>Optional user-supplied provenance metadata recorded at save time (git
+        /// commit, dataset id, run name, license, and any other key/value pairs), or null when
+        /// the manifest carries none. Distinct from the auto <see cref="Producer"/> and
+        /// <see cref="CreatedUtc"/> fields. Reported exactly as recorded — values are preserved
+        /// raw here (control characters included); only <see cref="ArtifactInspection.ToString"/>
+        /// sanitizes them for display. Trusted as far as its writer: Inspect never interprets or
+        /// validates it, and it never affects a <see cref="Persistence.Load"/>.</summary>
+        public IReadOnlyDictionary<string, string>? UserMetadata { get; }
+
         /// <summary>The model registry, in manifest order.</summary>
         public IReadOnlyList<SkptModelSummary> Models { get; }
 
@@ -264,6 +273,7 @@ namespace Shorokoo
 
         internal SkptArtifactInfo(
             string? formatName, int skptVersion, string? producer, string? createdUtc,
+            IReadOnlyDictionary<string, string>? userMetadata,
             IReadOnlyList<SkptModelSummary> models, IReadOnlyList<SkptDataSummary> dataEntries,
             IReadOnlyList<string> mappingSetNames)
         {
@@ -271,6 +281,7 @@ namespace Shorokoo
             SkptVersion = skptVersion;
             Producer = producer;
             CreatedUtc = createdUtc;
+            UserMetadata = userMetadata;
             Models = models;
             DataEntries = dataEntries;
             MappingSetNames = mappingSetNames;
@@ -394,6 +405,24 @@ namespace Shorokoo
                   .Append(", created: ").Append(skpt.CreatedUtc ?? "<unrecorded>")
                   .Append(", producer: Shorokoo ").AppendLine(skpt.Producer ?? "<unknown>");
 
+                // User provenance metadata, kept visually distinct from the auto producer/
+                // created fields above. Both key and value are file-derived, so both are
+                // sanitized (control characters stripped) before they reach an output line —
+                // a hostile value must not be able to forge a line here.
+                if (skpt.UserMetadata is { Count: > 0 } userMeta)
+                {
+                    sb.Append("  user metadata (").Append(userMeta.Count).AppendLine(", as recorded):");
+                    // Cap the listing like the model/data/tensor listings: a hostile manifest
+                    // can carry a very large metadata map (bounded only by the config-read cap),
+                    // and the human summary must stay bounded.
+                    foreach (var (key, value) in userMeta.Take(MaxListedTensors))
+                        sb.Append("    ").Append(SanitizeForDisplay(key)).Append(": ")
+                          .AppendLine(SanitizeForDisplay(value));
+                    if (userMeta.Count > MaxListedTensors)
+                        sb.Append("    … and ").Append(userMeta.Count - MaxListedTensors)
+                          .AppendLine(" more");
+                }
+
                 sb.Append("  models (").Append(skpt.Models.Count).AppendLine("):");
                 AppendItemList(sb, skpt.Models, indent: "    ");
                 sb.Append("  data entries (").Append(skpt.DataEntries.Count)
@@ -440,6 +469,32 @@ namespace Shorokoo
             if (tensors.Count > MaxListedTensors)
                 sb.Append(indent).Append("… and ").Append(tensors.Count - MaxListedTensors)
                   .AppendLine(" more");
+        }
+
+        /// <summary>
+        /// Renders a file-derived string safe to embed in the multi-line human-readable
+        /// summary: every C0 control character (U+0000–U+001F, including CR/LF/TAB), the DEL
+        /// character (U+007F), and every C1 control character (U+0080–U+009F) is replaced with
+        /// the Unicode replacement character U+FFFD. Stripping the line and field separators
+        /// this way keeps a hostile metadata value (or key) from forging a line — injecting a
+        /// newline to fake a producer/observation line, or a carriage return to overwrite one —
+        /// while leaving all ordinary printable text (including non-Latin scripts) untouched.
+        /// The structured properties keep the raw value; only this display path sanitizes.
+        /// </summary>
+        private static string SanitizeForDisplay(string value)
+        {
+            int bad = -1;
+            for (int i = 0; i < value.Length; i++)
+                if (IsControl(value[i])) { bad = i; break; }
+            if (bad < 0) return value;   // common case: nothing to sanitize, no allocation
+
+            var chars = value.ToCharArray();
+            for (int i = bad; i < chars.Length; i++)
+                if (IsControl(chars[i])) chars[i] = '\uFFFD';
+            return new string(chars);
+
+            // C0 (U+0000-U+001F, so CR/LF/TAB too), DEL (U+007F), and C1 (U+0080-U+009F).
+            static bool IsControl(char c) => c <= '\u001F' || c == '\u007F' || (c >= '\u0080' && c <= '\u009F');
         }
 
         /// <summary>Prints each item's ToString on its own indented line, eliding past
@@ -851,9 +906,16 @@ namespace Shorokoo
                 observations.Add($"… and {unreferenced - MaxZipEntryObservations} more entries " +
                     "not referenced by the manifest.");
 
+            // User metadata is carried through exactly as recorded — never interpreted,
+            // validated, or checked against the archive (it wires nothing). Values stay raw
+            // here; ToString sanitizes them for display. An empty bag reads as "no metadata".
+            var userMetadata = manifest.UserMetadata is { Count: > 0 } rawMetadata
+                ? new Dictionary<string, string>(rawMetadata, StringComparer.Ordinal)
+                : null;
+
             return new SkptArtifactInfo(
                 manifest.Format, manifest.SkptVersion, manifest.Producer?.Shorokoo,
-                manifest.CreatedUtc, models, dataEntries, mappingSetNames);
+                manifest.CreatedUtc, userMetadata, models, dataEntries, mappingSetNames);
         }
 
         // ---- Zstd frame (legacy v1 compressed layouts) ----

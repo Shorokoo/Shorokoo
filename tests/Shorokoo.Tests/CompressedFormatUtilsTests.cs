@@ -2244,6 +2244,201 @@ public class CompressedFormatUtilsCoverageTests
         }
     }
 
+    /// <summary>
+    /// Optional user provenance metadata (issue #87): the checkpoint builder accepts a
+    /// string→string bag — well-known keys (git commit, dataset id, run name, license)
+    /// surfaced as named parameters plus arbitrary pairs — recorded under the manifest's
+    /// dedicated <c>userMetadata</c> key and echoed by Inspect, distinct from the auto
+    /// producer/created fields. The metadata is purely informational: a checkpoint saved
+    /// with it loads and binds identically to one saved without, and supplying none leaves
+    /// the output byte-identical (the key is simply absent). Every supplied key/value
+    /// round-trips through save → inspect unchanged, and because values are echoed into the
+    /// human-readable summary, a value bearing control characters is sanitized in
+    /// <c>ToString()</c> — it cannot forge a line — while the structured property keeps it raw.
+    /// </summary>
+    [Fact]
+    public void TestSkptUserProvenanceMetadata()
+    {
+        var (model, numOut, input) = BuildSkptModel();
+        var plainPath = Path.Combine(TempDir, "provenance_plain.skpt");
+        var metaPath = Path.Combine(TempDir, "provenance_meta.skpt");
+        try
+        {
+            // ── No metadata → the manifest carries no userMetadata key, and Inspect reports
+            // none. Byte-identity of the no-metadata output is proven deterministically at the
+            // serialization boundary (the file's createdUtc/zip timestamps are not): declaring
+            // the nullable field changes nothing when it is left null, because the manifest
+            // serializer omits nulls — so a null field and an absent field are the same bytes.
+            Persistence.From(model).WithModel().WithWeights().Save(plainPath);
+            var plainEntries = ReadZipEntries(plainPath);
+            var plainConfig = plainEntries[SkptFileFormat.ConfigEntryName];
+            Assert.DoesNotContain("userMetadata", System.Text.Encoding.UTF8.GetString(plainConfig));
+
+            SkptManifest Template() => new()
+            {
+                Format = SkptFileFormat.FormatName,
+                SkptVersion = SkptFileFormat.CurrentVersion,
+                CreatedUtc = "2026-07-22T00:00:00Z",
+                Producer = new SkptProducerInfo { Shorokoo = "x" },
+            };
+            var absentBytes = SkptFileFormat.SerializeManifest(Template());
+            var withNull = Template();
+            withNull.UserMetadata = null;
+            Assert.Equal(absentBytes, SkptFileFormat.SerializeManifest(withNull));
+            Assert.DoesNotContain("userMetadata", System.Text.Encoding.UTF8.GetString(absentBytes));
+
+            var plainInspect = Persistence.Inspect(plainPath);
+            Assert.Equal(ArtifactKind.SkptCheckpoint, plainInspect.Kind);
+            Assert.Null(plainInspect.Skpt!.UserMetadata);
+            Assert.DoesNotContain("user metadata", plainInspect.ToString());
+
+            // ── With metadata: well-known keys as named parameters + arbitrary extra pairs,
+            // and a named parameter overriding a same-key entry in the map.
+            var extra = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["experiment"] = "ablation-7",
+                [SkptFileFormat.MetadataLicenseKey] = "OVERRIDDEN",   // named param wins below
+            };
+            Persistence.From(model).WithModel().WithWeights()
+                .WithMetadata(extra,
+                    gitCommit: "9f3c1ba",
+                    datasetId: "imagenet-1k@v2",
+                    runName: "nightly-run-42",
+                    license: "Apache-2.0")
+                .Save(metaPath);
+
+            // The manifest records every key under the dedicated userMetadata key.
+            var metaEntries = ReadZipEntries(metaPath);
+            var metaManifest = SkptFileFormat.ParseManifest(
+                metaEntries[SkptFileFormat.ConfigEntryName], metaPath);
+            var recorded = metaManifest.UserMetadata!;
+            Assert.Equal("9f3c1ba", recorded[SkptFileFormat.MetadataGitCommitKey]);
+            Assert.Equal("imagenet-1k@v2", recorded[SkptFileFormat.MetadataDatasetIdKey]);
+            Assert.Equal("nightly-run-42", recorded[SkptFileFormat.MetadataRunNameKey]);
+            Assert.Equal("Apache-2.0", recorded[SkptFileFormat.MetadataLicenseKey]);   // override applied
+            Assert.Equal("ablation-7", recorded["experiment"]);
+
+            // Inspect echoes every key/value in the structured property, round-tripped
+            // unchanged, and distinct from the producer/created fields it also reports.
+            var metaInspect = Persistence.Inspect(metaPath);
+            Assert.Equal(ArtifactKind.SkptCheckpoint, metaInspect.Kind);
+            var userMeta = metaInspect.Skpt!.UserMetadata!;
+            Assert.NotNull(userMeta);
+            Assert.Equal(5, userMeta.Count);
+            foreach (var (k, v) in recorded)
+                Assert.Equal(v, userMeta[k]);
+            Assert.Empty(metaInspect.Observations);
+            // Producer/created remain their own, separate fields — metadata does not bleed in.
+            Assert.Equal(Shorokoo.ShorokooVersion.VersionString, metaInspect.Skpt.Producer);
+            Assert.False(userMeta.ContainsKey("shorokoo"));
+
+            // ToString renders each provenance pair on its own line, in a section distinct
+            // from the producer/created line.
+            var metaText = metaInspect.ToString();
+            Assert.Contains("user metadata", metaText);
+            Assert.Contains($"{SkptFileFormat.MetadataGitCommitKey}: 9f3c1ba", metaText);
+            Assert.Contains($"{SkptFileFormat.MetadataDatasetIdKey}: imagenet-1k@v2", metaText);
+            Assert.Contains($"{SkptFileFormat.MetadataRunNameKey}: nightly-run-42", metaText);
+            Assert.Contains($"{SkptFileFormat.MetadataLicenseKey}: Apache-2.0", metaText);
+            Assert.Contains("experiment: ablation-7", metaText);
+
+            // ── Load is identical with or without metadata: metadata wires nothing, so both
+            // checkpoints bind the same weights and execute bit-identically.
+            var plainLoaded = Persistence.Load(plainPath);
+            var metaLoaded = Persistence.Load(metaPath);
+            var plainWeights = WeightBytesByParam(plainLoaded);
+            var metaWeights = WeightBytesByParam(metaLoaded);
+            Assert.Equal(plainWeights.Count, metaWeights.Count);
+            foreach (var (paramId, bytes) in plainWeights)
+                Assert.Equal(bytes, metaWeights[paramId]);
+            var reference = ExecuteToBytes(model, numOut, input);
+            Assert.Equal(reference, ExecuteToBytes(plainLoaded, numOut, input));
+            Assert.Equal(reference, ExecuteToBytes(metaLoaded, numOut, input));
+
+            // ── Input guards: an empty key and a null value are rejected (the only structural
+            // checks; values are otherwise uninterpreted).
+            Assert.Throws<ArgumentException>(() =>
+                Persistence.From(model).WithMetadata(
+                    new Dictionary<string, string> { [""] = "v" }));
+            Assert.Throws<ArgumentNullException>(() =>
+                Persistence.From(model).WithMetadata(
+                    new Dictionary<string, string> { ["k"] = null! }));
+
+            // ── A large metadata map is rendered bounded: ToString lists at most the same cap
+            // as the other registries, then elides the rest (a hostile manifest could carry a
+            // very large map, bounded only by the config-read cap).
+            var bigPath = Path.Combine(TempDir, "provenance_big.skpt");
+            try
+            {
+                var big = new Dictionary<string, string>(StringComparer.Ordinal);
+                for (int i = 0; i < 200; i++) big[$"k{i:D3}"] = $"v{i}";
+                Persistence.From(model).WithModel().WithWeights().WithMetadata(big).Save(bigPath);
+                var bigInspect = Persistence.Inspect(bigPath);
+                Assert.Equal(200, bigInspect.Skpt!.UserMetadata!.Count);   // structured: all present
+                var bigText = bigInspect.ToString();
+                Assert.Contains("user metadata (200", bigText);
+                Assert.Contains("more", bigText);                          // rendering elided
+                // The rendered metadata lines are capped, not one-per-entry.
+                var metaLineCount = bigText.Split('\n').Count(l => l.TrimStart().StartsWith("k0"));
+                Assert.True(metaLineCount <= 50, $"expected <= 50 rendered keys, got {metaLineCount}");
+            }
+            finally
+            {
+                if (File.Exists(bigPath)) File.Delete(bigPath);
+            }
+
+            // ── Hostile value/key bearing control characters: preserved raw in the structured
+            // property, but sanitized in ToString so it cannot forge a line (an embedded
+            // newline+"note:" must not manufacture a fake observation line, a tab/NUL/C1 char
+            // must not survive into the rendered text).
+            var hostilePath = Path.Combine(TempDir, "provenance_hostile.skpt");
+            const string hostileValue = "clean\n  note: forged\ttab\u0000nul\u0085nel\u009Fc1\u007Fdel";
+            const string hostileKey = "e\nvil";
+            try
+            {
+                var hostile = new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    [SkptFileFormat.MetadataRunNameKey] = hostileValue,
+                    [hostileKey] = "hk",
+                };
+                Persistence.From(model).WithModel().WithWeights()
+                    .WithMetadata(hostile).Save(hostilePath);
+
+                var hostileInspect = Persistence.Inspect(hostilePath);
+                var hostileMeta = hostileInspect.Skpt!.UserMetadata!;
+                // Structured property keeps the value and key byte-for-byte, control chars intact.
+                Assert.Equal(hostileValue, hostileMeta[SkptFileFormat.MetadataRunNameKey]);
+                Assert.True(hostileMeta.ContainsKey(hostileKey));
+
+                var hostileText = hostileInspect.ToString();
+                // The embedded newline+"note:" did not manufacture a line; the raw control
+                // characters (newline-then-indent, tab) are gone from the rendered output.
+                Assert.DoesNotContain("\n  note: forged", hostileText);
+                Assert.DoesNotContain("forged\ttab", hostileText);
+                Assert.DoesNotContain("e\nvil", hostileText);
+                // C0, C1 and DEL control characters are all stripped from the rendered text.
+                Assert.DoesNotContain('\u0000', hostileText);   // C0 (NUL)
+                Assert.DoesNotContain('\u0085', hostileText);   // C1 (NEL)
+                Assert.DoesNotContain('\u009F', hostileText);   // C1
+                Assert.DoesNotContain('\u007F', hostileText);   // DEL
+                // Sanitized characters render as the Unicode replacement character.
+                Assert.Contains('�', hostileText);
+                // And loading still ignores the metadata entirely.
+                Assert.Equal(reference,
+                    ExecuteToBytes(Persistence.Load(hostilePath), numOut, input));
+            }
+            finally
+            {
+                if (File.Exists(hostilePath)) File.Delete(hostilePath);
+            }
+        }
+        finally
+        {
+            if (File.Exists(plainPath)) File.Delete(plainPath);
+            if (File.Exists(metaPath)) File.Delete(metaPath);
+        }
+    }
+
     // ──────────────────────────────────────────────────────────────────────
     // SafeTensors weight exchange (issue #74): ExportSafeTensors writes a
     // model's weights to a standard .safetensors file (canonical names or a

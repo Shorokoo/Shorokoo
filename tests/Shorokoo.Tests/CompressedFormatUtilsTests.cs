@@ -1222,6 +1222,18 @@ public class CompressedFormatUtilsCoverageTests
             Assert.Equal(ArtifactKind.NotRecognized, shortResult.Kind);
             Assert.Contains(shortResult.Observations, o => o.Contains("ends after"));
 
+            // Amplification guard: a small file declaring a near-cap (99 MB) header must
+            // yield the same structured result without the declaration costing 99 MB of
+            // allocation — the header buffer grows with what the stream delivers (here
+            // 200 KB), which also exercises the growth path across block boundaries.
+            var hugeDecl = new byte[8 + 200_000];
+            BitConverter.GetBytes(99_000_000L).CopyTo(hugeDecl, 0);
+            var hugePath = NextPath("inspect_huge_decl.zsafetensor");
+            File.WriteAllBytes(hugePath, CompressedFormatUtils.Compress(hugeDecl));
+            var hugeResult = Checkpoint.Inspect(hugePath);
+            Assert.Equal(ArtifactKind.NotRecognized, hugeResult.Kind);
+            Assert.Contains(hugeResult.Observations, o => o.Contains("ends after 200000"));
+
             // The .zsafetensor probe must not disturb legacy-.srk recognition: a
             // single-Zstd legacy graph still sniffs as such (its decompressed prefix
             // never declares a plausible header length).

@@ -508,11 +508,26 @@ namespace Shorokoo
             if (headerLen <= 0 || headerLen > MaxSafeTensorsHeaderBytes)
                 return null;
 
-            var headerBytes = new byte[headerLen];
-            int headerRead;
+            // Read the header through the stream with a growing buffer instead of allocating
+            // the declared length up front: unlike the uncompressed path, headerLen has no
+            // file-size bound here, so a tiny hostile file declaring a 100 MB header must not
+            // cost a 100 MB allocation — memory tracks what the stream actually delivers.
+            var headerBytes = new byte[(int)Math.Min(headerLen, 64 * 1024)];
+            int headerRead = 0;
             try
             {
-                headerRead = ds.ReadAtLeast(headerBytes, headerBytes.Length, throwOnEndOfStream: false);
+                while (headerRead < headerLen)
+                {
+                    if (headerRead == headerBytes.Length)
+                    {
+                        var grown = new byte[(int)Math.Min(headerLen, (long)headerBytes.Length * 4)];
+                        headerBytes.CopyTo(grown, 0);
+                        headerBytes = grown;
+                    }
+                    int n = ds.Read(headerBytes, headerRead, headerBytes.Length - headerRead);
+                    if (n == 0) break;   // clean end of the decompressed stream
+                    headerRead += n;
+                }
             }
             catch (Exception e) when (e is ZstdException or InvalidDataException or EndOfStreamException)
             {

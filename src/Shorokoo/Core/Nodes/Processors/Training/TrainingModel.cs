@@ -299,12 +299,14 @@ namespace Shorokoo
     /// The TrainingStepPureGraph contains no embedded state (no trainable parameters, no model
     /// state). All state flows through inputs and outputs as TensorStructs:
     /// 
-    /// Inputs:  trainable_params, model_state, optimizer_state, [hyperparams], training_inputs, training_targets
+    /// Inputs:  trainable_params, model_state, optimizer_state, [hyperparams], [step], training_inputs, training_targets
     /// Outputs: updated_trainable_params, updated_model_state, updated_optimizer_state, loss
     ///
-    /// Optimizer hyperparameters are baked in as constants by default; any subset can instead be
-    /// routed as a runtime "hyperparams" input (see <see cref="HyperparamStructDef"/>) so a schedule
-    /// can vary them per step without recompiling.
+    /// Optimizer hyperparameters are baked in as constants by default. A scheduled hyperparameter
+    /// (a built-in <see cref="Schedule"/> or a scheduler module) is instead computed in-graph from the
+    /// int64 "step" counter input each step — no recompilation and no host evaluation. A schedule-less
+    /// <see cref="HyperValue.Runtime"/> hyperparameter is routed as a runtime "hyperparams" input (see
+    /// <see cref="HyperparamStructDef"/>) and supplied explicitly per step.
     ///
     /// The training loop calls TrainStep repeatedly, passing updated state from one step to the next.
     /// </summary>

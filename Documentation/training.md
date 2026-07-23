@@ -110,7 +110,7 @@ public TrainingResult Fit(  // alias: Train(...)
 ```
 
 Result types:
-- `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step; advances each `TrainStep`, so schedules resume from a saved checkpoint).
+- `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (the training loop advances them — `TrainStep` carries them through unchanged; default `0`).
 - `TrainingStepResult` → `.Checkpoint`, `.Loss`.
 - `TrainingResult` → `.FinalCheckpoint`, `.EpochLosses`.
 
@@ -131,8 +131,8 @@ resumed run continues exactly). Pass
 ## Save and resume a checkpoint (across process restarts)
 
 A `TrainingCheckpoint` holds the full training state — trainable params, model
-state, optimizer state, and the global step. Save one to disk and resume from it
-in a later run:
+state, optimizer state, and the host-owned run counters (global step, epoch, batch
+index). Save one to disk and resume from it in a later run:
 
 ```csharp
 // Save mid-training (e.g. every N steps, or at the end of an epoch):
@@ -146,7 +146,9 @@ var ckpt = rig.LoadCheckpoint("run.safetensors");   // params + optimizer moment
 var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it left off
 ```
 
-- The file is a single SafeTensors file (every param/state field plus the step).
+- The file is a single SafeTensors file (every param/state field plus the run
+  counters — step, epoch, batch index). A checkpoint written before epoch/batch
+  existed loads them as `0`.
 - For the **native `.skpt` container** instead — the training state split into
   per-kind data entries alongside the concrete inference model, with the container's
   inspectable manifest, per-entry Zstd, and provenance metadata — save with
@@ -163,8 +165,9 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
 - `TrainingCheckpoint.Load(path, trainableDef, modelStateDef, optimizerStateDef)`
   is the lower-level static form if you hold the struct defs without a rig;
   `rig.LoadCheckpoint(path)` just passes the rig's defs to it.
-- To see what a checkpoint file holds (step, per-section tensor listing) without
-  loading it — or to identify an unknown file — use `Persistence.Inspect(path)`;
+- To see what a checkpoint file holds (the run counters — step, epoch, batch index —
+  and the per-section tensor listing) without loading it — or to identify an unknown
+  file — use `Persistence.Inspect(path)`;
   see [onnx-and-weights.md](onnx-and-weights.md#identify-and-summarize-a-file-checkpointinspect).
 
 ### Keep only the last N checkpoints (rotation)

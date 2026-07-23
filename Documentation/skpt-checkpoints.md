@@ -26,7 +26,8 @@ Related: [onnx-and-weights.md](onnx-and-weights.md) · [training.md](training.md
   (e.g. an `ema` set alongside `default`), selected at load time — see
   [Named weight sets](#named-weight-sets-default--ema).
 - A `.skpt` can also persist a **training checkpoint** — the trainable weights, model
-  state, optimizer state and global step of a training run — with the state split into
+  state, optimizer state and the run counters (global step, epoch, batch index) of a
+  training run — with the state split into
   separate per-kind `data/` entries alongside the concrete inference model, so a run
   resumes across process restarts and the same file also loads as an inference model. See
   [Training checkpoints](#training-checkpoints). Precompiled artifacts and the full
@@ -113,11 +114,15 @@ What the file carries:
   omitted for a stateless model) and the optimizer state
   (`data/optimizer_state.safetensors`, omitted for a stateless optimizer like plain SGD).
   Each entry stores its kind's tensors keyed by struct field name.
-- **The global step** and which data entry holds each kind, recorded in the manifest's
-  `training` block (so `Persistence.Inspect` reports them without reading tensor data).
+- **The run counters** — the global step, plus the epoch and batch index — and which data
+  entry holds each kind, recorded in the manifest's `training` block (so `Persistence.Inspect`
+  reports them without reading tensor data). Step, epoch and batch index are host-owned: the
+  training loop advances them (`TrainStep` advances the step and carries epoch/batch through
+  unchanged), and they are persisted so a resumed run restores its position. Checkpoints written
+  before epoch/batch existed load with those counters defaulting to `0`.
 
 Round-trip is exact: reloaded trainable params, model state and optimizer state are
-bit-identical, the step is preserved, and a resumed `TrainStep` reproduces the pre-save
+bit-identical, the counters are preserved, and a resumed `TrainStep` reproduces the pre-save
 trajectory. Loading validates against the rig's struct definitions with the same fail-loud
 contract as the legacy flat format — a checkpoint from a different model or optimizer, a
 missing kind, a rank mismatch, or a tampered entry (sha256) fails loudly.
@@ -304,7 +309,7 @@ model.skpt
 - A [training checkpoint](#training-checkpoints) adds more `data/` entries — one per
   training-state kind (`data/trainable.safetensors`, and, when non-empty,
   `data/model_state.safetensors` and `data/optimizer_state.safetensors`) — and a
-  `training` block in the manifest.
+  `training` block in the manifest (the run counters: step, epoch, batch index).
 - The trees are optional and the layout is extensible: future versions add more
   `models/` entries, more `data/` kinds, `precompiledmodels/`, and `sample_inputs/`
   without a container change.
@@ -377,11 +382,15 @@ model.skpt
   },
 
   // Training block: present only in a training checkpoint (omitted for an inference
-  // checkpoint). Records the global step and which data entry holds each state kind —
-  // an empty kind (e.g. model state for a stateless model) is absent and has no entry.
+  // checkpoint). Records the host-owned run counters (step, epoch, batch index) and which
+  // data entry holds each state kind — an empty kind (e.g. model state for a stateless
+  // model) is absent and has no entry. epoch/batchIndex are add-only: a checkpoint written
+  // before they existed omits them and reads them back as 0.
   "training": {
     "checkpointVersion": 1,
     "step": 42,
+    "epoch": 3,
+    "batchIndex": 17,
     "kinds": {
       "trainableParams": "trainable",         // → data/trainable.safetensors (also the default set)
       "modelState": "model_state",            // → data/model_state.safetensors

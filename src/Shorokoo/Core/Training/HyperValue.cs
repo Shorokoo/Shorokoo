@@ -1,5 +1,6 @@
 using System;
 using Shorokoo.Core.Training;
+using Shorokoo.Graph;
 
 namespace Shorokoo
 {
@@ -15,10 +16,17 @@ namespace Shorokoo
     /// hyperparameters (e.g. AdamW's betas).
     /// </description></item>
     /// <item><description>
-    /// A <see cref="Schedule"/> (implicitly converted) is <b>scheduled</b>: it flows as a runtime
-    /// input and the rig evaluates it at the checkpoint's step on every
-    /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, Shorokoo.Runtime.CompiledGraph)"/>.
-    /// The graph compiles once; the value can change every step.
+    /// A built-in <see cref="Schedule"/> (implicitly converted) is <b>scheduled in-graph</b>: the
+    /// rig lowers it to graph math (<c>ScheduleLowering</c>) and inlines it into the training-step
+    /// graph as a pure function of the int64 step counter, so the value is recomputed on the engine
+    /// each step with no host evaluation. The graph compiles once; the schedule is a durable graph
+    /// constituent that resumes from a checkpoint's step alone.
+    /// </description></item>
+    /// <item><description>
+    /// A <b>scheduler module</b> (via <see cref="Scheduled(ComputationGraph)"/>) covers anything the
+    /// built-ins don't: a Shorokoo module graph taking the int64 scalar step counter as input and
+    /// producing the scheduled float32 scalar value, inlined into the training-step graph just like
+    /// a built-in schedule. Its signature is validated at rig build.
     /// </description></item>
     /// <item><description>
     /// <see cref="Runtime"/> marks the hyperparameter dynamic but <i>schedule-less</i>: the rig
@@ -30,28 +38,48 @@ namespace Shorokoo
     ///
     /// This mirrors how Keras (<c>Adam(learning_rate=schedule)</c>) and Optax
     /// (<c>adamw(learning_rate=schedule)</c>) let the value's type decide constant-vs-scheduled.
+    /// There is deliberately no API that accepts an arbitrary host lambda: a compiled closure has
+    /// no durable graph representation, so schedules come only from the built-in factories/combinators
+    /// or a scheduler module.
     /// </summary>
     public readonly struct HyperValue
     {
         private readonly float _value;
         private readonly Schedule? _schedule;
+        private readonly ComputationGraph? _schedulerModule;
         private readonly bool _isDynamic;
 
-        private HyperValue(float value, Schedule? schedule, bool isDynamic)
+        private HyperValue(float value, Schedule? schedule, ComputationGraph? schedulerModule, bool isDynamic)
         {
             _value = value;
             _schedule = schedule;
+            _schedulerModule = schedulerModule;
             _isDynamic = isDynamic;
         }
 
         /// <summary>A fixed value baked into the graph as a constant.</summary>
-        public static HyperValue Constant(float value) => new(value, null, isDynamic: false);
+        public static HyperValue Constant(float value) => new(value, null, null, isDynamic: false);
 
-        /// <summary>A scheduled value evaluated at the current step on every training step.</summary>
+        /// <summary>
+        /// A built-in <see cref="Schedule"/>, lowered to graph math and evaluated in-graph from the
+        /// step counter each training step.
+        /// </summary>
         public static HyperValue Scheduled(Schedule schedule)
         {
             if (schedule is null) throw new ArgumentNullException(nameof(schedule));
-            return new HyperValue(schedule.At(0), schedule, isDynamic: true);
+            return new HyperValue(schedule.At(0), schedule, null, isDynamic: true);
+        }
+
+        /// <summary>
+        /// A user-supplied scheduler <b>module</b> — a Shorokoo module graph taking the int64 scalar
+        /// step counter as its single input and producing the scheduled float32 scalar value. Inlined
+        /// into the training-step graph as a constituent; its signature is validated at rig build.
+        /// Use this for schedules the built-in <see cref="Schedules"/> factories don't cover.
+        /// </summary>
+        public static HyperValue Scheduled(ComputationGraph schedulerModule)
+        {
+            if (schedulerModule is null) throw new ArgumentNullException(nameof(schedulerModule));
+            return new HyperValue(0f, null, schedulerModule, isDynamic: true);
         }
 
         /// <summary>
@@ -59,26 +87,29 @@ namespace Shorokoo
         /// supply it explicitly each step (see <see cref="TrainingRig.MakeHyperparams(float)"/>).
         /// <paramref name="seed"/> is used only to seed shape inference / graph optimization.
         /// </summary>
-        public static HyperValue Runtime(float seed = 0f) => new(seed, null, isDynamic: true);
+        public static HyperValue Runtime(float seed = 0f) => new(seed, null, null, isDynamic: true);
 
-        /// <summary>Whether this hyperparameter flows as a runtime input (scheduled or manual) rather than a baked constant.</summary>
+        /// <summary>Whether this hyperparameter flows as a runtime/in-graph value rather than a baked constant.</summary>
         public bool IsDynamic => _isDynamic;
 
-        /// <summary>The schedule driving this value, or <c>null</c> when baked or schedule-less runtime.</summary>
+        /// <summary>The built-in schedule driving this value, or <c>null</c> when baked, a scheduler module, or schedule-less runtime.</summary>
         public Schedule? AsSchedule => _schedule;
+
+        /// <summary>The user scheduler module driving this value, or <c>null</c> when it is not a scheduler-module hyperparameter.</summary>
+        public ComputationGraph? AsSchedulerModule => _schedulerModule;
 
         /// <summary>
         /// The value used to seed shape inference / graph optimization (and the baked constant
-        /// when not dynamic): the schedule's step-0 value when scheduled, else the stored value.
+        /// when not dynamic): the built-in schedule's step-0 value when scheduled, else the stored
+        /// value. For a scheduler module the step-0 value is only known by executing the module, so
+        /// this returns the stored seed (0); the rig feeds the real step counter for the in-graph value.
         /// </summary>
         public float InitialValue => _schedule is not null ? _schedule.At(0) : _value;
 
         /// <summary>A plain float is a baked-in <see cref="Constant"/> hyperparameter.</summary>
         public static implicit operator HyperValue(float value) => Constant(value);
-        /// <summary>A <see cref="Schedule"/> becomes a <see cref="Scheduled"/> hyperparameter.</summary>
+        /// <summary>A <see cref="Schedule"/> becomes a <see cref="Scheduled(Schedule)"/> hyperparameter.</summary>
         public static implicit operator HyperValue(Schedule schedule) => Scheduled(schedule);
-        /// <summary>A step → value function becomes a <see cref="Scheduled"/> hyperparameter.</summary>
-        public static implicit operator HyperValue(Func<int, float> schedule) => Scheduled(new Schedule(schedule));
     }
 
     /// <summary>

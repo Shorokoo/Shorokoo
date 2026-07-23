@@ -371,6 +371,131 @@ public class CoreUtilsCoverageTests
         AtomicFileWriter.WriteFile(
             path, s => s.Write(System.Text.Encoding.UTF8.GetBytes(content)), onWarning);
 
+    /// <summary>Writes series member <c>{prefix}{index}{suffix}</c> in <paramref name="dir"/> with retain-last-N rotation.</summary>
+    private static string WriteSeriesMember(
+        string dir, string prefix, int index, string suffix, int keep, Action<string>? onWarning = null)
+    {
+        var path = Path.Combine(dir, $"{prefix}{index}{suffix}");
+        AtomicFileWriter.WriteFile(
+            path,
+            s => s.Write(System.Text.Encoding.UTF8.GetBytes($"content-{index}")),
+            AtomicFileWriter.RetainPolicy.KeepLast(keep, prefix, suffix),
+            onWarning);
+        return path;
+    }
+
+    private static int[] SurvivingIndices(string dir, string prefix, string suffix) =>
+        Directory.GetFiles(dir, $"{prefix}*{suffix}")
+            .Select(Path.GetFileName)
+            .Where(n => n!.StartsWith(prefix, StringComparison.Ordinal) && n.EndsWith(suffix, StringComparison.Ordinal))
+            .Select(n => n!.Substring(prefix.Length, n.Length - prefix.Length - suffix.Length))
+            .Where(t => t.Length > 0 && t.All(char.IsAsciiDigit))
+            .Select(int.Parse)
+            .OrderBy(i => i)
+            .ToArray();
+
+    /// <summary>
+    /// Retain-last-N rotation on the atomic writer: after a commit it keeps exactly the N
+    /// highest-indexed members of the series and deletes the rest, ordering by the integer token
+    /// in each name — so <c>ckpt-10</c> outranks <c>ckpt-9</c> (a lexicographic sort would keep the
+    /// wrong one). It never touches files outside the series: a non-matching prefix, a non-numeric
+    /// token, an empty token, and a staged <c>.tmp-</c> sibling all survive, as does the entry just
+    /// committed.
+    /// </summary>
+    [Fact]
+    public void TestAtomicFileWriterRotationKeepsLastNCoverage()
+    {
+        var dir = NewScratchDir();
+        const string prefix = "ckpt-";
+        const string suffix = ".safetensors";
+        try
+        {
+            // Sequential saves with keep=3: each commit prunes the series down to its three
+            // highest indices. Writing 0..11 in order must leave exactly {9,10,11} — and the
+            // 9-vs-10 boundary is where a lexicographic ("10" < "9") sort would delete the wrong
+            // file.
+            for (int i = 0; i <= 11; i++)
+            {
+                var written = WriteSeriesMember(dir, prefix, i, suffix, keep: 3);
+                Assert.True(File.Exists(written)); // the just-committed member is never rotated out
+            }
+            int[] afterSequential = [9, 10, 11];
+            Assert.Equal(afterSequential, SurvivingIndices(dir, prefix, suffix));
+
+            // Clear the series and start the hostile-ordering scenario from a clean slate.
+            foreach (var f in Directory.GetFiles(dir, $"{prefix}*{suffix}")) File.Delete(f);
+
+            // Pre-plant a hostile mix, then one rotating write of index 20 with keep=3. Ordering is
+            // by integer, so survivors are the three largest series indices {10, 12, 20}; the small
+            // indices go. A lexicographic keep-newest-3 would have retained "9"/"2" and dropped "10".
+            int[] planted = [2, 9, 10, 12];
+            foreach (var idx in planted)
+                File.WriteAllText(Path.Combine(dir, $"{prefix}{idx}{suffix}"), "planted");
+            // Files that are NOT members of the series — must all survive rotation.
+            var otherPrefix  = Path.Combine(dir, $"other-5{suffix}");              // different prefix
+            var nonNumeric   = Path.Combine(dir, $"{prefix}abc{suffix}");          // non-numeric token
+            var emptyToken   = Path.Combine(dir, $"{prefix}{suffix}");             // empty token
+            var stagedTemp   = Path.Combine(dir, $".tmp-{prefix}7{suffix}");       // staged temp shape
+            var wrongSuffix  = Path.Combine(dir, $"{prefix}8.other");              // different suffix
+            string[] nonMembers = [otherPrefix, nonNumeric, emptyToken, stagedTemp, wrongSuffix];
+            foreach (var p in nonMembers)
+                File.WriteAllText(p, "not-a-member");
+
+            var committed = WriteSeriesMember(dir, prefix, 20, suffix, keep: 3);
+
+            int[] afterHostile = [10, 12, 20];
+            Assert.Equal(afterHostile, SurvivingIndices(dir, prefix, suffix));
+            Assert.True(File.Exists(committed));           // just-committed survives
+            Assert.False(File.Exists(Path.Combine(dir, $"{prefix}9{suffix}")));  // integer order: 9 < 10,12,20
+            Assert.False(File.Exists(Path.Combine(dir, $"{prefix}2{suffix}")));
+            // Everything outside the managed series is untouched.
+            Assert.True(File.Exists(otherPrefix));
+            Assert.True(File.Exists(nonNumeric));
+            Assert.True(File.Exists(emptyToken));
+            Assert.True(File.Exists(stagedTemp));
+            Assert.True(File.Exists(wrongSuffix));
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    /// <summary>
+    /// A rotation failure never fails the save: the new checkpoint is already committed before
+    /// rotation runs, so a fault thrown during rotation leaves the new file in place, leaves the
+    /// old members unpruned, and surfaces only through <c>onWarning</c> (never as a throw).
+    /// </summary>
+    [Fact]
+    public void TestAtomicFileWriterRotationFailureIsIsolatedCoverage()
+    {
+        var dir = NewScratchDir();
+        const string prefix = "ckpt-";
+        const string suffix = ".safetensors";
+        try
+        {
+            // Seed three members with rotation off (keep large enough to prune nothing).
+            for (int i = 0; i < 3; i++) WriteSeriesMember(dir, prefix, i, suffix, keep: 10);
+
+            var warnings = new List<string>();
+            AtomicFileWriter.RotationFaultInjection = p =>
+            {
+                if (p.StartsWith(dir, StringComparison.Ordinal)) throw new IOException("injected rotation crash");
+            };
+            string committed;
+            try
+            {
+                // keep=1 would normally prune 0,1,2 — but rotation throws, so nothing is pruned and
+                // the save still succeeds (no exception propagates).
+                committed = WriteSeriesMember(dir, prefix, 3, suffix, keep: 1, onWarning: warnings.Add);
+            }
+            finally { AtomicFileWriter.RotationFaultInjection = null; }
+
+            Assert.True(File.Exists(committed));                                  // save committed despite rotation failure
+            int[] unpruned = [0, 1, 2, 3];
+            Assert.Equal(unpruned, SurvivingIndices(dir, prefix, suffix)); // nothing pruned
+            Assert.Contains(warnings, w => w.Contains("rotation failed") && w.Contains("injected rotation crash"));
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
     /// <summary>
     /// The single-file commit protocol: a successful save lands the content with no staged
     /// <c>.tmp-</c> sibling left behind; a failure injected in the crash window between write

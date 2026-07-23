@@ -603,7 +603,7 @@ public class TrainingRigCoverageTests
             .ToArray();
 
     /// <summary>
-    /// Covers <see cref="TrainingCheckpoint.Save"/> / <see cref="TrainingRig.LoadCheckpoint"/>
+    /// Covers <see cref="TrainingCheckpoint.Save(string)"/> / <see cref="TrainingRig.LoadCheckpoint"/>
     /// (and the static <see cref="TrainingCheckpoint.Load"/> they delegate to): a checkpoint must
     /// survive a save → "fresh process" (a brand-new rig + compiled graph from the same graphs) →
     /// load, with the global step, trainable params, model state, and optimizer state all restored
@@ -694,6 +694,85 @@ public class TrainingRigCoverageTests
     }
 
     /// <summary>
+    /// Covers the retain-last-N rotating save (issue #49) on the real training-checkpoint caller:
+    /// <see cref="TrainingCheckpoint.Save(string, string, string, int, System.Action{string})"/> and
+    /// its <see cref="Persistence.SaveTrainingCheckpoint(TrainingCheckpoint, string, string, string, int, System.Action{string})"/>
+    /// facade. Saving successive checkpoints as the step advances keeps exactly the N most recent,
+    /// ordered by the step encoded in each name — so step 10 outranks step 9 (a lexicographic sort
+    /// would delete the wrong one) — and the newest survivor still loads and resumes training.
+    /// </summary>
+    [Fact]
+    public void TestCheckpointRotationKeepLastNCoverage()
+    {
+        var sample = new NamedModelParam[]
+        {
+            new TensorDataModelParam("input", ModelParamType.InputParam,
+                TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+        };
+        TrainingRig AdamRig() => TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            AdamWOptimizer.ComputationGraph, sample,
+            new AdamWOptimizerHyperparameters { LearningRate = 0.1f });
+
+        var modelInputDef = new TensorStructDef(
+            new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32) }, "ModelInput");
+        var targetDef = new TensorStructDef(
+            new[] { new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32) }, "Target");
+        var inputBatch = new TensorDataStruct(modelInputDef,
+            new Dictionary<string, IData> { { "input", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }) } });
+        var targetBatch = new TensorDataStruct(targetDef,
+            new Dictionary<string, IData> { { "targets", TensorData([4L], new float[] { 2f, 4f, 6f, 8f }) } });
+
+        const string prefix = "ckpt-";
+        const string suffix = ".safetensors";
+        var dir = Path.Combine(Path.GetTempPath(), $"shrk_ckpt_rot_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var ctx = new ComputeContext();
+            var rig = AdamRig();
+            var compiled = ctx.Compile(rig.TrainingStepPureGraph);
+            var ckpt = rig.CreateDefaultCheckpoint();
+
+            // A non-series sibling that rotation must never touch.
+            var bystander = Path.Combine(dir, "notes.txt");
+            File.WriteAllText(bystander, "keep me");
+
+            // Save at steps 0..10, keeping the 3 most recent. The 9->10 boundary is exactly where a
+            // lexicographic ("10" < "9") sort would keep the wrong file. Save through the
+            // TrainingCheckpoint overload for even steps and the Persistence facade for odd steps so
+            // both entry points are exercised.
+            string lastPath = "";
+            for (int step = 0; step <= 10; step++)
+            {
+                Assert.Equal(step, ckpt.Step);
+                lastPath = step % 2 == 0
+                    ? ckpt.Save(dir, prefix, suffix, keepLast: 3)
+                    : Persistence.SaveTrainingCheckpoint(ckpt, dir, prefix, suffix, keepLast: 3);
+                Assert.Equal(Path.Combine(dir, $"{prefix}{step}{suffix}"), lastPath);
+                if (step < 10)
+                    ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled).Checkpoint;
+            }
+
+            // Exactly the 3 highest steps survive — integer order, so step 10 is retained, not 9.
+            int[] survivors = Directory.GetFiles(dir, $"{prefix}*{suffix}")
+                .Select(p => int.Parse(Path.GetFileName(p)!["ckpt-".Length..^".safetensors".Length]))
+                .OrderBy(i => i)
+                .ToArray();
+            int[] expectedSurvivors = [8, 9, 10];
+            Assert.Equal(expectedSurvivors, survivors);
+            Assert.True(File.Exists(Path.Combine(dir, $"{prefix}10{suffix}")));
+            Assert.False(File.Exists(Path.Combine(dir, $"{prefix}7{suffix}")));
+            Assert.True(File.Exists(bystander)); // non-series file untouched
+
+            // The newest survivor loads and resumes from the right step.
+            var loaded = AdamRig().LoadCheckpoint(lastPath);
+            Assert.Equal(10, loaded.Step);
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    /// <summary>
     /// Covers the truncated-checkpoint diagnostic inherited from the SafeTensors loader:
     /// a checkpoint file cut short (interrupted download/copy, disk full) is refused by
     /// <see cref="TrainingRig.LoadCheckpoint"/> with an error naming truncation, the declared
@@ -728,7 +807,7 @@ public class TrainingRigCoverageTests
     }
 
     /// <summary>
-    /// Covers the atomic commit in <see cref="TrainingCheckpoint.Save"/> (via
+    /// Covers the atomic commit in <see cref="TrainingCheckpoint.Save(string)"/> (via
     /// <see cref="AtomicFileWriter"/>): a save that dies between writing the staged temp file
     /// and the rename leaves the previous checkpoint intact and loadable at the target path
     /// (never a truncated file); the stale temp from the failed save is swept by the next
@@ -791,7 +870,7 @@ public class TrainingRigCoverageTests
     }
 
     /// <summary>
-    /// <see cref="Persistence.Inspect"/> (issue #57) recognizes <see cref="TrainingCheckpoint.Save"/>
+    /// <see cref="Persistence.Inspect"/> (issue #57) recognizes <see cref="TrainingCheckpoint.Save(string)"/>
     /// output via the marker tensor and reports the checkpoint format version, the global step, and
     /// the per-section tensor listing — all matching what was written, from the SafeTensors header
     /// plus the marker's 16 bytes only (tensor payloads are never loaded). A SafeTensors file

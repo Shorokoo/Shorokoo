@@ -89,6 +89,20 @@ namespace Shorokoo.Onnx
             FromOnnxModelWithKindTag(Stream inputStream, string? externalDataDirectory = null)
         {
             var model = ProtoBuf.Serializer.Deserialize<IR.ModelProto>(inputStream);
+            return FromModelProtoWithKindTag(model, externalDataDirectory);
+        }
+
+        /// <summary>
+        /// Builds the graph from an already-deserialized <see cref="IR.ModelProto"/>: the
+        /// post-parse half of <see cref="FromOnnxModelWithKindTag(Stream, string?)"/>
+        /// (external-data materialization, the reader, signature-name restoration, and the
+        /// kind-tag consistency check). Split out so a boundary (e.g.
+        /// <c>Persistence.ImportOnnx</c>) can inspect or validate the proto between parsing
+        /// it and building the graph without re-deserializing.
+        /// </summary>
+        internal static (InternalComputationGraph Graph, Shorokoo.Graph.GraphKind? TaggedKind)
+            FromModelProtoWithKindTag(IR.ModelProto model, string? externalDataDirectory = null)
+        {
             OnnxExternalData.LoadIntoModel(model, externalDataDirectory);
             var taggedKind = Shorokoo.Core.Utils.SrkFileFormat.TryReadKindTag(model);
             var reader = new OnnxModelReader(model);

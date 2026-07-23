@@ -2955,4 +2955,280 @@ public class CompressedFormatUtilsCoverageTests
         }
     }
 
+    // ──────────────────────────────────────────────────────────────────────
+    // ONNX exchange boundary (issue #85): ExportOnnx writes a concrete model
+    // to a standard vanilla .onnx; ImportOnnx turns a foreign vanilla .onnx
+    // back into a native runnable graph (initializer names adopted as param
+    // identifiers at the boundary); ImportOnnxToCheckpoint lands it as .skpt.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// <summary>A float[4] ValueInfo for a third-party ONNX model's I/O.</summary>
+    private static ValueInfoProto OnnxFloatVec(string name, long len)
+    {
+        var shape = new TensorShapeProto();
+        shape.Dims.Add(new TensorShapeProto.Dimension { DimValue = len });
+        return new ValueInfoProto
+        {
+            Name = name,
+            Type = new TypeProto { TensorType = new TypeProto.Tensor { ElemType = 1, Shape = shape } },
+        };
+    }
+
+    private static byte[] OnnxFloatBytes(params float[] vals)
+    {
+        var bytes = new byte[vals.Length * sizeof(float)];
+        System.Buffer.BlockCopy(vals, 0, bytes, 0, bytes.Length);
+        return bytes;
+    }
+
+    /// <summary>A minimal third-party-style vanilla ONNX model: y = x + w, with w a plain
+    /// named initializer (no Shorokoo metadata — exactly what a foreign exporter writes).</summary>
+    private static ModelProto BuildForeignAddModel(string initName, float[] wVals)
+    {
+        var g = new GraphProto { Name = "foreign" };
+        g.Inputs.Add(OnnxFloatVec("x", wVals.Length));
+        g.Initializers.Add(new TensorProto
+        {
+            Name = initName, data_type = 1, Dims = [wVals.Length], RawData = OnnxFloatBytes(wVals),
+        });
+        var add = new NodeProto { OpType = "Add", Name = "add0" };
+        add.Inputs.AddRange(["x", initName]);
+        add.Outputs.Add("y");
+        g.Nodes.Add(add);
+        g.Outputs.Add(OnnxFloatVec("y", wVals.Length));
+        var model = new ModelProto { IrVersion = 10, Graph = g };
+        model.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+        return model;
+    }
+
+    private static string WriteOnnx(string path, ModelProto model)
+    {
+        using var fs = File.Create(path);
+        ProtoBuf.Serializer.Serialize(fs, model);
+        return path;
+    }
+
+    private static float[] RunFloatVecModel(ComputationGraph graph, params float[] x)
+    {
+        IData[] inputs = [TensorData(DType.Float32, [(long)x.Length], x.Cast<object>().ToArray())];
+        return ((TensorData<float32>)ComputeContext.Default.Execute(graph, inputs)[0].ToTensorData())
+            .AccessMemory().ToArray();
+    }
+
+    /// <summary>
+    /// The acceptance round-trip against export at the concrete-inference level: a
+    /// weight-filled concrete model exports to a standard vanilla .onnx and re-imports to a
+    /// runnable concrete model whose outputs match the original on a sample input. Vanilla
+    /// ONNX is lossy by design (module structure/hyper defaults are dropped), so this is
+    /// value-level parity, not a structural round-trip. The exported file is also loadable
+    /// by the low-level importer directly — proof it is standard, not a Shorokoo dialect.
+    /// </summary>
+    [Fact]
+    public void TestOnnxExportImportRoundTrip()
+    {
+        var (model, numOut, input) = BuildSkptModel();
+        var onnxPath = Path.Combine(TempDir, "roundtrip.onnx");
+        try
+        {
+            var direct = ExecuteToBytes(model, numOut, input);
+
+            Persistence.ExportOnnx(model, onnxPath);
+            Assert.True(File.Exists(onnxPath));
+
+            var imported = Persistence.ImportOnnx(onnxPath);
+            Assert.Equal(GraphKind.ConcreteModel, imported.Kind);
+            Assert.Equal(direct, ExecuteToBytes(imported, numOut, input));
+
+            // The same file loads through the low-level importer unchanged — it is a plain
+            // vanilla .onnx any conforming runtime could read.
+            var viaReader = OnnxModelImporter.FromOnnxModel(onnxPath);
+            Assert.Equal(direct, ExecuteToBytes(viaReader, numOut, input));
+        }
+        finally
+        {
+            if (File.Exists(onnxPath)) File.Delete(onnxPath);
+        }
+    }
+
+    /// <summary>
+    /// A representative third-party .onnx (a plain y = x + w model carrying no Shorokoo
+    /// metadata) imports and executes: the boundary adopts the foreign initializer's ONNX
+    /// name ("w") as its parameter identifier, so the imported concrete model both runs and
+    /// is nameable for a native checkpoint.
+    /// </summary>
+    [Fact]
+    public void TestThirdPartyOnnxImportsAndExecutes()
+    {
+        var onnxPath = Path.Combine(TempDir, "foreign.onnx");
+        try
+        {
+            float[] w = [10f, 20f, 30f, 40f];
+            WriteOnnx(onnxPath, BuildForeignAddModel("w", w));
+
+            var imported = Persistence.ImportOnnx(onnxPath);
+            Assert.Equal([11f, 22f, 33f, 44f], RunFloatVecModel(imported, 1f, 2f, 3f, 4f));
+
+            // The foreign initializer was promoted to a canonical parameter identifier at the
+            // boundary, carrying the ONNX name ("w") as its template part.
+            var paramIds = WeightBytesByParam(imported).Keys.ToArray();
+            Assert.Equal(["[1]:TrainableParam#0.w#0"], paramIds);
+
+            // With a naming scheme, the ONNX name maps onto a canonical Shorokoo name.
+            SimplePatternScheme[] patterns = [new SimplePatternScheme("w", "TrainableParam#0.MyWeight#0")];
+            var scheme = new SimplePatternNamingScheme(
+                patterns, new ModelIdNamingScheme([], ModuleParamSetNamingScheme.PyTorchFrameworkId),
+                ModuleParamSetNamingScheme.PyTorchFrameworkId);
+            var renamed = Persistence.ImportOnnx(onnxPath, scheme);
+            Assert.Equal(["[1]:TrainableParam#0.MyWeight#0"], WeightBytesByParam(renamed).Keys.ToArray());
+            Assert.Equal([11f, 22f, 33f, 44f], RunFloatVecModel(renamed, 1f, 2f, 3f, 4f));
+        }
+        finally
+        {
+            if (File.Exists(onnxPath)) File.Delete(onnxPath);
+        }
+    }
+
+    /// <summary>
+    /// Import fails loudly, naming the offending op and the file, on a construct the reader
+    /// cannot ingest (an op outside the vanilla ONNX dialect); a garbage file and a truncated
+    /// file each fail loudly naming the file.
+    /// </summary>
+    [Fact]
+    public void TestImportOnnxFailsLoud()
+    {
+        var badOpPath = Path.Combine(TempDir, "badop.onnx");
+        var garbagePath = Path.Combine(TempDir, "garbage.onnx");
+        var truncPath = Path.Combine(TempDir, "trunc.onnx");
+        try
+        {
+            // Unsupported op: names the op and the file.
+            var g = new GraphProto { Name = "bogus" };
+            g.Inputs.Add(OnnxFloatVec("x", 4));
+            var node = new NodeProto { OpType = "TotallyMadeUpOp", Name = "n0" };
+            node.Inputs.Add("x");
+            node.Outputs.Add("y");
+            g.Nodes.Add(node);
+            g.Outputs.Add(OnnxFloatVec("y", 4));
+            var badOpModel = new ModelProto { IrVersion = 10, Graph = g };
+            badOpModel.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+            WriteOnnx(badOpPath, badOpModel);
+
+            var exOp = Assert.Throws<InvalidDataException>(() => Persistence.ImportOnnx(badOpPath));
+            Assert.Contains("TotallyMadeUpOp", exOp.Message);
+            Assert.Contains(badOpPath, exOp.Message);
+
+            // Garbage bytes: not a readable ONNX model, named by file.
+            File.WriteAllBytes(garbagePath, Enumerable.Range(0, 256).Select(i => (byte)(i * 7 + 1)).ToArray());
+            var exGarbage = Assert.Throws<InvalidDataException>(() => Persistence.ImportOnnx(garbagePath));
+            Assert.Contains(garbagePath, exGarbage.Message);
+
+            // Truncated valid model: fails, named by file.
+            var whole = File.ReadAllBytes(WriteOnnx(truncPath, BuildForeignAddModel("w", [1f, 2f, 3f, 4f])));
+            File.WriteAllBytes(truncPath, whole[..(whole.Length / 2)]);
+            var exTrunc = Assert.Throws<InvalidDataException>(() => Persistence.ImportOnnx(truncPath));
+            Assert.Contains(truncPath, exTrunc.Message);
+        }
+        finally
+        {
+            foreach (var p in new[] { badOpPath, garbagePath, truncPath })
+                if (File.Exists(p)) File.Delete(p);
+        }
+    }
+
+    /// <summary>
+    /// The one-call native landing: ImportOnnxToCheckpoint imports a foreign .onnx and writes
+    /// the imported concrete model straight to a .skpt via the standard container writer. The
+    /// returned model, the reloaded checkpoint, and a direct import all execute identically,
+    /// and the checkpoint's weights are byte-identical to the foreign initializer. A failed
+    /// import (unsupported op) lands nothing — a previously written checkpoint is untouched.
+    /// </summary>
+    [Fact]
+    public void TestImportOnnxToCheckpointRoundTrip()
+    {
+        var onnxPath = Path.Combine(TempDir, "landing.onnx");
+        var badPath = Path.Combine(TempDir, "landing_bad.onnx");
+        var skptPath = Path.Combine(TempDir, "landing.skpt");
+        try
+        {
+            float[] w = [10f, 20f, 30f, 40f];
+            WriteOnnx(onnxPath, BuildForeignAddModel("w", w));
+
+            var imported = Persistence.ImportOnnxToCheckpoint(onnxPath, skptPath);
+            Assert.Equal(GraphKind.ConcreteModel, imported.Kind);
+            var expected = RunFloatVecModel(Persistence.ImportOnnx(onnxPath), 1f, 2f, 3f, 4f);
+            Assert.Equal(expected, RunFloatVecModel(imported, 1f, 2f, 3f, 4f));
+
+            var reloaded = Persistence.Load(skptPath);
+            Assert.Equal(GraphKind.ConcreteModel, reloaded.Kind);
+            Assert.Equal(WeightBytesByParam(imported), WeightBytesByParam(reloaded));
+            Assert.Equal(expected, RunFloatVecModel(reloaded, 1f, 2f, 3f, 4f));
+
+            // A failed import leaves the previously committed checkpoint untouched.
+            var committed = File.ReadAllBytes(skptPath);
+            var bogus = new GraphProto { Name = "bogus" };
+            bogus.Inputs.Add(OnnxFloatVec("x", 4));
+            var bn = new NodeProto { OpType = "TotallyMadeUpOp", Name = "n0" };
+            bn.Inputs.Add("x");
+            bn.Outputs.Add("y");
+            bogus.Nodes.Add(bn);
+            bogus.Outputs.Add(OnnxFloatVec("y", 4));
+            var bogusModel = new ModelProto { IrVersion = 10, Graph = bogus };
+            bogusModel.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+            WriteOnnx(badPath, bogusModel);
+            Assert.Throws<InvalidDataException>(
+                () => Persistence.ImportOnnxToCheckpoint(badPath, skptPath));
+            Assert.Equal(committed, File.ReadAllBytes(skptPath));
+        }
+        finally
+        {
+            foreach (var p in new[] { onnxPath, badPath, skptPath })
+                if (File.Exists(p)) File.Delete(p);
+        }
+    }
+
+    /// <summary>
+    /// ImportOnnx composes with ONNX external-data reading (#38): a foreign model whose
+    /// initializer bytes live in a <c>.data</c> side file (referenced from
+    /// <c>TensorProto.external_data</c>) imports through the same path and executes
+    /// identically to the inline form, and lands as a native .skpt.
+    /// </summary>
+    [Fact]
+    public void TestImportOnnxComposesWithExternalData()
+    {
+        var inlinePath = Path.Combine(TempDir, "xd_inline.onnx");
+        var extPath = Path.Combine(TempDir, "xd_external.onnx");
+        var dataPath = Path.Combine(TempDir, "xd_external.onnx.data");
+        var skptPath = Path.Combine(TempDir, "xd.skpt");
+        try
+        {
+            float[] w = [0.5f, -1.5f, 2.5f, 3.5f];
+            WriteOnnx(inlinePath, BuildForeignAddModel("w", w));
+
+            // Same model, but w's bytes moved to a side file referenced as external data.
+            var extModel = BuildForeignAddModel("w", w);
+            File.WriteAllBytes(dataPath, OnnxFloatBytes(w));
+            var wInit = extModel.Graph.Initializers.Single();
+            wInit.RawData = null!;
+            wInit.data_location = TensorProto.DataLocation.External;
+            wInit.ExternalDatas.Add(new StringStringEntryProto { Key = "location", Value = "xd_external.onnx.data" });
+            wInit.ExternalDatas.Add(new StringStringEntryProto { Key = "offset", Value = "0" });
+            wInit.ExternalDatas.Add(new StringStringEntryProto { Key = "length", Value = (w.Length * sizeof(float)).ToString() });
+            WriteOnnx(extPath, extModel);
+
+            var inlineOut = RunFloatVecModel(Persistence.ImportOnnx(inlinePath), 1f, 1f, 1f, 1f);
+            var externalOut = RunFloatVecModel(Persistence.ImportOnnx(extPath), 1f, 1f, 1f, 1f);
+            Assert.Equal(inlineOut, externalOut);
+
+            // The external-data model lands natively too.
+            var imported = Persistence.ImportOnnxToCheckpoint(extPath, skptPath);
+            Assert.Equal(inlineOut, RunFloatVecModel(Persistence.Load(skptPath), 1f, 1f, 1f, 1f));
+            Assert.Equal(GraphKind.ConcreteModel, imported.Kind);
+        }
+        finally
+        {
+            foreach (var p in new[] { inlinePath, extPath, dataPath, skptPath })
+                if (File.Exists(p)) File.Delete(p);
+        }
+    }
+
 }

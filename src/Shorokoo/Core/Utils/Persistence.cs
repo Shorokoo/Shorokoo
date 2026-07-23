@@ -424,6 +424,7 @@ namespace Shorokoo
         private bool _withModel;
         private bool _withWeights;
         private int? _zstdDataCompressionLevel;
+        private Dictionary<string, string>? _userMetadata;
 
         internal CheckpointBuilder(ComputationGraph model) => _model = model;
 
@@ -463,6 +464,67 @@ namespace Shorokoo
                     "Zstandard compression level must be between 1 and 22.");
             _zstdDataCompressionLevel = compressionLevel;
             return this;
+        }
+
+        /// <summary>
+        /// Opt-in: attaches user-supplied provenance metadata to the checkpoint, recorded under
+        /// the manifest's dedicated <c>userMetadata</c> key. This is descriptive, reproducibility
+        /// metadata — "cheap to write at save time, impossible to reconstruct later" — echoed
+        /// back by <see cref="Persistence.Inspect"/>; it is trusted only as far as its writer and
+        /// never affects load: <see cref="Persistence.Load"/> ignores it entirely, binding a
+        /// checkpoint identically with or without it. Nothing here is interpreted or validated
+        /// (a git commit is not checked to exist) and nothing is auto-populated from the
+        /// environment — the caller supplies every value.
+        ///
+        /// <para>The four well-known keys (<paramref name="gitCommit"/>,
+        /// <paramref name="datasetId"/>, <paramref name="runName"/>, <paramref name="license"/>)
+        /// are conveniences that write the corresponding <see cref="SkptFileFormat"/> keys; a
+        /// non-null one overrides any same-key entry in <paramref name="metadata"/>. Any other
+        /// key/value pairs go in <paramref name="metadata"/>. Calls accumulate, so metadata can
+        /// be built up across several invocations. Values are stored verbatim (control characters
+        /// included); the human-readable inspection output sanitizes them for display only.</para>
+        ///
+        /// <para>Supplying no metadata at all — never calling this method, or calling it with
+        /// nothing set — leaves the manifest's <c>userMetadata</c> key absent, keeping the
+        /// output byte-for-byte identical to a checkpoint saved without provenance.</para>
+        /// </summary>
+        /// <param name="metadata">Arbitrary provenance key/value pairs. Keys must be non-empty
+        /// and values non-null.</param>
+        /// <param name="gitCommit">Convenience for the <see cref="SkptFileFormat.MetadataGitCommitKey"/> key.</param>
+        /// <param name="datasetId">Convenience for the <see cref="SkptFileFormat.MetadataDatasetIdKey"/> key.</param>
+        /// <param name="runName">Convenience for the <see cref="SkptFileFormat.MetadataRunNameKey"/> key.</param>
+        /// <param name="license">Convenience for the <see cref="SkptFileFormat.MetadataLicenseKey"/> key.</param>
+        public CheckpointBuilder WithMetadata(
+            IReadOnlyDictionary<string, string>? metadata = null,
+            string? gitCommit = null,
+            string? datasetId = null,
+            string? runName = null,
+            string? license = null)
+        {
+            if (metadata is not null)
+                foreach (var (key, value) in metadata)
+                    AddMetadata(key, value);
+            if (gitCommit is not null) AddMetadata(SkptFileFormat.MetadataGitCommitKey, gitCommit);
+            if (datasetId is not null) AddMetadata(SkptFileFormat.MetadataDatasetIdKey, datasetId);
+            if (runName is not null) AddMetadata(SkptFileFormat.MetadataRunNameKey, runName);
+            if (license is not null) AddMetadata(SkptFileFormat.MetadataLicenseKey, license);
+            return this;
+        }
+
+        /// <summary>
+        /// Records one metadata entry, allocating the bag lazily so a call that sets nothing
+        /// leaves it null (and thus the <c>userMetadata</c> key absent). Keys must be non-empty
+        /// and values non-null — the only structural check; values are otherwise uninterpreted.
+        /// </summary>
+        private void AddMetadata(string key, string value)
+        {
+            if (string.IsNullOrEmpty(key))
+                throw new ArgumentException(
+                    "Persistence.WithMetadata: a metadata key must be non-empty.", nameof(key));
+            if (value is null)
+                throw new ArgumentNullException(nameof(value),
+                    $"Persistence.WithMetadata: the value for metadata key '{key}' is null.");
+            (_userMetadata ??= new Dictionary<string, string>(StringComparer.Ordinal))[key] = value;
         }
 
         /// <summary>
@@ -528,6 +590,9 @@ namespace Shorokoo
                 SkptVersion = SkptFileFormat.CurrentVersion,
                 CreatedUtc = DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"),
                 Producer = new SkptProducerInfo { Shorokoo = ShorokooVersion.VersionString },
+                // Null (never allocated) when no metadata was supplied, so JsonIgnoreCondition
+                // .WhenWritingNull omits the key entirely and the output stays byte-identical.
+                UserMetadata = _userMetadata,
                 Models = new Dictionary<string, SkptModelEntry>
                 {
                     [SkptFileFormat.DefaultModelKey] = new SkptModelEntry

@@ -739,7 +739,8 @@ namespace Shorokoo
                     throw new ArgumentException(
                         $"Persistence.WithUserData: top-level user-data key '{key}' begins with " +
                         $"'{SkptFileFormat.ReservedUserDataKeyPrefix}', which is reserved for Shorokoo; rename it.",
-                        nameof(userData));
+                        // Both public overloads name the parameter 'value'; report that, not the helper's.
+                        "value");
         }
 
         /// <summary>

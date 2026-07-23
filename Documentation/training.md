@@ -147,6 +147,13 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
 ```
 
 - The file is a single SafeTensors file (every param/state field plus the step).
+- For the **native `.skpt` container** instead — the training state split into
+  per-kind data entries alongside the concrete inference model, with the container's
+  inspectable manifest, per-entry Zstd, and provenance metadata — save with
+  `Persistence.SaveTrainingCheckpointToSkpt(checkpoint, modelGraph, exampleInput, "run.skpt")`
+  (or the `Persistence.ForTrainingCheckpoint(...)` builder). `rig.LoadCheckpoint`
+  reads either shape — the on-disk form is auto-detected — so this line resumes a
+  `.skpt` run unchanged. See [skpt-checkpoints.md](skpt-checkpoints.md#training-checkpoints).
 - `LoadCheckpoint` reconstructs the checkpoint against the rig's own parameter
   and state definitions, so the rig must be built from the **same**
   model/loss/optimizer graphs. Loading a checkpoint from a different model or

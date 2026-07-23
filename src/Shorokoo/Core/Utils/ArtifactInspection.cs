@@ -234,6 +234,32 @@ namespace Shorokoo
                $"sha256 {Sha256 ?? "<unrecorded>"} (unverified)";
     }
 
+    /// <summary>The training-checkpoint block of an inspected .skpt manifest (issue #95) — present
+    /// only when the file persists a <see cref="TrainingCheckpoint"/>. Read from the config.json
+    /// <c>training</c> block alone; no tensor payload is touched (the step and per-kind wiring live
+    /// in the manifest, so Inspect reports them without loading data).</summary>
+    public sealed class SkptTrainingSummary
+    {
+        /// <summary>Training-checkpoint block version (<see cref="SkptFileFormat.TrainingCheckpointVersion"/>
+        /// for files written today); 0 when the field is missing — see the observations.</summary>
+        public int CheckpointVersion { get; }
+
+        /// <summary>The 0-based global training step the checkpoint was saved at.</summary>
+        public long Step { get; }
+
+        /// <summary>Training-state kind name → the manifest data-registry key that stores it, in
+        /// manifest order (the kinds present; an empty struct is omitted).</summary>
+        public IReadOnlyList<KeyValuePair<string, string>> Kinds { get; }
+
+        internal SkptTrainingSummary(
+            int checkpointVersion, long step, IReadOnlyList<KeyValuePair<string, string>> kinds)
+        {
+            CheckpointVersion = checkpointVersion;
+            Step = step;
+            Kinds = kinds;
+        }
+    }
+
     /// <summary>Details of a <see cref="ArtifactKind.SkptCheckpoint"/> artifact, read from the
     /// zip central directory and the config.json manifest alone — no other entry is opened,
     /// and no tensor payload is touched.</summary>
@@ -271,11 +297,16 @@ namespace Shorokoo
         /// in manifest order.</summary>
         public IReadOnlyList<string> MappingSetNames { get; }
 
+        /// <summary>Training-checkpoint block (issue #95): non-null iff the file persists a
+        /// <see cref="TrainingCheckpoint"/> (its manifest carries a <c>training</c> block). Null for
+        /// an inference checkpoint. Reports the global step and per-kind data entries.</summary>
+        public SkptTrainingSummary? Training { get; }
+
         internal SkptArtifactInfo(
             string? formatName, int skptVersion, string? producer, string? createdUtc,
             IReadOnlyDictionary<string, string>? userMetadata,
             IReadOnlyList<SkptModelSummary> models, IReadOnlyList<SkptDataSummary> dataEntries,
-            IReadOnlyList<string> mappingSetNames)
+            IReadOnlyList<string> mappingSetNames, SkptTrainingSummary? training = null)
         {
             FormatName = formatName;
             SkptVersion = skptVersion;
@@ -285,6 +316,7 @@ namespace Shorokoo
             Models = models;
             DataEntries = dataEntries;
             MappingSetNames = mappingSetNames;
+            Training = training;
         }
     }
 
@@ -434,6 +466,19 @@ namespace Shorokoo
                       + (skpt.MappingSetNames.Count > MaxListedTensors
                           ? $", … and {skpt.MappingSetNames.Count - MaxListedTensors} more"
                           : string.Empty));
+
+                if (skpt.Training is { } tr)
+                {
+                    sb.Append("  training checkpoint: version ").Append(tr.CheckpointVersion)
+                      .Append(", global step ").Append(tr.Step).AppendLine();
+                    sb.Append("  training kinds (").Append(tr.Kinds.Count).AppendLine("):");
+                    foreach (var kind in tr.Kinds.Take(MaxListedTensors))
+                        sb.Append("    ").Append(kind.Key).Append(" → data entry '")
+                          .Append(kind.Value).AppendLine("'");
+                    if (tr.Kinds.Count > MaxListedTensors)
+                        sb.Append("    … and ").Append(tr.Kinds.Count - MaxListedTensors)
+                          .AppendLine(" more");
+                }
             }
 
             if (TrainingCheckpoint is { } ckpt)
@@ -809,6 +854,7 @@ namespace Shorokoo
             }
             CollectUnknown("top level", manifest.AdditionalFields);
             CollectUnknown("producer", manifest.Producer?.AdditionalFields);
+            CollectUnknown("training", manifest.Training?.AdditionalFields);
 
             var models = new List<SkptModelSummary>();
             foreach (var (key, m) in manifest.Models ?? new())
@@ -851,7 +897,9 @@ namespace Shorokoo
                 if (d is not null && d.Format != SkptFileFormat.DataFormatSafeTensors)
                     observations.Add($"data entry '{key}' uses the unknown storage format " +
                         $"'{d.Format ?? "<none>"}' (likely written by a newer Shorokoo version).");
-                if (d?.Compression is not null && d.Compression != SkptFileFormat.CompressionNone)
+                if (d?.Compression is not null
+                    && d.Compression != SkptFileFormat.CompressionNone
+                    && d.Compression != SkptFileFormat.CompressionZstd)
                     observations.Add($"data entry '{key}' declares the unknown compression " +
                         $"'{d.Compression}' (likely written by a newer Shorokoo version).");
                 if (string.IsNullOrEmpty(d?.Sha256))
@@ -913,9 +961,36 @@ namespace Shorokoo
                 ? new Dictionary<string, string>(rawMetadata, StringComparer.Ordinal)
                 : null;
 
+            // Training-checkpoint block (issue #95): read straight from the manifest — step and
+            // per-kind wiring are metadata, so this needs no tensor reads. Cross-check that each
+            // named kind's data key exists in the data registry, and flag a malformed block.
+            SkptTrainingSummary? training = null;
+            if (manifest.Training is { } t)
+            {
+                if (t.CheckpointVersion == 0)
+                    observations.Add("the manifest's training block is missing required field " +
+                        "'checkpointVersion' (or it is zero).");
+                else if (t.CheckpointVersion != SkptFileFormat.TrainingCheckpointVersion)
+                    observations.Add($"training-checkpoint block version {t.CheckpointVersion} is not the " +
+                        $"version this build reads ({SkptFileFormat.TrainingCheckpointVersion}); " +
+                        "Persistence.LoadTrainingCheckpoint would refuse the file" +
+                        (t.CheckpointVersion > SkptFileFormat.TrainingCheckpointVersion
+                            ? " (likely written by a newer Shorokoo version)." : "."));
+
+                var kinds = new List<KeyValuePair<string, string>>();
+                foreach (var (kindName, dataKey) in t.Kinds ?? new())
+                {
+                    kinds.Add(new KeyValuePair<string, string>(kindName, dataKey));
+                    if (manifest.Data is null || !manifest.Data.ContainsKey(dataKey))
+                        observations.Add($"the training kind '{kindName}' references data entry " +
+                            $"'{dataKey}', which the manifest's data registry does not declare.");
+                }
+                training = new SkptTrainingSummary(t.CheckpointVersion, t.Step, kinds);
+            }
+
             return new SkptArtifactInfo(
                 manifest.Format, manifest.SkptVersion, manifest.Producer?.Shorokoo,
-                manifest.CreatedUtc, userMetadata, models, dataEntries, mappingSetNames);
+                manifest.CreatedUtc, userMetadata, models, dataEntries, mappingSetNames, training);
         }
 
         // ---- Zstd frame (legacy v1 compressed layouts) ----

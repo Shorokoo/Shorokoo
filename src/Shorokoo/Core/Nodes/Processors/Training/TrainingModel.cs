@@ -1306,15 +1306,17 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Loads a checkpoint previously written by <see cref="TrainingCheckpoint.Save(string)"/>,
-        /// reconstructing it against this rig's parameter/state struct definitions so training resumes
-        /// exactly where it left off: trainable params, optimizer moments, model state, and the global
-        /// step are all restored (schedules resume from that step). Throws if the file's fields don't
-        /// match this rig — e.g. a checkpoint produced by a different model or optimizer. The rig must
-        /// be built from the same model/loss/optimizer graphs as the one that saved the checkpoint.
+        /// Loads a checkpoint previously written by <see cref="TrainingCheckpoint.Save(string)"/>
+        /// (legacy flat safetensors) or <see cref="Persistence.SaveTrainingCheckpointToSkpt"/> (the
+        /// native .skpt container) — the on-disk shape is detected automatically — reconstructing it
+        /// against this rig's parameter/state struct definitions so training resumes exactly where it
+        /// left off: trainable params, optimizer moments, model state, and the global step are all
+        /// restored (schedules resume from that step). Throws if the file's fields don't match this
+        /// rig — e.g. a checkpoint produced by a different model or optimizer. The rig must be built
+        /// from the same model/loss/optimizer graphs as the one that saved the checkpoint.
         /// </summary>
         public TrainingCheckpoint LoadCheckpoint(string filePath)
-            => TrainingCheckpoint.Load(filePath, TrainableParamStructDef, ModelStateDef, OptimizerStateDef);
+            => Persistence.LoadTrainingCheckpoint(filePath, TrainableParamStructDef, ModelStateDef, OptimizerStateDef);
 
         /// <summary>
         /// Packs a single dynamic hyperparameter value into a <see cref="TensorDataStruct"/> for the

@@ -24,8 +24,13 @@ Related: [onnx-and-weights.md](onnx-and-weights.md) · [training.md](training.md
 - This version writes an **inference checkpoint of a concrete model** (definition +
   weights). It can also carry **additional named weight sets** over the same parameters
   (e.g. an `ema` set alongside `default`), selected at load time — see
-  [Named weight sets](#named-weight-sets-default--ema). Training-rig state and
-  precompiled artifacts are future extensions of the same container.
+  [Named weight sets](#named-weight-sets-default--ema).
+- A `.skpt` can also persist a **training checkpoint** — the trainable weights, model
+  state, optimizer state and global step of a training run — with the state split into
+  separate per-kind `data/` entries alongside the concrete inference model, so a run
+  resumes across process restarts and the same file also loads as an inference model. See
+  [Training checkpoints](#training-checkpoints). Precompiled artifacts and the full
+  training-rig (constituent models, schedules) are future extensions of the same container.
 - `.skpt` replaces nothing: ONNX export and `.safetensors`/`.srk` files remain
   separate, on-demand projections (see [onnx-and-weights.md](onnx-and-weights.md)).
 
@@ -66,6 +71,69 @@ var loaded = Persistence.Load("model.skpt");   // decompression is transparent
 
 Loading honors each entry's manifest-declared compression; nothing changes on the
 read side of the API.
+
+## Training checkpoints
+
+A training run's state — the trainable weights, model state, optimizer state and the
+global step — persists into a `.skpt` too, so training resumes across process restarts
+in the native container (inspectable manifest, per-entry Zstd, atomic write, provenance
+metadata), sharing one on-disk format with inference checkpoints.
+
+```csharp
+using Shorokoo;   // Persistence, TrainingRig, TrainingCheckpoint
+
+// checkpoint: a TrainingCheckpoint from rig.CreateDefaultCheckpoint() / TrainStep().
+// exampleInput: any sample model input — only its shape matters (drives concretization).
+Persistence.SaveTrainingCheckpointToSkpt(
+    checkpoint, modelGraph, exampleInput, "run.skpt");
+
+// Resume in a fresh process: rebuild the rig from the same graphs, then load.
+var rig     = TrainingRig.FromScratch(modelGraph, lossGraph, optimizerGraph, sample, hypers);
+var resumed = rig.LoadCheckpoint("run.skpt");   // reads .skpt or legacy flat, auto-detected
+var next    = rig.TrainStep(resumed, inputBatch, targetBatch, compiled);
+```
+
+To compose the container's features, use the builder form:
+
+```csharp
+Persistence.ForTrainingCheckpoint(checkpoint, modelGraph, exampleInput)
+    .WithZstdCompressedData()                          // per-entry Zstd (optional level 1–22)
+    .WithMetadata(runName: "nightly-42", gitCommit: "9f3c1ba")
+    .Save("run.skpt");
+```
+
+What the file carries:
+
+- **The concrete inference model** in `models/model.srk` (definition, weights stripped),
+  built from the checkpoint's trained weights. The trainable weights double as the model's
+  `default` weight set, so the same file loads as a runnable inference model with
+  `Persistence.Load("run.skpt")` — no separate export step.
+- **The training state, split by kind into separate `data/` entries**: the trainable
+  weights (`data/trainable.safetensors`), the model state (`data/model_state.safetensors`,
+  omitted for a stateless model) and the optimizer state
+  (`data/optimizer_state.safetensors`, omitted for a stateless optimizer like plain SGD).
+  Each entry stores its kind's tensors keyed by struct field name.
+- **The global step** and which data entry holds each kind, recorded in the manifest's
+  `training` block (so `Persistence.Inspect` reports them without reading tensor data).
+
+Round-trip is exact: reloaded trainable params, model state and optimizer state are
+bit-identical, the step is preserved, and a resumed `TrainStep` reproduces the pre-save
+trajectory. Loading validates against the rig's struct definitions with the same fail-loud
+contract as the legacy flat format — a checkpoint from a different model or optimizer, a
+missing kind, a rank mismatch, or a tampered entry (sha256) fails loudly.
+
+Reconstruct without a rig by supplying the struct defs directly:
+
+```csharp
+TrainingCheckpoint ckpt = Persistence.LoadTrainingCheckpoint(
+    "run.skpt", trainableParamDef, modelStateDef, optimizerStateDef);
+```
+
+`Persistence.SaveTrainingCheckpoint(checkpoint, path)` still writes the **legacy flat**
+[safetensors format](training.md); the `.skpt` path is opt-in via
+`SaveTrainingCheckpointToSkpt` / `ForTrainingCheckpoint`. Both `LoadTrainingCheckpoint`
+and `TrainingRig.LoadCheckpoint` read either shape — the on-disk form is detected from the
+file — so old and new checkpoints load through one entry point.
 
 ## Provenance metadata
 
@@ -233,6 +301,10 @@ model.skpt
   [safetensors](https://huggingface.co/docs/safetensors) file. Tensor names are the
   model's internal parameter identifiers, as wired by the manifest — extract the entry
   with any unzip tool and read it with any safetensors reader.
+- A [training checkpoint](#training-checkpoints) adds more `data/` entries — one per
+  training-state kind (`data/trainable.safetensors`, and, when non-empty,
+  `data/model_state.safetensors` and `data/optimizer_state.safetensors`) — and a
+  `training` block in the manifest.
 - The trees are optional and the layout is extensible: future versions add more
   `models/` entries, more `data/` kinds, `precompiledmodels/`, and `sample_inputs/`
   without a container change.
@@ -302,6 +374,19 @@ model.skpt
       "compression": "none",
       "sha256": "9af0c1…"
     }
+  },
+
+  // Training block: present only in a training checkpoint (omitted for an inference
+  // checkpoint). Records the global step and which data entry holds each state kind —
+  // an empty kind (e.g. model state for a stateless model) is absent and has no entry.
+  "training": {
+    "checkpointVersion": 1,
+    "step": 42,
+    "kinds": {
+      "trainableParams": "trainable",         // → data/trainable.safetensors (also the default set)
+      "modelState": "model_state",            // → data/model_state.safetensors
+      "optimizerState": "optimizer_state"     // → data/optimizer_state.safetensors
+    }
   }
 }
 ```
@@ -323,6 +408,7 @@ Rules:
 - Data entries are bounded by the in-memory safetensors path — checkpoints with ≥ 2 GB
   of tensor data in a single entry are not yet supported (compressed or not; the bound
   applies to both the stored and the decompressed bytes).
-- Training state (optimizer/scheduler, constituent models of a rig) is not stored;
-  for training resume across process restarts, use `TrainingCheckpoint.Save` /
-  `TrainingRig.LoadCheckpoint` (see [training.md](training.md)).
+- A [training checkpoint](#training-checkpoints) stores the trainable weights, model
+  state, optimizer state and global step of a run. The full training **rig** — the
+  constituent model/loss/optimizer/scheduler graphs and their schedules — is not yet
+  carried; resume rebuilds the rig from the same graphs, then `LoadCheckpoint`s the file.

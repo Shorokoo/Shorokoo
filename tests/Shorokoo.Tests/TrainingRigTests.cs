@@ -1439,4 +1439,315 @@ public class TrainingRigCoverageTests
         Assert.Contains("'module'", exLoss.Message);
     }
 
+    // ──────────────────────────────────────────────────────────────────────
+    // Native .skpt training checkpoints (issue #95): a training checkpoint
+    // persists into the .skpt container with training state split into per-kind
+    // data entries plus the concrete inference model, and reloads bit-identically.
+    // ──────────────────────────────────────────────────────────────────────
+
+    private static readonly long[] ScalarInputShape = [4L];
+
+    private static (TrainingRig Rig, TrainingCheckpoint Ckpt, TensorDataStruct In, TensorDataStruct Out, CompiledGraph Compiled)
+        BuildTrainedAdamRig(int steps)
+    {
+        var sample = new NamedModelParam[]
+        {
+            new TensorDataModelParam("input", ModelParamType.InputParam,
+                TensorData(ScalarInputShape, new float[] { 1f, 2f, 3f, 4f })),
+        };
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            AdamWOptimizer.ComputationGraph, sample,
+            new AdamWOptimizerHyperparameters { LearningRate = 0.1f });
+
+        var inDef = new TensorStructDef(
+            [new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32)], "ModelInput");
+        var outDef = new TensorStructDef(
+            [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)], "Target");
+        var inBatch = new TensorDataStruct(inDef,
+            new Dictionary<string, IData> { { "input", TensorData(ScalarInputShape, new float[] { 1f, 2f, 3f, 4f }) } });
+        var outBatch = new TensorDataStruct(outDef,
+            new Dictionary<string, IData> { { "targets", TensorData(ScalarInputShape, new float[] { 2f, 4f, 6f, 8f }) } });
+
+        var compiled = new ComputeContext().Compile(rig.TrainingStepPureGraph);
+        var ckpt = rig.CreateDefaultCheckpoint();
+        for (int i = 0; i < steps; i++)
+            ckpt = rig.TrainStep(ckpt, inBatch, outBatch, compiled).Checkpoint;
+        return (rig, ckpt, inBatch, outBatch, compiled);
+    }
+
+    /// <summary>
+    /// The .skpt training-checkpoint acceptance round-trip (issue #95): a mid-training checkpoint
+    /// saves to a native .skpt whose training state is split into per-kind data entries recorded in
+    /// config.json (trainable weights, optimizer state; no model-state entry for a stateless model),
+    /// and reloads — through a fresh rig, as a fresh process would — with the step, trainable params
+    /// and optimizer state bit-identical and a resumed TrainStep matching the pre-save trajectory
+    /// exactly. The file is a standard STORED zip, and it also loads as a self-describing inference
+    /// model via Persistence.Load.
+    /// </summary>
+    [Fact]
+    public void TestSkptTrainingCheckpointRoundTripResumeCoverage()
+    {
+        var (rigA, ckpt, inBatch, outBatch, compiledA) = BuildTrainedAdamRig(steps: 2);
+        Assert.Equal(2, ckpt.Step);
+        Assert.NotEmpty(ckpt.OptimizerState.Fields);   // AdamW carries m/v/step per param
+        Assert.Empty(ckpt.ModelState.Fields);          // ScalarMultiply is stateless
+
+        // The reference trajectory: one more step from the in-memory checkpoint.
+        var reference = rigA.TrainStep(ckpt, inBatch, outBatch, compiledA);
+
+        var exampleInput = TensorData(ScalarInputShape, new float[4]);
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_skpt_ckpt_{Guid.NewGuid():N}.skpt");
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(
+                ckpt, ScalarMultiplyModel.ComputationGraph, exampleInput, path);
+            Assert.True(File.Exists(path));
+
+            // Standard STORED zip with exactly the expected per-kind entries (read via the BCL).
+            using (var zip = System.IO.Compression.ZipFile.OpenRead(path))
+            {
+                var names = zip.Entries.Select(e => e.FullName).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+                Assert.Equal(
+                    new[]
+                    {
+                        SkptFileFormat.ConfigEntryName,
+                        SkptFileFormat.OptimizerStateEntryPath,
+                        SkptFileFormat.TrainableEntryPath,
+                        SkptFileFormat.ModelEntryPath,
+                    }.OrderBy(n => n, StringComparer.Ordinal),
+                    names);
+                Assert.All(zip.Entries, e => Assert.Equal(e.Length, e.CompressedLength));   // all STORED
+                Assert.DoesNotContain(SkptFileFormat.ModelStateEntryPath, names);           // stateless → no entry
+            }
+
+            // The manifest records the per-kind data entries and the step in config.json.
+            var manifest = SkptFileFormat.ParseManifest(
+                ReadEntryBytesViaBcl(path, SkptFileFormat.ConfigEntryName), path);
+            Assert.NotNull(manifest.Training);
+            Assert.Equal(SkptFileFormat.TrainingCheckpointVersion, manifest.Training!.CheckpointVersion);
+            Assert.Equal(2, manifest.Training.Step);
+            Assert.Contains(SkptFileFormat.TrainingKindTrainableParams, manifest.Training.Kinds!.Keys);
+            Assert.Contains(SkptFileFormat.TrainingKindOptimizerState, manifest.Training.Kinds.Keys);
+            Assert.DoesNotContain(SkptFileFormat.TrainingKindModelState, manifest.Training.Kinds.Keys);
+
+            // Fresh rig, as a fresh process: state + step round-trip bit-identically.
+            var rigB = BuildTrainedAdamRig(steps: 0).Rig;
+            var loaded = rigB.LoadCheckpoint(path);
+            Assert.Equal(2, loaded.Step);
+            Assert.Equal(FlattenStruct(ckpt.TrainableParams), FlattenStruct(loaded.TrainableParams));
+            Assert.Equal(FlattenStruct(ckpt.OptimizerState), FlattenStruct(loaded.OptimizerState));
+            Assert.Empty(loaded.ModelState.Fields);
+
+            // Resuming from the loaded checkpoint reproduces the pre-save trajectory exactly.
+            var compiledB = new ComputeContext().Compile(rigB.TrainingStepPureGraph);
+            var resumed = rigB.TrainStep(loaded, inBatch, outBatch, compiledB);
+            Assert.Equal(3, resumed.Checkpoint.Step);
+            Assert.Equal(reference.Loss, resumed.Loss);
+            Assert.Equal(
+                FlattenStruct(reference.Checkpoint.TrainableParams),
+                FlattenStruct(resumed.Checkpoint.TrainableParams));
+            Assert.Equal(
+                FlattenStruct(reference.Checkpoint.OptimizerState),
+                FlattenStruct(resumed.Checkpoint.OptimizerState));
+
+            // The .skpt is self-describing for inference: Persistence.Load rebinds a concrete model
+            // that executes identically to one built straight from the checkpoint's trained weights.
+            var inferenceModel = Persistence.Load(path);
+            Assert.Equal(GraphKind.ConcreteModel, inferenceModel.Kind);
+            var probe = TensorData(ScalarInputShape, new float[] { 5f, 6f, 7f, 8f });
+            var fromCkpt = ckpt.ToInferenceModel(ScalarMultiplyModel.ComputationGraph, probe);
+            var loadedOut = ComputeContext.Default.Execute(inferenceModel, probe)[0].ToTensorData().As<float32>().AccessMemory().ToArray();
+            var ckptOut = ComputeContext.Default.Execute(fromCkpt, probe)[0].ToTensorData().As<float32>().AccessMemory().ToArray();
+            Assert.Equal(ckptOut, loadedOut);
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    /// <summary>Reads one archive entry's bytes through the BCL zip reader (independent of the
+    /// .skpt writer), for asserting on the raw config.json manifest.</summary>
+    private static byte[] ReadEntryBytesViaBcl(string path, string entryName)
+    {
+        using var zip = System.IO.Compression.ZipFile.OpenRead(path);
+        using var s = zip.GetEntry(entryName)!.Open();
+        using var buf = new MemoryStream();
+        s.CopyTo(buf);
+        return buf.ToArray();
+    }
+
+    /// <summary>
+    /// A .skpt training checkpoint carrying non-empty model state (a BatchNorm model) writes a
+    /// model-state data entry too, and round-trips its running-stat state alongside trainable and
+    /// optimizer state — exercising the model-state per-kind path.
+    /// </summary>
+    [Fact]
+    public void TestSkptTrainingCheckpointModelStateCoverage()
+    {
+        var sample = new NamedModelParam[]
+        {
+            new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([8L], new float[8])),
+        };
+        TrainingRig BnRig() => TrainingRig.FromScratch(
+            ScalarMultiplyWithBatchNormModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDMomentumOptimizer.ComputationGraph, sample, 0.5f, 0.9f);
+
+        var rig = BnRig();
+        var ckpt = new TrainingCheckpoint(
+            rig.CreateDefaultCheckpoint().TrainableParams,
+            rig.CreateDefaultCheckpoint().ModelState,
+            rig.CreateDefaultCheckpoint().OptimizerState, step: 11);
+        Assert.NotEmpty(ckpt.ModelState.Fields);
+
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_skpt_bn_{Guid.NewGuid():N}.skpt");
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(
+                ckpt, ScalarMultiplyWithBatchNormModel.ComputationGraph, TensorData([8L], new float[8]), path);
+
+            using (var zip = System.IO.Compression.ZipFile.OpenRead(path))
+                Assert.Contains(SkptFileFormat.ModelStateEntryPath, zip.Entries.Select(e => e.FullName));
+
+            var loaded = BnRig().LoadCheckpoint(path);
+            Assert.Equal(11, loaded.Step);
+            Assert.Equal(FlattenStruct(ckpt.ModelState), FlattenStruct(loaded.ModelState));
+            Assert.Equal(FlattenStruct(ckpt.TrainableParams), FlattenStruct(loaded.TrainableParams));
+            Assert.Equal(FlattenStruct(ckpt.OptimizerState), FlattenStruct(loaded.OptimizerState));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    /// <summary>
+    /// Persistence.Inspect recognizes a .skpt training checkpoint and reports the training block —
+    /// checkpoint version, global step, and the per-kind data entries — from the manifest alone,
+    /// without loading any tensor payload (Observations stays empty).
+    /// </summary>
+    [Fact]
+    public void TestSkptTrainingCheckpointInspectCoverage()
+    {
+        var (_, ckpt, _, _, _) = BuildTrainedAdamRig(steps: 3);
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_skpt_inspect_{Guid.NewGuid():N}.skpt");
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(
+                ckpt, ScalarMultiplyModel.ComputationGraph, TensorData(ScalarInputShape, new float[4]), path);
+
+            var result = Persistence.Inspect(path);
+            Assert.Equal(ArtifactKind.SkptCheckpoint, result.Kind);
+            Assert.Empty(result.Observations);
+            Assert.NotNull(result.Skpt);
+
+            var training = result.Skpt!.Training;
+            Assert.NotNull(training);
+            Assert.Equal(SkptFileFormat.TrainingCheckpointVersion, training!.CheckpointVersion);
+            Assert.Equal(3, training.Step);
+            var kindNames = training.Kinds.Select(k => k.Key).ToArray();
+            Assert.Contains(SkptFileFormat.TrainingKindTrainableParams, kindNames);
+            Assert.Contains(SkptFileFormat.TrainingKindOptimizerState, kindNames);
+
+            var text = result.ToString();
+            Assert.Contains("training checkpoint: version 1", text);
+            Assert.Contains("global step 3", text);
+            Assert.Contains(SkptFileFormat.TrainingKindTrainableParams, text);
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    /// <summary>
+    /// Fail-loud contract for .skpt training-checkpoint load: a checkpoint reconstructed against
+    /// mismatched struct defs (a different model/optimizer) throws; a tampered data entry fails its
+    /// SHA-256 check; and loading an ordinary inference .skpt (no training block) as a training
+    /// checkpoint is refused. Composes with per-entry Zstd + provenance metadata on the happy path.
+    /// </summary>
+    [Fact]
+    public void TestSkptTrainingCheckpointFailsLoudAndComposesCoverage()
+    {
+        var (_, ckpt, _, _, _) = BuildTrainedAdamRig(steps: 1);
+        var exampleInput = TensorData(ScalarInputShape, new float[4]);
+
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_skpt_fail_{Guid.NewGuid():N}.skpt");
+        var tampered = Path.Combine(Path.GetTempPath(), $"shrk_skpt_tamper_{Guid.NewGuid():N}.skpt");
+        try
+        {
+            // Happy path composes Zstd + metadata; the data entries declare zstd compression and
+            // the checkpoint still round-trips through a fresh rig.
+            Persistence.ForTrainingCheckpoint(ckpt, ScalarMultiplyModel.ComputationGraph, exampleInput)
+                .WithZstdCompressedData()
+                .WithMetadata(runName: "skpt-95-run", gitCommit: "abc123")
+                .Save(path);
+
+            var inspect = Persistence.Inspect(path);
+            Assert.Empty(inspect.Observations);   // zstd is a recognized compression, not flagged
+            Assert.Equal("skpt-95-run", inspect.Skpt!.UserMetadata!["runName"]);
+            Assert.Contains(inspect.Skpt.DataEntries,
+                d => d.Key == SkptFileFormat.TrainableDataKey && d.Compression == SkptFileFormat.CompressionZstd);
+            Assert.NotNull(inspect.Skpt.Training);
+            Assert.Equal(1, inspect.Skpt.Training!.Step);
+
+            var rig = BuildTrainedAdamRig(steps: 0).Rig;
+            var loaded = rig.LoadCheckpoint(path);
+            Assert.Equal(1, loaded.Step);
+            Assert.Equal(FlattenStruct(ckpt.TrainableParams), FlattenStruct(loaded.TrainableParams));
+
+            // Mismatch: a checkpoint from the Adam/ScalarMultiply rig must not load into a
+            // BatchNorm+SGD-momentum rig (its struct defs differ).
+            var bnRig = TrainingRig.FromScratch(
+                ScalarMultiplyWithBatchNormModel.ComputationGraph, L2Loss.ComputationGraph,
+                SGDMomentumOptimizer.ComputationGraph,
+                [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([8L], new float[8]))],
+                0.5f, 0.9f);
+            Assert.ThrowsAny<Exception>(() => bnRig.LoadCheckpoint(path));
+
+            // Tamper: flip a byte inside a data entry → SHA-256 mismatch on load.
+            var bytes = File.ReadAllBytes(path);
+            int idx = bytes.Length / 2;
+            bytes[idx] ^= 0xFF;
+            File.WriteAllBytes(tampered, bytes);
+            var rig2 = BuildTrainedAdamRig(steps: 0).Rig;
+            Assert.ThrowsAny<Exception>(() => rig2.LoadCheckpoint(tampered));
+
+            // An inference-only .skpt (no training block) is refused as a training checkpoint.
+            var infPath = Path.Combine(Path.GetTempPath(), $"shrk_skpt_inf_{Guid.NewGuid():N}.skpt");
+            try
+            {
+                var infModel = ckpt.ToInferenceModel(ScalarMultiplyModel.ComputationGraph, exampleInput);
+                Persistence.From(infModel).WithModel().WithWeights().Save(infPath);
+                var ex = Assert.Throws<System.IO.InvalidDataException>(() =>
+                    Persistence.LoadTrainingCheckpoint(infPath,
+                        rig.TrainableParamStructDef, rig.ModelStateDef, rig.OptimizerStateDef));
+                Assert.Contains("training", ex.Message);
+            }
+            finally { if (File.Exists(infPath)) File.Delete(infPath); }
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (File.Exists(tampered)) File.Delete(tampered);
+        }
+    }
+
+    /// <summary>
+    /// Back-compat: <see cref="TrainingRig.LoadCheckpoint"/> and
+    /// <see cref="Persistence.LoadTrainingCheckpoint"/> still read a legacy flat safetensors
+    /// checkpoint (written by <see cref="TrainingCheckpoint.Save"/>) — the shape is detected from the
+    /// file, so old and new checkpoints load through one entry point.
+    /// </summary>
+    [Fact]
+    public void TestLegacyFlatCheckpointStillLoadsCoverage()
+    {
+        var (rig, ckpt, _, _, _) = BuildTrainedAdamRig(steps: 2);
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_legacy_{Guid.NewGuid():N}.safetensors");
+        try
+        {
+            Persistence.SaveTrainingCheckpoint(ckpt, path);   // legacy flat format
+            Assert.Equal(ArtifactKind.TrainingCheckpoint, Persistence.Inspect(path).Kind);
+
+            var rigB = BuildTrainedAdamRig(steps: 0).Rig;
+            var loaded = rigB.LoadCheckpoint(path);            // routes to the legacy reader
+            Assert.Equal(2, loaded.Step);
+            Assert.Equal(FlattenStruct(ckpt.TrainableParams), FlattenStruct(loaded.TrainableParams));
+            Assert.Equal(FlattenStruct(ckpt.OptimizerState), FlattenStruct(loaded.OptimizerState));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
 }

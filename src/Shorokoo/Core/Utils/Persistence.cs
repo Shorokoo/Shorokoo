@@ -118,16 +118,23 @@ namespace Shorokoo
 
         // ---- Training checkpoints ----
         // Training-run state (trainable params, model + optimizer state, global step) persists
-        // through this same facade. Today it lands in the self-contained sectioned-safetensors
-        // format that TrainingCheckpoint owns; folding training state into the .skpt container
-        // (so the whole rig round-trips through From/Load) is future work. Routing it through
-        // Persistence keeps one entry point for every save/load while that migration happens.
+        // through this same facade in one of two on-disk shapes. The legacy shape is the
+        // self-contained flat sectioned-safetensors file TrainingCheckpoint owns; the native
+        // shape is a .skpt container (issue #95) that carries the concrete inference model plus
+        // the training state split into per-kind data entries, so a training checkpoint gains the
+        // container's benefits (inspectable manifest, per-entry Zstd, atomic write, provenance
+        // metadata) and shares one format with inference checkpoints. New saves opt into the .skpt
+        // shape via SaveTrainingCheckpointToSkpt / ForTrainingCheckpoint (in
+        // Persistence.TrainingCheckpoint.cs); LoadTrainingCheckpoint reads either shape.
 
         /// <summary>
         /// Saves a <see cref="TrainingCheckpoint"/> — trainable parameters, model state, optimizer
-        /// state and the global step — so a training run can resume across process restarts.
-        /// Delegates to <see cref="TrainingCheckpoint.Save(string)"/>; the write is atomic (temp file +
-        /// rename). A <c>.safetensors</c> extension is conventional.
+        /// state and the global step — in the legacy flat sectioned-safetensors format, so a
+        /// training run can resume across process restarts. Delegates to
+        /// <see cref="TrainingCheckpoint.Save(string)"/>; the write is atomic (temp file + rename). A
+        /// <c>.safetensors</c> extension is conventional. To write the native .skpt container
+        /// instead (carrying the inference model and per-kind data entries), use
+        /// <see cref="SaveTrainingCheckpointToSkpt"/> / <see cref="ForTrainingCheckpoint"/>.
         /// </summary>
         public static void SaveTrainingCheckpoint(TrainingCheckpoint checkpoint, string filePath)
         {
@@ -158,18 +165,33 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Loads a <see cref="TrainingCheckpoint"/> saved by <see cref="SaveTrainingCheckpoint(TrainingCheckpoint, string)"/>,
-        /// reconstructing its sections against the given struct defs (which pin the expected shapes,
-        /// so a checkpoint from a different model or optimizer fails loudly). Delegates to
-        /// <see cref="TrainingCheckpoint.Load"/>. To resume a whole rig, prefer
-        /// <see cref="TrainingRig.LoadCheckpoint"/>, which supplies these defs from the rig.
+        /// Loads a <see cref="TrainingCheckpoint"/> saved by either <see cref="SaveTrainingCheckpoint(TrainingCheckpoint, string)"/>
+        /// (the legacy flat safetensors file) or <see cref="SaveTrainingCheckpointToSkpt"/> (the
+        /// native .skpt container) — the shape is detected from the file's bytes. Either way the
+        /// checkpoint is reconstructed against the given struct defs (which pin the expected shapes,
+        /// so a checkpoint from a different model or optimizer fails loudly). To resume a whole rig,
+        /// prefer <see cref="TrainingRig.LoadCheckpoint"/>, which supplies these defs from the rig.
         /// </summary>
         public static TrainingCheckpoint LoadTrainingCheckpoint(
             string filePath,
             TensorStructDef trainableParamDef,
             TensorStructDef modelStateDef,
             TensorStructDef optimizerStateDef)
-            => TrainingCheckpoint.Load(filePath, trainableParamDef, modelStateDef, optimizerStateDef);
+        {
+            if (string.IsNullOrWhiteSpace(filePath))
+                throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
+
+            // Sniff the container shape from the leading bytes: a .skpt is a zip (PK\x03\x04),
+            // the legacy flat checkpoint a safetensors file (8-byte header-length prefix). The
+            // read is bounded — four bytes — and routes to the matching reconstructor.
+            byte[] prefix = new byte[4];
+            using (var probe = File.OpenRead(filePath))
+                probe.ReadAtLeast(prefix, prefix.Length, throwOnEndOfStream: false);
+
+            return LooksLikeZipArchive(prefix)
+                ? LoadTrainingCheckpointFromSkpt(filePath, trainableParamDef, modelStateDef, optimizerStateDef)
+                : TrainingCheckpoint.Load(filePath, trainableParamDef, modelStateDef, optimizerStateDef);
+        }
 
         private static ZipArchive OpenArchive(Stream stream, string filePath)
         {
@@ -869,7 +891,7 @@ namespace Shorokoo
         /// values-elided initializers that keep the definition a loadable concrete model,
         /// while the real bytes live once, in the checkpoint's data tree.
         /// </summary>
-        private static InternalComputationGraph StripWeights(
+        internal static InternalComputationGraph StripWeights(
             InternalComputationGraph graph, List<FastNode> weightNodes)
         {
             var indexByKey = new Dictionary<FastNodeKey, int>();

@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Shorokoo.Core;
 using Shorokoo.Core.Graph;
 using Shorokoo.Core.Nodes.NodeDefinitions;
@@ -488,6 +490,7 @@ namespace Shorokoo
         private bool _withWeights;
         private int? _zstdDataCompressionLevel;
         private Dictionary<string, string>? _userMetadata;
+        private JsonObject? _userData;
         private readonly List<(string Name, IReadOnlyDictionary<string, TensorData> Values)> _extraSets = new();
 
         internal CheckpointBuilder(ComputationGraph model) => _model = model;
@@ -535,6 +538,10 @@ namespace Shorokoo
             if (setName == SkptFileFormat.DefaultDataKey)
                 throw new ArgumentException(
                     $"'{SkptFileFormat.DefaultDataKey}' is reserved for the default weights data entry; " +
+                    "name the additional set something else.", nameof(setName));
+            if (setName == SkptFileFormat.UserDataDataKey)
+                throw new ArgumentException(
+                    $"'{SkptFileFormat.UserDataDataKey}' is reserved for the host user-data entry; " +
                     "name the additional set something else.", nameof(setName));
             if (!IsValidSetName(setName))
                 throw new ArgumentException(
@@ -641,6 +648,98 @@ namespace Shorokoo
                 throw new ArgumentNullException(nameof(value),
                     $"Persistence.WithMetadata: the value for metadata key '{key}' is null.");
             (_userMetadata ??= new Dictionary<string, string>(StringComparer.Ordinal))[key] = value;
+        }
+
+        /// <summary>
+        /// Opt-in: attaches a host-owned <b>user-data bag</b> to the checkpoint (issue #101) —
+        /// an arbitrary JSON object the host serializes at save and reads back verbatim on load,
+        /// stored as the <see cref="SkptFileFormat.UserDataEntryPath"/> data entry and wired into
+        /// the manifest's data registry (<c>format: "json"</c>, sha256, so the manifest stays the
+        /// verification root). It carries the one part of a run Shorokoo cannot reconstruct — the
+        /// data-pipeline state (which corpus, shuffle/augmentation strategy, stream position) —
+        /// because Shorokoo does not own the dataloader.
+        ///
+        /// <para><paramref name="value"/> is serialized with <see cref="System.Text.Json"/>
+        /// (using <paramref name="options"/> when supplied) and its serialized <b>root must be a
+        /// JSON object</b>: a value that serializes to an array, string, number, boolean, or null
+        /// is rejected with an <see cref="ArgumentException"/> (wrap it in an object first). The
+        /// values under the root may be any valid JSON — Shorokoo validates well-formedness only,
+        /// never the shape or meaning of the values, and never fails a load on a data mismatch
+        /// (that check, if wanted, is host code). Read the bag back via
+        /// <see cref="SkptArtifactInfo.UserData"/> / <see cref="SkptArtifactInfo.GetUserData{T}"/>.</para>
+        ///
+        /// <para>Top-level keys beginning with <c>'$'</c> are reserved for Shorokoo and rejected.
+        /// The bag never affects a <see cref="Persistence.Load(string)"/>: it is not referenced by
+        /// any tensor mapping, so loading binds a checkpoint identically with or without it, and
+        /// it is stored uncompressed regardless of <see cref="WithZstdCompressedData"/>. Not
+        /// calling this method leaves the entry absent, keeping the output byte-for-byte identical
+        /// to a checkpoint saved without user data. The last call wins.</para>
+        /// </summary>
+        /// <param name="value">The host object to serialize; its serialized root must be a JSON object.</param>
+        /// <param name="options">Optional serializer options for <paramref name="value"/>.</param>
+        public CheckpointBuilder WithUserData<T>(T value, JsonSerializerOptions? options = null)
+        {
+            JsonNode? node;
+            try
+            {
+                node = JsonSerializer.SerializeToNode(value, options);
+            }
+            catch (JsonException e)
+            {
+                throw new ArgumentException(
+                    "Persistence.WithUserData: the value could not be serialized to JSON.",
+                    nameof(value), e);
+            }
+            if (node is not JsonObject obj)
+                throw new ArgumentException(
+                    "Persistence.WithUserData: the user-data root must be a JSON object, but the " +
+                    $"value serialized to {DescribeJsonRoot(node)}. A user-data bag needs a JSON " +
+                    "object at its root; wrap a list or scalar in an object (e.g. { \"items\": [ … ] }).",
+                    nameof(value));
+            // SerializeToNode returns a fresh, unparented node — take it directly after validating.
+            ValidateNoReservedUserDataKeys(obj);
+            _userData = obj;
+            return this;
+        }
+
+        /// <summary>
+        /// Attaches a host user-data bag from a <see cref="JsonObject"/> DOM directly (issue #101);
+        /// see <see cref="WithUserData{T}(T, JsonSerializerOptions?)"/> for the semantics. The
+        /// object is deep-cloned, so later mutation of <paramref name="value"/> does not affect the
+        /// checkpoint.
+        /// </summary>
+        public CheckpointBuilder WithUserData(JsonObject value)
+        {
+            if (value is null) throw new ArgumentNullException(nameof(value));
+            // Deep-clone: detaches the node from any parent DOM and snapshots it against later mutation.
+            var snapshot = value.DeepClone().AsObject();
+            ValidateNoReservedUserDataKeys(snapshot);
+            _userData = snapshot;
+            return this;
+        }
+
+        /// <summary>Names the JSON kind a value serialized to, for the non-object-root error.</summary>
+        private static string DescribeJsonRoot(JsonNode? node) => node switch
+        {
+            null => "JSON null",
+            JsonArray => "a JSON array",
+            JsonValue => "a JSON scalar (string, number, or boolean)",
+            _ => "a non-object JSON value",
+        };
+
+        /// <summary>
+        /// Rejects top-level user-data keys beginning with <c>'$'</c> — reserved for Shorokoo
+        /// (issue #101). Only the root's own keys are checked; nested objects may use any keys,
+        /// since the bag's values are never interpreted.
+        /// </summary>
+        private static void ValidateNoReservedUserDataKeys(JsonObject userData)
+        {
+            foreach (var (key, _) in userData)
+                if (key.Length > 0 && key[0] == SkptFileFormat.ReservedUserDataKeyPrefix)
+                    throw new ArgumentException(
+                        $"Persistence.WithUserData: top-level user-data key '{key}' begins with " +
+                        $"'{SkptFileFormat.ReservedUserDataKeyPrefix}', which is reserved for Shorokoo; rename it.",
+                        nameof(userData));
         }
 
         /// <summary>
@@ -800,6 +899,24 @@ namespace Shorokoo
                     };
                     bodyEntries.Add(new(setEntryPath, setStored, Align: setAlign));
                 }
+            }
+
+            // Host user-data bag (issue #101): a JSON object stored as its own data entry and
+            // wired into the data registry (format "json", sha256). It is never referenced by a
+            // tensor mapping, so Load ignores it; and it is stored uncompressed regardless of the
+            // Zstd option (it is small config-like JSON, not a range-read tensor payload). Absent
+            // unless WithUserData was called, so the no-user-data output stays byte-identical.
+            if (_userData is not null)
+            {
+                var userDataBytes = SkptFileFormat.SerializeUserData(_userData);
+                dataEntries[SkptFileFormat.UserDataDataKey] = new SkptDataEntry
+                {
+                    Entry = SkptFileFormat.UserDataEntryPath,
+                    Format = SkptFileFormat.DataFormatJson,
+                    Compression = SkptFileFormat.CompressionNone,
+                    Sha256 = SkptFileFormat.Sha256Hex(userDataBytes),
+                };
+                bodyEntries.Add(new(SkptFileFormat.UserDataEntryPath, userDataBytes, Align: false));
             }
 
             var manifest = new SkptManifest

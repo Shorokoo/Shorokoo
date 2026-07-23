@@ -5,6 +5,7 @@ using System.IO.Compression;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Shorokoo.Core.Utils;
 using ZstdSharp;
 
@@ -287,6 +288,25 @@ namespace Shorokoo
         /// validates it, and it never affects a <see cref="Persistence.Load(string)"/>.</summary>
         public IReadOnlyDictionary<string, string>? UserMetadata { get; }
 
+        /// <summary>The host user-data bag recorded at save time (issue #101): the parsed JSON
+        /// DOM of the <c>data/user-data.json</c> entry, or null when the checkpoint carries none
+        /// (or the entry could not be read as a JSON object — see the observations). Distinct from
+        /// the flat, human-oriented <see cref="UserMetadata"/>: this is the nested object a
+        /// resuming program reads back, carried verbatim. Shorokoo never interprets, schema-checks,
+        /// or validates the values; it never affects a <see cref="Persistence.Load(string)"/>.
+        /// Use <see cref="GetUserData{T}"/> to deserialize it into a host type.</summary>
+        public JsonObject? UserData { get; }
+
+        /// <summary>
+        /// Deserializes the host <see cref="UserData"/> bag into <typeparamref name="T"/> (issue
+        /// #101) — sugar over <c>UserData.Deserialize&lt;T&gt;()</c>. Returns <c>default</c> when
+        /// no user data is present. <paramref name="options"/> tunes the deserialization; a shape
+        /// that does not match <typeparamref name="T"/> surfaces as a <see cref="JsonException"/>
+        /// from <see cref="System.Text.Json"/>, since Shorokoo does not interpret the bag itself.
+        /// </summary>
+        public T? GetUserData<T>(JsonSerializerOptions? options = null)
+            => UserData is null ? default : UserData.Deserialize<T>(options);
+
         /// <summary>The model registry, in manifest order.</summary>
         public IReadOnlyList<SkptModelSummary> Models { get; }
 
@@ -304,7 +324,7 @@ namespace Shorokoo
 
         internal SkptArtifactInfo(
             string? formatName, int skptVersion, string? producer, string? createdUtc,
-            IReadOnlyDictionary<string, string>? userMetadata,
+            IReadOnlyDictionary<string, string>? userMetadata, JsonObject? userData,
             IReadOnlyList<SkptModelSummary> models, IReadOnlyList<SkptDataSummary> dataEntries,
             IReadOnlyList<string> mappingSetNames, SkptTrainingSummary? training = null)
         {
@@ -313,6 +333,7 @@ namespace Shorokoo
             Producer = producer;
             CreatedUtc = createdUtc;
             UserMetadata = userMetadata;
+            UserData = userData;
             Models = models;
             DataEntries = dataEntries;
             MappingSetNames = mappingSetNames;
@@ -454,6 +475,13 @@ namespace Shorokoo
                         sb.Append("    … and ").Append(userMeta.Count - MaxListedTensors)
                           .AppendLine(" more");
                 }
+
+                // Host user-data bag (issue #101): a one-line count only — never a nested dump.
+                // The full DOM stays available via SkptArtifactInfo.UserData. Only the integer key
+                // count is printed, so no file-derived string reaches this line to sanitize.
+                if (skpt.UserData is { } userData)
+                    sb.Append("  user-data: ").Append(userData.Count)
+                      .AppendLine(userData.Count == 1 ? " key" : " keys");
 
                 sb.Append("  models (").Append(skpt.Models.Count).AppendLine("):");
                 AppendItemList(sb, skpt.Models, indent: "    ");
@@ -749,12 +777,17 @@ namespace Shorokoo
             // which is also why every recorded sha256 is reported unverified.
             List<(string Name, long Length, long CompressedLength)> zipEntries;
             byte[] configBytes;
+            // Raw bytes of the host user-data entry (issue #101), read here while the archive is
+            // open; parsed into the UserData DOM below only if the manifest declares the entry.
+            // Bounded by MaxSkptManifestBytes like the manifest itself — never a tensor payload.
+            byte[]? userDataBytes = null;
             int configCount = 0;
             try
             {
                 stream.Position = 0;
                 using var archive = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true);
                 ZipArchiveEntry? configEntry = null;
+                ZipArchiveEntry? userDataEntry = null;
                 zipEntries = new List<(string, long, long)>(archive.Entries.Count);
                 foreach (var entry in archive.Entries)
                 {
@@ -763,6 +796,10 @@ namespace Shorokoo
                     {
                         configCount++;
                         configEntry ??= entry;
+                    }
+                    else if (entry.FullName == SkptFileFormat.UserDataEntryPath)
+                    {
+                        userDataEntry ??= entry;
                     }
                 }
 
@@ -783,6 +820,17 @@ namespace Shorokoo
                 using var entryStream = configEntry.Open();
                 int read = entryStream.ReadAtLeast(buf, buf.Length, throwOnEndOfStream: false);
                 configBytes = read == buf.Length ? buf : buf[..read];
+
+                // Read the user-data entry's raw bytes if present and within the manifest-read cap
+                // (an over-cap or negative-length entry is left unread and surfaces as an
+                // observation below). Parsing is deferred until the manifest confirms the entry.
+                if (userDataEntry is not null && userDataEntry.Length is >= 0 and <= MaxSkptManifestBytes)
+                {
+                    var udBuf = new byte[(int)userDataEntry.Length];
+                    using var udStream = userDataEntry.Open();
+                    int udRead = udStream.ReadAtLeast(udBuf, udBuf.Length, throwOnEndOfStream: false);
+                    userDataBytes = udRead == udBuf.Length ? udBuf : udBuf[..udRead];
+                }
             }
             catch (InvalidDataException e)
             {
@@ -810,7 +858,8 @@ namespace Shorokoo
                     "a zip, not a .skpt checkpoint.");
 
             return new ArtifactInspection(filePath, fileLen, ArtifactKind.SkptCheckpoint,
-                SummarizeSkptManifest(manifest, zipEntries, configCount, observations), observations);
+                SummarizeSkptManifest(manifest, zipEntries, configCount, userDataBytes, filePath, observations),
+                observations);
         }
 
         /// <summary>
@@ -824,7 +873,7 @@ namespace Shorokoo
         private static SkptArtifactInfo SummarizeSkptManifest(
             SkptManifest manifest,
             List<(string Name, long Length, long CompressedLength)> zipEntries,
-            int configCount, List<string> observations)
+            int configCount, byte[]? userDataBytes, string filePath, List<string> observations)
         {
             if (manifest.SkptVersion == 0)
                 observations.Add("required manifest field 'skptVersion' is missing or zero.");
@@ -894,7 +943,10 @@ namespace Shorokoo
                         $"'{d.Entry}', but the archive has no such entry.");
                 else
                     referenced.Add(d.Entry);
-                if (d is not null && d.Format != SkptFileFormat.DataFormatSafeTensors)
+                // "json" is a known storage format for the host user-data entry (issue #101);
+                // any other non-safetensors format is unknown (likely a newer Shorokoo version).
+                if (d is not null && d.Format != SkptFileFormat.DataFormatSafeTensors
+                    && d.Format != SkptFileFormat.DataFormatJson)
                     observations.Add($"data entry '{key}' uses the unknown storage format " +
                         $"'{d.Format ?? "<none>"}' (likely written by a newer Shorokoo version).");
                 if (d?.Compression is not null
@@ -961,6 +1013,34 @@ namespace Shorokoo
                 ? new Dictionary<string, string>(rawMetadata, StringComparer.Ordinal)
                 : null;
 
+            // Host user-data bag (issue #101): parse the JSON DOM back when the manifest declares
+            // the reserved user-data entry. Well-formedness only — the values are never
+            // interpreted. Like every read on this path, a content problem becomes an observation,
+            // never an exception; the recorded sha256 is reported by its data-registry summary but
+            // not verified here (that is Load's job — and Load never touches this entry).
+            JsonObject? userData = null;
+            if (manifest.Data is not null
+                && manifest.Data.TryGetValue(SkptFileFormat.UserDataDataKey, out var userDataEntry)
+                && userDataEntry?.Format == SkptFileFormat.DataFormatJson)
+            {
+                if (userDataBytes is null)
+                    observations.Add($"the manifest declares a '{SkptFileFormat.UserDataDataKey}' " +
+                        $"entry but its archive entry '{SkptFileFormat.UserDataEntryPath}' is " +
+                        "missing or too large to read.");
+                else
+                {
+                    try
+                    {
+                        userData = SkptFileFormat.ParseUserData(userDataBytes, filePath);
+                    }
+                    catch (InvalidDataException e)
+                    {
+                        observations.Add($"the host user-data entry is not a readable JSON " +
+                            $"object and was skipped ({e.Message}).");
+                    }
+                }
+            }
+
             // Training-checkpoint block (issue #95): read straight from the manifest — step and
             // per-kind wiring are metadata, so this needs no tensor reads. Cross-check that each
             // named kind's data key exists in the data registry, and flag a malformed block.
@@ -990,7 +1070,7 @@ namespace Shorokoo
 
             return new SkptArtifactInfo(
                 manifest.Format, manifest.SkptVersion, manifest.Producer?.Shorokoo,
-                manifest.CreatedUtc, userMetadata, models, dataEntries, mappingSetNames, training);
+                manifest.CreatedUtc, userMetadata, userData, models, dataEntries, mappingSetNames, training);
         }
 
         // ---- Zstd frame (legacy v1 compressed layouts) ----

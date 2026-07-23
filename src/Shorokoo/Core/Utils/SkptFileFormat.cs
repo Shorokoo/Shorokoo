@@ -4,6 +4,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 
 namespace Shorokoo.Core.Utils
@@ -224,11 +225,18 @@ namespace Shorokoo.Core.Utils
         /// <summary>Archive path of the (single, for now) weights data entry.</summary>
         public const string WeightsEntryPath = "data/weights.safetensors";
 
+        /// <summary>Archive path of the host user-data bag (issue #101).</summary>
+        public const string UserDataEntryPath = "data/user-data.json";
+
         /// <summary>Model serialization format name for .srk v2 payloads.</summary>
         public const string ModelFormatSrk2 = "srk2";
 
         /// <summary>Data storage format name for safetensors payloads.</summary>
         public const string DataFormatSafeTensors = "safetensors";
+
+        /// <summary>Data storage format name for the host user-data bag — a JSON object
+        /// (issue #101). Carried verbatim; never schema-checked or interpreted.</summary>
+        public const string DataFormatJson = "json";
 
         /// <summary>Data compression name for uncompressed payloads.</summary>
         public const string CompressionNone = "none";
@@ -248,6 +256,14 @@ namespace Shorokoo.Core.Utils
 
         /// <summary>Name of the (only, for now) tensor mapping set.</summary>
         internal const string DefaultMappingSetName = "default";
+
+        /// <summary>Manifest data-registry key of the host user-data bag (issue #101). Reserved:
+        /// no weight set may take this name, so a user-data entry never collides with one.</summary>
+        internal const string UserDataDataKey = "userData";
+
+        /// <summary>Top-level user-data keys beginning with this character are reserved for
+        /// Shorokoo and rejected from a host-supplied bag (issue #101).</summary>
+        internal const char ReservedUserDataKeyPrefix = '$';
 
         // ---- Training-checkpoint container (issue #95) ----
         // A training-checkpoint .skpt is a superset of an inference .skpt: it carries the concrete
@@ -343,6 +359,41 @@ namespace Shorokoo.Core.Utils
         /// <summary>Lowercase hex SHA-256, as recorded in manifest sha256 fields.</summary>
         internal static string Sha256Hex(ReadOnlySpan<byte> data)
             => Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant();
+
+        private static readonly JsonSerializerOptions UserDataJsonOptions = new()
+        {
+            WriteIndented = true,
+        };
+
+        /// <summary>Serializes the host user-data bag to the UTF-8 bytes of the
+        /// <see cref="UserDataEntryPath"/> entry (issue #101). The bag is written verbatim; its
+        /// values are never interpreted.</summary>
+        internal static byte[] SerializeUserData(JsonObject userData)
+            => JsonSerializer.SerializeToUtf8Bytes(userData, UserDataJsonOptions);
+
+        /// <summary>
+        /// Parses the host user-data entry back into its JSON DOM (issue #101). Validates
+        /// well-formedness only: the bytes must be valid JSON whose root is an object — never the
+        /// shape or meaning of the values. Throws <see cref="InvalidDataException"/> for malformed
+        /// JSON or a non-object root (a <see cref="JsonException"/> is wrapped).
+        /// </summary>
+        internal static JsonObject ParseUserData(byte[] bytes, string origin)
+        {
+            JsonNode? node;
+            try
+            {
+                node = JsonNode.Parse(bytes);
+            }
+            catch (JsonException e)
+            {
+                throw new InvalidDataException(
+                    $"'{origin}': the '{UserDataEntryPath}' entry does not parse as JSON: {e.Message}", e);
+            }
+            if (node is not JsonObject obj)
+                throw new InvalidDataException(
+                    $"'{origin}': the '{UserDataEntryPath}' entry is not a JSON object at its root.");
+            return obj;
+        }
 
         /// <summary>
         /// Whether the bytes open with the Zstd frame magic (28 B5 2F FD, little-endian

@@ -2439,6 +2439,186 @@ public class CompressedFormatUtilsCoverageTests
         }
     }
 
+    /// <summary>
+    /// Host user-data bag (issue #101): the checkpoint builder attaches an arbitrary JSON object
+    /// — the one part of a run Shorokoo cannot reconstruct (the data-pipeline state) — stored as
+    /// the reserved <c>data/user-data.json</c> entry and wired into the manifest's data registry
+    /// (<c>format: "json"</c>, sha256). This test proves the whole contract from the issue's
+    /// acceptance criteria: a JSON object round-trips unchanged through save → Inspect
+    /// <c>UserData</c>/<c>GetUserData</c>; a non-object root (and a null value) is rejected at
+    /// save; a <c>$</c>-prefixed top-level host key is rejected as reserved; supplying none leaves
+    /// the <c>.skpt</c> byte-identical to today; the bag never affects a Load; Inspect summarizes
+    /// it as a one-line key count (never a nested dump); and the <see cref="JsonObject"/> overload
+    /// snapshots against later mutation.
+    /// </summary>
+    [Fact]
+    public void TestSkptHostUserDataBag()
+    {
+        var (model, numOut, input) = BuildSkptModel();
+        var plainPath = Path.Combine(TempDir, "userdata_plain.skpt");
+        var dataPath = Path.Combine(TempDir, "userdata_bag.skpt");
+        try
+        {
+            // ── No user data → no user-data.json entry, no manifest data key, and the output is
+            // byte-identical to a checkpoint saved without it. Byte-identity is proven at the
+            // serialization boundary (the file's createdUtc/zip timestamps are not deterministic):
+            // an unset bag adds no entry and no data-registry record.
+            Persistence.From(model).WithModel().WithWeights().Save(plainPath);
+            var plainEntries = ReadZipEntries(plainPath);
+            Assert.False(plainEntries.ContainsKey(SkptFileFormat.UserDataEntryPath));
+            Assert.DoesNotContain("user-data.json",
+                System.Text.Encoding.UTF8.GetString(plainEntries[SkptFileFormat.ConfigEntryName]));
+
+            var plainInspect = Persistence.Inspect(plainPath);
+            Assert.Equal(ArtifactKind.SkptCheckpoint, plainInspect.Kind);
+            Assert.Null(plainInspect.Skpt!.UserData);
+            Assert.Null(plainInspect.Skpt.GetUserData<PipelineState>());
+            Assert.DoesNotContain("user-data:", plainInspect.ToString());
+
+            // ── A JSON object attached at save round-trips unchanged. The bag carries nested and
+            // heterogeneous values (object, array, number, string, bool, null) — all valid JSON,
+            // none of which Shorokoo interprets.
+            var bag = new JsonObject
+            {
+                ["corpus"] = "imagenet-1k",
+                ["shuffleSeed"] = 12345,
+                ["epoch"] = 3,
+                ["done"] = false,
+                ["cursor"] = null,
+                ["shards"] = new JsonArray("a.tar", "b.tar", "c.tar"),
+                ["augment"] = new JsonObject { ["flip"] = true, ["crop"] = 224 },
+            };
+            Persistence.From(model).WithModel().WithWeights().WithUserData(bag).Save(dataPath);
+
+            // The archive carries the reserved entry, and the manifest wires it into the data
+            // registry with format "json" and a sha256 covering the stored bytes.
+            var dataEntries = ReadZipEntries(dataPath);
+            Assert.True(dataEntries.ContainsKey(SkptFileFormat.UserDataEntryPath));
+            var manifest = SkptFileFormat.ParseManifest(
+                dataEntries[SkptFileFormat.ConfigEntryName], dataPath);
+            var udEntry = manifest.Data![SkptFileFormat.UserDataDataKey];
+            Assert.Equal(SkptFileFormat.UserDataEntryPath, udEntry.Entry);
+            Assert.Equal(SkptFileFormat.DataFormatJson, udEntry.Format);
+            Assert.Equal(SkptFileFormat.CompressionNone, udEntry.Compression);
+            Assert.Equal(
+                SkptFileFormat.Sha256Hex(dataEntries[SkptFileFormat.UserDataEntryPath]),
+                udEntry.Sha256);
+
+            // Read back via the DOM: every value survives verbatim.
+            var inspect = Persistence.Inspect(dataPath);
+            Assert.Empty(inspect.Observations);
+            var read = inspect.Skpt!.UserData!;
+            Assert.NotNull(read);
+            Assert.Equal(7, read.Count);
+            Assert.Equal("imagenet-1k", (string?)read["corpus"]);
+            Assert.Equal(12345, (int?)read["shuffleSeed"]);
+            Assert.Equal(3, (int?)read["epoch"]);
+            Assert.False((bool?)read["done"]);
+            Assert.Null(read["cursor"]);
+            Assert.Equal(3, read["shards"]!.AsArray().Count);
+            Assert.Equal("b.tar", (string?)read["shards"]![1]);
+            Assert.True((bool?)read["augment"]!["flip"]);
+            Assert.Equal(224, (int?)read["augment"]!["crop"]);
+
+            // Inspect summarizes the bag as a one-line key count — never a nested dump.
+            var text = inspect.ToString();
+            Assert.Contains("user-data: 7 keys", text);
+            Assert.DoesNotContain("imagenet-1k", text);   // values are not dumped
+            Assert.DoesNotContain("shuffleSeed", text);
+
+            // ── The bag never affects a Load: the checkpoint binds identical weights and executes
+            // bit-identically with or without it.
+            var reference = ExecuteToBytes(model, numOut, input);
+            var plainWeights = WeightBytesByParam(Persistence.Load(plainPath));
+            var dataWeights = WeightBytesByParam(Persistence.Load(dataPath));
+            Assert.Equal(plainWeights.Count, dataWeights.Count);
+            foreach (var (paramId, bytes) in plainWeights)
+                Assert.Equal(bytes, dataWeights[paramId]);
+            Assert.Equal(reference, ExecuteToBytes(Persistence.Load(dataPath), numOut, input));
+
+            // ── The generic overload accepts a POCO whose root is an object.
+            var pocoPath = Path.Combine(TempDir, "userdata_poco.skpt");
+            try
+            {
+                var state = new PipelineState
+                {
+                    Corpus = "c4",
+                    ShuffleSeed = 7,
+                    Epoch = 1,
+                    Shards = ["x", "y"],
+                };
+                Persistence.From(model).WithModel().WithWeights().WithUserData(state).Save(pocoPath);
+                var pocoBack = Persistence.Inspect(pocoPath).Skpt!.GetUserData<PipelineState>()!;
+                Assert.Equal("c4", pocoBack.Corpus);
+                Assert.Equal(7, pocoBack.ShuffleSeed);
+                Assert.Equal(["x", "y"], pocoBack.Shards);
+            }
+            finally
+            {
+                if (File.Exists(pocoPath)) File.Delete(pocoPath);
+            }
+
+            // ── A non-object serialized root is rejected at save (a list, a scalar, and JSON
+            // null all fail with a clear ArgumentException — the only structural check).
+            Assert.Throws<ArgumentException>(() =>
+                Persistence.From(model).WithUserData(new[] { 1, 2, 3 }));
+            Assert.Throws<ArgumentException>(() =>
+                Persistence.From(model).WithUserData("just a string"));
+            Assert.Throws<ArgumentException>(() =>
+                Persistence.From(model).WithUserData(42));
+            Assert.Throws<ArgumentException>(() =>
+                Persistence.From(model).WithUserData<object?>(null));
+            Assert.Throws<ArgumentNullException>(() =>
+                Persistence.From(model).WithUserData((JsonObject)null!));
+
+            // ── A $-prefixed top-level key is reserved for Shorokoo and rejected, through both
+            // the DOM overload and the generic path; nested $-keys are allowed (values are never
+            // interpreted).
+            Assert.Throws<ArgumentException>(() =>
+                Persistence.From(model).WithUserData(new JsonObject { ["$reserved"] = 1 }));
+            Assert.Throws<ArgumentException>(() =>
+                Persistence.From(model).WithUserData(
+                    new Dictionary<string, int> { ["$nope"] = 1 }));
+            // Nested "$" keys are fine — only the root is reserved.
+            Persistence.From(model).WithUserData(
+                new JsonObject { ["ok"] = new JsonObject { ["$inner"] = 1 } });
+
+            // ── The JsonObject overload snapshots: mutating the caller's object after the call
+            // does not change what was stored.
+            var mutPath = Path.Combine(TempDir, "userdata_mut.skpt");
+            try
+            {
+                var live = new JsonObject { ["v"] = 1 };
+                var builder = Persistence.From(model).WithModel().WithWeights().WithUserData(live);
+                live["v"] = 999;          // mutate after attaching
+                live["added"] = "late";
+                builder.Save(mutPath);
+                var snap = Persistence.Inspect(mutPath).Skpt!.UserData!;
+                Assert.Equal(1, (int?)snap["v"]);
+                Assert.False(snap.ContainsKey("added"));
+            }
+            finally
+            {
+                if (File.Exists(mutPath)) File.Delete(mutPath);
+            }
+        }
+        finally
+        {
+            if (File.Exists(plainPath)) File.Delete(plainPath);
+            if (File.Exists(dataPath)) File.Delete(dataPath);
+        }
+    }
+
+    /// <summary>A host pipeline-state POCO used to exercise the generic
+    /// <c>WithUserData&lt;T&gt;</c> / <c>GetUserData&lt;T&gt;</c> round-trip.</summary>
+    private sealed class PipelineState
+    {
+        public string? Corpus { get; set; }
+        public int ShuffleSeed { get; set; }
+        public int Epoch { get; set; }
+        public string[] Shards { get; set; } = [];
+    }
+
     /// <summary>The model's weight tensors (TensorData) keyed by parameter identifier,
     /// excluding the RNG identity parameter — the values an additional set is built over.</summary>
     private static Dictionary<string, TensorData> WeightDataByParam(ComputationGraph model)

@@ -31,6 +31,10 @@ Related: [onnx-and-weights.md](onnx-and-weights.md) · [training.md](training.md
   resumes across process restarts and the same file also loads as an inference model. See
   [Training checkpoints](#training-checkpoints). Precompiled artifacts and the full
   training-rig (constituent models, schedules) are future extensions of the same container.
+- A checkpoint can carry a **host user-data bag** — an arbitrary JSON object you attach
+  at save and read back verbatim on load (e.g. your data-pipeline state), stored as
+  `data/user-data.json` and never interpreted by Shorokoo. See
+  [Host user-data bag](#host-user-data-bag).
 - `.skpt` replaces nothing: ONNX export and `.safetensors`/`.srk` files remain
   separate, on-demand projections (see [onnx-and-weights.md](onnx-and-weights.md)).
 
@@ -189,6 +193,71 @@ What provenance metadata **is and is not**:
   simply not written — the output is byte-for-byte identical to a checkpoint
   saved without provenance.
 
+## Host user-data bag
+
+Provenance metadata is a flat `string → string` map for **humans** to read in
+`Inspect`. When your resuming **program** needs to read back structured state,
+attach a **user-data bag** instead: an arbitrary JSON object you serialize at
+save and read back verbatim on load, stored as `data/user-data.json`.
+
+Its motivating use is the **data-pipeline state** — which corpus, the
+shuffle/augmentation strategy, the stream position — the one part of a run
+Shorokoo cannot reconstruct for you, because it does not own your dataloader. The
+bag carries your own bytes and hands them back, making a `.skpt` a self-contained
+resume unit, without interpreting them.
+
+```csharp
+Persistence.From(concreteModel)
+    .WithModel()
+    .WithWeights()
+    .WithUserData(new PipelineState        // any type System.Text.Json can serialize
+    {
+        Corpus      = "imagenet-1k",
+        ShuffleSeed = 12345,
+        Epoch       = 3,
+        Shards      = ["a.tar", "b.tar", "c.tar"],
+    })
+    .Save("model.skpt");
+```
+
+Read it back through `Inspect` — as the raw DOM, or deserialized into your type:
+
+```csharp
+var info = Persistence.Inspect("model.skpt");
+
+System.Text.Json.Nodes.JsonObject? bag = info.Skpt!.UserData;   // null when absent
+PipelineState? state = info.Skpt!.GetUserData<PipelineState>();  // default when absent
+```
+
+`WithUserData(JsonObject value)` takes a `System.Text.Json.Nodes.JsonObject`
+directly if you would rather build the DOM by hand.
+
+What the user-data bag **is and is not**:
+
+- **A JSON object at the root.** The one structural rule: the value must
+  serialize to a JSON *object* (a property bag), so a bare list or scalar is
+  rejected at save with a clear error — wrap it in an object first (e.g.
+  `{ "items": [ … ] }`). The values *under* the root may be any valid JSON.
+- **Never interpreted.** Shorokoo validates well-formedness only — it never
+  schema-checks the shape or meaning of the values, and never fails a load on a
+  data mismatch (that check, if you want one, is your code). The bag wires
+  nothing: `Persistence.Load` ignores it entirely, binding a checkpoint
+  identically with or without it.
+- **`$`-prefixed top-level keys are reserved** for Shorokoo and rejected at save;
+  use any other key. (Only the root's keys are reserved — nested objects may use
+  any keys.)
+- **Summarized, not dumped.** `Inspect`'s text summary shows a one-line key count
+  (`user-data: 4 keys`), never the nested contents; the full object stays
+  available through the `UserData` property.
+- **Absent by default.** Supply none and no `data/user-data.json` entry is
+  written — the output is byte-for-byte identical to a checkpoint saved without
+  it. The bag is always stored uncompressed, independent of
+  `.WithZstdCompressedData()`.
+
+Distinct from a Shorokoo-defined data-pipeline format: there is none. If Shorokoo
+ever grows a first-class dataloader, a replayable pipeline state could supersede
+this bag — until then it is your bytes, round-tripped.
+
 ## Compressed data entries: the trade-off
 
 Compression is a per-entry, opt-in trade of **size against range-readability**:
@@ -259,10 +328,12 @@ scope; `.WithWeights(setName, values)` only carries and selects the parallel ver
 ## Inspecting a .skpt
 
 `Persistence.Inspect("model.skpt")` identifies the container and summarizes its
-manifest — whole-archive metadata (producer, creation time, and any
-[user provenance metadata](#provenance-metadata)), the model and data registries,
-the mapping-set names — reading only the zip central directory and `config.json`,
-never the tensor data. The recorded per-entry sha256s are reported as written
+manifest — whole-archive metadata (producer, creation time, any
+[user provenance metadata](#provenance-metadata), and a one-line count of the
+[host user-data bag](#host-user-data-bag) with the full object on `Skpt.UserData`),
+the model and data registries, the mapping-set names — reading only the zip
+central directory, `config.json`, and (when present) the small `data/user-data.json`
+entry, never the tensor data. The recorded per-entry sha256s are reported as written
 but not verified (a full `Persistence.Load` verifies them), and cheap sanity
 observations flag manifest/archive mismatches, compressed entries where STORED
 is expected, and unknown manifest keys. See the inspection section in
@@ -287,7 +358,8 @@ model.skpt
 ├── models/
 │   └── model.srk              the model definition (srk2 encoding, weights stripped)
 └── data/
-    └── weights.safetensors    tensor data (safetensors layout)
+    ├── weights.safetensors    tensor data (safetensors layout)
+    └── user-data.json         optional host user-data bag (JSON object)
 ```
 
 - `models/model.srk` is the model **definition**: a valid `.srk` v2 concrete-model
@@ -301,6 +373,9 @@ model.skpt
   [safetensors](https://huggingface.co/docs/safetensors) file. Tensor names are the
   model's internal parameter identifiers, as wired by the manifest — extract the entry
   with any unzip tool and read it with any safetensors reader.
+- `data/user-data.json` holds the optional [host user-data bag](#host-user-data-bag) —
+  a JSON object you attach and read back verbatim; present only when you supply one, and
+  ignored by load.
 - A [training checkpoint](#training-checkpoints) adds more `data/` entries — one per
   training-state kind (`data/trainable.safetensors`, and, when non-empty,
   `data/model_state.safetensors` and `data/optimizer_state.safetensors`) — and a
@@ -373,6 +448,15 @@ model.skpt
       "format": "safetensors",
       "compression": "none",
       "sha256": "9af0c1…"
+    },
+
+    // Optional host user-data bag (issue #101): format "json", never referenced by a
+    // tensor mapping, so load ignores it. Present only when you attach one.
+    "userData": {
+      "entry": "data/user-data.json",
+      "format": "json",
+      "compression": "none",
+      "sha256": "1c0ffe…"
     }
   },
 

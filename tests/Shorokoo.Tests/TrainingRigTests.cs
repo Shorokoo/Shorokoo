@@ -905,8 +905,10 @@ public class TrainingRigCoverageTests
             Assert.Null(result.Srk);
 
             var info = result.TrainingCheckpoint!;
-            Assert.Equal(1, info.FormatVersion);
+            Assert.Equal(2, info.FormatVersion);   // v2 marker: [version, step, epoch, batchIndex]
             Assert.Equal(5, info.Step);
+            Assert.Equal(0, info.Epoch);           // not set on this checkpoint → default 0
+            Assert.Equal(0, info.BatchIndex);
 
             // Per-section listing matches the rig's struct defs field-for-field (names with
             // the section prefix stripped; SGD-momentum carries per-param velocity state,
@@ -1748,6 +1750,207 @@ public class TrainingRigCoverageTests
             Assert.Equal(FlattenStruct(ckpt.OptimizerState), FlattenStruct(loaded.OptimizerState));
         }
         finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    /// <summary>
+    /// Host-owned epoch/batch counters (issue #100) persist and restore in both checkpoint formats.
+    /// A checkpoint saved at (step, epoch, batchIndex) reloads with all three through a fresh rig, the
+    /// .skpt and legacy flat formats agree, and <see cref="Persistence.Inspect"/> surfaces epoch and
+    /// batch from the manifest / marker alone (no tensor payload load — Observations stays empty).
+    /// </summary>
+    [Fact]
+    public void TestCheckpointEpochBatchCountersRoundTripCoverage()
+    {
+        // Step comes from training; epoch and batch index are host-owned, set here by the "host".
+        var (_, trained, _, _, _) = BuildTrainedAdamRig(steps: 4);
+        var ckpt = new TrainingCheckpoint(
+            trained.TrainableParams, trained.ModelState, trained.OptimizerState,
+            step: trained.Step, epoch: 7, batchIndex: 340);
+        Assert.Equal(4, ckpt.Step);
+        Assert.Equal(7, ckpt.Epoch);
+        Assert.Equal(340, ckpt.BatchIndex);
+
+        var exampleInput = TensorData(ScalarInputShape, new float[4]);
+        var skptPath = Path.Combine(Path.GetTempPath(), $"shrk_ctr_skpt_{Guid.NewGuid():N}.skpt");
+        var legacyPath = Path.Combine(Path.GetTempPath(), $"shrk_ctr_legacy_{Guid.NewGuid():N}.safetensors");
+        try
+        {
+            // --- .skpt format: manifest records the counters; a fresh rig restores them. ---
+            Persistence.SaveTrainingCheckpointToSkpt(
+                ckpt, ScalarMultiplyModel.ComputationGraph, exampleInput, skptPath);
+            var manifest = SkptFileFormat.ParseManifest(
+                ReadEntryBytesViaBcl(skptPath, SkptFileFormat.ConfigEntryName), skptPath);
+            Assert.Equal(7, manifest.Training!.Epoch);
+            Assert.Equal(340, manifest.Training.BatchIndex);
+
+            var skptLoaded = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(skptPath);
+            Assert.Equal(4, skptLoaded.Step);
+            Assert.Equal(7, skptLoaded.Epoch);
+            Assert.Equal(340, skptLoaded.BatchIndex);
+
+            // --- Legacy flat safetensors format: same counters round-trip via the marker. ---
+            ckpt.Save(legacyPath);
+            var legacyLoaded = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(legacyPath);
+            Assert.Equal(4, legacyLoaded.Step);
+            Assert.Equal(7, legacyLoaded.Epoch);
+            Assert.Equal(340, legacyLoaded.BatchIndex);
+
+            // --- The two formats agree. ---
+            Assert.Equal(skptLoaded.Step, legacyLoaded.Step);
+            Assert.Equal(skptLoaded.Epoch, legacyLoaded.Epoch);
+            Assert.Equal(skptLoaded.BatchIndex, legacyLoaded.BatchIndex);
+
+            // --- Inspect reports them without loading tensor data. ---
+            var skptInspect = Persistence.Inspect(skptPath);
+            Assert.Empty(skptInspect.Observations);
+            Assert.Equal(7, skptInspect.Skpt!.Training!.Epoch);
+            Assert.Equal(340, skptInspect.Skpt.Training.BatchIndex);
+            var skptText = skptInspect.ToString();
+            Assert.Contains("epoch 7", skptText);
+            Assert.Contains("batch index 340", skptText);
+
+            var legacyInspect = Persistence.Inspect(legacyPath);
+            Assert.Empty(legacyInspect.Observations);
+            Assert.Equal(2, legacyInspect.TrainingCheckpoint!.FormatVersion);
+            Assert.Equal(7, legacyInspect.TrainingCheckpoint.Epoch);
+            Assert.Equal(340, legacyInspect.TrainingCheckpoint.BatchIndex);
+            var legacyText = legacyInspect.ToString();
+            Assert.Contains("epoch: 7", legacyText);
+            Assert.Contains("batch index: 340", legacyText);
+        }
+        finally
+        {
+            if (File.Exists(skptPath)) File.Delete(skptPath);
+            if (File.Exists(legacyPath)) File.Delete(legacyPath);
+        }
+    }
+
+    /// <summary>
+    /// Epoch and batch index are host-owned run counters, so a single <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>
+    /// (a graph execution) advances only the step and carries epoch/batch through unchanged — the
+    /// training loop, not the graph, moves them.
+    /// </summary>
+    [Fact]
+    public void TestTrainStepCarriesEpochBatchCountersCoverage()
+    {
+        var (rig, trained, inBatch, outBatch, compiled) = BuildTrainedAdamRig(steps: 1);
+        var ckpt = new TrainingCheckpoint(
+            trained.TrainableParams, trained.ModelState, trained.OptimizerState,
+            step: trained.Step, epoch: 3, batchIndex: 12);
+
+        var next = rig.TrainStep(ckpt, inBatch, outBatch, compiled).Checkpoint;
+        Assert.Equal(ckpt.Step + 1, next.Step);   // step advances (one graph execution)
+        Assert.Equal(3, next.Epoch);              // host-owned: unchanged by TrainStep
+        Assert.Equal(12, next.BatchIndex);
+    }
+
+    /// <summary>
+    /// Backward compatibility (issue #100, §5.8.5 "fill new state kinds as absent"): a checkpoint
+    /// written before epoch/batch existed loads with those counters defaulting to 0, in both formats
+    /// — a legacy flat file with the pre-#100 two-element marker, and a .skpt whose manifest training
+    /// block lacks the epoch/batchIndex keys.
+    /// </summary>
+    [Fact]
+    public void TestCheckpointWithoutEpochBatchLoadsDefaultsCoverage()
+    {
+        var (_, trained, _, _, _) = BuildTrainedAdamRig(steps: 2);
+        var ckpt = new TrainingCheckpoint(
+            trained.TrainableParams, trained.ModelState, trained.OptimizerState, step: 2);
+
+        var legacyPath = Path.Combine(Path.GetTempPath(), $"shrk_v1_{Guid.NewGuid():N}.safetensors");
+        var skptPath = Path.Combine(Path.GetTempPath(), $"shrk_old_{Guid.NewGuid():N}.skpt");
+        try
+        {
+            // --- Legacy: a pre-#100 v1 marker ([version=1, step]) has no epoch/batch slots. ---
+            WriteLegacyV1Checkpoint(ckpt, legacyPath);
+            var legacyLoaded = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(legacyPath);
+            Assert.Equal(2, legacyLoaded.Step);
+            Assert.Equal(0, legacyLoaded.Epoch);
+            Assert.Equal(0, legacyLoaded.BatchIndex);
+
+            var legacyInspect = Persistence.Inspect(legacyPath);
+            Assert.Empty(legacyInspect.Observations);   // v1 is a readable older version, not flagged
+            Assert.Equal(1, legacyInspect.TrainingCheckpoint!.FormatVersion);
+            Assert.Equal(0, legacyInspect.TrainingCheckpoint.Epoch);
+            Assert.Equal(0, legacyInspect.TrainingCheckpoint.BatchIndex);
+
+            // --- .skpt: strip the epoch/batchIndex keys to mimic a #95-era manifest. ---
+            Persistence.SaveTrainingCheckpointToSkpt(
+                ckpt, ScalarMultiplyModel.ComputationGraph, TensorData(ScalarInputShape, new float[4]), skptPath);
+            StripSkptTrainingCounterKeys(skptPath);
+
+            var manifest = SkptFileFormat.ParseManifest(
+                ReadEntryBytesViaBcl(skptPath, SkptFileFormat.ConfigEntryName), skptPath);
+            Assert.Equal(0, manifest.Training!.Epoch);       // absent keys ⇒ 0
+            Assert.Equal(0, manifest.Training.BatchIndex);
+
+            var skptLoaded = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(skptPath);
+            Assert.Equal(2, skptLoaded.Step);
+            Assert.Equal(0, skptLoaded.Epoch);
+            Assert.Equal(0, skptLoaded.BatchIndex);
+
+            var skptInspect = Persistence.Inspect(skptPath);
+            Assert.Empty(skptInspect.Observations);
+            Assert.Equal(0, skptInspect.Skpt!.Training!.Epoch);
+            Assert.Equal(0, skptInspect.Skpt.Training.BatchIndex);
+        }
+        finally
+        {
+            if (File.Exists(legacyPath)) File.Delete(legacyPath);
+            if (File.Exists(skptPath)) File.Delete(skptPath);
+        }
+    }
+
+    /// <summary>Writes a pre-#100 legacy flat checkpoint: the three namespaced sections plus a
+    /// two-element (<c>[version=1, step]</c>) marker, i.e. a file without the epoch/batch marker
+    /// slots this build now writes — so loaders must default those counters to 0.</summary>
+    private static void WriteLegacyV1Checkpoint(TrainingCheckpoint ckpt, string path)
+    {
+        var tensors = new List<SafeTensor>();
+        void AddSection(string section, TensorDataStruct data)
+        {
+            foreach (var fd in data.Definition.Fields)
+            {
+                var td = (TensorData)data.Fields[fd.Name];
+                tensors.Add(new SafeTensor(
+                    $"{section}/{fd.Name}", td,
+                    SafeTensorLoader.DTypeToSafeTensorDType(td.DType), td.Shape.Dims));
+            }
+        }
+        AddSection(TrainingCheckpoint.TrainableSection, ckpt.TrainableParams);
+        AddSection(TrainingCheckpoint.ModelStateSection, ckpt.ModelState);
+        AddSection(TrainingCheckpoint.OptimizerStateSection, ckpt.OptimizerState);
+
+        var marker = TensorData([2L], 1L, (long)ckpt.Step);   // v1 marker: [version, step]
+        tensors.Add(new SafeTensor(TrainingCheckpoint.CheckpointMarkerName, marker, "I64", [2L]));
+        SafeTensorLoader.SaveSafeTensors(path, tensors);
+    }
+
+    /// <summary>Rewrites a .skpt in place, deleting the <c>epoch</c>/<c>batchIndex</c> keys from its
+    /// manifest training block to mimic a checkpoint written before those add-only fields existed.
+    /// Every other entry (and each data entry's bytes, hence its recorded sha256) is preserved.</summary>
+    private static void StripSkptTrainingCounterKeys(string path)
+    {
+        var entries = new List<SkptFileFormat.ZipEntrySpec>();
+        using (var zip = System.IO.Compression.ZipFile.OpenRead(path))
+            foreach (var e in zip.Entries)
+            {
+                using var s = e.Open();
+                using var buf = new MemoryStream();
+                s.CopyTo(buf);
+                var data = buf.ToArray();
+                if (e.FullName == SkptFileFormat.ConfigEntryName)
+                {
+                    var node = System.Text.Json.Nodes.JsonNode.Parse(data)!;
+                    var training = node["training"]!.AsObject();
+                    training.Remove("epoch");
+                    training.Remove("batchIndex");
+                    data = System.Text.Encoding.UTF8.GetBytes(node.ToJsonString());
+                }
+                entries.Add(new SkptFileFormat.ZipEntrySpec(e.FullName, data, Align: false));
+            }
+        using var outStream = File.Create(path);
+        SkptFileFormat.WriteStoredZip(outStream, entries, DateTime.UtcNow);
     }
 
 }

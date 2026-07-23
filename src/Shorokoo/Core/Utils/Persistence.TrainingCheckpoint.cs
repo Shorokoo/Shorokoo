@@ -133,7 +133,12 @@ namespace Shorokoo
                     (training.CheckpointVersion > SkptFileFormat.TrainingCheckpointVersion
                         ? "a newer framework version." : "an older, unsupported framework version."));
 
+            // Step/epoch/batch are host-owned scalars read straight from the manifest. Epoch and
+            // batchIndex are add-only fields (issue #100): a .skpt written before they existed omits
+            // them, so they deserialize to 0 — the "fill new state kinds as absent" rule.
             int step = checked((int)training.Step);
+            int epoch = checked((int)training.Epoch);
+            int batchIndex = checked((int)training.BatchIndex);
             var kinds = training.Kinds ?? new Dictionary<string, string>();
 
             var trainable = ReconstructTrainingKind(
@@ -143,7 +148,7 @@ namespace Shorokoo
             var optState = ReconstructTrainingKind(
                 archive, manifest, kinds, SkptFileFormat.TrainingKindOptimizerState, optimizerStateDef, filePath);
 
-            return new TrainingCheckpoint(trainable, modelState, optState, step);
+            return new TrainingCheckpoint(trainable, modelState, optState, step, epoch, batchIndex);
         }
 
         /// <summary>
@@ -431,6 +436,8 @@ namespace Shorokoo
                 {
                     CheckpointVersion = SkptFileFormat.TrainingCheckpointVersion,
                     Step = _checkpoint.Step,
+                    Epoch = _checkpoint.Epoch,
+                    BatchIndex = _checkpoint.BatchIndex,
                     Kinds = kinds,
                 },
             };

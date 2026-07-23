@@ -43,17 +43,39 @@ namespace Shorokoo
         /// </summary>
         public int Step { get; }
 
-        /// <summary>Packages trainable params, model state and optimizer state at <paramref name="step"/>.</summary>
+        /// <summary>
+        /// The 0-based epoch counter this checkpoint sits at — a host-owned run counter the
+        /// training loop advances (the graph never does), persisted so a resumed run restores
+        /// its position in the data schedule. <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>
+        /// carries it through unchanged; the host sets it (e.g. at each epoch boundary).
+        /// Checkpoints written before this counter existed load with the default 0.
+        /// </summary>
+        public int Epoch { get; }
+
+        /// <summary>
+        /// The 0-based batch index within the current epoch — a host-owned run counter the
+        /// training loop advances (the graph never does), persisted for exact resume.
+        /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>
+        /// carries it through unchanged; the host sets it. Older checkpoints load with the default 0.
+        /// </summary>
+        public int BatchIndex { get; }
+
+        /// <summary>Packages trainable params, model state and optimizer state at
+        /// <paramref name="step"/> / <paramref name="epoch"/> / <paramref name="batchIndex"/>.</summary>
         public TrainingCheckpoint(
             TensorDataStruct trainableParams,
             TensorDataStruct modelState,
             TensorDataStruct optimizerState,
-            int step = 0)
+            int step = 0,
+            int epoch = 0,
+            int batchIndex = 0)
         {
             TrainableParams = trainableParams ?? throw new ArgumentNullException(nameof(trainableParams));
             ModelState = modelState ?? throw new ArgumentNullException(nameof(modelState));
             OptimizerState = optimizerState ?? throw new ArgumentNullException(nameof(optimizerState));
             Step = step;
+            Epoch = epoch;
+            BatchIndex = batchIndex;
         }
 
         // ---- Inference: bind trained weights into a concrete model for execution ----
@@ -92,14 +114,16 @@ namespace Shorokoo
         internal const string TrainableSection = "trainable";
         internal const string ModelStateSection = "model_state";
         internal const string OptimizerStateSection = "opt_state";
-        internal const string CheckpointMarkerName = "__shorokoo_checkpoint__"; // int64[2] = [version, step]
-        internal const long CheckpointFormatVersion = 1;
+        internal const string CheckpointMarkerName = "__shorokoo_checkpoint__"; // int64[4] = [version, step, epoch, batchIndex]
+        internal const long CheckpointFormatVersion = 2;
 
         /// <summary>
         /// Saves this checkpoint to a single SafeTensors file so training can resume across process
         /// restarts. Every trainable-parameter, model-state, and optimizer-state field is written as
-        /// a namespaced tensor, alongside the global <see cref="Step"/> (so schedules resume from the
-        /// right step). Reload with <see cref="TrainingRig.LoadCheckpoint(string)"/> — or with
+        /// a namespaced tensor, alongside the host-owned run counters <see cref="Step"/>,
+        /// <see cref="Epoch"/>, and <see cref="BatchIndex"/> (so schedules resume from the right step
+        /// and the run resumes at the right point in its data schedule). Reload with
+        /// <see cref="TrainingRig.LoadCheckpoint(string)"/> — or with
         /// <see cref="Load"/> if you hold the struct defs directly. A <c>.safetensors</c> extension is
         /// conventional. Fields must be plain tensors (nested-struct fields are unsupported); rank-0
         /// scalars are fine — they serialize as the SafeTensors empty-shape encoding (e.g. an
@@ -168,8 +192,9 @@ namespace Shorokoo
             AppendSection(tensors, ModelStateSection, ModelState);
             AppendSection(tensors, OptimizerStateSection, OptimizerState);
 
-            var marker = Globals.TensorData(new long[] { 2L }, CheckpointFormatVersion, (long)Step);
-            tensors.Add(new SafeTensor(CheckpointMarkerName, marker, "I64", new long[] { 2L }));
+            var marker = Globals.TensorData(
+                [4L], CheckpointFormatVersion, (long)Step, (long)Epoch, (long)BatchIndex);
+            tensors.Add(new SafeTensor(CheckpointMarkerName, marker, "I64", [4L]));
             return tensors;
         }
 
@@ -211,17 +236,22 @@ namespace Shorokoo
                     $"'{filePath}' is not a Shorokoo training checkpoint (missing '{CheckpointMarkerName}' marker).");
 
             var marker = markerData.As<int64>().AccessMemory<long>();
-            if (marker.Length < 2 || marker[0] != CheckpointFormatVersion)
+            // Accept any format version this build knows (1 = [version, step]; 2 adds epoch and
+            // batchIndex). A v1 file lacks the epoch/batch slots, so they default to 0 — the
+            // "fill new state kinds as absent" compatibility rule.
+            if (marker.Length < 2 || marker[0] < 1 || marker[0] > CheckpointFormatVersion)
                 throw new InvalidOperationException(
                     $"Unsupported checkpoint format version {(marker.Length > 0 ? marker[0] : -1)}; " +
-                    $"this build reads version {CheckpointFormatVersion}.");
+                    $"this build reads versions 1 through {CheckpointFormatVersion}.");
             int step = checked((int)marker[1]);
+            int epoch = marker.Length > 2 ? checked((int)marker[2]) : 0;
+            int batchIndex = marker.Length > 3 ? checked((int)marker[3]) : 0;
 
             var trainable = ReadSection(byName, TrainableSection, trainableParamDef, filePath);
             var modelState = ReadSection(byName, ModelStateSection, modelStateDef, filePath);
             var optState = ReadSection(byName, OptimizerStateSection, optimizerStateDef, filePath);
 
-            return new TrainingCheckpoint(trainable, modelState, optState, step);
+            return new TrainingCheckpoint(trainable, modelState, optState, step, epoch, batchIndex);
         }
 
         private static TensorDataStruct ReadSection(
@@ -1218,11 +1248,16 @@ namespace Shorokoo
             var lossIndex = UpdatedParamFieldCount + UpdatedStateFieldCount + UpdatedOptimizerStateFieldCount;
             var lossValue = results[lossIndex].ToTensorData<float32>().AccessMemory()[0];
 
+            // Step is the graph-advanced counter (one training step per call). Epoch and batch
+            // index are host-owned — the training loop advances them — so they carry through
+            // unchanged here.
             var newCheckpoint = new TrainingCheckpoint(
                 updatedParams,
                 updatedModelState,
                 updatedOptimizerState,
-                checkpoint.Step + 1);
+                checkpoint.Step + 1,
+                checkpoint.Epoch,
+                checkpoint.BatchIndex);
 
             return new TrainingStepResult(newCheckpoint, lossValue);
         }
@@ -1275,7 +1310,7 @@ namespace Shorokoo
 
         /// <summary>
         /// Fits the model to the data for <paramref name="numEpochs"/> epochs — a one-liner over
-        /// <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>.
+        /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>.
         /// Scheduled hyperparameters are applied automatically (the global step advances across epochs
         /// via the checkpoint), so the schedule sees a monotonically increasing step. Alias for
         /// <see cref="Train"/>. <paramref name="initialCheckpoint"/> defaults to
@@ -1310,8 +1345,9 @@ namespace Shorokoo
         /// (legacy flat safetensors) or <see cref="Persistence.SaveTrainingCheckpointToSkpt"/> (the
         /// native .skpt container) — the on-disk shape is detected automatically — reconstructing it
         /// against this rig's parameter/state struct definitions so training resumes exactly where it
-        /// left off: trainable params, optimizer moments, model state, and the global step are all
-        /// restored (schedules resume from that step). Throws if the file's fields don't match this
+        /// left off: trainable params, optimizer moments, model state, and the host-owned run counters
+        /// (global step, epoch, batch index) are all restored (schedules resume from that step; older
+        /// checkpoints lacking epoch/batch restore them as 0). Throws if the file's fields don't match this
         /// rig — e.g. a checkpoint produced by a different model or optimizer. The rig must be built
         /// from the same model/loss/optimizer graphs as the one that saved the checkpoint.
         /// </summary>

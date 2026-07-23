@@ -106,7 +106,8 @@ namespace Shorokoo.Core.Utils
     /// The training-checkpoint block of a .skpt manifest (issue #95). Present only when the file
     /// persists a <see cref="Shorokoo.TrainingCheckpoint"/>; absent for an ordinary inference
     /// checkpoint (so those stay byte-identical to files from builds predating this field). It
-    /// records the checkpoint's global step and which manifest data-registry entry holds each
+    /// records the checkpoint's host-owned run counters (step, epoch, batch index) and which
+    /// manifest data-registry entry holds each
     /// training-state kind — the trainable weights (which also serve as the model's default weight
     /// set), the model state, and the optimizer state. A kind whose struct is empty is omitted
     /// from <see cref="Kinds"/> and carries no data entry. Like the rest of the manifest, its keys
@@ -122,6 +123,16 @@ namespace Shorokoo.Core.Utils
         /// <summary>The 0-based global training step the checkpoint sits at.</summary>
         [JsonPropertyName("step")]
         public long Step { get; set; }
+
+        /// <summary>The 0-based epoch counter the checkpoint sits at — a host-owned run counter
+        /// (issue #100). Add-only: absent in checkpoints written before it existed, which read as 0.</summary>
+        [JsonPropertyName("epoch")]
+        public long Epoch { get; set; }
+
+        /// <summary>The 0-based batch index within the current epoch — a host-owned run counter
+        /// (issue #100). Add-only: absent in checkpoints written before it existed, which read as 0.</summary>
+        [JsonPropertyName("batchIndex")]
+        public long BatchIndex { get; set; }
 
         /// <summary>Training-state kind name → the manifest data-registry key that stores it
         /// (e.g. <c>"trainableParams" → "trainable"</c>). A kind with an empty struct is absent.</summary>

@@ -117,6 +117,52 @@ namespace Shorokoo
             if (string.IsNullOrWhiteSpace(filePath))
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
 
+            AtomicFileWriter.WriteFile(
+                filePath, stream => SafeTensorLoader.SaveSafeTensorsToStream(stream, BuildCheckpointTensors()));
+        }
+
+        /// <summary>
+        /// Saves this checkpoint into a rotating series and prunes older members, keeping only the
+        /// <paramref name="keepLast"/> most recent. The file is written to
+        /// <c>{directory}/{filePrefix}{Step}{fileSuffix}</c> (so the global <see cref="Step"/> is
+        /// encoded in the name); a typical call is
+        /// <c>Save(dir, "ckpt-", ".safetensors", keepLast: 3)</c>, producing <c>ckpt-0.safetensors</c>,
+        /// <c>ckpt-1.safetensors</c>, … and retaining the three newest. Returns the path written.
+        ///
+        /// <para>
+        /// The write is atomic, exactly as <see cref="Save(string)"/>. Rotation runs only after the
+        /// new checkpoint has been committed and orders the series by the <see cref="Step"/> parsed
+        /// back out of each name — a producer-owned, monotonic integer key — so it is correct
+        /// regardless of filesystem timestamp resolution and of zero-padding (step 9 sorts before
+        /// step 10). Files that are not members of this series (different prefix/suffix, non-numeric
+        /// names, staged temps, and the checkpoint just written) are never deleted.
+        /// </para>
+        ///
+        /// <para>
+        /// Rotation is best-effort: a rotation failure never fails the save (the new checkpoint is
+        /// already committed) and is surfaced only through <paramref name="onWarning"/> (silent if
+        /// null). The directory must already exist.
+        /// </para>
+        /// </summary>
+        public string Save(string directory, string filePrefix, string fileSuffix, int keepLast, Action<string>? onWarning = null)
+        {
+            if (string.IsNullOrWhiteSpace(directory))
+                throw new ArgumentException("Checkpoint directory cannot be null or empty.", nameof(directory));
+            ArgumentNullException.ThrowIfNull(filePrefix);
+            ArgumentNullException.ThrowIfNull(fileSuffix);
+
+            string filePath = Path.Combine(directory, $"{filePrefix}{Step}{fileSuffix}");
+            AtomicFileWriter.WriteFile(
+                filePath,
+                stream => SafeTensorLoader.SaveSafeTensorsToStream(stream, BuildCheckpointTensors()),
+                AtomicFileWriter.RetainPolicy.KeepLast(keepLast, filePrefix, fileSuffix),
+                onWarning);
+            return filePath;
+        }
+
+        /// <summary>Serializes the three namespaced sections plus the checkpoint marker (shared by both save paths).</summary>
+        private List<SafeTensor> BuildCheckpointTensors()
+        {
             var tensors = new List<SafeTensor>();
             AppendSection(tensors, TrainableSection, TrainableParams);
             AppendSection(tensors, ModelStateSection, ModelState);
@@ -124,8 +170,7 @@ namespace Shorokoo
 
             var marker = Globals.TensorData(new long[] { 2L }, CheckpointFormatVersion, (long)Step);
             tensors.Add(new SafeTensor(CheckpointMarkerName, marker, "I64", new long[] { 2L }));
-
-            AtomicFileWriter.WriteFile(filePath, stream => SafeTensorLoader.SaveSafeTensorsToStream(stream, tensors));
+            return tensors;
         }
 
         private static void AppendSection(List<SafeTensor> tensors, string section, TensorDataStruct data)
@@ -143,7 +188,7 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Loads a checkpoint written by <see cref="Save"/>, reconstructing each section against the
+        /// Loads a checkpoint written by <see cref="Save(string)"/>, reconstructing each section against the
         /// supplied struct defs (normally the ones on the <see cref="TrainingRig"/> the checkpoint was
         /// produced by — prefer <see cref="TrainingRig.LoadCheckpoint(string)"/>, which passes them for
         /// you). Throws if the file is not a Shorokoo checkpoint, was written by a newer format, or its

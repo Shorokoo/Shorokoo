@@ -43,7 +43,7 @@ namespace Shorokoo
     /// The safetensors boundary lives here too: <c>ExportSafeTensors</c> writes a model's
     /// weights to a standard .safetensors file and <c>ImportSafeTensors</c> binds a foreign
     /// .safetensors file onto an architecture (see <c>Persistence.SafeTensors.cs</c>).
-    /// Training-run state routes through <see cref="SaveTrainingCheckpoint"/> /
+    /// Training-run state routes through <see cref="SaveTrainingCheckpoint(TrainingCheckpoint, string)"/> /
     /// <see cref="LoadTrainingCheckpoint"/>.
     /// </summary>
     // Partial: Persistence.Inspect (read-only artifact identification) lives in
@@ -126,7 +126,7 @@ namespace Shorokoo
         /// <summary>
         /// Saves a <see cref="TrainingCheckpoint"/> — trainable parameters, model state, optimizer
         /// state and the global step — so a training run can resume across process restarts.
-        /// Delegates to <see cref="TrainingCheckpoint.Save"/>; the write is atomic (temp file +
+        /// Delegates to <see cref="TrainingCheckpoint.Save(string)"/>; the write is atomic (temp file +
         /// rename). A <c>.safetensors</c> extension is conventional.
         /// </summary>
         public static void SaveTrainingCheckpoint(TrainingCheckpoint checkpoint, string filePath)
@@ -136,7 +136,29 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Loads a <see cref="TrainingCheckpoint"/> saved by <see cref="SaveTrainingCheckpoint"/>,
+        /// Saves a <see cref="TrainingCheckpoint"/> into a rotating series — the file is written to
+        /// <c>{directory}/{filePrefix}{step}{fileSuffix}</c> — and prunes older members so only the
+        /// <paramref name="keepLast"/> most recent survive (the "keep last N training checkpoints"
+        /// use case). Rotation orders strictly by the global step encoded in each name, so it is
+        /// correct regardless of filesystem timestamp resolution or zero-padding, never touches
+        /// files outside the series, and — running only after the atomic commit — never fails the
+        /// save; failures surface only through <paramref name="onWarning"/>. Returns the path
+        /// written. Delegates to <see cref="TrainingCheckpoint.Save(string, string, string, int, Action{string})"/>.
+        /// </summary>
+        public static string SaveTrainingCheckpoint(
+            TrainingCheckpoint checkpoint,
+            string directory,
+            string filePrefix,
+            string fileSuffix,
+            int keepLast,
+            Action<string>? onWarning = null)
+        {
+            if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
+            return checkpoint.Save(directory, filePrefix, fileSuffix, keepLast, onWarning);
+        }
+
+        /// <summary>
+        /// Loads a <see cref="TrainingCheckpoint"/> saved by <see cref="SaveTrainingCheckpoint(TrainingCheckpoint, string)"/>,
         /// reconstructing its sections against the given struct defs (which pin the expected shapes,
         /// so a checkpoint from a different model or optimizer fails loudly). Delegates to
         /// <see cref="TrainingCheckpoint.Load"/>. To resume a whole rig, prefer

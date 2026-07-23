@@ -160,6 +160,34 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
   loading it — or to identify an unknown file — use `Persistence.Inspect(path)`;
   see [onnx-and-weights.md](onnx-and-weights.md#identify-and-summarize-a-file-checkpointinspect).
 
+### Keep only the last N checkpoints (rotation)
+
+Saving every N steps leaves a growing pile of files on disk. The rotating save
+overload writes the checkpoint into a numbered series and prunes older members,
+keeping only the `keepLast` most recent:
+
+```csharp
+// Writes {directory}/ckpt-{step}.safetensors and keeps the 3 newest members.
+checkpoint.Save(directory: "runs/exp1", filePrefix: "ckpt-", fileSuffix: ".safetensors",
+                keepLast: 3);
+
+// Same thing through the Persistence facade (returns the path written):
+Persistence.SaveTrainingCheckpoint(checkpoint, "runs/exp1", "ckpt-", ".safetensors", keepLast: 3);
+```
+
+- The global `.Step` is encoded in each file name, and rotation orders the series
+  strictly by that integer — so `ckpt-10` is correctly newer than `ckpt-9`
+  regardless of filesystem timestamp resolution or zero-padding. Ordering never
+  depends on file mtime.
+- Rotation only ever deletes members of that exact series. Any other file in the
+  directory — a different prefix/suffix, a non-numeric name, an in-progress
+  `.tmp-` staging file, or the checkpoint just written — is left untouched.
+- The save itself is still atomic. Rotation runs **only after** the new
+  checkpoint is safely committed, so a rotation failure never fails the save; it
+  is surfaced only through the optional `onWarning` callback (silent if omitted).
+- Load a rotated checkpoint exactly like any other — pass the specific file (e.g.
+  the newest, returned by the save) to `rig.LoadCheckpoint(path)`.
+
 ## Types used by the training API
 
 All of these are in namespace `Shorokoo` (covered by `using Shorokoo;`):

@@ -23,7 +23,7 @@ namespace Shorokoo
         /// <summary>A SafeTensors weights file (8-byte header-length prefix + JSON header + tensor data).</summary>
         SafeTensors,
 
-        /// <summary>A SafeTensors file written by <see cref="TrainingCheckpoint.Save"/>, recognized
+        /// <summary>A SafeTensors file written by <see cref="TrainingCheckpoint.Save(string)"/>, recognized
         /// via its <c>__shorokoo_checkpoint__</c> marker tensor.</summary>
         TrainingCheckpoint,
 
@@ -533,7 +533,7 @@ namespace Shorokoo
         /// the legacy v1 layouts by content sniffing), SafeTensors weights files (header only),
         /// Zstd-compressed SafeTensors archives (.zsafetensor; the length prefix and JSON header
         /// are stream-decompressed, the tensor payload never), training checkpoints written
-        /// by <see cref="TrainingCheckpoint.Save"/> (via the
+        /// by <see cref="TrainingCheckpoint.Save(string)"/> (via the
         /// checkpoint marker; the marker's 16 bytes are the only payload bytes ever read),
         /// and .skpt checkpoint containers written by <see cref="CheckpointBuilder.Save"/>
         /// (a zip archive with a root config.json manifest — only the zip central directory

@@ -6,7 +6,7 @@ namespace Shorokoo.Core.Utils
     /// commit rename is atomic), flushed to disk, then renamed onto the target. On any failure
     /// the staged copy is deleted and the previous target is left untouched — a crash mid-save
     /// never corrupts the existing file. This is the designated write path for every
-    /// save/export API (see <see cref="TrainingCheckpoint.Save"/>); it carries no assumptions
+    /// save/export API (see <see cref="TrainingCheckpoint.Save(string)"/>); it carries no assumptions
     /// about what is being written.
     /// </summary>
     /// <remarks>
@@ -32,6 +32,14 @@ namespace Shorokoo.Core.Utils
         /// parallel) and be reset in a <c>finally</c>.
         /// </summary>
         internal static Action<string>? CommitFaultInjection;
+
+        /// <summary>
+        /// Test hook: invoked at the start of rotation — i.e. after the new file has already been
+        /// committed — with the committed path. Throwing here simulates a rotation failure, used to
+        /// verify rotation never fails the save. Hooks must filter on the path they receive (tests
+        /// can run in parallel) and be reset in a <c>finally</c>.
+        /// </summary>
+        internal static Action<string>? RotationFaultInjection;
 
         /// <summary>True if <paramref name="name"/> is a staged (uncommitted) sibling name.</summary>
         internal static bool IsTempName(string name) =>
@@ -71,6 +79,115 @@ namespace Shorokoo.Core.Utils
             }
 
             AfterCommit(directory, name, onWarning);
+        }
+
+        /// <summary>
+        /// Writes a file exactly as <see cref="WriteFile(string, Action{Stream}, Action{string})"/>
+        /// and then, <b>after the commit has succeeded</b>, prunes older members of the same
+        /// checkpoint series so only the <see cref="RetainPolicy.Keep"/> most recent survive.
+        ///
+        /// <para>
+        /// Ordering is <b>explicit and producer-owned</b>: rotation orders the series by the
+        /// integer token each name carries between <see cref="RetainPolicy.Prefix"/> and
+        /// <see cref="RetainPolicy.Suffix"/> (the caller encodes a monotonic key there — e.g. the
+        /// training step). Integer compare of that token is correct regardless of filesystem
+        /// timestamp resolution and of zero-padding, so <c>ckpt-9</c> sorts before <c>ckpt-10</c>.
+        /// Ordering is never inferred from file mtime.
+        /// </para>
+        ///
+        /// <para>
+        /// Rotation only ever deletes members of the series. Non-matching siblings (different
+        /// prefix/suffix, or a non-numeric token), staged <c>.tmp-</c> temps, and the entry just
+        /// committed are left untouched. Rotation is best-effort: because the new file is already
+        /// committed when it runs, a rotation failure <b>never</b> fails the save — it surfaces only
+        /// through <paramref name="onWarning"/> (silent if none is given).
+        /// </para>
+        /// </summary>
+        internal static void WriteFile(
+            string targetPath,
+            Action<Stream> writeContent,
+            RetainPolicy retain,
+            Action<string>? onWarning = null)
+        {
+            // Commit first — this throws on write failure, which correctly fails the save.
+            WriteFile(targetPath, writeContent, onWarning);
+
+            // The checkpoint is now committed; rotation is pure housekeeping and must not throw
+            // out of a successful save.
+            try { Rotate(targetPath, retain, onWarning); }
+            catch (Exception e)
+            {
+                (onWarning ?? (static _ => { }))($"Shorokoo: checkpoint rotation failed: {e.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Prunes older members of the retain series in the committed file's directory, keeping the
+        /// <see cref="RetainPolicy.Keep"/> highest-indexed members. See
+        /// <see cref="WriteFile(string, Action{Stream}, RetainPolicy, Action{string})"/> for the
+        /// ordering and never-delete-outside-the-series guarantees. Best-effort; the commit already
+        /// succeeded.
+        /// </summary>
+        private static void Rotate(string committedPath, RetainPolicy retain, Action<string>? onWarning)
+        {
+            onWarning ??= static _ => { };
+
+            string fullTarget = Path.GetFullPath(committedPath);
+            string directory = Path.GetDirectoryName(fullTarget)!;
+            string committedName = Path.GetFileName(fullTarget);
+
+            RotationFaultInjection?.Invoke(fullTarget);
+
+            // Collect series members with their parsed integer index. The glob is only a coarse
+            // pre-filter; TryParseSeriesIndex below is authoritative, so an over-broad glob can't
+            // cause a wrong deletion.
+            var members = new List<(long Index, string Path)>();
+            foreach (var entry in EnumerateSafely(directory, $"{retain.Prefix}*{retain.Suffix}", onWarning))
+            {
+                if (!File.Exists(entry)) continue;                       // a directory, or vanished under us
+                string name = Path.GetFileName(entry);
+                if (IsTempName(name)) continue;                         // never touch a staged temp
+                if (!TryParseSeriesIndex(name, retain, out long index)) continue; // non-matching sibling
+                members.Add((index, entry));
+            }
+
+            if (members.Count <= retain.Keep) return;
+
+            // Newest-first by the producer-owned integer key; delete everything past the first Keep.
+            members.Sort(static (a, b) => b.Index.CompareTo(a.Index));
+            for (int i = retain.Keep; i < members.Count; i++)
+            {
+                // Defence in depth: the file we just committed is by construction among the newest
+                // and so never reaches here, but never delete it regardless.
+                if (string.Equals(Path.GetFileName(members[i].Path), committedName, StringComparison.Ordinal))
+                    continue;
+                try { File.Delete(members[i].Path); }
+                catch (Exception e)
+                {
+                    onWarning($"Shorokoo: failed to rotate out old checkpoint '{members[i].Path}': {e.Message}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// True when <paramref name="name"/> is <c>{Prefix}{token}{Suffix}</c> with a non-empty
+        /// base-10 <paramref name="index"/> token (digits only — no sign, whitespace, or grouping).
+        /// A name whose token is empty or non-numeric is <b>not</b> a series member and is never
+        /// rotated out.
+        /// </summary>
+        private static bool TryParseSeriesIndex(string name, RetainPolicy retain, out long index)
+        {
+            index = 0;
+            if (name.Length <= retain.Prefix.Length + retain.Suffix.Length) return false; // no room for a token
+            if (!name.StartsWith(retain.Prefix, StringComparison.Ordinal)) return false;
+            if (!name.EndsWith(retain.Suffix, StringComparison.Ordinal)) return false;
+
+            ReadOnlySpan<char> token = name.AsSpan(
+                retain.Prefix.Length, name.Length - retain.Prefix.Length - retain.Suffix.Length);
+            foreach (char c in token)
+                if (!char.IsAsciiDigit(c)) return false;
+            // Token is non-empty ASCII digits, so the culture-sensitive default parse is safe here.
+            return long.TryParse(token, out index);
         }
 
         /// <summary>
@@ -160,6 +277,48 @@ namespace Shorokoo.Core.Utils
         private static void DeleteAbandonedTemp(string path)
         {
             using (new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.DeleteOnClose)) { }
+        }
+
+        /// <summary>
+        /// Opt-in retain-last-N rotation policy for
+        /// <see cref="WriteFile(string, Action{Stream}, RetainPolicy, Action{string})"/>. A series is
+        /// the set of files in one directory named <c>{Prefix}{index}{Suffix}</c> with a base-10
+        /// integer <c>index</c>; the producer chooses a monotonic key for that index (for training
+        /// checkpoints, the step). Rotation keeps the <see cref="Keep"/> highest-indexed members and
+        /// orders strictly by the parsed integer, never by file mtime — so it is correct even with
+        /// coarse timestamp resolution and non-zero-padded indices.
+        /// </summary>
+        internal readonly struct RetainPolicy
+        {
+            /// <summary>Literal text before the integer index in every series member's name.</summary>
+            internal string Prefix { get; }
+
+            /// <summary>Literal text after the integer index (e.g. a file extension); may be empty.</summary>
+            internal string Suffix { get; }
+
+            /// <summary>Number of most-recent members to keep; at least 1.</summary>
+            internal int Keep { get; }
+
+            private RetainPolicy(string prefix, string suffix, int keep)
+            {
+                Prefix = prefix;
+                Suffix = suffix;
+                Keep = keep;
+            }
+
+            /// <summary>
+            /// Keep the <paramref name="keep"/> highest-indexed members of the series whose names are
+            /// <c>{seriesPrefix}{index}{seriesSuffix}</c>. <paramref name="keep"/> must be at least 1
+            /// (rotation never deletes down to nothing — the entry just committed is always kept).
+            /// </summary>
+            internal static RetainPolicy KeepLast(int keep, string seriesPrefix, string seriesSuffix)
+            {
+                if (keep < 1)
+                    throw new ArgumentOutOfRangeException(nameof(keep), keep, "Retain count must be at least 1.");
+                ArgumentNullException.ThrowIfNull(seriesPrefix);
+                ArgumentNullException.ThrowIfNull(seriesSuffix);
+                return new RetainPolicy(seriesPrefix, seriesSuffix, keep);
+            }
         }
     }
 }

@@ -103,6 +103,37 @@ namespace Shorokoo.Core.Utils
     }
 
     /// <summary>
+    /// The training-checkpoint block of a .skpt manifest (issue #95). Present only when the file
+    /// persists a <see cref="Shorokoo.TrainingCheckpoint"/>; absent for an ordinary inference
+    /// checkpoint (so those stay byte-identical to files from builds predating this field). It
+    /// records the checkpoint's global step and which manifest data-registry entry holds each
+    /// training-state kind — the trainable weights (which also serve as the model's default weight
+    /// set), the model state, and the optimizer state. A kind whose struct is empty is omitted
+    /// from <see cref="Kinds"/> and carries no data entry. Like the rest of the manifest, its keys
+    /// are add-only across minor revisions.
+    /// </summary>
+    public sealed class SkptTrainingInfo
+    {
+        /// <summary>Training-checkpoint block version; <see cref="SkptFileFormat.TrainingCheckpointVersion"/>
+        /// for files written today. 0 means the field was absent (a malformed block).</summary>
+        [JsonPropertyName("checkpointVersion")]
+        public int CheckpointVersion { get; set; }
+
+        /// <summary>The 0-based global training step the checkpoint sits at.</summary>
+        [JsonPropertyName("step")]
+        public long Step { get; set; }
+
+        /// <summary>Training-state kind name → the manifest data-registry key that stores it
+        /// (e.g. <c>"trainableParams" → "trainable"</c>). A kind with an empty struct is absent.</summary>
+        [JsonPropertyName("kinds")]
+        public Dictionary<string, string>? Kinds { get; set; }
+
+        /// <summary>Round-trips training fields added by newer minor revisions of the format.</summary>
+        [JsonExtensionData]
+        public Dictionary<string, JsonElement>? AdditionalFields { get; set; }
+    }
+
+    /// <summary>
     /// The config.json manifest of a .skpt checkpoint — the single source of wiring: archive
     /// entries never reference each other directly; every mapping (model → serialization
     /// format, model tensor references → data items, data item → storage format) lives here.
@@ -151,6 +182,13 @@ namespace Shorokoo.Core.Utils
         /// <summary>Data registry: data key → stored tensor payload.</summary>
         [JsonPropertyName("data")]
         public Dictionary<string, SkptDataEntry>? Data { get; set; }
+
+        /// <summary>Training-checkpoint block (issue #95): present only when the file persists a
+        /// <see cref="Shorokoo.TrainingCheckpoint"/>, recording its global step and per-kind data
+        /// entries. Absent (null, omitted from the JSON) for an inference checkpoint, so those stay
+        /// byte-identical to files from builds predating this field.</summary>
+        [JsonPropertyName("training")]
+        public SkptTrainingInfo? Training { get; set; }
 
         /// <summary>Round-trips manifest fields added by newer minor revisions of the format.</summary>
         [JsonExtensionData]
@@ -210,6 +248,49 @@ namespace Shorokoo.Core.Utils
 
         /// <summary>Name of the (only, for now) tensor mapping set.</summary>
         internal const string DefaultMappingSetName = "default";
+
+        // ---- Training-checkpoint container (issue #95) ----
+        // A training-checkpoint .skpt is a superset of an inference .skpt: it carries the concrete
+        // inference model (models/) plus its default weight set — which doubles as the run's
+        // trainable weights — and adds per-kind data entries for the remaining training state
+        // (model state, optimizer state). The global step is small metadata and rides in the
+        // manifest's dedicated training block rather than a data entry. A file carrying that block
+        // reconstructs a TrainingCheckpoint; one without it is an ordinary inference checkpoint.
+
+        /// <summary>Current training-checkpoint manifest-block version (see <see cref="SkptTrainingInfo"/>).</summary>
+        public const int TrainingCheckpointVersion = 1;
+
+        /// <summary>Training-state kind name: the trainable parameters (also the model's default
+        /// weight set, so the checkpoint is self-describing for inference).</summary>
+        public const string TrainingKindTrainableParams = "trainableParams";
+
+        /// <summary>Training-state kind name: the model state (running stats, etc.; empty for
+        /// stateless models).</summary>
+        public const string TrainingKindModelState = "modelState";
+
+        /// <summary>Training-state kind name: the optimizer state (moment buffers, step, etc.;
+        /// empty for basic SGD).</summary>
+        public const string TrainingKindOptimizerState = "optimizerState";
+
+        /// <summary>Manifest data-registry key of the trainable-weights entry. Doubles as the
+        /// model's default weight set (referenced by the "default" tensor mapping) and as the
+        /// trainable-params training kind.</summary>
+        internal const string TrainableDataKey = "trainable";
+
+        /// <summary>Manifest data-registry key of the model-state entry.</summary>
+        internal const string ModelStateDataKey = "model_state";
+
+        /// <summary>Manifest data-registry key of the optimizer-state entry.</summary>
+        internal const string OptimizerStateDataKey = "optimizer_state";
+
+        /// <summary>Archive path of the trainable-weights data entry.</summary>
+        internal const string TrainableEntryPath = "data/trainable.safetensors";
+
+        /// <summary>Archive path of the model-state data entry.</summary>
+        internal const string ModelStateEntryPath = "data/model_state.safetensors";
+
+        /// <summary>Archive path of the optimizer-state data entry.</summary>
+        internal const string OptimizerStateEntryPath = "data/optimizer_state.safetensors";
 
         /// <summary>Well-known user-metadata key: the source-control commit the checkpoint
         /// was produced from (see <see cref="SkptManifest.UserMetadata"/>).</summary>

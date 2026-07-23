@@ -21,9 +21,11 @@ Related: [onnx-and-weights.md](onnx-and-weights.md) · [training.md](training.md
   stored tensor, data entry → storage format) lives in the manifest.
 - Saves are **atomic** (staged to a temp file, committed by rename): a crash mid-save
   never corrupts an existing checkpoint. The target directory must already exist.
-- This version writes exactly one checkpoint shape: an **inference checkpoint of a
-  concrete model** (definition + weights). Training-rig state, precompiled artifacts,
-  and additional weight sets (e.g. EMA) are future extensions of the same container.
+- This version writes an **inference checkpoint of a concrete model** (definition +
+  weights). It can also carry **additional named weight sets** over the same parameters
+  (e.g. an `ema` set alongside `default`), selected at load time — see
+  [Named weight sets](#named-weight-sets-default--ema). Training-rig state and
+  precompiled artifacts are future extensions of the same container.
 - `.skpt` replaces nothing: ONNX export and `.safetensors`/`.srk` files remain
   separate, on-demand projections (see [onnx-and-weights.md](onnx-and-weights.md)).
 
@@ -142,6 +144,50 @@ Compression is a per-entry, opt-in trade of **size against range-readability**:
   frame, or one marked `"none"` whose bytes are — fails loudly on load, naming the
   entry.
 
+## Named weight sets (default + ema)
+
+A checkpoint can carry **more than one named set of weights over the same model
+parameters** — the motivating case being EMA / averaged weights kept alongside the raw
+weights. The model definition is stored once; each set is a mapping from the model's
+parameters to stored tensors. The parameterless `.WithWeights()` writes the model's own
+weights as the `default` set; add another set with `.WithWeights(setName, values)`,
+where `values` maps each weight-parameter identifier to that set's tensor:
+
+```csharp
+// emaWeights: IReadOnlyDictionary<string, TensorData> keyed by the model's weight-
+// parameter identifiers, covering exactly the same parameters as the default weights.
+Persistence.From(concreteModel)
+    .WithModel()
+    .WithWeights()                    // the "default" set (the model's own weights)
+    .WithWeights("ema", emaWeights)   // an additional set over the same parameters
+    .Save("model.skpt");
+
+var raw = Persistence.Load("model.skpt");            // binds "default"
+var smoothed = Persistence.Load("model.skpt", "ema"); // binds "ema"
+```
+
+- **Selection at load.** `Persistence.Load(path)` binds `default`; `Persistence.Load(path,
+  set)` binds the named set. An unknown set name fails loudly, listing the sets the file
+  declares.
+- **Shared data is stored once.** A set's tensor whose bytes (dtype, shape and content)
+  are identical to one already stored — in the `default` set or an earlier additional
+  set — is **referenced, not copied**. Only a set's genuinely distinct tensors are
+  written, into its own `data/<setName>.safetensors` entry. So an EMA set that differs
+  from the raw weights in only a few tensors adds only those few tensors to the file.
+- **Coverage is exact.** An additional set must map every weight parameter the model
+  declares (the same parameters the `default` weights span), each with a matching dtype
+  and shape; a missing or stray parameter, or a shape/dtype mismatch, fails loudly at
+  save.
+- **`config.json` records every set.** Each set is a named entry under a model's
+  `tensorMappings`; the data registry gains one entry per set that has distinct tensors.
+- **`default`-only is unchanged.** A save with no additional set is byte-for-byte the
+  single-set output — the feature adds nothing to a file that does not use it. The set
+  name must be a non-empty identifier over `[A-Za-z0-9._-]`, distinct from the reserved
+  `default` set and `weights` data key.
+
+Computing EMA / averaged weights is a **training** concern and out of the container's
+scope; `.WithWeights(setName, values)` only carries and selects the parallel versions.
+
 ## Inspecting a .skpt
 
 `Persistence.Inspect("model.skpt")` identifies the container and summarizes its
@@ -220,25 +266,41 @@ model.skpt
   },
 
   // Tensor mappings: per model, named mapping sets resolving each parameter to a
-  // tensor inside a data entry. Only the "default" set is written today; the shape
-  // allows parallel sets (e.g. EMA weights) later.
+  // tensor inside a data entry. "default" is always present; additional sets (e.g.
+  // "ema") map the same parameters, sharing data entries where the bytes are identical.
   "tensorMappings": {
     "model": {
       "default": {
         "tensors": {
-          "[1]:TrainableParam#0…": { "data": "weights", "tensor": "[1]:TrainableParam#0…" }
+          "[1]:TrainableParam#0…": { "data": "weights", "tensor": "[1]:TrainableParam#0…" },
+          "[1]:TrainableParam#1…": { "data": "weights", "tensor": "[1]:TrainableParam#1…" }
+        }
+      },
+      "ema": {
+        "tensors": {
+          // the first tensor differs from default → stored in the "ema" data entry
+          "[1]:TrainableParam#0…": { "data": "ema", "tensor": "[1]:TrainableParam#0…" },
+          // the second is byte-identical to default → shared, referenced back into "weights"
+          "[1]:TrainableParam#1…": { "data": "weights", "tensor": "[1]:TrainableParam#1…" }
         }
       }
     }
   },
 
-  // Data registry: per data entry, its storage format, compression, and hash.
+  // Data registry: per data entry, its storage format, compression, and hash. An
+  // additional set contributes one entry holding only its distinct tensors.
   "data": {
     "weights": {
       "entry": "data/weights.safetensors",
       "format": "safetensors",
       "compression": "none",              // "none" or "zstd"; never inferred from the name
       "sha256": "734485…"                 // hash of the entry's bytes as stored (compressed)
+    },
+    "ema": {
+      "entry": "data/ema.safetensors",
+      "format": "safetensors",
+      "compression": "none",
+      "sha256": "9af0c1…"
     }
   }
 }
@@ -256,7 +318,8 @@ Rules:
 
 ## Current limits
 
-- One model per file, the `default` mapping set only.
+- One model per file. Any number of named weight sets over that model's parameters
+  (see [Named weight sets](#named-weight-sets-default--ema)).
 - Data entries are bounded by the in-memory safetensors path — checkpoints with ≥ 2 GB
   of tensor data in a single entry are not yet supported (compressed or not; the bound
   applies to both the stored and the decompressed bytes).

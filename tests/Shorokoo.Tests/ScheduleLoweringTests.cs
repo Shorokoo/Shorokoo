@@ -278,7 +278,9 @@ public class ScheduleLoweringCoverageTests
     [Fact]
     public void TestOpaqueScheduleCannotLower()
     {
-        Schedule opaque = new(s => s * 0.1f);
+        // The public host-lambda constructor was removed (#99); an opaque, non-lowerable schedule
+        // can still be built internally (expr: null) to pin the defensive non-lowerable path.
+        Schedule opaque = new(s => s * 0.1f, expr: null);
         Assert.False(opaque.CanLower());
         // Opaqueness is contagious through every combinator…
         Assert.False(opaque.Scale(2f).CanLower());

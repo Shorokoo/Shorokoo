@@ -358,12 +358,13 @@ namespace Shorokoo
         public TensorStructDef OptimizerStateDef { get; private set; } = null!;
 
         /// <summary>
-        /// Struct definition for the optimizer hyperparameters that flow as <b>runtime inputs</b>
-        /// (one scalar <c>float32</c> field per dynamic hyperparameter). Empty when every
-        /// hyperparameter is baked into the graph as a constant (the default). When non-empty, the
-        /// rig compiles once and the caller supplies fresh values each step via
-        /// <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>
-        /// — enabling learning-rate / weight-decay schedules without rebuilding the rig.
+        /// Struct definition for the <b>schedule-less runtime</b> optimizer hyperparameters — the ones
+        /// built with <see cref="HyperValue.Runtime"/> that the caller supplies explicitly each step
+        /// (one scalar <c>float32</c> field each). Empty when every hyperparameter is either baked as a
+        /// constant or scheduled in-graph. Scheduled hyperparameters (a built-in <see cref="Schedule"/>
+        /// or a scheduler module) are <b>not</b> here — they are computed in-graph from the step counter
+        /// and need no per-step value. When non-empty, supply values via
+        /// <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>.
         /// </summary>
         public TensorStructDef HyperparamStructDef { get; private set; } = null!;
 
@@ -404,11 +405,12 @@ namespace Shorokoo
         public IReadOnlyList<string> DynamicHyperparameterNames { get; private set; } = Array.Empty<string>();
 
         /// <summary>
-        /// Per dynamic hyperparameter (in <see cref="HyperparamStructDef"/> field order), the schedule
-        /// the rig evaluates each step, or <c>null</c> for a schedule-less runtime hyperparameter whose
-        /// value must be supplied explicitly. Empty when no hyperparameter is dynamic.
+        /// Whether the training-step graph has an int64 scalar step-counter input, added when the rig
+        /// has at least one in-graph scheduled hyperparameter (a built-in <see cref="Schedule"/> or a
+        /// scheduler module). The counter is fed the checkpoint's step each <c>TrainStep</c>; the
+        /// scheduler math computes the hyperparameter value from it in-graph (no host evaluation).
         /// </summary>
-        private Schedule?[] _dynamicSchedules = Array.Empty<Schedule?>();
+        private bool _hasStepCounter;
 
         /// <summary>Number of trainable parameter fields in graph outputs.</summary>
         public int UpdatedParamFieldCount { get; private set; }
@@ -797,32 +799,50 @@ namespace Shorokoo
                 throw new ArgumentException(
                     $"Optimizer expects {numHyperparams} hyperparameter(s), but {hyperparameters.Length} were provided.");
 
-            // Each hyperparameter's kind decides its wiring: a dynamic HyperValue (scheduled or
-            // schedule-less runtime) flows as a runtime input via a "hyperparams" TensorStruct (one
-            // scalar float32 field each); a baked HyperValue stays a graph Constant. The seed value
-            // (a schedule's step-0 value, or the constant) is baked into the Constant and seeds shape
-            // inference / optimization for dynamic fields.
+            // Each hyperparameter's kind decides how it is wired into the training-step graph:
+            //  • baked (a bare float)          → a graph CONSTANT (its value also seeds shape inference).
+            //  • scheduled (built-in Schedule  → lowered to graph math (ScheduleLowering); scheduler
+            //    or a scheduler module)          module → inlined — both computed in-graph from the
+            //                                     int64 step-counter input, with no per-step host
+            //                                     evaluation (#99).
+            //  • schedule-less runtime         → a "hyperparams" TensorStruct runtime input (one scalar
+            //    (HyperValue.Runtime)             float32 field each), supplied explicitly every step.
             string NameOf(int h) => hyperparamNames is not null && h < hyperparamNames.Count
                 ? hyperparamNames[h] : $"hyperparam_{h}";
             float SeedOf(int h) => hyperparameters[h].InitialValue;
 
             HyperparameterNames = Enumerable.Range(0, numHyperparams).Select(NameOf).ToArray();
 
-            var dynamicIndices = new List<int>();
+            // Classify the dynamic hyperparameters into in-graph scheduled vs schedule-less runtime.
+            var scheduledIndices = new List<int>();
+            var runtimeIndices = new List<int>();
             for (int h = 0; h < numHyperparams; h++)
-                if (hyperparameters[h].IsDynamic) dynamicIndices.Add(h);
-            DynamicHyperparamIndices = dynamicIndices;
+            {
+                var hv = hyperparameters[h];
+                if (!hv.IsDynamic) continue;
+                if (hv.AsSchedule is not null || hv.AsSchedulerModule is not null)
+                    scheduledIndices.Add(h);
+                else
+                    runtimeIndices.Add(h);
+            }
 
-            var hyperFields = dynamicIndices
+            // The "hyperparams" struct carries only the schedule-less runtime hyperparameters — the
+            // ones the caller supplies via MakeHyperparams. Scheduled hyperparameters are computed
+            // in-graph and never appear here.
+            DynamicHyperparamIndices = runtimeIndices;
+            var hyperFields = runtimeIndices
                 .Select(h => new TensorStructFieldDef(NameOf(h), DataStructure.Tensor, 0, DType.Float32))
                 .ToArray();
             HyperparamStructDef = new TensorStructDef(hyperFields, "Hyperparams");
             DynamicHyperparameterNames = hyperFields.Select(f => f.Name).ToArray();
-            _dynamicSchedules = dynamicIndices.Select(h => hyperparameters[h].AsSchedule).ToArray();
 
+            // The key feeding each optimizer replay slot: a runtime GETFIELD, an in-graph scheduler
+            // output, or a baked CONSTANT. Shared across all per-parameter optimizer replays.
+            var hyperparamKeys = new FastTensorKey[numHyperparams];
+
+            // --- Schedule-less runtime hyperparameters: a "hyperparams" TensorStruct input. ---
             _initialHyperparamFields = new Dictionary<string, IData>();
             FastTensorKey? hyperparamsInputKey = null;
-            var dynamicHyperparamKeyByIndex = new Dictionary<int, FastTensorKey>();
             if (hyperFields.Length > 0)
             {
                 var hyperDType = DType.GetOrCreateForTensorStruct(HyperparamStructDef);
@@ -839,29 +859,44 @@ namespace Shorokoo
                         hyperparamsInputKey.Value, f.Name, f.ElementType, f.Rank, f.Structure);
                     fastTraining.Nodes.Add(node);
                     headNodesInOrder.Add(node);
-                    dynamicHyperparamKeyByIndex[dynamicIndices[i]] = new FastTensorKey(node.Key, 0);
+                    hyperparamKeys[runtimeIndices[i]] = new FastTensorKey(node.Key, 0);
                     _initialHyperparamFields[f.Name] =
-                        Shorokoo.Globals.TensorData(Array.Empty<long>(), SeedOf(dynamicIndices[i]));
+                        Shorokoo.Globals.TensorData(Array.Empty<long>(), SeedOf(runtimeIndices[i]));
                 }
             }
 
-            // Per-hyperparam key: a runtime GETFIELD when dynamic, else a baked CONSTANT.
-            // Shared across all per-param optimizer replays.
-            var hyperparamKeys = new FastTensorKey[numHyperparams];
+            // --- Scheduled hyperparameters: emitted in-graph from the int64 step counter. ---
+            // The step counter is a single shared graph input; each scheduler (built-in lowering or
+            // user module) is inlined against it via FastReplay. Built-in PerEpoch derives its epoch
+            // in-graph from the step (#39), so the step counter is the only scheduler input needed.
+            FastTensorKey? stepCounterInputKey = null;
+            if (scheduledIndices.Count > 0)
+            {
+                var stepNode = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.RuntimeInput(
+                    DType.Int64, rank: 0, "step");
+                fastTraining.Nodes.Add(stepNode);
+                headNodesInOrder.Add(stepNode);
+                stepCounterInputKey = new FastTensorKey(stepNode.Key, 0);
+
+                foreach (var h in scheduledIndices)
+                {
+                    var schedulerModule = BuildSchedulerModule(hyperparameters[h], NameOf(h));
+                    var replayed = Shorokoo.Core.Nodes.Processors.Fast.FastReplay.ReplayInto(
+                        fastTraining, schedulerModule, [stepCounterInputKey.Value]);
+                    hyperparamKeys[h] = replayed[0];
+                }
+            }
+            _hasStepCounter = stepCounterInputKey is not null;
+
+            // --- Baked hyperparameters: graph CONSTANTs. ---
             for (int h = 0; h < numHyperparams; h++)
             {
-                if (dynamicHyperparamKeyByIndex.TryGetValue(h, out var dynKey))
-                {
-                    hyperparamKeys[h] = dynKey;
-                }
-                else
-                {
-                    var node = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.Constant(
-                        Shorokoo.Globals.TensorData(Array.Empty<long>(), SeedOf(h)));
-                    fastTraining.Nodes.Add(node);
-                    headNodesInOrder.Add(node);
-                    hyperparamKeys[h] = new FastTensorKey(node.Key, 0);
-                }
+                if (hyperparameters[h].IsDynamic) continue;
+                var node = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.Constant(
+                    Shorokoo.Globals.TensorData(Array.Empty<long>(), SeedOf(h)));
+                fastTraining.Nodes.Add(node);
+                headNodesInOrder.Add(node);
+                hyperparamKeys[h] = new FastTensorKey(node.Key, 0);
             }
 
             // Build optimizer state struct definition. Element type comes from each state's
@@ -952,7 +987,7 @@ namespace Shorokoo
 
             // Step 9: reorder fastTraining.Inputs and Outputs to the TrainStep convention.
             // Original order: [model_inputs_struct, targets, param_struct, state_struct?]
-            // Target order:   [param_struct, state_struct?, optimizer_state_struct?, hyperparams_struct?, model_inputs_struct, targets]
+            // Target order:   [param_struct, state_struct?, optimizer_state_struct?, hyperparams_struct?, step_counter?, model_inputs_struct, targets]
             var modelInputsStructKey = fastTraining.Inputs[0];
             var targetsKey = fastTraining.Inputs[1];
             var modelInputsName = fastTraining.InputUniqueNames.Count > 0 ? fastTraining.InputUniqueNames[0] : null;
@@ -967,6 +1002,7 @@ namespace Shorokoo
             if (stateStructInputKey is FastTensorKey ssk) { newInputs.Add(ssk); newInputNames.Add(stateStructName); }
             if (optStateInputKey is FastTensorKey osk) { newInputs.Add(osk); newInputNames.Add("optimizer_state"); }
             if (hyperparamsInputKey is FastTensorKey hpk) { newInputs.Add(hpk); newInputNames.Add("hyperparams"); }
+            if (stepCounterInputKey is FastTensorKey sck) { newInputs.Add(sck); newInputNames.Add("step"); }
             newInputs.Add(modelInputsStructKey); newInputNames.Add(modelInputsName);
             newInputs.Add(targetsKey); newInputNames.Add(targetsName);
 
@@ -1009,6 +1045,113 @@ namespace Shorokoo
             UpdatedParamFieldCount = TrainableParamStructDef.Fields.Length;
             UpdatedStateFieldCount = ModelStateDef.Fields.Length;
             UpdatedOptimizerStateFieldCount = OptimizerStateDef.Fields.Length;
+        }
+
+        /// <summary>
+        /// Builds the graph a scheduled hyperparameter is emitted from: a module taking the int64
+        /// scalar step counter and producing the float32 scalar scheduled value. A built-in
+        /// <see cref="Schedule"/> is lowered via <see cref="ScheduleLowering"/>; a user scheduler
+        /// module is validated and inlined. The returned graph is spliced into the training-step
+        /// graph by <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastReplay.ReplayInto"/> against
+        /// the shared step-counter input.
+        /// </summary>
+        private static InternalComputationGraph BuildSchedulerModule(HyperValue hv, string name)
+        {
+            if (hv.AsSchedule is Schedule schedule)
+            {
+                if (!schedule.CanLower())
+                    throw new ArgumentException(
+                        $"Scheduled hyperparameter '{name}' wraps an opaque host function and cannot be " +
+                        "lowered to graph math. Build the schedule from the Schedules factories and " +
+                        "Schedule combinators, or supply a scheduler module.", nameof(hv));
+                var step = Shorokoo.Globals.InputScalar<int64>("step");
+                var value = schedule.LowerToGraph(step);
+                return new InternalComputationGraph([step], [value]);
+            }
+
+            var module = hv.AsSchedulerModule
+                ?? throw new InvalidOperationException(
+                    $"Scheduled hyperparameter '{name}' has neither a built-in schedule nor a scheduler module.");
+            return ValidateAndInlineSchedulerModule(module, name);
+        }
+
+        /// <summary>
+        /// Validates a user scheduler module's signature — exactly one int64 scalar (rank-0) input
+        /// and one float32 scalar (rank-0) output — and returns its inlined (module-invokes expanded)
+        /// internal graph, ready to splice into the training-step graph. Fails loud at rig build with
+        /// a clear message on any signature mismatch.
+        /// </summary>
+        private static InternalComputationGraph ValidateAndInlineSchedulerModule(ComputationGraph module, string name)
+        {
+            if (module.Kind is not (GraphKind.Module or GraphKind.ConcreteArchitecture or GraphKind.ConcreteModel))
+                throw new ArgumentException(
+                    $"Scheduler module for hyperparameter '{name}' must be a module graph (e.g. " +
+                    $"MyScheduler.ComputationGraph); got graph kind '{module.Kind}'.", nameof(module));
+
+            var g = module.ToInternal().Clone();
+
+            // Inline any sub-modules/functions so no MODEL_INVOKE / FUNCTION_INVOKE survives into the
+            // training-step graph (the training-graph lowering does not inline modules).
+            if (HasHighLevelForms(g))
+            {
+                Shorokoo.Core.Nodes.Processors.Fast.FastApplyIdentifierTemplates.Process(g);
+                Shorokoo.Core.Nodes.Processors.Fast.FastInlineModulesAndFunctions.Process(g);
+                Shorokoo.Core.Nodes.Processors.Fast.FastProcessorHelper.RemoveUnreachableNodes(g);
+            }
+
+            if (g.Inputs.Count != 1)
+                throw new ArgumentException(
+                    $"Scheduler module for hyperparameter '{name}' must take exactly one input " +
+                    $"(the int64 scalar step counter), but takes {g.Inputs.Count}.", nameof(module));
+
+            var producerByOutput = BuildProducerByOutputMap(g);
+            var inProducer = producerByOutput[g.Inputs[0]];
+            var inDType = inProducer.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype);
+            var inRank = (int?)inProducer.Attributes.GetLongVal(OnnxOpAttributeNames.ShrkAttrRank);
+            if (inDType != DType.Int64 || (inRank is int ir && ir != 0))
+                throw new ArgumentException(
+                    $"Scheduler module for hyperparameter '{name}' must take an int64 scalar (rank-0) " +
+                    $"step counter; got {inDType?.ToString() ?? "unknown"} rank {inRank?.ToString() ?? "?"}.",
+                    nameof(module));
+
+            if (g.Outputs.Count != 1)
+                throw new ArgumentException(
+                    $"Scheduler module for hyperparameter '{name}' must produce exactly one output " +
+                    $"(the scheduled value), but produces {g.Outputs.Count}.", nameof(module));
+
+            // Validate the output dtype/shape via shape inference at step 0 (which also smoke-checks
+            // that the module executes at all).
+            var outInfo = new ShapeInferenceInterpreter(ComputeContext.Default)
+                .Infer(g, Shorokoo.Globals.TensorData(Array.Empty<long>(), 0L))
+                .GetTensorInfo(g.Outputs[0])
+                ?? throw new ArgumentException(
+                    $"Scheduler module for hyperparameter '{name}': could not infer its output shape.",
+                    nameof(module));
+            if (outInfo.DType != DType.Float32)
+                throw new ArgumentException(
+                    $"Scheduler module for hyperparameter '{name}' must produce a float32 value; " +
+                    $"got {outInfo.DType}.", nameof(module));
+            if (outInfo.Shape.Dims.Length != 0)
+                throw new ArgumentException(
+                    $"Scheduler module for hyperparameter '{name}' must produce a scalar (rank-0) value; " +
+                    $"got rank {outInfo.Shape.Dims.Length}.", nameof(module));
+
+            return g;
+        }
+
+        /// <summary>True if <paramref name="graph"/> still carries un-inlined module/function forms.</summary>
+        private static bool HasHighLevelForms(InternalComputationGraph graph)
+        {
+            foreach (var node in graph.Nodes)
+            {
+                if (node.OpCode == InternalOpCodes.MODEL_INVOKE
+                    || node.OpCode == InternalOpCodes.FUNCTION_INVOKE
+                    || node.OpCode == InternalOpCodes.MODEL_PARAM_REF
+                    || node.OpCode == InternalOpCodes.MODEL_PARAM_MODEL_REF
+                    || node.OpCode == InternalOpCodes.MODEL_PARAM_ID_REF)
+                    return true;
+            }
+            return false;
         }
 
         private static Dictionary<FastTensorKey, FastNode> BuildProducerByOutputMap(InternalComputationGraph graph)
@@ -1089,10 +1232,12 @@ namespace Shorokoo
 
         /// <summary>
         /// Executes a single training step and advances the checkpoint's
-        /// <see cref="TrainingCheckpoint.Step"/>. When the rig has scheduled hyperparameters, each
-        /// schedule is evaluated at the checkpoint's current step and applied automatically — compile
-        /// once, then just loop. A schedule-less runtime hyperparameter (<see cref="HyperValue.Runtime"/>)
-        /// has no value to apply here; use the explicit-override overload for those.
+        /// <see cref="TrainingCheckpoint.Step"/>. Scheduled hyperparameters (a built-in
+        /// <see cref="Schedule"/> or a scheduler module) are computed <b>in-graph</b> from the
+        /// checkpoint's current step — fed as the step-counter input — so nothing is host-evaluated
+        /// here: compile once, then just loop. This overload requires the rig to have <b>no</b>
+        /// schedule-less runtime hyperparameter (<see cref="HyperValue.Runtime"/>), which has no value
+        /// to apply automatically; use the explicit-override overload for those.
         /// </summary>
         /// <param name="checkpoint">Current training state (params, model state, optimizer state, step)</param>
         /// <param name="trainingInput">Training input data as TensorDataStruct</param>
@@ -1106,10 +1251,13 @@ namespace Shorokoo
             CompiledGraph compiled)
         {
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
-            var hyperparams = HyperparamStructDef.Fields.Length > 0
-                ? MakeScheduledHyperparams(checkpoint.Step)
-                : null;
-            return RunStep(checkpoint, hyperparams, trainingInput, trainingOutput, compiled);
+            if (HyperparamStructDef.Fields.Length > 0)
+                throw new InvalidOperationException(
+                    $"This rig has schedule-less runtime hyperparameter(s) " +
+                    $"[{string.Join(", ", DynamicHyperparameterNames)}] with no schedule to apply " +
+                    "automatically; supply their values via MakeHyperparams and the " +
+                    "TrainStep(checkpoint, hyperparams, …) overload.");
+            return RunStep(checkpoint, hyperparams: null, trainingInput, trainingOutput, compiled);
         }
 
         /// <summary>
@@ -1117,9 +1265,12 @@ namespace Shorokoo
         /// schedules for this step (build the values with <see cref="MakeHyperparams(float)"/> or
         /// <see cref="MakeHyperparams(ValueTuple{string, float}[])"/>). Use this for manual control, or
         /// for rigs whose dynamic hyperparameters are schedule-less (<see cref="HyperValue.Runtime"/>).
+        /// In-graph scheduled hyperparameters (built-in schedules / scheduler modules) are unaffected
+        /// by this overload — they are always computed from the step counter — so <paramref name="hyperparams"/>
+        /// carries only the schedule-less runtime values.
         /// </summary>
         /// <param name="checkpoint">Current training state (params, model state, optimizer state, step)</param>
-        /// <param name="hyperparams">Values for all dynamic hyperparameters (<see cref="HyperparamStructDef"/> order).</param>
+        /// <param name="hyperparams">Values for the schedule-less runtime hyperparameters (<see cref="HyperparamStructDef"/> order).</param>
         /// <param name="trainingInput">Training input data as TensorDataStruct</param>
         /// <param name="trainingOutput">Training target data as TensorDataStruct</param>
         /// <param name="compiled">Compiled training step graph (from <see cref="ComputeContext.Compile(ComputationGraph)"/>)</param>
@@ -1133,27 +1284,6 @@ namespace Shorokoo
         {
             if (hyperparams is null) throw new ArgumentNullException(nameof(hyperparams));
             return RunStep(checkpoint, hyperparams, trainingInput, trainingOutput, compiled);
-        }
-
-        /// <summary>
-        /// Builds the per-step hyperparameter struct by evaluating each dynamic hyperparameter's
-        /// schedule at <paramref name="step"/>. Throws when a dynamic hyperparameter is schedule-less
-        /// (built with <see cref="HyperValue.Runtime"/>) — supply those via the explicit TrainStep overload.
-        /// </summary>
-        private TensorDataStruct MakeScheduledHyperparams(int step)
-        {
-            var values = new float[_dynamicSchedules.Length];
-            for (int i = 0; i < _dynamicSchedules.Length; i++)
-            {
-                var schedule = _dynamicSchedules[i];
-                if (schedule is null)
-                    throw new InvalidOperationException(
-                        $"Dynamic hyperparameter '{DynamicHyperparameterNames[i]}' has no schedule " +
-                        "(built with HyperValue.Runtime); supply it explicitly via the " +
-                        "TrainStep(checkpoint, hyperparams, …) overload / MakeHyperparams.");
-                values[i] = schedule.At(step);
-            }
-            return PackHyperparams(values);
         }
 
         private TrainingStepResult RunStep(
@@ -1173,17 +1303,20 @@ namespace Shorokoo
                     "(see TrainingRig.MakeHyperparams).");
 
             // Execute the training step graph.
-            // Graph inputs (after lowering): [param_fields..., state_fields..., opt_state_fields..., hyperparam_fields..., model_input_fields..., target_fields...]
+            // Graph inputs (after lowering): [param_fields..., state_fields..., opt_state_fields..., hyperparam_fields..., step_counter?, model_input_fields..., target_fields...]
             // CompiledGraph.Execute expands TensorDataStruct inputs into individual fields; an empty
             // struct contributes no fields. The hyperparams input slot exists only when the rig has
-            // dynamic hyperparameters, so it is included only then.
-            var execInputs = new List<IData>(6)
+            // schedule-less runtime hyperparameters; the int64 step-counter input exists only when the
+            // rig has in-graph scheduled hyperparameters, and is fed the checkpoint's current step so
+            // the scheduler math resumes correctly from a saved checkpoint.
+            var execInputs = new List<IData>(7)
             {
                 checkpoint.TrainableParams,
                 checkpoint.ModelState,
                 checkpoint.OptimizerState,
             };
             if (HyperparamStructDef.Fields.Length > 0) execInputs.Add(hyperparams!);
+            if (_hasStepCounter) execInputs.Add(Shorokoo.Globals.TensorData(Array.Empty<long>(), (long)checkpoint.Step));
             execInputs.Add(trainingInput);
             execInputs.Add(trainingOutput);
             var results = compiled.Execute(execInputs.ToArray());
@@ -1481,16 +1614,18 @@ namespace Shorokoo
             var targetDType = modelOutputInfo.DType;
 
             // Step 3: Assemble inputs in TrainingStepPureGraph order.
-            // Layout: [param_fields, state_fields, opt_state_fields, hyperparam_fields, model_input_fields, target_fields].
+            // Layout: [param_fields, state_fields, opt_state_fields, hyperparam_fields, step_counter?, model_input_fields, target_fields].
             // Current losses (L2, CE) use a single Tensor target, so target_field_count is 1.
             var graph = _trainingStepWorkGraph!;
             const int targetFieldCount = 1;
+            var stepCounterFieldCount = _hasStepCounter ? 1 : 0;
             var expectedModelInputFields =
                 graph.Inputs.Count
                 - TrainableParamStructDef.Fields.Length
                 - ModelStateDef.Fields.Length
                 - OptimizerStateDef.Fields.Length
                 - HyperparamStructDef.Fields.Length
+                - stepCounterFieldCount
                 - targetFieldCount;
             if (sampleInputs.Length != expectedModelInputFields)
                 throw new ArgumentException(
@@ -1508,10 +1643,16 @@ namespace Shorokoo
             foreach (var f in OptimizerStateDef.Fields)
                 allInputs[idx++] = (TensorData)_initialOptStateFields[f.Name];
 
-            // Dynamic-hyperparameter fields: seed shape inference / optimization with their
-            // default (initial) scalar values. At run time these are supplied per step.
+            // Schedule-less runtime hyperparameter fields: seed shape inference / optimization with
+            // their default (initial) scalar values. At run time these are supplied per step.
             foreach (var f in HyperparamStructDef.Fields)
                 allInputs[idx++] = (TensorData)_initialHyperparamFields[f.Name];
+
+            // Step-counter field (int64 scalar): seed shape inference at step 0; the scheduler math
+            // downstream computes the hyperparameter values from it. At run time it is fed the
+            // checkpoint's current step.
+            if (_hasStepCounter)
+                allInputs[idx++] = (TensorData)Shorokoo.Globals.TensorData(Array.Empty<long>(), 0L);
 
             // Model-input fields: one per sample input (in the order the user provided them,
             // which matches the model graph's input order).

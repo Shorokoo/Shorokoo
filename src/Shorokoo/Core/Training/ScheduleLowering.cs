@@ -74,9 +74,9 @@ internal abstract record ScheduleExpr
 /// the schedule-lowering parity tests for the measured tolerance contract.
 ///
 /// Every schedule constructible from the <see cref="Schedules"/> factories and
-/// <see cref="Schedule"/> combinators can be lowered. The one exception is a schedule built
-/// directly from an opaque host function (<see cref="Schedule(Func{int, float})"/> or the
-/// implicit conversion), whose definition exists only as compiled code —
+/// <see cref="Schedule"/> combinators can be lowered — which, since the public host-lambda
+/// constructor was removed, is every schedule a caller can build. Only an opaque schedule with
+/// no structural definition (constructible internally, e.g. in lowering tests) cannot be lowered:
 /// <see cref="CanLower"/> reports <c>false</c> and <see cref="LowerToGraph(Schedule, Scalar{int64})"/>
 /// throws. <see cref="Schedule.PerEpoch"/> needs no separate epoch input: the epoch index is
 /// derived in-graph from the step counter (<c>step / stepsPerEpoch</c>, the combinator's

@@ -59,12 +59,24 @@ Each hyperparameter property is a `HyperValue`; its *kind* — not a separate fl
 | Assign | Kind | Wiring |
 |---|---|---|
 | a `float` (e.g. `1e-4f`) | baked | graph `Constant`; change ⇒ rebuild |
-| a `Schedule` (e.g. `Schedules.Cosine(3e-4f, total)`) | scheduled | runtime input; evaluated at the checkpoint step every `TrainStep` |
+| a `Schedule` (e.g. `Schedules.Cosine(3e-4f, total)`) | scheduled | lowered to graph math and computed **in-graph** from the step counter each `TrainStep` — no host evaluation |
+| `HyperValue.Scheduled(module)` | scheduled (module) | a scheduler module (`int64` step → `float32` value) inlined into the graph, for schedules the built-ins don't cover |
 | `HyperValue.Runtime(seed)` | manual | runtime input with no schedule; supply each step via `MakeHyperparams` |
 
 `Schedule` factories live on `Schedules` (`Constant`, `Linear`, `Cosine`, `CosineWithWarmup`,
 `StepDecay`, `Exponential`, `OneCycle`) with fluent combinators on the result (`WithWarmup`, `Then`,
 `Scale`, `Clamp`, `Shift`, `PerEpoch`).
+
+Every schedule the rig accepts is a graph, from exactly two sources: a built-in `Schedule`, or a
+scheduler **module** — a Shorokoo module graph taking the `int64` scalar step counter as input and
+producing the `float32` scalar value, passed via `HyperValue.Scheduled(module)` and signature-checked
+at rig build. There is **no** API for an arbitrary host lambda (a compiled closure has no durable
+graph representation and could not be persisted or resumed).
+
+> **Numeric note.** Because a schedule is now evaluated in-graph rather than host-side, its live-training
+> value carries the schedule-lowering tolerance: on engines whose `Cos`/`Pow` differ from .NET `MathF`
+> (e.g. ONNX Runtime) a schedule using those ops may differ from the host `Schedule.At` value by a few
+> ulps (arithmetic/piecewise schedules stay exact). This is the documented `ScheduleLowering` contract.
 
 ## `TrainingRig` API
 
@@ -83,14 +95,15 @@ public static TrainingRig FromScratch(
 
 public TrainingCheckpoint CreateDefaultCheckpoint();
 
-// Schedule-driven: applies each schedule at checkpoint.Step, then advances the step.
+// Schedule-driven: scheduled hyperparameters are computed in-graph from the checkpoint's
+// step (fed as the step counter), then the step advances. Requires no schedule-less runtime hypers.
 public TrainingStepResult TrainStep(
     TrainingCheckpoint checkpoint,
     TensorDataStruct trainingInput,
     TensorDataStruct trainingOutput,
     CompiledGraph compiled);
 
-// Explicit override: supply dynamic hyperparameter values for this step.
+// Explicit override: supply the schedule-less runtime hyperparameter values for this step.
 public TrainingStepResult TrainStep(
     TrainingCheckpoint checkpoint,
     TensorDataStruct hyperparams,              // from MakeHyperparams(...)

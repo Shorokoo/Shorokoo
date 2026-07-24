@@ -211,3 +211,89 @@ public static class ScheduleLowering
     private static Tensor<float32> Progress(Tensor<int64> step, int totalSteps)
         => (step.Cast<float32>() / Scalar((float)totalSteps)).Clip(Scalar(0f), Scalar(1f));
 }
+
+/// <summary>
+/// The single host-side evaluator for a <see cref="Schedule"/>: interprets its
+/// <see cref="ScheduleExpr"/> tree in float32, mirroring <see cref="ScheduleLowering"/>'s graph
+/// emission operation for operation (the same int64→float32 counter conversion, the same folded
+/// constants, the same piecewise selection). <see cref="Schedule.At(long)"/> — and hence preview,
+/// plotting, and the optimizer-state-init seed — routes through here, so there is exactly one host
+/// implementation per schedule instead of one closure per factory/combinator: the graph stays
+/// normative and this interpreter is its pinned mirror (the schedule-lowering parity tests compare
+/// the two). On an engine whose elementary float32 ops match .NET (<c>MathF</c>) semantics the graph
+/// value is bit-identical to this interpreter at every counter; engines with different
+/// transcendentals (ORT's <c>Cos</c>/<c>Pow</c>) may differ by a few ulps (see those tests).
+/// </summary>
+internal static class ScheduleInterpreter
+{
+    /// <summary>
+    /// Evaluates <paramref name="expr"/> at the (possibly re-based) int64 counter
+    /// <paramref name="step"/>, returning the float32 scheduled value. Mirrors
+    /// <see cref="ScheduleLowering"/>'s <c>Emit</c> switch shape for shape.
+    /// </summary>
+    internal static float Evaluate(ScheduleExpr expr, long step)
+    {
+        switch (expr)
+        {
+            case ScheduleExpr.Constant c:
+                return c.Value;
+
+            case ScheduleExpr.Linear l:
+                return l.BaseValue + (l.FinalValue - l.BaseValue) * Progress(step, l.TotalSteps);
+
+            case ScheduleExpr.Cosine c:
+                return (0.5f * c.BaseValue) * (1f + MathF.Cos(MathF.PI * Progress(step, c.TotalSteps)));
+
+            case ScheduleExpr.StepDecay d:
+                return d.BaseValue * MathF.Pow(d.Gamma, (float)(step / (long)d.StepSize));
+
+            case ScheduleExpr.Exponential e:
+                return e.BaseValue * MathF.Pow(e.Gamma, (float)step);
+
+            case ScheduleExpr.OneCycle o:
+            {
+                if (step < o.Up)
+                {
+                    float t = (float)step / (float)o.Up;
+                    return o.Initial + ((o.MaxValue - o.Initial) * 0.5f) * (1f - MathF.Cos(MathF.PI * t));
+                }
+                float td = Math.Clamp((float)(step - o.Up) / (float)o.Down, 0f, 1f);
+                return o.Final + ((o.MaxValue - o.Final) * 0.5f) * (1f + MathF.Cos(MathF.PI * td));
+            }
+
+            case ScheduleExpr.Scale s:
+                return Evaluate(s.Inner, step) * s.Factor;
+
+            case ScheduleExpr.Clamp cl:
+                // min <= max is enforced at construction, so Math.Clamp matches the lowered Clip.
+                return Math.Clamp(Evaluate(cl.Inner, step), cl.Min, cl.Max);
+
+            case ScheduleExpr.Shift sh:
+                return Evaluate(sh.Inner, step + sh.Steps);
+
+            case ScheduleExpr.PerEpoch p:
+                return Evaluate(p.Inner, step / p.StepsPerEpoch);
+
+            case ScheduleExpr.Warmup w:
+            {
+                if (step < w.WarmupSteps)
+                {
+                    float t = (float)(step + 1) / (float)w.WarmupSteps;
+                    return w.Peak * (w.StartFactor + (1f - w.StartFactor) * t);
+                }
+                return Evaluate(w.Inner, step - w.WarmupSteps);
+            }
+
+            case ScheduleExpr.Then t:
+                return step < t.AtStep ? Evaluate(t.First, step) : Evaluate(t.Next, step - t.AtStep);
+
+            default:
+                throw new NotSupportedException($"Unhandled schedule expression '{expr.GetType().Name}'.");
+        }
+    }
+
+    /// <summary>The clamped progress ratio <c>clamp((float)step / totalSteps, 0, 1)</c>, mirroring
+    /// <see cref="ScheduleLowering"/>'s graph <c>Progress</c>.</summary>
+    private static float Progress(long step, int totalSteps)
+        => Math.Clamp((float)step / (float)totalSteps, 0f, 1f);
+}

@@ -1333,7 +1333,7 @@ public class TrainingRigCoverageTests
         Assert.Throws<ArgumentException>(() => Build(HyperValue.Scheduled(intOutputModule)));
 
         // An opaque, non-lowerable schedule (built internally) is likewise rejected at build.
-        Assert.Throws<ArgumentException>(() => Build(HyperValue.Scheduled(new Schedule(s => s * 0.1f, expr: null))));
+        Assert.Throws<ArgumentException>(() => Build(HyperValue.Scheduled(new Schedule((ScheduleExpr?)null))));
     }
 
     /// <summary>

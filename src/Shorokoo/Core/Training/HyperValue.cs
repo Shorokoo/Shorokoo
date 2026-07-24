@@ -67,7 +67,10 @@ namespace Shorokoo
         public static HyperValue Scheduled(Schedule schedule)
         {
             if (schedule is null) throw new ArgumentNullException(nameof(schedule));
-            return new HyperValue(schedule.At(0), schedule, null, isDynamic: true);
+            // The stored _value is ignored for a scheduled hyper (InitialValue recomputes At(0) from
+            // the schedule); keep it 0 rather than eagerly evaluating a possibly non-lowerable
+            // schedule here, which would throw before the rig can report the clearer build error.
+            return new HyperValue(0f, schedule, null, isDynamic: true);
         }
 
         /// <summary>
@@ -104,7 +107,7 @@ namespace Shorokoo
         /// value. For a scheduler module the step-0 value is only known by executing the module, so
         /// this returns the stored seed (0); the rig feeds the real step counter for the in-graph value.
         /// </summary>
-        public float InitialValue => _schedule is not null ? _schedule.At(0) : _value;
+        public float InitialValue => _schedule is not null && _schedule.CanLower() ? _schedule.At(0) : _value;
 
         /// <summary>A plain float is a baked-in <see cref="Constant"/> hyperparameter.</summary>
         public static implicit operator HyperValue(float value) => Constant(value);

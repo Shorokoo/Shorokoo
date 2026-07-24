@@ -4,11 +4,13 @@ using Shorokoo.Runtime;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Coverage-purpose parity tests for <see cref="ScheduleLowering"/> (issue #39 spike): every
-/// schedule shape constructible from the public <see cref="Schedules"/> factories and
-/// <see cref="Schedule"/> combinators is lowered to graph math
+/// Coverage-purpose parity tests for <see cref="ScheduleLowering"/> (issue #39 spike; re-anchored
+/// in #105 to the single interpreter): every schedule shape constructible from the public
+/// <see cref="Schedules"/> factories and <see cref="Schedule"/> combinators is lowered to graph math
 /// (<c>int64 step counter → float32 value</c>) and evaluated against the host
-/// <see cref="Schedule.At"/> across dense step ranges around every piecewise boundary
+/// <see cref="Schedule.At"/> — now the single <c>ScheduleInterpreter</c> over the same
+/// <c>ScheduleExpr</c> the lowering walks (the per-factory closures were deleted), so this is an
+/// interpreter↔lowered-graph parity check — across dense step ranges around every piecewise boundary
 /// (warmup end, <c>Then</c> transitions, cycle edges, step 0) plus large counters around the
 /// float32 2²⁴ integer-exactness limit.
 ///
@@ -56,7 +58,7 @@ public class ScheduleLoweringCoverageTests
     {
         long[] probes = [.. probeSteps.Where(p => p >= 0 && p <= int.MaxValue).Distinct().Order()];
         Assert.NotEmpty(probes);
-        float[] expected = [.. probes.Select(p => schedule.At((int)p))];
+        float[] expected = [.. probes.Select(p => schedule.At(p))];
 
         var steps = InputVector<int64>("steps");
         var value = schedule.LowerToGraph(steps);
@@ -273,14 +275,32 @@ public class ScheduleLoweringCoverageTests
             [.. DenseRange((1 << 24) - 3, (1 << 24) + 3), 1 << 25, (1 << 26) - 1, 1 << 26,
              (1 << 26) + 1, .. LargeSteps]);
 
+    // int64 counters (#105): At widened int→long, so a step past int.MaxValue is a valid counter.
+    // The interpreter and the lowered graph must still agree there (both cast int64→float32), which
+    // the harness's int.MaxValue probe cap can't reach — so probe the large steps directly here.
+    [Fact]
+    public void TestInt64CounterBeyondIntRangeParity()
+    {
+        var schedule = Schedules.Linear(1f, 0f, 1 << 26).WithWarmup(1000);
+        long[] probes = [(long)int.MaxValue + 1, 1L << 40, 5_000_000_000L, long.MaxValue / 4];
+        var steps = InputVector<int64>("steps");
+        var value = schedule.LowerToGraph(steps);
+        var graph = new InternalComputationGraph([steps], [value]);
+        var qee = ((TensorData)new QuickExecutionEngine { MaxDataElements = 1 << 22 }
+            .Execute(graph, TensorData([probes.Length], probes))[0]).As<float32>().AccessMemory<float>().ToArray();
+        for (int i = 0; i < probes.Length; i++)
+            Assert.Equal(schedule.At(probes[i]), qee[i]);   // interpreter == lowered graph (bit-exact on QEE)
+    }
+
     // ───────────────────────────── lowering contract ─────────────────────────────
 
     [Fact]
     public void TestOpaqueScheduleCannotLower()
     {
-        // The public host-lambda constructor was removed (#99); an opaque, non-lowerable schedule
-        // can still be built internally (expr: null) to pin the defensive non-lowerable path.
-        Schedule opaque = new(s => s * 0.1f, expr: null);
+        // There is no host-lambda schedule API; the per-factory host closures were deleted (#105),
+        // so an opaque, non-lowerable schedule can only be built internally (expr: null) to pin the
+        // defensive non-lowerable path.
+        Schedule opaque = new((ScheduleExpr?)null);
         Assert.False(opaque.CanLower());
         // Opaqueness is contagious through every combinator…
         Assert.False(opaque.Scale(2f).CanLower());
@@ -328,7 +348,7 @@ public class ScheduleLoweringCoverageTests
             var graph = (new InternalComputationGraph([step], [schedule.LowerToGraph(step)]));
             float got = new ComputeContext().Execute(graph, TensorData([], p))[0]
                 .ToTensorData().As<float32>().AccessMemory<float>()[0];
-            float expected = schedule.At((int)p);
+            float expected = schedule.At(p);
             long ulps = UlpDistance(expected, got);
             Assert.True(ulps <= TranscendentalUlps
                     || MathF.Abs(expected - got) <= 3e-4f * PeakRelativeTolerance,

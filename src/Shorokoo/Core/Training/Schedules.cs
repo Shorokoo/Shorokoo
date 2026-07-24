@@ -4,9 +4,12 @@ namespace Shorokoo.Core.Training
 {
     /// <summary>
     /// A <c>step → value</c> schedule for a scalar hyperparameter (typically the learning rate),
-    /// with fluent combinators. A <see cref="Schedule"/> implicitly converts to/from
-    /// <c>Func&lt;int, float&gt;</c> and to <see cref="HyperValue"/>, so it can be handed straight to a
-    /// strongly-typed optimizer hyperparameter set:
+    /// with fluent combinators. Build one only through the <see cref="Schedules"/> factories and the
+    /// combinators on this type — there is no public constructor from an arbitrary host lambda,
+    /// because every schedule the rig accepts must lower to a durable graph (see
+    /// <see cref="ScheduleLowering"/>). A <see cref="Schedule"/> implicitly converts to
+    /// <see cref="HyperValue"/>, so it can be handed straight to a strongly-typed optimizer
+    /// hyperparameter set:
     ///
     /// <code>
     /// var rig = TrainingRig.FromScratch(model, loss, AdamWOptimizer.ComputationGraph, sample,
@@ -33,9 +36,13 @@ namespace Shorokoo.Core.Training
         /// </summary>
         internal ScheduleExpr? Expr { get; }
 
-        /// <summary>Wraps a step → value function as a schedule.</summary>
-        public Schedule(Func<int, float> fn) : this(fn, expr: null) { }
-
+        /// <summary>
+        /// Builds a schedule from its host evaluator <paramref name="fn"/> and its structural
+        /// <paramref name="expr"/> (the graph-lowerable description). Internal because every public
+        /// schedule must carry a lowerable <paramref name="expr"/>; the factories and combinators are
+        /// the only callers. A <c>null</c> <paramref name="expr"/> marks an opaque, non-lowerable
+        /// schedule — used only defensively (e.g. in lowering tests).
+        /// </summary>
         internal Schedule(Func<int, float> fn, ScheduleExpr? expr)
         {
             _fn = fn ?? throw new ArgumentNullException(nameof(fn));
@@ -44,11 +51,6 @@ namespace Shorokoo.Core.Training
 
         /// <summary>The scheduled value at <paramref name="step"/> (0-based global training step).</summary>
         public float At(int step) => _fn(step);
-
-        /// <summary>Wraps a step → value function as a schedule.</summary>
-        public static implicit operator Schedule(Func<int, float> fn) => new(fn);
-        /// <summary>Unwraps the underlying step → value function.</summary>
-        public static implicit operator Func<int, float>(Schedule schedule) => schedule._fn;
 
         // --- Combinators ---------------------------------------------------------------
 

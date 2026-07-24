@@ -8,7 +8,7 @@ namespace Shorokoo.Core.Training
     /// combinators on this type — there is no public constructor from an arbitrary host lambda,
     /// because every schedule the rig accepts must lower to a durable graph (see
     /// <see cref="ScheduleLowering"/>). A <see cref="Schedule"/> implicitly converts to
-    /// <see cref="HyperValue"/>, so it can be handed straight to a strongly-typed optimizer
+    /// <see cref="Hyperparameter"/>, so it can be handed straight to a strongly-typed optimizer
     /// hyperparameter set:
     ///
     /// <code>
@@ -134,7 +134,7 @@ namespace Shorokoo.Core.Training
     /// <summary>
     /// Factory for common scalar-hyperparameter <see cref="Schedule"/>s (the discoverable entry
     /// point; combinators live on <see cref="Schedule"/> itself). Each factory returns a
-    /// <c>step → value</c> schedule that can be assigned directly to a <see cref="HyperValue"/>
+    /// <c>step → value</c> schedule that can be assigned directly to a <see cref="Hyperparameter"/>
     /// optimizer hyperparameter.
     /// </summary>
     public static class Schedules

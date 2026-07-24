@@ -1084,8 +1084,8 @@ public class ModuleSourceGenerator : IIncrementalGenerator
         sb.AppendLine("    }");
 
         // Strongly-typed, named hyperparameter set for optimizer-shaped modules (all hyperparameters
-        // are scalar float32). Gives named, defaulted, init-only HyperValue properties so a rig can be
-        // built as `new XxxHyperparameters { LearningRate = Schedules.Cosine(...), WeightDecay = 1e-4f }`.
+        // are scalar float32). Gives named, defaulted, init-only Hyperparameter properties so a rig can
+        // be built as `new XxxHyperparameters { LearningRate = Schedules.Cosine(...), WeightDecay = 1e-4f }`.
         if (AllHyperparamsAreFloatScalars(fullModule))
         {
             EmitHyperparameterSet(sb, className, fullModule);
@@ -1101,7 +1101,7 @@ public class ModuleSourceGenerator : IIncrementalGenerator
 
     /// <summary>
     /// Emits <c>{className}Hyperparameters</c>: a sealed <see cref="global::Shorokoo.IOptimizerHyperparameters"/>
-    /// with one named, init-only <c>HyperValue</c> property per hyperparameter (defaulted from
+    /// with one named, init-only <c>Hyperparameter</c> property per hyperparameter (defaulted from
     /// <c>[Hyper(default)]</c>, else <c>required</c>), plus the optimizer-order accessor and names.
     /// </summary>
     private static void EmitHyperparameterSet(StringBuilder sb, string className, FullModuleInfo fullModule)
@@ -1118,16 +1118,16 @@ public class ModuleSourceGenerator : IIncrementalGenerator
         {
             var prop = Pascalize(h.Name);
             if (h.DefaultLiteral is not null)
-                sb.AppendLine($"        public global::Shorokoo.HyperValue {prop} {{ get; init; }} = {h.DefaultLiteral};");
+                sb.AppendLine($"        public global::Shorokoo.Hyperparameter {prop} {{ get; init; }} = {h.DefaultLiteral};");
             else
-                sb.AppendLine($"        public required global::Shorokoo.HyperValue {prop} {{ get; init; }}");
+                sb.AppendLine($"        public required global::Shorokoo.Hyperparameter {prop} {{ get; init; }}");
         }
 
         var orderRefs = string.Join(", ", fullModule.Hyperparams.Select(h => Pascalize(h.Name)));
         var nameLits = string.Join(", ", fullModule.Hyperparams.Select(h => $"\"{h.Name}\""));
 
         sb.AppendLine()
-          .AppendLine($"        public global::Shorokoo.HyperValue[] InOptimizerOrder() => new global::Shorokoo.HyperValue[] {{ {orderRefs} }};")
+          .AppendLine($"        public global::Shorokoo.Hyperparameter[] InOptimizerOrder() => new global::Shorokoo.Hyperparameter[] {{ {orderRefs} }};")
           .AppendLine($"        private static readonly string[] _names = new string[] {{ {nameLits} }};")
           .AppendLine("        public System.Collections.Generic.IReadOnlyList<string> HyperparameterNames => _names;")
           .AppendLine("    }");

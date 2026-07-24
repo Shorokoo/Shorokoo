@@ -217,7 +217,7 @@ public class TrainingRigCoverageTests
         ComputationGraph lossGraph,
         ComputationGraph optimizerGraph,
         long[] inputShape,
-        params HyperValue[] hyperparams)
+        params Hyperparameter[] hyperparams)
     {
         long totalElements = 1;
         foreach (var d in inputShape) totalElements *= d;
@@ -247,7 +247,7 @@ public class TrainingRigCoverageTests
         ComputationGraph lossGraph,
         ComputationGraph optimizerGraph,
         long[] inputShape,
-        params HyperValue[] hyperparams)
+        params Hyperparameter[] hyperparams)
     {
         long totalElements = 1;
         foreach (var d in inputShape) totalElements *= d;
@@ -958,13 +958,13 @@ public class TrainingRigCoverageTests
     }
 
     /// <summary>
-    /// Dynamic optimizer hyperparameters, in both flavours. A <see cref="HyperValue.Runtime"/> hyper
-    /// routes the learning rate as a schedule-less runtime input (<see cref="TrainingRig.HyperparamStructDef"/>)
+    /// Dynamic optimizer hyperparameters, in both flavours. A <see cref="Hyperparameter.Runtime"/> hyper
+    /// routes the learning rate as a schedule-less runtime input (<see cref="TrainingRig.HyperparameterStructDef"/>)
     /// supplied each step; a built-in <see cref="Schedule"/> is instead lowered and evaluated entirely
     /// in-graph from the step counter (#99), so it is not a runtime field. Drives the wiring in
     /// <c>BuildTrainingStepPureGraph</c> (hyperparam struct input + GETFIELDs, in-graph scheduler splice,
     /// step-counter input, input reorder, real names), <c>InitializeAndOptimize</c> (seed values), the
-    /// named/single <see cref="TrainingRig.MakeHyperparams(float)"/>, and both the auto (no-override) and
+    /// named/single <see cref="TrainingRig.MakeHyperparameters(float)"/>, and both the auto (no-override) and
     /// explicit-override <c>TrainStep</c> overloads.
     ///
     /// Correctness check: from one starting state the SGD update is <c>w − lr·grad</c>, so two
@@ -980,17 +980,17 @@ public class TrainingRigCoverageTests
             new TensorDataModelParam("input", ModelParamType.InputParam,
                 TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
         };
-        // SGD's learning rate is its sole hyperparameter. HyperValue.Runtime marks it as a
+        // SGD's learning rate is its sole hyperparameter. Hyperparameter.Runtime marks it as a
         // schedule-less runtime input so we can inject explicit values and prove the LR is live.
         var rig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            sample, new SGDOptimizerHyperparameters { LearningRate = HyperValue.Runtime(0.1f) });
+            sample, new SGDOptimizerHyperparameters { LearningRate = Hyperparameter.Runtime() });
 
-        Assert.Single(rig.HyperparamStructDef.Fields);
-        Assert.Equal(new[] { 0 }, rig.DynamicHyperparamIndices);
+        Assert.Single(rig.HyperparameterStructDef.Fields);
+        Assert.Equal(new[] { 0 }, rig.DynamicHyperparameterIndices);
         // Real hyperparameter names now flow end-to-end (not "hyperparam_0").
         Assert.Equal(new[] { "learningRate" }, rig.DynamicHyperparameterNames);
-        Assert.Equal("learningRate", rig.HyperparamStructDef.Fields[0].Name);
+        Assert.Equal("learningRate", rig.HyperparameterStructDef.Fields[0].Name);
 
         var modelInputDef = new TensorStructDef(
             new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32) }, "ModelInput");
@@ -1010,8 +1010,8 @@ public class TrainingRigCoverageTests
 
         // Same start state, two different runtime learning rates, one compiled graph — supplied via
         // the explicit-override TrainStep, once by the single-value helper and once by name.
-        var stepA = rig.TrainStep(initial, rig.MakeHyperparams(0.1f), inputBatch, targetBatch, compiled);
-        var stepB = rig.TrainStep(initial, rig.MakeHyperparams(("learningRate", 0.3f)), inputBatch, targetBatch, compiled);
+        var stepA = rig.TrainStep(initial, rig.MakeHyperparameters(0.1f), inputBatch, targetBatch, compiled);
+        var stepB = rig.TrainStep(initial, rig.MakeHyperparameters(("learningRate", 0.3f)), inputBatch, targetBatch, compiled);
         Assert.Equal(1, stepA.Checkpoint.Step);   // the global step counter advanced
         float wA = ((TensorData<float32>)stepA.Checkpoint.TrainableParams.Fields[wName]).AccessMemory()[0];
         float wB = ((TensorData<float32>)stepB.Checkpoint.TrainableParams.Fields[wName]).AccessMemory()[0];
@@ -1025,18 +1025,18 @@ public class TrainingRigCoverageTests
 
         // A schedule-less runtime hyperparameter cannot be auto-driven: the no-override TrainStep throws.
         Assert.Throws<InvalidOperationException>(() => rig.TrainStep(initial, inputBatch, targetBatch, compiled));
-        // Named MakeHyperparams rejects unknown / missing names.
-        Assert.Throws<ArgumentException>(() => rig.MakeHyperparams(("bogus", 0.1f)));
+        // Named MakeHyperparameters rejects unknown / missing names.
+        Assert.Throws<ArgumentException>(() => rig.MakeHyperparameters(("bogus", 0.1f)));
 
         // A built-in Schedule is lowered and applied entirely in-graph (#99): it is NOT a runtime
-        // "hyperparams" field, so the schedule rig has an empty HyperparamStructDef and the no-override
+        // "hyperparams" field, so the schedule rig has an empty HyperparameterStructDef and the no-override
         // TrainStep drives it from the checkpoint's step. The in-graph value at step 0 of Linear(0.2→0, 4)
         // is 0.2, so the auto step must match a Runtime reference rig fed 0.2 explicitly.
         var schedRig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             sample, new SGDOptimizerHyperparameters { LearningRate = Schedules.Linear(0.2f, 0.0f, 4) });
-        Assert.Empty(schedRig.HyperparamStructDef.Fields);              // schedule is in-graph, not a runtime field
-        Assert.Empty(schedRig.DynamicHyperparamIndices);
+        Assert.Empty(schedRig.HyperparameterStructDef.Fields);              // schedule is in-graph, not a runtime field
+        Assert.Empty(schedRig.DynamicHyperparameterIndices);
         var schedCompiled = ctx.Compile(schedRig.TrainingStepPureGraph);
         var sc = schedRig.CreateDefaultCheckpoint();
         string swName = schedRig.TrainableParamStructDef.Fields[0].Name;
@@ -1045,21 +1045,21 @@ public class TrainingRigCoverageTests
 
         var refRig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            sample, new SGDOptimizerHyperparameters { LearningRate = HyperValue.Runtime(0.2f) });
+            sample, new SGDOptimizerHyperparameters { LearningRate = Hyperparameter.Runtime() });
         var refCompiled = ctx.Compile(refRig.TrainingStepPureGraph);
-        var refStep = refRig.TrainStep(refRig.CreateDefaultCheckpoint(), refRig.MakeHyperparams(0.2f),
+        var refStep = refRig.TrainStep(refRig.CreateDefaultCheckpoint(), refRig.MakeHyperparameters(0.2f),
             inputBatch, targetBatch, refCompiled);
         float swRef = ((TensorData<float32>)refStep.Checkpoint.TrainableParams.Fields[swName]).AccessMemory()[0];
         Assert.True(MathF.Abs(swAuto - swRef) < 1e-5f, "in-graph scheduled step must equal explicit LR = schedule(step).");
 
         // Scheduled LR also works for a stateful optimizer (AdamW: 5 hyperparams, m/v state), built with
         // the named set — LR scheduled in-graph, everything else left at its [Hyper] default (baked). No
-        // hyperparameter is a runtime field, so DynamicHyperparamIndices is empty.
+        // hyperparameter is a runtime field, so DynamicHyperparameterIndices is empty.
         var adamRig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
             sample, new AdamWOptimizerHyperparameters { LearningRate = Schedules.Constant(0.01f) });
-        Assert.Empty(adamRig.DynamicHyperparamIndices);                // LR is scheduled in-graph; betas baked
-        Assert.Empty(adamRig.HyperparamStructDef.Fields);
+        Assert.Empty(adamRig.DynamicHyperparameterIndices);                // LR is scheduled in-graph; betas baked
+        Assert.Empty(adamRig.HyperparameterStructDef.Fields);
         var adamCompiled = ctx.Compile(adamRig.TrainingStepPureGraph);
         var adamStep = adamRig.TrainStep(adamRig.CreateDefaultCheckpoint(), inputBatch, targetBatch, adamCompiled);
         Assert.True(float.IsFinite(adamStep.Loss));
@@ -1120,7 +1120,7 @@ public class TrainingRigCoverageTests
     /// Coverage that a schedule genuinely drives the <see cref="TrainingRig.Fit"/>/<see cref="TrainingRig.Train"/>
     /// loop: the global step advances across the loop (so the schedule sees increasing steps), and two
     /// rigs differing only in their learning-rate schedule reach different final weights — the loop-level
-    /// analogue of the per-step liveness proof. Also covers multi-dynamic named MakeHyperparams via
+    /// analogue of the per-step liveness proof. Also covers multi-dynamic named MakeHyperparameters via
     /// SGD-with-momentum.
     /// </summary>
     [Fact]
@@ -1164,23 +1164,23 @@ public class TrainingRigCoverageTests
         Assert.True(MathF.Abs(wDecay - wConst) > 1e-4f,
             $"a live schedule must change the trajectory vs constant LR; got {wDecay} vs {wConst}");
 
-        // Multi-dynamic: SGD-with-momentum, both hyperparameters scheduled; named MakeHyperparams must
+        // Multi-dynamic: SGD-with-momentum, both hyperparameters scheduled; named MakeHyperparameters must
         // accept both names (order-independent) and reject a wrong set.
         var momRig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph,
             sample, new SGDMomentumOptimizerHyperparameters
             {
-                LearningRate = HyperValue.Runtime(0.1f),
-                MomentumCoeff = HyperValue.Runtime(0.9f),
+                LearningRate = Hyperparameter.Runtime(),
+                MomentumCoeff = Hyperparameter.Runtime(),
             });
         Assert.Equal(new[] { "learningRate", "momentumCoeff" }, momRig.DynamicHyperparameterNames.ToArray());
         var momCompiled = ctx.Compile(momRig.TrainingStepPureGraph);
         var momStep = momRig.TrainStep(momRig.CreateDefaultCheckpoint(),
-            momRig.MakeHyperparams(("momentumCoeff", 0.9f), ("learningRate", 0.1f)),  // order-independent
+            momRig.MakeHyperparameters(("momentumCoeff", 0.9f), ("learningRate", 0.1f)),  // order-independent
             inputBatch, targetBatch, momCompiled);
         Assert.True(float.IsFinite(momStep.Loss));
         Assert.NotEmpty(momStep.Checkpoint.OptimizerState.Fields);     // velocity state flows
-        Assert.Throws<ArgumentException>(() => momRig.MakeHyperparams(("learningRate", 0.1f))); // missing momentumCoeff
+        Assert.Throws<ArgumentException>(() => momRig.MakeHyperparameters(("learningRate", 0.1f))); // missing momentumCoeff
     }
 
     // ───────────────────────── in-graph scheduler (#99) ─────────────────────────
@@ -1234,11 +1234,11 @@ public class TrainingRigCoverageTests
         var schedRig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             sample, new SGDOptimizerHyperparameters { LearningRate = schedule });
-        Assert.Empty(schedRig.HyperparamStructDef.Fields);        // schedule is in-graph, not a runtime field
+        Assert.Empty(schedRig.HyperparameterStructDef.Fields);        // schedule is in-graph, not a runtime field
 
         var refRig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            sample, new SGDOptimizerHyperparameters { LearningRate = HyperValue.Runtime(0f) });
+            sample, new SGDOptimizerHyperparameters { LearningRate = Hyperparameter.Runtime() });
 
         var schedCompiled = ctx.Compile(schedRig.TrainingStepPureGraph);
         var refCompiled = ctx.Compile(refRig.TrainingStepPureGraph);
@@ -1249,7 +1249,7 @@ public class TrainingRigCoverageTests
         for (int s = 0; s < 6; s++)
         {
             schedCkpt = schedRig.TrainStep(schedCkpt, inputBatch, targetBatch, schedCompiled).Checkpoint; // in-graph LR at step s
-            refCkpt = refRig.TrainStep(refCkpt, refRig.MakeHyperparams(schedule.At(s)),                   // host LR at step s
+            refCkpt = refRig.TrainStep(refCkpt, refRig.MakeHyperparameters(schedule.At(s)),                   // host LR at step s
                 inputBatch, targetBatch, refCompiled).Checkpoint;
             float wSched = ((TensorData<float32>)schedCkpt.TrainableParams.Fields[wName]).AccessMemory()[0];
             float wRef = ((TensorData<float32>)refCkpt.TrainableParams.Fields[wName]).AccessMemory()[0];
@@ -1262,7 +1262,7 @@ public class TrainingRigCoverageTests
     /// <summary>
     /// A user-supplied scheduler <b>module</b> (int64 step → float32 value, #99) inlines into the rig and
     /// drives training exactly as feeding its value explicitly does: over several steps the module-scheduled
-    /// weight tracks a reference rig fed the module's <c>lr(step)</c> via <see cref="HyperValue.Runtime"/>.
+    /// weight tracks a reference rig fed the module's <c>lr(step)</c> via <see cref="Hyperparameter.Runtime"/>.
     /// The module here is pure arithmetic, so the match is exact.
     /// </summary>
     [Fact]
@@ -1277,12 +1277,12 @@ public class TrainingRigCoverageTests
 
         var modRig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            sample, new SGDOptimizerHyperparameters { LearningRate = HyperValue.Scheduled(schedulerModule) });
-        Assert.Empty(modRig.HyperparamStructDef.Fields);          // module is in-graph, not a runtime field
+            sample, new SGDOptimizerHyperparameters { LearningRate = Hyperparameter.Scheduled(schedulerModule) });
+        Assert.Empty(modRig.HyperparameterStructDef.Fields);          // module is in-graph, not a runtime field
 
         var refRig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            sample, new SGDOptimizerHyperparameters { LearningRate = HyperValue.Runtime(0f) });
+            sample, new SGDOptimizerHyperparameters { LearningRate = Hyperparameter.Runtime() });
 
         var modCompiled = ctx.Compile(modRig.TrainingStepPureGraph);
         var refCompiled = ctx.Compile(refRig.TrainingStepPureGraph);
@@ -1293,7 +1293,7 @@ public class TrainingRigCoverageTests
         for (int s = 0; s < 4; s++)
         {
             modCkpt = modRig.TrainStep(modCkpt, inputBatch, targetBatch, modCompiled).Checkpoint;
-            refCkpt = refRig.TrainStep(refCkpt, refRig.MakeHyperparams(Lr(s)),
+            refCkpt = refRig.TrainStep(refCkpt, refRig.MakeHyperparameters(Lr(s)),
                 inputBatch, targetBatch, refCompiled).Checkpoint;
             float wMod = ((TensorData<float32>)modCkpt.TrainableParams.Fields[wName]).AccessMemory()[0];
             float wRef = ((TensorData<float32>)refCkpt.TrainableParams.Fields[wName]).AccessMemory()[0];
@@ -1312,28 +1312,28 @@ public class TrainingRigCoverageTests
     public void TestBadSchedulerFailsLoudAtRigBuild()
     {
         var (sample, _, _) = ScalarMultiplyBatches();
-        TrainingRig Build(HyperValue lr) => TrainingRig.FromScratch(
+        TrainingRig Build(Hyperparameter lr) => TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             sample, new SGDOptimizerHyperparameters { LearningRate = lr });
 
         // Wrong input dtype: a float32 step counter instead of int64.
         var floatStep = InputScalar<float32>("step");
         var floatInputModule = SchedulerModuleRaw([floatStep], [floatStep]);
-        Assert.Throws<ArgumentException>(() => Build(HyperValue.Scheduled(floatInputModule)));
+        Assert.Throws<ArgumentException>(() => Build(Hyperparameter.Scheduled(floatInputModule)));
 
         // Wrong input count: two inputs.
         var a = InputScalar<int64>("a");
         var b = InputScalar<int64>("b");
         var twoInputModule = SchedulerModuleRaw([a, b], [a.Cast<float32>() + b.Cast<float32>()]);
-        Assert.Throws<ArgumentException>(() => Build(HyperValue.Scheduled(twoInputModule)));
+        Assert.Throws<ArgumentException>(() => Build(Hyperparameter.Scheduled(twoInputModule)));
 
         // Wrong output dtype: an int64 (not float32) value.
         var intStep = InputScalar<int64>("step");
         var intOutputModule = SchedulerModuleRaw([intStep], [intStep]);
-        Assert.Throws<ArgumentException>(() => Build(HyperValue.Scheduled(intOutputModule)));
+        Assert.Throws<ArgumentException>(() => Build(Hyperparameter.Scheduled(intOutputModule)));
 
         // An opaque, non-lowerable schedule (built internally) is likewise rejected at build.
-        Assert.Throws<ArgumentException>(() => Build(HyperValue.Scheduled(new Schedule((ScheduleExpr?)null))));
+        Assert.Throws<ArgumentException>(() => Build(Hyperparameter.Scheduled(new Schedule((ScheduleExpr?)null))));
     }
 
     /// <summary>
@@ -1493,7 +1493,7 @@ public class TrainingRigCoverageTests
     }
 
     /// <summary>
-    /// Verifies the <see cref="TrainingRig.FromScratch(ComputationGraph,ComputationGraph,ComputationGraph,ModelParamList,HyperValue[])"/>
+    /// Verifies the <see cref="TrainingRig.FromScratch(ComputationGraph,ComputationGraph,ComputationGraph,ModelParamList,Hyperparameter[])"/>
     /// overload, the <see cref="TrainingRig.InputDef"/> and <see cref="TrainingRig.TargetDef"/> properties,
     /// and <see cref="TensorStructDef.FromOrderedData"/> — covering all the convenience APIs
     /// added to clean up training call sites.

@@ -1336,6 +1336,98 @@ public class TrainingRigCoverageTests
         Assert.Throws<ArgumentException>(() => Build(Hyperparameter.Scheduled(new Schedule((ScheduleExpr?)null))));
     }
 
+    // ───────────────────────── P3: one value route (#105) ─────────────────────────
+
+    /// <summary>The single scalar the <see cref="InitFromHyperOptimizer"/> writes into its optimizer
+    /// state at fresh-checkpoint creation — which equals the learning-rate hyper's value at the initial
+    /// counters, so it directly reads back the value the §2.5 route fed to state init.</summary>
+    private static float FreshOptStateValue(TrainingRig rig, TrainingCheckpoint ckpt)
+    {
+        var field = rig.OptimizerStateDef.Fields[0].Name;
+        return ((TensorData<float32>)ckpt.OptimizerState.Fields[field]).AccessMemory()[0];
+    }
+
+    /// <summary>
+    /// The §2.5 value route: optimizer state init sees each scheduled hyper's real value at the initial
+    /// counters — a built-in <see cref="Schedule"/> via its lowered graph, and a scheduler <b>module</b>
+    /// via QEE of its graph — not a placeholder. The module case explicitly pins that the old hardcoded
+    /// <c>0f</c> state-init hole (a module fed 0 to state init while feeding its true value to the
+    /// trainstep) is gone. <see cref="InitFromHyperOptimizer"/> initializes its state to the LR hyper,
+    /// so the fresh optimizer-state value <em>is</em> that fed value.
+    /// </summary>
+    [Fact]
+    public void TestScheduledHyperStateInitUsesGraphValueCoverage()
+    {
+        var (sample, _, _) = ScalarMultiplyBatches();
+        TrainingRig Build(Hyperparameter lr) => TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, InitFromHyperOptimizer.ComputationGraph,
+            sample, new InitFromHyperOptimizerHyperparameters { LearningRate = lr });
+
+        // Built-in schedule: state init sees Constant(0.5).At(0) = 0.5.
+        var dslRig = Build(Schedules.Constant(0.5f));
+        Assert.True(MathF.Abs(0.5f - FreshOptStateValue(dslRig, dslRig.CreateDefaultCheckpoint())) < 1e-4f);
+
+        // A decaying schedule: state init sees the step-0 value (0.2), not the final value.
+        var decayRig = Build(Schedules.Linear(0.2f, 0f, 10));
+        Assert.True(MathF.Abs(0.2f - FreshOptStateValue(decayRig, decayRig.CreateDefaultCheckpoint())) < 1e-4f);
+
+        // Scheduler module returning 0.7 at step 0: state init must see 0.7 — NOT the old 0f.
+        var moduleRig = Build(Hyperparameter.Scheduled(
+            SchedulerModule(step => Scalar(0.7f) + step.Cast<float32>() * Scalar(0f))));
+        float moduleState = FreshOptStateValue(moduleRig, moduleRig.CreateDefaultCheckpoint());
+        Assert.True(MathF.Abs(0.7f - moduleState) < 1e-4f, $"expected 0.7, got {moduleState}");
+        Assert.True(MathF.Abs(moduleState) > 1e-4f, "the old hardcoded-0f scheduler-module state-init hole must be gone.");
+    }
+
+    /// <summary>
+    /// D5: when the optimizer's state initializer actually reads a <see cref="HyperparameterKind.Runtime"/>
+    /// hyper (dependency-analyzed at build), fresh-checkpoint creation fails loud unless explicit initial
+    /// values are supplied via <see cref="TrainingRig.CreateDefaultCheckpoint(TensorDataStruct)"/>. A
+    /// baked hyper never trips this, since its value is known at build.
+    /// </summary>
+    [Fact]
+    public void TestRuntimeHyperStateInitFailsLoudUnlessSuppliedCoverage()
+    {
+        var (sample, _, _) = ScalarMultiplyBatches();
+        var runtimeRig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, InitFromHyperOptimizer.ComputationGraph,
+            sample, new InitFromHyperOptimizerHyperparameters { LearningRate = Hyperparameter.Runtime() });
+
+        // No value known at build → fail loud (D5), naming the hyper.
+        var ex = Assert.Throws<InvalidOperationException>(() => runtimeRig.CreateDefaultCheckpoint());
+        Assert.Contains("learningRate", ex.Message);
+
+        // Supplied explicitly → state init uses the given value.
+        var ckpt = runtimeRig.CreateDefaultCheckpoint(runtimeRig.MakeHyperparameters(0.3f));
+        Assert.True(MathF.Abs(0.3f - FreshOptStateValue(runtimeRig, ckpt)) < 1e-4f);
+
+        // A baked LR needs no override — its value is known at build.
+        var bakedRig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, InitFromHyperOptimizer.ComputationGraph,
+            sample, new InitFromHyperOptimizerHyperparameters { LearningRate = 0.05f });
+        Assert.True(MathF.Abs(0.05f - FreshOptStateValue(bakedRig, bakedRig.CreateDefaultCheckpoint())) < 1e-4f);
+    }
+
+    /// <summary>
+    /// D4 purity enforcement: a scheduler module that carries a trainable parameter, module state (a
+    /// StateUpdate), or an RNG draw is rejected at rig build with a message naming the purity contract —
+    /// it would otherwise be inlined into the trainstep with an undefined failure mode.
+    /// </summary>
+    [Fact]
+    public void TestImpureSchedulerModuleRejectedAtRigBuildCoverage()
+    {
+        var (sample, _, _) = ScalarMultiplyBatches();
+        TrainingRig Build(ComputationGraph schedulerModule) => TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            sample, new SGDOptimizerHyperparameters { LearningRate = Hyperparameter.Scheduled(schedulerModule) });
+
+        foreach (var impure in new[] { ParamScheduler.ComputationGraph, StateScheduler.ComputationGraph, RngScheduler.ComputationGraph })
+        {
+            var ex = Assert.Throws<ArgumentException>(() => Build(impure));
+            Assert.Contains("pure", ex.Message);
+        }
+    }
+
     /// <summary>
     /// Coverage for a model whose training graph carries batched (3-D) matmuls
     /// (<see cref="BatchedMatmulModel"/>): drives the MatMul gradient's rank-agnostic

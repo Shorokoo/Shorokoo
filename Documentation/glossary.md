@@ -26,7 +26,7 @@
 | `Globals.StateUpdate` | Register a state mutation (optimizer/BatchNorm state) inside a module. | `training.md` |
 | `TrainingRig` | Entry point that composes model+loss+optimizer and runs autodiff. | `training.md` |
 | `TrainingCheckpoint` | Holds trainable params, model state, optimizer state, and the global `Step` (advances each `TrainStep`; schedules resume from it). | `training.md` |
-| `HyperValue` | An optimizer hyperparameter's value: a baked `float`, a `Schedule`, or `HyperValue.Runtime(seed)`; its kind decides constant-vs-runtime wiring. | `training.md` |
+| `Hyperparameter` | An optimizer hyperparameter's source: `Hyperparameter.Baked(float)` (a bare `float`), a `Schedule`, or `Hyperparameter.Runtime()`; its `Kind` decides baked-vs-scheduled-vs-runtime wiring. | `training.md` |
 | `Schedule` / `Schedules` | A `step → value` schedule (`Schedules.Cosine`, `OneCycle`, …) with fluent combinators (`WithWarmup`, `Then`, `Scale`, `Clamp`, `Shift`, `PerEpoch`). | `training.md` |
 | `IOptimizerHyperparameters` / `<Optimizer>Hyperparameters` | The named, defaulted hyperparameter set; source-generated per optimizer (e.g. `AdamWOptimizerHyperparameters`). | `training.md` |
 | autodiff / `[AutoDiff]` | Automatic gradient generation; per-op derivative rules. | `training.md` |

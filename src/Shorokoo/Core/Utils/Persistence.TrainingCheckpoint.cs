@@ -133,12 +133,14 @@ namespace Shorokoo
                     (training.CheckpointVersion > SkptFileFormat.TrainingCheckpointVersion
                         ? "a newer framework version." : "an older, unsupported framework version."));
 
-            // Step/epoch/batch are host-owned scalars read straight from the manifest. Epoch and
-            // batchIndex are add-only fields (issue #100): a .skpt written before they existed omits
-            // them, so they deserialize to 0 — the "fill new state kinds as absent" rule.
-            int step = checked((int)training.Step);
-            int epoch = checked((int)training.Epoch);
-            int batchIndex = checked((int)training.BatchIndex);
+            // Step/epoch/batch are host-owned int64 scalars read straight from the manifest (the
+            // manifest training block has stored them as int64 since #102, so #105's in-memory int64
+            // widening needs no format change here — no truncation on read). Epoch and batchIndex are
+            // add-only fields (issue #100): a .skpt written before they existed omits them, so they
+            // deserialize to 0 — the "fill new state kinds as absent" rule.
+            long step = training.Step;
+            long epoch = training.Epoch;
+            long batchIndex = training.BatchIndex;
             var kinds = training.Kinds ?? new Dictionary<string, string>();
 
             var trainable = ReconstructTrainingKind(

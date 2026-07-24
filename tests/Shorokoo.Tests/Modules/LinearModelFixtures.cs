@@ -123,6 +123,18 @@ public partial class StateScheduler
     }
 }
 
+/// <summary>
+/// Multi-counter scheduler module (D1): consumes both the <c>step</c> and <c>epoch</c> reserved
+/// counters, so a test can prove the rig feeds each named counter from the checkpoint. Value is
+/// <c>0.5 − 0.01·step − 0.1·epoch</c> — pure arithmetic over both counters.
+/// </summary>
+[Module]
+public partial class StepEpochScheduler
+{
+    public static Scalar<float32> Inline(Scalar<int64> step, Scalar<int64> epoch)
+        => Scalar(0.5f) - step.Cast<float32>() * Scalar(0.01f) - epoch.Cast<float32>() * Scalar(0.1f);
+}
+
 /// <summary>Impure scheduler module — draws RNG; rig build must reject it (D4).</summary>
 [Module]
 public partial class RngScheduler

@@ -905,7 +905,7 @@ public class TrainingRigCoverageTests
             Assert.Null(result.Srk);
 
             var info = result.TrainingCheckpoint!;
-            Assert.Equal(2, info.FormatVersion);   // v2 marker: [version, step, epoch, batchIndex]
+            Assert.Equal(3, info.FormatVersion);   // v3 marker: int64 [version, step, epoch, batchIndex]
             Assert.Equal(5, info.Step);
             Assert.Equal(0, info.Epoch);           // not set on this checkpoint → default 0
             Assert.Equal(0, info.BatchIndex);
@@ -1425,6 +1425,93 @@ public class TrainingRigCoverageTests
         {
             var ex = Assert.Throws<ArgumentException>(() => Build(impure));
             Assert.Contains("pure", ex.Message);
+        }
+    }
+
+    // ───────────────────────── P4: int64 counters (#105) ─────────────────────────
+
+    /// <summary>
+    /// int64 counter round-trip: a checkpoint whose step/epoch/batchIndex exceed int32 survives Save
+    /// and Load in both formats — the legacy flat safetensors marker (v3) and the native .skpt manifest
+    /// — with no truncation. Pins the widening of <see cref="TrainingCheckpoint.Step"/> et al. to int64.
+    /// </summary>
+    [Fact]
+    public void TestInt64CounterRoundTripCoverage()
+    {
+        var (_, trained, _, _, _) = BuildTrainedAdamRig(steps: 1);
+        long bigStep = 5_000_000_000L;              // > int.MaxValue
+        long bigEpoch = 3_000_000_000L;             // > int.MaxValue
+        long bigBatch = (long)int.MaxValue + 7L;    // just past int32
+        var ckpt = new TrainingCheckpoint(
+            trained.TrainableParams, trained.ModelState, trained.OptimizerState,
+            step: bigStep, epoch: bigEpoch, batchIndex: bigBatch);
+
+        var legacyPath = Path.Combine(Path.GetTempPath(), $"shrk_i64_{Guid.NewGuid():N}.safetensors");
+        var skptPath = Path.Combine(Path.GetTempPath(), $"shrk_i64_{Guid.NewGuid():N}.skpt");
+        try
+        {
+            // Legacy flat safetensors (v3 marker).
+            ckpt.Save(legacyPath);
+            var legacy = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(legacyPath);
+            Assert.Equal(bigStep, legacy.Step);
+            Assert.Equal(bigEpoch, legacy.Epoch);
+            Assert.Equal(bigBatch, legacy.BatchIndex);
+            Assert.Equal(3, Persistence.Inspect(legacyPath).TrainingCheckpoint!.FormatVersion);
+
+            // Native .skpt manifest.
+            Persistence.SaveTrainingCheckpointToSkpt(
+                ckpt, ScalarMultiplyModel.ComputationGraph, TensorData(ScalarInputShape, new float[4]), skptPath);
+            var skpt = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(skptPath);
+            Assert.Equal(bigStep, skpt.Step);
+            Assert.Equal(bigEpoch, skpt.Epoch);
+            Assert.Equal(bigBatch, skpt.BatchIndex);
+        }
+        finally
+        {
+            if (File.Exists(legacyPath)) File.Delete(legacyPath);
+            if (File.Exists(skptPath)) File.Delete(skptPath);
+        }
+    }
+
+    /// <summary>
+    /// D1 multi-counter scheduler module: a module consuming both the <c>step</c> and <c>epoch</c>
+    /// reserved counters is fed each from the checkpoint, so its value tracks a reference rig fed the
+    /// same <c>lr(step, epoch)</c> explicitly. Proves the rig creates and wires the named counter subset
+    /// (not just step) and feeds epoch (a host-owned counter not derivable from step).
+    /// </summary>
+    [Fact]
+    public void TestMultiCounterSchedulerModuleConsumesEpochCoverage()
+    {
+        var (sample, inputBatch, targetBatch) = ScalarMultiplyBatches();
+        var ctx = new ComputeContext();
+        float Lr(long s, long e) => 0.5f - 0.01f * s - 0.1f * e;
+
+        var modRig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            sample, new SGDOptimizerHyperparameters { LearningRate = Hyperparameter.Scheduled(StepEpochScheduler.ComputationGraph) });
+        var refRig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            sample, new SGDOptimizerHyperparameters { LearningRate = Hyperparameter.Runtime() });
+
+        var modCompiled = ctx.Compile(modRig.TrainingStepPureGraph);
+        var refCompiled = ctx.Compile(refRig.TrainingStepPureGraph);
+        string wName = modRig.TrainableParamStructDef.Fields[0].Name;
+
+        // Several (step, epoch) points — epoch varies independently of step (host-owned).
+        foreach (var (s, e) in new[] { (0L, 0L), (3L, 1L), (7L, 4L) })
+        {
+            var seed = modRig.CreateDefaultCheckpoint();
+            var atCkpt = new TrainingCheckpoint(seed.TrainableParams, seed.ModelState, seed.OptimizerState, step: s, epoch: e);
+            var modStep = modRig.TrainStep(atCkpt, inputBatch, targetBatch, modCompiled).Checkpoint;
+
+            var refSeed = refRig.CreateDefaultCheckpoint();
+            var refAt = new TrainingCheckpoint(refSeed.TrainableParams, refSeed.ModelState, refSeed.OptimizerState, step: s, epoch: e);
+            var refStep = refRig.TrainStep(refAt, refRig.MakeHyperparameters(Lr(s, e)), inputBatch, targetBatch, refCompiled).Checkpoint;
+
+            float wMod = ((TensorData<float32>)modStep.TrainableParams.Fields[wName]).AccessMemory()[0];
+            float wRef = ((TensorData<float32>)refStep.TrainableParams.Fields[wName]).AccessMemory()[0];
+            Assert.True(MathF.Abs(wMod - wRef) < 1e-5f,
+                $"(step {s}, epoch {e}): module-scheduled weight {wMod} vs host lr={Lr(s, e)} weight {wRef} differ.");
         }
     }
 
@@ -2067,7 +2154,7 @@ public class TrainingRigCoverageTests
 
             var legacyInspect = Persistence.Inspect(legacyPath);
             Assert.Empty(legacyInspect.Observations);
-            Assert.Equal(2, legacyInspect.TrainingCheckpoint!.FormatVersion);
+            Assert.Equal(3, legacyInspect.TrainingCheckpoint!.FormatVersion);
             Assert.Equal(7, legacyInspect.TrainingCheckpoint.Epoch);
             Assert.Equal(340, legacyInspect.TrainingCheckpoint.BatchIndex);
             var legacyText = legacyInspect.ToString();

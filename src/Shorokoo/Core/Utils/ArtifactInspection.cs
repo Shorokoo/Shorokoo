@@ -131,7 +131,7 @@ namespace Shorokoo
     public sealed class TrainingCheckpointArtifactInfo
     {
         /// <summary>Checkpoint format version from the marker tensor
-        /// (<see cref="TrainingCheckpoint"/> writes version 2).</summary>
+        /// (<see cref="TrainingCheckpoint"/> writes version 3; the loader reads 1..3).</summary>
         public long FormatVersion { get; }
 
         /// <summary>The 0-based global training step the checkpoint was saved at.</summary>

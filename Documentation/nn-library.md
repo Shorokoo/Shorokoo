@@ -1014,7 +1014,7 @@ for a rank-0 scalar seeded at 0 (e.g. Adam's `step`), or `OptimizerScalarOnes` f
 rank-0 scalar seeded at 1 (e.g. NAdam's running momentum product, which needs the
 multiplicative identity) — and updated via `Globals.StateUpdate`. Each optimizer gets a generated named hyperparameter set
 (`<Name>Hyperparameters`, e.g. `AdamOptimizerHyperparameters`) — see
-[training.md](training.md) for schedules, the `HyperValue` kinds, and the
+[training.md](training.md) for schedules, the `Hyperparameter` kinds, and the
 custom-optimizer authoring contract.
 
 | Module | Update rule | Hyper defaults | State per param |

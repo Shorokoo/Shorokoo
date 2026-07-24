@@ -378,8 +378,8 @@ new Module<Scalar<float32>, (Tensor<float32>, Tensor<float32>), Tensor<float32>>
 - **Flattened parameters.** Like `Inline` methods, bodies take one parameter per
   tensor — tuple-typed parameters are rejected; use the multi-parameter overloads.
 - **No generated typed hyperparameter sets.** The `FooHyperparameters` classes
-  (named, defaulted `HyperValue` properties implementing `IOptimizerHyperparameters`)
-  are codegen-only. For optimizer-style scheduling, pass `HyperValue` /
+  (named, defaulted `Hyperparameter` properties implementing `IOptimizerHyperparameters`)
+  are codegen-only. For optimizer-style scheduling, pass `Hyperparameter` /
   `Schedules.*` values positionally to `TrainingRig.FromScratch(...)` (in the
   optimizer's `[Hyper]` parameter order) — see [training.md](training.md).
 - **Naming.** The module name defaults to the body's declaring class; pass the

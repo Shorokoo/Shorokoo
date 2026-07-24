@@ -25,10 +25,10 @@ Ready-made losses and optimizers ship in the `Shorokoo.Modules` package
 initializers too). Each optimizer with scalar `float32` hyperparameters gets a
 source-generated, named, defaulted hyperparameter set
 (`<Optimizer>Hyperparameters`) implementing `IOptimizerHyperparameters`. The
-twelve optimizers (the positional `params HyperValue[]` count for `FromScratch`
+twelve optimizers (the positional `params Hyperparameter[]` count for `FromScratch`
 equals each set's property count):
 
-| Optimizer | Hyperparameter set (named, init-only `HyperValue` properties; defaults from `[Hyper]`) |
+| Optimizer | Hyperparameter set (named, init-only `Hyperparameter` properties; defaults from `[Hyper]`) |
 |---|---|
 | `SGDOptimizer` | `SGDOptimizerHyperparameters { LearningRate = 0.01 }` |
 | `SGDMomentumOptimizer` | `SGDMomentumOptimizerHyperparameters { LearningRate = 0.01, MomentumCoeff = 0.9 }` |
@@ -52,31 +52,52 @@ created inside the body by an **optimizer-owned state initializer** (e.g.
 `Globals.StateUpdate(state, newValue)` call per state — see
 [Custom optimizers](#custom-optimizers).
 
-### Hyperparameter kinds (`HyperValue`)
+### Hyperparameter kinds (`Hyperparameter`)
 
-Each hyperparameter property is a `HyperValue`; its *kind* — not a separate flag — decides the wiring:
+Each hyperparameter property is a `Hyperparameter` — a **declared signature bound to exactly one of
+three sources** (an explicit closed union with an exhaustive `Kind`, `Baked`/`Scheduled`/`Runtime`).
+Its *kind* — not a separate flag — decides the wiring:
 
 | Assign | Kind | Wiring |
 |---|---|---|
-| a `float` (e.g. `1e-4f`) | baked | graph `Constant`; change ⇒ rebuild |
-| a `Schedule` (e.g. `Schedules.Cosine(3e-4f, total)`) | scheduled | lowered to graph math and computed **in-graph** from the step counter each `TrainStep` — no host evaluation |
-| `HyperValue.Scheduled(module)` | scheduled (module) | a scheduler module (`int64` step → `float32` value) inlined into the graph, for schedules the built-ins don't cover |
-| `HyperValue.Runtime(seed)` | manual | runtime input with no schedule; supply each step via `MakeHyperparams` |
+| a `float` (e.g. `1e-4f`), or `Hyperparameter.Baked(v)` | `Baked` | graph `Constant`; change ⇒ rebuild |
+| a `Schedule` (e.g. `Schedules.Cosine(3e-4f, total)`), or `Hyperparameter.Scheduled(schedule)` | `Scheduled` | lowered to graph math and computed **in-graph** from the counter input(s) each `TrainStep` — no host evaluation |
+| `Hyperparameter.Scheduled(module)` | `Scheduled` (module) | a scheduler module (int64 counter(s) → `float32` value) inlined into the graph, for schedules the built-ins don't cover |
+| `Hyperparameter.Runtime()` | `Runtime` | runtime input with no schedule; supply each step via `MakeHyperparameters` |
 
 `Schedule` factories live on `Schedules` (`Constant`, `Linear`, `Cosine`, `CosineWithWarmup`,
 `StepDecay`, `Exponential`, `OneCycle`) with fluent combinators on the result (`WithWarmup`, `Then`,
-`Scale`, `Clamp`, `Shift`, `PerEpoch`).
+`Scale`, `Clamp`, `Shift`, `PerEpoch`). `Schedule.At(long)` previews a schedule's value at a step.
 
-Every schedule the rig accepts is a graph, from exactly two sources: a built-in `Schedule`, or a
-scheduler **module** — a Shorokoo module graph taking the `int64` scalar step counter as input and
-producing the `float32` scalar value, passed via `HyperValue.Scheduled(module)` and signature-checked
-at rig build. There is **no** API for an arbitrary host lambda (a compiled closure has no durable
-graph representation and could not be persisted or resumed).
+**Two scheduler construction paths, one runtime representation.** Every schedule the rig accepts is a
+graph, from exactly two sources: a built-in `Schedule`, or a scheduler **module** — a Shorokoo module
+graph whose inputs are a named subset of the reserved int64 scalar counters `{step, epoch, batchIndex}`
+and whose single output is the `float32` scalar value, passed via `Hyperparameter.Scheduled(module)`.
+Built-in DSL schedules are step-only (`PerEpoch` derives its epoch in-graph from the step); a module
+declares which counters it consumes by naming its inputs. Both lower to the **same** artifact — a pure
+`counters → value` graph — and rig build enforces that purity (a scheduler graph carrying trainable
+params, module state / `StateUpdate`, RNG draws, or an unrecognized input is rejected). There is **no**
+API for an arbitrary host lambda (a compiled closure has no durable graph representation and could not
+be persisted or resumed).
 
-> **Numeric note.** Because a schedule is now evaluated in-graph rather than host-side, its live-training
+**One value route.** A hyperparameter's value at some counters is always obtained by *evaluating its
+canonical graph at those counters*: in-graph every `TrainStep`, and — for optimizer state
+initialization — via a build-time evaluation at the initial counters (all 0). There is no second,
+host-materialized value that can disagree with the in-graph one. Host preview (`Schedule.At`) is served
+by a single interpreter that mirrors the graph lowering.
+
+> **Numeric note.** Because a schedule is evaluated in-graph rather than host-side, its live-training
 > value carries the schedule-lowering tolerance: on engines whose `Cos`/`Pow` differ from .NET `MathF`
 > (e.g. ONNX Runtime) a schedule using those ops may differ from the host `Schedule.At` value by a few
 > ulps (arithmetic/piecewise schedules stay exact). This is the documented `ScheduleLowering` contract.
+
+> **Migration (breaking).** `HyperValue` is renamed **`Hyperparameter`** and is now an explicit
+> `Baked`/`Scheduled`/`Runtime` union. `HyperValue.Constant(v)` → `Hyperparameter.Baked(v)` (a bare
+> `float` still converts implicitly); `HyperValue.Runtime(seed)` → **`Hyperparameter.Runtime()`** (the
+> seed is gone — the shape placeholder is internal); the undocumented `InitialValue` is removed. The
+> rig's public surface is spelled out: `MakeHyperparams` → `MakeHyperparameters`, `HyperparamStructDef`
+> → `HyperparameterStructDef`, `DynamicHyperparamIndices` → `DynamicHyperparameterIndices`. Fresh-
+> checkpoint creation can now **fail loud** (see `CreateDefaultCheckpoint` below).
 
 ## `TrainingRig` API
 
@@ -90,10 +111,14 @@ public static TrainingRig FromScratch(
     RngConfig? rngConfig = null);              // seeds the run — see "Seeding the run" below
 
 // Lower-level: positional values (a float bakes a constant, a Schedule schedules it):
-//   FromScratch(model, loss, opt, sampleInputs, params HyperValue[] hyperparameters)
-//   FromScratch(model, loss, opt, sampleInputs, rngConfig, params HyperValue[] hyperparameters)
+//   FromScratch(model, loss, opt, sampleInputs, params Hyperparameter[] hyperparameters)
+//   FromScratch(model, loss, opt, sampleInputs, rngConfig, params Hyperparameter[] hyperparameters)
 
+// Fresh initial checkpoint. Optimizer state is initialized at each hyperparameter's value at the
+// initial counters. Fails loud if the optimizer's state initializer reads a Runtime hyper (its value
+// is unknown at build) — supply explicit values with the overload below.
 public TrainingCheckpoint CreateDefaultCheckpoint();
+public TrainingCheckpoint CreateDefaultCheckpoint(TensorDataStruct hyperparameters); // from MakeHyperparameters(...)
 
 // Schedule-driven: scheduled hyperparameters are computed in-graph from the checkpoint's
 // step (fed as the step counter), then the step advances. Requires no schedule-less runtime hypers.
@@ -106,13 +131,13 @@ public TrainingStepResult TrainStep(
 // Explicit override: supply the schedule-less runtime hyperparameter values for this step.
 public TrainingStepResult TrainStep(
     TrainingCheckpoint checkpoint,
-    TensorDataStruct hyperparams,              // from MakeHyperparams(...)
+    TensorDataStruct hyperparams,              // from MakeHyperparameters(...)
     TensorDataStruct trainingInput,
     TensorDataStruct trainingOutput,
     CompiledGraph compiled);
 
-public TensorDataStruct MakeHyperparams(float value);                       // exactly one dynamic
-public TensorDataStruct MakeHyperparams(params (string name, float value)[] values); // named
+public TensorDataStruct MakeHyperparameters(float value);                       // exactly one dynamic
+public TensorDataStruct MakeHyperparameters(params (string name, float value)[] values); // named
 
 public TrainingResult Fit(  // alias: Train(...)
     TrainingCheckpoint initialCheckpoint,
@@ -123,7 +148,7 @@ public TrainingResult Fit(  // alias: Train(...)
 ```
 
 Result types:
-- `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (the training loop advances them — `TrainStep` carries them through unchanged; default `0`).
+- `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long`; the training loop advances them — `TrainStep` carries them through unchanged; default `0`). All three counters are `int64` end to end.
 - `TrainingStepResult` → `.Checkpoint`, `.Loss`.
 - `TrainingResult` → `.FinalCheckpoint`, `.EpochLosses`.
 
@@ -247,7 +272,7 @@ by name and sample shape. `Train`/`TrainStep` take `TensorDataStruct` batches.
 3. Initialize parameters: `var ckpt = rig.CreateDefaultCheckpoint();`.
 4. Run epochs: `var outcome = rig.Fit(inputs, targets, numEpochs: 10);`
    The learning-rate schedule is applied automatically as the global step advances. (Or call
-   `rig.TrainStep(...)` per batch; pass `rig.MakeHyperparams(...)` to override a step explicitly.)
+   `rig.TrainStep(...)` per batch; pass `rig.MakeHyperparameters(...)` to override a step explicitly.)
 5. Read `outcome.EpochLosses` for the loss curve and
    `outcome.FinalCheckpoint.TrainableParams` for trained weights. `TrainableParams` is a
    `TensorDataStruct`; read its values via `.Fields` (name → `IData`, each a `TensorData`), e.g.:
@@ -331,7 +356,7 @@ Constraints:
   schedules are `step → float`. A non-float or *mixed* hyperparameter list yields no generated set.
 - **Order + `[Hyper]` matter** — hyperparameters must be the leading inputs, and `[Hyper]` is what
   makes the named set generate. Without it the optimizer still works via the positional
-  `params HyperValue[]` overload, but you lose the named, compile-checked set.
+  `params Hyperparameter[]` overload, but you lose the named, compile-checked set.
 - For non-generated cases you can hand-implement `IOptimizerHyperparameters` yourself.
 
 ## Notes / known limitations
@@ -355,7 +380,7 @@ Constraints:
   specifically to save memory gets Adam-sized state; `learningRate` is the **cap** on the
   relative step, not a fixed lr.
 - Prefer the optimizer's generated named set (`<Optimizer>Hyperparameters`); it has the right
-  names/defaults and is checked at compile time. The positional `params HyperValue[]` overload must
+  names/defaults and is checked at compile time. The positional `params Hyperparameter[]` overload must
   still match the optimizer's hyperparameter count exactly: SGD=1, SGDMomentum=2, Adam=4,
   RMSprop=4, AdamW=5, Adagrad=2, Adamax=4, NAdam=5, RAdam=4, Adadelta=3, Lion=4, Adafactor=6.
 - Optimizer state has one or more fields per trainable parameter (momentum: velocity;
@@ -374,10 +399,10 @@ Constraints:
 
 ## Anti-patterns
 
-- Do not mismatch the positional `params HyperValue[]` overload with the optimizer's hyperparameter
+- Do not mismatch the positional `params Hyperparameter[]` overload with the optimizer's hyperparameter
   count; prefer the named set so this can't happen.
 - Do not call the schedule-driven `TrainStep` on a rig whose dynamic hyperparameter is
-  `HyperValue.Runtime` (schedule-less); supply it via `MakeHyperparams` and the override overload.
+  `Hyperparameter.Runtime` (schedule-less); supply it via `MakeHyperparameters` and the override overload.
 - Do not implement backward passes manually; rely on autodiff.
 - Do not mutate `TrainingCheckpoint` in place across steps; thread the returned
   checkpoint forward.

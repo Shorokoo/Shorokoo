@@ -1123,7 +1123,7 @@ public class NNLibraryTrainingCoverageTests
         ComputationGraph lossGraph,
         ComputationGraph optimizerGraph,
         long[] inputShape,
-        params HyperValue[] hyperparams)
+        params Hyperparameter[] hyperparams)
     {
         long totalElements = 1;
         foreach (var d in inputShape) totalElements *= d;
@@ -1492,7 +1492,7 @@ public class NNLibraryTrainingCoverageTests
     /// state threading (e.g. NAdam's two scalar states step + muProduct, RAdam's Where path through
     /// the autodiff/scheduler) end-to-end, not just construction.</summary>
     private static void CoverTrainStepMovesParam(
-        ComputationGraph optimizerGraph, params HyperValue[] hyperparams)
+        ComputationGraph optimizerGraph, params Hyperparameter[] hyperparams)
     {
         var input = new float[] { 1f, 2f, 3f, 4f };
         var target = new float[] { 0f, 0f, 0f, 0f };
@@ -1531,7 +1531,7 @@ public class NNLibraryTrainingCoverageTests
     private static void CoverTrainStepMovesNonScalarParam(
         ComputationGraph modelGraph, ComputationGraph optimizerGraph,
         long[] inShape, float[] input, float[] target,
-        params HyperValue[] hyperparams)
+        params Hyperparameter[] hyperparams)
     {
         var rig = TrainingRig.FromScratch(
             modelGraph, L2Loss.ComputationGraph, optimizerGraph,
@@ -2588,7 +2588,7 @@ public class NNLibraryTrainingCoverageTests
     /// on one fixed batch and returns the final checkpoint, so each analytic check is a
     /// one-liner asserting exact hand-computed post-step values.</summary>
     private static TrainingCheckpoint TrainAnalytic(
-        ComputationGraph modelGraph, ComputationGraph optimizerGraph, HyperValue[] hypers,
+        ComputationGraph modelGraph, ComputationGraph optimizerGraph, Hyperparameter[] hypers,
         long[] inShape, float[] input, long[] outShape, float[] target, int steps)
     {
         var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, optimizerGraph,

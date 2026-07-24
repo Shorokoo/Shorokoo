@@ -61,6 +61,93 @@ public partial class StepCountingSgdOptimizer
 }
 
 /// <summary>
+/// Optimizer-owned state initializer that fills the parameter's shape with a supplied scalar value
+/// — deliberately <b>reads a hyperparameter</b> (see <see cref="InitFromHyperOptimizer"/>) so its
+/// state-init graph consumes a hyper input. Used to exercise the §2.5 value route (state init sees
+/// the hyper's real value at the initial counters, not 0f) and the D5 fail-loud path.
+/// </summary>
+[StateInitializer(Ownership = StateOwnership.OptimizerOwned)]
+public static partial class InitToScalarFill
+{
+    public static Tensor<float32> Inline(Vector<int64> shape, Scalar<float32> value)
+    {
+        // A param-shaped tensor filled with the (graph-valued) scalar: ones * value broadcasts it,
+        // and — crucially — reads `value`, so the split-off state-init graph consumes that hyper input.
+        return Globals.TensorFill(shape, 1.0f) * value;
+    }
+}
+
+/// <summary>
+/// SGD whose optimizer state is initialized to the learning-rate hyperparameter's value (via
+/// <see cref="InitToScalarFill"/>), then carried unchanged. Because its state initializer reads the
+/// LR hyper, the fresh optimizer state equals the LR at the initial counters — so a test can read
+/// that state back and prove the value route feeds the real scheduled value (not the old hardcoded
+/// 0f), and that a runtime LR triggers the D5 fail-loud unless supplied explicitly.
+/// </summary>
+[Module]
+public partial class InitFromHyperOptimizer
+{
+    public static Tensor<float32> Inline(
+        Tensor<float32> currentParam,
+        Tensor<float32> grad,
+        [Hyper(0.1f)] Scalar<float32> learningRate)
+    {
+        var s = InitToScalarFill.Init(currentParam.ShapeTensor(), learningRate);   // state init reads LR
+        Globals.StateUpdate(s, s);                                                 // carried unchanged
+        return currentParam - learningRate * grad;
+    }
+}
+
+/// <summary>Impure scheduler module — carries a trainable parameter; rig build must reject it (D4).</summary>
+[Module]
+public partial class ParamScheduler
+{
+    public static Scalar<float32> Inline(Scalar<int64> step)
+    {
+        var w = InitScalarWeight.Init(Vector(1L));
+        var wScalar = w.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        return step.Cast<float32>() * Scalar(0f) + wScalar;
+    }
+}
+
+/// <summary>Impure scheduler module — carries module state (a StateUpdate); rig build must reject it (D4).</summary>
+[Module]
+public partial class StateScheduler
+{
+    public static Scalar<float32> Inline(Scalar<int64> step)
+    {
+        var s = InitBnRunningMean.Init(Vector(1L));
+        Globals.StateUpdate(s, s + Scalar(1f));
+        var sScalar = s.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        return step.Cast<float32>() * Scalar(0f) + sScalar;
+    }
+}
+
+/// <summary>
+/// Multi-counter scheduler module (D1): consumes both the <c>step</c> and <c>epoch</c> reserved
+/// counters, so a test can prove the rig feeds each named counter from the checkpoint. Value is
+/// <c>0.5 − 0.01·step − 0.1·epoch</c> — pure arithmetic over both counters.
+/// </summary>
+[Module]
+public partial class StepEpochScheduler
+{
+    public static Scalar<float32> Inline(Scalar<int64> step, Scalar<int64> epoch)
+        => Scalar(0.5f) - step.Cast<float32>() * Scalar(0.01f) - epoch.Cast<float32>() * Scalar(0.1f);
+}
+
+/// <summary>Impure scheduler module — draws RNG; rig build must reject it (D4).</summary>
+[Module]
+public partial class RngScheduler
+{
+    public static Scalar<float32> Inline(Scalar<int64> step)
+    {
+        var r = Globals.RandomUniform(Vector(1L));
+        var rScalar = r.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        return step.Cast<float32>() * Scalar(0f) + rScalar;
+    }
+}
+
+/// <summary>
 /// Optimizer that misuses a module-owned state initializer for its state; the TrainingRig must
 /// reject the graph with guidance towards StateOwnership.OptimizerOwned.
 /// </summary>

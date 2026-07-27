@@ -4,7 +4,7 @@ namespace Shorokoo.Graph
     /// What a computation graph <em>is</em> — its position in the lowering lifecycle.
     /// Stamped on <see cref="ComputationGraph.Kind"/> by every producing path (module
     /// build, <c>ToConcreteArchitecture</c>, <c>ToConcreteModel</c>, the importers),
-    /// carried through copies and recorded in the .srk v2 header (as the
+    /// carried through copies and recorded in the .srk header (as the
     /// <c>stage</c> field) so a loader can route or refuse a file at load time
     /// instead of failing deep inside execution (e.g.
     /// <c>No Op registered for ShrkCreateModule</c>).

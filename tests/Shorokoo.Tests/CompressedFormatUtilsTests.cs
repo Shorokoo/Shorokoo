@@ -191,8 +191,8 @@ public class CompressedFormatUtilsCoverageTests
     }
 
     // ──────────────────────────────────────────────────────────────────────
-    // .srk v2 container (issue #34): self-describing header, stage marker,
-    // single header-declared compression layer, v1 content-sniffing shim.
+    // .srk container (issue #34): self-describing header, stage marker,
+    // single header-declared compression layer. There is no legacy read path.
     // ──────────────────────────────────────────────────────────────────────
 
     /// <summary>Builds the same small graph at all three lifecycle stages.</summary>
@@ -231,7 +231,7 @@ public class CompressedFormatUtilsCoverageTests
         foreach (var compressed in compressionModes)
         {
             var bytes = CompressedFormatUtils.SaveFastGraphToBinary(graph, compressed);
-            Assert.True(SrkFileFormat.IsSrkV2(bytes));
+            Assert.True(SrkFileFormat.IsSrkContainer(bytes));
 
             var header = SrkFileFormat.TryReadHeader(bytes);
             Assert.NotNull(header);
@@ -278,53 +278,7 @@ public class CompressedFormatUtilsCoverageTests
     }
 
     /// <summary>
-    /// The three historical v1 layouts — bare protobuf, single-Zstd
-    /// (v1 SaveFastGraphToFile) and double-Zstd (the retired architecture writer) —
-    /// still load through the content-sniffing shim, from bytes and from files,
-    /// regardless of extension.
-    /// </summary>
-    [Fact]
-    public void TestSrkV1LegacyLayoutsLoadThroughShim()
-    {
-        var (_, arch, _) = BuildStageGraphs();
-
-        // Reconstruct the exact v1 byte layouts from the v2 payload: the payload of an
-        // uncompressed v2 container IS the bare-protobuf v1 layout the old writers
-        // produced; the old single/double-Zstd layouts wrapped it in 1 / 2 Zstd frames.
-        var v2Bytes = CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: false);
-        var bareProtobuf = SrkFileFormat.Read(v2Bytes).OnnxBytes;
-        var singleZstd = CompressedFormatUtils.Compress(bareProtobuf);
-        var doubleZstd = CompressedFormatUtils.Compress(singleZstd);
-
-        var referenceNodeCount = CompressedFormatUtils.LoadFastGraphFromBinary(v2Bytes).ToInternal().Nodes.Count;
-
-        (string Name, byte[] Bytes)[] layouts =
-            [("bare", bareProtobuf), ("single-zstd", singleZstd), ("double-zstd", doubleZstd)];
-        foreach (var (name, bytes) in layouts)
-        {
-            Assert.Null(SrkFileFormat.TryReadHeader(bytes));
-
-            var fromBinary = CompressedFormatUtils.LoadFastGraphFromBinary(bytes);
-            Assert.Equal(referenceNodeCount, fromBinary.ToInternal().Nodes.Count);
-            Assert.Equal(GraphKind.ConcreteArchitecture, SrkFileFormat.DetectStage(fromBinary.ToInternal()));
-
-            // File load with a deliberately "wrong" extension: content decides.
-            var path = Path.Combine(TempDir, $"v1_{name}.zsrk");
-            try
-            {
-                File.WriteAllBytes(path, bytes);
-                var fromFile = CompressedFormatUtils.LoadFastGraphFromFile(path);
-                Assert.Equal(referenceNodeCount, fromFile.ToInternal().Nodes.Count);
-
-                // The JSON introspection helpers accept every layout too.
-                Assert.Contains("Graph", CompressedFormatUtils.ToJson(path));
-            }
-            finally { if (File.Exists(path)) File.Delete(path); }
-        }
-    }
-
-    /// <summary>
-    /// A renamed v2 file (wrong or no extension) loads identically — content, not
+    /// A renamed .srk file (wrong or no extension) loads identically — content, not
     /// extension, decides how the file parses.
     /// </summary>
     [Fact]
@@ -363,7 +317,7 @@ public class CompressedFormatUtilsCoverageTests
     {
         var headerBytes = System.Text.Encoding.UTF8.GetBytes(headerJson);
         var result = new byte[4 + 2 + headerBytes.Length + payload.Length];
-        result[0] = (byte)'S'; result[1] = (byte)'R'; result[2] = (byte)'K'; result[3] = 2;
+        result[0] = (byte)'S'; result[1] = (byte)'R'; result[2] = (byte)'K'; result[3] = 1;
         result[4] = (byte)(headerBytes.Length & 0xFF);
         result[5] = (byte)(headerBytes.Length >> 8);
         headerBytes.CopyTo(result, 6);
@@ -428,7 +382,7 @@ public class CompressedFormatUtilsCoverageTests
         // Unknown compression scheme is named in the error.
         var exCompression = Assert.Throws<InvalidDataException>(() =>
             CompressedFormatUtils.LoadFastGraphFromBinary(BuildRawSrkContainer(
-                $"{{\"srkVersion\":2,\"stage\":\"concrete-architecture\",\"compression\":\"lz4\",\"payloadSha256\":\"{Sha256Hex(payload)}\"}}",
+                $"{{\"srkVersion\":1,\"stage\":\"concrete-architecture\",\"compression\":\"lz4\",\"payloadSha256\":\"{Sha256Hex(payload)}\"}}",
                 payload)));
         Assert.Contains("lz4", exCompression.Message);
 
@@ -440,14 +394,6 @@ public class CompressedFormatUtilsCoverageTests
                 payload)));
         Assert.Contains("'srkVersion'", exMissing.Message);
         Assert.Contains("missing or zero", exMissing.Message);
-
-        // An older (but positive) container version reads as "older, unsupported", not "newer".
-        var exOlder = Assert.Throws<InvalidDataException>(() =>
-            CompressedFormatUtils.LoadFastGraphFromBinary(BuildRawSrkContainer(
-                $"{{\"srkVersion\":1,\"stage\":\"concrete-architecture\",\"compression\":\"none\",\"payloadSha256\":\"{Sha256Hex(payload)}\"}}",
-                payload)));
-        Assert.Contains("version 1", exOlder.Message);
-        Assert.Contains("older", exOlder.Message);
     }
 
     /// <summary>
@@ -556,8 +502,8 @@ public class CompressedFormatUtilsCoverageTests
     }
 
     /// <summary>
-    /// The header-peek API reads a real v2 header (identifying stage/compression/producer)
-    /// and returns null for legacy v1 data that carries no container header.
+    /// The header-peek API reads a real .srk header (identifying stage/compression/producer)
+    /// and returns null for non-container data (e.g. a bare Zstd frame).
     /// </summary>
     [Fact]
     public void TestSrkHeaderPeekIdentifiesContainer()
@@ -575,7 +521,7 @@ public class CompressedFormatUtilsCoverageTests
             Assert.Equal(GraphKind.ConcreteArchitecture, header.TryGetStage());
             Assert.Equal("zstd", header.Compression);
 
-            // A legacy v1 file (single-Zstd bare protobuf) has no container header → null.
+            // A non-container file (a bare Zstd frame) has no container header → null.
             var bare = SrkFileFormat.Read(
                 CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: false)).OnnxBytes;
             File.WriteAllBytes(v1Path, CompressedFormatUtils.Compress(bare));
@@ -590,16 +536,15 @@ public class CompressedFormatUtilsCoverageTests
 
     /// <summary>
     /// Loading a module-stage graph through an API that requires a concrete graph
-    /// produces a clear stage-mismatch error at load time — from the header for v2
-    /// files (before the payload is parsed) and from the detected stage for legacy v1
-    /// data. Matching stages load normally.
+    /// produces a clear stage-mismatch error at load time — from the container header
+    /// (before the payload is parsed), naming both stages. Matching stages load normally.
     /// </summary>
     [Fact]
     public void TestSrkStageMismatchIsRejectedAtLoadTime()
     {
         var (moduleGraph, arch, model) = BuildStageGraphs();
 
-        // v2: header-based refusal, error names both stages.
+        // Header-based refusal, error names both stages.
         var moduleBytes = CompressedFormatUtils.SaveFastGraphToBinary(moduleGraph);
         var ex = Assert.Throws<InvalidOperationException>(() =>
             CompressedFormatUtils.LoadFastGraphFromBinary(moduleBytes, requiredStage: GraphKind.ConcreteModel));
@@ -616,12 +561,6 @@ public class CompressedFormatUtilsCoverageTests
             Assert.Contains(modulePath, exFile.Message);
         }
         finally { if (File.Exists(modulePath)) File.Delete(modulePath); }
-
-        // v1 shim: no header, stage detected from the loaded graph.
-        var v1ModuleBytes = CompressedFormatUtils.Compress(
-            SrkFileFormat.Read(CompressedFormatUtils.SaveFastGraphToBinary(moduleGraph, compressed: false)).OnnxBytes);
-        Assert.Throws<InvalidOperationException>(() =>
-            CompressedFormatUtils.LoadFastGraphFromBinary(v1ModuleBytes, requiredStage: GraphKind.ConcreteModel));
 
         // Matching required stages load fine, for all three stages.
         Assert.NotEmpty(CompressedFormatUtils.LoadFastGraphFromBinary(
@@ -676,11 +615,11 @@ public class CompressedFormatUtilsCoverageTests
     {
         var (_, arch, _) = BuildStageGraphs();
 
-        // A real v2 container with the magic's major-version byte bumped 2 → 3.
+        // A real .srk container with the magic's major-version byte bumped 1 → 3.
         var v3 = (byte[])CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: true).Clone();
         v3[3] = 3;
 
-        Assert.False(SrkFileFormat.IsSrkV2(v3));
+        Assert.False(SrkFileFormat.IsSrkContainer(v3));
 
         var exLoad = Assert.Throws<InvalidDataException>(
             () => CompressedFormatUtils.LoadFastGraphFromBinary(v3));
@@ -702,20 +641,20 @@ public class CompressedFormatUtilsCoverageTests
     }
 
     /// <summary>
-    /// Corrupt legacy (v1) data fails loudly with an InvalidDataException naming the origin:
-    /// an empty file, non-.srk garbage, and bytes still Zstd-framed after the maximum legacy
-    /// layer count each produce a clear message instead of a bare protobuf/index exception.
+    /// Non-container data fails loudly with an InvalidDataException naming the origin: an
+    /// empty file, non-.srk garbage, and a bare Zstd frame each produce a clear message
+    /// instead of a bare protobuf/index exception. There is no legacy read path — anything
+    /// that does not open with the container magic is refused up front.
     /// </summary>
     [Fact]
-    public void TestSrkV1CorruptDataFailsLoudly()
+    public void TestSrkNonContainerDataFailsLoudly()
     {
         // Empty input.
         var exEmpty = Assert.Throws<InvalidDataException>(
             () => CompressedFormatUtils.LoadFastGraphFromBinary([]));
         Assert.Contains("empty", exEmpty.Message);
 
-        // Non-.srk garbage (not SRK-prefixed, not Zstd, not valid protobuf): the importer
-        // failure is wrapped with the origin named.
+        // Non-.srk garbage (not SRK-prefixed, not Zstd): refused with the origin named.
         var garbage = new byte[64];
         Array.Fill(garbage, (byte)0x77);
         var garbagePath = Path.Combine(TempDir, "garbage.srk");
@@ -728,16 +667,15 @@ public class CompressedFormatUtilsCoverageTests
         }
         finally { if (File.Exists(garbagePath)) File.Delete(garbagePath); }
 
-        // Triple-Zstd-wrapped: the shim unwraps at most two layers, so the remainder is
-        // still Zstd-framed → a clear "still Zstd-compressed" error, not a cryptic crash.
+        // A bare Zstd frame (a plausible pre-container layout) is no longer a .srk file:
+        // it does not open with the container magic, so it is refused up front.
         var (_, arch, _) = BuildStageGraphs();
         var bare = SrkFileFormat.Read(
             CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: false)).OnnxBytes;
-        var triple = CompressedFormatUtils.Compress(
-            CompressedFormatUtils.Compress(CompressedFormatUtils.Compress(bare)));
-        var exTriple = Assert.Throws<InvalidDataException>(
-            () => CompressedFormatUtils.LoadFastGraphFromBinary(triple));
-        Assert.Contains("still Zstd-compressed", exTriple.Message);
+        var zstdFramed = CompressedFormatUtils.Compress(bare);
+        var exZstd = Assert.Throws<InvalidDataException>(
+            () => CompressedFormatUtils.LoadFastGraphFromBinary(zstdFramed));
+        Assert.Contains("not a Shorokoo .srk container", exZstd.Message);
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -746,19 +684,18 @@ public class CompressedFormatUtilsCoverageTests
     // ──────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Inspect identifies .srk graph files of every layout. v2 containers (compressed and
-    /// uncompressed, i.e. SaveFastGraphToFile's two modes) report the header metadata that
-    /// was written — stage, compression, producer, payload hash. Legacy v1 layouts are
-    /// sniffed with bounded reads. A corrupt payload does not disturb inspection (payload
-    /// bytes are never read — the same file fails a full load on its hash check), and
-    /// corrupt headers / future versions yield structured results instead of exceptions.
+    /// Inspect identifies .srk graph files. Containers (compressed and uncompressed, i.e.
+    /// SaveFastGraphToFile's two modes) report the header metadata that was written — stage,
+    /// compression, producer, payload hash. A corrupt payload does not disturb inspection
+    /// (payload bytes are never read — the same file fails a full load on its hash check),
+    /// and corrupt headers / future versions yield structured results instead of exceptions.
     /// </summary>
     [Fact]
     public void TestCheckpointInspectSrkArtifacts()
     {
         var (_, arch, _) = BuildStageGraphs();
 
-        // v2 round-trip, compressed and uncompressed.
+        // Container round-trip, compressed and uncompressed.
         bool[] compressionModes = [true, false];
         foreach (var compressed in compressionModes)
         {
@@ -783,7 +720,6 @@ public class CompressedFormatUtilsCoverageTests
                 Assert.Equal(compressed ? "zstd" : "none", header.Compression);
                 Assert.False(string.IsNullOrEmpty(header.PayloadSha256));
                 Assert.Equal(Shorokoo.ShorokooVersion.VersionString, header.Producer!.Shorokoo);
-                Assert.Null(result.Srk.LegacyLayout);
                 Assert.True(result.Srk.PayloadSizeBytes > 0);
 
                 var text = result.ToString();
@@ -809,38 +745,13 @@ public class CompressedFormatUtilsCoverageTests
             finally { if (File.Exists(path)) File.Delete(path); }
         }
 
-        // Legacy v1 layouts: bare protobuf, single-Zstd, double-Zstd.
-        var v2Bytes = CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: false);
-        var bare = SrkFileFormat.Read(v2Bytes).OnnxBytes;
-        (string ExpectedLayout, byte[] Bytes)[] legacy =
-            [("bare ONNX protobuf", bare),
-             ("single-Zstd", CompressedFormatUtils.Compress(bare)),
-             ("double-Zstd", CompressedFormatUtils.Compress(CompressedFormatUtils.Compress(bare)))];
-        foreach (var (expectedLayout, bytes) in legacy)
-        {
-            var path = Path.Combine(TempDir, "inspect_v1.srk");
-            try
-            {
-                File.WriteAllBytes(path, bytes);
-                var result = Persistence.Inspect(path);
-                Assert.Equal(ArtifactKind.SrkGraph, result.Kind);
-                Assert.Null(result.Srk!.Header);
-                Assert.Equal(expectedLayout, result.Srk.LegacyLayout);
-                Assert.Equal((long?)bytes.Length, result.Srk.PayloadSizeBytes);
-                // Every sniffed legacy layout carries the same no-header observation,
-                // however it was detected (bare protobuf or Zstd-wrapped).
-                Assert.Contains(result.Observations, o => o.Contains("record no stage"));
-                Assert.Contains("legacy", result.ToString());
-            }
-            finally { if (File.Exists(path)) File.Delete(path); }
-        }
-
         // A future container version and a truncated container yield structured results
         // with an observation naming the problem — never an exception.
-        var future = (byte[])v2Bytes.Clone();
+        var srkBytes = CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: false);
+        var future = (byte[])srkBytes.Clone();
         future[3] = 3;
         (string Name, byte[] Bytes)[] damaged =
-            [("future", future), ("truncated", v2Bytes[..5])];
+            [("future", future), ("truncated", srkBytes[..5])];
         foreach (var (name, bytes) in damaged)
         {
             var path = Path.Combine(TempDir, $"inspect_{name}.srk");
@@ -850,7 +761,6 @@ public class CompressedFormatUtilsCoverageTests
                 var result = Persistence.Inspect(path);
                 Assert.Equal(ArtifactKind.SrkGraph, result.Kind);
                 Assert.Null(result.Srk!.Header);
-                Assert.Null(result.Srk.LegacyLayout);
                 Assert.Null(result.Srk.PayloadSizeBytes);   // unknown, no longer a 0 sentinel
                 Assert.Contains(result.Observations, o => o.Contains("header is not readable"));
             }
@@ -996,11 +906,11 @@ public class CompressedFormatUtilsCoverageTests
 
         try
         {
-            // Marker offset near long.MaxValue: markerStart + 16 wraps, which used to
+            // Marker offset near long.MaxValue: markerStart + 32 wraps, which used to
             // bypass the bounds guard and crash in the seek/read. Iterate because the
             // offset's digits feed back into the header length.
             static string MarkerJson(long start) =>
-                $"{{\"__shorokoo_checkpoint__\":{{\"dtype\":\"I64\",\"shape\":[2],\"data_offsets\":[{start},{start + 16}]}}}}";
+                $"{{\"__shorokoo_checkpoint__\":{{\"dtype\":\"I64\",\"shape\":[4],\"data_offsets\":[{start},{start + 32}]}}}}";
             var markerHeader = MarkerJson(long.MaxValue / 2);
             for (int i = 0; i < 4; i++)
             {
@@ -1040,8 +950,8 @@ public class CompressedFormatUtilsCoverageTests
             // A marker with the wrong dtype degrades to plain SafeTensors + observation.
             var wrongDtypePath = NextPath("hostile_marker_dtype.safetensors");
             File.WriteAllBytes(wrongDtypePath, BuildRawSafeTensors(
-                "{\"__shorokoo_checkpoint__\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,16]}}",
-                new byte[16]));
+                "{\"__shorokoo_checkpoint__\":{\"dtype\":\"F32\",\"shape\":[4],\"data_offsets\":[0,32]}}",
+                new byte[32]));
             var wrongDtype = Persistence.Inspect(wrongDtypePath);
             Assert.Equal(ArtifactKind.SafeTensors, wrongDtype.Kind);
             Assert.Null(wrongDtype.TrainingCheckpoint);
@@ -1056,7 +966,7 @@ public class CompressedFormatUtilsCoverageTests
             {
                 new SafeTensor("trainable/w", w, "F32", w.Shape.Dims),
                 new SafeTensor("stray", w, "F32", w.Shape.Dims),
-                new SafeTensor("__shorokoo_checkpoint__", TensorData([2L], 99L, 3L), "I64", [2L]),
+                new SafeTensor("__shorokoo_checkpoint__", TensorData([4L], 99L, 3L, 0L, 0L), "I64", [4L]),
             });
             var futureCkpt = Persistence.Inspect(futureCkptPath);
             Assert.Equal(ArtifactKind.TrainingCheckpoint, futureCkpt.Kind);
@@ -1066,9 +976,9 @@ public class CompressedFormatUtilsCoverageTests
             Assert.Contains(futureCkpt.Observations, o => o.Contains("format version 99"));
             Assert.Contains(futureCkpt.Observations, o => o.Contains("'stray'"));
 
-            // Zstd-compressed non-ONNX data is NotRecognized — including the near-miss
+            // Zstd-compressed non-SafeTensors data is NotRecognized — including the near-miss
             // whose decompressed prefix starts 0x08 (a .zsafetensor header-length prefix
-            // with headerLen ≡ 8 mod 256), which used to be mislabeled "single-Zstd" .srk.
+            // with headerLen ≡ 8 mod 256): its inner content is not a SafeTensors header.
             byte[] textBytes = System.Text.Encoding.UTF8.GetBytes("clearly not a model, just some text.");
             byte[] nearMiss = [0x08, 0x01, 0, 0, 0, 0, 0, 0, 0x7B, 0x22];
             (string Name, byte[] Inner)[] zstdCases =
@@ -1187,15 +1097,15 @@ public class CompressedFormatUtilsCoverageTests
             Assert.Equal(300_000L * 4, chopped.SafeTensors.TotalTensorBytes);
 
             // A checkpoint saved compressed: the marker is visible in the header, but its
-            // [version, step] payload sits inside the compressed tensor data, beyond the
-            // bounded header read — the archive kind is reported, TrainingCheckpoint stays
-            // null, and an observation says why.
+            // [version, step, epoch, batchIndex] payload sits inside the compressed tensor
+            // data, beyond the bounded header read — the archive kind is reported,
+            // TrainingCheckpoint stays null, and an observation says why.
             var w = TensorData([2L], 1.0f, 2.0f);
             var ckptPath = NextPath("inspect_ckpt.zsafetensor");
             CompressedFormatUtils.SaveCompressedSafeTensors(ckptPath, new List<SafeTensor>
             {
                 new SafeTensor("trainable/w", w, "F32", w.Shape.Dims),
-                new SafeTensor("__shorokoo_checkpoint__", TensorData([2L], 1L, 7L), "I64", [2L]),
+                new SafeTensor("__shorokoo_checkpoint__", TensorData([4L], 1L, 7L, 0L, 0L), "I64", [4L]),
             });
             var ckpt = Persistence.Inspect(ckptPath);
             Assert.Equal(ArtifactKind.CompressedSafeTensors, ckpt.Kind);
@@ -1234,17 +1144,17 @@ public class CompressedFormatUtilsCoverageTests
             Assert.Equal(ArtifactKind.NotRecognized, hugeResult.Kind);
             Assert.Contains(hugeResult.Observations, o => o.Contains("ends after 200000"));
 
-            // The .zsafetensor probe must not disturb legacy-.srk recognition: a
-            // single-Zstd legacy graph still sniffs as such (its decompressed prefix
-            // never declares a plausible header length).
+            // A bare Zstd frame whose decompressed content is a serialized ONNX model (no
+            // SafeTensors header) is not a Shorokoo artifact — there is no legacy .srk read
+            // path — so it inspects as NotRecognized, not a graph.
             var (_, arch, _) = BuildStageGraphs();
             var bare = SrkFileFormat.Read(
                 CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: false)).OnnxBytes;
-            var legacyPath = NextPath("inspect_legacy_single.srk");
-            File.WriteAllBytes(legacyPath, CompressedFormatUtils.Compress(bare));
-            var legacy = Persistence.Inspect(legacyPath);
-            Assert.Equal(ArtifactKind.SrkGraph, legacy.Kind);
-            Assert.Equal("single-Zstd", legacy.Srk!.LegacyLayout);
+            var framedPath = NextPath("inspect_zstd_onnx.srk");
+            File.WriteAllBytes(framedPath, CompressedFormatUtils.Compress(bare));
+            var framed = Persistence.Inspect(framedPath);
+            Assert.Equal(ArtifactKind.NotRecognized, framed.Kind);
+            Assert.Contains(framed.Observations, o => o.Contains("not a SafeTensors archive"));
         }
         finally
         {

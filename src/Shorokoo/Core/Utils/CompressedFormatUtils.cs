@@ -23,10 +23,9 @@ namespace Shorokoo.Core.Utils
     /// Utility class for loading and saving compressed Shorokoo data formats.
     /// Supports:
     /// - .zsafetensor: Zstandard-compressed safetensors files
-    /// - .srk / .zsrk: Shorokoo graph files — written as self-describing v2 containers
-    ///   (see <see cref="SrkFileFormat"/>), loaded by content for every layout (v2 and
-    ///   the three legacy v1 layouts). The extensions are hints for humans only; the
-    ///   header, not the extension, declares the compression.
+    /// - .srk / .zsrk: Shorokoo graph files — written and read as self-describing
+    ///   containers (see <see cref="SrkFileFormat"/>). The extensions are hints for
+    ///   humans only; the header, not the extension, declares the compression.
     /// </summary>
     public static class CompressedFormatUtils
     {
@@ -149,7 +148,7 @@ namespace Shorokoo.Core.Utils
         #region Architecture Save / Load
 
         /// <summary>
-        /// Serialize <paramref name="graph"/> to a self-describing .srk v2 container
+        /// Serialize <paramref name="graph"/> to a self-describing .srk container
         /// (see <see cref="SrkFileFormat"/>): the ONNX payload built via
         /// <see cref="FastOnnxModelBuilder"/>, wrapped in exactly one optional Zstd layer,
         /// behind a JSON header recording the container version, the graph's lifecycle
@@ -191,20 +190,17 @@ namespace Shorokoo.Core.Utils
 
         /// <summary>
         /// Inverse of <see cref="SaveFastGraphToBinary(ComputationGraph, bool, int)"/>:
-        /// deserialize .srk bytes into a <see cref="ComputationGraph"/> via
-        /// <see cref="OnnxModelImporter"/>, stamped with the header stage (or, for
-        /// unstamped v1/foreign data, the op-scanned kind). The layout
-        /// is decided by content only — v2 containers are validated against their header
-        /// (compression, payload SHA-256), and legacy v1 data (bare protobuf, single- or
-        /// double-Zstd) loads through the content-sniffing shim in
-        /// <see cref="SrkFileFormat.Read"/>.
+        /// deserialize .srk container bytes into a <see cref="ComputationGraph"/> via
+        /// <see cref="OnnxModelImporter"/>, stamped with the header stage (or, for a header
+        /// whose stage is unknown to this build, the op-scanned kind). The container is
+        /// validated against its header (compression, payload SHA-256); data that is not a
+        /// .srk container is refused (see <see cref="SrkFileFormat.Read"/>).
         /// </summary>
-        /// <param name="data">.srk bytes (any layout).</param>
+        /// <param name="data">.srk container bytes.</param>
         /// <param name="requiredStage">When set, refuse (with a clear stage-mismatch error)
         /// data whose graph is not of this <see cref="GraphKind"/> — e.g. reject a
-        /// module-stage graph where a runnable concrete model is required. For v2 data the
-        /// header is checked before the payload is parsed; for v1 data the stage is detected
-        /// from the loaded graph.</param>
+        /// module-stage graph where a runnable concrete model is required. The header stage
+        /// is checked before the payload is parsed.</param>
         public static ComputationGraph LoadFastGraphFromBinary(
             byte[] data, GraphKind? requiredStage = null)
         {
@@ -213,18 +209,18 @@ namespace Shorokoo.Core.Utils
         }
 
         /// <summary>
-        /// Shared load path: container/shim payload extraction, header-first stage
-        /// enforcement for v2, graph import, and detected-stage enforcement for v1.
-        /// The returned kind is the header stage when the file carries a known one,
-        /// else the op-scanned fallback (<see cref="SrkFileFormat.DetectStage(InternalComputationGraph)"/>) —
-        /// v1 files and files written by newer framework versions have no usable stamp.
+        /// Shared load path: container payload extraction, header-first stage enforcement,
+        /// and graph import. The returned kind is the header stage when the file carries a
+        /// known one, else the op-scanned fallback
+        /// (<see cref="SrkFileFormat.DetectStage(InternalComputationGraph)"/>) — a header
+        /// written by a newer framework version may record a stage this build cannot name.
         /// </summary>
         internal static (InternalComputationGraph Graph, GraphKind Kind) LoadFastGraphCore(
             byte[] data, string origin, GraphKind? requiredStage)
         {
             var (header, onnxBytes) = SrkFileFormat.Read(data, origin);
 
-            if (header is not null && requiredStage is not null)
+            if (requiredStage is not null)
             {
                 var stage = header.TryGetStage() ?? throw new InvalidDataException(
                     $"'{origin}': the .srk header records the unknown stage '{header.Stage}' " +
@@ -259,15 +255,12 @@ namespace Shorokoo.Core.Utils
                     $"({e.GetType().Name}: {e.Message}). The file is corrupt or not a .srk file.", e);
             }
 
-            if (header is null && requiredStage is not null)
-                SrkFileFormat.EnforceStage(SrkFileFormat.DetectStage(graph), requiredStage.Value, origin);
-
-            return (graph, header?.TryGetStage() ?? taggedKind ?? SrkFileFormat.DetectStage(graph));
+            return (graph, header.TryGetStage() ?? taggedKind ?? SrkFileFormat.DetectStage(graph));
         }
 
         /// <summary>
         /// Save <paramref name="graph"/> directly to <paramref name="filename"/> as a
-        /// .srk v2 container (see <see cref="SaveFastGraphToBinary(ComputationGraph, bool, int)"/>). Inverse of
+        /// .srk container (see <see cref="SaveFastGraphToBinary(ComputationGraph, bool, int)"/>). Inverse of
         /// <see cref="LoadFastGraphFromFile"/>. With <paramref name="overrideExtension"/>
         /// the extension is normalized to .zsrk/.srk purely as a hint for humans — the
         /// extension has no parsing significance; the header records the compression.
@@ -306,10 +299,10 @@ namespace Shorokoo.Core.Utils
         }
 
         /// <summary>
-        /// Load a <see cref="ComputationGraph"/> from a .srk file of any layout —
+        /// Load a <see cref="ComputationGraph"/> from a .srk container file —
         /// the content decides how the file parses, never the extension, so a renamed
         /// file loads identically. See <see cref="LoadFastGraphFromBinary"/> for the
-        /// layout handling and the <paramref name="requiredStage"/> contract; errors
+        /// container handling and the <paramref name="requiredStage"/> contract; errors
         /// name <paramref name="filename"/>.
         /// </summary>
         public static ComputationGraph LoadFastGraphFromFile(
@@ -321,10 +314,9 @@ namespace Shorokoo.Core.Utils
         }
 
         /// <summary>
-        /// Reads the raw serialized-ONNX payload out of an architecture file of any .srk
-        /// layout (v2 container or legacy v1), by content. Shared by the JSON/introspection
-        /// helpers below, which parse the ModelProto without building a full
-        /// <see cref="InternalComputationGraph"/>.
+        /// Reads the raw serialized-ONNX payload out of a .srk container file, by content.
+        /// Shared by the JSON/introspection helpers below, which parse the ModelProto without
+        /// building a full <see cref="InternalComputationGraph"/>.
         /// </summary>
         private static byte[] ReadArchitecturePayloadFromFile(string filePath)
         {
@@ -336,14 +328,14 @@ namespace Shorokoo.Core.Utils
 
         /// <summary>
         /// Generates a text listing of all node names and tensor names found in an
-        /// architecture file (any .srk layout), by deserializing into intermediate JSON
+        /// architecture file (a .srk container), by deserializing into intermediate JSON
         /// objects rather than a full <see cref="InternalComputationGraph"/>.
         ///
         /// The returned string lists all node names first, followed by an empty line, then all
         /// tensor names. Names are listed in the order they are first encountered when scanning
         /// the JSON representation of the file.
         /// </summary>
-        /// <param name="filePath">Path to the architecture file (any .srk layout)</param>
+        /// <param name="filePath">Path to the architecture file (a .srk container)</param>
         /// <returns>Formatted text listing of node names and tensor names</returns>
         public static string GetNodeAndTensorNameListing(string filePath)
         {
@@ -440,7 +432,7 @@ namespace Shorokoo.Core.Utils
         /// This is primarily useful for diffing two runs of a generation step to identify
         /// which fields or nodes differ between runs.
         /// </summary>
-        /// <param name="filePath">Path to the architecture file (any .srk layout) to convert.</param>
+        /// <param name="filePath">Path to the architecture file (a .srk container) to convert.</param>
         /// <returns>Pretty-printed JSON string representing the ModelProto.</returns>
         public static string ToJson(string filePath)
         {

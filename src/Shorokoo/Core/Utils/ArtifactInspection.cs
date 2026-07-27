@@ -17,8 +17,7 @@ namespace Shorokoo
         /// <summary>The file matches no format Shorokoo writes; see the observations for what was seen.</summary>
         NotRecognized,
 
-        /// <summary>A serialized computation graph: a .srk v2 container, or one of the legacy
-        /// pre-container v1 layouts (bare ONNX protobuf, single- or double-Zstd).</summary>
+        /// <summary>A serialized computation graph: a .srk container.</summary>
         SrkGraph,
 
         /// <summary>A SafeTensors weights file (8-byte header-length prefix + JSON header + tensor data).</summary>
@@ -58,7 +57,7 @@ namespace Shorokoo
         public long ByteSize { get; }
 
         /// <summary>Declared start offset within the tensor-data area (data_offsets[0]); kept
-        /// internally so the checkpoint-marker read can locate its 16 bytes.</summary>
+        /// internally so the checkpoint-marker read can locate its 32 bytes.</summary>
         internal long DataStartOffset { get; }
 
         internal InspectedTensorInfo(string name, string dtype, long[] shape, long byteSize, long dataStartOffset)
@@ -78,23 +77,18 @@ namespace Shorokoo
     /// <summary>Details of a <see cref="ArtifactKind.SrkGraph"/> artifact.</summary>
     public sealed class SrkArtifactInfo
     {
-        /// <summary>The parsed v2 container header (format version, stage, compression, payload
-        /// SHA-256, producer). Null for legacy v1 layouts (which carry no header) and for
-        /// containers whose header could not be read — see the inspection's observations.</summary>
+        /// <summary>The parsed container header (format version, stage, compression, payload
+        /// SHA-256, producer). Null for a container whose header could not be read — see the
+        /// inspection's observations.</summary>
         public SrkHeader? Header { get; }
 
-        /// <summary>For a legacy pre-container file, names the sniffed v1 layout; null for v2.</summary>
-        public string? LegacyLayout { get; }
-
         /// <summary>Size of the payload as stored in the file (after compression): everything
-        /// following the v2 header, or the whole file for a legacy layout. Null when unknown
-        /// (unreadable header).</summary>
+        /// following the header. Null when unknown (unreadable header).</summary>
         public long? PayloadSizeBytes { get; }
 
-        internal SrkArtifactInfo(SrkHeader? header, string? legacyLayout, long? payloadSizeBytes)
+        internal SrkArtifactInfo(SrkHeader? header, long? payloadSizeBytes)
         {
             Header = header;
-            LegacyLayout = legacyLayout;
             PayloadSizeBytes = payloadSizeBytes;
         }
     }
@@ -131,18 +125,16 @@ namespace Shorokoo
     public sealed class TrainingCheckpointArtifactInfo
     {
         /// <summary>Checkpoint format version from the marker tensor
-        /// (<see cref="TrainingCheckpoint"/> writes version 3; the loader reads 1..3).</summary>
+        /// (<see cref="TrainingCheckpoint"/> writes version 1; the loader reads version 1 only).</summary>
         public long FormatVersion { get; }
 
         /// <summary>The 0-based global training step the checkpoint was saved at.</summary>
         public long Step { get; }
 
-        /// <summary>The 0-based epoch counter the checkpoint was saved at — a host-owned run counter
-        /// (issue #100); 0 for legacy (format-version 1) checkpoints that predate it.</summary>
+        /// <summary>The 0-based epoch counter the checkpoint was saved at — a host-owned run counter.</summary>
         public long Epoch { get; }
 
-        /// <summary>The 0-based batch index the checkpoint was saved at — a host-owned run counter
-        /// (issue #100); 0 for legacy (format-version 1) checkpoints that predate it.</summary>
+        /// <summary>The 0-based batch index the checkpoint was saved at — a host-owned run counter.</summary>
         public long BatchIndex { get; }
 
         /// <summary>Per-section tensor listing, keyed "trainable" / "model_state" / "opt_state"
@@ -437,8 +429,6 @@ namespace Shorokoo
             {
                 ArtifactKind.SrkGraph when Srk?.Header is not null =>
                     $"Shorokoo graph (.srk v{Srk.Header.SrkVersion} container)",
-                ArtifactKind.SrkGraph when Srk?.LegacyLayout is not null =>
-                    $"Shorokoo graph (legacy pre-container .srk, {Srk.LegacyLayout})",
                 ArtifactKind.SrkGraph => "Shorokoo graph (.srk container, header not readable)",
                 ArtifactKind.SafeTensors => "SafeTensors weights file",
                 ArtifactKind.TrainingCheckpoint => "Shorokoo training checkpoint (SafeTensors)",
@@ -466,10 +456,6 @@ namespace Shorokoo
                                 kv => $"{(kv.Key.Length == 0 ? "ai.onnx" : kv.Key)}:{kv.Value}")));
                         sb.AppendLine();
                     }
-                }
-                else if (Srk.LegacyLayout is not null)
-                {
-                    sb.AppendLine("  no header: legacy layouts record no stage/compression/producer metadata");
                 }
             }
 
@@ -619,20 +605,14 @@ namespace Shorokoo
         // SafeTensors file (and bounds our header read).
         private const long MaxSafeTensorsHeaderBytes = 100_000_000;
 
-        /// <summary>Shared observation for every sniffed legacy v1 layout, so the
-        /// Observations collection reads the same however the layout was detected.</summary>
-        private const string LegacyNoHeaderObservation =
-            "legacy pre-container .srk layouts record no stage/compression/producer " +
-            "header; loading the file is the only way to learn more.";
-
         /// <summary>
         /// Identifies <paramref name="filePath"/> and summarizes its contents without loading
-        /// tensor data. Recognized formats: .srk graph files (the v2 container by its header;
-        /// the legacy v1 layouts by content sniffing), SafeTensors weights files (header only),
+        /// tensor data. Recognized formats: .srk graph files (the container by its header),
+        /// SafeTensors weights files (header only),
         /// Zstd-compressed SafeTensors archives (.zsafetensor; the length prefix and JSON header
         /// are stream-decompressed, the tensor payload never), training checkpoints written
         /// by <see cref="TrainingCheckpoint.Save(string)"/> (via the
-        /// checkpoint marker; the marker's 16 bytes are the only payload bytes ever read),
+        /// checkpoint marker; the marker's 32 bytes are the only payload bytes ever read),
         /// and .skpt checkpoint containers written by <see cref="CheckpointBuilder.Save"/>
         /// (a zip archive with a root config.json manifest — only the zip central directory
         /// and the manifest entry are read; recorded sha256s are reported, never verified).
@@ -671,21 +651,9 @@ namespace Shorokoo
             if (prefixRead == 8 && TryInspectSafeTensors(filePath, stream, fileLen, prefix, observations) is { } st)
                 return st;
 
-            // The bare-protobuf legacy v1 .srk layout — the encoding is a plain ONNX
-            // model's too; content cannot tell the two apart.
-            if (LooksLikeOnnxModelProto(prefix.AsSpan(0, prefixRead)))
-            {
-                observations.Add(LegacyNoHeaderObservation);
-                observations.Add("a bare serialized ONNX model is indistinguishable from a plain " +
-                    ".onnx file by content; if this is a .onnx export, use standard ONNX tooling instead.");
-                return new ArtifactInspection(filePath, fileLen, ArtifactKind.SrkGraph,
-                    new SrkArtifactInfo(header: null, legacyLayout: "bare ONNX protobuf", fileLen),
-                    safeTensors: null, trainingCheckpoint: null, observations);
-            }
-
             return NotRecognized(filePath, fileLen, observations,
                 $"the file starts with bytes {Convert.ToHexString(prefix.AsSpan(0, Math.Min(prefixRead, 4)))}, " +
-                "matching no format Shorokoo writes (.srk container, legacy .srk layout, " +
+                "matching no format Shorokoo writes (.srk container, " +
                 "SafeTensors, or .skpt zip container).");
         }
 
@@ -700,22 +668,6 @@ namespace Shorokoo
         /// <summary>Zstd frame magic: 28 B5 2F FD.</summary>
         private static bool LooksLikeZstd(ReadOnlySpan<byte> data)
             => data.Length >= 4 && data[0] == 0x28 && data[1] == 0xB5 && data[2] == 0x2F && data[3] == 0xFD;
-
-        /// <summary>
-        /// A serialized ONNX ModelProto opens with field 1 (ir_version) as a small varint —
-        /// 0x08 then a single non-zero byte — followed by the next field's protobuf tag.
-        /// Requiring that follow-on byte to be a valid tag (field number ≥ 1, wire type
-        /// 0/1/2/5) keeps near-misses from matching — e.g. a Zstd-compressed SafeTensors
-        /// file whose 8-byte header-length prefix happens to start 08 xx 00.
-        /// </summary>
-        private static bool LooksLikeOnnxModelProto(ReadOnlySpan<byte> data)
-        {
-            if (data.Length < 3 || data[0] != 0x08) return false;
-            if (data[1] == 0 || (data[1] & 0x80) != 0) return false;   // ir_version: single-byte varint ≥ 1
-            int fieldNumber = data[2] >> 3;
-            int wireType = data[2] & 0x7;
-            return fieldNumber >= 1 && wireType is 0 or 1 or 2 or 5;
-        }
 
         // ---- .srk container ("SRK" prefix present) ----
 
@@ -771,7 +723,7 @@ namespace Shorokoo
             }
 
             return new ArtifactInspection(filePath, fileLen, ArtifactKind.SrkGraph,
-                new SrkArtifactInfo(header, legacyLayout: null, payloadSize),
+                new SrkArtifactInfo(header, payloadSize),
                 safeTensors: null, trainingCheckpoint: null, observations);
         }
 
@@ -1100,27 +1052,23 @@ namespace Shorokoo
                 manifest.CreatedUtc, userMetadata, userData, models, dataEntries, mappingSetNames, training);
         }
 
-        // ---- Zstd frame (legacy v1 compressed layouts) ----
+        // ---- Zstd frame (.zsafetensor compressed archive) ----
 
         private static ArtifactInspection InspectZstdFrame(
             string filePath, FileStream stream, long fileLen, List<string> observations)
         {
-            // Same sniff as the v1 shim, but bounded: stream-decompress only the first 8 inner
-            // bytes to classify the frame's content instead of unwrapping the whole payload.
-            byte[] inner = new byte[8];
-            int innerRead;
+            // Bounded: stream-decompress only the first 8 inner bytes to classify the frame's
+            // content instead of unwrapping the whole payload. The only Shorokoo format that is
+            // a bare Zstd frame is the .zsafetensor archive; anything else is foreign data.
             try
             {
                 stream.Position = 0;
                 using var ds = new DecompressionStream(stream);
-                innerRead = ds.ReadAtLeast(inner, inner.Length, throwOnEndOfStream: false);
+                byte[] inner = new byte[8];
+                int innerRead = ds.ReadAtLeast(inner, inner.Length, throwOnEndOfStream: false);
 
-                // .zsafetensor probe — deliberately BEFORE the legacy-.srk classification:
-                // it is the more specific format, and recognizing it first eliminates the
-                // residual ambiguity class where a SafeTensors 8-byte header-length prefix
-                // imitates the opening bytes of a serialized ONNX model. The decompression
-                // stream sits right after the 8 prefix bytes, so the probe can continue
-                // reading the (bounded) JSON header sequentially.
+                // The decompression stream sits right after the 8 prefix bytes, so the probe can
+                // continue reading the (bounded) JSON header sequentially.
                 if (innerRead == 8
                     && TryInspectCompressedSafeTensors(filePath, ds, fileLen, inner, observations) is { } zst)
                     return zst;
@@ -1131,19 +1079,9 @@ namespace Shorokoo
                     $"a Zstd frame that fails to decompress — corrupt or truncated ({e.Message}).");
             }
 
-            string? layout =
-                LooksLikeOnnxModelProto(inner.AsSpan(0, innerRead)) ? "single-Zstd"
-                : innerRead >= 4 && LooksLikeZstd(inner) ? "double-Zstd"
-                : null;
-            if (layout is null)
-                return NotRecognized(filePath, fileLen, observations,
-                    "a Zstd frame whose decompressed content is not a serialized ONNX model — " +
-                    "possibly a .zsafetensor archive or foreign compressed data.");
-
-            observations.Add(LegacyNoHeaderObservation);
-            return new ArtifactInspection(filePath, fileLen, ArtifactKind.SrkGraph,
-                new SrkArtifactInfo(header: null, layout, fileLen),
-                safeTensors: null, trainingCheckpoint: null, observations);
+            return NotRecognized(filePath, fileLen, observations,
+                "a Zstd frame whose decompressed content is not a SafeTensors archive — " +
+                "foreign compressed data.");
         }
 
         // ---- Zstd-compressed SafeTensors archive (.zsafetensor) ----
@@ -1214,18 +1152,19 @@ namespace Shorokoo
             observations.AddRange(parsed.Observations);
 
             // A checkpoint saved compressed: the marker is visible in the header, but its
-            // 16-byte [version, step] payload sits at its declared offset inside the
-            // compressed tensor data (TrainingCheckpoint.Save writes it last). Reaching it
-            // through the non-seekable Zstd stream would mean decompressing everything before
-            // it — not a bounded header read — so the archive keeps the CompressedSafeTensors
-            // kind and the observation says what more is known and why it stops there.
+            // 32-byte [version, step, epoch, batchIndex] payload sits at its declared offset
+            // inside the compressed tensor data (TrainingCheckpoint.Save writes it last).
+            // Reaching it through the non-seekable Zstd stream would mean decompressing
+            // everything before it — not a bounded header read — so the archive keeps the
+            // CompressedSafeTensors kind and the observation says what more is known and why it
+            // stops there.
             int markerIndex = parsed.Tensors.FindIndex(
                 t => t.Name == TrainingCheckpoint.CheckpointMarkerName);
             if (markerIndex >= 0)
                 observations.Add(
                     $"the archive's header carries a '{TrainingCheckpoint.CheckpointMarkerName}' " +
                     "marker — a Shorokoo training checkpoint stored compressed — but the marker's " +
-                    $"version/step payload sits {parsed.Tensors[markerIndex].DataStartOffset} bytes " +
+                    $"version/counter payload sits {parsed.Tensors[markerIndex].DataStartOffset} bytes " +
                     "into the compressed tensor data, beyond Inspect's bounded header-only reads; " +
                     "decompress the archive (CompressedFormatUtils.LoadCompressedSafeTensors) to " +
                     "read them.");
@@ -1375,28 +1314,27 @@ namespace Shorokoo
             List<InspectedTensorInfo> tensors, List<string> observations)
         {
             // Locate the marker in the header listing; its declared extent gives the file
-            // position of its payload bytes. v1 markers hold 16 bytes ([version, step] as two
-            // int64s); v2 (issue #100) holds 32 ([version, step, epoch, batchIndex]). Read up to
-            // 32 bytes — the only payload bytes Inspect ever reads — falling back to the 16 a v1
-            // file carries (its epoch/batch counters then read as the default 0).
+            // position of its payload bytes. The marker is a fixed 32 bytes:
+            // int64[4] = [version, step, epoch, batchIndex]. Those 32 bytes are the only payload
+            // bytes Inspect ever reads.
+            const int MarkerBytes = 32;
             int markerIndex = tensors.FindIndex(t => t.Name == TrainingCheckpoint.CheckpointMarkerName);
             if (markerIndex < 0)
                 return null;
 
-            // Bounds in subtracted form (fileLen - toRead cannot underflow for any file large
-            // enough to hold a marker entry): markerStart + toRead could wrap past the check
-            // for a crafted offset near long.MaxValue.
+            // Bounds in subtracted form (fileLen - MarkerBytes cannot underflow for any file
+            // large enough to hold a marker entry): markerStart + MarkerBytes could wrap past the
+            // check for a crafted offset near long.MaxValue.
             var marker = tensors[markerIndex];
             long markerStart = dataStart + marker.DataStartOffset;
-            int toRead = marker.ByteSize >= 32 ? 32 : 16;
-            if (marker.DType != "I64" || marker.ByteSize < 16 || markerStart < dataStart || markerStart > fileLen - toRead)
+            if (marker.DType != "I64" || marker.ByteSize < MarkerBytes || markerStart < dataStart || markerStart > fileLen - MarkerBytes)
             {
                 observations.Add($"the file carries a '{TrainingCheckpoint.CheckpointMarkerName}' marker, " +
                     "but it is malformed — not a readable Shorokoo training checkpoint.");
                 return null;
             }
 
-            var markerBytes = new byte[toRead];
+            var markerBytes = new byte[MarkerBytes];
             try
             {
                 stream.Position = markerStart;
@@ -1413,8 +1351,8 @@ namespace Shorokoo
             }
             long version = BitConverter.ToInt64(markerBytes, 0);
             long step = BitConverter.ToInt64(markerBytes, 8);
-            long epoch = toRead >= 32 ? BitConverter.ToInt64(markerBytes, 16) : 0;
-            long batchIndex = toRead >= 32 ? BitConverter.ToInt64(markerBytes, 24) : 0;
+            long epoch = BitConverter.ToInt64(markerBytes, 16);
+            long batchIndex = BitConverter.ToInt64(markerBytes, 24);
 
             if (version > TrainingCheckpoint.CheckpointFormatVersion)
                 observations.Add($"checkpoint format version {version} is newer than this build reads " +

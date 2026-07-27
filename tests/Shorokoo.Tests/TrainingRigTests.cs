@@ -873,7 +873,7 @@ public class TrainingRigCoverageTests
     /// <see cref="Persistence.Inspect"/> (issue #57) recognizes <see cref="TrainingCheckpoint.Save(string)"/>
     /// output via the marker tensor and reports the checkpoint format version, the global step, and
     /// the per-section tensor listing — all matching what was written, from the SafeTensors header
-    /// plus the marker's 16 bytes only (tensor payloads are never loaded). A SafeTensors file
+    /// plus the marker's 32 bytes only (tensor payloads are never loaded). A SafeTensors file
     /// without the marker inspects as plain <see cref="ArtifactKind.SafeTensors"/>, not as a
     /// checkpoint.
     /// </summary>
@@ -905,7 +905,7 @@ public class TrainingRigCoverageTests
             Assert.Null(result.Srk);
 
             var info = result.TrainingCheckpoint!;
-            Assert.Equal(3, info.FormatVersion);   // v3 marker: int64 [version, step, epoch, batchIndex]
+            Assert.Equal(1, info.FormatVersion);   // v1 marker: int64 [version, step, epoch, batchIndex]
             Assert.Equal(5, info.Step);
             Assert.Equal(0, info.Epoch);           // not set on this checkpoint → default 0
             Assert.Equal(0, info.BatchIndex);
@@ -1432,7 +1432,7 @@ public class TrainingRigCoverageTests
 
     /// <summary>
     /// int64 counter round-trip: a checkpoint whose step/epoch/batchIndex exceed int32 survives Save
-    /// and Load in both formats — the legacy flat safetensors marker (v3) and the native .skpt manifest
+    /// and Load in both formats — the legacy flat safetensors marker (v1) and the native .skpt manifest
     /// — with no truncation. Pins the widening of <see cref="TrainingCheckpoint.Step"/> et al. to int64.
     /// </summary>
     [Fact]
@@ -1450,13 +1450,13 @@ public class TrainingRigCoverageTests
         var skptPath = Path.Combine(Path.GetTempPath(), $"shrk_i64_{Guid.NewGuid():N}.skpt");
         try
         {
-            // Legacy flat safetensors (v3 marker).
+            // Legacy flat safetensors (v1 marker).
             ckpt.Save(legacyPath);
             var legacy = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(legacyPath);
             Assert.Equal(bigStep, legacy.Step);
             Assert.Equal(bigEpoch, legacy.Epoch);
             Assert.Equal(bigBatch, legacy.BatchIndex);
-            Assert.Equal(3, Persistence.Inspect(legacyPath).TrainingCheckpoint!.FormatVersion);
+            Assert.Equal(1, Persistence.Inspect(legacyPath).TrainingCheckpoint!.FormatVersion);
 
             // Native .skpt manifest.
             Persistence.SaveTrainingCheckpointToSkpt(
@@ -2154,7 +2154,7 @@ public class TrainingRigCoverageTests
 
             var legacyInspect = Persistence.Inspect(legacyPath);
             Assert.Empty(legacyInspect.Observations);
-            Assert.Equal(3, legacyInspect.TrainingCheckpoint!.FormatVersion);
+            Assert.Equal(1, legacyInspect.TrainingCheckpoint!.FormatVersion);
             Assert.Equal(7, legacyInspect.TrainingCheckpoint.Epoch);
             Assert.Equal(340, legacyInspect.TrainingCheckpoint.BatchIndex);
             var legacyText = legacyInspect.ToString();
@@ -2188,36 +2188,21 @@ public class TrainingRigCoverageTests
     }
 
     /// <summary>
-    /// Backward compatibility (issue #100, §5.8.5 "fill new state kinds as absent"): a checkpoint
-    /// written before epoch/batch existed loads with those counters defaulting to 0, in both formats
-    /// — a legacy flat file with the pre-#100 two-element marker, and a .skpt whose manifest training
-    /// block lacks the epoch/batchIndex keys.
+    /// A .skpt manifest whose training block lacks the add-only <c>epoch</c>/<c>batchIndex</c>
+    /// keys (a #95-era manifest, written before those counters existed) loads with those
+    /// counters defaulting to 0 — the JSON add-only-field leniency of the .skpt manifest.
     /// </summary>
     [Fact]
-    public void TestCheckpointWithoutEpochBatchLoadsDefaultsCoverage()
+    public void TestSkptWithoutEpochBatchKeysLoadsDefaultsCoverage()
     {
         var (_, trained, _, _, _) = BuildTrainedAdamRig(steps: 2);
         var ckpt = new TrainingCheckpoint(
             trained.TrainableParams, trained.ModelState, trained.OptimizerState, step: 2);
 
-        var legacyPath = Path.Combine(Path.GetTempPath(), $"shrk_v1_{Guid.NewGuid():N}.safetensors");
         var skptPath = Path.Combine(Path.GetTempPath(), $"shrk_old_{Guid.NewGuid():N}.skpt");
         try
         {
-            // --- Legacy: a pre-#100 v1 marker ([version=1, step]) has no epoch/batch slots. ---
-            WriteLegacyV1Checkpoint(ckpt, legacyPath);
-            var legacyLoaded = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(legacyPath);
-            Assert.Equal(2, legacyLoaded.Step);
-            Assert.Equal(0, legacyLoaded.Epoch);
-            Assert.Equal(0, legacyLoaded.BatchIndex);
-
-            var legacyInspect = Persistence.Inspect(legacyPath);
-            Assert.Empty(legacyInspect.Observations);   // v1 is a readable older version, not flagged
-            Assert.Equal(1, legacyInspect.TrainingCheckpoint!.FormatVersion);
-            Assert.Equal(0, legacyInspect.TrainingCheckpoint.Epoch);
-            Assert.Equal(0, legacyInspect.TrainingCheckpoint.BatchIndex);
-
-            // --- .skpt: strip the epoch/batchIndex keys to mimic a #95-era manifest. ---
+            // Strip the epoch/batchIndex keys to mimic a #95-era manifest.
             Persistence.SaveTrainingCheckpointToSkpt(
                 ckpt, ScalarMultiplyModel.ComputationGraph, TensorData(ScalarInputShape, new float[4]), skptPath);
             StripSkptTrainingCounterKeys(skptPath);
@@ -2239,34 +2224,8 @@ public class TrainingRigCoverageTests
         }
         finally
         {
-            if (File.Exists(legacyPath)) File.Delete(legacyPath);
             if (File.Exists(skptPath)) File.Delete(skptPath);
         }
-    }
-
-    /// <summary>Writes a pre-#100 legacy flat checkpoint: the three namespaced sections plus a
-    /// two-element (<c>[version=1, step]</c>) marker, i.e. a file without the epoch/batch marker
-    /// slots this build now writes — so loaders must default those counters to 0.</summary>
-    private static void WriteLegacyV1Checkpoint(TrainingCheckpoint ckpt, string path)
-    {
-        var tensors = new List<SafeTensor>();
-        void AddSection(string section, TensorDataStruct data)
-        {
-            foreach (var fd in data.Definition.Fields)
-            {
-                var td = (TensorData)data.Fields[fd.Name];
-                tensors.Add(new SafeTensor(
-                    $"{section}/{fd.Name}", td,
-                    SafeTensorLoader.DTypeToSafeTensorDType(td.DType), td.Shape.Dims));
-            }
-        }
-        AddSection(TrainingCheckpoint.TrainableSection, ckpt.TrainableParams);
-        AddSection(TrainingCheckpoint.ModelStateSection, ckpt.ModelState);
-        AddSection(TrainingCheckpoint.OptimizerStateSection, ckpt.OptimizerState);
-
-        var marker = TensorData([2L], 1L, (long)ckpt.Step);   // v1 marker: [version, step]
-        tensors.Add(new SafeTensor(TrainingCheckpoint.CheckpointMarkerName, marker, "I64", [2L]));
-        SafeTensorLoader.SaveSafeTensors(path, tensors);
     }
 
     /// <summary>Rewrites a .skpt in place, deleting the <c>epoch</c>/<c>batchIndex</c> keys from its

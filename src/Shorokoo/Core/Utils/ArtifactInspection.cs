@@ -57,7 +57,8 @@ namespace Shorokoo
         public long ByteSize { get; }
 
         /// <summary>Declared start offset within the tensor-data area (data_offsets[0]); kept
-        /// internally so the checkpoint-marker read can locate its 32 bytes.</summary>
+        /// internally so the checkpoint-marker read can locate its 16 bytes (and the epoch / batch
+        /// scalar reads their 8 bytes each).</summary>
         internal long DataStartOffset { get; }
 
         internal InspectedTensorInfo(string name, string dtype, long[] shape, long byteSize, long dataStartOffset)
@@ -616,7 +617,8 @@ namespace Shorokoo
         /// Zstd-compressed SafeTensors archives (.zsafetensor; the length prefix and JSON header
         /// are stream-decompressed, the tensor payload never), training checkpoints written
         /// by <see cref="TrainingCheckpoint.Save(string, CheckpointComponents?)"/> (via the
-        /// checkpoint marker; the marker's 32 bytes are the only payload bytes ever read),
+        /// checkpoint marker; only the marker's 16 bytes and the presence-gated epoch / batch / loss
+        /// scalars' 8 bytes each are ever read),
         /// and .skpt checkpoint containers written by <see cref="CheckpointBuilder.Save"/>
         /// (a zip archive with a root config.json manifest — only the zip central directory
         /// and the manifest entry are read; recorded sha256s are reported, never verified).
@@ -1317,10 +1319,10 @@ namespace Shorokoo
             List<InspectedTensorInfo> tensors, List<string> observations)
         {
             // Locate the marker in the header listing; its declared extent gives the file position of
-            // its payload bytes. The marker is a fixed 16 bytes: int64[2] = [version, step] (format v3;
-            // a longer marker from a future/legacy layout is tolerated — only the first 16 bytes are
-            // read). Epoch and batch index moved out into their own presence-gated int64 scalars, read
-            // separately below.
+            // its payload bytes. The marker is a fixed 16 bytes: int64[2] = [version, step] (format v3).
+            // Epoch and batch index moved out into their own presence-gated int64 scalars, read
+            // separately below — the marker never grows, so any other marker length is malformed (the
+            // same strict shape the Load path enforces; there are no released files of any older shape).
             const int MarkerBytes = 16;
             int markerIndex = tensors.FindIndex(t => t.Name == TrainingCheckpoint.CheckpointMarkerName);
             if (markerIndex < 0)
@@ -1331,7 +1333,7 @@ namespace Shorokoo
             // check for a crafted offset near long.MaxValue.
             var marker = tensors[markerIndex];
             long markerStart = dataStart + marker.DataStartOffset;
-            if (marker.DType != "I64" || marker.ByteSize < MarkerBytes || markerStart < dataStart || markerStart > fileLen - MarkerBytes)
+            if (marker.DType != "I64" || marker.ByteSize != MarkerBytes || markerStart < dataStart || markerStart > fileLen - MarkerBytes)
             {
                 observations.Add($"the file carries a '{TrainingCheckpoint.CheckpointMarkerName}' marker, " +
                     "but it is malformed — not a readable Shorokoo training checkpoint.");

@@ -950,7 +950,7 @@ public class TrainingRigCoverageTests
     /// <see cref="Persistence.Inspect"/> (issue #57) recognizes <see cref="TrainingCheckpoint.Save(string)"/>
     /// output via the marker tensor and reports the checkpoint format version, the global step, and
     /// the per-section tensor listing — all matching what was written, from the SafeTensors header
-    /// plus the marker's 32 bytes only (tensor payloads are never loaded). A SafeTensors file
+    /// plus the marker's 16 bytes only (tensor payloads are never loaded). A SafeTensors file
     /// without the marker inspects as plain <see cref="ArtifactKind.SafeTensors"/>, not as a
     /// checkpoint.
     /// </summary>
@@ -1509,7 +1509,7 @@ public class TrainingRigCoverageTests
 
     /// <summary>
     /// int64 counter round-trip: a checkpoint whose step/epoch/batchIndex exceed int32 survives Save
-    /// and Load in both formats — the legacy flat safetensors marker (v1) and the native .skpt manifest
+    /// and Load in both formats — the flat safetensors marker (v3) and the native .skpt manifest
     /// — with no truncation. Pins the widening of <see cref="TrainingCheckpoint.Step"/> et al. to int64.
     /// </summary>
     [Fact]

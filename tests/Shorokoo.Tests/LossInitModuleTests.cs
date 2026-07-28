@@ -61,7 +61,7 @@ public class LossInitTrainingTests
             },
             0.01f);
 
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
 
         var modelInputDef = new TensorStructDef(
             new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32) },
@@ -79,9 +79,9 @@ public class LossInitTrainingTests
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var step = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
 
-        Assert.NotNull(step.Checkpoint);
-        Assert.NotNull(step.Checkpoint.TrainableParams);
-        Assert.True(float.IsFinite(step.Loss),
-            $"KLDivLoss must produce a finite loss through the rig; got {step.Loss}");
+        Assert.NotNull(step);
+        Assert.NotNull(step.TrainableParams);
+        Assert.True(float.IsFinite(step.Loss!.Value),
+            $"KLDivLoss must produce a finite loss through the rig; got {step.Loss!.Value}");
     }
 }

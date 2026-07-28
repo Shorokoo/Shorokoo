@@ -133,7 +133,7 @@ namespace Shorokoo
         /// Saves a <see cref="TrainingCheckpoint"/> — trainable parameters, model state, optimizer
         /// state and the global step — in the legacy flat sectioned-safetensors format, so a
         /// training run can resume across process restarts. Delegates to
-        /// <see cref="TrainingCheckpoint.Save(string)"/>; the write is atomic (temp file + rename). A
+        /// <see cref="TrainingCheckpoint.Save(string, CheckpointComponents?)"/>; the write is atomic (temp file + rename). A
         /// <c>.safetensors</c> extension is conventional. To write the native .skpt container
         /// instead (carrying the inference model and per-kind data entries), use
         /// <see cref="SaveTrainingCheckpointToSkpt"/> / <see cref="ForTrainingCheckpoint"/>.
@@ -145,34 +145,13 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Saves a <see cref="TrainingCheckpoint"/> into a rotating series — the file is written to
-        /// <c>{directory}/{filePrefix}{step}{fileSuffix}</c> — and prunes older members so only the
-        /// <paramref name="keepLast"/> most recent survive (the "keep last N training checkpoints"
-        /// use case). Rotation orders strictly by the global step encoded in each name, so it is
-        /// correct regardless of filesystem timestamp resolution or zero-padding, never touches
-        /// files outside the series, and — running only after the atomic commit — never fails the
-        /// save; failures surface only through <paramref name="onWarning"/>. Returns the path
-        /// written. Delegates to <see cref="TrainingCheckpoint.Save(string, string, string, int, Action{string})"/>.
-        /// </summary>
-        public static string SaveTrainingCheckpoint(
-            TrainingCheckpoint checkpoint,
-            string directory,
-            string filePrefix,
-            string fileSuffix,
-            int keepLast,
-            Action<string>? onWarning = null)
-        {
-            if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
-            return checkpoint.Save(directory, filePrefix, fileSuffix, keepLast, onWarning);
-        }
-
-        /// <summary>
         /// Loads a <see cref="TrainingCheckpoint"/> saved by either <see cref="SaveTrainingCheckpoint(TrainingCheckpoint, string)"/>
         /// (the legacy flat safetensors file) or <see cref="SaveTrainingCheckpointToSkpt"/> (the
         /// native .skpt container) — the shape is detected from the file's bytes. Either way the
         /// checkpoint is reconstructed against the given struct defs (which pin the expected shapes,
-        /// so a checkpoint from a different model or optimizer fails loudly). To resume a whole rig,
-        /// prefer <see cref="TrainingRig.LoadCheckpoint"/>, which supplies these defs from the rig.
+        /// so a checkpoint from a different model or optimizer fails loudly). The result carries no
+        /// <see cref="TrainingCheckpoint.Rig"/>; to resume a whole rig (and attach it), prefer
+        /// <see cref="TrainingRig.LoadCheckpoint"/>, which supplies these defs from the rig.
         /// </summary>
         public static TrainingCheckpoint LoadTrainingCheckpoint(
             string filePath,
@@ -183,16 +162,26 @@ namespace Shorokoo
             if (string.IsNullOrWhiteSpace(filePath))
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
 
-            // Sniff the container shape from the leading bytes: a .skpt is a zip (PK\x03\x04),
-            // the legacy flat checkpoint a safetensors file (8-byte header-length prefix). The
-            // read is bounded — four bytes — and routes to the matching reconstructor.
-            byte[] prefix = new byte[4];
-            using (var probe = File.OpenRead(filePath))
-                probe.ReadAtLeast(prefix, prefix.Length, throwOnEndOfStream: false);
+            return IsSkptFile(filePath)
+                ? LoadTrainingCheckpointFromSkpt(
+                    filePath, trainableParamDef, modelStateDef, optimizerStateDef,
+                    components: null, rigForDefaults: null)
+                : TrainingCheckpoint.LoadFlat(
+                    filePath, trainableParamDef, modelStateDef, optimizerStateDef,
+                    components: null, rigForDefaults: null);
+        }
 
-            return LooksLikeZipArchive(prefix)
-                ? LoadTrainingCheckpointFromSkpt(filePath, trainableParamDef, modelStateDef, optimizerStateDef)
-                : TrainingCheckpoint.Load(filePath, trainableParamDef, modelStateDef, optimizerStateDef);
+        /// <summary>
+        /// True if the file is a <c>.skpt</c> container (a zip archive) rather than a legacy flat
+        /// safetensors checkpoint — sniffed from the leading four bytes (a zip starts <c>PK\x03\x04</c>;
+        /// the flat checkpoint is a safetensors file with an 8-byte header-length prefix).
+        /// </summary>
+        internal static bool IsSkptFile(string filePath)
+        {
+            byte[] prefix = new byte[4];
+            using var probe = File.OpenRead(filePath);
+            probe.ReadAtLeast(prefix, prefix.Length, throwOnEndOfStream: false);
+            return LooksLikeZipArchive(prefix);
         }
 
         private static ZipArchive OpenArchive(Stream stream, string filePath)

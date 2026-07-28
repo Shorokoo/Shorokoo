@@ -136,7 +136,7 @@ public class AttentionModuleTests
 /// <summary>
 /// Training-rig smoke coverage for <see cref="Shorokoo.Modules.Layers.TransformerEncoderLayer"/>:
 /// a tiny model (<see cref="TransformerEncoderMeanPoolModel"/>) wrapping one encoder layer is
-/// driven through <see cref="TrainingRig.FromScratch"/> + <c>CreateDefaultCheckpoint</c> + one
+/// driven through <see cref="TrainingRig.FromScratch"/> + <c>CreateInitialCheckpoint</c> + one
 /// <see cref="TrainingRig.TrainStep"/>, asserting a finite loss and that a trainable parameter
 /// actually moved. Mirrors the helper-driven style of
 /// <see cref="Shorokoo.Tests.TrainingRigCoverageTests"/>.
@@ -163,7 +163,7 @@ public class AttentionTrainingCoverageTests
             SGDOptimizer.ComputationGraph,
             sample, 0.01f);
 
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
 
         var modelInputDef = new TensorStructDef(
@@ -179,9 +179,9 @@ public class AttentionTrainingCoverageTests
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var step = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
 
-        Assert.True(float.IsFinite(step.Loss));
-        Assert.NotEmpty(step.Checkpoint.TrainableParams.Fields);
-        Assert.True(AnyFieldChanged(initial.TrainableParams, step.Checkpoint.TrainableParams),
+        Assert.True(float.IsFinite(step.Loss!.Value));
+        Assert.NotEmpty(step.TrainableParams.Fields);
+        Assert.True(AnyFieldChanged(initial.TrainableParams, step.TrainableParams),
             "no trainable parameter moved after a TrainStep (gradient did not flow)");
     }
 
@@ -207,7 +207,7 @@ public class AttentionTrainingCoverageTests
             SGDOptimizer.ComputationGraph,
             sample, 0.01f);
 
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
 
         var modelInputDef = new TensorStructDef(
@@ -231,9 +231,9 @@ public class AttentionTrainingCoverageTests
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var step = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
 
-        Assert.True(float.IsFinite(step.Loss));
-        Assert.NotEmpty(step.Checkpoint.TrainableParams.Fields);
-        Assert.True(AnyFieldChanged(initial.TrainableParams, step.Checkpoint.TrainableParams),
+        Assert.True(float.IsFinite(step.Loss!.Value));
+        Assert.NotEmpty(step.TrainableParams.Fields);
+        Assert.True(AnyFieldChanged(initial.TrainableParams, step.TrainableParams),
             "no trainable parameter moved after a TrainStep (gradient did not flow)");
     }
 

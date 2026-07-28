@@ -22,6 +22,35 @@ using System.Linq;
 namespace Shorokoo
 {
     /// <summary>
+    /// Selects which parts of a <see cref="TrainingCheckpoint"/> a save writes or a load reads. Combine
+    /// with <c>|</c>; pass <c>null</c> to <see cref="TrainingCheckpoint.Save(string, CheckpointComponents?)"/>
+    /// / <see cref="TrainingCheckpoint.Load"/> for "every available component" on save and "everything
+    /// present" on load.
+    /// </summary>
+    [Flags]
+    public enum CheckpointComponents
+    {
+        /// <summary>No component.</summary>
+        None = 0,
+        /// <summary>The rig's constituent model/loss/optimizer graphs, hyperparameters and RNG config —
+        /// enough to rebuild the whole rig from the file alone. Serialization not yet implemented
+        /// (Shorokoo/Shorokoo#115); requesting it throws.</summary>
+        TrainingRig = 1 << 0,
+        /// <summary>Trainable parameters plus model state — everything the inference model binds.</summary>
+        InferenceState = 1 << 1,
+        /// <summary>Optimizer state (moment buffers, scalar timesteps, …).</summary>
+        OptimizerState = 1 << 2,
+        /// <summary>The host-owned run counters: step, epoch, batch index.</summary>
+        Counters = 1 << 3,
+        /// <summary>The host-owned run-progress loss scalar of the step that produced the checkpoint
+        /// (a nullable value — <c>null</c> on an initial/bare checkpoint contributes nothing to a
+        /// save). Independent of <see cref="Counters"/>.</summary>
+        Loss = 1 << 4,
+        /// <summary>Every component.</summary>
+        All = TrainingRig | InferenceState | OptimizerState | Counters | Loss,
+    }
+
+    /// <summary>
     /// Holds the full training state between training steps.
     /// </summary>
     public class TrainingCheckpoint
@@ -59,15 +88,42 @@ namespace Shorokoo
         /// </summary>
         public long BatchIndex { get; }
 
+        /// <summary>
+        /// The <see cref="TrainingRig"/> this checkpoint belongs to, or <c>null</c> for a bare
+        /// checkpoint constructed without one. Every rig-produced checkpoint carries its rig
+        /// (<see cref="TrainingRig.CreateInitialCheckpoint()"/>, <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>,
+        /// <see cref="TrainingRig.Train"/>/<see cref="TrainingRig.Fit"/>, load, and
+        /// <see cref="TrainingRig.AdoptCheckpoint"/> all set it), so <see cref="ToInferenceModel()"/>
+        /// can extract the inference model with no re-supplied graph. The rig does not store
+        /// checkpoints, so there is no reference cycle. Attach one to a bare checkpoint via
+        /// <see cref="TrainingRig.AdoptCheckpoint"/>.
+        /// </summary>
+        public TrainingRig? Rig { get; }
+
+        /// <summary>
+        /// The loss computed for the training step that produced this checkpoint, or <c>null</c> on an
+        /// initial or bare checkpoint that no step produced. Set by
+        /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>
+        /// (which now returns the post-step checkpoint directly) to that step's loss. Carried
+        /// unchanged through the counter derivations, and persisted as its own
+        /// <see cref="CheckpointComponents.Loss"/> component, independent of the counters (absent, or a
+        /// null loss, ⇒ reads back <c>null</c>).
+        /// </summary>
+        public float? Loss { get; }
+
         /// <summary>Packages trainable params, model state and optimizer state at
-        /// <paramref name="step"/> / <paramref name="epoch"/> / <paramref name="batchIndex"/>.</summary>
+        /// <paramref name="step"/> / <paramref name="epoch"/> / <paramref name="batchIndex"/>,
+        /// optionally attaching the producing <paramref name="rig"/> and the <paramref name="loss"/>
+        /// of the step that produced it.</summary>
         public TrainingCheckpoint(
             TensorDataStruct trainableParams,
             TensorDataStruct modelState,
             TensorDataStruct optimizerState,
             long step = 0,
             long epoch = 0,
-            long batchIndex = 0)
+            long batchIndex = 0,
+            TrainingRig? rig = null,
+            float? loss = null)
         {
             TrainableParams = trainableParams ?? throw new ArgumentNullException(nameof(trainableParams));
             ModelState = modelState ?? throw new ArgumentNullException(nameof(modelState));
@@ -75,32 +131,53 @@ namespace Shorokoo
             Step = step;
             Epoch = epoch;
             BatchIndex = batchIndex;
+            Rig = rig;
+            Loss = loss;
         }
+
+        // ---- Counter derivations (§5.8.5): step/epoch/batch are host-owned scalars, not rig
+        // state, so resetting one yields a NEW checkpoint value carrying the same trainable
+        // params / model state / optimizer state (shared by reference — nothing is re-derived).
+        // The receiver is never mutated. ----
+
+        /// <summary>
+        /// Returns a new checkpoint identical to this one but with the given host-owned run
+        /// counter(s) set (each defaulting to this checkpoint's current value when omitted). The
+        /// tensor state — trainable params, model state, optimizer state — is shared by reference,
+        /// since counters are not graph state (§5.8.1). The receiver is unchanged.
+        /// </summary>
+        public TrainingCheckpoint WithCounters(long? step = null, long? epoch = null, long? batchIndex = null)
+            => new(TrainableParams, ModelState, OptimizerState,
+                step ?? Step, epoch ?? Epoch, batchIndex ?? BatchIndex, Rig, Loss);
+
+        /// <summary>A new checkpoint with <see cref="Step"/> set (epoch/batch carried through).</summary>
+        public TrainingCheckpoint WithStep(long step) => WithCounters(step: step);
+
+        /// <summary>A new checkpoint with <see cref="Epoch"/> set (step/batch carried through).</summary>
+        public TrainingCheckpoint WithEpoch(long epoch) => WithCounters(epoch: epoch);
+
+        /// <summary>A new checkpoint with <see cref="BatchIndex"/> set (step/epoch carried through).</summary>
+        public TrainingCheckpoint WithBatchIndex(long batchIndex) => WithCounters(batchIndex: batchIndex);
 
         // ---- Inference: bind trained weights into a concrete model for execution ----
 
         /// <summary>
-        /// Builds a concrete inference model from this checkpoint's trained weights in one call,
-        /// encapsulating the full <c>ToConcreteArchitecture → weights → ToConcreteModel</c> pipeline.
+        /// Builds a concrete inference model from this checkpoint's trained weights in one call.
+        /// Requires an attached <see cref="Rig"/>: the checkpoint's trainable params and model state
+        /// are bound by canonical identity into the rig's <b>retained concrete architecture</b> — the
+        /// one the rig concretized once at build time (at all its inputs, so a multi-input model is
+        /// supported), held on the rig and reused, never re-concretized and needing no sample inputs.
+        /// Attach a rig first via <see cref="TrainingRig.AdoptCheckpoint"/> — or load the checkpoint
+        /// against a rig — if this one has none.
         /// </summary>
-        public ComputationGraph ToInferenceModel(ComputationGraph modelGraph, TensorData exampleInput)
+        public ComputationGraph ToInferenceModel()
         {
-            if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
-            var g = TrainingRig.RequireModelGraphKind(modelGraph, nameof(ToInferenceModel));
-            return new ComputationGraph(ToInferenceModelCore(g, exampleInput), GraphKind.ConcreteModel);
-        }
-
-        internal InternalComputationGraph ToInferenceModelCore(InternalComputationGraph modelGraph, TensorData exampleInput)
-        {
-            if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
-            if (exampleInput is null) throw new ArgumentNullException(nameof(exampleInput));
-            var arch    = modelGraph.ToConcreteArchitecture(modelGraph.FromOrderedInputs([exampleInput]));
-            var weights = new ModelParamList(
-                TrainableParams.Fields
-                    .Where(f => f.Value is TensorData)
-                    .Select(f => new KeyValuePair<string, TensorData>(f.Key, (TensorData)f.Value)),
-                ModelParamType.TrainableParam);
-            return arch.ToConcreteModel(weights, arch.GetShorokooIdNamingScheme());
+            if (Rig is null)
+                throw new InvalidOperationException(
+                    "ToInferenceModel() requires a training rig, but this checkpoint has none attached. " +
+                    "Adopt one via rig.AdoptCheckpoint(checkpoint), or load the checkpoint against a rig " +
+                    "(rig.LoadCheckpoint(path)), then call ToInferenceModel().");
+            return Rig.ExtractInferenceModel(this);
         }
 
         // ---- Persistence: save a checkpoint to disk and resume across process restarts ----
@@ -114,7 +191,14 @@ namespace Shorokoo
         internal const string ModelStateSection = "model_state";
         internal const string OptimizerStateSection = "opt_state";
         internal const string CheckpointMarkerName = "__shorokoo_checkpoint__"; // int64[4] = [version, step, epoch, batchIndex]
-        internal const long CheckpointFormatVersion = 1;
+        // The loss (a host-owned run-progress scalar, its OWN savable component) is written as a
+        // presence-gated float32 scalar tensor, only when Loss.HasValue and the Loss component is
+        // included — never overloading the int64 marker, so a null loss is genuinely absent (not a
+        // sentinel 0.0). A '/'-free name, so it can't be mistaken for a namespaced section field.
+        internal const string CheckpointLossName = "__shorokoo_loss__";
+        // Version 2: adds the presence-gated loss tensor beside the int64[4] marker (no released
+        // users, so no back-compat shim — v1 files are simply not produced or read).
+        internal const long CheckpointFormatVersion = 2;
 
         /// <summary>
         /// Saves this checkpoint to a single SafeTensors file so training can resume across process
@@ -122,11 +206,25 @@ namespace Shorokoo
         /// a namespaced tensor, alongside the host-owned run counters <see cref="Step"/>,
         /// <see cref="Epoch"/>, and <see cref="BatchIndex"/> (so schedules resume from the right step
         /// and the run resumes at the right point in its data schedule). Reload with
-        /// <see cref="TrainingRig.LoadCheckpoint(string)"/> — or with
-        /// <see cref="Load"/> if you hold the struct defs directly. A <c>.safetensors</c> extension is
+        /// <see cref="TrainingRig.LoadCheckpoint(string, CheckpointComponents?)"/> — or with
+        /// <see cref="Load"/> against the same rig. A <c>.safetensors</c> extension is
         /// conventional. Fields must be plain tensors (nested-struct fields are unsupported); rank-0
         /// scalars are fine — they serialize as the SafeTensors empty-shape encoding (e.g. an
         /// optimizer's scalar timestep).
+        ///
+        /// <para>
+        /// <paramref name="components"/> selects which parts to write. <c>null</c> writes every
+        /// <b>available</b> component: <see cref="CheckpointComponents.InferenceState"/> (trainable
+        /// params + model state) and <see cref="CheckpointComponents.Counters"/> always,
+        /// <see cref="CheckpointComponents.OptimizerState"/> when this checkpoint carries any, and
+        /// <see cref="CheckpointComponents.Loss"/> when it carries a (non-null) loss. Explicitly
+        /// requesting <see cref="CheckpointComponents.Loss"/> on a checkpoint whose loss is
+        /// <c>null</c> is a no-op — it writes nothing, and does not throw (a null loss is a
+        /// legitimate value). The
+        /// <see cref="CheckpointComponents.TrainingRig"/> component is never written automatically and
+        /// throws when requested explicitly — serializing the rig's constituent graphs is not yet
+        /// implemented (Shorokoo/Shorokoo#115).
+        /// </para>
         ///
         /// <para>
         /// The write is atomic: the checkpoint is staged to a temp file in the target directory and
@@ -135,65 +233,85 @@ namespace Shorokoo
         /// The directory must already exist.
         /// </para>
         /// </summary>
-        public void Save(string filePath)
+        public void Save(string filePath, CheckpointComponents? components = null)
         {
             if (string.IsNullOrWhiteSpace(filePath))
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
 
+            var comps = ResolveSaveComponents(components);
             AtomicFileWriter.WriteFile(
-                filePath, stream => SafeTensorLoader.SaveSafeTensorsToStream(stream, BuildCheckpointTensors()));
+                filePath, stream => SafeTensorLoader.SaveSafeTensorsToStream(stream, BuildCheckpointTensors(comps)));
         }
 
         /// <summary>
-        /// Saves this checkpoint into a rotating series and prunes older members, keeping only the
-        /// <paramref name="keepLast"/> most recent. The file is written to
-        /// <c>{directory}/{filePrefix}{Step}{fileSuffix}</c> (so the global <see cref="Step"/> is
-        /// encoded in the name); a typical call is
-        /// <c>Save(dir, "ckpt-", ".safetensors", keepLast: 3)</c>, producing <c>ckpt-0.safetensors</c>,
-        /// <c>ckpt-1.safetensors</c>, … and retaining the three newest. Returns the path written.
-        ///
-        /// <para>
-        /// The write is atomic, exactly as <see cref="Save(string)"/>. Rotation runs only after the
-        /// new checkpoint has been committed and orders the series by the <see cref="Step"/> parsed
-        /// back out of each name — a producer-owned, monotonic integer key — so it is correct
-        /// regardless of filesystem timestamp resolution and of zero-padding (step 9 sorts before
-        /// step 10). Files that are not members of this series (different prefix/suffix, non-numeric
-        /// names, staged temps, and the checkpoint just written) are never deleted.
-        /// </para>
-        ///
-        /// <para>
-        /// Rotation is best-effort: a rotation failure never fails the save (the new checkpoint is
-        /// already committed) and is surfaced only through <paramref name="onWarning"/> (silent if
-        /// null). The directory must already exist.
-        /// </para>
+        /// Resolves the effective component set for a save. <c>null</c> ⇒ every available component
+        /// (never the <see cref="CheckpointComponents.TrainingRig"/> one, whose serialization is
+        /// unimplemented — #115). Explicitly requesting <see cref="CheckpointComponents.TrainingRig"/>
+        /// throws: <see cref="InvalidOperationException"/> when no rig is attached, otherwise a
+        /// <see cref="NotSupportedException"/> naming #115.
         /// </summary>
-        public string Save(string directory, string filePrefix, string fileSuffix, int keepLast, Action<string>? onWarning = null)
+        private CheckpointComponents ResolveSaveComponents(CheckpointComponents? requested)
         {
-            if (string.IsNullOrWhiteSpace(directory))
-                throw new ArgumentException("Checkpoint directory cannot be null or empty.", nameof(directory));
-            ArgumentNullException.ThrowIfNull(filePrefix);
-            ArgumentNullException.ThrowIfNull(fileSuffix);
+            if (requested is CheckpointComponents c)
+            {
+                if ((c & CheckpointComponents.TrainingRig) != 0)
+                {
+                    if (Rig is null)
+                        throw new InvalidOperationException(
+                            "Cannot save the TrainingRig component: this checkpoint has no rig attached " +
+                            "(see TrainingCheckpoint.Rig / TrainingRig.AdoptCheckpoint).");
+                    throw new NotSupportedException(
+                        "Saving the TrainingRig component — the rig's constituent model/loss/optimizer " +
+                        "graphs, hyperparameters and RNG config — is not yet implemented (Shorokoo/Shorokoo#115). " +
+                        "Save InferenceState / OptimizerState / Counters (the default) and rebuild the rig " +
+                        "from its source graphs to resume.");
+                }
+                return c;
+            }
 
-            string filePath = Path.Combine(directory, $"{filePrefix}{Step}{fileSuffix}");
-            AtomicFileWriter.WriteFile(
-                filePath,
-                stream => SafeTensorLoader.SaveSafeTensorsToStream(stream, BuildCheckpointTensors()),
-                AtomicFileWriter.RetainPolicy.KeepLast(keepLast, filePrefix, fileSuffix),
-                onWarning);
-            return filePath;
+            // null ⇒ all AVAILABLE components. TrainingRig is never auto-included (its serialization is
+            // unimplemented, #115); request it explicitly to get the clear #115 error. Loss is included
+            // only when this checkpoint actually carries one (a null loss contributes nothing).
+            var comps = CheckpointComponents.InferenceState | CheckpointComponents.Counters;
+            if (OptimizerState.Definition.Fields.Length > 0) comps |= CheckpointComponents.OptimizerState;
+            if (Loss.HasValue) comps |= CheckpointComponents.Loss;
+            return comps;
         }
 
-        /// <summary>Serializes the three namespaced sections plus the checkpoint marker (shared by both save paths).</summary>
-        private List<SafeTensor> BuildCheckpointTensors()
+        /// <summary>Serializes the requested namespaced sections plus the checkpoint marker.</summary>
+        private List<SafeTensor> BuildCheckpointTensors(CheckpointComponents comps)
         {
             var tensors = new List<SafeTensor>();
-            AppendSection(tensors, TrainableSection, TrainableParams);
-            AppendSection(tensors, ModelStateSection, ModelState);
-            AppendSection(tensors, OptimizerStateSection, OptimizerState);
+            if ((comps & CheckpointComponents.InferenceState) != 0)
+            {
+                AppendSection(tensors, TrainableSection, TrainableParams);
+                AppendSection(tensors, ModelStateSection, ModelState);
+            }
+            if ((comps & CheckpointComponents.OptimizerState) != 0)
+                AppendSection(tensors, OptimizerStateSection, OptimizerState);
 
+            // The marker always identifies the file as a Shorokoo checkpoint and carries the format
+            // version; the counter VALUES are written only when the Counters component is included
+            // (else zeros, so a counters-less save reloads at step/epoch/batch 0).
+            bool counters = (comps & CheckpointComponents.Counters) != 0;
             var marker = Globals.TensorData(
-                [4L], CheckpointFormatVersion, (long)Step, (long)Epoch, (long)BatchIndex);
+                [4L], CheckpointFormatVersion,
+                counters ? Step : 0L, counters ? Epoch : 0L, counters ? BatchIndex : 0L);
             tensors.Add(new SafeTensor(CheckpointMarkerName, marker, "I64", [4L]));
+
+            // Loss is its own savable component (a host-owned run-progress scalar), independent of the
+            // counters. Written only when this checkpoint actually carries a loss AND the Loss
+            // component is included — so a Loss-less save, or an initial/bare checkpoint with no loss,
+            // writes no loss tensor and reloads with Loss == null (never a sentinel 0.0). Explicitly
+            // requesting Loss on a null-loss checkpoint is a no-op (writes nothing), not an error — a
+            // null loss is a legitimate value, unlike the unavailable TrainingRig case.
+            if ((comps & CheckpointComponents.Loss) != 0 && Loss is float lossValue)
+            {
+                var lossTensor = Globals.TensorData(Array.Empty<long>(), lossValue);
+                tensors.Add(new SafeTensor(
+                    CheckpointLossName, lossTensor,
+                    SafeTensorLoader.DTypeToSafeTensorDType(lossTensor.DType), lossTensor.Shape.Dims));
+            }
             return tensors;
         }
 
@@ -212,17 +330,75 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Loads a checkpoint written by <see cref="Save(string)"/>, reconstructing each section against the
-        /// supplied struct defs (normally the ones on the <see cref="TrainingRig"/> the checkpoint was
-        /// produced by — prefer <see cref="TrainingRig.LoadCheckpoint(string)"/>, which passes them for
-        /// you). Throws if the file is not a Shorokoo checkpoint, was written by a newer format, or its
-        /// fields don't match the given defs (e.g. a checkpoint from a different model or optimizer).
+        /// Loads a checkpoint against <paramref name="rig"/>, whose struct definitions the sections are
+        /// reconstructed against and whose model/loss/optimizer this checkpoint is attached to
+        /// (<see cref="Rig"/> is set on the result). Reads either on-disk shape — the legacy flat
+        /// sectioned-safetensors file (<see cref="Save(string, CheckpointComponents?)"/>) or the native
+        /// <c>.skpt</c> container — detected automatically. <paramref name="components"/> selects which
+        /// parts to load; <c>null</c> loads everything present. A component not present in the file is
+        /// filled from the rig's initial values (counters default to 0). Explicitly requesting the
+        /// <see cref="CheckpointComponents.TrainingRig"/> component (including via
+        /// <see cref="CheckpointComponents.All"/>) throws a <see cref="NotSupportedException"/> naming
+        /// #115 — no file stores the rig's constituent graphs yet, so the request cannot be satisfied;
+        /// pass the rig and omit the flag. Throws if the file is not a
+        /// Shorokoo checkpoint, was written by a newer format, or its fields don't match the rig (e.g.
+        /// a checkpoint from a different model or optimizer). Prefer
+        /// <see cref="TrainingRig.LoadCheckpoint(string, CheckpointComponents?)"/>.
+        ///
+        /// <para>A <paramref name="rig"/> is required: the struct definitions come from it. Rebuilding
+        /// the rig from the checkpoint file alone is not yet implemented (Shorokoo/Shorokoo#115), so a
+        /// <c>null</c> rig throws.</para>
         /// </summary>
         public static TrainingCheckpoint Load(
             string filePath,
+            TrainingRig? rig = null,
+            CheckpointComponents? components = null)
+        {
+            if (string.IsNullOrWhiteSpace(filePath))
+                throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
+            if (rig is null)
+                throw new InvalidOperationException(
+                    "TrainingCheckpoint.Load requires a rig to resolve the checkpoint's struct definitions. " +
+                    "Pass the rig you are resuming (or use rig.LoadCheckpoint(path)). Reconstructing the rig " +
+                    "from the checkpoint file itself is not yet implemented (Shorokoo/Shorokoo#115).");
+
+            // Explicitly requesting the TrainingRig component (including via CheckpointComponents.All)
+            // throws, symmetric with Save (ResolveSaveComponents): the file never stores the rig's
+            // constituent graphs — that serialization is unimplemented (#115) — so the request cannot
+            // be satisfied. null ⇒ "everything present" is the way to load without naming the flag.
+            if (components is CheckpointComponents cReq && (cReq & CheckpointComponents.TrainingRig) != 0)
+                throw new NotSupportedException(
+                    "Cannot load the TrainingRig component — the rig's constituent model/loss/optimizer " +
+                    "graphs, hyperparameters and RNG config — because that serialization is not yet " +
+                    "implemented (Shorokoo/Shorokoo#115) and no checkpoint file stores it. Pass the rig to " +
+                    "Load (or use rig.LoadCheckpoint(path)) and omit the TrainingRig flag; null components " +
+                    "loads every component the file contains.");
+
+            var raw = Persistence.IsSkptFile(filePath)
+                ? Persistence.LoadTrainingCheckpointFromSkpt(
+                    filePath, rig.TrainableParamStructDef, rig.ModelStateDef, rig.OptimizerStateDef,
+                    components, rig)
+                : LoadFlat(
+                    filePath, rig.TrainableParamStructDef, rig.ModelStateDef, rig.OptimizerStateDef,
+                    components, rig);
+            // Attach the rig (sets Rig, preserves counters); the raw checkpoint was read against the
+            // rig's own defs, so the compatibility check inside AdoptCheckpoint always passes.
+            return rig.AdoptCheckpoint(raw);
+        }
+
+        /// <summary>
+        /// Reads the legacy flat sectioned-safetensors checkpoint against the given defs, honoring
+        /// <paramref name="components"/> (null ⇒ everything present). A component not present in the
+        /// file (or not requested) is filled from <paramref name="rigForDefaults"/>'s initial values
+        /// when a rig is supplied; without a rig, an absent-but-expected section fails loud.
+        /// </summary>
+        internal static TrainingCheckpoint LoadFlat(
+            string filePath,
             TensorStructDef trainableParamDef,
             TensorStructDef modelStateDef,
-            TensorStructDef optimizerStateDef)
+            TensorStructDef optimizerStateDef,
+            CheckpointComponents? components,
+            TrainingRig? rigForDefaults)
         {
             if (trainableParamDef is null) throw new ArgumentNullException(nameof(trainableParamDef));
             if (modelStateDef is null) throw new ArgumentNullException(nameof(modelStateDef));
@@ -236,7 +412,8 @@ namespace Shorokoo
 
             var marker = markerData.As<int64>().AccessMemory<long>();
             // The marker is a fixed int64[4] = [version, step, epoch, batchIndex]. Exactly one
-            // format version exists (1); a wrong shape or version is unreadable by this build.
+            // format version exists (2); a wrong shape or version is unreadable by this build.
+            // (v2 adds the presence-gated loss tensor; there are no released v1 files.)
             if (marker.Length != 4)
                 throw new InvalidOperationException(
                     $"'{filePath}' has a malformed checkpoint marker: expected 4 int64 elements " +
@@ -245,15 +422,62 @@ namespace Shorokoo
                 throw new InvalidOperationException(
                     $"Unsupported checkpoint format version {marker[0]}; this build reads version " +
                     $"{CheckpointFormatVersion} only.");
-            long step = marker[1];
-            long epoch = marker[2];
-            long batchIndex = marker[3];
 
-            var trainable = ReadSection(byName, TrainableSection, trainableParamDef, filePath);
-            var modelState = ReadSection(byName, ModelStateSection, modelStateDef, filePath);
-            var optState = ReadSection(byName, OptimizerStateSection, optimizerStateDef, filePath);
+            bool Want(CheckpointComponents c) => components is null || (components.Value & c) != 0;
+            bool SectionPresent(string section)
+            {
+                var prefix = section + "/";
+                foreach (var k in byName.Keys)
+                    if (k.StartsWith(prefix, StringComparison.Ordinal)) return true;
+                return false;
+            }
 
-            return new TrainingCheckpoint(trainable, modelState, optState, step, epoch, batchIndex);
+            long step = Want(CheckpointComponents.Counters) ? marker[1] : 0L;
+            long epoch = Want(CheckpointComponents.Counters) ? marker[2] : 0L;
+            long batchIndex = Want(CheckpointComponents.Counters) ? marker[3] : 0L;
+
+            // Loss is its own component (independent of the counters): read it only when Loss is
+            // wanted and the presence-gated loss tensor is actually present; absence ⇒ null (an
+            // initial/bare or Loss-less checkpoint), never a sentinel 0.
+            float? loss = Want(CheckpointComponents.Loss)
+                          && byName.TryGetValue(CheckpointLossName, out var lossData)
+                ? lossData.As<float32>().AccessMemory<float>()[0]
+                : (float?)null;
+
+            TensorDataStruct trainable, modelState, optState;
+
+            if (Want(CheckpointComponents.InferenceState)
+                && (SectionPresent(TrainableSection) || trainableParamDef.Fields.Length == 0))
+            {
+                trainable = ReadSection(byName, TrainableSection, trainableParamDef, filePath);
+                modelState = ReadSection(byName, ModelStateSection, modelStateDef, filePath);
+            }
+            else if (rigForDefaults is not null)
+            {
+                trainable = rigForDefaults.InitialTrainableStruct;
+                modelState = rigForDefaults.InitialModelStateStruct;
+            }
+            else
+            {
+                trainable = ReadSection(byName, TrainableSection, trainableParamDef, filePath);
+                modelState = ReadSection(byName, ModelStateSection, modelStateDef, filePath);
+            }
+
+            if (Want(CheckpointComponents.OptimizerState)
+                && (SectionPresent(OptimizerStateSection) || optimizerStateDef.Fields.Length == 0))
+            {
+                optState = ReadSection(byName, OptimizerStateSection, optimizerStateDef, filePath);
+            }
+            else if (rigForDefaults is not null)
+            {
+                optState = rigForDefaults.InitialOptimizerStateStruct;
+            }
+            else
+            {
+                optState = ReadSection(byName, OptimizerStateSection, optimizerStateDef, filePath);
+            }
+
+            return new TrainingCheckpoint(trainable, modelState, optState, step, epoch, batchIndex, rig: null, loss: loss);
         }
 
         private static TensorDataStruct ReadSection(
@@ -284,24 +508,6 @@ namespace Shorokoo
             }
 
             return new TensorDataStruct(def, fields);
-        }
-    }
-
-    /// <summary>
-    /// Result of a single training step.
-    /// </summary>
-    public class TrainingStepResult
-    {
-        /// <summary>The post-step checkpoint (updated params/state, step advanced by one).</summary>
-        public TrainingCheckpoint Checkpoint { get; }
-        /// <summary>The loss computed for this step.</summary>
-        public float Loss { get; }
-
-        /// <summary>Packages a post-step checkpoint and its loss.</summary>
-        public TrainingStepResult(TrainingCheckpoint checkpoint, float loss)
-        {
-            Checkpoint = checkpoint;
-            Loss = loss;
         }
     }
 
@@ -358,8 +564,67 @@ namespace Shorokoo
         /// </summary>
         private InternalComputationGraph? _trainingStepWorkGraph;
 
-        /// <summary>Struct definition for trainable parameters.</summary>
-        public TensorStructDef TrainableParamStructDef { get; private set; } = null!;
+        /// <summary>
+        /// The rig's <b>constituent</b> layer (§5.8): the swappable source-of-truth models — the
+        /// inference model, the loss graph, the optimizer graph (as authored), and the scheduler
+        /// (carried in the <see cref="Hyperparameters"/> until #106 folds it into its own persisted
+        /// constituent) — plus the RNG config the trainstep is derived from. This
+        /// is the source of truth; the <see cref="TrainingStepPureGraph"/> (<c>trainstep</c>) is the
+        /// purely in-memory derived executable, composed from these and never persisted. A rig is an
+        /// <b>immutable value</b>: the <c>With…</c> derivations return a NEW rig sharing the
+        /// unchanged constituents by reference (via <c>record with</c>) and re-deriving only what
+        /// changed — the receiver is never mutated.
+        /// </summary>
+        private RigConstituents _constituents = null!;
+
+        /// <summary>
+        /// The model constituent's <b>concrete architecture</b> — derived state, computed once when
+        /// the rig is first built (§5.8): the model graph run through <c>ToConcreteArchitecture</c> at
+        /// its inputs and bound to the RNG config, shape-specialized and with every trainable parameter
+        /// visible at the top level. Like <see cref="TrainingStepPureGraph"/> it is environment-
+        /// independent and NEVER persisted; unlike the trainstep it does not change when loss /
+        /// optimizer / scheduler are swapped, so every <c>With…</c> derivation reuses this same graph by
+        /// reference instead of re-concretizing (only <see cref="WithSeed"/> rebinds it, on a clone).
+        /// It is the single substrate both the trainstep build and inference extraction read from, so
+        /// weight-binding for <see cref="TrainingCheckpoint.ToInferenceModel()"/> and the <c>.skpt</c>
+        /// container's self-describing model can never diverge. Consumed read-only (its consumers clone
+        /// before mutating), so sharing it across derived rigs preserves immutability.
+        ///
+        /// <para>It is also <b>self-describing for shape inference</b>: each <c>MODEL_TENSOR_INPUT</c>
+        /// node carries a zero-filled representative input on its
+        /// <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInput"/> attribute (shape+dtype-only
+        /// placeholder for large inputs), recording the shape the model was concretized at. The two
+        /// training-graph shape-inference sites reconstruct their <c>sampleInputs[]</c> off these
+        /// attributes (<see cref="ReadRepresentativeInputs"/>), so no separate sample-input field is
+        /// stored on the rig. The attribute is inert for export (a boundary node is not emitted as a
+        /// NodeProto) and rides along on <c>Clone()</c>, so it survives re-seeding.</para>
+        /// </summary>
+        private InternalComputationGraph _concreteArch = null!;
+
+        /// <summary>The inference-model constituent (a module graph or concrete architecture), as authored.</summary>
+        public ComputationGraph ModelConstituent => _constituents.Model;
+
+        /// <summary>The loss-graph constituent (a module graph), as authored.</summary>
+        public ComputationGraph LossConstituent => _constituents.Loss;
+
+        /// <summary>The optimizer-graph constituent (a module graph), as authored (pre-normalization).</summary>
+        public ComputationGraph OptimizerConstituent => _constituents.Optimizer;
+
+        /// <summary>
+        /// The optimizer hyperparameters this rig was derived with, in the optimizer's declared order —
+        /// the schedule-carrying constituent (a baked constant, a built-in <see cref="Schedule"/>, or a
+        /// scheduler module per field) until #106 promotes the scheduler to its own persisted model entry.
+        /// </summary>
+        public IReadOnlyList<Hyperparameter> Hyperparameters => _constituents.Hyperparameters;
+
+        /// <summary>The RNG configuration bound into the derived trainstep (never null; defaults to
+        /// <see cref="RngConfig.Default"/>). Re-seed with <see cref="WithSeed"/>.</summary>
+        public RngConfig RngConfig => _constituents.RngConfig;
+
+        /// <summary>Struct definition for trainable parameters. Internal build/persistence machinery —
+        /// persistence sources the defs from the rig directly, and callers drive training through the
+        /// checkpoint's <see cref="TrainingCheckpoint.TrainableParams"/> rather than the def.</summary>
+        internal TensorStructDef TrainableParamStructDef { get; private set; } = null!;
 
         /// <summary>
         /// Result of the <see cref="MemoryAwareGraphOptimizer"/> pass applied to
@@ -368,14 +633,14 @@ namespace Shorokoo
         /// Exposed for diagnostics — lets callers measure how much the optimizer actually
         /// improved the compute / peak-memory metric over the unoptimized graph.
         /// </summary>
-        public GraphOptimizationResult OptimizationResult { get; private set; } = null!;
+        internal GraphOptimizationResult OptimizationResult { get; private set; } = null!;
 
         /// <summary>
         /// The unoptimized training-step graph, before <see cref="MemoryAwareGraphOptimizer"/>
         /// ran. Held alongside <see cref="OptimizationResult"/> so the per-strategy
         /// improvement is measurable.
         /// </summary>
-        public ComputationGraph PreOptimizationGraph { get; private set; } = null!;
+        internal ComputationGraph PreOptimizationGraph { get; private set; } = null!;
 
         /// <summary>
         /// Compute time + peak memory the <see cref="GraphEvaluator"/> projected for the
@@ -383,13 +648,15 @@ namespace Shorokoo
         /// the optimizer used. Compare with <see cref="OptimizationResult"/>'s evaluation
         /// to quantify the optimizer's improvement.
         /// </summary>
-        public GraphEvaluationResult PreOptimizationEval { get; private set; } = null!;
+        internal GraphEvaluationResult PreOptimizationEval { get; private set; } = null!;
 
-        /// <summary>Struct definition for model state (empty for stateless models).</summary>
-        public TensorStructDef ModelStateDef { get; private set; } = null!;
+        /// <summary>Struct definition for model state (empty for stateless models). Internal
+        /// build/persistence machinery — see <see cref="TrainableParamStructDef"/>.</summary>
+        internal TensorStructDef ModelStateDef { get; private set; } = null!;
 
-        /// <summary>Struct definition for optimizer state (empty for basic SGD).</summary>
-        public TensorStructDef OptimizerStateDef { get; private set; } = null!;
+        /// <summary>Struct definition for optimizer state (empty for basic SGD). Internal
+        /// build/persistence machinery — see <see cref="TrainableParamStructDef"/>.</summary>
+        internal TensorStructDef OptimizerStateDef { get; private set; } = null!;
 
         /// <summary>
         /// Struct definition for the <b>schedule-less runtime</b> optimizer hyperparameters — the ones
@@ -399,8 +666,10 @@ namespace Shorokoo
         /// or a scheduler module) are <b>not</b> here — they are computed in-graph from the step counter
         /// and need no per-step value. When non-empty, supply values via
         /// <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>.
+        /// Internal build machinery — build the per-step values with <see cref="MakeHyperparameters(float)"/>
+        /// (which reads this def internally); inspect the dynamic names via <see cref="DynamicHyperparameterNames"/>.
         /// </summary>
-        public TensorStructDef HyperparameterStructDef { get; private set; } = null!;
+        internal TensorStructDef HyperparameterStructDef { get; private set; } = null!;
 
         /// <summary>
         /// Struct definition for the model's runtime inputs — one field per model input tensor,
@@ -421,9 +690,9 @@ namespace Shorokoo
         /// <summary>
         /// Indices into the optimizer's hyperparameter order that were routed as runtime inputs, in
         /// <see cref="HyperparameterStructDef"/> field order. Used by <see cref="MakeHyperparameters(float)"/>
-        /// to map caller-supplied values to the right fields.
+        /// to map caller-supplied values to the right fields. Internal build machinery.
         /// </summary>
-        public IReadOnlyList<int> DynamicHyperparameterIndices { get; private set; } = Array.Empty<int>();
+        internal IReadOnlyList<int> DynamicHyperparameterIndices { get; private set; } = Array.Empty<int>();
 
         /// <summary>
         /// The optimizer's hyperparameter names, in declaration order (e.g. <c>learningRate, beta1,
@@ -449,14 +718,14 @@ namespace Shorokoo
         /// </summary>
         private string[] _counterInputNames = Array.Empty<string>();
 
-        /// <summary>Number of trainable parameter fields in graph outputs.</summary>
-        public int UpdatedParamFieldCount { get; private set; }
+        /// <summary>Number of trainable parameter fields in graph outputs. Internal output-layout machinery.</summary>
+        internal int UpdatedParamFieldCount { get; private set; }
 
-        /// <summary>Number of model state fields in graph outputs.</summary>
-        public int UpdatedStateFieldCount { get; private set; }
+        /// <summary>Number of model state fields in graph outputs. Internal output-layout machinery.</summary>
+        internal int UpdatedStateFieldCount { get; private set; }
 
-        /// <summary>Number of optimizer state fields in graph outputs.</summary>
-        public int UpdatedOptimizerStateFieldCount { get; private set; }
+        /// <summary>Number of optimizer state fields in graph outputs. Internal output-layout machinery.</summary>
+        internal int UpdatedOptimizerStateFieldCount { get; private set; }
 
         /// <summary>Initial trainable parameter values, computed at FromScratch time.</summary>
         private Dictionary<string, IData> _initialParamFields = null!;
@@ -497,8 +766,8 @@ namespace Shorokoo
 
         /// <summary>
         /// True when the optimizer's state-init graph reads a <see cref="HyperparameterKind.Runtime"/>
-        /// hyper: its initial value is unknowable at build, so <see cref="CreateDefaultCheckpoint()"/>
-        /// fails loud (D5) until <see cref="CreateDefaultCheckpoint(TensorDataStruct)"/> supplies it.
+        /// hyper: its initial value is unknowable at build, so <see cref="CreateInitialCheckpoint()"/>
+        /// fails loud (D5) until <see cref="CreateInitialCheckpoint(TensorDataStruct)"/> supplies it.
         /// </summary>
         private bool _stateInitNeedsRuntimeHypers;
 
@@ -643,19 +912,19 @@ namespace Shorokoo
             if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
             if (lossGraph is null) throw new ArgumentNullException(nameof(lossGraph));
             if (optimizerGraph is null) throw new ArgumentNullException(nameof(optimizerGraph));
+            if (sampleInputs is null) throw new ArgumentNullException(nameof(sampleInputs));
+            if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
 
-            // The model position takes a module graph or an already-lowered concrete
-            // architecture (the concretization pipeline is idempotent on the latter, so
-            // callers that lowered once — e.g. to inspect parameters — need not redo it);
-            // a weight-filled concrete model is refused up front. Loss and optimizer are
-            // composed as module bodies and must be module graphs.
-            var model = RequireModelGraphKind(modelGraph, "TrainingRig.FromScratch (modelGraph)");
-            lossGraph.RequireKind(GraphKind.Module, "TrainingRig.FromScratch (lossGraph)",
-                "Pass the loss module graph (e.g. Losses.L2Loss).");
-            optimizerGraph.RequireKind(GraphKind.Module, "TrainingRig.FromScratch (optimizerGraph)",
-                "Pass the optimizer module graph (e.g. Optimizers.Adam).");
-            return FromScratchInternal(model, lossGraph.ToInternal(), optimizerGraph.ToInternal(),
-                sampleInputs, hyperparameters, names, rngConfig);
+            // Capture the constituents (the swappable source-of-truth layer, §5.8) and take the
+            // initial build path, which concretizes the model from the sample inputs. The sample
+            // inputs are a construction-time argument only — consumed here to produce the retained
+            // concrete arch and its shape exemplars, and never stored on the rig. "No config" means
+            // the default deterministic identity.
+            return BuildInitialRig(
+                new RigConstituents(
+                    modelGraph, lossGraph, optimizerGraph, hyperparameters, names,
+                    rngConfig ?? RngConfig.Default),
+                sampleInputs);
         }
 
         /// <summary>
@@ -677,52 +946,367 @@ namespace Shorokoo
                 "(e.g. MyModel.ComputationGraph) or its ToConcreteArchitecture result instead."));
         }
 
-        private static TrainingRig FromScratchInternal(
-            InternalComputationGraph modelGraph,
-            InternalComputationGraph lossGraph,
-            InternalComputationGraph optimizerGraph,
-            NamedModelParam[] sampleInputs,
-            Hyperparameter[] hyperparameters,
-            IReadOnlyList<string>? names,
-            RngConfig? rngConfig)
+        /// <summary>
+        /// Shared shape check for both derive paths: hyperparameter names, when supplied, must match
+        /// the hyperparameter value count (a swapped optimizer/scheduler is checked just as at build).
+        /// </summary>
+        private static void ValidateConstituents(RigConstituents c)
         {
-            if (sampleInputs is null) throw new ArgumentNullException(nameof(sampleInputs));
-            if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
-            if (names is not null && names.Count != hyperparameters.Length)
+            if (c.Names is not null && c.Names.Count != c.Hyperparameters.Length)
                 throw new ArgumentException(
-                    $"hyperparameter names ({names.Count}) must match hyperparameter values " +
-                    $"({hyperparameters.Length}).", nameof(names));
+                    $"hyperparameter names ({c.Names.Count}) must match hyperparameter values " +
+                    $"({c.Hyperparameters.Length}).", nameof(c));
+        }
+
+        /// <summary>
+        /// The <b>initial build path</b> (<see cref="FromScratch(ComputationGraph, ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?)"/>
+        /// only): concretizes the model from the <paramref name="sampleInputs"/> once, binds the RNG
+        /// config, and derives the retained concrete arch + its shape exemplars — then hands off to
+        /// <see cref="DeriveFromConcreteArch"/> to compose and optimize the trainstep. The sample
+        /// inputs are consumed here (parameter shape resolution, liveness pruning, concretization value
+        /// fallbacks) and NOT stored: everything the derivation path later needs is captured on the
+        /// concrete arch itself (structure + RNG identity + the representative-input attributes written
+        /// onto its <c>MODEL_TENSOR_INPUT</c> nodes below).
+        /// </summary>
+        private static TrainingRig BuildInitialRig(RigConstituents constituents, NamedModelParam[] sampleInputs)
+        {
+            var c = constituents;
+            ValidateConstituents(c);
             if (sampleInputs.Length == 0)
                 throw new ArgumentException(
-                    "TrainingRig.FromScratch requires at least one sample input. Sample inputs " +
+                    "A training rig requires at least one sample input. Sample inputs " +
                     "drive parameter shape resolution and training-graph shape inference.",
                     nameof(sampleInputs));
 
+            // The model position takes a module graph or an already-lowered concrete architecture
+            // (the concretization pipeline is idempotent on the latter); a weight-filled concrete
+            // model is refused up front.
+            var model = RequireModelGraphKind(c.Model, "TrainingRig (model constituent)");
+
             var ctx = ComputeContext.Default;
 
-            // No config means the default deterministic identity — the rig's randomness
-            // (init and runtime feeds alike) is always keyed, never backend random ops.
-            rngConfig ??= RngConfig.Default;
-
-            // Single ToConcreteArchitecture pass. The resulting concrete arch graph is the
-            // shared substrate for both phases below: Phase 1 composes it with loss +
-            // autograd + optimizer to build the training-step graph; Phase 2 reads its
-            // MODEL_PARAM nodes to initialize values and to determine prediction shape.
-            // The concrete pass also runs the QEE-backed liveness filter that prunes
-            // trainable params whose reachability is killed by the sample input shape.
-            var concreteArch = modelGraph.ToConcreteArchitecture(new ModelParamList(sampleInputs), ctx);
+            // Single ToConcreteArchitecture pass — the ONE concretization for this rig and all its
+            // future derivations. The resulting concrete arch is the shared substrate: the trainstep
+            // build composes it with loss + autograd + optimizer; initialization reads its MODEL_PARAM
+            // nodes for initial values and prediction shape; inference extraction binds weights into
+            // it. The pass also runs the QEE-backed liveness filter that prunes trainable params whose
+            // reachability is killed by the sample input shape. Sample input VALUES matter only here
+            // (concretization's QEE/ORT resolution fallbacks); the derivation path needs only shapes.
+            var concreteArch = model.ToConcreteArchitecture(new ModelParamList(sampleInputs), ctx);
 
             // Bind the RNG config at the shared concretization point: binding writes the
             // config's runtime identity into the RngSeed parameter, which — with the feeds'
             // key derivation chains — rides unchanged through loss composition and autograd
             // into the training-step graph, where the ONNX-prep lowering emits the keyed draws.
-            concreteArch.ApplyRngConfig(rngConfig);
+            concreteArch.ApplyRngConfig(c.RngConfig);
 
-            var rig = new TrainingRig();
-            rig.BuildTrainingStepPureGraph(concreteArch, lossGraph, optimizerGraph, hyperparameters, names);
-            rig.InitializeAndOptimize(concreteArch, sampleInputs, ctx, rngConfig);
+            // Make the concrete arch self-describing: record a representative input on each model-input
+            // node (zero-filled, shape+dtype only — never the user's values), so every re-derivation's
+            // shape inference reconstructs its sampleInputs off the arch and no separate exemplar field
+            // is stored. Done once here; the attributes ride along on Clone() and survive re-seeding.
+            WriteRepresentativeInputs(concreteArch, sampleInputs);
+
+            return DeriveFromConcreteArch(c, concreteArch);
+        }
+
+        /// <summary>
+        /// The <b>derivation path</b> — shared by the initial build (once its concrete arch exists) and
+        /// every <c>With…</c> derivation. Reuses the already-<paramref name="concreteArch"/> (NO
+        /// <c>ToConcreteArchitecture</c>, NO sample inputs — the model constituent never changes under a
+        /// derivation; the shape metadata shape inference needs is read off the arch's own
+        /// representative-input attributes), re-validates the swappable loss / optimizer constituent
+        /// kinds, composes the in-memory <c>trainstep</c>, and initializes / optimizes it. The receiver
+        /// is never mutated: the concrete arch is shared by reference (its consumers clone before
+        /// mutating); only the trainstep is derived anew.
+        /// </summary>
+        private static TrainingRig DeriveFromConcreteArch(
+            RigConstituents constituents,
+            InternalComputationGraph concreteArch)
+        {
+            var c = constituents;
+            ValidateConstituents(c);
+
+            // Loss and optimizer are composed as module bodies and must be module graphs; re-validated
+            // on every derivation so a swapped constituent is checked. The model is not re-checked — it
+            // is already the concrete arch and never changes on a derivation.
+            c.Loss.RequireKind(GraphKind.Module, "TrainingRig (loss constituent)",
+                "Pass the loss module graph (e.g. Losses.L2Loss).");
+            c.Optimizer.RequireKind(GraphKind.Module, "TrainingRig (optimizer constituent)",
+                "Pass the optimizer module graph (e.g. Optimizers.Adam).");
+
+            var ctx = ComputeContext.Default;
+
+            var rig = new TrainingRig
+            {
+                _constituents = c,
+                _concreteArch = concreteArch,
+            };
+            rig.BuildTrainingStepPureGraph(
+                concreteArch, c.Loss.ToInternal(), c.Optimizer.ToInternal(), c.Hyperparameters, c.Names);
+            rig.InitializeAndOptimize(concreteArch, ctx, c.RngConfig);
             return rig;
         }
+
+        /// <summary>
+        /// Writes a representative input onto each of the concrete arch's <c>MODEL_TENSOR_INPUT</c> nodes
+        /// (in graph-input order, one per <paramref name="sampleInputs"/>), making the arch self-describing
+        /// for training-graph shape inference. The value is <b>zero-filled</b> (never the user's sample
+        /// values) and <b>shape-limited</b> by the shape-inference engine's small-tensor threshold: inputs
+        /// with at most
+        /// <see cref="Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements"/>
+        /// elements get a real zero payload; larger ones get a shape+dtype-only placeholder (no payload),
+        /// which is all the engine keeps for a tensor over that threshold anyway. Only concretization
+        /// (already done) needed input values; from here on only shapes matter, so this records exactly
+        /// the shape metadata.
+        /// </summary>
+        private static void WriteRepresentativeInputs(InternalComputationGraph concreteArch, NamedModelParam[] sampleInputs)
+        {
+            if (concreteArch.Inputs.Count != sampleInputs.Length)
+                throw new InvalidOperationException(
+                    $"Concrete arch has {concreteArch.Inputs.Count} input(s) but {sampleInputs.Length} " +
+                    "sample input(s) were supplied; they must correspond one-to-one in declaration order.");
+            var producerByOutput = BuildProducerByOutputMap(concreteArch);
+            for (int i = 0; i < concreteArch.Inputs.Count; i++)
+            {
+                if (!producerByOutput.TryGetValue(concreteArch.Inputs[i], out var node))
+                    throw new InvalidOperationException(
+                        $"Concrete arch input {concreteArch.Inputs[i]} has no producing node.");
+                if (node.OpCode != InternalOpCodes.MODEL_TENSOR_INPUT) continue;
+                var sample = sampleInputs[i].ToTensorData();
+                node.Attributes = node.Attributes.SetAttributes(
+                    (OnnxOpAttributeNames.ShrkAttrRepresentativeInput,
+                     (object?)RepresentativeInputFor(sample.Shape, sample.DType)));
+            }
+        }
+
+        /// <summary>
+        /// Reconstructs the <c>sampleInputs[]</c> array for shape inference off the concrete arch's
+        /// representative-input attributes (in graph-input order) — the derivation-path counterpart of
+        /// <see cref="WriteRepresentativeInputs"/>. Each stored tensor is fed straight to
+        /// <see cref="ShapeInferenceInterpreter"/>: a small one carries real zeros; a large one is a
+        /// shape+dtype-only placeholder that QEE reads shape-only (it never touches the tensor's memory
+        /// for a tensor above its threshold), so no large buffer is ever materialized.
+        /// </summary>
+        private static TensorData[] ReadRepresentativeInputs(InternalComputationGraph concreteArch)
+        {
+            var producerByOutput = BuildProducerByOutputMap(concreteArch);
+            var inputs = new TensorData[concreteArch.Inputs.Count];
+            for (int i = 0; i < concreteArch.Inputs.Count; i++)
+            {
+                if (!producerByOutput.TryGetValue(concreteArch.Inputs[i], out var node)
+                    || node.OpCode != InternalOpCodes.MODEL_TENSOR_INPUT)
+                    throw new InvalidOperationException(
+                        $"Concrete arch input {concreteArch.Inputs[i]} is not a MODEL_TENSOR_INPUT node; " +
+                        "cannot read its representative input.");
+                inputs[i] = node.Attributes.GetTensorVal(OnnxOpAttributeNames.ShrkAttrRepresentativeInput)
+                    ?? throw new InvalidOperationException(
+                        "Concrete arch input node carries no representative-input attribute; the rig was " +
+                        "not built through BuildInitialRig (which records it on every model input).");
+            }
+            return inputs;
+        }
+
+        /// <summary>
+        /// A zero-filled representative tensor for shape inference: a real zero payload when the element
+        /// count is within the consuming shape-inference engine's small-tensor threshold
+        /// (<see cref="Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements"/>),
+        /// else a shape+dtype-only placeholder (no allocation). Holds no sample-input values.
+        ///
+        /// <para>The threshold MUST match the one <see cref="ShapeInferenceInterpreter"/> hands its
+        /// <see cref="Shorokoo.Core.Inference.QuickExecutionEngine"/> (<c>MaxSmallTensorElements</c>),
+        /// not QEE's own <c>DefaultMaxDataElements</c>: a placeholder is legal input to QEE only when
+        /// its element count is <b>strictly above</b> the threshold QEE reads payloads at — otherwise
+        /// <see cref="Shorokoo.Core.Inference.Helpers.TensorDataConverter.ToRuntimeTensor"/> tries to read
+        /// the placeholder's elided memory and throws, defeating the whole QEE shape-inference pass. Below
+        /// the threshold we must therefore carry a real (zero) payload, exactly as the retired
+        /// <c>ZeroExemplar</c> did for every size.</para>
+        /// </summary>
+        private static TensorData RepresentativeInputFor(Shape shape, DType dtype)
+        {
+            if (shape.Count > Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements)
+                return new WeightPlaceholderTensorData(shape, dtype);
+            var bytesPerElement = dtype.EncodingBitCount / 8;
+            return TensorData.CreateFromRawBytes(shape, dtype, new byte[shape.Count * bytesPerElement]);
+        }
+
+        // ───────────────────── Two-layer rig: immutable derivations (§5.8.5) ─────────────────────
+        // A TrainingRig is an immutable value (consistent with the frozen ComputationGraph). None of
+        // the operations below mutate the receiver; each returns a NEW rig that shares the unchanged
+        // constituents (and their graphs) BY REFERENCE — via `record with` on RigConstituents — and
+        // re-derives only its own trainstep from the swapped constituent. Deriving is therefore free
+        // of aliasing surprises: the original rig is untouched.
+
+        /// <summary>
+        /// A new rig with the loss constituent replaced; its <c>trainstep</c> is re-derived, and the
+        /// model (its retained concrete arch), optimizer, hyperparameters and RNG config are shared by
+        /// reference.
+        /// </summary>
+        public TrainingRig WithLoss(ComputationGraph loss)
+        {
+            if (loss is null) throw new ArgumentNullException(nameof(loss));
+            return DeriveFromConcreteArch(_constituents with { Loss = loss }, _concreteArch);
+        }
+
+        /// <summary>
+        /// A new rig with the optimizer constituent (and its hyperparameters) replaced; optimizer
+        /// state is re-initialized as part of re-deriving the <c>trainstep</c>, everything else shared.
+        /// </summary>
+        public TrainingRig WithOptimizer(ComputationGraph optimizer, IOptimizerHyperparameters hyperparameters)
+        {
+            if (optimizer is null) throw new ArgumentNullException(nameof(optimizer));
+            if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
+            return DeriveFromConcreteArch(_constituents with
+            {
+                Optimizer = optimizer,
+                Hyperparameters = hyperparameters.InOptimizerOrder(),
+                Names = hyperparameters.HyperparameterNames,
+            }, _concreteArch);
+        }
+
+        /// <summary>Positional-hyperparameter overload of <see cref="WithOptimizer(ComputationGraph, IOptimizerHyperparameters)"/>.</summary>
+        public TrainingRig WithOptimizer(ComputationGraph optimizer, params Hyperparameter[] hyperparameters)
+        {
+            if (optimizer is null) throw new ArgumentNullException(nameof(optimizer));
+            if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
+            return DeriveFromConcreteArch(
+                _constituents with { Optimizer = optimizer, Hyperparameters = hyperparameters, Names = null },
+                _concreteArch);
+        }
+
+        /// <summary>
+        /// A new rig with the scheduler swapped, keeping the optimizer graph — the schedule rides in
+        /// the hyperparameters (a baked constant, a built-in <see cref="Schedule"/>, or a scheduler
+        /// module per field) until #106 folds the scheduler into its own persisted constituent. Only
+        /// the <c>trainstep</c> is re-derived; the model, loss and optimizer graphs are shared.
+        /// </summary>
+        public TrainingRig WithScheduler(IOptimizerHyperparameters hyperparameters)
+        {
+            if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
+            return DeriveFromConcreteArch(_constituents with
+            {
+                Hyperparameters = hyperparameters.InOptimizerOrder(),
+                Names = hyperparameters.HyperparameterNames,
+            }, _concreteArch);
+        }
+
+        /// <summary>Positional-hyperparameter overload of <see cref="WithScheduler(IOptimizerHyperparameters)"/>.</summary>
+        public TrainingRig WithScheduler(params Hyperparameter[] hyperparameters)
+        {
+            if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
+            return DeriveFromConcreteArch(
+                _constituents with { Hyperparameters = hyperparameters, Names = null },
+                _concreteArch);
+        }
+
+        /// <summary>
+        /// A new rig re-seeded with <paramref name="rngConfig"/> — the model's (and other drawing
+        /// constituents') RNG identity is re-initialized, everything else shared by reference. Unlike
+        /// the other derivations, WithSeed does change the concrete arch: the RNG identity is bound into
+        /// its RngSeed parameter, so re-seeding rebinds it. That binding mutates, so this rig's retained
+        /// arch is left untouched — a <b>clone</b> is re-keyed and the new rig derives from that. It is
+        /// still only a rebind, not a re-concretization: the model constituent's structure is unchanged,
+        /// so no <c>ToConcreteArchitecture</c> and no sample inputs are needed; re-initialization then
+        /// re-draws every trainable parameter on the new seed's keyed streams (§2.5). The design's
+        /// cheaper path (share even the trainstep, re-derive only the compiled session, since the seed
+        /// rides as an aliased param value) rests on the #22 param-identity substrate; until that lands
+        /// the re-seed re-derives the trainstep, which is correct and equally immutable.
+        /// </summary>
+        public TrainingRig WithSeed(RngConfig rngConfig)
+        {
+            if (rngConfig is null) throw new ArgumentNullException(nameof(rngConfig));
+            // Rebind the new RNG identity on a clone (ApplyRngConfig mutates), keeping this rig's
+            // retained arch pristine. Clone() copies node attributes by reference, so the clone's
+            // MODEL_TENSOR_INPUT nodes still carry the representative-input attributes (same model inputs).
+            var reArch = _concreteArch.Clone();
+            reArch.ApplyRngConfig(rngConfig);
+            return DeriveFromConcreteArch(_constituents with { RngConfig = rngConfig }, reArch);
+        }
+
+        /// <summary>
+        /// Extracts the inference model for a checkpoint — a <b>pure read off the model constituent's
+        /// mapping</b> (§5.8.2): bind the checkpoint's model-owned params (trainable weights + module
+        /// state) by their canonical identifiers into the rig's retained concrete arch. No
+        /// re-concretization and no sample inputs — the arch was concretized once at build (at all
+        /// inputs, so a multi-input model extracts correctly) and is reused. No copy step, no
+        /// which-tensors-belong-to-inference heuristic; because model-owned parameter identity is
+        /// preserved across composition, the tensors the <c>trainstep</c> updated bind straight back
+        /// into the inference model by the same name.
+        /// </summary>
+        public ComputationGraph ExtractInferenceModel(TrainingCheckpoint checkpoint)
+            => new(BindInferenceWeights(checkpoint), GraphKind.ConcreteModel);
+
+        /// <summary>
+        /// The single weight-binding step shared by <see cref="ExtractInferenceModel"/> (and thus
+        /// <see cref="TrainingCheckpoint.ToInferenceModel()"/>) and the <c>.skpt</c> container's
+        /// self-describing model, so the two can never disagree on how a checkpoint concretizes: bind
+        /// the checkpoint's model-owned params — its trainable weights AND its module-owned state
+        /// (BatchNorm running stats, …), each by its canonical identifier — into the rig's retained
+        /// concrete arch. The arch is consumed read-only (<c>ToConcreteModel</c> clones before
+        /// binding), so this never disturbs the retained graph. For a stateless model
+        /// <see cref="TrainingCheckpoint.ModelState"/> is empty, so this is a trainable-only bind.
+        /// </summary>
+        internal InternalComputationGraph BindInferenceWeights(TrainingCheckpoint checkpoint)
+        {
+            if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
+            var weights = new ModelParamList(
+                checkpoint.TrainableParams.Fields
+                    .Where(f => f.Value is TensorData)
+                    .Concat(checkpoint.ModelState.Fields.Where(f => f.Value is TensorData))
+                    .Select(f => new KeyValuePair<string, TensorData>(f.Key, (TensorData)f.Value)),
+                ModelParamType.TrainableParam);
+            return _concreteArch.ToConcreteModel(weights, _concreteArch.GetShorokooIdNamingScheme());
+        }
+
+        /// <summary>
+        /// Returns a NEW checkpoint identical to <paramref name="checkpoint"/> — same trainable params,
+        /// model state, optimizer state, counters and loss — but with its <see cref="TrainingCheckpoint.Rig"/>
+        /// set to this rig, so <see cref="TrainingCheckpoint.ToInferenceModel()"/> and rig-based load/save
+        /// work against it. Validates that the checkpoint's field definitions are compatible with this rig
+        /// (trainable-param, model-state and optimizer-state field names and shapes must match); throws a
+        /// clear <see cref="ArgumentException"/> otherwise. The argument is not mutated.
+        /// </summary>
+        public TrainingCheckpoint AdoptCheckpoint(TrainingCheckpoint checkpoint)
+        {
+            if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
+            AssertStructDefCompatible(checkpoint.TrainableParams.Definition, TrainableParamStructDef, "trainable-parameter");
+            AssertStructDefCompatible(checkpoint.ModelState.Definition, ModelStateDef, "model-state");
+            AssertStructDefCompatible(checkpoint.OptimizerState.Definition, OptimizerStateDef, "optimizer-state");
+            return new TrainingCheckpoint(
+                checkpoint.TrainableParams, checkpoint.ModelState, checkpoint.OptimizerState,
+                checkpoint.Step, checkpoint.Epoch, checkpoint.BatchIndex, this, checkpoint.Loss);
+        }
+
+        /// <summary>Fails loud when a checkpoint's struct def does not match this rig's, by field
+        /// names and per-field rank/dtype/structure (the compatibility contract for adoption/load).</summary>
+        private static void AssertStructDefCompatible(TensorStructDef actual, TensorStructDef expected, string kind)
+        {
+            if (actual.Fields.Length != expected.Fields.Length)
+                throw new ArgumentException(
+                    $"Checkpoint's {kind} definition has {actual.Fields.Length} field(s), but this rig " +
+                    $"expects {expected.Fields.Length}. The checkpoint was produced by a different model/optimizer.");
+            for (int i = 0; i < expected.Fields.Length; i++)
+            {
+                var e = expected.Fields[i];
+                var a = actual.GetField(e.Name)
+                    ?? throw new ArgumentException(
+                        $"Checkpoint's {kind} definition is missing field '{e.Name}' this rig expects. " +
+                        "The checkpoint was produced by a different model/optimizer.");
+                if (a.Rank != e.Rank || a.ElementType != e.ElementType || a.Structure != e.Structure)
+                    throw new ArgumentException(
+                        $"Checkpoint's {kind} field '{e.Name}' (rank {a.Rank?.ToString() ?? "?"}, {a.ElementType}) " +
+                        $"does not match this rig's (rank {e.Rank?.ToString() ?? "?"}, {e.ElementType}). " +
+                        "The checkpoint was produced by a different model/optimizer.");
+            }
+        }
+
+        /// <summary>The rig's initial trainable-parameter values, as a struct (for load-time defaults).</summary>
+        internal TensorDataStruct InitialTrainableStruct => new(TrainableParamStructDef, _initialParamFields);
+
+        /// <summary>The rig's initial model-state values, as a struct (for load-time defaults).</summary>
+        internal TensorDataStruct InitialModelStateStruct => new(ModelStateDef, _initialStateFields);
+
+        /// <summary>The rig's initial optimizer-state values, as a struct (for load-time defaults).</summary>
+        internal TensorDataStruct InitialOptimizerStateStruct => new(OptimizerStateDef, _initialOptStateFields);
 
         /// <summary>
         /// Builds the TrainingStepPureGraph by composing model + loss + autograd + optimizer.
@@ -901,7 +1485,7 @@ namespace Shorokoo
             HyperparameterStructDef = new TensorStructDef(hyperFields, "Hyperparameters");
             DynamicHyperparameterNames = hyperFields.Select(f => f.Name).ToArray();
 
-            // Runtime-hyper optimizer-index → field name, for the D5 CreateDefaultCheckpoint override.
+            // Runtime-hyper optimizer-index → field name, for the D5 CreateInitialCheckpoint override.
             _runtimeHyperNameByOptIndex = new Dictionary<int, string>();
             for (int i = 0; i < runtimeIndices.Count; i++)
                 _runtimeHyperNameByOptIndex[runtimeIndices[i]] = hyperFields[i].Name;
@@ -1433,8 +2017,9 @@ namespace Shorokoo
         /// <param name="trainingInput">Training input data as TensorDataStruct</param>
         /// <param name="trainingOutput">Training target data as TensorDataStruct</param>
         /// <param name="compiled">Compiled training step graph (from <see cref="ComputeContext.Compile(ComputationGraph)"/>)</param>
-        /// <returns>Result containing the advanced checkpoint and loss value</returns>
-        public TrainingStepResult TrainStep(
+        /// <returns>The post-step checkpoint (advanced step, updated params/state) with its
+        /// <see cref="TrainingCheckpoint.Loss"/> set to this step's loss.</returns>
+        public TrainingCheckpoint TrainStep(
             TrainingCheckpoint checkpoint,
             TensorDataStruct trainingInput,
             TensorDataStruct trainingOutput,
@@ -1464,8 +2049,9 @@ namespace Shorokoo
         /// <param name="trainingInput">Training input data as TensorDataStruct</param>
         /// <param name="trainingOutput">Training target data as TensorDataStruct</param>
         /// <param name="compiled">Compiled training step graph (from <see cref="ComputeContext.Compile(ComputationGraph)"/>)</param>
-        /// <returns>Result containing the advanced checkpoint and loss value</returns>
-        public TrainingStepResult TrainStep(
+        /// <returns>The post-step checkpoint (advanced step, updated params/state) with its
+        /// <see cref="TrainingCheckpoint.Loss"/> set to this step's loss.</returns>
+        public TrainingCheckpoint TrainStep(
             TrainingCheckpoint checkpoint,
             TensorDataStruct hyperparams,
             TensorDataStruct trainingInput,
@@ -1485,7 +2071,7 @@ namespace Shorokoo
             _ => throw new InvalidOperationException($"Unknown scheduler counter input '{counter}'."),
         };
 
-        private TrainingStepResult RunStep(
+        private TrainingCheckpoint RunStep(
             TrainingCheckpoint checkpoint,
             TensorDataStruct? hyperparams,
             TensorDataStruct trainingInput,
@@ -1560,9 +2146,11 @@ namespace Shorokoo
                 updatedOptimizerState,
                 checkpoint.Step + 1,
                 checkpoint.Epoch,
-                checkpoint.BatchIndex);
+                checkpoint.BatchIndex,
+                this,
+                lossValue);
 
-            return new TrainingStepResult(newCheckpoint, lossValue);
+            return newCheckpoint;
         }
 
         /// <summary>
@@ -1600,9 +2188,9 @@ namespace Shorokoo
 
                 for (int i = 0; i < trainingInputs.Length; i++)
                 {
-                    var result = TrainStep(checkpoint, trainingInputs[i], trainingOutputs[i], compiled);
-                    checkpoint = result.Checkpoint;
-                    epochLoss += result.Loss;
+                    checkpoint = TrainStep(checkpoint, trainingInputs[i], trainingOutputs[i], compiled);
+                    // TrainStep sets the post-step checkpoint's Loss to this step's loss.
+                    epochLoss += checkpoint.Loss!.Value;
                 }
 
                 epochLosses[epoch] = epochLoss / trainingInputs.Length;
@@ -1617,7 +2205,7 @@ namespace Shorokoo
         /// Scheduled hyperparameters are applied automatically (the global step advances across epochs
         /// via the checkpoint), so the schedule sees a monotonically increasing step. Alias for
         /// <see cref="Train"/>. <paramref name="initialCheckpoint"/> defaults to
-        /// <see cref="CreateDefaultCheckpoint()"/> and <paramref name="ctx"/> defaults to
+        /// <see cref="CreateInitialCheckpoint()"/> and <paramref name="ctx"/> defaults to
         /// <see cref="ComputeContext.Default"/>, so a minimal call is
         /// <c>rig.Fit(inputs, targets, numEpochs: 10)</c>.
         /// </summary>
@@ -1627,7 +2215,7 @@ namespace Shorokoo
             int numEpochs,
             TrainingCheckpoint? initialCheckpoint = null,
             ComputeContext? ctx = null)
-            => Train(initialCheckpoint ?? CreateDefaultCheckpoint(), trainingInputs, trainingOutputs, numEpochs, ctx ?? ComputeContext.Default);
+            => Train(initialCheckpoint ?? CreateInitialCheckpoint(), trainingInputs, trainingOutputs, numEpochs, ctx ?? ComputeContext.Default);
 
         /// <summary>
         /// Returns the default initial checkpoint produced at <see cref="FromScratch(ComputationGraph, ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?)"/> time.
@@ -1638,33 +2226,34 @@ namespace Shorokoo
         ///
         /// <para><b>Fails loud (D5)</b> when the optimizer's state initializer actually reads a
         /// <see cref="HyperparameterKind.Runtime"/> hyperparameter, whose value is unknown at build:
-        /// supply explicit initial values via <see cref="CreateDefaultCheckpoint(TensorDataStruct)"/>
+        /// supply explicit initial values via <see cref="CreateInitialCheckpoint(TensorDataStruct)"/>
         /// (build them with <see cref="MakeHyperparameters(float)"/>). No silent placeholder is ever
         /// fed to an initializer that reads it.</para>
         /// </summary>
-        public TrainingCheckpoint CreateDefaultCheckpoint()
+        public TrainingCheckpoint CreateInitialCheckpoint()
         {
             if (_stateInitNeedsRuntimeHypers)
                 throw new InvalidOperationException(
                     "This optimizer's state initializer reads runtime hyperparameter(s) " +
                     $"[{string.Join(", ", _stateInitConsumedRuntimeHyperNames)}], whose value is not " +
                     "known when the checkpoint is created. Supply explicit initial values via " +
-                    "CreateDefaultCheckpoint(MakeHyperparameters(...)).");
+                    "CreateInitialCheckpoint(MakeHyperparameters(...)).");
             return new TrainingCheckpoint(
                 new TensorDataStruct(TrainableParamStructDef, _initialParamFields),
                 new TensorDataStruct(ModelStateDef, _initialStateFields),
-                new TensorDataStruct(OptimizerStateDef, _initialOptStateFields));
+                new TensorDataStruct(OptimizerStateDef, _initialOptStateFields),
+                rig: this);
         }
 
         /// <summary>
-        /// Like <see cref="CreateDefaultCheckpoint()"/>, but with explicit initial values for the
+        /// Like <see cref="CreateInitialCheckpoint()"/>, but with explicit initial values for the
         /// <see cref="HyperparameterKind.Runtime"/> hyperparameters (build the struct with
         /// <see cref="MakeHyperparameters(float)"/> / <see cref="MakeHyperparameters(ValueTuple{string, float}[])"/>
         /// — the same struct the per-step override <c>TrainStep</c> takes). Required (D5) when the
         /// optimizer's state initializer reads a runtime hyperparameter; harmless otherwise. Baked and
         /// scheduled hyperparameters still contribute their build-time value at the initial counters.
         /// </summary>
-        public TrainingCheckpoint CreateDefaultCheckpoint(TensorDataStruct hyperparameters)
+        public TrainingCheckpoint CreateInitialCheckpoint(TensorDataStruct hyperparameters)
         {
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
             var optState = OptimizerStateDef.Fields.Length > 0
@@ -1674,7 +2263,8 @@ namespace Shorokoo
             return new TrainingCheckpoint(
                 new TensorDataStruct(TrainableParamStructDef, _initialParamFields),
                 new TensorDataStruct(ModelStateDef, _initialStateFields),
-                new TensorDataStruct(OptimizerStateDef, optState));
+                new TensorDataStruct(OptimizerStateDef, optState),
+                rig: this);
         }
 
         /// <summary>
@@ -1705,7 +2295,7 @@ namespace Shorokoo
                 {
                     throw new ArgumentException(
                         $"The optimizer's state initializer reads runtime hyperparameter '{name}', but no " +
-                        "value for it was supplied. Pass it via CreateDefaultCheckpoint(MakeHyperparameters(...)).",
+                        "value for it was supplied. Pass it via CreateInitialCheckpoint(MakeHyperparameters(...)).",
                         nameof(runtimeHypers));
                 }
                 else
@@ -1773,7 +2363,7 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Loads a checkpoint previously written by <see cref="TrainingCheckpoint.Save(string)"/>
+        /// Loads a checkpoint previously written by <see cref="TrainingCheckpoint.Save(string, CheckpointComponents?)"/>
         /// (legacy flat safetensors) or <see cref="Persistence.SaveTrainingCheckpointToSkpt"/> (the
         /// native .skpt container) — the on-disk shape is detected automatically — reconstructing it
         /// against this rig's parameter/state struct definitions so training resumes exactly where it
@@ -1783,8 +2373,8 @@ namespace Shorokoo
         /// rig — e.g. a checkpoint produced by a different model or optimizer. The rig must be built
         /// from the same model/loss/optimizer graphs as the one that saved the checkpoint.
         /// </summary>
-        public TrainingCheckpoint LoadCheckpoint(string filePath)
-            => Persistence.LoadTrainingCheckpoint(filePath, TrainableParamStructDef, ModelStateDef, OptimizerStateDef);
+        public TrainingCheckpoint LoadCheckpoint(string filePath, CheckpointComponents? components = null)
+            => TrainingCheckpoint.Load(filePath, this, components);
 
         /// <summary>
         /// Packs a single dynamic hyperparameter value into a <see cref="TensorDataStruct"/> for the
@@ -1799,7 +2389,7 @@ namespace Shorokoo
                     $"MakeHyperparameters(float) requires exactly one dynamic hyperparameter; this rig has " +
                     $"{HyperparameterStructDef.Fields.Length} ([{string.Join(", ", DynamicHyperparameterNames)}]). " +
                     "Use MakeHyperparameters((name, value), …).");
-            return PackHyperparams(new[] { value });
+            return PackHyperparams([value]);
         }
 
         /// <summary>
@@ -1859,10 +2449,15 @@ namespace Shorokoo
         /// </summary>
         private void InitializeAndOptimize(
             InternalComputationGraph concreteArch,
-            NamedModelParam[] sampleInputs,
             ComputeContext ctx,
             RngConfig? rngConfig = null)
         {
+            // The model inputs for shape inference are read off the concrete arch's own
+            // representative-input attributes (recorded once at BuildInitialRig) — no separate
+            // sample-input field. Zero-filled shapes for small inputs; shape+dtype-only placeholders
+            // for large ones (QEE keeps those shape-only anyway), so no big buffer is materialized.
+            var modelInputExemplars = ReadRepresentativeInputs(concreteArch);
+
             // Step 1: walk concreteArch's MODEL_PARAM nodes in linear order to capture
             // each one's (ModelId, isTrainable). The same linear order is what Phase 1's
             // FastReplaceTrainableParamsWithInputProcessor used to build the param /
@@ -1916,7 +2511,7 @@ namespace Shorokoo
                         "Optimizer state fields exist but no state-init graph was produced.");
 
                 // D5: which hyperparameters does the state-init graph actually consume? A runtime hyper
-                // it reads has no build-time value, so defer to CreateDefaultCheckpoint(hyperparameters)
+                // it reads has no build-time value, so defer to CreateInitialCheckpoint(hyperparameters)
                 // and fail loud on the no-arg path — no silent placeholder ever reaches an initializer.
                 _stateInitConsumedHyperIndices =
                     ConsumedInputIndices(stateInitGraph, _hyperparamInitialCounterValues.Length);
@@ -1929,8 +2524,8 @@ namespace Shorokoo
                 // Always compute state seed values so shape inference / optimization below has
                 // shape-correct optimizer-state tensors. A consumed runtime hyper contributes an
                 // internal 0 placeholder here (shape only — the state init is shape-driven); the real
-                // value is required (and recomputed) in CreateDefaultCheckpoint(hyperparameters), and
-                // the no-arg CreateDefaultCheckpoint fails loud on the _stateInitNeedsRuntimeHypers flag.
+                // value is required (and recomputed) in CreateInitialCheckpoint(hyperparameters), and
+                // the no-arg CreateInitialCheckpoint fails loud on the _stateInitNeedsRuntimeHypers flag.
                 _initialOptStateFields = ComputeInitialOptStateFields(
                     ResolveStateInitHyperValues(null, throwOnMissingConsumed: false), ctx);
             }
@@ -1941,8 +2536,7 @@ namespace Shorokoo
             // second initializer-execution pass.
             var shapeInferencer = new ShapeInferenceInterpreter(ctx);
             var concreteModel = Shorokoo.Core.Nodes.Processors.Fast.FastApplyModelParamValues.Process(concreteArch, paramValuesById);
-            var modelInputTensors = sampleInputs.Select(p => p.ToTensorData()).ToArray();
-            var modelShapeInfo = shapeInferencer.Infer(concreteModel, modelInputTensors);
+            var modelShapeInfo = shapeInferencer.Infer(concreteModel, modelInputExemplars);
             var modelOutputInfo = modelShapeInfo.GetTensorInfo(concreteModel.Outputs[0])
                 ?? throw new InvalidOperationException(
                     "Shape inference of concrete model graph failed to produce an output shape.");
@@ -1963,11 +2557,11 @@ namespace Shorokoo
                 - HyperparameterStructDef.Fields.Length
                 - counterFieldCount
                 - targetFieldCount;
-            if (sampleInputs.Length != expectedModelInputFields)
+            if (modelInputExemplars.Length != expectedModelInputFields)
                 throw new ArgumentException(
-                    $"Expected {expectedModelInputFields} sample inputs (one per model input field), " +
-                    $"got {sampleInputs.Length}.",
-                    nameof(sampleInputs));
+                    $"Expected {expectedModelInputFields} model-input shape exemplars (one per model " +
+                    $"input field), got {modelInputExemplars.Length}.",
+                    nameof(modelInputExemplars));
 
             var allInputs = new TensorData[graph.Inputs.Count];
             var idx = 0;
@@ -1990,10 +2584,10 @@ namespace Shorokoo
             foreach (var _ in _counterInputNames)
                 allInputs[idx++] = (TensorData)Shorokoo.Globals.TensorData(Array.Empty<long>(), 0L);
 
-            // Model-input fields: one per sample input (in the order the user provided them,
-            // which matches the model graph's input order).
-            foreach (var sample in sampleInputs)
-                allInputs[idx++] = sample.ToTensorData();
+            // Model-input fields: one zero-filled shape exemplar per model input, in the model
+            // graph's input order — shape inference reads only their shapes.
+            foreach (var exemplar in modelInputExemplars)
+                allInputs[idx++] = exemplar;
 
             // Remaining inputs are target fields (typically one Tensor target for L2/CE losses).
             // Synthesize zero tensors with the predicted output shape.
@@ -2022,4 +2616,23 @@ namespace Shorokoo
             _trainingStepWorkGraph = null;
         }
     }
+
+    /// <summary>
+    /// The immutable <b>constituent</b> layer of a <see cref="TrainingRig"/> (§5.8): the swappable
+    /// source-of-truth models plus the hyperparameters and RNG config needed to (re-)derive the
+    /// in-memory <c>trainstep</c>. A <c>With…</c> derivation produces a new value with <c>record
+    /// with</c>, sharing every unchanged constituent (and its graph) by reference and re-deriving only
+    /// what changed. Sample inputs are deliberately NOT here: they are a construction-time argument,
+    /// consumed once to produce the rig's retained concrete arch (and its shape exemplars) and never
+    /// stored — the derivation path reuses that arch, so it needs no sample inputs. Held as an
+    /// implementation value on the rig; the rig exposes the individual constituents through its own
+    /// public accessors.
+    /// </summary>
+    internal sealed record RigConstituents(
+        ComputationGraph Model,
+        ComputationGraph Loss,
+        ComputationGraph Optimizer,
+        Hyperparameter[] Hyperparameters,
+        IReadOnlyList<string>? Names,
+        RngConfig RngConfig);
 }

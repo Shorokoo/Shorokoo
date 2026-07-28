@@ -346,7 +346,7 @@ public class CodegenFreeModuleTests
             },
             0.1f);
 
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         Assert.Single(rig.TrainableParamStructDef.Fields);
         var weightField = rig.TrainableParamStructDef.Fields[0].Name;
         var initialWeight = ((TensorData<float32>)initial.TrainableParams.Fields[weightField]).AccessMemory()[0];
@@ -367,8 +367,8 @@ public class CodegenFreeModuleTests
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var stepResult = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
 
-        Assert.True(float.IsFinite(stepResult.Loss));
-        var steppedWeight = ((TensorData<float32>)stepResult.Checkpoint.TrainableParams.Fields[weightField]).AccessMemory()[0];
+        Assert.True(float.IsFinite(stepResult.Loss!.Value));
+        var steppedWeight = ((TensorData<float32>)stepResult.TrainableParams.Fields[weightField]).AccessMemory()[0];
         Assert.NotEqual(initialWeight, steppedWeight);
     }
 

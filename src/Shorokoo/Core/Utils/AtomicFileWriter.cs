@@ -6,7 +6,7 @@ namespace Shorokoo.Core.Utils
     /// commit rename is atomic), flushed to disk, then renamed onto the target. On any failure
     /// the staged copy is deleted and the previous target is left untouched — a crash mid-save
     /// never corrupts the existing file. This is the designated write path for every
-    /// save/export API (see <see cref="TrainingCheckpoint.Save(string)"/>); it carries no assumptions
+    /// save/export API (see <see cref="TrainingCheckpoint.Save(string, CheckpointComponents?)"/>); it carries no assumptions
     /// about what is being written.
     /// </summary>
     /// <remarks>

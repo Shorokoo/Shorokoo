@@ -192,18 +192,18 @@ public class NormActTrainingCoverageTests
 
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", targetData),
             compiled);
 
-        Assert.True(float.IsFinite(step.Loss), $"training-step loss must be finite; got {step.Loss}");
+        Assert.True(float.IsFinite(step.Loss!.Value), $"training-step loss must be finite; got {step.Loss!.Value}");
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
         bool anyMoved = rig.TrainableParamStructDef.Fields.Any(field =>
         {
             var before = Floats(initial.TrainableParams.Fields[field.Name]);
-            var after = Floats(step.Checkpoint.TrainableParams.Fields[field.Name]);
+            var after = Floats(step.TrainableParams.Fields[field.Name]);
             return before.Zip(after).Any(p => MathF.Abs(p.First - p.Second) > 1e-9f);
         });
         Assert.True(anyMoved, "no trainable param moved — no gradient flowed through the layer");
@@ -279,7 +279,7 @@ public class NormActTrainingCoverageTests
             Inputs(), 0.01f);
         Assert.Single(cwRig.TrainableParamStructDef.Fields);
         var cwSlope = cwRig.TrainableParamStructDef.Fields[0];
-        var cwInit = cwRig.CreateDefaultCheckpoint();
+        var cwInit = cwRig.CreateInitialCheckpoint();
         Assert.Equal((int)c, Floats(cwInit.TrainableParams.Fields[cwSlope.Name]).Length);
 
         // Shared sibling: its slope is [1] (1 element) regardless of C.
@@ -288,7 +288,7 @@ public class NormActTrainingCoverageTests
             Inputs(), 0.01f);
         Assert.Single(sharedRig.TrainableParamStructDef.Fields);
         var sharedSlope = sharedRig.TrainableParamStructDef.Fields[0];
-        var sharedInit = sharedRig.CreateDefaultCheckpoint();
+        var sharedInit = sharedRig.CreateInitialCheckpoint();
         Assert.Equal(1, Floats(sharedInit.TrainableParams.Fields[sharedSlope.Name]).Length);
     }
 
@@ -328,7 +328,7 @@ public class NormActTrainingCoverageTests
 
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
 
         // Sanity: the single slope param is [C] and starts uniform at 0.25.
         Assert.Single(rig.TrainableParamStructDef.Fields);
@@ -341,9 +341,9 @@ public class NormActTrainingCoverageTests
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", targetData),
             compiled);
-        Assert.True(float.IsFinite(step.Loss), $"training-step loss must be finite; got {step.Loss}");
+        Assert.True(float.IsFinite(step.Loss!.Value), $"training-step loss must be finite; got {step.Loss!.Value}");
 
-        float[] slope1 = Floats(step.Checkpoint.TrainableParams.Fields[slopeName]);
+        float[] slope1 = Floats(step.TrainableParams.Fields[slopeName]);
         Assert.Equal((int)c, slope1.Length);
 
         // The post-step [C] slopes must NOT all be equal — at least two channels differ

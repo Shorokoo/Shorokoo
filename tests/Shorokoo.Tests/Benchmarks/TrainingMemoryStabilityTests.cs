@@ -74,15 +74,15 @@ public class TrainingMemoryStabilityTests
         var targetBatch = rig.TargetDef.FromOrderedData(
             TensorData(TargetShape, new float[] { 1f, 0f, 1f, 0f }));
 
-        var ckpt = rig.CreateDefaultCheckpoint();
+        var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < WarmupSteps; i++)
-            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled).Checkpoint;
+            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled);
 
         long managedBefore = LiveManagedBytes();
         long rssBefore = WorkingSetBytes();
 
         for (int i = 0; i < MeasuredSteps; i++)
-            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled).Checkpoint;
+            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled);
 
         long managedAfter = LiveManagedBytes();
         long rssAfter = WorkingSetBytes();

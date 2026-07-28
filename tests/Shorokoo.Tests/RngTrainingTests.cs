@@ -73,14 +73,14 @@ public class RngTrainingTests
 
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var checkpoint = rig.CreateDefaultCheckpoint();
+        var checkpoint = rig.CreateInitialCheckpoint();
 
         var losses = new float[steps];
         for (int i = 0; i < steps; i++)
         {
             var step = rig.TrainStep(checkpoint, inputBatch, targetBatch, compiled);
-            losses[i] = step.Loss;
-            checkpoint = step.Checkpoint;
+            losses[i] = step.Loss!.Value;
+            checkpoint = step;
         }
         return (losses, rig, checkpoint);
     }
@@ -131,7 +131,7 @@ public class RngTrainingTests
             var rig = TrainingRig.FromScratch(
                 SwitchInitLinear.ComputationGraph, L2Loss.ComputationGraph,
                 SGDOptimizer.ComputationGraph, sample, cfg, 0.05f);
-            var ckpt = rig.CreateDefaultCheckpoint();
+            var ckpt = rig.CreateInitialCheckpoint();
             var name = rig.TrainableParamStructDef.Fields[0].Name;
             return ((TensorData<float32>)ckpt.TrainableParams.Fields[name]).AccessMemory().ToArray();
         }
@@ -182,8 +182,8 @@ public class RngTrainingTests
             for (int i = 0; i < resumedLosses.Length; i++)
             {
                 var step = rigC.TrainStep(resumed, inputBatch, targetBatch, compiledC);
-                resumedLosses[i] = step.Loss;
-                resumed = step.Checkpoint;
+                resumedLosses[i] = step.Loss!.Value;
+                resumed = step;
             }
 
             // Bit-exact continuation: the resumed losses ARE the uninterrupted run's steps

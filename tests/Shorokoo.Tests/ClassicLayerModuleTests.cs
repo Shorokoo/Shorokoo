@@ -76,7 +76,7 @@ public class ClassicLayerTrainingCoverageTests
             new NamedModelParam[] { new TensorDataModelParam("input", ModelParamType.InputParam, inputData) },
             0.01f);
 
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         Assert.NotEmpty(initial.ModelState.Fields);
 
         var ctx = new ComputeContext();
@@ -86,14 +86,14 @@ public class ClassicLayerTrainingCoverageTests
             MakeBatch("targets", "Target", targetData),
             compiled);
 
-        Assert.True(float.IsFinite(step.Loss), $"BatchNorm1d training-mode loss must be finite; got {step.Loss}");
+        Assert.True(float.IsFinite(step.Loss!.Value), $"BatchNorm1d training-mode loss must be finite; got {step.Loss!.Value}");
 
         // The training pass must EMA-update the running statistics.
         Assert.NotEmpty(rig.ModelStateDef.Fields);
         foreach (var field in rig.ModelStateDef.Fields)
         {
             var before = Floats(initial.ModelState.Fields[field.Name]);
-            var after = Floats(step.Checkpoint.ModelState.Fields[field.Name]);
+            var after = Floats(step.ModelState.Fields[field.Name]);
             Assert.True(before.Zip(after).Any(p => MathF.Abs(p.First - p.Second) > 1e-7f),
                 $"running stat '{field.Name}' was not updated by a training-mode pass");
         }

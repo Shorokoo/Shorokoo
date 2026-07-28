@@ -182,9 +182,26 @@ public partial class BatchedMatmulModel
 }
 
 /// <summary>
+/// Two-input model: y = a·wa + b·wb, with two trainable scalar weights. Used to prove the
+/// multi-input inference-extraction path (<see cref="TrainingRig.ExtractInferenceModel"/> /
+/// <see cref="TrainingCheckpoint.ToInferenceModel()"/> bind weights into a retained concrete arch that
+/// was concretized at ALL the rig's inputs, not just the first).
+/// </summary>
+[Module]
+public partial class TwoInputSumModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> a, Tensor<float32> b)
+    {
+        var wa = InitScalarWeight.Init(Vector(1L));
+        var wb = InitScalarWeight.Init(Vector(1L));
+        return a * wa + b * wb;
+    }
+}
+
+/// <summary>
 /// Coverage-purpose training-rig pipeline tests. Each [Fact] drives the full
 /// model + loss + optimizer composition through <see cref="TrainingRig.FromScratch"/>
-/// and <c>CreateDefaultCheckpoint</c> for a curated combination of modules.
+/// and <c>CreateInitialCheckpoint</c> for a curated combination of modules.
 ///
 /// <para>
 /// This file is structured like
@@ -228,7 +245,7 @@ public class TrainingRigCoverageTests
         var rig = TrainingRig.FromScratch(modelGraph, lossGraph, optimizerGraph,
             new NamedModelParam[] { sampleInput }, hyperparams);
 
-        var checkpoint = rig.CreateDefaultCheckpoint();
+        var checkpoint = rig.CreateInitialCheckpoint();
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
         Assert.NotNull(checkpoint.TrainableParams);
     }
@@ -257,7 +274,7 @@ public class TrainingRigCoverageTests
 
         var rig = TrainingRig.FromScratch(modelGraph, lossGraph, optimizerGraph,
             new NamedModelParam[] { sampleInput }, hyperparams);
-        var checkpoint = rig.CreateDefaultCheckpoint();
+        var checkpoint = rig.CreateInitialCheckpoint();
 
         // Concretize the inference model + Shorokoo naming scheme (the documented binding flow).
         var hints = new ModelParamList(
@@ -287,7 +304,7 @@ public class TrainingRigCoverageTests
     /// Coverage for the minimal pipeline: scalar-multiply model + L2 loss +
     /// plain SGD. Asserts initial weight equals 1.0 (the model's default
     /// trainable-param initializer) — a smoke check that
-    /// <c>CreateDefaultCheckpoint</c> wired initializers correctly.
+    /// <c>CreateInitialCheckpoint</c> wired initializers correctly.
     /// </summary>
     [Fact]
     public void TestScalarMultiplySgdCoverage()
@@ -303,7 +320,7 @@ public class TrainingRigCoverageTests
         var rig = TrainingRig.FromScratch(modelGraph, lossGraph, optimizerGraph,
             new NamedModelParam[] { sampleInput }, 0.01f);
 
-        var checkpoint = rig.CreateDefaultCheckpoint();
+        var checkpoint = rig.CreateInitialCheckpoint();
 
         Assert.Single(rig.TrainableParamStructDef.Fields);
         var weightField = rig.TrainableParamStructDef.Fields[0].Name;
@@ -359,6 +376,145 @@ public class TrainingRigCoverageTests
             SGDMomentumOptimizer.ComputationGraph, [4L, 64L], 0.5f, 0.9f);
         CoverFromScratch(DigitClassifier.ComputationGraph, SoftmaxL2Loss.ComputationGraph,
             AdamWOptimizer.ComputationGraph, [4L, 64L], 0.001f, 0.9f, 0.999f, 1e-8f, 0.01f);
+    }
+
+    /// <summary>
+    /// Coverage for the concrete arch's representative-input attribute across the
+    /// shape-inference size threshold. The rig records a zero-filled representative input
+    /// on each <c>MODEL_TENSOR_INPUT</c> node; inputs at or below
+    /// <see cref="Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements"/>
+    /// carry a real zero payload, larger ones a shape+dtype-only placeholder.
+    ///
+    /// <para>The <c>512</c> case pins a regression: the placeholder threshold must be the
+    /// engine's small-tensor limit (1024), not QEE's <c>DefaultMaxDataElements</c> (256).
+    /// With the wrong (256) threshold a 512-element input got a values-elided placeholder that
+    /// the shape-inference engine — which reads payloads up to 1024 — then tried to read,
+    /// throwing and collapsing the whole QEE pass so no output shape could be inferred. The
+    /// <c>256</c> (boundary), <c>1024</c> (boundary, real payload) and <c>2048</c>
+    /// (over-threshold, genuine placeholder — read shape-only, never materialized) cases fence
+    /// the boundary and exercise the placeholder path.</para>
+    /// </summary>
+    [Fact]
+    public void TestRepresentativeInputThresholdCoverage()
+    {
+        // Boundary at/below the small-tensor threshold: real zero payload.
+        CoverFromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, [256L], 0.01f);
+        // Regression window (256, 1024]: must be a real payload, not an elided placeholder.
+        CoverFromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, [512L], 0.01f);
+        CoverFromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, [1024L], 0.01f);
+        // Over the threshold: genuine shape+dtype-only placeholder, read shape-only by QEE.
+        CoverFromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, [2048L], 0.01f);
+    }
+
+    /// <summary>
+    /// The representative inputs live on the shared concrete arch and are re-read on every
+    /// derivation (<c>ReadRepresentativeInputs</c>). This drives an over-threshold input (so the
+    /// derivation path re-reads a shape-only placeholder and feeds it to shape inference) through
+    /// <see cref="TrainingRig.WithLoss"/>, <see cref="TrainingRig.WithOptimizer(ComputationGraph, Hyperparameter[])"/>
+    /// and <see cref="TrainingRig.WithScheduler(Hyperparameter[])"/>, asserting each derived rig
+    /// still builds a valid checkpoint — proving the attribute survives derivation and the
+    /// placeholder is never materialized on the re-read.
+    /// </summary>
+    [Fact]
+    public void TestRepresentativeInputSurvivesDerivationCoverage()
+    {
+        NamedModelParam[] sample =
+        [
+            new TensorDataModelParam("input", ModelParamType.InputParam,
+                TensorData([2048L], new float[2048])),
+        ];
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, sample, 0.01f);
+
+        var reLoss = rig.WithLoss(L2Loss.ComputationGraph);
+        Assert.NotNull(reLoss.CreateInitialCheckpoint().TrainableParams);
+
+        var reOpt = rig.WithOptimizer(SGDMomentumOptimizer.ComputationGraph, 0.5f, 0.9f);
+        Assert.NotEmpty(reOpt.CreateInitialCheckpoint().OptimizerState.Fields);
+
+        var reSched = reOpt.WithScheduler(0.25f, 0.9f);
+        Assert.NotNull(reSched.CreateInitialCheckpoint().TrainableParams);
+    }
+
+    /// <summary>
+    /// <see cref="TrainingRig.WithSeed"/> rebinds the RNG identity on a <c>Clone()</c> of the
+    /// concrete arch; <c>Clone</c> copies node attributes by reference, so the reseeded arch's
+    /// <c>MODEL_TENSOR_INPUT</c> nodes must still carry their representative-input attributes.
+    /// A checkpoint built from the reseeded rig (whose derivation re-reads those attributes for
+    /// shape inference) therefore has to succeed. Uses an over-threshold input so the carried
+    /// attribute is a shape-only placeholder.
+    /// </summary>
+    [Fact]
+    public void TestRepresentativeInputSurvivesReSeedCoverage()
+    {
+        NamedModelParam[] sample =
+        [
+            new TensorDataModelParam("input", ModelParamType.InputParam,
+                TensorData([2048L], new float[2048])),
+        ];
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, sample, 0.01f);
+
+        var reseeded = rig.WithSeed(new RngConfig { MasterSeed = 7 });
+        Assert.NotNull(reseeded.CreateInitialCheckpoint().TrainableParams);
+    }
+
+    /// <summary>
+    /// Inertness: the representative-input attribute must never reach a serialized artifact. A
+    /// boundary/input node is emitted as a <c>ValueInfoProto</c>, never a <c>NodeProto</c>, so its
+    /// attributes are not serialized. This saves an initial checkpoint (whose model lineage carries
+    /// the attribute on its input node) to a native <c>.skpt</c> and asserts the raw container bytes
+    /// contain no trace of the attribute name, then confirms the artifact still loads as a concrete
+    /// inference model. Uses an over-threshold input so the attribute value is a placeholder.
+    /// </summary>
+    [Fact]
+    public void TestRepresentativeInputIsInertInSkptCoverage()
+    {
+        NamedModelParam[] sample =
+        [
+            new TensorDataModelParam("input", ModelParamType.InputParam,
+                TensorData([2048L], new float[2048])),
+        ];
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, sample, 0.01f);
+        var ckpt = rig.CreateInitialCheckpoint();
+
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_repin_inert_{Guid.NewGuid():N}.skpt");
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+
+            var bytes = File.ReadAllBytes(path);
+            var needle = System.Text.Encoding.ASCII.GetBytes(
+                Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInput);
+            Assert.False(ContainsSubsequence(bytes, needle),
+                "the representative-input attribute leaked into the serialized .skpt artifact");
+
+            var inferenceModel = Persistence.Load(path);
+            Assert.Equal(GraphKind.ConcreteModel, inferenceModel.Kind);
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    /// <summary>Byte-subsequence search for the inertness assertion (no dependency on the STORED-zip
+    /// entry layout — the attribute name must be absent from the whole container).</summary>
+    private static bool ContainsSubsequence(byte[] haystack, byte[] needle)
+    {
+        if (needle.Length == 0 || haystack.Length < needle.Length) return false;
+        for (int i = 0; i <= haystack.Length - needle.Length; i++)
+        {
+            int j = 0;
+            while (j < needle.Length && haystack[i + j] == needle[j]) j++;
+            if (j == needle.Length) return true;
+        }
+        return false;
     }
 
     /// <summary>
@@ -430,7 +586,7 @@ public class TrainingRigCoverageTests
             },
             0.1f);
 
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
 
         var modelInputDef = new TensorStructDef(
             new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32) },
@@ -453,16 +609,16 @@ public class TrainingRigCoverageTests
         Assert.NotNull(trainResult.FinalCheckpoint);
 
         // Drive TrainStep directly so its output-repacking branches all execute
-        // outside the Train wrapper, and touch the TrainingStepResult getters.
+        // outside the Train wrapper; TrainStep now returns the post-step checkpoint directly.
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var stepResult = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
-        Assert.NotNull(stepResult.Checkpoint);
-        Assert.NotNull(stepResult.Checkpoint.TrainableParams);
+        Assert.NotNull(stepResult);
+        Assert.NotNull(stepResult.TrainableParams);
         // ModelState / OptimizerState are empty for this combo, but their getters
         // still need to be exercised for full coverage.
-        Assert.NotNull(stepResult.Checkpoint.ModelState);
-        Assert.NotNull(stepResult.Checkpoint.OptimizerState);
-        Assert.True(float.IsFinite(stepResult.Loss));
+        Assert.NotNull(stepResult.ModelState);
+        Assert.NotNull(stepResult.OptimizerState);
+        Assert.True(float.IsFinite(stepResult.Loss!.Value));
 
         // FastTrainingGraphs is a plain container (internal, reachable via
         // InternalsVisibleTo); its constructor and three getters are otherwise
@@ -500,7 +656,7 @@ public class TrainingRigCoverageTests
             StepCountingSgdOptimizer.ComputationGraph, sample, 0.1f);
 
         // One state field per (single) trainable param, initialized by InitOptStateOnes to 1.
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         Assert.Single(rig.OptimizerStateDef.Fields);
         Assert.All(FlattenStruct(initial.OptimizerState), v => Assert.Equal(1f, v));
 
@@ -517,7 +673,7 @@ public class TrainingRigCoverageTests
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var step = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
-        Assert.All(FlattenStruct(step.Checkpoint.OptimizerState), v => Assert.Equal(2f, v));
+        Assert.All(FlattenStruct(step.OptimizerState), v => Assert.Equal(2f, v));
 
         // Ownership misuse is rejected in both directions, with guidance in the message.
         var optEx = Assert.Throws<InvalidOperationException>(() => TrainingRig.FromScratch(
@@ -568,9 +724,9 @@ public class TrainingRigCoverageTests
 
         var ctx = new ComputeContext();
         var compiledA = ctx.Compile(rig.TrainingStepPureGraph);
-        var ckpt = rig.CreateDefaultCheckpoint();
+        var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < 2; i++)
-            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch, compiledA).Checkpoint;
+            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch, compiledA);
 
         // After two steps the scalar step state holds 2 (and is genuinely rank-0 in the data).
         var stepData = (TensorData)ckpt.OptimizerState.Fields[stepField.Name];
@@ -641,9 +797,9 @@ public class TrainingRigCoverageTests
             // Train two steps, then save mid-training.
             var rigA = AdamRig();
             var compiledA = ctx.Compile(rigA.TrainingStepPureGraph);
-            var ckpt = rigA.CreateDefaultCheckpoint();
+            var ckpt = rigA.CreateInitialCheckpoint();
             for (int i = 0; i < 2; i++)
-                ckpt = rigA.TrainStep(ckpt, inputBatch, targetBatch, compiledA).Checkpoint;
+                ckpt = rigA.TrainStep(ckpt, inputBatch, targetBatch, compiledA);
             Assert.Equal(2, ckpt.Step);
             ckpt.Save(path);
             Assert.True(File.Exists(path));
@@ -661,8 +817,8 @@ public class TrainingRigCoverageTests
 
             // Resuming from the loaded checkpoint advances the step and yields a finite loss.
             var resumed = rigB.TrainStep(loaded, inputBatch, targetBatch, compiledB);
-            Assert.Equal(3, resumed.Checkpoint.Step);
-            Assert.True(float.IsFinite(resumed.Loss));
+            Assert.Equal(3, resumed.Step);
+            Assert.True(float.IsFinite(resumed.Loss!.Value));
 
             // Non-empty model-state path: a BatchNorm model's default checkpoint round-trips its
             // running-stat state fields (no TrainStep needed — exercises the model_state section).
@@ -678,7 +834,7 @@ public class TrainingRigCoverageTests
             var bnPath = Path.Combine(Path.GetTempPath(), $"shrk_ckpt_bn_{Guid.NewGuid():N}.safetensors");
             try
             {
-                var bnCkpt = bnRig.CreateDefaultCheckpoint();
+                var bnCkpt = bnRig.CreateInitialCheckpoint();
                 Assert.NotEmpty(bnCkpt.ModelState.Fields);
                 bnCkpt.Save(bnPath);
                 var bnLoaded = bnRig.LoadCheckpoint(bnPath);
@@ -691,85 +847,6 @@ public class TrainingRigCoverageTests
             finally { if (File.Exists(bnPath)) File.Delete(bnPath); }
         }
         finally { if (File.Exists(path)) File.Delete(path); }
-    }
-
-    /// <summary>
-    /// Covers the retain-last-N rotating save (issue #49) on the real training-checkpoint caller:
-    /// <see cref="TrainingCheckpoint.Save(string, string, string, int, System.Action{string})"/> and
-    /// its <see cref="Persistence.SaveTrainingCheckpoint(TrainingCheckpoint, string, string, string, int, System.Action{string})"/>
-    /// facade. Saving successive checkpoints as the step advances keeps exactly the N most recent,
-    /// ordered by the step encoded in each name — so step 10 outranks step 9 (a lexicographic sort
-    /// would delete the wrong one) — and the newest survivor still loads and resumes training.
-    /// </summary>
-    [Fact]
-    public void TestCheckpointRotationKeepLastNCoverage()
-    {
-        var sample = new NamedModelParam[]
-        {
-            new TensorDataModelParam("input", ModelParamType.InputParam,
-                TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
-        };
-        TrainingRig AdamRig() => TrainingRig.FromScratch(
-            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
-            AdamWOptimizer.ComputationGraph, sample,
-            new AdamWOptimizerHyperparameters { LearningRate = 0.1f });
-
-        var modelInputDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32) }, "ModelInput");
-        var targetDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32) }, "Target");
-        var inputBatch = new TensorDataStruct(modelInputDef,
-            new Dictionary<string, IData> { { "input", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }) } });
-        var targetBatch = new TensorDataStruct(targetDef,
-            new Dictionary<string, IData> { { "targets", TensorData([4L], new float[] { 2f, 4f, 6f, 8f }) } });
-
-        const string prefix = "ckpt-";
-        const string suffix = ".safetensors";
-        var dir = Path.Combine(Path.GetTempPath(), $"shrk_ckpt_rot_{Guid.NewGuid():N}");
-        Directory.CreateDirectory(dir);
-        try
-        {
-            var ctx = new ComputeContext();
-            var rig = AdamRig();
-            var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-            var ckpt = rig.CreateDefaultCheckpoint();
-
-            // A non-series sibling that rotation must never touch.
-            var bystander = Path.Combine(dir, "notes.txt");
-            File.WriteAllText(bystander, "keep me");
-
-            // Save at steps 0..10, keeping the 3 most recent. The 9->10 boundary is exactly where a
-            // lexicographic ("10" < "9") sort would keep the wrong file. Save through the
-            // TrainingCheckpoint overload for even steps and the Persistence facade for odd steps so
-            // both entry points are exercised.
-            string lastPath = "";
-            for (int step = 0; step <= 10; step++)
-            {
-                Assert.Equal(step, ckpt.Step);
-                lastPath = step % 2 == 0
-                    ? ckpt.Save(dir, prefix, suffix, keepLast: 3)
-                    : Persistence.SaveTrainingCheckpoint(ckpt, dir, prefix, suffix, keepLast: 3);
-                Assert.Equal(Path.Combine(dir, $"{prefix}{step}{suffix}"), lastPath);
-                if (step < 10)
-                    ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled).Checkpoint;
-            }
-
-            // Exactly the 3 highest steps survive — integer order, so step 10 is retained, not 9.
-            int[] survivors = Directory.GetFiles(dir, $"{prefix}*{suffix}")
-                .Select(p => int.Parse(Path.GetFileName(p)!["ckpt-".Length..^".safetensors".Length]))
-                .OrderBy(i => i)
-                .ToArray();
-            int[] expectedSurvivors = [8, 9, 10];
-            Assert.Equal(expectedSurvivors, survivors);
-            Assert.True(File.Exists(Path.Combine(dir, $"{prefix}10{suffix}")));
-            Assert.False(File.Exists(Path.Combine(dir, $"{prefix}7{suffix}")));
-            Assert.True(File.Exists(bystander)); // non-series file untouched
-
-            // The newest survivor loads and resumes from the right step.
-            var loaded = AdamRig().LoadCheckpoint(lastPath);
-            Assert.Equal(10, loaded.Step);
-        }
-        finally { Directory.Delete(dir, recursive: true); }
     }
 
     /// <summary>
@@ -792,7 +869,7 @@ public class TrainingRigCoverageTests
         var path = Path.Combine(Path.GetTempPath(), $"shrk_ckpt_trunc_{Guid.NewGuid():N}.safetensors");
         try
         {
-            rig.CreateDefaultCheckpoint().Save(path);
+            rig.CreateInitialCheckpoint().Save(path);
             var full = File.ReadAllBytes(path);
             File.WriteAllBytes(path, full[..^8]);   // cut mid-tensor-data, as an interrupted copy would
 
@@ -826,7 +903,7 @@ public class TrainingRigCoverageTests
                     TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
             },
             0.1f);
-        var ckptV1 = rig.CreateDefaultCheckpoint();                       // Step 0
+        var ckptV1 = rig.CreateInitialCheckpoint();                       // Step 0
         var ckptV2 = new TrainingCheckpoint(                              // same tensors, Step 7
             ckptV1.TrainableParams, ckptV1.ModelState, ckptV1.OptimizerState, step: 7);
 
@@ -889,7 +966,7 @@ public class TrainingRigCoverageTests
                     TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
             },
             0.5f, 0.9f);
-        var ckpt0 = rig.CreateDefaultCheckpoint();
+        var ckpt0 = rig.CreateInitialCheckpoint();
         var ckpt = new TrainingCheckpoint(                       // same tensors, at step 5
             ckpt0.TrainableParams, ckpt0.ModelState, ckpt0.OptimizerState, step: 5);
 
@@ -905,7 +982,7 @@ public class TrainingRigCoverageTests
             Assert.Null(result.Srk);
 
             var info = result.TrainingCheckpoint!;
-            Assert.Equal(1, info.FormatVersion);   // v1 marker: int64 [version, step, epoch, batchIndex]
+            Assert.Equal(2, info.FormatVersion);   // v2 marker: int64 [version, step, epoch, batchIndex] + presence-gated loss
             Assert.Equal(5, info.Step);
             Assert.Equal(0, info.Epoch);           // not set on this checkpoint → default 0
             Assert.Equal(0, info.BatchIndex);
@@ -1003,7 +1080,7 @@ public class TrainingRigCoverageTests
 
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);   // compiled ONCE
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         Assert.Equal(0, initial.Step);
         string wName = rig.TrainableParamStructDef.Fields[0].Name;
         float w0 = ((TensorData<float32>)initial.TrainableParams.Fields[wName]).AccessMemory()[0];
@@ -1012,14 +1089,14 @@ public class TrainingRigCoverageTests
         // the explicit-override TrainStep, once by the single-value helper and once by name.
         var stepA = rig.TrainStep(initial, rig.MakeHyperparameters(0.1f), inputBatch, targetBatch, compiled);
         var stepB = rig.TrainStep(initial, rig.MakeHyperparameters(("learningRate", 0.3f)), inputBatch, targetBatch, compiled);
-        Assert.Equal(1, stepA.Checkpoint.Step);   // the global step counter advanced
-        float wA = ((TensorData<float32>)stepA.Checkpoint.TrainableParams.Fields[wName]).AccessMemory()[0];
-        float wB = ((TensorData<float32>)stepB.Checkpoint.TrainableParams.Fields[wName]).AccessMemory()[0];
+        Assert.Equal(1, stepA.Step);   // the global step counter advanced
+        float wA = ((TensorData<float32>)stepA.TrainableParams.Fields[wName]).AccessMemory()[0];
+        float wB = ((TensorData<float32>)stepB.TrainableParams.Fields[wName]).AccessMemory()[0];
 
         float deltaA = w0 - wA;   // = 0.1 · grad
         float deltaB = w0 - wB;   // = 0.3 · grad
         Assert.True(MathF.Abs(deltaA) > 1e-4f, "LR must actually move the weight (grad·lr ≠ 0).");
-        Assert.True(MathF.Abs(stepA.Loss - stepB.Loss) < 1e-4f);       // identical starting state
+        Assert.True(MathF.Abs(stepA.Loss!.Value - stepB.Loss!.Value) < 1e-4f);       // identical starting state
         Assert.True(MathF.Abs(deltaB - 3f * deltaA) < 1e-4f,           // 3× LR ⇒ 3× step
             $"expected ΔB ≈ 3·ΔA; got ΔA={deltaA}, ΔB={deltaB}");
 
@@ -1038,18 +1115,18 @@ public class TrainingRigCoverageTests
         Assert.Empty(schedRig.HyperparameterStructDef.Fields);              // schedule is in-graph, not a runtime field
         Assert.Empty(schedRig.DynamicHyperparameterIndices);
         var schedCompiled = ctx.Compile(schedRig.TrainingStepPureGraph);
-        var sc = schedRig.CreateDefaultCheckpoint();
+        var sc = schedRig.CreateInitialCheckpoint();
         string swName = schedRig.TrainableParamStructDef.Fields[0].Name;
         var autoStep = schedRig.TrainStep(sc, inputBatch, targetBatch, schedCompiled);   // no override; step 0 ⇒ LR 0.2
-        float swAuto = ((TensorData<float32>)autoStep.Checkpoint.TrainableParams.Fields[swName]).AccessMemory()[0];
+        float swAuto = ((TensorData<float32>)autoStep.TrainableParams.Fields[swName]).AccessMemory()[0];
 
         var refRig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             sample, new SGDOptimizerHyperparameters { LearningRate = Hyperparameter.Runtime() });
         var refCompiled = ctx.Compile(refRig.TrainingStepPureGraph);
-        var refStep = refRig.TrainStep(refRig.CreateDefaultCheckpoint(), refRig.MakeHyperparameters(0.2f),
+        var refStep = refRig.TrainStep(refRig.CreateInitialCheckpoint(), refRig.MakeHyperparameters(0.2f),
             inputBatch, targetBatch, refCompiled);
-        float swRef = ((TensorData<float32>)refStep.Checkpoint.TrainableParams.Fields[swName]).AccessMemory()[0];
+        float swRef = ((TensorData<float32>)refStep.TrainableParams.Fields[swName]).AccessMemory()[0];
         Assert.True(MathF.Abs(swAuto - swRef) < 1e-5f, "in-graph scheduled step must equal explicit LR = schedule(step).");
 
         // Scheduled LR also works for a stateful optimizer (AdamW: 5 hyperparams, m/v state), built with
@@ -1061,9 +1138,9 @@ public class TrainingRigCoverageTests
         Assert.Empty(adamRig.DynamicHyperparameterIndices);                // LR is scheduled in-graph; betas baked
         Assert.Empty(adamRig.HyperparameterStructDef.Fields);
         var adamCompiled = ctx.Compile(adamRig.TrainingStepPureGraph);
-        var adamStep = adamRig.TrainStep(adamRig.CreateDefaultCheckpoint(), inputBatch, targetBatch, adamCompiled);
-        Assert.True(float.IsFinite(adamStep.Loss));
-        Assert.NotEmpty(adamStep.Checkpoint.OptimizerState.Fields);    // m/v state still flows
+        var adamStep = adamRig.TrainStep(adamRig.CreateInitialCheckpoint(), inputBatch, targetBatch, adamCompiled);
+        Assert.True(float.IsFinite(adamStep.Loss!.Value));
+        Assert.NotEmpty(adamStep.OptimizerState.Fields);    // m/v state still flows
     }
 
     /// <summary>
@@ -1146,7 +1223,7 @@ public class TrainingRigCoverageTests
             var rig = TrainingRig.FromScratch(
                 ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
                 sample, new SGDOptimizerHyperparameters { LearningRate = lr });
-            var ckpt = rig.CreateDefaultCheckpoint();
+            var ckpt = rig.CreateInitialCheckpoint();
             // 4 batches → Fit advances the global step each batch, so the schedule is sampled at 0..3.
             var result = rig.Fit(
                 [inputBatch, inputBatch, inputBatch, inputBatch],
@@ -1175,11 +1252,11 @@ public class TrainingRigCoverageTests
             });
         Assert.Equal(new[] { "learningRate", "momentumCoeff" }, momRig.DynamicHyperparameterNames.ToArray());
         var momCompiled = ctx.Compile(momRig.TrainingStepPureGraph);
-        var momStep = momRig.TrainStep(momRig.CreateDefaultCheckpoint(),
+        var momStep = momRig.TrainStep(momRig.CreateInitialCheckpoint(),
             momRig.MakeHyperparameters(("momentumCoeff", 0.9f), ("learningRate", 0.1f)),  // order-independent
             inputBatch, targetBatch, momCompiled);
-        Assert.True(float.IsFinite(momStep.Loss));
-        Assert.NotEmpty(momStep.Checkpoint.OptimizerState.Fields);     // velocity state flows
+        Assert.True(float.IsFinite(momStep.Loss!.Value));
+        Assert.NotEmpty(momStep.OptimizerState.Fields);     // velocity state flows
         Assert.Throws<ArgumentException>(() => momRig.MakeHyperparameters(("learningRate", 0.1f))); // missing momentumCoeff
     }
 
@@ -1242,15 +1319,15 @@ public class TrainingRigCoverageTests
 
         var schedCompiled = ctx.Compile(schedRig.TrainingStepPureGraph);
         var refCompiled = ctx.Compile(refRig.TrainingStepPureGraph);
-        var schedCkpt = schedRig.CreateDefaultCheckpoint();
-        var refCkpt = refRig.CreateDefaultCheckpoint();
+        var schedCkpt = schedRig.CreateInitialCheckpoint();
+        var refCkpt = refRig.CreateInitialCheckpoint();
         string wName = schedRig.TrainableParamStructDef.Fields[0].Name;
 
         for (int s = 0; s < 6; s++)
         {
-            schedCkpt = schedRig.TrainStep(schedCkpt, inputBatch, targetBatch, schedCompiled).Checkpoint; // in-graph LR at step s
+            schedCkpt = schedRig.TrainStep(schedCkpt, inputBatch, targetBatch, schedCompiled); // in-graph LR at step s
             refCkpt = refRig.TrainStep(refCkpt, refRig.MakeHyperparameters(schedule.At(s)),                   // host LR at step s
-                inputBatch, targetBatch, refCompiled).Checkpoint;
+                inputBatch, targetBatch, refCompiled);
             float wSched = ((TensorData<float32>)schedCkpt.TrainableParams.Fields[wName]).AccessMemory()[0];
             float wRef = ((TensorData<float32>)refCkpt.TrainableParams.Fields[wName]).AccessMemory()[0];
             Assert.True(MathF.Abs(wSched - wRef) < 1e-5f,
@@ -1286,15 +1363,15 @@ public class TrainingRigCoverageTests
 
         var modCompiled = ctx.Compile(modRig.TrainingStepPureGraph);
         var refCompiled = ctx.Compile(refRig.TrainingStepPureGraph);
-        var modCkpt = modRig.CreateDefaultCheckpoint();
-        var refCkpt = refRig.CreateDefaultCheckpoint();
+        var modCkpt = modRig.CreateInitialCheckpoint();
+        var refCkpt = refRig.CreateInitialCheckpoint();
         string wName = modRig.TrainableParamStructDef.Fields[0].Name;
 
         for (int s = 0; s < 4; s++)
         {
-            modCkpt = modRig.TrainStep(modCkpt, inputBatch, targetBatch, modCompiled).Checkpoint;
+            modCkpt = modRig.TrainStep(modCkpt, inputBatch, targetBatch, modCompiled);
             refCkpt = refRig.TrainStep(refCkpt, refRig.MakeHyperparameters(Lr(s)),
-                inputBatch, targetBatch, refCompiled).Checkpoint;
+                inputBatch, targetBatch, refCompiled);
             float wMod = ((TensorData<float32>)modCkpt.TrainableParams.Fields[wName]).AccessMemory()[0];
             float wRef = ((TensorData<float32>)refCkpt.TrainableParams.Fields[wName]).AccessMemory()[0];
             Assert.True(MathF.Abs(wMod - wRef) < 1e-5f,
@@ -1365,16 +1442,16 @@ public class TrainingRigCoverageTests
 
         // Built-in schedule: state init sees Constant(0.5).At(0) = 0.5.
         var dslRig = Build(Schedules.Constant(0.5f));
-        Assert.True(MathF.Abs(0.5f - FreshOptStateValue(dslRig, dslRig.CreateDefaultCheckpoint())) < 1e-4f);
+        Assert.True(MathF.Abs(0.5f - FreshOptStateValue(dslRig, dslRig.CreateInitialCheckpoint())) < 1e-4f);
 
         // A decaying schedule: state init sees the step-0 value (0.2), not the final value.
         var decayRig = Build(Schedules.Linear(0.2f, 0f, 10));
-        Assert.True(MathF.Abs(0.2f - FreshOptStateValue(decayRig, decayRig.CreateDefaultCheckpoint())) < 1e-4f);
+        Assert.True(MathF.Abs(0.2f - FreshOptStateValue(decayRig, decayRig.CreateInitialCheckpoint())) < 1e-4f);
 
         // Scheduler module returning 0.7 at step 0: state init must see 0.7 — NOT the old 0f.
         var moduleRig = Build(Hyperparameter.Scheduled(
             SchedulerModule(step => Scalar(0.7f) + step.Cast<float32>() * Scalar(0f))));
-        float moduleState = FreshOptStateValue(moduleRig, moduleRig.CreateDefaultCheckpoint());
+        float moduleState = FreshOptStateValue(moduleRig, moduleRig.CreateInitialCheckpoint());
         Assert.True(MathF.Abs(0.7f - moduleState) < 1e-4f, $"expected 0.7, got {moduleState}");
         Assert.True(MathF.Abs(moduleState) > 1e-4f, "the old hardcoded-0f scheduler-module state-init hole must be gone.");
     }
@@ -1382,7 +1459,7 @@ public class TrainingRigCoverageTests
     /// <summary>
     /// D5: when the optimizer's state initializer actually reads a <see cref="HyperparameterKind.Runtime"/>
     /// hyper (dependency-analyzed at build), fresh-checkpoint creation fails loud unless explicit initial
-    /// values are supplied via <see cref="TrainingRig.CreateDefaultCheckpoint(TensorDataStruct)"/>. A
+    /// values are supplied via <see cref="TrainingRig.CreateInitialCheckpoint(TensorDataStruct)"/>. A
     /// baked hyper never trips this, since its value is known at build.
     /// </summary>
     [Fact]
@@ -1394,18 +1471,18 @@ public class TrainingRigCoverageTests
             sample, new InitFromHyperOptimizerHyperparameters { LearningRate = Hyperparameter.Runtime() });
 
         // No value known at build → fail loud (D5), naming the hyper.
-        var ex = Assert.Throws<InvalidOperationException>(() => runtimeRig.CreateDefaultCheckpoint());
+        var ex = Assert.Throws<InvalidOperationException>(() => runtimeRig.CreateInitialCheckpoint());
         Assert.Contains("learningRate", ex.Message);
 
         // Supplied explicitly → state init uses the given value.
-        var ckpt = runtimeRig.CreateDefaultCheckpoint(runtimeRig.MakeHyperparameters(0.3f));
+        var ckpt = runtimeRig.CreateInitialCheckpoint(runtimeRig.MakeHyperparameters(0.3f));
         Assert.True(MathF.Abs(0.3f - FreshOptStateValue(runtimeRig, ckpt)) < 1e-4f);
 
         // A baked LR needs no override — its value is known at build.
         var bakedRig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, InitFromHyperOptimizer.ComputationGraph,
             sample, new InitFromHyperOptimizerHyperparameters { LearningRate = 0.05f });
-        Assert.True(MathF.Abs(0.05f - FreshOptStateValue(bakedRig, bakedRig.CreateDefaultCheckpoint())) < 1e-4f);
+        Assert.True(MathF.Abs(0.05f - FreshOptStateValue(bakedRig, bakedRig.CreateInitialCheckpoint())) < 1e-4f);
     }
 
     /// <summary>
@@ -1444,7 +1521,7 @@ public class TrainingRigCoverageTests
         long bigBatch = (long)int.MaxValue + 7L;    // just past int32
         var ckpt = new TrainingCheckpoint(
             trained.TrainableParams, trained.ModelState, trained.OptimizerState,
-            step: bigStep, epoch: bigEpoch, batchIndex: bigBatch);
+            step: bigStep, epoch: bigEpoch, batchIndex: bigBatch, rig: trained.Rig);
 
         var legacyPath = Path.Combine(Path.GetTempPath(), $"shrk_i64_{Guid.NewGuid():N}.safetensors");
         var skptPath = Path.Combine(Path.GetTempPath(), $"shrk_i64_{Guid.NewGuid():N}.skpt");
@@ -1456,11 +1533,10 @@ public class TrainingRigCoverageTests
             Assert.Equal(bigStep, legacy.Step);
             Assert.Equal(bigEpoch, legacy.Epoch);
             Assert.Equal(bigBatch, legacy.BatchIndex);
-            Assert.Equal(1, Persistence.Inspect(legacyPath).TrainingCheckpoint!.FormatVersion);
+            Assert.Equal(2, Persistence.Inspect(legacyPath).TrainingCheckpoint!.FormatVersion);
 
             // Native .skpt manifest.
-            Persistence.SaveTrainingCheckpointToSkpt(
-                ckpt, ScalarMultiplyModel.ComputationGraph, TensorData(ScalarInputShape, new float[4]), skptPath);
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, skptPath);
             var skpt = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(skptPath);
             Assert.Equal(bigStep, skpt.Step);
             Assert.Equal(bigEpoch, skpt.Epoch);
@@ -1500,13 +1576,13 @@ public class TrainingRigCoverageTests
         // Several (step, epoch) points — epoch varies independently of step (host-owned).
         foreach (var (s, e) in new[] { (0L, 0L), (3L, 1L), (7L, 4L) })
         {
-            var seed = modRig.CreateDefaultCheckpoint();
+            var seed = modRig.CreateInitialCheckpoint();
             var atCkpt = new TrainingCheckpoint(seed.TrainableParams, seed.ModelState, seed.OptimizerState, step: s, epoch: e);
-            var modStep = modRig.TrainStep(atCkpt, inputBatch, targetBatch, modCompiled).Checkpoint;
+            var modStep = modRig.TrainStep(atCkpt, inputBatch, targetBatch, modCompiled);
 
-            var refSeed = refRig.CreateDefaultCheckpoint();
+            var refSeed = refRig.CreateInitialCheckpoint();
             var refAt = new TrainingCheckpoint(refSeed.TrainableParams, refSeed.ModelState, refSeed.OptimizerState, step: s, epoch: e);
-            var refStep = refRig.TrainStep(refAt, refRig.MakeHyperparameters(Lr(s, e)), inputBatch, targetBatch, refCompiled).Checkpoint;
+            var refStep = refRig.TrainStep(refAt, refRig.MakeHyperparameters(Lr(s, e)), inputBatch, targetBatch, refCompiled);
 
             float wMod = ((TensorData<float32>)modStep.TrainableParams.Fields[wName]).AccessMemory()[0];
             float wRef = ((TensorData<float32>)refStep.TrainableParams.Fields[wName]).AccessMemory()[0];
@@ -1713,8 +1789,9 @@ public class TrainingRigCoverageTests
     }
 
     /// <summary>
-    /// Verifies <see cref="TrainingCheckpoint.ToInferenceModel"/> produces a concrete model
-    /// that executes successfully and returns the expected output shape.
+    /// Verifies the parameterless <see cref="TrainingCheckpoint.ToInferenceModel()"/> produces a
+    /// concrete model that executes successfully and returns the expected output shape — reading the
+    /// model graph and sample-input shape off the checkpoint's rig (no re-supplied graph).
     /// </summary>
     [Fact]
     [Trait("Purpose", "Coverage")]
@@ -1733,15 +1810,16 @@ public class TrainingRigCoverageTests
             [rig.TargetDef.FromOrderedData(TensorData([4L], new float[4]))],
             numEpochs: 1);
 
-        var inferenceInput = TensorData([1L], new float[] { 5f });
-        var concrete       = result.FinalCheckpoint.ToInferenceModel(modelGraph, inferenceInput);
+        // Parameterless: the rig on the checkpoint supplies the model graph + sample-input shape [4].
+        var concrete       = result.FinalCheckpoint.ToInferenceModel();
         Assert.NotNull(concrete);
 
+        var inferenceInput = TensorData([4L], new float[] { 5f, 6f, 7f, 8f });
         var outputs = ComputeContext.Default.Execute(concrete, inferenceInput);
         Assert.Single(outputs);
         var output = outputs[0].ToTensorData<float32>();
         Assert.Equal(1, output.Shape.Dims.Length);
-        Assert.Equal(1L, output.Shape.Dims[0]);
+        Assert.Equal(4L, output.Shape.Dims[0]);
     }
 
     /// <summary>
@@ -1767,7 +1845,7 @@ public class TrainingRigCoverageTests
             [sampleInput], 0.5f);
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
         Assert.Equal(GraphKind.ConcreteModel, rig.TrainingStepPureGraph.Kind);
-        Assert.NotNull(rig.CreateDefaultCheckpoint().TrainableParams);
+        Assert.NotNull(rig.CreateInitialCheckpoint().TrainableParams);
 
         // A weight-filled concrete model is refused with the kinds named.
         var model = arch.ToConcreteModel();
@@ -1815,9 +1893,9 @@ public class TrainingRigCoverageTests
             new Dictionary<string, IData> { { "targets", TensorData(ScalarInputShape, new float[] { 2f, 4f, 6f, 8f }) } });
 
         var compiled = new ComputeContext().Compile(rig.TrainingStepPureGraph);
-        var ckpt = rig.CreateDefaultCheckpoint();
+        var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < steps; i++)
-            ckpt = rig.TrainStep(ckpt, inBatch, outBatch, compiled).Checkpoint;
+            ckpt = rig.TrainStep(ckpt, inBatch, outBatch, compiled);
         return (rig, ckpt, inBatch, outBatch, compiled);
     }
 
@@ -1841,12 +1919,10 @@ public class TrainingRigCoverageTests
         // The reference trajectory: one more step from the in-memory checkpoint.
         var reference = rigA.TrainStep(ckpt, inBatch, outBatch, compiledA);
 
-        var exampleInput = TensorData(ScalarInputShape, new float[4]);
         var path = Path.Combine(Path.GetTempPath(), $"shrk_skpt_ckpt_{Guid.NewGuid():N}.skpt");
         try
         {
-            Persistence.SaveTrainingCheckpointToSkpt(
-                ckpt, ScalarMultiplyModel.ComputationGraph, exampleInput, path);
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
             Assert.True(File.Exists(path));
 
             // Standard STORED zip with exactly the expected per-kind entries (read via the BCL).
@@ -1887,21 +1963,21 @@ public class TrainingRigCoverageTests
             // Resuming from the loaded checkpoint reproduces the pre-save trajectory exactly.
             var compiledB = new ComputeContext().Compile(rigB.TrainingStepPureGraph);
             var resumed = rigB.TrainStep(loaded, inBatch, outBatch, compiledB);
-            Assert.Equal(3, resumed.Checkpoint.Step);
-            Assert.Equal(reference.Loss, resumed.Loss);
+            Assert.Equal(3, resumed.Step);
+            Assert.Equal(reference.Loss!.Value, resumed.Loss!.Value);
             Assert.Equal(
-                FlattenStruct(reference.Checkpoint.TrainableParams),
-                FlattenStruct(resumed.Checkpoint.TrainableParams));
+                FlattenStruct(reference.TrainableParams),
+                FlattenStruct(resumed.TrainableParams));
             Assert.Equal(
-                FlattenStruct(reference.Checkpoint.OptimizerState),
-                FlattenStruct(resumed.Checkpoint.OptimizerState));
+                FlattenStruct(reference.OptimizerState),
+                FlattenStruct(resumed.OptimizerState));
 
             // The .skpt is self-describing for inference: Persistence.Load rebinds a concrete model
             // that executes identically to one built straight from the checkpoint's trained weights.
             var inferenceModel = Persistence.Load(path);
             Assert.Equal(GraphKind.ConcreteModel, inferenceModel.Kind);
             var probe = TensorData(ScalarInputShape, new float[] { 5f, 6f, 7f, 8f });
-            var fromCkpt = ckpt.ToInferenceModel(ScalarMultiplyModel.ComputationGraph, probe);
+            var fromCkpt = ckpt.ToInferenceModel();
             var loadedOut = ComputeContext.Default.Execute(inferenceModel, probe)[0].ToTensorData().As<float32>().AccessMemory().ToArray();
             var ckptOut = ComputeContext.Default.Execute(fromCkpt, probe)[0].ToTensorData().As<float32>().AccessMemory().ToArray();
             Assert.Equal(ckptOut, loadedOut);
@@ -1938,16 +2014,15 @@ public class TrainingRigCoverageTests
 
         var rig = BnRig();
         var ckpt = new TrainingCheckpoint(
-            rig.CreateDefaultCheckpoint().TrainableParams,
-            rig.CreateDefaultCheckpoint().ModelState,
-            rig.CreateDefaultCheckpoint().OptimizerState, step: 11);
+            rig.CreateInitialCheckpoint().TrainableParams,
+            rig.CreateInitialCheckpoint().ModelState,
+            rig.CreateInitialCheckpoint().OptimizerState, step: 11, rig: rig);
         Assert.NotEmpty(ckpt.ModelState.Fields);
 
         var path = Path.Combine(Path.GetTempPath(), $"shrk_skpt_bn_{Guid.NewGuid():N}.skpt");
         try
         {
-            Persistence.SaveTrainingCheckpointToSkpt(
-                ckpt, ScalarMultiplyWithBatchNormModel.ComputationGraph, TensorData([8L], new float[8]), path);
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
 
             using (var zip = System.IO.Compression.ZipFile.OpenRead(path))
                 Assert.Contains(SkptFileFormat.ModelStateEntryPath, zip.Entries.Select(e => e.FullName));
@@ -1973,8 +2048,7 @@ public class TrainingRigCoverageTests
         var path = Path.Combine(Path.GetTempPath(), $"shrk_skpt_inspect_{Guid.NewGuid():N}.skpt");
         try
         {
-            Persistence.SaveTrainingCheckpointToSkpt(
-                ckpt, ScalarMultiplyModel.ComputationGraph, TensorData(ScalarInputShape, new float[4]), path);
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
 
             var result = Persistence.Inspect(path);
             Assert.Equal(ArtifactKind.SkptCheckpoint, result.Kind);
@@ -2007,7 +2081,6 @@ public class TrainingRigCoverageTests
     public void TestSkptTrainingCheckpointFailsLoudAndComposesCoverage()
     {
         var (_, ckpt, _, _, _) = BuildTrainedAdamRig(steps: 1);
-        var exampleInput = TensorData(ScalarInputShape, new float[4]);
 
         var path = Path.Combine(Path.GetTempPath(), $"shrk_skpt_fail_{Guid.NewGuid():N}.skpt");
         var tampered = Path.Combine(Path.GetTempPath(), $"shrk_skpt_tamper_{Guid.NewGuid():N}.skpt");
@@ -2015,7 +2088,7 @@ public class TrainingRigCoverageTests
         {
             // Happy path composes Zstd + metadata; the data entries declare zstd compression and
             // the checkpoint still round-trips through a fresh rig.
-            Persistence.ForTrainingCheckpoint(ckpt, ScalarMultiplyModel.ComputationGraph, exampleInput)
+            Persistence.ForTrainingCheckpoint(ckpt)
                 .WithZstdCompressedData()
                 .WithMetadata(runName: "skpt-95-run", gitCommit: "abc123")
                 .Save(path);
@@ -2054,7 +2127,7 @@ public class TrainingRigCoverageTests
             var infPath = Path.Combine(Path.GetTempPath(), $"shrk_skpt_inf_{Guid.NewGuid():N}.skpt");
             try
             {
-                var infModel = ckpt.ToInferenceModel(ScalarMultiplyModel.ComputationGraph, exampleInput);
+                var infModel = ckpt.ToInferenceModel();
                 Persistence.From(infModel).WithModel().WithWeights().Save(infPath);
                 var ex = Assert.Throws<System.IO.InvalidDataException>(() =>
                     Persistence.LoadTrainingCheckpoint(infPath,
@@ -2108,19 +2181,17 @@ public class TrainingRigCoverageTests
         var (_, trained, _, _, _) = BuildTrainedAdamRig(steps: 4);
         var ckpt = new TrainingCheckpoint(
             trained.TrainableParams, trained.ModelState, trained.OptimizerState,
-            step: trained.Step, epoch: 7, batchIndex: 340);
+            step: trained.Step, epoch: 7, batchIndex: 340, rig: trained.Rig);
         Assert.Equal(4, ckpt.Step);
         Assert.Equal(7, ckpt.Epoch);
         Assert.Equal(340, ckpt.BatchIndex);
 
-        var exampleInput = TensorData(ScalarInputShape, new float[4]);
         var skptPath = Path.Combine(Path.GetTempPath(), $"shrk_ctr_skpt_{Guid.NewGuid():N}.skpt");
         var legacyPath = Path.Combine(Path.GetTempPath(), $"shrk_ctr_legacy_{Guid.NewGuid():N}.safetensors");
         try
         {
             // --- .skpt format: manifest records the counters; a fresh rig restores them. ---
-            Persistence.SaveTrainingCheckpointToSkpt(
-                ckpt, ScalarMultiplyModel.ComputationGraph, exampleInput, skptPath);
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, skptPath);
             var manifest = SkptFileFormat.ParseManifest(
                 ReadEntryBytesViaBcl(skptPath, SkptFileFormat.ConfigEntryName), skptPath);
             Assert.Equal(7, manifest.Training!.Epoch);
@@ -2154,7 +2225,7 @@ public class TrainingRigCoverageTests
 
             var legacyInspect = Persistence.Inspect(legacyPath);
             Assert.Empty(legacyInspect.Observations);
-            Assert.Equal(1, legacyInspect.TrainingCheckpoint!.FormatVersion);
+            Assert.Equal(2, legacyInspect.TrainingCheckpoint!.FormatVersion);
             Assert.Equal(7, legacyInspect.TrainingCheckpoint.Epoch);
             Assert.Equal(340, legacyInspect.TrainingCheckpoint.BatchIndex);
             var legacyText = legacyInspect.ToString();
@@ -2181,7 +2252,7 @@ public class TrainingRigCoverageTests
             trained.TrainableParams, trained.ModelState, trained.OptimizerState,
             step: trained.Step, epoch: 3, batchIndex: 12);
 
-        var next = rig.TrainStep(ckpt, inBatch, outBatch, compiled).Checkpoint;
+        var next = rig.TrainStep(ckpt, inBatch, outBatch, compiled);
         Assert.Equal(ckpt.Step + 1, next.Step);   // step advances (one graph execution)
         Assert.Equal(3, next.Epoch);              // host-owned: unchanged by TrainStep
         Assert.Equal(12, next.BatchIndex);
@@ -2197,14 +2268,13 @@ public class TrainingRigCoverageTests
     {
         var (_, trained, _, _, _) = BuildTrainedAdamRig(steps: 2);
         var ckpt = new TrainingCheckpoint(
-            trained.TrainableParams, trained.ModelState, trained.OptimizerState, step: 2);
+            trained.TrainableParams, trained.ModelState, trained.OptimizerState, step: 2, rig: trained.Rig);
 
         var skptPath = Path.Combine(Path.GetTempPath(), $"shrk_old_{Guid.NewGuid():N}.skpt");
         try
         {
             // Strip the epoch/batchIndex keys to mimic a #95-era manifest.
-            Persistence.SaveTrainingCheckpointToSkpt(
-                ckpt, ScalarMultiplyModel.ComputationGraph, TensorData(ScalarInputShape, new float[4]), skptPath);
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, skptPath);
             StripSkptTrainingCounterKeys(skptPath);
 
             var manifest = SkptFileFormat.ParseManifest(
@@ -2226,6 +2296,485 @@ public class TrainingRigCoverageTests
         {
             if (File.Exists(skptPath)) File.Delete(skptPath);
         }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Two-layer rig (issue #110): swappable constituents + a derived in-memory
+    // trainstep, as an immutable value with a With… derivation surface, plus
+    // extraction as a pure read off the model constituent.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The rig exposes its constituent layer, and every <c>With…</c> derivation returns a NEW rig
+    /// that shares the unchanged constituents by reference and re-derives only its own trainstep —
+    /// never mutating the receiver (a rig is an immutable value, §5.8.5). WithOptimizer re-initializes
+    /// optimizer state (plain SGD → SGD-momentum grows a state field per param); WithScheduler keeps
+    /// the optimizer graph and swaps the schedule-carrying hyperparameters; WithSeed re-seeds. Each
+    /// derived rig is a working rig that trains a step to a finite loss on its own trainstep.
+    /// </summary>
+    [Fact]
+    public void TestRigDerivationsShareConstituentsAndAreImmutableCoverage()
+    {
+        var (sample, input, target) = ScalarMultiplyBatches();
+        var model = ScalarMultiplyModel.ComputationGraph;
+        var loss = L2Loss.ComputationGraph;
+        var opt = SGDOptimizer.ComputationGraph;
+
+        var rig = TrainingRig.FromScratch(model, loss, opt, sample, 0.1f);
+
+        // The constituent layer is exactly what was authored (shared by reference).
+        Assert.Same(model, rig.ModelConstituent);
+        Assert.Same(loss, rig.LossConstituent);
+        Assert.Same(opt, rig.OptimizerConstituent);
+        Assert.Equal(0UL, rig.RngConfig.MasterSeed);
+        Assert.Empty(rig.OptimizerStateDef.Fields);   // plain SGD carries no optimizer state
+
+        // WithLoss: loss swapped; model/optimizer shared; the original rig is untouched.
+        var newLoss = Losses.L1Loss;
+        var lossRig = rig.WithLoss(newLoss);
+        Assert.NotSame(rig, lossRig);
+        Assert.Same(newLoss, lossRig.LossConstituent);
+        Assert.Same(model, lossRig.ModelConstituent);      // shared by reference
+        Assert.Same(opt, lossRig.OptimizerConstituent);    // shared by reference
+        Assert.Same(loss, rig.LossConstituent);            // receiver unchanged (immutable)
+
+        // WithOptimizer: optimizer + hyperparameters swapped; optimizer state re-initialized.
+        var momRig = rig.WithOptimizer(SGDMomentumOptimizer.ComputationGraph,
+            new SGDMomentumOptimizerHyperparameters { LearningRate = 0.5f, MomentumCoeff = 0.9f });
+        Assert.Same(model, momRig.ModelConstituent);
+        Assert.Same(loss, momRig.LossConstituent);
+        Assert.NotSame(opt, momRig.OptimizerConstituent);
+        Assert.NotEmpty(momRig.OptimizerStateDef.Fields);  // opt-state re-derived on the swap
+        Assert.Empty(rig.OptimizerStateDef.Fields);        // receiver unchanged
+
+        // WithScheduler: same optimizer graph, schedule-carrying hyperparameters swapped.
+        var schedRig = rig.WithScheduler(
+            new SGDOptimizerHyperparameters { LearningRate = Schedules.Linear(0.2f, 0f, 4) });
+        Assert.Same(opt, schedRig.OptimizerConstituent);
+        Assert.Empty(schedRig.HyperparameterStructDef.Fields);   // schedule is in-graph, not a runtime field
+
+        // WithSeed: re-seeded; all constituents shared; the original keeps the default seed.
+        var reseeded = rig.WithSeed(new RngConfig { MasterSeed = 42 });
+        Assert.Same(model, reseeded.ModelConstituent);
+        Assert.Same(opt, reseeded.OptimizerConstituent);
+        Assert.Equal(42UL, reseeded.RngConfig.MasterSeed);
+        Assert.Equal(0UL, rig.RngConfig.MasterSeed);
+
+        // Every derived rig trains a step to a finite loss on its own re-derived trainstep.
+        var ctx = new ComputeContext();
+        foreach (var derived in new[] { lossRig, momRig, schedRig, reseeded })
+        {
+            var compiled = ctx.Compile(derived.TrainingStepPureGraph);
+            var stepped = derived.TrainStep(derived.CreateInitialCheckpoint(), input, target, compiled);
+            Assert.True(float.IsFinite(stepped.Loss!.Value));
+        }
+    }
+
+    /// <summary>
+    /// The extraction contract (§5.8.2), pinned end to end: build a rig, train a real step, then
+    /// <see cref="TrainingRig.ExtractInferenceModel"/> — a pure read off the model constituent's
+    /// mapping, with no re-supplied model graph. The extracted model's params ARE the trainstep's
+    /// updated tensors, matched by identifier: every updated trainable-param name resolves to a
+    /// ModelId in the extracted model (identity preserved across composition), and the extracted
+    /// model's forward (ScalarMultiply: <c>input · weight</c>) equals <c>probe · wUpdated</c> — i.e.
+    /// it computes with exactly the tensor the trainstep produced for that identifier, not the init.
+    /// </summary>
+    [Fact]
+    public void TestExtractInferenceModelIdentityCoverage()
+    {
+        var (sample, input, target) = ScalarMultiplyBatches();
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            sample, 0.1f);
+
+        var ctx = new ComputeContext();
+        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
+        var stepped = rig.TrainStep(rig.CreateInitialCheckpoint(), input, target, compiled);
+        string wName = rig.TrainableParamStructDef.Fields[0].Name;
+        float wUpdated = ((TensorData<float32>)stepped.TrainableParams.Fields[wName]).AccessMemory()[0];
+        Assert.NotEqual(1.0f, wUpdated);   // the step genuinely moved the weight off its init
+
+        // Extraction: pure read off the model constituent — no model graph re-supplied by the caller.
+        var inference = rig.ExtractInferenceModel(stepped);
+        Assert.Equal(GraphKind.ConcreteModel, inference.Kind);
+
+        // Identity preserved: each updated-tensor identifier resolves to a ModelId in the extracted model.
+        var concrete = rig.ModelConstituent.ToConcreteArchitecture(
+            rig.ModelConstituent.FromOrderedInputs([sample[0].ToTensorData()]));
+        var scheme = ModuleParamSetNamingScheme.FromModelIdFormats(concrete.GetShorokooIdNamingScheme(), "Shorokoo");
+        var modelIds = concrete.GetConcreteModelParamInfos().ModelIds;
+        foreach (var f in stepped.TrainableParams.Fields.Where(f => f.Value is TensorData))
+            Assert.True(scheme.ToModelId(f.Key, modelIds) is not null,
+                $"extracted param '{f.Key}' did not resolve to a ModelId (composition identity regressed)");
+
+        // The extracted model computes with exactly the trainstep's updated tensor for wName.
+        var probe = TensorData([4L], new float[] { 2f, 3f, 4f, 5f });
+        var outputs = ComputeContext.Default.Execute(inference, probe)[0]
+            .ToTensorData<float32>().AccessMemory().ToArray();
+        float[] expected = [2f * wUpdated, 3f * wUpdated, 4f * wUpdated, 5f * wUpdated];
+        for (int i = 0; i < expected.Length; i++)
+            Assert.True(MathF.Abs(expected[i] - outputs[i]) < 1e-5f,
+                $"extracted forward [{i}] = {outputs[i]}, expected probe·wUpdated = {expected[i]}");
+    }
+
+    /// <summary>
+    /// Counter derivations (§5.8.5): step/epoch/batch are host-owned scalars, so resetting one yields
+    /// a NEW <see cref="TrainingCheckpoint"/> carrying the same tensor state by reference (nothing is
+    /// re-derived), leaving the receiver untouched. The single-counter helpers carry the others through.
+    /// </summary>
+    [Fact]
+    public void TestCheckpointCounterDerivationsCoverage()
+    {
+        var (sample, _, _) = ScalarMultiplyBatches();
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            sample, 0.1f);
+        var ck = rig.CreateInitialCheckpoint();   // step/epoch/batch = 0
+        Assert.Equal(0, ck.Step);
+
+        var moved = ck.WithCounters(step: 5, epoch: 2, batchIndex: 3);
+        Assert.NotSame(ck, moved);
+        Assert.Equal(5, moved.Step);
+        Assert.Equal(2, moved.Epoch);
+        Assert.Equal(3, moved.BatchIndex);
+        // Tensor state shared by reference — counters are not rig state.
+        Assert.Same(ck.TrainableParams, moved.TrainableParams);
+        Assert.Same(ck.ModelState, moved.ModelState);
+        Assert.Same(ck.OptimizerState, moved.OptimizerState);
+        // Receiver untouched (immutable value).
+        Assert.Equal(0, ck.Step);
+        Assert.Equal(0, ck.Epoch);
+        Assert.Equal(0, ck.BatchIndex);
+
+        // Single-counter helpers carry the others through unchanged.
+        Assert.Equal(9, ck.WithStep(9).Step);
+        Assert.Equal(0, ck.WithStep(9).Epoch);
+        Assert.Equal(7, ck.WithEpoch(7).Epoch);
+        Assert.Equal(0, ck.WithEpoch(7).Step);
+        Assert.Equal(4, ck.WithBatchIndex(4).BatchIndex);
+        Assert.Equal(0, ck.WithBatchIndex(4).Step);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Checkpoint/rig API redesign (#110 follow-up, towards #115): a checkpoint
+    // carries its rig; parameterless ToInferenceModel(); AdoptCheckpoint; the
+    // step's loss on the checkpoint; component-subset save/load; the flags API.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Every rig-produced checkpoint carries its <see cref="TrainingCheckpoint.Rig"/> — the initial
+    /// checkpoint, each <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>
+    /// result, and the counter derivations (which also preserve <see cref="TrainingCheckpoint.Loss"/>).
+    /// A bare checkpoint built by the public constructor has none.
+    /// </summary>
+    [Fact]
+    public void TestCheckpointCarriesRigCoverage()
+    {
+        var (sample, input, target) = ScalarMultiplyBatches();
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            sample, 0.1f);
+
+        var initial = rig.CreateInitialCheckpoint();
+        Assert.Same(rig, initial.Rig);
+        Assert.Null(initial.Loss);   // no step produced it
+
+        var ctx = new ComputeContext();
+        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
+        var stepped = rig.TrainStep(initial, input, target, compiled);
+        Assert.Same(rig, stepped.Rig);
+
+        // Counter derivations preserve both Rig and Loss.
+        var moved = stepped.WithStep(42);
+        Assert.Same(rig, moved.Rig);
+        Assert.Equal(stepped.Loss, moved.Loss);
+
+        // A bare checkpoint carries no rig.
+        var bare = new TrainingCheckpoint(initial.TrainableParams, initial.ModelState, initial.OptimizerState);
+        Assert.Null(bare.Rig);
+    }
+
+    /// <summary>
+    /// <see cref="TrainingCheckpoint.Loss"/> is <c>null</c> on an initial checkpoint and set by
+    /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>
+    /// (which now returns the post-step checkpoint directly) to that step's loss, carried through
+    /// the counter derivations.
+    /// </summary>
+    [Fact]
+    public void TestCheckpointLossSetByStepCoverage()
+    {
+        var (sample, input, target) = ScalarMultiplyBatches();
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            sample, 0.1f);
+        var ctx = new ComputeContext();
+        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
+
+        var initial = rig.CreateInitialCheckpoint();
+        Assert.Null(initial.Loss);
+
+        var result = rig.TrainStep(initial, input, target, compiled);
+        Assert.NotNull(result.Loss);
+        Assert.True(float.IsFinite(result.Loss!.Value));
+        Assert.Equal(result.Loss, result.WithEpoch(3).Loss);   // carried through the counter derivation
+    }
+
+    /// <summary>
+    /// The parameterless <see cref="TrainingCheckpoint.ToInferenceModel()"/> works for a
+    /// <b>multi-input</b> model: the rig's retained concrete arch was concretized at ALL its inputs (not
+    /// just the first), so a two-input model round-trips. y = a·wa + b·wb with wa = wb = 1 ⇒ output = a + b.
+    /// This is the path the old single-sample-input extraction could not build.
+    /// </summary>
+    [Fact]
+    public void TestToInferenceModelMultiInputCoverage()
+    {
+        var sample = new NamedModelParam[]
+        {
+            new TensorDataModelParam("a", ModelParamType.InputParam, TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+            new TensorDataModelParam("b", ModelParamType.InputParam, TensorData([4L], new float[] { 5f, 6f, 7f, 8f })),
+        };
+        var rig = TrainingRig.FromScratch(
+            TwoInputSumModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            sample, 0.1f);
+        Assert.Equal(2, rig.InputDef.Fields.Length);          // two model inputs
+
+        var ckpt = rig.CreateInitialCheckpoint();             // wa = wb = 1
+        var inference = ckpt.ToInferenceModel();              // binds weights into the retained arch (concretized at BOTH [4] inputs)
+        Assert.Equal(GraphKind.ConcreteModel, inference.Kind);
+
+        var a = TensorData([4L], new float[] { 1f, 2f, 3f, 4f });
+        var b = TensorData([4L], new float[] { 10f, 20f, 30f, 40f });
+        var outputs = ComputeContext.Default.Execute(inference, a, b)[0]
+            .ToTensorData<float32>().AccessMemory().ToArray();
+        float[] expected = [11f, 22f, 33f, 44f];              // a + b
+        for (int i = 0; i < expected.Length; i++)
+            Assert.True(MathF.Abs(expected[i] - outputs[i]) < 1e-5f,
+                $"multi-input extract [{i}] = {outputs[i]}, expected a+b = {expected[i]}");
+    }
+
+    /// <summary>
+    /// <see cref="TrainingRig.AdoptCheckpoint"/> attaches a rig to a bare checkpoint (so
+    /// <see cref="TrainingCheckpoint.ToInferenceModel()"/> works), preserving counters and loss and
+    /// leaving the argument untouched; a checkpoint whose field defs are incompatible with the rig is
+    /// rejected. A rig-less checkpoint's <see cref="TrainingCheckpoint.ToInferenceModel()"/> throws.
+    /// </summary>
+    [Fact]
+    public void TestAdoptCheckpointCoverage()
+    {
+        var (sample, _, _) = ScalarMultiplyBatches();
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            sample, 0.1f);
+        var seed = rig.CreateInitialCheckpoint();
+
+        // A bare checkpoint (no rig) at some counters; ToInferenceModel throws.
+        var bare = new TrainingCheckpoint(
+            seed.TrainableParams, seed.ModelState, seed.OptimizerState, step: 5, epoch: 2, batchIndex: 1);
+        Assert.Null(bare.Rig);
+        Assert.Throws<InvalidOperationException>(() => bare.ToInferenceModel());
+
+        // Adopt: new checkpoint with the rig attached; counters preserved; argument untouched.
+        var adopted = rig.AdoptCheckpoint(bare);
+        Assert.NotSame(bare, adopted);
+        Assert.Same(rig, adopted.Rig);
+        Assert.Equal(5, adopted.Step);
+        Assert.Equal(2, adopted.Epoch);
+        Assert.Equal(1, adopted.BatchIndex);
+        Assert.Null(bare.Rig);                                // argument untouched
+        Assert.NotNull(adopted.ToInferenceModel());           // now works
+
+        // Incompatible defs are rejected: a BatchNorm (+ momentum) rig cannot adopt a
+        // ScalarMultiply/SGD checkpoint (different trainable/state/opt defs).
+        var bnRig = TrainingRig.FromScratch(
+            ScalarMultiplyWithBatchNormModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDMomentumOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([8L], new float[8]))],
+            0.5f, 0.9f);
+        Assert.Throws<ArgumentException>(() => bnRig.AdoptCheckpoint(bare));
+    }
+
+    /// <summary>
+    /// The component flags on save/load: saving <see cref="CheckpointComponents.InferenceState"/> only
+    /// writes the trainable params (and model state), dropping optimizer state and counters. Reloading
+    /// against a fresh rig restores the trainable params, fills the dropped optimizer state from the
+    /// rig's initial values (so it is the init, not the trained state), and reads counters as 0. The
+    /// reloaded checkpoint carries the rig. Requesting the (unimplemented) TrainingRig component throws
+    /// a clear <see cref="NotSupportedException"/> naming #115.
+    /// </summary>
+    [Fact]
+    public void TestSaveLoadComponentsSubsetCoverage()
+    {
+        var (rigA, trained, _, _, _) = BuildTrainedAdamRig(steps: 3);
+        Assert.NotEmpty(trained.OptimizerState.Fields);       // AdamW carries m/v/step
+        var trainedOpt = FlattenStruct(trained.OptimizerState);
+        var initialOpt = FlattenStruct(rigA.CreateInitialCheckpoint().OptimizerState);
+        Assert.NotEqual(trainedOpt, initialOpt);              // training moved the optimizer state
+
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_subset_{Guid.NewGuid():N}.safetensors");
+        try
+        {
+            // Save inference state only — no optimizer state, no counters.
+            trained.Save(path, CheckpointComponents.InferenceState);
+
+            var rigB = BuildTrainedAdamRig(steps: 0).Rig;
+            var loaded = rigB.LoadCheckpoint(path);
+            Assert.Same(rigB, loaded.Rig);                    // load attaches the rig
+            Assert.Equal(FlattenStruct(trained.TrainableParams), FlattenStruct(loaded.TrainableParams));
+            Assert.Equal(0, loaded.Step);                     // counters were dropped ⇒ 0
+            // Optimizer state was not saved ⇒ filled from the rig's initial values (not the trained ones).
+            Assert.Equal(initialOpt, FlattenStruct(loaded.OptimizerState));
+
+            // Requesting the TrainingRig component is a clear NotSupportedException (#115).
+            var ex = Assert.Throws<NotSupportedException>(
+                () => trained.Save(path, CheckpointComponents.All));
+            Assert.Contains("#115", ex.Message);
+
+            // Symmetric on load: explicitly asking for the TrainingRig component (directly or via All)
+            // throws the same #115 NotSupportedException — the file never stores the rig's constituents.
+            var loadRigEx = Assert.Throws<NotSupportedException>(
+                () => rigB.LoadCheckpoint(path, CheckpointComponents.TrainingRig));
+            Assert.Contains("#115", loadRigEx.Message);
+            Assert.Throws<NotSupportedException>(() => rigB.LoadCheckpoint(path, CheckpointComponents.All));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    /// <summary>
+    /// The component filter is honored on a partial load from a native <c>.skpt</c> exactly as it is
+    /// for the flat path (Fix #3): a full <c>.skpt</c> is saved, then reloaded with only
+    /// <see cref="CheckpointComponents.InferenceState"/> — the trainable params restore from the file,
+    /// but the dropped optimizer state fills from the rig's initial values (not the trained ones), the
+    /// counters read as 0, and the loss reads back <c>null</c> (its own Loss component was dropped too).
+    /// Requesting the (unimplemented) TrainingRig component throws a #115 <see cref="NotSupportedException"/>.
+    /// </summary>
+    [Fact]
+    public void TestSkptSaveLoadComponentsSubsetCoverage()
+    {
+        var (rigA, trained, _, _, _) = BuildTrainedAdamRig(steps: 3);
+        Assert.NotEmpty(trained.OptimizerState.Fields);       // AdamW carries m/v/step
+        Assert.NotNull(trained.Loss);                         // a step produced the loss
+        var trainedOpt = FlattenStruct(trained.OptimizerState);
+        var initialOpt = FlattenStruct(rigA.CreateInitialCheckpoint().OptimizerState);
+        Assert.NotEqual(trainedOpt, initialOpt);              // training moved the optimizer state
+
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_skpt_subset_{Guid.NewGuid():N}.skpt");
+        try
+        {
+            // The .skpt save writes every kind; the FILTER is exercised on load.
+            Persistence.SaveTrainingCheckpointToSkpt(trained, path);
+
+            var rigB = BuildTrainedAdamRig(steps: 0).Rig;
+            var loaded = rigB.LoadCheckpoint(path, CheckpointComponents.InferenceState);
+            Assert.Same(rigB, loaded.Rig);                    // load attaches the rig
+            Assert.Equal(FlattenStruct(trained.TrainableParams), FlattenStruct(loaded.TrainableParams));
+            Assert.Equal(0, loaded.Step);                     // counters dropped ⇒ 0
+            Assert.Null(loaded.Loss);                         // Loss component dropped ⇒ null
+            // Optimizer state was filtered out ⇒ filled from the rig's initial values, not the trained ones.
+            Assert.Equal(initialOpt, FlattenStruct(loaded.OptimizerState));
+
+            // Symmetric with the flat path: requesting the TrainingRig component throws a #115 error.
+            var ex = Assert.Throws<NotSupportedException>(
+                () => rigB.LoadCheckpoint(path, CheckpointComponents.TrainingRig));
+            Assert.Contains("#115", ex.Message);
+            Assert.Throws<NotSupportedException>(() => rigB.LoadCheckpoint(path, CheckpointComponents.All));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    /// <summary>
+    /// <see cref="TrainingCheckpoint.Loss"/> persists as its <b>own</b>
+    /// <see cref="CheckpointComponents.Loss"/> component — independent of
+    /// <see cref="CheckpointComponents.Counters"/> — in BOTH the flat safetensors format and the
+    /// <c>.skpt</c> manifest: a checkpoint with a known non-null loss round-trips its loss; an initial
+    /// checkpoint (null loss) reads back <c>null</c> (never a sentinel 0.0). The two axes are exercised
+    /// independently: a <c>Counters</c>-only save carries the counters but NOT the loss, and a
+    /// <c>Loss</c>-only save carries the loss but drops the counters. Explicitly requesting <c>Loss</c>
+    /// on a null-loss checkpoint is a no-op (writes nothing, no throw).
+    /// </summary>
+    [Fact]
+    public void TestCheckpointLossPersistsCoverage()
+    {
+        var (rigA, trained, _, _, _) = BuildTrainedAdamRig(steps: 3);
+        Assert.NotNull(trained.Loss);
+        float loss = trained.Loss!.Value;
+        Assert.True(trained.Step > 0);
+        var initial = rigA.CreateInitialCheckpoint();
+        Assert.Null(initial.Loss);
+
+        var flatPath = Path.Combine(Path.GetTempPath(), $"shrk_loss_flat_{Guid.NewGuid():N}.safetensors");
+        var flatInitPath = Path.Combine(Path.GetTempPath(), $"shrk_loss_flatinit_{Guid.NewGuid():N}.safetensors");
+        var flatCountersOnlyPath = Path.Combine(Path.GetTempPath(), $"shrk_loss_flatco_{Guid.NewGuid():N}.safetensors");
+        var flatLossOnlyPath = Path.Combine(Path.GetTempPath(), $"shrk_loss_flatlo_{Guid.NewGuid():N}.safetensors");
+        var flatNullLossReqPath = Path.Combine(Path.GetTempPath(), $"shrk_loss_flatnull_{Guid.NewGuid():N}.safetensors");
+        var skptPath = Path.Combine(Path.GetTempPath(), $"shrk_loss_skpt_{Guid.NewGuid():N}.skpt");
+        var skptInitPath = Path.Combine(Path.GetTempPath(), $"shrk_loss_skptinit_{Guid.NewGuid():N}.skpt");
+        try
+        {
+            // ---- Flat format: non-null loss round-trips; null loss reads back null. ----
+            trained.Save(flatPath);
+            var full = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(flatPath);
+            Assert.Equal(loss, full.Loss!.Value);
+            Assert.Equal(trained.Step, full.Step);            // counters ride too, independently
+
+            initial.Save(flatInitPath);
+            Assert.Null(BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(flatInitPath).Loss);
+
+            // Axis 1 — Counters WITHOUT Loss: the counters persist but the loss is dropped (reads null).
+            trained.Save(flatCountersOnlyPath,
+                CheckpointComponents.InferenceState | CheckpointComponents.Counters);
+            var countersOnly = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(flatCountersOnlyPath);
+            Assert.Equal(trained.Step, countersOnly.Step);    // counters carried
+            Assert.Null(countersOnly.Loss);                   // loss NOT carried (its own component was dropped)
+
+            // Axis 2 — Loss WITHOUT Counters: the loss persists but the counters drop to 0.
+            trained.Save(flatLossOnlyPath,
+                CheckpointComponents.InferenceState | CheckpointComponents.Loss);
+            var lossOnly = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(flatLossOnlyPath);
+            Assert.Equal(loss, lossOnly.Loss!.Value);         // loss carried
+            Assert.Equal(0, lossOnly.Step);                   // counters dropped ⇒ 0
+
+            // Requesting Loss on a null-loss checkpoint is a no-op (writes nothing, no throw).
+            initial.Save(flatNullLossReqPath, CheckpointComponents.InferenceState | CheckpointComponents.Loss);
+            Assert.Null(BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(flatNullLossReqPath).Loss);
+
+            // ---- .skpt manifest: non-null loss round-trips; null loss reads back null. ----
+            Persistence.SaveTrainingCheckpointToSkpt(trained, skptPath);
+            Assert.Equal(loss, BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(skptPath).Loss!.Value);
+            // .skpt load honors the Loss component independently: drop Loss ⇒ null even though counters load.
+            var skptNoLoss = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(
+                skptPath, CheckpointComponents.InferenceState | CheckpointComponents.OptimizerState | CheckpointComponents.Counters);
+            Assert.Equal(trained.Step, skptNoLoss.Step);      // counters carried
+            Assert.Null(skptNoLoss.Loss);                     // Loss component dropped ⇒ null
+
+            Persistence.SaveTrainingCheckpointToSkpt(initial, skptInitPath);
+            Assert.Null(BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(skptInitPath).Loss);
+        }
+        finally
+        {
+            string[] paths =
+                [flatPath, flatInitPath, flatCountersOnlyPath, flatLossOnlyPath, flatNullLossReqPath, skptPath, skptInitPath];
+            foreach (var p in paths)
+                if (File.Exists(p)) File.Delete(p);
+        }
+    }
+
+    /// <summary>
+    /// Rename smoke: the initial-checkpoint factory is <c>CreateInitialCheckpoint</c> (was
+    /// <c>CreateDefaultCheckpoint</c>), in both the no-arg and hyperparameter-struct overloads.
+    /// </summary>
+    [Fact]
+    public void TestCreateInitialCheckpointRenameSmokeCoverage()
+    {
+        var (sample, _, _) = ScalarMultiplyBatches();
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            sample, 0.1f);
+        Assert.NotNull(rig.CreateInitialCheckpoint().TrainableParams);
+
+        var runtimeRig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, InitFromHyperOptimizer.ComputationGraph,
+            sample, new InitFromHyperOptimizerHyperparameters { LearningRate = Hyperparameter.Runtime() });
+        Assert.NotNull(runtimeRig.CreateInitialCheckpoint(runtimeRig.MakeHyperparameters(0.3f)).OptimizerState);
     }
 
     /// <summary>Rewrites a .skpt in place, deleting the <c>epoch</c>/<c>batchIndex</c> keys from its

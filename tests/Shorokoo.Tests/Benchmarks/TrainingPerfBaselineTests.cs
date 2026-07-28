@@ -161,13 +161,13 @@ public class TrainingPerfBaselineTests
         var inputBatch = rig.InputDef.FromOrderedData(TensorData(InputShape, new float[] { 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f }));
         var targetBatch = rig.TargetDef.FromOrderedData(TensorData(TargetShape, new float[] { 1f, 0f, 1f, 0f }));
 
-        var ckpt = rig.CreateDefaultCheckpoint();
+        var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < ThroughputWarmupSteps; i++)
-            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled).Checkpoint;
+            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled);
 
         var sw = Stopwatch.StartNew();
         for (int i = 0; i < ThroughputMeasuredSteps; i++)
-            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled).Checkpoint;
+            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled);
         sw.Stop();
 
         return ThroughputMeasuredSteps / sw.Elapsed.TotalSeconds;

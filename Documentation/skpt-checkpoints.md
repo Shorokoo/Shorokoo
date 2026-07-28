@@ -361,7 +361,7 @@ ComputationGraph model = Persistence.ImportSafeTensorsToCheckpoint(
 model.skpt
 ├── config.json                the manifest: all metadata and all wiring
 ├── models/
-│   └── model.srk              the model definition (srk2 encoding, weights stripped)
+│   └── model.srk              the model definition (srk1 encoding, weights stripped)
 └── data/
     ├── weights.safetensors    tensor data (safetensors layout)
     └── user-data.json         optional host user-data bag (JSON object)
@@ -411,7 +411,7 @@ model.skpt
   "models": {
     "model": {
       "entry": "models/model.srk",
-      "format": "srk2",                   // the .srk v2 container encoding
+      "format": "srk1",                   // the .srk container encoding
       "stage": "concrete-model",          // lifecycle stage of the serialized graph
       "sha256": "6824d4…"                 // hash of the entry's bytes (the graph hash)
     }

@@ -58,7 +58,7 @@ namespace Shorokoo.Graph
         /// What this graph is — a <see cref="GraphKind.Module"/>, a
         /// <see cref="GraphKind.ConcreteArchitecture"/>, or a
         /// <see cref="GraphKind.ConcreteModel"/>. Reliable by construction: stamped by
-        /// the producing path, carried through copies and (as the .srk v2 header
+        /// the producing path, carried through copies and (as the .srk header
         /// <c>stage</c> and the ONNX <c>shrk_graph_kind</c> metadata) through
         /// serialization, never re-derived by op-scanning.
         /// </summary>

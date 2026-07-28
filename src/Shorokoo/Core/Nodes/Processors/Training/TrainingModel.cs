@@ -48,7 +48,6 @@ namespace Shorokoo
         /// training loop advances (the graph never does), persisted so a resumed run restores
         /// its position in the data schedule. <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>
         /// carries it through unchanged; the host sets it (e.g. at each epoch boundary).
-        /// Checkpoints written before this counter existed load with the default 0.
         /// </summary>
         public long Epoch { get; }
 
@@ -56,7 +55,7 @@ namespace Shorokoo
         /// The 0-based batch index within the current epoch — a host-owned run counter the
         /// training loop advances (the graph never does), persisted for exact resume.
         /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>
-        /// carries it through unchanged; the host sets it. Older checkpoints load with the default 0.
+        /// carries it through unchanged; the host sets it.
         /// </summary>
         public long BatchIndex { get; }
 
@@ -115,10 +114,7 @@ namespace Shorokoo
         internal const string ModelStateSection = "model_state";
         internal const string OptimizerStateSection = "opt_state";
         internal const string CheckpointMarkerName = "__shorokoo_checkpoint__"; // int64[4] = [version, step, epoch, batchIndex]
-        // v1 = [version, step]; v2 added epoch + batchIndex; v3 (#105) widens the counters to full
-        // int64 in memory (the marker was always I64 on disk, so no layout change — the bump signals
-        // that step/epoch/batchIndex may now legitimately exceed int32). The loader reads 1..3.
-        internal const long CheckpointFormatVersion = 3;
+        internal const long CheckpointFormatVersion = 1;
 
         /// <summary>
         /// Saves this checkpoint to a single SafeTensors file so training can resume across process
@@ -239,17 +235,19 @@ namespace Shorokoo
                     $"'{filePath}' is not a Shorokoo training checkpoint (missing '{CheckpointMarkerName}' marker).");
 
             var marker = markerData.As<int64>().AccessMemory<long>();
-            // Accept any format version this build knows (1 = [version, step]; 2 adds epoch and
-            // batchIndex; 3 widens the counters to int64 — same on-disk I64 layout). A v1 file lacks
-            // the epoch/batch slots, so they default to 0 — the "fill new state kinds as absent" rule.
-            // Counters are read at full int64 width (no int32 truncation), accepting older widths.
-            if (marker.Length < 2 || marker[0] < 1 || marker[0] > CheckpointFormatVersion)
+            // The marker is a fixed int64[4] = [version, step, epoch, batchIndex]. Exactly one
+            // format version exists (1); a wrong shape or version is unreadable by this build.
+            if (marker.Length != 4)
                 throw new InvalidOperationException(
-                    $"Unsupported checkpoint format version {(marker.Length > 0 ? marker[0] : -1)}; " +
-                    $"this build reads versions 1 through {CheckpointFormatVersion}.");
+                    $"'{filePath}' has a malformed checkpoint marker: expected 4 int64 elements " +
+                    $"[version, step, epoch, batchIndex], found {marker.Length}.");
+            if (marker[0] != CheckpointFormatVersion)
+                throw new InvalidOperationException(
+                    $"Unsupported checkpoint format version {marker[0]}; this build reads version " +
+                    $"{CheckpointFormatVersion} only.");
             long step = marker[1];
-            long epoch = marker.Length > 2 ? marker[2] : 0;
-            long batchIndex = marker.Length > 3 ? marker[3] : 0;
+            long epoch = marker[2];
+            long batchIndex = marker[3];
 
             var trainable = ReadSection(byName, TrainableSection, trainableParamDef, filePath);
             var modelState = ReadSection(byName, ModelStateSection, modelStateDef, filePath);

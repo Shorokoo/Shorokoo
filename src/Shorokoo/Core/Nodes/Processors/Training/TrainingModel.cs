@@ -1032,11 +1032,13 @@ namespace Shorokoo
         /// Writes a representative input onto each of the concrete arch's <c>MODEL_TENSOR_INPUT</c> nodes
         /// (in graph-input order, one per <paramref name="sampleInputs"/>), making the arch self-describing
         /// for training-graph shape inference. The value is <b>zero-filled</b> (never the user's sample
-        /// values) and <b>shape-limited</b> by QEE's own threshold: inputs with at most
-        /// <see cref="Shorokoo.Core.Inference.QuickExecutionEngine.DefaultMaxDataElements"/> elements get a
-        /// real zero payload; larger ones get a shape+dtype-only placeholder (no payload), which is all
-        /// QEE keeps for a tensor over that threshold anyway. Only concretization (already done) needed
-        /// input values; from here on only shapes matter, so this records exactly the shape metadata.
+        /// values) and <b>shape-limited</b> by the shape-inference engine's small-tensor threshold: inputs
+        /// with at most
+        /// <see cref="Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements"/>
+        /// elements get a real zero payload; larger ones get a shape+dtype-only placeholder (no payload),
+        /// which is all the engine keeps for a tensor over that threshold anyway. Only concretization
+        /// (already done) needed input values; from here on only shapes matter, so this records exactly
+        /// the shape metadata.
         /// </summary>
         private static void WriteRepresentativeInputs(InternalComputationGraph concreteArch, NamedModelParam[] sampleInputs)
         {
@@ -1087,12 +1089,22 @@ namespace Shorokoo
 
         /// <summary>
         /// A zero-filled representative tensor for shape inference: a real zero payload when the element
-        /// count is within QEE's <see cref="Shorokoo.Core.Inference.QuickExecutionEngine.DefaultMaxDataElements"/>
-        /// threshold, else a shape+dtype-only placeholder (no allocation). Holds no sample-input values.
+        /// count is within the consuming shape-inference engine's small-tensor threshold
+        /// (<see cref="Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements"/>),
+        /// else a shape+dtype-only placeholder (no allocation). Holds no sample-input values.
+        ///
+        /// <para>The threshold MUST match the one <see cref="ShapeInferenceInterpreter"/> hands its
+        /// <see cref="Shorokoo.Core.Inference.QuickExecutionEngine"/> (<c>MaxSmallTensorElements</c>),
+        /// not QEE's own <c>DefaultMaxDataElements</c>: a placeholder is legal input to QEE only when
+        /// its element count is <b>strictly above</b> the threshold QEE reads payloads at — otherwise
+        /// <see cref="Shorokoo.Core.Inference.Helpers.TensorDataConverter.ToRuntimeTensor"/> tries to read
+        /// the placeholder's elided memory and throws, defeating the whole QEE shape-inference pass. Below
+        /// the threshold we must therefore carry a real (zero) payload, exactly as the retired
+        /// <c>ZeroExemplar</c> did for every size.</para>
         /// </summary>
         private static TensorData RepresentativeInputFor(Shape shape, DType dtype)
         {
-            if (shape.Count > Shorokoo.Core.Inference.QuickExecutionEngine.DefaultMaxDataElements)
+            if (shape.Count > Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements)
                 return new WeightPlaceholderTensorData(shape, dtype);
             var bytesPerElement = dtype.EncodingBitCount / 8;
             return TensorData.CreateFromRawBytes(shape, dtype, new byte[shape.Count * bytesPerElement]);

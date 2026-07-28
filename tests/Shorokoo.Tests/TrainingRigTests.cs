@@ -379,6 +379,145 @@ public class TrainingRigCoverageTests
     }
 
     /// <summary>
+    /// Coverage for the concrete arch's representative-input attribute across the
+    /// shape-inference size threshold. The rig records a zero-filled representative input
+    /// on each <c>MODEL_TENSOR_INPUT</c> node; inputs at or below
+    /// <see cref="Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements"/>
+    /// carry a real zero payload, larger ones a shape+dtype-only placeholder.
+    ///
+    /// <para>The <c>512</c> case pins a regression: the placeholder threshold must be the
+    /// engine's small-tensor limit (1024), not QEE's <c>DefaultMaxDataElements</c> (256).
+    /// With the wrong (256) threshold a 512-element input got a values-elided placeholder that
+    /// the shape-inference engine — which reads payloads up to 1024 — then tried to read,
+    /// throwing and collapsing the whole QEE pass so no output shape could be inferred. The
+    /// <c>256</c> (boundary), <c>1024</c> (boundary, real payload) and <c>2048</c>
+    /// (over-threshold, genuine placeholder — read shape-only, never materialized) cases fence
+    /// the boundary and exercise the placeholder path.</para>
+    /// </summary>
+    [Fact]
+    public void TestRepresentativeInputThresholdCoverage()
+    {
+        // Boundary at/below the small-tensor threshold: real zero payload.
+        CoverFromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, [256L], 0.01f);
+        // Regression window (256, 1024]: must be a real payload, not an elided placeholder.
+        CoverFromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, [512L], 0.01f);
+        CoverFromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, [1024L], 0.01f);
+        // Over the threshold: genuine shape+dtype-only placeholder, read shape-only by QEE.
+        CoverFromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, [2048L], 0.01f);
+    }
+
+    /// <summary>
+    /// The representative inputs live on the shared concrete arch and are re-read on every
+    /// derivation (<c>ReadRepresentativeInputs</c>). This drives an over-threshold input (so the
+    /// derivation path re-reads a shape-only placeholder and feeds it to shape inference) through
+    /// <see cref="TrainingRig.WithLoss"/>, <see cref="TrainingRig.WithOptimizer(ComputationGraph, Hyperparameter[])"/>
+    /// and <see cref="TrainingRig.WithScheduler(Hyperparameter[])"/>, asserting each derived rig
+    /// still builds a valid checkpoint — proving the attribute survives derivation and the
+    /// placeholder is never materialized on the re-read.
+    /// </summary>
+    [Fact]
+    public void TestRepresentativeInputSurvivesDerivationCoverage()
+    {
+        var sample = new NamedModelParam[]
+        {
+            new TensorDataModelParam("input", ModelParamType.InputParam,
+                TensorData([2048L], new float[2048])),
+        };
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, sample, 0.01f);
+
+        var reLoss = rig.WithLoss(L2Loss.ComputationGraph);
+        Assert.NotNull(reLoss.CreateInitialCheckpoint().TrainableParams);
+
+        var reOpt = rig.WithOptimizer(SGDMomentumOptimizer.ComputationGraph, 0.5f, 0.9f);
+        Assert.NotEmpty(reOpt.CreateInitialCheckpoint().OptimizerState.Fields);
+
+        var reSched = reOpt.WithScheduler(0.25f, 0.9f);
+        Assert.NotNull(reSched.CreateInitialCheckpoint().TrainableParams);
+    }
+
+    /// <summary>
+    /// <see cref="TrainingRig.WithSeed"/> rebinds the RNG identity on a <c>Clone()</c> of the
+    /// concrete arch; <c>Clone</c> copies node attributes by reference, so the reseeded arch's
+    /// <c>MODEL_TENSOR_INPUT</c> nodes must still carry their representative-input attributes.
+    /// A checkpoint built from the reseeded rig (whose derivation re-reads those attributes for
+    /// shape inference) therefore has to succeed. Uses an over-threshold input so the carried
+    /// attribute is a shape-only placeholder.
+    /// </summary>
+    [Fact]
+    public void TestRepresentativeInputSurvivesReSeedCoverage()
+    {
+        var sample = new NamedModelParam[]
+        {
+            new TensorDataModelParam("input", ModelParamType.InputParam,
+                TensorData([2048L], new float[2048])),
+        };
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, sample, 0.01f);
+
+        var reseeded = rig.WithSeed(new RngConfig { MasterSeed = 7 });
+        Assert.NotNull(reseeded.CreateInitialCheckpoint().TrainableParams);
+    }
+
+    /// <summary>
+    /// Inertness: the representative-input attribute must never reach a serialized artifact. A
+    /// boundary/input node is emitted as a <c>ValueInfoProto</c>, never a <c>NodeProto</c>, so its
+    /// attributes are not serialized. This saves an initial checkpoint (whose model lineage carries
+    /// the attribute on its input node) to a native <c>.skpt</c> and asserts the raw container bytes
+    /// contain no trace of the attribute name, then confirms the artifact still loads as a concrete
+    /// inference model. Uses an over-threshold input so the attribute value is a placeholder.
+    /// </summary>
+    [Fact]
+    public void TestRepresentativeInputIsInertInSkptCoverage()
+    {
+        var sample = new NamedModelParam[]
+        {
+            new TensorDataModelParam("input", ModelParamType.InputParam,
+                TensorData([2048L], new float[2048])),
+        };
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, sample, 0.01f);
+        var ckpt = rig.CreateInitialCheckpoint();
+
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_repin_inert_{Guid.NewGuid():N}.skpt");
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+
+            var bytes = File.ReadAllBytes(path);
+            var needle = System.Text.Encoding.ASCII.GetBytes(
+                Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInput);
+            Assert.False(ContainsSubsequence(bytes, needle),
+                "the representative-input attribute leaked into the serialized .skpt artifact");
+
+            var inferenceModel = Persistence.Load(path);
+            Assert.Equal(GraphKind.ConcreteModel, inferenceModel.Kind);
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    /// <summary>Byte-subsequence search for the inertness assertion (no dependency on the STORED-zip
+    /// entry layout — the attribute name must be absent from the whole container).</summary>
+    private static bool ContainsSubsequence(byte[] haystack, byte[] needle)
+    {
+        if (needle.Length == 0 || haystack.Length < needle.Length) return false;
+        for (int i = 0; i <= haystack.Length - needle.Length; i++)
+        {
+            int j = 0;
+            while (j < needle.Length && haystack[i + j] == needle[j]) j++;
+            if (j == needle.Length) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Coverage for the shape-manipulation arms of
     /// <see cref="Shorokoo.Core.AutoDiffCheckpointing.OpsPerf.TensorManipulationPerf"/>
     /// that no mainstream model in the Coverage suite exercises. Each model

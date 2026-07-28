@@ -1821,6 +1821,135 @@ public class TrainingRigCoverageTests
         return (rig, ckpt, inBatch, outBatch, compiled);
     }
 
+    // A two-runtime-input rig (issue #98): BilinearRigModel takes x1 [N,in1] and x2 [N,in2] over a
+    // trainable rank-3 A weight + bias, reduced to a per-row scalar [N] so L2Loss applies. Used to
+    // exercise the multi-input .skpt save / ToInferenceModel paths, which must supply one example
+    // per runtime input to concretization.
+    private static readonly long[] BilinearX1Shape = [2L, 3L];
+    private static readonly long[] BilinearX2Shape = [2L, 4L];
+    private static readonly long[] BilinearOutShape = [2L];
+    private static readonly float[] BilinearX1Data = [0.5f, -1f, 0.25f, 1f, -0.5f, 0.75f];
+    private static readonly float[] BilinearX2Data = [0.3f, -0.5f, 0.2f, -0.1f, 0.4f, 0.6f, -0.2f, 0.8f];
+
+    private static (TrainingRig Rig, TrainingCheckpoint Ckpt, TensorDataStruct In, TensorDataStruct Out, CompiledGraph Compiled)
+        BuildTrainedBilinearRig(int steps)
+    {
+        var sample = new NamedModelParam[]
+        {
+            new TensorDataModelParam("x1", ModelParamType.InputParam, TensorData(BilinearX1Shape, BilinearX1Data)),
+            new TensorDataModelParam("x2", ModelParamType.InputParam, TensorData(BilinearX2Shape, BilinearX2Data)),
+        };
+        var rig = TrainingRig.FromScratch(
+            BilinearRigModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, sample,
+            new AdamWOptimizerHyperparameters { LearningRate = 0.1f });
+
+        var inDef = new TensorStructDef(
+            [new TensorStructFieldDef("x1", DataStructure.Tensor, 2, DType.Float32),
+             new TensorStructFieldDef("x2", DataStructure.Tensor, 2, DType.Float32)], "ModelInput");
+        var outDef = new TensorStructDef(
+            [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)], "Target");
+        var inBatch = new TensorDataStruct(inDef, new Dictionary<string, IData>
+        {
+            { "x1", TensorData(BilinearX1Shape, BilinearX1Data) },
+            { "x2", TensorData(BilinearX2Shape, BilinearX2Data) },
+        });
+        var outBatch = new TensorDataStruct(outDef, new Dictionary<string, IData>
+        {
+            { "targets", TensorData(BilinearOutShape, new float[] { 0.5f, -0.25f }) },
+        });
+
+        var compiled = new ComputeContext().Compile(rig.TrainingStepPureGraph);
+        var ckpt = rig.CreateDefaultCheckpoint();
+        for (int i = 0; i < steps; i++)
+            ckpt = rig.TrainStep(ckpt, inBatch, outBatch, compiled).Checkpoint;
+        return (rig, ckpt, inBatch, outBatch, compiled);
+    }
+
+    /// <summary>
+    /// Issue #98: a model with more than one runtime input persists to (and exports from) a .skpt
+    /// training checkpoint. The multi-input <see cref="Persistence.SaveTrainingCheckpointToSkpt(
+    /// TrainingCheckpoint, ComputationGraph, string, TensorData[])"/> save (one example per runtime
+    /// input) round-trips through a fresh rig — step, trainable params and optimizer state
+    /// bit-identical, and a resumed TrainStep matching the pre-save trajectory — while the
+    /// multi-input <see cref="TrainingCheckpoint.ToInferenceModel(ComputationGraph, TensorData[])"/>
+    /// and the container's own self-describing inference model both concretize the two inputs and
+    /// execute identically. Before the fix, concretization saw only one example input and the model
+    /// could not be persisted at all.
+    /// </summary>
+    [Fact]
+    [Trait("Purpose", "Coverage")]
+    [Trait("Domain", "Training")]
+    public void TestSkptMultiInputTrainingCheckpointRoundTripCoverage()
+    {
+        var (rigA, ckpt, inBatch, outBatch, compiledA) = BuildTrainedBilinearRig(steps: 2);
+        Assert.Equal(2, ckpt.Step);
+        Assert.NotEmpty(ckpt.OptimizerState.Fields);   // AdamW carries m/v/step per param
+        Assert.Empty(ckpt.ModelState.Fields);          // Bilinear is stateless
+
+        // The reference trajectory: one more step from the in-memory checkpoint.
+        var reference = rigA.TrainStep(ckpt, inBatch, outBatch, compiledA);
+
+        // One example (shapes only) per runtime input, in declared order (x1, x2).
+        var ex1 = TensorData(BilinearX1Shape, BilinearX1Data);
+        var ex2 = TensorData(BilinearX2Shape, BilinearX2Data);
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_skpt_multi_{Guid.NewGuid():N}.skpt");
+        try
+        {
+            // Multi-input save: filePath precedes the params array of example inputs.
+            Persistence.SaveTrainingCheckpointToSkpt(
+                ckpt, BilinearRigModel.ComputationGraph, path, ex1, ex2);
+            Assert.True(File.Exists(path));
+
+            // Fresh rig, as a fresh process: state + step round-trip bit-identically.
+            var rigB = BuildTrainedBilinearRig(steps: 0).Rig;
+            var loaded = rigB.LoadCheckpoint(path);
+            Assert.Equal(2, loaded.Step);
+            Assert.Equal(FlattenStruct(ckpt.TrainableParams), FlattenStruct(loaded.TrainableParams));
+            Assert.Equal(FlattenStruct(ckpt.OptimizerState), FlattenStruct(loaded.OptimizerState));
+
+            // Resuming from the loaded checkpoint reproduces the pre-save trajectory exactly.
+            var compiledB = new ComputeContext().Compile(rigB.TrainingStepPureGraph);
+            var resumed = rigB.TrainStep(loaded, inBatch, outBatch, compiledB);
+            Assert.Equal(3, resumed.Checkpoint.Step);
+            Assert.Equal(reference.Loss, resumed.Loss);
+            Assert.Equal(
+                FlattenStruct(reference.Checkpoint.TrainableParams),
+                FlattenStruct(resumed.Checkpoint.TrainableParams));
+
+            // The .skpt is self-describing for inference: the container's concrete model executes
+            // identically to ToInferenceModel built straight from the checkpoint's trained weights,
+            // both concretizing the two runtime inputs.
+            var inferenceModel = Persistence.Load(path);
+            Assert.Equal(GraphKind.ConcreteModel, inferenceModel.Kind);
+            var fromCkpt = ckpt.ToInferenceModel(BilinearRigModel.ComputationGraph, ex1, ex2);
+            Assert.Equal(GraphKind.ConcreteModel, fromCkpt.Kind);
+
+            var probe1 = TensorData(BilinearX1Shape, new float[] { 0.1f, 0.2f, 0.3f, -0.4f, 0.5f, -0.6f });
+            var probe2 = TensorData(BilinearX2Shape, new float[] { 0.2f, -0.3f, 0.1f, 0.7f, -0.5f, 0.4f, 0.6f, -0.1f });
+            var loadedOut = ComputeContext.Default.Execute(inferenceModel, probe1, probe2)[0]
+                .ToTensorData().As<float32>().AccessMemory<float>().ToArray();
+            var ckptOut = ComputeContext.Default.Execute(fromCkpt, probe1, probe2)[0]
+                .ToTensorData().As<float32>().AccessMemory<float>().ToArray();
+            Assert.Equal(ckptOut, loadedOut);
+            Assert.Equal(2, ckptOut.Length);   // per-row output [N], N = 2
+
+            // The builder form also accepts the params example inputs (composing container features).
+            var builderPath = Path.Combine(Path.GetTempPath(), $"shrk_skpt_multi_b_{Guid.NewGuid():N}.skpt");
+            try
+            {
+                Persistence.ForTrainingCheckpoint(ckpt, BilinearRigModel.ComputationGraph, ex1, ex2)
+                    .WithZstdCompressedData()
+                    .Save(builderPath);
+                var loadedFromBuilder = BuildTrainedBilinearRig(steps: 0).Rig.LoadCheckpoint(builderPath);
+                Assert.Equal(2, loadedFromBuilder.Step);
+                Assert.Equal(
+                    FlattenStruct(ckpt.TrainableParams), FlattenStruct(loadedFromBuilder.TrainableParams));
+            }
+            finally { if (File.Exists(builderPath)) File.Delete(builderPath); }
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
     /// <summary>
     /// The .skpt training-checkpoint acceptance round-trip (issue #95): a mid-training checkpoint
     /// saves to a native .skpt whose training state is split into per-kind data entries recorded in

@@ -136,7 +136,8 @@ namespace Shorokoo
         /// <see cref="TrainingCheckpoint.Save(string)"/>; the write is atomic (temp file + rename). A
         /// <c>.safetensors</c> extension is conventional. To write the native .skpt container
         /// instead (carrying the inference model and per-kind data entries), use
-        /// <see cref="SaveTrainingCheckpointToSkpt"/> / <see cref="ForTrainingCheckpoint"/>.
+        /// <see cref="SaveTrainingCheckpointToSkpt(TrainingCheckpoint, ComputationGraph, TensorData, string)"/> /
+        /// <see cref="ForTrainingCheckpoint(TrainingCheckpoint, ComputationGraph, TensorData)"/>.
         /// </summary>
         public static void SaveTrainingCheckpoint(TrainingCheckpoint checkpoint, string filePath)
         {
@@ -168,7 +169,7 @@ namespace Shorokoo
 
         /// <summary>
         /// Loads a <see cref="TrainingCheckpoint"/> saved by either <see cref="SaveTrainingCheckpoint(TrainingCheckpoint, string)"/>
-        /// (the legacy flat safetensors file) or <see cref="SaveTrainingCheckpointToSkpt"/> (the
+        /// (the legacy flat safetensors file) or <see cref="SaveTrainingCheckpointToSkpt(TrainingCheckpoint, ComputationGraph, TensorData, string)"/> (the
         /// native .skpt container) — the shape is detected from the file's bytes. Either way the
         /// checkpoint is reconstructed against the given struct defs (which pin the expected shapes,
         /// so a checkpoint from a different model or optimizer fails loudly). To resume a whole rig,

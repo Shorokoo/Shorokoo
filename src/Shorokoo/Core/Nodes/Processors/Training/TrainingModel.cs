@@ -82,19 +82,31 @@ namespace Shorokoo
         /// <summary>
         /// Builds a concrete inference model from this checkpoint's trained weights in one call,
         /// encapsulating the full <c>ToConcreteArchitecture → weights → ToConcreteModel</c> pipeline.
+        /// Convenience overload for a single-input model; a multi-input model supplies one example
+        /// per runtime input via <see cref="ToInferenceModel(ComputationGraph, TensorData[])"/>.
         /// </summary>
         public ComputationGraph ToInferenceModel(ComputationGraph modelGraph, TensorData exampleInput)
+            => ToInferenceModel(modelGraph, [exampleInput]);
+
+        /// <summary>
+        /// Builds a concrete inference model from this checkpoint's trained weights in one call,
+        /// encapsulating the full <c>ToConcreteArchitecture → weights → ToConcreteModel</c> pipeline.
+        /// Supply one example (shapes only) per runtime input, in the model's declared input order —
+        /// the same values <c>FromOrderedInputs</c> pairs with the graph's inputs.
+        /// </summary>
+        public ComputationGraph ToInferenceModel(ComputationGraph modelGraph, params TensorData[] exampleInputs)
         {
             if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
             var g = TrainingRig.RequireModelGraphKind(modelGraph, nameof(ToInferenceModel));
-            return new ComputationGraph(ToInferenceModelCore(g, exampleInput), GraphKind.ConcreteModel);
+            return new ComputationGraph(ToInferenceModelCore(g, [.. exampleInputs]), GraphKind.ConcreteModel);
         }
 
-        internal InternalComputationGraph ToInferenceModelCore(InternalComputationGraph modelGraph, TensorData exampleInput)
+        internal InternalComputationGraph ToInferenceModelCore(
+            InternalComputationGraph modelGraph, ImmutableArray<TensorData> exampleInputs)
         {
             if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
-            if (exampleInput is null) throw new ArgumentNullException(nameof(exampleInput));
-            var arch    = modelGraph.ToConcreteArchitecture(modelGraph.FromOrderedInputs([exampleInput]));
+            TrainingRig.RequireExampleInputs(exampleInputs, nameof(ToInferenceModel));
+            var arch    = modelGraph.ToConcreteArchitecture(modelGraph.FromOrderedInputs(exampleInputs));
             var weights = new ModelParamList(
                 TrainableParams.Fields
                     .Where(f => f.Value is TensorData)
@@ -661,7 +673,7 @@ namespace Shorokoo
         /// <summary>
         /// The model-graph precondition shared by <see cref="FromScratch(ComputationGraph,
         /// ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?)"/>
-        /// and <see cref="TrainingCheckpoint.ToInferenceModel"/>: a module graph or an
+        /// and <see cref="TrainingCheckpoint.ToInferenceModel(ComputationGraph, TensorData)"/>: a module graph or an
         /// already-lowered concrete architecture (both feed the idempotent
         /// <c>ToConcreteArchitecture</c> pipeline). A weight-filled concrete model is
         /// refused — its parameters are already materialized as values, so there is
@@ -675,6 +687,28 @@ namespace Shorokoo
                 operation, "a 'module' or 'concrete-architecture' model graph", modelGraph.Kind,
                 "Its parameters are already materialized as values; pass the module graph " +
                 "(e.g. MyModel.ComputationGraph) or its ToConcreteArchitecture result instead."));
+        }
+
+        /// <summary>
+        /// The example-inputs precondition shared by the checkpoint export paths
+        /// (<see cref="TrainingCheckpoint.ToInferenceModel(ComputationGraph, TensorData[])"/> and
+        /// <see cref="Persistence.SaveTrainingCheckpointToSkpt(TrainingCheckpoint, ComputationGraph, string, TensorData[])"/>):
+        /// a model with more than one runtime
+        /// input needs one example per input (shapes only), in the model's declared input order, to
+        /// drive concretization. The collection must be non-empty and hold no null example.
+        /// </summary>
+        internal static void RequireExampleInputs(ImmutableArray<TensorData> exampleInputs, string operation)
+        {
+            if (exampleInputs.IsDefaultOrEmpty)
+                throw new ArgumentException(
+                    $"{operation} requires at least one example input to drive concretization. " +
+                    "Supply one example (shapes only) per runtime input, in the model's declared input order.",
+                    nameof(exampleInputs));
+            for (int i = 0; i < exampleInputs.Length; i++)
+                if (exampleInputs[i] is null)
+                    throw new ArgumentException(
+                        $"{operation}: example input at index {i} is null. Every runtime input needs a " +
+                        "non-null example (shapes only).", nameof(exampleInputs));
         }
 
         private static TrainingRig FromScratchInternal(
@@ -1774,7 +1808,7 @@ namespace Shorokoo
 
         /// <summary>
         /// Loads a checkpoint previously written by <see cref="TrainingCheckpoint.Save(string)"/>
-        /// (legacy flat safetensors) or <see cref="Persistence.SaveTrainingCheckpointToSkpt"/> (the
+        /// (legacy flat safetensors) or <see cref="Persistence.SaveTrainingCheckpointToSkpt(TrainingCheckpoint, ComputationGraph, TensorData, string)"/> (the
         /// native .skpt container) — the on-disk shape is detected automatically — reconstructing it
         /// against this rig's parameter/state struct definitions so training resumes exactly where it
         /// left off: trainable params, optimizer moments, model state, and the host-owned run counters

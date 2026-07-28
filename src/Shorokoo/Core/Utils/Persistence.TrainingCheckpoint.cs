@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -26,7 +27,7 @@ namespace Shorokoo
         /// <summary>
         /// Saves a <see cref="TrainingCheckpoint"/> as a native <c>.skpt</c> container: the concrete
         /// inference model (built from the checkpoint's trained weights via
-        /// <see cref="TrainingCheckpoint.ToInferenceModel"/>) plus the training state split into
+        /// <see cref="TrainingCheckpoint.ToInferenceModel(ComputationGraph, TensorData)"/>) plus the training state split into
         /// per-kind data entries (trainable weights, model state, optimizer state), with the global
         /// step recorded in the manifest. The trainable-weights entry doubles as the model's default
         /// weight set, so the file also loads as an inference checkpoint via
@@ -35,7 +36,7 @@ namespace Shorokoo
         ///
         /// <para>The write is atomic (staged to a temp file and committed by rename). For per-entry
         /// Zstd compression or provenance metadata, use the builder form
-        /// <see cref="ForTrainingCheckpoint"/>.</para>
+        /// <see cref="ForTrainingCheckpoint(TrainingCheckpoint, ComputationGraph, TensorData)"/>.</para>
         /// </summary>
         /// <param name="checkpoint">The training state to persist.</param>
         /// <param name="modelGraph">The model graph the checkpoint was trained for (a module graph
@@ -48,19 +49,46 @@ namespace Shorokoo
             => ForTrainingCheckpoint(checkpoint, modelGraph, exampleInput).Save(filePath);
 
         /// <summary>
+        /// Multi-input overload of <see cref="SaveTrainingCheckpointToSkpt(TrainingCheckpoint,
+        /// ComputationGraph, TensorData, string)"/>: supply one example (shapes only) per runtime
+        /// input, in the model's declared input order, so a model with more than one runtime input
+        /// concretizes correctly. (<paramref name="filePath"/> precedes the <c>params</c> array, so
+        /// the single-input convenience form keeps its <c>(…, exampleInput, filePath)</c> shape.)
+        /// </summary>
+        /// <param name="checkpoint">The training state to persist.</param>
+        /// <param name="modelGraph">The model graph the checkpoint was trained for (a module graph
+        /// or concrete architecture), used to build the self-describing inference model.</param>
+        /// <param name="filePath">Target <c>.skpt</c> path; its directory must already exist.</param>
+        /// <param name="exampleInputs">One sample input per runtime input (shapes only), in declared
+        /// input order, driving concretization of the inference model.</param>
+        public static void SaveTrainingCheckpointToSkpt(
+            TrainingCheckpoint checkpoint, ComputationGraph modelGraph, string filePath, params TensorData[] exampleInputs)
+            => ForTrainingCheckpoint(checkpoint, modelGraph, exampleInputs).Save(filePath);
+
+        /// <summary>
         /// Starts a native <c>.skpt</c> training-checkpoint save (issue #95). Compose the container
         /// features — <see cref="TrainingCheckpointBuilder.WithZstdCompressedData"/> and
         /// <see cref="TrainingCheckpointBuilder.WithMetadata"/> — then commit with
         /// <see cref="TrainingCheckpointBuilder.Save"/>. See
-        /// <see cref="SaveTrainingCheckpointToSkpt"/> for the parameters and on-disk shape.
+        /// <see cref="SaveTrainingCheckpointToSkpt(TrainingCheckpoint, ComputationGraph, TensorData, string)"/>
+        /// for the parameters and on-disk shape. Convenience overload for a single-input model.
         /// </summary>
         public static TrainingCheckpointBuilder ForTrainingCheckpoint(
             TrainingCheckpoint checkpoint, ComputationGraph modelGraph, TensorData exampleInput)
+            => ForTrainingCheckpoint(checkpoint, modelGraph, [exampleInput]);
+
+        /// <summary>
+        /// Multi-input form of <see cref="ForTrainingCheckpoint(TrainingCheckpoint, ComputationGraph,
+        /// TensorData)"/>: supply one example (shapes only) per runtime input, in the model's declared
+        /// input order, so a model with more than one runtime input concretizes correctly.
+        /// </summary>
+        public static TrainingCheckpointBuilder ForTrainingCheckpoint(
+            TrainingCheckpoint checkpoint, ComputationGraph modelGraph, params TensorData[] exampleInputs)
         {
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
             if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
-            if (exampleInput is null) throw new ArgumentNullException(nameof(exampleInput));
-            return new TrainingCheckpointBuilder(checkpoint, modelGraph, exampleInput);
+            if (exampleInputs is null) throw new ArgumentNullException(nameof(exampleInputs));
+            return new TrainingCheckpointBuilder(checkpoint, modelGraph, [.. exampleInputs]);
         }
 
         /// <summary>
@@ -89,7 +117,7 @@ namespace Shorokoo
 
         /// <summary>
         /// Reconstructs a <see cref="TrainingCheckpoint"/> from a native <c>.skpt</c> container
-        /// written by <see cref="SaveTrainingCheckpointToSkpt"/>. Validated against the expected
+        /// written by <see cref="SaveTrainingCheckpointToSkpt(TrainingCheckpoint, ComputationGraph, TensorData, string)"/>. Validated against the expected
         /// struct defs with the same fail-loud contract as <see cref="TrainingCheckpoint.Load"/>:
         /// every referenced entry's SHA-256 is verified, each kind's tensors must match the given
         /// def field-for-field (missing field, rank mismatch, or a stray tensor fails loudly), and a
@@ -239,7 +267,7 @@ namespace Shorokoo
 
     /// <summary>
     /// Builder for a native <c>.skpt</c> training checkpoint, started by
-    /// <see cref="Persistence.ForTrainingCheckpoint"/>. Optionally compose the container's features —
+    /// <see cref="Persistence.ForTrainingCheckpoint(TrainingCheckpoint, ComputationGraph, TensorData)"/>. Optionally compose the container's features —
     /// <see cref="WithZstdCompressedData"/> for per-entry Zstd, <see cref="WithMetadata"/> for
     /// provenance — then commit with <see cref="Save"/>.
     /// </summary>
@@ -247,16 +275,16 @@ namespace Shorokoo
     {
         private readonly TrainingCheckpoint _checkpoint;
         private readonly ComputationGraph _modelGraph;
-        private readonly TensorData _exampleInput;
+        private readonly ImmutableArray<TensorData> _exampleInputs;
         private int? _zstdDataCompressionLevel;
         private Dictionary<string, string>? _userMetadata;
 
         internal TrainingCheckpointBuilder(
-            TrainingCheckpoint checkpoint, ComputationGraph modelGraph, TensorData exampleInput)
+            TrainingCheckpoint checkpoint, ComputationGraph modelGraph, ImmutableArray<TensorData> exampleInputs)
         {
             _checkpoint = checkpoint;
             _modelGraph = modelGraph;
-            _exampleInput = exampleInput;
+            _exampleInputs = exampleInputs;
         }
 
         /// <summary>
@@ -316,7 +344,7 @@ namespace Shorokoo
         /// Commits the training checkpoint as a single <c>.skpt</c> file. The write is atomic (staged
         /// to a temp file beside <paramref name="filePath"/> and committed by rename), so a crash
         /// mid-save never corrupts an existing checkpoint; the target's directory must already exist.
-        /// See <see cref="Persistence.SaveTrainingCheckpointToSkpt"/> for the on-disk shape.
+        /// See <see cref="Persistence.SaveTrainingCheckpointToSkpt(TrainingCheckpoint, ComputationGraph, TensorData, string)"/> for the on-disk shape.
         /// </summary>
         public void Save(string filePath)
         {
@@ -329,8 +357,9 @@ namespace Shorokoo
             // stats etc., so a stateful model like BatchNorm still concretizes). Each parameter is
             // mapped below to its own per-kind data entry, so no weight bytes are duplicated.
             const string operation = "Persistence.SaveTrainingCheckpointToSkpt";
+            TrainingRig.RequireExampleInputs(_exampleInputs, operation);
             var modelInternal = TrainingRig.RequireModelGraphKind(_modelGraph, operation);
-            var arch = modelInternal.ToConcreteArchitecture(modelInternal.FromOrderedInputs([_exampleInput]));
+            var arch = modelInternal.ToConcreteArchitecture(modelInternal.FromOrderedInputs(_exampleInputs));
 
             var boundValues = new List<KeyValuePair<string, TensorData>>();
             foreach (var (name, value) in _checkpoint.TrainableParams.Fields)

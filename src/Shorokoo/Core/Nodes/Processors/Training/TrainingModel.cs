@@ -92,7 +92,7 @@ namespace Shorokoo
         /// The <see cref="TrainingRig"/> this checkpoint belongs to, or <c>null</c> for a bare
         /// checkpoint constructed without one. Every rig-produced checkpoint carries its rig
         /// (<see cref="TrainingRig.CreateInitialCheckpoint()"/>, <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>,
-        /// <see cref="TrainingRig.Train"/>/<see cref="TrainingRig.Fit"/>, load, and
+        /// <see cref="TrainingRig.Train"/>/<see cref="TrainingRig.Fit(TensorDataStruct[], TensorDataStruct[], int, TrainingCheckpoint?, ComputeContext?)"/>, load, and
         /// <see cref="TrainingRig.AdoptCheckpoint"/> all set it), so <see cref="ToInferenceModel()"/>
         /// can extract the inference model with no re-supplied graph. The rig does not store
         /// checkpoints, so there is no reference cycle. Attach one to a bare checkpoint via
@@ -2216,6 +2216,90 @@ namespace Shorokoo
             TrainingCheckpoint? initialCheckpoint = null,
             ComputeContext? ctx = null)
             => Train(initialCheckpoint ?? CreateInitialCheckpoint(), trainingInputs, trainingOutputs, numEpochs, ctx ?? ComputeContext.Default);
+
+        /// <summary>
+        /// Fits the model by draining an <see cref="IDataLoader"/> for <paramref name="numEpochs"/>
+        /// epochs, advancing the checkpoint's <see cref="TrainingCheckpoint.Step"/>,
+        /// <see cref="TrainingCheckpoint.Epoch"/> and <see cref="TrainingCheckpoint.BatchIndex"/> at
+        /// the right points — so the host no longer hand-sets epoch / batch: the loader owns the data
+        /// stream and the rig reads the counters off it. Each produced checkpoint therefore carries a
+        /// correct position, and the returned <see cref="TrainingResult.FinalCheckpoint"/> can be saved
+        /// and later resumed by passing it back as <paramref name="initialCheckpoint"/>: the loader is
+        /// <see cref="IDataLoader.Restore"/>d to the checkpoint's position, so the run continues from
+        /// exactly the next batch it had reached.
+        ///
+        /// <para>"Epochs" are counted from the checkpoint's current epoch: the loop trains until the
+        /// loader reaches <c>startEpoch + numEpochs</c>. Resuming a checkpoint saved mid-epoch first
+        /// finishes that partial epoch. Scheduled hyperparameters are applied automatically (the global
+        /// step advances across the run); this schedule-driven form requires the rig to have no
+        /// schedule-less runtime hyperparameter — supply those via <see cref="MakeHyperparameters(float)"/>
+        /// and a manual <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>
+        /// loop instead.</para>
+        /// </summary>
+        /// <param name="loader">The data loader owning the (input, target) batch stream and its position.</param>
+        /// <param name="numEpochs">Number of additional epochs to train, counted from the checkpoint's epoch.</param>
+        /// <param name="initialCheckpoint">State to resume from; defaults to <see cref="CreateInitialCheckpoint()"/>.</param>
+        /// <param name="ctx">Compute context; defaults to <see cref="ComputeContext.Default"/>.</param>
+        /// <returns>Final checkpoint (with advanced step / epoch / batch) and the per-epoch mean losses.</returns>
+        public TrainingResult Fit(
+            IDataLoader loader,
+            int numEpochs,
+            TrainingCheckpoint? initialCheckpoint = null,
+            ComputeContext? ctx = null)
+        {
+            if (loader is null) throw new ArgumentNullException(nameof(loader));
+            if (numEpochs < 1) throw new ArgumentException("Number of epochs must be at least 1.", nameof(numEpochs));
+            ctx ??= ComputeContext.Default;
+
+            var checkpoint = initialCheckpoint ?? CreateInitialCheckpoint();
+
+            // Resume: point the loader at the checkpoint's position so training continues from the
+            // very next batch. For a fresh checkpoint this is (epoch 0, batch 0).
+            loader.Restore(new DataLoaderPosition(checkpoint.Epoch, checkpoint.BatchIndex));
+
+            var compiled = ctx.Compile(TrainingStepPureGraph);
+            long targetEpoch = checkpoint.Epoch + numEpochs;
+
+            var epochLosses = new List<float>();
+            long runningEpoch = checkpoint.Epoch;
+            float epochLossSum = 0f;
+            int epochBatchCount = 0;
+
+            while (checkpoint.Epoch < targetEpoch)
+            {
+                var batch = loader.Next();
+
+                // Feed the step the position of the batch being trained, so any scheduler reading the
+                // epoch / batchIndex counters sees this batch's own position. WithCounters carries the
+                // step through and preserves the attached rig (and any prior loss).
+                var stepInput = checkpoint.WithCounters(
+                    epoch: batch.Position.Epoch, batchIndex: batch.Position.BatchIndex);
+                var stepped = TrainStep(stepInput, batch.Input, batch.Target, compiled);
+
+                // Stamp the loader's new position (the next batch to yield) onto the checkpoint the run
+                // carries forward — so a checkpoint saved here restores the loader to the right place.
+                // WithCounters preserves the rig TrainStep attached and this step's Loss; TrainStep
+                // already advanced Step, so we set only epoch / batchIndex.
+                var next = loader.Position;
+                checkpoint = stepped.WithCounters(epoch: next.Epoch, batchIndex: next.BatchIndex);
+
+                // Group per-epoch mean loss by the epoch the batch belonged to.
+                if (batch.Position.Epoch != runningEpoch)
+                {
+                    epochLosses.Add(epochBatchCount > 0 ? epochLossSum / epochBatchCount : 0f);
+                    runningEpoch = batch.Position.Epoch;
+                    epochLossSum = 0f;
+                    epochBatchCount = 0;
+                }
+                // TrainStep sets the post-step checkpoint's Loss to this step's loss.
+                epochLossSum += stepped.Loss!.Value;
+                epochBatchCount++;
+            }
+            if (epochBatchCount > 0)
+                epochLosses.Add(epochLossSum / epochBatchCount);
+
+            return new TrainingResult(checkpoint, epochLosses.ToArray());
+        }
 
         /// <summary>
         /// Returns the default initial checkpoint produced at <see cref="FromScratch(ComputationGraph, ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?)"/> time.

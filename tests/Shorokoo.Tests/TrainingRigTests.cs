@@ -1788,6 +1788,241 @@ public class TrainingRigCoverageTests
         Assert.True(float.IsFinite(result.EpochLosses[0]));
     }
 
+    // ---------------------------------------------------------------------------
+    // Data loader (issue #111): interface + in-memory implementation + rig integration.
+    // These use a dataset where sample i carries the value i in every feature, so the
+    // floats read back out of a gathered batch reveal exactly which sample indices the
+    // loader drew — letting the shuffle order and resume position be checked exactly.
+    // ---------------------------------------------------------------------------
+
+    /// <summary>Builds a rig over ScalarMultiply + L2Loss whose batch shape is [batchSize, features].</summary>
+    private static TrainingRig LoaderRig(int batchSize, int features) =>
+        TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [
+                new TensorDataModelParam("input", ModelParamType.InputParam,
+                    TensorData([batchSize, features], new float[batchSize * features])),
+            ],
+            0.1f);
+
+    /// <summary>Dataset of <paramref name="n"/> samples where sample i holds the value i in each of its
+    /// <paramref name="features"/> features, plus a matching (constant-zero) target set.</summary>
+    private static (TensorDataStruct inputs, TensorDataStruct targets) IndexDataset(
+        TrainingRig rig, int n, int features)
+    {
+        float[] inVals = new float[n * features];
+        for (int i = 0; i < n; i++)
+            for (int f = 0; f < features; f++)
+                inVals[i * features + f] = i;
+        var inputs = new TensorDataStruct(rig.InputDef,
+            new Dictionary<string, IData> { { "input", TensorData([n, (long)features], inVals) } });
+        var targets = new TensorDataStruct(rig.TargetDef,
+            new Dictionary<string, IData> { { "targets", TensorData([n, (long)features], new float[n * features]) } });
+        return (inputs, targets);
+    }
+
+    /// <summary>Drains one full epoch and returns the sample index each batch row was gathered from.</summary>
+    private static int[] EpochIndexSequence(IDataLoader loader, int features)
+    {
+        var seq = new List<int>();
+        for (int b = 0; b < loader.BatchesPerEpoch; b++)
+        {
+            var batch = loader.Next();
+            var vals = ((TensorData)batch.Input.Fields["input"]).As<float32>().AccessMemory().ToArray();
+            for (int r = 0; r < vals.Length; r += features)
+                seq.Add((int)vals[r]);
+        }
+        return seq.ToArray();
+    }
+
+    /// <summary>
+    /// Covers <see cref="InMemoryDataLoader"/> batching, position tracking / epoch rollover, and
+    /// deterministic per-epoch shuffle. dropLast drops the trailing partial batch; the shuffle is a
+    /// genuine, seed-determined permutation (identical across loaders sharing a seed, regenerated
+    /// bit-for-bit when an epoch is revisited) and differs from the identity order.
+    /// </summary>
+    [Fact]
+    public void TestInMemoryDataLoaderBatchingAndShuffleCoverage()
+    {
+        const int features = 1;
+        var rig = LoaderRig(batchSize: 2, features);
+        var (inputs, targets) = IndexDataset(rig, n: 8, features);
+
+        // dropLast=true: 8 samples / batch 2 = 4 batches; identity order in-order.
+        var plain = new InMemoryDataLoader(inputs, targets, batchSize: 2);
+        Assert.Equal(4, plain.BatchesPerEpoch);
+        Assert.Equal(8, plain.SampleCount);
+        Assert.Equal(new DataLoaderPosition(0, 0), plain.Position);
+        int[] identity = [0, 1, 2, 3, 4, 5, 6, 7];
+        Assert.Equal(identity, EpochIndexSequence(plain, features));
+        // After a full epoch the position has rolled to the start of epoch 1.
+        Assert.Equal(new DataLoaderPosition(1, 0), plain.Position);
+
+        // dropLast=false keeps a trailing partial batch: 9 samples / batch 2 = 5 batches.
+        var (inputs9, targets9) = IndexDataset(rig, n: 9, features);
+        var keepPartial = new InMemoryDataLoader(inputs9, targets9, batchSize: 2, dropLast: false);
+        Assert.Equal(5, keepPartial.BatchesPerEpoch);
+        var partialSeq = EpochIndexSequence(keepPartial, features);
+        Assert.Equal(9, partialSeq.Length);   // the lone final sample is included
+        Assert.Equal(Enumerable.Range(0, 9), partialSeq);
+
+        // Position stepping within an epoch.
+        var stepper = new InMemoryDataLoader(inputs, targets, batchSize: 2);
+        stepper.Next();
+        Assert.Equal(new DataLoaderPosition(0, 1), stepper.Position);
+        stepper.Next();
+        Assert.Equal(new DataLoaderPosition(0, 2), stepper.Position);
+
+        // Shuffle: same seed → identical order; a revisited epoch regenerates the same order;
+        // the order is a real permutation and (for this seed) not the identity.
+        var s1 = new InMemoryDataLoader(inputs, targets, batchSize: 2, shuffle: true, seed: 12345);
+        var s2 = new InMemoryDataLoader(inputs, targets, batchSize: 2, shuffle: true, seed: 12345);
+        int[] order1 = EpochIndexSequence(s1, features);
+        int[] order2 = EpochIndexSequence(s2, features);
+        Assert.Equal(order1, order2);                        // deterministic across loaders
+        Assert.Equal(identity, order1.OrderBy(i => i));      // a genuine permutation of 0..7
+        Assert.NotEqual(identity, order1);                   // actually reordered
+
+        // Different epoch → different draw order (epoch is mixed into the seed).
+        int[] epoch1Order = EpochIndexSequence(s1, features);
+        Assert.Equal(identity, epoch1Order.OrderBy(i => i));
+        Assert.NotEqual(order1, epoch1Order);
+
+        // Revisiting epoch 0 (via Restore) regenerates epoch 0's order exactly.
+        var s3 = new InMemoryDataLoader(inputs, targets, batchSize: 2, shuffle: true, seed: 12345);
+        s3.Restore(new DataLoaderPosition(0, 0));
+        Assert.Equal(order1, EpochIndexSequence(s3, features));
+
+        // Out-of-range batch index is rejected (guards against a mismatched checkpoint/loader).
+        Assert.Throws<ArgumentOutOfRangeException>(() => plain.Restore(new DataLoaderPosition(0, 4)));
+    }
+
+    /// <summary>
+    /// Covers <see cref="TrainingRig.Fit(IDataLoader, int, TrainingCheckpoint?, ComputeContext?)"/>:
+    /// driving a loader advances the checkpoint's step, epoch, and batch counters automatically — with
+    /// no host hand-setting — so a run of E epochs over B batches/epoch lands at step = E*B, epoch = E,
+    /// batchIndex = 0, and reports one mean loss per epoch. The invariant step == epoch*batchesPerEpoch
+    /// holds for a single-loader run.
+    /// </summary>
+    [Fact]
+    public void TestFitWithDataLoaderAdvancesCountersCoverage()
+    {
+        const int features = 4;
+        var rig = LoaderRig(batchSize: 2, features);
+        var (inputs, targets) = IndexDataset(rig, n: 6, features);
+        var loader = new InMemoryDataLoader(inputs, targets, batchSize: 2);   // 3 batches/epoch
+        Assert.Equal(3, loader.BatchesPerEpoch);
+
+        var result = rig.Fit(loader, numEpochs: 2);
+
+        Assert.Equal(2, result.EpochLosses.Length);
+        Assert.All(result.EpochLosses, l => Assert.True(float.IsFinite(l)));
+
+        var final = result.FinalCheckpoint;
+        Assert.Equal(6, final.Step);        // 2 epochs * 3 batches
+        Assert.Equal(2, final.Epoch);       // advanced by the loop, not the host
+        Assert.Equal(0, final.BatchIndex);  // rolled to the start of the next epoch
+        Assert.Equal(final.Epoch * loader.BatchesPerEpoch, final.Step);
+
+        // The loader is left at the matching position (next batch to yield).
+        Assert.Equal(new DataLoaderPosition(2, 0), loader.Position);
+    }
+
+    /// <summary>
+    /// Covers loader-position resume end to end. A run split by a save → fresh-rig-and-loader reload →
+    /// continue must reach the exact same trained weights and counters as one uninterrupted run — the
+    /// deterministic shuffle plus <see cref="IDataLoader.Restore"/> make the resumed batch stream
+    /// identical. Separately, a mid-epoch position (batchIndex != 0) round-trips through a saved
+    /// checkpoint and the reloaded loader yields the very next batch the original would have.
+    /// </summary>
+    [Fact]
+    public void TestDataLoaderResumeRoundTripCoverage()
+    {
+        const int features = 4;
+        const long seed = 777;
+
+        // --- End-to-end: uninterrupted 2-epoch run vs a 1+1 split with save/reload between. ---
+        var rigRef = LoaderRig(batchSize: 2, features);
+        var (inRef, tgtRef) = IndexDataset(rigRef, n: 6, features);
+        var loaderRef = new InMemoryDataLoader(inRef, tgtRef, batchSize: 2, shuffle: true, seed: seed);
+        var refResult = rigRef.Fit(loaderRef, numEpochs: 2);
+        float[] refWeights = FlattenStruct(refResult.FinalCheckpoint.TrainableParams);
+
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_loader_resume_{Guid.NewGuid():N}.safetensors");
+        try
+        {
+            // First half: one epoch, then save mid-run.
+            var rigA = LoaderRig(batchSize: 2, features);
+            var (inA, tgtA) = IndexDataset(rigA, n: 6, features);
+            var loaderA = new InMemoryDataLoader(inA, tgtA, batchSize: 2, shuffle: true, seed: seed);
+            var half = rigA.Fit(loaderA, numEpochs: 1);
+            Assert.Equal(3, half.FinalCheckpoint.Step);
+            Assert.Equal(1, half.FinalCheckpoint.Epoch);
+            half.FinalCheckpoint.Save(path);
+
+            // Second half: fresh rig + fresh loader, load the checkpoint, continue one more epoch.
+            var rigB = LoaderRig(batchSize: 2, features);
+            var (inB, tgtB) = IndexDataset(rigB, n: 6, features);
+            var loaderB = new InMemoryDataLoader(inB, tgtB, batchSize: 2, shuffle: true, seed: seed);
+            var loaded = rigB.LoadCheckpoint(path);
+            Assert.Equal(1, loaded.Epoch);
+            Assert.Equal(0, loaded.BatchIndex);
+            var resumed = rigB.Fit(loaderB, numEpochs: 1, loaded);
+
+            // Same counters and — because the batch stream was reproduced exactly — the same weights.
+            Assert.Equal(refResult.FinalCheckpoint.Step, resumed.FinalCheckpoint.Step);
+            Assert.Equal(refResult.FinalCheckpoint.Epoch, resumed.FinalCheckpoint.Epoch);
+            Assert.Equal(refWeights, FlattenStruct(resumed.FinalCheckpoint.TrainableParams));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+
+        // --- Mid-epoch position (batchIndex != 0) round-trips through a saved checkpoint. ---
+        var rigM = LoaderRig(batchSize: 2, features: 1);
+        var (inM, tgtM) = IndexDataset(rigM, n: 8, features: 1);
+
+        // Reference loader advanced to a mid-epoch position, and the batches it would yield next.
+        var refLoader = new InMemoryDataLoader(inM, tgtM, batchSize: 2, shuffle: true, seed: seed);
+        refLoader.Next(); refLoader.Next();                       // consume 2 batches → position (0, 2)
+        var midPos = refLoader.Position;
+        Assert.Equal(new DataLoaderPosition(0, 2), midPos);
+        int[] refTail = TailIndices(refLoader, features: 1);
+
+        // Persist that position via a checkpoint, reload it, and restore a fresh loader from it.
+        var midPath = Path.Combine(Path.GetTempPath(), $"shrk_loader_midpos_{Guid.NewGuid():N}.safetensors");
+        try
+        {
+            var ckpt0 = rigM.CreateInitialCheckpoint();
+            var midCkpt = new TrainingCheckpoint(
+                ckpt0.TrainableParams, ckpt0.ModelState, ckpt0.OptimizerState,
+                step: 2, epoch: midPos.Epoch, batchIndex: midPos.BatchIndex);
+            midCkpt.Save(midPath);
+            var reloaded = rigM.LoadCheckpoint(midPath);
+            Assert.Equal(midPos.Epoch, reloaded.Epoch);
+            Assert.Equal(midPos.BatchIndex, reloaded.BatchIndex);
+
+            var restored = new InMemoryDataLoader(inM, tgtM, batchSize: 2, shuffle: true, seed: seed);
+            restored.Restore(new DataLoaderPosition(reloaded.Epoch, reloaded.BatchIndex));
+            Assert.Equal(midPos, restored.Position);
+            Assert.Equal(refTail, TailIndices(restored, features: 1));   // continues from the exact next batch
+        }
+        finally { if (File.Exists(midPath)) File.Delete(midPath); }
+    }
+
+    /// <summary>Reads the remaining sample indices in the current epoch without rolling past its end.</summary>
+    private static int[] TailIndices(IDataLoader loader, int features)
+    {
+        var seq = new List<int>();
+        long remaining = loader.BatchesPerEpoch - loader.Position.BatchIndex;
+        for (long b = 0; b < remaining; b++)
+        {
+            var batch = loader.Next();
+            var vals = ((TensorData)batch.Input.Fields["input"]).As<float32>().AccessMemory().ToArray();
+            for (int r = 0; r < vals.Length; r += features)
+                seq.Add((int)vals[r]);
+        }
+        return seq.ToArray();
+    }
+
     /// <summary>
     /// Verifies the parameterless <see cref="TrainingCheckpoint.ToInferenceModel()"/> produces a
     /// concrete model that executes successfully and returns the expected output shape — reading the

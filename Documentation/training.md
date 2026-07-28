@@ -148,6 +148,13 @@ public TrainingResult Fit(  // alias: Train(...)
     TensorDataStruct[] trainingOutputs,
     int numEpochs,
     ComputeContext ctx);
+
+// Data-loader-driven: the loader owns the batch stream; Fit advances step / epoch / batch for you.
+public TrainingResult Fit(
+    IDataLoader loader,
+    int numEpochs,
+    TrainingCheckpoint? initialCheckpoint = null,  // defaults to CreateInitialCheckpoint()
+    ComputeContext? ctx = null);                   // defaults to ComputeContext.Default
 ```
 
 Result types:
@@ -167,6 +174,50 @@ vary per training step (the per-step RNG position is saved in the checkpoint, so
 resumed run continues exactly). Pass
 `new RngConfig { MasterSeed = … }` to re-roll all streams coherently, or
 `RngConfig.NonDeterministic()` for per-run variation.
+
+## Feeding data: the data loader
+
+The array overloads of `Fit`/`Train` take pre-batched `TensorDataStruct[]` and leave the
+checkpoint's epoch / batch counters for you to set. A **data loader** instead owns the batch
+stream: it chops your data into batches, tracks its position, and lets `Fit` advance the
+checkpoint's step / epoch / batch counters automatically — so a saved checkpoint records exactly
+where the run was, and a resumed run continues from the very next batch.
+
+```csharp
+// One field per model input / target; the leading dimension is the sample count.
+var inputs  = new TensorDataStruct(rig.InputDef,
+    new Dictionary<string, IData> { { "input",   TensorData([1000L, 64L], features) } });
+var targets = new TensorDataStruct(rig.TargetDef,
+    new Dictionary<string, IData> { { "targets", TensorData([1000L, 10L], labels)  } });
+
+// Batch into 32s, reshuffling each epoch (deterministically from the seed).
+var loader = new InMemoryDataLoader(inputs, targets, batchSize: 32, shuffle: true, seed: 42);
+
+var outcome = rig.Fit(loader, numEpochs: 10);   // step / epoch / batch advance automatically
+```
+
+- **`IDataLoader`** is the minimal contract: `BatchesPerEpoch`, a current `Position`
+  (`DataLoaderPosition`, the epoch + index of the *next* batch it will yield), `Next()` (produces
+  the current `DataBatch` — input + target + the position it came from — and advances one batch,
+  rolling into the next epoch after the last), and `Restore(position)` to resume.
+- **`InMemoryDataLoader`** is the bare-minimum implementation over tensors you already hold. Each
+  field's leading dimension is the sample count `N`; it slices along that dimension into
+  fixed-size batches, optionally reshuffling every epoch.
+- **Shuffle is deterministic.** With `shuffle: true`, the permutation for epoch `e` is a pure
+  function of `(seed, e)` — a Fisher–Yates shuffle over a SplitMix64 stream, using no ambient
+  `Random` and no wall clock. That is what makes resume exact: restoring to `(e, b)` regenerates
+  epoch `e`'s order bit-for-bit and skips the first `b` batches, so the continued run sees the
+  same batches the original would have.
+- **Partial final batch.** `dropLast: true` (the default) drops a trailing partial batch so every
+  batch matches the shape the training-step graph was compiled for. Pass `dropLast: false` to keep
+  the smaller final batch (only safe if the graph tolerates a variable batch dimension).
+- **Resume.** For a single-loader run, `step == epoch * BatchesPerEpoch + batchIndex`. Save the
+  `FinalCheckpoint` (or any mid-run checkpoint), then in a later process rebuild the rig and a loader
+  over the same data/seed and call `rig.Fit(loader, numEpochs, initialCheckpoint: loaded)`: `Fit`
+  restores the loader to the checkpoint's position, so the run picks up exactly where it left off.
+  `numEpochs` is counted from the checkpoint's current epoch (a checkpoint saved mid-epoch first
+  finishes that partial epoch). This is Shorokoo owning **its own** loader's position; a host driving
+  an external pipeline Shorokoo doesn't own still uses the checkpoint's host user-data bag instead.
 
 ## Save and resume a checkpoint (across process restarts)
 

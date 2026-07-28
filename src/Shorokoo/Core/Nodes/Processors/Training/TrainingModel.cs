@@ -326,7 +326,11 @@ namespace Shorokoo
         /// sectioned-safetensors file (<see cref="Save(string, CheckpointComponents?)"/>) or the native
         /// <c>.skpt</c> container — detected automatically. <paramref name="components"/> selects which
         /// parts to load; <c>null</c> loads everything present. A component not present in the file is
-        /// filled from the rig's initial values (counters default to 0). Throws if the file is not a
+        /// filled from the rig's initial values (counters default to 0). Explicitly requesting the
+        /// <see cref="CheckpointComponents.TrainingRig"/> component (including via
+        /// <see cref="CheckpointComponents.All"/>) throws a <see cref="NotSupportedException"/> naming
+        /// #115 — no file stores the rig's constituent graphs yet, so the request cannot be satisfied;
+        /// pass the rig and omit the flag. Throws if the file is not a
         /// Shorokoo checkpoint, was written by a newer format, or its fields don't match the rig (e.g.
         /// a checkpoint from a different model or optimizer). Prefer
         /// <see cref="TrainingRig.LoadCheckpoint(string, CheckpointComponents?)"/>.
@@ -347,6 +351,18 @@ namespace Shorokoo
                     "TrainingCheckpoint.Load requires a rig to resolve the checkpoint's struct definitions. " +
                     "Pass the rig you are resuming (or use rig.LoadCheckpoint(path)). Reconstructing the rig " +
                     "from the checkpoint file itself is not yet implemented (Shorokoo/Shorokoo#115).");
+
+            // Explicitly requesting the TrainingRig component (including via CheckpointComponents.All)
+            // throws, symmetric with Save (ResolveSaveComponents): the file never stores the rig's
+            // constituent graphs — that serialization is unimplemented (#115) — so the request cannot
+            // be satisfied. null ⇒ "everything present" is the way to load without naming the flag.
+            if (components is CheckpointComponents cReq && (cReq & CheckpointComponents.TrainingRig) != 0)
+                throw new NotSupportedException(
+                    "Cannot load the TrainingRig component — the rig's constituent model/loss/optimizer " +
+                    "graphs, hyperparameters and RNG config — because that serialization is not yet " +
+                    "implemented (Shorokoo/Shorokoo#115) and no checkpoint file stores it. Pass the rig to " +
+                    "Load (or use rig.LoadCheckpoint(path)) and omit the TrainingRig flag; null components " +
+                    "loads every component the file contains.");
 
             var raw = Persistence.IsSkptFile(filePath)
                 ? Persistence.LoadTrainingCheckpointFromSkpt(
@@ -2177,7 +2193,7 @@ namespace Shorokoo
                     $"MakeHyperparameters(float) requires exactly one dynamic hyperparameter; this rig has " +
                     $"{HyperparameterStructDef.Fields.Length} ([{string.Join(", ", DynamicHyperparameterNames)}]). " +
                     "Use MakeHyperparameters((name, value), …).");
-            return PackHyperparams(new[] { value });
+            return PackHyperparams([value]);
         }
 
         /// <summary>

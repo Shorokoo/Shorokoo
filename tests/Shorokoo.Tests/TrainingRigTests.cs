@@ -2499,6 +2499,13 @@ public class TrainingRigCoverageTests
             var ex = Assert.Throws<NotSupportedException>(
                 () => trained.Save(path, CheckpointComponents.All));
             Assert.Contains("#115", ex.Message);
+
+            // Symmetric on load: explicitly asking for the TrainingRig component (directly or via All)
+            // throws the same #115 NotSupportedException — the file never stores the rig's constituents.
+            var loadRigEx = Assert.Throws<NotSupportedException>(
+                () => rigB.LoadCheckpoint(path, CheckpointComponents.TrainingRig));
+            Assert.Contains("#115", loadRigEx.Message);
+            Assert.Throws<NotSupportedException>(() => rigB.LoadCheckpoint(path, CheckpointComponents.All));
         }
         finally { if (File.Exists(path)) File.Delete(path); }
     }

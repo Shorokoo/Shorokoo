@@ -157,14 +157,13 @@ namespace Shorokoo
         // ---- Inference: bind trained weights into a concrete model for execution ----
 
         /// <summary>
-        /// Builds a concrete inference model from this checkpoint's trained weights in one call,
-        /// encapsulating the full <c>ToConcreteArchitecture → weights → ToConcreteModel</c> pipeline.
-        /// Requires an attached <see cref="Rig"/> (the model graph and sample inputs come from it):
-        /// the rig's model constituent is concretized at <b>all</b> the rig's stored sample inputs
-        /// (so a multi-input model is supported), then this checkpoint's trainable params and model
-        /// state are bound by canonical identity. Attach a rig first via
-        /// <see cref="TrainingRig.AdoptCheckpoint"/> — or load the checkpoint against a rig — if this
-        /// one has none.
+        /// Builds a concrete inference model from this checkpoint's trained weights in one call.
+        /// Requires an attached <see cref="Rig"/>: the checkpoint's trainable params and model state
+        /// are bound by canonical identity into the rig's <b>retained concrete architecture</b> — the
+        /// one the rig concretized once at build time (at all its inputs, so a multi-input model is
+        /// supported), held on the rig and reused, never re-concretized and needing no sample inputs.
+        /// Attach a rig first via <see cref="TrainingRig.AdoptCheckpoint"/> — or load the checkpoint
+        /// against a rig — if this one has none.
         /// </summary>
         public ComputationGraph ToInferenceModel()
         {
@@ -174,28 +173,6 @@ namespace Shorokoo
                     "Adopt one via rig.AdoptCheckpoint(checkpoint), or load the checkpoint against a rig " +
                     "(rig.LoadCheckpoint(path)), then call ToInferenceModel().");
             return Rig.ExtractInferenceModel(this);
-        }
-
-        internal InternalComputationGraph ToInferenceModelCore(InternalComputationGraph modelGraph, TensorData[] exampleInputs)
-        {
-            if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
-            if (exampleInputs is null || exampleInputs.Length == 0)
-                throw new ArgumentException("At least one sample input is required.", nameof(exampleInputs));
-            var arch    = modelGraph.ToConcreteArchitecture(modelGraph.FromOrderedInputs([.. exampleInputs]));
-            // Bind every param the model owns — its trainable weights AND its module-owned state
-            // (BatchNorm running stats, …) — each by its canonical identifier, so a stateful model
-            // concretizes too. This is the extraction contract (§5.8.2): follow the model
-            // constituent's mapping, no copy step, no which-tensors-belong-to-inference heuristic —
-            // model-owned parameter identity is preserved across composition, so the fields the
-            // trainstep updated bind straight back into the inference model by the same name. (For
-            // a stateless model ModelState is empty, so this is identical to a trainable-only bind.)
-            var weights = new ModelParamList(
-                TrainableParams.Fields
-                    .Where(f => f.Value is TensorData)
-                    .Concat(ModelState.Fields.Where(f => f.Value is TensorData))
-                    .Select(f => new KeyValuePair<string, TensorData>(f.Key, (TensorData)f.Value)),
-                ModelParamType.TrainableParam);
-            return arch.ToConcreteModel(weights, arch.GetShorokooIdNamingScheme());
         }
 
         // ---- Persistence: save a checkpoint to disk and resume across process restarts ----
@@ -578,7 +555,7 @@ namespace Shorokoo
         /// The rig's <b>constituent</b> layer (§5.8): the swappable source-of-truth models — the
         /// inference model, the loss graph, the optimizer graph (as authored), and the scheduler
         /// (carried in the <see cref="Hyperparameters"/> until #106 folds it into its own persisted
-        /// constituent) — plus the sample inputs and RNG config the trainstep is derived from. This
+        /// constituent) — plus the RNG config the trainstep is derived from. This
         /// is the source of truth; the <see cref="TrainingStepPureGraph"/> (<c>trainstep</c>) is the
         /// purely in-memory derived executable, composed from these and never persisted. A rig is an
         /// <b>immutable value</b>: the <c>With…</c> derivations return a NEW rig sharing the
@@ -586,6 +563,31 @@ namespace Shorokoo
         /// changed — the receiver is never mutated.
         /// </summary>
         private RigConstituents _constituents = null!;
+
+        /// <summary>
+        /// The model constituent's <b>concrete architecture</b> — derived state, computed once when
+        /// the rig is first built (§5.8): the model graph run through <c>ToConcreteArchitecture</c> at
+        /// its inputs and bound to the RNG config, shape-specialized and with every trainable parameter
+        /// visible at the top level. Like <see cref="TrainingStepPureGraph"/> it is environment-
+        /// independent and NEVER persisted; unlike the trainstep it does not change when loss /
+        /// optimizer / scheduler are swapped, so every <c>With…</c> derivation reuses this same graph by
+        /// reference instead of re-concretizing (only <see cref="WithSeed"/> rebinds it, on a clone).
+        /// It is the single substrate both the trainstep build and inference extraction read from, so
+        /// weight-binding for <see cref="TrainingCheckpoint.ToInferenceModel()"/> and the <c>.skpt</c>
+        /// container's self-describing model can never diverge. Consumed read-only (its consumers clone
+        /// before mutating), so sharing it across derived rigs preserves immutability.
+        /// </summary>
+        private InternalComputationGraph _concreteArch = null!;
+
+        /// <summary>
+        /// Zero-filled exemplars carrying only each model input's shape + dtype — the shape metadata
+        /// the training-step shape inference / memory optimizer needs on every (re-)derivation. Derived
+        /// once from the sample inputs at first build and carried by reference across derivations (the
+        /// model inputs never change under a <c>With…</c>); NEVER persisted. These are pure shape
+        /// carriers, NOT the sample inputs: no input VALUES are retained — only concretization (first
+        /// build) ever needed values, and it consumes the construction-time sample inputs directly.
+        /// </summary>
+        private TensorData[] _modelInputExemplars = null!;
 
         /// <summary>The inference-model constituent (a module graph or concrete architecture), as authored.</summary>
         public ComputationGraph ModelConstituent => _constituents.Model;
@@ -895,11 +897,16 @@ namespace Shorokoo
             if (sampleInputs is null) throw new ArgumentNullException(nameof(sampleInputs));
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
 
-            // Capture the constituents (the swappable source-of-truth layer, §5.8) and derive the
-            // trainstep from them. "No config" means the default deterministic identity.
-            return DeriveRig(new RigConstituents(
-                modelGraph, lossGraph, optimizerGraph, sampleInputs, hyperparameters, names,
-                rngConfig ?? RngConfig.Default));
+            // Capture the constituents (the swappable source-of-truth layer, §5.8) and take the
+            // initial build path, which concretizes the model from the sample inputs. The sample
+            // inputs are a construction-time argument only — consumed here to produce the retained
+            // concrete arch and its shape exemplars, and never stored on the rig. "No config" means
+            // the default deterministic identity.
+            return BuildInitialRig(
+                new RigConstituents(
+                    modelGraph, lossGraph, optimizerGraph, hyperparameters, names,
+                    rngConfig ?? RngConfig.Default),
+                sampleInputs);
         }
 
         /// <summary>
@@ -922,45 +929,51 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Derives a rig from its <paramref name="constituents"/> — the sole build path, shared by
-        /// <see cref="FromScratch(ComputationGraph, ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?)"/>
-        /// and every <c>With…</c> derivation. Validates the constituent kinds (so a swapped-in loss
-        /// or optimizer is checked just as at first build), composes them into the in-memory
-        /// <c>trainstep</c>, and initializes/optimizes it. The constituents are captured on the rig
-        /// as the source of truth; the trainstep is never persisted (§5.8).
+        /// Shared shape check for both derive paths: hyperparameter names, when supplied, must match
+        /// the hyperparameter value count (a swapped optimizer/scheduler is checked just as at build).
         /// </summary>
-        private static TrainingRig DeriveRig(RigConstituents constituents)
+        private static void ValidateConstituents(RigConstituents c)
         {
-            var c = constituents;
             if (c.Names is not null && c.Names.Count != c.Hyperparameters.Length)
                 throw new ArgumentException(
                     $"hyperparameter names ({c.Names.Count}) must match hyperparameter values " +
-                    $"({c.Hyperparameters.Length}).", nameof(constituents));
-            if (c.SampleInputs.Length == 0)
+                    $"({c.Hyperparameters.Length}).", nameof(c));
+        }
+
+        /// <summary>
+        /// The <b>initial build path</b> (<see cref="FromScratch(ComputationGraph, ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?)"/>
+        /// only): concretizes the model from the <paramref name="sampleInputs"/> once, binds the RNG
+        /// config, and derives the retained concrete arch + its shape exemplars — then hands off to
+        /// <see cref="DeriveFromConcreteArch"/> to compose and optimize the trainstep. The sample
+        /// inputs are consumed here (parameter shape resolution, liveness pruning, concretization value
+        /// fallbacks) and NOT stored: everything the derivation path later needs is captured as the
+        /// concrete arch (structure + RNG identity) and the zero-filled input-shape exemplars.
+        /// </summary>
+        private static TrainingRig BuildInitialRig(RigConstituents constituents, NamedModelParam[] sampleInputs)
+        {
+            var c = constituents;
+            ValidateConstituents(c);
+            if (sampleInputs.Length == 0)
                 throw new ArgumentException(
                     "A training rig requires at least one sample input. Sample inputs " +
                     "drive parameter shape resolution and training-graph shape inference.",
-                    nameof(constituents));
+                    nameof(sampleInputs));
 
             // The model position takes a module graph or an already-lowered concrete architecture
             // (the concretization pipeline is idempotent on the latter); a weight-filled concrete
-            // model is refused up front. Loss and optimizer are composed as module bodies and must
-            // be module graphs. Re-validated on every derivation so a swapped constituent is checked.
+            // model is refused up front.
             var model = RequireModelGraphKind(c.Model, "TrainingRig (model constituent)");
-            c.Loss.RequireKind(GraphKind.Module, "TrainingRig (loss constituent)",
-                "Pass the loss module graph (e.g. Losses.L2Loss).");
-            c.Optimizer.RequireKind(GraphKind.Module, "TrainingRig (optimizer constituent)",
-                "Pass the optimizer module graph (e.g. Optimizers.Adam).");
 
             var ctx = ComputeContext.Default;
 
-            // Single ToConcreteArchitecture pass. The resulting concrete arch graph is the
-            // shared substrate for both phases below: Phase 1 composes it with loss +
-            // autograd + optimizer to build the training-step graph; Phase 2 reads its
-            // MODEL_PARAM nodes to initialize values and to determine prediction shape.
-            // The concrete pass also runs the QEE-backed liveness filter that prunes
-            // trainable params whose reachability is killed by the sample input shape.
-            var concreteArch = model.ToConcreteArchitecture(new ModelParamList(c.SampleInputs), ctx);
+            // Single ToConcreteArchitecture pass — the ONE concretization for this rig and all its
+            // future derivations. The resulting concrete arch is the shared substrate: the trainstep
+            // build composes it with loss + autograd + optimizer; initialization reads its MODEL_PARAM
+            // nodes for initial values and prediction shape; inference extraction binds weights into
+            // it. The pass also runs the QEE-backed liveness filter that prunes trainable params whose
+            // reachability is killed by the sample input shape. Sample input VALUES matter only here
+            // (concretization's QEE/ORT resolution fallbacks); the derivation path needs only shapes.
+            var concreteArch = model.ToConcreteArchitecture(new ModelParamList(sampleInputs), ctx);
 
             // Bind the RNG config at the shared concretization point: binding writes the
             // config's runtime identity into the RngSeed parameter, which — with the feeds'
@@ -968,11 +981,61 @@ namespace Shorokoo
             // into the training-step graph, where the ONNX-prep lowering emits the keyed draws.
             concreteArch.ApplyRngConfig(c.RngConfig);
 
-            var rig = new TrainingRig { _constituents = c };
+            // Distil the sample inputs to shape exemplars (zero-filled, shape+dtype only) — the shape
+            // metadata every re-derivation's shape inference needs, retained WITHOUT retaining values.
+            var exemplars = sampleInputs.Select(p => ZeroExemplar(p.ToTensorData())).ToArray();
+
+            return DeriveFromConcreteArch(c, concreteArch, exemplars);
+        }
+
+        /// <summary>
+        /// The <b>derivation path</b> — shared by the initial build (once its concrete arch exists) and
+        /// every <c>With…</c> derivation. Reuses the already-<paramref name="concreteArch"/> (NO
+        /// <c>ToConcreteArchitecture</c>, NO sample inputs — the model constituent never changes under a
+        /// derivation) and its <paramref name="modelInputExemplars"/>, re-validates the swappable loss /
+        /// optimizer constituent kinds, composes the in-memory <c>trainstep</c>, and initializes /
+        /// optimizes it. The receiver is never mutated: the concrete arch and exemplars are shared by
+        /// reference (their consumers clone before mutating); only the trainstep is derived anew.
+        /// </summary>
+        private static TrainingRig DeriveFromConcreteArch(
+            RigConstituents constituents,
+            InternalComputationGraph concreteArch,
+            TensorData[] modelInputExemplars)
+        {
+            var c = constituents;
+            ValidateConstituents(c);
+
+            // Loss and optimizer are composed as module bodies and must be module graphs; re-validated
+            // on every derivation so a swapped constituent is checked. The model is not re-checked — it
+            // is already the concrete arch and never changes on a derivation.
+            c.Loss.RequireKind(GraphKind.Module, "TrainingRig (loss constituent)",
+                "Pass the loss module graph (e.g. Losses.L2Loss).");
+            c.Optimizer.RequireKind(GraphKind.Module, "TrainingRig (optimizer constituent)",
+                "Pass the optimizer module graph (e.g. Optimizers.Adam).");
+
+            var ctx = ComputeContext.Default;
+
+            var rig = new TrainingRig
+            {
+                _constituents = c,
+                _concreteArch = concreteArch,
+                _modelInputExemplars = modelInputExemplars,
+            };
             rig.BuildTrainingStepPureGraph(
                 concreteArch, c.Loss.ToInternal(), c.Optimizer.ToInternal(), c.Hyperparameters, c.Names);
-            rig.InitializeAndOptimize(concreteArch, c.SampleInputs, ctx, c.RngConfig);
+            rig.InitializeAndOptimize(concreteArch, modelInputExemplars, ctx, c.RngConfig);
             return rig;
+        }
+
+        /// <summary>
+        /// A zero-filled tensor with the same shape and dtype as <paramref name="sample"/> — a pure
+        /// shape carrier for shape inference, holding no sample-input values.
+        /// </summary>
+        private static TensorData ZeroExemplar(TensorData sample)
+        {
+            var bytesPerElement = sample.DType.EncodingBitCount / 8;
+            var zeroBytes = new byte[sample.Shape.Count * bytesPerElement];
+            return TensorData.CreateFromRawBytes(sample.Shape, sample.DType, zeroBytes);
         }
 
         // ───────────────────── Two-layer rig: immutable derivations (§5.8.5) ─────────────────────
@@ -989,7 +1052,7 @@ namespace Shorokoo
         public TrainingRig WithLoss(ComputationGraph loss)
         {
             if (loss is null) throw new ArgumentNullException(nameof(loss));
-            return DeriveRig(_constituents with { Loss = loss });
+            return DeriveFromConcreteArch(_constituents with { Loss = loss }, _concreteArch, _modelInputExemplars);
         }
 
         /// <summary>
@@ -1000,12 +1063,12 @@ namespace Shorokoo
         {
             if (optimizer is null) throw new ArgumentNullException(nameof(optimizer));
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
-            return DeriveRig(_constituents with
+            return DeriveFromConcreteArch(_constituents with
             {
                 Optimizer = optimizer,
                 Hyperparameters = hyperparameters.InOptimizerOrder(),
                 Names = hyperparameters.HyperparameterNames,
-            });
+            }, _concreteArch, _modelInputExemplars);
         }
 
         /// <summary>Positional-hyperparameter overload of <see cref="WithOptimizer(ComputationGraph, IOptimizerHyperparameters)"/>.</summary>
@@ -1013,7 +1076,9 @@ namespace Shorokoo
         {
             if (optimizer is null) throw new ArgumentNullException(nameof(optimizer));
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
-            return DeriveRig(_constituents with { Optimizer = optimizer, Hyperparameters = hyperparameters, Names = null });
+            return DeriveFromConcreteArch(
+                _constituents with { Optimizer = optimizer, Hyperparameters = hyperparameters, Names = null },
+                _concreteArch, _modelInputExemplars);
         }
 
         /// <summary>
@@ -1025,50 +1090,78 @@ namespace Shorokoo
         public TrainingRig WithScheduler(IOptimizerHyperparameters hyperparameters)
         {
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
-            return DeriveRig(_constituents with
+            return DeriveFromConcreteArch(_constituents with
             {
                 Hyperparameters = hyperparameters.InOptimizerOrder(),
                 Names = hyperparameters.HyperparameterNames,
-            });
+            }, _concreteArch, _modelInputExemplars);
         }
 
         /// <summary>Positional-hyperparameter overload of <see cref="WithScheduler(IOptimizerHyperparameters)"/>.</summary>
         public TrainingRig WithScheduler(params Hyperparameter[] hyperparameters)
         {
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
-            return DeriveRig(_constituents with { Hyperparameters = hyperparameters, Names = null });
+            return DeriveFromConcreteArch(
+                _constituents with { Hyperparameters = hyperparameters, Names = null },
+                _concreteArch, _modelInputExemplars);
         }
 
         /// <summary>
         /// A new rig re-seeded with <paramref name="rngConfig"/> — the model's (and other drawing
-        /// constituents') RNG identity is re-initialized, everything else shared by reference. The
-        /// design's cheap path (share the trainstep, re-derive only the compiled session, since the
-        /// seed rides as an aliased param value) rests on the #22 param-identity substrate; until that
-        /// lands the re-seed re-derives the trainstep, which is correct and equally immutable.
+        /// constituents') RNG identity is re-initialized, everything else shared by reference. Unlike
+        /// the other derivations, WithSeed does change the concrete arch: the RNG identity is bound into
+        /// its RngSeed parameter, so re-seeding rebinds it. That binding mutates, so this rig's retained
+        /// arch is left untouched — a <b>clone</b> is re-keyed and the new rig derives from that. It is
+        /// still only a rebind, not a re-concretization: the model constituent's structure is unchanged,
+        /// so no <c>ToConcreteArchitecture</c> and no sample inputs are needed; re-initialization then
+        /// re-draws every trainable parameter on the new seed's keyed streams (§2.5). The design's
+        /// cheaper path (share even the trainstep, re-derive only the compiled session, since the seed
+        /// rides as an aliased param value) rests on the #22 param-identity substrate; until that lands
+        /// the re-seed re-derives the trainstep, which is correct and equally immutable.
         /// </summary>
         public TrainingRig WithSeed(RngConfig rngConfig)
         {
             if (rngConfig is null) throw new ArgumentNullException(nameof(rngConfig));
-            return DeriveRig(_constituents with { RngConfig = rngConfig });
+            // Rebind the new RNG identity on a clone (ApplyRngConfig mutates), keeping this rig's
+            // retained arch pristine. The shape exemplars are unchanged (same model inputs).
+            var reArch = _concreteArch.Clone();
+            reArch.ApplyRngConfig(rngConfig);
+            return DeriveFromConcreteArch(_constituents with { RngConfig = rngConfig }, reArch, _modelInputExemplars);
         }
 
         /// <summary>
         /// Extracts the inference model for a checkpoint — a <b>pure read off the model constituent's
-        /// mapping</b> (§5.8.2): concretize the rig's model constituent at its sample input and bind
-        /// the checkpoint's model-owned params (trainable weights + module state) by their canonical
-        /// identifiers. No copy step, no which-tensors-belong-to-inference heuristic; because
-        /// model-owned parameter identity is preserved across composition, the tensors the
-        /// <c>trainstep</c> updated bind straight back into the inference model by the same name.
+        /// mapping</b> (§5.8.2): bind the checkpoint's model-owned params (trainable weights + module
+        /// state) by their canonical identifiers into the rig's retained concrete arch. No
+        /// re-concretization and no sample inputs — the arch was concretized once at build (at all
+        /// inputs, so a multi-input model extracts correctly) and is reused. No copy step, no
+        /// which-tensors-belong-to-inference heuristic; because model-owned parameter identity is
+        /// preserved across composition, the tensors the <c>trainstep</c> updated bind straight back
+        /// into the inference model by the same name.
         /// </summary>
         public ComputationGraph ExtractInferenceModel(TrainingCheckpoint checkpoint)
+            => new(BindInferenceWeights(checkpoint), GraphKind.ConcreteModel);
+
+        /// <summary>
+        /// The single weight-binding step shared by <see cref="ExtractInferenceModel"/> (and thus
+        /// <see cref="TrainingCheckpoint.ToInferenceModel()"/>) and the <c>.skpt</c> container's
+        /// self-describing model, so the two can never disagree on how a checkpoint concretizes: bind
+        /// the checkpoint's model-owned params — its trainable weights AND its module-owned state
+        /// (BatchNorm running stats, …), each by its canonical identifier — into the rig's retained
+        /// concrete arch. The arch is consumed read-only (<c>ToConcreteModel</c> clones before
+        /// binding), so this never disturbs the retained graph. For a stateless model
+        /// <see cref="TrainingCheckpoint.ModelState"/> is empty, so this is a trainable-only bind.
+        /// </summary>
+        internal InternalComputationGraph BindInferenceWeights(TrainingCheckpoint checkpoint)
         {
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
-            var model = RequireModelGraphKind(_constituents.Model, nameof(ExtractInferenceModel));
-            // Concretize at ALL stored sample inputs (one per model input), so a multi-input model
-            // extracts correctly — not just at the first input.
-            var sampleInputs = _constituents.SampleInputs.Select(p => p.ToTensorData()).ToArray();
-            return new ComputationGraph(
-                checkpoint.ToInferenceModelCore(model, sampleInputs), GraphKind.ConcreteModel);
+            var weights = new ModelParamList(
+                checkpoint.TrainableParams.Fields
+                    .Where(f => f.Value is TensorData)
+                    .Concat(checkpoint.ModelState.Fields.Where(f => f.Value is TensorData))
+                    .Select(f => new KeyValuePair<string, TensorData>(f.Key, (TensorData)f.Value)),
+                ModelParamType.TrainableParam);
+            return _concreteArch.ToConcreteModel(weights, _concreteArch.GetShorokooIdNamingScheme());
         }
 
         /// <summary>
@@ -1112,10 +1205,6 @@ namespace Shorokoo
                         "The checkpoint was produced by a different model/optimizer.");
             }
         }
-
-        /// <summary>The sample inputs (one per model input) this rig was derived with, in declaration
-        /// order — used to concretize the inference model in <see cref="ExtractInferenceModel"/>.</summary>
-        public IReadOnlyList<NamedModelParam> SampleInputs => _constituents.SampleInputs;
 
         /// <summary>The rig's initial trainable-parameter values, as a struct (for load-time defaults).</summary>
         internal TensorDataStruct InitialTrainableStruct => new(TrainableParamStructDef, _initialParamFields);
@@ -2267,7 +2356,7 @@ namespace Shorokoo
         /// </summary>
         private void InitializeAndOptimize(
             InternalComputationGraph concreteArch,
-            NamedModelParam[] sampleInputs,
+            TensorData[] modelInputExemplars,
             ComputeContext ctx,
             RngConfig? rngConfig = null)
         {
@@ -2349,8 +2438,7 @@ namespace Shorokoo
             // second initializer-execution pass.
             var shapeInferencer = new ShapeInferenceInterpreter(ctx);
             var concreteModel = Shorokoo.Core.Nodes.Processors.Fast.FastApplyModelParamValues.Process(concreteArch, paramValuesById);
-            var modelInputTensors = sampleInputs.Select(p => p.ToTensorData()).ToArray();
-            var modelShapeInfo = shapeInferencer.Infer(concreteModel, modelInputTensors);
+            var modelShapeInfo = shapeInferencer.Infer(concreteModel, modelInputExemplars);
             var modelOutputInfo = modelShapeInfo.GetTensorInfo(concreteModel.Outputs[0])
                 ?? throw new InvalidOperationException(
                     "Shape inference of concrete model graph failed to produce an output shape.");
@@ -2371,11 +2459,11 @@ namespace Shorokoo
                 - HyperparameterStructDef.Fields.Length
                 - counterFieldCount
                 - targetFieldCount;
-            if (sampleInputs.Length != expectedModelInputFields)
+            if (modelInputExemplars.Length != expectedModelInputFields)
                 throw new ArgumentException(
-                    $"Expected {expectedModelInputFields} sample inputs (one per model input field), " +
-                    $"got {sampleInputs.Length}.",
-                    nameof(sampleInputs));
+                    $"Expected {expectedModelInputFields} model-input shape exemplars (one per model " +
+                    $"input field), got {modelInputExemplars.Length}.",
+                    nameof(modelInputExemplars));
 
             var allInputs = new TensorData[graph.Inputs.Count];
             var idx = 0;
@@ -2398,10 +2486,10 @@ namespace Shorokoo
             foreach (var _ in _counterInputNames)
                 allInputs[idx++] = (TensorData)Shorokoo.Globals.TensorData(Array.Empty<long>(), 0L);
 
-            // Model-input fields: one per sample input (in the order the user provided them,
-            // which matches the model graph's input order).
-            foreach (var sample in sampleInputs)
-                allInputs[idx++] = sample.ToTensorData();
+            // Model-input fields: one zero-filled shape exemplar per model input, in the model
+            // graph's input order — shape inference reads only their shapes.
+            foreach (var exemplar in modelInputExemplars)
+                allInputs[idx++] = exemplar;
 
             // Remaining inputs are target fields (typically one Tensor target for L2/CE losses).
             // Synthesize zero tensors with the predicted output shape.
@@ -2433,17 +2521,19 @@ namespace Shorokoo
 
     /// <summary>
     /// The immutable <b>constituent</b> layer of a <see cref="TrainingRig"/> (§5.8): the swappable
-    /// source-of-truth models plus the build arguments needed to (re-)derive the in-memory
-    /// <c>trainstep</c>. A <c>With…</c> derivation produces a new value with <c>record with</c>,
-    /// sharing every unchanged constituent (and its graph) by reference and re-deriving only what
-    /// changed. Held as an implementation value on the rig; the rig exposes the individual
-    /// constituents through its own public accessors.
+    /// source-of-truth models plus the hyperparameters and RNG config needed to (re-)derive the
+    /// in-memory <c>trainstep</c>. A <c>With…</c> derivation produces a new value with <c>record
+    /// with</c>, sharing every unchanged constituent (and its graph) by reference and re-deriving only
+    /// what changed. Sample inputs are deliberately NOT here: they are a construction-time argument,
+    /// consumed once to produce the rig's retained concrete arch (and its shape exemplars) and never
+    /// stored — the derivation path reuses that arch, so it needs no sample inputs. Held as an
+    /// implementation value on the rig; the rig exposes the individual constituents through its own
+    /// public accessors.
     /// </summary>
     internal sealed record RigConstituents(
         ComputationGraph Model,
         ComputationGraph Loss,
         ComputationGraph Optimizer,
-        NamedModelParam[] SampleInputs,
         Hyperparameter[] Hyperparameters,
         IReadOnlyList<string>? Names,
         RngConfig RngConfig);

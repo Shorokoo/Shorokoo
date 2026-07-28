@@ -184,8 +184,8 @@ public partial class BatchedMatmulModel
 /// <summary>
 /// Two-input model: y = a·wa + b·wb, with two trainable scalar weights. Used to prove the
 /// multi-input inference-extraction path (<see cref="TrainingRig.ExtractInferenceModel"/> /
-/// <see cref="TrainingCheckpoint.ToInferenceModel()"/> concretize at ALL the rig's sample inputs,
-/// not just the first).
+/// <see cref="TrainingCheckpoint.ToInferenceModel()"/> bind weights into a retained concrete arch that
+/// was concretized at ALL the rig's inputs, not just the first).
 /// </summary>
 [Module]
 public partial class TwoInputSumModel
@@ -1382,7 +1382,7 @@ public class TrainingRigCoverageTests
         long bigBatch = (long)int.MaxValue + 7L;    // just past int32
         var ckpt = new TrainingCheckpoint(
             trained.TrainableParams, trained.ModelState, trained.OptimizerState,
-            step: bigStep, epoch: bigEpoch, batchIndex: bigBatch);
+            step: bigStep, epoch: bigEpoch, batchIndex: bigBatch, rig: trained.Rig);
 
         var legacyPath = Path.Combine(Path.GetTempPath(), $"shrk_i64_{Guid.NewGuid():N}.safetensors");
         var skptPath = Path.Combine(Path.GetTempPath(), $"shrk_i64_{Guid.NewGuid():N}.skpt");
@@ -1397,8 +1397,7 @@ public class TrainingRigCoverageTests
             Assert.Equal(2, Persistence.Inspect(legacyPath).TrainingCheckpoint!.FormatVersion);
 
             // Native .skpt manifest.
-            Persistence.SaveTrainingCheckpointToSkpt(
-                ckpt, ScalarMultiplyModel.ComputationGraph, TensorData(ScalarInputShape, new float[4]), skptPath);
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, skptPath);
             var skpt = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(skptPath);
             Assert.Equal(bigStep, skpt.Step);
             Assert.Equal(bigEpoch, skpt.Epoch);
@@ -1781,12 +1780,10 @@ public class TrainingRigCoverageTests
         // The reference trajectory: one more step from the in-memory checkpoint.
         var reference = rigA.TrainStep(ckpt, inBatch, outBatch, compiledA);
 
-        var exampleInput = TensorData(ScalarInputShape, new float[4]);
         var path = Path.Combine(Path.GetTempPath(), $"shrk_skpt_ckpt_{Guid.NewGuid():N}.skpt");
         try
         {
-            Persistence.SaveTrainingCheckpointToSkpt(
-                ckpt, ScalarMultiplyModel.ComputationGraph, exampleInput, path);
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
             Assert.True(File.Exists(path));
 
             // Standard STORED zip with exactly the expected per-kind entries (read via the BCL).
@@ -1880,14 +1877,13 @@ public class TrainingRigCoverageTests
         var ckpt = new TrainingCheckpoint(
             rig.CreateInitialCheckpoint().TrainableParams,
             rig.CreateInitialCheckpoint().ModelState,
-            rig.CreateInitialCheckpoint().OptimizerState, step: 11);
+            rig.CreateInitialCheckpoint().OptimizerState, step: 11, rig: rig);
         Assert.NotEmpty(ckpt.ModelState.Fields);
 
         var path = Path.Combine(Path.GetTempPath(), $"shrk_skpt_bn_{Guid.NewGuid():N}.skpt");
         try
         {
-            Persistence.SaveTrainingCheckpointToSkpt(
-                ckpt, ScalarMultiplyWithBatchNormModel.ComputationGraph, TensorData([8L], new float[8]), path);
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
 
             using (var zip = System.IO.Compression.ZipFile.OpenRead(path))
                 Assert.Contains(SkptFileFormat.ModelStateEntryPath, zip.Entries.Select(e => e.FullName));
@@ -1913,8 +1909,7 @@ public class TrainingRigCoverageTests
         var path = Path.Combine(Path.GetTempPath(), $"shrk_skpt_inspect_{Guid.NewGuid():N}.skpt");
         try
         {
-            Persistence.SaveTrainingCheckpointToSkpt(
-                ckpt, ScalarMultiplyModel.ComputationGraph, TensorData(ScalarInputShape, new float[4]), path);
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
 
             var result = Persistence.Inspect(path);
             Assert.Equal(ArtifactKind.SkptCheckpoint, result.Kind);
@@ -1947,7 +1942,6 @@ public class TrainingRigCoverageTests
     public void TestSkptTrainingCheckpointFailsLoudAndComposesCoverage()
     {
         var (_, ckpt, _, _, _) = BuildTrainedAdamRig(steps: 1);
-        var exampleInput = TensorData(ScalarInputShape, new float[4]);
 
         var path = Path.Combine(Path.GetTempPath(), $"shrk_skpt_fail_{Guid.NewGuid():N}.skpt");
         var tampered = Path.Combine(Path.GetTempPath(), $"shrk_skpt_tamper_{Guid.NewGuid():N}.skpt");
@@ -1955,7 +1949,7 @@ public class TrainingRigCoverageTests
         {
             // Happy path composes Zstd + metadata; the data entries declare zstd compression and
             // the checkpoint still round-trips through a fresh rig.
-            Persistence.ForTrainingCheckpoint(ckpt, ScalarMultiplyModel.ComputationGraph, exampleInput)
+            Persistence.ForTrainingCheckpoint(ckpt)
                 .WithZstdCompressedData()
                 .WithMetadata(runName: "skpt-95-run", gitCommit: "abc123")
                 .Save(path);
@@ -2048,19 +2042,17 @@ public class TrainingRigCoverageTests
         var (_, trained, _, _, _) = BuildTrainedAdamRig(steps: 4);
         var ckpt = new TrainingCheckpoint(
             trained.TrainableParams, trained.ModelState, trained.OptimizerState,
-            step: trained.Step, epoch: 7, batchIndex: 340);
+            step: trained.Step, epoch: 7, batchIndex: 340, rig: trained.Rig);
         Assert.Equal(4, ckpt.Step);
         Assert.Equal(7, ckpt.Epoch);
         Assert.Equal(340, ckpt.BatchIndex);
 
-        var exampleInput = TensorData(ScalarInputShape, new float[4]);
         var skptPath = Path.Combine(Path.GetTempPath(), $"shrk_ctr_skpt_{Guid.NewGuid():N}.skpt");
         var legacyPath = Path.Combine(Path.GetTempPath(), $"shrk_ctr_legacy_{Guid.NewGuid():N}.safetensors");
         try
         {
             // --- .skpt format: manifest records the counters; a fresh rig restores them. ---
-            Persistence.SaveTrainingCheckpointToSkpt(
-                ckpt, ScalarMultiplyModel.ComputationGraph, exampleInput, skptPath);
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, skptPath);
             var manifest = SkptFileFormat.ParseManifest(
                 ReadEntryBytesViaBcl(skptPath, SkptFileFormat.ConfigEntryName), skptPath);
             Assert.Equal(7, manifest.Training!.Epoch);
@@ -2137,14 +2129,13 @@ public class TrainingRigCoverageTests
     {
         var (_, trained, _, _, _) = BuildTrainedAdamRig(steps: 2);
         var ckpt = new TrainingCheckpoint(
-            trained.TrainableParams, trained.ModelState, trained.OptimizerState, step: 2);
+            trained.TrainableParams, trained.ModelState, trained.OptimizerState, step: 2, rig: trained.Rig);
 
         var skptPath = Path.Combine(Path.GetTempPath(), $"shrk_old_{Guid.NewGuid():N}.skpt");
         try
         {
             // Strip the epoch/batchIndex keys to mimic a #95-era manifest.
-            Persistence.SaveTrainingCheckpointToSkpt(
-                ckpt, ScalarMultiplyModel.ComputationGraph, TensorData(ScalarInputShape, new float[4]), skptPath);
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, skptPath);
             StripSkptTrainingCounterKeys(skptPath);
 
             var manifest = SkptFileFormat.ParseManifest(
@@ -2391,8 +2382,8 @@ public class TrainingRigCoverageTests
 
     /// <summary>
     /// The parameterless <see cref="TrainingCheckpoint.ToInferenceModel()"/> works for a
-    /// <b>multi-input</b> model: the rig concretizes at ALL its stored sample inputs (not just the
-    /// first), so a two-input model round-trips. y = a·wa + b·wb with wa = wb = 1 ⇒ output = a + b.
+    /// <b>multi-input</b> model: the rig's retained concrete arch was concretized at ALL its inputs (not
+    /// just the first), so a two-input model round-trips. y = a·wa + b·wb with wa = wb = 1 ⇒ output = a + b.
     /// This is the path the old single-sample-input extraction could not build.
     /// </summary>
     [Fact]
@@ -2407,10 +2398,9 @@ public class TrainingRigCoverageTests
             TwoInputSumModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             sample, 0.1f);
         Assert.Equal(2, rig.InputDef.Fields.Length);          // two model inputs
-        Assert.Equal(2, rig.SampleInputs.Count);
 
         var ckpt = rig.CreateInitialCheckpoint();             // wa = wb = 1
-        var inference = ckpt.ToInferenceModel();              // concretizes at BOTH [4] sample inputs
+        var inference = ckpt.ToInferenceModel();              // binds weights into the retained arch (concretized at BOTH [4] inputs)
         Assert.Equal(GraphKind.ConcreteModel, inference.Kind);
 
         var a = TensorData([4L], new float[] { 1f, 2f, 3f, 4f });
@@ -2532,8 +2522,7 @@ public class TrainingRigCoverageTests
         try
         {
             // The .skpt save writes every kind; the FILTER is exercised on load.
-            Persistence.SaveTrainingCheckpointToSkpt(
-                trained, ScalarMultiplyModel.ComputationGraph, TensorData(ScalarInputShape, new float[4]), path);
+            Persistence.SaveTrainingCheckpointToSkpt(trained, path);
 
             var rigB = BuildTrainedAdamRig(steps: 0).Rig;
             var loaded = rigB.LoadCheckpoint(path, CheckpointComponents.InferenceState);
@@ -2589,12 +2578,10 @@ public class TrainingRigCoverageTests
             Assert.Null(BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(flatNoCountersPath).Loss);
 
             // ---- .skpt manifest: non-null loss round-trips; null loss reads back null. ----
-            Persistence.SaveTrainingCheckpointToSkpt(
-                trained, ScalarMultiplyModel.ComputationGraph, TensorData(ScalarInputShape, new float[4]), skptPath);
+            Persistence.SaveTrainingCheckpointToSkpt(trained, skptPath);
             Assert.Equal(loss, BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(skptPath).Loss!.Value);
 
-            Persistence.SaveTrainingCheckpointToSkpt(
-                initial, ScalarMultiplyModel.ComputationGraph, TensorData(ScalarInputShape, new float[4]), skptInitPath);
+            Persistence.SaveTrainingCheckpointToSkpt(initial, skptInitPath);
             Assert.Null(BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(skptInitPath).Loss);
         }
         finally

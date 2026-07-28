@@ -190,8 +190,9 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
 - For the **native `.skpt` container** instead — the training state split into
   per-kind data entries alongside the concrete inference model, with the container's
   inspectable manifest, per-entry Zstd, and provenance metadata — save with
-  `Persistence.SaveTrainingCheckpointToSkpt(checkpoint, modelGraph, exampleInput, "run.skpt")`
-  (or the `Persistence.ForTrainingCheckpoint(...)` builder). `rig.LoadCheckpoint`
+  `Persistence.SaveTrainingCheckpointToSkpt(checkpoint, "run.skpt")` — the checkpoint's
+  `.Rig` supplies the self-describing inference model, so no model graph or example input
+  is needed (or use the `Persistence.ForTrainingCheckpoint(...)` builder). `rig.LoadCheckpoint`
   reads either shape — the on-disk form is auto-detected — so this line resumes a
   `.skpt` run unchanged. See [skpt-checkpoints.md](skpt-checkpoints.md#training-checkpoints).
 - `LoadCheckpoint` reconstructs the checkpoint against the rig's own parameter
@@ -229,11 +230,12 @@ var concrete = result.FinalCheckpoint.ToInferenceModel();   // no graph to re-su
 var output   = ComputeContext.Default.Execute(concrete, myInput);
 ```
 
-`ToInferenceModel()` reads the model graph and sample-input shapes off the checkpoint's
-`.Rig`, concretizes the model at **all** the rig's sample inputs (so multi-input models are
-supported), and binds this checkpoint's trainable params and model state by canonical
-identity. It requires an attached rig — every rig-produced checkpoint has one; attach one to
-a bare checkpoint with `rig.AdoptCheckpoint(checkpoint)` first.
+`ToInferenceModel()` binds this checkpoint's trainable params and model state, by canonical
+identity, into the checkpoint's `.Rig`'s **retained concrete architecture** — the model the rig
+concretized once at build time (at **all** its inputs, so multi-input models are supported) and
+holds for reuse. No re-concretization and no sample inputs are involved. It requires an attached
+rig — every rig-produced checkpoint has one; attach one to a bare checkpoint with
+`rig.AdoptCheckpoint(checkpoint)` first.
 
 ## Types used by the training API
 

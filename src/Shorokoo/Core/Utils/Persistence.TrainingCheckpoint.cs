@@ -37,30 +37,34 @@ namespace Shorokoo
         /// Zstd compression or provenance metadata, use the builder form
         /// <see cref="ForTrainingCheckpoint"/>.</para>
         /// </summary>
-        /// <param name="checkpoint">The training state to persist.</param>
-        /// <param name="modelGraph">The model graph the checkpoint was trained for (a module graph
-        /// or concrete architecture), used to build the self-describing inference model.</param>
-        /// <param name="exampleInput">A sample model input (shapes only) that drives concretization
-        /// of the inference model.</param>
+        /// <param name="checkpoint">The training state to persist. Must carry its
+        /// <see cref="TrainingCheckpoint.Rig"/> — the self-describing inference model is bound into the
+        /// rig's retained concrete architecture, so no model graph or example input is needed.</param>
         /// <param name="filePath">Target <c>.skpt</c> path; its directory must already exist.</param>
         public static void SaveTrainingCheckpointToSkpt(
-            TrainingCheckpoint checkpoint, ComputationGraph modelGraph, TensorData exampleInput, string filePath)
-            => ForTrainingCheckpoint(checkpoint, modelGraph, exampleInput).Save(filePath);
+            TrainingCheckpoint checkpoint, string filePath)
+            => ForTrainingCheckpoint(checkpoint).Save(filePath);
 
         /// <summary>
         /// Starts a native <c>.skpt</c> training-checkpoint save (issue #95). Compose the container
         /// features — <see cref="TrainingCheckpointBuilder.WithZstdCompressedData"/> and
         /// <see cref="TrainingCheckpointBuilder.WithMetadata"/> — then commit with
         /// <see cref="TrainingCheckpointBuilder.Save"/>. See
-        /// <see cref="SaveTrainingCheckpointToSkpt"/> for the parameters and on-disk shape.
+        /// <see cref="SaveTrainingCheckpointToSkpt"/> for the parameters and on-disk shape. The
+        /// <paramref name="checkpoint"/> must carry its <see cref="TrainingCheckpoint.Rig"/>: the
+        /// inference model is bound into the rig's retained concrete architecture (the same path
+        /// <see cref="TrainingCheckpoint.ToInferenceModel()"/> uses), so a rig-less checkpoint throws.
         /// </summary>
-        public static TrainingCheckpointBuilder ForTrainingCheckpoint(
-            TrainingCheckpoint checkpoint, ComputationGraph modelGraph, TensorData exampleInput)
+        public static TrainingCheckpointBuilder ForTrainingCheckpoint(TrainingCheckpoint checkpoint)
         {
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
-            if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
-            if (exampleInput is null) throw new ArgumentNullException(nameof(exampleInput));
-            return new TrainingCheckpointBuilder(checkpoint, modelGraph, exampleInput);
+            if (checkpoint.Rig is null)
+                throw new InvalidOperationException(
+                    "SaveTrainingCheckpointToSkpt requires a training rig, but this checkpoint has none " +
+                    "attached — the rig is the source of the self-describing inference model. Adopt one " +
+                    "via rig.AdoptCheckpoint(checkpoint), or load the checkpoint against a rig " +
+                    "(rig.LoadCheckpoint(path)), then save.");
+            return new TrainingCheckpointBuilder(checkpoint);
         }
 
         /// <summary>
@@ -296,17 +300,12 @@ namespace Shorokoo
     public sealed class TrainingCheckpointBuilder
     {
         private readonly TrainingCheckpoint _checkpoint;
-        private readonly ComputationGraph _modelGraph;
-        private readonly TensorData _exampleInput;
         private int? _zstdDataCompressionLevel;
         private Dictionary<string, string>? _userMetadata;
 
-        internal TrainingCheckpointBuilder(
-            TrainingCheckpoint checkpoint, ComputationGraph modelGraph, TensorData exampleInput)
+        internal TrainingCheckpointBuilder(TrainingCheckpoint checkpoint)
         {
             _checkpoint = checkpoint;
-            _modelGraph = modelGraph;
-            _exampleInput = exampleInput;
         }
 
         /// <summary>
@@ -374,22 +373,15 @@ namespace Shorokoo
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
 
             // Build the concrete inference model — the self-describing "models/" half of the
-            // container. A concrete model needs every non-RNG parameter materialized, so bind both
-            // the checkpoint's trainable params (the default weight set) and its model state (running
-            // stats etc., so a stateful model like BatchNorm still concretizes). Each parameter is
-            // mapped below to its own per-kind data entry, so no weight bytes are duplicated.
+            // container. This is the SAME weight-bind the extraction path uses: bind the checkpoint's
+            // trainable params (the default weight set) and its model state (running stats etc., so a
+            // stateful model like BatchNorm still concretizes) into the rig's retained concrete arch,
+            // by canonical identity. Sourcing it from the rig (not a re-supplied model graph +
+            // example input) means the container's self-describing model and ToInferenceModel() can
+            // never diverge. Each parameter is mapped below to its own per-kind data entry, so no
+            // weight bytes are duplicated.
             const string operation = "Persistence.SaveTrainingCheckpointToSkpt";
-            var modelInternal = TrainingRig.RequireModelGraphKind(_modelGraph, operation);
-            var arch = modelInternal.ToConcreteArchitecture(modelInternal.FromOrderedInputs([_exampleInput]));
-
-            var boundValues = new List<KeyValuePair<string, TensorData>>();
-            foreach (var (name, value) in _checkpoint.TrainableParams.Fields)
-                if (value is TensorData td) boundValues.Add(new KeyValuePair<string, TensorData>(name, td));
-            foreach (var (name, value) in _checkpoint.ModelState.Fields)
-                if (value is TensorData td) boundValues.Add(new KeyValuePair<string, TensorData>(name, td));
-
-            var source = arch.ToConcreteModel(
-                new ModelParamList(boundValues, ModelParamType.TrainableParam), arch.GetShorokooIdNamingScheme());
+            var source = _checkpoint.Rig!.BindInferenceWeights(_checkpoint);
             var weightNodes = CheckpointBuilder.CollectWeightNodes(source, operation);
 
             // Default weight mapping: each model parameter (keyed by its full identifier) points at

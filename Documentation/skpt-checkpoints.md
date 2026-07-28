@@ -87,10 +87,10 @@ metadata), sharing one on-disk format with inference checkpoints.
 ```csharp
 using Shorokoo;   // Persistence, TrainingRig, TrainingCheckpoint
 
-// checkpoint: a TrainingCheckpoint from rig.CreateInitialCheckpoint() / TrainStep().
-// exampleInput: any sample model input — only its shape matters (drives concretization).
-Persistence.SaveTrainingCheckpointToSkpt(
-    checkpoint, modelGraph, exampleInput, "run.skpt");
+// checkpoint: a TrainingCheckpoint from rig.CreateInitialCheckpoint() / TrainStep(). It carries
+// its rig, which is the source of the self-describing inference model — no model graph or example
+// input is needed. (For a bare checkpoint, attach a rig first via rig.AdoptCheckpoint(checkpoint).)
+Persistence.SaveTrainingCheckpointToSkpt(checkpoint, "run.skpt");
 
 // Resume in a fresh process: rebuild the rig from the same graphs, then load.
 var rig     = TrainingRig.FromScratch(modelGraph, lossGraph, optimizerGraph, sample, hypers);
@@ -101,7 +101,7 @@ var next    = rig.TrainStep(resumed, inputBatch, targetBatch, compiled);
 To compose the container's features, use the builder form:
 
 ```csharp
-Persistence.ForTrainingCheckpoint(checkpoint, modelGraph, exampleInput)
+Persistence.ForTrainingCheckpoint(checkpoint)
     .WithZstdCompressedData()                          // per-entry Zstd (optional level 1–22)
     .WithMetadata(runName: "nightly-42", gitCommit: "9f3c1ba")
     .Save("run.skpt");
@@ -110,7 +110,9 @@ Persistence.ForTrainingCheckpoint(checkpoint, modelGraph, exampleInput)
 What the file carries:
 
 - **The concrete inference model** in `models/model.srk` (definition, weights stripped),
-  built from the checkpoint's trained weights. The trainable weights double as the model's
+  built from the checkpoint's trained weights bound into the rig's retained concrete
+  architecture — the same weight-bind `checkpoint.ToInferenceModel()` uses, so the container's
+  self-describing model can never disagree with extraction. The trainable weights double as the model's
   `default` weight set, so the same file loads as a runnable inference model with
   `Persistence.Load("run.skpt")` — no separate export step.
 - **The training state, split by kind into separate `data/` entries**: the trainable

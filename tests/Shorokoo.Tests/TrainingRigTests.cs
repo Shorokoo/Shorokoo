@@ -2228,6 +2228,163 @@ public class TrainingRigCoverageTests
         }
     }
 
+    // ──────────────────────────────────────────────────────────────────────
+    // Two-layer rig (issue #110): swappable constituents + a derived in-memory
+    // trainstep, as an immutable value with a With… derivation surface, plus
+    // extraction as a pure read off the model constituent.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The rig exposes its constituent layer, and every <c>With…</c> derivation returns a NEW rig
+    /// that shares the unchanged constituents by reference and re-derives only its own trainstep —
+    /// never mutating the receiver (a rig is an immutable value, §5.8.5). WithOptimizer re-initializes
+    /// optimizer state (plain SGD → SGD-momentum grows a state field per param); WithScheduler keeps
+    /// the optimizer graph and swaps the schedule-carrying hyperparameters; WithSeed re-seeds. Each
+    /// derived rig is a working rig that trains a step to a finite loss on its own trainstep.
+    /// </summary>
+    [Fact]
+    public void TestRigDerivationsShareConstituentsAndAreImmutableCoverage()
+    {
+        var (sample, input, target) = ScalarMultiplyBatches();
+        var model = ScalarMultiplyModel.ComputationGraph;
+        var loss = L2Loss.ComputationGraph;
+        var opt = SGDOptimizer.ComputationGraph;
+
+        var rig = TrainingRig.FromScratch(model, loss, opt, sample, 0.1f);
+
+        // The constituent layer is exactly what was authored (shared by reference).
+        Assert.Same(model, rig.ModelConstituent);
+        Assert.Same(loss, rig.LossConstituent);
+        Assert.Same(opt, rig.OptimizerConstituent);
+        Assert.Equal(0UL, rig.RngConfig.MasterSeed);
+        Assert.Empty(rig.OptimizerStateDef.Fields);   // plain SGD carries no optimizer state
+
+        // WithLoss: loss swapped; model/optimizer shared; the original rig is untouched.
+        var newLoss = Losses.L1Loss;
+        var lossRig = rig.WithLoss(newLoss);
+        Assert.NotSame(rig, lossRig);
+        Assert.Same(newLoss, lossRig.LossConstituent);
+        Assert.Same(model, lossRig.ModelConstituent);      // shared by reference
+        Assert.Same(opt, lossRig.OptimizerConstituent);    // shared by reference
+        Assert.Same(loss, rig.LossConstituent);            // receiver unchanged (immutable)
+
+        // WithOptimizer: optimizer + hyperparameters swapped; optimizer state re-initialized.
+        var momRig = rig.WithOptimizer(SGDMomentumOptimizer.ComputationGraph,
+            new SGDMomentumOptimizerHyperparameters { LearningRate = 0.5f, MomentumCoeff = 0.9f });
+        Assert.Same(model, momRig.ModelConstituent);
+        Assert.Same(loss, momRig.LossConstituent);
+        Assert.NotSame(opt, momRig.OptimizerConstituent);
+        Assert.NotEmpty(momRig.OptimizerStateDef.Fields);  // opt-state re-derived on the swap
+        Assert.Empty(rig.OptimizerStateDef.Fields);        // receiver unchanged
+
+        // WithScheduler: same optimizer graph, schedule-carrying hyperparameters swapped.
+        var schedRig = rig.WithScheduler(
+            new SGDOptimizerHyperparameters { LearningRate = Schedules.Linear(0.2f, 0f, 4) });
+        Assert.Same(opt, schedRig.OptimizerConstituent);
+        Assert.Empty(schedRig.HyperparameterStructDef.Fields);   // schedule is in-graph, not a runtime field
+
+        // WithSeed: re-seeded; all constituents shared; the original keeps the default seed.
+        var reseeded = rig.WithSeed(new RngConfig { MasterSeed = 42 });
+        Assert.Same(model, reseeded.ModelConstituent);
+        Assert.Same(opt, reseeded.OptimizerConstituent);
+        Assert.Equal(42UL, reseeded.RngConfig.MasterSeed);
+        Assert.Equal(0UL, rig.RngConfig.MasterSeed);
+
+        // Every derived rig trains a step to a finite loss on its own re-derived trainstep.
+        var ctx = new ComputeContext();
+        foreach (var derived in new[] { lossRig, momRig, schedRig, reseeded })
+        {
+            var compiled = ctx.Compile(derived.TrainingStepPureGraph);
+            var stepped = derived.TrainStep(derived.CreateDefaultCheckpoint(), input, target, compiled);
+            Assert.True(float.IsFinite(stepped.Loss));
+        }
+    }
+
+    /// <summary>
+    /// The extraction contract (§5.8.2), pinned end to end: build a rig, train a real step, then
+    /// <see cref="TrainingRig.ExtractInferenceModel"/> — a pure read off the model constituent's
+    /// mapping, with no re-supplied model graph. The extracted model's params ARE the trainstep's
+    /// updated tensors, matched by identifier: every updated trainable-param name resolves to a
+    /// ModelId in the extracted model (identity preserved across composition), and the extracted
+    /// model's forward (ScalarMultiply: <c>input · weight</c>) equals <c>probe · wUpdated</c> — i.e.
+    /// it computes with exactly the tensor the trainstep produced for that identifier, not the init.
+    /// </summary>
+    [Fact]
+    public void TestExtractInferenceModelIdentityCoverage()
+    {
+        var (sample, input, target) = ScalarMultiplyBatches();
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            sample, 0.1f);
+
+        var ctx = new ComputeContext();
+        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
+        var stepped = rig.TrainStep(rig.CreateDefaultCheckpoint(), input, target, compiled).Checkpoint;
+        string wName = rig.TrainableParamStructDef.Fields[0].Name;
+        float wUpdated = ((TensorData<float32>)stepped.TrainableParams.Fields[wName]).AccessMemory()[0];
+        Assert.NotEqual(1.0f, wUpdated);   // the step genuinely moved the weight off its init
+
+        // Extraction: pure read off the model constituent — no model graph re-supplied by the caller.
+        var inference = rig.ExtractInferenceModel(stepped);
+        Assert.Equal(GraphKind.ConcreteModel, inference.Kind);
+
+        // Identity preserved: each updated-tensor identifier resolves to a ModelId in the extracted model.
+        var concrete = rig.ModelConstituent.ToConcreteArchitecture(
+            rig.ModelConstituent.FromOrderedInputs([sample[0].ToTensorData()]));
+        var scheme = ModuleParamSetNamingScheme.FromModelIdFormats(concrete.GetShorokooIdNamingScheme(), "Shorokoo");
+        var modelIds = concrete.GetConcreteModelParamInfos().ModelIds;
+        foreach (var f in stepped.TrainableParams.Fields.Where(f => f.Value is TensorData))
+            Assert.True(scheme.ToModelId(f.Key, modelIds) is not null,
+                $"extracted param '{f.Key}' did not resolve to a ModelId (composition identity regressed)");
+
+        // The extracted model computes with exactly the trainstep's updated tensor for wName.
+        var probe = TensorData([4L], new float[] { 2f, 3f, 4f, 5f });
+        var outputs = ComputeContext.Default.Execute(inference, probe)[0]
+            .ToTensorData<float32>().AccessMemory().ToArray();
+        float[] expected = [2f * wUpdated, 3f * wUpdated, 4f * wUpdated, 5f * wUpdated];
+        for (int i = 0; i < expected.Length; i++)
+            Assert.True(MathF.Abs(expected[i] - outputs[i]) < 1e-5f,
+                $"extracted forward [{i}] = {outputs[i]}, expected probe·wUpdated = {expected[i]}");
+    }
+
+    /// <summary>
+    /// Counter derivations (§5.8.5): step/epoch/batch are host-owned scalars, so resetting one yields
+    /// a NEW <see cref="TrainingCheckpoint"/> carrying the same tensor state by reference (nothing is
+    /// re-derived), leaving the receiver untouched. The single-counter helpers carry the others through.
+    /// </summary>
+    [Fact]
+    public void TestCheckpointCounterDerivationsCoverage()
+    {
+        var (sample, _, _) = ScalarMultiplyBatches();
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            sample, 0.1f);
+        var ck = rig.CreateDefaultCheckpoint();   // step/epoch/batch = 0
+        Assert.Equal(0, ck.Step);
+
+        var moved = ck.WithCounters(step: 5, epoch: 2, batchIndex: 3);
+        Assert.NotSame(ck, moved);
+        Assert.Equal(5, moved.Step);
+        Assert.Equal(2, moved.Epoch);
+        Assert.Equal(3, moved.BatchIndex);
+        // Tensor state shared by reference — counters are not rig state.
+        Assert.Same(ck.TrainableParams, moved.TrainableParams);
+        Assert.Same(ck.ModelState, moved.ModelState);
+        Assert.Same(ck.OptimizerState, moved.OptimizerState);
+        // Receiver untouched (immutable value).
+        Assert.Equal(0, ck.Step);
+        Assert.Equal(0, ck.Epoch);
+        Assert.Equal(0, ck.BatchIndex);
+
+        // Single-counter helpers carry the others through unchanged.
+        Assert.Equal(9, ck.WithStep(9).Step);
+        Assert.Equal(0, ck.WithStep(9).Epoch);
+        Assert.Equal(7, ck.WithEpoch(7).Epoch);
+        Assert.Equal(0, ck.WithEpoch(7).Step);
+        Assert.Equal(4, ck.WithBatchIndex(4).BatchIndex);
+        Assert.Equal(0, ck.WithBatchIndex(4).Step);
+    }
+
     /// <summary>Rewrites a .skpt in place, deleting the <c>epoch</c>/<c>batchIndex</c> keys from its
     /// manifest training block to mimic a checkpoint written before those add-only fields existed.
     /// Every other entry (and each data entry's bytes, hence its recorded sha256) is preserved.</summary>

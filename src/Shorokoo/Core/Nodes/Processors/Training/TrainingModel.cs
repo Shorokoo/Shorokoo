@@ -77,6 +77,30 @@ namespace Shorokoo
             BatchIndex = batchIndex;
         }
 
+        // ---- Counter derivations (§5.8.5): step/epoch/batch are host-owned scalars, not rig
+        // state, so resetting one yields a NEW checkpoint value carrying the same trainable
+        // params / model state / optimizer state (shared by reference — nothing is re-derived).
+        // The receiver is never mutated. ----
+
+        /// <summary>
+        /// Returns a new checkpoint identical to this one but with the given host-owned run
+        /// counter(s) set (each defaulting to this checkpoint's current value when omitted). The
+        /// tensor state — trainable params, model state, optimizer state — is shared by reference,
+        /// since counters are not graph state (§5.8.1). The receiver is unchanged.
+        /// </summary>
+        public TrainingCheckpoint WithCounters(long? step = null, long? epoch = null, long? batchIndex = null)
+            => new(TrainableParams, ModelState, OptimizerState,
+                step ?? Step, epoch ?? Epoch, batchIndex ?? BatchIndex);
+
+        /// <summary>A new checkpoint with <see cref="Step"/> set (epoch/batch carried through).</summary>
+        public TrainingCheckpoint WithStep(long step) => WithCounters(step: step);
+
+        /// <summary>A new checkpoint with <see cref="Epoch"/> set (step/batch carried through).</summary>
+        public TrainingCheckpoint WithEpoch(long epoch) => WithCounters(epoch: epoch);
+
+        /// <summary>A new checkpoint with <see cref="BatchIndex"/> set (step/epoch carried through).</summary>
+        public TrainingCheckpoint WithBatchIndex(long batchIndex) => WithCounters(batchIndex: batchIndex);
+
         // ---- Inference: bind trained weights into a concrete model for execution ----
 
         /// <summary>
@@ -95,9 +119,17 @@ namespace Shorokoo
             if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
             if (exampleInput is null) throw new ArgumentNullException(nameof(exampleInput));
             var arch    = modelGraph.ToConcreteArchitecture(modelGraph.FromOrderedInputs([exampleInput]));
+            // Bind every param the model owns — its trainable weights AND its module-owned state
+            // (BatchNorm running stats, …) — each by its canonical identifier, so a stateful model
+            // concretizes too. This is the extraction contract (§5.8.2): follow the model
+            // constituent's mapping, no copy step, no which-tensors-belong-to-inference heuristic —
+            // model-owned parameter identity is preserved across composition, so the fields the
+            // trainstep updated bind straight back into the inference model by the same name. (For
+            // a stateless model ModelState is empty, so this is identical to a trainable-only bind.)
             var weights = new ModelParamList(
                 TrainableParams.Fields
                     .Where(f => f.Value is TensorData)
+                    .Concat(ModelState.Fields.Where(f => f.Value is TensorData))
                     .Select(f => new KeyValuePair<string, TensorData>(f.Key, (TensorData)f.Value)),
                 ModelParamType.TrainableParam);
             return arch.ToConcreteModel(weights, arch.GetShorokooIdNamingScheme());
@@ -357,6 +389,39 @@ namespace Shorokoo
         /// <see cref="TrainingStepPureGraph"/> wrapper (and nulled — the wrapper owns it).
         /// </summary>
         private InternalComputationGraph? _trainingStepWorkGraph;
+
+        /// <summary>
+        /// The rig's <b>constituent</b> layer (§5.8): the swappable source-of-truth models — the
+        /// inference model, the loss graph, the optimizer graph (as authored), and the scheduler
+        /// (carried in the <see cref="Hyperparameters"/> until #106 folds it into its own persisted
+        /// constituent) — plus the sample inputs and RNG config the trainstep is derived from. This
+        /// is the source of truth; the <see cref="TrainingStepPureGraph"/> (<c>trainstep</c>) is the
+        /// purely in-memory derived executable, composed from these and never persisted. A rig is an
+        /// <b>immutable value</b>: the <c>With…</c> derivations return a NEW rig sharing the
+        /// unchanged constituents by reference (via <c>record with</c>) and re-deriving only what
+        /// changed — the receiver is never mutated.
+        /// </summary>
+        private RigConstituents _constituents = null!;
+
+        /// <summary>The inference-model constituent (a module graph or concrete architecture), as authored.</summary>
+        public ComputationGraph ModelConstituent => _constituents.Model;
+
+        /// <summary>The loss-graph constituent (a module graph), as authored.</summary>
+        public ComputationGraph LossConstituent => _constituents.Loss;
+
+        /// <summary>The optimizer-graph constituent (a module graph), as authored (pre-normalization).</summary>
+        public ComputationGraph OptimizerConstituent => _constituents.Optimizer;
+
+        /// <summary>
+        /// The optimizer hyperparameters this rig was derived with, in the optimizer's declared order —
+        /// the schedule-carrying constituent (a baked constant, a built-in <see cref="Schedule"/>, or a
+        /// scheduler module per field) until #106 promotes the scheduler to its own persisted model entry.
+        /// </summary>
+        public IReadOnlyList<Hyperparameter> Hyperparameters => _constituents.Hyperparameters;
+
+        /// <summary>The RNG configuration bound into the derived trainstep (never null; defaults to
+        /// <see cref="RngConfig.Default"/>). Re-seed with <see cref="WithSeed"/>.</summary>
+        public RngConfig RngConfig => _constituents.RngConfig;
 
         /// <summary>Struct definition for trainable parameters.</summary>
         public TensorStructDef TrainableParamStructDef { get; private set; } = null!;
@@ -643,19 +708,14 @@ namespace Shorokoo
             if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
             if (lossGraph is null) throw new ArgumentNullException(nameof(lossGraph));
             if (optimizerGraph is null) throw new ArgumentNullException(nameof(optimizerGraph));
+            if (sampleInputs is null) throw new ArgumentNullException(nameof(sampleInputs));
+            if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
 
-            // The model position takes a module graph or an already-lowered concrete
-            // architecture (the concretization pipeline is idempotent on the latter, so
-            // callers that lowered once — e.g. to inspect parameters — need not redo it);
-            // a weight-filled concrete model is refused up front. Loss and optimizer are
-            // composed as module bodies and must be module graphs.
-            var model = RequireModelGraphKind(modelGraph, "TrainingRig.FromScratch (modelGraph)");
-            lossGraph.RequireKind(GraphKind.Module, "TrainingRig.FromScratch (lossGraph)",
-                "Pass the loss module graph (e.g. Losses.L2Loss).");
-            optimizerGraph.RequireKind(GraphKind.Module, "TrainingRig.FromScratch (optimizerGraph)",
-                "Pass the optimizer module graph (e.g. Optimizers.Adam).");
-            return FromScratchInternal(model, lossGraph.ToInternal(), optimizerGraph.ToInternal(),
-                sampleInputs, hyperparameters, names, rngConfig);
+            // Capture the constituents (the swappable source-of-truth layer, §5.8) and derive the
+            // trainstep from them. "No config" means the default deterministic identity.
+            return DeriveRig(new RigConstituents(
+                modelGraph, lossGraph, optimizerGraph, sampleInputs, hyperparameters, names,
+                rngConfig ?? RngConfig.Default));
         }
 
         /// <summary>
@@ -677,32 +737,38 @@ namespace Shorokoo
                 "(e.g. MyModel.ComputationGraph) or its ToConcreteArchitecture result instead."));
         }
 
-        private static TrainingRig FromScratchInternal(
-            InternalComputationGraph modelGraph,
-            InternalComputationGraph lossGraph,
-            InternalComputationGraph optimizerGraph,
-            NamedModelParam[] sampleInputs,
-            Hyperparameter[] hyperparameters,
-            IReadOnlyList<string>? names,
-            RngConfig? rngConfig)
+        /// <summary>
+        /// Derives a rig from its <paramref name="constituents"/> — the sole build path, shared by
+        /// <see cref="FromScratch(ComputationGraph, ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?)"/>
+        /// and every <c>With…</c> derivation. Validates the constituent kinds (so a swapped-in loss
+        /// or optimizer is checked just as at first build), composes them into the in-memory
+        /// <c>trainstep</c>, and initializes/optimizes it. The constituents are captured on the rig
+        /// as the source of truth; the trainstep is never persisted (§5.8).
+        /// </summary>
+        private static TrainingRig DeriveRig(RigConstituents constituents)
         {
-            if (sampleInputs is null) throw new ArgumentNullException(nameof(sampleInputs));
-            if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
-            if (names is not null && names.Count != hyperparameters.Length)
+            var c = constituents;
+            if (c.Names is not null && c.Names.Count != c.Hyperparameters.Length)
                 throw new ArgumentException(
-                    $"hyperparameter names ({names.Count}) must match hyperparameter values " +
-                    $"({hyperparameters.Length}).", nameof(names));
-            if (sampleInputs.Length == 0)
+                    $"hyperparameter names ({c.Names.Count}) must match hyperparameter values " +
+                    $"({c.Hyperparameters.Length}).", nameof(constituents));
+            if (c.SampleInputs.Length == 0)
                 throw new ArgumentException(
-                    "TrainingRig.FromScratch requires at least one sample input. Sample inputs " +
+                    "A training rig requires at least one sample input. Sample inputs " +
                     "drive parameter shape resolution and training-graph shape inference.",
-                    nameof(sampleInputs));
+                    nameof(constituents));
+
+            // The model position takes a module graph or an already-lowered concrete architecture
+            // (the concretization pipeline is idempotent on the latter); a weight-filled concrete
+            // model is refused up front. Loss and optimizer are composed as module bodies and must
+            // be module graphs. Re-validated on every derivation so a swapped constituent is checked.
+            var model = RequireModelGraphKind(c.Model, "TrainingRig (model constituent)");
+            c.Loss.RequireKind(GraphKind.Module, "TrainingRig (loss constituent)",
+                "Pass the loss module graph (e.g. Losses.L2Loss).");
+            c.Optimizer.RequireKind(GraphKind.Module, "TrainingRig (optimizer constituent)",
+                "Pass the optimizer module graph (e.g. Optimizers.Adam).");
 
             var ctx = ComputeContext.Default;
-
-            // No config means the default deterministic identity — the rig's randomness
-            // (init and runtime feeds alike) is always keyed, never backend random ops.
-            rngConfig ??= RngConfig.Default;
 
             // Single ToConcreteArchitecture pass. The resulting concrete arch graph is the
             // shared substrate for both phases below: Phase 1 composes it with loss +
@@ -710,18 +776,110 @@ namespace Shorokoo
             // MODEL_PARAM nodes to initialize values and to determine prediction shape.
             // The concrete pass also runs the QEE-backed liveness filter that prunes
             // trainable params whose reachability is killed by the sample input shape.
-            var concreteArch = modelGraph.ToConcreteArchitecture(new ModelParamList(sampleInputs), ctx);
+            var concreteArch = model.ToConcreteArchitecture(new ModelParamList(c.SampleInputs), ctx);
 
             // Bind the RNG config at the shared concretization point: binding writes the
             // config's runtime identity into the RngSeed parameter, which — with the feeds'
             // key derivation chains — rides unchanged through loss composition and autograd
             // into the training-step graph, where the ONNX-prep lowering emits the keyed draws.
-            concreteArch.ApplyRngConfig(rngConfig);
+            concreteArch.ApplyRngConfig(c.RngConfig);
 
-            var rig = new TrainingRig();
-            rig.BuildTrainingStepPureGraph(concreteArch, lossGraph, optimizerGraph, hyperparameters, names);
-            rig.InitializeAndOptimize(concreteArch, sampleInputs, ctx, rngConfig);
+            var rig = new TrainingRig { _constituents = c };
+            rig.BuildTrainingStepPureGraph(
+                concreteArch, c.Loss.ToInternal(), c.Optimizer.ToInternal(), c.Hyperparameters, c.Names);
+            rig.InitializeAndOptimize(concreteArch, c.SampleInputs, ctx, c.RngConfig);
             return rig;
+        }
+
+        // ───────────────────── Two-layer rig: immutable derivations (§5.8.5) ─────────────────────
+        // A TrainingRig is an immutable value (consistent with the frozen ComputationGraph). None of
+        // the operations below mutate the receiver; each returns a NEW rig that shares the unchanged
+        // constituents (and their graphs) BY REFERENCE — via `record with` on RigConstituents — and
+        // re-derives only its own trainstep from the swapped constituent. Deriving is therefore free
+        // of aliasing surprises: the original rig is untouched.
+
+        /// <summary>
+        /// A new rig with the loss constituent replaced; its <c>trainstep</c> is re-derived, and the
+        /// model, optimizer, hyperparameters, sample inputs and RNG config are shared by reference.
+        /// </summary>
+        public TrainingRig WithLoss(ComputationGraph loss)
+        {
+            if (loss is null) throw new ArgumentNullException(nameof(loss));
+            return DeriveRig(_constituents with { Loss = loss });
+        }
+
+        /// <summary>
+        /// A new rig with the optimizer constituent (and its hyperparameters) replaced; optimizer
+        /// state is re-initialized as part of re-deriving the <c>trainstep</c>, everything else shared.
+        /// </summary>
+        public TrainingRig WithOptimizer(ComputationGraph optimizer, IOptimizerHyperparameters hyperparameters)
+        {
+            if (optimizer is null) throw new ArgumentNullException(nameof(optimizer));
+            if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
+            return DeriveRig(_constituents with
+            {
+                Optimizer = optimizer,
+                Hyperparameters = hyperparameters.InOptimizerOrder(),
+                Names = hyperparameters.HyperparameterNames,
+            });
+        }
+
+        /// <summary>Positional-hyperparameter overload of <see cref="WithOptimizer(ComputationGraph, IOptimizerHyperparameters)"/>.</summary>
+        public TrainingRig WithOptimizer(ComputationGraph optimizer, params Hyperparameter[] hyperparameters)
+        {
+            if (optimizer is null) throw new ArgumentNullException(nameof(optimizer));
+            if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
+            return DeriveRig(_constituents with { Optimizer = optimizer, Hyperparameters = hyperparameters, Names = null });
+        }
+
+        /// <summary>
+        /// A new rig with the scheduler swapped, keeping the optimizer graph — the schedule rides in
+        /// the hyperparameters (a baked constant, a built-in <see cref="Schedule"/>, or a scheduler
+        /// module per field) until #106 folds the scheduler into its own persisted constituent. Only
+        /// the <c>trainstep</c> is re-derived; the model, loss and optimizer graphs are shared.
+        /// </summary>
+        public TrainingRig WithScheduler(IOptimizerHyperparameters hyperparameters)
+        {
+            if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
+            return DeriveRig(_constituents with
+            {
+                Hyperparameters = hyperparameters.InOptimizerOrder(),
+                Names = hyperparameters.HyperparameterNames,
+            });
+        }
+
+        /// <summary>Positional-hyperparameter overload of <see cref="WithScheduler(IOptimizerHyperparameters)"/>.</summary>
+        public TrainingRig WithScheduler(params Hyperparameter[] hyperparameters)
+        {
+            if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
+            return DeriveRig(_constituents with { Hyperparameters = hyperparameters, Names = null });
+        }
+
+        /// <summary>
+        /// A new rig re-seeded with <paramref name="rngConfig"/> — the model's (and other drawing
+        /// constituents') RNG identity is re-initialized, everything else shared by reference. The
+        /// design's cheap path (share the trainstep, re-derive only the compiled session, since the
+        /// seed rides as an aliased param value) rests on the #22 param-identity substrate; until that
+        /// lands the re-seed re-derives the trainstep, which is correct and equally immutable.
+        /// </summary>
+        public TrainingRig WithSeed(RngConfig rngConfig)
+        {
+            if (rngConfig is null) throw new ArgumentNullException(nameof(rngConfig));
+            return DeriveRig(_constituents with { RngConfig = rngConfig });
+        }
+
+        /// <summary>
+        /// Extracts the inference model for a checkpoint — a <b>pure read off the model constituent's
+        /// mapping</b> (§5.8.2): concretize the rig's model constituent at its sample input and bind
+        /// the checkpoint's model-owned params (trainable weights + module state) by their canonical
+        /// identifiers. No copy step, no which-tensors-belong-to-inference heuristic; because
+        /// model-owned parameter identity is preserved across composition, the tensors the
+        /// <c>trainstep</c> updated bind straight back into the inference model by the same name.
+        /// </summary>
+        public ComputationGraph ExtractInferenceModel(TrainingCheckpoint checkpoint)
+        {
+            if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
+            return checkpoint.ToInferenceModel(_constituents.Model, _constituents.SampleInputs[0].ToTensorData());
         }
 
         /// <summary>
@@ -2022,4 +2180,21 @@ namespace Shorokoo
             _trainingStepWorkGraph = null;
         }
     }
+
+    /// <summary>
+    /// The immutable <b>constituent</b> layer of a <see cref="TrainingRig"/> (§5.8): the swappable
+    /// source-of-truth models plus the build arguments needed to (re-)derive the in-memory
+    /// <c>trainstep</c>. A <c>With…</c> derivation produces a new value with <c>record with</c>,
+    /// sharing every unchanged constituent (and its graph) by reference and re-deriving only what
+    /// changed. Held as an implementation value on the rig; the rig exposes the individual
+    /// constituents through its own public accessors.
+    /// </summary>
+    internal sealed record RigConstituents(
+        ComputationGraph Model,
+        ComputationGraph Loss,
+        ComputationGraph Optimizer,
+        NamedModelParam[] SampleInputs,
+        Hyperparameter[] Hyperparameters,
+        IReadOnlyList<string>? Names,
+        RngConfig RngConfig);
 }

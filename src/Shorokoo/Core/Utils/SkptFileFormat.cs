@@ -136,10 +136,10 @@ namespace Shorokoo.Core.Utils
         public long BatchIndex { get; set; }
 
         /// <summary>The loss of the training step that produced this checkpoint — a host-owned
-        /// run-progress scalar, grouped with the counters. Add-only and nullable: absent (⇒ read back
-        /// as <c>null</c>) on an initial/bare checkpoint no step produced, or when the
-        /// <see cref="Shorokoo.CheckpointComponents.Counters"/> component is filtered out on save.
-        /// The serializer omits it when null (never a sentinel 0.0).</summary>
+        /// run-progress scalar, its own savable component (independent of the counters). Add-only and
+        /// nullable: absent (⇒ read back as <c>null</c>) on an initial/bare checkpoint no step
+        /// produced, or when the <see cref="Shorokoo.CheckpointComponents.Loss"/> component is
+        /// filtered out on load. The serializer omits it when null (never a sentinel 0.0).</summary>
         [JsonPropertyName("loss")]
         public float? Loss { get; set; }
 

@@ -42,8 +42,12 @@ namespace Shorokoo
         OptimizerState = 1 << 2,
         /// <summary>The host-owned run counters: step, epoch, batch index.</summary>
         Counters = 1 << 3,
+        /// <summary>The host-owned run-progress loss scalar of the step that produced the checkpoint
+        /// (a nullable value — <c>null</c> on an initial/bare checkpoint contributes nothing to a
+        /// save). Independent of <see cref="Counters"/>.</summary>
+        Loss = 1 << 4,
         /// <summary>Every component.</summary>
-        All = TrainingRig | InferenceState | OptimizerState | Counters,
+        All = TrainingRig | InferenceState | OptimizerState | Counters | Loss,
     }
 
     /// <summary>
@@ -101,8 +105,9 @@ namespace Shorokoo
         /// initial or bare checkpoint that no step produced. Set by
         /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>
         /// (which now returns the post-step checkpoint directly) to that step's loss. Carried
-        /// unchanged through the counter derivations, and persisted with the
-        /// <see cref="CheckpointComponents.Counters"/> component (absent ⇒ reads back <c>null</c>).
+        /// unchanged through the counter derivations, and persisted as its own
+        /// <see cref="CheckpointComponents.Loss"/> component, independent of the counters (absent, or a
+        /// null loss, ⇒ reads back <c>null</c>).
         /// </summary>
         public float? Loss { get; }
 
@@ -186,8 +191,8 @@ namespace Shorokoo
         internal const string ModelStateSection = "model_state";
         internal const string OptimizerStateSection = "opt_state";
         internal const string CheckpointMarkerName = "__shorokoo_checkpoint__"; // int64[4] = [version, step, epoch, batchIndex]
-        // The loss (a host-owned run-progress scalar, grouped with the Counters component) is written
-        // as its OWN presence-gated float32 scalar tensor, only when Loss.HasValue and Counters is
+        // The loss (a host-owned run-progress scalar, its OWN savable component) is written as a
+        // presence-gated float32 scalar tensor, only when Loss.HasValue and the Loss component is
         // included — never overloading the int64 marker, so a null loss is genuinely absent (not a
         // sentinel 0.0). A '/'-free name, so it can't be mistaken for a namespaced section field.
         internal const string CheckpointLossName = "__shorokoo_loss__";
@@ -211,7 +216,11 @@ namespace Shorokoo
         /// <paramref name="components"/> selects which parts to write. <c>null</c> writes every
         /// <b>available</b> component: <see cref="CheckpointComponents.InferenceState"/> (trainable
         /// params + model state) and <see cref="CheckpointComponents.Counters"/> always,
-        /// <see cref="CheckpointComponents.OptimizerState"/> when this checkpoint carries any. The
+        /// <see cref="CheckpointComponents.OptimizerState"/> when this checkpoint carries any, and
+        /// <see cref="CheckpointComponents.Loss"/> when it carries a (non-null) loss. Explicitly
+        /// requesting <see cref="CheckpointComponents.Loss"/> on a checkpoint whose loss is
+        /// <c>null</c> is a no-op — it writes nothing, and does not throw (a null loss is a
+        /// legitimate value). The
         /// <see cref="CheckpointComponents.TrainingRig"/> component is never written automatically and
         /// throws when requested explicitly — serializing the rig's constituent graphs is not yet
         /// implemented (Shorokoo/Shorokoo#115).
@@ -261,9 +270,11 @@ namespace Shorokoo
             }
 
             // null ⇒ all AVAILABLE components. TrainingRig is never auto-included (its serialization is
-            // unimplemented, #115); request it explicitly to get the clear #115 error.
+            // unimplemented, #115); request it explicitly to get the clear #115 error. Loss is included
+            // only when this checkpoint actually carries one (a null loss contributes nothing).
             var comps = CheckpointComponents.InferenceState | CheckpointComponents.Counters;
             if (OptimizerState.Definition.Fields.Length > 0) comps |= CheckpointComponents.OptimizerState;
+            if (Loss.HasValue) comps |= CheckpointComponents.Loss;
             return comps;
         }
 
@@ -288,11 +299,13 @@ namespace Shorokoo
                 counters ? Step : 0L, counters ? Epoch : 0L, counters ? BatchIndex : 0L);
             tensors.Add(new SafeTensor(CheckpointMarkerName, marker, "I64", [4L]));
 
-            // Loss rides with the Counters component (a host-owned run-progress scalar). Written only
-            // when this checkpoint actually carries a loss AND counters are included — so a
-            // counters-less save, or an initial/bare checkpoint with no loss, writes no loss tensor
-            // and reloads with Loss == null (never a sentinel 0.0).
-            if (counters && Loss is float lossValue)
+            // Loss is its own savable component (a host-owned run-progress scalar), independent of the
+            // counters. Written only when this checkpoint actually carries a loss AND the Loss
+            // component is included — so a Loss-less save, or an initial/bare checkpoint with no loss,
+            // writes no loss tensor and reloads with Loss == null (never a sentinel 0.0). Explicitly
+            // requesting Loss on a null-loss checkpoint is a no-op (writes nothing), not an error — a
+            // null loss is a legitimate value, unlike the unavailable TrainingRig case.
+            if ((comps & CheckpointComponents.Loss) != 0 && Loss is float lossValue)
             {
                 var lossTensor = Globals.TensorData(Array.Empty<long>(), lossValue);
                 tensors.Add(new SafeTensor(
@@ -423,10 +436,10 @@ namespace Shorokoo
             long epoch = Want(CheckpointComponents.Counters) ? marker[2] : 0L;
             long batchIndex = Want(CheckpointComponents.Counters) ? marker[3] : 0L;
 
-            // Loss is grouped with the Counters component: read it only when Counters is wanted and
-            // the presence-gated loss tensor is actually present; absence ⇒ null (an initial/bare or
-            // counters-less checkpoint), never a sentinel 0.
-            float? loss = Want(CheckpointComponents.Counters)
+            // Loss is its own component (independent of the counters): read it only when Loss is
+            // wanted and the presence-gated loss tensor is actually present; absence ⇒ null (an
+            // initial/bare or Loss-less checkpoint), never a sentinel 0.
+            float? loss = Want(CheckpointComponents.Loss)
                           && byName.TryGetValue(CheckpointLossName, out var lossData)
                 ? lossData.As<float32>().AccessMemory<float>()[0]
                 : (float?)null;
@@ -608,8 +621,10 @@ namespace Shorokoo
         /// <see cref="RngConfig.Default"/>). Re-seed with <see cref="WithSeed"/>.</summary>
         public RngConfig RngConfig => _constituents.RngConfig;
 
-        /// <summary>Struct definition for trainable parameters.</summary>
-        public TensorStructDef TrainableParamStructDef { get; private set; } = null!;
+        /// <summary>Struct definition for trainable parameters. Internal build/persistence machinery —
+        /// persistence sources the defs from the rig directly, and callers drive training through the
+        /// checkpoint's <see cref="TrainingCheckpoint.TrainableParams"/> rather than the def.</summary>
+        internal TensorStructDef TrainableParamStructDef { get; private set; } = null!;
 
         /// <summary>
         /// Result of the <see cref="MemoryAwareGraphOptimizer"/> pass applied to
@@ -618,14 +633,14 @@ namespace Shorokoo
         /// Exposed for diagnostics — lets callers measure how much the optimizer actually
         /// improved the compute / peak-memory metric over the unoptimized graph.
         /// </summary>
-        public GraphOptimizationResult OptimizationResult { get; private set; } = null!;
+        internal GraphOptimizationResult OptimizationResult { get; private set; } = null!;
 
         /// <summary>
         /// The unoptimized training-step graph, before <see cref="MemoryAwareGraphOptimizer"/>
         /// ran. Held alongside <see cref="OptimizationResult"/> so the per-strategy
         /// improvement is measurable.
         /// </summary>
-        public ComputationGraph PreOptimizationGraph { get; private set; } = null!;
+        internal ComputationGraph PreOptimizationGraph { get; private set; } = null!;
 
         /// <summary>
         /// Compute time + peak memory the <see cref="GraphEvaluator"/> projected for the
@@ -633,13 +648,15 @@ namespace Shorokoo
         /// the optimizer used. Compare with <see cref="OptimizationResult"/>'s evaluation
         /// to quantify the optimizer's improvement.
         /// </summary>
-        public GraphEvaluationResult PreOptimizationEval { get; private set; } = null!;
+        internal GraphEvaluationResult PreOptimizationEval { get; private set; } = null!;
 
-        /// <summary>Struct definition for model state (empty for stateless models).</summary>
-        public TensorStructDef ModelStateDef { get; private set; } = null!;
+        /// <summary>Struct definition for model state (empty for stateless models). Internal
+        /// build/persistence machinery — see <see cref="TrainableParamStructDef"/>.</summary>
+        internal TensorStructDef ModelStateDef { get; private set; } = null!;
 
-        /// <summary>Struct definition for optimizer state (empty for basic SGD).</summary>
-        public TensorStructDef OptimizerStateDef { get; private set; } = null!;
+        /// <summary>Struct definition for optimizer state (empty for basic SGD). Internal
+        /// build/persistence machinery — see <see cref="TrainableParamStructDef"/>.</summary>
+        internal TensorStructDef OptimizerStateDef { get; private set; } = null!;
 
         /// <summary>
         /// Struct definition for the <b>schedule-less runtime</b> optimizer hyperparameters — the ones
@@ -649,8 +666,10 @@ namespace Shorokoo
         /// or a scheduler module) are <b>not</b> here — they are computed in-graph from the step counter
         /// and need no per-step value. When non-empty, supply values via
         /// <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>.
+        /// Internal build machinery — build the per-step values with <see cref="MakeHyperparameters(float)"/>
+        /// (which reads this def internally); inspect the dynamic names via <see cref="DynamicHyperparameterNames"/>.
         /// </summary>
-        public TensorStructDef HyperparameterStructDef { get; private set; } = null!;
+        internal TensorStructDef HyperparameterStructDef { get; private set; } = null!;
 
         /// <summary>
         /// Struct definition for the model's runtime inputs — one field per model input tensor,
@@ -671,9 +690,9 @@ namespace Shorokoo
         /// <summary>
         /// Indices into the optimizer's hyperparameter order that were routed as runtime inputs, in
         /// <see cref="HyperparameterStructDef"/> field order. Used by <see cref="MakeHyperparameters(float)"/>
-        /// to map caller-supplied values to the right fields.
+        /// to map caller-supplied values to the right fields. Internal build machinery.
         /// </summary>
-        public IReadOnlyList<int> DynamicHyperparameterIndices { get; private set; } = Array.Empty<int>();
+        internal IReadOnlyList<int> DynamicHyperparameterIndices { get; private set; } = Array.Empty<int>();
 
         /// <summary>
         /// The optimizer's hyperparameter names, in declaration order (e.g. <c>learningRate, beta1,
@@ -699,14 +718,14 @@ namespace Shorokoo
         /// </summary>
         private string[] _counterInputNames = Array.Empty<string>();
 
-        /// <summary>Number of trainable parameter fields in graph outputs.</summary>
-        public int UpdatedParamFieldCount { get; private set; }
+        /// <summary>Number of trainable parameter fields in graph outputs. Internal output-layout machinery.</summary>
+        internal int UpdatedParamFieldCount { get; private set; }
 
-        /// <summary>Number of model state fields in graph outputs.</summary>
-        public int UpdatedStateFieldCount { get; private set; }
+        /// <summary>Number of model state fields in graph outputs. Internal output-layout machinery.</summary>
+        internal int UpdatedStateFieldCount { get; private set; }
 
-        /// <summary>Number of optimizer state fields in graph outputs.</summary>
-        public int UpdatedOptimizerStateFieldCount { get; private set; }
+        /// <summary>Number of optimizer state fields in graph outputs. Internal output-layout machinery.</summary>
+        internal int UpdatedOptimizerStateFieldCount { get; private set; }
 
         /// <summary>Initial trainable parameter values, computed at FromScratch time.</summary>
         private Dictionary<string, IData> _initialParamFields = null!;

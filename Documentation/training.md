@@ -95,9 +95,11 @@ by a single interpreter that mirrors the graph lowering.
 > `Baked`/`Scheduled`/`Runtime` union. `HyperValue.Constant(v)` → `Hyperparameter.Baked(v)` (a bare
 > `float` still converts implicitly); `HyperValue.Runtime(seed)` → **`Hyperparameter.Runtime()`** (the
 > seed is gone — the shape placeholder is internal); the undocumented `InitialValue` is removed. The
-> rig's public surface is spelled out: `MakeHyperparams` → `MakeHyperparameters`, `HyperparamStructDef`
-> → `HyperparameterStructDef`, `DynamicHyperparamIndices` → `DynamicHyperparameterIndices`. Fresh-
-> checkpoint creation can now **fail loud** (see `CreateInitialCheckpoint` below).
+> public per-step hyperparameter entry point is renamed `MakeHyperparams` → `MakeHyperparameters`; the
+> low-level struct-def / index plumbing behind it (`HyperparameterStructDef`,
+> `DynamicHyperparameterIndices`) is now `internal` build machinery — inspect the dynamic hyperparameter
+> names via `DynamicHyperparameterNames`. Fresh-checkpoint creation can now **fail loud** (see
+> `CreateInitialCheckpoint` below).
 
 ## `TrainingRig` API
 
@@ -149,7 +151,7 @@ public TrainingResult Fit(  // alias: Train(...)
 ```
 
 Result types:
-- `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long`; the training loop advances them — `TrainStep` carries them through unchanged; default `0`). All three counters are `int64` end to end. It also carries `.Rig` (the `TrainingRig?` that produced it — set on every rig-produced checkpoint, so `checkpoint.ToInferenceModel()` needs no re-supplied graph) and `.Loss` (`float?`; the loss of the `TrainStep` that produced it, `null` on an initial or bare checkpoint). Both are preserved through the counter derivations (`WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex`). `TrainStep` returns this checkpoint directly — read the step's loss off `.Loss`. `.Loss` persists with the `Counters` component (dropping `Counters`, or an initial checkpoint, reloads with `.Loss == null` — never a sentinel `0`).
+- `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long`; the training loop advances them — `TrainStep` carries them through unchanged; default `0`). All three counters are `int64` end to end. It also carries `.Rig` (the `TrainingRig?` that produced it — set on every rig-produced checkpoint, so `checkpoint.ToInferenceModel()` needs no re-supplied graph) and `.Loss` (`float?`; the loss of the `TrainStep` that produced it, `null` on an initial or bare checkpoint). Both are preserved through the counter derivations (`WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex`). `TrainStep` returns this checkpoint directly — read the step's loss off `.Loss`. `.Loss` persists as its own `Loss` component, independent of `Counters` (dropping `Loss`, or an initial checkpoint, reloads with `.Loss == null` — never a sentinel `0`).
 - `TrainingResult` → `.FinalCheckpoint`, `.EpochLosses` (the per-epoch mean losses).
 
 `TrainingRig`, `TrainingCheckpoint`, and `TrainingResult` are in
@@ -206,13 +208,15 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
   `Persistence.LoadTrainingCheckpoint(path, trainableDef, modelStateDef, optimizerStateDef)`
   is the def-based form if you hold the struct defs without a rig (its result carries no rig).
 - Both save and load take an optional `CheckpointComponents` flags value —
-  `InferenceState` (trainable params + model state), `OptimizerState`, `Counters`, and
+  `InferenceState` (trainable params + model state), `OptimizerState`, `Counters`, `Loss`, and
   `TrainingRig` — combined with `|`. On save, `null` writes every available component; on
   load, `null` reads everything present (a component absent from the file is filled from the
   rig's initial values). `checkpoint.Save(path, CheckpointComponents.InferenceState)` writes
-  weights only. The `TrainingRig` component — serializing the rig's own constituent graphs so
-  a checkpoint rebuilds the whole rig from the file alone — is **not yet implemented**
-  (tracked as Shorokoo/Shorokoo#115); requesting it throws.
+  weights only. `Loss` is its own component, independent of `Counters`; explicitly requesting
+  `Loss` on a checkpoint whose loss is `null` is a no-op (it writes nothing and does not throw —
+  a null loss is a legitimate value). The `TrainingRig` component — serializing the rig's own
+  constituent graphs so a checkpoint rebuilds the whole rig from the file alone — is **not yet
+  implemented** (tracked as Shorokoo/Shorokoo#115); requesting it throws.
 - `rig.AdoptCheckpoint(checkpoint)` returns a new checkpoint identical to the argument but
   bound to that rig (validating the field defs match), so a bare checkpoint — or one loaded
   against a different rig instance — gains a rig for `ToInferenceModel()`.

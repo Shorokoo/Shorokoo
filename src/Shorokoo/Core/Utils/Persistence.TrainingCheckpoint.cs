@@ -105,8 +105,9 @@ namespace Shorokoo
         /// dropped or absent kind is filled from <paramref name="rigForDefaults"/>'s initial values
         /// when a rig is supplied (<see cref="CheckpointComponents.InferenceState"/> → rig initial
         /// params + model state, <see cref="CheckpointComponents.OptimizerState"/> → rig initial
-        /// optimizer state, <see cref="CheckpointComponents.Counters"/> → 0 and a <c>null</c> loss);
-        /// without a rig, an absent-but-expected kind fails loud.</para>
+        /// optimizer state, <see cref="CheckpointComponents.Counters"/> → 0,
+        /// <see cref="CheckpointComponents.Loss"/> → a <c>null</c> loss); without a rig, an
+        /// absent-but-expected kind fails loud.</para>
         /// </summary>
         internal static TrainingCheckpoint LoadTrainingCheckpointFromSkpt(
             string filePath,
@@ -158,12 +159,12 @@ namespace Shorokoo
             bool KindPresent(string kindName) =>
                 kinds.TryGetValue(kindName, out var key) && !string.IsNullOrEmpty(key);
 
-            // Counters (step/epoch/batch) and the loss ride with the Counters component. Filtered out
-            // ⇒ 0 / null, mirroring the flat path.
+            // Counters (step/epoch/batch) ride with the Counters component; the loss is its own
+            // independent Loss component. Each filtered out ⇒ 0 / null, mirroring the flat path.
             long step = Want(CheckpointComponents.Counters) ? training.Step : 0L;
             long epoch = Want(CheckpointComponents.Counters) ? training.Epoch : 0L;
             long batchIndex = Want(CheckpointComponents.Counters) ? training.BatchIndex : 0L;
-            float? loss = Want(CheckpointComponents.Counters) ? training.Loss : null;
+            float? loss = Want(CheckpointComponents.Loss) ? training.Loss : null;
 
             TensorDataStruct trainable, modelState, optState;
 
@@ -482,9 +483,12 @@ namespace Shorokoo
                     Step = _checkpoint.Step,
                     Epoch = _checkpoint.Epoch,
                     BatchIndex = _checkpoint.BatchIndex,
-                    // Loss is a host-owned run-progress scalar grouped with the counters. Nullable and
-                    // add-only: null (an initial/bare checkpoint) is omitted by the manifest serializer
-                    // (WhenWritingNull), so it reads back as null — never a sentinel 0.0.
+                    // Loss is a host-owned run-progress scalar, its own savable component (independent
+                    // of the counters). The .skpt builder writes every available component, so the loss
+                    // is written iff the checkpoint carries one. Nullable and add-only: null (an
+                    // initial/bare checkpoint) is omitted by the manifest serializer (WhenWritingNull),
+                    // so it reads back as null — never a sentinel 0.0. A dropped Loss component on LOAD
+                    // (or a null value) reads back null.
                     Loss = _checkpoint.Loss,
                     Kinds = kinds,
                 },

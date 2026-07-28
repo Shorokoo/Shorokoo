@@ -2644,7 +2644,7 @@ public class TrainingRigCoverageTests
     /// for the flat path (Fix #3): a full <c>.skpt</c> is saved, then reloaded with only
     /// <see cref="CheckpointComponents.InferenceState"/> — the trainable params restore from the file,
     /// but the dropped optimizer state fills from the rig's initial values (not the trained ones), the
-    /// counters read as 0, and the loss reads back <c>null</c> (it rides with the dropped Counters).
+    /// counters read as 0, and the loss reads back <c>null</c> (its own Loss component was dropped too).
     /// Requesting the (unimplemented) TrainingRig component throws a #115 <see cref="NotSupportedException"/>.
     /// </summary>
     [Fact]
@@ -2668,7 +2668,7 @@ public class TrainingRigCoverageTests
             Assert.Same(rigB, loaded.Rig);                    // load attaches the rig
             Assert.Equal(FlattenStruct(trained.TrainableParams), FlattenStruct(loaded.TrainableParams));
             Assert.Equal(0, loaded.Step);                     // counters dropped ⇒ 0
-            Assert.Null(loaded.Loss);                         // loss rides with the dropped Counters ⇒ null
+            Assert.Null(loaded.Loss);                         // Loss component dropped ⇒ null
             // Optimizer state was filtered out ⇒ filled from the rig's initial values, not the trained ones.
             Assert.Equal(initialOpt, FlattenStruct(loaded.OptimizerState));
 
@@ -2682,11 +2682,14 @@ public class TrainingRigCoverageTests
     }
 
     /// <summary>
-    /// <see cref="TrainingCheckpoint.Loss"/> now persists (Fix #4), grouped with the
-    /// <see cref="CheckpointComponents.Counters"/> component, in BOTH the flat safetensors format and
-    /// the <c>.skpt</c> manifest: a checkpoint with a known non-null loss round-trips its loss; an
-    /// initial checkpoint (null loss) reads back <c>null</c> (never a sentinel 0.0); and a flat save
-    /// that filters out Counters drops the loss (reads back <c>null</c>).
+    /// <see cref="TrainingCheckpoint.Loss"/> persists as its <b>own</b>
+    /// <see cref="CheckpointComponents.Loss"/> component — independent of
+    /// <see cref="CheckpointComponents.Counters"/> — in BOTH the flat safetensors format and the
+    /// <c>.skpt</c> manifest: a checkpoint with a known non-null loss round-trips its loss; an initial
+    /// checkpoint (null loss) reads back <c>null</c> (never a sentinel 0.0). The two axes are exercised
+    /// independently: a <c>Counters</c>-only save carries the counters but NOT the loss, and a
+    /// <c>Loss</c>-only save carries the loss but drops the counters. Explicitly requesting <c>Loss</c>
+    /// on a null-loss checkpoint is a no-op (writes nothing, no throw).
     /// </summary>
     [Fact]
     public void TestCheckpointLossPersistsCoverage()
@@ -2694,38 +2697,62 @@ public class TrainingRigCoverageTests
         var (rigA, trained, _, _, _) = BuildTrainedAdamRig(steps: 3);
         Assert.NotNull(trained.Loss);
         float loss = trained.Loss!.Value;
+        Assert.True(trained.Step > 0);
         var initial = rigA.CreateInitialCheckpoint();
         Assert.Null(initial.Loss);
 
         var flatPath = Path.Combine(Path.GetTempPath(), $"shrk_loss_flat_{Guid.NewGuid():N}.safetensors");
         var flatInitPath = Path.Combine(Path.GetTempPath(), $"shrk_loss_flatinit_{Guid.NewGuid():N}.safetensors");
-        var flatNoCountersPath = Path.Combine(Path.GetTempPath(), $"shrk_loss_flatnc_{Guid.NewGuid():N}.safetensors");
+        var flatCountersOnlyPath = Path.Combine(Path.GetTempPath(), $"shrk_loss_flatco_{Guid.NewGuid():N}.safetensors");
+        var flatLossOnlyPath = Path.Combine(Path.GetTempPath(), $"shrk_loss_flatlo_{Guid.NewGuid():N}.safetensors");
+        var flatNullLossReqPath = Path.Combine(Path.GetTempPath(), $"shrk_loss_flatnull_{Guid.NewGuid():N}.safetensors");
         var skptPath = Path.Combine(Path.GetTempPath(), $"shrk_loss_skpt_{Guid.NewGuid():N}.skpt");
         var skptInitPath = Path.Combine(Path.GetTempPath(), $"shrk_loss_skptinit_{Guid.NewGuid():N}.skpt");
         try
         {
             // ---- Flat format: non-null loss round-trips; null loss reads back null. ----
             trained.Save(flatPath);
-            Assert.Equal(loss, BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(flatPath).Loss!.Value);
+            var full = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(flatPath);
+            Assert.Equal(loss, full.Loss!.Value);
+            Assert.Equal(trained.Step, full.Step);            // counters ride too, independently
 
             initial.Save(flatInitPath);
             Assert.Null(BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(flatInitPath).Loss);
 
-            // Filtering out Counters drops the loss (it is grouped with Counters).
-            trained.Save(flatNoCountersPath,
-                CheckpointComponents.InferenceState | CheckpointComponents.OptimizerState);
-            Assert.Null(BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(flatNoCountersPath).Loss);
+            // Axis 1 — Counters WITHOUT Loss: the counters persist but the loss is dropped (reads null).
+            trained.Save(flatCountersOnlyPath,
+                CheckpointComponents.InferenceState | CheckpointComponents.Counters);
+            var countersOnly = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(flatCountersOnlyPath);
+            Assert.Equal(trained.Step, countersOnly.Step);    // counters carried
+            Assert.Null(countersOnly.Loss);                   // loss NOT carried (its own component was dropped)
+
+            // Axis 2 — Loss WITHOUT Counters: the loss persists but the counters drop to 0.
+            trained.Save(flatLossOnlyPath,
+                CheckpointComponents.InferenceState | CheckpointComponents.Loss);
+            var lossOnly = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(flatLossOnlyPath);
+            Assert.Equal(loss, lossOnly.Loss!.Value);         // loss carried
+            Assert.Equal(0, lossOnly.Step);                   // counters dropped ⇒ 0
+
+            // Requesting Loss on a null-loss checkpoint is a no-op (writes nothing, no throw).
+            initial.Save(flatNullLossReqPath, CheckpointComponents.InferenceState | CheckpointComponents.Loss);
+            Assert.Null(BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(flatNullLossReqPath).Loss);
 
             // ---- .skpt manifest: non-null loss round-trips; null loss reads back null. ----
             Persistence.SaveTrainingCheckpointToSkpt(trained, skptPath);
             Assert.Equal(loss, BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(skptPath).Loss!.Value);
+            // .skpt load honors the Loss component independently: drop Loss ⇒ null even though counters load.
+            var skptNoLoss = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(
+                skptPath, CheckpointComponents.InferenceState | CheckpointComponents.OptimizerState | CheckpointComponents.Counters);
+            Assert.Equal(trained.Step, skptNoLoss.Step);      // counters carried
+            Assert.Null(skptNoLoss.Loss);                     // Loss component dropped ⇒ null
 
             Persistence.SaveTrainingCheckpointToSkpt(initial, skptInitPath);
             Assert.Null(BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(skptInitPath).Loss);
         }
         finally
         {
-            string[] paths = [flatPath, flatInitPath, flatNoCountersPath, skptPath, skptInitPath];
+            string[] paths =
+                [flatPath, flatInitPath, flatCountersOnlyPath, flatLossOnlyPath, flatNullLossReqPath, skptPath, skptInitPath];
             foreach (var p in paths)
                 if (File.Exists(p)) File.Delete(p);
         }

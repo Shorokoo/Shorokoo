@@ -422,11 +422,11 @@ public class TrainingRigCoverageTests
     [Fact]
     public void TestRepresentativeInputSurvivesDerivationCoverage()
     {
-        var sample = new NamedModelParam[]
-        {
+        NamedModelParam[] sample =
+        [
             new TensorDataModelParam("input", ModelParamType.InputParam,
                 TensorData([2048L], new float[2048])),
-        };
+        ];
         var rig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
             SGDOptimizer.ComputationGraph, sample, 0.01f);
@@ -452,11 +452,11 @@ public class TrainingRigCoverageTests
     [Fact]
     public void TestRepresentativeInputSurvivesReSeedCoverage()
     {
-        var sample = new NamedModelParam[]
-        {
+        NamedModelParam[] sample =
+        [
             new TensorDataModelParam("input", ModelParamType.InputParam,
                 TensorData([2048L], new float[2048])),
-        };
+        ];
         var rig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
             SGDOptimizer.ComputationGraph, sample, 0.01f);
@@ -476,11 +476,11 @@ public class TrainingRigCoverageTests
     [Fact]
     public void TestRepresentativeInputIsInertInSkptCoverage()
     {
-        var sample = new NamedModelParam[]
-        {
+        NamedModelParam[] sample =
+        [
             new TensorDataModelParam("input", ModelParamType.InputParam,
                 TensorData([2048L], new float[2048])),
-        };
+        ];
         var rig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
             SGDOptimizer.ComputationGraph, sample, 0.01f);

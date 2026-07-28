@@ -79,8 +79,8 @@ public class RngTrainingTests
         for (int i = 0; i < steps; i++)
         {
             var step = rig.TrainStep(checkpoint, inputBatch, targetBatch, compiled);
-            losses[i] = step.Loss;
-            checkpoint = step.Checkpoint;
+            losses[i] = step.Loss!.Value;
+            checkpoint = step;
         }
         return (losses, rig, checkpoint);
     }
@@ -182,8 +182,8 @@ public class RngTrainingTests
             for (int i = 0; i < resumedLosses.Length; i++)
             {
                 var step = rigC.TrainStep(resumed, inputBatch, targetBatch, compiledC);
-                resumedLosses[i] = step.Loss;
-                resumed = step.Checkpoint;
+                resumedLosses[i] = step.Loss!.Value;
+                resumed = step;
             }
 
             // Bit-exact continuation: the resumed losses ARE the uninterrupted run's steps

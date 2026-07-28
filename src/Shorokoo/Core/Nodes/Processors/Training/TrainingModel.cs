@@ -100,8 +100,9 @@ namespace Shorokoo
         /// The loss computed for the training step that produced this checkpoint, or <c>null</c> on an
         /// initial or bare checkpoint that no step produced. Set by
         /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>
-        /// to that step's loss (it also appears on <see cref="TrainingStepResult.Loss"/>). Carried
-        /// unchanged through the counter derivations.
+        /// (which now returns the post-step checkpoint directly) to that step's loss. Carried
+        /// unchanged through the counter derivations, and persisted with the
+        /// <see cref="CheckpointComponents.Counters"/> component (absent ⇒ reads back <c>null</c>).
         /// </summary>
         public float? Loss { get; }
 
@@ -208,7 +209,14 @@ namespace Shorokoo
         internal const string ModelStateSection = "model_state";
         internal const string OptimizerStateSection = "opt_state";
         internal const string CheckpointMarkerName = "__shorokoo_checkpoint__"; // int64[4] = [version, step, epoch, batchIndex]
-        internal const long CheckpointFormatVersion = 1;
+        // The loss (a host-owned run-progress scalar, grouped with the Counters component) is written
+        // as its OWN presence-gated float32 scalar tensor, only when Loss.HasValue and Counters is
+        // included — never overloading the int64 marker, so a null loss is genuinely absent (not a
+        // sentinel 0.0). A '/'-free name, so it can't be mistaken for a namespaced section field.
+        internal const string CheckpointLossName = "__shorokoo_loss__";
+        // Version 2: adds the presence-gated loss tensor beside the int64[4] marker (no released
+        // users, so no back-compat shim — v1 files are simply not produced or read).
+        internal const long CheckpointFormatVersion = 2;
 
         /// <summary>
         /// Saves this checkpoint to a single SafeTensors file so training can resume across process
@@ -302,6 +310,18 @@ namespace Shorokoo
                 [4L], CheckpointFormatVersion,
                 counters ? Step : 0L, counters ? Epoch : 0L, counters ? BatchIndex : 0L);
             tensors.Add(new SafeTensor(CheckpointMarkerName, marker, "I64", [4L]));
+
+            // Loss rides with the Counters component (a host-owned run-progress scalar). Written only
+            // when this checkpoint actually carries a loss AND counters are included — so a
+            // counters-less save, or an initial/bare checkpoint with no loss, writes no loss tensor
+            // and reloads with Loss == null (never a sentinel 0.0).
+            if (counters && Loss is float lossValue)
+            {
+                var lossTensor = Globals.TensorData(Array.Empty<long>(), lossValue);
+                tensors.Add(new SafeTensor(
+                    CheckpointLossName, lossTensor,
+                    SafeTensorLoader.DTypeToSafeTensorDType(lossTensor.DType), lossTensor.Shape.Dims));
+            }
             return tensors;
         }
 
@@ -366,7 +386,8 @@ namespace Shorokoo
 
             var raw = Persistence.IsSkptFile(filePath)
                 ? Persistence.LoadTrainingCheckpointFromSkpt(
-                    filePath, rig.TrainableParamStructDef, rig.ModelStateDef, rig.OptimizerStateDef)
+                    filePath, rig.TrainableParamStructDef, rig.ModelStateDef, rig.OptimizerStateDef,
+                    components, rig)
                 : LoadFlat(
                     filePath, rig.TrainableParamStructDef, rig.ModelStateDef, rig.OptimizerStateDef,
                     components, rig);
@@ -401,7 +422,8 @@ namespace Shorokoo
 
             var marker = markerData.As<int64>().AccessMemory<long>();
             // The marker is a fixed int64[4] = [version, step, epoch, batchIndex]. Exactly one
-            // format version exists (1); a wrong shape or version is unreadable by this build.
+            // format version exists (2); a wrong shape or version is unreadable by this build.
+            // (v2 adds the presence-gated loss tensor; there are no released v1 files.)
             if (marker.Length != 4)
                 throw new InvalidOperationException(
                     $"'{filePath}' has a malformed checkpoint marker: expected 4 int64 elements " +
@@ -423,6 +445,14 @@ namespace Shorokoo
             long step = Want(CheckpointComponents.Counters) ? marker[1] : 0L;
             long epoch = Want(CheckpointComponents.Counters) ? marker[2] : 0L;
             long batchIndex = Want(CheckpointComponents.Counters) ? marker[3] : 0L;
+
+            // Loss is grouped with the Counters component: read it only when Counters is wanted and
+            // the presence-gated loss tensor is actually present; absence ⇒ null (an initial/bare or
+            // counters-less checkpoint), never a sentinel 0.
+            float? loss = Want(CheckpointComponents.Counters)
+                          && byName.TryGetValue(CheckpointLossName, out var lossData)
+                ? lossData.As<float32>().AccessMemory<float>()[0]
+                : (float?)null;
 
             TensorDataStruct trainable, modelState, optState;
 
@@ -457,7 +487,7 @@ namespace Shorokoo
                 optState = ReadSection(byName, OptimizerStateSection, optimizerStateDef, filePath);
             }
 
-            return new TrainingCheckpoint(trainable, modelState, optState, step, epoch, batchIndex);
+            return new TrainingCheckpoint(trainable, modelState, optState, step, epoch, batchIndex, rig: null, loss: loss);
         }
 
         private static TensorDataStruct ReadSection(
@@ -488,24 +518,6 @@ namespace Shorokoo
             }
 
             return new TensorDataStruct(def, fields);
-        }
-    }
-
-    /// <summary>
-    /// Result of a single training step.
-    /// </summary>
-    public class TrainingStepResult
-    {
-        /// <summary>The post-step checkpoint (updated params/state, step advanced by one).</summary>
-        public TrainingCheckpoint Checkpoint { get; }
-        /// <summary>The loss computed for this step.</summary>
-        public float Loss { get; }
-
-        /// <summary>Packages a post-step checkpoint and its loss.</summary>
-        public TrainingStepResult(TrainingCheckpoint checkpoint, float loss)
-        {
-            Checkpoint = checkpoint;
-            Loss = loss;
         }
     }
 
@@ -1823,8 +1835,9 @@ namespace Shorokoo
         /// <param name="trainingInput">Training input data as TensorDataStruct</param>
         /// <param name="trainingOutput">Training target data as TensorDataStruct</param>
         /// <param name="compiled">Compiled training step graph (from <see cref="ComputeContext.Compile(ComputationGraph)"/>)</param>
-        /// <returns>Result containing the advanced checkpoint and loss value</returns>
-        public TrainingStepResult TrainStep(
+        /// <returns>The post-step checkpoint (advanced step, updated params/state) with its
+        /// <see cref="TrainingCheckpoint.Loss"/> set to this step's loss.</returns>
+        public TrainingCheckpoint TrainStep(
             TrainingCheckpoint checkpoint,
             TensorDataStruct trainingInput,
             TensorDataStruct trainingOutput,
@@ -1854,8 +1867,9 @@ namespace Shorokoo
         /// <param name="trainingInput">Training input data as TensorDataStruct</param>
         /// <param name="trainingOutput">Training target data as TensorDataStruct</param>
         /// <param name="compiled">Compiled training step graph (from <see cref="ComputeContext.Compile(ComputationGraph)"/>)</param>
-        /// <returns>Result containing the advanced checkpoint and loss value</returns>
-        public TrainingStepResult TrainStep(
+        /// <returns>The post-step checkpoint (advanced step, updated params/state) with its
+        /// <see cref="TrainingCheckpoint.Loss"/> set to this step's loss.</returns>
+        public TrainingCheckpoint TrainStep(
             TrainingCheckpoint checkpoint,
             TensorDataStruct hyperparams,
             TensorDataStruct trainingInput,
@@ -1875,7 +1889,7 @@ namespace Shorokoo
             _ => throw new InvalidOperationException($"Unknown scheduler counter input '{counter}'."),
         };
 
-        private TrainingStepResult RunStep(
+        private TrainingCheckpoint RunStep(
             TrainingCheckpoint checkpoint,
             TensorDataStruct? hyperparams,
             TensorDataStruct trainingInput,
@@ -1954,7 +1968,7 @@ namespace Shorokoo
                 this,
                 lossValue);
 
-            return new TrainingStepResult(newCheckpoint, lossValue);
+            return newCheckpoint;
         }
 
         /// <summary>
@@ -1992,9 +2006,9 @@ namespace Shorokoo
 
                 for (int i = 0; i < trainingInputs.Length; i++)
                 {
-                    var result = TrainStep(checkpoint, trainingInputs[i], trainingOutputs[i], compiled);
-                    checkpoint = result.Checkpoint;
-                    epochLoss += result.Loss;
+                    checkpoint = TrainStep(checkpoint, trainingInputs[i], trainingOutputs[i], compiled);
+                    // TrainStep sets the post-step checkpoint's Loss to this step's loss.
+                    epochLoss += checkpoint.Loss!.Value;
                 }
 
                 epochLosses[epoch] = epochLoss / trainingInputs.Length;

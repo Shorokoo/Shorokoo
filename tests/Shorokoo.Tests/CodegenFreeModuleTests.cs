@@ -367,8 +367,8 @@ public class CodegenFreeModuleTests
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var stepResult = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
 
-        Assert.True(float.IsFinite(stepResult.Loss));
-        var steppedWeight = ((TensorData<float32>)stepResult.Checkpoint.TrainableParams.Fields[weightField]).AccessMemory()[0];
+        Assert.True(float.IsFinite(stepResult.Loss!.Value));
+        var steppedWeight = ((TensorData<float32>)stepResult.TrainableParams.Fields[weightField]).AccessMemory()[0];
         Assert.NotEqual(initialWeight, steppedWeight);
     }
 

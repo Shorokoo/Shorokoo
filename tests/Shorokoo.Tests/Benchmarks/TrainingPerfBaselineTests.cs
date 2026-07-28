@@ -163,11 +163,11 @@ public class TrainingPerfBaselineTests
 
         var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < ThroughputWarmupSteps; i++)
-            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled).Checkpoint;
+            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled);
 
         var sw = Stopwatch.StartNew();
         for (int i = 0; i < ThroughputMeasuredSteps; i++)
-            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled).Checkpoint;
+            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled);
         sw.Stop();
 
         return ThroughputMeasuredSteps / sw.Elapsed.TotalSeconds;

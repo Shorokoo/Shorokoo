@@ -135,6 +135,14 @@ namespace Shorokoo.Core.Utils
         [JsonPropertyName("batchIndex")]
         public long BatchIndex { get; set; }
 
+        /// <summary>The loss of the training step that produced this checkpoint — a host-owned
+        /// run-progress scalar, grouped with the counters. Add-only and nullable: absent (⇒ read back
+        /// as <c>null</c>) on an initial/bare checkpoint no step produced, or when the
+        /// <see cref="Shorokoo.CheckpointComponents.Counters"/> component is filtered out on save.
+        /// The serializer omits it when null (never a sentinel 0.0).</summary>
+        [JsonPropertyName("loss")]
+        public float? Loss { get; set; }
+
         /// <summary>Training-state kind name → the manifest data-registry key that stores it
         /// (e.g. <c>"trainableParams" → "trainable"</c>). A kind with an empty struct is absent.</summary>
         [JsonPropertyName("kinds")]

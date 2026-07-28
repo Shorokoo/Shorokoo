@@ -122,14 +122,15 @@ public TrainingCheckpoint CreateInitialCheckpoint(TensorDataStruct hyperparamete
 
 // Schedule-driven: scheduled hyperparameters are computed in-graph from the checkpoint's
 // step (fed as the step counter), then the step advances. Requires no schedule-less runtime hypers.
-public TrainingStepResult TrainStep(
+// Returns the post-step checkpoint directly, with its .Loss set to this step's loss.
+public TrainingCheckpoint TrainStep(
     TrainingCheckpoint checkpoint,
     TensorDataStruct trainingInput,
     TensorDataStruct trainingOutput,
     CompiledGraph compiled);
 
 // Explicit override: supply the schedule-less runtime hyperparameter values for this step.
-public TrainingStepResult TrainStep(
+public TrainingCheckpoint TrainStep(
     TrainingCheckpoint checkpoint,
     TensorDataStruct hyperparams,              // from MakeHyperparameters(...)
     TensorDataStruct trainingInput,
@@ -148,11 +149,10 @@ public TrainingResult Fit(  // alias: Train(...)
 ```
 
 Result types:
-- `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long`; the training loop advances them — `TrainStep` carries them through unchanged; default `0`). All three counters are `int64` end to end. It also carries `.Rig` (the `TrainingRig?` that produced it — set on every rig-produced checkpoint, so `checkpoint.ToInferenceModel()` needs no re-supplied graph) and `.Loss` (`float?`; the loss of the `TrainStep` that produced it, `null` on an initial or bare checkpoint). Both are preserved through the counter derivations (`WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex`).
-- `TrainingStepResult` → `.Checkpoint`, `.Loss` (the same value as `.Checkpoint.Loss`).
-- `TrainingResult` → `.FinalCheckpoint`, `.EpochLosses`.
+- `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long`; the training loop advances them — `TrainStep` carries them through unchanged; default `0`). All three counters are `int64` end to end. It also carries `.Rig` (the `TrainingRig?` that produced it — set on every rig-produced checkpoint, so `checkpoint.ToInferenceModel()` needs no re-supplied graph) and `.Loss` (`float?`; the loss of the `TrainStep` that produced it, `null` on an initial or bare checkpoint). Both are preserved through the counter derivations (`WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex`). `TrainStep` returns this checkpoint directly — read the step's loss off `.Loss`. `.Loss` persists with the `Counters` component (dropping `Counters`, or an initial checkpoint, reloads with `.Loss == null` — never a sentinel `0`).
+- `TrainingResult` → `.FinalCheckpoint`, `.EpochLosses` (the per-epoch mean losses).
 
-`TrainingRig`, `TrainingCheckpoint`, `TrainingStepResult`, and `TrainingResult` are in
+`TrainingRig`, `TrainingCheckpoint`, and `TrainingResult` are in
 namespace `Shorokoo` (covered by `using Shorokoo;`).
 
 ### Seeding the run

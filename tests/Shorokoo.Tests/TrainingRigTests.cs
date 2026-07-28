@@ -470,16 +470,16 @@ public class TrainingRigCoverageTests
         Assert.NotNull(trainResult.FinalCheckpoint);
 
         // Drive TrainStep directly so its output-repacking branches all execute
-        // outside the Train wrapper, and touch the TrainingStepResult getters.
+        // outside the Train wrapper; TrainStep now returns the post-step checkpoint directly.
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var stepResult = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
-        Assert.NotNull(stepResult.Checkpoint);
-        Assert.NotNull(stepResult.Checkpoint.TrainableParams);
+        Assert.NotNull(stepResult);
+        Assert.NotNull(stepResult.TrainableParams);
         // ModelState / OptimizerState are empty for this combo, but their getters
         // still need to be exercised for full coverage.
-        Assert.NotNull(stepResult.Checkpoint.ModelState);
-        Assert.NotNull(stepResult.Checkpoint.OptimizerState);
-        Assert.True(float.IsFinite(stepResult.Loss));
+        Assert.NotNull(stepResult.ModelState);
+        Assert.NotNull(stepResult.OptimizerState);
+        Assert.True(float.IsFinite(stepResult.Loss!.Value));
 
         // FastTrainingGraphs is a plain container (internal, reachable via
         // InternalsVisibleTo); its constructor and three getters are otherwise
@@ -534,7 +534,7 @@ public class TrainingRigCoverageTests
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var step = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
-        Assert.All(FlattenStruct(step.Checkpoint.OptimizerState), v => Assert.Equal(2f, v));
+        Assert.All(FlattenStruct(step.OptimizerState), v => Assert.Equal(2f, v));
 
         // Ownership misuse is rejected in both directions, with guidance in the message.
         var optEx = Assert.Throws<InvalidOperationException>(() => TrainingRig.FromScratch(
@@ -587,7 +587,7 @@ public class TrainingRigCoverageTests
         var compiledA = ctx.Compile(rig.TrainingStepPureGraph);
         var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < 2; i++)
-            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch, compiledA).Checkpoint;
+            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch, compiledA);
 
         // After two steps the scalar step state holds 2 (and is genuinely rank-0 in the data).
         var stepData = (TensorData)ckpt.OptimizerState.Fields[stepField.Name];
@@ -660,7 +660,7 @@ public class TrainingRigCoverageTests
             var compiledA = ctx.Compile(rigA.TrainingStepPureGraph);
             var ckpt = rigA.CreateInitialCheckpoint();
             for (int i = 0; i < 2; i++)
-                ckpt = rigA.TrainStep(ckpt, inputBatch, targetBatch, compiledA).Checkpoint;
+                ckpt = rigA.TrainStep(ckpt, inputBatch, targetBatch, compiledA);
             Assert.Equal(2, ckpt.Step);
             ckpt.Save(path);
             Assert.True(File.Exists(path));
@@ -678,8 +678,8 @@ public class TrainingRigCoverageTests
 
             // Resuming from the loaded checkpoint advances the step and yields a finite loss.
             var resumed = rigB.TrainStep(loaded, inputBatch, targetBatch, compiledB);
-            Assert.Equal(3, resumed.Checkpoint.Step);
-            Assert.True(float.IsFinite(resumed.Loss));
+            Assert.Equal(3, resumed.Step);
+            Assert.True(float.IsFinite(resumed.Loss!.Value));
 
             // Non-empty model-state path: a BatchNorm model's default checkpoint round-trips its
             // running-stat state fields (no TrainStep needed — exercises the model_state section).
@@ -843,7 +843,7 @@ public class TrainingRigCoverageTests
             Assert.Null(result.Srk);
 
             var info = result.TrainingCheckpoint!;
-            Assert.Equal(1, info.FormatVersion);   // v1 marker: int64 [version, step, epoch, batchIndex]
+            Assert.Equal(2, info.FormatVersion);   // v2 marker: int64 [version, step, epoch, batchIndex] + presence-gated loss
             Assert.Equal(5, info.Step);
             Assert.Equal(0, info.Epoch);           // not set on this checkpoint → default 0
             Assert.Equal(0, info.BatchIndex);
@@ -950,14 +950,14 @@ public class TrainingRigCoverageTests
         // the explicit-override TrainStep, once by the single-value helper and once by name.
         var stepA = rig.TrainStep(initial, rig.MakeHyperparameters(0.1f), inputBatch, targetBatch, compiled);
         var stepB = rig.TrainStep(initial, rig.MakeHyperparameters(("learningRate", 0.3f)), inputBatch, targetBatch, compiled);
-        Assert.Equal(1, stepA.Checkpoint.Step);   // the global step counter advanced
-        float wA = ((TensorData<float32>)stepA.Checkpoint.TrainableParams.Fields[wName]).AccessMemory()[0];
-        float wB = ((TensorData<float32>)stepB.Checkpoint.TrainableParams.Fields[wName]).AccessMemory()[0];
+        Assert.Equal(1, stepA.Step);   // the global step counter advanced
+        float wA = ((TensorData<float32>)stepA.TrainableParams.Fields[wName]).AccessMemory()[0];
+        float wB = ((TensorData<float32>)stepB.TrainableParams.Fields[wName]).AccessMemory()[0];
 
         float deltaA = w0 - wA;   // = 0.1 · grad
         float deltaB = w0 - wB;   // = 0.3 · grad
         Assert.True(MathF.Abs(deltaA) > 1e-4f, "LR must actually move the weight (grad·lr ≠ 0).");
-        Assert.True(MathF.Abs(stepA.Loss - stepB.Loss) < 1e-4f);       // identical starting state
+        Assert.True(MathF.Abs(stepA.Loss!.Value - stepB.Loss!.Value) < 1e-4f);       // identical starting state
         Assert.True(MathF.Abs(deltaB - 3f * deltaA) < 1e-4f,           // 3× LR ⇒ 3× step
             $"expected ΔB ≈ 3·ΔA; got ΔA={deltaA}, ΔB={deltaB}");
 
@@ -979,7 +979,7 @@ public class TrainingRigCoverageTests
         var sc = schedRig.CreateInitialCheckpoint();
         string swName = schedRig.TrainableParamStructDef.Fields[0].Name;
         var autoStep = schedRig.TrainStep(sc, inputBatch, targetBatch, schedCompiled);   // no override; step 0 ⇒ LR 0.2
-        float swAuto = ((TensorData<float32>)autoStep.Checkpoint.TrainableParams.Fields[swName]).AccessMemory()[0];
+        float swAuto = ((TensorData<float32>)autoStep.TrainableParams.Fields[swName]).AccessMemory()[0];
 
         var refRig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
@@ -987,7 +987,7 @@ public class TrainingRigCoverageTests
         var refCompiled = ctx.Compile(refRig.TrainingStepPureGraph);
         var refStep = refRig.TrainStep(refRig.CreateInitialCheckpoint(), refRig.MakeHyperparameters(0.2f),
             inputBatch, targetBatch, refCompiled);
-        float swRef = ((TensorData<float32>)refStep.Checkpoint.TrainableParams.Fields[swName]).AccessMemory()[0];
+        float swRef = ((TensorData<float32>)refStep.TrainableParams.Fields[swName]).AccessMemory()[0];
         Assert.True(MathF.Abs(swAuto - swRef) < 1e-5f, "in-graph scheduled step must equal explicit LR = schedule(step).");
 
         // Scheduled LR also works for a stateful optimizer (AdamW: 5 hyperparams, m/v state), built with
@@ -1000,8 +1000,8 @@ public class TrainingRigCoverageTests
         Assert.Empty(adamRig.HyperparameterStructDef.Fields);
         var adamCompiled = ctx.Compile(adamRig.TrainingStepPureGraph);
         var adamStep = adamRig.TrainStep(adamRig.CreateInitialCheckpoint(), inputBatch, targetBatch, adamCompiled);
-        Assert.True(float.IsFinite(adamStep.Loss));
-        Assert.NotEmpty(adamStep.Checkpoint.OptimizerState.Fields);    // m/v state still flows
+        Assert.True(float.IsFinite(adamStep.Loss!.Value));
+        Assert.NotEmpty(adamStep.OptimizerState.Fields);    // m/v state still flows
     }
 
     /// <summary>
@@ -1116,8 +1116,8 @@ public class TrainingRigCoverageTests
         var momStep = momRig.TrainStep(momRig.CreateInitialCheckpoint(),
             momRig.MakeHyperparameters(("momentumCoeff", 0.9f), ("learningRate", 0.1f)),  // order-independent
             inputBatch, targetBatch, momCompiled);
-        Assert.True(float.IsFinite(momStep.Loss));
-        Assert.NotEmpty(momStep.Checkpoint.OptimizerState.Fields);     // velocity state flows
+        Assert.True(float.IsFinite(momStep.Loss!.Value));
+        Assert.NotEmpty(momStep.OptimizerState.Fields);     // velocity state flows
         Assert.Throws<ArgumentException>(() => momRig.MakeHyperparameters(("learningRate", 0.1f))); // missing momentumCoeff
     }
 
@@ -1186,9 +1186,9 @@ public class TrainingRigCoverageTests
 
         for (int s = 0; s < 6; s++)
         {
-            schedCkpt = schedRig.TrainStep(schedCkpt, inputBatch, targetBatch, schedCompiled).Checkpoint; // in-graph LR at step s
+            schedCkpt = schedRig.TrainStep(schedCkpt, inputBatch, targetBatch, schedCompiled); // in-graph LR at step s
             refCkpt = refRig.TrainStep(refCkpt, refRig.MakeHyperparameters(schedule.At(s)),                   // host LR at step s
-                inputBatch, targetBatch, refCompiled).Checkpoint;
+                inputBatch, targetBatch, refCompiled);
             float wSched = ((TensorData<float32>)schedCkpt.TrainableParams.Fields[wName]).AccessMemory()[0];
             float wRef = ((TensorData<float32>)refCkpt.TrainableParams.Fields[wName]).AccessMemory()[0];
             Assert.True(MathF.Abs(wSched - wRef) < 1e-5f,
@@ -1230,9 +1230,9 @@ public class TrainingRigCoverageTests
 
         for (int s = 0; s < 4; s++)
         {
-            modCkpt = modRig.TrainStep(modCkpt, inputBatch, targetBatch, modCompiled).Checkpoint;
+            modCkpt = modRig.TrainStep(modCkpt, inputBatch, targetBatch, modCompiled);
             refCkpt = refRig.TrainStep(refCkpt, refRig.MakeHyperparameters(Lr(s)),
-                inputBatch, targetBatch, refCompiled).Checkpoint;
+                inputBatch, targetBatch, refCompiled);
             float wMod = ((TensorData<float32>)modCkpt.TrainableParams.Fields[wName]).AccessMemory()[0];
             float wRef = ((TensorData<float32>)refCkpt.TrainableParams.Fields[wName]).AccessMemory()[0];
             Assert.True(MathF.Abs(wMod - wRef) < 1e-5f,
@@ -1394,7 +1394,7 @@ public class TrainingRigCoverageTests
             Assert.Equal(bigStep, legacy.Step);
             Assert.Equal(bigEpoch, legacy.Epoch);
             Assert.Equal(bigBatch, legacy.BatchIndex);
-            Assert.Equal(1, Persistence.Inspect(legacyPath).TrainingCheckpoint!.FormatVersion);
+            Assert.Equal(2, Persistence.Inspect(legacyPath).TrainingCheckpoint!.FormatVersion);
 
             // Native .skpt manifest.
             Persistence.SaveTrainingCheckpointToSkpt(
@@ -1440,11 +1440,11 @@ public class TrainingRigCoverageTests
         {
             var seed = modRig.CreateInitialCheckpoint();
             var atCkpt = new TrainingCheckpoint(seed.TrainableParams, seed.ModelState, seed.OptimizerState, step: s, epoch: e);
-            var modStep = modRig.TrainStep(atCkpt, inputBatch, targetBatch, modCompiled).Checkpoint;
+            var modStep = modRig.TrainStep(atCkpt, inputBatch, targetBatch, modCompiled);
 
             var refSeed = refRig.CreateInitialCheckpoint();
             var refAt = new TrainingCheckpoint(refSeed.TrainableParams, refSeed.ModelState, refSeed.OptimizerState, step: s, epoch: e);
-            var refStep = refRig.TrainStep(refAt, refRig.MakeHyperparameters(Lr(s, e)), inputBatch, targetBatch, refCompiled).Checkpoint;
+            var refStep = refRig.TrainStep(refAt, refRig.MakeHyperparameters(Lr(s, e)), inputBatch, targetBatch, refCompiled);
 
             float wMod = ((TensorData<float32>)modStep.TrainableParams.Fields[wName]).AccessMemory()[0];
             float wRef = ((TensorData<float32>)refStep.TrainableParams.Fields[wName]).AccessMemory()[0];
@@ -1757,7 +1757,7 @@ public class TrainingRigCoverageTests
         var compiled = new ComputeContext().Compile(rig.TrainingStepPureGraph);
         var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < steps; i++)
-            ckpt = rig.TrainStep(ckpt, inBatch, outBatch, compiled).Checkpoint;
+            ckpt = rig.TrainStep(ckpt, inBatch, outBatch, compiled);
         return (rig, ckpt, inBatch, outBatch, compiled);
     }
 
@@ -1827,14 +1827,14 @@ public class TrainingRigCoverageTests
             // Resuming from the loaded checkpoint reproduces the pre-save trajectory exactly.
             var compiledB = new ComputeContext().Compile(rigB.TrainingStepPureGraph);
             var resumed = rigB.TrainStep(loaded, inBatch, outBatch, compiledB);
-            Assert.Equal(3, resumed.Checkpoint.Step);
-            Assert.Equal(reference.Loss, resumed.Loss);
+            Assert.Equal(3, resumed.Step);
+            Assert.Equal(reference.Loss!.Value, resumed.Loss!.Value);
             Assert.Equal(
-                FlattenStruct(reference.Checkpoint.TrainableParams),
-                FlattenStruct(resumed.Checkpoint.TrainableParams));
+                FlattenStruct(reference.TrainableParams),
+                FlattenStruct(resumed.TrainableParams));
             Assert.Equal(
-                FlattenStruct(reference.Checkpoint.OptimizerState),
-                FlattenStruct(resumed.Checkpoint.OptimizerState));
+                FlattenStruct(reference.OptimizerState),
+                FlattenStruct(resumed.OptimizerState));
 
             // The .skpt is self-describing for inference: Persistence.Load rebinds a concrete model
             // that executes identically to one built straight from the checkpoint's trained weights.
@@ -2094,7 +2094,7 @@ public class TrainingRigCoverageTests
 
             var legacyInspect = Persistence.Inspect(legacyPath);
             Assert.Empty(legacyInspect.Observations);
-            Assert.Equal(1, legacyInspect.TrainingCheckpoint!.FormatVersion);
+            Assert.Equal(2, legacyInspect.TrainingCheckpoint!.FormatVersion);
             Assert.Equal(7, legacyInspect.TrainingCheckpoint.Epoch);
             Assert.Equal(340, legacyInspect.TrainingCheckpoint.BatchIndex);
             var legacyText = legacyInspect.ToString();
@@ -2121,7 +2121,7 @@ public class TrainingRigCoverageTests
             trained.TrainableParams, trained.ModelState, trained.OptimizerState,
             step: trained.Step, epoch: 3, batchIndex: 12);
 
-        var next = rig.TrainStep(ckpt, inBatch, outBatch, compiled).Checkpoint;
+        var next = rig.TrainStep(ckpt, inBatch, outBatch, compiled);
         Assert.Equal(ckpt.Step + 1, next.Step);   // step advances (one graph execution)
         Assert.Equal(3, next.Epoch);              // host-owned: unchanged by TrainStep
         Assert.Equal(12, next.BatchIndex);
@@ -2236,7 +2236,7 @@ public class TrainingRigCoverageTests
         {
             var compiled = ctx.Compile(derived.TrainingStepPureGraph);
             var stepped = derived.TrainStep(derived.CreateInitialCheckpoint(), input, target, compiled);
-            Assert.True(float.IsFinite(stepped.Loss));
+            Assert.True(float.IsFinite(stepped.Loss!.Value));
         }
     }
 
@@ -2259,7 +2259,7 @@ public class TrainingRigCoverageTests
 
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var stepped = rig.TrainStep(rig.CreateInitialCheckpoint(), input, target, compiled).Checkpoint;
+        var stepped = rig.TrainStep(rig.CreateInitialCheckpoint(), input, target, compiled);
         string wName = rig.TrainableParamStructDef.Fields[0].Name;
         float wUpdated = ((TensorData<float32>)stepped.TrainableParams.Fields[wName]).AccessMemory()[0];
         Assert.NotEqual(1.0f, wUpdated);   // the step genuinely moved the weight off its init
@@ -2352,12 +2352,12 @@ public class TrainingRigCoverageTests
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var stepped = rig.TrainStep(initial, input, target, compiled);
-        Assert.Same(rig, stepped.Checkpoint.Rig);
+        Assert.Same(rig, stepped.Rig);
 
         // Counter derivations preserve both Rig and Loss.
-        var moved = stepped.Checkpoint.WithStep(42);
+        var moved = stepped.WithStep(42);
         Assert.Same(rig, moved.Rig);
-        Assert.Equal(stepped.Checkpoint.Loss, moved.Loss);
+        Assert.Equal(stepped.Loss, moved.Loss);
 
         // A bare checkpoint carries no rig.
         var bare = new TrainingCheckpoint(initial.TrainableParams, initial.ModelState, initial.OptimizerState);
@@ -2367,7 +2367,7 @@ public class TrainingRigCoverageTests
     /// <summary>
     /// <see cref="TrainingCheckpoint.Loss"/> is <c>null</c> on an initial checkpoint and set by
     /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>
-    /// to that step's loss (the same value as <see cref="TrainingStepResult.Loss"/>), carried through
+    /// (which now returns the post-step checkpoint directly) to that step's loss, carried through
     /// the counter derivations.
     /// </summary>
     [Fact]
@@ -2384,9 +2384,9 @@ public class TrainingRigCoverageTests
         Assert.Null(initial.Loss);
 
         var result = rig.TrainStep(initial, input, target, compiled);
-        Assert.NotNull(result.Checkpoint.Loss);
-        Assert.Equal(result.Loss, result.Checkpoint.Loss!.Value);
-        Assert.Equal(result.Loss, result.Checkpoint.WithEpoch(3).Loss!.Value);   // carried through
+        Assert.NotNull(result.Loss);
+        Assert.True(float.IsFinite(result.Loss!.Value));
+        Assert.Equal(result.Loss, result.WithEpoch(3).Loss);   // carried through the counter derivation
     }
 
     /// <summary>
@@ -2508,6 +2508,101 @@ public class TrainingRigCoverageTests
             Assert.Throws<NotSupportedException>(() => rigB.LoadCheckpoint(path, CheckpointComponents.All));
         }
         finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    /// <summary>
+    /// The component filter is honored on a partial load from a native <c>.skpt</c> exactly as it is
+    /// for the flat path (Fix #3): a full <c>.skpt</c> is saved, then reloaded with only
+    /// <see cref="CheckpointComponents.InferenceState"/> — the trainable params restore from the file,
+    /// but the dropped optimizer state fills from the rig's initial values (not the trained ones), the
+    /// counters read as 0, and the loss reads back <c>null</c> (it rides with the dropped Counters).
+    /// Requesting the (unimplemented) TrainingRig component throws a #115 <see cref="NotSupportedException"/>.
+    /// </summary>
+    [Fact]
+    public void TestSkptSaveLoadComponentsSubsetCoverage()
+    {
+        var (rigA, trained, _, _, _) = BuildTrainedAdamRig(steps: 3);
+        Assert.NotEmpty(trained.OptimizerState.Fields);       // AdamW carries m/v/step
+        Assert.NotNull(trained.Loss);                         // a step produced the loss
+        var trainedOpt = FlattenStruct(trained.OptimizerState);
+        var initialOpt = FlattenStruct(rigA.CreateInitialCheckpoint().OptimizerState);
+        Assert.NotEqual(trainedOpt, initialOpt);              // training moved the optimizer state
+
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_skpt_subset_{Guid.NewGuid():N}.skpt");
+        try
+        {
+            // The .skpt save writes every kind; the FILTER is exercised on load.
+            Persistence.SaveTrainingCheckpointToSkpt(
+                trained, ScalarMultiplyModel.ComputationGraph, TensorData(ScalarInputShape, new float[4]), path);
+
+            var rigB = BuildTrainedAdamRig(steps: 0).Rig;
+            var loaded = rigB.LoadCheckpoint(path, CheckpointComponents.InferenceState);
+            Assert.Same(rigB, loaded.Rig);                    // load attaches the rig
+            Assert.Equal(FlattenStruct(trained.TrainableParams), FlattenStruct(loaded.TrainableParams));
+            Assert.Equal(0, loaded.Step);                     // counters dropped ⇒ 0
+            Assert.Null(loaded.Loss);                         // loss rides with the dropped Counters ⇒ null
+            // Optimizer state was filtered out ⇒ filled from the rig's initial values, not the trained ones.
+            Assert.Equal(initialOpt, FlattenStruct(loaded.OptimizerState));
+
+            // Symmetric with the flat path: requesting the TrainingRig component throws a #115 error.
+            var ex = Assert.Throws<NotSupportedException>(
+                () => rigB.LoadCheckpoint(path, CheckpointComponents.TrainingRig));
+            Assert.Contains("#115", ex.Message);
+            Assert.Throws<NotSupportedException>(() => rigB.LoadCheckpoint(path, CheckpointComponents.All));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    /// <summary>
+    /// <see cref="TrainingCheckpoint.Loss"/> now persists (Fix #4), grouped with the
+    /// <see cref="CheckpointComponents.Counters"/> component, in BOTH the flat safetensors format and
+    /// the <c>.skpt</c> manifest: a checkpoint with a known non-null loss round-trips its loss; an
+    /// initial checkpoint (null loss) reads back <c>null</c> (never a sentinel 0.0); and a flat save
+    /// that filters out Counters drops the loss (reads back <c>null</c>).
+    /// </summary>
+    [Fact]
+    public void TestCheckpointLossPersistsCoverage()
+    {
+        var (rigA, trained, _, _, _) = BuildTrainedAdamRig(steps: 3);
+        Assert.NotNull(trained.Loss);
+        float loss = trained.Loss!.Value;
+        var initial = rigA.CreateInitialCheckpoint();
+        Assert.Null(initial.Loss);
+
+        var flatPath = Path.Combine(Path.GetTempPath(), $"shrk_loss_flat_{Guid.NewGuid():N}.safetensors");
+        var flatInitPath = Path.Combine(Path.GetTempPath(), $"shrk_loss_flatinit_{Guid.NewGuid():N}.safetensors");
+        var flatNoCountersPath = Path.Combine(Path.GetTempPath(), $"shrk_loss_flatnc_{Guid.NewGuid():N}.safetensors");
+        var skptPath = Path.Combine(Path.GetTempPath(), $"shrk_loss_skpt_{Guid.NewGuid():N}.skpt");
+        var skptInitPath = Path.Combine(Path.GetTempPath(), $"shrk_loss_skptinit_{Guid.NewGuid():N}.skpt");
+        try
+        {
+            // ---- Flat format: non-null loss round-trips; null loss reads back null. ----
+            trained.Save(flatPath);
+            Assert.Equal(loss, BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(flatPath).Loss!.Value);
+
+            initial.Save(flatInitPath);
+            Assert.Null(BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(flatInitPath).Loss);
+
+            // Filtering out Counters drops the loss (it is grouped with Counters).
+            trained.Save(flatNoCountersPath,
+                CheckpointComponents.InferenceState | CheckpointComponents.OptimizerState);
+            Assert.Null(BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(flatNoCountersPath).Loss);
+
+            // ---- .skpt manifest: non-null loss round-trips; null loss reads back null. ----
+            Persistence.SaveTrainingCheckpointToSkpt(
+                trained, ScalarMultiplyModel.ComputationGraph, TensorData(ScalarInputShape, new float[4]), skptPath);
+            Assert.Equal(loss, BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(skptPath).Loss!.Value);
+
+            Persistence.SaveTrainingCheckpointToSkpt(
+                initial, ScalarMultiplyModel.ComputationGraph, TensorData(ScalarInputShape, new float[4]), skptInitPath);
+            Assert.Null(BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(skptInitPath).Loss);
+        }
+        finally
+        {
+            string[] paths = [flatPath, flatInitPath, flatNoCountersPath, skptPath, skptInitPath];
+            foreach (var p in paths)
+                if (File.Exists(p)) File.Delete(p);
+        }
     }
 
     /// <summary>

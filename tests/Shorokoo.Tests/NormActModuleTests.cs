@@ -198,12 +198,12 @@ public class NormActTrainingCoverageTests
             MakeBatch("targets", "Target", targetData),
             compiled);
 
-        Assert.True(float.IsFinite(step.Loss), $"training-step loss must be finite; got {step.Loss}");
+        Assert.True(float.IsFinite(step.Loss!.Value), $"training-step loss must be finite; got {step.Loss!.Value}");
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
         bool anyMoved = rig.TrainableParamStructDef.Fields.Any(field =>
         {
             var before = Floats(initial.TrainableParams.Fields[field.Name]);
-            var after = Floats(step.Checkpoint.TrainableParams.Fields[field.Name]);
+            var after = Floats(step.TrainableParams.Fields[field.Name]);
             return before.Zip(after).Any(p => MathF.Abs(p.First - p.Second) > 1e-9f);
         });
         Assert.True(anyMoved, "no trainable param moved — no gradient flowed through the layer");
@@ -341,9 +341,9 @@ public class NormActTrainingCoverageTests
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", targetData),
             compiled);
-        Assert.True(float.IsFinite(step.Loss), $"training-step loss must be finite; got {step.Loss}");
+        Assert.True(float.IsFinite(step.Loss!.Value), $"training-step loss must be finite; got {step.Loss!.Value}");
 
-        float[] slope1 = Floats(step.Checkpoint.TrainableParams.Fields[slopeName]);
+        float[] slope1 = Floats(step.TrainableParams.Fields[slopeName]);
         Assert.Equal((int)c, slope1.Length);
 
         // The post-step [C] slopes must NOT all be equal — at least two channels differ

@@ -163,7 +163,9 @@ namespace Shorokoo
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
 
             return IsSkptFile(filePath)
-                ? LoadTrainingCheckpointFromSkpt(filePath, trainableParamDef, modelStateDef, optimizerStateDef)
+                ? LoadTrainingCheckpointFromSkpt(
+                    filePath, trainableParamDef, modelStateDef, optimizerStateDef,
+                    components: null, rigForDefaults: null)
                 : TrainingCheckpoint.LoadFlat(
                     filePath, trainableParamDef, modelStateDef, optimizerStateDef,
                     components: null, rigForDefaults: null);

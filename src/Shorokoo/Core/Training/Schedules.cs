@@ -21,7 +21,7 @@ namespace Shorokoo.Core.Training
     /// var compiled = ctx.Compile(rig.TrainingStepPureGraph); // compile once
     /// var ckpt = rig.CreateInitialCheckpoint();
     /// for (int step = 0; step &lt; totalSteps; step++)
-    ///     ckpt = rig.TrainStep(ckpt, inS, outS, compiled).Checkpoint; // schedule applied automatically
+    ///     ckpt = rig.TrainStep(ckpt, inS, outS, compiled); // schedule applied automatically
     /// </code>
     /// </summary>
     public sealed class Schedule

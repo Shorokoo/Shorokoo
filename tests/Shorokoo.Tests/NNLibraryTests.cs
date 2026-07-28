@@ -1259,10 +1259,10 @@ public class NNLibraryTrainingCoverageTests
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var step = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
-        float[] a1 = Floats(step.Checkpoint.TrainableParams.Fields[aName]);
+        float[] a1 = Floats(step.TrainableParams.Fields[aName]);
 
-        Assert.True(float.IsFinite(step.Loss), $"TrainStep loss must be finite; got {step.Loss}");
-        Assert.NotEmpty(step.Checkpoint.OptimizerState.Fields);
+        Assert.True(float.IsFinite(step.Loss!.Value), $"TrainStep loss must be finite; got {step.Loss!.Value}");
+        Assert.NotEmpty(step.OptimizerState.Fields);
         bool moved = false;
         for (int i = 0; i < a0.Length; i++)
             if (MathF.Abs(a1[i] - a0[i]) > 1e-7f) { moved = true; break; }
@@ -1307,9 +1307,9 @@ public class NNLibraryTrainingCoverageTests
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var step = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
-        float[] w1 = Floats(step.Checkpoint.TrainableParams.Fields[wName]);
+        float[] w1 = Floats(step.TrainableParams.Fields[wName]);
 
-        Assert.True(float.IsFinite(step.Loss), $"Embedding TrainStep loss must be finite; got {step.Loss}");
+        Assert.True(float.IsFinite(step.Loss!.Value), $"Embedding TrainStep loss must be finite; got {step.Loss!.Value}");
         bool moved = false;
         for (int i = 0; i < w0.Length; i++)
             if (MathF.Abs(w1[i] - w0[i]) > 1e-7f) { moved = true; break; }
@@ -1354,9 +1354,9 @@ public class NNLibraryTrainingCoverageTests
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var step = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
-        float[] w1 = Floats(step.Checkpoint.TrainableParams.Fields[wName]);
+        float[] w1 = Floats(step.TrainableParams.Fields[wName]);
 
-        Assert.True(float.IsFinite(step.Loss), $"EmbeddingBag TrainStep loss must be finite; got {step.Loss}");
+        Assert.True(float.IsFinite(step.Loss!.Value), $"EmbeddingBag TrainStep loss must be finite; got {step.Loss!.Value}");
         bool moved = false;
         for (int i = 0; i < w0.Length; i++)
             if (MathF.Abs(w1[i] - w0[i]) > 1e-7f) { moved = true; break; }
@@ -1415,10 +1415,10 @@ public class NNLibraryTrainingCoverageTests
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var step = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
-        float[] w1 = Floats(step.Checkpoint.TrainableParams.Fields[wName]);
+        float[] w1 = Floats(step.TrainableParams.Fields[wName]);
 
-        Assert.True(float.IsFinite(step.Loss), $"Triplet TrainStep loss must be finite; got {step.Loss}");
-        Assert.NotEmpty(step.Checkpoint.OptimizerState.Fields);
+        Assert.True(float.IsFinite(step.Loss!.Value), $"Triplet TrainStep loss must be finite; got {step.Loss!.Value}");
+        Assert.NotEmpty(step.OptimizerState.Fields);
         bool moved = false;
         for (int i = 0; i < w0.Length; i++)
             if (MathF.Abs(w1[i] - w0[i]) > 1e-7f) { moved = true; break; }
@@ -1475,10 +1475,10 @@ public class NNLibraryTrainingCoverageTests
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var step = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
-        float[] w1 = Floats(step.Checkpoint.TrainableParams.Fields[wName]);
+        float[] w1 = Floats(step.TrainableParams.Fields[wName]);
 
-        Assert.True(float.IsFinite(step.Loss), $"Cosine TrainStep loss must be finite; got {step.Loss}");
-        Assert.NotEmpty(step.Checkpoint.OptimizerState.Fields);
+        Assert.True(float.IsFinite(step.Loss!.Value), $"Cosine TrainStep loss must be finite; got {step.Loss!.Value}");
+        Assert.NotEmpty(step.OptimizerState.Fields);
         bool moved = false;
         for (int i = 0; i < w0.Length; i++)
             if (MathF.Abs(w1[i] - w0[i]) > 1e-7f) { moved = true; break; }
@@ -1516,10 +1516,10 @@ public class NNLibraryTrainingCoverageTests
             MakeBatch("input", "ModelInput", TensorData([4L], input)),
             MakeBatch("targets", "Target", TensorData([4L], target)),
             compiled);
-        float w1 = Floats(step.Checkpoint.TrainableParams.Fields[wName])[0];
+        float w1 = Floats(step.TrainableParams.Fields[wName])[0];
 
-        Assert.True(float.IsFinite(step.Loss), $"TrainStep loss must be finite; got {step.Loss}");
-        Assert.NotEmpty(step.Checkpoint.OptimizerState.Fields); // state threaded between steps
+        Assert.True(float.IsFinite(step.Loss!.Value), $"TrainStep loss must be finite; got {step.Loss!.Value}");
+        Assert.NotEmpty(step.OptimizerState.Fields); // state threaded between steps
         Assert.True(MathF.Abs(w1 - w0) > 1e-7f, $"param must move; w0={w0}, w1={w1}");
     }
 
@@ -1553,10 +1553,10 @@ public class NNLibraryTrainingCoverageTests
             MakeBatch("input", "ModelInput", TensorData(inShape, input)),
             MakeBatch("targets", "Target", TensorData(inShape, target)),
             compiled);
-        float[] w1 = Floats(step.Checkpoint.TrainableParams.Fields[wName]);
+        float[] w1 = Floats(step.TrainableParams.Fields[wName]);
 
-        Assert.True(float.IsFinite(step.Loss), $"TrainStep loss must be finite; got {step.Loss}");
-        Assert.NotEmpty(step.Checkpoint.OptimizerState.Fields);
+        Assert.True(float.IsFinite(step.Loss!.Value), $"TrainStep loss must be finite; got {step.Loss!.Value}");
+        Assert.NotEmpty(step.OptimizerState.Fields);
         Assert.True(w0.Length >= 2, $"expected a rank-≥2 param with ≥2 elements; got {w0.Length}");
         bool moved = false;
         for (int i = 0; i < w0.Length; i++)
@@ -1622,12 +1622,12 @@ public class NNLibraryTrainingCoverageTests
         string wName = rig.TrainableParamStructDef.Fields[0].Name;
         float w0 = Floats(initial.TrainableParams.Fields[wName])[0];
         var step = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
-        float w1 = Floats(step.Checkpoint.TrainableParams.Fields[wName])[0];
+        float w1 = Floats(step.TrainableParams.Fields[wName])[0];
 
         // Gradient is large (15), so |Δw| must be ≈ lr to within eps effects.
         Assert.True(MathF.Abs((w0 - w1) - lr) < 5e-5f,
             $"bias-corrected first Adam step must be ≈ lr={lr}; got Δw={w0 - w1}");
-        Assert.NotEmpty(step.Checkpoint.OptimizerState.Fields); // m/v/step state flows
+        Assert.NotEmpty(step.OptimizerState.Fields); // m/v/step state flows
     }
 
     /// <summary>
@@ -1667,8 +1667,8 @@ public class NNLibraryTrainingCoverageTests
         for (int i = 0; i < 150; i++)
         {
             var step = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled);
-            losses.Add(step.Loss);
-            ckpt = step.Checkpoint;
+            losses.Add(step.Loss!.Value);
+            ckpt = step;
         }
 
         Assert.All(losses, l => Assert.True(float.IsFinite(l)));
@@ -1718,8 +1718,8 @@ public class NNLibraryTrainingCoverageTests
         for (int i = 0; i < 15; i++)
         {
             var step = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled);
-            losses.Add(step.Loss);
-            ckpt = step.Checkpoint;
+            losses.Add(step.Loss!.Value);
+            ckpt = step;
         }
 
         Assert.All(losses, l => Assert.True(float.IsFinite(l)));
@@ -1768,14 +1768,14 @@ public class NNLibraryTrainingCoverageTests
             MakeBatch("targets", "Target", targetData),
             compiled);
 
-        Assert.True(float.IsFinite(step.Loss), $"loss must be finite; got {step.Loss}");
+        Assert.True(float.IsFinite(step.Loss!.Value), $"loss must be finite; got {step.Loss!.Value}");
 
         // At least one trainable param must move (gradient flowed through the generalized conv).
         bool anyMoved = false;
         foreach (var field in rig.TrainableParamStructDef.Fields)
         {
             var before = Floats(initial.TrainableParams.Fields[field.Name]);
-            var after = Floats(step.Checkpoint.TrainableParams.Fields[field.Name]);
+            var after = Floats(step.TrainableParams.Fields[field.Name]);
             if (before.Zip(after).Any(p => MathF.Abs(p.First - p.Second) > 1e-7f)) { anyMoved = true; break; }
         }
         Assert.True(anyMoved, "no trainable param moved — no gradient flowed through the generalized Conv path");
@@ -1822,15 +1822,15 @@ public class NNLibraryTrainingCoverageTests
             expectedLoss += (pred - targetVals[c]) * (pred - targetVals[c]);
         }
         expectedLoss /= 3f;
-        Assert.True(MathF.Abs(step.Loss - expectedLoss) < 1e-3f,
-            $"BatchNorm2d eval output must match closed form; expected loss {expectedLoss}, got {step.Loss}");
+        Assert.True(MathF.Abs(step.Loss!.Value - expectedLoss) < 1e-3f,
+            $"BatchNorm2d eval output must match closed form; expected loss {expectedLoss}, got {step.Loss!.Value}");
 
         // Both gamma and beta must receive non-zero gradients through the eval path.
         Assert.Equal(2, rig.TrainableParamStructDef.Fields.Length);
         foreach (var field in rig.TrainableParamStructDef.Fields)
         {
             var before = Floats(initial.TrainableParams.Fields[field.Name]);
-            var after = Floats(step.Checkpoint.TrainableParams.Fields[field.Name]);
+            var after = Floats(step.TrainableParams.Fields[field.Name]);
             Assert.True(before.Zip(after).Any(p => MathF.Abs(p.First - p.Second) > 1e-7f),
                 $"trainable param '{field.Name}' did not move — no gradient flowed through the BN eval path");
         }
@@ -1839,7 +1839,7 @@ public class NNLibraryTrainingCoverageTests
         foreach (var field in rig.ModelStateDef.Fields)
         {
             var before = Floats(initial.ModelState.Fields[field.Name]);
-            var after = Floats(step.Checkpoint.ModelState.Fields[field.Name]);
+            var after = Floats(step.ModelState.Fields[field.Name]);
             Assert.True(before.Zip(after).All(p => MathF.Abs(p.First - p.Second) < 1e-7f),
                 $"running stat '{field.Name}' changed during an eval-mode pass");
         }
@@ -1871,15 +1871,15 @@ public class NNLibraryTrainingCoverageTests
             compiled);
 
         // Per-channel mean of the batch-normalized output is 0 (gamma=1, beta=0).
-        Assert.True(step.Loss < 1e-6f,
-            $"training-mode BN output must have ~zero per-channel mean; got loss {step.Loss}");
+        Assert.True(step.Loss!.Value < 1e-6f,
+            $"training-mode BN output must have ~zero per-channel mean; got loss {step.Loss!.Value}");
 
         // The training pass must EMA-update both running statistics.
         Assert.NotEmpty(rig.ModelStateDef.Fields);
         foreach (var field in rig.ModelStateDef.Fields)
         {
             var before = Floats(initial.ModelState.Fields[field.Name]);
-            var after = Floats(step.Checkpoint.ModelState.Fields[field.Name]);
+            var after = Floats(step.ModelState.Fields[field.Name]);
             Assert.True(before.Zip(after).Any(p => MathF.Abs(p.First - p.Second) > 1e-7f),
                 $"running stat '{field.Name}' was not updated by a training-mode pass");
         }
@@ -1896,9 +1896,10 @@ public class NNLibraryTrainingCoverageTests
     // -----------------------------------------------------------------------
 
     /// <summary>Runs a single L2 + SGD TrainStep of <paramref name="modelGraph"/> on one fixed
-    /// batch and returns the resulting step (Loss + Checkpoint). Used by the closed-form /
-    /// alias-equivalence BatchNorm checks whose models emit a residual against a zero target.</summary>
-    private static TrainingStepResult RunResidualStep(
+    /// batch and returns the resulting post-step checkpoint (its <see cref="TrainingCheckpoint.Loss"/>
+    /// carries the step's loss). Used by the closed-form / alias-equivalence BatchNorm checks whose
+    /// models emit a residual against a zero target.</summary>
+    private static TrainingCheckpoint RunResidualStep(
         ComputationGraph modelGraph, long[] inShape, float[] input, long[] outShape, float lr = 0f)
     {
         var inputData = TensorData(inShape, input);
@@ -1931,16 +1932,16 @@ public class NNLibraryTrainingCoverageTests
     {
         // rank 2 [2,3]
         Assert.True(RunResidualStep(NNBatchNormEvalRank2ClosedForm.ComputationGraph,
-            [2L, 3L], Ramp(6, 0.5f, -1f), [2L, 3L]).Loss < 1e-8f);
+            [2L, 3L], Ramp(6, 0.5f, -1f), [2L, 3L]).Loss!.Value < 1e-8f);
         // rank 3 [2,3,4] — the form the old BatchNorm1d rejected
         Assert.True(RunResidualStep(NNBatchNormEvalRank3ClosedForm.ComputationGraph,
-            [2L, 3L, 4L], Ramp(24, 0.25f, -2f), [2L, 3L, 4L]).Loss < 1e-8f);
+            [2L, 3L, 4L], Ramp(24, 0.25f, -2f), [2L, 3L, 4L]).Loss!.Value < 1e-8f);
         // rank 4 [2,3,4,4]
         Assert.True(RunResidualStep(NNBatchNormEvalRank4ClosedForm.ComputationGraph,
-            [2L, 3L, 4L, 4L], Ramp(96, 0.1f, -3f), [2L, 3L, 4L, 4L]).Loss < 1e-8f);
+            [2L, 3L, 4L, 4L], Ramp(96, 0.1f, -3f), [2L, 3L, 4L, 4L]).Loss!.Value < 1e-8f);
         // rank 5 [2,3,2,2,2] — the new rank-5 path
         Assert.True(RunResidualStep(NNBatchNormEvalRank5ClosedForm.ComputationGraph,
-            [2L, 3L, 2L, 2L, 2L], Ramp(48, 0.2f, -2f), [2L, 3L, 2L, 2L, 2L]).Loss < 1e-8f);
+            [2L, 3L, 2L, 2L, 2L], Ramp(48, 0.2f, -2f), [2L, 3L, 2L, 2L, 2L]).Loss!.Value < 1e-8f);
     }
 
     /// <summary>
@@ -1954,13 +1955,13 @@ public class NNLibraryTrainingCoverageTests
     public void TestBatchNormAliasEquivalence()
     {
         Assert.True(RunResidualStep(NNBatchNorm2dAliasEquiv.ComputationGraph,
-            [2L, 3L, 4L, 4L], Ramp(96, 0.1f, -3f), [2L, 3L, 4L, 4L]).Loss < 1e-10f);
+            [2L, 3L, 4L, 4L], Ramp(96, 0.1f, -3f), [2L, 3L, 4L, 4L]).Loss!.Value < 1e-10f);
         Assert.True(RunResidualStep(NNBatchNorm1dAliasEquivRank2.ComputationGraph,
-            [2L, 3L], Ramp(6, 0.5f, -1f), [2L, 3L]).Loss < 1e-10f);
+            [2L, 3L], Ramp(6, 0.5f, -1f), [2L, 3L]).Loss!.Value < 1e-10f);
         Assert.True(RunResidualStep(NNBatchNorm1dAliasEquivRank3.ComputationGraph,
-            [2L, 3L, 4L], Ramp(24, 0.25f, -2f), [2L, 3L, 4L]).Loss < 1e-10f);
+            [2L, 3L, 4L], Ramp(24, 0.25f, -2f), [2L, 3L, 4L]).Loss!.Value < 1e-10f);
         Assert.True(RunResidualStep(NNBatchNorm3dAliasEquiv.ComputationGraph,
-            [2L, 3L, 2L, 2L, 2L], Ramp(48, 0.2f, -2f), [2L, 3L, 2L, 2L, 2L]).Loss < 1e-10f);
+            [2L, 3L, 2L, 2L, 2L], Ramp(48, 0.2f, -2f), [2L, 3L, 2L, 2L, 2L]).Loss!.Value < 1e-10f);
     }
 
     /// <summary>
@@ -1977,7 +1978,7 @@ public class NNLibraryTrainingCoverageTests
     {
         // affine:false eval output == bare x/sqrt(1+eps).
         Assert.True(RunResidualStep(NNBatchNormAffineFalseClosedForm.ComputationGraph,
-            [2L, 3L, 2L, 2L], Ramp(24, 0.5f, -3f), [2L, 3L, 2L, 2L]).Loss < 1e-8f);
+            [2L, 3L, 2L, 2L], Ramp(24, 0.5f, -3f), [2L, 3L, 2L, 2L]).Loss!.Value < 1e-8f);
 
         // affine:false ⇒ gamma/beta receive no gradient ⇒ the model's only live trainable
         // param is the scalar pre-weight (the affine:true NNBatchNormEvalGradModel has 2).
@@ -2082,13 +2083,13 @@ public class NNLibraryTrainingCoverageTests
             MakeBatch("targets", "Target", TensorData(outShape, new float[outTotal])),
             compiled);
 
-        Assert.True(step.Loss < 1e-6f,
-            $"training-mode BN output must have ~zero per-channel mean; got loss {step.Loss}");
+        Assert.True(step.Loss!.Value < 1e-6f,
+            $"training-mode BN output must have ~zero per-channel mean; got loss {step.Loss!.Value}");
         Assert.NotEmpty(rig.ModelStateDef.Fields);
         foreach (var field in rig.ModelStateDef.Fields)
         {
             var before = Floats(initial.ModelState.Fields[field.Name]);
-            var after = Floats(step.Checkpoint.ModelState.Fields[field.Name]);
+            var after = Floats(step.ModelState.Fields[field.Name]);
             Assert.True(before.Zip(after).Any(p => MathF.Abs(p.First - p.Second) > 1e-7f),
                 $"running stat '{field.Name}' was not updated by a training-mode pass");
         }
@@ -2255,8 +2256,8 @@ public class NNLibraryTrainingCoverageTests
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", TensorData(outShape, new float[outTotal])),
             compiled);
-        var state = rig.ModelStateDef.Fields.SelectMany(f => Floats(step.Checkpoint.ModelState.Fields[f.Name])).ToArray();
-        return (step.Loss, state);
+        var state = rig.ModelStateDef.Fields.SelectMany(f => Floats(step.ModelState.Fields[f.Name])).ToArray();
+        return (step.Loss!.Value, state);
     }
 
     /// <summary>Runs an eval-mode BN model with <paramref name="injectedState"/> as its ModelState
@@ -2283,8 +2284,8 @@ public class NNLibraryTrainingCoverageTests
                 MakeBatch("input", "ModelInput", inputData),
                 MakeBatch("targets", "Target", TensorData(inShape, target)),
                 compiled);
-            stateAfter = rig.ModelStateDef.Fields.SelectMany(f => Floats(step.Checkpoint.ModelState.Fields[f.Name])).ToArray();
-            return step.Loss;
+            stateAfter = rig.ModelStateDef.Fields.SelectMany(f => Floats(step.ModelState.Fields[f.Name])).ToArray();
+            return step.Loss!.Value;
         }
 
         float matchLoss = LossAgainst(matchTarget, out var afterMatch);
@@ -2336,11 +2337,11 @@ public class NNLibraryTrainingCoverageTests
             MakeBatch("targets", "Target", targetData),
             compiled);
 
-        Assert.True(MathF.Abs(step.Loss - 7.5f) < 1e-4f,
-            $"eval-mode Dropout must be the identity (expected loss 7.5); got {step.Loss}");
+        Assert.True(MathF.Abs(step.Loss!.Value - 7.5f) < 1e-4f,
+            $"eval-mode Dropout must be the identity (expected loss 7.5); got {step.Loss!.Value}");
 
         string wName = rig.TrainableParamStructDef.Fields[0].Name;
-        float w1 = Floats(step.Checkpoint.TrainableParams.Fields[wName])[0];
+        float w1 = Floats(step.TrainableParams.Fields[wName])[0];
         Assert.True(MathF.Abs(w1 - (-0.5f)) < 1e-3f,
             $"gradient must flow through eval-mode Dropout (expected w1 ≈ -0.5); got {w1}");
     }
@@ -2378,11 +2379,11 @@ public class NNLibraryTrainingCoverageTests
                 MakeBatch("targets", "Target", targetData),
                 compiled);
 
-            Assert.True(MathF.Abs(step.Loss - 7.5f) < 1e-4f,
-                $"eval-mode SpatialDropout must be the identity (expected loss 7.5); got {step.Loss}");
+            Assert.True(MathF.Abs(step.Loss!.Value - 7.5f) < 1e-4f,
+                $"eval-mode SpatialDropout must be the identity (expected loss 7.5); got {step.Loss!.Value}");
 
             string wName = rig.TrainableParamStructDef.Fields[0].Name;
-            float w1 = Floats(step.Checkpoint.TrainableParams.Fields[wName])[0];
+            float w1 = Floats(step.TrainableParams.Fields[wName])[0];
             Assert.True(MathF.Abs(w1 - (-0.5f)) < 1e-3f,
                 $"gradient must flow through eval-mode SpatialDropout (expected w1 ≈ -0.5); got {w1}");
         }
@@ -2406,9 +2407,9 @@ public class NNLibraryTrainingCoverageTests
                 MakeBatch("input", "ModelInput", inputData),
                 MakeBatch("targets", "Target", targetData),
                 compiled);
-            float w1 = Floats(step.Checkpoint.TrainableParams.Fields[wName])[0];
+            float w1 = Floats(step.TrainableParams.Fields[wName])[0];
 
-            Assert.True(float.IsFinite(step.Loss), $"train-mode SpatialDropout TrainStep loss must be finite; got {step.Loss}");
+            Assert.True(float.IsFinite(step.Loss!.Value), $"train-mode SpatialDropout TrainStep loss must be finite; got {step.Loss!.Value}");
             Assert.True(MathF.Abs(w1 - w0) > 1e-7f,
                 $"gradient must flow through train-mode SpatialDropout channel mask (param must move); w0={w0}, w1={w1}");
         }
@@ -2450,11 +2451,11 @@ public class NNLibraryTrainingCoverageTests
                 MakeBatch("targets", "Target", targetData),
                 compiled);
 
-            Assert.True(MathF.Abs(step.Loss - 7.5f) < 1e-4f,
-                $"eval-mode AlphaDropout must be the identity (expected loss 7.5); got {step.Loss}");
+            Assert.True(MathF.Abs(step.Loss!.Value - 7.5f) < 1e-4f,
+                $"eval-mode AlphaDropout must be the identity (expected loss 7.5); got {step.Loss!.Value}");
 
             string wName = rig.TrainableParamStructDef.Fields[0].Name;
-            float w1 = Floats(step.Checkpoint.TrainableParams.Fields[wName])[0];
+            float w1 = Floats(step.TrainableParams.Fields[wName])[0];
             Assert.True(MathF.Abs(w1 - (-0.5f)) < 1e-3f,
                 $"gradient must flow through eval-mode AlphaDropout (expected w1 ≈ -0.5); got {w1}");
         }
@@ -2476,9 +2477,9 @@ public class NNLibraryTrainingCoverageTests
                 MakeBatch("input", "ModelInput", inputData),
                 MakeBatch("targets", "Target", targetData),
                 compiled);
-            float w1 = Floats(step.Checkpoint.TrainableParams.Fields[wName])[0];
+            float w1 = Floats(step.TrainableParams.Fields[wName])[0];
 
-            Assert.True(float.IsFinite(step.Loss), $"train-mode AlphaDropout TrainStep loss must be finite; got {step.Loss}");
+            Assert.True(float.IsFinite(step.Loss!.Value), $"train-mode AlphaDropout TrainStep loss must be finite; got {step.Loss!.Value}");
             Assert.True(MathF.Abs(w1 - w0) > 1e-7f,
                 $"gradient must flow through train-mode AlphaDropout affine + mask (param must move); w0={w0}, w1={w1}");
         }
@@ -2500,9 +2501,9 @@ public class NNLibraryTrainingCoverageTests
                 MakeBatch("input", "ModelInput", inputData),
                 MakeBatch("targets", "Target", targetData),
                 compiled);
-            float w1 = Floats(step.Checkpoint.TrainableParams.Fields[wName])[0];
+            float w1 = Floats(step.TrainableParams.Fields[wName])[0];
 
-            Assert.True(float.IsFinite(step.Loss), $"train-mode FeatureAlphaDropout TrainStep loss must be finite; got {step.Loss}");
+            Assert.True(float.IsFinite(step.Loss!.Value), $"train-mode FeatureAlphaDropout TrainStep loss must be finite; got {step.Loss!.Value}");
             Assert.True(MathF.Abs(w1 - w0) > 1e-7f,
                 $"gradient must flow through train-mode FeatureAlphaDropout affine + channel mask (param must move); w0={w0}, w1={w1}");
         }
@@ -2558,13 +2559,13 @@ public class NNLibraryTrainingCoverageTests
                 MakeBatch("targets", "Target", targetData),
                 compiled);
 
-            Assert.True(float.IsFinite(step.Loss), $"loss must be finite; got {step.Loss}");
+            Assert.True(float.IsFinite(step.Loss!.Value), $"loss must be finite; got {step.Loss!.Value}");
 
             bool anyMoved = false;
             foreach (var field in rig.TrainableParamStructDef.Fields)
             {
                 var before = Floats(initial.TrainableParams.Fields[field.Name]);
-                var after = Floats(step.Checkpoint.TrainableParams.Fields[field.Name]);
+                var after = Floats(step.TrainableParams.Fields[field.Name]);
                 if (before.Zip(after).Any(p => MathF.Abs(p.First - p.Second) > 1e-7f)) { anyMoved = true; break; }
             }
             Assert.True(anyMoved, "no trainable param moved — no gradient flowed through the configurable CE loss");
@@ -2601,7 +2602,7 @@ public class NNLibraryTrainingCoverageTests
             ckpt = rig.TrainStep(ckpt,
                 MakeBatch("input", "AnalyticIn", TensorData(inShape, input)),
                 MakeBatch("targets", "AnalyticTg", TensorData(outShape, target)),
-                compiled).Checkpoint;
+                compiled);
         return ckpt;
     }
 
@@ -2964,8 +2965,8 @@ public class NNLibraryTrainingCoverageTests
         for (int i = 0; i < 150; i++)
         {
             var step = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled);
-            losses.Add(step.Loss);
-            ckpt = step.Checkpoint;
+            losses.Add(step.Loss!.Value);
+            ckpt = step;
         }
 
         Assert.All(losses, l => Assert.True(float.IsFinite(l)));
@@ -3108,13 +3109,13 @@ public class NNLibraryTrainingCoverageTests
             MakeBatch("targets", "Target", targetData),
             compiled);
 
-        Assert.True(float.IsFinite(step.Loss), $"loss must be finite; got {step.Loss}");
+        Assert.True(float.IsFinite(step.Loss!.Value), $"loss must be finite; got {step.Loss!.Value}");
 
         bool anyMoved = false;
         foreach (var field in rig.TrainableParamStructDef.Fields)
         {
             var before = Floats(initial.TrainableParams.Fields[field.Name]);
-            var after = Floats(step.Checkpoint.TrainableParams.Fields[field.Name]);
+            var after = Floats(step.TrainableParams.Fields[field.Name]);
             if (before.Zip(after).Any(p => MathF.Abs(p.First - p.Second) > 1e-7f)) { anyMoved = true; break; }
         }
         Assert.True(anyMoved, "no trainable param moved — no gradient flowed through the Recurrent.LSTM path");
@@ -3185,13 +3186,13 @@ public class NNLibraryTrainingCoverageTests
             MakeBatch("targets", "Target", targetData),
             compiled);
 
-        Assert.True(float.IsFinite(step.Loss), $"loss must be finite; got {step.Loss}");
+        Assert.True(float.IsFinite(step.Loss!.Value), $"loss must be finite; got {step.Loss!.Value}");
 
         bool anyMoved = false;
         foreach (var field in rig.TrainableParamStructDef.Fields)
         {
             var before = Floats(initial.TrainableParams.Fields[field.Name]);
-            var after = Floats(step.Checkpoint.TrainableParams.Fields[field.Name]);
+            var after = Floats(step.TrainableParams.Fields[field.Name]);
             if (before.Zip(after).Any(p => MathF.Abs(p.First - p.Second) > 1e-7f)) { anyMoved = true; break; }
         }
         Assert.True(anyMoved, "no trainable param moved — no gradient flowed through the Recurrent.GRU path");
@@ -3276,13 +3277,13 @@ public class NNLibraryTrainingCoverageTests
             MakeBatch("targets", "Target", targetData),
             compiled);
 
-        Assert.True(float.IsFinite(step.Loss), $"loss must be finite; got {step.Loss}");
+        Assert.True(float.IsFinite(step.Loss!.Value), $"loss must be finite; got {step.Loss!.Value}");
 
         bool anyMoved = false;
         foreach (var field in rig.TrainableParamStructDef.Fields)
         {
             var before = Floats(initial.TrainableParams.Fields[field.Name]);
-            var after = Floats(step.Checkpoint.TrainableParams.Fields[field.Name]);
+            var after = Floats(step.TrainableParams.Fields[field.Name]);
             if (before.Zip(after).Any(p => MathF.Abs(p.First - p.Second) > 1e-7f)) { anyMoved = true; break; }
         }
         Assert.True(anyMoved, "no trainable param moved — no gradient flowed through the recurrent cell path");

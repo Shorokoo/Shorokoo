@@ -125,7 +125,7 @@ namespace Shorokoo
     public sealed class TrainingCheckpointArtifactInfo
     {
         /// <summary>Checkpoint format version from the marker tensor
-        /// (<see cref="TrainingCheckpoint"/> writes version 1; the loader reads version 1 only).</summary>
+        /// (<see cref="TrainingCheckpoint"/> writes version 2; the loader reads version 2 only).</summary>
         public long FormatVersion { get; }
 
         /// <summary>The 0-based global training step the checkpoint was saved at.</summary>
@@ -1383,7 +1383,10 @@ namespace Shorokoo
 
             foreach (var t in tensors)
             {
-                if (t.Name == TrainingCheckpoint.CheckpointMarkerName) continue;
+                // The marker and the presence-gated loss scalar are the checkpoint's own '/'-free
+                // recognition/run-progress tensors, not section fields — never flag them as stray.
+                if (t.Name == TrainingCheckpoint.CheckpointMarkerName
+                    || t.Name == TrainingCheckpoint.CheckpointLossName) continue;
                 if (!sectionNames.Any(s => t.Name.StartsWith(s + "/", StringComparison.Ordinal)))
                     observations.Add($"tensor '{t.Name}' sits outside the known checkpoint sections " +
                         $"({string.Join(", ", sectionNames)}).");

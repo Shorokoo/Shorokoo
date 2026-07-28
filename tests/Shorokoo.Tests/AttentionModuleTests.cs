@@ -179,9 +179,9 @@ public class AttentionTrainingCoverageTests
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var step = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
 
-        Assert.True(float.IsFinite(step.Loss));
-        Assert.NotEmpty(step.Checkpoint.TrainableParams.Fields);
-        Assert.True(AnyFieldChanged(initial.TrainableParams, step.Checkpoint.TrainableParams),
+        Assert.True(float.IsFinite(step.Loss!.Value));
+        Assert.NotEmpty(step.TrainableParams.Fields);
+        Assert.True(AnyFieldChanged(initial.TrainableParams, step.TrainableParams),
             "no trainable parameter moved after a TrainStep (gradient did not flow)");
     }
 
@@ -231,9 +231,9 @@ public class AttentionTrainingCoverageTests
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var step = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
 
-        Assert.True(float.IsFinite(step.Loss));
-        Assert.NotEmpty(step.Checkpoint.TrainableParams.Fields);
-        Assert.True(AnyFieldChanged(initial.TrainableParams, step.Checkpoint.TrainableParams),
+        Assert.True(float.IsFinite(step.Loss!.Value));
+        Assert.NotEmpty(step.TrainableParams.Fields);
+        Assert.True(AnyFieldChanged(initial.TrainableParams, step.TrainableParams),
             "no trainable parameter moved after a TrainStep (gradient did not flow)");
     }
 

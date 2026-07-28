@@ -95,12 +95,22 @@ namespace Shorokoo
         /// def field-for-field (missing field, rank mismatch, or a stray tensor fails loudly), and a
         /// kind the def expects but the file omits fails loudly. Routed to by
         /// <see cref="LoadTrainingCheckpoint"/> when the file is a .skpt.
+        ///
+        /// <para><paramref name="components"/> selects which parts to load (<c>null</c> ⇒ everything
+        /// present), exactly as the flat path (<see cref="TrainingCheckpoint.LoadFlat"/>) does: a
+        /// dropped or absent kind is filled from <paramref name="rigForDefaults"/>'s initial values
+        /// when a rig is supplied (<see cref="CheckpointComponents.InferenceState"/> → rig initial
+        /// params + model state, <see cref="CheckpointComponents.OptimizerState"/> → rig initial
+        /// optimizer state, <see cref="CheckpointComponents.Counters"/> → 0 and a <c>null</c> loss);
+        /// without a rig, an absent-but-expected kind fails loud.</para>
         /// </summary>
         internal static TrainingCheckpoint LoadTrainingCheckpointFromSkpt(
             string filePath,
             TensorStructDef trainableParamDef,
             TensorStructDef modelStateDef,
-            TensorStructDef optimizerStateDef)
+            TensorStructDef optimizerStateDef,
+            CheckpointComponents? components,
+            TrainingRig? rigForDefaults)
         {
             if (trainableParamDef is null) throw new ArgumentNullException(nameof(trainableParamDef));
             if (modelStateDef is null) throw new ArgumentNullException(nameof(modelStateDef));
@@ -138,19 +148,59 @@ namespace Shorokoo
             // widening needs no format change here — no truncation on read). Epoch and batchIndex are
             // add-only fields (issue #100): a .skpt written before they existed omits them, so they
             // deserialize to 0 — the "fill new state kinds as absent" rule.
-            long step = training.Step;
-            long epoch = training.Epoch;
-            long batchIndex = training.BatchIndex;
             var kinds = training.Kinds ?? new Dictionary<string, string>();
 
-            var trainable = ReconstructTrainingKind(
-                archive, manifest, kinds, SkptFileFormat.TrainingKindTrainableParams, trainableParamDef, filePath);
-            var modelState = ReconstructTrainingKind(
-                archive, manifest, kinds, SkptFileFormat.TrainingKindModelState, modelStateDef, filePath);
-            var optState = ReconstructTrainingKind(
-                archive, manifest, kinds, SkptFileFormat.TrainingKindOptimizerState, optimizerStateDef, filePath);
+            bool Want(CheckpointComponents c) => components is null || (components.Value & c) != 0;
+            bool KindPresent(string kindName) =>
+                kinds.TryGetValue(kindName, out var key) && !string.IsNullOrEmpty(key);
 
-            return new TrainingCheckpoint(trainable, modelState, optState, step, epoch, batchIndex);
+            // Counters (step/epoch/batch) and the loss ride with the Counters component. Filtered out
+            // ⇒ 0 / null, mirroring the flat path.
+            long step = Want(CheckpointComponents.Counters) ? training.Step : 0L;
+            long epoch = Want(CheckpointComponents.Counters) ? training.Epoch : 0L;
+            long batchIndex = Want(CheckpointComponents.Counters) ? training.BatchIndex : 0L;
+            float? loss = Want(CheckpointComponents.Counters) ? training.Loss : null;
+
+            TensorDataStruct trainable, modelState, optState;
+
+            if (Want(CheckpointComponents.InferenceState)
+                && (KindPresent(SkptFileFormat.TrainingKindTrainableParams) || trainableParamDef.Fields.Length == 0))
+            {
+                trainable = ReconstructTrainingKind(
+                    archive, manifest, kinds, SkptFileFormat.TrainingKindTrainableParams, trainableParamDef, filePath);
+                modelState = ReconstructTrainingKind(
+                    archive, manifest, kinds, SkptFileFormat.TrainingKindModelState, modelStateDef, filePath);
+            }
+            else if (rigForDefaults is not null)
+            {
+                trainable = rigForDefaults.InitialTrainableStruct;
+                modelState = rigForDefaults.InitialModelStateStruct;
+            }
+            else
+            {
+                trainable = ReconstructTrainingKind(
+                    archive, manifest, kinds, SkptFileFormat.TrainingKindTrainableParams, trainableParamDef, filePath);
+                modelState = ReconstructTrainingKind(
+                    archive, manifest, kinds, SkptFileFormat.TrainingKindModelState, modelStateDef, filePath);
+            }
+
+            if (Want(CheckpointComponents.OptimizerState)
+                && (KindPresent(SkptFileFormat.TrainingKindOptimizerState) || optimizerStateDef.Fields.Length == 0))
+            {
+                optState = ReconstructTrainingKind(
+                    archive, manifest, kinds, SkptFileFormat.TrainingKindOptimizerState, optimizerStateDef, filePath);
+            }
+            else if (rigForDefaults is not null)
+            {
+                optState = rigForDefaults.InitialOptimizerStateStruct;
+            }
+            else
+            {
+                optState = ReconstructTrainingKind(
+                    archive, manifest, kinds, SkptFileFormat.TrainingKindOptimizerState, optimizerStateDef, filePath);
+            }
+
+            return new TrainingCheckpoint(trainable, modelState, optState, step, epoch, batchIndex, rig: null, loss: loss);
         }
 
         /// <summary>
@@ -440,6 +490,10 @@ namespace Shorokoo
                     Step = _checkpoint.Step,
                     Epoch = _checkpoint.Epoch,
                     BatchIndex = _checkpoint.BatchIndex,
+                    // Loss is a host-owned run-progress scalar grouped with the counters. Nullable and
+                    // add-only: null (an initial/bare checkpoint) is omitted by the manifest serializer
+                    // (WhenWritingNull), so it reads back as null — never a sentinel 0.0.
+                    Loss = _checkpoint.Loss,
                     Kinds = kinds,
                 },
             };

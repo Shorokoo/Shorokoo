@@ -139,6 +139,25 @@ public TrainingCheckpoint TrainStep(
     TensorDataStruct trainingOutput,
     CompiledGraph compiled);
 
+// Loader-driven single step: draws loader.Next(), sourcing epoch / batch from the loader — the
+// single-step form of Fit(loader). The batch's own position drives the scheduler for this step;
+// the returned checkpoint records the loader's NEXT (resume) position. Requires no runtime hypers.
+public TrainingCheckpoint TrainStep(
+    TrainingCheckpoint checkpoint,
+    IDataLoader loader,
+    CompiledGraph compiled);
+
+// Explicit epoch / batch: for a host driving its own iteration (no loader). epoch / batchNumber name
+// the batch being trained — fed to the scheduler for this step AND recorded verbatim on the returned
+// checkpoint (it cannot advance to a "next" position without a loader's batches-per-epoch).
+public TrainingCheckpoint TrainStep(
+    TrainingCheckpoint checkpoint,
+    TensorDataStruct trainingInput,
+    TensorDataStruct trainingOutput,
+    long epoch,
+    long batchNumber,
+    CompiledGraph compiled);
+
 public TensorDataStruct MakeHyperparameters(float value);                       // exactly one dynamic
 public TensorDataStruct MakeHyperparameters(params (string name, float value)[] values); // named
 
@@ -158,7 +177,7 @@ public TrainingResult Fit(
 ```
 
 Result types:
-- `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long`; the training loop advances them — `TrainStep` carries them through unchanged; default `0`). All three counters are `int64` end to end. It also carries `.Rig` (the `TrainingRig?` that produced it — set on every rig-produced checkpoint, so `checkpoint.ToInferenceModel()` needs no re-supplied graph) and `.Loss` (`float?`; the loss of the `TrainStep` that produced it, `null` on an initial or bare checkpoint). Both are preserved through the counter derivations (`WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex`). `TrainStep` returns this checkpoint directly — read the step's loss off `.Loss`. `.Loss` persists as its own `Loss` component, independent of `Counters` (dropping `Loss`, or an initial checkpoint, reloads with `.Loss == null` — never a sentinel `0`).
+- `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long?`; the training loop advances them — the counter-agnostic `TrainStep` carries them through unchanged). They are `null` when the position is genuinely **unknown** — an initial checkpoint, or one trained without a data loader / explicit counters — rather than a misleading `0`; the loader-driven and explicit-counter paths set concrete values. A scheduled hyperparameter reading the epoch / batch counter sees `0` for a `null` value. `.Step` is always a concrete `long`; all counters are `int64` end to end. It also carries `.Rig` (the `TrainingRig?` that produced it — set on every rig-produced checkpoint, so `checkpoint.ToInferenceModel()` needs no re-supplied graph) and `.Loss` (`float?`; the loss of the `TrainStep` that produced it, `null` on an initial or bare checkpoint). Both are preserved through the counter derivations (`WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex`). `TrainStep` returns this checkpoint directly — read the step's loss off `.Loss`. `.Loss` persists as its own `Loss` component, independent of `Counters` (dropping `Loss`, or an initial checkpoint, reloads with `.Loss == null` — never a sentinel `0`).
 - `TrainingResult` → `.FinalCheckpoint`, `.EpochLosses` (the per-epoch mean losses).
 
 `TrainingRig`, `TrainingCheckpoint`, and `TrainingResult` are in
@@ -200,6 +219,13 @@ var outcome = rig.Fit(loader, numEpochs: 10);   // step / epoch / batch advance 
   (`DataLoaderPosition`, the epoch + index of the *next* batch it will yield), `Next()` (produces
   the current `DataBatch` — input + target + the position it came from — and advances one batch,
   rolling into the next epoch after the last), and `Restore(position)` to resume.
+- **One step at a time.** `rig.TrainStep(checkpoint, loader, compiled)` is the single-step form of
+  `Fit(loader)` — it draws one batch, runs the step (the batch's own position drives any scheduler),
+  and returns a checkpoint recording the loader's **next** (resume) position. `Fit(loader)` is just a
+  loop over it, so the two share one source of the loader step-and-counter semantics. For a host that
+  owns its own iteration (no loader), `rig.TrainStep(checkpoint, input, target, epoch, batchNumber,
+  compiled)` records the given `epoch` / `batchNumber` verbatim (it names the batch being trained; it
+  cannot infer a "next" position without a loader's batches-per-epoch).
 - **`InMemoryDataLoader`** is the bare-minimum implementation over tensors you already hold. Each
   field's leading dimension is the sample count `N`; it slices along that dimension into
   fixed-size batches, optionally reshuffling every epoch.
@@ -238,8 +264,11 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
 ```
 
 - The file is a single SafeTensors file (every param/state field plus the run
-  counters — step, epoch, batch index). A checkpoint written before epoch/batch
-  existed loads them as `0`.
+  counters). The `int64` marker carries `[version, step]` (always present); epoch and batch index
+  are each a **presence-gated** `int64` scalar beside it, written only when set — so an unknown
+  epoch/batch (a checkpoint trained without a loader / explicit counters, or one written before
+  those counters existed) is absent on disk and reloads as `null`, never a sentinel `0`. A concrete
+  `0` (e.g. a run resting at the start of an epoch) is written and reloads as `0`.
 - For the **native `.skpt` container** instead — the training state split into
   per-kind data entries alongside the concrete inference model, with the container's
   inspectable manifest, per-entry Zstd, and provenance metadata — save with

@@ -75,18 +75,27 @@ namespace Shorokoo
         /// <summary>
         /// The 0-based epoch counter this checkpoint sits at — a host-owned run counter the
         /// training loop advances (the graph never does), persisted so a resumed run restores
-        /// its position in the data schedule. <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>
-        /// carries it through unchanged; the host sets it (e.g. at each epoch boundary).
+        /// its position in the data schedule — or <c>null</c> when it is genuinely <b>unknown</b>: a
+        /// checkpoint produced without a data loader or an explicit epoch (an initial checkpoint, or one
+        /// trained through <see cref="TrainingRig.Train"/> / <see cref="TrainingRig.Fit(TensorDataStruct[], TensorDataStruct[], int, TrainingCheckpoint?, ComputeContext?)"/>
+        /// / the counter-agnostic <c>TrainStep</c>) carries <c>null</c> rather than a misleading <c>0</c>.
+        /// The loader-driven and explicit-counter paths (<see cref="TrainingRig.Fit(IDataLoader, int, TrainingCheckpoint?, ComputeContext?)"/>,
+        /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, IDataLoader, CompiledGraph)"/>,
+        /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, long, long, CompiledGraph)"/>)
+        /// set a concrete value. Persisted as its own presence-gated part of the
+        /// <see cref="CheckpointComponents.Counters"/> component (absent on disk ⇒ <c>null</c>, never a
+        /// sentinel 0). A scheduled hyperparameter reading the epoch counter sees <c>0</c> for a null epoch.
         /// </summary>
-        public long Epoch { get; }
+        public long? Epoch { get; }
 
         /// <summary>
         /// The 0-based batch index within the current epoch — a host-owned run counter the
-        /// training loop advances (the graph never does), persisted for exact resume.
-        /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>
-        /// carries it through unchanged; the host sets it.
+        /// training loop advances (the graph never does), persisted for exact resume — or <c>null</c> when
+        /// genuinely <b>unknown</b>, on the same terms as <see cref="Epoch"/> (no loader / no explicit
+        /// counter ⇒ <c>null</c>, never a sentinel 0). The loader-driven and explicit-counter paths set a
+        /// concrete value; a scheduled hyperparameter reading the batch counter sees <c>0</c> for a null value.
         /// </summary>
-        public long BatchIndex { get; }
+        public long? BatchIndex { get; }
 
         /// <summary>
         /// The <see cref="TrainingRig"/> this checkpoint belongs to, or <c>null</c> for a bare
@@ -114,14 +123,16 @@ namespace Shorokoo
         /// <summary>Packages trainable params, model state and optimizer state at
         /// <paramref name="step"/> / <paramref name="epoch"/> / <paramref name="batchIndex"/>,
         /// optionally attaching the producing <paramref name="rig"/> and the <paramref name="loss"/>
-        /// of the step that produced it.</summary>
+        /// of the step that produced it. <paramref name="epoch"/> and <paramref name="batchIndex"/>
+        /// default to <c>null</c> — "unknown", the right value for a checkpoint with no data-loader or
+        /// explicit position (see <see cref="Epoch"/>); pass concrete values only when the position is known.</summary>
         public TrainingCheckpoint(
             TensorDataStruct trainableParams,
             TensorDataStruct modelState,
             TensorDataStruct optimizerState,
             long step = 0,
-            long epoch = 0,
-            long batchIndex = 0,
+            long? epoch = null,
+            long? batchIndex = null,
             TrainingRig? rig = null,
             float? loss = null)
         {
@@ -145,6 +156,13 @@ namespace Shorokoo
         /// counter(s) set (each defaulting to this checkpoint's current value when omitted). The
         /// tensor state — trainable params, model state, optimizer state — is shared by reference,
         /// since counters are not graph state (§5.8.1). The receiver is unchanged.
+        ///
+        /// <para>An omitted (<c>null</c>) argument keeps the current value — which, for
+        /// <paramref name="epoch"/> / <paramref name="batchIndex"/>, may itself be <c>null</c> (unknown).
+        /// This "null means keep" convention means the method sets a concrete value or leaves the current
+        /// one; it does not reset a set counter back to <c>null</c> (nothing in the run needs to — an
+        /// unknown counter only ever arises at construction, then a loader / explicit step gives it a
+        /// concrete value that is carried forward).</para>
         /// </summary>
         public TrainingCheckpoint WithCounters(long? step = null, long? epoch = null, long? batchIndex = null)
             => new(TrainableParams, ModelState, OptimizerState,
@@ -190,15 +208,24 @@ namespace Shorokoo
         internal const string TrainableSection = "trainable";
         internal const string ModelStateSection = "model_state";
         internal const string OptimizerStateSection = "opt_state";
-        internal const string CheckpointMarkerName = "__shorokoo_checkpoint__"; // int64[4] = [version, step, epoch, batchIndex]
+        internal const string CheckpointMarkerName = "__shorokoo_checkpoint__"; // int64[2] = [version, step]
         // The loss (a host-owned run-progress scalar, its OWN savable component) is written as a
         // presence-gated float32 scalar tensor, only when Loss.HasValue and the Loss component is
         // included — never overloading the int64 marker, so a null loss is genuinely absent (not a
         // sentinel 0.0). A '/'-free name, so it can't be mistaken for a namespaced section field.
         internal const string CheckpointLossName = "__shorokoo_loss__";
-        // Version 2: adds the presence-gated loss tensor beside the int64[4] marker (no released
-        // users, so no back-compat shim — v1 files are simply not produced or read).
-        internal const long CheckpointFormatVersion = 2;
+        // Epoch and batch index are host-owned run counters, each its own presence-gated int64 scalar
+        // beside the marker (part of the Counters component), written only when non-null — so an unknown
+        // epoch/batch is genuinely absent on disk (⇒ reads back null), never a sentinel 0. Same
+        // '/'-free-name discipline as the loss/marker, so they can't be mistaken for section fields.
+        internal const string CheckpointEpochName = "__shorokoo_epoch__";
+        internal const string CheckpointBatchName = "__shorokoo_batch__";
+        // Version 3: the int64 marker carries only [version, step] (always present); epoch and batch
+        // moved out into their own presence-gated int64 scalars (v3), so an unknown epoch/batch reads
+        // back null instead of a misleading 0. Version 2 added the presence-gated loss tensor beside the
+        // then-int64[4] marker. No released users, so no back-compat shim — older files are neither
+        // produced nor read.
+        internal const long CheckpointFormatVersion = 3;
 
         /// <summary>
         /// Saves this checkpoint to a single SafeTensors file so training can resume across process
@@ -291,13 +318,32 @@ namespace Shorokoo
                 AppendSection(tensors, OptimizerStateSection, OptimizerState);
 
             // The marker always identifies the file as a Shorokoo checkpoint and carries the format
-            // version; the counter VALUES are written only when the Counters component is included
-            // (else zeros, so a counters-less save reloads at step/epoch/batch 0).
+            // version plus the step (a graph-advanced counter that is always concrete). Its VALUE for
+            // step is written only when the Counters component is included (else 0, so a counters-less
+            // save reloads at step 0).
             bool counters = (comps & CheckpointComponents.Counters) != 0;
             var marker = Globals.TensorData(
-                [4L], CheckpointFormatVersion,
-                counters ? Step : 0L, counters ? Epoch : 0L, counters ? BatchIndex : 0L);
-            tensors.Add(new SafeTensor(CheckpointMarkerName, marker, "I64", [4L]));
+                [2L], CheckpointFormatVersion, counters ? Step : 0L);
+            tensors.Add(new SafeTensor(CheckpointMarkerName, marker, "I64", [2L]));
+
+            // Epoch and batch index are host-owned run counters that may be genuinely unknown (null).
+            // Each is written as its own presence-gated int64 scalar beside the marker — only when the
+            // Counters component is included AND the value is non-null — so an unknown epoch/batch is
+            // absent on disk and reloads as null (never a sentinel 0), mirroring the loss treatment.
+            if (counters && Epoch is long epochValue)
+            {
+                var epochTensor = Globals.TensorData(Array.Empty<long>(), epochValue);
+                tensors.Add(new SafeTensor(
+                    CheckpointEpochName, epochTensor,
+                    SafeTensorLoader.DTypeToSafeTensorDType(epochTensor.DType), epochTensor.Shape.Dims));
+            }
+            if (counters && BatchIndex is long batchValue)
+            {
+                var batchTensor = Globals.TensorData(Array.Empty<long>(), batchValue);
+                tensors.Add(new SafeTensor(
+                    CheckpointBatchName, batchTensor,
+                    SafeTensorLoader.DTypeToSafeTensorDType(batchTensor.DType), batchTensor.Shape.Dims));
+            }
 
             // Loss is its own savable component (a host-owned run-progress scalar), independent of the
             // counters. Written only when this checkpoint actually carries a loss AND the Loss
@@ -411,13 +457,13 @@ namespace Shorokoo
                     $"'{filePath}' is not a Shorokoo training checkpoint (missing '{CheckpointMarkerName}' marker).");
 
             var marker = markerData.As<int64>().AccessMemory<long>();
-            // The marker is a fixed int64[4] = [version, step, epoch, batchIndex]. Exactly one
-            // format version exists (2); a wrong shape or version is unreadable by this build.
-            // (v2 adds the presence-gated loss tensor; there are no released v1 files.)
-            if (marker.Length != 4)
+            // The marker is a fixed int64[2] = [version, step]. Exactly one format version exists (3);
+            // a wrong shape or version is unreadable by this build. (v3 moves epoch/batch out of the
+            // marker into presence-gated int64 scalars; there are no released v1/v2 files.)
+            if (marker.Length != 2)
                 throw new InvalidOperationException(
-                    $"'{filePath}' has a malformed checkpoint marker: expected 4 int64 elements " +
-                    $"[version, step, epoch, batchIndex], found {marker.Length}.");
+                    $"'{filePath}' has a malformed checkpoint marker: expected 2 int64 elements " +
+                    $"[version, step], found {marker.Length}.");
             if (marker[0] != CheckpointFormatVersion)
                 throw new InvalidOperationException(
                     $"Unsupported checkpoint format version {marker[0]}; this build reads version " +
@@ -433,8 +479,18 @@ namespace Shorokoo
             }
 
             long step = Want(CheckpointComponents.Counters) ? marker[1] : 0L;
-            long epoch = Want(CheckpointComponents.Counters) ? marker[2] : 0L;
-            long batchIndex = Want(CheckpointComponents.Counters) ? marker[3] : 0L;
+            // Epoch and batch index ride with the Counters component and are each their own
+            // presence-gated int64 scalar: read only when Counters is wanted and the scalar is actually
+            // present; absence ⇒ null (an unknown position — no loader / no explicit counter was set),
+            // never a sentinel 0.
+            long? epoch = Want(CheckpointComponents.Counters)
+                          && byName.TryGetValue(CheckpointEpochName, out var epochData)
+                ? epochData.As<int64>().AccessMemory<long>()[0]
+                : (long?)null;
+            long? batchIndex = Want(CheckpointComponents.Counters)
+                               && byName.TryGetValue(CheckpointBatchName, out var batchData)
+                ? batchData.As<int64>().AccessMemory<long>()[0]
+                : (long?)null;
 
             // Loss is its own component (independent of the counters): read it only when Loss is
             // wanted and the presence-gated loss tensor is actually present; absence ⇒ null (an
@@ -2062,12 +2118,114 @@ namespace Shorokoo
             return RunStep(checkpoint, hyperparams, trainingInput, trainingOutput, compiled);
         }
 
-        /// <summary>The checkpoint's value for one reserved counter input ({step, epoch, batchIndex}).</summary>
+        /// <summary>
+        /// Executes a single training step on the next batch drawn from <paramref name="loader"/>,
+        /// sourcing the epoch / batch counters from the loader — the single-step analogue of
+        /// <see cref="Fit(IDataLoader, int, TrainingCheckpoint?, ComputeContext?)"/>, and the one place
+        /// the loader-step-and-counter semantics live (<c>Fit(loader)</c> loops over this).
+        ///
+        /// <para>The batch's <b>own</b> position (<see cref="DataBatch.Position"/>) drives the scheduler
+        /// counters for this step, so a scheduled hyperparameter reading the epoch / batch counters sees
+        /// the batch being trained. The returned checkpoint then records the loader's <b>new</b> position
+        /// — the next batch it will yield (<see cref="IDataLoader.Position"/> after
+        /// <see cref="IDataLoader.Next"/>) — as its <see cref="TrainingCheckpoint.Epoch"/> /
+        /// <see cref="TrainingCheckpoint.BatchIndex"/>, matching the checkpoint-wide invariant that those
+        /// counters are the <b>resume</b> position: feeding the returned checkpoint back to
+        /// <c>Fit(loader)</c> (or <see cref="IDataLoader.Restore"/>) continues from exactly the batch this
+        /// step stopped before. <see cref="TrainingCheckpoint.Step"/> is advanced by one and the attached
+        /// <see cref="TrainingCheckpoint.Rig"/> and this step's <see cref="TrainingCheckpoint.Loss"/> are
+        /// preserved (via <see cref="TrainingCheckpoint.WithCounters"/>).</para>
+        ///
+        /// <para>Like the counter-agnostic <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>
+        /// it drives, this schedule-driven form requires the rig to have no schedule-less runtime
+        /// hyperparameter (<see cref="Hyperparameter.Runtime"/>); supply those via
+        /// <see cref="MakeHyperparameters(float)"/> and a manual explicit-data loop instead.</para>
+        /// </summary>
+        /// <param name="checkpoint">Current training state; its counters are replaced from the loader.</param>
+        /// <param name="loader">The data loader; <see cref="IDataLoader.Next"/> is called once.</param>
+        /// <param name="compiled">Compiled training step graph.</param>
+        /// <returns>The post-step checkpoint: step advanced, epoch / batch set to the loader's next
+        /// (resume) position, with this step's loss.</returns>
+        public TrainingCheckpoint TrainStep(
+            TrainingCheckpoint checkpoint,
+            IDataLoader loader,
+            CompiledGraph compiled)
+        {
+            if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
+            if (loader is null) throw new ArgumentNullException(nameof(loader));
+            if (compiled is null) throw new ArgumentNullException(nameof(compiled));
+
+            var batch = loader.Next();
+            // The batch's own position drives the scheduler counters for THIS step (a scheduler reading
+            // epoch / batchIndex sees the batch being trained). TrainStep advances Step and preserves the
+            // attached rig and this step's loss.
+            var stepInput = checkpoint.WithCounters(
+                epoch: batch.Position.Epoch, batchIndex: batch.Position.BatchIndex);
+            var stepped = TrainStep(stepInput, batch.Input, batch.Target, compiled);
+
+            // Record the loader's NEW position (the next batch to yield) as the checkpoint's resume
+            // position, so a later Fit(loader) / TrainStep(loader) that Restores from it continues exactly.
+            var next = loader.Position;
+            return stepped.WithCounters(epoch: next.Epoch, batchIndex: next.BatchIndex);
+        }
+
+        /// <summary>
+        /// Executes a single training step on caller-supplied data with an explicit epoch and batch
+        /// number — the counter-sourcing analogue of
+        /// <see cref="TrainStep(TrainingCheckpoint, IDataLoader, CompiledGraph)"/> for a host driving its
+        /// own data iteration (no <see cref="IDataLoader"/>).
+        ///
+        /// <para><b>What the recorded counters mean.</b> <paramref name="epoch"/> and
+        /// <paramref name="batchNumber"/> name the position of the batch you are training now. They are
+        /// fed to any scheduled hyperparameter reading the epoch / batch counters during this step, and
+        /// are recorded <b>verbatim</b> on the returned checkpoint's <see cref="TrainingCheckpoint.Epoch"/>
+        /// / <see cref="TrainingCheckpoint.BatchIndex"/>. Unlike the loader overload this one does
+        /// <b>not</b> advance to a "next batch" position — without a loader it has no batches-per-epoch to
+        /// know when a batch index rolls into the next epoch, so verbatim recording is the only
+        /// well-defined contract. Consequently, since a loader-driven resume restores from the recorded
+        /// counters, resuming <c>Fit(loader)</c> from a checkpoint produced here would re-run this batch;
+        /// a manual loop that owns its own iteration simply passes each batch's position and manages
+        /// resume itself. <see cref="TrainingCheckpoint.Step"/> is advanced by one; the attached
+        /// <see cref="TrainingCheckpoint.Rig"/> and this step's <see cref="TrainingCheckpoint.Loss"/> are
+        /// preserved.</para>
+        ///
+        /// <para>Like <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>,
+        /// this schedule-driven form requires the rig to have no schedule-less runtime hyperparameter
+        /// (<see cref="Hyperparameter.Runtime"/>); use the explicit-hyperparameters overload and set the
+        /// counters via <see cref="TrainingCheckpoint.WithCounters"/> for those.</para>
+        /// </summary>
+        /// <param name="checkpoint">Current training state; its epoch / batch counters are replaced by the arguments.</param>
+        /// <param name="trainingInput">Training input data as TensorDataStruct.</param>
+        /// <param name="trainingOutput">Training target data as TensorDataStruct.</param>
+        /// <param name="epoch">The 0-based epoch of the batch being trained; recorded verbatim.</param>
+        /// <param name="batchNumber">The 0-based batch index of the batch being trained; recorded verbatim.</param>
+        /// <param name="compiled">Compiled training step graph.</param>
+        /// <returns>The post-step checkpoint: step advanced, epoch / batch set to the given values, with this step's loss.</returns>
+        public TrainingCheckpoint TrainStep(
+            TrainingCheckpoint checkpoint,
+            TensorDataStruct trainingInput,
+            TensorDataStruct trainingOutput,
+            long epoch,
+            long batchNumber,
+            CompiledGraph compiled)
+        {
+            if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
+            if (epoch < 0)
+                throw new ArgumentOutOfRangeException(nameof(epoch), epoch, "Epoch must be non-negative.");
+            if (batchNumber < 0)
+                throw new ArgumentOutOfRangeException(nameof(batchNumber), batchNumber, "Batch number must be non-negative.");
+            var stepInput = checkpoint.WithCounters(epoch: epoch, batchIndex: batchNumber);
+            return TrainStep(stepInput, trainingInput, trainingOutput, compiled);
+        }
+
+        /// <summary>The checkpoint's value for one reserved counter input ({step, epoch, batchIndex}).
+        /// A null (unknown) epoch / batch feeds the scheduler <c>0</c> — the schedule sees the run's
+        /// start until a loader / explicit counter gives the position a concrete value.</summary>
         private static long CounterValue(TrainingCheckpoint ckpt, string counter) => counter switch
         {
             "step" => ckpt.Step,
-            "epoch" => ckpt.Epoch,
-            "batchIndex" => ckpt.BatchIndex,
+            "epoch" => ckpt.Epoch ?? 0L,
+            "batchIndex" => ckpt.BatchIndex ?? 0L,
             _ => throw new InvalidOperationException($"Unknown scheduler counter input '{counter}'."),
         };
 
@@ -2253,46 +2411,40 @@ namespace Shorokoo
 
             var checkpoint = initialCheckpoint ?? CreateInitialCheckpoint();
 
-            // Resume: point the loader at the checkpoint's position so training continues from the
-            // very next batch. For a fresh checkpoint this is (epoch 0, batch 0).
-            loader.Restore(new DataLoaderPosition(checkpoint.Epoch, checkpoint.BatchIndex));
+            // Resume: point the loader at the checkpoint's position so training continues from the very
+            // next batch. A fresh checkpoint — or one whose epoch / batch is unknown (null), e.g. trained
+            // without a loader — starts at (epoch 0, batch 0).
+            long startEpoch = checkpoint.Epoch ?? 0L;
+            long startBatch = checkpoint.BatchIndex ?? 0L;
+            loader.Restore(new DataLoaderPosition(startEpoch, startBatch));
 
             var compiled = ctx.Compile(TrainingStepPureGraph);
-            long targetEpoch = checkpoint.Epoch + numEpochs;
+            long targetEpoch = startEpoch + numEpochs;
 
             var epochLosses = new List<float>();
-            long runningEpoch = checkpoint.Epoch;
+            long runningEpoch = startEpoch;
             float epochLossSum = 0f;
             int epochBatchCount = 0;
 
-            while (checkpoint.Epoch < targetEpoch)
+            // Drive off the loader's live position (always concrete) and route each step through the
+            // single-step TrainStep(loader) overload — the one source of the loader-step-and-counter
+            // semantics. TrainStep(loader) feeds the batch's own position to the scheduler and stamps
+            // the loader's next (resume) position onto the returned checkpoint.
+            while (loader.Position.Epoch < targetEpoch)
             {
-                var batch = loader.Next();
-
-                // Feed the step the position of the batch being trained, so any scheduler reading the
-                // epoch / batchIndex counters sees this batch's own position. WithCounters carries the
-                // step through and preserves the attached rig (and any prior loss).
-                var stepInput = checkpoint.WithCounters(
-                    epoch: batch.Position.Epoch, batchIndex: batch.Position.BatchIndex);
-                var stepped = TrainStep(stepInput, batch.Input, batch.Target, compiled);
-
-                // Stamp the loader's new position (the next batch to yield) onto the checkpoint the run
-                // carries forward — so a checkpoint saved here restores the loader to the right place.
-                // WithCounters preserves the rig TrainStep attached and this step's Loss; TrainStep
-                // already advanced Step, so we set only epoch / batchIndex.
-                var next = loader.Position;
-                checkpoint = stepped.WithCounters(epoch: next.Epoch, batchIndex: next.BatchIndex);
+                long batchEpoch = loader.Position.Epoch;   // the epoch of the batch TrainStep(loader) will draw
+                checkpoint = TrainStep(checkpoint, loader, compiled);
 
                 // Group per-epoch mean loss by the epoch the batch belonged to.
-                if (batch.Position.Epoch != runningEpoch)
+                if (batchEpoch != runningEpoch)
                 {
                     epochLosses.Add(epochBatchCount > 0 ? epochLossSum / epochBatchCount : 0f);
-                    runningEpoch = batch.Position.Epoch;
+                    runningEpoch = batchEpoch;
                     epochLossSum = 0f;
                     epochBatchCount = 0;
                 }
-                // TrainStep sets the post-step checkpoint's Loss to this step's loss.
-                epochLossSum += stepped.Loss!.Value;
+                // TrainStep(loader) sets the post-step checkpoint's Loss to this step's loss.
+                epochLossSum += checkpoint.Loss!.Value;
                 epochBatchCount++;
             }
             if (epochBatchCount > 0)

@@ -125,24 +125,27 @@ namespace Shorokoo
     public sealed class TrainingCheckpointArtifactInfo
     {
         /// <summary>Checkpoint format version from the marker tensor
-        /// (<see cref="TrainingCheckpoint"/> writes version 2; the loader reads version 2 only).</summary>
+        /// (<see cref="TrainingCheckpoint"/> writes version 3; the loader reads version 3 only).</summary>
         public long FormatVersion { get; }
 
         /// <summary>The 0-based global training step the checkpoint was saved at.</summary>
         public long Step { get; }
 
-        /// <summary>The 0-based epoch counter the checkpoint was saved at — a host-owned run counter.</summary>
-        public long Epoch { get; }
+        /// <summary>The 0-based epoch counter the checkpoint was saved at — a host-owned run counter —
+        /// or <c>null</c> when the checkpoint records no epoch (its presence-gated scalar is absent, e.g.
+        /// a checkpoint trained without a data loader / explicit counter).</summary>
+        public long? Epoch { get; }
 
-        /// <summary>The 0-based batch index the checkpoint was saved at — a host-owned run counter.</summary>
-        public long BatchIndex { get; }
+        /// <summary>The 0-based batch index the checkpoint was saved at — a host-owned run counter — or
+        /// <c>null</c> when the checkpoint records none (its presence-gated scalar is absent).</summary>
+        public long? BatchIndex { get; }
 
         /// <summary>Per-section tensor listing, keyed "trainable" / "model_state" / "opt_state"
         /// (always all three, possibly empty); tensor names have the section prefix stripped.</summary>
         public IReadOnlyDictionary<string, IReadOnlyList<InspectedTensorInfo>> Sections { get; }
 
         internal TrainingCheckpointArtifactInfo(
-            long formatVersion, long step, long epoch, long batchIndex,
+            long formatVersion, long step, long? epoch, long? batchIndex,
             IReadOnlyDictionary<string, IReadOnlyList<InspectedTensorInfo>> sections)
         {
             FormatVersion = formatVersion;
@@ -251,19 +254,20 @@ namespace Shorokoo
         public long Step { get; }
 
         /// <summary>The 0-based epoch counter the checkpoint was saved at — a host-owned run counter
-        /// (issue #100); 0 for checkpoints written before it existed.</summary>
-        public long Epoch { get; }
+        /// (issue #100) — or <c>null</c> when the manifest omits it (a checkpoint whose position is
+        /// unknown, or one written before the key existed — issue #111).</summary>
+        public long? Epoch { get; }
 
         /// <summary>The 0-based batch index within the current epoch the checkpoint was saved at — a
-        /// host-owned run counter (issue #100); 0 for checkpoints written before it existed.</summary>
-        public long BatchIndex { get; }
+        /// host-owned run counter (issue #100) — or <c>null</c> when the manifest omits it (issue #111).</summary>
+        public long? BatchIndex { get; }
 
         /// <summary>Training-state kind name → the manifest data-registry key that stores it, in
         /// manifest order (the kinds present; an empty struct is omitted).</summary>
         public IReadOnlyList<KeyValuePair<string, string>> Kinds { get; }
 
         internal SkptTrainingSummary(
-            int checkpointVersion, long step, long epoch, long batchIndex,
+            int checkpointVersion, long step, long? epoch, long? batchIndex,
             IReadOnlyList<KeyValuePair<string, string>> kinds)
         {
             CheckpointVersion = checkpointVersion;
@@ -506,8 +510,8 @@ namespace Shorokoo
                 {
                     sb.Append("  training checkpoint: version ").Append(tr.CheckpointVersion)
                       .Append(", global step ").Append(tr.Step)
-                      .Append(", epoch ").Append(tr.Epoch)
-                      .Append(", batch index ").Append(tr.BatchIndex).AppendLine();
+                      .Append(", epoch ").Append(tr.Epoch?.ToString() ?? "unset")
+                      .Append(", batch index ").Append(tr.BatchIndex?.ToString() ?? "unset").AppendLine();
                     sb.Append("  training kinds (").Append(tr.Kinds.Count).AppendLine("):");
                     foreach (var kind in tr.Kinds.Take(MaxListedTensors))
                         sb.Append("    ").Append(kind.Key).Append(" → data entry '")
@@ -522,8 +526,8 @@ namespace Shorokoo
             {
                 sb.Append("  checkpoint format version: ").Append(ckpt.FormatVersion)
                   .Append(", global step: ").Append(ckpt.Step)
-                  .Append(", epoch: ").Append(ckpt.Epoch)
-                  .Append(", batch index: ").Append(ckpt.BatchIndex).AppendLine();
+                  .Append(", epoch: ").Append(ckpt.Epoch?.ToString() ?? "unset")
+                  .Append(", batch index: ").Append(ckpt.BatchIndex?.ToString() ?? "unset").AppendLine();
                 foreach (var (section, tensors) in ckpt.Sections)
                 {
                     sb.Append("  ").Append(section).Append(" (").Append(tensors.Count)
@@ -1152,19 +1156,18 @@ namespace Shorokoo
             observations.AddRange(parsed.Observations);
 
             // A checkpoint saved compressed: the marker is visible in the header, but its
-            // 32-byte [version, step, epoch, batchIndex] payload sits at its declared offset
-            // inside the compressed tensor data (TrainingCheckpoint.Save writes it last).
-            // Reaching it through the non-seekable Zstd stream would mean decompressing
-            // everything before it — not a bounded header read — so the archive keeps the
-            // CompressedSafeTensors kind and the observation says what more is known and why it
-            // stops there.
+            // 16-byte [version, step] payload sits at its declared offset inside the compressed
+            // tensor data (TrainingCheckpoint.Save writes it last). Reaching it through the
+            // non-seekable Zstd stream would mean decompressing everything before it — not a bounded
+            // header read — so the archive keeps the CompressedSafeTensors kind and the observation
+            // says what more is known and why it stops there.
             int markerIndex = parsed.Tensors.FindIndex(
                 t => t.Name == TrainingCheckpoint.CheckpointMarkerName);
             if (markerIndex >= 0)
                 observations.Add(
                     $"the archive's header carries a '{TrainingCheckpoint.CheckpointMarkerName}' " +
                     "marker — a Shorokoo training checkpoint stored compressed — but the marker's " +
-                    $"version/counter payload sits {parsed.Tensors[markerIndex].DataStartOffset} bytes " +
+                    $"version/step payload sits {parsed.Tensors[markerIndex].DataStartOffset} bytes " +
                     "into the compressed tensor data, beyond Inspect's bounded header-only reads; " +
                     "decompress the archive (CompressedFormatUtils.LoadCompressedSafeTensors) to " +
                     "read them.");
@@ -1313,11 +1316,12 @@ namespace Shorokoo
             FileStream stream, long fileLen, long dataStart,
             List<InspectedTensorInfo> tensors, List<string> observations)
         {
-            // Locate the marker in the header listing; its declared extent gives the file
-            // position of its payload bytes. The marker is a fixed 32 bytes:
-            // int64[4] = [version, step, epoch, batchIndex]. Those 32 bytes are the only payload
-            // bytes Inspect ever reads.
-            const int MarkerBytes = 32;
+            // Locate the marker in the header listing; its declared extent gives the file position of
+            // its payload bytes. The marker is a fixed 16 bytes: int64[2] = [version, step] (format v3;
+            // a longer marker from a future/legacy layout is tolerated — only the first 16 bytes are
+            // read). Epoch and batch index moved out into their own presence-gated int64 scalars, read
+            // separately below.
+            const int MarkerBytes = 16;
             int markerIndex = tensors.FindIndex(t => t.Name == TrainingCheckpoint.CheckpointMarkerName);
             if (markerIndex < 0)
                 return null;
@@ -1351,8 +1355,10 @@ namespace Shorokoo
             }
             long version = BitConverter.ToInt64(markerBytes, 0);
             long step = BitConverter.ToInt64(markerBytes, 8);
-            long epoch = BitConverter.ToInt64(markerBytes, 16);
-            long batchIndex = BitConverter.ToInt64(markerBytes, 24);
+            // Epoch and batch index are each their own presence-gated int64 scalar beside the marker
+            // (format v3): read the 8-byte payload of each when present, else null (an unknown position).
+            long? epoch = TryReadInt64Scalar(stream, fileLen, dataStart, tensors, TrainingCheckpoint.CheckpointEpochName);
+            long? batchIndex = TryReadInt64Scalar(stream, fileLen, dataStart, tensors, TrainingCheckpoint.CheckpointBatchName);
 
             if (version > TrainingCheckpoint.CheckpointFormatVersion)
                 observations.Add($"checkpoint format version {version} is newer than this build reads " +
@@ -1383,16 +1389,51 @@ namespace Shorokoo
 
             foreach (var t in tensors)
             {
-                // The marker and the presence-gated loss scalar are the checkpoint's own '/'-free
-                // recognition/run-progress tensors, not section fields — never flag them as stray.
+                // The marker and the presence-gated loss / epoch / batch scalars are the checkpoint's
+                // own '/'-free recognition / run-progress tensors, not section fields — never flag them
+                // as stray.
                 if (t.Name == TrainingCheckpoint.CheckpointMarkerName
-                    || t.Name == TrainingCheckpoint.CheckpointLossName) continue;
+                    || t.Name == TrainingCheckpoint.CheckpointLossName
+                    || t.Name == TrainingCheckpoint.CheckpointEpochName
+                    || t.Name == TrainingCheckpoint.CheckpointBatchName) continue;
                 if (!sectionNames.Any(s => t.Name.StartsWith(s + "/", StringComparison.Ordinal)))
                     observations.Add($"tensor '{t.Name}' sits outside the known checkpoint sections " +
                         $"({string.Join(", ", sectionNames)}).");
             }
 
             return new TrainingCheckpointArtifactInfo(version, step, epoch, batchIndex, sections);
+        }
+
+        /// <summary>
+        /// Reads one presence-gated int64 scalar tensor's 8-byte payload by name (the checkpoint's
+        /// epoch / batch counters), or returns <c>null</c> when it is absent or malformed. Same bounded,
+        /// never-throwing discipline as the marker read: only these 8 bytes are ever read for it, and any
+        /// out-of-bounds offset or seek/read failure degrades to <c>null</c> rather than escaping Inspect.
+        /// </summary>
+        private static long? TryReadInt64Scalar(
+            FileStream stream, long fileLen, long dataStart,
+            List<InspectedTensorInfo> tensors, string name)
+        {
+            const int ScalarBytes = 8;
+            int idx = tensors.FindIndex(t => t.Name == name);
+            if (idx < 0) return null;
+
+            var t = tensors[idx];
+            long start = dataStart + t.DataStartOffset;
+            if (t.DType != "I64" || t.ByteSize < ScalarBytes || start < dataStart || start > fileLen - ScalarBytes)
+                return null;
+
+            var buf = new byte[ScalarBytes];
+            try
+            {
+                stream.Position = start;
+                stream.ReadExactly(buf);
+            }
+            catch (Exception e) when (e is IOException or EndOfStreamException)
+            {
+                return null;
+            }
+            return BitConverter.ToInt64(buf, 0);
         }
     }
 }

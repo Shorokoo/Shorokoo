@@ -151,8 +151,9 @@ namespace Shorokoo
             // Step/epoch/batch are host-owned int64 scalars read straight from the manifest (the
             // manifest training block has stored them as int64 since #102, so #105's in-memory int64
             // widening needs no format change here — no truncation on read). Epoch and batchIndex are
-            // add-only fields (issue #100): a .skpt written before they existed omits them, so they
-            // deserialize to 0 — the "fill new state kinds as absent" rule.
+            // add-only, nullable fields (issues #100 / #111): a .skpt that omits them — one written
+            // before they existed, or one whose position is genuinely unknown — deserializes them to
+            // null, never a sentinel 0.
             var kinds = training.Kinds ?? new Dictionary<string, string>();
 
             bool Want(CheckpointComponents c) => components is null || (components.Value & c) != 0;
@@ -160,10 +161,11 @@ namespace Shorokoo
                 kinds.TryGetValue(kindName, out var key) && !string.IsNullOrEmpty(key);
 
             // Counters (step/epoch/batch) ride with the Counters component; the loss is its own
-            // independent Loss component. Each filtered out ⇒ 0 / null, mirroring the flat path.
+            // independent Loss component. Each filtered out ⇒ 0 (step) / null (epoch, batch, loss),
+            // mirroring the flat path.
             long step = Want(CheckpointComponents.Counters) ? training.Step : 0L;
-            long epoch = Want(CheckpointComponents.Counters) ? training.Epoch : 0L;
-            long batchIndex = Want(CheckpointComponents.Counters) ? training.BatchIndex : 0L;
+            long? epoch = Want(CheckpointComponents.Counters) ? training.Epoch : null;
+            long? batchIndex = Want(CheckpointComponents.Counters) ? training.BatchIndex : null;
             float? loss = Want(CheckpointComponents.Loss) ? training.Loss : null;
 
             TensorDataStruct trainable, modelState, optState;
@@ -481,6 +483,10 @@ namespace Shorokoo
                 {
                     CheckpointVersion = SkptFileFormat.TrainingCheckpointVersion,
                     Step = _checkpoint.Step,
+                    // Epoch / batch index are host-owned run counters that may be genuinely unknown
+                    // (null — no loader / no explicit counter). Nullable and add-only: a null value is
+                    // omitted by the manifest serializer (WhenWritingNull) and reads back null, never a
+                    // sentinel 0.0 — the same presence-gated treatment as the loss below.
                     Epoch = _checkpoint.Epoch,
                     BatchIndex = _checkpoint.BatchIndex,
                     // Loss is a host-owned run-progress scalar, its own savable component (independent

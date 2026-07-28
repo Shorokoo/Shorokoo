@@ -126,14 +126,18 @@ namespace Shorokoo.Core.Utils
         public long Step { get; set; }
 
         /// <summary>The 0-based epoch counter the checkpoint sits at — a host-owned run counter
-        /// (issue #100). Add-only: absent in checkpoints written before it existed, which read as 0.</summary>
+        /// (issue #100), or <c>null</c> when the position is genuinely unknown (a checkpoint trained
+        /// without a data loader / explicit counter — issue #111). Add-only and nullable: the serializer
+        /// omits it when null (never a sentinel 0.0), and a manifest that omits it (a null value, or one
+        /// written before the key existed) reads back as <c>null</c>.</summary>
         [JsonPropertyName("epoch")]
-        public long Epoch { get; set; }
+        public long? Epoch { get; set; }
 
         /// <summary>The 0-based batch index within the current epoch — a host-owned run counter
-        /// (issue #100). Add-only: absent in checkpoints written before it existed, which read as 0.</summary>
+        /// (issue #100), or <c>null</c> when the position is genuinely unknown (issue #111). Add-only and
+        /// nullable on the same terms as <see cref="Epoch"/>: omitted when null, absent ⇒ null.</summary>
         [JsonPropertyName("batchIndex")]
-        public long BatchIndex { get; set; }
+        public long? BatchIndex { get; set; }
 
         /// <summary>The loss of the training step that produced this checkpoint — a host-owned
         /// run-progress scalar, its own savable component (independent of the counters). Add-only and

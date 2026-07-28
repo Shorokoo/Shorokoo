@@ -982,10 +982,10 @@ public class TrainingRigCoverageTests
             Assert.Null(result.Srk);
 
             var info = result.TrainingCheckpoint!;
-            Assert.Equal(2, info.FormatVersion);   // v2 marker: int64 [version, step, epoch, batchIndex] + presence-gated loss
+            Assert.Equal(3, info.FormatVersion);   // v3 marker: int64 [version, step] + presence-gated epoch/batch/loss
             Assert.Equal(5, info.Step);
-            Assert.Equal(0, info.Epoch);           // not set on this checkpoint → default 0
-            Assert.Equal(0, info.BatchIndex);
+            Assert.Null(info.Epoch);               // not set on this checkpoint → unknown (null), never a sentinel 0
+            Assert.Null(info.BatchIndex);
 
             // Per-section listing matches the rig's struct defs field-for-field (names with
             // the section prefix stripped; SGD-momentum carries per-param velocity state,
@@ -1527,13 +1527,13 @@ public class TrainingRigCoverageTests
         var skptPath = Path.Combine(Path.GetTempPath(), $"shrk_i64_{Guid.NewGuid():N}.skpt");
         try
         {
-            // Legacy flat safetensors (v1 marker).
+            // Legacy flat safetensors (v3 marker).
             ckpt.Save(legacyPath);
             var legacy = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(legacyPath);
             Assert.Equal(bigStep, legacy.Step);
             Assert.Equal(bigEpoch, legacy.Epoch);
             Assert.Equal(bigBatch, legacy.BatchIndex);
-            Assert.Equal(2, Persistence.Inspect(legacyPath).TrainingCheckpoint!.FormatVersion);
+            Assert.Equal(3, Persistence.Inspect(legacyPath).TrainingCheckpoint!.FormatVersion);
 
             // Native .skpt manifest.
             Persistence.SaveTrainingCheckpointToSkpt(ckpt, skptPath);
@@ -2001,7 +2001,7 @@ public class TrainingRigCoverageTests
             Assert.Equal(midPos.BatchIndex, reloaded.BatchIndex);
 
             var restored = new InMemoryDataLoader(inM, tgtM, batchSize: 2, shuffle: true, seed: seed);
-            restored.Restore(new DataLoaderPosition(reloaded.Epoch, reloaded.BatchIndex));
+            restored.Restore(new DataLoaderPosition(reloaded.Epoch!.Value, reloaded.BatchIndex!.Value));
             Assert.Equal(midPos, restored.Position);
             Assert.Equal(refTail, TailIndices(restored, features: 1));   // continues from the exact next batch
         }
@@ -2021,6 +2021,106 @@ public class TrainingRigCoverageTests
                 seq.Add((int)vals[r]);
         }
         return seq.ToArray();
+    }
+
+    /// <summary>
+    /// Covers <see cref="TrainingRig.TrainStep(TrainingCheckpoint, IDataLoader, CompiledGraph)"/>: a
+    /// single loader-driven step advances <see cref="TrainingCheckpoint.Step"/> by one, sets the
+    /// checkpoint's epoch / batch to the loader's <b>new</b> (resume) position — the next batch to yield,
+    /// rolling into the next epoch after the last batch — and preserves the rig + loss. Looping this
+    /// overload by hand reproduces <see cref="TrainingRig.Fit(IDataLoader, int, TrainingCheckpoint?, ComputeContext?)"/>
+    /// exactly (same counters and weights), pinning that Fit routes through this one source of truth.
+    /// </summary>
+    [Fact]
+    public void TestTrainStepWithLoaderAdvancesCountersCoverage()
+    {
+        const int features = 4;
+        var rig = LoaderRig(batchSize: 2, features);
+        var (inputs, targets) = IndexDataset(rig, n: 6, features);      // 3 batches/epoch
+        var loader = new InMemoryDataLoader(inputs, targets, batchSize: 2);
+        Assert.Equal(3, loader.BatchesPerEpoch);
+
+        var compiled = ComputeContext.Default.Compile(rig.TrainingStepPureGraph);
+        var ckpt = rig.CreateInitialCheckpoint();
+
+        // Step 1: draws batch (0,0); records the loader's next position (0,1).
+        var s1 = rig.TrainStep(ckpt, loader, compiled);
+        Assert.Equal(1, s1.Step);
+        Assert.Equal(0, s1.Epoch);
+        Assert.Equal(1, s1.BatchIndex);
+        Assert.True(float.IsFinite(s1.Loss!.Value));
+        Assert.Same(rig, s1.Rig);                               // rig preserved via WithCounters
+        Assert.Equal(new DataLoaderPosition(0, 1), loader.Position);
+
+        // Step 2: draws batch (0,1); records (0,2).
+        var s2 = rig.TrainStep(s1, loader, compiled);
+        Assert.Equal(2, s2.Step);
+        Assert.Equal(0, s2.Epoch);
+        Assert.Equal(2, s2.BatchIndex);
+
+        // Step 3: draws the last batch of epoch 0; the loader rolls to (1,0), which the checkpoint records.
+        var s3 = rig.TrainStep(s2, loader, compiled);
+        Assert.Equal(3, s3.Step);
+        Assert.Equal(1, s3.Epoch);
+        Assert.Equal(0, s3.BatchIndex);
+        Assert.Equal(new DataLoaderPosition(1, 0), loader.Position);
+
+        // Hand-looping TrainStep(loader) for one epoch equals Fit(loader, numEpochs: 1): the same
+        // final counters and — since the batch stream is identical — the same trained weights.
+        var fitRig = LoaderRig(batchSize: 2, features);
+        var (fin, ftg) = IndexDataset(fitRig, n: 6, features);
+        var fitLoader = new InMemoryDataLoader(fin, ftg, batchSize: 2);
+        var fitResult = fitRig.Fit(fitLoader, numEpochs: 1);
+        Assert.Equal(fitResult.FinalCheckpoint.Step, s3.Step);
+        Assert.Equal(fitResult.FinalCheckpoint.Epoch, s3.Epoch);
+        Assert.Equal(fitResult.FinalCheckpoint.BatchIndex, s3.BatchIndex);
+        Assert.Equal(FlattenStruct(fitResult.FinalCheckpoint.TrainableParams), FlattenStruct(s3.TrainableParams));
+    }
+
+    /// <summary>
+    /// Covers <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, long, long, CompiledGraph)"/>:
+    /// the explicit epoch / batch overload records the given <c>epoch</c> / <c>batchNumber</c> verbatim on
+    /// the returned checkpoint (with <see cref="TrainingCheckpoint.Step"/> advanced), and feeds them to a
+    /// scheduler as the counters in effect for the step — matching the same rig stepped with a checkpoint
+    /// carrying those counters directly. Negative counters are rejected.
+    /// </summary>
+    [Fact]
+    public void TestTrainStepWithExplicitEpochBatchRecordsCountersCoverage()
+    {
+        var (sample, inputBatch, targetBatch) = ScalarMultiplyBatches();
+        var ctx = new ComputeContext();
+
+        // A rig whose learning rate is a scheduler module reading (step, epoch), so the epoch counter
+        // supplied to the explicit overload demonstrably drives the step (not just gets recorded).
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            sample, new SGDOptimizerHyperparameters { LearningRate = Hyperparameter.Scheduled(StepEpochScheduler.ComputationGraph) });
+        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
+        string wName = rig.TrainableParamStructDef.Fields[0].Name;
+
+        // Explicit overload at (epoch 4, batch 7): the returned checkpoint records exactly those.
+        var initial = rig.CreateInitialCheckpoint();
+        var stepped = rig.TrainStep(initial, inputBatch, targetBatch, epoch: 4, batchNumber: 7, compiled);
+        Assert.Equal(initial.Step + 1, stepped.Step);
+        Assert.Equal(4, stepped.Epoch);
+        Assert.Equal(7, stepped.BatchIndex);
+        Assert.True(float.IsFinite(stepped.Loss!.Value));
+        Assert.Same(rig, stepped.Rig);
+
+        // The supplied epoch is the counter in effect for the step: a reference stepped from a
+        // checkpoint that already carries (step 0, epoch 4) produces the identical weight.
+        var refAt = new TrainingCheckpoint(
+            initial.TrainableParams, initial.ModelState, initial.OptimizerState, step: 0, epoch: 4);
+        var refStep = rig.TrainStep(refAt, inputBatch, targetBatch, compiled);
+        float wExplicit = ((TensorData<float32>)stepped.TrainableParams.Fields[wName]).AccessMemory()[0];
+        float wRef = ((TensorData<float32>)refStep.TrainableParams.Fields[wName]).AccessMemory()[0];
+        Assert.True(MathF.Abs(wExplicit - wRef) < 1e-6f,
+            $"explicit-epoch weight {wExplicit} vs reference {wRef} differ — the supplied epoch did not drive the step.");
+
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => rig.TrainStep(initial, inputBatch, targetBatch, epoch: -1, batchNumber: 0, compiled));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => rig.TrainStep(initial, inputBatch, targetBatch, epoch: 0, batchNumber: -1, compiled));
     }
 
     /// <summary>
@@ -2460,7 +2560,7 @@ public class TrainingRigCoverageTests
 
             var legacyInspect = Persistence.Inspect(legacyPath);
             Assert.Empty(legacyInspect.Observations);
-            Assert.Equal(2, legacyInspect.TrainingCheckpoint!.FormatVersion);
+            Assert.Equal(3, legacyInspect.TrainingCheckpoint!.FormatVersion);
             Assert.Equal(7, legacyInspect.TrainingCheckpoint.Epoch);
             Assert.Equal(340, legacyInspect.TrainingCheckpoint.BatchIndex);
             var legacyText = legacyInspect.ToString();
@@ -2496,7 +2596,9 @@ public class TrainingRigCoverageTests
     /// <summary>
     /// A .skpt manifest whose training block lacks the add-only <c>epoch</c>/<c>batchIndex</c>
     /// keys (a #95-era manifest, written before those counters existed) loads with those
-    /// counters defaulting to 0 — the JSON add-only-field leniency of the .skpt manifest.
+    /// counters read back as <c>null</c> (unknown) — the add-only-field leniency of the .skpt manifest
+    /// combined with the nullable counters (issue #111): an absent key is genuinely unknown, never a
+    /// sentinel 0.
     /// </summary>
     [Fact]
     public void TestSkptWithoutEpochBatchKeysLoadsDefaultsCoverage()
@@ -2514,23 +2616,112 @@ public class TrainingRigCoverageTests
 
             var manifest = SkptFileFormat.ParseManifest(
                 ReadEntryBytesViaBcl(skptPath, SkptFileFormat.ConfigEntryName), skptPath);
-            Assert.Equal(0, manifest.Training!.Epoch);       // absent keys ⇒ 0
-            Assert.Equal(0, manifest.Training.BatchIndex);
+            Assert.Null(manifest.Training!.Epoch);       // absent keys ⇒ null (unknown)
+            Assert.Null(manifest.Training.BatchIndex);
 
             var skptLoaded = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(skptPath);
             Assert.Equal(2, skptLoaded.Step);
-            Assert.Equal(0, skptLoaded.Epoch);
-            Assert.Equal(0, skptLoaded.BatchIndex);
+            Assert.Null(skptLoaded.Epoch);
+            Assert.Null(skptLoaded.BatchIndex);
 
             var skptInspect = Persistence.Inspect(skptPath);
             Assert.Empty(skptInspect.Observations);
-            Assert.Equal(0, skptInspect.Skpt!.Training!.Epoch);
-            Assert.Equal(0, skptInspect.Skpt.Training.BatchIndex);
+            Assert.Null(skptInspect.Skpt!.Training!.Epoch);
+            Assert.Null(skptInspect.Skpt.Training.BatchIndex);
         }
         finally
         {
             if (File.Exists(skptPath)) File.Delete(skptPath);
         }
+    }
+
+    /// <summary>
+    /// Issue #111: a checkpoint with an unknown position — no data loader, no explicit counter — has
+    /// <see cref="TrainingCheckpoint.Epoch"/> / <see cref="TrainingCheckpoint.BatchIndex"/> = <c>null</c>,
+    /// and that null survives a save/load round-trip as null (never a sentinel 0) through <b>both</b> the
+    /// flat safetensors marker (its presence-gated epoch/batch scalars are simply absent) and the .skpt
+    /// manifest (the keys are omitted). <see cref="Persistence.Inspect"/> reports the null counters too.
+    /// </summary>
+    [Fact]
+    public void TestNullEpochBatchCountersRoundTripAsNullCoverage()
+    {
+        // Step comes from training (always concrete); epoch/batch are left unset ⇒ null (unknown).
+        var (_, trained, _, _, _) = BuildTrainedAdamRig(steps: 3);
+        var ckpt = new TrainingCheckpoint(
+            trained.TrainableParams, trained.ModelState, trained.OptimizerState,
+            step: trained.Step, rig: trained.Rig);
+        Assert.Null(ckpt.Epoch);
+        Assert.Null(ckpt.BatchIndex);
+
+        var legacyPath = Path.Combine(Path.GetTempPath(), $"shrk_nullctr_{Guid.NewGuid():N}.safetensors");
+        var skptPath = Path.Combine(Path.GetTempPath(), $"shrk_nullctr_{Guid.NewGuid():N}.skpt");
+        try
+        {
+            // Flat safetensors: the presence-gated epoch/batch scalars are absent, so they reload null.
+            ckpt.Save(legacyPath);
+            var legacy = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(legacyPath);
+            Assert.Equal(trained.Step, legacy.Step);   // step stays concrete
+            Assert.Null(legacy.Epoch);
+            Assert.Null(legacy.BatchIndex);
+
+            var flatInspect = Persistence.Inspect(legacyPath);
+            Assert.Empty(flatInspect.Observations);
+            Assert.Equal(3, flatInspect.TrainingCheckpoint!.FormatVersion);
+            Assert.Null(flatInspect.TrainingCheckpoint.Epoch);
+            Assert.Null(flatInspect.TrainingCheckpoint.BatchIndex);
+            Assert.Contains("epoch: unset", flatInspect.ToString());
+
+            // Native .skpt: the manifest omits epoch/batch, so they reload null too.
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, skptPath);
+            var manifest = SkptFileFormat.ParseManifest(
+                ReadEntryBytesViaBcl(skptPath, SkptFileFormat.ConfigEntryName), skptPath);
+            Assert.Null(manifest.Training!.Epoch);
+            Assert.Null(manifest.Training.BatchIndex);
+
+            var skptLoaded = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(skptPath);
+            Assert.Equal(trained.Step, skptLoaded.Step);
+            Assert.Null(skptLoaded.Epoch);
+            Assert.Null(skptLoaded.BatchIndex);
+        }
+        finally
+        {
+            if (File.Exists(legacyPath)) File.Delete(legacyPath);
+            if (File.Exists(skptPath)) File.Delete(skptPath);
+        }
+    }
+
+    /// <summary>
+    /// Issue #111: a loader-driven run records <b>concrete</b> epoch/batch counters on its checkpoint
+    /// (from the loader), and those survive save/load as concrete values — including a batch index of
+    /// exactly <c>0</c>, which persists as a present scalar valued 0 (NOT omitted, so it reloads as 0,
+    /// never null). This is the concrete-vs-unknown distinction the presence-gating draws.
+    /// </summary>
+    [Fact]
+    public void TestLoaderDrivenRunPersistsConcreteCountersCoverage()
+    {
+        const int features = 4;
+        var rig = LoaderRig(batchSize: 2, features);
+        var (inputs, targets) = IndexDataset(rig, n: 6, features);   // 3 batches/epoch
+        var loader = new InMemoryDataLoader(inputs, targets, batchSize: 2);
+
+        var final = rig.Fit(loader, numEpochs: 1).FinalCheckpoint;
+        Assert.Equal(1, final.Epoch);       // concrete, sourced from the loader
+        Assert.Equal(0, final.BatchIndex);  // concrete 0 (rolled to the next epoch's start)
+
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_concctr_{Guid.NewGuid():N}.safetensors");
+        try
+        {
+            final.Save(path);
+            var loaded = LoaderRig(batchSize: 2, features).LoadCheckpoint(path);
+            Assert.Equal(1, loaded.Epoch);       // concrete value round-trips
+            Assert.Equal(0, loaded.BatchIndex);  // a concrete 0 reloads as 0, not null
+
+            var inspect = Persistence.Inspect(path);
+            Assert.Empty(inspect.Observations);
+            Assert.Equal(1, inspect.TrainingCheckpoint!.Epoch);
+            Assert.Equal(0, inspect.TrainingCheckpoint.BatchIndex);
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -2664,7 +2855,7 @@ public class TrainingRigCoverageTests
         var rig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             sample, 0.1f);
-        var ck = rig.CreateInitialCheckpoint();   // step/epoch/batch = 0
+        var ck = rig.CreateInitialCheckpoint();   // step = 0; epoch/batch = null (no loader / explicit counter)
         Assert.Equal(0, ck.Step);
 
         var moved = ck.WithCounters(step: 5, epoch: 2, batchIndex: 3);
@@ -2676,14 +2867,14 @@ public class TrainingRigCoverageTests
         Assert.Same(ck.TrainableParams, moved.TrainableParams);
         Assert.Same(ck.ModelState, moved.ModelState);
         Assert.Same(ck.OptimizerState, moved.OptimizerState);
-        // Receiver untouched (immutable value).
+        // Receiver untouched (immutable value); its epoch/batch stay unknown (null).
         Assert.Equal(0, ck.Step);
-        Assert.Equal(0, ck.Epoch);
-        Assert.Equal(0, ck.BatchIndex);
+        Assert.Null(ck.Epoch);
+        Assert.Null(ck.BatchIndex);
 
-        // Single-counter helpers carry the others through unchanged.
+        // Single-counter helpers carry the others through unchanged (a null epoch stays null).
         Assert.Equal(9, ck.WithStep(9).Step);
-        Assert.Equal(0, ck.WithStep(9).Epoch);
+        Assert.Null(ck.WithStep(9).Epoch);
         Assert.Equal(7, ck.WithEpoch(7).Epoch);
         Assert.Equal(0, ck.WithEpoch(7).Step);
         Assert.Equal(4, ck.WithBatchIndex(4).BatchIndex);

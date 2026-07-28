@@ -576,18 +576,17 @@ namespace Shorokoo
         /// weight-binding for <see cref="TrainingCheckpoint.ToInferenceModel()"/> and the <c>.skpt</c>
         /// container's self-describing model can never diverge. Consumed read-only (its consumers clone
         /// before mutating), so sharing it across derived rigs preserves immutability.
+        ///
+        /// <para>It is also <b>self-describing for shape inference</b>: each <c>MODEL_TENSOR_INPUT</c>
+        /// node carries a zero-filled representative input on its
+        /// <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInput"/> attribute (shape+dtype-only
+        /// placeholder for large inputs), recording the shape the model was concretized at. The two
+        /// training-graph shape-inference sites reconstruct their <c>sampleInputs[]</c> off these
+        /// attributes (<see cref="ReadRepresentativeInputs"/>), so no separate sample-input field is
+        /// stored on the rig. The attribute is inert for export (a boundary node is not emitted as a
+        /// NodeProto) and rides along on <c>Clone()</c>, so it survives re-seeding.</para>
         /// </summary>
         private InternalComputationGraph _concreteArch = null!;
-
-        /// <summary>
-        /// Zero-filled exemplars carrying only each model input's shape + dtype — the shape metadata
-        /// the training-step shape inference / memory optimizer needs on every (re-)derivation. Derived
-        /// once from the sample inputs at first build and carried by reference across derivations (the
-        /// model inputs never change under a <c>With…</c>); NEVER persisted. These are pure shape
-        /// carriers, NOT the sample inputs: no input VALUES are retained — only concretization (first
-        /// build) ever needed values, and it consumes the construction-time sample inputs directly.
-        /// </summary>
-        private TensorData[] _modelInputExemplars = null!;
 
         /// <summary>The inference-model constituent (a module graph or concrete architecture), as authored.</summary>
         public ComputationGraph ModelConstituent => _constituents.Model;
@@ -946,8 +945,9 @@ namespace Shorokoo
         /// config, and derives the retained concrete arch + its shape exemplars — then hands off to
         /// <see cref="DeriveFromConcreteArch"/> to compose and optimize the trainstep. The sample
         /// inputs are consumed here (parameter shape resolution, liveness pruning, concretization value
-        /// fallbacks) and NOT stored: everything the derivation path later needs is captured as the
-        /// concrete arch (structure + RNG identity) and the zero-filled input-shape exemplars.
+        /// fallbacks) and NOT stored: everything the derivation path later needs is captured on the
+        /// concrete arch itself (structure + RNG identity + the representative-input attributes written
+        /// onto its <c>MODEL_TENSOR_INPUT</c> nodes below).
         /// </summary>
         private static TrainingRig BuildInitialRig(RigConstituents constituents, NamedModelParam[] sampleInputs)
         {
@@ -981,26 +981,28 @@ namespace Shorokoo
             // into the training-step graph, where the ONNX-prep lowering emits the keyed draws.
             concreteArch.ApplyRngConfig(c.RngConfig);
 
-            // Distil the sample inputs to shape exemplars (zero-filled, shape+dtype only) — the shape
-            // metadata every re-derivation's shape inference needs, retained WITHOUT retaining values.
-            var exemplars = sampleInputs.Select(p => ZeroExemplar(p.ToTensorData())).ToArray();
+            // Make the concrete arch self-describing: record a representative input on each model-input
+            // node (zero-filled, shape+dtype only — never the user's values), so every re-derivation's
+            // shape inference reconstructs its sampleInputs off the arch and no separate exemplar field
+            // is stored. Done once here; the attributes ride along on Clone() and survive re-seeding.
+            WriteRepresentativeInputs(concreteArch, sampleInputs);
 
-            return DeriveFromConcreteArch(c, concreteArch, exemplars);
+            return DeriveFromConcreteArch(c, concreteArch);
         }
 
         /// <summary>
         /// The <b>derivation path</b> — shared by the initial build (once its concrete arch exists) and
         /// every <c>With…</c> derivation. Reuses the already-<paramref name="concreteArch"/> (NO
         /// <c>ToConcreteArchitecture</c>, NO sample inputs — the model constituent never changes under a
-        /// derivation) and its <paramref name="modelInputExemplars"/>, re-validates the swappable loss /
-        /// optimizer constituent kinds, composes the in-memory <c>trainstep</c>, and initializes /
-        /// optimizes it. The receiver is never mutated: the concrete arch and exemplars are shared by
-        /// reference (their consumers clone before mutating); only the trainstep is derived anew.
+        /// derivation; the shape metadata shape inference needs is read off the arch's own
+        /// representative-input attributes), re-validates the swappable loss / optimizer constituent
+        /// kinds, composes the in-memory <c>trainstep</c>, and initializes / optimizes it. The receiver
+        /// is never mutated: the concrete arch is shared by reference (its consumers clone before
+        /// mutating); only the trainstep is derived anew.
         /// </summary>
         private static TrainingRig DeriveFromConcreteArch(
             RigConstituents constituents,
-            InternalComputationGraph concreteArch,
-            TensorData[] modelInputExemplars)
+            InternalComputationGraph concreteArch)
         {
             var c = constituents;
             ValidateConstituents(c);
@@ -1019,23 +1021,81 @@ namespace Shorokoo
             {
                 _constituents = c,
                 _concreteArch = concreteArch,
-                _modelInputExemplars = modelInputExemplars,
             };
             rig.BuildTrainingStepPureGraph(
                 concreteArch, c.Loss.ToInternal(), c.Optimizer.ToInternal(), c.Hyperparameters, c.Names);
-            rig.InitializeAndOptimize(concreteArch, modelInputExemplars, ctx, c.RngConfig);
+            rig.InitializeAndOptimize(concreteArch, ctx, c.RngConfig);
             return rig;
         }
 
         /// <summary>
-        /// A zero-filled tensor with the same shape and dtype as <paramref name="sample"/> — a pure
-        /// shape carrier for shape inference, holding no sample-input values.
+        /// Writes a representative input onto each of the concrete arch's <c>MODEL_TENSOR_INPUT</c> nodes
+        /// (in graph-input order, one per <paramref name="sampleInputs"/>), making the arch self-describing
+        /// for training-graph shape inference. The value is <b>zero-filled</b> (never the user's sample
+        /// values) and <b>shape-limited</b> by QEE's own threshold: inputs with at most
+        /// <see cref="Shorokoo.Core.Inference.QuickExecutionEngine.DefaultMaxDataElements"/> elements get a
+        /// real zero payload; larger ones get a shape+dtype-only placeholder (no payload), which is all
+        /// QEE keeps for a tensor over that threshold anyway. Only concretization (already done) needed
+        /// input values; from here on only shapes matter, so this records exactly the shape metadata.
         /// </summary>
-        private static TensorData ZeroExemplar(TensorData sample)
+        private static void WriteRepresentativeInputs(InternalComputationGraph concreteArch, NamedModelParam[] sampleInputs)
         {
-            var bytesPerElement = sample.DType.EncodingBitCount / 8;
-            var zeroBytes = new byte[sample.Shape.Count * bytesPerElement];
-            return TensorData.CreateFromRawBytes(sample.Shape, sample.DType, zeroBytes);
+            if (concreteArch.Inputs.Count != sampleInputs.Length)
+                throw new InvalidOperationException(
+                    $"Concrete arch has {concreteArch.Inputs.Count} input(s) but {sampleInputs.Length} " +
+                    "sample input(s) were supplied; they must correspond one-to-one in declaration order.");
+            var producerByOutput = BuildProducerByOutputMap(concreteArch);
+            for (int i = 0; i < concreteArch.Inputs.Count; i++)
+            {
+                if (!producerByOutput.TryGetValue(concreteArch.Inputs[i], out var node))
+                    throw new InvalidOperationException(
+                        $"Concrete arch input {concreteArch.Inputs[i]} has no producing node.");
+                if (node.OpCode != InternalOpCodes.MODEL_TENSOR_INPUT) continue;
+                var sample = sampleInputs[i].ToTensorData();
+                node.Attributes = node.Attributes.SetAttributes(
+                    (OnnxOpAttributeNames.ShrkAttrRepresentativeInput,
+                     (object?)RepresentativeInputFor(sample.Shape, sample.DType)));
+            }
+        }
+
+        /// <summary>
+        /// Reconstructs the <c>sampleInputs[]</c> array for shape inference off the concrete arch's
+        /// representative-input attributes (in graph-input order) — the derivation-path counterpart of
+        /// <see cref="WriteRepresentativeInputs"/>. Each stored tensor is fed straight to
+        /// <see cref="ShapeInferenceInterpreter"/>: a small one carries real zeros; a large one is a
+        /// shape+dtype-only placeholder that QEE reads shape-only (it never touches the tensor's memory
+        /// for a tensor above its threshold), so no large buffer is ever materialized.
+        /// </summary>
+        private static TensorData[] ReadRepresentativeInputs(InternalComputationGraph concreteArch)
+        {
+            var producerByOutput = BuildProducerByOutputMap(concreteArch);
+            var inputs = new TensorData[concreteArch.Inputs.Count];
+            for (int i = 0; i < concreteArch.Inputs.Count; i++)
+            {
+                if (!producerByOutput.TryGetValue(concreteArch.Inputs[i], out var node)
+                    || node.OpCode != InternalOpCodes.MODEL_TENSOR_INPUT)
+                    throw new InvalidOperationException(
+                        $"Concrete arch input {concreteArch.Inputs[i]} is not a MODEL_TENSOR_INPUT node; " +
+                        "cannot read its representative input.");
+                inputs[i] = node.Attributes.GetTensorVal(OnnxOpAttributeNames.ShrkAttrRepresentativeInput)
+                    ?? throw new InvalidOperationException(
+                        "Concrete arch input node carries no representative-input attribute; the rig was " +
+                        "not built through BuildInitialRig (which records it on every model input).");
+            }
+            return inputs;
+        }
+
+        /// <summary>
+        /// A zero-filled representative tensor for shape inference: a real zero payload when the element
+        /// count is within QEE's <see cref="Shorokoo.Core.Inference.QuickExecutionEngine.DefaultMaxDataElements"/>
+        /// threshold, else a shape+dtype-only placeholder (no allocation). Holds no sample-input values.
+        /// </summary>
+        private static TensorData RepresentativeInputFor(Shape shape, DType dtype)
+        {
+            if (shape.Count > Shorokoo.Core.Inference.QuickExecutionEngine.DefaultMaxDataElements)
+                return new WeightPlaceholderTensorData(shape, dtype);
+            var bytesPerElement = dtype.EncodingBitCount / 8;
+            return TensorData.CreateFromRawBytes(shape, dtype, new byte[shape.Count * bytesPerElement]);
         }
 
         // ───────────────────── Two-layer rig: immutable derivations (§5.8.5) ─────────────────────
@@ -1047,12 +1107,13 @@ namespace Shorokoo
 
         /// <summary>
         /// A new rig with the loss constituent replaced; its <c>trainstep</c> is re-derived, and the
-        /// model, optimizer, hyperparameters, sample inputs and RNG config are shared by reference.
+        /// model (its retained concrete arch), optimizer, hyperparameters and RNG config are shared by
+        /// reference.
         /// </summary>
         public TrainingRig WithLoss(ComputationGraph loss)
         {
             if (loss is null) throw new ArgumentNullException(nameof(loss));
-            return DeriveFromConcreteArch(_constituents with { Loss = loss }, _concreteArch, _modelInputExemplars);
+            return DeriveFromConcreteArch(_constituents with { Loss = loss }, _concreteArch);
         }
 
         /// <summary>
@@ -1068,7 +1129,7 @@ namespace Shorokoo
                 Optimizer = optimizer,
                 Hyperparameters = hyperparameters.InOptimizerOrder(),
                 Names = hyperparameters.HyperparameterNames,
-            }, _concreteArch, _modelInputExemplars);
+            }, _concreteArch);
         }
 
         /// <summary>Positional-hyperparameter overload of <see cref="WithOptimizer(ComputationGraph, IOptimizerHyperparameters)"/>.</summary>
@@ -1078,7 +1139,7 @@ namespace Shorokoo
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
             return DeriveFromConcreteArch(
                 _constituents with { Optimizer = optimizer, Hyperparameters = hyperparameters, Names = null },
-                _concreteArch, _modelInputExemplars);
+                _concreteArch);
         }
 
         /// <summary>
@@ -1094,7 +1155,7 @@ namespace Shorokoo
             {
                 Hyperparameters = hyperparameters.InOptimizerOrder(),
                 Names = hyperparameters.HyperparameterNames,
-            }, _concreteArch, _modelInputExemplars);
+            }, _concreteArch);
         }
 
         /// <summary>Positional-hyperparameter overload of <see cref="WithScheduler(IOptimizerHyperparameters)"/>.</summary>
@@ -1103,7 +1164,7 @@ namespace Shorokoo
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
             return DeriveFromConcreteArch(
                 _constituents with { Hyperparameters = hyperparameters, Names = null },
-                _concreteArch, _modelInputExemplars);
+                _concreteArch);
         }
 
         /// <summary>
@@ -1123,10 +1184,11 @@ namespace Shorokoo
         {
             if (rngConfig is null) throw new ArgumentNullException(nameof(rngConfig));
             // Rebind the new RNG identity on a clone (ApplyRngConfig mutates), keeping this rig's
-            // retained arch pristine. The shape exemplars are unchanged (same model inputs).
+            // retained arch pristine. Clone() copies node attributes by reference, so the clone's
+            // MODEL_TENSOR_INPUT nodes still carry the representative-input attributes (same model inputs).
             var reArch = _concreteArch.Clone();
             reArch.ApplyRngConfig(rngConfig);
-            return DeriveFromConcreteArch(_constituents with { RngConfig = rngConfig }, reArch, _modelInputExemplars);
+            return DeriveFromConcreteArch(_constituents with { RngConfig = rngConfig }, reArch);
         }
 
         /// <summary>
@@ -2356,10 +2418,15 @@ namespace Shorokoo
         /// </summary>
         private void InitializeAndOptimize(
             InternalComputationGraph concreteArch,
-            TensorData[] modelInputExemplars,
             ComputeContext ctx,
             RngConfig? rngConfig = null)
         {
+            // The model inputs for shape inference are read off the concrete arch's own
+            // representative-input attributes (recorded once at BuildInitialRig) — no separate
+            // sample-input field. Zero-filled shapes for small inputs; shape+dtype-only placeholders
+            // for large ones (QEE keeps those shape-only anyway), so no big buffer is materialized.
+            var modelInputExemplars = ReadRepresentativeInputs(concreteArch);
+
             // Step 1: walk concreteArch's MODEL_PARAM nodes in linear order to capture
             // each one's (ModelId, isTrainable). The same linear order is what Phase 1's
             // FastReplaceTrainableParamsWithInputProcessor used to build the param /

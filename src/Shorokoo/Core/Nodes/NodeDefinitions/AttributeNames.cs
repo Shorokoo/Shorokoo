@@ -258,6 +258,13 @@ public static class OnnxOpAttributeNames
     public const string ShrkAttrRank = "shrk_rank";
     public const string ShrkAttrShape = "shrk_shape";
     public const string ShrkAttrTensorData = "shrk_tensor_data";
+    /// <summary>Optional, on a MODEL_TENSOR_INPUT node only: a zero-filled representative input tensor
+    /// (or a shape+dtype-only placeholder for large inputs) recording the shape the model was
+    /// concretized at, so a concrete architecture is self-describing for training-graph shape inference
+    /// without carrying separate sample inputs. Never a real graph-input value — a boundary/input node
+    /// is emitted as a ValueInfoProto (its attributes are not serialized), so this stays inert for
+    /// ONNX export / .srk save / Compile.</summary>
+    public const string ShrkAttrRepresentativeInput = "shrk_representative_input";
     public const string ShrkAttrStructure = "shrk_structure";
     public const string ShrkAttrDtype = "shrk_dtype";
     public const string ShrkAttrFunctionName = "shrk_function_name";

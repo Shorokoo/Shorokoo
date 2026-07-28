@@ -87,7 +87,7 @@ metadata), sharing one on-disk format with inference checkpoints.
 ```csharp
 using Shorokoo;   // Persistence, TrainingRig, TrainingCheckpoint
 
-// checkpoint: a TrainingCheckpoint from rig.CreateDefaultCheckpoint() / TrainStep().
+// checkpoint: a TrainingCheckpoint from rig.CreateInitialCheckpoint() / TrainStep().
 // exampleInput: any sample model input — only its shape matters (drives concretization).
 Persistence.SaveTrainingCheckpointToSkpt(
     checkpoint, modelGraph, exampleInput, "run.skpt");

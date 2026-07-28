@@ -50,14 +50,14 @@ var savePath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "readme-vali
 result.FinalCheckpoint.Save(savePath);
 Console.WriteLine($"Checkpoint saved to: {savePath}");
 
-var inferenceInput = TensorData([1L, 8L], new float[] { 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f });
-var concrete       = result.FinalCheckpoint.ToInferenceModel(model, inferenceInput);
+var inferenceInput = TensorData([4L, 8L], new float[32]);   // same [4 × 8] shape the rig trained on
+var concrete       = result.FinalCheckpoint.ToInferenceModel();
 
 ReadOnlySpan<float> prediction = ComputeContext.Default
     .Execute(concrete, inferenceInput)[0]
     .ToTensorData<float32>().AccessMemory();
 
 Console.WriteLine($"Inference output ({prediction.Length} values): [{string.Join(", ", prediction.ToArray())}]");
-if (prediction.Length != 8) throw new Exception($"Expected 8 output values, got {prediction.Length}");
+if (prediction.Length != 32) throw new Exception($"Expected 32 output values, got {prediction.Length}");
 
 Console.WriteLine("\nREADME validation passed.");

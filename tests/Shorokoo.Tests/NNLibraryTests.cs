@@ -1134,7 +1134,7 @@ public class NNLibraryTrainingCoverageTests
         var rig = TrainingRig.FromScratch(modelGraph, lossGraph, optimizerGraph,
             new NamedModelParam[] { sampleInput }, hyperparams);
 
-        var checkpoint = rig.CreateDefaultCheckpoint();
+        var checkpoint = rig.CreateInitialCheckpoint();
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
         Assert.NotNull(checkpoint.TrainableParams);
     }
@@ -1230,7 +1230,7 @@ public class NNLibraryTrainingCoverageTests
             BilinearRigModel.ComputationGraph, L2Loss.ComputationGraph, AdamOptimizer.ComputationGraph,
             sample, 0.01f, 0.9f, 0.999f, 1e-8f);
 
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
 
         // Locate the rank-3 A weight field [out, in1, in2] (the bias is rank 1).
@@ -1293,7 +1293,7 @@ public class NNLibraryTrainingCoverageTests
             EmbeddingPaddingRigModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             sample, 0.1f);
 
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
 
         // Locate the embedding weight field [4, 3] (the only trainable param).
@@ -1340,7 +1340,7 @@ public class NNLibraryTrainingCoverageTests
             EmbeddingBagRigModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             sample, 0.1f);
 
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
 
         // Locate the embedding table field [5, 3] (the only trainable param).
@@ -1397,7 +1397,7 @@ public class NNLibraryTrainingCoverageTests
             NNTripletEmbeddingRigModel.ComputationGraph, NNIdentityScalarLoss.ComputationGraph,
             AdamOptimizer.ComputationGraph, sample, 0.01f, 0.9f, 0.999f, 1e-8f);
 
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
 
         // Locate the Linear embedding weight (the rank-2 [out, in] = [2, 2] param).
@@ -1457,7 +1457,7 @@ public class NNLibraryTrainingCoverageTests
             NNCosineEmbeddingRigModel.ComputationGraph, NNIdentityScalarLoss.ComputationGraph,
             AdamOptimizer.ComputationGraph, sample, 0.01f, 0.9f, 0.999f, 1e-8f);
 
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
 
         // Locate the Linear embedding weight (the rank-2 [out, in] = [2, 2] param).
@@ -1504,7 +1504,7 @@ public class NNLibraryTrainingCoverageTests
             },
             hyperparams);
 
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
 
         var ctx = new ComputeContext();
@@ -1541,7 +1541,7 @@ public class NNLibraryTrainingCoverageTests
             },
             hyperparams);
 
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
 
         var ctx = new ComputeContext();
@@ -1612,7 +1612,7 @@ public class NNLibraryTrainingCoverageTests
             },
             lr, 0.9f, 0.999f, 1e-8f);
 
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
 
@@ -1662,7 +1662,7 @@ public class NNLibraryTrainingCoverageTests
         var inputBatch = MakeBatch("input", "ModelInput", inputData);
         var targetBatch = MakeBatch("targets", "Target", targetData);
 
-        var ckpt = rig.CreateDefaultCheckpoint();
+        var ckpt = rig.CreateInitialCheckpoint();
         var losses = new List<float>();
         for (int i = 0; i < 150; i++)
         {
@@ -1713,7 +1713,7 @@ public class NNLibraryTrainingCoverageTests
         var inputBatch = MakeBatch("input", "ModelInput", inputData);
         var targetBatch = MakeBatch("targets", "Target", targetData);
 
-        var ckpt = rig.CreateDefaultCheckpoint();
+        var ckpt = rig.CreateInitialCheckpoint();
         var losses = new List<float>();
         for (int i = 0; i < 15; i++)
         {
@@ -1762,7 +1762,7 @@ public class NNLibraryTrainingCoverageTests
 
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", targetData),
@@ -1803,7 +1803,7 @@ public class NNLibraryTrainingCoverageTests
 
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", targetData),
@@ -1864,7 +1864,7 @@ public class NNLibraryTrainingCoverageTests
 
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", targetData),
@@ -1909,7 +1909,7 @@ public class NNLibraryTrainingCoverageTests
         long outTotal = 1;
         foreach (var d in outShape) outTotal *= d;
         var targetData = TensorData(outShape, new float[outTotal]);
-        return rig.TrainStep(rig.CreateDefaultCheckpoint(),
+        return rig.TrainStep(rig.CreateInitialCheckpoint(),
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", targetData),
             compiled);
@@ -2076,7 +2076,7 @@ public class NNLibraryTrainingCoverageTests
             new NamedModelParam[] { new TensorDataModelParam("input", ModelParamType.InputParam, inputData) }, 0.1f);
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", TensorData(outShape, new float[outTotal])),
@@ -2251,7 +2251,7 @@ public class NNLibraryTrainingCoverageTests
             new NamedModelParam[] { new TensorDataModelParam("input", ModelParamType.InputParam, inputData) }, 0f);
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var step = rig.TrainStep(rig.CreateDefaultCheckpoint(),
+        var step = rig.TrainStep(rig.CreateInitialCheckpoint(),
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", TensorData(outShape, new float[outTotal])),
             compiled);
@@ -2276,7 +2276,7 @@ public class NNLibraryTrainingCoverageTests
             var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
                 new NamedModelParam[] { new TensorDataModelParam("input", ModelParamType.InputParam, inputData) }, 0f);
             var compiled = new ComputeContext().Compile(rig.TrainingStepPureGraph);
-            var fresh = rig.CreateDefaultCheckpoint();
+            var fresh = rig.CreateInitialCheckpoint();
             var injected = InjectModelState(fresh.ModelState, injectedState);
             var ckpt = new TrainingCheckpoint(fresh.TrainableParams, injected, fresh.OptimizerState, fresh.Step);
             var step = rig.TrainStep(ckpt,
@@ -2330,7 +2330,7 @@ public class NNLibraryTrainingCoverageTests
 
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", targetData),
@@ -2372,7 +2372,7 @@ public class NNLibraryTrainingCoverageTests
 
             var ctx = new ComputeContext();
             var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-            var initial = rig.CreateDefaultCheckpoint();
+            var initial = rig.CreateInitialCheckpoint();
             var step = rig.TrainStep(initial,
                 MakeBatch("input", "ModelInput", inputData),
                 MakeBatch("targets", "Target", targetData),
@@ -2396,7 +2396,7 @@ public class NNLibraryTrainingCoverageTests
 
             var ctx = new ComputeContext();
             var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-            var initial = rig.CreateDefaultCheckpoint();
+            var initial = rig.CreateInitialCheckpoint();
             Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
 
             string wName = rig.TrainableParamStructDef.Fields[0].Name;
@@ -2444,7 +2444,7 @@ public class NNLibraryTrainingCoverageTests
 
             var ctx = new ComputeContext();
             var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-            var initial = rig.CreateDefaultCheckpoint();
+            var initial = rig.CreateInitialCheckpoint();
             var step = rig.TrainStep(initial,
                 MakeBatch("input", "ModelInput", inputData),
                 MakeBatch("targets", "Target", targetData),
@@ -2468,7 +2468,7 @@ public class NNLibraryTrainingCoverageTests
 
             var ctx = new ComputeContext();
             var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-            var initial = rig.CreateDefaultCheckpoint();
+            var initial = rig.CreateInitialCheckpoint();
             string wName = rig.TrainableParamStructDef.Fields[0].Name;
             float w0 = Floats(initial.TrainableParams.Fields[wName])[0];
 
@@ -2492,7 +2492,7 @@ public class NNLibraryTrainingCoverageTests
 
             var ctx = new ComputeContext();
             var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-            var initial = rig.CreateDefaultCheckpoint();
+            var initial = rig.CreateInitialCheckpoint();
             string wName = rig.TrainableParamStructDef.Fields[0].Name;
             float w0 = Floats(initial.TrainableParams.Fields[wName])[0];
 
@@ -2552,7 +2552,7 @@ public class NNLibraryTrainingCoverageTests
 
             var ctx = new ComputeContext();
             var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-            var initial = rig.CreateDefaultCheckpoint();
+            var initial = rig.CreateInitialCheckpoint();
             var step = rig.TrainStep(initial,
                 MakeBatch("input", "ModelInput", inputData),
                 MakeBatch("targets", "Target", targetData),
@@ -2596,7 +2596,7 @@ public class NNLibraryTrainingCoverageTests
             hypers);
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var ckpt = rig.CreateDefaultCheckpoint();
+        var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < steps; i++)
             ckpt = rig.TrainStep(ckpt,
                 MakeBatch("input", "AnalyticIn", TensorData(inShape, input)),
@@ -2959,7 +2959,7 @@ public class NNLibraryTrainingCoverageTests
         var inputBatch = MakeBatch("input", "ModelInput", inputData);
         var targetBatch = MakeBatch("targets", "Target", targetData);
 
-        var ckpt = rig.CreateDefaultCheckpoint();
+        var ckpt = rig.CreateInitialCheckpoint();
         var losses = new List<float>();
         for (int i = 0; i < 150; i++)
         {
@@ -3102,7 +3102,7 @@ public class NNLibraryTrainingCoverageTests
 
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", targetData),
@@ -3179,7 +3179,7 @@ public class NNLibraryTrainingCoverageTests
 
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", targetData),
@@ -3270,7 +3270,7 @@ public class NNLibraryTrainingCoverageTests
 
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", targetData),

@@ -61,7 +61,7 @@ public class LossInitTrainingTests
             },
             0.01f);
 
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
 
         var modelInputDef = new TensorStructDef(
             new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32) },

@@ -192,7 +192,7 @@ public class NormActTrainingCoverageTests
 
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", targetData),
@@ -279,7 +279,7 @@ public class NormActTrainingCoverageTests
             Inputs(), 0.01f);
         Assert.Single(cwRig.TrainableParamStructDef.Fields);
         var cwSlope = cwRig.TrainableParamStructDef.Fields[0];
-        var cwInit = cwRig.CreateDefaultCheckpoint();
+        var cwInit = cwRig.CreateInitialCheckpoint();
         Assert.Equal((int)c, Floats(cwInit.TrainableParams.Fields[cwSlope.Name]).Length);
 
         // Shared sibling: its slope is [1] (1 element) regardless of C.
@@ -288,7 +288,7 @@ public class NormActTrainingCoverageTests
             Inputs(), 0.01f);
         Assert.Single(sharedRig.TrainableParamStructDef.Fields);
         var sharedSlope = sharedRig.TrainableParamStructDef.Fields[0];
-        var sharedInit = sharedRig.CreateDefaultCheckpoint();
+        var sharedInit = sharedRig.CreateInitialCheckpoint();
         Assert.Equal(1, Floats(sharedInit.TrainableParams.Fields[sharedSlope.Name]).Length);
     }
 
@@ -328,7 +328,7 @@ public class NormActTrainingCoverageTests
 
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
 
         // Sanity: the single slope param is [C] and starts uniform at 0.25.
         Assert.Single(rig.TrainableParamStructDef.Fields);

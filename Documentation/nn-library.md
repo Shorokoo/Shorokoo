@@ -1176,7 +1176,7 @@ static TensorDataStruct MakeBatch(string field, string structName, TensorData da
 var inputBatch  = MakeBatch("input", "ModelInput", inputData);
 var targetBatch = MakeBatch("targets", "Target", targetData);
 
-var ckpt = rig.CreateDefaultCheckpoint();
+var ckpt = rig.CreateInitialCheckpoint();
 for (int i = 0; i < 15; i++)
 {
     var step = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled);

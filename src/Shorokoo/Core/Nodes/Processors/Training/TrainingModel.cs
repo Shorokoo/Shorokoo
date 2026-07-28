@@ -22,6 +22,31 @@ using System.Linq;
 namespace Shorokoo
 {
     /// <summary>
+    /// Selects which parts of a <see cref="TrainingCheckpoint"/> a save writes or a load reads. Combine
+    /// with <c>|</c>; pass <c>null</c> to <see cref="TrainingCheckpoint.Save(string, CheckpointComponents?)"/>
+    /// / <see cref="TrainingCheckpoint.Load"/> for "every available component" on save and "everything
+    /// present" on load.
+    /// </summary>
+    [Flags]
+    public enum CheckpointComponents
+    {
+        /// <summary>No component.</summary>
+        None = 0,
+        /// <summary>The rig's constituent model/loss/optimizer graphs, hyperparameters and RNG config —
+        /// enough to rebuild the whole rig from the file alone. Serialization not yet implemented
+        /// (Shorokoo/Shorokoo#115); requesting it throws.</summary>
+        TrainingRig = 1 << 0,
+        /// <summary>Trainable parameters plus model state — everything the inference model binds.</summary>
+        InferenceState = 1 << 1,
+        /// <summary>Optimizer state (moment buffers, scalar timesteps, …).</summary>
+        OptimizerState = 1 << 2,
+        /// <summary>The host-owned run counters: step, epoch, batch index.</summary>
+        Counters = 1 << 3,
+        /// <summary>Every component.</summary>
+        All = TrainingRig | InferenceState | OptimizerState | Counters,
+    }
+
+    /// <summary>
     /// Holds the full training state between training steps.
     /// </summary>
     public class TrainingCheckpoint
@@ -59,15 +84,40 @@ namespace Shorokoo
         /// </summary>
         public long BatchIndex { get; }
 
+        /// <summary>
+        /// The <see cref="TrainingRig"/> this checkpoint belongs to, or <c>null</c> for a bare
+        /// checkpoint constructed without one. Every rig-produced checkpoint carries its rig
+        /// (<see cref="TrainingRig.CreateInitialCheckpoint()"/>, <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>,
+        /// <see cref="TrainingRig.Train"/>/<see cref="TrainingRig.Fit"/>, load, and
+        /// <see cref="TrainingRig.AdoptCheckpoint"/> all set it), so <see cref="ToInferenceModel()"/>
+        /// can extract the inference model with no re-supplied graph. The rig does not store
+        /// checkpoints, so there is no reference cycle. Attach one to a bare checkpoint via
+        /// <see cref="TrainingRig.AdoptCheckpoint"/>.
+        /// </summary>
+        public TrainingRig? Rig { get; }
+
+        /// <summary>
+        /// The loss computed for the training step that produced this checkpoint, or <c>null</c> on an
+        /// initial or bare checkpoint that no step produced. Set by
+        /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>
+        /// to that step's loss (it also appears on <see cref="TrainingStepResult.Loss"/>). Carried
+        /// unchanged through the counter derivations.
+        /// </summary>
+        public float? Loss { get; }
+
         /// <summary>Packages trainable params, model state and optimizer state at
-        /// <paramref name="step"/> / <paramref name="epoch"/> / <paramref name="batchIndex"/>.</summary>
+        /// <paramref name="step"/> / <paramref name="epoch"/> / <paramref name="batchIndex"/>,
+        /// optionally attaching the producing <paramref name="rig"/> and the <paramref name="loss"/>
+        /// of the step that produced it.</summary>
         public TrainingCheckpoint(
             TensorDataStruct trainableParams,
             TensorDataStruct modelState,
             TensorDataStruct optimizerState,
             long step = 0,
             long epoch = 0,
-            long batchIndex = 0)
+            long batchIndex = 0,
+            TrainingRig? rig = null,
+            float? loss = null)
         {
             TrainableParams = trainableParams ?? throw new ArgumentNullException(nameof(trainableParams));
             ModelState = modelState ?? throw new ArgumentNullException(nameof(modelState));
@@ -75,6 +125,8 @@ namespace Shorokoo
             Step = step;
             Epoch = epoch;
             BatchIndex = batchIndex;
+            Rig = rig;
+            Loss = loss;
         }
 
         // ---- Counter derivations (§5.8.5): step/epoch/batch are host-owned scalars, not rig
@@ -90,7 +142,7 @@ namespace Shorokoo
         /// </summary>
         public TrainingCheckpoint WithCounters(long? step = null, long? epoch = null, long? batchIndex = null)
             => new(TrainableParams, ModelState, OptimizerState,
-                step ?? Step, epoch ?? Epoch, batchIndex ?? BatchIndex);
+                step ?? Step, epoch ?? Epoch, batchIndex ?? BatchIndex, Rig, Loss);
 
         /// <summary>A new checkpoint with <see cref="Step"/> set (epoch/batch carried through).</summary>
         public TrainingCheckpoint WithStep(long step) => WithCounters(step: step);
@@ -106,19 +158,29 @@ namespace Shorokoo
         /// <summary>
         /// Builds a concrete inference model from this checkpoint's trained weights in one call,
         /// encapsulating the full <c>ToConcreteArchitecture → weights → ToConcreteModel</c> pipeline.
+        /// Requires an attached <see cref="Rig"/> (the model graph and sample inputs come from it):
+        /// the rig's model constituent is concretized at <b>all</b> the rig's stored sample inputs
+        /// (so a multi-input model is supported), then this checkpoint's trainable params and model
+        /// state are bound by canonical identity. Attach a rig first via
+        /// <see cref="TrainingRig.AdoptCheckpoint"/> — or load the checkpoint against a rig — if this
+        /// one has none.
         /// </summary>
-        public ComputationGraph ToInferenceModel(ComputationGraph modelGraph, TensorData exampleInput)
+        public ComputationGraph ToInferenceModel()
         {
-            if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
-            var g = TrainingRig.RequireModelGraphKind(modelGraph, nameof(ToInferenceModel));
-            return new ComputationGraph(ToInferenceModelCore(g, exampleInput), GraphKind.ConcreteModel);
+            if (Rig is null)
+                throw new InvalidOperationException(
+                    "ToInferenceModel() requires a training rig, but this checkpoint has none attached. " +
+                    "Adopt one via rig.AdoptCheckpoint(checkpoint), or load the checkpoint against a rig " +
+                    "(rig.LoadCheckpoint(path)), then call ToInferenceModel().");
+            return Rig.ExtractInferenceModel(this);
         }
 
-        internal InternalComputationGraph ToInferenceModelCore(InternalComputationGraph modelGraph, TensorData exampleInput)
+        internal InternalComputationGraph ToInferenceModelCore(InternalComputationGraph modelGraph, TensorData[] exampleInputs)
         {
             if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
-            if (exampleInput is null) throw new ArgumentNullException(nameof(exampleInput));
-            var arch    = modelGraph.ToConcreteArchitecture(modelGraph.FromOrderedInputs([exampleInput]));
+            if (exampleInputs is null || exampleInputs.Length == 0)
+                throw new ArgumentException("At least one sample input is required.", nameof(exampleInputs));
+            var arch    = modelGraph.ToConcreteArchitecture(modelGraph.FromOrderedInputs([.. exampleInputs]));
             // Bind every param the model owns — its trainable weights AND its module-owned state
             // (BatchNorm running stats, …) — each by its canonical identifier, so a stateful model
             // concretizes too. This is the extraction contract (§5.8.2): follow the model
@@ -154,11 +216,21 @@ namespace Shorokoo
         /// a namespaced tensor, alongside the host-owned run counters <see cref="Step"/>,
         /// <see cref="Epoch"/>, and <see cref="BatchIndex"/> (so schedules resume from the right step
         /// and the run resumes at the right point in its data schedule). Reload with
-        /// <see cref="TrainingRig.LoadCheckpoint(string)"/> — or with
-        /// <see cref="Load"/> if you hold the struct defs directly. A <c>.safetensors</c> extension is
+        /// <see cref="TrainingRig.LoadCheckpoint(string, CheckpointComponents?)"/> — or with
+        /// <see cref="Load"/> against the same rig. A <c>.safetensors</c> extension is
         /// conventional. Fields must be plain tensors (nested-struct fields are unsupported); rank-0
         /// scalars are fine — they serialize as the SafeTensors empty-shape encoding (e.g. an
         /// optimizer's scalar timestep).
+        ///
+        /// <para>
+        /// <paramref name="components"/> selects which parts to write. <c>null</c> writes every
+        /// <b>available</b> component: <see cref="CheckpointComponents.InferenceState"/> (trainable
+        /// params + model state) and <see cref="CheckpointComponents.Counters"/> always,
+        /// <see cref="CheckpointComponents.OptimizerState"/> when this checkpoint carries any. The
+        /// <see cref="CheckpointComponents.TrainingRig"/> component is never written automatically and
+        /// throws when requested explicitly — serializing the rig's constituent graphs is not yet
+        /// implemented (Shorokoo/Shorokoo#115).
+        /// </para>
         ///
         /// <para>
         /// The write is atomic: the checkpoint is staged to a temp file in the target directory and
@@ -167,64 +239,68 @@ namespace Shorokoo
         /// The directory must already exist.
         /// </para>
         /// </summary>
-        public void Save(string filePath)
+        public void Save(string filePath, CheckpointComponents? components = null)
         {
             if (string.IsNullOrWhiteSpace(filePath))
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
 
+            var comps = ResolveSaveComponents(components);
             AtomicFileWriter.WriteFile(
-                filePath, stream => SafeTensorLoader.SaveSafeTensorsToStream(stream, BuildCheckpointTensors()));
+                filePath, stream => SafeTensorLoader.SaveSafeTensorsToStream(stream, BuildCheckpointTensors(comps)));
         }
 
         /// <summary>
-        /// Saves this checkpoint into a rotating series and prunes older members, keeping only the
-        /// <paramref name="keepLast"/> most recent. The file is written to
-        /// <c>{directory}/{filePrefix}{Step}{fileSuffix}</c> (so the global <see cref="Step"/> is
-        /// encoded in the name); a typical call is
-        /// <c>Save(dir, "ckpt-", ".safetensors", keepLast: 3)</c>, producing <c>ckpt-0.safetensors</c>,
-        /// <c>ckpt-1.safetensors</c>, … and retaining the three newest. Returns the path written.
-        ///
-        /// <para>
-        /// The write is atomic, exactly as <see cref="Save(string)"/>. Rotation runs only after the
-        /// new checkpoint has been committed and orders the series by the <see cref="Step"/> parsed
-        /// back out of each name — a producer-owned, monotonic integer key — so it is correct
-        /// regardless of filesystem timestamp resolution and of zero-padding (step 9 sorts before
-        /// step 10). Files that are not members of this series (different prefix/suffix, non-numeric
-        /// names, staged temps, and the checkpoint just written) are never deleted.
-        /// </para>
-        ///
-        /// <para>
-        /// Rotation is best-effort: a rotation failure never fails the save (the new checkpoint is
-        /// already committed) and is surfaced only through <paramref name="onWarning"/> (silent if
-        /// null). The directory must already exist.
-        /// </para>
+        /// Resolves the effective component set for a save. <c>null</c> ⇒ every available component
+        /// (never the <see cref="CheckpointComponents.TrainingRig"/> one, whose serialization is
+        /// unimplemented — #115). Explicitly requesting <see cref="CheckpointComponents.TrainingRig"/>
+        /// throws: <see cref="InvalidOperationException"/> when no rig is attached, otherwise a
+        /// <see cref="NotSupportedException"/> naming #115.
         /// </summary>
-        public string Save(string directory, string filePrefix, string fileSuffix, int keepLast, Action<string>? onWarning = null)
+        private CheckpointComponents ResolveSaveComponents(CheckpointComponents? requested)
         {
-            if (string.IsNullOrWhiteSpace(directory))
-                throw new ArgumentException("Checkpoint directory cannot be null or empty.", nameof(directory));
-            ArgumentNullException.ThrowIfNull(filePrefix);
-            ArgumentNullException.ThrowIfNull(fileSuffix);
+            if (requested is CheckpointComponents c)
+            {
+                if ((c & CheckpointComponents.TrainingRig) != 0)
+                {
+                    if (Rig is null)
+                        throw new InvalidOperationException(
+                            "Cannot save the TrainingRig component: this checkpoint has no rig attached " +
+                            "(see TrainingCheckpoint.Rig / TrainingRig.AdoptCheckpoint).");
+                    throw new NotSupportedException(
+                        "Saving the TrainingRig component — the rig's constituent model/loss/optimizer " +
+                        "graphs, hyperparameters and RNG config — is not yet implemented (Shorokoo/Shorokoo#115). " +
+                        "Save InferenceState / OptimizerState / Counters (the default) and rebuild the rig " +
+                        "from its source graphs to resume.");
+                }
+                return c;
+            }
 
-            string filePath = Path.Combine(directory, $"{filePrefix}{Step}{fileSuffix}");
-            AtomicFileWriter.WriteFile(
-                filePath,
-                stream => SafeTensorLoader.SaveSafeTensorsToStream(stream, BuildCheckpointTensors()),
-                AtomicFileWriter.RetainPolicy.KeepLast(keepLast, filePrefix, fileSuffix),
-                onWarning);
-            return filePath;
+            // null ⇒ all AVAILABLE components. TrainingRig is never auto-included (its serialization is
+            // unimplemented, #115); request it explicitly to get the clear #115 error.
+            var comps = CheckpointComponents.InferenceState | CheckpointComponents.Counters;
+            if (OptimizerState.Definition.Fields.Length > 0) comps |= CheckpointComponents.OptimizerState;
+            return comps;
         }
 
-        /// <summary>Serializes the three namespaced sections plus the checkpoint marker (shared by both save paths).</summary>
-        private List<SafeTensor> BuildCheckpointTensors()
+        /// <summary>Serializes the requested namespaced sections plus the checkpoint marker.</summary>
+        private List<SafeTensor> BuildCheckpointTensors(CheckpointComponents comps)
         {
             var tensors = new List<SafeTensor>();
-            AppendSection(tensors, TrainableSection, TrainableParams);
-            AppendSection(tensors, ModelStateSection, ModelState);
-            AppendSection(tensors, OptimizerStateSection, OptimizerState);
+            if ((comps & CheckpointComponents.InferenceState) != 0)
+            {
+                AppendSection(tensors, TrainableSection, TrainableParams);
+                AppendSection(tensors, ModelStateSection, ModelState);
+            }
+            if ((comps & CheckpointComponents.OptimizerState) != 0)
+                AppendSection(tensors, OptimizerStateSection, OptimizerState);
 
+            // The marker always identifies the file as a Shorokoo checkpoint and carries the format
+            // version; the counter VALUES are written only when the Counters component is included
+            // (else zeros, so a counters-less save reloads at step/epoch/batch 0).
+            bool counters = (comps & CheckpointComponents.Counters) != 0;
             var marker = Globals.TensorData(
-                [4L], CheckpointFormatVersion, (long)Step, (long)Epoch, (long)BatchIndex);
+                [4L], CheckpointFormatVersion,
+                counters ? Step : 0L, counters ? Epoch : 0L, counters ? BatchIndex : 0L);
             tensors.Add(new SafeTensor(CheckpointMarkerName, marker, "I64", [4L]));
             return tensors;
         }
@@ -244,17 +320,58 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Loads a checkpoint written by <see cref="Save(string)"/>, reconstructing each section against the
-        /// supplied struct defs (normally the ones on the <see cref="TrainingRig"/> the checkpoint was
-        /// produced by — prefer <see cref="TrainingRig.LoadCheckpoint(string)"/>, which passes them for
-        /// you). Throws if the file is not a Shorokoo checkpoint, was written by a newer format, or its
-        /// fields don't match the given defs (e.g. a checkpoint from a different model or optimizer).
+        /// Loads a checkpoint against <paramref name="rig"/>, whose struct definitions the sections are
+        /// reconstructed against and whose model/loss/optimizer this checkpoint is attached to
+        /// (<see cref="Rig"/> is set on the result). Reads either on-disk shape — the legacy flat
+        /// sectioned-safetensors file (<see cref="Save(string, CheckpointComponents?)"/>) or the native
+        /// <c>.skpt</c> container — detected automatically. <paramref name="components"/> selects which
+        /// parts to load; <c>null</c> loads everything present. A component not present in the file is
+        /// filled from the rig's initial values (counters default to 0). Throws if the file is not a
+        /// Shorokoo checkpoint, was written by a newer format, or its fields don't match the rig (e.g.
+        /// a checkpoint from a different model or optimizer). Prefer
+        /// <see cref="TrainingRig.LoadCheckpoint(string, CheckpointComponents?)"/>.
+        ///
+        /// <para>A <paramref name="rig"/> is required: the struct definitions come from it. Rebuilding
+        /// the rig from the checkpoint file alone is not yet implemented (Shorokoo/Shorokoo#115), so a
+        /// <c>null</c> rig throws.</para>
         /// </summary>
         public static TrainingCheckpoint Load(
             string filePath,
+            TrainingRig? rig = null,
+            CheckpointComponents? components = null)
+        {
+            if (string.IsNullOrWhiteSpace(filePath))
+                throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
+            if (rig is null)
+                throw new InvalidOperationException(
+                    "TrainingCheckpoint.Load requires a rig to resolve the checkpoint's struct definitions. " +
+                    "Pass the rig you are resuming (or use rig.LoadCheckpoint(path)). Reconstructing the rig " +
+                    "from the checkpoint file itself is not yet implemented (Shorokoo/Shorokoo#115).");
+
+            var raw = Persistence.IsSkptFile(filePath)
+                ? Persistence.LoadTrainingCheckpointFromSkpt(
+                    filePath, rig.TrainableParamStructDef, rig.ModelStateDef, rig.OptimizerStateDef)
+                : LoadFlat(
+                    filePath, rig.TrainableParamStructDef, rig.ModelStateDef, rig.OptimizerStateDef,
+                    components, rig);
+            // Attach the rig (sets Rig, preserves counters); the raw checkpoint was read against the
+            // rig's own defs, so the compatibility check inside AdoptCheckpoint always passes.
+            return rig.AdoptCheckpoint(raw);
+        }
+
+        /// <summary>
+        /// Reads the legacy flat sectioned-safetensors checkpoint against the given defs, honoring
+        /// <paramref name="components"/> (null ⇒ everything present). A component not present in the
+        /// file (or not requested) is filled from <paramref name="rigForDefaults"/>'s initial values
+        /// when a rig is supplied; without a rig, an absent-but-expected section fails loud.
+        /// </summary>
+        internal static TrainingCheckpoint LoadFlat(
+            string filePath,
             TensorStructDef trainableParamDef,
             TensorStructDef modelStateDef,
-            TensorStructDef optimizerStateDef)
+            TensorStructDef optimizerStateDef,
+            CheckpointComponents? components,
+            TrainingRig? rigForDefaults)
         {
             if (trainableParamDef is null) throw new ArgumentNullException(nameof(trainableParamDef));
             if (modelStateDef is null) throw new ArgumentNullException(nameof(modelStateDef));
@@ -277,13 +394,52 @@ namespace Shorokoo
                 throw new InvalidOperationException(
                     $"Unsupported checkpoint format version {marker[0]}; this build reads version " +
                     $"{CheckpointFormatVersion} only.");
-            long step = marker[1];
-            long epoch = marker[2];
-            long batchIndex = marker[3];
 
-            var trainable = ReadSection(byName, TrainableSection, trainableParamDef, filePath);
-            var modelState = ReadSection(byName, ModelStateSection, modelStateDef, filePath);
-            var optState = ReadSection(byName, OptimizerStateSection, optimizerStateDef, filePath);
+            bool Want(CheckpointComponents c) => components is null || (components.Value & c) != 0;
+            bool SectionPresent(string section)
+            {
+                var prefix = section + "/";
+                foreach (var k in byName.Keys)
+                    if (k.StartsWith(prefix, StringComparison.Ordinal)) return true;
+                return false;
+            }
+
+            long step = Want(CheckpointComponents.Counters) ? marker[1] : 0L;
+            long epoch = Want(CheckpointComponents.Counters) ? marker[2] : 0L;
+            long batchIndex = Want(CheckpointComponents.Counters) ? marker[3] : 0L;
+
+            TensorDataStruct trainable, modelState, optState;
+
+            if (Want(CheckpointComponents.InferenceState)
+                && (SectionPresent(TrainableSection) || trainableParamDef.Fields.Length == 0))
+            {
+                trainable = ReadSection(byName, TrainableSection, trainableParamDef, filePath);
+                modelState = ReadSection(byName, ModelStateSection, modelStateDef, filePath);
+            }
+            else if (rigForDefaults is not null)
+            {
+                trainable = rigForDefaults.InitialTrainableStruct;
+                modelState = rigForDefaults.InitialModelStateStruct;
+            }
+            else
+            {
+                trainable = ReadSection(byName, TrainableSection, trainableParamDef, filePath);
+                modelState = ReadSection(byName, ModelStateSection, modelStateDef, filePath);
+            }
+
+            if (Want(CheckpointComponents.OptimizerState)
+                && (SectionPresent(OptimizerStateSection) || optimizerStateDef.Fields.Length == 0))
+            {
+                optState = ReadSection(byName, OptimizerStateSection, optimizerStateDef, filePath);
+            }
+            else if (rigForDefaults is not null)
+            {
+                optState = rigForDefaults.InitialOptimizerStateStruct;
+            }
+            else
+            {
+                optState = ReadSection(byName, OptimizerStateSection, optimizerStateDef, filePath);
+            }
 
             return new TrainingCheckpoint(trainable, modelState, optState, step, epoch, batchIndex);
         }
@@ -562,8 +718,8 @@ namespace Shorokoo
 
         /// <summary>
         /// True when the optimizer's state-init graph reads a <see cref="HyperparameterKind.Runtime"/>
-        /// hyper: its initial value is unknowable at build, so <see cref="CreateDefaultCheckpoint()"/>
-        /// fails loud (D5) until <see cref="CreateDefaultCheckpoint(TensorDataStruct)"/> supplies it.
+        /// hyper: its initial value is unknowable at build, so <see cref="CreateInitialCheckpoint()"/>
+        /// fails loud (D5) until <see cref="CreateInitialCheckpoint(TensorDataStruct)"/> supplies it.
         /// </summary>
         private bool _stateInitNeedsRuntimeHypers;
 
@@ -879,8 +1035,68 @@ namespace Shorokoo
         public ComputationGraph ExtractInferenceModel(TrainingCheckpoint checkpoint)
         {
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
-            return checkpoint.ToInferenceModel(_constituents.Model, _constituents.SampleInputs[0].ToTensorData());
+            var model = RequireModelGraphKind(_constituents.Model, nameof(ExtractInferenceModel));
+            // Concretize at ALL stored sample inputs (one per model input), so a multi-input model
+            // extracts correctly — not just at the first input.
+            var sampleInputs = _constituents.SampleInputs.Select(p => p.ToTensorData()).ToArray();
+            return new ComputationGraph(
+                checkpoint.ToInferenceModelCore(model, sampleInputs), GraphKind.ConcreteModel);
         }
+
+        /// <summary>
+        /// Returns a NEW checkpoint identical to <paramref name="checkpoint"/> — same trainable params,
+        /// model state, optimizer state, counters and loss — but with its <see cref="TrainingCheckpoint.Rig"/>
+        /// set to this rig, so <see cref="TrainingCheckpoint.ToInferenceModel()"/> and rig-based load/save
+        /// work against it. Validates that the checkpoint's field definitions are compatible with this rig
+        /// (trainable-param, model-state and optimizer-state field names and shapes must match); throws a
+        /// clear <see cref="ArgumentException"/> otherwise. The argument is not mutated.
+        /// </summary>
+        public TrainingCheckpoint AdoptCheckpoint(TrainingCheckpoint checkpoint)
+        {
+            if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
+            AssertStructDefCompatible(checkpoint.TrainableParams.Definition, TrainableParamStructDef, "trainable-parameter");
+            AssertStructDefCompatible(checkpoint.ModelState.Definition, ModelStateDef, "model-state");
+            AssertStructDefCompatible(checkpoint.OptimizerState.Definition, OptimizerStateDef, "optimizer-state");
+            return new TrainingCheckpoint(
+                checkpoint.TrainableParams, checkpoint.ModelState, checkpoint.OptimizerState,
+                checkpoint.Step, checkpoint.Epoch, checkpoint.BatchIndex, this, checkpoint.Loss);
+        }
+
+        /// <summary>Fails loud when a checkpoint's struct def does not match this rig's, by field
+        /// names and per-field rank/dtype/structure (the compatibility contract for adoption/load).</summary>
+        private static void AssertStructDefCompatible(TensorStructDef actual, TensorStructDef expected, string kind)
+        {
+            if (actual.Fields.Length != expected.Fields.Length)
+                throw new ArgumentException(
+                    $"Checkpoint's {kind} definition has {actual.Fields.Length} field(s), but this rig " +
+                    $"expects {expected.Fields.Length}. The checkpoint was produced by a different model/optimizer.");
+            for (int i = 0; i < expected.Fields.Length; i++)
+            {
+                var e = expected.Fields[i];
+                var a = actual.GetField(e.Name)
+                    ?? throw new ArgumentException(
+                        $"Checkpoint's {kind} definition is missing field '{e.Name}' this rig expects. " +
+                        "The checkpoint was produced by a different model/optimizer.");
+                if (a.Rank != e.Rank || a.ElementType != e.ElementType || a.Structure != e.Structure)
+                    throw new ArgumentException(
+                        $"Checkpoint's {kind} field '{e.Name}' (rank {a.Rank?.ToString() ?? "?"}, {a.ElementType}) " +
+                        $"does not match this rig's (rank {e.Rank?.ToString() ?? "?"}, {e.ElementType}). " +
+                        "The checkpoint was produced by a different model/optimizer.");
+            }
+        }
+
+        /// <summary>The sample inputs (one per model input) this rig was derived with, in declaration
+        /// order — used to concretize the inference model in <see cref="ExtractInferenceModel"/>.</summary>
+        public IReadOnlyList<NamedModelParam> SampleInputs => _constituents.SampleInputs;
+
+        /// <summary>The rig's initial trainable-parameter values, as a struct (for load-time defaults).</summary>
+        internal TensorDataStruct InitialTrainableStruct => new(TrainableParamStructDef, _initialParamFields);
+
+        /// <summary>The rig's initial model-state values, as a struct (for load-time defaults).</summary>
+        internal TensorDataStruct InitialModelStateStruct => new(ModelStateDef, _initialStateFields);
+
+        /// <summary>The rig's initial optimizer-state values, as a struct (for load-time defaults).</summary>
+        internal TensorDataStruct InitialOptimizerStateStruct => new(OptimizerStateDef, _initialOptStateFields);
 
         /// <summary>
         /// Builds the TrainingStepPureGraph by composing model + loss + autograd + optimizer.
@@ -1059,7 +1275,7 @@ namespace Shorokoo
             HyperparameterStructDef = new TensorStructDef(hyperFields, "Hyperparameters");
             DynamicHyperparameterNames = hyperFields.Select(f => f.Name).ToArray();
 
-            // Runtime-hyper optimizer-index → field name, for the D5 CreateDefaultCheckpoint override.
+            // Runtime-hyper optimizer-index → field name, for the D5 CreateInitialCheckpoint override.
             _runtimeHyperNameByOptIndex = new Dictionary<int, string>();
             for (int i = 0; i < runtimeIndices.Count; i++)
                 _runtimeHyperNameByOptIndex[runtimeIndices[i]] = hyperFields[i].Name;
@@ -1718,7 +1934,9 @@ namespace Shorokoo
                 updatedOptimizerState,
                 checkpoint.Step + 1,
                 checkpoint.Epoch,
-                checkpoint.BatchIndex);
+                checkpoint.BatchIndex,
+                this,
+                lossValue);
 
             return new TrainingStepResult(newCheckpoint, lossValue);
         }
@@ -1775,7 +1993,7 @@ namespace Shorokoo
         /// Scheduled hyperparameters are applied automatically (the global step advances across epochs
         /// via the checkpoint), so the schedule sees a monotonically increasing step. Alias for
         /// <see cref="Train"/>. <paramref name="initialCheckpoint"/> defaults to
-        /// <see cref="CreateDefaultCheckpoint()"/> and <paramref name="ctx"/> defaults to
+        /// <see cref="CreateInitialCheckpoint()"/> and <paramref name="ctx"/> defaults to
         /// <see cref="ComputeContext.Default"/>, so a minimal call is
         /// <c>rig.Fit(inputs, targets, numEpochs: 10)</c>.
         /// </summary>
@@ -1785,7 +2003,7 @@ namespace Shorokoo
             int numEpochs,
             TrainingCheckpoint? initialCheckpoint = null,
             ComputeContext? ctx = null)
-            => Train(initialCheckpoint ?? CreateDefaultCheckpoint(), trainingInputs, trainingOutputs, numEpochs, ctx ?? ComputeContext.Default);
+            => Train(initialCheckpoint ?? CreateInitialCheckpoint(), trainingInputs, trainingOutputs, numEpochs, ctx ?? ComputeContext.Default);
 
         /// <summary>
         /// Returns the default initial checkpoint produced at <see cref="FromScratch(ComputationGraph, ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?)"/> time.
@@ -1796,33 +2014,34 @@ namespace Shorokoo
         ///
         /// <para><b>Fails loud (D5)</b> when the optimizer's state initializer actually reads a
         /// <see cref="HyperparameterKind.Runtime"/> hyperparameter, whose value is unknown at build:
-        /// supply explicit initial values via <see cref="CreateDefaultCheckpoint(TensorDataStruct)"/>
+        /// supply explicit initial values via <see cref="CreateInitialCheckpoint(TensorDataStruct)"/>
         /// (build them with <see cref="MakeHyperparameters(float)"/>). No silent placeholder is ever
         /// fed to an initializer that reads it.</para>
         /// </summary>
-        public TrainingCheckpoint CreateDefaultCheckpoint()
+        public TrainingCheckpoint CreateInitialCheckpoint()
         {
             if (_stateInitNeedsRuntimeHypers)
                 throw new InvalidOperationException(
                     "This optimizer's state initializer reads runtime hyperparameter(s) " +
                     $"[{string.Join(", ", _stateInitConsumedRuntimeHyperNames)}], whose value is not " +
                     "known when the checkpoint is created. Supply explicit initial values via " +
-                    "CreateDefaultCheckpoint(MakeHyperparameters(...)).");
+                    "CreateInitialCheckpoint(MakeHyperparameters(...)).");
             return new TrainingCheckpoint(
                 new TensorDataStruct(TrainableParamStructDef, _initialParamFields),
                 new TensorDataStruct(ModelStateDef, _initialStateFields),
-                new TensorDataStruct(OptimizerStateDef, _initialOptStateFields));
+                new TensorDataStruct(OptimizerStateDef, _initialOptStateFields),
+                rig: this);
         }
 
         /// <summary>
-        /// Like <see cref="CreateDefaultCheckpoint()"/>, but with explicit initial values for the
+        /// Like <see cref="CreateInitialCheckpoint()"/>, but with explicit initial values for the
         /// <see cref="HyperparameterKind.Runtime"/> hyperparameters (build the struct with
         /// <see cref="MakeHyperparameters(float)"/> / <see cref="MakeHyperparameters(ValueTuple{string, float}[])"/>
         /// — the same struct the per-step override <c>TrainStep</c> takes). Required (D5) when the
         /// optimizer's state initializer reads a runtime hyperparameter; harmless otherwise. Baked and
         /// scheduled hyperparameters still contribute their build-time value at the initial counters.
         /// </summary>
-        public TrainingCheckpoint CreateDefaultCheckpoint(TensorDataStruct hyperparameters)
+        public TrainingCheckpoint CreateInitialCheckpoint(TensorDataStruct hyperparameters)
         {
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
             var optState = OptimizerStateDef.Fields.Length > 0
@@ -1832,7 +2051,8 @@ namespace Shorokoo
             return new TrainingCheckpoint(
                 new TensorDataStruct(TrainableParamStructDef, _initialParamFields),
                 new TensorDataStruct(ModelStateDef, _initialStateFields),
-                new TensorDataStruct(OptimizerStateDef, optState));
+                new TensorDataStruct(OptimizerStateDef, optState),
+                rig: this);
         }
 
         /// <summary>
@@ -1863,7 +2083,7 @@ namespace Shorokoo
                 {
                     throw new ArgumentException(
                         $"The optimizer's state initializer reads runtime hyperparameter '{name}', but no " +
-                        "value for it was supplied. Pass it via CreateDefaultCheckpoint(MakeHyperparameters(...)).",
+                        "value for it was supplied. Pass it via CreateInitialCheckpoint(MakeHyperparameters(...)).",
                         nameof(runtimeHypers));
                 }
                 else
@@ -1931,7 +2151,7 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Loads a checkpoint previously written by <see cref="TrainingCheckpoint.Save(string)"/>
+        /// Loads a checkpoint previously written by <see cref="TrainingCheckpoint.Save(string, CheckpointComponents?)"/>
         /// (legacy flat safetensors) or <see cref="Persistence.SaveTrainingCheckpointToSkpt"/> (the
         /// native .skpt container) — the on-disk shape is detected automatically — reconstructing it
         /// against this rig's parameter/state struct definitions so training resumes exactly where it
@@ -1941,8 +2161,8 @@ namespace Shorokoo
         /// rig — e.g. a checkpoint produced by a different model or optimizer. The rig must be built
         /// from the same model/loss/optimizer graphs as the one that saved the checkpoint.
         /// </summary>
-        public TrainingCheckpoint LoadCheckpoint(string filePath)
-            => Persistence.LoadTrainingCheckpoint(filePath, TrainableParamStructDef, ModelStateDef, OptimizerStateDef);
+        public TrainingCheckpoint LoadCheckpoint(string filePath, CheckpointComponents? components = null)
+            => TrainingCheckpoint.Load(filePath, this, components);
 
         /// <summary>
         /// Packs a single dynamic hyperparameter value into a <see cref="TensorDataStruct"/> for the
@@ -2074,7 +2294,7 @@ namespace Shorokoo
                         "Optimizer state fields exist but no state-init graph was produced.");
 
                 // D5: which hyperparameters does the state-init graph actually consume? A runtime hyper
-                // it reads has no build-time value, so defer to CreateDefaultCheckpoint(hyperparameters)
+                // it reads has no build-time value, so defer to CreateInitialCheckpoint(hyperparameters)
                 // and fail loud on the no-arg path — no silent placeholder ever reaches an initializer.
                 _stateInitConsumedHyperIndices =
                     ConsumedInputIndices(stateInitGraph, _hyperparamInitialCounterValues.Length);
@@ -2087,8 +2307,8 @@ namespace Shorokoo
                 // Always compute state seed values so shape inference / optimization below has
                 // shape-correct optimizer-state tensors. A consumed runtime hyper contributes an
                 // internal 0 placeholder here (shape only — the state init is shape-driven); the real
-                // value is required (and recomputed) in CreateDefaultCheckpoint(hyperparameters), and
-                // the no-arg CreateDefaultCheckpoint fails loud on the _stateInitNeedsRuntimeHypers flag.
+                // value is required (and recomputed) in CreateInitialCheckpoint(hyperparameters), and
+                // the no-arg CreateInitialCheckpoint fails loud on the _stateInitNeedsRuntimeHypers flag.
                 _initialOptStateFields = ComputeInitialOptStateFields(
                     ResolveStateInitHyperValues(null, throwOnMissingConsumed: false), ctx);
             }

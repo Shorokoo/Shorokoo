@@ -76,7 +76,7 @@ public class ClassicLayerTrainingCoverageTests
             new NamedModelParam[] { new TensorDataModelParam("input", ModelParamType.InputParam, inputData) },
             0.01f);
 
-        var initial = rig.CreateDefaultCheckpoint();
+        var initial = rig.CreateInitialCheckpoint();
         Assert.NotEmpty(initial.ModelState.Fields);
 
         var ctx = new ComputeContext();

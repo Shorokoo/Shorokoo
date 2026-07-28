@@ -73,7 +73,7 @@ public class RngTrainingTests
 
         var ctx = new ComputeContext();
         var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var checkpoint = rig.CreateDefaultCheckpoint();
+        var checkpoint = rig.CreateInitialCheckpoint();
 
         var losses = new float[steps];
         for (int i = 0; i < steps; i++)
@@ -131,7 +131,7 @@ public class RngTrainingTests
             var rig = TrainingRig.FromScratch(
                 SwitchInitLinear.ComputationGraph, L2Loss.ComputationGraph,
                 SGDOptimizer.ComputationGraph, sample, cfg, 0.05f);
-            var ckpt = rig.CreateDefaultCheckpoint();
+            var ckpt = rig.CreateInitialCheckpoint();
             var name = rig.TrainableParamStructDef.Fields[0].Name;
             return ((TensorData<float32>)ckpt.TrainableParams.Fields[name]).AccessMemory().ToArray();
         }

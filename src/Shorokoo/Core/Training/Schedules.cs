@@ -19,7 +19,7 @@ namespace Shorokoo.Core.Training
     ///         WeightDecay  = 1e-4f, // a bare float is baked
     ///     });
     /// var compiled = ctx.Compile(rig.TrainingStepPureGraph); // compile once
-    /// var ckpt = rig.CreateDefaultCheckpoint();
+    /// var ckpt = rig.CreateInitialCheckpoint();
     /// for (int step = 0; step &lt; totalSteps; step++)
     ///     ckpt = rig.TrainStep(ckpt, inS, outS, compiled).Checkpoint; // schedule applied automatically
     /// </code>

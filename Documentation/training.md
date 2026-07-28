@@ -97,7 +97,7 @@ by a single interpreter that mirrors the graph lowering.
 > seed is gone — the shape placeholder is internal); the undocumented `InitialValue` is removed. The
 > rig's public surface is spelled out: `MakeHyperparams` → `MakeHyperparameters`, `HyperparamStructDef`
 > → `HyperparameterStructDef`, `DynamicHyperparamIndices` → `DynamicHyperparameterIndices`. Fresh-
-> checkpoint creation can now **fail loud** (see `CreateDefaultCheckpoint` below).
+> checkpoint creation can now **fail loud** (see `CreateInitialCheckpoint` below).
 
 ## `TrainingRig` API
 
@@ -117,8 +117,8 @@ public static TrainingRig FromScratch(
 // Fresh initial checkpoint. Optimizer state is initialized at each hyperparameter's value at the
 // initial counters. Fails loud if the optimizer's state initializer reads a Runtime hyper (its value
 // is unknown at build) — supply explicit values with the overload below.
-public TrainingCheckpoint CreateDefaultCheckpoint();
-public TrainingCheckpoint CreateDefaultCheckpoint(TensorDataStruct hyperparameters); // from MakeHyperparameters(...)
+public TrainingCheckpoint CreateInitialCheckpoint();
+public TrainingCheckpoint CreateInitialCheckpoint(TensorDataStruct hyperparameters); // from MakeHyperparameters(...)
 
 // Schedule-driven: scheduled hyperparameters are computed in-graph from the checkpoint's
 // step (fed as the step counter), then the step advances. Requires no schedule-less runtime hypers.
@@ -148,8 +148,8 @@ public TrainingResult Fit(  // alias: Train(...)
 ```
 
 Result types:
-- `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long`; the training loop advances them — `TrainStep` carries them through unchanged; default `0`). All three counters are `int64` end to end.
-- `TrainingStepResult` → `.Checkpoint`, `.Loss`.
+- `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long`; the training loop advances them — `TrainStep` carries them through unchanged; default `0`). All three counters are `int64` end to end. It also carries `.Rig` (the `TrainingRig?` that produced it — set on every rig-produced checkpoint, so `checkpoint.ToInferenceModel()` needs no re-supplied graph) and `.Loss` (`float?`; the loss of the `TrainStep` that produced it, `null` on an initial or bare checkpoint). Both are preserved through the counter derivations (`WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex`).
+- `TrainingStepResult` → `.Checkpoint`, `.Loss` (the same value as `.Checkpoint.Loss`).
 - `TrainingResult` → `.FinalCheckpoint`, `.EpochLosses`.
 
 `TrainingRig`, `TrainingCheckpoint`, `TrainingStepResult`, and `TrainingResult` are in
@@ -200,41 +200,40 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
   optimizer throws.
 - Because `.Step` is restored, learning-rate **schedules resume from the right
   step** — not from step 0.
-- `TrainingCheckpoint.Load(path, trainableDef, modelStateDef, optimizerStateDef)`
-  is the lower-level static form if you hold the struct defs without a rig;
-  `rig.LoadCheckpoint(path)` just passes the rig's defs to it.
+- `rig.LoadCheckpoint(path)` delegates to `TrainingCheckpoint.Load(path, rig)`, which
+  resolves the struct defs from the rig and sets `.Rig` on the result. The lower-level
+  `Persistence.LoadTrainingCheckpoint(path, trainableDef, modelStateDef, optimizerStateDef)`
+  is the def-based form if you hold the struct defs without a rig (its result carries no rig).
+- Both save and load take an optional `CheckpointComponents` flags value —
+  `InferenceState` (trainable params + model state), `OptimizerState`, `Counters`, and
+  `TrainingRig` — combined with `|`. On save, `null` writes every available component; on
+  load, `null` reads everything present (a component absent from the file is filled from the
+  rig's initial values). `checkpoint.Save(path, CheckpointComponents.InferenceState)` writes
+  weights only. The `TrainingRig` component — serializing the rig's own constituent graphs so
+  a checkpoint rebuilds the whole rig from the file alone — is **not yet implemented**
+  (tracked as Shorokoo/Shorokoo#115); requesting it throws.
+- `rig.AdoptCheckpoint(checkpoint)` returns a new checkpoint identical to the argument but
+  bound to that rig (validating the field defs match), so a bare checkpoint — or one loaded
+  against a different rig instance — gains a rig for `ToInferenceModel()`.
 - To see what a checkpoint file holds (the run counters — step, epoch, batch index —
   and the per-section tensor listing) without loading it — or to identify an unknown
   file — use `Persistence.Inspect(path)`;
   see [onnx-and-weights.md](onnx-and-weights.md#identify-and-summarize-a-file-checkpointinspect).
 
-### Keep only the last N checkpoints (rotation)
+### Bind trained weights into an inference model
 
-Saving every N steps leaves a growing pile of files on disk. The rotating save
-overload writes the checkpoint into a numbered series and prunes older members,
-keeping only the `keepLast` most recent:
+Once trained, turn a checkpoint into a runnable concrete model with one call:
 
 ```csharp
-// Writes {directory}/ckpt-{step}.safetensors and keeps the 3 newest members.
-checkpoint.Save(directory: "runs/exp1", filePrefix: "ckpt-", fileSuffix: ".safetensors",
-                keepLast: 3);
-
-// Same thing through the Persistence facade (returns the path written):
-Persistence.SaveTrainingCheckpoint(checkpoint, "runs/exp1", "ckpt-", ".safetensors", keepLast: 3);
+var concrete = result.FinalCheckpoint.ToInferenceModel();   // no graph to re-supply
+var output   = ComputeContext.Default.Execute(concrete, myInput);
 ```
 
-- The global `.Step` is encoded in each file name, and rotation orders the series
-  strictly by that integer — so `ckpt-10` is correctly newer than `ckpt-9`
-  regardless of filesystem timestamp resolution or zero-padding. Ordering never
-  depends on file mtime.
-- Rotation only ever deletes members of that exact series. Any other file in the
-  directory — a different prefix/suffix, a non-numeric name, an in-progress
-  `.tmp-` staging file, or the checkpoint just written — is left untouched.
-- The save itself is still atomic. Rotation runs **only after** the new
-  checkpoint is safely committed, so a rotation failure never fails the save; it
-  is surfaced only through the optional `onWarning` callback (silent if omitted).
-- Load a rotated checkpoint exactly like any other — pass the specific file (e.g.
-  the newest, returned by the save) to `rig.LoadCheckpoint(path)`.
+`ToInferenceModel()` reads the model graph and sample-input shapes off the checkpoint's
+`.Rig`, concretizes the model at **all** the rig's sample inputs (so multi-input models are
+supported), and binds this checkpoint's trainable params and model state by canonical
+identity. It requires an attached rig — every rig-produced checkpoint has one; attach one to
+a bare checkpoint with `rig.AdoptCheckpoint(checkpoint)` first.
 
 ## Types used by the training API
 
@@ -269,7 +268,7 @@ by name and sample shape. `Train`/`TrainStep` take `TensorDataStruct` batches.
            MomentumCoeff = 0.9f,          // baked constant
        });
    ```
-3. Initialize parameters: `var ckpt = rig.CreateDefaultCheckpoint();`.
+3. Initialize parameters: `var ckpt = rig.CreateInitialCheckpoint();`.
 4. Run epochs: `var outcome = rig.Fit(inputs, targets, numEpochs: 10);`
    The learning-rate schedule is applied automatically as the global step advances. (Or call
    `rig.TrainStep(...)` per batch; pass `rig.MakeHyperparameters(...)` to override a step explicitly.)

@@ -107,6 +107,18 @@ Persistence.ForTrainingCheckpoint(checkpoint, modelGraph, exampleInput)
     .Save("run.skpt");
 ```
 
+A model with more than one runtime input supplies **one example per input**, in the
+model's declared input order (the values `FromOrderedInputs` pairs with the graph's
+inputs) — the same convenience each save/export entry point offers. The flat save takes
+the path *before* the examples so the example list stays last:
+
+```csharp
+Persistence.SaveTrainingCheckpointToSkpt(
+    checkpoint, modelGraph, "run.skpt", exampleX1, exampleX2);
+Persistence.ForTrainingCheckpoint(checkpoint, modelGraph, exampleX1, exampleX2)
+    .Save("run.skpt");
+```
+
 What the file carries:
 
 - **The concrete inference model** in `models/model.srk` (definition, weights stripped),

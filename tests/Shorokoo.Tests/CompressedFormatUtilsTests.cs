@@ -1536,7 +1536,7 @@ public class CompressedFormatUtilsCoverageTests
                 fileBytes.AsSpan((int)weightsHeader.DataOffset, (int)weightsHeader.Size).ToArray());
 
             // The manifest is the wiring: format/version identity, model registry entry
-            // (srk2, concrete-model, entry hash), data registry entry (safetensors,
+            // (srk1, concrete-model, entry hash), data registry entry (safetensors,
             // uncompressed, entry hash), and the default mapping set covering every parameter.
             var manifest = SkptFileFormat.ParseManifest(entries[SkptFileFormat.ConfigEntryName], path);
             Assert.Equal(SkptFileFormat.FormatName, manifest.Format);
@@ -1545,7 +1545,7 @@ public class CompressedFormatUtilsCoverageTests
             Assert.Equal(Shorokoo.ShorokooVersion.VersionString, manifest.Producer?.Shorokoo);
             var modelEntry = Assert.Single(manifest.Models!).Value;
             Assert.Equal(SkptFileFormat.ModelEntryPath, modelEntry.Entry);
-            Assert.Equal(SkptFileFormat.ModelFormatSrk2, modelEntry.Format);
+            Assert.Equal(SkptFileFormat.ModelFormatSrk1, modelEntry.Format);
             Assert.Equal(SrkFileFormat.StageName(GraphKind.ConcreteModel), modelEntry.Stage);
             Assert.Equal(SkptFileFormat.Sha256Hex(entries[SkptFileFormat.ModelEntryPath]), modelEntry.Sha256);
             var dataEntry = Assert.Single(manifest.Data!).Value;
@@ -2026,7 +2026,7 @@ public class CompressedFormatUtilsCoverageTests
             var modelSummary = Assert.Single(skpt.Models);
             Assert.Equal("model", modelSummary.Key);
             Assert.Equal(SkptFileFormat.ModelEntryPath, modelSummary.EntryPath);
-            Assert.Equal(SkptFileFormat.ModelFormatSrk2, modelSummary.Format);
+            Assert.Equal(SkptFileFormat.ModelFormatSrk1, modelSummary.Format);
             Assert.Equal(SrkFileFormat.StageName(GraphKind.ConcreteModel), modelSummary.Stage);
             Assert.Equal(SkptFileFormat.Sha256Hex(entries[SkptFileFormat.ModelEntryPath]),
                 modelSummary.GraphHash);

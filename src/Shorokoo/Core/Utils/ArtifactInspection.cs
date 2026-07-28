@@ -164,7 +164,7 @@ namespace Shorokoo
         /// or null when the manifest names none.</summary>
         public string? EntryPath { get; }
 
-        /// <summary>Serialization format of the entry ("srk2" for files written today).</summary>
+        /// <summary>Serialization format of the entry ("srk1" for files written today).</summary>
         public string? Format { get; }
 
         /// <summary>Lifecycle stage of the serialized graph, in .srk stage-name form
@@ -184,7 +184,7 @@ namespace Shorokoo
             GraphHash = graphHash;
         }
 
-        /// <summary>"model: models/model.srk (srk2, stage concrete-model), graph hash 6824…".</summary>
+        /// <summary>"model: models/model.srk (srk1, stage concrete-model), graph hash 6824…".</summary>
         public override string ToString()
             => $"{Key}: {EntryPath ?? "<no entry>"} ({Format ?? "<unrecorded>"}, " +
                $"stage {Stage ?? "<unrecorded>"}), graph hash {GraphHash ?? "<unrecorded>"}";
@@ -894,7 +894,7 @@ namespace Shorokoo
                         "but the archive has no such entry.");
                 else
                     referenced.Add(m.Entry);
-                if (m is not null && m.Format != SkptFileFormat.ModelFormatSrk2)
+                if (m is not null && m.Format != SkptFileFormat.ModelFormatSrk1)
                     observations.Add($"model '{key}' uses the unknown serialization format " +
                         $"'{m.Format ?? "<none>"}' (likely written by a newer Shorokoo version).");
                 if (m?.Stage is not null && SrkFileFormat.TryParseStageName(m.Stage) is null)
@@ -1094,7 +1094,7 @@ namespace Shorokoo
         /// when the prefix declares a plausible header length, the probe stream-decompresses
         /// exactly the JSON header — bounded by <see cref="MaxSafeTensorsHeaderBytes"/>, like the
         /// uncompressed path — and never the tensor payload. Returns null when the content is not
-        /// a compressed SafeTensors archive (so the legacy-.srk sniff proceeds), or a final
+        /// a compressed SafeTensors archive (the frame is then reported NotRecognized), or a final
         /// result: recognized <see cref="ArtifactKind.CompressedSafeTensors"/>, or NotRecognized
         /// for a frame that positively declared a SafeTensors header but could not deliver it.
         ///

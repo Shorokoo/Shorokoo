@@ -421,7 +421,7 @@ namespace Shorokoo
                     [SkptFileFormat.DefaultModelKey] = new SkptModelEntry
                     {
                         Entry = SkptFileFormat.ModelEntryPath,
-                        Format = SkptFileFormat.ModelFormatSrk2,
+                        Format = SkptFileFormat.ModelFormatSrk1,
                         Stage = SrkFileFormat.StageName(GraphKind.ConcreteModel),
                         Sha256 = SkptFileFormat.Sha256Hex(modelBytes),
                     },

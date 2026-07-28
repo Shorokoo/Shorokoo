@@ -250,10 +250,10 @@ namespace Shorokoo
             if (string.IsNullOrEmpty(modelEntry.Entry))
                 throw new InvalidDataException(
                     $"'{filePath}': the manifest's model '{modelKey}' names no archive entry.");
-            if (modelEntry.Format != SkptFileFormat.ModelFormatSrk2)
+            if (modelEntry.Format != SkptFileFormat.ModelFormatSrk1)
                 throw new InvalidDataException(
                     $"'{filePath}': model '{modelKey}' uses unsupported serialization format " +
-                    $"'{modelEntry.Format}' (supported: '{SkptFileFormat.ModelFormatSrk2}'). " +
+                    $"'{modelEntry.Format}' (supported: '{SkptFileFormat.ModelFormatSrk1}'). " +
                     "The file was likely written by a newer framework version.");
             if (SrkFileFormat.TryParseStageName(modelEntry.Stage) != GraphKind.ConcreteModel)
                 throw new InvalidDataException(
@@ -376,7 +376,7 @@ namespace Shorokoo
             var storedBytes = ReadEntry(archive, dataEntry.Entry, $"data entry '{dataKey}'", filePath);
             // The manifest sha256 covers the entry's bytes as stored in the archive — for a
             // compressed entry, the compressed bytes — so integrity is checked here, before
-            // and without decompression (mirroring .srk v2's payloadSha256 semantics).
+            // and without decompression (mirroring .srk's payloadSha256 semantics).
             VerifySha256(storedBytes, dataEntry.Sha256, dataEntry.Entry, filePath);
             var dataBytes = DecodeDataEntryPayload(storedBytes, dataEntry, dataKey, filePath);
 
@@ -495,7 +495,7 @@ namespace Shorokoo
 
         internal CheckpointBuilder(ComputationGraph model) => _model = model;
 
-        /// <summary>Includes the model definition (serialized as .srk v2, weights stripped) in the checkpoint.</summary>
+        /// <summary>Includes the model definition (serialized as .srk, weights stripped) in the checkpoint.</summary>
         public CheckpointBuilder WithModel()
         {
             _withModel = true;
@@ -569,7 +569,7 @@ namespace Shorokoo
         /// Opt-in: Zstd-compress the checkpoint's data-tree entries (the weights entry, in
         /// this version's single checkpoint shape), recording <c>compression: "zstd"</c> in
         /// each compressed entry's data-registry record. The zip framing stays STORED — the
-        /// Zstd layer lives inside the entry's bytes, mirroring how .srk v2 declares
+        /// Zstd layer lives inside the entry's bytes, mirroring how .srk declares
         /// compression in its header. The manifest sha256 covers the stored (compressed)
         /// bytes, so integrity checking never needs decompression. The trade: a compressed
         /// entry is smaller on disk but forfeits memory-mapped/range reads, so it also skips
@@ -934,7 +934,7 @@ namespace Shorokoo
                     [SkptFileFormat.DefaultModelKey] = new SkptModelEntry
                     {
                         Entry = SkptFileFormat.ModelEntryPath,
-                        Format = SkptFileFormat.ModelFormatSrk2,
+                        Format = SkptFileFormat.ModelFormatSrk1,
                         Stage = SrkFileFormat.StageName(GraphKind.ConcreteModel),
                         Sha256 = SkptFileFormat.Sha256Hex(modelBytes),
                     },

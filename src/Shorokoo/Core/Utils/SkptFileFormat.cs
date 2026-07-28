@@ -28,7 +28,7 @@ namespace Shorokoo.Core.Utils
         [JsonPropertyName("entry")]
         public string? Entry { get; set; }
 
-        /// <summary>Serialization format of the entry; "srk2" is the only format written today.</summary>
+        /// <summary>Serialization format of the entry; "srk1" is the only format written today.</summary>
         [JsonPropertyName("format")]
         public string? Format { get; set; }
 
@@ -87,14 +87,14 @@ namespace Shorokoo.Core.Utils
         public string? Format { get; set; }
 
         /// <summary>Compression of the entry's bytes: "none" (default) or "zstd" (a single
-        /// Zstd layer inside the STORED zip bytes, mirroring .srk v2's header-declared
+        /// Zstd layer inside the STORED zip bytes, mirroring .srk's header-declared
         /// compression). Always taken from here, never inferred from the entry's extension.</summary>
         [JsonPropertyName("compression")]
         public string? Compression { get; set; }
 
         /// <summary>Lowercase hex SHA-256 of the entry's bytes as stored in the archive —
         /// for a compressed entry, the compressed bytes. Integrity is thus checkable
-        /// without decompressing, mirroring .srk v2's payloadSha256.</summary>
+        /// without decompressing, mirroring .srk's payloadSha256.</summary>
         [JsonPropertyName("sha256")]
         public string? Sha256 { get; set; }
 
@@ -239,8 +239,8 @@ namespace Shorokoo.Core.Utils
         /// <summary>Archive path of the host user-data bag (issue #101).</summary>
         public const string UserDataEntryPath = "data/user-data.json";
 
-        /// <summary>Model serialization format name for .srk v2 payloads.</summary>
-        public const string ModelFormatSrk2 = "srk2";
+        /// <summary>Model serialization format name for .srk payloads.</summary>
+        public const string ModelFormatSrk1 = "srk1";
 
         /// <summary>Data storage format name for safetensors payloads.</summary>
         public const string DataFormatSafeTensors = "safetensors";

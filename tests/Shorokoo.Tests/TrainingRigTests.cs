@@ -1822,7 +1822,7 @@ public class TrainingRigCoverageTests
     }
 
     /// <summary>Drains one full epoch and returns the sample index each batch row was gathered from.</summary>
-    private static int[] EpochIndexSequence(IDataLoader loader, int features)
+    private static int[] EpochIndexSequence(InMemoryDataLoader loader, int features)
     {
         var seq = new List<int>();
         for (int b = 0; b < loader.BatchesPerEpoch; b++)
@@ -1888,21 +1888,31 @@ public class TrainingRigCoverageTests
         Assert.Equal(identity, epoch1Order.OrderBy(i => i));
         Assert.NotEqual(order1, epoch1Order);
 
-        // Revisiting epoch 0 (via Restore) regenerates epoch 0's order exactly.
+        // Revisiting epoch 0 (via RestoreFrom) regenerates epoch 0's order exactly.
         var s3 = new InMemoryDataLoader(inputs, targets, batchSize: 2, shuffle: true, seed: 12345);
-        s3.Restore(new DataLoaderPosition(0, 0));
+        s3.RestoreFrom(new DataLoaderPosition(0, 0));
         Assert.Equal(order1, EpochIndexSequence(s3, features));
 
         // Out-of-range batch index is rejected (guards against a mismatched checkpoint/loader).
-        Assert.Throws<ArgumentOutOfRangeException>(() => plain.Restore(new DataLoaderPosition(0, 4)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => plain.RestoreFrom(new DataLoaderPosition(0, 4)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => plain.RestoreAfter(new DataLoaderPosition(0, 4)));
+
+        // RestoreAfter advances one batch past the given (used) position, rolling into the next epoch
+        // after an epoch's last batch — the resume primitive for the "checkpoint stores the batch used"
+        // convention. From the last batch of epoch 0 (index 3) it lands at (1, 0); mid-epoch it just +1s.
+        var afterStepper = new InMemoryDataLoader(inputs, targets, batchSize: 2);
+        afterStepper.RestoreAfter(new DataLoaderPosition(0, 1));
+        Assert.Equal(new DataLoaderPosition(0, 2), afterStepper.Position);
+        afterStepper.RestoreAfter(new DataLoaderPosition(0, 3));   // last batch of the epoch
+        Assert.Equal(new DataLoaderPosition(1, 0), afterStepper.Position);
     }
 
     /// <summary>
     /// Covers <see cref="TrainingRig.Fit(IDataLoader, int, TrainingCheckpoint?, ComputeContext?)"/>:
     /// driving a loader advances the checkpoint's step, epoch, and batch counters automatically — with
-    /// no host hand-setting — so a run of E epochs over B batches/epoch lands at step = E*B, epoch = E,
-    /// batchIndex = 0, and reports one mean loss per epoch. The invariant step == epoch*batchesPerEpoch
-    /// holds for a single-loader run.
+    /// no host hand-setting — so a run of E epochs over B batches/epoch lands at step = E*B and records
+    /// the <b>batch used</b> at the last step (epoch = E-1, batchIndex = B-1). Reports one mean loss per
+    /// epoch. The invariant step == epoch*B + batchIndex + 1 (batches used) holds for a single-loader run.
     /// </summary>
     [Fact]
     public void TestFitWithDataLoaderAdvancesCountersCoverage()
@@ -1920,20 +1930,21 @@ public class TrainingRigCoverageTests
 
         var final = result.FinalCheckpoint;
         Assert.Equal(6, final.Step);        // 2 epochs * 3 batches
-        Assert.Equal(2, final.Epoch);       // advanced by the loop, not the host
-        Assert.Equal(0, final.BatchIndex);  // rolled to the start of the next epoch
-        Assert.Equal(final.Epoch * loader.BatchesPerEpoch, final.Step);
+        Assert.Equal(1, final.Epoch);       // the batch USED at the last step: epoch 1 (0-based)...
+        Assert.Equal(2, final.BatchIndex);  // ...batch index 2 (the epoch's last batch)
+        Assert.Equal(final.Epoch * loader.BatchesPerEpoch + final.BatchIndex + 1, final.Step);
 
-        // The loader is left at the matching position (next batch to yield).
+        // The loader itself is left rolled past that last batch, at the next epoch's start.
         Assert.Equal(new DataLoaderPosition(2, 0), loader.Position);
     }
 
     /// <summary>
     /// Covers loader-position resume end to end. A run split by a save → fresh-rig-and-loader reload →
     /// continue must reach the exact same trained weights and counters as one uninterrupted run — the
-    /// deterministic shuffle plus <see cref="IDataLoader.Restore"/> make the resumed batch stream
-    /// identical. Separately, a mid-epoch position (batchIndex != 0) round-trips through a saved
-    /// checkpoint and the reloaded loader yields the very next batch the original would have.
+    /// deterministic shuffle plus <see cref="IDataLoader.RestoreAfter"/> (resume advances one past the
+    /// batch the checkpoint recorded as used) make the resumed batch stream identical. Separately, a
+    /// mid-epoch batch-used position round-trips through a saved checkpoint and the reloaded loader,
+    /// RestoreAfter'd from it, yields the very next batch the original would have.
     /// </summary>
     [Fact]
     public void TestDataLoaderResumeRoundTripCoverage()
@@ -1957,7 +1968,8 @@ public class TrainingRigCoverageTests
             var loaderA = new InMemoryDataLoader(inA, tgtA, batchSize: 2, shuffle: true, seed: seed);
             var half = rigA.Fit(loaderA, numEpochs: 1);
             Assert.Equal(3, half.FinalCheckpoint.Step);
-            Assert.Equal(1, half.FinalCheckpoint.Epoch);
+            Assert.Equal(0, half.FinalCheckpoint.Epoch);       // batch used at the last step: epoch 0...
+            Assert.Equal(2, half.FinalCheckpoint.BatchIndex);  // ...its last batch (index 2)
             half.FinalCheckpoint.Save(path);
 
             // Second half: fresh rig + fresh loader, load the checkpoint, continue one more epoch.
@@ -1965,9 +1977,9 @@ public class TrainingRigCoverageTests
             var (inB, tgtB) = IndexDataset(rigB, n: 6, features);
             var loaderB = new InMemoryDataLoader(inB, tgtB, batchSize: 2, shuffle: true, seed: seed);
             var loaded = rigB.LoadCheckpoint(path);
-            Assert.Equal(1, loaded.Epoch);
-            Assert.Equal(0, loaded.BatchIndex);
-            var resumed = rigB.Fit(loaderB, numEpochs: 1, loaded);
+            Assert.Equal(0, loaded.Epoch);       // the batch-used position round-trips
+            Assert.Equal(2, loaded.BatchIndex);
+            var resumed = rigB.Fit(loaderB, numEpochs: 1, loaded);  // RestoreAfter((0,2)) → (1,0)
 
             // Same counters and — because the batch stream was reproduced exactly — the same weights.
             Assert.Equal(refResult.FinalCheckpoint.Step, resumed.FinalCheckpoint.Step);
@@ -1976,40 +1988,41 @@ public class TrainingRigCoverageTests
         }
         finally { if (File.Exists(path)) File.Delete(path); }
 
-        // --- Mid-epoch position (batchIndex != 0) round-trips through a saved checkpoint. ---
+        // --- Mid-epoch batch-used position round-trips through a saved checkpoint. ---
         var rigM = LoaderRig(batchSize: 2, features: 1);
         var (inM, tgtM) = IndexDataset(rigM, n: 8, features: 1);
 
-        // Reference loader advanced to a mid-epoch position, and the batches it would yield next.
+        // Reference loader that has USED two batches (indices 0 and 1); the batches it would yield next.
         var refLoader = new InMemoryDataLoader(inM, tgtM, batchSize: 2, shuffle: true, seed: seed);
-        refLoader.Next(); refLoader.Next();                       // consume 2 batches → position (0, 2)
+        refLoader.Next(); refLoader.Next();                       // use 2 batches → position now (0, 2)
+        var lastUsed = new DataLoaderPosition(0, 1);              // the batch USED at the last step
         var midPos = refLoader.Position;
         Assert.Equal(new DataLoaderPosition(0, 2), midPos);
         int[] refTail = TailIndices(refLoader, features: 1);
 
-        // Persist that position via a checkpoint, reload it, and restore a fresh loader from it.
+        // Persist the batch-used position via a checkpoint, reload it, and RestoreAfter a fresh loader.
         var midPath = Path.Combine(Path.GetTempPath(), $"shrk_loader_midpos_{Guid.NewGuid():N}.safetensors");
         try
         {
             var ckpt0 = rigM.CreateInitialCheckpoint();
             var midCkpt = new TrainingCheckpoint(
                 ckpt0.TrainableParams, ckpt0.ModelState, ckpt0.OptimizerState,
-                step: 2, epoch: midPos.Epoch, batchIndex: midPos.BatchIndex);
+                step: 2, epoch: lastUsed.Epoch, batchIndex: lastUsed.BatchIndex);
             midCkpt.Save(midPath);
             var reloaded = rigM.LoadCheckpoint(midPath);
-            Assert.Equal(midPos.Epoch, reloaded.Epoch);
-            Assert.Equal(midPos.BatchIndex, reloaded.BatchIndex);
+            Assert.Equal(lastUsed.Epoch, reloaded.Epoch);
+            Assert.Equal(lastUsed.BatchIndex, reloaded.BatchIndex);
 
             var restored = new InMemoryDataLoader(inM, tgtM, batchSize: 2, shuffle: true, seed: seed);
-            restored.Restore(new DataLoaderPosition(reloaded.Epoch!.Value, reloaded.BatchIndex!.Value));
-            Assert.Equal(midPos, restored.Position);
+            restored.RestoreAfter(new DataLoaderPosition(reloaded.Epoch!.Value, reloaded.BatchIndex!.Value));
+            Assert.Equal(midPos, restored.Position);                     // RestoreAfter((0,1)) → (0,2)
             Assert.Equal(refTail, TailIndices(restored, features: 1));   // continues from the exact next batch
         }
         finally { if (File.Exists(midPath)) File.Delete(midPath); }
     }
 
     /// <summary>Reads the remaining sample indices in the current epoch without rolling past its end.</summary>
-    private static int[] TailIndices(IDataLoader loader, int features)
+    private static int[] TailIndices(InMemoryDataLoader loader, int features)
     {
         var seq = new List<int>();
         long remaining = loader.BatchesPerEpoch - loader.Position.BatchIndex;
@@ -2025,10 +2038,11 @@ public class TrainingRigCoverageTests
 
     /// <summary>
     /// Covers <see cref="TrainingRig.TrainStep(TrainingCheckpoint, IDataLoader, CompiledGraph)"/>: a
-    /// single loader-driven step advances <see cref="TrainingCheckpoint.Step"/> by one, sets the
-    /// checkpoint's epoch / batch to the loader's <b>new</b> (resume) position — the next batch to yield,
-    /// rolling into the next epoch after the last batch — and preserves the rig + loss. Looping this
-    /// overload by hand reproduces <see cref="TrainingRig.Fit(IDataLoader, int, TrainingCheckpoint?, ComputeContext?)"/>
+    /// single loader-driven step advances <see cref="TrainingCheckpoint.Step"/> by one, records the
+    /// position of the batch it <b>used</b> (the drawn batch's own position) on the checkpoint's epoch /
+    /// batch, and preserves the rig + loss — while the loader itself advances one batch (rolling into the
+    /// next epoch after the last). Looping this overload by hand reproduces
+    /// <see cref="TrainingRig.Fit(IDataLoader, int, TrainingCheckpoint?, ComputeContext?)"/>
     /// exactly (same counters and weights), pinning that Fit routes through this one source of truth.
     /// </summary>
     [Fact]
@@ -2043,26 +2057,26 @@ public class TrainingRigCoverageTests
         var compiled = ComputeContext.Default.Compile(rig.TrainingStepPureGraph);
         var ckpt = rig.CreateInitialCheckpoint();
 
-        // Step 1: draws batch (0,0); records the loader's next position (0,1).
+        // Step 1: uses batch (0,0); records that used position. The loader advances to (0,1).
         var s1 = rig.TrainStep(ckpt, loader, compiled);
         Assert.Equal(1, s1.Step);
         Assert.Equal(0, s1.Epoch);
-        Assert.Equal(1, s1.BatchIndex);
+        Assert.Equal(0, s1.BatchIndex);
         Assert.True(float.IsFinite(s1.Loss!.Value));
         Assert.Same(rig, s1.Rig);                               // rig preserved via WithCounters
         Assert.Equal(new DataLoaderPosition(0, 1), loader.Position);
 
-        // Step 2: draws batch (0,1); records (0,2).
+        // Step 2: uses batch (0,1); records (0,1). Loader advances to (0,2).
         var s2 = rig.TrainStep(s1, loader, compiled);
         Assert.Equal(2, s2.Step);
         Assert.Equal(0, s2.Epoch);
-        Assert.Equal(2, s2.BatchIndex);
+        Assert.Equal(1, s2.BatchIndex);
 
-        // Step 3: draws the last batch of epoch 0; the loader rolls to (1,0), which the checkpoint records.
+        // Step 3: uses the last batch of epoch 0 (0,2); records it. The loader rolls to (1,0).
         var s3 = rig.TrainStep(s2, loader, compiled);
         Assert.Equal(3, s3.Step);
-        Assert.Equal(1, s3.Epoch);
-        Assert.Equal(0, s3.BatchIndex);
+        Assert.Equal(0, s3.Epoch);
+        Assert.Equal(2, s3.BatchIndex);
         Assert.Equal(new DataLoaderPosition(1, 0), loader.Position);
 
         // Hand-looping TrainStep(loader) for one epoch equals Fit(loader, numEpochs: 1): the same
@@ -2692,9 +2706,10 @@ public class TrainingRigCoverageTests
 
     /// <summary>
     /// Issue #111: a loader-driven run records <b>concrete</b> epoch/batch counters on its checkpoint
-    /// (from the loader), and those survive save/load as concrete values — including a batch index of
-    /// exactly <c>0</c>, which persists as a present scalar valued 0 (NOT omitted, so it reloads as 0,
-    /// never null). This is the concrete-vs-unknown distinction the presence-gating draws.
+    /// (the batch used, sourced from the loader), and those survive save/load as concrete values —
+    /// including an epoch of exactly <c>0</c>, which persists as a present scalar valued 0 (NOT omitted,
+    /// so it reloads as 0, never null). This is the concrete-vs-unknown distinction the presence-gating
+    /// draws.
     /// </summary>
     [Fact]
     public void TestLoaderDrivenRunPersistsConcreteCountersCoverage()
@@ -2705,21 +2720,21 @@ public class TrainingRigCoverageTests
         var loader = new InMemoryDataLoader(inputs, targets, batchSize: 2);
 
         var final = rig.Fit(loader, numEpochs: 1).FinalCheckpoint;
-        Assert.Equal(1, final.Epoch);       // concrete, sourced from the loader
-        Assert.Equal(0, final.BatchIndex);  // concrete 0 (rolled to the next epoch's start)
+        Assert.Equal(0, final.Epoch);       // concrete 0 (batch used was in epoch 0), not null
+        Assert.Equal(2, final.BatchIndex);  // the last batch used (epoch 0's last batch)
 
         var path = Path.Combine(Path.GetTempPath(), $"shrk_concctr_{Guid.NewGuid():N}.safetensors");
         try
         {
             final.Save(path);
             var loaded = LoaderRig(batchSize: 2, features).LoadCheckpoint(path);
-            Assert.Equal(1, loaded.Epoch);       // concrete value round-trips
-            Assert.Equal(0, loaded.BatchIndex);  // a concrete 0 reloads as 0, not null
+            Assert.Equal(0, loaded.Epoch);       // a concrete 0 reloads as 0, not null
+            Assert.Equal(2, loaded.BatchIndex);  // concrete value round-trips
 
             var inspect = Persistence.Inspect(path);
             Assert.Empty(inspect.Observations);
-            Assert.Equal(1, inspect.TrainingCheckpoint!.Epoch);
-            Assert.Equal(0, inspect.TrainingCheckpoint.BatchIndex);
+            Assert.Equal(0, inspect.TrainingCheckpoint!.Epoch);
+            Assert.Equal(2, inspect.TrainingCheckpoint.BatchIndex);
         }
         finally { if (File.Exists(path)) File.Delete(path); }
     }

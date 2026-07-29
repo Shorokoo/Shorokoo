@@ -140,8 +140,8 @@ public TrainingCheckpoint TrainStep(
     CompiledGraph compiled);
 
 // Loader-driven single step: draws loader.Next(), sourcing epoch / batch from the loader — the
-// single-step form of Fit(loader). The batch's own position drives the scheduler for this step;
-// the returned checkpoint records the loader's NEXT (resume) position. Requires no runtime hypers.
+// single-step form of Fit(loader). The batch's own position drives the scheduler for this step and
+// is recorded on the returned checkpoint (the batch USED). Requires no runtime hypers.
 public TrainingCheckpoint TrainStep(
     TrainingCheckpoint checkpoint,
     IDataLoader loader,
@@ -149,7 +149,7 @@ public TrainingCheckpoint TrainStep(
 
 // Explicit epoch / batch: for a host driving its own iteration (no loader). epoch / batchNumber name
 // the batch being trained — fed to the scheduler for this step AND recorded verbatim on the returned
-// checkpoint (it cannot advance to a "next" position without a loader's batches-per-epoch).
+// checkpoint: the same "batch used" convention the loader overload records.
 public TrainingCheckpoint TrainStep(
     TrainingCheckpoint checkpoint,
     TensorDataStruct trainingInput,
@@ -215,17 +215,21 @@ var loader = new InMemoryDataLoader(inputs, targets, batchSize: 32, shuffle: tru
 var outcome = rig.Fit(loader, numEpochs: 10);   // step / epoch / batch advance automatically
 ```
 
-- **`IDataLoader`** is the minimal contract: `BatchesPerEpoch`, a current `Position`
+- **`IDataLoader`** is the minimal contract: a current `Position`
   (`DataLoaderPosition`, the epoch + index of the *next* batch it will yield), `Next()` (produces
   the current `DataBatch` — input + target + the position it came from — and advances one batch,
-  rolling into the next epoch after the last), and `Restore(position)` to resume.
+  rolling into the next epoch after the last), and two resume primitives — `RestoreFrom(position)`
+  (the next `Next()` yields the batch *at* `position`) and `RestoreAfter(position)` (the next `Next()`
+  yields the batch *one step after* `position`, rolling into the next epoch internally).
+  `InMemoryDataLoader` also exposes `BatchesPerEpoch`, but that is **not** on the interface — the epoch
+  rollover a caller would have used it for now lives inside `RestoreAfter`.
 - **One step at a time.** `rig.TrainStep(checkpoint, loader, compiled)` is the single-step form of
   `Fit(loader)` — it draws one batch, runs the step (the batch's own position drives any scheduler),
-  and returns a checkpoint recording the loader's **next** (resume) position. `Fit(loader)` is just a
-  loop over it, so the two share one source of the loader step-and-counter semantics. For a host that
-  owns its own iteration (no loader), `rig.TrainStep(checkpoint, input, target, epoch, batchNumber,
-  compiled)` records the given `epoch` / `batchNumber` verbatim (it names the batch being trained; it
-  cannot infer a "next" position without a loader's batches-per-epoch).
+  and returns a checkpoint recording the **batch used** (that same drawn position). `Fit(loader)` is
+  just a loop over it, so the two share one source of the loader step-and-counter semantics. For a host
+  that owns its own iteration (no loader), `rig.TrainStep(checkpoint, input, target, epoch, batchNumber,
+  compiled)` records the given `epoch` / `batchNumber` verbatim — the same "batch used" convention (it
+  names the batch being trained).
 - **`InMemoryDataLoader`** is the bare-minimum implementation over tensors you already hold. Each
   field's leading dimension is the sample count `N`; it slices along that dimension into
   fixed-size batches, optionally reshuffling every epoch.
@@ -237,13 +241,15 @@ var outcome = rig.Fit(loader, numEpochs: 10);   // step / epoch / batch advance 
 - **Partial final batch.** `dropLast: true` (the default) drops a trailing partial batch so every
   batch matches the shape the training-step graph was compiled for. Pass `dropLast: false` to keep
   the smaller final batch (only safe if the graph tolerates a variable batch dimension).
-- **Resume.** For a single-loader run, `step == epoch * BatchesPerEpoch + batchIndex`. Save the
-  `FinalCheckpoint` (or any mid-run checkpoint), then in a later process rebuild the rig and a loader
-  over the same data/seed and call `rig.Fit(loader, numEpochs, initialCheckpoint: loaded)`: `Fit`
-  restores the loader to the checkpoint's position, so the run picks up exactly where it left off.
-  `numEpochs` is counted from the checkpoint's current epoch (a checkpoint saved mid-epoch first
-  finishes that partial epoch). This is Shorokoo owning **its own** loader's position; a host driving
-  an external pipeline Shorokoo doesn't own still uses the checkpoint's host user-data bag instead.
+- **Resume.** A checkpoint's `.Epoch` / `.BatchIndex` name the batch that was **used** at its last
+  step. Save the `FinalCheckpoint` (or any mid-run checkpoint), then in a later process rebuild the rig
+  and a loader over the same data/seed and call `rig.Fit(loader, numEpochs, initialCheckpoint: loaded)`:
+  `Fit` advances the loader one batch past that recorded position (`RestoreAfter`), so the run picks up
+  at exactly the next batch — no re-run and no skip. (A fresh, position-unknown checkpoint instead
+  starts at `(0, 0)` via `RestoreFrom`.) `numEpochs` is counted from the loader's resume epoch (a
+  checkpoint saved mid-epoch first finishes that partial epoch; one saved at an epoch's last batch
+  begins the next). This is Shorokoo owning **its own** loader's position; a host driving an external
+  pipeline Shorokoo doesn't own still uses the checkpoint's host user-data bag instead.
 
 ## Save and resume a checkpoint (across process restarts)
 

@@ -2124,17 +2124,17 @@ namespace Shorokoo
         /// <see cref="Fit(IDataLoader, int, TrainingCheckpoint?, ComputeContext?)"/>, and the one place
         /// the loader-step-and-counter semantics live (<c>Fit(loader)</c> loops over this).
         ///
-        /// <para>The batch's <b>own</b> position (<see cref="DataBatch.Position"/>) drives the scheduler
-        /// counters for this step, so a scheduled hyperparameter reading the epoch / batch counters sees
-        /// the batch being trained. The returned checkpoint then records the loader's <b>new</b> position
-        /// — the next batch it will yield (<see cref="IDataLoader.Position"/> after
-        /// <see cref="IDataLoader.Next"/>) — as its <see cref="TrainingCheckpoint.Epoch"/> /
-        /// <see cref="TrainingCheckpoint.BatchIndex"/>, matching the checkpoint-wide invariant that those
-        /// counters are the <b>resume</b> position: feeding the returned checkpoint back to
-        /// <c>Fit(loader)</c> (or <see cref="IDataLoader.Restore"/>) continues from exactly the batch this
-        /// step stopped before. <see cref="TrainingCheckpoint.Step"/> is advanced by one and the attached
-        /// <see cref="TrainingCheckpoint.Rig"/> and this step's <see cref="TrainingCheckpoint.Loss"/> are
-        /// preserved (via <see cref="TrainingCheckpoint.WithCounters"/>).</para>
+        /// <para>The batch's <b>own</b> position (<see cref="DataBatch.Position"/>) both drives the
+        /// scheduler counters for this step (so a scheduled hyperparameter reading the epoch / batch
+        /// counters sees the batch being trained) and is recorded on the returned checkpoint's
+        /// <see cref="TrainingCheckpoint.Epoch"/> / <see cref="TrainingCheckpoint.BatchIndex"/> — the
+        /// unified convention that the checkpoint stores the batch that was <b>used</b> (recorded ==
+        /// what-drove-the-step). Resuming advances past it: feeding the returned checkpoint back to
+        /// <c>Fit(loader)</c> restores the loader with <see cref="IDataLoader.RestoreAfter"/>, continuing
+        /// at exactly the batch after this one. <see cref="TrainingCheckpoint.Step"/> is advanced by one
+        /// and the attached <see cref="TrainingCheckpoint.Rig"/> and this step's
+        /// <see cref="TrainingCheckpoint.Loss"/> are preserved (via
+        /// <see cref="TrainingCheckpoint.WithCounters"/>).</para>
         ///
         /// <para>Like the counter-agnostic <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>
         /// it drives, this schedule-driven form requires the rig to have no schedule-less runtime
@@ -2144,8 +2144,8 @@ namespace Shorokoo
         /// <param name="checkpoint">Current training state; its counters are replaced from the loader.</param>
         /// <param name="loader">The data loader; <see cref="IDataLoader.Next"/> is called once.</param>
         /// <param name="compiled">Compiled training step graph.</param>
-        /// <returns>The post-step checkpoint: step advanced, epoch / batch set to the loader's next
-        /// (resume) position, with this step's loss.</returns>
+        /// <returns>The post-step checkpoint: step advanced, epoch / batch set to the position of the
+        /// batch used, with this step's loss.</returns>
         public TrainingCheckpoint TrainStep(
             TrainingCheckpoint checkpoint,
             IDataLoader loader,
@@ -2157,16 +2157,13 @@ namespace Shorokoo
 
             var batch = loader.Next();
             // The batch's own position drives the scheduler counters for THIS step (a scheduler reading
-            // epoch / batchIndex sees the batch being trained). TrainStep advances Step and preserves the
-            // attached rig and this step's loss.
+            // epoch / batchIndex sees the batch being trained) AND is recorded on the returned checkpoint
+            // (the unified "batch used" convention). RunStep carries those counters through unchanged and
+            // advances Step, preserving the attached rig and this step's loss — so a later Fit(loader)
+            // resumes past this batch via RestoreAfter.
             var stepInput = checkpoint.WithCounters(
                 epoch: batch.Position.Epoch, batchIndex: batch.Position.BatchIndex);
-            var stepped = TrainStep(stepInput, batch.Input, batch.Target, compiled);
-
-            // Record the loader's NEW position (the next batch to yield) as the checkpoint's resume
-            // position, so a later Fit(loader) / TrainStep(loader) that Restores from it continues exactly.
-            var next = loader.Position;
-            return stepped.WithCounters(epoch: next.Epoch, batchIndex: next.BatchIndex);
+            return TrainStep(stepInput, batch.Input, batch.Target, compiled);
         }
 
         /// <summary>
@@ -2179,12 +2176,12 @@ namespace Shorokoo
         /// <paramref name="batchNumber"/> name the position of the batch you are training now. They are
         /// fed to any scheduled hyperparameter reading the epoch / batch counters during this step, and
         /// are recorded <b>verbatim</b> on the returned checkpoint's <see cref="TrainingCheckpoint.Epoch"/>
-        /// / <see cref="TrainingCheckpoint.BatchIndex"/>. Unlike the loader overload this one does
-        /// <b>not</b> advance to a "next batch" position — without a loader it has no batches-per-epoch to
-        /// know when a batch index rolls into the next epoch, so verbatim recording is the only
-        /// well-defined contract. Consequently, since a loader-driven resume restores from the recorded
-        /// counters, resuming <c>Fit(loader)</c> from a checkpoint produced here would re-run this batch;
-        /// a manual loop that owns its own iteration simply passes each batch's position and manages
+        /// / <see cref="TrainingCheckpoint.BatchIndex"/> — the same "batch used" convention the loader
+        /// overload records (there it is the drawn batch's own position). Both overloads therefore agree:
+        /// the checkpoint stores the batch that was <b>used</b>, and a loader-driven resume advances one
+        /// past it via <see cref="IDataLoader.RestoreAfter"/> (the loader owns the epoch rollover). So
+        /// resuming <c>Fit(loader)</c> from a checkpoint produced here continues at the batch <b>after</b>
+        /// this one — no re-run. A host owning its own iteration passes each batch's position and manages
         /// resume itself. <see cref="TrainingCheckpoint.Step"/> is advanced by one; the attached
         /// <see cref="TrainingCheckpoint.Rig"/> and this step's <see cref="TrainingCheckpoint.Loss"/> are
         /// preserved.</para>
@@ -2381,21 +2378,24 @@ namespace Shorokoo
         /// <see cref="TrainingCheckpoint.Epoch"/> and <see cref="TrainingCheckpoint.BatchIndex"/> at
         /// the right points — so the host no longer hand-sets epoch / batch: the loader owns the data
         /// stream and the rig reads the counters off it. Each produced checkpoint therefore carries a
-        /// correct position, and the returned <see cref="TrainingResult.FinalCheckpoint"/> can be saved
-        /// and later resumed by passing it back as <paramref name="initialCheckpoint"/>: the loader is
-        /// <see cref="IDataLoader.Restore"/>d to the checkpoint's position, so the run continues from
-        /// exactly the next batch it had reached.
+        /// correct position — the batch that was USED — and the returned
+        /// <see cref="TrainingResult.FinalCheckpoint"/> can be saved and later resumed by passing it back
+        /// as <paramref name="initialCheckpoint"/>: the loader is advanced one past the checkpoint's
+        /// position with <see cref="IDataLoader.RestoreAfter"/>, so the run continues from exactly the
+        /// batch after the last one it trained. A fresh (or position-unknown) checkpoint instead starts
+        /// at <c>(0, 0)</c> via <see cref="IDataLoader.RestoreFrom"/>.
         ///
-        /// <para>"Epochs" are counted from the checkpoint's current epoch: the loop trains until the
-        /// loader reaches <c>startEpoch + numEpochs</c>. Resuming a checkpoint saved mid-epoch first
-        /// finishes that partial epoch. Scheduled hyperparameters are applied automatically (the global
+        /// <para>"Epochs" are counted from the loader's resume epoch: the loop trains until the
+        /// loader reaches <c>resumeEpoch + numEpochs</c>. Resuming a checkpoint saved mid-epoch first
+        /// finishes that partial epoch (the resume position is still within it); resuming one saved at an
+        /// epoch's last batch begins the next epoch. Scheduled hyperparameters are applied automatically (the global
         /// step advances across the run); this schedule-driven form requires the rig to have no
         /// schedule-less runtime hyperparameter — supply those via <see cref="MakeHyperparameters(float)"/>
         /// and a manual <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, TensorDataStruct, CompiledGraph)"/>
         /// loop instead.</para>
         /// </summary>
         /// <param name="loader">The data loader owning the (input, target) batch stream and its position.</param>
-        /// <param name="numEpochs">Number of additional epochs to train, counted from the checkpoint's epoch.</param>
+        /// <param name="numEpochs">Number of additional epochs to train, counted from the loader's resume epoch.</param>
         /// <param name="initialCheckpoint">State to resume from; defaults to <see cref="CreateInitialCheckpoint()"/>.</param>
         /// <param name="ctx">Compute context; defaults to <see cref="ComputeContext.Default"/>.</param>
         /// <returns>Final checkpoint (with advanced step / epoch / batch) and the per-epoch mean losses.</returns>
@@ -2411,14 +2411,20 @@ namespace Shorokoo
 
             var checkpoint = initialCheckpoint ?? CreateInitialCheckpoint();
 
-            // Resume: point the loader at the checkpoint's position so training continues from the very
-            // next batch. A fresh checkpoint — or one whose epoch / batch is unknown (null), e.g. trained
-            // without a loader — starts at (epoch 0, batch 0).
-            long startEpoch = checkpoint.Epoch ?? 0L;
-            long startBatch = checkpoint.BatchIndex ?? 0L;
-            loader.Restore(new DataLoaderPosition(startEpoch, startBatch));
+            // Resume: point the loader at the next batch to train. A checkpoint's epoch / batch now names
+            // the batch that was USED, so a resuming run advances one past it via RestoreAfter (the loader
+            // does the epoch rollover). A fresh checkpoint — or one whose epoch / batch is unknown (null),
+            // e.g. trained without a loader — starts at (epoch 0, batch 0) via RestoreFrom.
+            if (checkpoint.Epoch is long ckptEpoch && checkpoint.BatchIndex is long ckptBatch)
+                loader.RestoreAfter(new DataLoaderPosition(ckptEpoch, ckptBatch));
+            else
+                loader.RestoreFrom(new DataLoaderPosition(0, 0));
 
             var compiled = ctx.Compile(TrainingStepPureGraph);
+            // Count epochs from the loader's live resume position (always concrete), not the checkpoint's
+            // recorded "batch used" — resuming a full epoch's last batch lands the loader at the next
+            // epoch's start, and numEpochs is added to THAT.
+            long startEpoch = loader.Position.Epoch;
             long targetEpoch = startEpoch + numEpochs;
 
             var epochLosses = new List<float>();

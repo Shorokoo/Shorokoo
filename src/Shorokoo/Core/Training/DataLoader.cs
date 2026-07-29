@@ -8,10 +8,12 @@ namespace Shorokoo
     /// <summary>
     /// A loader's position in its batch stream: the (0-based) <see cref="Epoch"/> and the
     /// <see cref="BatchIndex"/> of the <b>next</b> batch that <see cref="IDataLoader.Next"/> will
-    /// yield within that epoch. It is the single source of truth for "where the run is" — the value
-    /// persisted in a <see cref="TrainingCheckpoint"/>'s <see cref="TrainingCheckpoint.Epoch"/> /
-    /// <see cref="TrainingCheckpoint.BatchIndex"/> so a resumed run continues exactly where it left
-    /// off (feed it back with <see cref="IDataLoader.Restore"/>).
+    /// yield within that epoch — the loader's live position. A run's resume point is derived from
+    /// the checkpoint's recorded counters (which name the batch that was <b>used</b>, see
+    /// <see cref="TrainingCheckpoint.Epoch"/> / <see cref="TrainingCheckpoint.BatchIndex"/>) and fed
+    /// back with <see cref="IDataLoader.RestoreFrom"/> (position at) or
+    /// <see cref="IDataLoader.RestoreAfter"/> (position one batch after) so the resumed run continues
+    /// exactly where it left off.
     /// </summary>
     public readonly struct DataLoaderPosition : IEquatable<DataLoaderPosition>
     {
@@ -70,8 +72,9 @@ namespace Shorokoo
 
     /// <summary>
     /// Owns a training data stream: it produces (input, target) batches one at a time, tracks its
-    /// <see cref="Position"/> in the stream, and can be <see cref="Restore"/>d to any position so a
-    /// resumed run continues exactly where it left off. <see cref="TrainingRig"/>'s loader-taking
+    /// <see cref="Position"/> in the stream, and can be repositioned — <see cref="RestoreFrom"/> to a
+    /// position, or <see cref="RestoreAfter"/> to one batch past it — so a resumed run continues
+    /// exactly where it left off. <see cref="TrainingRig"/>'s loader-taking
     /// <c>Fit</c> overload drives a loader and advances the checkpoint's step / epoch / batch counters
     /// for you.
     ///
@@ -84,11 +87,6 @@ namespace Shorokoo
     /// </summary>
     public interface IDataLoader
     {
-        /// <summary>The number of batches in one epoch (a full pass over the data). Fixed for the
-        /// loader's lifetime, so <c>step = epoch * BatchesPerEpoch + batchIndex</c> holds for a run
-        /// driven from a single loader.</summary>
-        int BatchesPerEpoch { get; }
-
         /// <summary>The current position — the epoch and within-epoch index of the batch the next
         /// <see cref="Next"/> will return.</summary>
         DataLoaderPosition Position { get; }
@@ -97,10 +95,18 @@ namespace Shorokoo
         /// one batch (rolling into the next epoch after the last batch of the current one).</summary>
         DataBatch Next();
 
-        /// <summary>Repositions the loader so the next <see cref="Next"/> yields the batch at
-        /// <paramref name="position"/> — the resume primitive. <paramref name="position"/>'s batch
-        /// index must be a valid index into an epoch (<c>0 &lt;= BatchIndex &lt; BatchesPerEpoch</c>).</summary>
-        void Restore(DataLoaderPosition position);
+        /// <summary>Repositions the loader so the next <see cref="Next"/> yields the batch <b>at</b>
+        /// <paramref name="position"/> — the resume-from-a-known-position primitive.
+        /// <paramref name="position"/>'s batch index must be a valid in-epoch index.</summary>
+        void RestoreFrom(DataLoaderPosition position);
+
+        /// <summary>Repositions the loader so the next <see cref="Next"/> yields the batch <b>one step
+        /// after</b> <paramref name="position"/> — <paramref name="position"/> advanced by one batch,
+        /// rolling into the next epoch when it names the last batch of an epoch (the loader performs the
+        /// rollover internally). This is the resume primitive for the unified checkpoint convention: a
+        /// checkpoint records the batch that was <b>used</b>, so resuming continues at the batch after it.
+        /// <paramref name="position"/>'s batch index must be a valid in-epoch index.</summary>
+        void RestoreAfter(DataLoaderPosition position);
     }
 
     /// <summary>
@@ -113,7 +119,7 @@ namespace Shorokoo
     /// is a pure function of <c>(seed, e)</c> — a Fisher–Yates shuffle driven by a SplitMix64 stream
     /// seeded from the two mixed together. It uses no ambient <see cref="System.Random"/> and no wall
     /// clock, so it is identical across processes and runtimes. That is what makes resume exact:
-    /// <see cref="Restore"/>ing to <c>(e, b)</c> regenerates epoch <c>e</c>'s order bit-for-bit and
+    /// <see cref="RestoreFrom"/>ing to <c>(e, b)</c> regenerates epoch <c>e</c>'s order bit-for-bit and
     /// skips the first <c>b</c> batches, so the continued run sees the very batches the original
     /// would have.</para>
     ///
@@ -190,7 +196,12 @@ namespace Shorokoo
             BatchesPerEpoch = checked((int)batches);
         }
 
-        /// <inheritdoc/>
+        /// <summary>The number of batches in one epoch (a full pass over the data). Fixed for the
+        /// loader's lifetime, so <c>step = epoch * BatchesPerEpoch + batchIndex</c> holds for a run
+        /// driven from a single loader. Concrete to <see cref="InMemoryDataLoader"/> — not on
+        /// <see cref="IDataLoader"/>, since the interface's resume primitives
+        /// (<see cref="RestoreFrom"/> / <see cref="RestoreAfter"/>) do the epoch rollover internally,
+        /// so a caller never needs the count to compute an "after" position by hand.</summary>
         public int BatchesPerEpoch { get; }
 
         /// <summary>The number of samples in the dataset (the shared leading dimension of every field).</summary>
@@ -200,14 +211,38 @@ namespace Shorokoo
         public DataLoaderPosition Position => new DataLoaderPosition(_epoch, _batchIndex);
 
         /// <inheritdoc/>
-        public void Restore(DataLoaderPosition position)
+        public void RestoreFrom(DataLoaderPosition position)
+        {
+            ValidateInEpoch(position);
+            _epoch = position.Epoch;
+            _batchIndex = position.BatchIndex;
+        }
+
+        /// <inheritdoc/>
+        public void RestoreAfter(DataLoaderPosition position)
+        {
+            ValidateInEpoch(position);
+            // Advance one batch past the given (used) position, rolling into the next epoch after the
+            // last batch of an epoch — the same rollover Next() performs.
+            long epoch = position.Epoch;
+            long batchIndex = position.BatchIndex + 1;
+            if (batchIndex >= BatchesPerEpoch)
+            {
+                batchIndex = 0;
+                epoch++;
+            }
+            _epoch = epoch;
+            _batchIndex = batchIndex;
+        }
+
+        /// <summary>Rejects a batch index outside a single epoch (guards against a mismatched
+        /// checkpoint/loader — e.g. a different batch size or dataset).</summary>
+        private void ValidateInEpoch(DataLoaderPosition position)
         {
             if (position.BatchIndex >= BatchesPerEpoch)
                 throw new ArgumentOutOfRangeException(nameof(position), position.BatchIndex,
                     $"Batch index {position.BatchIndex} is out of range for a loader with {BatchesPerEpoch} batches per epoch. " +
                     "Was this checkpoint produced with a different batch size / dataset?");
-            _epoch = position.Epoch;
-            _batchIndex = position.BatchIndex;
         }
 
         /// <inheritdoc/>

@@ -959,14 +959,16 @@ public class CompressedFormatUtilsCoverageTests
 
             // A future checkpoint format version still inspects as a checkpoint (version and
             // step read from the marker) with an observation; a tensor outside the known
-            // sections is observed too.
+            // sections is observed too. A future version keeps the fixed int64[2] = [version, step]
+            // marker and grows via new presence-gated scalars (the design's forward-compat story),
+            // so the marker here is the same shape this build writes, only with a newer version.
             var w = TensorData([2L], 1.0f, 2.0f);
             var futureCkptPath = NextPath("future_checkpoint.safetensors");
             SafeTensorLoader.SaveSafeTensors(futureCkptPath, new List<SafeTensor>
             {
                 new SafeTensor("trainable/w", w, "F32", w.Shape.Dims),
                 new SafeTensor("stray", w, "F32", w.Shape.Dims),
-                new SafeTensor("__shorokoo_checkpoint__", TensorData([4L], 99L, 3L, 0L, 0L), "I64", [4L]),
+                new SafeTensor("__shorokoo_checkpoint__", TensorData([2L], 99L, 3L), "I64", [2L]),
             });
             var futureCkpt = Persistence.Inspect(futureCkptPath);
             Assert.Equal(ArtifactKind.TrainingCheckpoint, futureCkpt.Kind);
@@ -1097,7 +1099,7 @@ public class CompressedFormatUtilsCoverageTests
             Assert.Equal(300_000L * 4, chopped.SafeTensors.TotalTensorBytes);
 
             // A checkpoint saved compressed: the marker is visible in the header, but its
-            // [version, step, epoch, batchIndex] payload sits inside the compressed tensor
+            // [version, step] payload sits inside the compressed tensor
             // data, beyond the bounded header read — the archive kind is reported,
             // TrainingCheckpoint stays null, and an observation says why.
             var w = TensorData([2L], 1.0f, 2.0f);

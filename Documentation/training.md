@@ -139,6 +139,25 @@ public TrainingCheckpoint TrainStep(
     TensorDataStruct trainingOutput,
     CompiledGraph compiled);
 
+// Loader-driven single step: draws loader.Next(), sourcing epoch / batch from the loader — the
+// single-step form of Fit(loader). The batch's own position drives the scheduler for this step and
+// is recorded on the returned checkpoint (the batch USED). Requires no runtime hypers.
+public TrainingCheckpoint TrainStep(
+    TrainingCheckpoint checkpoint,
+    IDataLoader loader,
+    CompiledGraph compiled);
+
+// Explicit epoch / batch: for a host driving its own iteration (no loader). epoch / batchNumber name
+// the batch being trained — fed to the scheduler for this step AND recorded verbatim on the returned
+// checkpoint: the same "batch used" convention the loader overload records.
+public TrainingCheckpoint TrainStep(
+    TrainingCheckpoint checkpoint,
+    TensorDataStruct trainingInput,
+    TensorDataStruct trainingOutput,
+    long epoch,
+    long batchNumber,
+    CompiledGraph compiled);
+
 public TensorDataStruct MakeHyperparameters(float value);                       // exactly one dynamic
 public TensorDataStruct MakeHyperparameters(params (string name, float value)[] values); // named
 
@@ -148,10 +167,17 @@ public TrainingResult Fit(  // alias: Train(...)
     TensorDataStruct[] trainingOutputs,
     int numEpochs,
     ComputeContext ctx);
+
+// Data-loader-driven: the loader owns the batch stream; Fit advances step / epoch / batch for you.
+public TrainingResult Fit(
+    IDataLoader loader,
+    int numEpochs,
+    TrainingCheckpoint? initialCheckpoint = null,  // defaults to CreateInitialCheckpoint()
+    ComputeContext? ctx = null);                   // defaults to ComputeContext.Default
 ```
 
 Result types:
-- `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long`; the training loop advances them — `TrainStep` carries them through unchanged; default `0`). All three counters are `int64` end to end. It also carries `.Rig` (the `TrainingRig?` that produced it — set on every rig-produced checkpoint, so `checkpoint.ToInferenceModel()` needs no re-supplied graph) and `.Loss` (`float?`; the loss of the `TrainStep` that produced it, `null` on an initial or bare checkpoint). Both are preserved through the counter derivations (`WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex`). `TrainStep` returns this checkpoint directly — read the step's loss off `.Loss`. `.Loss` persists as its own `Loss` component, independent of `Counters` (dropping `Loss`, or an initial checkpoint, reloads with `.Loss == null` — never a sentinel `0`).
+- `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long?`; the training loop advances them — the counter-agnostic `TrainStep` carries them through unchanged). They are `null` when the position is genuinely **unknown** — an initial checkpoint, or one trained without a data loader / explicit counters — rather than a misleading `0`; the loader-driven and explicit-counter paths set concrete values. A scheduled hyperparameter reading the epoch / batch counter sees `0` for a `null` value. `.Step` is always a concrete `long`; all counters are `int64` end to end. It also carries `.Rig` (the `TrainingRig?` that produced it — set on every rig-produced checkpoint, so `checkpoint.ToInferenceModel()` needs no re-supplied graph) and `.Loss` (`float?`; the loss of the `TrainStep` that produced it, `null` on an initial or bare checkpoint). Both are preserved through the counter derivations (`WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex`). `TrainStep` returns this checkpoint directly — read the step's loss off `.Loss`. `.Loss` persists as its own `Loss` component, independent of `Counters` (dropping `Loss`, or an initial checkpoint, reloads with `.Loss == null` — never a sentinel `0`).
 - `TrainingResult` → `.FinalCheckpoint`, `.EpochLosses` (the per-epoch mean losses).
 
 `TrainingRig`, `TrainingCheckpoint`, and `TrainingResult` are in
@@ -167,6 +193,63 @@ vary per training step (the per-step RNG position is saved in the checkpoint, so
 resumed run continues exactly). Pass
 `new RngConfig { MasterSeed = … }` to re-roll all streams coherently, or
 `RngConfig.NonDeterministic()` for per-run variation.
+
+## Feeding data: the data loader
+
+The array overloads of `Fit`/`Train` take pre-batched `TensorDataStruct[]` and leave the
+checkpoint's epoch / batch counters for you to set. A **data loader** instead owns the batch
+stream: it chops your data into batches, tracks its position, and lets `Fit` advance the
+checkpoint's step / epoch / batch counters automatically — so a saved checkpoint records exactly
+where the run was, and a resumed run continues from the very next batch.
+
+```csharp
+// One field per model input / target; the leading dimension is the sample count.
+var inputs  = new TensorDataStruct(rig.InputDef,
+    new Dictionary<string, IData> { { "input",   TensorData([1000L, 64L], features) } });
+var targets = new TensorDataStruct(rig.TargetDef,
+    new Dictionary<string, IData> { { "targets", TensorData([1000L, 10L], labels)  } });
+
+// Batch into 32s, reshuffling each epoch (deterministically from the seed).
+var loader = new InMemoryDataLoader(inputs, targets, batchSize: 32, shuffle: true, seed: 42);
+
+var outcome = rig.Fit(loader, numEpochs: 10);   // step / epoch / batch advance automatically
+```
+
+- **`IDataLoader`** is the minimal contract: a current `Position`
+  (`DataLoaderPosition`, the epoch + index of the *next* batch it will yield), `Next()` (produces
+  the current `DataBatch` — input + target + the position it came from — and advances one batch,
+  rolling into the next epoch after the last), and two resume primitives — `RestoreFrom(position)`
+  (the next `Next()` yields the batch *at* `position`) and `RestoreAfter(position)` (the next `Next()`
+  yields the batch *one step after* `position`, rolling into the next epoch internally).
+  `InMemoryDataLoader` also exposes `BatchesPerEpoch`, but that is **not** on the interface — the epoch
+  rollover a caller would have used it for now lives inside `RestoreAfter`.
+- **One step at a time.** `rig.TrainStep(checkpoint, loader, compiled)` is the single-step form of
+  `Fit(loader)` — it draws one batch, runs the step (the batch's own position drives any scheduler),
+  and returns a checkpoint recording the **batch used** (that same drawn position). `Fit(loader)` is
+  just a loop over it, so the two share one source of the loader step-and-counter semantics. For a host
+  that owns its own iteration (no loader), `rig.TrainStep(checkpoint, input, target, epoch, batchNumber,
+  compiled)` records the given `epoch` / `batchNumber` verbatim — the same "batch used" convention (it
+  names the batch being trained).
+- **`InMemoryDataLoader`** is the bare-minimum implementation over tensors you already hold. Each
+  field's leading dimension is the sample count `N`; it slices along that dimension into
+  fixed-size batches, optionally reshuffling every epoch.
+- **Shuffle is deterministic.** With `shuffle: true`, the permutation for epoch `e` is a pure
+  function of `(seed, e)` — a Fisher–Yates shuffle over a SplitMix64 stream, using no ambient
+  `Random` and no wall clock. That is what makes resume exact: restoring to `(e, b)` regenerates
+  epoch `e`'s order bit-for-bit and skips the first `b` batches, so the continued run sees the
+  same batches the original would have.
+- **Partial final batch.** `dropLast: true` (the default) drops a trailing partial batch so every
+  batch matches the shape the training-step graph was compiled for. Pass `dropLast: false` to keep
+  the smaller final batch (only safe if the graph tolerates a variable batch dimension).
+- **Resume.** A checkpoint's `.Epoch` / `.BatchIndex` name the batch that was **used** at its last
+  step. Save the `FinalCheckpoint` (or any mid-run checkpoint), then in a later process rebuild the rig
+  and a loader over the same data/seed and call `rig.Fit(loader, numEpochs, initialCheckpoint: loaded)`:
+  `Fit` advances the loader one batch past that recorded position (`RestoreAfter`), so the run picks up
+  at exactly the next batch — no re-run and no skip. (A fresh, position-unknown checkpoint instead
+  starts at `(0, 0)` via `RestoreFrom`.) `numEpochs` is counted from the loader's resume epoch (a
+  checkpoint saved mid-epoch first finishes that partial epoch; one saved at an epoch's last batch
+  begins the next). This is Shorokoo owning **its own** loader's position; a host driving an external
+  pipeline Shorokoo doesn't own still uses the checkpoint's host user-data bag instead.
 
 ## Save and resume a checkpoint (across process restarts)
 
@@ -187,8 +270,11 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
 ```
 
 - The file is a single SafeTensors file (every param/state field plus the run
-  counters — step, epoch, batch index). A checkpoint written before epoch/batch
-  existed loads them as `0`.
+  counters). The `int64` marker carries `[version, step]` (always present); epoch and batch index
+  are each a **presence-gated** `int64` scalar beside it, written only when set — so an unknown
+  epoch/batch (a checkpoint trained without a loader / explicit counters, or one written before
+  those counters existed) is absent on disk and reloads as `null`, never a sentinel `0`. A concrete
+  `0` (e.g. a run resting at the start of an epoch) is written and reloads as `0`.
 - For the **native `.skpt` container** instead — the training state split into
   per-kind data entries alongside the concrete inference model, with the container's
   inspectable manifest, per-entry Zstd, and provenance metadata — save with

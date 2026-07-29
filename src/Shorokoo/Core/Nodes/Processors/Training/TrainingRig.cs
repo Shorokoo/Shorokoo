@@ -1874,7 +1874,10 @@ namespace Shorokoo
                 throw new ArgumentException("Training inputs and outputs must have the same length.");
             if (numEpochs < 1) throw new ArgumentException("Number of epochs must be at least 1.", nameof(numEpochs));
 
-            var compiled = (ctx ?? RuntimeContext).Compile(TrainingStepPureGraph);
+            // A context-less call reuses the rig's lazily-compiled, cached trainstep (compiled via
+            // RuntimeContext), so a Fit()/Train() loop and a manual TrainStep loop share exactly one
+            // compiled graph per rig. An explicit ctx override compiles a fresh session on that backend.
+            var compiled = ctx is null ? CompiledTrainStep : ctx.Compile(TrainingStepPureGraph);
             var checkpoint = initialCheckpoint;
             var epochLosses = new float[numEpochs];
 
@@ -1949,7 +1952,6 @@ namespace Shorokoo
         {
             if (loader is null) throw new ArgumentNullException(nameof(loader));
             if (numEpochs < 1) throw new ArgumentException("Number of epochs must be at least 1.", nameof(numEpochs));
-            ctx ??= RuntimeContext;
 
             var checkpoint = initialCheckpoint ?? CreateInitialCheckpoint();
 
@@ -1962,7 +1964,9 @@ namespace Shorokoo
             else
                 loader.RestoreFrom(new DataLoaderPosition(0, 0));
 
-            var compiled = ctx.Compile(TrainingStepPureGraph);
+            // Context-less: reuse the rig's cached trainstep (one compiled graph per rig); an explicit
+            // ctx override compiles a fresh session on that backend.
+            var compiled = ctx is null ? CompiledTrainStep : ctx.Compile(TrainingStepPureGraph);
             // Count epochs from the loader's live resume position (always concrete), not the checkpoint's
             // recorded "batch used" — resuming a full epoch's last batch lands the loader at the next
             // epoch's start, and numEpochs is added to THAT.

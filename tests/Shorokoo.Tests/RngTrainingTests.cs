@@ -71,7 +71,6 @@ public class RngTrainingTests
         var rig = BuildDropoutRig(rngConfig);
         var (inputBatch, targetBatch) = MakeBatches();
 
-        var ctx = new ComputeContext();
         var checkpoint = rig.CreateInitialCheckpoint();
 
         var losses = new float[steps];

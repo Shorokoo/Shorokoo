@@ -151,7 +151,6 @@ public class TrainingPerfBaselineTests
 
     private static double MeasureThroughput(ComputationGraph baseGraph, TensorData exampleInput)
     {
-        var ctx = new ComputeContext();
         var rig = TrainingRig.FromScratch(
             baseGraph, Losses.L2Loss, Optimizers.Adam,
             baseGraph.FromOrderedInputs([exampleInput]),

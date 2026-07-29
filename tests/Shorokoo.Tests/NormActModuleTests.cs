@@ -190,7 +190,6 @@ public class NormActTrainingCoverageTests
             new NamedModelParam[] { new TensorDataModelParam("input", ModelParamType.InputParam, inputData) },
             0.01f);
 
-        var ctx = new ComputeContext();
         var initial = rig.CreateInitialCheckpoint();
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", inputData),
@@ -324,7 +323,6 @@ public class NormActTrainingCoverageTests
             new NamedModelParam[] { new TensorDataModelParam("input", ModelParamType.InputParam, inputData) },
             0.1f);
 
-        var ctx = new ComputeContext();
         var initial = rig.CreateInitialCheckpoint();
 
         // Sanity: the single slope param is [C] and starts uniform at 0.25.

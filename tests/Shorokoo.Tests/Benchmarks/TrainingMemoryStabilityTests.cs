@@ -62,7 +62,6 @@ public class TrainingMemoryStabilityTests
         var baseGraph = PerfBaselineLinearModel.ComputationGraph;
         var exampleInput = TensorData(InputShape, new float[8]);
 
-        var ctx = new ComputeContext();
         var rig = TrainingRig.FromScratch(
             baseGraph, Losses.L2Loss, Optimizers.Adam,
             baseGraph.FromOrderedInputs([exampleInput]),

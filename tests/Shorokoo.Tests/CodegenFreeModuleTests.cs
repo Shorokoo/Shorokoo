@@ -363,7 +363,6 @@ public class CodegenFreeModuleTests
         var targetBatch = new TensorDataStruct(targetDef,
             new Dictionary<string, IData> { { "targets", TensorData([4L], new float[] { 0f, 0f, 0f, 0f }) } });
 
-        var ctx = new ComputeContext();
         var stepResult = rig.TrainStep(initial, inputBatch, targetBatch);
 
         Assert.True(float.IsFinite(stepResult.Loss!.Value));

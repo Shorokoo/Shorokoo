@@ -466,6 +466,93 @@ public class TrainingRigCoverageTests
     }
 
     /// <summary>
+    /// The two runtime <see cref="ComputeContext"/> members — <see cref="TrainingRig.MergeContext"/>
+    /// (build/merge phase) and <see cref="TrainingRig.RuntimeContext"/> (compile/run) — default to
+    /// <see cref="ComputeContext.Default"/> under a plain construction, are stored verbatim when
+    /// supplied non-default, and are carried forward BY REFERENCE (never re-defaulted) through every
+    /// <c>With…</c> derivation, including the distinct <see cref="TrainingRig.WithSeed"/> re-key path.
+    /// </summary>
+    [Fact]
+    public void TestComputeContextsStoredAndPropagatedThroughDerivationCoverage()
+    {
+        NamedModelParam[] sample =
+        [
+            new TensorDataModelParam("input", ModelParamType.InputParam,
+                TensorData([4L], new float[4])),
+        ];
+
+        // Default construction: both contexts are the process-wide Default singleton.
+        var defaultRig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, sample, 0.01f);
+        Assert.Same(ComputeContext.Default, defaultRig.MergeContext);
+        Assert.Same(ComputeContext.Default, defaultRig.RuntimeContext);
+
+        // Non-default contexts are stored verbatim. The rng overload places the two contexts before
+        // the params hyperparameters, matching the RngConfig-before-params convention.
+        var merge = new ComputeContext();
+        var runtime = new ComputeContext();
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, sample, null, merge, runtime, 0.01f);
+        Assert.Same(merge, rig.MergeContext);
+        Assert.Same(runtime, rig.RuntimeContext);
+
+        // Propagated by reference through a constituent-swap derivation…
+        var derived = rig.WithLoss(L2Loss.ComputationGraph);
+        Assert.Same(merge, derived.MergeContext);
+        Assert.Same(runtime, derived.RuntimeContext);
+
+        // …and through the re-seed derivation (a separate code path that re-keys a cloned arch).
+        var reseeded = rig.WithSeed(new RngConfig { MasterSeed = 3 });
+        Assert.Same(merge, reseeded.MergeContext);
+        Assert.Same(runtime, reseeded.RuntimeContext);
+    }
+
+    /// <summary>
+    /// The compute contexts are runtime config, never serialized to any checkpoint. A rig built with
+    /// distinctive custom contexts saves a checkpoint; a <b>fresh</b> rig carrying its own, different
+    /// contexts loads it. Because nothing context-shaped is written to (or read back from) the file,
+    /// the reloaded checkpoint's rig carries the LOADER rig's contexts — the supplied-rig precedence —
+    /// and never a trace of the saver's. This pins both "not persisted" and the precedence rule.
+    /// </summary>
+    [Fact]
+    public void TestComputeContextsNeverPersistedCoverage()
+    {
+        NamedModelParam[] sample =
+        [
+            new TensorDataModelParam("input", ModelParamType.InputParam,
+                TensorData([4L], new float[4])),
+        ];
+
+        var saverMerge = new ComputeContext();
+        var saverRuntime = new ComputeContext();
+        var saverRig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, sample, null, saverMerge, saverRuntime, 0.01f);
+        var ckpt = saverRig.CreateInitialCheckpoint();
+
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_ctx_notpersisted_{Guid.NewGuid():N}.safetensors");
+        try
+        {
+            ckpt.Save(path);
+
+            var loaderMerge = new ComputeContext();
+            var loaderRuntime = new ComputeContext();
+            var loaderRig = TrainingRig.FromScratch(
+                ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+                SGDOptimizer.ComputationGraph, sample, null, loaderMerge, loaderRuntime, 0.01f);
+            var loaded = loaderRig.LoadCheckpoint(path);
+
+            Assert.Same(loaderMerge, loaded.Rig!.MergeContext);
+            Assert.Same(loaderRuntime, loaded.Rig!.RuntimeContext);
+            Assert.NotSame(saverMerge, loaded.Rig!.MergeContext);
+            Assert.NotSame(saverRuntime, loaded.Rig!.RuntimeContext);
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    /// <summary>
     /// Inertness: the representative-input attribute must never reach a serialized artifact. A
     /// boundary/input node is emitted as a <c>ValueInfoProto</c>, never a <c>NodeProto</c>, so its
     /// attributes are not serialized. This saves an initial checkpoint (whose model lineage carries

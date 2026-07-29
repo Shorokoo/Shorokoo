@@ -69,7 +69,7 @@ namespace Shorokoo
 
         /// <summary>
         /// Lazily-compiled, cached executable for <see cref="TrainingStepPureGraph"/>, compiled once
-        /// via <see cref="ComputeContext.Default"/> on the first <c>TrainStep</c> and reused by every
+        /// via <see cref="RuntimeContext"/> on the first <c>TrainStep</c> and reused by every
         /// subsequent step — so a manual <c>for (…) cp = rig.TrainStep(cp, in, out);</c> loop compiles
         /// nothing caller-side. Each rig instance owns its own, since its trainstep is distinct. This is
         /// a pure in-memory memo of the already-derived (and never-persisted) trainstep graph; it does
@@ -77,8 +77,8 @@ namespace Shorokoo
         /// </summary>
         private CompiledGraph? _compiledTrainStep;
 
-        /// <summary>The cached compiled trainstep, compiled on first use via <see cref="ComputeContext.Default"/>.</summary>
-        private CompiledGraph CompiledTrainStep => _compiledTrainStep ??= ComputeContext.Default.Compile(TrainingStepPureGraph);
+        /// <summary>The cached compiled trainstep, compiled on first use via <see cref="RuntimeContext"/>.</summary>
+        private CompiledGraph CompiledTrainStep => _compiledTrainStep ??= RuntimeContext.Compile(TrainingStepPureGraph);
 
         /// <summary>
         /// The rig's <b>constituent</b> layer (§5.8): the swappable source-of-truth models — the
@@ -136,6 +136,29 @@ namespace Shorokoo
         /// <summary>The RNG configuration bound into the derived trainstep (never null; defaults to
         /// <see cref="RngConfig.Default"/>). Re-seed with <see cref="WithSeed"/>.</summary>
         public RngConfig RngConfig => _constituents.RngConfig;
+
+        /// <summary>
+        /// The compute context used for the rig's <b>build/merge phase</b>: concretizing the model,
+        /// shape-inferring, lowering, memory-optimizing and initializing the training-step graph and the
+        /// optimizer state. Supplied at construction (defaults to <see cref="ComputeContext.Default"/>);
+        /// every <c>With…</c> derivation carries it forward by reference. It is <b>runtime configuration,
+        /// never persisted</b> — no checkpoint (flat or <c>.skpt</c>) or manifest records it, so a
+        /// reloaded rig receives a fresh one via <see cref="FromScratch(ComputationGraph, ComputationGraph,
+        /// ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?, ComputeContext?, ComputeContext?)"/>.
+        /// </summary>
+        public ComputeContext MergeContext { get; private set; } = ComputeContext.Default;
+
+        /// <summary>
+        /// The compute context used to <b>compile the merged <see cref="TrainingStepPureGraph"/> into an
+        /// executable and run it</b>: the lazily-cached trainstep session (see <see cref="CompiledTrainStep"/>)
+        /// and the default context for <see cref="Train"/> / <see cref="Fit(TensorDataStruct[],
+        /// TensorDataStruct[], int, TrainingCheckpoint?, ComputeContext?)"/>. Because the context that
+        /// compiles the trainstep bakes the ORT session that executes it, this single context determines
+        /// the execution backend. Supplied at construction (defaults to <see cref="ComputeContext.Default"/>);
+        /// every <c>With…</c> derivation carries it forward by reference and, like <see cref="MergeContext"/>,
+        /// it is runtime configuration that is <b>never persisted</b>.
+        /// </summary>
+        public ComputeContext RuntimeContext { get; private set; } = ComputeContext.Default;
 
         /// <summary>Struct definition for trainable parameters. Internal build/persistence machinery —
         /// persistence sources the defs from the rig directly, and callers drive training through the
@@ -320,6 +343,14 @@ namespace Shorokoo
         /// <see cref="RngConfig.Default"/> (master seed 0) is used — "no config" means the
         /// default deterministic identity, never non-reproducible backend randomness.
         /// </param>
+        /// <param name="mergeContext">
+        /// Optional build/merge-phase compute context (see <see cref="MergeContext"/>); <c>null</c> ⇒
+        /// <see cref="ComputeContext.Default"/>. Never persisted — a reloaded rig gets a fresh one here.
+        /// </param>
+        /// <param name="runtimeContext">
+        /// Optional compile/run compute context (see <see cref="RuntimeContext"/>); <c>null</c> ⇒
+        /// <see cref="ComputeContext.Default"/>. Never persisted — a reloaded rig gets a fresh one here.
+        /// </param>
         /// <returns>A configured TrainingRig ready for training</returns>
         public static TrainingRig FromScratch(
             ComputationGraph modelGraph,
@@ -327,11 +358,14 @@ namespace Shorokoo
             ComputationGraph optimizerGraph,
             NamedModelParam[] sampleInputs,
             IOptimizerHyperparameters hyperparameters,
-            RngConfig? rngConfig = null)
+            RngConfig? rngConfig = null,
+            ComputeContext? mergeContext = null,
+            ComputeContext? runtimeContext = null)
         {
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
             return FromScratchCore(modelGraph, lossGraph, optimizerGraph, sampleInputs,
-                hyperparameters.InOptimizerOrder(), hyperparameters.HyperparameterNames, rngConfig);
+                hyperparameters.InOptimizerOrder(), hyperparameters.HyperparameterNames, rngConfig,
+                mergeContext, runtimeContext);
         }
 
         /// <summary>
@@ -348,11 +382,14 @@ namespace Shorokoo
             NamedModelParam[] sampleInputs,
             params Hyperparameter[] hyperparameters)
             => FromScratchCore(modelGraph, lossGraph, optimizerGraph, sampleInputs, hyperparameters,
-                names: null, rngConfig: null);
+                names: null, rngConfig: null, mergeContext: null, runtimeContext: null);
 
         /// <summary>
-        /// Positional-hyperparameter overload with an RNG configuration. The config precedes
-        /// the hyperparameter values because a <c>params</c> array must come last.
+        /// Positional-hyperparameter overload with an RNG configuration and the optional build/merge and
+        /// compile/run compute contexts (see <see cref="MergeContext"/> / <see cref="RuntimeContext"/>).
+        /// All three precede the hyperparameter values because a <c>params</c> array must come last —
+        /// the same convention that places <paramref name="rngConfig"/> before the array; each defaults
+        /// to its neutral value (<see cref="RngConfig.Default"/> / <see cref="ComputeContext.Default"/>).
         /// </summary>
         public static TrainingRig FromScratch(
             ComputationGraph modelGraph,
@@ -360,9 +397,11 @@ namespace Shorokoo
             ComputationGraph optimizerGraph,
             NamedModelParam[] sampleInputs,
             RngConfig? rngConfig,
+            ComputeContext? mergeContext = null,
+            ComputeContext? runtimeContext = null,
             params Hyperparameter[] hyperparameters)
             => FromScratchCore(modelGraph, lossGraph, optimizerGraph, sampleInputs, hyperparameters,
-                names: null, rngConfig: rngConfig);
+                names: null, rngConfig: rngConfig, mergeContext: mergeContext, runtimeContext: runtimeContext);
 
         /// <summary>
         /// Convenience overload that accepts a <see cref="ModelParamList"/> for sample inputs,
@@ -376,11 +415,13 @@ namespace Shorokoo
             ComputationGraph optimizerGraph,
             ModelParamList sampleInputs,
             IOptimizerHyperparameters hyperparameters,
-            RngConfig? rngConfig = null)
+            RngConfig? rngConfig = null,
+            ComputeContext? mergeContext = null,
+            ComputeContext? runtimeContext = null)
         {
             if (sampleInputs is null) throw new ArgumentNullException(nameof(sampleInputs));
             return FromScratch(modelGraph, lossGraph, optimizerGraph,
-                sampleInputs.ModelParams.ToArray(), hyperparameters, rngConfig);
+                sampleInputs.ModelParams.ToArray(), hyperparameters, rngConfig, mergeContext, runtimeContext);
         }
 
         /// <summary>
@@ -400,8 +441,9 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// <see cref="ModelParamList"/> convenience overload with an RNG configuration and
-        /// positional hyperparameter values (the config precedes the <c>params</c> array).
+        /// <see cref="ModelParamList"/> convenience overload with an RNG configuration and the optional
+        /// build/merge and compile/run compute contexts (see <see cref="MergeContext"/> /
+        /// <see cref="RuntimeContext"/>), all preceding the <c>params</c> array as the array must come last.
         /// </summary>
         public static TrainingRig FromScratch(
             ComputationGraph modelGraph,
@@ -409,11 +451,13 @@ namespace Shorokoo
             ComputationGraph optimizerGraph,
             ModelParamList sampleInputs,
             RngConfig? rngConfig,
+            ComputeContext? mergeContext = null,
+            ComputeContext? runtimeContext = null,
             params Hyperparameter[] hyperparameters)
         {
             if (sampleInputs is null) throw new ArgumentNullException(nameof(sampleInputs));
             return FromScratch(modelGraph, lossGraph, optimizerGraph,
-                sampleInputs.ModelParams.ToArray(), rngConfig, hyperparameters);
+                sampleInputs.ModelParams.ToArray(), rngConfig, mergeContext, runtimeContext, hyperparameters);
         }
 
         private static TrainingRig FromScratchCore(
@@ -423,7 +467,9 @@ namespace Shorokoo
             NamedModelParam[] sampleInputs,
             Hyperparameter[] hyperparameters,
             IReadOnlyList<string>? names,
-            RngConfig? rngConfig)
+            RngConfig? rngConfig,
+            ComputeContext? mergeContext,
+            ComputeContext? runtimeContext)
         {
             if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
             if (lossGraph is null) throw new ArgumentNullException(nameof(lossGraph));
@@ -435,17 +481,20 @@ namespace Shorokoo
             // initial build path, which concretizes the model from the sample inputs. The sample
             // inputs are a construction-time argument only — consumed here to produce the retained
             // concrete arch and its shape exemplars, and never stored on the rig. "No config" means
-            // the default deterministic identity.
+            // the default deterministic identity. The two compute contexts are runtime config, held
+            // directly on the rig (never inside the persisted constituents); "no context" ⇒ Default.
             return BuildInitialRig(
                 new RigConstituents(
                     modelGraph, lossGraph, optimizerGraph, hyperparameters, names,
                     rngConfig ?? RngConfig.Default),
-                sampleInputs);
+                sampleInputs,
+                mergeContext ?? ComputeContext.Default,
+                runtimeContext ?? ComputeContext.Default);
         }
 
         /// <summary>
         /// The model-graph precondition shared by <see cref="FromScratch(ComputationGraph,
-        /// ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?)"/>
+        /// ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?, ComputeContext?, ComputeContext?)"/>
         /// and <see cref="TrainingCheckpoint.ToInferenceModel"/>: a module graph or an
         /// already-lowered concrete architecture (both feed the idempotent
         /// <c>ToConcreteArchitecture</c> pipeline). A weight-filled concrete model is
@@ -475,7 +524,7 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// The <b>initial build path</b> (<see cref="FromScratch(ComputationGraph, ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?)"/>
+        /// The <b>initial build path</b> (<see cref="FromScratch(ComputationGraph, ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?, ComputeContext?, ComputeContext?)"/>
         /// only): concretizes the model from the <paramref name="sampleInputs"/> once, binds the RNG
         /// config, and derives the retained concrete arch + its shape exemplars — then hands off to
         /// <see cref="DeriveFromConcreteArch"/> to compose and optimize the trainstep. The sample
@@ -484,7 +533,11 @@ namespace Shorokoo
         /// concrete arch itself (structure + RNG identity + the representative-input attributes written
         /// onto its <c>MODEL_TENSOR_INPUT</c> nodes below).
         /// </summary>
-        private static TrainingRig BuildInitialRig(RigConstituents constituents, NamedModelParam[] sampleInputs)
+        private static TrainingRig BuildInitialRig(
+            RigConstituents constituents,
+            NamedModelParam[] sampleInputs,
+            ComputeContext mergeContext,
+            ComputeContext runtimeContext)
         {
             var c = constituents;
             ValidateConstituents(c);
@@ -499,7 +552,8 @@ namespace Shorokoo
             // model is refused up front.
             var model = RequireModelGraphKind(c.Model, "TrainingRig (model constituent)");
 
-            var ctx = ComputeContext.Default;
+            // Concretization is a build/merge-phase step, so it runs on the merge context.
+            var ctx = mergeContext;
 
             // Single ToConcreteArchitecture pass — the ONE concretization for this rig and all its
             // future derivations. The resulting concrete arch is the shared substrate: the trainstep
@@ -522,7 +576,7 @@ namespace Shorokoo
             // is stored. Done once here; the attributes ride along on Clone() and survive re-seeding.
             WriteRepresentativeInputs(concreteArch, sampleInputs);
 
-            return DeriveFromConcreteArch(c, concreteArch);
+            return DeriveFromConcreteArch(c, concreteArch, mergeContext, runtimeContext);
         }
 
         /// <summary>
@@ -537,7 +591,9 @@ namespace Shorokoo
         /// </summary>
         private static TrainingRig DeriveFromConcreteArch(
             RigConstituents constituents,
-            InternalComputationGraph concreteArch)
+            InternalComputationGraph concreteArch,
+            ComputeContext mergeContext,
+            ComputeContext runtimeContext)
         {
             var c = constituents;
             ValidateConstituents(c);
@@ -550,16 +606,19 @@ namespace Shorokoo
             c.Optimizer.RequireKind(GraphKind.Module, "TrainingRig (optimizer constituent)",
                 "Pass the optimizer module graph (e.g. Optimizers.Adam).");
 
-            var ctx = ComputeContext.Default;
-
+            // The two runtime contexts ride on the rig itself (never in the persisted constituents);
+            // a derivation keeps the same two contexts. All the composition/lowering/optimization below
+            // is build/merge-phase work and therefore runs on MergeContext.
             var rig = new TrainingRig
             {
                 _constituents = c,
                 _concreteArch = concreteArch,
+                MergeContext = mergeContext,
+                RuntimeContext = runtimeContext,
             };
             rig.BuildTrainingStepPureGraph(
                 concreteArch, c.Loss.ToInternal(), c.Optimizer.ToInternal(), c.Hyperparameters, c.Names);
-            rig.InitializeAndOptimize(concreteArch, ctx, c.RngConfig);
+            rig.InitializeAndOptimize(concreteArch, mergeContext, c.RngConfig);
             return rig;
         }
 
@@ -660,7 +719,7 @@ namespace Shorokoo
         public TrainingRig WithLoss(ComputationGraph loss)
         {
             if (loss is null) throw new ArgumentNullException(nameof(loss));
-            return DeriveFromConcreteArch(_constituents with { Loss = loss }, _concreteArch);
+            return DeriveFromConcreteArch(_constituents with { Loss = loss }, _concreteArch, MergeContext, RuntimeContext);
         }
 
         /// <summary>
@@ -676,7 +735,7 @@ namespace Shorokoo
                 Optimizer = optimizer,
                 Hyperparameters = hyperparameters.InOptimizerOrder(),
                 Names = hyperparameters.HyperparameterNames,
-            }, _concreteArch);
+            }, _concreteArch, MergeContext, RuntimeContext);
         }
 
         /// <summary>Positional-hyperparameter overload of <see cref="WithOptimizer(ComputationGraph, IOptimizerHyperparameters)"/>.</summary>
@@ -686,7 +745,7 @@ namespace Shorokoo
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
             return DeriveFromConcreteArch(
                 _constituents with { Optimizer = optimizer, Hyperparameters = hyperparameters, Names = null },
-                _concreteArch);
+                _concreteArch, MergeContext, RuntimeContext);
         }
 
         /// <summary>
@@ -702,7 +761,7 @@ namespace Shorokoo
             {
                 Hyperparameters = hyperparameters.InOptimizerOrder(),
                 Names = hyperparameters.HyperparameterNames,
-            }, _concreteArch);
+            }, _concreteArch, MergeContext, RuntimeContext);
         }
 
         /// <summary>Positional-hyperparameter overload of <see cref="WithScheduler(IOptimizerHyperparameters)"/>.</summary>
@@ -711,7 +770,7 @@ namespace Shorokoo
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
             return DeriveFromConcreteArch(
                 _constituents with { Hyperparameters = hyperparameters, Names = null },
-                _concreteArch);
+                _concreteArch, MergeContext, RuntimeContext);
         }
 
         /// <summary>
@@ -735,7 +794,7 @@ namespace Shorokoo
             // MODEL_TENSOR_INPUT nodes still carry the representative-input attributes (same model inputs).
             var reArch = _concreteArch.Clone();
             reArch.ApplyRngConfig(rngConfig);
-            return DeriveFromConcreteArch(_constituents with { RngConfig = rngConfig }, reArch);
+            return DeriveFromConcreteArch(_constituents with { RngConfig = rngConfig }, reArch, MergeContext, RuntimeContext);
         }
 
         /// <summary>
@@ -1049,7 +1108,7 @@ namespace Shorokoo
                 var needed = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var h in scheduledIndices)
                 {
-                    var built = BuildSchedulerModule(hyperparameters[h], NameOf(h));
+                    var built = BuildSchedulerModule(hyperparameters[h], NameOf(h), MergeContext);
                     builtByIndex[h] = built;
                     foreach (var c in built.CounterNames) needed.Add(c);
                 }
@@ -1237,7 +1296,7 @@ namespace Shorokoo
             // Step 10: lower to an executable form. LowerGraph runs its Fast pipeline
             // in place on fastTraining and returns the same graph for the public-facing
             // TrainingStepPureGraph property.
-            _trainingStepWorkGraph = LowerGraph(fastTraining);
+            _trainingStepWorkGraph = LowerGraph(fastTraining, MergeContext);
 
             UpdatedParamFieldCount = TrainableParamStructDef.Fields.Length;
             UpdatedStateFieldCount = ModelStateDef.Fields.Length;
@@ -1288,7 +1347,7 @@ namespace Shorokoo
         /// <summary>A built scheduler graph and the counter inputs it consumes, in the graph's input order.</summary>
         private readonly record struct SchedulerGraph(InternalComputationGraph Graph, string[] CounterNames);
 
-        private static SchedulerGraph BuildSchedulerModule(Hyperparameter hv, string name)
+        private static SchedulerGraph BuildSchedulerModule(Hyperparameter hv, string name, ComputeContext mergeContext)
         {
             if (hv.AsSchedule is Schedule schedule)
             {
@@ -1306,7 +1365,7 @@ namespace Shorokoo
             var module = hv.AsSchedulerModule
                 ?? throw new InvalidOperationException(
                     $"Scheduled hyperparameter '{name}' has neither a built-in schedule nor a scheduler module.");
-            return ValidateAndInlineSchedulerModule(module, name);
+            return ValidateAndInlineSchedulerModule(module, name, mergeContext);
         }
 
         /// <summary>
@@ -1316,7 +1375,7 @@ namespace Shorokoo
         /// with the counter names it consumes (in input order, for wiring). Fails loud at rig build with
         /// a clear message on any signature/purity mismatch.
         /// </summary>
-        private static SchedulerGraph ValidateAndInlineSchedulerModule(ComputationGraph module, string name)
+        private static SchedulerGraph ValidateAndInlineSchedulerModule(ComputationGraph module, string name, ComputeContext mergeContext)
         {
             if (module.Kind is not (GraphKind.Module or GraphKind.ConcreteArchitecture or GraphKind.ConcreteModel))
                 throw new ArgumentException(
@@ -1377,7 +1436,7 @@ namespace Shorokoo
             var zeros = new TensorData[g.Inputs.Count];
             for (int i = 0; i < zeros.Length; i++)
                 zeros[i] = (TensorData)Shorokoo.Globals.TensorData(Array.Empty<long>(), 0L);
-            var outInfo = new ShapeInferenceInterpreter(ComputeContext.Default)
+            var outInfo = new ShapeInferenceInterpreter(mergeContext)
                 .Infer(g, zeros)
                 .GetTensorInfo(g.Outputs[0])
                 ?? throw new ArgumentException(
@@ -1486,7 +1545,7 @@ namespace Shorokoo
         /// loop over trainable parameters (e.g. ResNet residual stacks) must be flattened before
         /// the autograd pass runs.
         /// </summary>
-        private static InternalComputationGraph LowerGraph(InternalComputationGraph fast)
+        private static InternalComputationGraph LowerGraph(InternalComputationGraph fast, ComputeContext mergeContext)
         {
             // Expand TensorStruct outputs into individual field outputs.
             Shorokoo.Core.Nodes.Processors.Fast.FastExpandStructOutputs.Process(fast);
@@ -1502,7 +1561,7 @@ namespace Shorokoo
             // Resolve any remaining LOOP_OPEN iteration counts that are computed from constants
             // (e.g. Sub(Constant(2), Constant(1))) into literal Constant nodes. Autograd has no
             // gradient implementation for Loop, so every loop reaching autograd must be flattened.
-            FastFoldLoopIterationCountsToConstantsProcessor.Process(fast, ComputeContext.Default);
+            FastFoldLoopIterationCountsToConstantsProcessor.Process(fast, mergeContext);
 
             // Simplify after iteration-count resolution; the FastFoldConstantIterationLoops pass
             // inside FastSimplify performs the actual unroll, then folds remaining constants.
@@ -1511,7 +1570,7 @@ namespace Shorokoo
             // Lower attribute-tensorized variant ops (e.g. SHRK_CONV) to standard ONNX ops before
             // autograd — they have no gradient rule. Loops are unrolled by this point, so their
             // geometry inputs are constant-foldable.
-            Shorokoo.Core.Nodes.Processors.Fast.FastLowerAttributeTensorOps.Process(fast, compute: ComputeContext.Default);
+            Shorokoo.Core.Nodes.Processors.Fast.FastLowerAttributeTensorOps.Process(fast, compute: mergeContext);
 
             // Lower AUTO_GRAD nodes natively on the Fast graph — no CG round-trip needed.
             Shorokoo.Core.Nodes.Processors.AutoGrad.FastProcessAutoGradProcessor.Process(fast);
@@ -1795,24 +1854,27 @@ namespace Shorokoo
         /// <param name="trainingInputs">Array of training input batches (each as TensorDataStruct)</param>
         /// <param name="trainingOutputs">Array of training target batches (each as TensorDataStruct)</param>
         /// <param name="numEpochs">Number of passes over the training data</param>
-        /// <param name="ctx">Compute context for execution</param>
+        /// <param name="ctx">
+        /// Optional per-call override of the compile/run context. Defaults (<c>null</c>) to the rig's
+        /// <see cref="RuntimeContext"/>, the single context that compiles and runs the trainstep — pass a
+        /// context here only to run this one loop on a different backend.
+        /// </param>
         /// <returns>Training result with final checkpoint and per-epoch average losses</returns>
         public TrainingResult Train(
             TrainingCheckpoint initialCheckpoint,
             TensorDataStruct[] trainingInputs,
             TensorDataStruct[] trainingOutputs,
             int numEpochs,
-            ComputeContext ctx)
+            ComputeContext? ctx = null)
         {
             if (initialCheckpoint is null) throw new ArgumentNullException(nameof(initialCheckpoint));
             if (trainingInputs is null) throw new ArgumentNullException(nameof(trainingInputs));
             if (trainingOutputs is null) throw new ArgumentNullException(nameof(trainingOutputs));
-            if (ctx is null) throw new ArgumentNullException(nameof(ctx));
             if (trainingInputs.Length != trainingOutputs.Length)
                 throw new ArgumentException("Training inputs and outputs must have the same length.");
             if (numEpochs < 1) throw new ArgumentException("Number of epochs must be at least 1.", nameof(numEpochs));
 
-            var compiled = ctx.Compile(TrainingStepPureGraph);
+            var compiled = (ctx ?? RuntimeContext).Compile(TrainingStepPureGraph);
             var checkpoint = initialCheckpoint;
             var epochLosses = new float[numEpochs];
 
@@ -1839,8 +1901,8 @@ namespace Shorokoo
         /// Scheduled hyperparameters are applied automatically (the global step advances across epochs
         /// via the checkpoint), so the schedule sees a monotonically increasing step. Alias for
         /// <see cref="Train"/>. <paramref name="initialCheckpoint"/> defaults to
-        /// <see cref="CreateInitialCheckpoint()"/> and <paramref name="ctx"/> defaults to
-        /// <see cref="ComputeContext.Default"/>, so a minimal call is
+        /// <see cref="CreateInitialCheckpoint()"/> and <paramref name="ctx"/> defaults to the rig's
+        /// <see cref="RuntimeContext"/>, so a minimal call is
         /// <c>rig.Fit(inputs, targets, numEpochs: 10)</c>.
         /// </summary>
         public TrainingResult Fit(
@@ -1849,7 +1911,7 @@ namespace Shorokoo
             int numEpochs,
             TrainingCheckpoint? initialCheckpoint = null,
             ComputeContext? ctx = null)
-            => Train(initialCheckpoint ?? CreateInitialCheckpoint(), trainingInputs, trainingOutputs, numEpochs, ctx ?? ComputeContext.Default);
+            => Train(initialCheckpoint ?? CreateInitialCheckpoint(), trainingInputs, trainingOutputs, numEpochs, ctx);
 
         /// <summary>
         /// Fits the model by draining an <see cref="IDataLoader"/> for <paramref name="numEpochs"/>
@@ -1876,7 +1938,8 @@ namespace Shorokoo
         /// <param name="loader">The data loader owning the (input, target) batch stream and its position.</param>
         /// <param name="numEpochs">Number of additional epochs to train, counted from the loader's resume epoch.</param>
         /// <param name="initialCheckpoint">State to resume from; defaults to <see cref="CreateInitialCheckpoint()"/>.</param>
-        /// <param name="ctx">Compute context; defaults to <see cref="ComputeContext.Default"/>.</param>
+        /// <param name="ctx">Optional per-call override of the compile/run context; defaults to the rig's
+        /// <see cref="RuntimeContext"/>.</param>
         /// <returns>Final checkpoint (with advanced step / epoch / batch) and the per-epoch mean losses.</returns>
         public TrainingResult Fit(
             IDataLoader loader,
@@ -1886,7 +1949,7 @@ namespace Shorokoo
         {
             if (loader is null) throw new ArgumentNullException(nameof(loader));
             if (numEpochs < 1) throw new ArgumentException("Number of epochs must be at least 1.", nameof(numEpochs));
-            ctx ??= ComputeContext.Default;
+            ctx ??= RuntimeContext;
 
             var checkpoint = initialCheckpoint ?? CreateInitialCheckpoint();
 
@@ -1939,7 +2002,7 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Returns the default initial checkpoint produced at <see cref="FromScratch(ComputationGraph, ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?)"/> time.
+        /// Returns the default initial checkpoint produced at <see cref="FromScratch(ComputationGraph, ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?, ComputeContext?, ComputeContext?)"/> time.
         /// Trainable parameters and model state were initialized from the model's built-in
         /// initializers, and optimizer state from the optimizer's [StateInitializer]s (run once per
         /// trainable parameter, at each hyperparameter's value at the initial counters). This is pure
@@ -1979,7 +2042,7 @@ namespace Shorokoo
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
             var optState = OptimizerStateDef.Fields.Length > 0
                 ? ComputeInitialOptStateFields(
-                    ResolveStateInitHyperValues(hyperparameters, throwOnMissingConsumed: true), ComputeContext.Default)
+                    ResolveStateInitHyperValues(hyperparameters, throwOnMissingConsumed: true), MergeContext)
                 : _initialOptStateFields;
             return new TrainingCheckpoint(
                 new TensorDataStruct(TrainableParamStructDef, _initialParamFields),

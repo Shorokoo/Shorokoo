@@ -51,7 +51,7 @@ public class RngTrainingTests
         };
         return TrainingRig.FromScratch(
             RngRigDropoutModel.ComputationGraph, L2Loss.ComputationGraph,
-            SGDOptimizer.ComputationGraph, sample, rngConfig, 0.05f);
+            SGDOptimizer.ComputationGraph, sample, rngConfig, mergeContext: null, runtimeContext: null, 0.05f);
     }
 
     private static (TensorDataStruct inputBatch, TensorDataStruct targetBatch) MakeBatches()
@@ -128,7 +128,7 @@ public class RngTrainingTests
             };
             var rig = TrainingRig.FromScratch(
                 SwitchInitLinear.ComputationGraph, L2Loss.ComputationGraph,
-                SGDOptimizer.ComputationGraph, sample, cfg, 0.05f);
+                SGDOptimizer.ComputationGraph, sample, cfg, mergeContext: null, runtimeContext: null, 0.05f);
             var ckpt = rig.CreateInitialCheckpoint();
             var name = rig.TrainableParamStructDef.Fields[0].Name;
             return ((TensorData<float32>)ckpt.TrainableParams.Fields[name]).AccessMemory().ToArray();

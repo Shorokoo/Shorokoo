@@ -80,11 +80,9 @@ public class ClassicLayerTrainingCoverageTests
         Assert.NotEmpty(initial.ModelState.Fields);
 
         var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", inputData),
-            MakeBatch("targets", "Target", targetData),
-            compiled);
+            MakeBatch("targets", "Target", targetData));
 
         Assert.True(float.IsFinite(step.Loss!.Value), $"BatchNorm1d training-mode loss must be finite; got {step.Loss!.Value}");
 

@@ -156,18 +156,17 @@ public class TrainingPerfBaselineTests
             baseGraph, Losses.L2Loss, Optimizers.Adam,
             baseGraph.FromOrderedInputs([exampleInput]),
             new AdamOptimizerHyperparameters { LearningRate = 1e-3f });
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
 
         var inputBatch = rig.InputDef.FromOrderedData(TensorData(InputShape, new float[] { 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f }));
         var targetBatch = rig.TargetDef.FromOrderedData(TensorData(TargetShape, new float[] { 1f, 0f, 1f, 0f }));
 
         var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < ThroughputWarmupSteps; i++)
-            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled);
+            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch);
 
         var sw = Stopwatch.StartNew();
         for (int i = 0; i < ThroughputMeasuredSteps; i++)
-            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled);
+            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch);
         sw.Stop();
 
         return ThroughputMeasuredSteps / sw.Elapsed.TotalSeconds;

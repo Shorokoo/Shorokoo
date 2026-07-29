@@ -1257,8 +1257,7 @@ public class NNLibraryTrainingCoverageTests
         var targetBatch = MakeBatch("targets", "Target", TensorData(outShape, new float[2]));
 
         var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var step = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
+        var step = rig.TrainStep(initial, inputBatch, targetBatch);
         float[] a1 = Floats(step.TrainableParams.Fields[aName]);
 
         Assert.True(float.IsFinite(step.Loss!.Value), $"TrainStep loss must be finite; got {step.Loss!.Value}");
@@ -1305,8 +1304,7 @@ public class NNLibraryTrainingCoverageTests
         var targetBatch = MakeBatch("targets", "Target", TensorData(xShape, new float[3]));
 
         var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var step = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
+        var step = rig.TrainStep(initial, inputBatch, targetBatch);
         float[] w1 = Floats(step.TrainableParams.Fields[wName]);
 
         Assert.True(float.IsFinite(step.Loss!.Value), $"Embedding TrainStep loss must be finite; got {step.Loss!.Value}");
@@ -1352,8 +1350,7 @@ public class NNLibraryTrainingCoverageTests
         var targetBatch = MakeBatch("targets", "Target", TensorData(xShape, new float[2]));
 
         var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var step = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
+        var step = rig.TrainStep(initial, inputBatch, targetBatch);
         float[] w1 = Floats(step.TrainableParams.Fields[wName]);
 
         Assert.True(float.IsFinite(step.Loss!.Value), $"EmbeddingBag TrainStep loss must be finite; got {step.Loss!.Value}");
@@ -1413,8 +1410,7 @@ public class NNLibraryTrainingCoverageTests
         var targetBatch = MakeBatch("targets", "Target", TensorData([1L], new float[1]));
 
         var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var step = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
+        var step = rig.TrainStep(initial, inputBatch, targetBatch);
         float[] w1 = Floats(step.TrainableParams.Fields[wName]);
 
         Assert.True(float.IsFinite(step.Loss!.Value), $"Triplet TrainStep loss must be finite; got {step.Loss!.Value}");
@@ -1473,8 +1469,7 @@ public class NNLibraryTrainingCoverageTests
         var targetBatch = MakeBatch("targets", "Target", TensorData([1L], new float[1]));
 
         var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var step = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
+        var step = rig.TrainStep(initial, inputBatch, targetBatch);
         float[] w1 = Floats(step.TrainableParams.Fields[wName]);
 
         Assert.True(float.IsFinite(step.Loss!.Value), $"Cosine TrainStep loss must be finite; got {step.Loss!.Value}");
@@ -1508,14 +1503,12 @@ public class NNLibraryTrainingCoverageTests
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
 
         var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         string wName = rig.TrainableParamStructDef.Fields[0].Name;
         float w0 = Floats(initial.TrainableParams.Fields[wName])[0];
 
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", TensorData([4L], input)),
-            MakeBatch("targets", "Target", TensorData([4L], target)),
-            compiled);
+            MakeBatch("targets", "Target", TensorData([4L], target)));
         float w1 = Floats(step.TrainableParams.Fields[wName])[0];
 
         Assert.True(float.IsFinite(step.Loss!.Value), $"TrainStep loss must be finite; got {step.Loss!.Value}");
@@ -1545,14 +1538,12 @@ public class NNLibraryTrainingCoverageTests
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
 
         var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         string wName = rig.TrainableParamStructDef.Fields[0].Name;
         float[] w0 = Floats(initial.TrainableParams.Fields[wName]);
 
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", TensorData(inShape, input)),
-            MakeBatch("targets", "Target", TensorData(inShape, target)),
-            compiled);
+            MakeBatch("targets", "Target", TensorData(inShape, target)));
         float[] w1 = Floats(step.TrainableParams.Fields[wName]);
 
         Assert.True(float.IsFinite(step.Loss!.Value), $"TrainStep loss must be finite; got {step.Loss!.Value}");
@@ -1614,14 +1605,13 @@ public class NNLibraryTrainingCoverageTests
 
         var initial = rig.CreateInitialCheckpoint();
         var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
 
         var inputBatch = MakeBatch("input", "ModelInput", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }));
         var targetBatch = MakeBatch("targets", "Target", TensorData([4L], new float[] { 0f, 0f, 0f, 0f }));
 
         string wName = rig.TrainableParamStructDef.Fields[0].Name;
         float w0 = Floats(initial.TrainableParams.Fields[wName])[0];
-        var step = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
+        var step = rig.TrainStep(initial, inputBatch, targetBatch);
         float w1 = Floats(step.TrainableParams.Fields[wName])[0];
 
         // Gradient is large (15), so |Δw| must be ≈ lr to within eps effects.
@@ -1658,7 +1648,6 @@ public class NNLibraryTrainingCoverageTests
             0.05f, 0.9f, 0.999f, 1e-8f);
 
         var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var inputBatch = MakeBatch("input", "ModelInput", inputData);
         var targetBatch = MakeBatch("targets", "Target", targetData);
 
@@ -1666,7 +1655,7 @@ public class NNLibraryTrainingCoverageTests
         var losses = new List<float>();
         for (int i = 0; i < 150; i++)
         {
-            var step = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled);
+            var step = rig.TrainStep(ckpt, inputBatch, targetBatch);
             losses.Add(step.Loss!.Value);
             ckpt = step;
         }
@@ -1709,7 +1698,6 @@ public class NNLibraryTrainingCoverageTests
             0.2f, 0.9f);
 
         var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var inputBatch = MakeBatch("input", "ModelInput", inputData);
         var targetBatch = MakeBatch("targets", "Target", targetData);
 
@@ -1717,7 +1705,7 @@ public class NNLibraryTrainingCoverageTests
         var losses = new List<float>();
         for (int i = 0; i < 15; i++)
         {
-            var step = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled);
+            var step = rig.TrainStep(ckpt, inputBatch, targetBatch);
             losses.Add(step.Loss!.Value);
             ckpt = step;
         }
@@ -1761,12 +1749,10 @@ public class NNLibraryTrainingCoverageTests
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
 
         var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var initial = rig.CreateInitialCheckpoint();
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", inputData),
-            MakeBatch("targets", "Target", targetData),
-            compiled);
+            MakeBatch("targets", "Target", targetData));
 
         Assert.True(float.IsFinite(step.Loss!.Value), $"loss must be finite; got {step.Loss!.Value}");
 
@@ -1802,12 +1788,10 @@ public class NNLibraryTrainingCoverageTests
             0.5f);
 
         var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var initial = rig.CreateInitialCheckpoint();
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", inputData),
-            MakeBatch("targets", "Target", targetData),
-            compiled);
+            MakeBatch("targets", "Target", targetData));
 
         // Closed-form loss: pred_c = mean_{n,h,w}(x) / sqrt(1 + eps).
         float invStd = 1f / MathF.Sqrt(1f + 1e-5f);
@@ -1863,12 +1847,10 @@ public class NNLibraryTrainingCoverageTests
             0.1f);
 
         var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var initial = rig.CreateInitialCheckpoint();
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", inputData),
-            MakeBatch("targets", "Target", targetData),
-            compiled);
+            MakeBatch("targets", "Target", targetData));
 
         // Per-channel mean of the batch-normalized output is 0 (gamma=1, beta=0).
         Assert.True(step.Loss!.Value < 1e-6f,
@@ -1906,14 +1888,12 @@ public class NNLibraryTrainingCoverageTests
         var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             new NamedModelParam[] { new TensorDataModelParam("input", ModelParamType.InputParam, inputData) }, lr);
         var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         long outTotal = 1;
         foreach (var d in outShape) outTotal *= d;
         var targetData = TensorData(outShape, new float[outTotal]);
         return rig.TrainStep(rig.CreateInitialCheckpoint(),
             MakeBatch("input", "ModelInput", inputData),
-            MakeBatch("targets", "Target", targetData),
-            compiled);
+            MakeBatch("targets", "Target", targetData));
     }
 
     /// <summary>[i * scale + offset for i in 0..total) — varied, non-degenerate inputs.</summary>
@@ -2076,12 +2056,10 @@ public class NNLibraryTrainingCoverageTests
         var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             new NamedModelParam[] { new TensorDataModelParam("input", ModelParamType.InputParam, inputData) }, 0.1f);
         var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var initial = rig.CreateInitialCheckpoint();
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", inputData),
-            MakeBatch("targets", "Target", TensorData(outShape, new float[outTotal])),
-            compiled);
+            MakeBatch("targets", "Target", TensorData(outShape, new float[outTotal])));
 
         Assert.True(step.Loss!.Value < 1e-6f,
             $"training-mode BN output must have ~zero per-channel mean; got loss {step.Loss!.Value}");
@@ -2251,11 +2229,9 @@ public class NNLibraryTrainingCoverageTests
         var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             new NamedModelParam[] { new TensorDataModelParam("input", ModelParamType.InputParam, inputData) }, 0f);
         var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var step = rig.TrainStep(rig.CreateInitialCheckpoint(),
             MakeBatch("input", "ModelInput", inputData),
-            MakeBatch("targets", "Target", TensorData(outShape, new float[outTotal])),
-            compiled);
+            MakeBatch("targets", "Target", TensorData(outShape, new float[outTotal])));
         var state = rig.ModelStateDef.Fields.SelectMany(f => Floats(step.ModelState.Fields[f.Name])).ToArray();
         return (step.Loss!.Value, state);
     }
@@ -2276,14 +2252,12 @@ public class NNLibraryTrainingCoverageTests
         {
             var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
                 new NamedModelParam[] { new TensorDataModelParam("input", ModelParamType.InputParam, inputData) }, 0f);
-            var compiled = new ComputeContext().Compile(rig.TrainingStepPureGraph);
             var fresh = rig.CreateInitialCheckpoint();
             var injected = InjectModelState(fresh.ModelState, injectedState);
             var ckpt = new TrainingCheckpoint(fresh.TrainableParams, injected, fresh.OptimizerState, fresh.Step);
             var step = rig.TrainStep(ckpt,
                 MakeBatch("input", "ModelInput", inputData),
-                MakeBatch("targets", "Target", TensorData(inShape, target)),
-                compiled);
+                MakeBatch("targets", "Target", TensorData(inShape, target)));
             stateAfter = rig.ModelStateDef.Fields.SelectMany(f => Floats(step.ModelState.Fields[f.Name])).ToArray();
             return step.Loss!.Value;
         }
@@ -2330,12 +2304,10 @@ public class NNLibraryTrainingCoverageTests
             0.1f);
 
         var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var initial = rig.CreateInitialCheckpoint();
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", inputData),
-            MakeBatch("targets", "Target", targetData),
-            compiled);
+            MakeBatch("targets", "Target", targetData));
 
         Assert.True(MathF.Abs(step.Loss!.Value - 7.5f) < 1e-4f,
             $"eval-mode Dropout must be the identity (expected loss 7.5); got {step.Loss!.Value}");
@@ -2372,12 +2344,10 @@ public class NNLibraryTrainingCoverageTests
                 0.1f);
 
             var ctx = new ComputeContext();
-            var compiled = ctx.Compile(rig.TrainingStepPureGraph);
             var initial = rig.CreateInitialCheckpoint();
             var step = rig.TrainStep(initial,
                 MakeBatch("input", "ModelInput", inputData),
-                MakeBatch("targets", "Target", targetData),
-                compiled);
+                MakeBatch("targets", "Target", targetData));
 
             Assert.True(MathF.Abs(step.Loss!.Value - 7.5f) < 1e-4f,
                 $"eval-mode SpatialDropout must be the identity (expected loss 7.5); got {step.Loss!.Value}");
@@ -2396,7 +2366,6 @@ public class NNLibraryTrainingCoverageTests
                 0.1f);
 
             var ctx = new ComputeContext();
-            var compiled = ctx.Compile(rig.TrainingStepPureGraph);
             var initial = rig.CreateInitialCheckpoint();
             Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
 
@@ -2405,8 +2374,7 @@ public class NNLibraryTrainingCoverageTests
 
             var step = rig.TrainStep(initial,
                 MakeBatch("input", "ModelInput", inputData),
-                MakeBatch("targets", "Target", targetData),
-                compiled);
+                MakeBatch("targets", "Target", targetData));
             float w1 = Floats(step.TrainableParams.Fields[wName])[0];
 
             Assert.True(float.IsFinite(step.Loss!.Value), $"train-mode SpatialDropout TrainStep loss must be finite; got {step.Loss!.Value}");
@@ -2444,12 +2412,10 @@ public class NNLibraryTrainingCoverageTests
                 0.1f);
 
             var ctx = new ComputeContext();
-            var compiled = ctx.Compile(rig.TrainingStepPureGraph);
             var initial = rig.CreateInitialCheckpoint();
             var step = rig.TrainStep(initial,
                 MakeBatch("input", "ModelInput", inputData),
-                MakeBatch("targets", "Target", targetData),
-                compiled);
+                MakeBatch("targets", "Target", targetData));
 
             Assert.True(MathF.Abs(step.Loss!.Value - 7.5f) < 1e-4f,
                 $"eval-mode AlphaDropout must be the identity (expected loss 7.5); got {step.Loss!.Value}");
@@ -2468,15 +2434,13 @@ public class NNLibraryTrainingCoverageTests
                 0.1f);
 
             var ctx = new ComputeContext();
-            var compiled = ctx.Compile(rig.TrainingStepPureGraph);
             var initial = rig.CreateInitialCheckpoint();
             string wName = rig.TrainableParamStructDef.Fields[0].Name;
             float w0 = Floats(initial.TrainableParams.Fields[wName])[0];
 
             var step = rig.TrainStep(initial,
                 MakeBatch("input", "ModelInput", inputData),
-                MakeBatch("targets", "Target", targetData),
-                compiled);
+                MakeBatch("targets", "Target", targetData));
             float w1 = Floats(step.TrainableParams.Fields[wName])[0];
 
             Assert.True(float.IsFinite(step.Loss!.Value), $"train-mode AlphaDropout TrainStep loss must be finite; got {step.Loss!.Value}");
@@ -2492,15 +2456,13 @@ public class NNLibraryTrainingCoverageTests
                 0.1f);
 
             var ctx = new ComputeContext();
-            var compiled = ctx.Compile(rig.TrainingStepPureGraph);
             var initial = rig.CreateInitialCheckpoint();
             string wName = rig.TrainableParamStructDef.Fields[0].Name;
             float w0 = Floats(initial.TrainableParams.Fields[wName])[0];
 
             var step = rig.TrainStep(initial,
                 MakeBatch("input", "ModelInput", inputData),
-                MakeBatch("targets", "Target", targetData),
-                compiled);
+                MakeBatch("targets", "Target", targetData));
             float w1 = Floats(step.TrainableParams.Fields[wName])[0];
 
             Assert.True(float.IsFinite(step.Loss!.Value), $"train-mode FeatureAlphaDropout TrainStep loss must be finite; got {step.Loss!.Value}");
@@ -2552,12 +2514,10 @@ public class NNLibraryTrainingCoverageTests
             Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
 
             var ctx = new ComputeContext();
-            var compiled = ctx.Compile(rig.TrainingStepPureGraph);
             var initial = rig.CreateInitialCheckpoint();
             var step = rig.TrainStep(initial,
                 MakeBatch("input", "ModelInput", inputData),
-                MakeBatch("targets", "Target", targetData),
-                compiled);
+                MakeBatch("targets", "Target", targetData));
 
             Assert.True(float.IsFinite(step.Loss!.Value), $"loss must be finite; got {step.Loss!.Value}");
 
@@ -2596,13 +2556,11 @@ public class NNLibraryTrainingCoverageTests
             [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData(inShape, input))],
             hypers);
         var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < steps; i++)
             ckpt = rig.TrainStep(ckpt,
                 MakeBatch("input", "AnalyticIn", TensorData(inShape, input)),
-                MakeBatch("targets", "AnalyticTg", TensorData(outShape, target)),
-                compiled);
+                MakeBatch("targets", "AnalyticTg", TensorData(outShape, target)));
         return ckpt;
     }
 
@@ -2956,7 +2914,6 @@ public class NNLibraryTrainingCoverageTests
             0.05f, 0.9f, 0.999f, 1e-6f, 0.01f);
 
         var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var inputBatch = MakeBatch("input", "ModelInput", inputData);
         var targetBatch = MakeBatch("targets", "Target", targetData);
 
@@ -2964,7 +2921,7 @@ public class NNLibraryTrainingCoverageTests
         var losses = new List<float>();
         for (int i = 0; i < 150; i++)
         {
-            var step = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled);
+            var step = rig.TrainStep(ckpt, inputBatch, targetBatch);
             losses.Add(step.Loss!.Value);
             ckpt = step;
         }
@@ -3102,12 +3059,10 @@ public class NNLibraryTrainingCoverageTests
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
 
         var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var initial = rig.CreateInitialCheckpoint();
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", inputData),
-            MakeBatch("targets", "Target", targetData),
-            compiled);
+            MakeBatch("targets", "Target", targetData));
 
         Assert.True(float.IsFinite(step.Loss!.Value), $"loss must be finite; got {step.Loss!.Value}");
 
@@ -3179,12 +3134,10 @@ public class NNLibraryTrainingCoverageTests
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
 
         var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var initial = rig.CreateInitialCheckpoint();
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", inputData),
-            MakeBatch("targets", "Target", targetData),
-            compiled);
+            MakeBatch("targets", "Target", targetData));
 
         Assert.True(float.IsFinite(step.Loss!.Value), $"loss must be finite; got {step.Loss!.Value}");
 
@@ -3270,12 +3223,10 @@ public class NNLibraryTrainingCoverageTests
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
 
         var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var initial = rig.CreateInitialCheckpoint();
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", inputData),
-            MakeBatch("targets", "Target", targetData),
-            compiled);
+            MakeBatch("targets", "Target", targetData));
 
         Assert.True(float.IsFinite(step.Loss!.Value), $"loss must be finite; got {step.Loss!.Value}");
 

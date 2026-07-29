@@ -124,28 +124,27 @@ public TrainingCheckpoint CreateInitialCheckpoint(TensorDataStruct hyperparamete
 
 // Schedule-driven: scheduled hyperparameters are computed in-graph from the checkpoint's
 // step (fed as the step counter), then the step advances. Requires no schedule-less runtime hypers.
-// Returns the post-step checkpoint directly, with its .Loss set to this step's loss.
+// Returns the post-step checkpoint directly, with its .Loss set to this step's loss. The rig
+// compiles its training-step graph once internally (lazily, cached), so a manual loop is just
+// `cp = rig.TrainStep(cp, in, out);` — no caller-side ComputeContext.Compile.
 public TrainingCheckpoint TrainStep(
     TrainingCheckpoint checkpoint,
     TensorDataStruct trainingInput,
-    TensorDataStruct trainingOutput,
-    CompiledGraph compiled);
+    TensorDataStruct trainingOutput);
 
 // Explicit override: supply the schedule-less runtime hyperparameter values for this step.
 public TrainingCheckpoint TrainStep(
     TrainingCheckpoint checkpoint,
     TensorDataStruct hyperparams,              // from MakeHyperparameters(...)
     TensorDataStruct trainingInput,
-    TensorDataStruct trainingOutput,
-    CompiledGraph compiled);
+    TensorDataStruct trainingOutput);
 
 // Loader-driven single step: draws loader.Next(), sourcing epoch / batch from the loader — the
 // single-step form of Fit(loader). The batch's own position drives the scheduler for this step and
 // is recorded on the returned checkpoint (the batch USED). Requires no runtime hypers.
 public TrainingCheckpoint TrainStep(
     TrainingCheckpoint checkpoint,
-    IDataLoader loader,
-    CompiledGraph compiled);
+    IDataLoader loader);
 
 // Explicit epoch / batch: for a host driving its own iteration (no loader). epoch / batchNumber name
 // the batch being trained — fed to the scheduler for this step AND recorded verbatim on the returned
@@ -155,8 +154,7 @@ public TrainingCheckpoint TrainStep(
     TensorDataStruct trainingInput,
     TensorDataStruct trainingOutput,
     long epoch,
-    long batchNumber,
-    CompiledGraph compiled);
+    long batchNumber);
 
 public TensorDataStruct MakeHyperparameters(float value);                       // exactly one dynamic
 public TensorDataStruct MakeHyperparameters(params (string name, float value)[] values); // named
@@ -223,12 +221,12 @@ var outcome = rig.Fit(loader, numEpochs: 10);   // step / epoch / batch advance 
   yields the batch *one step after* `position`, rolling into the next epoch internally).
   `InMemoryDataLoader` also exposes `BatchesPerEpoch`, but that is **not** on the interface — the epoch
   rollover a caller would have used it for now lives inside `RestoreAfter`.
-- **One step at a time.** `rig.TrainStep(checkpoint, loader, compiled)` is the single-step form of
+- **One step at a time.** `rig.TrainStep(checkpoint, loader)` is the single-step form of
   `Fit(loader)` — it draws one batch, runs the step (the batch's own position drives any scheduler),
   and returns a checkpoint recording the **batch used** (that same drawn position). `Fit(loader)` is
   just a loop over it, so the two share one source of the loader step-and-counter semantics. For a host
-  that owns its own iteration (no loader), `rig.TrainStep(checkpoint, input, target, epoch, batchNumber,
-  compiled)` records the given `epoch` / `batchNumber` verbatim — the same "batch used" convention (it
+  that owns its own iteration (no loader), `rig.TrainStep(checkpoint, input, target, epoch, batchNumber)`
+  records the given `epoch` / `batchNumber` verbatim — the same "batch used" convention (it
   names the batch being trained).
 - **`InMemoryDataLoader`** is the bare-minimum implementation over tensors you already hold. Each
   field's leading dimension is the sample count `N`; it slices along that dimension into

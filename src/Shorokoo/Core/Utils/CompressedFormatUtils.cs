@@ -176,8 +176,11 @@ namespace Shorokoo.Core.Utils
             // execution lowerings are disabled: a saved graph keeps its
             // STATE_UPDATE_LINK / WITH_STATE_DEPS machinery, state initializers, and
             // SHRK_RANDOM_* / SHRK_RNG_* feed ops verbatim.
+            // emitInputsAsNodes: the .srk on-disk dialect serializes each top-level MODEL_TENSOR_INPUT as
+            // a NodeProto (carrying its attributes — the representative-input shape), not a graph-input
+            // ValueInfoProto, so a concrete architecture stays self-describing across the round-trip.
             var model = FastOnnxModelBuilder.BuildInternalOnnxModel(
-                graph, stage: resolvedStage, applyExecutionLowerings: false);
+                graph, stage: resolvedStage, applyExecutionLowerings: false, emitInputsAsNodes: true);
             Serializer.Serialize(memoryStream, model);
             var onnxBytes = memoryStream.ToArray();
 

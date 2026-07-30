@@ -553,15 +553,15 @@ public class TrainingRigCoverageTests
     }
 
     /// <summary>
-    /// Inertness: the representative-input attribute must never reach a serialized artifact. A
-    /// boundary/input node is emitted as a <c>ValueInfoProto</c>, never a <c>NodeProto</c>, so its
-    /// attributes are not serialized. This saves an initial checkpoint (whose model lineage carries
-    /// the attribute on its input node) to a native <c>.skpt</c> and asserts the raw container bytes
-    /// contain no trace of the attribute name, then confirms the artifact still loads as a concrete
-    /// inference model. Uses an over-threshold input so the attribute value is a placeholder.
+    /// Self-describing .skpt (issue #115): in the native <c>.srk</c> dialect a <c>MODEL_TENSOR_INPUT</c>
+    /// is serialized as a NodeProto, so its representative-input attribute round-trips on disk — the saved
+    /// arch carries the shape itself, with no separate manifest input-shape field. This saves an initial
+    /// checkpoint whose over-threshold input makes the arch carry the shape-only attribute, then confirms
+    /// the file both loads as a concrete inference model and rebuilds the whole rig from the file alone
+    /// (which can only succeed if the reconstructed arch self-described its input shape).
     /// </summary>
     [Fact]
-    public void TestRepresentativeInputIsInertInSkptCoverage()
+    public void TestRepresentativeInputSurvivesSkptRoundTripCoverage()
     {
         NamedModelParam[] sample =
         [
@@ -573,35 +573,176 @@ public class TrainingRigCoverageTests
             SGDOptimizer.ComputationGraph, sample, 0.01f);
         var ckpt = rig.CreateInitialCheckpoint();
 
-        var path = Path.Combine(Path.GetTempPath(), $"shrk_repin_inert_{Guid.NewGuid():N}.skpt");
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_repin_selfdesc_{Guid.NewGuid():N}.skpt");
         try
         {
             Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
 
-            var bytes = File.ReadAllBytes(path);
-            var needle = System.Text.Encoding.ASCII.GetBytes(
-                Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInput);
-            Assert.False(ContainsSubsequence(bytes, needle),
-                "the representative-input attribute leaked into the serialized .skpt artifact");
-
+            // Loads as a concrete inference model…
             var inferenceModel = Persistence.Load(path);
             Assert.Equal(GraphKind.ConcreteModel, inferenceModel.Kind);
+
+            // …and rebuilds the whole rig from the file alone: the reconstructed arch's MODEL_TENSOR_INPUT
+            // node must carry the shape-only attribute (round-tripped as a NodeProto), the only source of
+            // the shape now that the manifest input-shape field is gone.
+            var (rig2, loaded) = TrainingRig.Load(path);
+            Assert.NotNull(rig2);
+            Assert.NotNull(loaded.TrainableParams);
+            var reloadedInput = TensorInputNode(rig2.ConcreteArchConstituent);
+            Assert.Equal((long[])[2048L], reloadedInput.Attributes.GetLongsVal(
+                Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape));
         }
         finally { if (File.Exists(path)) File.Delete(path); }
     }
 
-    /// <summary>Byte-subsequence search for the inertness assertion (no dependency on the STORED-zip
-    /// entry layout — the attribute name must be absent from the whole container).</summary>
-    private static bool ContainsSubsequence(byte[] haystack, byte[] needle)
+    // ─────────────── representative-input two-attribute split & serialization (#115) ───────────────
+
+    private static long ProductOf(long[] shape)
     {
-        if (needle.Length == 0 || haystack.Length < needle.Length) return false;
-        for (int i = 0; i <= haystack.Length - needle.Length; i++)
+        long p = 1;
+        foreach (var d in shape) p *= d;
+        return p;
+    }
+
+    /// <summary>A minimal from-scratch rig over <see cref="ScalarMultiplyModel"/> with a single rank-1
+    /// input of the given shape.</summary>
+    private static TrainingRig RigWithInputShape(long[] shape)
+        => TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            new NamedModelParam[]
+            {
+                new TensorDataModelParam("input", ModelParamType.InputParam,
+                    TensorData(shape, new float[ProductOf(shape)])),
+            },
+            0.01f);
+
+    /// <summary>The (sole) <c>MODEL_TENSOR_INPUT</c> node of a graph's internal form.</summary>
+    private static Shorokoo.Core.Graph.FastNode TensorInputNode(ComputationGraph graph)
+        => graph.ToInternal().Nodes.First(
+            n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_TENSOR_INPUT);
+
+    /// <summary>
+    /// The two representative-input attributes are mutually exclusive on a <c>MODEL_TENSOR_INPUT</c>,
+    /// split by the shape-inference small-tensor threshold (1024): a small input records a zero-filled
+    /// inline tensor on <c>ShrkAttrRepresentativeInput</c> (shape attr cleared); a large one records only
+    /// its dims on <c>ShrkAttrRepresentativeInputShape</c> (tensor attr cleared).
+    /// </summary>
+    [Fact]
+    public void TestRepresentativeInputTwoAttributeSplitCoverage()
+    {
+        var small = TensorInputNode(RigWithInputShape([4L]).ConcreteArchConstituent);
+        var smallTensor = small.Attributes.GetTensorVal(
+            Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInput);
+        Assert.NotNull(smallTensor);
+        Assert.Equal((long[])[4L], smallTensor!.Shape.Dims);
+        Assert.Null(small.Attributes.GetLongsVal(
+            Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape));
+
+        var large = TensorInputNode(RigWithInputShape([2048L]).ConcreteArchConstituent);
+        Assert.Null(large.Attributes.GetTensorVal(
+            Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInput));
+        Assert.Equal((long[])[2048L], large.Attributes.GetLongsVal(
+            Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape));
+    }
+
+    /// <summary>
+    /// The native <c>.srk</c> dialect serializes a <c>MODEL_TENSOR_INPUT</c> as a NodeProto, so whichever
+    /// representative attribute is set round-trips on disk and the reconstructed graph's input list keeps
+    /// its order/identity. Covers a small input (inline tensor attr) and a large one (shape-only attr).
+    /// </summary>
+    [Fact]
+    public void TestRepresentativeInputSrkNodeRoundTripCoverage()
+    {
+        AssertArchSrkRoundTrip([4L], expectInline: true);
+        AssertArchSrkRoundTrip([2048L], expectInline: false);
+    }
+
+    private static void AssertArchSrkRoundTrip(long[] shape, bool expectInline)
+    {
+        var arch = RigWithInputShape(shape).ConcreteArchConstituent;
+        var bytes = Shorokoo.Core.Utils.CompressedFormatUtils.SaveFastGraphToBinary(arch);
+        var reloaded = Shorokoo.Core.Utils.CompressedFormatUtils.LoadFastGraphFromBinary(bytes);
+        var internalReloaded = reloaded.ToInternal();
+
+        // The input list survives the node-based round-trip (one input, preserved).
+        Assert.Single(internalReloaded.Inputs);
+
+        var node = internalReloaded.Nodes.First(
+            n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_TENSOR_INPUT);
+        var tensor = node.Attributes.GetTensorVal(
+            Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInput);
+        var dims = node.Attributes.GetLongsVal(
+            Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape);
+        if (expectInline)
         {
-            int j = 0;
-            while (j < needle.Length && haystack[i + j] == needle[j]) j++;
-            if (j == needle.Length) return true;
+            Assert.NotNull(tensor);
+            Assert.Equal(shape, tensor!.Shape.Dims);
+            Assert.Null(dims);
         }
-        return false;
+        else
+        {
+            Assert.Null(tensor);
+            Assert.Equal(shape, dims);
+        }
+    }
+
+    /// <summary>
+    /// Vanilla ONNX export writes an input's representative info to <c>metadata_props</c> (an input stays
+    /// an ONNX graph input, which has no attribute bag) and <c>ImportOnnx</c> re-attaches it. Small
+    /// (≤ 16 elements) round-trips as the inline tensor attribute; a larger inline tensor is downgraded
+    /// to shape-only on export; a shape-only attribute stays shape-only.
+    /// </summary>
+    [Fact]
+    public void TestRepresentativeInputVanillaOnnxMetadataRoundTripCoverage()
+    {
+        // ≤16 elements, inline tensor → survives as the inline tensor attribute.
+        AssertOnnxRepRoundTrip(setShape: [4L], asShapeAttr: false, expectInlineAfter: true);
+        // 17–1024 elements, inline in memory → export downgrades to shape-only metadata.
+        AssertOnnxRepRoundTrip(setShape: [32L], asShapeAttr: false, expectInlineAfter: false);
+        // shape-only attribute (a large input's form) → stays shape-only.
+        AssertOnnxRepRoundTrip(setShape: [2048L], asShapeAttr: true, expectInlineAfter: false);
+    }
+
+    private static void AssertOnnxRepRoundTrip(long[] setShape, bool asShapeAttr, bool expectInlineAfter)
+    {
+        var reprInput = Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInput;
+        var reprShape = Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape;
+
+        // A base rank-1 concrete inference model; attach the representative attribute under test to its input.
+        var baseModel = RigWithInputShape([4L]).CreateInitialCheckpoint().ToInferenceModel();
+        var internalModel = baseModel.ToInternal();
+        var inputNode = internalModel.Nodes.First(
+            n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_TENSOR_INPUT);
+        inputNode.Attributes = asShapeAttr
+            ? inputNode.Attributes.SetAttributes(
+                (reprShape, (object?)setShape), (reprInput, (object?)null))
+            : inputNode.Attributes.SetAttributes(
+                (reprInput, (object?)TensorData(setShape, new float[ProductOf(setShape)])),
+                (reprShape, (object?)null));
+        var modelWithRep = new ComputationGraph(internalModel, GraphKind.ConcreteModel);
+
+        var onnxPath = Path.Combine(Path.GetTempPath(), $"shrk_rep_onnx_{Guid.NewGuid():N}.onnx");
+        try
+        {
+            Persistence.ExportOnnx(modelWithRep, onnxPath);
+            var imported = Persistence.ImportOnnx(onnxPath);
+            var node = imported.ToInternal().Nodes.First(
+                n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_TENSOR_INPUT);
+            var tensor = node.Attributes.GetTensorVal(reprInput);
+            var dims = node.Attributes.GetLongsVal(reprShape);
+            if (expectInlineAfter)
+            {
+                Assert.NotNull(tensor);
+                Assert.Equal(setShape, tensor!.Shape.Dims);
+                Assert.Null(dims);
+            }
+            else
+            {
+                Assert.Null(tensor);
+                Assert.Equal(setShape, dims);
+            }
+        }
+        finally { if (File.Exists(onnxPath)) File.Delete(onnxPath); }
     }
 
     /// <summary>

@@ -299,8 +299,9 @@ namespace Shorokoo
         /// <summary>
         /// Rebuilds a <see cref="TrainingRig"/> from the constituents serialized in a native
         /// <c>.skpt</c> checkpoint (#115) — the concrete architecture, loss, optimizer, and composed
-        /// scheduler <c>models/</c> entries plus the rig block's model-input shapes, hyperparameter
-        /// bindings, and RNG config — with no host-supplied source graphs. Backs the static
+        /// scheduler <c>models/</c> entries plus the rig block's hyperparameter bindings and RNG config
+        /// — with no host-supplied source graphs. The model-input shapes ride on the arch itself (its
+        /// self-describing MODEL_TENSOR_INPUT nodes), not the manifest. Backs the static
         /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?)"/>. A file with no rig
         /// block (a legacy flat checkpoint or a <c>.skpt</c> from a build predating #115) fails loudly.
         /// </summary>
@@ -344,13 +345,9 @@ namespace Shorokoo
                 ? LoadConstituentGraph(archive, manifest, schedKey, filePath)
                 : null;
 
-            var inputShapes = rig.InputShapes
-                ?? throw new InvalidDataException(
-                    $"'{filePath}': the rig block records no model-input shapes; the rig cannot be reconstructed.");
-            var repInputs = inputShapes
-                .Select(s => TrainingRig.RepresentativeInputFor(
-                    new Shape((s.Dims ?? Array.Empty<long>())), ParseSafeTensorDType(s.DType, filePath)))
-                .ToArray();
+            // Model-input shapes are not read from the manifest: the deserialized arch's
+            // MODEL_TENSOR_INPUT nodes carry their own representative-input attribute (round-tripped
+            // as NodeProtos in the native .srk dialect), so the reconstructed arch is self-describing.
 
             var bindings = rig.Hyperparameters
                 ?? throw new InvalidDataException(
@@ -384,7 +381,7 @@ namespace Shorokoo
             var rngConfig = DeserializeRngConfig(rig.Rng, filePath);
 
             return TrainingRig.ReconstructFromConstituents(
-                archGraph, repInputs, lossGraph, optimizerGraph, hypers, names, rngConfig,
+                archGraph, lossGraph, optimizerGraph, hypers, names, rngConfig,
                 mergeContext, runtimeContext);
         }
 
@@ -442,28 +439,6 @@ namespace Shorokoo
             }
             return config;
         }
-
-        /// <summary>Inverse of <see cref="SafeTensorLoader.DTypeToSafeTensorDType"/> for the dtypes a
-        /// model input may carry (#115); fails loudly on an unknown name.</summary>
-        private static DType ParseSafeTensorDType(string? name, string filePath) => name switch
-        {
-            "BOOL" => DType.Bool,
-            "I8" => DType.Int8,
-            "I16" => DType.Int16,
-            "I32" => DType.Int32,
-            "I64" => DType.Int64,
-            "U8" => DType.UInt8,
-            "U16" => DType.UInt16,
-            "U32" => DType.UInt32,
-            "U64" => DType.UInt64,
-            "F32" => DType.Float32,
-            "F64" => DType.Float64,
-            "F16" => DType.Float16,
-            "BF16" => DType.BFloat16,
-            _ => throw new InvalidDataException(
-                $"'{filePath}': the rig block records the unknown input dtype '{name ?? "<none>"}' " +
-                "(likely written by a newer framework version)."),
-        };
     }
 
     /// <summary>
@@ -698,8 +673,9 @@ namespace Shorokoo
         /// Serializes the rig's constituents (#115, folding in #106) into <paramref name="models"/> /
         /// <paramref name="bodyEntries"/> as ordinary <c>models/</c> entries — the concrete
         /// architecture, the loss and optimizer module graphs, and (when any hyperparameter is
-        /// scheduled) the composed scheduler model — and returns the non-graph recipe (model-input
-        /// shapes, hyperparameter bindings, RNG config) as the manifest's rig block.
+        /// scheduled) the composed scheduler model — and returns the non-graph recipe (hyperparameter
+        /// bindings, RNG config) as the manifest's rig block. Model-input shapes are NOT recorded: the
+        /// serialized arch is self-describing (its MODEL_TENSOR_INPUT nodes carry the shape).
         /// </summary>
         private static SkptRigInfo AppendRigConstituents(
             TrainingRig rig,
@@ -731,15 +707,10 @@ namespace Shorokoo
                 schedulerKey = SkptFileFormat.SchedulerModelKey;
             }
 
-            // The serialized arch keeps only rank+dtype for a boundary input (rev 17), so record the
-            // concrete dims here for a reconstruction to re-attach as representative inputs.
-            var inputShapes = rig.RepresentativeInputTensors
-                .Select(t => new SkptModelInputShape
-                {
-                    Dims = t.Shape.Dims.ToArray(),
-                    DType = SafeTensorLoader.DTypeToSafeTensorDType(t.DType),
-                })
-                .ToList();
+            // No model-input shapes are recorded here: the arch's MODEL_TENSOR_INPUT nodes serialize
+            // as NodeProtos in the native .srk dialect and carry their own representative-input
+            // attribute, so the reconstructed arch is self-describing (a from-file load reads the
+            // shapes straight off it via ReadRepresentativeInputs).
 
             // Hyperparameter bindings, in optimizer order. Baked values ride in bakedHypers; a scheduled
             // one maps to the scheduler model's output of the same name; a runtime one is host-supplied.
@@ -768,7 +739,6 @@ namespace Shorokoo
                 LossModel = SkptFileFormat.LossModelKey,
                 OptimizerModel = SkptFileFormat.OptimizerModelKey,
                 SchedulerModel = schedulerKey,
-                InputShapes = inputShapes,
                 Hyperparameters = hyperBindings,
                 BakedHypers = bakedHypers.Count > 0 ? bakedHypers : null,
                 Rng = SerializeRngConfig(rig.RngConfig),

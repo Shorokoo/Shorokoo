@@ -73,9 +73,31 @@ namespace Shorokoo.Core.Factory.IR
             var tensorStructDefs = ParseTensorStructMetadata(this.model);
 
             var (functions, onnxNameToFunction) = internalBuildFunctions(this.model.Functions, this.OpSetVersion, tensorStructDefs);
-            var fastGraph = internalBuildInternalComputationGraph(this.model.Graph, functions, onnxNameToFunction, this.OpSetVersion, tensorStructDefs);
+            var inputTensorKeyOrder = ReadInputTensorKeyOrder(this.model);
+            var fastGraph = internalBuildInternalComputationGraph(this.model.Graph, functions, onnxNameToFunction, this.OpSetVersion, tensorStructDefs, inputTensorKeyOrder);
             Shorokoo.Core.Nodes.Processors.Fast.FastUnPrepFromOnnx.Process(fastGraph);
             return fastGraph;
+        }
+
+        /// <summary>
+        /// Reads the native <c>.srk</c> dialect's ordered graph-input tensor ids
+        /// (<see cref="OnnxOpAttributeNames.ShrkMetaInputTensorKeys"/>), written when a top-level
+        /// <c>MODEL_TENSOR_INPUT</c> is serialized as a NodeProto rather than a graph-input
+        /// <c>ValueInfoProto</c>. Returns <c>null</c> for a vanilla ONNX / execution model (no such
+        /// metadata), in which case the loader keeps the ordinary graph-input path.
+        /// </summary>
+        private static List<string>? ReadInputTensorKeyOrder(ModelProto model)
+        {
+            var prop = model.MetadataProps.FirstOrDefault(x => x.Key == ShrkMetaInputTensorKeys);
+            if (prop is null) return null;
+            try
+            {
+                return System.Text.Json.JsonSerializer.Deserialize<List<string>>(prop.Value);
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                return null;
+            }
         }
 
         /// <summary>
@@ -499,7 +521,8 @@ namespace Shorokoo.Core.Factory.IR
             Function[] functions,
             Dictionary<string, Function> onnxNameToFunction,
             OpSetVersion opset,
-            ImmutableDictionary<int, TensorStructDef>? tensorStructDefs = null)
+            ImmutableDictionary<int, TensorStructDef>? tensorStructDefs = null,
+            List<string>? inputTensorKeyOrder = null)
         {
             var fastGraph = new InternalComputationGraph();
             var functionsMap = onnxNameToFunction.ToImmutableDictionary();
@@ -530,6 +553,26 @@ namespace Shorokoo.Core.Factory.IR
             // attributes are recursed into positionally between the parent op's OPEN and
             // CLOSE TempNodes. Materialize one FastNode per visited TempNode.
             CreateFastNodes(fastGraph, EnumerateNodesInProtoOrder(graphProto.Nodes), tensorKeys, functionsMap, opset);
+
+            // .srk dialect: MODEL_TENSOR_INPUT inputs were emitted as NodeProtos (materialized above by
+            // CreateFastNodes), not graph-input ValueInfoProtos, so the input list must be rebuilt from
+            // the ordered ShrkMetaInputTensorKeys metadata — preserving exact input order and identity
+            // across the mix of node-emitted and any remaining graph-input entries. Absent this metadata
+            // (vanilla ONNX / execution model), the graph-input path above already populated the list.
+            if (inputTensorKeyOrder is not null)
+            {
+                fastGraph.Inputs.Clear();
+                fastGraph.InputUniqueNames.Clear();
+                foreach (var name in inputTensorKeyOrder)
+                {
+                    if (!tensorKeys.TryGetValue(name, out var key))
+                        throw new System.IO.InvalidDataException(
+                            $"the model records graph-input tensor id '{name}' " +
+                            $"('{ShrkMetaInputTensorKeys}'), but no node in the graph produces it.");
+                    fastGraph.Inputs.Add(key);
+                    fastGraph.InputUniqueNames.Add(name);
+                }
+            }
 
             // Outputs (in proto declaration order).
             foreach (var output in graphProto.Outputs)

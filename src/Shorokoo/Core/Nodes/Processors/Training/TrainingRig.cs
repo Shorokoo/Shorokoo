@@ -107,13 +107,16 @@ namespace Shorokoo
         /// before mutating), so sharing it across derived rigs preserves immutability.
         ///
         /// <para>It is also <b>self-describing for shape inference</b>: each <c>MODEL_TENSOR_INPUT</c>
-        /// node carries a zero-filled representative input on its
-        /// <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInput"/> attribute (shape+dtype-only
-        /// placeholder for large inputs), recording the shape the model was concretized at. The two
+        /// node carries the shape the model was concretized at, on exactly one of two mutually-exclusive
+        /// attributes — a zero-filled <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInput"/>
+        /// tensor for a small input, or a shape-only
+        /// <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape"/> for a large one (see
+        /// <see cref="WriteRepresentativeInputs(InternalComputationGraph, TensorData[])"/>). The two
         /// training-graph shape-inference sites reconstruct their <c>sampleInputs[]</c> off these
         /// attributes (<see cref="ReadRepresentativeInputs"/>), so no separate sample-input field is
-        /// stored on the rig. The attribute is inert for export (a boundary node is not emitted as a
-        /// NodeProto) and rides along on <c>Clone()</c>, so it survives re-seeding.</para>
+        /// stored on the rig. In the native <c>.srk</c> dialect a <c>MODEL_TENSOR_INPUT</c> serializes
+        /// as a NodeProto, so the attribute round-trips on disk (making the saved arch self-describing);
+        /// it also rides along on <c>Clone()</c>, so it survives re-seeding.</para>
         /// </summary>
         private InternalComputationGraph _concreteArch = null!;
 
@@ -643,10 +646,23 @@ namespace Shorokoo
         /// <see cref="TensorData"/>-shaped counterpart of
         /// <see cref="WriteRepresentativeInputs(InternalComputationGraph, NamedModelParam[])"/>:
         /// records a representative input on each <c>MODEL_TENSOR_INPUT</c> node from the given
-        /// tensors' shape+dtype (values ignored — the recorded representative is zero-filled or a
-        /// placeholder). Used when reconstructing a rig from a checkpoint file, whose serialized
-        /// concrete arch carries only rank+dtype for its boundary inputs (rev 17), so the concrete
-        /// dims are re-attached here from the manifest-recorded input shapes.
+        /// tensors' shape+dtype (values ignored). Sets <b>exactly one</b> of the two mutually-exclusive
+        /// attributes, chosen by element count against the shape-inference small-tensor threshold
+        /// <see cref="Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements"/>
+        /// (1024) — the same threshold today's build already used to decide real-payload vs placeholder:
+        /// <list type="bullet">
+        ///   <item>≤ threshold → <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInput"/> = a
+        ///     zero-filled <see cref="TensorData"/> (never the user's values); the shape attribute is
+        ///     cleared.</item>
+        ///   <item>&gt; threshold → <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape"/> =
+        ///     the dims; the tensor attribute is cleared (no inline payload). This is exactly the old
+        ///     "placeholder for a large input" case, relocated from a <c>WeightPlaceholderTensorData</c>
+        ///     on the tensor attribute to plain dims on the shape attribute.</item>
+        /// </list>
+        /// The concrete arch's <c>MODEL_TENSOR_INPUT</c> serializes as a NodeProto in the native
+        /// <c>.srk</c> dialect, so whichever attribute is set round-trips on disk verbatim (no
+        /// re-thresholding at serialize time) and the saved arch is self-describing — no separate
+        /// manifest input-shape field is needed.
         /// </summary>
         private static void WriteRepresentativeInputs(InternalComputationGraph concreteArch, TensorData[] inputs)
         {
@@ -661,19 +677,36 @@ namespace Shorokoo
                     throw new InvalidOperationException(
                         $"Concrete arch input {concreteArch.Inputs[i]} has no producing node.");
                 if (node.OpCode != InternalOpCodes.MODEL_TENSOR_INPUT) continue;
-                node.Attributes = node.Attributes.SetAttributes(
-                    (OnnxOpAttributeNames.ShrkAttrRepresentativeInput,
-                     (object?)RepresentativeInputFor(inputs[i].Shape, inputs[i].DType)));
+                var shape = inputs[i].Shape;
+                if (shape.Count <= Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements)
+                    // Small: inline a real zero tensor; clear the shape-only attribute.
+                    node.Attributes = node.Attributes.SetAttributes(
+                        (OnnxOpAttributeNames.ShrkAttrRepresentativeInput,
+                         (object?)RepresentativeInputFor(shape, inputs[i].DType)),
+                        (OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape, (object?)null));
+                else
+                    // Large: record dims only; clear the inline-tensor attribute.
+                    node.Attributes = node.Attributes.SetAttributes(
+                        (OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape, (object?)shape.Dims),
+                        (OnnxOpAttributeNames.ShrkAttrRepresentativeInput, (object?)null));
             }
         }
 
         /// <summary>
         /// Reconstructs the <c>sampleInputs[]</c> array for shape inference off the concrete arch's
         /// representative-input attributes (in graph-input order) — the derivation-path counterpart of
-        /// <see cref="WriteRepresentativeInputs(InternalComputationGraph, NamedModelParam[])"/>. Each stored tensor is fed straight to
-        /// <see cref="ShapeInferenceInterpreter"/>: a small one carries real zeros; a large one is a
-        /// shape+dtype-only placeholder that QEE reads shape-only (it never touches the tensor's memory
-        /// for a tensor above its threshold), so no large buffer is ever materialized.
+        /// <see cref="WriteRepresentativeInputs(InternalComputationGraph, NamedModelParam[])"/>. Reads
+        /// whichever of the two mutually-exclusive attributes the node carries:
+        /// <list type="bullet">
+        ///   <item><see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInput"/> set → use that inline
+        ///     (small, zero-filled) tensor directly.</item>
+        ///   <item>else <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape"/> set → read
+        ///     the dims plus the node's dtype and re-materialize via <see cref="RepresentativeInputFor"/>,
+        ///     which applies the QEE read threshold (real zeros ≤ 1024 elements, a shape+dtype-only
+        ///     placeholder above it, so no large buffer is materialized).</item>
+        ///   <item>neither set → fail loud (the arch was not built self-describing).</item>
+        /// </list>
+        /// Each resulting tensor is fed straight to <see cref="ShapeInferenceInterpreter"/>.
         /// </summary>
         private static TensorData[] ReadRepresentativeInputs(InternalComputationGraph concreteArch)
         {
@@ -686,10 +719,28 @@ namespace Shorokoo
                     throw new InvalidOperationException(
                         $"Concrete arch input {concreteArch.Inputs[i]} is not a MODEL_TENSOR_INPUT node; " +
                         "cannot read its representative input.");
-                inputs[i] = node.Attributes.GetTensorVal(OnnxOpAttributeNames.ShrkAttrRepresentativeInput)
-                    ?? throw new InvalidOperationException(
-                        "Concrete arch input node carries no representative-input attribute; the rig was " +
-                        "not built through BuildInitialRig (which records it on every model input).");
+
+                var inlineTensor = node.Attributes.GetTensorVal(OnnxOpAttributeNames.ShrkAttrRepresentativeInput);
+                if (inlineTensor is not null)
+                {
+                    inputs[i] = inlineTensor;
+                    continue;
+                }
+
+                var dims = node.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape);
+                if (dims is not null)
+                {
+                    var dtype = node.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype)
+                        ?? throw new InvalidOperationException(
+                            "Concrete arch input node records a representative-input shape but no dtype; " +
+                            "cannot re-materialize its representative input.");
+                    inputs[i] = RepresentativeInputFor(new Shape(dims), dtype);
+                    continue;
+                }
+
+                throw new InvalidOperationException(
+                    "Concrete arch input node carries no representative-input attribute; the rig was " +
+                    "not built through BuildInitialRig (which records one on every model input).");
             }
             return inputs;
         }
@@ -2173,11 +2224,6 @@ namespace Shorokoo
         /// the checkpoint's <c>model-arch</c> constituent entry.</summary>
         internal ComputationGraph ConcreteArchConstituent => new(_concreteArch, GraphKind.ConcreteArchitecture);
 
-        /// <summary>The representative model inputs (one per model input; shape+dtype only) the concrete
-        /// arch was made self-describing with — recorded in the checkpoint so a reconstructed rig can
-        /// re-attach them (the serialized arch keeps only rank+dtype for a boundary input, rev 17).</summary>
-        internal TensorData[] RepresentativeInputTensors => ReadRepresentativeInputs(_concreteArch);
-
         /// <summary>
         /// Composes the per-hyperparameter scheduler graphs (one pure <c>counters → value</c> graph per
         /// scheduled hyperparameter) into ONE scheduler model — the union of the counter inputs they
@@ -2287,14 +2333,15 @@ namespace Shorokoo
         /// <summary>
         /// Rebuilds a rig from its persisted constituents (#115/#106) — the concrete architecture, the
         /// loss and optimizer module graphs, the hyperparameter bindings and RNG config — with NO
-        /// host-supplied source graphs. The concrete arch is made self-describing again by re-attaching
-        /// the representative inputs from <paramref name="representativeInputs"/> (shape+dtype only),
-        /// then the trainstep is re-derived exactly as a fresh build's derivation path does. The two
-        /// compute contexts seed the rebuilt rig (rev 22; never persisted).
+        /// host-supplied source graphs. The deserialized <paramref name="concreteArch"/> is already
+        /// self-describing: its <c>MODEL_TENSOR_INPUT</c> nodes carry the representative-input attribute
+        /// (round-tripped as NodeProtos in the native <c>.srk</c> dialect), so the shape metadata the
+        /// re-derivation's shape inference needs is read straight off the arch — no separate input-shape
+        /// field is re-attached. The trainstep is re-derived exactly as a fresh build's derivation path
+        /// does. The two compute contexts seed the rebuilt rig (rev 22; never persisted).
         /// </summary>
         internal static TrainingRig ReconstructFromConstituents(
             ComputationGraph concreteArch,
-            TensorData[] representativeInputs,
             ComputationGraph loss,
             ComputationGraph optimizer,
             Hyperparameter[] hyperparameters,
@@ -2309,12 +2356,13 @@ namespace Shorokoo
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
             if (rngConfig is null) throw new ArgumentNullException(nameof(rngConfig));
 
-            // Work on an owned copy — WriteRepresentativeInputs mutates node attributes. The RNG config
-            // was baked into the arch's RngSeed param at the original build, so it is NOT re-applied
-            // here; it rides as a constituent so the reconstructed rig re-derives identical initial
-            // values (load-time defaults, optimizer-state seeding).
+            // Own a copy so the rig's retained arch is independent of the caller's deserialized graph.
+            // The arch is already self-describing (its MODEL_TENSOR_INPUT nodes carry the
+            // representative-input attribute), so nothing is re-attached here. The RNG config was baked
+            // into the arch's RngSeed param at the original build, so it is NOT re-applied here; it rides
+            // as a constituent so the reconstructed rig re-derives identical initial values (load-time
+            // defaults, optimizer-state seeding).
             var archInternal = concreteArch.ToInternal().Clone();
-            WriteRepresentativeInputs(archInternal, representativeInputs);
 
             var constituents = new RigConstituents(
                 new ComputationGraph(archInternal, GraphKind.ConcreteArchitecture),

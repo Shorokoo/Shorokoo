@@ -59,8 +59,166 @@ namespace Shorokoo
             // BuildOnnxModel enforces the concrete-model kind and the vanilla-dialect
             // guarantee, naming offending ops on failure — no need to duplicate that here.
             var model = FastOnnxModelBuilder.BuildOnnxModel(concreteModel, opset);
+            // A vanilla input stays an ONNX graph input (no attribute bag), so any representative-input
+            // shape the concrete model carries on its MODEL_TENSOR_INPUT nodes is written to the model's
+            // string metadata_props instead, keyed per input; ImportOnnx re-attaches it.
+            WriteRepresentativeInputMetadata(model, concreteModel.ToInternal());
             AtomicFileWriter.WriteFile(
                 filePath, stream => ProtoBuf.Serializer.Serialize(stream, model));
+        }
+
+        /// <summary>ONNX-export-only downgrade threshold (element count): a representative input with
+        /// more than this many elements is written to <c>metadata_props</c> as shape-only, else as full
+        /// (zero-filled) tensor data. Independent of the in-memory / <c>.srk</c> 1024 threshold — vanilla
+        /// ONNX keeps the metadata small, so even a mid-size (17–1024) input that carries an inline
+        /// tensor attribute in memory is downgraded to shape-only in the file.</summary>
+        internal const int ExportRepresentativeInputMaxTensorElements = 16;
+
+        /// <summary>Metadata_props key prefix for an input's representative-input info; the full key is
+        /// this prefix plus the (exported) graph-input name.</summary>
+        private const string RepresentativeInputMetaPrefix = "shrk_repr_input.";
+
+        /// <summary>
+        /// Writes the representative-input info of each <c>MODEL_TENSOR_INPUT</c> in
+        /// <paramref name="internalModel"/> that carries it into <paramref name="model"/>'s
+        /// <c>metadata_props</c>, keyed by the exported graph-input name (matched positionally to the
+        /// internal graph's inputs). Emits exactly the attribute that is set: the inline tensor
+        /// (encoded as <c>"tensor|{protoDtype}|{dims}|{base64 raw bytes}"</c>) when it is small enough
+        /// (≤ <see cref="ExportRepresentativeInputMaxTensorElements"/> elements), otherwise shape-only
+        /// (<c>"shape|{protoDtype}|{dims}"</c>) — so a large or downgraded input records just its shape.
+        /// A model with no representative info writes nothing.
+        /// </summary>
+        private static void WriteRepresentativeInputMetadata(
+            IR.ModelProto model, InternalComputationGraph internalModel)
+        {
+            if (model.Graph is null) return;
+            // Position i of the internal graph's inputs corresponds to model.Graph.Inputs[i]; a count
+            // mismatch (a pre-pass added/removed a boundary input) makes the pairing unsafe — skip.
+            if (internalModel.Inputs.Count != model.Graph.Inputs.Count) return;
+
+            var producerByOutput = BuildProducerByOutputMap(internalModel);
+            for (int i = 0; i < internalModel.Inputs.Count; i++)
+            {
+                if (!producerByOutput.TryGetValue(internalModel.Inputs[i], out var node)
+                    || node.OpCode != InternalOpCodes.MODEL_TENSOR_INPUT)
+                    continue;
+
+                string? encoded = EncodeRepresentativeInput(node);
+                if (encoded is null) continue;
+
+                model.MetadataProps.Add(new IR.StringStringEntryProto
+                {
+                    Key = RepresentativeInputMetaPrefix + model.Graph.Inputs[i].Name,
+                    Value = encoded,
+                });
+            }
+        }
+
+        /// <summary>Encodes a MODEL_TENSOR_INPUT node's representative-input attribute (whichever is
+        /// set) to its metadata string, applying the export-only shape-only downgrade; null when neither
+        /// attribute is set.</summary>
+        private static string? EncodeRepresentativeInput(FastNode node)
+        {
+            var inline = node.Attributes.GetTensorVal(OnnxOpAttributeNames.ShrkAttrRepresentativeInput);
+            if (inline is not null)
+            {
+                var dims = inline.Shape.Dims;
+                if (inline.Shape.Count > ExportRepresentativeInputMaxTensorElements)
+                    return EncodeShape(inline.DType, dims); // downgrade: shape-only
+                var b64 = Convert.ToBase64String(inline.AccessRawMemory().ToArray());
+                return $"tensor|{inline.DType.ProtoTypeNum}|{DimsToString(dims)}|{b64}";
+            }
+
+            var shapeDims = node.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape);
+            if (shapeDims is not null)
+            {
+                var dtype = node.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype);
+                if (dtype is null) return null;
+                return EncodeShape(dtype, shapeDims);
+            }
+            return null;
+        }
+
+        private static string EncodeShape(DType dtype, long[] dims)
+            => $"shape|{dtype.ProtoTypeNum}|{DimsToString(dims)}";
+
+        private static string DimsToString(long[] dims) => string.Join(",", dims);
+
+        private static long[] ParseDims(string s)
+            => s.Length == 0 ? Array.Empty<long>()
+                             : s.Split(',').Select(long.Parse).ToArray();
+
+        /// <summary>Builds a graph-input-key → producing-node map for an internal graph (input and
+        /// param-data producers), mirroring the equivalent helper on the training rig.</summary>
+        private static Dictionary<Core.Graph.FastTensorKey, FastNode> BuildProducerByOutputMap(
+            InternalComputationGraph graph)
+        {
+            var map = new Dictionary<Core.Graph.FastTensorKey, FastNode>();
+            foreach (var node in graph.Nodes)
+                foreach (var slot in node.FullOutputs.Values)
+                    foreach (var k in slot)
+                        if (k is Core.Graph.FastTensorKey tk && !tk.IsEmpty)
+                            map[tk] = node;
+            return map;
+        }
+
+        /// <summary>
+        /// Re-attaches representative-input info from <paramref name="model"/>'s <c>metadata_props</c>
+        /// (written by <see cref="WriteRepresentativeInputMetadata"/>) onto the reconstructed graph's
+        /// <c>MODEL_TENSOR_INPUT</c> nodes, matched by graph-input name to
+        /// <see cref="InternalComputationGraph.InputUniqueNames"/> (which the reader has already restored
+        /// to the exported signature names). A foreign ONNX carries no such props; a malformed value is
+        /// skipped. Sets whichever of the two mutually-exclusive attributes the encoding names.
+        /// </summary>
+        private static void ReattachRepresentativeInputMetadata(
+            InternalComputationGraph graph, IR.ModelProto model)
+        {
+            var indexByName = new Dictionary<string, int>(StringComparer.Ordinal);
+            for (int i = 0; i < graph.InputUniqueNames.Count; i++)
+                if (graph.InputUniqueNames[i] is string n)
+                    indexByName[n] = i;
+
+            var producerByOutput = BuildProducerByOutputMap(graph);
+            foreach (var prop in model.MetadataProps)
+            {
+                if (!prop.Key.StartsWith(RepresentativeInputMetaPrefix, StringComparison.Ordinal)) continue;
+                var inputName = prop.Key.Substring(RepresentativeInputMetaPrefix.Length);
+                if (!indexByName.TryGetValue(inputName, out var idx) || idx >= graph.Inputs.Count) continue;
+                if (!producerByOutput.TryGetValue(graph.Inputs[idx], out var node)
+                    || node.OpCode != InternalOpCodes.MODEL_TENSOR_INPUT)
+                    continue;
+                DecodeRepresentativeInputOnto(node, prop.Value);
+            }
+        }
+
+        /// <summary>Decodes one representative-input metadata string and sets the matching attribute on
+        /// <paramref name="node"/> (clearing the other), mirroring <see cref="EncodeRepresentativeInput"/>.
+        /// A malformed string is ignored.</summary>
+        private static void DecodeRepresentativeInputOnto(FastNode node, string encoded)
+        {
+            var parts = encoded.Split('|');
+            if (parts.Length < 3 || !int.TryParse(parts[1], out var protoDtype)) return;
+            DType dtype = (DType)protoDtype;
+            long[] dims;
+            try { dims = ParseDims(parts[2]); }
+            catch (FormatException) { return; }
+
+            if (parts[0] == "tensor" && parts.Length >= 4)
+            {
+                byte[] bytes;
+                try { bytes = Convert.FromBase64String(parts[3]); }
+                catch (FormatException) { return; }
+                var tensor = TensorData.CreateFromRawBytes(new Shape(dims), dtype, bytes);
+                node.Attributes = node.Attributes.SetAttributes(
+                    (OnnxOpAttributeNames.ShrkAttrRepresentativeInput, (object?)tensor),
+                    (OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape, (object?)null));
+            }
+            else if (parts[0] == "shape")
+            {
+                node.Attributes = node.Attributes.SetAttributes(
+                    (OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape, (object?)dims),
+                    (OnnxOpAttributeNames.ShrkAttrRepresentativeInput, (object?)null));
+            }
         }
 
         /// <summary>
@@ -156,6 +314,10 @@ namespace Shorokoo
                     $"({e.GetType().Name}: {e.Message}). The file is corrupt or uses a construct " +
                     "Shorokoo's importer cannot ingest.", e);
             }
+
+            // Re-attach any representative-input info Shorokoo wrote to metadata_props onto the
+            // reconstructed MODEL_TENSOR_INPUT nodes (a foreign ONNX has none — nothing happens).
+            ReattachRepresentativeInputMetadata(graph, model);
 
             // Assign identifiers on the mutable internal graph, then freeze — a
             // ComputationGraph is immutable, so the naming must happen before it is wrapped.

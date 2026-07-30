@@ -168,27 +168,6 @@ namespace Shorokoo.Core.Utils
     }
 
     /// <summary>
-    /// One model input's shape and dtype (issue #115), recorded so a rig reconstructed from the
-    /// checkpoint file can re-attach the representative inputs its shape inference needs — the
-    /// concrete architecture's <c>.srk</c> payload preserves only rank+dtype for a boundary input
-    /// (rev 17), never the concrete dims, so the dims are recorded here instead.
-    /// </summary>
-    public sealed class SkptModelInputShape
-    {
-        /// <summary>The input's concrete dimensions, in order (empty for a rank-0 scalar).</summary>
-        [JsonPropertyName("dims")]
-        public long[]? Dims { get; set; }
-
-        /// <summary>The input's element dtype in SafeTensors dtype-name form (e.g. <c>"F32"</c>).</summary>
-        [JsonPropertyName("dtype")]
-        public string? DType { get; set; }
-
-        /// <summary>Round-trips fields added by newer minor revisions of the format.</summary>
-        [JsonExtensionData]
-        public Dictionary<string, JsonElement>? AdditionalFields { get; set; }
-    }
-
-    /// <summary>
     /// One optimizer hyperparameter's persisted binding (issue #115 / #106), in the optimizer's
     /// declared order. <see cref="Kind"/> decides reconstruction: <c>"baked"</c> reads its value from
     /// <see cref="SkptRigInfo.BakedHypers"/> (keyed by <see cref="Name"/>); <c>"runtime"</c> is
@@ -266,9 +245,11 @@ namespace Shorokoo.Core.Utils
     /// <summary>
     /// The serialized training-rig constituents (issue #115, folding in #106): the model registry
     /// keys of the concrete architecture, loss, optimizer, and (optional) composed scheduler model
-    /// entries, plus the model-input shapes, the hyperparameter bindings, and the RNG config — the
-    /// non-graph part of the recipe. Together with those <c>models/</c> entries this is enough to
-    /// rebuild the rig from the file alone. Keys are add-only across minor revisions.
+    /// entries, plus the hyperparameter bindings and the RNG config — the non-graph part of the recipe.
+    /// Model-input shapes are NOT recorded here: the arch's <c>MODEL_TENSOR_INPUT</c> nodes serialize as
+    /// NodeProtos in the native <c>.srk</c> dialect and carry the shape themselves, so the arch is
+    /// self-describing. Together with those <c>models/</c> entries this is enough to rebuild the rig from
+    /// the file alone. Keys are add-only across minor revisions.
     /// </summary>
     public sealed class SkptRigInfo
     {
@@ -293,10 +274,6 @@ namespace Shorokoo.Core.Utils
         /// no scheduled hyperparameter (nothing to compose).</summary>
         [JsonPropertyName("schedulerModel")]
         public string? SchedulerModel { get; set; }
-
-        /// <summary>The model-input shapes, in the model graph's input order.</summary>
-        [JsonPropertyName("inputShapes")]
-        public List<SkptModelInputShape>? InputShapes { get; set; }
 
         /// <summary>The hyperparameter bindings, in the optimizer's declared order.</summary>
         [JsonPropertyName("hyperparameters")]
@@ -498,8 +475,11 @@ namespace Shorokoo.Core.Utils
         // rig from the file alone. These sit alongside the "model" inference-model entry, which stays
         // the one Persistence.Load binds; the constituents carry no tensor mapping (the rig re-derives).
 
-        /// <summary>Current rig-block version (see <see cref="SkptRigInfo"/>).</summary>
-        public const int TrainingRigVersion = 1;
+        /// <summary>Current rig-block version (see <see cref="SkptRigInfo"/>). Bumped to 2 when the
+        /// redundant per-input <c>inputShapes</c> field was removed: the arch's <c>MODEL_TENSOR_INPUT</c>
+        /// nodes now serialize as NodeProtos carrying their representative-input shape, so the arch is
+        /// self-describing. A version-1 rig block fails loud (its arch predates node-based inputs).</summary>
+        public const int TrainingRigVersion = 2;
 
         /// <summary>Model-registry key of the rig's concrete-architecture constituent.</summary>
         internal const string ArchModelKey = "modelArch";

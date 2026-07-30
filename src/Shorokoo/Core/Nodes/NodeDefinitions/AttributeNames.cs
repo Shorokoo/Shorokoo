@@ -258,13 +258,29 @@ public static class OnnxOpAttributeNames
     public const string ShrkAttrRank = "shrk_rank";
     public const string ShrkAttrShape = "shrk_shape";
     public const string ShrkAttrTensorData = "shrk_tensor_data";
-    /// <summary>Optional, on a MODEL_TENSOR_INPUT node only: a zero-filled representative input tensor
-    /// (or a shape+dtype-only placeholder for large inputs) recording the shape the model was
-    /// concretized at, so a concrete architecture is self-describing for training-graph shape inference
-    /// without carrying separate sample inputs. Never a real graph-input value — a boundary/input node
-    /// is emitted as a ValueInfoProto (its attributes are not serialized), so this stays inert for
-    /// ONNX export / .srk save / Compile.</summary>
+    /// <summary>Optional, on a MODEL_TENSOR_INPUT node only, and mutually exclusive with
+    /// <see cref="ShrkAttrRepresentativeInputShape"/>: a zero-filled representative input tensor
+    /// (never the user's values) recording the shape the model was concretized at, so a concrete
+    /// architecture is self-describing for training-graph shape inference without carrying separate
+    /// sample inputs. Set only for a <b>small</b> input — at most
+    /// <see cref="Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements"/>
+    /// (1024) elements — so the inline zero payload stays bounded; larger inputs record only their shape
+    /// via <see cref="ShrkAttrRepresentativeInputShape"/> instead. In the native <c>.srk</c> dialect a
+    /// MODEL_TENSOR_INPUT is serialized as a NodeProto, so this attribute round-trips on disk (making
+    /// the saved arch self-describing); the vanilla ONNX export/compile path keeps the input as a graph
+    /// input and carries the info in <c>metadata_props</c> instead (see <c>Persistence.ExportOnnx</c>).</summary>
     public const string ShrkAttrRepresentativeInput = "shrk_representative_input";
+
+    /// <summary>Optional, on a MODEL_TENSOR_INPUT node only, and mutually exclusive with
+    /// <see cref="ShrkAttrRepresentativeInput"/>: the concrete input dimensions (an int64 list, empty
+    /// for a scalar), recording the shape the model was concretized at without an inline tensor payload.
+    /// Set only for a <b>large</b> input — more than
+    /// <see cref="Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements"/>
+    /// (1024) elements — where inlining a zero tensor would be wasteful; the shape-inference read path
+    /// re-materializes a representative tensor from these dims plus the node's dtype
+    /// (<see cref="Shorokoo.TrainingRig.RepresentativeInputFor"/>). Rides
+    /// the NodeProto in the native <c>.srk</c> dialect, exactly like <see cref="ShrkAttrRepresentativeInput"/>.</summary>
+    public const string ShrkAttrRepresentativeInputShape = "shrk_representative_input_shape";
     public const string ShrkAttrStructure = "shrk_structure";
     public const string ShrkAttrDtype = "shrk_dtype";
     public const string ShrkAttrFunctionName = "shrk_function_name";
@@ -336,5 +352,14 @@ public static class OnnxOpAttributeNames
     /// <summary>Model-level metadata prop carrying the graph's signature output names
     /// (<c>InternalComputationGraph.OutputUniqueNames</c>); see <see cref="ShrkMetaInputNames"/>.</summary>
     public const string ShrkMetaOutputNames = "shrk_output_names";
+
+    /// <summary>Model-level metadata prop carrying the graph's ordered graph-input tensor ids
+    /// (each input key's raw <c>N{k}_T{s}</c> form) as a positional JSON string array. Written only by
+    /// the native <c>.srk</c> dialect, where a <c>MODEL_TENSOR_INPUT</c> is serialized as a NodeProto
+    /// rather than a graph-input <c>ValueInfoProto</c> (so its attributes — the representative-input
+    /// shape — round-trip on disk). The loader repopulates the graph's input list from this list,
+    /// preserving input order and identity across the round-trip regardless of node emission order.
+    /// Absent on vanilla ONNX / execution models, whose inputs stay ordinary graph inputs.</summary>
+    public const string ShrkMetaInputTensorKeys = "shrk_input_tensor_keys";
 }
 

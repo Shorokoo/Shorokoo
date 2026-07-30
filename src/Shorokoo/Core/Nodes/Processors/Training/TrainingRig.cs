@@ -629,14 +629,11 @@ namespace Shorokoo
         /// <summary>
         /// Writes a representative input onto each of the concrete arch's <c>MODEL_TENSOR_INPUT</c> nodes
         /// (in graph-input order, one per <paramref name="sampleInputs"/>), making the arch self-describing
-        /// for training-graph shape inference. The value is <b>zero-filled</b> (never the user's sample
-        /// values) and <b>shape-limited</b> by the shape-inference engine's small-tensor threshold: inputs
-        /// with at most
-        /// <see cref="Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements"/>
-        /// elements get a real zero payload; larger ones get a shape+dtype-only placeholder (no payload),
-        /// which is all the engine keeps for a tensor over that threshold anyway. Only concretization
-        /// (already done) needed input values; from here on only shapes matter, so this records exactly
-        /// the shape metadata.
+        /// for training-graph shape inference. Never records the user's sample values — see the
+        /// <see cref="WriteRepresentativeInputs(InternalComputationGraph, TensorData[])"/> overload for
+        /// the two-attribute split (zero-filled inline tensor for a small input, shape-only dims for a
+        /// large one) keyed on the shape-inference small-tensor threshold. Only concretization (already
+        /// done) needed input values; from here on only shapes matter, so this records exactly the shape.
         /// </summary>
         private static void WriteRepresentativeInputs(InternalComputationGraph concreteArch, NamedModelParam[] sampleInputs)
             => WriteRepresentativeInputs(

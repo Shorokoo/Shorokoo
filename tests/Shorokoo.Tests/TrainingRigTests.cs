@@ -687,10 +687,12 @@ public class TrainingRigCoverageTests
     }
 
     /// <summary>
-    /// Vanilla ONNX export writes an input's representative info to <c>metadata_props</c> (an input stays
-    /// an ONNX graph input, which has no attribute bag) and <c>ImportOnnx</c> re-attaches it. Small
-    /// (≤ 16 elements) round-trips as the inline tensor attribute; a larger inline tensor is downgraded
-    /// to shape-only on export; a shape-only attribute stays shape-only.
+    /// Vanilla ONNX export writes an input's representative info into that input's OWN
+    /// <c>ValueInfoProto</c> metadata (a graph input has no attribute bag), and the ONNX reader re-attaches
+    /// it as it builds the input node. Small (≤ 16 elements) round-trips as the inline tensor attribute; a
+    /// larger inline tensor is downgraded (by the export pre-pass) to shape-only; a shape-only attribute
+    /// stays shape-only. Also asserts the metadata's new home — the input's ValueInfoProto, not model-level
+    /// <c>metadata_props</c>.
     /// </summary>
     [Fact]
     public void TestRepresentativeInputVanillaOnnxMetadataRoundTripCoverage()
@@ -725,6 +727,19 @@ public class TrainingRigCoverageTests
         try
         {
             Persistence.ExportOnnx(modelWithRep, onnxPath);
+
+            // The representative info rides the input's OWN ValueInfoProto metadata — not model-level props.
+            using (var ms = new MemoryStream(File.ReadAllBytes(onnxPath)))
+            {
+                var proto = ProtoBuf.Serializer.Deserialize<Shorokoo.Core.Factory.IR.ModelProto>(ms);
+                Assert.Single(proto.Graph.Inputs);
+                Assert.Contains(proto.Graph.Inputs[0].MetadataProps,
+                    p => p.Key == Shorokoo.Core.Factory.RepresentativeInputMetadata.Key);
+                Assert.DoesNotContain(proto.MetadataProps,
+                    p => p.Key == Shorokoo.Core.Factory.RepresentativeInputMetadata.Key
+                      || p.Key.StartsWith("shrk_repr_input", StringComparison.Ordinal));
+            }
+
             var imported = Persistence.ImportOnnx(onnxPath);
             var node = imported.ToInternal().Nodes.First(
                 n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_TENSOR_INPUT);
@@ -743,6 +758,49 @@ public class TrainingRigCoverageTests
             }
         }
         finally { if (File.Exists(onnxPath)) File.Delete(onnxPath); }
+    }
+
+    /// <summary>
+    /// The vanilla-export downgrade pre-pass
+    /// (<see cref="Shorokoo.Core.Nodes.Processors.Fast.FastDowngradeRepresentativeInputs"/>) rewrites an
+    /// inline representative tensor with more than the vanilla limit (16) elements to the shape-only
+    /// attribute, and leaves one at or below the limit as an inline tensor. Applied as a graph transform
+    /// before emission (so the downgrade is a single decision on the emitted graph, not re-decided at
+    /// emission time).
+    /// </summary>
+    [Fact]
+    public void TestDowngradeRepresentativeInputsPrePassCoverage()
+    {
+        AssertReprDowngrade([4L], expectTensorAfter: true);    // 4 ≤ 16 → stays inline
+        AssertReprDowngrade([16L], expectTensorAfter: true);   // 16 == limit → stays inline
+        AssertReprDowngrade([17L], expectTensorAfter: false);  // 17 > 16 → shape-only
+        AssertReprDowngrade([500L], expectTensorAfter: false); // mid-size (≤1024 in memory) → shape-only
+    }
+
+    private static void AssertReprDowngrade(long[] shape, bool expectTensorAfter)
+    {
+        var reprInput = Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInput;
+        var reprShape = Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape;
+
+        // All shapes here are ≤1024, so the in-memory build sets the inline tensor attribute.
+        var arch = RigWithInputShape(shape).ConcreteArchConstituent.ToInternal();
+        var node = arch.Nodes.First(
+            n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_TENSOR_INPUT);
+        Assert.NotNull(node.Attributes.GetTensorVal(reprInput)); // precondition: inline tensor before
+
+        Shorokoo.Core.Nodes.Processors.Fast.FastDowngradeRepresentativeInputs.Process(
+            arch, Shorokoo.Core.Nodes.Processors.Fast.FastDowngradeRepresentativeInputs.VanillaMaxInlineElements);
+
+        if (expectTensorAfter)
+        {
+            Assert.NotNull(node.Attributes.GetTensorVal(reprInput));
+            Assert.Null(node.Attributes.GetLongsVal(reprShape));
+        }
+        else
+        {
+            Assert.Null(node.Attributes.GetTensorVal(reprInput));
+            Assert.Equal(shape, node.Attributes.GetLongsVal(reprShape));
+        }
     }
 
     /// <summary>

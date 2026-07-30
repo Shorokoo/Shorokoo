@@ -166,15 +166,13 @@ public TrainingResult Fit(  // alias: Train(...)
     TrainingCheckpoint initialCheckpoint,
     TensorDataStruct[] trainingInputs,
     TensorDataStruct[] trainingOutputs,
-    int numEpochs,
-    ComputeContext? ctx = null);                   // per-call override; defaults to rig.RuntimeContext
+    int numEpochs);                                // compiles/runs via rig.RuntimeContext (one graph per rig)
 
 // Data-loader-driven: the loader owns the batch stream; Fit advances step / epoch / batch for you.
 public TrainingResult Fit(
     IDataLoader loader,
     int numEpochs,
-    TrainingCheckpoint? initialCheckpoint = null,  // defaults to CreateInitialCheckpoint()
-    ComputeContext? ctx = null);                   // per-call override; defaults to rig.RuntimeContext
+    TrainingCheckpoint? initialCheckpoint = null); // defaults to CreateInitialCheckpoint()
 ```
 
 ### Compute contexts: `MergeContext` and `RuntimeContext`
@@ -184,9 +182,10 @@ A rig carries two `ComputeContext` members, both supplied at construction (defau
 a reloaded run gets fresh contexts by passing them to `FromScratch`. `MergeContext` runs the
 build/merge phase (concretization, shape inference, graph lowering and memory optimization, optimizer
 state init); `RuntimeContext` compiles the training-step graph into its executable session and runs it,
-so it determines the execution backend. It is the default for `TrainStep`, `Train` and `Fit` — pass a
-`ComputeContext` to `Train`/`Fit` only to override it for one loop. Every `With…` derivation keeps the
-same two contexts.
+so it determines the execution backend. It is the sole compile/run context for `TrainStep`, `Train` and
+`Fit` — none of them takes a per-call context override, so a rig has exactly one compiled training-step
+graph that the `Fit`/`Train` loop and a manual `TrainStep` loop all share. Every `With…` derivation
+keeps the same two contexts.
 
 Result types:
 - `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long?`; the training loop advances them — the counter-agnostic `TrainStep` carries them through unchanged). They are `null` when the position is genuinely **unknown** — an initial checkpoint, or one trained without a data loader / explicit counters — rather than a misleading `0`; the loader-driven and explicit-counter paths set concrete values. A scheduled hyperparameter reading the epoch / batch counter sees `0` for a `null` value. `.Step` is always a concrete `long`; all counters are `int64` end to end. It also carries `.Rig` (the `TrainingRig?` that produced it — set on every rig-produced checkpoint, so `checkpoint.ToInferenceModel()` needs no re-supplied graph) and `.Loss` (`float?`; the loss of the `TrainStep` that produced it, `null` on an initial or bare checkpoint). Both are preserved through the counter derivations (`WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex`). `TrainStep` returns this checkpoint directly — read the step's loss off `.Loss`. `.Loss` persists as its own `Loss` component, independent of `Counters` (dropping `Loss`, or an initial checkpoint, reloads with `.Loss == null` — never a sentinel `0`).

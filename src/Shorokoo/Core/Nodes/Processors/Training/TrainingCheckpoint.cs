@@ -65,9 +65,9 @@ namespace Shorokoo
         /// training loop advances (the graph never does), persisted so a resumed run restores
         /// its position in the data schedule — or <c>null</c> when it is genuinely <b>unknown</b>: a
         /// checkpoint produced without a data loader or an explicit epoch (an initial checkpoint, or one
-        /// trained through <see cref="TrainingRig.Train"/> / <see cref="TrainingRig.Fit(TensorDataStruct[], TensorDataStruct[], int, TrainingCheckpoint?, ComputeContext?)"/>
+        /// trained through <see cref="TrainingRig.Train"/> / <see cref="TrainingRig.Fit(TensorDataStruct[], TensorDataStruct[], int, TrainingCheckpoint?)"/>
         /// / the counter-agnostic <c>TrainStep</c>) carries <c>null</c> rather than a misleading <c>0</c>.
-        /// The loader-driven and explicit-counter paths (<see cref="TrainingRig.Fit(IDataLoader, int, TrainingCheckpoint?, ComputeContext?)"/>,
+        /// The loader-driven and explicit-counter paths (<see cref="TrainingRig.Fit(IDataLoader, int, TrainingCheckpoint?)"/>,
         /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, IDataLoader)"/>,
         /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, long, long)"/>)
         /// set a concrete value. Persisted as its own presence-gated part of the
@@ -89,7 +89,7 @@ namespace Shorokoo
         /// The <see cref="TrainingRig"/> this checkpoint belongs to, or <c>null</c> for a bare
         /// checkpoint constructed without one. Every rig-produced checkpoint carries its rig
         /// (<see cref="TrainingRig.CreateInitialCheckpoint()"/>, <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct)"/>,
-        /// <see cref="TrainingRig.Train"/>/<see cref="TrainingRig.Fit(TensorDataStruct[], TensorDataStruct[], int, TrainingCheckpoint?, ComputeContext?)"/>, load, and
+        /// <see cref="TrainingRig.Train"/>/<see cref="TrainingRig.Fit(TensorDataStruct[], TensorDataStruct[], int, TrainingCheckpoint?)"/>, load, and
         /// <see cref="TrainingRig.AdoptCheckpoint"/> all set it), so <see cref="ToInferenceModel()"/>
         /// can extract the inference model with no re-supplied graph. The rig does not store
         /// checkpoints, so there is no reference cycle. Attach one to a bare checkpoint via

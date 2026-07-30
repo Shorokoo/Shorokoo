@@ -150,11 +150,12 @@ namespace Shorokoo
 
         /// <summary>
         /// The compute context used to <b>compile the merged <see cref="TrainingStepPureGraph"/> into an
-        /// executable and run it</b>: the lazily-cached trainstep session (see <see cref="CompiledTrainStep"/>)
-        /// and the default context for <see cref="Train"/> / <see cref="Fit(TensorDataStruct[],
-        /// TensorDataStruct[], int, TrainingCheckpoint?, ComputeContext?)"/>. Because the context that
-        /// compiles the trainstep bakes the ORT session that executes it, this single context determines
-        /// the execution backend. Supplied at construction (defaults to <see cref="ComputeContext.Default"/>);
+        /// executable and run it</b>: the single lazily-cached trainstep session (see
+        /// <see cref="CompiledTrainStep"/>) that <see cref="Train"/>, every <c>Fit</c> overload and the
+        /// manual <c>TrainStep</c> all share. Because the context that compiles the trainstep bakes the
+        /// ORT session that executes it, this single context determines the execution backend. It is the
+        /// rig's sole compile/run context — <c>Train</c>/<c>Fit</c> take no per-call context override, so
+        /// there is exactly one compiled graph per rig. Supplied at construction (defaults to <see cref="ComputeContext.Default"/>);
         /// every <c>With…</c> derivation carries it forward by reference and, like <see cref="MergeContext"/>,
         /// it is runtime configuration that is <b>never persisted</b>.
         /// </summary>
@@ -1599,7 +1600,7 @@ namespace Shorokoo
             TrainingCheckpoint checkpoint,
             TensorDataStruct trainingInput,
             TensorDataStruct trainingOutput)
-            => TrainStepWith(checkpoint, trainingInput, trainingOutput, CompiledTrainStep);
+            => TrainStepWith(checkpoint, trainingInput, trainingOutput);
 
         /// <summary>
         /// Executes a single training step with explicit hyperparameter values, overriding any
@@ -1623,13 +1624,13 @@ namespace Shorokoo
             TensorDataStruct trainingOutput)
         {
             if (hyperparams is null) throw new ArgumentNullException(nameof(hyperparams));
-            return RunStep(checkpoint, hyperparams, trainingInput, trainingOutput, CompiledTrainStep);
+            return RunStep(checkpoint, hyperparams, trainingInput, trainingOutput);
         }
 
         /// <summary>
         /// Executes a single training step on the next batch drawn from <paramref name="loader"/>,
         /// sourcing the epoch / batch counters from the loader — the single-step analogue of
-        /// <see cref="Fit(IDataLoader, int, TrainingCheckpoint?, ComputeContext?)"/>, and the one place
+        /// <see cref="Fit(IDataLoader, int, TrainingCheckpoint?)"/>, and the one place
         /// the loader-step-and-counter semantics live (<c>Fit(loader)</c> loops over this).
         ///
         /// <para>The batch's <b>own</b> position (<see cref="DataBatch.Position"/>) both drives the
@@ -1656,7 +1657,7 @@ namespace Shorokoo
         public TrainingCheckpoint TrainStep(
             TrainingCheckpoint checkpoint,
             IDataLoader loader)
-            => TrainStepWith(checkpoint, loader, CompiledTrainStep);
+            => TrainStepWith(checkpoint, loader);
 
         /// <summary>
         /// Executes a single training step on caller-supplied data with an explicit epoch and batch
@@ -1706,16 +1707,16 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// The shared body of the counter-agnostic data <c>TrainStep</c>, parameterized by the compiled
-        /// trainstep so the public overload can pass the rig's lazy <see cref="CompiledTrainStep"/> cache
-        /// while <see cref="Train"/> passes a graph it compiled with the caller-supplied
-        /// <see cref="ComputeContext"/>. Applies the no-runtime-hyperparameter guard, then runs the step.
+        /// The shared body of the counter-agnostic data <c>TrainStep</c>: applies the
+        /// no-runtime-hyperparameter guard, then runs the step against the rig's single cached
+        /// <see cref="CompiledTrainStep"/> (compiled once via <see cref="RuntimeContext"/>). Both the
+        /// public <c>TrainStep</c> overload and <see cref="Train"/> route through here, so they share
+        /// exactly one compiled graph per rig.
         /// </summary>
         private TrainingCheckpoint TrainStepWith(
             TrainingCheckpoint checkpoint,
             TensorDataStruct trainingInput,
-            TensorDataStruct trainingOutput,
-            CompiledGraph compiled)
+            TensorDataStruct trainingOutput)
         {
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
             if (HyperparameterStructDef.Fields.Length > 0)
@@ -1724,20 +1725,19 @@ namespace Shorokoo
                     $"[{string.Join(", ", DynamicHyperparameterNames)}] with no schedule to apply " +
                     "automatically; supply their values via MakeHyperparameters and the " +
                     "TrainStep(checkpoint, hyperparams, …) overload.");
-            return RunStep(checkpoint, hyperparams: null, trainingInput, trainingOutput, compiled);
+            return RunStep(checkpoint, hyperparams: null, trainingInput, trainingOutput);
         }
 
         /// <summary>
-        /// The shared body of the loader <c>TrainStep</c>, parameterized by the compiled trainstep so the
-        /// public overload can pass the lazy <see cref="CompiledTrainStep"/> cache while
-        /// <see cref="Fit(IDataLoader, int, TrainingCheckpoint?, ComputeContext?)"/> passes a graph it
-        /// compiled with the caller-supplied <see cref="ComputeContext"/>. This is the one place the
-        /// loader-step-and-counter semantics live.
+        /// The shared body of the loader <c>TrainStep</c>, run against the rig's single cached
+        /// <see cref="CompiledTrainStep"/>. Both the public <c>TrainStep(loader)</c> overload and
+        /// <see cref="Fit(IDataLoader, int, TrainingCheckpoint?)"/> route through here, so they share
+        /// exactly one compiled graph per rig. This is the one place the loader-step-and-counter
+        /// semantics live.
         /// </summary>
         private TrainingCheckpoint TrainStepWith(
             TrainingCheckpoint checkpoint,
-            IDataLoader loader,
-            CompiledGraph compiled)
+            IDataLoader loader)
         {
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
             if (loader is null) throw new ArgumentNullException(nameof(loader));
@@ -1750,7 +1750,7 @@ namespace Shorokoo
             // resumes past this batch via RestoreAfter.
             var stepInput = checkpoint.WithCounters(
                 epoch: batch.Position.Epoch, batchIndex: batch.Position.BatchIndex);
-            return TrainStepWith(stepInput, batch.Input, batch.Target, compiled);
+            return TrainStepWith(stepInput, batch.Input, batch.Target);
         }
 
         /// <summary>The checkpoint's value for one reserved counter input ({step, epoch, batchIndex}).
@@ -1768,13 +1768,11 @@ namespace Shorokoo
             TrainingCheckpoint checkpoint,
             TensorDataStruct? hyperparams,
             TensorDataStruct trainingInput,
-            TensorDataStruct trainingOutput,
-            CompiledGraph compiled)
+            TensorDataStruct trainingOutput)
         {
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
             if (trainingInput is null) throw new ArgumentNullException(nameof(trainingInput));
             if (trainingOutput is null) throw new ArgumentNullException(nameof(trainingOutput));
-            if (compiled is null) throw new ArgumentNullException(nameof(compiled));
             if (HyperparameterStructDef.Fields.Length > 0 && hyperparams is null)
                 throw new ArgumentNullException(nameof(hyperparams),
                     "This rig was built with dynamic hyperparameters; supply their values each step " +
@@ -1798,7 +1796,7 @@ namespace Shorokoo
                 execInputs.Add(Shorokoo.Globals.TensorData(Array.Empty<long>(), CounterValue(checkpoint, counter)));
             execInputs.Add(trainingInput);
             execInputs.Add(trainingOutput);
-            var results = compiled.Execute(execInputs.ToArray());
+            var results = CompiledTrainStep.Execute(execInputs.ToArray());
 
             // Graph outputs (after lowering): [updated_param_field_0, ..., updated_state_field_0, ..., updated_opt_state_field_0, ..., loss]
             // Repack updated param fields into a TensorDataStruct
@@ -1854,18 +1852,12 @@ namespace Shorokoo
         /// <param name="trainingInputs">Array of training input batches (each as TensorDataStruct)</param>
         /// <param name="trainingOutputs">Array of training target batches (each as TensorDataStruct)</param>
         /// <param name="numEpochs">Number of passes over the training data</param>
-        /// <param name="ctx">
-        /// Optional per-call override of the compile/run context. Defaults (<c>null</c>) to the rig's
-        /// <see cref="RuntimeContext"/>, the single context that compiles and runs the trainstep — pass a
-        /// context here only to run this one loop on a different backend.
-        /// </param>
         /// <returns>Training result with final checkpoint and per-epoch average losses</returns>
         public TrainingResult Train(
             TrainingCheckpoint initialCheckpoint,
             TensorDataStruct[] trainingInputs,
             TensorDataStruct[] trainingOutputs,
-            int numEpochs,
-            ComputeContext? ctx = null)
+            int numEpochs)
         {
             if (initialCheckpoint is null) throw new ArgumentNullException(nameof(initialCheckpoint));
             if (trainingInputs is null) throw new ArgumentNullException(nameof(trainingInputs));
@@ -1874,10 +1866,9 @@ namespace Shorokoo
                 throw new ArgumentException("Training inputs and outputs must have the same length.");
             if (numEpochs < 1) throw new ArgumentException("Number of epochs must be at least 1.", nameof(numEpochs));
 
-            // A context-less call reuses the rig's lazily-compiled, cached trainstep (compiled via
+            // The step body runs against the rig's lazily-compiled, cached trainstep (compiled once via
             // RuntimeContext), so a Fit()/Train() loop and a manual TrainStep loop share exactly one
-            // compiled graph per rig. An explicit ctx override compiles a fresh session on that backend.
-            var compiled = ctx is null ? CompiledTrainStep : ctx.Compile(TrainingStepPureGraph);
+            // compiled graph per rig.
             var checkpoint = initialCheckpoint;
             var epochLosses = new float[numEpochs];
 
@@ -1887,7 +1878,7 @@ namespace Shorokoo
 
                 for (int i = 0; i < trainingInputs.Length; i++)
                 {
-                    checkpoint = TrainStepWith(checkpoint, trainingInputs[i], trainingOutputs[i], compiled);
+                    checkpoint = TrainStepWith(checkpoint, trainingInputs[i], trainingOutputs[i]);
                     // TrainStep sets the post-step checkpoint's Loss to this step's loss.
                     epochLoss += checkpoint.Loss!.Value;
                 }
@@ -1904,17 +1895,16 @@ namespace Shorokoo
         /// Scheduled hyperparameters are applied automatically (the global step advances across epochs
         /// via the checkpoint), so the schedule sees a monotonically increasing step. Alias for
         /// <see cref="Train"/>. <paramref name="initialCheckpoint"/> defaults to
-        /// <see cref="CreateInitialCheckpoint()"/> and <paramref name="ctx"/> defaults to the rig's
-        /// <see cref="RuntimeContext"/>, so a minimal call is
-        /// <c>rig.Fit(inputs, targets, numEpochs: 10)</c>.
+        /// <see cref="CreateInitialCheckpoint()"/>, so a minimal call is
+        /// <c>rig.Fit(inputs, targets, numEpochs: 10)</c>. The trainstep is compiled and run through the
+        /// rig's <see cref="RuntimeContext"/> (set at construction), the single compiled graph per rig.
         /// </summary>
         public TrainingResult Fit(
             TensorDataStruct[] trainingInputs,
             TensorDataStruct[] trainingOutputs,
             int numEpochs,
-            TrainingCheckpoint? initialCheckpoint = null,
-            ComputeContext? ctx = null)
-            => Train(initialCheckpoint ?? CreateInitialCheckpoint(), trainingInputs, trainingOutputs, numEpochs, ctx);
+            TrainingCheckpoint? initialCheckpoint = null)
+            => Train(initialCheckpoint ?? CreateInitialCheckpoint(), trainingInputs, trainingOutputs, numEpochs);
 
         /// <summary>
         /// Fits the model by draining an <see cref="IDataLoader"/> for <paramref name="numEpochs"/>
@@ -1941,14 +1931,11 @@ namespace Shorokoo
         /// <param name="loader">The data loader owning the (input, target) batch stream and its position.</param>
         /// <param name="numEpochs">Number of additional epochs to train, counted from the loader's resume epoch.</param>
         /// <param name="initialCheckpoint">State to resume from; defaults to <see cref="CreateInitialCheckpoint()"/>.</param>
-        /// <param name="ctx">Optional per-call override of the compile/run context; defaults to the rig's
-        /// <see cref="RuntimeContext"/>.</param>
         /// <returns>Final checkpoint (with advanced step / epoch / batch) and the per-epoch mean losses.</returns>
         public TrainingResult Fit(
             IDataLoader loader,
             int numEpochs,
-            TrainingCheckpoint? initialCheckpoint = null,
-            ComputeContext? ctx = null)
+            TrainingCheckpoint? initialCheckpoint = null)
         {
             if (loader is null) throw new ArgumentNullException(nameof(loader));
             if (numEpochs < 1) throw new ArgumentException("Number of epochs must be at least 1.", nameof(numEpochs));
@@ -1964,9 +1951,8 @@ namespace Shorokoo
             else
                 loader.RestoreFrom(new DataLoaderPosition(0, 0));
 
-            // Context-less: reuse the rig's cached trainstep (one compiled graph per rig); an explicit
-            // ctx override compiles a fresh session on that backend.
-            var compiled = ctx is null ? CompiledTrainStep : ctx.Compile(TrainingStepPureGraph);
+            // The step body runs against the rig's cached trainstep (one compiled graph per rig,
+            // compiled once via RuntimeContext).
             // Count epochs from the loader's live resume position (always concrete), not the checkpoint's
             // recorded "batch used" — resuming a full epoch's last batch lands the loader at the next
             // epoch's start, and numEpochs is added to THAT.
@@ -1985,7 +1971,7 @@ namespace Shorokoo
             while (loader.Position.Epoch < targetEpoch)
             {
                 long batchEpoch = loader.Position.Epoch;   // the epoch of the batch TrainStep(loader) will draw
-                checkpoint = TrainStepWith(checkpoint, loader, compiled);
+                checkpoint = TrainStepWith(checkpoint, loader);
 
                 // Group per-epoch mean loss by the epoch the batch belonged to.
                 if (batchEpoch != runningEpoch)

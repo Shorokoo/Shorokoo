@@ -687,11 +687,9 @@ public class TrainingRigCoverageTests
         var targetBatch = new TensorDataStruct(targetDef,
             new Dictionary<string, IData> { { "targets", TensorData([4L], new float[] { 0f, 0f, 0f, 0f }) } });
 
-        var ctx = new ComputeContext();
-
         // Drive Train: covers the per-epoch / per-batch loop and the
         // TrainingResult constructor + EpochLosses / FinalCheckpoint getters.
-        var trainResult = rig.Train(initial, new[] { inputBatch }, new[] { targetBatch }, numEpochs: 1, ctx);
+        var trainResult = rig.Train(initial, new[] { inputBatch }, new[] { targetBatch }, numEpochs: 1);
         Assert.Single(trainResult.EpochLosses);
         Assert.NotNull(trainResult.FinalCheckpoint);
 
@@ -1290,7 +1288,6 @@ public class TrainingRigCoverageTests
             new Dictionary<string, IData> { { "input", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }) } });
         var targetBatch = new TensorDataStruct(targetDef,
             new Dictionary<string, IData> { { "targets", TensorData([4L], new float[] { 0f, 0f, 0f, 0f }) } });
-        var ctx = new ComputeContext();
 
         float FinalWeight(Schedule lr)
         {
@@ -1302,7 +1299,7 @@ public class TrainingRigCoverageTests
             var result = rig.Fit(
                 [inputBatch, inputBatch, inputBatch, inputBatch],
                 [targetBatch, targetBatch, targetBatch, targetBatch],
-                numEpochs: 1, ckpt, ctx);
+                numEpochs: 1, ckpt);
             Assert.Single(result.EpochLosses);
             var wName = rig.TrainableParamStructDef.Fields[0].Name;
             return ((TensorData<float32>)result.FinalCheckpoint.TrainableParams.Fields[wName]).AccessMemory()[0];
@@ -1973,7 +1970,7 @@ public class TrainingRigCoverageTests
     }
 
     /// <summary>
-    /// Covers <see cref="TrainingRig.Fit(IDataLoader, int, TrainingCheckpoint?, ComputeContext?)"/>:
+    /// Covers <see cref="TrainingRig.Fit(IDataLoader, int, TrainingCheckpoint?)"/>:
     /// driving a loader advances the checkpoint's step, epoch, and batch counters automatically — with
     /// no host hand-setting — so a run of E epochs over B batches/epoch lands at step = E*B and records
     /// the <b>batch used</b> at the last step (epoch = E-1, batchIndex = B-1). Reports one mean loss per
@@ -2107,7 +2104,7 @@ public class TrainingRigCoverageTests
     /// position of the batch it <b>used</b> (the drawn batch's own position) on the checkpoint's epoch /
     /// batch, and preserves the rig + loss — while the loader itself advances one batch (rolling into the
     /// next epoch after the last). Looping this overload by hand reproduces
-    /// <see cref="TrainingRig.Fit(IDataLoader, int, TrainingCheckpoint?, ComputeContext?)"/>
+    /// <see cref="TrainingRig.Fit(IDataLoader, int, TrainingCheckpoint?)"/>
     /// exactly (same counters and weights), pinning that Fit routes through this one source of truth.
     /// </summary>
     [Fact]

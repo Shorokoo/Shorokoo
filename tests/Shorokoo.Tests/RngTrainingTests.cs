@@ -51,7 +51,7 @@ public class RngTrainingTests
         };
         return TrainingRig.FromScratch(
             RngRigDropoutModel.ComputationGraph, L2Loss.ComputationGraph,
-            SGDOptimizer.ComputationGraph, sample, rngConfig, 0.05f);
+            SGDOptimizer.ComputationGraph, sample, rngConfig, mergeContext: null, runtimeContext: null, 0.05f);
     }
 
     private static (TensorDataStruct inputBatch, TensorDataStruct targetBatch) MakeBatches()
@@ -71,14 +71,12 @@ public class RngTrainingTests
         var rig = BuildDropoutRig(rngConfig);
         var (inputBatch, targetBatch) = MakeBatches();
 
-        var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var checkpoint = rig.CreateInitialCheckpoint();
 
         var losses = new float[steps];
         for (int i = 0; i < steps; i++)
         {
-            var step = rig.TrainStep(checkpoint, inputBatch, targetBatch, compiled);
+            var step = rig.TrainStep(checkpoint, inputBatch, targetBatch);
             losses[i] = step.Loss!.Value;
             checkpoint = step;
         }
@@ -130,7 +128,7 @@ public class RngTrainingTests
             };
             var rig = TrainingRig.FromScratch(
                 SwitchInitLinear.ComputationGraph, L2Loss.ComputationGraph,
-                SGDOptimizer.ComputationGraph, sample, cfg, 0.05f);
+                SGDOptimizer.ComputationGraph, sample, cfg, mergeContext: null, runtimeContext: null, 0.05f);
             var ckpt = rig.CreateInitialCheckpoint();
             var name = rig.TrainableParamStructDef.Fields[0].Name;
             return ((TensorData<float32>)ckpt.TrainableParams.Fields[name]).AccessMemory().ToArray();
@@ -174,14 +172,13 @@ public class RngTrainingTests
             // int64 drawBase counter rides in ModelState, so the resumed steps draw the
             // masks of executions k, k+1, … — not 0, 1, … over again.
             var rigC = BuildDropoutRig(cfg);
-            var compiledC = new ComputeContext().Compile(rigC.TrainingStepPureGraph);
             var resumed = rigC.LoadCheckpoint(path);
             Assert.Equal(resumeAt, resumed.Step);
 
             var resumedLosses = new float[totalSteps - resumeAt];
             for (int i = 0; i < resumedLosses.Length; i++)
             {
-                var step = rigC.TrainStep(resumed, inputBatch, targetBatch, compiledC);
+                var step = rigC.TrainStep(resumed, inputBatch, targetBatch);
                 resumedLosses[i] = step.Loss!.Value;
                 resumed = step;
             }

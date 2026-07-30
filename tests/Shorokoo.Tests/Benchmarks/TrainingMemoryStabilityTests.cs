@@ -62,12 +62,10 @@ public class TrainingMemoryStabilityTests
         var baseGraph = PerfBaselineLinearModel.ComputationGraph;
         var exampleInput = TensorData(InputShape, new float[8]);
 
-        var ctx = new ComputeContext();
         var rig = TrainingRig.FromScratch(
             baseGraph, Losses.L2Loss, Optimizers.Adam,
             baseGraph.FromOrderedInputs([exampleInput]),
             new AdamOptimizerHyperparameters { LearningRate = 1e-3f });
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
 
         var inputBatch = rig.InputDef.FromOrderedData(
             TensorData(InputShape, new float[] { 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f }));
@@ -76,13 +74,13 @@ public class TrainingMemoryStabilityTests
 
         var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < WarmupSteps; i++)
-            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled);
+            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch);
 
         long managedBefore = LiveManagedBytes();
         long rssBefore = WorkingSetBytes();
 
         for (int i = 0; i < MeasuredSteps; i++)
-            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled);
+            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch);
 
         long managedAfter = LiveManagedBytes();
         long rssAfter = WorkingSetBytes();

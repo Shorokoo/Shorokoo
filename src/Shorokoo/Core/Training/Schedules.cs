@@ -18,10 +18,9 @@ namespace Shorokoo.Core.Training
     ///         LearningRate = Schedules.Cosine(3e-4f, totalSteps).WithWarmup(warmupSteps),
     ///         WeightDecay  = 1e-4f, // a bare float is baked
     ///     });
-    /// var compiled = ctx.Compile(rig.TrainingStepPureGraph); // compile once
     /// var ckpt = rig.CreateInitialCheckpoint();
     /// for (int step = 0; step &lt; totalSteps; step++)
-    ///     ckpt = rig.TrainStep(ckpt, inS, outS, compiled); // schedule applied automatically
+    ///     ckpt = rig.TrainStep(ckpt, inS, outS); // compiled once internally; schedule applied automatically
     /// </code>
     /// </summary>
     public sealed class Schedule

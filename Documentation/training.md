@@ -110,11 +110,14 @@ public static TrainingRig FromScratch(
     ComputationGraph optimizerGraph,  // kind must be GraphKind.Module
     NamedModelParam[] sampleInputs,            // names + sample shapes for model inputs
     IOptimizerHyperparameters hyperparameters, // named set, e.g. new AdamWOptimizerHyperparameters { ... }
-    RngConfig? rngConfig = null);              // seeds the run — see "Seeding the run" below
+    RngConfig? rngConfig = null,              // seeds the run — see "Seeding the run" below
+    ComputeContext? mergeContext = null,      // build/merge-phase context (rig.MergeContext); null ⇒ Default
+    ComputeContext? runtimeContext = null);   // compile/run context (rig.RuntimeContext); null ⇒ Default
 
-// Lower-level: positional values (a float bakes a constant, a Schedule schedules it):
+// Lower-level: positional values (a float bakes a constant, a Schedule schedules it). The rng overload
+// places the two ComputeContexts before the params array, next to rngConfig:
 //   FromScratch(model, loss, opt, sampleInputs, params Hyperparameter[] hyperparameters)
-//   FromScratch(model, loss, opt, sampleInputs, rngConfig, params Hyperparameter[] hyperparameters)
+//   FromScratch(model, loss, opt, sampleInputs, rngConfig, mergeContext, runtimeContext, params Hyperparameter[] hyperparameters)
 
 // Fresh initial checkpoint. Optimizer state is initialized at each hyperparameter's value at the
 // initial counters. Fails loud if the optimizer's state initializer reads a Runtime hyper (its value
@@ -124,28 +127,27 @@ public TrainingCheckpoint CreateInitialCheckpoint(TensorDataStruct hyperparamete
 
 // Schedule-driven: scheduled hyperparameters are computed in-graph from the checkpoint's
 // step (fed as the step counter), then the step advances. Requires no schedule-less runtime hypers.
-// Returns the post-step checkpoint directly, with its .Loss set to this step's loss.
+// Returns the post-step checkpoint directly, with its .Loss set to this step's loss. The rig
+// compiles its training-step graph once internally (lazily, cached), so a manual loop is just
+// `cp = rig.TrainStep(cp, in, out);` — no caller-side ComputeContext.Compile.
 public TrainingCheckpoint TrainStep(
     TrainingCheckpoint checkpoint,
     TensorDataStruct trainingInput,
-    TensorDataStruct trainingOutput,
-    CompiledGraph compiled);
+    TensorDataStruct trainingOutput);
 
 // Explicit override: supply the schedule-less runtime hyperparameter values for this step.
 public TrainingCheckpoint TrainStep(
     TrainingCheckpoint checkpoint,
     TensorDataStruct hyperparams,              // from MakeHyperparameters(...)
     TensorDataStruct trainingInput,
-    TensorDataStruct trainingOutput,
-    CompiledGraph compiled);
+    TensorDataStruct trainingOutput);
 
 // Loader-driven single step: draws loader.Next(), sourcing epoch / batch from the loader — the
 // single-step form of Fit(loader). The batch's own position drives the scheduler for this step and
 // is recorded on the returned checkpoint (the batch USED). Requires no runtime hypers.
 public TrainingCheckpoint TrainStep(
     TrainingCheckpoint checkpoint,
-    IDataLoader loader,
-    CompiledGraph compiled);
+    IDataLoader loader);
 
 // Explicit epoch / batch: for a host driving its own iteration (no loader). epoch / batchNumber name
 // the batch being trained — fed to the scheduler for this step AND recorded verbatim on the returned
@@ -155,8 +157,7 @@ public TrainingCheckpoint TrainStep(
     TensorDataStruct trainingInput,
     TensorDataStruct trainingOutput,
     long epoch,
-    long batchNumber,
-    CompiledGraph compiled);
+    long batchNumber);
 
 public TensorDataStruct MakeHyperparameters(float value);                       // exactly one dynamic
 public TensorDataStruct MakeHyperparameters(params (string name, float value)[] values); // named
@@ -165,16 +166,26 @@ public TrainingResult Fit(  // alias: Train(...)
     TrainingCheckpoint initialCheckpoint,
     TensorDataStruct[] trainingInputs,
     TensorDataStruct[] trainingOutputs,
-    int numEpochs,
-    ComputeContext ctx);
+    int numEpochs);                                // compiles/runs via rig.RuntimeContext (one graph per rig)
 
 // Data-loader-driven: the loader owns the batch stream; Fit advances step / epoch / batch for you.
 public TrainingResult Fit(
     IDataLoader loader,
     int numEpochs,
-    TrainingCheckpoint? initialCheckpoint = null,  // defaults to CreateInitialCheckpoint()
-    ComputeContext? ctx = null);                   // defaults to ComputeContext.Default
+    TrainingCheckpoint? initialCheckpoint = null); // defaults to CreateInitialCheckpoint()
 ```
+
+### Compute contexts: `MergeContext` and `RuntimeContext`
+
+A rig carries two `ComputeContext` members, both supplied at construction (defaulting to
+`ComputeContext.Default`) and both **runtime configuration that is never written to a checkpoint** —
+a reloaded run gets fresh contexts by passing them to `FromScratch`. `MergeContext` runs the
+build/merge phase (concretization, shape inference, graph lowering and memory optimization, optimizer
+state init); `RuntimeContext` compiles the training-step graph into its executable session and runs it,
+so it determines the execution backend. It is the sole compile/run context for `TrainStep`, `Train` and
+`Fit` — none of them takes a per-call context override, so a rig has exactly one compiled training-step
+graph that the `Fit`/`Train` loop and a manual `TrainStep` loop all share. Every `With…` derivation
+keeps the same two contexts.
 
 Result types:
 - `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long?`; the training loop advances them — the counter-agnostic `TrainStep` carries them through unchanged). They are `null` when the position is genuinely **unknown** — an initial checkpoint, or one trained without a data loader / explicit counters — rather than a misleading `0`; the loader-driven and explicit-counter paths set concrete values. A scheduled hyperparameter reading the epoch / batch counter sees `0` for a `null` value. `.Step` is always a concrete `long`; all counters are `int64` end to end. It also carries `.Rig` (the `TrainingRig?` that produced it — set on every rig-produced checkpoint, so `checkpoint.ToInferenceModel()` needs no re-supplied graph) and `.Loss` (`float?`; the loss of the `TrainStep` that produced it, `null` on an initial or bare checkpoint). Both are preserved through the counter derivations (`WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex`). `TrainStep` returns this checkpoint directly — read the step's loss off `.Loss`. `.Loss` persists as its own `Loss` component, independent of `Counters` (dropping `Loss`, or an initial checkpoint, reloads with `.Loss == null` — never a sentinel `0`).
@@ -223,12 +234,12 @@ var outcome = rig.Fit(loader, numEpochs: 10);   // step / epoch / batch advance 
   yields the batch *one step after* `position`, rolling into the next epoch internally).
   `InMemoryDataLoader` also exposes `BatchesPerEpoch`, but that is **not** on the interface — the epoch
   rollover a caller would have used it for now lives inside `RestoreAfter`.
-- **One step at a time.** `rig.TrainStep(checkpoint, loader, compiled)` is the single-step form of
+- **One step at a time.** `rig.TrainStep(checkpoint, loader)` is the single-step form of
   `Fit(loader)` — it draws one batch, runs the step (the batch's own position drives any scheduler),
   and returns a checkpoint recording the **batch used** (that same drawn position). `Fit(loader)` is
   just a loop over it, so the two share one source of the loader step-and-counter semantics. For a host
-  that owns its own iteration (no loader), `rig.TrainStep(checkpoint, input, target, epoch, batchNumber,
-  compiled)` records the given `epoch` / `batchNumber` verbatim — the same "batch used" convention (it
+  that owns its own iteration (no loader), `rig.TrainStep(checkpoint, input, target, epoch, batchNumber)`
+  records the given `epoch` / `batchNumber` verbatim — the same "batch used" convention (it
   names the batch being trained).
 - **`InMemoryDataLoader`** is the bare-minimum implementation over tensors you already hold. Each
   field's leading dimension is the sample count `N`; it slices along that dimension into

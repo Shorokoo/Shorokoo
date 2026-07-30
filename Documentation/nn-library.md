@@ -1163,9 +1163,6 @@ var rig = TrainingRig.FromScratch(
         new TensorDataModelParam("input", ModelParamType.InputParam, inputData) },
     new AdamOptimizerHyperparameters { LearningRate = 0.01f });  // β/ε keep defaults
 
-var ctx      = new ComputeContext();
-var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-
 static TensorDataStruct MakeBatch(string field, string structName, TensorData data) =>
     new(new TensorStructDef(
             new[] { new TensorStructFieldDef(field, DataStructure.Tensor,
@@ -1179,7 +1176,7 @@ var targetBatch = MakeBatch("targets", "Target", targetData);
 var ckpt = rig.CreateInitialCheckpoint();
 for (int i = 0; i < 15; i++)
 {
-    ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch, compiled);
+    ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch);  // compiled once internally, then reused
     Console.WriteLine($"step {i}: loss {ckpt.Loss}");
 }
 ```

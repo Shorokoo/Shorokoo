@@ -190,13 +190,10 @@ public class NormActTrainingCoverageTests
             new NamedModelParam[] { new TensorDataModelParam("input", ModelParamType.InputParam, inputData) },
             0.01f);
 
-        var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var initial = rig.CreateInitialCheckpoint();
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", inputData),
-            MakeBatch("targets", "Target", targetData),
-            compiled);
+            MakeBatch("targets", "Target", targetData));
 
         Assert.True(float.IsFinite(step.Loss!.Value), $"training-step loss must be finite; got {step.Loss!.Value}");
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
@@ -326,8 +323,6 @@ public class NormActTrainingCoverageTests
             new NamedModelParam[] { new TensorDataModelParam("input", ModelParamType.InputParam, inputData) },
             0.1f);
 
-        var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
         var initial = rig.CreateInitialCheckpoint();
 
         // Sanity: the single slope param is [C] and starts uniform at 0.25.
@@ -339,8 +334,7 @@ public class NormActTrainingCoverageTests
 
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", inputData),
-            MakeBatch("targets", "Target", targetData),
-            compiled);
+            MakeBatch("targets", "Target", targetData));
         Assert.True(float.IsFinite(step.Loss!.Value), $"training-step loss must be finite; got {step.Loss!.Value}");
 
         float[] slope1 = Floats(step.TrainableParams.Fields[slopeName]);

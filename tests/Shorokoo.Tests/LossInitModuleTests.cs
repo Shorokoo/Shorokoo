@@ -75,9 +75,7 @@ public class LossInitTrainingTests
         var targetBatch = new TensorDataStruct(targetDef,
             new Dictionary<string, IData> { { "targets", targetData } });
 
-        var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var step = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
+        var step = rig.TrainStep(initial, inputBatch, targetBatch);
 
         Assert.NotNull(step);
         Assert.NotNull(step.TrainableParams);

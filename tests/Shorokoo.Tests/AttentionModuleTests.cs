@@ -175,9 +175,7 @@ public class AttentionTrainingCoverageTests
         var targetBatch = new TensorDataStruct(targetDef,
             new Dictionary<string, IData> { { "targets", TensorData(outShape, new float[8]) } });
 
-        var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var step = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
+        var step = rig.TrainStep(initial, inputBatch, targetBatch);
 
         Assert.True(float.IsFinite(step.Loss!.Value));
         Assert.NotEmpty(step.TrainableParams.Fields);
@@ -227,9 +225,7 @@ public class AttentionTrainingCoverageTests
         var targetBatch = new TensorDataStruct(targetDef,
             new Dictionary<string, IData> { { "targets", TensorData(outShape, new float[8]) } });
 
-        var ctx = new ComputeContext();
-        var compiled = ctx.Compile(rig.TrainingStepPureGraph);
-        var step = rig.TrainStep(initial, inputBatch, targetBatch, compiled);
+        var step = rig.TrainStep(initial, inputBatch, targetBatch);
 
         Assert.True(float.IsFinite(step.Loss!.Value));
         Assert.NotEmpty(step.TrainableParams.Fields);

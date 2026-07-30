@@ -2636,6 +2636,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
             var store = engine.Run(graph, initialInputs);
             var candidateModelIdInfos = ExtractModelIdInfosFromStore(graph, store);
+            var perSiteRealizedIds = ExtractPerSiteRealizedIds(graph, store);
 
             // If QEE couldn't resolve every MODEL_PARAM_ID_REF node's model ID (e.g., the
             // ID flows through ops whose integer data QEE can't track — Sequence ops populated
@@ -2698,7 +2699,41 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // there is genuinely nothing to do.
             if (liveModelIdInfos.IsEmpty && deadModelIdInfos.IsEmpty) return;
 
-            NativeConvertTrainableParamIdRef(graph, liveModelIdInfos, deadModelIdInfos, paramIdentifierTemplates);
+            NativeConvertTrainableParamIdRef(graph, liveModelIdInfos, deadModelIdInfos, paramIdentifierTemplates, perSiteRealizedIds);
+        }
+
+        /// <summary>
+        /// Per <c>MODEL_PARAM_ID_REF</c> site, the ordered set of specific model ids it realizes,
+        /// read from the QEE store's per-iteration history of the site's model-id input. This is
+        /// the per-site inventory the feed-convention value selection indexes over: a static site
+        /// realizes exactly one id (a direct reference), an in-loop site realizes one id per
+        /// iteration slot combination (a small site-local selection over its own iteration slots),
+        /// never the global joint id space. Mirrors the per-iteration walk
+        /// <see cref="ExtractModelIdInfosFromStore"/> rides, but keyed by site rather than deduped
+        /// by model id, so each site keeps its own realized-id ordering.
+        /// </summary>
+        private static Dictionary<FastNodeKey, ImmutableArray<ModelId>> ExtractPerSiteRealizedIds(
+            InternalComputationGraph graph,
+            Dictionary<FastTensorKey, IRuntimeTensor> store)
+        {
+            var result = new Dictionary<FastNodeKey, ImmutableArray<ModelId>>();
+            foreach (var node in graph.Nodes)
+            {
+                if (node.OpCode != InternalOpCodes.MODEL_PARAM_ID_REF) continue;
+                var inputs = node.Inputs;
+                if (inputs.Count == 0 || inputs[0] is null) continue;
+                if (!store.TryGetValue(inputs[0]!.Value, out var modelIdRaw)) continue;
+                if (modelIdRaw is not RuntimeTensor modelIdRt) continue;
+
+                var builder = ImmutableArray.CreateBuilder<ModelId>();
+                foreach (var (_, filteredId) in EnumerateIterationIntVectors(modelIdRt))
+                {
+                    if (filteredId.Length == 0) continue;
+                    builder.Add(ModelId.FromLongVals(filteredId));
+                }
+                result[node.Key] = builder.ToImmutable();
+            }
+            return result;
         }
 
         /// <summary>
@@ -2767,27 +2802,31 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             InternalComputationGraph graph,
             ImmutableArray<TrainableParamInfo> liveParamInfos,
             ImmutableArray<TrainableParamInfo> deadParamInfos,
-            IdTemplateInfos idTemplateInfos)
+            IdTemplateInfos idTemplateInfos,
+            Dictionary<FastNodeKey, ImmutableArray<ModelId>> perSiteRealizedIds)
         {
-            // Index space must cover every candidate ID — including pruned ones — because
-            // their ID_REF nodes are still in the graph and produce runtime IDs whose
-            // dimension values can lie outside the live-only range.
-            var allIdsForDims = liveParamInfos.Concat(deadParamInfos).Select(x => x.SpecificModelId);
-            var maxIdCounts = FoldHelpers.MaxModelIdCounts(allIdsForDims);
-            var maxSize = Enumerable.Aggregate(maxIdCounts, 1, (a, c) => a * c);
-            var transformArray = FoldHelpers.IndexToFlattenedIndexTransform(maxIdCounts);
+            // The value each MODEL_PARAM_ID_REF site materializes is now selected on the
+            // FEED CONVENTION (Shorokoo/Shorokoo#22): per-site, over that site's own iteration
+            // slots only — never through one global sequence indexed over the full joint id
+            // space. The MODEL_PARAM nodes (and their canonical identity) are still created once
+            // per specific model id, exactly as before, so autograd / optimizer-state / ONNX
+            // export and the extraction identity are unchanged; only the SELECTION wiring differs:
+            //   * a static site (one realized id) becomes a DIRECT reference to that param — no
+            //     sequence, no index arithmetic;
+            //   * an in-loop site (a realized id per iteration-slot combination) builds a small
+            //     site-local SEQUENCE_CONSTRUCT of just its own realized params and selects with
+            //     a site-local flat index computed from the site's own model-id vector — the loop
+            //     slots enter the index the same way a runtime feed's iteration index enters its
+            //     split counter (FastWireRngKeyDerivation), the direct analogue for the
+            //     heterogeneous-tensor value kind.
 
             var newNodes = new List<FastNode>();
 
-            // --- MODEL_PARAM nodes + CONSTANT initializer params ---
-            var trainableParamKeysByType = liveParamInfos.Concat(deadParamInfos)
-                .Select(x => x.TargetFn.Outputs[0].DType).Distinct()
-                .ToDictionary(x => x, x => new FastTensorKey?[maxSize]);
-
+            // --- MODEL_PARAM nodes (one per live specific model id, deduped by identity) ---
+            var liveParamKeyByModelId = new Dictionary<ModelId, FastTensorKey>();
             foreach (var paramInfo in liveParamInfos)
             {
                 var modelId = paramInfo.SpecificModelId;
-                var index = FoldHelpers.TransformModelIdToFlattenedIndex(modelId, transformArray);
                 var dtype = paramInfo.TargetFn.Outputs[0].DType;
                 var rank = paramInfo.TargetFn.OutputRankOverrides[0];
                 var idTemplateString = idTemplateInfos.GetSpecificIdentifierTemplate(modelId).ToString();
@@ -2825,79 +2864,46 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     TargetFunction = paramInfo.TargetFn,
                     IdentifierTemplate = idTemplateString,
                 });
-                trainableParamKeysByType[dtype][index] = tpTensorKey;
+                liveParamKeyByModelId[modelId] = tpTensorKey;
             }
 
-            // Dead candidates — emit shape-correct zero CONSTANTs (not MODEL_PARAMs,
-            // so they don't bloat the persisted ModelParamList). Their value is never
-            // observed: the SequenceAt result feeds a dead branch whose output the IF
-            // discards — only its shape matters, so it broadcasts cleanly with peers.
+            // Dead candidates — emit shape-correct zero CONSTANTs (not MODEL_PARAMs, so they
+            // don't bloat the persisted ModelParamList). Their value is never observed: a dead
+            // site's selection feeds a branch whose output the IF discards — only its shape
+            // matters, so it broadcasts cleanly with peers.
+            var deadZeroKeyByModelId = new Dictionary<ModelId, FastTensorKey>();
             foreach (var paramInfo in deadParamInfos)
             {
                 var modelId = paramInfo.SpecificModelId;
-                var index = FoldHelpers.TransformModelIdToFlattenedIndex(modelId, transformArray);
                 var dtype = paramInfo.TargetFn.Outputs[0].DType;
                 var zeroKey = FastNodeKey.New();
                 newNodes.Add(CreateConstantTensorDataNode(zeroKey,
                     Globals.TensorDataWithDefaultVals(dtype, paramInfo.Shape.Dims)));
-                trainableParamKeysByType[dtype][index] = new FastTensorKey(zeroKey, 0);
+                deadZeroKeyByModelId[modelId] = new FastTensorKey(zeroKey, 0);
             }
 
-            // --- Empty vector fillers for sequence slots that no ID_REF can ever hit
-            // (combinations of dim values not present in any candidate). Safe to leave
-            // shape-(0,) since they're never read. ---
+            // Empty (shape-(0,)) filler per dtype, created on demand: fills the rare in-loop
+            // sequence slot no realized id maps to (never read). Created lazily so the common
+            // static-only graph emits none.
             var emptyVectorKeys = new Dictionary<DType, FastTensorKey>();
-            foreach (var dtype in trainableParamKeysByType.Keys)
+            FastTensorKey EmptyFiller(DType dtype)
             {
-                var evKey = FastNodeKey.New();
-                newNodes.Add(CreateConstantTensorDataNode(evKey, Globals.TensorData(dtype)));
-                emptyVectorKeys[dtype] = new FastTensorKey(evKey, 0);
-            }
-
-            // --- SEQUENCE_CONSTRUCT nodes (one per DType) ---
-            var sequenceKeys = new Dictionary<DType, FastTensorKey>();
-            foreach (var kvp in trainableParamKeysByType)
-            {
-                var dtype = kvp.Key;
-                var seqKey = FastNodeKey.New();
-                var seqTensorKey = new FastTensorKey(seqKey, 0);
-
-                var seqInputs = kvp.Value
-                    .Select(e => e ?? (FastTensorKey?)emptyVectorKeys[dtype])
-                    .ToList();
-
-                var seqAttrDefs = Definitions.NodeDefinitions[OpCodes.SEQUENCE_CONSTRUCT].AttributeDefs;
-                var seqAttrs = OnnxCSharpAttributes.FromCSharpVals(new Dictionary<string, object?>(), seqAttrDefs);
-
-                newNodes.Add(new FastNode
+                if (!emptyVectorKeys.TryGetValue(dtype, out var k))
                 {
-                    Key = seqKey,
-                    OpCode = OpCodes.SEQUENCE_CONSTRUCT,
-                    Attributes = seqAttrs,
-                    FullInputs = { [""] = seqInputs },
-                    FullOutputs = { [""] = new List<FastTensorKey?> { seqTensorKey } },
-                });
-                sequenceKeys[dtype] = seqTensorKey;
+                    var evKey = FastNodeKey.New();
+                    newNodes.Add(CreateConstantTensorDataNode(evKey, Globals.TensorData(dtype)));
+                    k = new FastTensorKey(evKey, 0);
+                    emptyVectorKeys[dtype] = k;
+                }
+                return k;
             }
 
-            // --- Shared index computation nodes ---
-
-            var transformVecKey = FastNodeKey.New();
-            var transformVecTK = new FastTensorKey(transformVecKey, 0);
-            newNodes.Add(CreateConstantTensorDataNode(transformVecKey,
-                Globals.TensorData(new long[] { transformArray.Length }, transformArray)));
-
-            var unsqAxesKey = FastNodeKey.New();
-            var unsqAxesTK = new FastTensorKey(unsqAxesKey, 0);
-            newNodes.Add(CreateConstantTensorDataNode(unsqAxesKey,
-                Globals.TensorData(new long[] { 1 }, -1L)));
-
-            var transformShapeKey = FastNodeKey.New();
-            var transformShapeTK = new FastTensorKey(transformShapeKey, 0);
-            newNodes.Add(FastNodeCreationHelpers.CreateFastNode(
-                transformShapeKey, OpCodes.SHAPE,
-                new Dictionary<string, object?>(),
-                new FastTensorKey?[] { transformVecTK }));
+            // Resolve a realized id to the tensor key that carries its value (a MODEL_PARAM for a
+            // live id, a shape-correct zero CONSTANT for a pruned/dead one).
+            FastTensorKey KeyForRealizedId(ModelId id, DType dtype)
+                => liveParamKeyByModelId.TryGetValue(id, out var live) ? live
+                 : deadZeroKeyByModelId.TryGetValue(id, out var dead) ? dead
+                 : EmptyFiller(dtype);
 
             var reduceAttrs = new Dictionary<string, object?>
             {
@@ -2905,32 +2911,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 [OnnxOpAttributeNames.AttrNoopWithEmptyAxes] = false,
             };
 
-            var transformSizeKey = FastNodeKey.New();
-            var transformSizeTK = new FastTensorKey(transformSizeKey, 0);
-            newNodes.Add(FastNodeCreationHelpers.CreateFastNode(
-                transformSizeKey, OpCodes.REDUCE_PROD,
-                new Dictionary<string, object?>(reduceAttrs),
-                new FastTensorKey?[] { transformShapeTK, null }));
-
-            var scalar0Key = FastNodeKey.New();
-            var scalar0TK = new FastTensorKey(scalar0Key, 0);
-            newNodes.Add(CreateConstantTensorDataNode(scalar0Key,
-                Globals.TensorData(new long[] { }, 0L)));
-
-            var unsqueezed0Key = FastNodeKey.New();
-            var unsqueezed0TK = new FastTensorKey(unsqueezed0Key, 0);
-            newNodes.Add(FastNodeCreationHelpers.CreateFastNode(
-                unsqueezed0Key, OpCodes.UNSQUEEZE,
-                new Dictionary<string, object?>(),
-                new FastTensorKey?[] { scalar0TK, unsqAxesTK }));
-
-            // --- Per MODEL_PARAM_ID_REF: index computation + SEQUENCE_AT ---
-            // Each ID_REF gets a small graph that's spliced in at the original
-            // ID_REF's position so the result is topologically ordered + nested
-            // by construction.
+            // --- Per MODEL_PARAM_ID_REF site: direct reference (static) or site-local
+            // sequence + iteration-slot index (in-loop). Each site's per-replacement subgraph is
+            // spliced in at the original ID_REF's position so scope nesting is preserved. ---
             var remap = new Dictionary<FastTensorKey, FastTensorKey>();
             var perIdRefReplacements = new Dictionary<FastNodeKey, List<FastNode>>();
-            var emptyAttrs = new Dictionary<string, object?>();
 
             foreach (var fastNode in graph.Nodes)
             {
@@ -2940,82 +2925,119 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var dtype = fastNode.Attributes.GetDTypeVal(OnnxOpAttributeNames.ShrkAttrDtype)!;
                 var modelIdInputKey = fastNode.Inputs[0]!.Value;
 
-                var perReplacement = new List<FastNode>(9);
+                var realizedIds = perSiteRealizedIds.TryGetValue(fastNode.Key, out var ids)
+                    ? ids : ImmutableArray<ModelId>.Empty;
+                var distinctIds = realizedIds.Distinct().ToList();
 
-                // SHAPE(modelIdInput)
-                var modelIdShapeKey = FastNodeKey.New();
-                perReplacement.Add(FastNodeCreationHelpers.CreateFastNode(
-                    modelIdShapeKey, OpCodes.SHAPE,
-                    new Dictionary<string, object?>(),
-                    new FastTensorKey?[] { modelIdInputKey }));
+                // Static site (or a zero-trip in-loop site with nothing realized): the value is
+                // fixed, so reference it directly — no sequence, no index arithmetic.
+                if (distinctIds.Count <= 1)
+                {
+                    remap[idRefOutputKey] = distinctIds.Count == 1
+                        ? KeyForRealizedId(distinctIds[0], dtype)
+                        : EmptyFiller(dtype);
+                    perIdRefReplacements[fastNode.Key] = new List<FastNode>();
+                    continue;
+                }
 
-                // REDUCE_PROD(modelIdShape) → modelId size
-                var modelIdSizeKey = FastNodeKey.New();
-                perReplacement.Add(FastNodeCreationHelpers.CreateFastNode(
-                    modelIdSizeKey, OpCodes.REDUCE_PROD,
-                    new Dictionary<string, object?>(reduceAttrs),
-                    new FastTensorKey?[] { new FastTensorKey(modelIdShapeKey, 0), null }));
+                // In-loop site: select over the site's OWN iteration slots only. The iteration
+                // slots are the model-id vector positions whose value varies across the realized
+                // ids; a site-local, row-major flat index over just those slots orders a small
+                // site-local sequence of the realized params.
+                int idLen = distinctIds[0].Vals.Length;
+                if (distinctIds.Any(x => x.Vals.Length != idLen))
+                    throw new FastPipelineUnsupportedException(
+                        "FastConvertModelParamIdRefToModelParam: a MODEL_PARAM_ID_REF site realizes " +
+                        "model ids of differing length; its per-site iteration-slot inventory is not " +
+                        "well-formed.");
 
-                // SUB(transformSize, modelIdSize) → padAmount
-                var padAmountKey = FastNodeKey.New();
-                perReplacement.Add(FastNodeCreationHelpers.CreateFastNode(
-                    padAmountKey, OpCodes.SUB,
-                    new Dictionary<string, object?>(),
-                    new FastTensorKey?[] { transformSizeTK, new FastTensorKey(modelIdSizeKey, 0) }));
+                var slotPositions = new List<int>();
+                for (int p = 0; p < idLen; p++)
+                {
+                    int first = distinctIds[0].Vals[p];
+                    if (distinctIds.Any(x => x.Vals[p] != first))
+                        slotPositions.Add(p);
+                }
 
-                // UNSQUEEZE(padAmount) → 1-element vector
-                var unsqPadAmtKey = FastNodeKey.New();
-                perReplacement.Add(FastNodeCreationHelpers.CreateFastNode(
-                    unsqPadAmtKey, OpCodes.UNSQUEEZE,
-                    new Dictionary<string, object?>(),
-                    new FastTensorKey?[] { new FastTensorKey(padAmountKey, 0), unsqAxesTK }));
+                // Per-slot count = max realized value + 1 (loops index 0..count-1 densely).
+                var slotCounts = slotPositions
+                    .Select(p => distinctIds.Max(x => x.Vals[p]) + 1)
+                    .ToArray();
+                var slotStrides = FoldHelpers.IndexToFlattenedIndexTransform(slotCounts);
+                int seqLen = slotCounts.Aggregate(1, (a, c) => a * c);
 
-                // CONCAT([unsqueezed0, unsqueezedPadAmount]) → pads vector
-                var padsKey = FastNodeKey.New();
-                perReplacement.Add(FastNodeCreationHelpers.CreateFastNode(
-                    padsKey, OpCodes.CONCAT,
-                    new Dictionary<string, object?> { [OnnxOpAttributeNames.AttrAxis] = 0L },
-                    new FastTensorKey?[] { unsqueezed0TK, new FastTensorKey(unsqPadAmtKey, 0) }));
+                long LocalIndex(ModelId id)
+                {
+                    long acc = 0;
+                    for (int s = 0; s < slotPositions.Count; s++)
+                        acc += id.Vals[slotPositions[s]] * slotStrides[s];
+                    return acc;
+                }
 
-                // PAD(modelIdInput, pads, scalar0, mode=Constant)
-                var paddedKey = FastNodeKey.New();
-                perReplacement.Add(FastNodeCreationHelpers.CreateFastNode(
-                    paddedKey, OpCodes.PAD,
-                    new Dictionary<string, object?> { [OnnxOpAttributeNames.AttrMode] = PadMode.Constant },
-                    new FastTensorKey?[] { modelIdInputKey, new FastTensorKey(padsKey, 0), scalar0TK, null }));
+                // Site-local transform vector (length = model-id length): the slot stride at each
+                // iteration-slot position, 0 elsewhere. MUL(modelId, transform) then REDUCE_SUM
+                // reproduces LocalIndex from the runtime model-id vector — bit-identically to the
+                // host ordering below, since iteration index == model-id value at each slot.
+                var transformArray = new long[idLen];
+                for (int s = 0; s < slotPositions.Count; s++)
+                    transformArray[slotPositions[s]] = slotStrides[s];
 
-                // MUL(padded, transformVector)
+                var seqSlots = new FastTensorKey?[seqLen];
+                foreach (var id in distinctIds)
+                    seqSlots[LocalIndex(id)] = KeyForRealizedId(id, dtype);
+                for (int i = 0; i < seqLen; i++)
+                    seqSlots[i] ??= EmptyFiller(dtype);
+
+                var seqKey = FastNodeKey.New();
+                var seqTensorKey = new FastTensorKey(seqKey, 0);
+                var seqAttrDefs = Definitions.NodeDefinitions[OpCodes.SEQUENCE_CONSTRUCT].AttributeDefs;
+                newNodes.Add(new FastNode
+                {
+                    Key = seqKey,
+                    OpCode = OpCodes.SEQUENCE_CONSTRUCT,
+                    Attributes = OnnxCSharpAttributes.FromCSharpVals(new Dictionary<string, object?>(), seqAttrDefs),
+                    FullInputs = { [""] = seqSlots.ToList() },
+                    FullOutputs = { [""] = new List<FastTensorKey?> { seqTensorKey } },
+                });
+
+                var transformVecKey = FastNodeKey.New();
+                var transformVecTK = new FastTensorKey(transformVecKey, 0);
+                newNodes.Add(CreateConstantTensorDataNode(transformVecKey,
+                    Globals.TensorData([idLen], transformArray)));
+
+                var perReplacement = new List<FastNode>(3);
+
+                // MUL(modelIdInput, siteTransform)
                 var multipliedKey = FastNodeKey.New();
                 perReplacement.Add(FastNodeCreationHelpers.CreateFastNode(
                     multipliedKey, OpCodes.MUL,
                     new Dictionary<string, object?>(),
-                    new FastTensorKey?[] { new FastTensorKey(paddedKey, 0), transformVecTK }));
+                    [modelIdInputKey, transformVecTK]));
 
-                // REDUCE_SUM(multiplied) → flat index scalar
+                // REDUCE_SUM(multiplied) → site-local flat index scalar
                 var flatIndexKey = FastNodeKey.New();
                 perReplacement.Add(FastNodeCreationHelpers.CreateFastNode(
                     flatIndexKey, OpCodes.REDUCE_SUM,
                     new Dictionary<string, object?>(reduceAttrs),
-                    new FastTensorKey?[] { new FastTensorKey(multipliedKey, 0), null }));
+                    [new FastTensorKey(multipliedKey, 0), null]));
 
-                // SEQUENCE_AT(sequence[dtype], flatIndex)
+                // SEQUENCE_AT(siteSequence, flatIndex)
                 var seqAtKey = FastNodeKey.New();
                 var seqAtTK = new FastTensorKey(seqAtKey, 0);
                 perReplacement.Add(FastNodeCreationHelpers.CreateFastNode(
                     seqAtKey, OpCodes.SEQUENCE_AT,
                     new Dictionary<string, object?>(),
-                    new FastTensorKey?[] { sequenceKeys[dtype], new FastTensorKey(flatIndexKey, 0) }));
+                    [seqTensorKey, new FastTensorKey(flatIndexKey, 0)]));
 
                 remap[idRefOutputKey] = seqAtTK;
                 perIdRefReplacements[fastNode.Key] = perReplacement;
             }
 
-            // Splice the new graph: shared nodes (MODEL_PARAMs + sequence
-            // construction + shared index helpers) go at the front — they have no
-            // dependencies on the original graph. Each ID_REF gets replaced
-            // in-place by its per-replacement subgraph, which inherits the ID_REF's
-            // surrounding scope (so nesting is preserved). All other original
-            // nodes stay in their existing positions.
+            // Splice the new graph: shared nodes (MODEL_PARAMs + per-site sequences + site
+            // transform constants) go at the front — they have no dependencies on the original
+            // graph. Each ID_REF is replaced in-place by its per-replacement subgraph (possibly
+            // empty for a direct reference), which inherits the ID_REF's surrounding scope (so
+            // nesting is preserved). All other original nodes stay in their existing positions.
             var rebuilt = new List<FastNode>(graph.Nodes.Count + newNodes.Count);
             rebuilt.AddRange(newNodes);
             foreach (var node in graph.Nodes)

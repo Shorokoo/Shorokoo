@@ -199,6 +199,27 @@ public partial class TwoInputSumModel
 }
 
 /// <summary>
+/// Three top-level model inputs in a DELIBERATELY non-alphabetical declaration order
+/// (<c>beta</c>, <c>alpha</c>, <c>gamma</c>) with mixed dtypes (float32 / int64 / float32).
+/// Each input is reduced to a scalar and summed, so the three may carry independent
+/// shapes and ranks — used to prove the <c>.srk</c> node-emission path rebuilds a
+/// multi-input graph's input list with its count, order, per-input identity and per-input
+/// type/representative info intact (issue #115).
+/// </summary>
+[Module]
+public partial class ThreeInputMixedModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> beta, Tensor<int64> alpha, Tensor<float32> gamma)
+    {
+        var w = InitScalarWeight.Init(Vector(1L));
+        var sBeta = beta.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        var sAlpha = alpha.Reduce(ReduceKind.Sum, keepDims: false).Scalar().Cast<float32>();
+        var sGamma = gamma.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        return ((sBeta + sAlpha + sGamma) * w.Scalar()).Reshape([Scalar(1L)]);
+    }
+}
+
+/// <summary>
 /// Coverage-purpose training-rig pipeline tests. Each [Fact] drives the full
 /// model + loss + optimizer composition through <see cref="TrainingRig.FromScratch"/>
 /// and <c>CreateInitialCheckpoint</c> for a curated combination of modules.
@@ -683,6 +704,97 @@ public class TrainingRigCoverageTests
         {
             Assert.Null(tensor);
             Assert.Equal(shape, dims);
+        }
+    }
+
+    /// <summary>The <c>MODEL_TENSOR_INPUT</c> node that produces graph-input <paramref name="key"/>.</summary>
+    private static Shorokoo.Core.Graph.FastNode InputNodeFor(
+        Shorokoo.Graph.InternalComputationGraph g, Shorokoo.Core.Graph.FastTensorKey key)
+        => g.Nodes.First(n => n.Outputs.Any(o => o.HasValue && o.Value.Equals(key)));
+
+    /// <summary>
+    /// Multi-input <c>.srk</c> round-trip (issue #115): the node-emission rewrite reconstructs a
+    /// graph's input list from the serialized <c>MODEL_*_INPUT</c> nodes <b>in order</b>, so a graph
+    /// with several inputs must round-trip with its input list intact — count, order, per-input
+    /// identity (name), and per-input type info (dtype + rank). A concrete arch additionally carries a
+    /// representative-input attribute per input; whichever attribute each input holds must survive
+    /// attached to the <b>correct</b> input. Three inputs are used in a deliberately non-alphabetical
+    /// order (<c>beta</c>, <c>alpha</c>, <c>gamma</c>) with mixed dtypes (float32 / int64 / float32),
+    /// ranks (1 / 1 / 2) and shapes ([4] / [2048] / [2,3]) chosen so the two small inputs record the
+    /// inline representative tensor and the large one the shape-only form — distinct enough on every
+    /// axis that any reorder, collapse, or cross-wiring of inputs is caught. This is the core guarantee
+    /// the node-emission rewrite rests on, which the single-input helpers above cannot exercise.
+    /// </summary>
+    [Fact]
+    public void TestMultiInputArchSrkNodeRoundTripCoverage()
+    {
+        // The rig attaches a representative-input attribute to each MODEL_TENSOR_INPUT (a plain
+        // ToConcreteArchitecture does not), concretized at the per-input sample shape below.
+        NamedModelParam[] sample =
+        [
+            new TensorDataModelParam("beta", ModelParamType.InputParam, TensorData([4L], new float[4])),        // small float32, rank 1 → inline
+            new TensorDataModelParam("alpha", ModelParamType.InputParam, TensorData([2048L], new long[2048])),  // large int64,   rank 1 → shape-only
+            new TensorDataModelParam("gamma", ModelParamType.InputParam, TensorData([2L, 3L], new float[6])),   // small float32, rank 2 → inline
+        ];
+        var arch = TrainingRig.FromScratch(
+            ThreeInputMixedModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            sample, 0.01f).ConcreteArchConstituent;
+        Assert.Equal(GraphKind.ConcreteArchitecture, arch.Kind);
+
+        var original = arch.ToInternal();
+        var reloaded = Shorokoo.Core.Utils.CompressedFormatUtils.LoadFastGraphFromBinary(
+            Shorokoo.Core.Utils.CompressedFormatUtils.SaveFastGraphToBinary(arch)).ToInternal();
+
+        // (a) count, order and identity: the ordered input list is three long, its ordered name
+        // sequence is byte-for-byte preserved, and every name is distinct (identity, not just count).
+        Assert.Equal(3, original.Inputs.Count);
+        Assert.Equal(original.Inputs.Count, reloaded.Inputs.Count);
+        Assert.Equal(original.InputUniqueNames, reloaded.InputUniqueNames);
+        Assert.Equal(3, reloaded.InputUniqueNames.Distinct().Count());
+
+        bool[] expectInline = [true, false, true];
+        long[][] expectDims = [[4L], [2048L], [2L, 3L]];
+        DType[] expectDtype = [DType.Float32, DType.Int64, DType.Float32];
+        long[] expectRank = [1L, 1L, 2L];
+
+        var reprInput = Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInput;
+        var reprShape = Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape;
+        var attrDtype = Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.AttrDtype;
+
+        // The concretized arch carries each input's rank in its representative attribute (the
+        // inline tensor's shape or the shape-only dims), so rank preservation is read from there.
+        static long RankOf(Shorokoo.Core.Graph.FastNode n, string reprInput, string reprShape)
+            => n.Attributes.GetTensorVal(reprInput) is { } t
+                ? t.Shape.Dims.Length
+                : n.Attributes.GetLongsVal(reprShape)!.Length;
+
+        for (int i = 0; i < 3; i++)
+        {
+            var before = InputNodeFor(original, original.Inputs[i]);
+            var after = InputNodeFor(reloaded, reloaded.Inputs[i]);
+            Assert.Equal(Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_TENSOR_INPUT, after.OpCode);
+
+            // (b) dtype/rank of each input slot are what we concretized at, and survive unchanged.
+            Assert.Equal(expectDtype[i], before.Attributes.GetDTypeVal(attrDtype));
+            Assert.Equal(expectDtype[i], after.Attributes.GetDTypeVal(attrDtype));
+            Assert.Equal(expectRank[i], RankOf(before, reprInput, reprShape));
+            Assert.Equal(expectRank[i], RankOf(after, reprInput, reprShape));
+
+            // (c) the representative attribute belonging to THIS input slot (inline for the small
+            // inputs, shape-only for the large one) survives on the correct slot after the round-trip.
+            var inlineTensor = after.Attributes.GetTensorVal(reprInput);
+            var shapeOnly = after.Attributes.GetLongsVal(reprShape);
+            if (expectInline[i])
+            {
+                Assert.NotNull(inlineTensor);
+                Assert.Equal(expectDims[i], inlineTensor!.Shape.Dims);
+                Assert.Null(shapeOnly);
+            }
+            else
+            {
+                Assert.Null(inlineTensor);
+                Assert.Equal(expectDims[i], shapeOnly);
+            }
         }
     }
 

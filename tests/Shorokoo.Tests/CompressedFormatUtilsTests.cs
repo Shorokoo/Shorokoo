@@ -1352,6 +1352,54 @@ public class CompressedFormatUtilsCoverageTests
         }
     }
 
+    /// <summary>Op-code + dtype of each top-level graph input, in graph-input order.</summary>
+    private static List<(string OpCode, DType? DType)> DescribeTopLevelInputs(InternalComputationGraph g)
+        => g.Inputs
+            .Select(key =>
+            {
+                var node = g.Nodes.First(n => n.Outputs.Any(o => o.HasValue && o.Value.Equals(key)));
+                return (node.OpCode, node.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype));
+            })
+            .ToList();
+
+    /// <summary>
+    /// Issue #115, node-emission path for the NON-tensor top-level graph-input kinds. In the native
+    /// <c>.srk</c> dialect every model-input op — <c>MODEL_TENSOR_INPUT</c>, <c>MODEL_OPTIONAL_INPUT</c>,
+    /// <c>MODEL_SEQUENCE_INPUT</c>, <c>MODEL_TENSORSTRUCT_INPUT</c> and <c>GENERIC_TYPE_INPUT</c> — is
+    /// serialized as an ordinary <c>NodeProto</c> in graph-input order (the non-tensor kinds previously
+    /// rode the graph-input <c>ValueInfoProto</c> path). For a fixture carrying each kind as a top-level
+    /// input, the graph's input list — its op-kind sequence, order and per-input dtype — survives a
+    /// save → load. All four kinds are constructed from existing module fixtures: an optional tensor input
+    /// (<see cref="NullableBiasLayer"/>), a top-level sequence input (<see cref="SeqHypersLayer"/>'s
+    /// <c>[Hyper] TensorSequence</c>), a tensorstruct input (<see cref="SimplePairSum"/>) and a
+    /// generic-type input (<see cref="GenericRecordSumCaller"/>'s <c>GenericType_T</c> placeholder).
+    /// </summary>
+    [Fact]
+    public void TestNonTensorTopLevelInputKindsSrkNodeRoundTripCoverage()
+    {
+        (ComputationGraph Graph, string ExpectedKind)[] cases =
+        [
+            (NullableBiasLayer.ComputationGraph, InternalOpCodes.MODEL_OPTIONAL_INPUT),    // (x, OptionalTensor bias)
+            (SeqHypersLayer.ComputationGraph, InternalOpCodes.MODEL_SEQUENCE_INPUT),       // (input, [Hyper] TensorSequence scales)
+            (SimplePairSum.ComputationGraph, InternalOpCodes.MODEL_TENSORSTRUCT_INPUT),    // (GenericPairStruct pair)
+            (GenericRecordSumCaller.ComputationGraph, InternalOpCodes.GENERIC_TYPE_INPUT), // Inline<T>() → GenericType_T
+        ];
+
+        foreach (var (graph, expectedKind) in cases)
+        {
+            // The kind under test is genuinely a top-level graph input of the fixture …
+            var before = DescribeTopLevelInputs(graph.ToInternal());
+            Assert.Contains(expectedKind, before.Select(d => d.OpCode));
+
+            // … and after the .srk round-trip the input list's op-kind sequence, order and per-input
+            // dtype are unchanged, and the kind under test is still present.
+            var reloaded = AssertModuleStageSrkRoundTrip(graph);
+            var after = DescribeTopLevelInputs(reloaded.ToInternal());
+            Assert.Equal(before, after);
+            Assert.Contains(expectedKind, after.Select(d => d.OpCode));
+        }
+    }
+
     /// <summary>
     /// Issue #59, construct 2: the StateOwnership tag of a state-initializer function
     /// survives save → load at module stage — an OptimizerOwned initializer must not

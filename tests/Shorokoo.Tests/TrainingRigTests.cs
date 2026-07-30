@@ -3237,8 +3237,10 @@ public class TrainingRigCoverageTests
     /// writes the trainable params (and model state), dropping optimizer state and counters. Reloading
     /// against a fresh rig restores the trainable params, fills the dropped optimizer state from the
     /// rig's initial values (so it is the init, not the trained state), and reads counters as 0. The
-    /// reloaded checkpoint carries the rig. Requesting the (unimplemented) TrainingRig component throws
-    /// a clear <see cref="NotSupportedException"/> naming #115.
+    /// reloaded checkpoint carries the rig. The flat format cannot carry the rig constituents, so
+    /// requesting the TrainingRig component on a flat save throws a clear <see cref="NotSupportedException"/>
+    /// pointing to the native <c>.skpt</c> / <see cref="TrainingRig.Load"/> path (#115); and the
+    /// rig-supplied flat load likewise redirects a TrainingRig request to <see cref="TrainingRig.Load"/>.
     /// </summary>
     [Fact]
     public void TestSaveLoadComponentsSubsetCoverage()
@@ -3263,13 +3265,14 @@ public class TrainingRigCoverageTests
             // Optimizer state was not saved ⇒ filled from the rig's initial values (not the trained ones).
             Assert.Equal(initialOpt, FlattenStruct(loaded.OptimizerState));
 
-            // Requesting the TrainingRig component is a clear NotSupportedException (#115).
+            // The flat format cannot carry the rig constituents, so requesting the TrainingRig
+            // component on a flat save throws, pointing to the .skpt / TrainingRig.Load path (#115).
             var ex = Assert.Throws<NotSupportedException>(
                 () => trained.Save(path, CheckpointComponents.All));
             Assert.Contains("#115", ex.Message);
 
-            // Symmetric on load: explicitly asking for the TrainingRig component (directly or via All)
-            // throws the same #115 NotSupportedException — the file never stores the rig's constituents.
+            // Symmetric on the rig-supplied load: asking for the TrainingRig component (directly or via
+            // All) throws, redirecting to the from-file-alone TrainingRig.Load path (#115).
             var loadRigEx = Assert.Throws<NotSupportedException>(
                 () => rigB.LoadCheckpoint(path, CheckpointComponents.TrainingRig));
             Assert.Contains("#115", loadRigEx.Message);
@@ -3284,7 +3287,8 @@ public class TrainingRigCoverageTests
     /// <see cref="CheckpointComponents.InferenceState"/> — the trainable params restore from the file,
     /// but the dropped optimizer state fills from the rig's initial values (not the trained ones), the
     /// counters read as 0, and the loss reads back <c>null</c> (its own Loss component was dropped too).
-    /// Requesting the (unimplemented) TrainingRig component throws a #115 <see cref="NotSupportedException"/>.
+    /// The rig-supplied load redirects a TrainingRig-component request to the from-file-alone
+    /// <see cref="TrainingRig.Load"/> path (#115) — a rig was already supplied here.
     /// </summary>
     [Fact]
     public void TestSkptSaveLoadComponentsSubsetCoverage()
@@ -3311,7 +3315,9 @@ public class TrainingRigCoverageTests
             // Optimizer state was filtered out ⇒ filled from the rig's initial values, not the trained ones.
             Assert.Equal(initialOpt, FlattenStruct(loaded.OptimizerState));
 
-            // Symmetric with the flat path: requesting the TrainingRig component throws a #115 error.
+            // The rig-supplied load redirects a TrainingRig-component request (directly or via All) to
+            // the from-file-alone TrainingRig.Load path (#115); the constituents ARE in this .skpt, but
+            // this path already has a rig, so it loads state only.
             var ex = Assert.Throws<NotSupportedException>(
                 () => rigB.LoadCheckpoint(path, CheckpointComponents.TrainingRig));
             Assert.Contains("#115", ex.Message);

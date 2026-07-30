@@ -20,9 +20,13 @@ namespace Shorokoo
     {
         /// <summary>No component.</summary>
         None = 0,
-        /// <summary>The rig's constituent model/loss/optimizer graphs, hyperparameters and RNG config —
-        /// enough to rebuild the whole rig from the file alone. Serialization not yet implemented
-        /// (Shorokoo/Shorokoo#115); requesting it throws.</summary>
+        /// <summary>The rig's constituent model/loss/optimizer/scheduler graphs, hyperparameters and RNG
+        /// config — enough to rebuild the whole rig from the file alone (Shorokoo/Shorokoo#115). A native
+        /// <c>.skpt</c> always carries them (written by <see cref="Persistence.SaveTrainingCheckpointToSkpt"/>);
+        /// rebuild the rig from the file with the static <see cref="TrainingRig.Load(string, Runtime.ComputeContext?, Runtime.ComputeContext?)"/>.
+        /// The flat safetensors format cannot carry constituent graphs, and the rig-supplied
+        /// <see cref="TrainingCheckpoint.Load"/> / <see cref="TrainingRig.LoadCheckpoint"/> already have a
+        /// rig, so requesting this component on those paths throws, redirecting to the paths above.</summary>
         TrainingRig = 1 << 0,
         /// <summary>Trainable parameters plus model state — everything the inference model binds.</summary>
         InferenceState = 1 << 1,

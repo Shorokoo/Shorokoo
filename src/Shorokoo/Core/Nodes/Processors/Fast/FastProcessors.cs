@@ -3003,7 +3003,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var transformVecKey = FastNodeKey.New();
                 var transformVecTK = new FastTensorKey(transformVecKey, 0);
                 newNodes.Add(CreateConstantTensorDataNode(transformVecKey,
-                    Globals.TensorData(new long[] { idLen }, transformArray)));
+                    Globals.TensorData([idLen], transformArray)));
 
                 var perReplacement = new List<FastNode>(3);
 
@@ -3012,14 +3012,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 perReplacement.Add(FastNodeCreationHelpers.CreateFastNode(
                     multipliedKey, OpCodes.MUL,
                     new Dictionary<string, object?>(),
-                    new FastTensorKey?[] { modelIdInputKey, transformVecTK }));
+                    [modelIdInputKey, transformVecTK]));
 
                 // REDUCE_SUM(multiplied) → site-local flat index scalar
                 var flatIndexKey = FastNodeKey.New();
                 perReplacement.Add(FastNodeCreationHelpers.CreateFastNode(
                     flatIndexKey, OpCodes.REDUCE_SUM,
                     new Dictionary<string, object?>(reduceAttrs),
-                    new FastTensorKey?[] { new FastTensorKey(multipliedKey, 0), null }));
+                    [new FastTensorKey(multipliedKey, 0), null]));
 
                 // SEQUENCE_AT(siteSequence, flatIndex)
                 var seqAtKey = FastNodeKey.New();
@@ -3027,7 +3027,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 perReplacement.Add(FastNodeCreationHelpers.CreateFastNode(
                     seqAtKey, OpCodes.SEQUENCE_AT,
                     new Dictionary<string, object?>(),
-                    new FastTensorKey?[] { seqTensorKey, new FastTensorKey(flatIndexKey, 0) }));
+                    [seqTensorKey, new FastTensorKey(flatIndexKey, 0)]));
 
                 remap[idRefOutputKey] = seqAtTK;
                 perIdRefReplacements[fastNode.Key] = perReplacement;

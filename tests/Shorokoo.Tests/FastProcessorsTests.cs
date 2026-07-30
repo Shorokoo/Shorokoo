@@ -168,4 +168,32 @@ public class FastProcessorsCoverageTests
         Assert.DoesNotContain(concreteArch.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.TENSOR_STRUCT_CREATE);
         Assert.DoesNotContain(concreteArch.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.TENSOR_STRUCT_GETFIELD);
     }
+
+    /// <summary>
+    /// Pins trainable-param value selection on the feed convention (Shorokoo/Shorokoo#22):
+    /// a static param site — one not enclosed in a loop, the overwhelmingly common case —
+    /// materializes its value through a <b>direct reference</b> to its own
+    /// <c>MODEL_PARAM</c>, never a selection over a global sequence indexed across the joint
+    /// id space. A model whose only params are static therefore concretizes with <b>no</b>
+    /// <c>SEQUENCE_CONSTRUCT</c>/<c>SEQUENCE_AT</c> param-selection ops, and each param keeps
+    /// its own canonical model id (the extraction identity this convergence is the clean
+    /// substrate for, §5.8.2). Uses a two-static-param Conv module (weight + bias).
+    /// </summary>
+    [Fact]
+    public void TestStaticTrainableParamSelectsByDirectReferenceCoverage()
+    {
+        var g = ((ComputationGraph)typeof(AutoGradStructConvStridePadCheck)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var x = TensorData([1L, 2L, 5L, 5L], new float[1 * 2 * 5 * 5]);
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x]));
+
+        // Static selection is a direct reference: no sequence machinery survives for params.
+        Assert.DoesNotContain(arch.Nodes, n => n.OpCode == OpCodes.SEQUENCE_AT);
+        Assert.DoesNotContain(arch.Nodes, n => n.OpCode == OpCodes.SEQUENCE_CONSTRUCT);
+
+        // The two params (Conv weight + bias) are realized, each with its own canonical id.
+        var paramIds = arch.GetConcreteModelParamInfos().ParamInfos
+            .Select(p => p.ModelId).Distinct().ToArray();
+        Assert.Equal(2, paramIds.Length);
+    }
 }

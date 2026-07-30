@@ -352,14 +352,5 @@ public static class OnnxOpAttributeNames
     /// <summary>Model-level metadata prop carrying the graph's signature output names
     /// (<c>InternalComputationGraph.OutputUniqueNames</c>); see <see cref="ShrkMetaInputNames"/>.</summary>
     public const string ShrkMetaOutputNames = "shrk_output_names";
-
-    /// <summary>Model-level metadata prop carrying the graph's ordered graph-input tensor ids
-    /// (each input key's raw <c>N{k}_T{s}</c> form) as a positional JSON string array. Written only by
-    /// the native <c>.srk</c> dialect, where a <c>MODEL_TENSOR_INPUT</c> is serialized as a NodeProto
-    /// rather than a graph-input <c>ValueInfoProto</c> (so its attributes — the representative-input
-    /// shape — round-trip on disk). The loader repopulates the graph's input list from this list,
-    /// preserving input order and identity across the round-trip regardless of node emission order.
-    /// Absent on vanilla ONNX / execution models, whose inputs stay ordinary graph inputs.</summary>
-    public const string ShrkMetaInputTensorKeys = "shrk_input_tensor_keys";
 }
 

@@ -2692,6 +2692,20 @@ public class TrainingRigCoverageTests
         return buf.ToArray();
     }
 
+    /// <summary>Index of the first occurrence of <paramref name="needle"/> in <paramref name="haystack"/>,
+    /// or -1.</summary>
+    private static int IndexOfSubsequence(byte[] haystack, byte[] needle)
+    {
+        if (needle.Length == 0 || haystack.Length < needle.Length) return -1;
+        for (int i = 0; i <= haystack.Length - needle.Length; i++)
+        {
+            int j = 0;
+            while (j < needle.Length && haystack[i + j] == needle[j]) j++;
+            if (j == needle.Length) return i;
+        }
+        return -1;
+    }
+
     /// <summary>
     /// A .skpt training checkpoint carrying non-empty model state (a BatchNorm model) writes a
     /// model-state data entry too, and round-trips its running-stat state alongside trainable and
@@ -2811,10 +2825,16 @@ public class TrainingRigCoverageTests
                 0.5f, 0.9f);
             Assert.ThrowsAny<Exception>(() => bnRig.LoadCheckpoint(path));
 
-            // Tamper: flip a byte inside a data entry → SHA-256 mismatch on load.
+            // Tamper: flip a byte inside the trainable-weights data entry (a SHA-256-checked entry the
+            // load reads) → SHA-256 mismatch on load. The entry is STORED, so its bytes appear verbatim
+            // in the container; locate them so the corruption is deterministic regardless of layout.
             var bytes = File.ReadAllBytes(path);
-            int idx = bytes.Length / 2;
-            bytes[idx] ^= 0xFF;
+            var entryBytes = ReadEntryBytesViaBcl(path, SkptFileFormat.TrainableEntryPath);
+            int window = Math.Min(24, entryBytes.Length);
+            var needle = entryBytes.Skip((entryBytes.Length - window) / 2).Take(window).ToArray();
+            int at = IndexOfSubsequence(bytes, needle);
+            Assert.True(at >= 0, "could not locate the trainable-weights entry payload in the container");
+            bytes[at] ^= 0xFF;
             File.WriteAllBytes(tampered, bytes);
             var rig2 = BuildTrainedAdamRig(steps: 0).Rig;
             Assert.ThrowsAny<Exception>(() => rig2.LoadCheckpoint(tampered));

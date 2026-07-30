@@ -8,6 +8,7 @@ using Shorokoo.Core.Graph;
 using Shorokoo.Core.Utils;
 using Shorokoo.Graph;
 using Shorokoo.Onnx;
+using Shorokoo.Runtime;
 
 namespace Shorokoo
 {
@@ -292,6 +293,177 @@ namespace Shorokoo
 
             return new TensorDataStruct(def, fields);
         }
+
+        // ---- Rig reconstruction from a .skpt file alone (issue #115, folding in #106) ----
+
+        /// <summary>
+        /// Rebuilds a <see cref="TrainingRig"/> from the constituents serialized in a native
+        /// <c>.skpt</c> checkpoint (#115) — the concrete architecture, loss, optimizer, and composed
+        /// scheduler <c>models/</c> entries plus the rig block's model-input shapes, hyperparameter
+        /// bindings, and RNG config — with no host-supplied source graphs. Backs the static
+        /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?)"/>. A file with no rig
+        /// block (a legacy flat checkpoint or a <c>.skpt</c> from a build predating #115) fails loudly.
+        /// </summary>
+        internal static TrainingRig ReconstructRigFromSkpt(
+            string filePath, ComputeContext mergeContext, ComputeContext runtimeContext)
+        {
+            var fileBytes = File.ReadAllBytes(filePath);
+            using var fileStream = new MemoryStream(fileBytes, writable: false);
+            using var archive = OpenArchive(fileStream, filePath);
+
+            var configEntry = archive.GetEntry(SkptFileFormat.ConfigEntryName)
+                ?? throw new InvalidDataException(
+                    $"'{filePath}' is not a .skpt checkpoint — the archive contains no " +
+                    $"'{SkptFileFormat.ConfigEntryName}' manifest.");
+            var manifest = SkptFileFormat.ParseManifest(ReadEntryBytes(configEntry, filePath), filePath);
+            ValidateManifestIdentity(manifest, filePath);
+
+            var training = manifest.Training
+                ?? throw new InvalidDataException(
+                    $"'{filePath}': the .skpt manifest has no 'training' block — this is an inference " +
+                    "checkpoint, not a training checkpoint, so there is no rig to reconstruct.");
+            var rig = training.Rig
+                ?? throw new InvalidDataException(
+                    $"'{filePath}': this training checkpoint stores no rig constituents (it was written " +
+                    "by a build predating Shorokoo/Shorokoo#115). Rebuild the rig from its source graphs " +
+                    "and resume with rig.LoadCheckpoint(path) instead.");
+            if (rig.RigVersion == 0)
+                throw new InvalidDataException(
+                    $"'{filePath}': invalid rig block — required field 'rigVersion' is missing or zero.");
+            if (rig.RigVersion != SkptFileFormat.TrainingRigVersion)
+                throw new InvalidDataException(
+                    $"'{filePath}': rig block version {rig.RigVersion} is not supported by this Shorokoo " +
+                    $"build (supported: {SkptFileFormat.TrainingRigVersion}). The file was likely written by " +
+                    (rig.RigVersion > SkptFileFormat.TrainingRigVersion
+                        ? "a newer framework version." : "an older, unsupported framework version."));
+
+            var archGraph = LoadConstituentGraph(archive, manifest, rig.ArchModel ?? SkptFileFormat.ArchModelKey, filePath);
+            var lossGraph = LoadConstituentGraph(archive, manifest, rig.LossModel ?? SkptFileFormat.LossModelKey, filePath);
+            var optimizerGraph = LoadConstituentGraph(archive, manifest, rig.OptimizerModel ?? SkptFileFormat.OptimizerModelKey, filePath);
+            var schedulerGraph = rig.SchedulerModel is string schedKey
+                ? LoadConstituentGraph(archive, manifest, schedKey, filePath)
+                : null;
+
+            var inputShapes = rig.InputShapes
+                ?? throw new InvalidDataException(
+                    $"'{filePath}': the rig block records no model-input shapes; the rig cannot be reconstructed.");
+            var repInputs = inputShapes
+                .Select(s => TrainingRig.RepresentativeInputFor(
+                    new Shape((s.Dims ?? Array.Empty<long>())), ParseSafeTensorDType(s.DType, filePath)))
+                .ToArray();
+
+            var bindings = rig.Hyperparameters
+                ?? throw new InvalidDataException(
+                    $"'{filePath}': the rig block records no hyperparameter bindings.");
+            var baked = rig.BakedHypers ?? new Dictionary<string, float>();
+            var hypers = new Hyperparameter[bindings.Count];
+            var names = new string[bindings.Count];
+            for (int h = 0; h < bindings.Count; h++)
+            {
+                var b = bindings[h];
+                names[h] = b.Name ?? $"hyperparam_{h}";
+                hypers[h] = b.Kind switch
+                {
+                    SkptFileFormat.HyperKindBaked => Hyperparameter.Baked(
+                        baked.TryGetValue(names[h], out var v) ? v
+                        : throw new InvalidDataException(
+                            $"'{filePath}': baked hyperparameter '{names[h]}' has no value in the rig block.")),
+                    SkptFileFormat.HyperKindRuntime => Hyperparameter.Runtime(),
+                    SkptFileFormat.HyperKindScheduled => Hyperparameter.Scheduled(
+                        TrainingRig.SplitSchedulerOutput(
+                            schedulerGraph ?? throw new InvalidDataException(
+                                $"'{filePath}': hyperparameter '{names[h]}' is scheduled but the checkpoint " +
+                                "carries no scheduler constituent."),
+                            names[h])),
+                    _ => throw new InvalidDataException(
+                        $"'{filePath}': hyperparameter '{names[h]}' records the unknown kind " +
+                        $"'{b.Kind ?? "<none>"}' (likely written by a newer framework version)."),
+                };
+            }
+
+            var rngConfig = DeserializeRngConfig(rig.Rng, filePath);
+
+            return TrainingRig.ReconstructFromConstituents(
+                archGraph, repInputs, lossGraph, optimizerGraph, hypers, names, rngConfig,
+                mergeContext, runtimeContext);
+        }
+
+        /// <summary>Loads one constituent model graph from its <c>models/</c> entry, verifying SHA-256
+        /// and stamping it with its recorded stage (#115).</summary>
+        private static ComputationGraph LoadConstituentGraph(
+            ZipArchive archive, SkptManifest manifest, string modelKey, string filePath)
+        {
+            if (manifest.Models is null || !manifest.Models.TryGetValue(modelKey, out var entry) || entry is null)
+                throw new InvalidDataException(
+                    $"'{filePath}': the rig references model '{modelKey}', which the manifest's model " +
+                    "registry does not declare.");
+            if (string.IsNullOrEmpty(entry.Entry))
+                throw new InvalidDataException(
+                    $"'{filePath}': the manifest's rig model '{modelKey}' names no archive entry.");
+            if (entry.Format != SkptFileFormat.ModelFormatSrk1)
+                throw new InvalidDataException(
+                    $"'{filePath}': rig model '{modelKey}' uses unsupported serialization format " +
+                    $"'{entry.Format}' (supported: '{SkptFileFormat.ModelFormatSrk1}'). " +
+                    "The file was likely written by a newer framework version.");
+
+            var bytes = ReadEntry(archive, entry.Entry, $"rig model '{modelKey}'", filePath);
+            VerifySha256(bytes, entry.Sha256, entry.Entry, filePath);
+            var (graph, kind) = CompressedFormatUtils.LoadFastGraphCore(
+                bytes, origin: $"{filePath}!{entry.Entry}", requiredStage: null);
+            return new ComputationGraph(graph, kind);
+        }
+
+        /// <summary>Reconstructs an <see cref="RngConfig"/> from its manifest form (#115).</summary>
+        private static RngConfig DeserializeRngConfig(SkptRngConfigInfo? info, string filePath)
+        {
+            if (info is null)
+                throw new InvalidDataException(
+                    $"'{filePath}': the rig block records no RNG config; the rig cannot be reconstructed.");
+            var algorithm = Enum.TryParse<RngAlgorithm>(info.Algorithm, out var a)
+                ? a
+                : throw new InvalidDataException(
+                    $"'{filePath}': the rig block records the unknown RNG algorithm '{info.Algorithm ?? "<none>"}' " +
+                    "(likely written by a newer framework version).");
+            var config = new RngConfig
+            {
+                MasterSeed = info.MasterSeed,
+                InitMasterSeed = info.InitMasterSeed,
+                RunMasterSeed = info.RunMasterSeed,
+                Algorithm = algorithm,
+                SharedKey = info.SharedKey,
+            };
+            foreach (var o in info.Overrides ?? new List<SkptRngOverride>())
+            {
+                if (!Enum.TryParse<RngCollection>(o.Collection, out var collection))
+                    throw new InvalidDataException(
+                        $"'{filePath}': the rig block records an override for the unknown RNG collection " +
+                        $"'{o.Collection ?? "<none>"}'.");
+                config = config.Override(collection, o.Path ?? Array.Empty<int>(), o.Seed);
+            }
+            return config;
+        }
+
+        /// <summary>Inverse of <see cref="SafeTensorLoader.DTypeToSafeTensorDType"/> for the dtypes a
+        /// model input may carry (#115); fails loudly on an unknown name.</summary>
+        private static DType ParseSafeTensorDType(string? name, string filePath) => name switch
+        {
+            "BOOL" => DType.Bool,
+            "I8" => DType.Int8,
+            "I16" => DType.Int16,
+            "I32" => DType.Int32,
+            "I64" => DType.Int64,
+            "U8" => DType.UInt8,
+            "U16" => DType.UInt16,
+            "U32" => DType.UInt32,
+            "U64" => DType.UInt64,
+            "F32" => DType.Float32,
+            "F64" => DType.Float64,
+            "F16" => DType.Float16,
+            "BF16" => DType.BFloat16,
+            _ => throw new InvalidDataException(
+                $"'{filePath}': the rig block records the unknown input dtype '{name ?? "<none>"}' " +
+                "(likely written by a newer framework version)."),
+        };
     }
 
     /// <summary>
@@ -454,6 +626,27 @@ namespace Shorokoo
                     SkptFileFormat.OptimizerStateEntryPath,
                     Persistence.SerializeTrainingKind(_checkpoint.OptimizerState, "optimizer state"));
 
+            // The model registry: the inference model (the one Persistence.Load binds) plus the rig's
+            // constituent graphs as ordinary models/ entries (#115). Constituents carry no tensor
+            // mapping — a from-file reconstruction re-derives the trainstep rather than binding weights
+            // into them.
+            var models = new Dictionary<string, SkptModelEntry>(StringComparer.Ordinal)
+            {
+                [SkptFileFormat.DefaultModelKey] = new SkptModelEntry
+                {
+                    Entry = SkptFileFormat.ModelEntryPath,
+                    Format = SkptFileFormat.ModelFormatSrk1,
+                    Stage = SrkFileFormat.StageName(GraphKind.ConcreteModel),
+                    Sha256 = SkptFileFormat.Sha256Hex(modelBytes),
+                },
+            };
+
+            // Serialize the rig constituents (#115, folding in #106): the concrete architecture (drives
+            // trainstep re-derivation), the loss and optimizer module graphs, and — when any
+            // hyperparameter is scheduled — the composed scheduler model, plus the non-graph recipe
+            // (input shapes, hyperparameter bindings, RNG config) in the rig block.
+            var rigInfo = AppendRigConstituents(_checkpoint.Rig!, models, bodyEntries);
+
             var manifest = new SkptManifest
             {
                 Format = SkptFileFormat.FormatName,
@@ -461,16 +654,7 @@ namespace Shorokoo
                 CreatedUtc = DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"),
                 Producer = new SkptProducerInfo { Shorokoo = ShorokooVersion.VersionString },
                 UserMetadata = _userMetadata,
-                Models = new Dictionary<string, SkptModelEntry>
-                {
-                    [SkptFileFormat.DefaultModelKey] = new SkptModelEntry
-                    {
-                        Entry = SkptFileFormat.ModelEntryPath,
-                        Format = SkptFileFormat.ModelFormatSrk1,
-                        Stage = SrkFileFormat.StageName(GraphKind.ConcreteModel),
-                        Sha256 = SkptFileFormat.Sha256Hex(modelBytes),
-                    },
-                },
+                Models = models,
                 TensorMappings = new Dictionary<string, Dictionary<string, SkptMappingSet>>
                 {
                     [SkptFileFormat.DefaultModelKey] = new Dictionary<string, SkptMappingSet>(StringComparer.Ordinal)
@@ -482,6 +666,7 @@ namespace Shorokoo
                 Training = new SkptTrainingInfo
                 {
                     CheckpointVersion = SkptFileFormat.TrainingCheckpointVersion,
+                    Rig = rigInfo,
                     Step = _checkpoint.Step,
                     // Epoch / batch index are host-owned run counters that may be genuinely unknown
                     // (null — no loader / no explicit counter). Nullable and add-only: a null value is
@@ -507,6 +692,109 @@ namespace Shorokoo
             entries.AddRange(bodyEntries);
             AtomicFileWriter.WriteFile(filePath,
                 stream => SkptFileFormat.WriteStoredZip(stream, entries, DateTime.UtcNow));
+        }
+
+        /// <summary>
+        /// Serializes the rig's constituents (#115, folding in #106) into <paramref name="models"/> /
+        /// <paramref name="bodyEntries"/> as ordinary <c>models/</c> entries — the concrete
+        /// architecture, the loss and optimizer module graphs, and (when any hyperparameter is
+        /// scheduled) the composed scheduler model — and returns the non-graph recipe (model-input
+        /// shapes, hyperparameter bindings, RNG config) as the manifest's rig block.
+        /// </summary>
+        private static SkptRigInfo AppendRigConstituents(
+            TrainingRig rig,
+            Dictionary<string, SkptModelEntry> models,
+            List<SkptFileFormat.ZipEntrySpec> bodyEntries)
+        {
+            void AddModel(string key, string entryPath, ComputationGraph graph)
+            {
+                var bytes = CompressedFormatUtils.SaveFastGraphToBinary(graph, compressed: true);
+                models[key] = new SkptModelEntry
+                {
+                    Entry = entryPath,
+                    Format = SkptFileFormat.ModelFormatSrk1,
+                    Stage = SrkFileFormat.StageName(graph.Kind),
+                    Sha256 = SkptFileFormat.Sha256Hex(bytes),
+                };
+                bodyEntries.Add(new(entryPath, bytes, Align: false));
+            }
+
+            AddModel(SkptFileFormat.ArchModelKey, SkptFileFormat.ArchEntryPath, rig.ConcreteArchConstituent);
+            AddModel(SkptFileFormat.LossModelKey, SkptFileFormat.LossEntryPath, rig.LossConstituent);
+            AddModel(SkptFileFormat.OptimizerModelKey, SkptFileFormat.OptimizerEntryPath, rig.OptimizerConstituent);
+
+            var (schedulerGraph, _) = rig.BuildComposedSchedulerModel();
+            string? schedulerKey = null;
+            if (schedulerGraph is not null)
+            {
+                AddModel(SkptFileFormat.SchedulerModelKey, SkptFileFormat.SchedulerEntryPath, schedulerGraph);
+                schedulerKey = SkptFileFormat.SchedulerModelKey;
+            }
+
+            // The serialized arch keeps only rank+dtype for a boundary input (rev 17), so record the
+            // concrete dims here for a reconstruction to re-attach as representative inputs.
+            var inputShapes = rig.RepresentativeInputTensors
+                .Select(t => new SkptModelInputShape
+                {
+                    Dims = t.Shape.Dims.ToArray(),
+                    DType = SafeTensorLoader.DTypeToSafeTensorDType(t.DType),
+                })
+                .ToList();
+
+            // Hyperparameter bindings, in optimizer order. Baked values ride in bakedHypers; a scheduled
+            // one maps to the scheduler model's output of the same name; a runtime one is host-supplied.
+            var names = rig.HyperparameterNames;
+            var hyperBindings = new List<SkptRigHyperparameter>(rig.Hyperparameters.Count);
+            var bakedHypers = new Dictionary<string, float>(StringComparer.Ordinal);
+            for (int h = 0; h < rig.Hyperparameters.Count; h++)
+            {
+                var hv = rig.Hyperparameters[h];
+                var name = h < names.Count ? names[h] : $"hyperparam_{h}";
+                var kind = hv.Kind switch
+                {
+                    HyperparameterKind.Baked => SkptFileFormat.HyperKindBaked,
+                    HyperparameterKind.Scheduled => SkptFileFormat.HyperKindScheduled,
+                    HyperparameterKind.Runtime => SkptFileFormat.HyperKindRuntime,
+                    _ => throw new InvalidOperationException($"Unknown hyperparameter kind {hv.Kind}."),
+                };
+                hyperBindings.Add(new SkptRigHyperparameter { Name = name, Kind = kind });
+                if (hv.Kind == HyperparameterKind.Baked) bakedHypers[name] = hv.BakedValue;
+            }
+
+            return new SkptRigInfo
+            {
+                RigVersion = SkptFileFormat.TrainingRigVersion,
+                ArchModel = SkptFileFormat.ArchModelKey,
+                LossModel = SkptFileFormat.LossModelKey,
+                OptimizerModel = SkptFileFormat.OptimizerModelKey,
+                SchedulerModel = schedulerKey,
+                InputShapes = inputShapes,
+                Hyperparameters = hyperBindings,
+                BakedHypers = bakedHypers.Count > 0 ? bakedHypers : null,
+                Rng = SerializeRngConfig(rig.RngConfig),
+            };
+        }
+
+        /// <summary>Serializes an <see cref="RngConfig"/> to its manifest form (#115).</summary>
+        private static SkptRngConfigInfo SerializeRngConfig(RngConfig rng)
+        {
+            var overrides = rng.AllOverrides()
+                .Select(o => new SkptRngOverride
+                {
+                    Collection = o.collection.ToString(),
+                    Path = o.path,
+                    Seed = o.seed,
+                })
+                .ToList();
+            return new SkptRngConfigInfo
+            {
+                MasterSeed = rng.MasterSeed,
+                InitMasterSeed = rng.InitMasterSeed,
+                RunMasterSeed = rng.RunMasterSeed,
+                Algorithm = rng.Algorithm.ToString(),
+                SharedKey = rng.SharedKey,
+                Overrides = overrides.Count > 0 ? overrides : null,
+            };
         }
     }
 }

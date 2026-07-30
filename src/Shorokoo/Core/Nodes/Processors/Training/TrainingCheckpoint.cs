@@ -276,10 +276,11 @@ namespace Shorokoo
                             "Cannot save the TrainingRig component: this checkpoint has no rig attached " +
                             "(see TrainingCheckpoint.Rig / TrainingRig.AdoptCheckpoint).");
                     throw new NotSupportedException(
-                        "Saving the TrainingRig component — the rig's constituent model/loss/optimizer " +
-                        "graphs, hyperparameters and RNG config — is not yet implemented (Shorokoo/Shorokoo#115). " +
-                        "Save InferenceState / OptimizerState / Counters (the default) and rebuild the rig " +
-                        "from its source graphs to resume.");
+                        "The flat safetensors checkpoint format cannot carry the TrainingRig component — " +
+                        "the rig's constituent model/loss/optimizer/scheduler graphs need the native .skpt " +
+                        "container. Save with Persistence.SaveTrainingCheckpointToSkpt(checkpoint, path), " +
+                        "which always writes the rig constituents, and reload the whole rig from the file " +
+                        "with TrainingRig.Load(path) (Shorokoo/Shorokoo#115).");
                 }
                 return c;
             }
@@ -402,11 +403,12 @@ namespace Shorokoo
             // be satisfied. null ⇒ "everything present" is the way to load without naming the flag.
             if (components is CheckpointComponents cReq && (cReq & CheckpointComponents.TrainingRig) != 0)
                 throw new NotSupportedException(
-                    "Cannot load the TrainingRig component — the rig's constituent model/loss/optimizer " +
-                    "graphs, hyperparameters and RNG config — because that serialization is not yet " +
-                    "implemented (Shorokoo/Shorokoo#115) and no checkpoint file stores it. Pass the rig to " +
-                    "Load (or use rig.LoadCheckpoint(path)) and omit the TrainingRig flag; null components " +
-                    "loads every component the file contains.");
+                    "Loading the TrainingRig component means rebuilding the rig from the checkpoint file " +
+                    "itself, which this rig-supplied load path does not do — you already passed a rig here. " +
+                    "To rebuild the whole rig (and its resumed checkpoint) from a native .skpt alone, use " +
+                    "the static TrainingRig.Load(path) (Shorokoo/Shorokoo#115). To load state into the rig " +
+                    "you passed, omit the TrainingRig flag; null components loads every state component the " +
+                    "file contains.");
 
             var raw = Persistence.IsSkptFile(filePath)
                 ? Persistence.LoadTrainingCheckpointFromSkpt(

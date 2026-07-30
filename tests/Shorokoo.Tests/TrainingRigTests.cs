@@ -2343,10 +2343,16 @@ public class TrainingRigCoverageTests
                         SkptFileFormat.OptimizerStateEntryPath,
                         SkptFileFormat.TrainableEntryPath,
                         SkptFileFormat.ModelEntryPath,
+                        // Rig constituents (#115): the concrete architecture, loss, and optimizer graphs
+                        // (no scheduler entry — this rig has no scheduled hyperparameter).
+                        SkptFileFormat.ArchEntryPath,
+                        SkptFileFormat.LossEntryPath,
+                        SkptFileFormat.OptimizerEntryPath,
                     }.OrderBy(n => n, StringComparer.Ordinal),
                     names);
                 Assert.All(zip.Entries, e => Assert.Equal(e.Length, e.CompressedLength));   // all STORED
                 Assert.DoesNotContain(SkptFileFormat.ModelStateEntryPath, names);           // stateless → no entry
+                Assert.DoesNotContain(SkptFileFormat.SchedulerEntryPath, names);            // no scheduled hyper
             }
 
             // The manifest records the per-kind data entries and the step in config.json.
@@ -2389,6 +2395,149 @@ public class TrainingRigCoverageTests
             Assert.Equal(ckptOut, loadedOut);
         }
         finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    /// <summary>
+    /// From-file-alone rig reconstruction (#115): a mid-training checkpoint saves to a native .skpt
+    /// carrying the rig's constituents (concrete architecture, loss, optimizer), and
+    /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?)"/> rebuilds the WHOLE
+    /// rig — trainstep and all — from the file alone, with NO host-supplied source graphs. The
+    /// reconstructed rig's resumed checkpoint restores the step, trainable params and optimizer state
+    /// bit-identically; a resumed TrainStep reproduces the pre-save trajectory exactly; and the
+    /// reconstructed rig extracts the same inference model.
+    /// </summary>
+    [Fact]
+    [Trait("Purpose", "Coverage")]
+    [Trait("Domain", "Training")]
+    public void TestTrainingRigLoadFromFileAloneCoverage()
+    {
+        var (rigA, ckpt, inBatch, outBatch) = BuildTrainedAdamRig(steps: 3);
+        var reference = rigA.TrainStep(ckpt, inBatch, outBatch);
+
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_rigload_{Guid.NewGuid():N}.skpt");
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+
+            // Rebuild the whole rig from the file alone — no ScalarMultiplyModel / L2Loss / AdamWOptimizer
+            // graphs are supplied here, as a fresh process resuming a run would not have them.
+            var (rig2, loaded) = TrainingRig.Load(path);
+            Assert.Same(rig2, loaded.Rig);
+            Assert.Equal(ckpt.Step, loaded.Step);
+            Assert.Equal(FlattenStruct(ckpt.TrainableParams), FlattenStruct(loaded.TrainableParams));
+            Assert.Equal(FlattenStruct(ckpt.OptimizerState), FlattenStruct(loaded.OptimizerState));
+
+            // The reconstructed rig resumes exactly (same trainstep math, same restored step).
+            var resumed = rig2.TrainStep(loaded, inBatch, outBatch);
+            Assert.Equal(reference.Step, resumed.Step);
+            Assert.Equal(reference.Loss!.Value, resumed.Loss!.Value);
+            Assert.Equal(FlattenStruct(reference.TrainableParams), FlattenStruct(resumed.TrainableParams));
+            Assert.Equal(FlattenStruct(reference.OptimizerState), FlattenStruct(resumed.OptimizerState));
+
+            // The reconstructed rig extracts the same inference model as the original checkpoint.
+            var probe = TensorData(ScalarInputShape, new float[] { 5f, 6f, 7f, 8f });
+            var fromReconstructed = loaded.ToInferenceModel();
+            var fromOriginal = ckpt.ToInferenceModel();
+            var a = ComputeContext.Default.Execute(fromReconstructed, probe)[0].ToTensorData().As<float32>().AccessMemory().ToArray();
+            var b = ComputeContext.Default.Execute(fromOriginal, probe)[0].ToTensorData().As<float32>().AccessMemory().ToArray();
+            Assert.Equal(b, a);
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    /// <summary>
+    /// From-file rig reconstruction folds in the scheduler constituent (#106): a rig with a scheduled
+    /// learning rate composes its per-hyperparameter scheduler graph into the persisted
+    /// <c>scheduler</c> model entry, and <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?)"/>
+    /// splits it back to a scheduled hyperparameter binding. The reconstructed rig resumes at the saved
+    /// step and reproduces the pre-save trajectory exactly — the scheduler math (which reads the step
+    /// counter) survives the round-trip.
+    /// </summary>
+    [Fact]
+    [Trait("Purpose", "Coverage")]
+    [Trait("Domain", "Training")]
+    public void TestTrainingRigLoadReconstructsSchedulerCoverage()
+    {
+        var sample = new NamedModelParam[]
+        {
+            new TensorDataModelParam("input", ModelParamType.InputParam,
+                TensorData(ScalarInputShape, new float[] { 1f, 2f, 3f, 4f })),
+        };
+        TrainingRig SchedRig() => TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            AdamWOptimizer.ComputationGraph, sample,
+            new AdamWOptimizerHyperparameters { LearningRate = Shorokoo.Core.Training.Schedules.Cosine(0.1f, 50) });
+
+        var inDef = new TensorStructDef(
+            [new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32)], "ModelInput");
+        var outDef = new TensorStructDef(
+            [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)], "Target");
+        var inBatch = new TensorDataStruct(inDef,
+            new Dictionary<string, IData> { { "input", TensorData(ScalarInputShape, new float[] { 1f, 2f, 3f, 4f }) } });
+        var outBatch = new TensorDataStruct(outDef,
+            new Dictionary<string, IData> { { "targets", TensorData(ScalarInputShape, new float[] { 2f, 4f, 6f, 8f }) } });
+
+        var rigA = SchedRig();
+        Assert.Equal(HyperparameterKind.Scheduled, rigA.Hyperparameters[0].Kind);
+        var ckpt = rigA.CreateInitialCheckpoint();
+        for (int i = 0; i < 5; i++)
+            ckpt = rigA.TrainStep(ckpt, inBatch, outBatch);
+        var reference = rigA.TrainStep(ckpt, inBatch, outBatch);
+
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_rigload_sched_{Guid.NewGuid():N}.skpt");
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+
+            // The composed scheduler is persisted as its own constituent model entry (#106).
+            using (var zip = System.IO.Compression.ZipFile.OpenRead(path))
+                Assert.Contains(SkptFileFormat.SchedulerEntryPath, zip.Entries.Select(e => e.FullName));
+
+            var (rig2, loaded) = TrainingRig.Load(path);
+            // The built-in schedule persisted and split back as a scheduler MODULE binding.
+            Assert.Equal(HyperparameterKind.Scheduled, rig2.Hyperparameters[0].Kind);
+            Assert.NotNull(rig2.Hyperparameters[0].AsSchedulerModule);
+            Assert.Equal(ckpt.Step, loaded.Step);
+
+            var resumed = rig2.TrainStep(loaded, inBatch, outBatch);
+            Assert.Equal(reference.Step, resumed.Step);
+            Assert.Equal(reference.Loss!.Value, resumed.Loss!.Value);
+            Assert.Equal(FlattenStruct(reference.TrainableParams), FlattenStruct(resumed.TrainableParams));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    /// <summary>
+    /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?)"/> fails loudly when the
+    /// file carries no rig constituents to rebuild from: a legacy flat safetensors checkpoint (not a
+    /// .skpt container at all), and an inference-only .skpt (no training/rig block). The from-file path
+    /// is only for a training .skpt written with the rig; otherwise the host rebuilds the rig and uses
+    /// <see cref="TrainingRig.LoadCheckpoint"/>.
+    /// </summary>
+    [Fact]
+    [Trait("Purpose", "Coverage")]
+    [Trait("Domain", "Training")]
+    public void TestTrainingRigLoadFailsWithoutConstituentsCoverage()
+    {
+        var (_, ckpt, _, _) = BuildTrainedAdamRig(steps: 1);
+
+        var flatPath = Path.Combine(Path.GetTempPath(), $"shrk_rigload_flat_{Guid.NewGuid():N}.safetensors");
+        var infPath = Path.Combine(Path.GetTempPath(), $"shrk_rigload_inf_{Guid.NewGuid():N}.skpt");
+        try
+        {
+            // Legacy flat checkpoint: not a .skpt container at all.
+            ckpt.Save(flatPath);
+            Assert.ThrowsAny<Exception>(() => TrainingRig.Load(flatPath));
+
+            // Inference-only .skpt: a container with a model but no training/rig block.
+            Persistence.From(ckpt.ToInferenceModel()).WithModel().WithWeights().Save(infPath);
+            Assert.Throws<System.IO.InvalidDataException>(() => TrainingRig.Load(infPath));
+        }
+        finally
+        {
+            if (File.Exists(flatPath)) File.Delete(flatPath);
+            if (File.Exists(infPath)) File.Delete(infPath);
+        }
     }
 
     /// <summary>Reads one archive entry's bytes through the BCL zip reader (independent of the

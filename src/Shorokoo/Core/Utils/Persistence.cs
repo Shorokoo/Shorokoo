@@ -224,13 +224,23 @@ namespace Shorokoo
             if (manifest.Models is null || manifest.Models.Count == 0)
                 throw new InvalidDataException(
                     $"'{filePath}': the .skpt manifest declares no models — nothing to load.");
-            if (manifest.Models.Count > 1)
-                throw new InvalidDataException(
-                    $"'{filePath}': the .skpt manifest declares {manifest.Models.Count} models; this " +
-                    "Shorokoo build loads single-model checkpoints only. The file was likely written " +
-                    "by a newer framework version.");
-            var kv = manifest.Models.First();
-            return (kv.Key, kv.Value);
+            if (manifest.Models.Count == 1)
+            {
+                var single = manifest.Models.First();
+                return (single.Key, single.Value);
+            }
+            // Several models: a training checkpoint carrying the rig's constituents as extra models/
+            // entries alongside the inference model (issue #115). The inference model — the one this
+            // path binds and executes — is the well-known "model" entry; the constituents are read only
+            // by TrainingRig.Load. Fall through to a clear error if no such entry exists (a genuinely
+            // multi-model file this build cannot load).
+            if (manifest.Models.TryGetValue(SkptFileFormat.DefaultModelKey, out var primary) && primary is not null)
+                return (SkptFileFormat.DefaultModelKey, primary);
+            throw new InvalidDataException(
+                $"'{filePath}': the .skpt manifest declares {manifest.Models.Count} models but none named " +
+                $"'{SkptFileFormat.DefaultModelKey}'; this Shorokoo build loads single-model checkpoints " +
+                "(or a training checkpoint whose inference model is the 'model' entry) only. The file was " +
+                "likely written by a newer framework version.");
         }
 
         private static InternalComputationGraph LoadModelDefinition(

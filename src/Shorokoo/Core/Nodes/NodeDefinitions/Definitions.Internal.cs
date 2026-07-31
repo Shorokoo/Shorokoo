@@ -34,7 +34,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeEnum<InputType>(ShrkAttrInputType, ["Hyperparam", "ReadyInput", "ModelInput", "GenericType"], defaultValue: "ReadyInput")
                 // Optional: the [Hyper(defaultValue)] default for a defaulted hyperparameter input.
                 .AttributeFloat(ShrkAttrDefaultValue)
-                // Optional, mutually exclusive: a small (≤ RepresentativeInputMaxInlineElements) input
+                // Optional, mutually exclusive: a small (≤ MaxSmallTensorElements) input
                 // records a zero-filled representative tensor here; a larger one records only its dims in
                 // ShrkAttrRepresentativeInputShape. Together they make a concrete architecture
                 // self-describing for training shape inference. In the native .srk dialect a

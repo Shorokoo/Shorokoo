@@ -144,7 +144,7 @@ public partial class ScalarMultiplyWithOrtOnlyLoopIterCountModel
     {
         var weight = InitScalarWeight.Init(Vector(1L));
         var scaled = input * weight;
-        var identity = Tensor(new long[] { 2L, 2L }, 1f, 0f, 0f, 1f);
+        var identity = Tensor([2L, 2L], 1f, 0f, 0f, 1f);
         var det = (Scalar<float32>)OnnxOp.Det(identity);
         var iter = det.Cast<int64>();
         foreach (var ctx in LoopAPI.Iterate(iter))
@@ -264,7 +264,7 @@ public class TrainingRigCoverageTests
             TensorData(inputShape, new float[totalElements]));
 
         var rig = TrainingRig.FromScratch(modelGraph, lossGraph, optimizerGraph,
-            new NamedModelParam[] { sampleInput }, hyperparams);
+            [sampleInput], hyperparams);
 
         var checkpoint = rig.CreateInitialCheckpoint();
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
@@ -294,12 +294,12 @@ public class TrainingRigCoverageTests
             TensorData(inputShape, new float[totalElements]));
 
         var rig = TrainingRig.FromScratch(modelGraph, lossGraph, optimizerGraph,
-            new NamedModelParam[] { sampleInput }, hyperparams);
+            [sampleInput], hyperparams);
         var checkpoint = rig.CreateInitialCheckpoint();
 
         // Concretize the inference model + Shorokoo naming scheme (the documented binding flow).
         var hints = new ModelParamList(
-            new[] { new KeyValuePair<string, TensorData>(modelGraph.ToInternal().Inputs[0].ToString(), TensorData(inputShape, new float[totalElements])) },
+            [new KeyValuePair<string, TensorData>(modelGraph.ToInternal().Inputs[0].ToString(), TensorData(inputShape, new float[totalElements]))],
             ModelParamType.InputParam);
         var ctx = new ComputeContext();
         var concrete = modelGraph.ToConcreteArchitecture(hints, ctx, null);
@@ -336,10 +336,10 @@ public class TrainingRigCoverageTests
 
         var sampleInput = new TensorDataModelParam(
             "input", ModelParamType.InputParam,
-            TensorData([4L], new float[] { 1f, 2f, 3f, 4f }));
+            TensorData([4L], [1f, 2f, 3f, 4f]));
 
         var rig = TrainingRig.FromScratch(modelGraph, lossGraph, optimizerGraph,
-            new NamedModelParam[] { sampleInput }, 0.01f);
+            [sampleInput], 0.01f);
 
         var checkpoint = rig.CreateInitialCheckpoint();
 
@@ -980,27 +980,27 @@ public class TrainingRigCoverageTests
             new NamedModelParam[]
             {
                 new TensorDataModelParam("input", ModelParamType.InputParam,
-                    TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+                    TensorData([4L], [1f, 2f, 3f, 4f])),
             },
             0.1f);
 
         var initial = rig.CreateInitialCheckpoint();
 
         var modelInputDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32) },
+            [new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32)],
             "ModelInput");
         var targetDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32) },
+            [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)],
             "Target");
 
         var inputBatch = new TensorDataStruct(modelInputDef,
-            new Dictionary<string, IData> { { "input", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }) } });
+            new Dictionary<string, IData> { { "input", TensorData([4L], [1f, 2f, 3f, 4f]) } });
         var targetBatch = new TensorDataStruct(targetDef,
-            new Dictionary<string, IData> { { "targets", TensorData([4L], new float[] { 0f, 0f, 0f, 0f }) } });
+            new Dictionary<string, IData> { { "targets", TensorData([4L], [0f, 0f, 0f, 0f]) } });
 
         // Drive Train: covers the per-epoch / per-batch loop and the
         // TrainingResult constructor + EpochLosses / FinalCheckpoint getters.
-        var trainResult = rig.Train(initial, new[] { inputBatch }, new[] { targetBatch }, numEpochs: 1);
+        var trainResult = rig.Train(initial, [inputBatch], [targetBatch], numEpochs: 1);
         Assert.Single(trainResult.EpochLosses);
         Assert.NotNull(trainResult.FinalCheckpoint);
 
@@ -1043,7 +1043,7 @@ public class TrainingRigCoverageTests
         var sample = new NamedModelParam[]
         {
             new TensorDataModelParam("input", ModelParamType.InputParam,
-                TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+                TensorData([4L], [1f, 2f, 3f, 4f])),
         };
 
         var rig = TrainingRig.FromScratch(
@@ -1057,13 +1057,13 @@ public class TrainingRigCoverageTests
 
         // After one step the counter state must have advanced to 2 (round-trip through outputs).
         var modelInputDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32) }, "ModelInput");
+            [new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32)], "ModelInput");
         var targetDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32) }, "Target");
+            [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)], "Target");
         var inputBatch = new TensorDataStruct(modelInputDef,
-            new Dictionary<string, IData> { { "input", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }) } });
+            new Dictionary<string, IData> { { "input", TensorData([4L], [1f, 2f, 3f, 4f]) } });
         var targetBatch = new TensorDataStruct(targetDef,
-            new Dictionary<string, IData> { { "targets", TensorData([4L], new float[] { 0f, 0f, 0f, 0f }) } });
+            new Dictionary<string, IData> { { "targets", TensorData([4L], [0f, 0f, 0f, 0f]) } });
 
         var step = rig.TrainStep(initial, inputBatch, targetBatch);
         Assert.All(FlattenStruct(step.OptimizerState), v => Assert.Equal(2f, v));
@@ -1093,7 +1093,7 @@ public class TrainingRigCoverageTests
         var sample = new NamedModelParam[]
         {
             new TensorDataModelParam("input", ModelParamType.InputParam,
-                TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+                TensorData([4L], [1f, 2f, 3f, 4f])),
         };
         TrainingRig AdamRig() => TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
@@ -1107,13 +1107,13 @@ public class TrainingRigCoverageTests
         Assert.Equal(0, stepField.Rank);   // the timestep is a rank-0 scalar, not param-shaped
 
         var modelInputDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32) }, "ModelInput");
+            [new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32)], "ModelInput");
         var targetDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32) }, "Target");
+            [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)], "Target");
         var inputBatch = new TensorDataStruct(modelInputDef,
-            new Dictionary<string, IData> { { "input", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }) } });
+            new Dictionary<string, IData> { { "input", TensorData([4L], [1f, 2f, 3f, 4f]) } });
         var targetBatch = new TensorDataStruct(targetDef,
-            new Dictionary<string, IData> { { "targets", TensorData([4L], new float[] { 2f, 4f, 6f, 8f }) } });
+            new Dictionary<string, IData> { { "targets", TensorData([4L], [2f, 4f, 6f, 8f]) } });
 
         var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < 2; i++)
@@ -1165,7 +1165,7 @@ public class TrainingRigCoverageTests
         var sample = new NamedModelParam[]
         {
             new TensorDataModelParam("input", ModelParamType.InputParam,
-                TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+                TensorData([4L], [1f, 2f, 3f, 4f])),
         };
         TrainingRig AdamRig() => TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
@@ -1173,13 +1173,13 @@ public class TrainingRigCoverageTests
             new AdamWOptimizerHyperparameters { LearningRate = 0.1f });
 
         var modelInputDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32) }, "ModelInput");
+            [new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32)], "ModelInput");
         var targetDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32) }, "Target");
+            [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)], "Target");
         var inputBatch = new TensorDataStruct(modelInputDef,
-            new Dictionary<string, IData> { { "input", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }) } });
+            new Dictionary<string, IData> { { "input", TensorData([4L], [1f, 2f, 3f, 4f]) } });
         var targetBatch = new TensorDataStruct(targetDef,
-            new Dictionary<string, IData> { { "targets", TensorData([4L], new float[] { 2f, 4f, 6f, 8f }) } });
+            new Dictionary<string, IData> { { "targets", TensorData([4L], [2f, 4f, 6f, 8f]) } });
 
         var path = Path.Combine(Path.GetTempPath(), $"shrk_ckpt_{Guid.NewGuid():N}.safetensors");
         try
@@ -1251,7 +1251,7 @@ public class TrainingRigCoverageTests
             SGDOptimizer.ComputationGraph,
             [
                 new TensorDataModelParam("input", ModelParamType.InputParam,
-                    TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+                    TensorData([4L], [1f, 2f, 3f, 4f])),
             ],
             0.1f);
         var path = Path.Combine(Path.GetTempPath(), $"shrk_ckpt_trunc_{Guid.NewGuid():N}.safetensors");
@@ -1288,7 +1288,7 @@ public class TrainingRigCoverageTests
             new NamedModelParam[]
             {
                 new TensorDataModelParam("input", ModelParamType.InputParam,
-                    TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+                    TensorData([4L], [1f, 2f, 3f, 4f])),
             },
             0.1f);
         var ckptV1 = rig.CreateInitialCheckpoint();                       // Step 0
@@ -1351,7 +1351,7 @@ public class TrainingRigCoverageTests
             new NamedModelParam[]
             {
                 new TensorDataModelParam("input", ModelParamType.InputParam,
-                    TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+                    TensorData([4L], [1f, 2f, 3f, 4f])),
             },
             0.5f, 0.9f);
         var ckpt0 = rig.CreateInitialCheckpoint();
@@ -1443,7 +1443,7 @@ public class TrainingRigCoverageTests
         var sample = new NamedModelParam[]
         {
             new TensorDataModelParam("input", ModelParamType.InputParam,
-                TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+                TensorData([4L], [1f, 2f, 3f, 4f])),
         };
         // SGD's learning rate is its sole hyperparameter. Hyperparameter.Runtime marks it as a
         // schedule-less runtime input so we can inject explicit values and prove the LR is live.
@@ -1452,19 +1452,19 @@ public class TrainingRigCoverageTests
             sample, new SGDOptimizerHyperparameters { LearningRate = Hyperparameter.Runtime() });
 
         Assert.Single(rig.HyperparameterStructDef.Fields);
-        Assert.Equal(new[] { 0 }, rig.DynamicHyperparameterIndices);
+        Assert.Equal((int[])[0], rig.DynamicHyperparameterIndices);
         // Real hyperparameter names now flow end-to-end (not "hyperparam_0").
-        Assert.Equal(new[] { "learningRate" }, rig.DynamicHyperparameterNames);
+        Assert.Equal((string[])["learningRate"], rig.DynamicHyperparameterNames);
         Assert.Equal("learningRate", rig.HyperparameterStructDef.Fields[0].Name);
 
         var modelInputDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32) }, "ModelInput");
+            [new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32)], "ModelInput");
         var targetDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32) }, "Target");
+            [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)], "Target");
         var inputBatch = new TensorDataStruct(modelInputDef,
-            new Dictionary<string, IData> { { "input", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }) } });
+            new Dictionary<string, IData> { { "input", TensorData([4L], [1f, 2f, 3f, 4f]) } });
         var targetBatch = new TensorDataStruct(targetDef,
-            new Dictionary<string, IData> { { "targets", TensorData([4L], new float[] { 0f, 0f, 0f, 0f }) } });
+            new Dictionary<string, IData> { { "targets", TensorData([4L], [0f, 0f, 0f, 0f]) } });
 
         var initial = rig.CreateInitialCheckpoint();
         Assert.Equal(0, initial.Step);
@@ -1589,16 +1589,16 @@ public class TrainingRigCoverageTests
         var sample = new NamedModelParam[]
         {
             new TensorDataModelParam("input", ModelParamType.InputParam,
-                TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+                TensorData([4L], [1f, 2f, 3f, 4f])),
         };
         var modelInputDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32) }, "ModelInput");
+            [new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32)], "ModelInput");
         var targetDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32) }, "Target");
+            [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)], "Target");
         var inputBatch = new TensorDataStruct(modelInputDef,
-            new Dictionary<string, IData> { { "input", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }) } });
+            new Dictionary<string, IData> { { "input", TensorData([4L], [1f, 2f, 3f, 4f]) } });
         var targetBatch = new TensorDataStruct(targetDef,
-            new Dictionary<string, IData> { { "targets", TensorData([4L], new float[] { 0f, 0f, 0f, 0f }) } });
+            new Dictionary<string, IData> { { "targets", TensorData([4L], [0f, 0f, 0f, 0f]) } });
 
         float FinalWeight(Schedule lr)
         {
@@ -1632,7 +1632,7 @@ public class TrainingRigCoverageTests
                 LearningRate = Hyperparameter.Runtime(),
                 MomentumCoeff = Hyperparameter.Runtime(),
             });
-        Assert.Equal(new[] { "learningRate", "momentumCoeff" }, momRig.DynamicHyperparameterNames.ToArray());
+        Assert.Equal((string[])["learningRate", "momentumCoeff"], momRig.DynamicHyperparameterNames.ToArray());
         var momStep = momRig.TrainStep(momRig.CreateInitialCheckpoint(),
             momRig.MakeHyperparameters(("momentumCoeff", 0.9f), ("learningRate", 0.1f)),  // order-independent
             inputBatch, targetBatch);
@@ -1649,16 +1649,16 @@ public class TrainingRigCoverageTests
         var sample = new NamedModelParam[]
         {
             new TensorDataModelParam("input", ModelParamType.InputParam,
-                TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+                TensorData([4L], [1f, 2f, 3f, 4f])),
         };
         var modelInputDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32) }, "ModelInput");
+            [new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32)], "ModelInput");
         var targetDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32) }, "Target");
+            [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)], "Target");
         var input = new TensorDataStruct(modelInputDef,
-            new Dictionary<string, IData> { { "input", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }) } });
+            new Dictionary<string, IData> { { "input", TensorData([4L], [1f, 2f, 3f, 4f]) } });
         var target = new TensorDataStruct(targetDef,
-            new Dictionary<string, IData> { { "targets", TensorData([4L], new float[] { 0f, 0f, 0f, 0f }) } });
+            new Dictionary<string, IData> { { "targets", TensorData([4L], [0f, 0f, 0f, 0f]) } });
         return (sample, input, target);
     }
 
@@ -1873,7 +1873,7 @@ public class TrainingRigCoverageTests
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             sample, new SGDOptimizerHyperparameters { LearningRate = Hyperparameter.Scheduled(schedulerModule) });
 
-        foreach (var impure in new[] { ParamScheduler.ComputationGraph, StateScheduler.ComputationGraph, RngScheduler.ComputationGraph })
+        foreach (var impure in (ComputationGraph[])[ParamScheduler.ComputationGraph, StateScheduler.ComputationGraph, RngScheduler.ComputationGraph])
         {
             var ex = Assert.Throws<ArgumentException>(() => Build(impure));
             Assert.Contains("pure", ex.Message);
@@ -1947,7 +1947,7 @@ public class TrainingRigCoverageTests
         string wName = modRig.TrainableParamStructDef.Fields[0].Name;
 
         // Several (step, epoch) points — epoch varies independently of step (host-owned).
-        foreach (var (s, e) in new[] { (0L, 0L), (3L, 1L), (7L, 4L) })
+        foreach (var (s, e) in ((long, long)[])[(0L, 0L), (3L, 1L), (7L, 4L)])
         {
             var seed = modRig.CreateInitialCheckpoint();
             var atCkpt = new TrainingCheckpoint(seed.TrainableParams, seed.ModelState, seed.OptimizerState, step: s, epoch: e);
@@ -2012,7 +2012,7 @@ public class TrainingRigCoverageTests
         Assert.Throws<System.InvalidOperationException>(() => moduleGraph.GetConcreteModelParamInfos());
         Assert.Throws<System.InvalidOperationException>(() => moduleGraph.InitializeTrainableParams());
 
-        var sample = TensorData([4L], new float[] { 1f, 2f, 3f, 4f });
+        var sample = TensorData([4L], [1f, 2f, 3f, 4f]);
         var arch = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([sample]));
         Assert.NotEmpty(arch.GetConcreteModelParamInfos().ParamInfos);
         Assert.NotEmpty(arch.InitializeTrainableParams().ModelParams);
@@ -2130,7 +2130,7 @@ public class TrainingRigCoverageTests
     public void TestFromScratchModelParamListAndStructDefsCoverage()
     {
         var modelGraph   = ScalarMultiplyModel.ComputationGraph;
-        var exampleInput = TensorData([4L], new float[] { 1f, 2f, 3f, 4f });
+        var exampleInput = TensorData([4L], [1f, 2f, 3f, 4f]);
 
         var rig = TrainingRig.FromScratch(
             modelGraph, Losses.L2Loss, Optimizers.SGD,
@@ -2518,7 +2518,7 @@ public class TrainingRigCoverageTests
     public void TestToInferenceModelCoverage()
     {
         var modelGraph   = ScalarMultiplyModel.ComputationGraph;
-        var exampleInput = TensorData([4L], new float[] { 1f, 2f, 3f, 4f });
+        var exampleInput = TensorData([4L], [1f, 2f, 3f, 4f]);
 
         var rig    = TrainingRig.FromScratch(
             modelGraph, Losses.L2Loss, Optimizers.SGD,
@@ -2533,7 +2533,7 @@ public class TrainingRigCoverageTests
         var concrete       = result.FinalCheckpoint.ToInferenceModel();
         Assert.NotNull(concrete);
 
-        var inferenceInput = TensorData([4L], new float[] { 5f, 6f, 7f, 8f });
+        var inferenceInput = TensorData([4L], [5f, 6f, 7f, 8f]);
         var outputs = ComputeContext.Default.Execute(concrete, inferenceInput);
         Assert.Single(outputs);
         var output = outputs[0].ToTensorData<float32>();
@@ -2595,7 +2595,7 @@ public class TrainingRigCoverageTests
         var sample = new NamedModelParam[]
         {
             new TensorDataModelParam("input", ModelParamType.InputParam,
-                TensorData(ScalarInputShape, new float[] { 1f, 2f, 3f, 4f })),
+                TensorData(ScalarInputShape, [1f, 2f, 3f, 4f])),
         };
         var rig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
@@ -2607,9 +2607,9 @@ public class TrainingRigCoverageTests
         var outDef = new TensorStructDef(
             [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)], "Target");
         var inBatch = new TensorDataStruct(inDef,
-            new Dictionary<string, IData> { { "input", TensorData(ScalarInputShape, new float[] { 1f, 2f, 3f, 4f }) } });
+            new Dictionary<string, IData> { { "input", TensorData(ScalarInputShape, [1f, 2f, 3f, 4f]) } });
         var outBatch = new TensorDataStruct(outDef,
-            new Dictionary<string, IData> { { "targets", TensorData(ScalarInputShape, new float[] { 2f, 4f, 6f, 8f }) } });
+            new Dictionary<string, IData> { { "targets", TensorData(ScalarInputShape, [2f, 4f, 6f, 8f]) } });
 
         var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < steps; i++)
@@ -2699,7 +2699,7 @@ public class TrainingRigCoverageTests
             // that executes identically to one built straight from the checkpoint's trained weights.
             var inferenceModel = Persistence.Load(path);
             Assert.Equal(GraphKind.ConcreteModel, inferenceModel.Kind);
-            var probe = TensorData(ScalarInputShape, new float[] { 5f, 6f, 7f, 8f });
+            var probe = TensorData(ScalarInputShape, [5f, 6f, 7f, 8f]);
             var fromCkpt = ckpt.ToInferenceModel();
             var loadedOut = ComputeContext.Default.Execute(inferenceModel, probe)[0].ToTensorData().As<float32>().AccessMemory().ToArray();
             var ckptOut = ComputeContext.Default.Execute(fromCkpt, probe)[0].ToTensorData().As<float32>().AccessMemory().ToArray();
@@ -2746,7 +2746,7 @@ public class TrainingRigCoverageTests
             Assert.Equal(FlattenStruct(reference.OptimizerState), FlattenStruct(resumed.OptimizerState));
 
             // The reconstructed rig extracts the same inference model as the original checkpoint.
-            var probe = TensorData(ScalarInputShape, new float[] { 5f, 6f, 7f, 8f });
+            var probe = TensorData(ScalarInputShape, [5f, 6f, 7f, 8f]);
             var fromReconstructed = loaded.ToInferenceModel();
             var fromOriginal = ckpt.ToInferenceModel();
             var a = ComputeContext.Default.Execute(fromReconstructed, probe)[0].ToTensorData().As<float32>().AccessMemory().ToArray();
@@ -2772,7 +2772,7 @@ public class TrainingRigCoverageTests
         var sample = new NamedModelParam[]
         {
             new TensorDataModelParam("input", ModelParamType.InputParam,
-                TensorData(ScalarInputShape, new float[] { 1f, 2f, 3f, 4f })),
+                TensorData(ScalarInputShape, [1f, 2f, 3f, 4f])),
         };
         TrainingRig SchedRig() => TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
@@ -2784,9 +2784,9 @@ public class TrainingRigCoverageTests
         var outDef = new TensorStructDef(
             [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)], "Target");
         var inBatch = new TensorDataStruct(inDef,
-            new Dictionary<string, IData> { { "input", TensorData(ScalarInputShape, new float[] { 1f, 2f, 3f, 4f }) } });
+            new Dictionary<string, IData> { { "input", TensorData(ScalarInputShape, [1f, 2f, 3f, 4f]) } });
         var outBatch = new TensorDataStruct(outDef,
-            new Dictionary<string, IData> { { "targets", TensorData(ScalarInputShape, new float[] { 2f, 4f, 6f, 8f }) } });
+            new Dictionary<string, IData> { { "targets", TensorData(ScalarInputShape, [2f, 4f, 6f, 8f]) } });
 
         var rigA = SchedRig();
         Assert.Equal(HyperparameterKind.Scheduled, rigA.Hyperparameters[0].Kind);
@@ -3339,7 +3339,7 @@ public class TrainingRigCoverageTests
         Assert.Equal(0UL, rig.RngConfig.MasterSeed);
 
         // Every derived rig trains a step to a finite loss on its own re-derived trainstep.
-        foreach (var derived in new[] { lossRig, momRig, schedRig, reseeded })
+        foreach (var derived in (TrainingRig[])[lossRig, momRig, schedRig, reseeded])
         {
             var stepped = derived.TrainStep(derived.CreateInitialCheckpoint(), input, target);
             Assert.True(float.IsFinite(stepped.Loss!.Value));
@@ -3382,7 +3382,7 @@ public class TrainingRigCoverageTests
                 $"extracted param '{f.Key}' did not resolve to a ModelId (composition identity regressed)");
 
         // The extracted model computes with exactly the trainstep's updated tensor for wName.
-        var probe = TensorData([4L], new float[] { 2f, 3f, 4f, 5f });
+        var probe = TensorData([4L], [2f, 3f, 4f, 5f]);
         var outputs = ComputeContext.Default.Execute(inference, probe)[0]
             .ToTensorData<float32>().AccessMemory().ToArray();
         float[] expected = [2f * wUpdated, 3f * wUpdated, 4f * wUpdated, 5f * wUpdated];
@@ -3500,8 +3500,8 @@ public class TrainingRigCoverageTests
     {
         var sample = new NamedModelParam[]
         {
-            new TensorDataModelParam("a", ModelParamType.InputParam, TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
-            new TensorDataModelParam("b", ModelParamType.InputParam, TensorData([4L], new float[] { 5f, 6f, 7f, 8f })),
+            new TensorDataModelParam("a", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f])),
+            new TensorDataModelParam("b", ModelParamType.InputParam, TensorData([4L], [5f, 6f, 7f, 8f])),
         };
         var rig = TrainingRig.FromScratch(
             TwoInputSumModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
@@ -3512,8 +3512,8 @@ public class TrainingRigCoverageTests
         var inference = ckpt.ToInferenceModel();              // binds weights into the retained arch (concretized at BOTH [4] inputs)
         Assert.Equal(GraphKind.ConcreteModel, inference.Kind);
 
-        var a = TensorData([4L], new float[] { 1f, 2f, 3f, 4f });
-        var b = TensorData([4L], new float[] { 10f, 20f, 30f, 40f });
+        var a = TensorData([4L], [1f, 2f, 3f, 4f]);
+        var b = TensorData([4L], [10f, 20f, 30f, 40f]);
         var outputs = ComputeContext.Default.Execute(inference, a, b)[0]
             .ToTensorData<float32>().AccessMemory().ToArray();
         float[] expected = [11f, 22f, 33f, 44f];              // a + b

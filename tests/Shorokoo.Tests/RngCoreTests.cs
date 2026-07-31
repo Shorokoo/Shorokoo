@@ -66,6 +66,20 @@ public class RngCoreTests
         Assert.False(FastInjectRngDrawCounter.IsExecutionCounter((ModelParamIdentifierTemplate?)null));
     }
 
+    /// <summary>
+    /// The execution counter's materialization fallback value is an <c>int64[1]</c> zero — it must
+    /// match what <c>CounterInit</c> produces, or a safetensors round-trip (which omits the counter
+    /// and refills it from this value) would bind a wrong-shaped or wrong-valued counter.
+    /// </summary>
+    [Fact]
+    public void TestExecutionCounterInitialValueIsInt64ScalarZero()
+    {
+        var v = FastInjectRngDrawCounter.ExecutionCounterInitialValue();
+        Assert.Equal((long[])[1L], v.Shape.Dims.ToArray());
+        // As<int64> also asserts the dtype (it throws on a non-int64 tensor).
+        Assert.Equal((long[])[0L], v.As<int64>().AccessMemory().ToArray());
+    }
+
     // Random123 known-answer test vectors for threefry2x32, 20 rounds
     // (tests/kat_vectors in DEShawResearch/random123): counter, key -> output.
     [Theory]

@@ -408,8 +408,8 @@ public class CompressedFormatUtilsCoverageTests
     {
         var tensors = new List<SafeTensor>
         {
-            new("w", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }), "F32", [4L]),
-            new("b", TensorData([2L], new float[] { 5f, 6f }), "F32", [2L]),
+            new("w", TensorData([4L], [1f, 2f, 3f, 4f]), "F32", [4L]),
+            new("b", TensorData([2L], [5f, 6f]), "F32", [2L]),
         };
         using var stream = new MemoryStream();
         SafeTensorLoader.SaveSafeTensorsToStream(stream, tensors);
@@ -1349,6 +1349,54 @@ public class CompressedFormatUtilsCoverageTests
             }
 
             Assert.Equal(Run(moduleGraph), Run(reloaded));
+        }
+    }
+
+    /// <summary>Op-code + dtype of each top-level graph input, in graph-input order.</summary>
+    private static List<(string OpCode, DType? DType)> DescribeTopLevelInputs(InternalComputationGraph g)
+        => g.Inputs
+            .Select(key =>
+            {
+                var node = g.Nodes.First(n => n.Outputs.Any(o => o.HasValue && o.Value.Equals(key)));
+                return (node.OpCode, node.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype));
+            })
+            .ToList();
+
+    /// <summary>
+    /// Issue #115, node-emission path for the NON-tensor top-level graph-input kinds. In the native
+    /// <c>.srk</c> dialect every model-input op — <c>MODEL_TENSOR_INPUT</c>, <c>MODEL_OPTIONAL_INPUT</c>,
+    /// <c>MODEL_SEQUENCE_INPUT</c>, <c>MODEL_TENSORSTRUCT_INPUT</c> and <c>GENERIC_TYPE_INPUT</c> — is
+    /// serialized as an ordinary <c>NodeProto</c> in graph-input order (the non-tensor kinds previously
+    /// rode the graph-input <c>ValueInfoProto</c> path). For a fixture carrying each kind as a top-level
+    /// input, the graph's input list — its op-kind sequence, order and per-input dtype — survives a
+    /// save → load. All four kinds are constructed from existing module fixtures: an optional tensor input
+    /// (<see cref="NullableBiasLayer"/>), a top-level sequence input (<see cref="SeqHypersLayer"/>'s
+    /// <c>[Hyper] TensorSequence</c>), a tensorstruct input (<see cref="SimplePairSum"/>) and a
+    /// generic-type input (<see cref="GenericRecordSumCaller"/>'s <c>GenericType_T</c> placeholder).
+    /// </summary>
+    [Fact]
+    public void TestNonTensorTopLevelInputKindsSrkNodeRoundTripCoverage()
+    {
+        (ComputationGraph Graph, string ExpectedKind)[] cases =
+        [
+            (NullableBiasLayer.ComputationGraph, InternalOpCodes.MODEL_OPTIONAL_INPUT),    // (x, OptionalTensor bias)
+            (SeqHypersLayer.ComputationGraph, InternalOpCodes.MODEL_SEQUENCE_INPUT),       // (input, [Hyper] TensorSequence scales)
+            (SimplePairSum.ComputationGraph, InternalOpCodes.MODEL_TENSORSTRUCT_INPUT),    // (GenericPairStruct pair)
+            (GenericRecordSumCaller.ComputationGraph, InternalOpCodes.GENERIC_TYPE_INPUT), // Inline<T>() → GenericType_T
+        ];
+
+        foreach (var (graph, expectedKind) in cases)
+        {
+            // The kind under test is genuinely a top-level graph input of the fixture …
+            var before = DescribeTopLevelInputs(graph.ToInternal());
+            Assert.Contains(expectedKind, before.Select(d => d.OpCode));
+
+            // … and after the .srk round-trip the input list's op-kind sequence, order and per-input
+            // dtype are unchanged, and the kind under test is still present.
+            var reloaded = AssertModuleStageSrkRoundTrip(graph);
+            var after = DescribeTopLevelInputs(reloaded.ToInternal());
+            Assert.Equal(before, after);
+            Assert.Contains(expectedKind, after.Select(d => d.OpCode));
         }
     }
 
@@ -2473,7 +2521,7 @@ public class CompressedFormatUtilsCoverageTests
             // ── A non-object serialized root is rejected at save (a list, a scalar, and JSON
             // null all fail with a clear ArgumentException — the only structural check).
             Assert.Throws<ArgumentException>(() =>
-                Persistence.From(model).WithUserData(new[] { 1, 2, 3 }));
+                Persistence.From(model).WithUserData((int[])[1, 2, 3]));
             Assert.Throws<ArgumentException>(() =>
                 Persistence.From(model).WithUserData("just a string"));
             Assert.Throws<ArgumentException>(() =>
@@ -2600,13 +2648,13 @@ public class CompressedFormatUtilsCoverageTests
             var defaultOnlyEntries = ReadZipEntries(defaultOnlyPath);
             const string emaEntryPath = "data/ema.safetensors";
             Assert.Equal(
-                new[] { SkptFileFormat.ConfigEntryName, SkptFileFormat.ModelEntryPath,
-                        SkptFileFormat.WeightsEntryPath, emaEntryPath }
+                ((string[])[SkptFileFormat.ConfigEntryName, SkptFileFormat.ModelEntryPath,
+                            SkptFileFormat.WeightsEntryPath, emaEntryPath])
                     .OrderBy(n => n, StringComparer.Ordinal),
                 entries.Keys.OrderBy(n => n, StringComparer.Ordinal));
             Assert.Equal(
-                new[] { SkptFileFormat.ConfigEntryName, SkptFileFormat.ModelEntryPath,
-                        SkptFileFormat.WeightsEntryPath }
+                ((string[])[SkptFileFormat.ConfigEntryName, SkptFileFormat.ModelEntryPath,
+                            SkptFileFormat.WeightsEntryPath])
                     .OrderBy(n => n, StringComparer.Ordinal),
                 defaultOnlyEntries.Keys.OrderBy(n => n, StringComparer.Ordinal));
 
@@ -2622,14 +2670,14 @@ public class CompressedFormatUtilsCoverageTests
             // bias is absent from it (it is referenced back into the weights entry).
             var emaStored = SafeTensorLoader.ParseSafeTensorBytes(entries[emaEntryPath])
                 .ToDictionary(t => t.Name, t => t.Data.AccessRawMemory().ToArray(), StringComparer.Ordinal);
-            Assert.Equal(new[] { distinctId }, emaStored.Keys.ToArray());
+            Assert.Equal((string[])[distinctId], emaStored.Keys.ToArray());
             Assert.DoesNotContain(sharedId, emaStored.Keys);
 
             // config.json records both sets; the ema mapping shares the bias (data "weights")
             // and points the distinct weight tensor at its own "ema" data entry.
             var manifest = SkptFileFormat.ParseManifest(entries[SkptFileFormat.ConfigEntryName], path);
             var sets = manifest.TensorMappings!["model"];
-            Assert.Equal(new[] { "default", "ema" }, sets.Keys.ToArray());
+            Assert.Equal((string[])["default", "ema"], sets.Keys.ToArray());
             Assert.Equal(2, manifest.Data!.Count);
             Assert.Equal(emaEntryPath, manifest.Data["ema"].Entry);
             var emaRefs = sets["ema"].Tensors!;
@@ -2664,7 +2712,7 @@ public class CompressedFormatUtilsCoverageTests
             // Inspect lists every set present (issue #73), not just default.
             var inspected = Persistence.Inspect(path);
             Assert.Equal(ArtifactKind.SkptCheckpoint, inspected.Kind);
-            Assert.Equal(new[] { "default", "ema" }, inspected.Skpt!.MappingSetNames.ToArray());
+            Assert.Equal((string[])["default", "ema"], inspected.Skpt!.MappingSetNames.ToArray());
             Assert.Contains("mapping sets: default, ema", inspected.ToString());
 
             // A set fully shared with the default weights adds NO data entry — every tensor is
@@ -2680,9 +2728,9 @@ public class CompressedFormatUtilsCoverageTests
                     sharedEntries.Keys.OrderBy(n => n, StringComparer.Ordinal));
                 var sharedManifest = SkptFileFormat.ParseManifest(
                     sharedEntries[SkptFileFormat.ConfigEntryName], sharedOnlyPath);
-                Assert.Equal(new[] { "default", "shadow" },
+                Assert.Equal((string[])["default", "shadow"],
                     sharedManifest.TensorMappings!["model"].Keys.ToArray());
-                Assert.Equal(new[] { SkptFileFormat.DefaultDataKey }, sharedManifest.Data!.Keys.ToArray());
+                Assert.Equal((string[])[SkptFileFormat.DefaultDataKey], sharedManifest.Data!.Keys.ToArray());
                 Assert.All(sharedManifest.TensorMappings["model"]["shadow"].Tensors!.Values,
                     r => Assert.Equal(SkptFileFormat.DefaultDataKey, r.Data));
                 var shadowBytes = WeightBytesByParam(Persistence.Load(sharedOnlyPath, "shadow"));
@@ -3222,7 +3270,7 @@ public class CompressedFormatUtilsCoverageTests
         }
         finally
         {
-            foreach (var p in new[] { badOpPath, garbagePath, truncPath })
+            foreach (var p in (string[])[badOpPath, garbagePath, truncPath])
                 if (File.Exists(p)) File.Delete(p);
         }
     }
@@ -3273,7 +3321,7 @@ public class CompressedFormatUtilsCoverageTests
         }
         finally
         {
-            foreach (var p in new[] { onnxPath, badPath, skptPath })
+            foreach (var p in (string[])[onnxPath, badPath, skptPath])
                 if (File.Exists(p)) File.Delete(p);
         }
     }
@@ -3318,7 +3366,7 @@ public class CompressedFormatUtilsCoverageTests
         }
         finally
         {
-            foreach (var p in new[] { inlinePath, extPath, dataPath, skptPath })
+            foreach (var p in (string[])[inlinePath, extPath, dataPath, skptPath])
                 if (File.Exists(p)) File.Delete(p);
         }
     }

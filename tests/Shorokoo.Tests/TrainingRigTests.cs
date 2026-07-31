@@ -144,7 +144,7 @@ public partial class ScalarMultiplyWithOrtOnlyLoopIterCountModel
     {
         var weight = InitScalarWeight.Init(Vector(1L));
         var scaled = input * weight;
-        var identity = Tensor(new long[] { 2L, 2L }, 1f, 0f, 0f, 1f);
+        var identity = Tensor([2L, 2L], 1f, 0f, 0f, 1f);
         var det = (Scalar<float32>)OnnxOp.Det(identity);
         var iter = det.Cast<int64>();
         foreach (var ctx in LoopAPI.Iterate(iter))
@@ -199,6 +199,27 @@ public partial class TwoInputSumModel
 }
 
 /// <summary>
+/// Three top-level model inputs in a DELIBERATELY non-alphabetical declaration order
+/// (<c>beta</c>, <c>alpha</c>, <c>gamma</c>) with mixed dtypes (float32 / int64 / float32).
+/// Each input is reduced to a scalar and summed, so the three may carry independent
+/// shapes and ranks — used to prove the <c>.srk</c> node-emission path rebuilds a
+/// multi-input graph's input list with its count, order, per-input identity and per-input
+/// type/representative info intact (issue #115).
+/// </summary>
+[Module]
+public partial class ThreeInputMixedModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> beta, Tensor<int64> alpha, Tensor<float32> gamma)
+    {
+        var w = InitScalarWeight.Init(Vector(1L));
+        var sBeta = beta.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        var sAlpha = alpha.Reduce(ReduceKind.Sum, keepDims: false).Scalar().Cast<float32>();
+        var sGamma = gamma.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        return ((sBeta + sAlpha + sGamma) * w.Scalar()).Reshape([Scalar(1L)]);
+    }
+}
+
+/// <summary>
 /// Coverage-purpose training-rig pipeline tests. Each [Fact] drives the full
 /// model + loss + optimizer composition through <see cref="TrainingRig.FromScratch"/>
 /// and <c>CreateInitialCheckpoint</c> for a curated combination of modules.
@@ -243,7 +264,7 @@ public class TrainingRigCoverageTests
             TensorData(inputShape, new float[totalElements]));
 
         var rig = TrainingRig.FromScratch(modelGraph, lossGraph, optimizerGraph,
-            new NamedModelParam[] { sampleInput }, hyperparams);
+            [sampleInput], hyperparams);
 
         var checkpoint = rig.CreateInitialCheckpoint();
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
@@ -273,12 +294,12 @@ public class TrainingRigCoverageTests
             TensorData(inputShape, new float[totalElements]));
 
         var rig = TrainingRig.FromScratch(modelGraph, lossGraph, optimizerGraph,
-            new NamedModelParam[] { sampleInput }, hyperparams);
+            [sampleInput], hyperparams);
         var checkpoint = rig.CreateInitialCheckpoint();
 
         // Concretize the inference model + Shorokoo naming scheme (the documented binding flow).
         var hints = new ModelParamList(
-            new[] { new KeyValuePair<string, TensorData>(modelGraph.ToInternal().Inputs[0].ToString(), TensorData(inputShape, new float[totalElements])) },
+            [new KeyValuePair<string, TensorData>(modelGraph.ToInternal().Inputs[0].ToString(), TensorData(inputShape, new float[totalElements]))],
             ModelParamType.InputParam);
         var ctx = new ComputeContext();
         var concrete = modelGraph.ToConcreteArchitecture(hints, ctx, null);
@@ -315,10 +336,10 @@ public class TrainingRigCoverageTests
 
         var sampleInput = new TensorDataModelParam(
             "input", ModelParamType.InputParam,
-            TensorData([4L], new float[] { 1f, 2f, 3f, 4f }));
+            TensorData([4L], [1f, 2f, 3f, 4f]));
 
         var rig = TrainingRig.FromScratch(modelGraph, lossGraph, optimizerGraph,
-            new NamedModelParam[] { sampleInput }, 0.01f);
+            [sampleInput], 0.01f);
 
         var checkpoint = rig.CreateInitialCheckpoint();
 
@@ -553,15 +574,15 @@ public class TrainingRigCoverageTests
     }
 
     /// <summary>
-    /// Inertness: the representative-input attribute must never reach a serialized artifact. A
-    /// boundary/input node is emitted as a <c>ValueInfoProto</c>, never a <c>NodeProto</c>, so its
-    /// attributes are not serialized. This saves an initial checkpoint (whose model lineage carries
-    /// the attribute on its input node) to a native <c>.skpt</c> and asserts the raw container bytes
-    /// contain no trace of the attribute name, then confirms the artifact still loads as a concrete
-    /// inference model. Uses an over-threshold input so the attribute value is a placeholder.
+    /// Self-describing .skpt (issue #115): in the native <c>.srk</c> dialect a <c>MODEL_TENSOR_INPUT</c>
+    /// is serialized as a NodeProto, so its representative-input attribute round-trips on disk — the saved
+    /// arch carries the shape itself, with no separate manifest input-shape field. This saves an initial
+    /// checkpoint whose over-threshold input makes the arch carry the shape-only attribute, then confirms
+    /// the file both loads as a concrete inference model and rebuilds the whole rig from the file alone
+    /// (which can only succeed if the reconstructed arch self-described its input shape).
     /// </summary>
     [Fact]
-    public void TestRepresentativeInputIsInertInSkptCoverage()
+    public void TestRepresentativeInputSurvivesSkptRoundTripCoverage()
     {
         NamedModelParam[] sample =
         [
@@ -573,35 +594,325 @@ public class TrainingRigCoverageTests
             SGDOptimizer.ComputationGraph, sample, 0.01f);
         var ckpt = rig.CreateInitialCheckpoint();
 
-        var path = Path.Combine(Path.GetTempPath(), $"shrk_repin_inert_{Guid.NewGuid():N}.skpt");
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_repin_selfdesc_{Guid.NewGuid():N}.skpt");
         try
         {
             Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
 
-            var bytes = File.ReadAllBytes(path);
-            var needle = System.Text.Encoding.ASCII.GetBytes(
-                Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInput);
-            Assert.False(ContainsSubsequence(bytes, needle),
-                "the representative-input attribute leaked into the serialized .skpt artifact");
-
+            // Loads as a concrete inference model…
             var inferenceModel = Persistence.Load(path);
             Assert.Equal(GraphKind.ConcreteModel, inferenceModel.Kind);
+
+            // …and rebuilds the whole rig from the file alone: the reconstructed arch's MODEL_TENSOR_INPUT
+            // node must carry the shape-only attribute (round-tripped as a NodeProto), the only source of
+            // the shape now that the manifest input-shape field is gone.
+            var (rig2, loaded) = TrainingRig.Load(path);
+            Assert.NotNull(rig2);
+            Assert.NotNull(loaded.TrainableParams);
+            var reloadedInput = TensorInputNode(rig2.ConcreteArchConstituent);
+            Assert.Equal((long[])[2048L], reloadedInput.Attributes.GetLongsVal(
+                Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape));
         }
         finally { if (File.Exists(path)) File.Delete(path); }
     }
 
-    /// <summary>Byte-subsequence search for the inertness assertion (no dependency on the STORED-zip
-    /// entry layout — the attribute name must be absent from the whole container).</summary>
-    private static bool ContainsSubsequence(byte[] haystack, byte[] needle)
+    // ─────────────── representative-input two-attribute split & serialization (#115) ───────────────
+
+    private static long ProductOf(long[] shape)
     {
-        if (needle.Length == 0 || haystack.Length < needle.Length) return false;
-        for (int i = 0; i <= haystack.Length - needle.Length; i++)
+        long p = 1;
+        foreach (var d in shape) p *= d;
+        return p;
+    }
+
+    /// <summary>A minimal from-scratch rig over <see cref="ScalarMultiplyModel"/> with a single rank-1
+    /// input of the given shape.</summary>
+    private static TrainingRig RigWithInputShape(long[] shape)
+        => TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            new NamedModelParam[]
+            {
+                new TensorDataModelParam("input", ModelParamType.InputParam,
+                    TensorData(shape, new float[ProductOf(shape)])),
+            },
+            0.01f);
+
+    /// <summary>The (sole) <c>MODEL_TENSOR_INPUT</c> node of a graph's internal form.</summary>
+    private static Shorokoo.Core.Graph.FastNode TensorInputNode(ComputationGraph graph)
+        => graph.ToInternal().Nodes.First(
+            n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_TENSOR_INPUT);
+
+    /// <summary>
+    /// The two representative-input attributes are mutually exclusive on a <c>MODEL_TENSOR_INPUT</c>,
+    /// split by the shape-inference small-tensor threshold (1024): a small input records a zero-filled
+    /// inline tensor on <c>ShrkAttrRepresentativeInput</c> (shape attr cleared); a large one records only
+    /// its dims on <c>ShrkAttrRepresentativeInputShape</c> (tensor attr cleared).
+    /// </summary>
+    [Fact]
+    public void TestRepresentativeInputTwoAttributeSplitCoverage()
+    {
+        var small = TensorInputNode(RigWithInputShape([4L]).ConcreteArchConstituent);
+        var smallTensor = small.Attributes.GetTensorVal(
+            Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInput);
+        Assert.NotNull(smallTensor);
+        Assert.Equal((long[])[4L], smallTensor!.Shape.Dims);
+        Assert.Null(small.Attributes.GetLongsVal(
+            Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape));
+
+        var large = TensorInputNode(RigWithInputShape([2048L]).ConcreteArchConstituent);
+        Assert.Null(large.Attributes.GetTensorVal(
+            Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInput));
+        Assert.Equal((long[])[2048L], large.Attributes.GetLongsVal(
+            Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape));
+    }
+
+    /// <summary>
+    /// The native <c>.srk</c> dialect serializes a <c>MODEL_TENSOR_INPUT</c> as a NodeProto, so whichever
+    /// representative attribute is set round-trips on disk and the reconstructed graph's input list keeps
+    /// its order/identity. Covers a small input (inline tensor attr) and a large one (shape-only attr).
+    /// </summary>
+    [Fact]
+    public void TestRepresentativeInputSrkNodeRoundTripCoverage()
+    {
+        AssertArchSrkRoundTrip([4L], expectInline: true);
+        AssertArchSrkRoundTrip([2048L], expectInline: false);
+    }
+
+    private static void AssertArchSrkRoundTrip(long[] shape, bool expectInline)
+    {
+        var arch = RigWithInputShape(shape).ConcreteArchConstituent;
+        var bytes = Shorokoo.Core.Utils.CompressedFormatUtils.SaveFastGraphToBinary(arch);
+        var reloaded = Shorokoo.Core.Utils.CompressedFormatUtils.LoadFastGraphFromBinary(bytes);
+        var internalReloaded = reloaded.ToInternal();
+
+        // The input list survives the node-based round-trip (one input, preserved).
+        Assert.Single(internalReloaded.Inputs);
+
+        var node = internalReloaded.Nodes.First(
+            n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_TENSOR_INPUT);
+        var tensor = node.Attributes.GetTensorVal(
+            Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInput);
+        var dims = node.Attributes.GetLongsVal(
+            Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape);
+        if (expectInline)
         {
-            int j = 0;
-            while (j < needle.Length && haystack[i + j] == needle[j]) j++;
-            if (j == needle.Length) return true;
+            Assert.NotNull(tensor);
+            Assert.Equal(shape, tensor!.Shape.Dims);
+            Assert.Null(dims);
         }
-        return false;
+        else
+        {
+            Assert.Null(tensor);
+            Assert.Equal(shape, dims);
+        }
+    }
+
+    /// <summary>The <c>MODEL_TENSOR_INPUT</c> node that produces graph-input <paramref name="key"/>.</summary>
+    private static Shorokoo.Core.Graph.FastNode InputNodeFor(
+        Shorokoo.Graph.InternalComputationGraph g, Shorokoo.Core.Graph.FastTensorKey key)
+        => g.Nodes.First(n => n.Outputs.Any(o => o.HasValue && o.Value.Equals(key)));
+
+    /// <summary>
+    /// Multi-input <c>.srk</c> round-trip (issue #115): the node-emission rewrite reconstructs a
+    /// graph's input list from the serialized <c>MODEL_*_INPUT</c> nodes <b>in order</b>, so a graph
+    /// with several inputs must round-trip with its input list intact — count, order, per-input
+    /// identity (name), and per-input type info (dtype + rank). A concrete arch additionally carries a
+    /// representative-input attribute per input; whichever attribute each input holds must survive
+    /// attached to the <b>correct</b> input. Three inputs are used in a deliberately non-alphabetical
+    /// order (<c>beta</c>, <c>alpha</c>, <c>gamma</c>) with mixed dtypes (float32 / int64 / float32),
+    /// ranks (1 / 1 / 2) and shapes ([4] / [2048] / [2,3]) chosen so the two small inputs record the
+    /// inline representative tensor and the large one the shape-only form — distinct enough on every
+    /// axis that any reorder, collapse, or cross-wiring of inputs is caught. This is the core guarantee
+    /// the node-emission rewrite rests on, which the single-input helpers above cannot exercise.
+    /// </summary>
+    [Fact]
+    public void TestMultiInputArchSrkNodeRoundTripCoverage()
+    {
+        // The rig attaches a representative-input attribute to each MODEL_TENSOR_INPUT (a plain
+        // ToConcreteArchitecture does not), concretized at the per-input sample shape below.
+        NamedModelParam[] sample =
+        [
+            new TensorDataModelParam("beta", ModelParamType.InputParam, TensorData([4L], new float[4])),        // small float32, rank 1 → inline
+            new TensorDataModelParam("alpha", ModelParamType.InputParam, TensorData([2048L], new long[2048])),  // large int64,   rank 1 → shape-only
+            new TensorDataModelParam("gamma", ModelParamType.InputParam, TensorData([2L, 3L], new float[6])),   // small float32, rank 2 → inline
+        ];
+        var arch = TrainingRig.FromScratch(
+            ThreeInputMixedModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            sample, 0.01f).ConcreteArchConstituent;
+        Assert.Equal(GraphKind.ConcreteArchitecture, arch.Kind);
+
+        var original = arch.ToInternal();
+        var reloaded = Shorokoo.Core.Utils.CompressedFormatUtils.LoadFastGraphFromBinary(
+            Shorokoo.Core.Utils.CompressedFormatUtils.SaveFastGraphToBinary(arch)).ToInternal();
+
+        // (a) count, order and identity: the ordered input list is three long, its ordered name
+        // sequence is byte-for-byte preserved, and every name is distinct (identity, not just count).
+        Assert.Equal(3, original.Inputs.Count);
+        Assert.Equal(original.Inputs.Count, reloaded.Inputs.Count);
+        Assert.Equal(original.InputUniqueNames, reloaded.InputUniqueNames);
+        Assert.Equal(3, reloaded.InputUniqueNames.Distinct().Count());
+
+        bool[] expectInline = [true, false, true];
+        long[][] expectDims = [[4L], [2048L], [2L, 3L]];
+        DType[] expectDtype = [DType.Float32, DType.Int64, DType.Float32];
+        long[] expectRank = [1L, 1L, 2L];
+
+        var reprInput = Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInput;
+        var reprShape = Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape;
+        var attrDtype = Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.AttrDtype;
+
+        // The concretized arch carries each input's rank in its representative attribute (the
+        // inline tensor's shape or the shape-only dims), so rank preservation is read from there.
+        static long RankOf(Shorokoo.Core.Graph.FastNode n, string reprInput, string reprShape)
+            => n.Attributes.GetTensorVal(reprInput) is { } t
+                ? t.Shape.Dims.Length
+                : n.Attributes.GetLongsVal(reprShape)!.Length;
+
+        for (int i = 0; i < 3; i++)
+        {
+            var before = InputNodeFor(original, original.Inputs[i]);
+            var after = InputNodeFor(reloaded, reloaded.Inputs[i]);
+            Assert.Equal(Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_TENSOR_INPUT, after.OpCode);
+
+            // (b) dtype/rank of each input slot are what we concretized at, and survive unchanged.
+            Assert.Equal(expectDtype[i], before.Attributes.GetDTypeVal(attrDtype));
+            Assert.Equal(expectDtype[i], after.Attributes.GetDTypeVal(attrDtype));
+            Assert.Equal(expectRank[i], RankOf(before, reprInput, reprShape));
+            Assert.Equal(expectRank[i], RankOf(after, reprInput, reprShape));
+
+            // (c) the representative attribute belonging to THIS input slot (inline for the small
+            // inputs, shape-only for the large one) survives on the correct slot after the round-trip.
+            var inlineTensor = after.Attributes.GetTensorVal(reprInput);
+            var shapeOnly = after.Attributes.GetLongsVal(reprShape);
+            if (expectInline[i])
+            {
+                Assert.NotNull(inlineTensor);
+                Assert.Equal(expectDims[i], inlineTensor!.Shape.Dims);
+                Assert.Null(shapeOnly);
+            }
+            else
+            {
+                Assert.Null(inlineTensor);
+                Assert.Equal(expectDims[i], shapeOnly);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Vanilla ONNX export writes an input's representative info into that input's OWN
+    /// <c>ValueInfoProto</c> metadata (a graph input has no attribute bag), and the ONNX reader re-attaches
+    /// it as it builds the input node. Small (≤ 16 elements) round-trips as the inline tensor attribute; a
+    /// larger inline tensor is downgraded (by the export pre-pass) to shape-only; a shape-only attribute
+    /// stays shape-only. Also asserts the metadata's new home — the input's ValueInfoProto, not model-level
+    /// <c>metadata_props</c>.
+    /// </summary>
+    [Fact]
+    public void TestRepresentativeInputVanillaOnnxMetadataRoundTripCoverage()
+    {
+        // ≤16 elements, inline tensor → survives as the inline tensor attribute.
+        AssertOnnxRepRoundTrip(setShape: [4L], asShapeAttr: false, expectInlineAfter: true);
+        // 17–1024 elements, inline in memory → export downgrades to shape-only metadata.
+        AssertOnnxRepRoundTrip(setShape: [32L], asShapeAttr: false, expectInlineAfter: false);
+        // shape-only attribute (a large input's form) → stays shape-only.
+        AssertOnnxRepRoundTrip(setShape: [2048L], asShapeAttr: true, expectInlineAfter: false);
+    }
+
+    private static void AssertOnnxRepRoundTrip(long[] setShape, bool asShapeAttr, bool expectInlineAfter)
+    {
+        var reprInput = Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInput;
+        var reprShape = Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape;
+
+        // A base rank-1 concrete inference model; attach the representative attribute under test to its input.
+        var baseModel = RigWithInputShape([4L]).CreateInitialCheckpoint().ToInferenceModel();
+        var internalModel = baseModel.ToInternal();
+        var inputNode = internalModel.Nodes.First(
+            n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_TENSOR_INPUT);
+        inputNode.Attributes = asShapeAttr
+            ? inputNode.Attributes.SetAttributes(
+                (reprShape, (object?)setShape), (reprInput, (object?)null))
+            : inputNode.Attributes.SetAttributes(
+                (reprInput, (object?)TensorData(setShape, new float[ProductOf(setShape)])),
+                (reprShape, (object?)null));
+        var modelWithRep = new ComputationGraph(internalModel, GraphKind.ConcreteModel);
+
+        var onnxPath = Path.Combine(Path.GetTempPath(), $"shrk_rep_onnx_{Guid.NewGuid():N}.onnx");
+        try
+        {
+            Persistence.ExportOnnx(modelWithRep, onnxPath);
+
+            // The representative info rides the input's OWN ValueInfoProto metadata — not model-level props.
+            using (var ms = new MemoryStream(File.ReadAllBytes(onnxPath)))
+            {
+                var proto = ProtoBuf.Serializer.Deserialize<Shorokoo.Core.Factory.IR.ModelProto>(ms);
+                Assert.Single(proto.Graph.Inputs);
+                Assert.Contains(proto.Graph.Inputs[0].MetadataProps,
+                    p => p.Key == Shorokoo.Core.Factory.RepresentativeInputMetadata.Key);
+                Assert.DoesNotContain(proto.MetadataProps,
+                    p => p.Key == Shorokoo.Core.Factory.RepresentativeInputMetadata.Key
+                      || p.Key.StartsWith("shrk_repr_input", StringComparison.Ordinal));
+            }
+
+            var imported = Persistence.ImportOnnx(onnxPath);
+            var node = imported.ToInternal().Nodes.First(
+                n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_TENSOR_INPUT);
+            var tensor = node.Attributes.GetTensorVal(reprInput);
+            var dims = node.Attributes.GetLongsVal(reprShape);
+            if (expectInlineAfter)
+            {
+                Assert.NotNull(tensor);
+                Assert.Equal(setShape, tensor!.Shape.Dims);
+                Assert.Null(dims);
+            }
+            else
+            {
+                Assert.Null(tensor);
+                Assert.Equal(setShape, dims);
+            }
+        }
+        finally { if (File.Exists(onnxPath)) File.Delete(onnxPath); }
+    }
+
+    /// <summary>
+    /// The vanilla-export downgrade pre-pass
+    /// (<see cref="Shorokoo.Core.Nodes.Processors.Fast.FastDowngradeRepresentativeInputs"/>) rewrites an
+    /// inline representative tensor with more than the vanilla limit (16) elements to the shape-only
+    /// attribute, and leaves one at or below the limit as an inline tensor. Applied as a graph transform
+    /// before emission (so the downgrade is a single decision on the emitted graph, not re-decided at
+    /// emission time).
+    /// </summary>
+    [Fact]
+    public void TestDowngradeRepresentativeInputsPrePassCoverage()
+    {
+        AssertReprDowngrade([4L], expectTensorAfter: true);    // 4 ≤ 16 → stays inline
+        AssertReprDowngrade([16L], expectTensorAfter: true);   // 16 == limit → stays inline
+        AssertReprDowngrade([17L], expectTensorAfter: false);  // 17 > 16 → shape-only
+        AssertReprDowngrade([500L], expectTensorAfter: false); // mid-size (≤1024 in memory) → shape-only
+    }
+
+    private static void AssertReprDowngrade(long[] shape, bool expectTensorAfter)
+    {
+        var reprInput = Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInput;
+        var reprShape = Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape;
+
+        // All shapes here are ≤1024, so the in-memory build sets the inline tensor attribute.
+        var arch = RigWithInputShape(shape).ConcreteArchConstituent.ToInternal();
+        var node = arch.Nodes.First(
+            n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_TENSOR_INPUT);
+        Assert.NotNull(node.Attributes.GetTensorVal(reprInput)); // precondition: inline tensor before
+
+        Shorokoo.Core.Nodes.Processors.Fast.FastDowngradeRepresentativeInputs.Process(
+            arch, Shorokoo.Core.Nodes.Processors.Fast.FastDowngradeRepresentativeInputs.VanillaMaxInlineElements);
+
+        if (expectTensorAfter)
+        {
+            Assert.NotNull(node.Attributes.GetTensorVal(reprInput));
+            Assert.Null(node.Attributes.GetLongsVal(reprShape));
+        }
+        else
+        {
+            Assert.Null(node.Attributes.GetTensorVal(reprInput));
+            Assert.Equal(shape, node.Attributes.GetLongsVal(reprShape));
+        }
     }
 
     /// <summary>
@@ -669,27 +980,27 @@ public class TrainingRigCoverageTests
             new NamedModelParam[]
             {
                 new TensorDataModelParam("input", ModelParamType.InputParam,
-                    TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+                    TensorData([4L], [1f, 2f, 3f, 4f])),
             },
             0.1f);
 
         var initial = rig.CreateInitialCheckpoint();
 
         var modelInputDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32) },
+            [new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32)],
             "ModelInput");
         var targetDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32) },
+            [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)],
             "Target");
 
         var inputBatch = new TensorDataStruct(modelInputDef,
-            new Dictionary<string, IData> { { "input", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }) } });
+            new Dictionary<string, IData> { { "input", TensorData([4L], [1f, 2f, 3f, 4f]) } });
         var targetBatch = new TensorDataStruct(targetDef,
-            new Dictionary<string, IData> { { "targets", TensorData([4L], new float[] { 0f, 0f, 0f, 0f }) } });
+            new Dictionary<string, IData> { { "targets", TensorData([4L], [0f, 0f, 0f, 0f]) } });
 
         // Drive Train: covers the per-epoch / per-batch loop and the
         // TrainingResult constructor + EpochLosses / FinalCheckpoint getters.
-        var trainResult = rig.Train(initial, new[] { inputBatch }, new[] { targetBatch }, numEpochs: 1);
+        var trainResult = rig.Train(initial, [inputBatch], [targetBatch], numEpochs: 1);
         Assert.Single(trainResult.EpochLosses);
         Assert.NotNull(trainResult.FinalCheckpoint);
 
@@ -732,7 +1043,7 @@ public class TrainingRigCoverageTests
         var sample = new NamedModelParam[]
         {
             new TensorDataModelParam("input", ModelParamType.InputParam,
-                TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+                TensorData([4L], [1f, 2f, 3f, 4f])),
         };
 
         var rig = TrainingRig.FromScratch(
@@ -746,13 +1057,13 @@ public class TrainingRigCoverageTests
 
         // After one step the counter state must have advanced to 2 (round-trip through outputs).
         var modelInputDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32) }, "ModelInput");
+            [new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32)], "ModelInput");
         var targetDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32) }, "Target");
+            [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)], "Target");
         var inputBatch = new TensorDataStruct(modelInputDef,
-            new Dictionary<string, IData> { { "input", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }) } });
+            new Dictionary<string, IData> { { "input", TensorData([4L], [1f, 2f, 3f, 4f]) } });
         var targetBatch = new TensorDataStruct(targetDef,
-            new Dictionary<string, IData> { { "targets", TensorData([4L], new float[] { 0f, 0f, 0f, 0f }) } });
+            new Dictionary<string, IData> { { "targets", TensorData([4L], [0f, 0f, 0f, 0f]) } });
 
         var step = rig.TrainStep(initial, inputBatch, targetBatch);
         Assert.All(FlattenStruct(step.OptimizerState), v => Assert.Equal(2f, v));
@@ -782,7 +1093,7 @@ public class TrainingRigCoverageTests
         var sample = new NamedModelParam[]
         {
             new TensorDataModelParam("input", ModelParamType.InputParam,
-                TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+                TensorData([4L], [1f, 2f, 3f, 4f])),
         };
         TrainingRig AdamRig() => TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
@@ -796,13 +1107,13 @@ public class TrainingRigCoverageTests
         Assert.Equal(0, stepField.Rank);   // the timestep is a rank-0 scalar, not param-shaped
 
         var modelInputDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32) }, "ModelInput");
+            [new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32)], "ModelInput");
         var targetDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32) }, "Target");
+            [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)], "Target");
         var inputBatch = new TensorDataStruct(modelInputDef,
-            new Dictionary<string, IData> { { "input", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }) } });
+            new Dictionary<string, IData> { { "input", TensorData([4L], [1f, 2f, 3f, 4f]) } });
         var targetBatch = new TensorDataStruct(targetDef,
-            new Dictionary<string, IData> { { "targets", TensorData([4L], new float[] { 2f, 4f, 6f, 8f }) } });
+            new Dictionary<string, IData> { { "targets", TensorData([4L], [2f, 4f, 6f, 8f]) } });
 
         var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < 2; i++)
@@ -854,7 +1165,7 @@ public class TrainingRigCoverageTests
         var sample = new NamedModelParam[]
         {
             new TensorDataModelParam("input", ModelParamType.InputParam,
-                TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+                TensorData([4L], [1f, 2f, 3f, 4f])),
         };
         TrainingRig AdamRig() => TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
@@ -862,13 +1173,13 @@ public class TrainingRigCoverageTests
             new AdamWOptimizerHyperparameters { LearningRate = 0.1f });
 
         var modelInputDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32) }, "ModelInput");
+            [new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32)], "ModelInput");
         var targetDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32) }, "Target");
+            [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)], "Target");
         var inputBatch = new TensorDataStruct(modelInputDef,
-            new Dictionary<string, IData> { { "input", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }) } });
+            new Dictionary<string, IData> { { "input", TensorData([4L], [1f, 2f, 3f, 4f]) } });
         var targetBatch = new TensorDataStruct(targetDef,
-            new Dictionary<string, IData> { { "targets", TensorData([4L], new float[] { 2f, 4f, 6f, 8f }) } });
+            new Dictionary<string, IData> { { "targets", TensorData([4L], [2f, 4f, 6f, 8f]) } });
 
         var path = Path.Combine(Path.GetTempPath(), $"shrk_ckpt_{Guid.NewGuid():N}.safetensors");
         try
@@ -940,7 +1251,7 @@ public class TrainingRigCoverageTests
             SGDOptimizer.ComputationGraph,
             [
                 new TensorDataModelParam("input", ModelParamType.InputParam,
-                    TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+                    TensorData([4L], [1f, 2f, 3f, 4f])),
             ],
             0.1f);
         var path = Path.Combine(Path.GetTempPath(), $"shrk_ckpt_trunc_{Guid.NewGuid():N}.safetensors");
@@ -977,7 +1288,7 @@ public class TrainingRigCoverageTests
             new NamedModelParam[]
             {
                 new TensorDataModelParam("input", ModelParamType.InputParam,
-                    TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+                    TensorData([4L], [1f, 2f, 3f, 4f])),
             },
             0.1f);
         var ckptV1 = rig.CreateInitialCheckpoint();                       // Step 0
@@ -1040,7 +1351,7 @@ public class TrainingRigCoverageTests
             new NamedModelParam[]
             {
                 new TensorDataModelParam("input", ModelParamType.InputParam,
-                    TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+                    TensorData([4L], [1f, 2f, 3f, 4f])),
             },
             0.5f, 0.9f);
         var ckpt0 = rig.CreateInitialCheckpoint();
@@ -1132,7 +1443,7 @@ public class TrainingRigCoverageTests
         var sample = new NamedModelParam[]
         {
             new TensorDataModelParam("input", ModelParamType.InputParam,
-                TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+                TensorData([4L], [1f, 2f, 3f, 4f])),
         };
         // SGD's learning rate is its sole hyperparameter. Hyperparameter.Runtime marks it as a
         // schedule-less runtime input so we can inject explicit values and prove the LR is live.
@@ -1141,19 +1452,19 @@ public class TrainingRigCoverageTests
             sample, new SGDOptimizerHyperparameters { LearningRate = Hyperparameter.Runtime() });
 
         Assert.Single(rig.HyperparameterStructDef.Fields);
-        Assert.Equal(new[] { 0 }, rig.DynamicHyperparameterIndices);
+        Assert.Equal((int[])[0], rig.DynamicHyperparameterIndices);
         // Real hyperparameter names now flow end-to-end (not "hyperparam_0").
-        Assert.Equal(new[] { "learningRate" }, rig.DynamicHyperparameterNames);
+        Assert.Equal((string[])["learningRate"], rig.DynamicHyperparameterNames);
         Assert.Equal("learningRate", rig.HyperparameterStructDef.Fields[0].Name);
 
         var modelInputDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32) }, "ModelInput");
+            [new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32)], "ModelInput");
         var targetDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32) }, "Target");
+            [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)], "Target");
         var inputBatch = new TensorDataStruct(modelInputDef,
-            new Dictionary<string, IData> { { "input", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }) } });
+            new Dictionary<string, IData> { { "input", TensorData([4L], [1f, 2f, 3f, 4f]) } });
         var targetBatch = new TensorDataStruct(targetDef,
-            new Dictionary<string, IData> { { "targets", TensorData([4L], new float[] { 0f, 0f, 0f, 0f }) } });
+            new Dictionary<string, IData> { { "targets", TensorData([4L], [0f, 0f, 0f, 0f]) } });
 
         var initial = rig.CreateInitialCheckpoint();
         Assert.Equal(0, initial.Step);
@@ -1278,16 +1589,16 @@ public class TrainingRigCoverageTests
         var sample = new NamedModelParam[]
         {
             new TensorDataModelParam("input", ModelParamType.InputParam,
-                TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+                TensorData([4L], [1f, 2f, 3f, 4f])),
         };
         var modelInputDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32) }, "ModelInput");
+            [new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32)], "ModelInput");
         var targetDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32) }, "Target");
+            [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)], "Target");
         var inputBatch = new TensorDataStruct(modelInputDef,
-            new Dictionary<string, IData> { { "input", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }) } });
+            new Dictionary<string, IData> { { "input", TensorData([4L], [1f, 2f, 3f, 4f]) } });
         var targetBatch = new TensorDataStruct(targetDef,
-            new Dictionary<string, IData> { { "targets", TensorData([4L], new float[] { 0f, 0f, 0f, 0f }) } });
+            new Dictionary<string, IData> { { "targets", TensorData([4L], [0f, 0f, 0f, 0f]) } });
 
         float FinalWeight(Schedule lr)
         {
@@ -1321,7 +1632,7 @@ public class TrainingRigCoverageTests
                 LearningRate = Hyperparameter.Runtime(),
                 MomentumCoeff = Hyperparameter.Runtime(),
             });
-        Assert.Equal(new[] { "learningRate", "momentumCoeff" }, momRig.DynamicHyperparameterNames.ToArray());
+        Assert.Equal((string[])["learningRate", "momentumCoeff"], momRig.DynamicHyperparameterNames.ToArray());
         var momStep = momRig.TrainStep(momRig.CreateInitialCheckpoint(),
             momRig.MakeHyperparameters(("momentumCoeff", 0.9f), ("learningRate", 0.1f)),  // order-independent
             inputBatch, targetBatch);
@@ -1338,16 +1649,16 @@ public class TrainingRigCoverageTests
         var sample = new NamedModelParam[]
         {
             new TensorDataModelParam("input", ModelParamType.InputParam,
-                TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
+                TensorData([4L], [1f, 2f, 3f, 4f])),
         };
         var modelInputDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32) }, "ModelInput");
+            [new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32)], "ModelInput");
         var targetDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32) }, "Target");
+            [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)], "Target");
         var input = new TensorDataStruct(modelInputDef,
-            new Dictionary<string, IData> { { "input", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }) } });
+            new Dictionary<string, IData> { { "input", TensorData([4L], [1f, 2f, 3f, 4f]) } });
         var target = new TensorDataStruct(targetDef,
-            new Dictionary<string, IData> { { "targets", TensorData([4L], new float[] { 0f, 0f, 0f, 0f }) } });
+            new Dictionary<string, IData> { { "targets", TensorData([4L], [0f, 0f, 0f, 0f]) } });
         return (sample, input, target);
     }
 
@@ -1562,7 +1873,7 @@ public class TrainingRigCoverageTests
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             sample, new SGDOptimizerHyperparameters { LearningRate = Hyperparameter.Scheduled(schedulerModule) });
 
-        foreach (var impure in new[] { ParamScheduler.ComputationGraph, StateScheduler.ComputationGraph, RngScheduler.ComputationGraph })
+        foreach (var impure in (ComputationGraph[])[ParamScheduler.ComputationGraph, StateScheduler.ComputationGraph, RngScheduler.ComputationGraph])
         {
             var ex = Assert.Throws<ArgumentException>(() => Build(impure));
             Assert.Contains("pure", ex.Message);
@@ -1636,7 +1947,7 @@ public class TrainingRigCoverageTests
         string wName = modRig.TrainableParamStructDef.Fields[0].Name;
 
         // Several (step, epoch) points — epoch varies independently of step (host-owned).
-        foreach (var (s, e) in new[] { (0L, 0L), (3L, 1L), (7L, 4L) })
+        foreach (var (s, e) in ((long, long)[])[(0L, 0L), (3L, 1L), (7L, 4L)])
         {
             var seed = modRig.CreateInitialCheckpoint();
             var atCkpt = new TrainingCheckpoint(seed.TrainableParams, seed.ModelState, seed.OptimizerState, step: s, epoch: e);
@@ -1701,7 +2012,7 @@ public class TrainingRigCoverageTests
         Assert.Throws<System.InvalidOperationException>(() => moduleGraph.GetConcreteModelParamInfos());
         Assert.Throws<System.InvalidOperationException>(() => moduleGraph.InitializeTrainableParams());
 
-        var sample = TensorData([4L], new float[] { 1f, 2f, 3f, 4f });
+        var sample = TensorData([4L], [1f, 2f, 3f, 4f]);
         var arch = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([sample]));
         Assert.NotEmpty(arch.GetConcreteModelParamInfos().ParamInfos);
         Assert.NotEmpty(arch.InitializeTrainableParams().ModelParams);
@@ -1819,7 +2130,7 @@ public class TrainingRigCoverageTests
     public void TestFromScratchModelParamListAndStructDefsCoverage()
     {
         var modelGraph   = ScalarMultiplyModel.ComputationGraph;
-        var exampleInput = TensorData([4L], new float[] { 1f, 2f, 3f, 4f });
+        var exampleInput = TensorData([4L], [1f, 2f, 3f, 4f]);
 
         var rig = TrainingRig.FromScratch(
             modelGraph, Losses.L2Loss, Optimizers.SGD,
@@ -2207,7 +2518,7 @@ public class TrainingRigCoverageTests
     public void TestToInferenceModelCoverage()
     {
         var modelGraph   = ScalarMultiplyModel.ComputationGraph;
-        var exampleInput = TensorData([4L], new float[] { 1f, 2f, 3f, 4f });
+        var exampleInput = TensorData([4L], [1f, 2f, 3f, 4f]);
 
         var rig    = TrainingRig.FromScratch(
             modelGraph, Losses.L2Loss, Optimizers.SGD,
@@ -2222,7 +2533,7 @@ public class TrainingRigCoverageTests
         var concrete       = result.FinalCheckpoint.ToInferenceModel();
         Assert.NotNull(concrete);
 
-        var inferenceInput = TensorData([4L], new float[] { 5f, 6f, 7f, 8f });
+        var inferenceInput = TensorData([4L], [5f, 6f, 7f, 8f]);
         var outputs = ComputeContext.Default.Execute(concrete, inferenceInput);
         Assert.Single(outputs);
         var output = outputs[0].ToTensorData<float32>();
@@ -2284,7 +2595,7 @@ public class TrainingRigCoverageTests
         var sample = new NamedModelParam[]
         {
             new TensorDataModelParam("input", ModelParamType.InputParam,
-                TensorData(ScalarInputShape, new float[] { 1f, 2f, 3f, 4f })),
+                TensorData(ScalarInputShape, [1f, 2f, 3f, 4f])),
         };
         var rig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
@@ -2296,9 +2607,9 @@ public class TrainingRigCoverageTests
         var outDef = new TensorStructDef(
             [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)], "Target");
         var inBatch = new TensorDataStruct(inDef,
-            new Dictionary<string, IData> { { "input", TensorData(ScalarInputShape, new float[] { 1f, 2f, 3f, 4f }) } });
+            new Dictionary<string, IData> { { "input", TensorData(ScalarInputShape, [1f, 2f, 3f, 4f]) } });
         var outBatch = new TensorDataStruct(outDef,
-            new Dictionary<string, IData> { { "targets", TensorData(ScalarInputShape, new float[] { 2f, 4f, 6f, 8f }) } });
+            new Dictionary<string, IData> { { "targets", TensorData(ScalarInputShape, [2f, 4f, 6f, 8f]) } });
 
         var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < steps; i++)
@@ -2343,10 +2654,16 @@ public class TrainingRigCoverageTests
                         SkptFileFormat.OptimizerStateEntryPath,
                         SkptFileFormat.TrainableEntryPath,
                         SkptFileFormat.ModelEntryPath,
+                        // Rig constituents (#115): the concrete architecture, loss, and optimizer graphs
+                        // (no scheduler entry — this rig has no scheduled hyperparameter).
+                        SkptFileFormat.ArchEntryPath,
+                        SkptFileFormat.LossEntryPath,
+                        SkptFileFormat.OptimizerEntryPath,
                     }.OrderBy(n => n, StringComparer.Ordinal),
                     names);
                 Assert.All(zip.Entries, e => Assert.Equal(e.Length, e.CompressedLength));   // all STORED
                 Assert.DoesNotContain(SkptFileFormat.ModelStateEntryPath, names);           // stateless → no entry
+                Assert.DoesNotContain(SkptFileFormat.SchedulerEntryPath, names);            // no scheduled hyper
             }
 
             // The manifest records the per-kind data entries and the step in config.json.
@@ -2382,13 +2699,156 @@ public class TrainingRigCoverageTests
             // that executes identically to one built straight from the checkpoint's trained weights.
             var inferenceModel = Persistence.Load(path);
             Assert.Equal(GraphKind.ConcreteModel, inferenceModel.Kind);
-            var probe = TensorData(ScalarInputShape, new float[] { 5f, 6f, 7f, 8f });
+            var probe = TensorData(ScalarInputShape, [5f, 6f, 7f, 8f]);
             var fromCkpt = ckpt.ToInferenceModel();
             var loadedOut = ComputeContext.Default.Execute(inferenceModel, probe)[0].ToTensorData().As<float32>().AccessMemory().ToArray();
             var ckptOut = ComputeContext.Default.Execute(fromCkpt, probe)[0].ToTensorData().As<float32>().AccessMemory().ToArray();
             Assert.Equal(ckptOut, loadedOut);
         }
         finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    /// <summary>
+    /// From-file-alone rig reconstruction (#115): a mid-training checkpoint saves to a native .skpt
+    /// carrying the rig's constituents (concrete architecture, loss, optimizer), and
+    /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?)"/> rebuilds the WHOLE
+    /// rig — trainstep and all — from the file alone, with NO host-supplied source graphs. The
+    /// reconstructed rig's resumed checkpoint restores the step, trainable params and optimizer state
+    /// bit-identically; a resumed TrainStep reproduces the pre-save trajectory exactly; and the
+    /// reconstructed rig extracts the same inference model.
+    /// </summary>
+    [Fact]
+    [Trait("Purpose", "Coverage")]
+    [Trait("Domain", "Training")]
+    public void TestTrainingRigLoadFromFileAloneCoverage()
+    {
+        var (rigA, ckpt, inBatch, outBatch) = BuildTrainedAdamRig(steps: 3);
+        var reference = rigA.TrainStep(ckpt, inBatch, outBatch);
+
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_rigload_{Guid.NewGuid():N}.skpt");
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+
+            // Rebuild the whole rig from the file alone — no ScalarMultiplyModel / L2Loss / AdamWOptimizer
+            // graphs are supplied here, as a fresh process resuming a run would not have them.
+            var (rig2, loaded) = TrainingRig.Load(path);
+            Assert.Same(rig2, loaded.Rig);
+            Assert.Equal(ckpt.Step, loaded.Step);
+            Assert.Equal(FlattenStruct(ckpt.TrainableParams), FlattenStruct(loaded.TrainableParams));
+            Assert.Equal(FlattenStruct(ckpt.OptimizerState), FlattenStruct(loaded.OptimizerState));
+
+            // The reconstructed rig resumes exactly (same trainstep math, same restored step).
+            var resumed = rig2.TrainStep(loaded, inBatch, outBatch);
+            Assert.Equal(reference.Step, resumed.Step);
+            Assert.Equal(reference.Loss!.Value, resumed.Loss!.Value);
+            Assert.Equal(FlattenStruct(reference.TrainableParams), FlattenStruct(resumed.TrainableParams));
+            Assert.Equal(FlattenStruct(reference.OptimizerState), FlattenStruct(resumed.OptimizerState));
+
+            // The reconstructed rig extracts the same inference model as the original checkpoint.
+            var probe = TensorData(ScalarInputShape, [5f, 6f, 7f, 8f]);
+            var fromReconstructed = loaded.ToInferenceModel();
+            var fromOriginal = ckpt.ToInferenceModel();
+            var a = ComputeContext.Default.Execute(fromReconstructed, probe)[0].ToTensorData().As<float32>().AccessMemory().ToArray();
+            var b = ComputeContext.Default.Execute(fromOriginal, probe)[0].ToTensorData().As<float32>().AccessMemory().ToArray();
+            Assert.Equal(b, a);
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    /// <summary>
+    /// From-file rig reconstruction folds in the scheduler constituent (#106): a rig with a scheduled
+    /// learning rate composes its per-hyperparameter scheduler graph into the persisted
+    /// <c>scheduler</c> model entry, and <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?)"/>
+    /// splits it back to a scheduled hyperparameter binding. The reconstructed rig resumes at the saved
+    /// step and reproduces the pre-save trajectory exactly — the scheduler math (which reads the step
+    /// counter) survives the round-trip.
+    /// </summary>
+    [Fact]
+    [Trait("Purpose", "Coverage")]
+    [Trait("Domain", "Training")]
+    public void TestTrainingRigLoadReconstructsSchedulerCoverage()
+    {
+        var sample = new NamedModelParam[]
+        {
+            new TensorDataModelParam("input", ModelParamType.InputParam,
+                TensorData(ScalarInputShape, [1f, 2f, 3f, 4f])),
+        };
+        TrainingRig SchedRig() => TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            AdamWOptimizer.ComputationGraph, sample,
+            new AdamWOptimizerHyperparameters { LearningRate = Shorokoo.Core.Training.Schedules.Cosine(0.1f, 50) });
+
+        var inDef = new TensorStructDef(
+            [new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32)], "ModelInput");
+        var outDef = new TensorStructDef(
+            [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)], "Target");
+        var inBatch = new TensorDataStruct(inDef,
+            new Dictionary<string, IData> { { "input", TensorData(ScalarInputShape, [1f, 2f, 3f, 4f]) } });
+        var outBatch = new TensorDataStruct(outDef,
+            new Dictionary<string, IData> { { "targets", TensorData(ScalarInputShape, [2f, 4f, 6f, 8f]) } });
+
+        var rigA = SchedRig();
+        Assert.Equal(HyperparameterKind.Scheduled, rigA.Hyperparameters[0].Kind);
+        var ckpt = rigA.CreateInitialCheckpoint();
+        for (int i = 0; i < 5; i++)
+            ckpt = rigA.TrainStep(ckpt, inBatch, outBatch);
+        var reference = rigA.TrainStep(ckpt, inBatch, outBatch);
+
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_rigload_sched_{Guid.NewGuid():N}.skpt");
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+
+            // The composed scheduler is persisted as its own constituent model entry (#106).
+            using (var zip = System.IO.Compression.ZipFile.OpenRead(path))
+                Assert.Contains(SkptFileFormat.SchedulerEntryPath, zip.Entries.Select(e => e.FullName));
+
+            var (rig2, loaded) = TrainingRig.Load(path);
+            // The built-in schedule persisted and split back as a scheduler MODULE binding.
+            Assert.Equal(HyperparameterKind.Scheduled, rig2.Hyperparameters[0].Kind);
+            Assert.NotNull(rig2.Hyperparameters[0].AsSchedulerModule);
+            Assert.Equal(ckpt.Step, loaded.Step);
+
+            var resumed = rig2.TrainStep(loaded, inBatch, outBatch);
+            Assert.Equal(reference.Step, resumed.Step);
+            Assert.Equal(reference.Loss!.Value, resumed.Loss!.Value);
+            Assert.Equal(FlattenStruct(reference.TrainableParams), FlattenStruct(resumed.TrainableParams));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    /// <summary>
+    /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?)"/> fails loudly when the
+    /// file carries no rig constituents to rebuild from: a legacy flat safetensors checkpoint (not a
+    /// .skpt container at all), and an inference-only .skpt (no training/rig block). The from-file path
+    /// is only for a training .skpt written with the rig; otherwise the host rebuilds the rig and uses
+    /// <see cref="TrainingRig.LoadCheckpoint"/>.
+    /// </summary>
+    [Fact]
+    [Trait("Purpose", "Coverage")]
+    [Trait("Domain", "Training")]
+    public void TestTrainingRigLoadFailsWithoutConstituentsCoverage()
+    {
+        var (_, ckpt, _, _) = BuildTrainedAdamRig(steps: 1);
+
+        var flatPath = Path.Combine(Path.GetTempPath(), $"shrk_rigload_flat_{Guid.NewGuid():N}.safetensors");
+        var infPath = Path.Combine(Path.GetTempPath(), $"shrk_rigload_inf_{Guid.NewGuid():N}.skpt");
+        try
+        {
+            // Legacy flat checkpoint: not a .skpt container at all.
+            ckpt.Save(flatPath);
+            Assert.ThrowsAny<Exception>(() => TrainingRig.Load(flatPath));
+
+            // Inference-only .skpt: a container with a model but no training/rig block.
+            Persistence.From(ckpt.ToInferenceModel()).WithModel().WithWeights().Save(infPath);
+            Assert.Throws<System.IO.InvalidDataException>(() => TrainingRig.Load(infPath));
+        }
+        finally
+        {
+            if (File.Exists(flatPath)) File.Delete(flatPath);
+            if (File.Exists(infPath)) File.Delete(infPath);
+        }
     }
 
     /// <summary>Reads one archive entry's bytes through the BCL zip reader (independent of the
@@ -2400,6 +2860,20 @@ public class TrainingRigCoverageTests
         using var buf = new MemoryStream();
         s.CopyTo(buf);
         return buf.ToArray();
+    }
+
+    /// <summary>Index of the first occurrence of <paramref name="needle"/> in <paramref name="haystack"/>,
+    /// or -1.</summary>
+    private static int IndexOfSubsequence(byte[] haystack, byte[] needle)
+    {
+        if (needle.Length == 0 || haystack.Length < needle.Length) return -1;
+        for (int i = 0; i <= haystack.Length - needle.Length; i++)
+        {
+            int j = 0;
+            while (j < needle.Length && haystack[i + j] == needle[j]) j++;
+            if (j == needle.Length) return i;
+        }
+        return -1;
     }
 
     /// <summary>
@@ -2521,10 +2995,16 @@ public class TrainingRigCoverageTests
                 0.5f, 0.9f);
             Assert.ThrowsAny<Exception>(() => bnRig.LoadCheckpoint(path));
 
-            // Tamper: flip a byte inside a data entry → SHA-256 mismatch on load.
+            // Tamper: flip a byte inside the trainable-weights data entry (a SHA-256-checked entry the
+            // load reads) → SHA-256 mismatch on load. The entry is STORED, so its bytes appear verbatim
+            // in the container; locate them so the corruption is deterministic regardless of layout.
             var bytes = File.ReadAllBytes(path);
-            int idx = bytes.Length / 2;
-            bytes[idx] ^= 0xFF;
+            var entryBytes = ReadEntryBytesViaBcl(path, SkptFileFormat.TrainableEntryPath);
+            int window = Math.Min(24, entryBytes.Length);
+            var needle = entryBytes.Skip((entryBytes.Length - window) / 2).Take(window).ToArray();
+            int at = IndexOfSubsequence(bytes, needle);
+            Assert.True(at >= 0, "could not locate the trainable-weights entry payload in the container");
+            bytes[at] ^= 0xFF;
             File.WriteAllBytes(tampered, bytes);
             var rig2 = BuildTrainedAdamRig(steps: 0).Rig;
             Assert.ThrowsAny<Exception>(() => rig2.LoadCheckpoint(tampered));
@@ -2859,7 +3339,7 @@ public class TrainingRigCoverageTests
         Assert.Equal(0UL, rig.RngConfig.MasterSeed);
 
         // Every derived rig trains a step to a finite loss on its own re-derived trainstep.
-        foreach (var derived in new[] { lossRig, momRig, schedRig, reseeded })
+        foreach (var derived in (TrainingRig[])[lossRig, momRig, schedRig, reseeded])
         {
             var stepped = derived.TrainStep(derived.CreateInitialCheckpoint(), input, target);
             Assert.True(float.IsFinite(stepped.Loss!.Value));
@@ -2902,7 +3382,7 @@ public class TrainingRigCoverageTests
                 $"extracted param '{f.Key}' did not resolve to a ModelId (composition identity regressed)");
 
         // The extracted model computes with exactly the trainstep's updated tensor for wName.
-        var probe = TensorData([4L], new float[] { 2f, 3f, 4f, 5f });
+        var probe = TensorData([4L], [2f, 3f, 4f, 5f]);
         var outputs = ComputeContext.Default.Execute(inference, probe)[0]
             .ToTensorData<float32>().AccessMemory().ToArray();
         float[] expected = [2f * wUpdated, 3f * wUpdated, 4f * wUpdated, 5f * wUpdated];
@@ -3020,8 +3500,8 @@ public class TrainingRigCoverageTests
     {
         var sample = new NamedModelParam[]
         {
-            new TensorDataModelParam("a", ModelParamType.InputParam, TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
-            new TensorDataModelParam("b", ModelParamType.InputParam, TensorData([4L], new float[] { 5f, 6f, 7f, 8f })),
+            new TensorDataModelParam("a", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f])),
+            new TensorDataModelParam("b", ModelParamType.InputParam, TensorData([4L], [5f, 6f, 7f, 8f])),
         };
         var rig = TrainingRig.FromScratch(
             TwoInputSumModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
@@ -3032,8 +3512,8 @@ public class TrainingRigCoverageTests
         var inference = ckpt.ToInferenceModel();              // binds weights into the retained arch (concretized at BOTH [4] inputs)
         Assert.Equal(GraphKind.ConcreteModel, inference.Kind);
 
-        var a = TensorData([4L], new float[] { 1f, 2f, 3f, 4f });
-        var b = TensorData([4L], new float[] { 10f, 20f, 30f, 40f });
+        var a = TensorData([4L], [1f, 2f, 3f, 4f]);
+        var b = TensorData([4L], [10f, 20f, 30f, 40f]);
         var outputs = ComputeContext.Default.Execute(inference, a, b)[0]
             .ToTensorData<float32>().AccessMemory().ToArray();
         float[] expected = [11f, 22f, 33f, 44f];              // a + b
@@ -3088,8 +3568,10 @@ public class TrainingRigCoverageTests
     /// writes the trainable params (and model state), dropping optimizer state and counters. Reloading
     /// against a fresh rig restores the trainable params, fills the dropped optimizer state from the
     /// rig's initial values (so it is the init, not the trained state), and reads counters as 0. The
-    /// reloaded checkpoint carries the rig. Requesting the (unimplemented) TrainingRig component throws
-    /// a clear <see cref="NotSupportedException"/> naming #115.
+    /// reloaded checkpoint carries the rig. The flat format cannot carry the rig constituents, so
+    /// requesting the TrainingRig component on a flat save throws a clear <see cref="NotSupportedException"/>
+    /// pointing to the native <c>.skpt</c> / <see cref="TrainingRig.Load"/> path (#115); and the
+    /// rig-supplied flat load likewise redirects a TrainingRig request to <see cref="TrainingRig.Load"/>.
     /// </summary>
     [Fact]
     public void TestSaveLoadComponentsSubsetCoverage()
@@ -3114,13 +3596,14 @@ public class TrainingRigCoverageTests
             // Optimizer state was not saved ⇒ filled from the rig's initial values (not the trained ones).
             Assert.Equal(initialOpt, FlattenStruct(loaded.OptimizerState));
 
-            // Requesting the TrainingRig component is a clear NotSupportedException (#115).
+            // The flat format cannot carry the rig constituents, so requesting the TrainingRig
+            // component on a flat save throws, pointing to the .skpt / TrainingRig.Load path (#115).
             var ex = Assert.Throws<NotSupportedException>(
                 () => trained.Save(path, CheckpointComponents.All));
             Assert.Contains("#115", ex.Message);
 
-            // Symmetric on load: explicitly asking for the TrainingRig component (directly or via All)
-            // throws the same #115 NotSupportedException — the file never stores the rig's constituents.
+            // Symmetric on the rig-supplied load: asking for the TrainingRig component (directly or via
+            // All) throws, redirecting to the from-file-alone TrainingRig.Load path (#115).
             var loadRigEx = Assert.Throws<NotSupportedException>(
                 () => rigB.LoadCheckpoint(path, CheckpointComponents.TrainingRig));
             Assert.Contains("#115", loadRigEx.Message);
@@ -3135,7 +3618,8 @@ public class TrainingRigCoverageTests
     /// <see cref="CheckpointComponents.InferenceState"/> — the trainable params restore from the file,
     /// but the dropped optimizer state fills from the rig's initial values (not the trained ones), the
     /// counters read as 0, and the loss reads back <c>null</c> (its own Loss component was dropped too).
-    /// Requesting the (unimplemented) TrainingRig component throws a #115 <see cref="NotSupportedException"/>.
+    /// The rig-supplied load redirects a TrainingRig-component request to the from-file-alone
+    /// <see cref="TrainingRig.Load"/> path (#115) — a rig was already supplied here.
     /// </summary>
     [Fact]
     public void TestSkptSaveLoadComponentsSubsetCoverage()
@@ -3162,7 +3646,9 @@ public class TrainingRigCoverageTests
             // Optimizer state was filtered out ⇒ filled from the rig's initial values, not the trained ones.
             Assert.Equal(initialOpt, FlattenStruct(loaded.OptimizerState));
 
-            // Symmetric with the flat path: requesting the TrainingRig component throws a #115 error.
+            // The rig-supplied load redirects a TrainingRig-component request (directly or via All) to
+            // the from-file-alone TrainingRig.Load path (#115); the constituents ARE in this .skpt, but
+            // this path already has a rig, so it loads state only.
             var ex = Assert.Throws<NotSupportedException>(
                 () => rigB.LoadCheckpoint(path, CheckpointComponents.TrainingRig));
             Assert.Contains("#115", ex.Message);

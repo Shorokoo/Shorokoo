@@ -152,7 +152,143 @@ namespace Shorokoo.Core.Utils
         [JsonPropertyName("kinds")]
         public Dictionary<string, string>? Kinds { get; set; }
 
+        /// <summary>The serialized <see cref="Shorokoo.TrainingRig"/> constituents (issue #115, folding
+        /// in #106): enough to rebuild the whole rig — <c>trainstep</c> and all — from the checkpoint
+        /// file alone, with no host-supplied source graphs. Present on every training <c>.skpt</c> this
+        /// build writes; absent (⇒ <c>null</c>) on a file written before #115, which resumes only by the
+        /// host rebuilding the rig from the same source graphs. Backs the
+        /// <see cref="Shorokoo.CheckpointComponents.TrainingRig"/> flag and the static
+        /// <see cref="Shorokoo.TrainingRig.Load(string, Shorokoo.Runtime.ComputeContext?, Shorokoo.Runtime.ComputeContext?)"/>.</summary>
+        [JsonPropertyName("rig")]
+        public SkptRigInfo? Rig { get; set; }
+
         /// <summary>Round-trips training fields added by newer minor revisions of the format.</summary>
+        [JsonExtensionData]
+        public Dictionary<string, JsonElement>? AdditionalFields { get; set; }
+    }
+
+    /// <summary>
+    /// One optimizer hyperparameter's persisted binding (issue #115 / #106), in the optimizer's
+    /// declared order. <see cref="Kind"/> decides reconstruction: <c>"baked"</c> reads its value from
+    /// <see cref="SkptRigInfo.BakedHypers"/> (keyed by <see cref="Name"/>); <c>"runtime"</c> is
+    /// rebuilt as a host-supplied runtime hyperparameter; <c>"scheduled"</c> takes the scheduler
+    /// model's output named <see cref="Name"/> as its <c>counters → value</c> graph.
+    /// </summary>
+    public sealed class SkptRigHyperparameter
+    {
+        /// <summary>The hyperparameter's name (the optimizer's declared name, or <c>hyperparam_{i}</c>).</summary>
+        [JsonPropertyName("name")]
+        public string? Name { get; set; }
+
+        /// <summary>The source kind: <c>"baked"</c>, <c>"scheduled"</c>, or <c>"runtime"</c>.</summary>
+        [JsonPropertyName("kind")]
+        public string? Kind { get; set; }
+
+        /// <summary>Round-trips fields added by newer minor revisions of the format.</summary>
+        [JsonExtensionData]
+        public Dictionary<string, JsonElement>? AdditionalFields { get; set; }
+    }
+
+    /// <summary>One <see cref="Shorokoo.RngConfig"/> per-stream override (issue #115).</summary>
+    public sealed class SkptRngOverride
+    {
+        /// <summary>The stream collection: <c>"Params"</c> or <c>"Runtime"</c>.</summary>
+        [JsonPropertyName("collection")]
+        public string? Collection { get; set; }
+
+        /// <summary>The consumer's absolute ModelId path.</summary>
+        [JsonPropertyName("path")]
+        public int[]? Path { get; set; }
+
+        /// <summary>The override seed.</summary>
+        [JsonPropertyName("seed")]
+        public ulong Seed { get; set; }
+
+        /// <summary>Round-trips fields added by newer minor revisions of the format.</summary>
+        [JsonExtensionData]
+        public Dictionary<string, JsonElement>? AdditionalFields { get; set; }
+    }
+
+    /// <summary>The <see cref="Shorokoo.RngConfig"/> a rig was built with (issue #115), recorded so a
+    /// reconstructed rig reproduces the same keyed initialization and runtime randomness.</summary>
+    public sealed class SkptRngConfigInfo
+    {
+        /// <summary>The master seed folded into every non-overridden stream key.</summary>
+        [JsonPropertyName("masterSeed")]
+        public ulong MasterSeed { get; set; }
+
+        /// <summary>Explicit init-collection sub-master, or <c>null</c> to derive from the master seed.</summary>
+        [JsonPropertyName("initMasterSeed")]
+        public ulong? InitMasterSeed { get; set; }
+
+        /// <summary>Explicit runtime-collection sub-master, or <c>null</c> to derive from the master seed.</summary>
+        [JsonPropertyName("runMasterSeed")]
+        public ulong? RunMasterSeed { get; set; }
+
+        /// <summary>The bit-generator algorithm name (the <see cref="Shorokoo.RngAlgorithm"/> enum name).</summary>
+        [JsonPropertyName("algorithm")]
+        public string? Algorithm { get; set; }
+
+        /// <summary>Whether all streams share one master-derived key (tied init; test/debug only).</summary>
+        [JsonPropertyName("sharedKey")]
+        public bool SharedKey { get; set; }
+
+        /// <summary>Per-stream overrides; omitted when none.</summary>
+        [JsonPropertyName("overrides")]
+        public List<SkptRngOverride>? Overrides { get; set; }
+
+        /// <summary>Round-trips fields added by newer minor revisions of the format.</summary>
+        [JsonExtensionData]
+        public Dictionary<string, JsonElement>? AdditionalFields { get; set; }
+    }
+
+    /// <summary>
+    /// The serialized training-rig constituents (issue #115, folding in #106): the model registry
+    /// keys of the concrete architecture, loss, optimizer, and (optional) composed scheduler model
+    /// entries, plus the hyperparameter bindings and the RNG config — the non-graph part of the recipe.
+    /// Model-input shapes are NOT recorded here: the arch's <c>MODEL_TENSOR_INPUT</c> nodes serialize as
+    /// NodeProtos in the native <c>.srk</c> dialect and carry the shape themselves, so the arch is
+    /// self-describing. Together with those <c>models/</c> entries this is enough to rebuild the rig from
+    /// the file alone. Keys are add-only across minor revisions.
+    /// </summary>
+    public sealed class SkptRigInfo
+    {
+        /// <summary>Rig-block version; <see cref="SkptFileFormat.TrainingRigVersion"/> for files written today.
+        /// 0 means the field was absent (a malformed block).</summary>
+        [JsonPropertyName("rigVersion")]
+        public int RigVersion { get; set; }
+
+        /// <summary>Model-registry key of the rig's concrete-architecture entry.</summary>
+        [JsonPropertyName("archModel")]
+        public string? ArchModel { get; set; }
+
+        /// <summary>Model-registry key of the loss constituent entry.</summary>
+        [JsonPropertyName("lossModel")]
+        public string? LossModel { get; set; }
+
+        /// <summary>Model-registry key of the optimizer constituent entry.</summary>
+        [JsonPropertyName("optimizerModel")]
+        public string? OptimizerModel { get; set; }
+
+        /// <summary>Model-registry key of the composed scheduler entry, or <c>null</c> when the rig has
+        /// no scheduled hyperparameter (nothing to compose).</summary>
+        [JsonPropertyName("schedulerModel")]
+        public string? SchedulerModel { get; set; }
+
+        /// <summary>The hyperparameter bindings, in the optimizer's declared order.</summary>
+        [JsonPropertyName("hyperparameters")]
+        public List<SkptRigHyperparameter>? Hyperparameters { get; set; }
+
+        /// <summary>The values of the baked hyperparameters, keyed by name. A scheduled or runtime
+        /// hyperparameter is absent (its value is a graph / host-supplied).</summary>
+        [JsonPropertyName("bakedHypers")]
+        public Dictionary<string, float>? BakedHypers { get; set; }
+
+        /// <summary>The RNG config the rig was built with.</summary>
+        [JsonPropertyName("rng")]
+        public SkptRngConfigInfo? Rng { get; set; }
+
+        /// <summary>Round-trips fields added by newer minor revisions of the format.</summary>
         [JsonExtensionData]
         public Dictionary<string, JsonElement>? AdditionalFields { get; set; }
     }
@@ -330,6 +466,53 @@ namespace Shorokoo.Core.Utils
 
         /// <summary>Archive path of the optimizer-state data entry.</summary>
         internal const string OptimizerStateEntryPath = "data/optimizer_state.safetensors";
+
+        // ---- Training-rig constituents (issue #115, folding in #106) ----
+        // A training .skpt also carries the rig's constituent graphs as ordinary models/ entries — the
+        // concrete architecture, loss, optimizer, and (when any hyperparameter is scheduled) a composed
+        // scheduler model — plus the non-graph recipe (input shapes, hyperparameter bindings, RNG
+        // config) in the manifest training block's rig section, so a fresh process rebuilds the whole
+        // rig from the file alone. These sit alongside the "model" inference-model entry, which stays
+        // the one Persistence.Load binds; the constituents carry no tensor mapping (the rig re-derives).
+
+        /// <summary>Current rig-block version (see <see cref="SkptRigInfo"/>). Bumped to 2 when the
+        /// redundant per-input <c>inputShapes</c> field was removed: the arch's <c>MODEL_TENSOR_INPUT</c>
+        /// nodes now serialize as NodeProtos carrying their representative-input shape, so the arch is
+        /// self-describing. A version-1 rig block fails loud (its arch predates node-based inputs).</summary>
+        public const int TrainingRigVersion = 2;
+
+        /// <summary>Model-registry key of the rig's concrete-architecture constituent.</summary>
+        internal const string ArchModelKey = "modelArch";
+
+        /// <summary>Model-registry key of the loss constituent.</summary>
+        internal const string LossModelKey = "loss";
+
+        /// <summary>Model-registry key of the optimizer constituent.</summary>
+        internal const string OptimizerModelKey = "optimizer";
+
+        /// <summary>Model-registry key of the composed scheduler constituent.</summary>
+        internal const string SchedulerModelKey = "scheduler";
+
+        /// <summary>Archive path of the rig's concrete-architecture constituent entry.</summary>
+        internal const string ArchEntryPath = "models/model-arch.srk";
+
+        /// <summary>Archive path of the loss constituent entry.</summary>
+        internal const string LossEntryPath = "models/loss.srk";
+
+        /// <summary>Archive path of the optimizer constituent entry.</summary>
+        internal const string OptimizerEntryPath = "models/optimizer.srk";
+
+        /// <summary>Archive path of the composed scheduler constituent entry.</summary>
+        internal const string SchedulerEntryPath = "models/scheduler.srk";
+
+        /// <summary>Hyperparameter-binding kind name: a fixed value baked into the graph.</summary>
+        internal const string HyperKindBaked = "baked";
+
+        /// <summary>Hyperparameter-binding kind name: driven in-graph by the scheduler constituent.</summary>
+        internal const string HyperKindScheduled = "scheduled";
+
+        /// <summary>Hyperparameter-binding kind name: supplied by the host each step.</summary>
+        internal const string HyperKindRuntime = "runtime";
 
         /// <summary>Well-known user-metadata key: the source-control commit the checkpoint
         /// was produced from (see <see cref="SkptManifest.UserMetadata"/>).</summary>

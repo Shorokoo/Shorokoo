@@ -55,8 +55,15 @@ namespace Shorokoo.Core.Factory
         /// dtype/rank/structure/input-type from the producing input node's
         /// attributes; the structure (Tensor/Optional/Sequence/TensorStruct) is
         /// implied by the input op code.
+        ///
+        /// <para>When <paramref name="emitRepresentativeMetadata"/> is set (vanilla ONNX export), the
+        /// producing <c>MODEL_TENSOR_INPUT</c> node's representative-input attribute is encoded into this
+        /// ValueInfoProto's own metadata — a graph input has no attribute bag, so this is where a
+        /// vanilla-loadable graph carries it. The node and the ValueInfoProto being built for it are both
+        /// in hand here, so name and shape are paired intrinsically (no cross-graph index matching).</para>
         /// </summary>
-        public static ValueInfoProto CreateGraphInputInfo(FastNode inputNode, FastTensorKey key)
+        public static ValueInfoProto CreateGraphInputInfo(
+            FastNode inputNode, FastTensorKey key, bool emitRepresentativeMetadata = false)
         {
             (DType dtype, int? rank, DataStructure structure) = ReadInputMetadata(inputNode);
             string? inputTypeName = ReadInputTypeName(inputNode);
@@ -67,7 +74,7 @@ namespace Shorokoo.Core.Factory
                 : null;
 
             var dims = rank is int r ? OnnxIRFactory.CreateDims(MakeUnnamedDims(r), key.ToString()) : null;
-            return OnnxIRFactory.CreateTensorInfo(
+            var valueInfo = OnnxIRFactory.CreateTensorInfo(
                 dims: dims,
                 name: key.ToString(),
                 type: dtype,
@@ -75,6 +82,18 @@ namespace Shorokoo.Core.Factory
                 targetFunctionName: null,
                 inputTypeName: inputTypeName,
                 defaultValue: defaultValue);
+
+            if (emitRepresentativeMetadata
+                && inputNode.OpCode == InternalOpCodes.MODEL_TENSOR_INPUT
+                && RepresentativeInputMetadata.Encode(inputNode) is { } encoded)
+            {
+                valueInfo.MetadataProps.Add(new StringStringEntryProto
+                {
+                    Key = RepresentativeInputMetadata.Key,
+                    Value = encoded,
+                });
+            }
+            return valueInfo;
         }
 
         /// <summary>

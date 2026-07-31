@@ -34,11 +34,15 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeEnum<InputType>(ShrkAttrInputType, ["Hyperparam", "ReadyInput", "ModelInput", "GenericType"], defaultValue: "ReadyInput")
                 // Optional: the [Hyper(defaultValue)] default for a defaulted hyperparameter input.
                 .AttributeFloat(ShrkAttrDefaultValue)
-                // Optional: a zero-filled representative input (or shape+dtype-only placeholder for large
-                // inputs) making a concrete architecture self-describing for training shape inference.
-                // Absent by default; a boundary/input node is not emitted as a NodeProto, so this never
-                // reaches ONNX/.srk output and stays inert for export/Compile.
+                // Optional, mutually exclusive: a small (≤ MaxSmallTensorElements) input
+                // records a zero-filled representative tensor here; a larger one records only its dims in
+                // ShrkAttrRepresentativeInputShape. Together they make a concrete architecture
+                // self-describing for training shape inference. In the native .srk dialect a
+                // MODEL_TENSOR_INPUT is emitted as a NodeProto, so whichever attribute is set round-trips
+                // on disk; the vanilla ONNX/compile path keeps the input as a graph input and carries the
+                // info in metadata_props instead.
                 .AttributeTensor(ShrkAttrRepresentativeInput, "T", "R")
+                .AttributeLongs(ShrkAttrRepresentativeInputShape)
                 .Output("modelInput", "T", rank: "R"),
 
             Op(MODEL_SEQUENCE_INPUT)

@@ -56,9 +56,13 @@ namespace Shorokoo
             if (string.IsNullOrWhiteSpace(filePath))
                 throw new ArgumentException("ONNX path cannot be null or empty.", nameof(filePath));
 
-            // BuildOnnxModel enforces the concrete-model kind and the vanilla-dialect
-            // guarantee, naming offending ops on failure — no need to duplicate that here.
-            var model = FastOnnxModelBuilder.BuildOnnxModel(concreteModel, opset);
+            // BuildOnnxModel enforces the concrete-model kind and the vanilla-dialect guarantee, naming
+            // offending ops on failure. In VanillaMetadata mode it also normalizes (downgrades large
+            // representative tensors to shape-only, via a pre-pass) and writes each input's
+            // representative-input info into that input's own ValueInfoProto metadata — no out-of-band,
+            // cross-graph pairing here; the builder owns it end-to-end. ImportOnnx re-attaches on load.
+            var model = FastOnnxModelBuilder.BuildOnnxModel(
+                concreteModel, opset, representativeForm: RepresentativeInputForm.VanillaMetadata);
             AtomicFileWriter.WriteFile(
                 filePath, stream => ProtoBuf.Serializer.Serialize(stream, model));
         }
@@ -156,6 +160,9 @@ namespace Shorokoo
                     $"({e.GetType().Name}: {e.Message}). The file is corrupt or uses a construct " +
                     "Shorokoo's importer cannot ingest.", e);
             }
+
+            // (Representative-input info written by ExportOnnx rides each input's ValueInfoProto metadata
+            // and is re-attached by the reader as it builds the input nodes — nothing to do here.)
 
             // Assign identifiers on the mutable internal graph, then freeze — a
             // ComputationGraph is immutable, so the naming must happen before it is wrapped.

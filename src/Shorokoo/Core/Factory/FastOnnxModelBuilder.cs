@@ -20,6 +20,25 @@ using Shorokoo.Onnx;
 namespace Shorokoo.Core.Factory
 {
     /// <summary>
+    /// Selects how a graph's <c>MODEL_TENSOR_INPUT</c> representative-input attributes are treated when
+    /// building an ONNX <see cref="ModelProto"/>.
+    /// </summary>
+    public enum RepresentativeInputForm
+    {
+        /// <summary>Leave representative-input attributes exactly as the in-memory build set them (tensor
+        /// attr ≤ 1024 elements, shape attr above). Native <c>.srk</c> (attributes ride on the emitted
+        /// input NodeProtos) and the execution/compile path (inputs are graph inputs, so the attributes
+        /// are simply not serialized) both use this — no downgrade, no ONNX metadata.</summary>
+        Passthrough,
+
+        /// <summary>Vanilla ONNX export: run the
+        /// <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastDowngradeRepresentativeInputs"/> pre-pass
+        /// (inline tensors over the vanilla limit become shape-only), then emit each input's normalized
+        /// representative attribute into its own graph-input <see cref="ValueInfoProto"/> metadata.</summary>
+        VanillaMetadata,
+    }
+
+    /// <summary>
     /// Builds an ONNX <see cref="ModelProto"/> directly from a
     /// <see cref="InternalComputationGraph"/>. Runs the standard pre-passes, then
     /// walks the graph emitting protos. Every step works against
@@ -81,7 +100,8 @@ namespace Shorokoo.Core.Factory
         public static ModelProto BuildOnnxModel(
             Shorokoo.Graph.ComputationGraph graph,
             OpSetVersion opset = OpSetVersion.OPS_21,
-            bool prepForOnnx = false)
+            bool prepForOnnx = false,
+            RepresentativeInputForm representativeForm = RepresentativeInputForm.Passthrough)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
             // The reliable-kind form of the FW045 gate: only a concrete model can satisfy
@@ -96,11 +116,12 @@ namespace Shorokoo.Core.Factory
                     "(ToConcreteArchitecture -> ToConcreteModel) and export that. Shorokoo's own .srk/.zsrk " +
                     "persistence (CompressedFormatUtils.SaveFastGraphToFile/SaveFastGraphToBinary) accepts every graph kind. " +
                     Shorokoo.Core.Utils.SrkFileFormat.WithKindRemedyHint);
-            return BuildOnnxModelCore(graph.ToInternal(), opset, prepForOnnx, vanillaExport: true, stage: graph.Kind);
+            return BuildOnnxModelCore(graph.ToInternal(), opset, prepForOnnx, vanillaExport: true, stage: graph.Kind,
+                representativeForm: representativeForm);
         }
 
         /// <summary>
-        /// Internal-graph form of <see cref="BuildOnnxModel(Shorokoo.Graph.ComputationGraph, OpSetVersion, bool)"/> for callers below the
+        /// Internal-graph form of <see cref="BuildOnnxModel(Shorokoo.Graph.ComputationGraph, OpSetVersion, bool, RepresentativeInputForm)"/> for callers below the
         /// readonly wrapper (no stamped kind — the vanilla-dialect op scan is the gate).
         /// </summary>
         internal static ModelProto BuildOnnxModel(
@@ -118,7 +139,7 @@ namespace Shorokoo.Core.Factory
         /// names and module-stage graphs serialize their Shorokoo-internal ops
         /// unchecked. Files produced this way are re-importable only by
         /// <see cref="Shorokoo.Onnx.OnnxModelImporter"/>; use
-        /// <see cref="BuildOnnxModel(Shorokoo.Graph.ComputationGraph, OpSetVersion, bool)"/> for anything meant to leave Shorokoo.
+        /// <see cref="BuildOnnxModel(Shorokoo.Graph.ComputationGraph, OpSetVersion, bool, RepresentativeInputForm)"/> for anything meant to leave Shorokoo.
         /// </summary>
         /// <param name="fastGraph">The graph to serialize.</param>
         /// <param name="opset">Default-domain opset stamp (raised as required).</param>
@@ -131,14 +152,27 @@ namespace Shorokoo.Core.Factory
         /// them; persistence (.srk) passes false — a saved graph must keep its state
         /// machinery and its runtime-feed ops verbatim, or a reloaded module/architecture
         /// would silently lose state semantics or keyed-RNG identity.</param>
+        /// <param name="emitInputsAsNodes">Native <c>.srk</c> on-disk dialect only: emit every top-level
+        /// model-input op as an ordinary <see cref="NodeProto"/> (carrying all its attributes, incl. the
+        /// representative-input shape) in graph-input order, and emit no graph-input
+        /// <see cref="ValueInfoProto"/>s; the loader rebuilds the input list from those nodes. Off
+        /// (default) for the execution/compile path, which must keep proper ONNX graph inputs for ONNX
+        /// Runtime.</param>
+        /// <param name="representativeForm">How representative-input attributes are treated (see
+        /// <see cref="RepresentativeInputForm"/>). The internal dialect is always
+        /// <see cref="RepresentativeInputForm.Passthrough"/>: native <c>.srk</c> serializes the attributes
+        /// on the emitted input nodes, and the execution path leaves them unserialized on graph inputs.</param>
         internal static ModelProto BuildInternalOnnxModel(
             InternalComputationGraph fastGraph,
             OpSetVersion opset = OpSetVersion.OPS_21,
             bool prepForOnnx = false,
             Shorokoo.Graph.GraphKind? stage = null,
-            bool applyExecutionLowerings = true)
+            bool applyExecutionLowerings = true,
+            bool emitInputsAsNodes = false,
+            RepresentativeInputForm representativeForm = RepresentativeInputForm.Passthrough)
             => BuildOnnxModelCore(fastGraph, opset, prepForOnnx, vanillaExport: false, stage: stage,
-                applyExecutionLowerings: applyExecutionLowerings);
+                applyExecutionLowerings: applyExecutionLowerings, emitInputsAsNodes: emitInputsAsNodes,
+                representativeForm: representativeForm);
 
         private static ModelProto BuildOnnxModelCore(
             InternalComputationGraph fastGraph,
@@ -146,12 +180,21 @@ namespace Shorokoo.Core.Factory
             bool prepForOnnx,
             bool vanillaExport,
             Shorokoo.Graph.GraphKind? stage = null,
-            bool applyExecutionLowerings = true)
+            bool applyExecutionLowerings = true,
+            bool emitInputsAsNodes = false,
+            RepresentativeInputForm representativeForm = RepresentativeInputForm.Passthrough)
         {
             if (fastGraph is null) throw new ArgumentNullException(nameof(fastGraph));
 
             // ----- 1. Clone so we never mutate the caller's graph.
             var prepFast = fastGraph.Clone();
+
+            // Vanilla ONNX keeps its per-input representative metadata compact: downgrade any inline
+            // representative tensor over the vanilla limit to shape-only, as a graph transform on the same
+            // graph we are about to emit (passthrough targets skip this — equivalently N = ∞).
+            if (representativeForm == RepresentativeInputForm.VanillaMetadata)
+                FastDowngradeRepresentativeInputs.Process(
+                    prepFast, FastDowngradeRepresentativeInputs.VanillaMaxInlineElements);
 
             // ----- 2. Run the Fast pre-passes in place. Capture the rename map
             // so we can also remap the tensor-info lookup we'll build below.
@@ -176,7 +219,9 @@ namespace Shorokoo.Core.Factory
                 fastGraph: prepFast,
                 opset: opset,
                 isFunction: false,
-                tensorInfoLookup: tensorInfoLookup);
+                tensorInfoLookup: tensorInfoLookup,
+                emitInputsAsNodes: emitInputsAsNodes,
+                emitRepresentativeMetadata: representativeForm == RepresentativeInputForm.VanillaMetadata);
 
             // ----- 4. Discover all reachable Functions in post order and emit
             // a FunctionProto for each.
@@ -1156,8 +1201,16 @@ namespace Shorokoo.Core.Factory
             InternalComputationGraph fastGraph,
             OpSetVersion opset,
             bool isFunction,
-            Dictionary<FastTensorKey, FastTensorInfo>? tensorInfoLookup = null)
+            Dictionary<FastTensorKey, FastTensorInfo>? tensorInfoLookup = null,
+            bool emitInputsAsNodes = false,
+            bool emitRepresentativeMetadata = false)
         {
+            // .srk dialect (top-level graph only): every model-input op is emitted as an ordinary
+            // NodeProto (carrying all its attributes — including the representative-input shape) instead
+            // of a graph-input ValueInfoProto, so the saved graph is self-describing. The input NodeProtos
+            // are built separately, in graph-input order, and prepended below; the reader rebuilds the
+            // input list from them in that order. Function bodies keep formal-parameter inputs, never this.
+            bool inputsAsNodes = emitInputsAsNodes && !isFunction;
             var scopeIndex = FastSubgraphExtractor.BuildScopeIndex(fastGraph);
 
             // Build a key→node lookup for resolving GraphOpenNodeKey on the fly.
@@ -1175,7 +1228,8 @@ namespace Shorokoo.Core.Factory
 
                 // Skip boundary nodes: model inputs and parameter data are emitted
                 // as ValueInfoProto/TensorProto, not as NodeProto. Open nodes are
-                // never emitted as NodeProto either.
+                // never emitted as NodeProto either. (In the .srk dialect the input ops
+                // are emitted separately as nodes and prepended after this walk.)
                 if (FastOpsetResolver.IsBoundaryOrOpen(node))
                     continue;
 
@@ -1251,6 +1305,11 @@ namespace Shorokoo.Core.Factory
                     swallowed.Add(j);
 
             var topLevelNodes = new List<NodeProto>();
+            // .srk dialect: prepend the input-op NodeProtos in graph-input order (they produce no inputs,
+            // so they are valid at the front), and emit no graph-input ValueInfoProtos — the reader
+            // reconstructs the input list from these nodes in this order.
+            if (inputsAsNodes)
+                topLevelNodes.AddRange(BuildInputNodeProtos(fastGraph, opset));
             foreach (var (idx, proto) in protoByIndex.OrderBy(kv => kv.Key))
             {
                 if (swallowed.Contains(idx)) continue;
@@ -1260,7 +1319,9 @@ namespace Shorokoo.Core.Factory
             var initializers = isFunction
                 ? Array.Empty<TensorProto>()
                 : CreateInitializerTensors(fastGraph);
-            var inputInfos = CreateInputInfos(fastGraph);
+            var inputInfos = inputsAsNodes
+                ? Array.Empty<ValueInfoProto>()
+                : CreateInputInfos(fastGraph, emitRepresentativeMetadata);
             var outputInfos = CreateOutputInfos(fastGraph);
 
             return (GraphProto)OnnxIRFactory.CreateGraph(
@@ -1269,6 +1330,38 @@ namespace Shorokoo.Core.Factory
                 inputInfos,
                 outputInfos,
                 topLevelNodes.ToArray());
+        }
+
+        /// <summary>
+        /// Builds the NodeProto for each model-input op, in graph-input order, for the native <c>.srk</c>
+        /// dialect (which emits inputs as ordinary nodes rather than graph-input ValueInfoProtos). Each is
+        /// resolved and emitted through the same path as any interior node, so it carries all of the op's
+        /// attributes verbatim. The reader collects these nodes, in this order, as the graph's inputs.
+        /// </summary>
+        private static NodeProto[] BuildInputNodeProtos(InternalComputationGraph fastGraph, OpSetVersion opset)
+        {
+            var producerByOutputKey = new Dictionary<FastTensorKey, FastNode>();
+            foreach (var node in fastGraph.Nodes)
+            {
+                if (!FastOpsetResolver.IsModelInputOpCode(node.OpCode)) continue;
+                foreach (var slot in node.FullOutputs.Values)
+                    foreach (var k in slot)
+                        if (k is FastTensorKey tk && !tk.IsEmpty)
+                            producerByOutputKey[tk] = node;
+            }
+
+            var protos = new List<NodeProto>(fastGraph.Inputs.Count);
+            foreach (var key in fastGraph.Inputs)
+            {
+                if (!producerByOutputKey.TryGetValue(key, out var producer))
+                    throw new InvalidOperationException(
+                        $"FastOnnxModelBuilder: graph input {key} has no model-input producing node.");
+                var info = FastOpsetResolver.Resolve(producer, graphOpenNode: null, opset)
+                    ?? throw new InvalidOperationException(
+                        $"FastOnnxModelBuilder: model-input op {producer.OpCode} did not resolve to an emittable node.");
+                protos.Add(FastOnnxProtoFactory.CreateNodeProto(producer, info, graphAttributes: null));
+            }
+            return protos.ToArray();
         }
 
         /// <summary>
@@ -1376,7 +1469,8 @@ namespace Shorokoo.Core.Factory
             return list.ToArray();
         }
 
-        private static ValueInfoProto[] CreateInputInfos(InternalComputationGraph fastGraph)
+        private static ValueInfoProto[] CreateInputInfos(
+            InternalComputationGraph fastGraph, bool emitRepresentativeMetadata)
         {
             // Map graph-input keys back to their producing node so we can read
             // dtype/rank/structure off the node's attributes.
@@ -1397,7 +1491,7 @@ namespace Shorokoo.Core.Factory
                 if (!producerByOutputKey.TryGetValue(key, out var producer))
                     throw new InvalidOperationException(
                         $"FastOnnxModelBuilder: graph input {key} has no producing node in the Fast graph.");
-                infos.Add(FastOnnxProtoFactory.CreateGraphInputInfo(producer, key));
+                infos.Add(FastOnnxProtoFactory.CreateGraphInputInfo(producer, key, emitRepresentativeMetadata));
             }
             return infos.ToArray();
         }

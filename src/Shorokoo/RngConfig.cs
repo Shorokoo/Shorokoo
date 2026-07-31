@@ -158,6 +158,12 @@ public sealed class RngConfig
     internal IEnumerable<(RngCollection collection, string pathKey)> OverrideKeys
         => _overrides.Keys;
 
+    /// <summary>Every registered override as (collection, ModelId path, seed) — for serializing a
+    /// config verbatim (issue #115), so a reconstructed config re-applies the same overrides.</summary>
+    internal IEnumerable<(RngCollection collection, int[] path, ulong seed)> AllOverrides()
+        => _overrides.Select(e =>
+            (e.Key.collection, e.Key.pathKey.Split(',').Select(int.Parse).ToArray(), e.Value));
+
     /// <summary>Whether a stream has an explicit override.</summary>
     public bool HasOverride(RngCollection collection, int[] modelIdPath)
         => _overrides.ContainsKey((collection, PathKey(modelIdPath ?? throw new ArgumentNullException(nameof(modelIdPath)))));

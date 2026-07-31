@@ -1,7 +1,9 @@
 using System;
 using System.Linq;
 using Shorokoo.Core.Nodes.NodeDefinitions;
+using Shorokoo.Core.Nodes.Processors.Fast;
 using Shorokoo.Core.Rng;
+using Shorokoo.Modules.Initializers;
 using Shorokoo.Runtime;
 using Shorokoo.Tests.Modules;
 
@@ -44,6 +46,33 @@ public partial class RngRuntimeLoopParamAndFeed
             var w = InitSimple.Init([Scalar(2L)]);
             var u = RandomUniform(x.ShapeTensor(), 0f, 1f);
             acc = acc + u + w.Reduce(ReduceKind.Sum);
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return acc;
+    }
+}
+
+/// <summary>
+/// An in-loop trainable param whose value DIFFERS per iteration (a random init draws a distinct
+/// value on each per-iteration ModelId's own stream), combined into an ORDER-sensitive recurrence
+/// <c>acc = acc*2 + w_i</c>. The trip count is a runtime graph input so the loop survives
+/// concretization: at each runtime iteration the in-loop MODEL_PARAM_ID_REF must select THAT
+/// iteration's realized param. Because the recurrence weights iteration <c>i</c>'s param by
+/// <c>2^(N-1-i)</c> (all distinct), selecting the wrong per-iteration slot — or an empty filler —
+/// changes the executed output; a pure sum could not tell a permutation apart. Multiplying by the
+/// exact power of two 2 keeps <c>acc*2</c> rounding-free, so the host recurrence reproduces the
+/// float32 execution bit-for-bit (FMA-agnostic).
+/// </summary>
+[Module]
+public partial class RngRuntimeLoopParamRecurrence
+{
+    public static Tensor<float32> Inline(Tensor<float32> x, Scalar<int64> steps)
+    {
+        var acc = x;
+        foreach (var ctx in LoopAPI.Iterate(steps))
+        {
+            var w = UniformRange.Init([Scalar(1L)], Scalar(0f), Scalar(1f));
+            acc = acc * Scalar(2f) + w.Reduce(ReduceKind.Sum);
             ctx.ContinueWhile(Scalar(true));
         }
         return acc;
@@ -290,6 +319,56 @@ public class RngLoopTests
         var output = ComputeContext.Default.Execute(concrete, x, TensorData(Array.Empty<long>(), 0L))[0]
             .ToTensorData().As<float32>().AccessMemory().ToArray();
         Assert.Equal(XVals, output);
+    }
+
+    [Fact]
+    public void TestRuntimeLoopSelectsPerIterationParamBitExactly()
+    {
+        // The trainable-param analogue of TestRuntimeLoopFeedDrawsPerIterationStreamsBitExactly:
+        // it exercises the in-loop MODEL_PARAM_ID_REF per-iteration selection path with
+        // value-DISCRIMINATING data. Each per-iteration in-loop param is a distinct ModelId
+        // (its own init stream), so a random init draws a distinct value per iteration; the
+        // order-sensitive recurrence acc = acc*2 + w_i weights iteration i by 2^(N-1-i), so a
+        // mis-selected slot (or an empty filler) diverges from the host expectation.
+        const int steps = 3;
+        var cfg = new RngConfig { MasterSeed = 11 };
+
+        var g = ((ComputationGraph)typeof(RngRuntimeLoopParamRecurrence)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var x = TensorData([N], XVals);
+        var stepsData = TensorData(Array.Empty<long>(), (long)steps);
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x, stepsData]));
+
+        // The realized in-loop params, keyed by ModelId and ORDERED BY ITERATION SLOT, read
+        // straight from the init draw — INDEPENDENTLY of the in-graph selection under test.
+        // An in-loop param takes a 3-slot ModelId [loopSlot, iterationIndex, paramSlot]; the
+        // middle entry orders the iterations (cf. the zero-trip test's [1, 0, 1]).
+        var drawn = FastInitializeModelParams.Process(
+            arch, ComputeContext.Default, cfg, arch.GetConcreteModelParamInfos());
+        var perIter = drawn
+            .Where(kv => kv.Key.Vals.Length == 3)
+            .OrderBy(kv => kv.Key.Vals[1])
+            .Select(kv => kv.Value.As<float32>().AccessMemory().ToArray()[0])
+            .ToArray();
+
+        // One realized param per iteration, and their values genuinely differ — otherwise this
+        // test could not discriminate a mis-selection.
+        Assert.Equal(steps, perIter.Length);
+        Assert.Equal(perIter.Length, perIter.Distinct().Count());
+
+        // Host recurrence over the per-iteration values in iteration order (float32-exact: the
+        // *2 is rounding-free, so every acc*2 + w_i matches the executed op bit-for-bit).
+        var expected = (float[])XVals.Clone();
+        foreach (var w in perIter)
+            for (long e = 0; e < N; e++)
+                expected[e] = expected[e] * 2f + w;
+
+        var concrete = arch.ToConcreteModel(cfg);
+        Assert.Contains(concrete.Nodes, n => n.OpCode == OpCodes.LOOP_OPEN);   // loop survived to runtime
+
+        var output = ComputeContext.Default.Execute(concrete, x, stepsData)[0]
+            .ToTensorData().As<float32>().AccessMemory().ToArray();
+        Assert.Equal(expected, output);
     }
 
     [Fact]

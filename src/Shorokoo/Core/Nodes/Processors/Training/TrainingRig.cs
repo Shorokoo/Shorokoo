@@ -107,13 +107,16 @@ namespace Shorokoo
         /// before mutating), so sharing it across derived rigs preserves immutability.
         ///
         /// <para>It is also <b>self-describing for shape inference</b>: each <c>MODEL_TENSOR_INPUT</c>
-        /// node carries a zero-filled representative input on its
-        /// <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInput"/> attribute (shape+dtype-only
-        /// placeholder for large inputs), recording the shape the model was concretized at. The two
+        /// node carries the shape the model was concretized at, on exactly one of two mutually-exclusive
+        /// attributes — a zero-filled <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInput"/>
+        /// tensor for a small input, or a shape-only
+        /// <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape"/> for a large one (see
+        /// <see cref="WriteRepresentativeInputs(InternalComputationGraph, TensorData[])"/>). The two
         /// training-graph shape-inference sites reconstruct their <c>sampleInputs[]</c> off these
         /// attributes (<see cref="ReadRepresentativeInputs"/>), so no separate sample-input field is
-        /// stored on the rig. The attribute is inert for export (a boundary node is not emitted as a
-        /// NodeProto) and rides along on <c>Clone()</c>, so it survives re-seeding.</para>
+        /// stored on the rig. In the native <c>.srk</c> dialect a <c>MODEL_TENSOR_INPUT</c> serializes
+        /// as a NodeProto, so the attribute round-trips on disk (making the saved arch self-describing);
+        /// it also rides along on <c>Clone()</c>, so it survives re-seeding.</para>
         /// </summary>
         private InternalComputationGraph _concreteArch = null!;
 
@@ -626,21 +629,44 @@ namespace Shorokoo
         /// <summary>
         /// Writes a representative input onto each of the concrete arch's <c>MODEL_TENSOR_INPUT</c> nodes
         /// (in graph-input order, one per <paramref name="sampleInputs"/>), making the arch self-describing
-        /// for training-graph shape inference. The value is <b>zero-filled</b> (never the user's sample
-        /// values) and <b>shape-limited</b> by the shape-inference engine's small-tensor threshold: inputs
-        /// with at most
-        /// <see cref="Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements"/>
-        /// elements get a real zero payload; larger ones get a shape+dtype-only placeholder (no payload),
-        /// which is all the engine keeps for a tensor over that threshold anyway. Only concretization
-        /// (already done) needed input values; from here on only shapes matter, so this records exactly
-        /// the shape metadata.
+        /// for training-graph shape inference. Never records the user's sample values — see the
+        /// <see cref="WriteRepresentativeInputs(InternalComputationGraph, TensorData[])"/> overload for
+        /// the two-attribute split (zero-filled inline tensor for a small input, shape-only dims for a
+        /// large one) keyed on the shape-inference small-tensor threshold. Only concretization (already
+        /// done) needed input values; from here on only shapes matter, so this records exactly the shape.
         /// </summary>
         private static void WriteRepresentativeInputs(InternalComputationGraph concreteArch, NamedModelParam[] sampleInputs)
+            => WriteRepresentativeInputs(
+                concreteArch, sampleInputs.Select(s => s.ToTensorData()).ToArray());
+
+        /// <summary>
+        /// <see cref="TensorData"/>-shaped counterpart of
+        /// <see cref="WriteRepresentativeInputs(InternalComputationGraph, NamedModelParam[])"/>:
+        /// records a representative input on each <c>MODEL_TENSOR_INPUT</c> node from the given
+        /// tensors' shape+dtype (values ignored). Sets <b>exactly one</b> of the two mutually-exclusive
+        /// attributes, chosen by element count against the shape-inference small-tensor threshold
+        /// <see cref="Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements"/>
+        /// (1024) — the same threshold today's build already used to decide real-payload vs placeholder:
+        /// <list type="bullet">
+        ///   <item>≤ threshold → <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInput"/> = a
+        ///     zero-filled <see cref="TensorData"/> (never the user's values); the shape attribute is
+        ///     cleared.</item>
+        ///   <item>&gt; threshold → <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape"/> =
+        ///     the dims; the tensor attribute is cleared (no inline payload). This is exactly the old
+        ///     "placeholder for a large input" case, relocated from a <c>WeightPlaceholderTensorData</c>
+        ///     on the tensor attribute to plain dims on the shape attribute.</item>
+        /// </list>
+        /// The concrete arch's <c>MODEL_TENSOR_INPUT</c> serializes as a NodeProto in the native
+        /// <c>.srk</c> dialect, so whichever attribute is set round-trips on disk verbatim (no
+        /// re-thresholding at serialize time) and the saved arch is self-describing — no separate
+        /// manifest input-shape field is needed.
+        /// </summary>
+        private static void WriteRepresentativeInputs(InternalComputationGraph concreteArch, TensorData[] inputs)
         {
-            if (concreteArch.Inputs.Count != sampleInputs.Length)
+            if (concreteArch.Inputs.Count != inputs.Length)
                 throw new InvalidOperationException(
-                    $"Concrete arch has {concreteArch.Inputs.Count} input(s) but {sampleInputs.Length} " +
-                    "sample input(s) were supplied; they must correspond one-to-one in declaration order.");
+                    $"Concrete arch has {concreteArch.Inputs.Count} input(s) but {inputs.Length} " +
+                    "input shape(s) were supplied; they must correspond one-to-one in declaration order.");
             var producerByOutput = BuildProducerByOutputMap(concreteArch);
             for (int i = 0; i < concreteArch.Inputs.Count; i++)
             {
@@ -648,20 +674,36 @@ namespace Shorokoo
                     throw new InvalidOperationException(
                         $"Concrete arch input {concreteArch.Inputs[i]} has no producing node.");
                 if (node.OpCode != InternalOpCodes.MODEL_TENSOR_INPUT) continue;
-                var sample = sampleInputs[i].ToTensorData();
-                node.Attributes = node.Attributes.SetAttributes(
-                    (OnnxOpAttributeNames.ShrkAttrRepresentativeInput,
-                     (object?)RepresentativeInputFor(sample.Shape, sample.DType)));
+                var shape = inputs[i].Shape;
+                if (shape.Count <= Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements)
+                    // Small: inline a real zero tensor; clear the shape-only attribute.
+                    node.Attributes = node.Attributes.SetAttributes(
+                        (OnnxOpAttributeNames.ShrkAttrRepresentativeInput,
+                         (object?)RepresentativeInputFor(shape, inputs[i].DType)),
+                        (OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape, (object?)null));
+                else
+                    // Large: record dims only; clear the inline-tensor attribute.
+                    node.Attributes = node.Attributes.SetAttributes(
+                        (OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape, (object?)shape.Dims),
+                        (OnnxOpAttributeNames.ShrkAttrRepresentativeInput, (object?)null));
             }
         }
 
         /// <summary>
         /// Reconstructs the <c>sampleInputs[]</c> array for shape inference off the concrete arch's
         /// representative-input attributes (in graph-input order) — the derivation-path counterpart of
-        /// <see cref="WriteRepresentativeInputs"/>. Each stored tensor is fed straight to
-        /// <see cref="ShapeInferenceInterpreter"/>: a small one carries real zeros; a large one is a
-        /// shape+dtype-only placeholder that QEE reads shape-only (it never touches the tensor's memory
-        /// for a tensor above its threshold), so no large buffer is ever materialized.
+        /// <see cref="WriteRepresentativeInputs(InternalComputationGraph, NamedModelParam[])"/>. Reads
+        /// whichever of the two mutually-exclusive attributes the node carries:
+        /// <list type="bullet">
+        ///   <item><see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInput"/> set → use that inline
+        ///     (small, zero-filled) tensor directly.</item>
+        ///   <item>else <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape"/> set → read
+        ///     the dims plus the node's dtype and re-materialize via <see cref="RepresentativeInputFor"/>,
+        ///     which applies the QEE read threshold (real zeros ≤ 1024 elements, a shape+dtype-only
+        ///     placeholder above it, so no large buffer is materialized).</item>
+        ///   <item>neither set → fail loud (the arch was not built self-describing).</item>
+        /// </list>
+        /// Each resulting tensor is fed straight to <see cref="ShapeInferenceInterpreter"/>.
         /// </summary>
         private static TensorData[] ReadRepresentativeInputs(InternalComputationGraph concreteArch)
         {
@@ -674,10 +716,28 @@ namespace Shorokoo
                     throw new InvalidOperationException(
                         $"Concrete arch input {concreteArch.Inputs[i]} is not a MODEL_TENSOR_INPUT node; " +
                         "cannot read its representative input.");
-                inputs[i] = node.Attributes.GetTensorVal(OnnxOpAttributeNames.ShrkAttrRepresentativeInput)
-                    ?? throw new InvalidOperationException(
-                        "Concrete arch input node carries no representative-input attribute; the rig was " +
-                        "not built through BuildInitialRig (which records it on every model input).");
+
+                var inlineTensor = node.Attributes.GetTensorVal(OnnxOpAttributeNames.ShrkAttrRepresentativeInput);
+                if (inlineTensor is not null)
+                {
+                    inputs[i] = inlineTensor;
+                    continue;
+                }
+
+                var dims = node.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape);
+                if (dims is not null)
+                {
+                    var dtype = node.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype)
+                        ?? throw new InvalidOperationException(
+                            "Concrete arch input node records a representative-input shape but no dtype; " +
+                            "cannot re-materialize its representative input.");
+                    inputs[i] = RepresentativeInputFor(new Shape(dims), dtype);
+                    continue;
+                }
+
+                throw new InvalidOperationException(
+                    "Concrete arch input node carries no representative-input attribute; the rig was " +
+                    "not built through BuildInitialRig (which records one on every model input).");
             }
             return inputs;
         }
@@ -697,7 +757,7 @@ namespace Shorokoo
         /// the threshold we must therefore carry a real (zero) payload, exactly as the retired
         /// <c>ZeroExemplar</c> did for every size.</para>
         /// </summary>
-        private static TensorData RepresentativeInputFor(Shape shape, DType dtype)
+        internal static TensorData RepresentativeInputFor(Shape shape, DType dtype)
         {
             if (shape.Count > Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements)
                 return new WeightPlaceholderTensorData(shape, dtype);
@@ -2149,6 +2209,192 @@ namespace Shorokoo
         /// </summary>
         public TrainingCheckpoint LoadCheckpoint(string filePath, CheckpointComponents? components = null)
             => TrainingCheckpoint.Load(filePath, this, components);
+
+        // ───────── Constituent persistence & from-file reconstruction (§5.8.2, #115/#106) ─────────
+        // A training .skpt stores the rig's constituents as ordinary models/ entries so a fresh process
+        // rebuilds the whole rig — trainstep and all — from the file alone. Save reads the graphs and
+        // recipe off these members; Load (static, below) reads them back and re-derives via the same
+        // DeriveFromConcreteArch path a fresh build uses.
+
+        /// <summary>The rig's concrete-architecture constituent (value-less), the substrate a from-file
+        /// reconstruction re-derives the trainstep from (§5.8). Environment-independent; serialized as
+        /// the checkpoint's <c>model-arch</c> constituent entry.</summary>
+        internal ComputationGraph ConcreteArchConstituent => new(_concreteArch, GraphKind.ConcreteArchitecture);
+
+        /// <summary>
+        /// Composes the per-hyperparameter scheduler graphs (one pure <c>counters → value</c> graph per
+        /// scheduled hyperparameter) into ONE scheduler model — the union of the counter inputs they
+        /// consume, one named output per scheduled hyperparameter (named by the hyperparameter) — for
+        /// persistence as the checkpoint's <c>scheduler</c> constituent entry (#106). Returns a null
+        /// graph when no hyperparameter is scheduled. Split back to per-hyperparameter bindings on load
+        /// by <see cref="SplitSchedulerOutput"/>.
+        /// </summary>
+        internal (ComputationGraph? Graph, IReadOnlyList<string> ScheduledNames) BuildComposedSchedulerModel()
+        {
+            var hyperparameters = _constituents.Hyperparameters;
+            var names = _constituents.Names;
+            string NameOf(int h) => names is not null && h < names.Count ? names[h] : $"hyperparam_{h}";
+
+            var scheduledIndices = new List<int>();
+            for (int h = 0; h < hyperparameters.Length; h++)
+                if (hyperparameters[h].Kind == HyperparameterKind.Scheduled) scheduledIndices.Add(h);
+            if (scheduledIndices.Count == 0)
+                return (null, Array.Empty<string>());
+
+            // Build each scheduler graph and collect the union of the counter inputs they consume.
+            var builtByIndex = new Dictionary<int, SchedulerGraph>(scheduledIndices.Count);
+            var needed = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var h in scheduledIndices)
+            {
+                var built = BuildSchedulerModule(hyperparameters[h], NameOf(h), MergeContext);
+                builtByIndex[h] = built;
+                foreach (var c in built.CounterNames) needed.Add(c);
+            }
+
+            // One shared int64 scalar input per needed counter, in canonical order.
+            var composed = new InternalComputationGraph();
+            var counterKeyByName = new Dictionary<string, FastTensorKey>(StringComparer.Ordinal);
+            foreach (var cn in CounterInputNames)
+            {
+                if (!needed.Contains(cn)) continue;
+                var node = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.RuntimeInput(DType.Int64, rank: 0, cn);
+                composed.Nodes.Add(node);
+                var key = new FastTensorKey(node.Key, 0);
+                counterKeyByName[cn] = key;
+                composed.Inputs.Add(key);
+                composed.InputUniqueNames.Add(cn);
+            }
+
+            var scheduledNames = new List<string>(scheduledIndices.Count);
+            foreach (var h in scheduledIndices)
+            {
+                var built = builtByIndex[h];
+                var mapped = built.CounterNames.Select(c => counterKeyByName[c]).ToArray();
+                var replayed = Shorokoo.Core.Nodes.Processors.Fast.FastReplay.ReplayInto(composed, built.Graph, mapped);
+                composed.Outputs.Add(replayed[0]);
+                composed.OutputUniqueNames.Add(NameOf(h));
+                scheduledNames.Add(NameOf(h));
+            }
+
+            return (new ComputationGraph(composed, GraphKind.ConcreteModel), scheduledNames);
+        }
+
+        /// <summary>
+        /// Splits one hyperparameter's <c>counters → value</c> graph back out of the composed scheduler
+        /// model (#106) by its output <paramref name="outputName"/>: the sub-graph reachable from that
+        /// output, keeping only the counter inputs it actually consumes — a single-output scheduler
+        /// module a <see cref="Hyperparameter.Scheduled(ComputationGraph)"/> binding re-inlines.
+        /// </summary>
+        internal static ComputationGraph SplitSchedulerOutput(ComputationGraph composedScheduler, string outputName)
+        {
+            var composed = composedScheduler.ToInternal().Clone();
+            int oi = composed.OutputUniqueNames.IndexOf(outputName);
+            if (oi < 0)
+                throw new System.IO.InvalidDataException(
+                    $"The composed scheduler model has no output named '{outputName}'; the checkpoint's " +
+                    "scheduler constituent does not match its hyperparameter bindings.");
+            var outKey = composed.Outputs[oi];
+
+            var producerByOutput = BuildProducerByOutputMap(composed);
+            var reachedKeys = new HashSet<FastTensorKey>();
+            var reachedNodes = new HashSet<FastNodeKey>();
+            var queue = new Queue<FastTensorKey>();
+            queue.Enqueue(outKey);
+            while (queue.Count > 0)
+            {
+                var k = queue.Dequeue();
+                if (k.IsEmpty || !reachedKeys.Add(k)) continue;
+                if (producerByOutput.TryGetValue(k, out var node))
+                {
+                    reachedNodes.Add(node.Key);
+                    foreach (var (_, slots) in node.FullInputs)
+                        foreach (var s in slots)
+                            if (s is FastTensorKey ik && !ik.IsEmpty) queue.Enqueue(ik);
+                }
+            }
+
+            var g = new InternalComputationGraph();
+            foreach (var n in composed.Nodes)
+                if (reachedNodes.Contains(n.Key)) g.Nodes.Add(n);
+            for (int i = 0; i < composed.Inputs.Count; i++)
+                if (reachedKeys.Contains(composed.Inputs[i]))
+                {
+                    g.Inputs.Add(composed.Inputs[i]);
+                    g.InputUniqueNames.Add(i < composed.InputUniqueNames.Count ? composed.InputUniqueNames[i] : null);
+                }
+            g.Outputs.Add(outKey);
+            g.OutputUniqueNames.Add(outputName);
+            return new ComputationGraph(g, GraphKind.ConcreteModel);
+        }
+
+        /// <summary>
+        /// Rebuilds a rig from its persisted constituents (#115/#106) — the concrete architecture, the
+        /// loss and optimizer module graphs, the hyperparameter bindings and RNG config — with NO
+        /// host-supplied source graphs. The deserialized <paramref name="concreteArch"/> is already
+        /// self-describing: its <c>MODEL_TENSOR_INPUT</c> nodes carry the representative-input attribute
+        /// (round-tripped as NodeProtos in the native <c>.srk</c> dialect), so the shape metadata the
+        /// re-derivation's shape inference needs is read straight off the arch — no separate input-shape
+        /// field is re-attached. The trainstep is re-derived exactly as a fresh build's derivation path
+        /// does. The two compute contexts seed the rebuilt rig (rev 22; never persisted).
+        /// </summary>
+        internal static TrainingRig ReconstructFromConstituents(
+            ComputationGraph concreteArch,
+            ComputationGraph loss,
+            ComputationGraph optimizer,
+            Hyperparameter[] hyperparameters,
+            IReadOnlyList<string>? hyperparameterNames,
+            RngConfig rngConfig,
+            ComputeContext mergeContext,
+            ComputeContext runtimeContext)
+        {
+            if (concreteArch is null) throw new ArgumentNullException(nameof(concreteArch));
+            if (loss is null) throw new ArgumentNullException(nameof(loss));
+            if (optimizer is null) throw new ArgumentNullException(nameof(optimizer));
+            if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
+            if (rngConfig is null) throw new ArgumentNullException(nameof(rngConfig));
+
+            // Own a copy so the rig's retained arch is independent of the caller's deserialized graph.
+            // The arch is already self-describing (its MODEL_TENSOR_INPUT nodes carry the
+            // representative-input attribute), so nothing is re-attached here. The RNG config was baked
+            // into the arch's RngSeed param at the original build, so it is NOT re-applied here; it rides
+            // as a constituent so the reconstructed rig re-derives identical initial values (load-time
+            // defaults, optimizer-state seeding).
+            var archInternal = concreteArch.ToInternal().Clone();
+
+            var constituents = new RigConstituents(
+                new ComputationGraph(archInternal, GraphKind.ConcreteArchitecture),
+                loss, optimizer, hyperparameters, hyperparameterNames, rngConfig);
+            return DeriveFromConcreteArch(constituents, archInternal, mergeContext, runtimeContext);
+        }
+
+        /// <summary>
+        /// Rebuilds a whole training rig — and its resumed checkpoint — from a native <c>.skpt</c>
+        /// checkpoint file ALONE (#115), with NO host-supplied model/loss/optimizer graphs: the rig's
+        /// serialized constituents (concrete architecture, loss, optimizer, and the composed scheduler
+        /// when present), hyperparameter bindings, and RNG config are read from the file and the
+        /// in-memory <c>trainstep</c> re-derived, then the checkpoint's state is loaded against the
+        /// reconstructed rig (§5.8). This is the from-file-alone counterpart of
+        /// <see cref="LoadCheckpoint"/> (which requires a pre-existing rig). The two compute contexts
+        /// seed the rebuilt rig (rev 22; never persisted — a reloaded run gets fresh ones), each
+        /// defaulting to <see cref="ComputeContext.Default"/>. The file must be a training <c>.skpt</c>
+        /// written with the rig constituents (this build always writes them); a legacy flat checkpoint,
+        /// or a <c>.skpt</c> from a build predating #115, has no constituents to rebuild from and fails
+        /// loudly — pass the rig and use <see cref="LoadCheckpoint"/> for those.
+        /// </summary>
+        /// <returns>The reconstructed rig and the checkpoint resumed against it (its
+        /// <see cref="TrainingCheckpoint.Rig"/> set to the rig).</returns>
+        public static (TrainingRig Rig, TrainingCheckpoint Checkpoint) Load(
+            string filePath,
+            ComputeContext? mergeContext = null,
+            ComputeContext? runtimeContext = null)
+        {
+            if (string.IsNullOrWhiteSpace(filePath))
+                throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
+            var rig = Persistence.ReconstructRigFromSkpt(
+                filePath, mergeContext ?? ComputeContext.Default, runtimeContext ?? ComputeContext.Default);
+            var checkpoint = rig.LoadCheckpoint(filePath);
+            return (rig, checkpoint);
+        }
 
         /// <summary>
         /// Packs a single dynamic hyperparameter value into a <see cref="TensorDataStruct"/> for the

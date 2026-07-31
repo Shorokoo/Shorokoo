@@ -531,6 +531,21 @@ namespace Shorokoo.Core.Factory.IR
             // CLOSE TempNodes. Materialize one FastNode per visited TempNode.
             CreateFastNodes(fastGraph, EnumerateNodesInProtoOrder(graphProto.Nodes), tensorKeys, functionsMap, opset);
 
+            // .srk dialect: the model-input ops were serialized as ordinary NodeProtos (materialized
+            // above by CreateFastNodes) rather than graph-input ValueInfoProtos, so rebuild the input
+            // list from those input-op nodes in serialized order. A node whose output key is already a
+            // graph input (the vanilla / execution path, which declared inputs via graphProto.Inputs)
+            // is skipped, so this is a no-op there.
+            var alreadyInputs = new HashSet<FastTensorKey>(fastGraph.Inputs);
+            foreach (var node in fastGraph.Nodes)
+            {
+                if (!FastOpsetResolver.IsModelInputOpCode(node.OpCode)) continue;
+                var key = node.Outputs.FirstOrDefault(k => k is not null && !k.Value.IsEmpty);
+                if (key is null || !alreadyInputs.Add(key.Value)) continue;
+                fastGraph.Inputs.Add(key.Value);
+                fastGraph.InputUniqueNames.Add(key.Value.ToString());
+            }
+
             // Outputs (in proto declaration order).
             foreach (var output in graphProto.Outputs)
             {
@@ -743,6 +758,15 @@ namespace Shorokoo.Core.Factory.IR
                         };
                     }
                 }
+
+                // Vanilla ONNX carries a MODEL_TENSOR_INPUT's representative-input info in this input's own
+                // ValueInfoProto metadata (a graph input has no attribute bag). Re-attach it here, where the
+                // ValueInfoProto and the FastNode built for it are both in hand — no cross-graph pairing. A
+                // foreign ONNX has no such prop (no-op); a malformed value is skipped by the decoder.
+                if (fastNode.OpCode == InternalOpCodes.MODEL_TENSOR_INPUT
+                    && inputProto.MetadataProps.FirstOrDefault(p => p.Key == RepresentativeInputMetadata.Key)
+                        is { } reprProp)
+                    RepresentativeInputMetadata.Apply(fastNode, reprProp.Value);
 
                 results.Add((inputProto, key, fastNode));
             }

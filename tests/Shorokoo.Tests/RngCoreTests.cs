@@ -21,28 +21,49 @@ namespace Shorokoo.Tests;
 public class RngCoreTests
 {
     /// <summary>
-    /// The framework-injected RNG execution counter is identified <b>structurally</b> — by its
-    /// parameter-name part — not by a substring scan of the identifier string. A user parameter
-    /// whose name merely <em>contains</em> the counter name is therefore not mistaken for it
-    /// (the false positive the old <c>name.Contains("RngExecutionCounter")</c> match had).
+    /// The framework-injected RNG execution counter is identified <b>structurally</b> — its leaf
+    /// parameter part is named <c>RngExecutionCounter</c> under the <c>TrainableParam</c> category
+    /// — not by a substring scan of the identifier string. So the false positives the old
+    /// <c>name.Contains("RngExecutionCounter")</c> match produced (the counter name appearing as a
+    /// module path segment or a mere name substring) are correctly rejected.
     /// </summary>
     [Fact]
     public void TestExecutionCounterIsIdentifiedStructurallyNotBySubstring()
     {
-        // The real counter (at any dynamically-assigned top-level slot) is recognized.
+        // The real counter (at any dynamically-assigned slot) is recognized.
         var counter = ModelParamIdentifierTemplate.LocalTrainableParam(
             new ModelId(3), FastInjectRngDrawCounter.CounterName, 0, ImmutableArray<int>.Empty);
         Assert.True(FastInjectRngDrawCounter.IsExecutionCounter(counter));
 
-        // A user parameter whose name only CONTAINS the counter name is not the counter.
+        // A user parameter whose leaf name only CONTAINS the counter name is not the counter.
         var lookalike = ModelParamIdentifierTemplate.LocalTrainableParam(
             new ModelId(4), FastInjectRngDrawCounter.CounterName + "Stat", 0, ImmutableArray<int>.Empty);
         Assert.False(FastInjectRngDrawCounter.IsExecutionCounter(lookalike));
+
+        // The strongest old false positive: an ordinary "weight" parameter nested in a user
+        // MODULE that happens to be named RngExecutionCounter. Its path string contains the
+        // counter name (so the old Contains match fired), but its leaf part is "weight".
+        var moduleNamedLikeCounter = ModelParamIdentifierTemplate.LocalModule(
+            new ModelId(4), FastInjectRngDrawCounter.CounterName, 0, ImmutableArray<int>.Empty);
+        var nestedWeight = ModelParamIdentifierTemplate.LocalTrainableParam(
+            new ModelId(0), "weight", 0, ImmutableArray<int>.Empty);
+        var nested = new ModelParamIdentifierTemplate(moduleNamedLikeCounter, nestedWeight);
+        Assert.Contains(FastInjectRngDrawCounter.CounterName, nested.ToString());   // old Contains would fire
+        Assert.False(FastInjectRngDrawCounter.IsExecutionCounter(nested));          // structural match does not
 
         // An ordinary weight is not the counter.
         var weight = ModelParamIdentifierTemplate.LocalTrainableParam(
             new ModelId(1), "weight", 0, ImmutableArray<int>.Empty);
         Assert.False(FastInjectRngDrawCounter.IsExecutionCounter(weight));
+
+        // A non-TrainableParam parameter whose leaf is exactly the counter name is not the
+        // counter either — the category clause is load-bearing.
+        var stateNamedLikeCounter = ModelParamIdentifierTemplate.LocalStateParam(
+            new ModelId(5), FastInjectRngDrawCounter.CounterName, 0, ImmutableArray<int>.Empty);
+        Assert.False(FastInjectRngDrawCounter.IsExecutionCounter(stateNamedLikeCounter));
+
+        // A null identifier is not the counter.
+        Assert.False(FastInjectRngDrawCounter.IsExecutionCounter((ModelParamIdentifierTemplate?)null));
     }
 
     // Random123 known-answer test vectors for threefry2x32, 20 rounds

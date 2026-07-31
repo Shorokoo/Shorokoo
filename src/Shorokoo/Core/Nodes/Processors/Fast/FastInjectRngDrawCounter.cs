@@ -35,14 +35,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         /// <summary>
         /// True when <paramref name="identifier"/> is the framework-injected execution counter
-        /// (<see cref="CounterName"/>), matched <b>structurally</b> — by its parameter-name part
-        /// under the <c>TrainableParam</c> category — rather than by a substring scan of the raw
-        /// identifier string. The counter sits at a dynamically-assigned top-level slot, so
-        /// (unlike the fixed-slot <c>RngSeed</c> identity, matched by a constant template) its
-        /// stable signal is the parameter part; a substring scan false-positives on any user
-        /// parameter whose name merely <em>contains</em> the counter name. (A user parameter
-        /// named exactly <see cref="CounterName"/> would still collide; removing even that needs
-        /// a reserved slot/region and its user-slot renumbering, deliberately not done here.)
+        /// (<see cref="CounterName"/>), matched <b>structurally</b> — the identifier's leaf
+        /// parameter part is named <see cref="CounterName"/> under the <c>TrainableParam</c>
+        /// category — rather than by a substring scan of the raw identifier string. The counter's
+        /// ModelId slot is assigned dynamically (so, unlike the fixed-slot <c>RngSeed</c> identity
+        /// that is matched by a constant template, the slot cannot anchor the match); the stable
+        /// signal is the leaf parameter name, matched regardless of slot or module nesting. A
+        /// substring scan, by contrast, false-positives whenever the counter name appears anywhere
+        /// in the path — e.g. as a <em>module</em> segment or a mere name substring. (A user
+        /// <c>TrainableParam</c> whose leaf name is exactly <see cref="CounterName"/> would still
+        /// collide; removing even that needs a reserved slot/region and its user-slot renumbering,
+        /// deliberately not done here.)
         /// </summary>
         public static bool IsExecutionCounter(ModelParamIdentifierTemplate? identifier)
             => identifier is not null

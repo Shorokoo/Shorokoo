@@ -60,8 +60,16 @@ namespace Shorokoo
                     "Only a weight-filled concrete model has weight tensors to export. Lower the " +
                     "graph with ToConcreteArchitecture(inputHints, ...).ToConcreteModel(...) first."));
 
+            // The RngExecutionCounter is RNG bookkeeping (an int64[1] draw counter), not an
+            // interchange weight foreign frameworks can use, so it is excluded from the
+            // safetensors export — unlike the native .skpt, which keeps it (in model_state) for
+            // exact resume. Import re-injects a fresh counter (its initializer default), so the
+            // round trip stays complete.
             var weightNodes = CheckpointBuilder.CollectWeightNodes(
-                concreteModel.ToInternal(), "Persistence.ExportSafeTensors");
+                    concreteModel.ToInternal(), "Persistence.ExportSafeTensors")
+                .Where(n => !Core.Nodes.Processors.Fast.FastInjectRngDrawCounter.IsExecutionCounter(
+                    n.IdentifierTemplate))
+                .ToList();
             if (weightNodes.Count == 0)
                 throw new InvalidOperationException(
                     "Persistence.ExportSafeTensors: the model has no weight parameters — there is " +
@@ -158,7 +166,12 @@ namespace Shorokoo
             // per invocation of its module; all copies share one ModelId and one tensor).
             // Two parameters colliding on one mapped name is a scheme defect and fails here,
             // before any file name is looked up against the ambiguous map.
+            // The RngExecutionCounter is excluded from the safetensors export (RNG bookkeeping,
+            // not an interchange weight), so it is not a required source tensor here either; the
+            // materialization fills it from its initializer default when absent.
             var distinctParams = paramInfos.ParamInfos
+                .Where(p => !Core.Nodes.Processors.Fast.FastInjectRngDrawCounter.IsExecutionCounter(
+                    p.ParamIdentifier))
                 .GroupBy(p => p.ModelId).Select(g => g.First()).ToList();
             var paramByMappedName = new Dictionary<string, ConcreteModelParamInfo>(StringComparer.Ordinal);
             var mappedNames = new string?[distinctParams.Count];

@@ -49,7 +49,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 var modelIdVals = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId).AssertNotNull();
                 var modelId = new ModelId(modelIdVals);
-                var paramValue = paramValues[modelId];
+
+                // The RngExecutionCounter is framework bookkeeping that an interchange source may
+                // omit (safetensors excludes it). When its value is not supplied, fall back to its
+                // initializer default (0) rather than requiring it like a weight; a native .skpt
+                // still supplies its checkpointed value, which is used when present.
+                var paramValue = FastInjectRngDrawCounter.IsExecutionCounter(node.IdentifierTemplate)
+                                 && !paramValues.ContainsKey(modelId)
+                    ? FastInjectRngDrawCounter.ExecutionCounterInitialValue()
+                    : paramValues[modelId];
                 var isTrainable = node.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsTrainable) ?? false;
 
                 node.OpCode = InternalOpCodes.MODEL_PARAM_DATA;

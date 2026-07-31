@@ -32,6 +32,22 @@ public partial class RtLoweredUniform
         => RandomUniform(x.ShapeTensor(), 0f, 1f);
 }
 
+/// <summary>A trainable weight plus a runtime RNG feed: the feed forces the framework to inject
+/// the <c>RngExecutionCounter</c> as model state, while the draw is zeroed so the model's output
+/// is exactly the linear transform. Used to exercise safetensors export/import of a model that
+/// carries the execution counter.</summary>
+[Module]
+public partial class RtFcWithRngFeed
+{
+    public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> numOutFeatures)
+    {
+        var numInFeatures = input.ShapeTensor()[-1L];
+        var weights = Shorokoo.Tests.Modules.InitSimple.Init([numOutFeatures, numInFeatures]);
+        var y = input.MatMul(weights.Transpose(1, 0));
+        return y + RandomUniform(y.ShapeTensor(), 0f, 1f) * Scalar(0f);
+    }
+}
+
 /// <summary>
 /// Coverage for the in-graph counter-based runtime RNG (<see cref="RuntimeRng"/>): the ONNX-op
 /// Threefry subgraph must reproduce the host generator (<see cref="Threefry2x32"/>) bit-for-bit

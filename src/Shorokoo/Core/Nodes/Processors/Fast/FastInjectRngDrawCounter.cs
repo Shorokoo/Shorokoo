@@ -1,5 +1,6 @@
 using Shorokoo.Graph;
 using Shorokoo.Core.Graph;
+using Shorokoo.Core.Inference.Helpers;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Modules;
 using System;
@@ -52,6 +53,29 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                && identifier.Category == ModelParamIdentifierTemplatePart.TrainableParamCategory.Name
                && identifier.Parts[^1].Type == ModelParamIdentifierTemplatePartType.Param
                && identifier.Parts[^1].Name == CounterName;
+
+        /// <summary>
+        /// String overload of <see cref="IsExecutionCounter(ModelParamIdentifierTemplate)"/> for a
+        /// node's raw <c>IdentifierTemplate</c>; a null, empty, or unparseable identifier is not
+        /// the counter.
+        /// </summary>
+        public static bool IsExecutionCounter(string? identifierTemplate)
+        {
+            if (string.IsNullOrEmpty(identifierTemplate)) return false;
+            try { return IsExecutionCounter(new ModelParamIdentifierTemplate(identifierTemplate)); }
+            catch (ArgumentException) { return false; }
+        }
+
+        /// <summary>
+        /// The execution counter's initial value — an <c>int64[1]</c> zero, mirroring
+        /// <see cref="CounterInit"/>. Used as the materialization fallback when no value for the
+        /// counter is supplied: the counter is framework bookkeeping (a draw counter), so a model
+        /// built from a source that omits it — notably a <c>.safetensors</c> interchange file,
+        /// which excludes it — starts it fresh at 0 rather than requiring it like a weight. A
+        /// native <c>.skpt</c> still supplies its checkpointed value, which takes precedence.
+        /// </summary>
+        public static TensorData ExecutionCounterInitialValue()
+            => TensorData.CreateFromRawBytes(new Shape([1L]), DType.Int64, BitConverter.GetBytes(0L));
 
         public static void Process(InternalComputationGraph graph)
         {

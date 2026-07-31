@@ -50,12 +50,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var modelIdVals = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId).AssertNotNull();
                 var modelId = new ModelId(modelIdVals);
 
-                // The RngExecutionCounter is framework bookkeeping that an interchange source may
-                // omit (safetensors excludes it). When its value is not supplied, fall back to its
-                // initializer default (0) rather than requiring it like a weight; a native .skpt
-                // still supplies its checkpointed value, which is used when present.
-                var paramValue = FastInjectRngDrawCounter.IsExecutionCounter(node.IdentifierTemplate)
-                                 && !paramValues.ContainsKey(modelId)
+                // The RngExecutionCounter is framework bookkeeping that a materialization source
+                // may omit — notably a .safetensors interchange file, which deliberately excludes
+                // it. When no value is supplied for it, fall back to its initializer default (0)
+                // rather than requiring it like a weight. A native .skpt always writes the counter
+                // (CollectWeightNodes keeps it), so on resume its checkpointed value is present and
+                // used; in practice this fallback only fires for an interchange import that omits
+                // it. The cheap dictionary lookup is tested first so the identifier parse runs only
+                // for a param actually absent from the supplied set (normally just the counter).
+                var paramValue = !paramValues.ContainsKey(modelId)
+                                 && FastInjectRngDrawCounter.IsExecutionCounter(node.IdentifierTemplate)
                     ? FastInjectRngDrawCounter.ExecutionCounterInitialValue()
                     : paramValues[modelId];
                 var isTrainable = node.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsTrainable) ?? false;

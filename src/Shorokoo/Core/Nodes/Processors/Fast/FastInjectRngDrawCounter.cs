@@ -33,6 +33,23 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     {
         public const string CounterName = "RngExecutionCounter";
 
+        /// <summary>
+        /// True when <paramref name="identifier"/> is the framework-injected execution counter
+        /// (<see cref="CounterName"/>), matched <b>structurally</b> — by its parameter-name part
+        /// under the <c>TrainableParam</c> category — rather than by a substring scan of the raw
+        /// identifier string. The counter sits at a dynamically-assigned top-level slot, so
+        /// (unlike the fixed-slot <c>RngSeed</c> identity, matched by a constant template) its
+        /// stable signal is the parameter part; a substring scan false-positives on any user
+        /// parameter whose name merely <em>contains</em> the counter name. (A user parameter
+        /// named exactly <see cref="CounterName"/> would still collide; removing even that needs
+        /// a reserved slot/region and its user-slot renumbering, deliberately not done here.)
+        /// </summary>
+        public static bool IsExecutionCounter(ModelParamIdentifierTemplate? identifier)
+            => identifier is not null
+               && identifier.Category == ModelParamIdentifierTemplatePart.TrainableParamCategory.Name
+               && identifier.Parts[^1].Type == ModelParamIdentifierTemplatePartType.Param
+               && identifier.Parts[^1].Name == CounterName;
+
         public static void Process(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));

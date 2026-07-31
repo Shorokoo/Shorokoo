@@ -1,6 +1,10 @@
 using System;
+using System.Collections.Immutable;
 using System.Linq;
 using Shorokoo.Core.Rng;
+using Shorokoo.Core.Graph;
+using Shorokoo.Core.Nodes.Processors.Fast;
+using Shorokoo.Graph;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
@@ -16,6 +20,31 @@ namespace Shorokoo.Tests;
 [Trait("Purpose", "Coverage")]
 public class RngCoreTests
 {
+    /// <summary>
+    /// The framework-injected RNG execution counter is identified <b>structurally</b> — by its
+    /// parameter-name part — not by a substring scan of the identifier string. A user parameter
+    /// whose name merely <em>contains</em> the counter name is therefore not mistaken for it
+    /// (the false positive the old <c>name.Contains("RngExecutionCounter")</c> match had).
+    /// </summary>
+    [Fact]
+    public void TestExecutionCounterIsIdentifiedStructurallyNotBySubstring()
+    {
+        // The real counter (at any dynamically-assigned top-level slot) is recognized.
+        var counter = ModelParamIdentifierTemplate.LocalTrainableParam(
+            new ModelId(3), FastInjectRngDrawCounter.CounterName, 0, ImmutableArray<int>.Empty);
+        Assert.True(FastInjectRngDrawCounter.IsExecutionCounter(counter));
+
+        // A user parameter whose name only CONTAINS the counter name is not the counter.
+        var lookalike = ModelParamIdentifierTemplate.LocalTrainableParam(
+            new ModelId(4), FastInjectRngDrawCounter.CounterName + "Stat", 0, ImmutableArray<int>.Empty);
+        Assert.False(FastInjectRngDrawCounter.IsExecutionCounter(lookalike));
+
+        // An ordinary weight is not the counter.
+        var weight = ModelParamIdentifierTemplate.LocalTrainableParam(
+            new ModelId(1), "weight", 0, ImmutableArray<int>.Empty);
+        Assert.False(FastInjectRngDrawCounter.IsExecutionCounter(weight));
+    }
+
     // Random123 known-answer test vectors for threefry2x32, 20 rounds
     // (tests/kat_vectors in DEShawResearch/random123): counter, key -> output.
     [Theory]

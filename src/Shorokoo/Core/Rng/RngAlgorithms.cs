@@ -38,6 +38,11 @@ internal static class RngAlgorithms
     public const string KindSplit = "split";
     public const string KindUniform = "uniform";
     public const string KindNormal = "normal";
+    public const string KindBits = "bits";
+
+    /// <summary>The uint output dtypes a raw-bits draw supports.</summary>
+    public static bool IsSupportedBitsDtype(DType dtype) =>
+        dtype == DType.UInt8 || dtype == DType.UInt16 || dtype == DType.UInt32 || dtype == DType.UInt64;
 
     /// <summary>The registry name of a configured <see cref="RngAlgorithm"/>.</summary>
     public static string NameOf(RngAlgorithm algorithm) => algorithm switch
@@ -66,48 +71,76 @@ internal static class RngAlgorithms
     };
 
     private static readonly object Gate = new();
-    private static readonly Dictionary<(string algorithm, string kind), Function> Cache = new();
+    private static readonly Dictionary<(string algorithm, string kind, DType? bitsDtype), Function> Cache = new();
 
-    /// <summary>The named algorithm's function of the given kind (cached; built on first use).</summary>
-    public static Function GetFunction(string algorithm, string kind)
+    /// <summary>
+    /// The named algorithm's function of the given kind (cached; built on first use). For
+    /// <see cref="KindBits"/> the output uint width is part of the function's identity, so
+    /// <paramref name="bitsDtype"/> is required (and must be a supported uint width); it must be
+    /// null for every other kind.
+    /// </summary>
+    public static Function GetFunction(string algorithm, string kind, DType? bitsDtype = null)
     {
         // Validate the name before any remap: an unknown algorithm must fail loudly for every
         // kind — the split remap below must never launder an unrecognized name into Default.
         int rounds = DrawRounds(algorithm);
 
+        if (kind == KindBits)
+        {
+            if (bitsDtype is null || !IsSupportedBitsDtype(bitsDtype))
+                throw new NotSupportedException(
+                    $"The '{KindBits}' RNG function requires a uint output dtype (U8/U16/U32/U64); " +
+                    $"got '{bitsDtype?.ToString() ?? "none"}'.");
+        }
+        else if (bitsDtype is not null)
+            throw new ArgumentException($"bitsDtype applies only to the '{KindBits}' kind, not '{kind}'.", nameof(bitsDtype));
+
         // The key tree is algorithm-independent: switching the draw algorithm must not re-key
         // any stream, so split (the in-graph key fold) is always the default 20-round Threefry
-        // regardless of the configured draw algorithm. Only uniform/normal vary by algorithm.
+        // regardless of the configured draw algorithm. Only the draws vary by algorithm.
         if (kind == KindSplit) algorithm = Default;
 
         lock (Gate)
         {
-            if (Cache.TryGetValue((algorithm, kind), out var fn)) return fn;
+            if (Cache.TryGetValue((algorithm, kind, bitsDtype), out var fn)) return fn;
 
+            bool r13 = rounds == Threefry2x32.Rounds13;
             Delegate body = kind switch
             {
                 KindSplit => (Func<Vector<int64>, Scalar<int64>, Vector<int64>>)SplitImpl,
-                KindUniform => rounds == Threefry2x32.Rounds13
+                KindUniform => r13
                     ? (Func<Vector<int64>, Scalar<int64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)Uniform13Impl
                     : (Func<Vector<int64>, Scalar<int64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)UniformImpl,
-                KindNormal => rounds == Threefry2x32.Rounds13
+                KindNormal => r13
                     ? (Func<Vector<int64>, Scalar<int64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)Normal13Impl
                     : (Func<Vector<int64>, Scalar<int64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)NormalImpl,
+                KindBits => BitsBody(r13, bitsDtype!),
                 _ => throw new NotSupportedException($"Unknown RNG function kind '{kind}'."),
             };
 
             // Sanitized, stable ONNX-safe name; the pretty algorithm name rides the metadata.
             var tag = algorithm == Threefry2x32x13BoxMullerV1 ? "Threefry2x32_13_BoxMuller_v1" : "Threefry2x32_BoxMuller_v1";
-            var name = "ShrkRng_" + tag + "_" + kind;
+            var suffix = kind == KindBits ? "_" + bitsDtype!.ToString() : "";
+            var name = "ShrkRng_" + tag + "_" + kind + suffix;
             var graph = GraphBuilder.BuildInternalComputationGraphFromDelegate(body);
             fn = new Function(graph, FunctionType.Function, name, name)
             {
                 RngAlgorithm = algorithm,
                 RngFunctionKind = kind,
             };
-            Cache[(algorithm, kind)] = fn;
+            Cache[(algorithm, kind, bitsDtype)] = fn;
             return fn;
         }
+    }
+
+    /// <summary>The bits draw delegate for a width and round count (a non-capturing static method,
+    /// as <see cref="GraphBuilder.BuildInternalComputationGraphFromDelegate"/> requires).</summary>
+    private static Delegate BitsBody(bool r13, DType dtype)
+    {
+        if (dtype == DType.UInt8)  return r13 ? (Func<Vector<int64>, Scalar<int64>, Vector<int64>, Tensor<uint8>>)BitsU8Impl13   : BitsU8Impl;
+        if (dtype == DType.UInt16) return r13 ? (Func<Vector<int64>, Scalar<int64>, Vector<int64>, Tensor<uint16>>)BitsU16Impl13 : BitsU16Impl;
+        if (dtype == DType.UInt32) return r13 ? (Func<Vector<int64>, Scalar<int64>, Vector<int64>, Tensor<uint32>>)BitsU32Impl13 : BitsU32Impl;
+        return r13 ? (Func<Vector<int64>, Scalar<int64>, Vector<int64>, Tensor<uint64>>)BitsU64Impl13 : BitsU64Impl;
     }
 
     private static Vector<int64> SplitImpl(Vector<int64> key, Scalar<int64> index)
@@ -135,4 +168,13 @@ internal static class RngAlgorithms
         Vector<int64> key, Scalar<int64> drawBase, Vector<int64> shape,
         Scalar<float32> mean, Scalar<float32> scale)
         => RuntimeRng.Normal(shape, key[0], key[1], drawBase, mean, scale, Threefry2x32.Rounds13);
+
+    private static Tensor<uint8>  BitsU8Impl  (Vector<int64> key, Scalar<int64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU8 (shape, key[0], key[1], drawBase, Threefry2x32.Rounds);
+    private static Tensor<uint16> BitsU16Impl (Vector<int64> key, Scalar<int64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU16(shape, key[0], key[1], drawBase, Threefry2x32.Rounds);
+    private static Tensor<uint32> BitsU32Impl (Vector<int64> key, Scalar<int64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU32(shape, key[0], key[1], drawBase, Threefry2x32.Rounds);
+    private static Tensor<uint64> BitsU64Impl (Vector<int64> key, Scalar<int64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU64(shape, key[0], key[1], drawBase, Threefry2x32.Rounds);
+    private static Tensor<uint8>  BitsU8Impl13 (Vector<int64> key, Scalar<int64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU8 (shape, key[0], key[1], drawBase, Threefry2x32.Rounds13);
+    private static Tensor<uint16> BitsU16Impl13(Vector<int64> key, Scalar<int64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU16(shape, key[0], key[1], drawBase, Threefry2x32.Rounds13);
+    private static Tensor<uint32> BitsU32Impl13(Vector<int64> key, Scalar<int64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU32(shape, key[0], key[1], drawBase, Threefry2x32.Rounds13);
+    private static Tensor<uint64> BitsU64Impl13(Vector<int64> key, Scalar<int64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU64(shape, key[0], key[1], drawBase, Threefry2x32.Rounds13);
 }

@@ -33,6 +33,49 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     {
         public const string CounterName = "RngExecutionCounter";
 
+        /// <summary>
+        /// True when <paramref name="identifier"/> is the framework-injected execution counter
+        /// (<see cref="CounterName"/>), matched <b>structurally</b> — the identifier's leaf
+        /// parameter part is named <see cref="CounterName"/> under the <c>TrainableParam</c>
+        /// category — rather than by a substring scan of the raw identifier string. The counter's
+        /// ModelId slot is assigned dynamically (so, unlike the fixed-slot <c>RngSeed</c> identity
+        /// that is matched by a constant template, the slot cannot anchor the match); the stable
+        /// signal is the leaf parameter name, matched regardless of slot or module nesting. A
+        /// substring scan, by contrast, false-positives whenever the counter name appears anywhere
+        /// in the path — e.g. as a <em>module</em> segment or a mere name substring. (A user
+        /// <c>TrainableParam</c> whose leaf name is exactly <see cref="CounterName"/> would still
+        /// collide; removing even that needs a reserved slot/region and its user-slot renumbering,
+        /// deliberately not done here.)
+        /// </summary>
+        public static bool IsExecutionCounter(ModelParamIdentifierTemplate? identifier)
+            => identifier is not null
+               && identifier.Category == ModelParamIdentifierTemplatePart.TrainableParamCategory.Name
+               && identifier.Parts[^1].Type == ModelParamIdentifierTemplatePartType.Param
+               && identifier.Parts[^1].Name == CounterName;
+
+        /// <summary>
+        /// String overload of <see cref="IsExecutionCounter(ModelParamIdentifierTemplate)"/> for a
+        /// node's raw <c>IdentifierTemplate</c>; a null, empty, or unparseable identifier is not
+        /// the counter.
+        /// </summary>
+        public static bool IsExecutionCounter(string? identifierTemplate)
+        {
+            if (string.IsNullOrEmpty(identifierTemplate)) return false;
+            try { return IsExecutionCounter(new ModelParamIdentifierTemplate(identifierTemplate)); }
+            catch (ArgumentException) { return false; }
+        }
+
+        /// <summary>
+        /// The execution counter's initial value — an <c>int64[1]</c> zero, mirroring
+        /// <see cref="CounterInit"/>. Used as the materialization fallback when no value for the
+        /// counter is supplied: the counter is framework bookkeeping (a draw counter), so a model
+        /// built from a source that omits it — notably a <c>.safetensors</c> interchange file,
+        /// which excludes it — starts it fresh at 0 rather than requiring it like a weight. A
+        /// native <c>.skpt</c> still supplies its checkpointed value, which takes precedence.
+        /// </summary>
+        public static TensorData ExecutionCounterInitialValue()
+            => TensorData.CreateFromRawBytes(new Shape([1L]), DType.Int64, BitConverter.GetBytes(0L));
+
         public static void Process(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));

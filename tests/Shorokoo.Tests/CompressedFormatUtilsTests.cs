@@ -2894,6 +2894,45 @@ public class CompressedFormatUtilsCoverageTests
     }
 
     /// <summary>
+    /// ExportSafeTensors excludes the framework-injected RngExecutionCounter — it is RNG
+    /// bookkeeping (an int64[1] draw counter), not an interchange weight — while still exporting
+    /// the model's trainable weights. The file round-trips onto a fresh architecture: the
+    /// materialization fills the absent counter from its initializer default (0), so the imported
+    /// model binds and executes bit-identically to the original. Contrast the native .skpt, which
+    /// keeps the counter in model_state for exact resume.
+    /// </summary>
+    [Fact]
+    public void TestSafeTensorsExportExcludesRngExecutionCounter()
+    {
+        var numOut = TensorData(DType.Int64, [], 4L);
+        var input = TensorDataWithSmallVals(DType.Float32, [4L, 4L]);
+        var g = RtFcWithRngFeed.ComputationGraph;
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([numOut, input]));
+        var model = arch.ToConcreteModel();
+        var path = Path.Combine(TempDir, "rng_feed_exchange.safetensors");
+        try
+        {
+            var direct = ExecuteToBytes(model, numOut, input);
+
+            Persistence.ExportSafeTensors(model, path);
+            var names = SafeTensorLoader.LoadSafeTensors(path).Select(t => t.Name).ToList();
+            Assert.NotEmpty(names);   // the trainable weight is still exported
+            Assert.DoesNotContain(names, n => n.Contains(
+                Shorokoo.Core.Nodes.Processors.Fast.FastInjectRngDrawCounter.CounterName));
+
+            // With the counter absent, the file still binds onto a fresh architecture (the
+            // materialization supplies the counter's default) and executes identically.
+            var imported = Persistence.ImportSafeTensors(arch, path);
+            Assert.Equal(GraphKind.ConcreteModel, imported.Kind);
+            Assert.Equal(direct, ExecuteToBytes(imported, numOut, input));
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
+    /// <summary>
     /// Import fails loudly, naming the offending tensor, on every mapping-mismatch
     /// class: a source tensor that maps to no parameter (with a dedicated hint when the
     /// file is a training checkpoint), a required parameter with no source tensor, a

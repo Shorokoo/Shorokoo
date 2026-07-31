@@ -469,7 +469,7 @@ namespace Shorokoo.Graph
                     Kind = RngStreamKind.ParamInit,
                     Name = name,
                     Shape = info.Shape.Dims,
-                    FrameworkOwned = name.Contains(FastInjectRngDrawCounter.CounterName),
+                    FrameworkOwned = FastInjectRngDrawCounter.IsExecutionCounter(info.ParamIdentifier),
                     KeyWords = rngConfig is null
                         ? null
                         : ToKeyWords(rngConfig.FoldInitKey(info.ModelId.Vals)),

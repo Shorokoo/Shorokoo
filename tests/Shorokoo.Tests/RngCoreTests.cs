@@ -1,6 +1,10 @@
 using System;
+using System.Collections.Immutable;
 using System.Linq;
 using Shorokoo.Core.Rng;
+using Shorokoo.Core.Graph;
+using Shorokoo.Core.Nodes.Processors.Fast;
+using Shorokoo.Graph;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
@@ -16,6 +20,66 @@ namespace Shorokoo.Tests;
 [Trait("Purpose", "Coverage")]
 public class RngCoreTests
 {
+    /// <summary>
+    /// The framework-injected RNG execution counter is identified <b>structurally</b> — its leaf
+    /// parameter part is named <c>RngExecutionCounter</c> under the <c>TrainableParam</c> category
+    /// — not by a substring scan of the identifier string. So the false positives the old
+    /// <c>name.Contains("RngExecutionCounter")</c> match produced (the counter name appearing as a
+    /// module path segment or a mere name substring) are correctly rejected.
+    /// </summary>
+    [Fact]
+    public void TestExecutionCounterIsIdentifiedStructurallyNotBySubstring()
+    {
+        // The real counter (at any dynamically-assigned slot) is recognized.
+        var counter = ModelParamIdentifierTemplate.LocalTrainableParam(
+            new ModelId(3), FastInjectRngDrawCounter.CounterName, 0, ImmutableArray<int>.Empty);
+        Assert.True(FastInjectRngDrawCounter.IsExecutionCounter(counter));
+
+        // A user parameter whose leaf name only CONTAINS the counter name is not the counter.
+        var lookalike = ModelParamIdentifierTemplate.LocalTrainableParam(
+            new ModelId(4), FastInjectRngDrawCounter.CounterName + "Stat", 0, ImmutableArray<int>.Empty);
+        Assert.False(FastInjectRngDrawCounter.IsExecutionCounter(lookalike));
+
+        // The strongest old false positive: an ordinary "weight" parameter nested in a user
+        // MODULE that happens to be named RngExecutionCounter. Its path string contains the
+        // counter name (so the old Contains match fired), but its leaf part is "weight".
+        var moduleNamedLikeCounter = ModelParamIdentifierTemplate.LocalModule(
+            new ModelId(4), FastInjectRngDrawCounter.CounterName, 0, ImmutableArray<int>.Empty);
+        var nestedWeight = ModelParamIdentifierTemplate.LocalTrainableParam(
+            new ModelId(0), "weight", 0, ImmutableArray<int>.Empty);
+        var nested = new ModelParamIdentifierTemplate(moduleNamedLikeCounter, nestedWeight);
+        Assert.Contains(FastInjectRngDrawCounter.CounterName, nested.ToString());   // old Contains would fire
+        Assert.False(FastInjectRngDrawCounter.IsExecutionCounter(nested));          // structural match does not
+
+        // An ordinary weight is not the counter.
+        var weight = ModelParamIdentifierTemplate.LocalTrainableParam(
+            new ModelId(1), "weight", 0, ImmutableArray<int>.Empty);
+        Assert.False(FastInjectRngDrawCounter.IsExecutionCounter(weight));
+
+        // A non-TrainableParam parameter whose leaf is exactly the counter name is not the
+        // counter either — the category clause is load-bearing.
+        var stateNamedLikeCounter = ModelParamIdentifierTemplate.LocalStateParam(
+            new ModelId(5), FastInjectRngDrawCounter.CounterName, 0, ImmutableArray<int>.Empty);
+        Assert.False(FastInjectRngDrawCounter.IsExecutionCounter(stateNamedLikeCounter));
+
+        // A null identifier is not the counter.
+        Assert.False(FastInjectRngDrawCounter.IsExecutionCounter((ModelParamIdentifierTemplate?)null));
+    }
+
+    /// <summary>
+    /// The execution counter's materialization fallback value is an <c>int64[1]</c> zero — it must
+    /// match what <c>CounterInit</c> produces, or a safetensors round-trip (which omits the counter
+    /// and refills it from this value) would bind a wrong-shaped or wrong-valued counter.
+    /// </summary>
+    [Fact]
+    public void TestExecutionCounterInitialValueIsInt64ScalarZero()
+    {
+        var v = FastInjectRngDrawCounter.ExecutionCounterInitialValue();
+        Assert.Equal((long[])[1L], v.Shape.Dims.ToArray());
+        // As<int64> also asserts the dtype (it throws on a non-int64 tensor).
+        Assert.Equal((long[])[0L], v.As<int64>().AccessMemory().ToArray());
+    }
+
     // Random123 known-answer test vectors for threefry2x32, 20 rounds
     // (tests/kat_vectors in DEShawResearch/random123): counter, key -> output.
     [Theory]

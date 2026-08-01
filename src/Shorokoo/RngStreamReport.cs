@@ -75,6 +75,7 @@ public sealed class RngStreamInfo
         {
             RngStreamKind.ParamInit => "init",
             RngStreamKind.UniformFeed => "uniform feed",
+            RngStreamKind.BitsFeed => "bits feed",
             _ => "normal feed",
         });
         if (Name is not null) sb.Append("  ").Append(Name);
@@ -167,6 +168,7 @@ public sealed class RngStreamReport
         {
             RngStreamKind.ParamInit => s.Name ?? "param",
             RngStreamKind.UniformFeed => "uniform feed",
+            RngStreamKind.BitsFeed => "bits feed",
             _ => "normal feed",
         };
         if (s.Kind == RngStreamKind.ParamInit && s.Shape is not null)

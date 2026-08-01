@@ -176,15 +176,13 @@ public class RngAlgorithmTests
 
         var proto = FastOnnxModelBuilder.BuildOnnxModel(concrete);
 
-        // The SPLIT constant-folds away by design: its QEE op computes real values, so a
-        // split chain over constant key/index collapses to a literal child-key constant
-        // at concretization — key derivation costs nothing in the exported graph. The DRAW
-        // (whose values QEE deliberately does not compute) must survive as a call of the
-        // algorithm's NON-INLINED function: a local FunctionProto tagged with the algorithm
-        // name and function kind.
+        // RNG is graph-only (#136): the split no longer constant-folds host-side. Both the
+        // split AND the draw survive as calls of the algorithm's NON-INLINED functions — local
+        // FunctionProtos tagged with the algorithm name and function kind. (The split resolves
+        // to a literal key only later, at ORT session build, not in this exported proto.)
         var rngFns = proto.Functions.Where(f => f.Name.Contains("ShrkRng_")).ToArray();
-        Assert.True(rngFns.Length >= 1,
-            $"expected the uniform algorithm FunctionProto; functions=[{string.Join(",", proto.Functions.Select(f => f.Name))}]");
+        Assert.True(rngFns.Length >= 2,
+            $"expected the split + uniform algorithm FunctionProtos; functions=[{string.Join(",", proto.Functions.Select(f => f.Name))}]");
         foreach (var fn in rngFns)
         {
             var algo = fn.MetadataProps.FirstOrDefault(p => p.Key == Function.IRRngAlgorithmParamName)?.Value;
@@ -193,10 +191,11 @@ public class RngAlgorithmTests
             Assert.Contains(kind, (string[])[RngAlgorithms.KindSplit, RngAlgorithms.KindUniform, RngAlgorithms.KindNormal]);
         }
 
-        // The main graph must CALL the draw (a Functions-domain call node), not contain
-        // its spliced body; and the folded split must NOT appear as a node.
+        // The main graph CALLS both the split and the draw (Functions-domain call nodes), not
+        // their spliced bodies; and no raw SHRK_RNG_SPLIT opcode survives (it was lowered).
         var callOps = proto.Graph.Nodes.Where(n => n.Domain == "Functions").Select(n => n.OpType).ToArray();
         Assert.Contains(callOps, op => op.Contains("uniform"));
+        Assert.Contains(callOps, op => op.Contains("split"));   // #136: split now exported as a call, not folded away
         Assert.DoesNotContain(proto.Graph.Nodes, n => n.OpType.Contains("RngSplit"));
     }
 }

@@ -490,10 +490,13 @@ namespace Shorokoo.Graph
             {
                 bool isUniform = node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM;
                 bool isNormal = node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL;
-                if (!isUniform && !isNormal) continue;
+                bool isBits = node.OpCode == InternalOpCodes.SHRK_RANDOM_BITS;
+                if (!isUniform && !isNormal && !isBits) continue;
                 var idVals = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId);
                 if (idVals is null || idVals.Length == 0) continue;
-                var kind = isUniform ? RngStreamKind.UniformFeed : RngStreamKind.NormalFeed;
+                var kind = isUniform ? RngStreamKind.UniformFeed
+                    : isNormal ? RngStreamKind.NormalFeed
+                    : RngStreamKind.BitsFeed;
 
                 if (node.Inputs.Count < 4 || node.Inputs[3] is null)
                     throw new System.InvalidOperationException(

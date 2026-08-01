@@ -44,6 +44,18 @@ public partial class RngKeyedNormalDraw
     }
 }
 
+/// <summary>Keyed raw-bits draw (U32) at the input's shape under a literal key (123, 456), drawBase 0.</summary>
+[Module]
+public partial class RngKeyedBitsDraw
+{
+    public static Tensor<uint32> Inline(Tensor<float32> x)
+    {
+        Vector<int64> key = [Scalar(123L), Scalar(456L)];
+        return (Tensor<uint32>)InternalOp.RngBits(
+            key, Scalar(0L), x.ShapeTensor(), DType.UInt32, RngAlgorithms.Default);
+    }
+}
+
 /// <summary>
 /// Coverage for the named-algorithm keyed RNG operators (SHRK_RNG_SPLIT / UNIFORM / NORMAL)
 /// and their ONNX lowering: each op lowers at export to a call of the algorithm's
@@ -72,6 +84,16 @@ public class RngAlgorithmTests
         return (x0 & 0x00FFFFFFu) * (1.0f / 16777216.0f);
     }
 
+    private static uint[] RunDrawU32<TModule>(long rows, long cols)
+    {
+        var g = ((ComputationGraph)typeof(TModule)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var input = TensorData([rows, cols], Enumerable.Repeat(0f, (int)(rows * cols)).ToArray());
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        return ComputeContext.Default.Execute(concrete, input)[0]
+            .ToTensorData().As<uint32>().AccessMemory().ToArray();
+    }
+
     [Fact]
     public void TestKeyedUniformMatchesHostBitExact()
     {
@@ -79,6 +101,33 @@ public class RngAlgorithmTests
         Assert.Equal(16, vals.Length);
         for (long i = 0; i < 16; i++)
             Assert.Equal(HostUniform(i, 123, 456), vals[i]);
+    }
+
+    [Fact]
+    public void TestKeyedBitsMatchesHostBitExact()
+    {
+        // The keyed raw-bits draw (InternalOp.RngBits) executes to the whole generator word x0
+        // under the literal key, bit-for-bit — the raw-bits analogue of the uniform keyed draw.
+        var vals = RunDrawU32<RngKeyedBitsDraw>(4, 4);
+        Assert.Equal(16, vals.Length);
+        for (long i = 0; i < 16; i++)
+        {
+            var (x0, _) = Threefry2x32.Bijection((uint)i, 0u, 123u, 456u);
+            Assert.Equal(x0, vals[i]);
+        }
+    }
+
+    [Fact]
+    public void TestGetFunctionBitsValidatesWidth()
+    {
+        // bits requires a supported uint width...
+        Assert.Throws<NotSupportedException>(
+            () => RngAlgorithms.GetFunction(RngAlgorithms.Default, RngAlgorithms.KindBits, DType.Float32));
+        Assert.Throws<NotSupportedException>(
+            () => RngAlgorithms.GetFunction(RngAlgorithms.Default, RngAlgorithms.KindBits, null));
+        // ...and a bitsDtype must not be supplied for a non-bits kind.
+        Assert.Throws<ArgumentException>(
+            () => RngAlgorithms.GetFunction(RngAlgorithms.Default, RngAlgorithms.KindUniform, DType.UInt32));
     }
 
     [Fact]

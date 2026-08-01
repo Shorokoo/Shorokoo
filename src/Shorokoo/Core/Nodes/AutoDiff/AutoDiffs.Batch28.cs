@@ -215,10 +215,10 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             where TOut : IVarType
             => null;
 
-        // RANDOM_NORMAL/RANDOM_UNIFORM have no inputs; SHRK_RANDOM_NORMAL/UNIFORM take
+        // RANDOM_NORMAL/RANDOM_UNIFORM have no inputs; SHRK_RANDOM_NORMAL/UNIFORM/BITS take
         // hyperparam-derived inputs that the autograd engine never differentiates
-        // through. They don't need [AutoDiff] entries because no reachable autograd
-        // path passes through them.
+        // through (and bits output is integer, non-differentiable). They don't need
+        // [AutoDiff] entries because no reachable autograd path passes through them.
 
         // ===== Multinomial =====
         // Discrete-sample output: non-differentiable w.r.t. logits in the standard path.

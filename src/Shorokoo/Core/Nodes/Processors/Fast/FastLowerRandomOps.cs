@@ -83,7 +83,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 if (node.OpCode == InternalOpCodes.SHRK_RNG_SPLIT ||
                     node.OpCode == InternalOpCodes.SHRK_RNG_UNIFORM ||
-                    node.OpCode == InternalOpCodes.SHRK_RNG_NORMAL)
+                    node.OpCode == InternalOpCodes.SHRK_RNG_NORMAL ||
+                    node.OpCode == InternalOpCodes.SHRK_RNG_BITS)
                 {
                     LowerKeyedRngToFunctionCall(node);
                     newNodes.Add(node);
@@ -92,23 +93,46 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 bool isUniform = node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM;
                 bool isNormal = node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL;
-                if (!isUniform && !isNormal)
+                bool isBits = node.OpCode == InternalOpCodes.SHRK_RANDOM_BITS;
+                if (!isUniform && !isNormal && !isBits)
                 {
                     newNodes.Add(node);
                     continue;
                 }
 
                 var idVals = node.Attributes.GetIntsVal(ShrkAttrLocalModelId);
+                // The key input is the last input slot: [shape, drawBase, iterationIndices, key].
                 var keySource = node.Inputs.Count > 3 ? node.Inputs[3] : null;
                 if (idVals is { Length: > 0 } && keySource is { } ks)
                 {
-                    RewriteFeedToKeyedDraw(node, isUniform, ks, algorithm, newNodes);
+                    if (isBits) RewriteBitsFeedToKeyedDraw(node, ks, algorithm, newNodes);
+                    else RewriteFeedToKeyedDraw(node, isUniform, ks, algorithm, newNodes);
                     LowerKeyedRngToFunctionCall(node);
                     newNodes.Add(node);
                     continue;
                 }
 
-                // A feed without stream identity (no ModelId, or no chain — e.g. inside
+                // Raw bits have no unkeyed fallback: unlike a float draw, a bit pattern is only
+                // meaningful under a stream key, and there is no ONNX bits-like op to defer to. So
+                // a bits feed that lacks a keyed chain is always a hard error — but the two causes
+                // want different diagnostics.
+                if (isBits)
+                {
+                    if (idVals is { Length: > 0 })
+                        // Id-bearing but chain-less — the graph was modified since concretization
+                        // (the analogue of the float path's Debug.Assert corruption case).
+                        throw new InvalidOperationException(
+                            $"FastLowerRandomOps: the SHRK_RANDOM_BITS feed at ModelId " +
+                            $"[{string.Join(", ", idVals)}] is id-bearing but has no key derivation " +
+                            "chain — the graph was modified since concretization. Re-concretize " +
+                            "(ToConcreteArchitecture) before lowering.");
+                    throw new InvalidOperationException(
+                        "FastLowerRandomOps: a SHRK_RANDOM_BITS feed reached lowering with no stream " +
+                        "identity. Raw random bits require a keyed RNG identity and have no unkeyed " +
+                        "fallback — draw them inside a concrete, id-bearing model.");
+                }
+
+                // A float feed without stream identity (no ModelId, or no chain — e.g. inside
                 // an initializer function body): the ONNX fallback — ConstantOfShape +
                 // RandomUniformLike/NormalLike. Every legitimate fallback case carries NO key
                 // input; an id-bearing feed always got its chain at concretization, so a
@@ -175,9 +199,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             graph.Nodes.Any(node =>
                 node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
                 node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||
+                node.OpCode == InternalOpCodes.SHRK_RANDOM_BITS ||
                 node.OpCode == InternalOpCodes.SHRK_RNG_SPLIT ||
                 node.OpCode == InternalOpCodes.SHRK_RNG_UNIFORM ||
-                node.OpCode == InternalOpCodes.SHRK_RNG_NORMAL);
+                node.OpCode == InternalOpCodes.SHRK_RNG_NORMAL ||
+                node.OpCode == InternalOpCodes.SHRK_RNG_BITS);
 
         /// <summary>
         /// Rewrites a keyed SHRK_RNG_* node in place to a FUNCTION_INVOKE of the named
@@ -190,13 +216,24 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         {
             var algorithm = node.Attributes.GetStringVal(ShrkAttrRngAlgorithm)
                 ?? RngAlgorithms.Default;
+            // bits carries its output uint width in shrk_dtype; the other kinds have a fixed dtype.
+            // A missing width is a hard error (never a silent default) — the attribute is always
+            // set by the feed/factory, so its absence means graph corruption.
+            DType? bitsDtype = node.OpCode == InternalOpCodes.SHRK_RNG_BITS
+                ? node.Attributes.GetDTypeVal(ShrkAttrDtype)
+                  ?? throw new InvalidOperationException(
+                      "FastLowerRandomOps: a SHRK_RNG_BITS node is missing its shrk_dtype (output width) attribute.")
+                : null;
             var (kind, dtype, rank) = node.OpCode switch
             {
                 InternalOpCodes.SHRK_RNG_SPLIT => (RngAlgorithms.KindSplit, DType.Int64, 1L),
                 InternalOpCodes.SHRK_RNG_UNIFORM => (RngAlgorithms.KindUniform, DType.Float32, -1L),
-                _ => (RngAlgorithms.KindNormal, DType.Float32, -1L),
+                InternalOpCodes.SHRK_RNG_NORMAL => (RngAlgorithms.KindNormal, DType.Float32, -1L),
+                InternalOpCodes.SHRK_RNG_BITS => (RngAlgorithms.KindBits, bitsDtype!, -1L),
+                _ => throw new InvalidOperationException(
+                    $"LowerKeyedRngToFunctionCall: unexpected opcode '{node.OpCode}'."),
             };
-            var fn = RngAlgorithms.GetFunction(algorithm, kind);
+            var fn = RngAlgorithms.GetFunction(algorithm, kind, bitsDtype);
 
             var invokeAttrDefs = Definitions.NodeDefinitions[InternalOpCodes.FUNCTION_INVOKE].AttributeDefs;
             node.OpCode = InternalOpCodes.FUNCTION_INVOKE;
@@ -249,6 +286,37 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             node.FullInputs = new Dictionary<string, List<FastTensorKey?>>
             {
                 [""] = new List<FastTensorKey?> { keySource, drawBaseKey, shapeInput, aKey, bKey }
+            };
+        }
+
+        /// <summary>
+        /// Rewrites an id-bearing SHRK_RANDOM_BITS feed in place to the SHRK_RNG_BITS keyed draw
+        /// form (inputs <c>[key, drawBase, shape]</c>), carrying the feed's output uint width
+        /// (shrk_dtype) onto the keyed op. Bits carry no distribution bounds.
+        /// </summary>
+        private static void RewriteBitsFeedToKeyedDraw(
+            FastNode node, FastTensorKey keySource, string algorithm, List<FastNode> newNodes)
+        {
+            var shapeInput = node.Inputs[0]
+                ?? throw new InvalidOperationException("SHRK_RANDOM_BITS has null shape input.");
+            var dtype = node.Attributes.GetDTypeVal(ShrkAttrDtype)
+                ?? throw new InvalidOperationException(
+                    "FastLowerRandomOps: a SHRK_RANDOM_BITS feed is missing its shrk_dtype (output width) attribute.");
+            var drawBaseKey = node.Inputs.Count > 1 && node.Inputs[1] is { } db
+                ? db
+                : AppendScalarInt64(0L, newNodes);
+
+            var attrDefs = Definitions.NodeDefinitions[InternalOpCodes.SHRK_RNG_BITS].AttributeDefs;
+            node.OpCode = InternalOpCodes.SHRK_RNG_BITS;
+            node.Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                new Dictionary<string, object?>
+                {
+                    [ShrkAttrRngAlgorithm] = algorithm,
+                    [ShrkAttrDtype] = dtype,
+                }, attrDefs);
+            node.FullInputs = new Dictionary<string, List<FastTensorKey?>>
+            {
+                [""] = new List<FastTensorKey?> { keySource, drawBaseKey, shapeInput }
             };
         }
 

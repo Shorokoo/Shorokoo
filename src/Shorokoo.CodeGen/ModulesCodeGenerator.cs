@@ -291,10 +291,12 @@ public class ModuleSourceGenerator : IIncrementalGenerator
     /// local slot instead of refusing the whole suggestion.</summary>
     private static bool IsSimpleFeed(InvocationExpressionSyntax inv)
     {
-        if (inv.Expression is IdentifierNameSyntax bare)
-            return bare.Identifier.Text is "RandomUniform" or "RandomNormal";
+        // SimpleNameSyntax (not just IdentifierNameSyntax) so the generic RandomBits<T>(...)
+        // form — a GenericNameSyntax — is recognized alongside the non-generic float feeds.
+        if (inv.Expression is SimpleNameSyntax bare)
+            return bare.Identifier.Text is "RandomUniform" or "RandomNormal" or "RandomBits";
         return inv.Expression is MemberAccessExpressionSyntax ma
-            && ma.Name.Identifier.Text is "RandomUniform" or "RandomNormal"
+            && ma.Name.Identifier.Text is "RandomUniform" or "RandomNormal" or "RandomBits"
             && ma.Expression is IdentifierNameSyntax { Identifier.Text: "Globals" };
     }
 
@@ -314,15 +316,17 @@ public class ModuleSourceGenerator : IIncrementalGenerator
     {
         foreach (var inv in node.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>())
         {
-            // Bare feed via `using static Globals`: RandomUniform(...) / RandomNormal(...).
-            if (inv.Expression is IdentifierNameSyntax bare &&
-                (bare.Identifier.Text == "RandomUniform" || bare.Identifier.Text == "RandomNormal"))
+            // Bare feed via `using static Globals`: RandomUniform/RandomNormal/RandomBits(...).
+            // SimpleNameSyntax so the generic RandomBits<T>(...) form is caught too.
+            if (inv.Expression is SimpleNameSyntax bare &&
+                (bare.Identifier.Text == "RandomUniform" || bare.Identifier.Text == "RandomNormal" ||
+                 bare.Identifier.Text == "RandomBits"))
                 return true;
 
             if (inv.Expression is MemberAccessExpressionSyntax ma)
             {
                 var name = ma.Name.Identifier.Text;
-                if (name is "Model" or "Init" or "RandomUniform" or "RandomNormal") return true;
+                if (name is "Model" or "Init" or "RandomUniform" or "RandomNormal" or "RandomBits") return true;
                 if (name == "Call")
                 {
                     // Stream-free only when provably re-invoking a model this analysis counted.

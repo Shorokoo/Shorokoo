@@ -22,6 +22,47 @@ public partial class RngInitTwoLinears
     }
 }
 
+/// <summary>A uint32 state parameter initialized with raw random bits: exercises RandomBits
+/// inside a (state) parameter initializer. Bits produce unsigned integers, so this must be a
+/// state parameter (trainable parameters are float — they carry gradients), keyed on the
+/// parameter's own init stream exactly like a uniform/normal init draw.</summary>
+[StateInitializer(Ownership = StateOwnership.ModuleOwned)]
+public static partial class RngBitsStateInit
+{
+    public static Tensor<uint32> Inline(Vector<int64> shape) => RandomBits<uint32>(shape);
+}
+
+[Module]
+public partial class RngBitsInitLayer
+{
+    public static Tensor<uint32> Inline(Tensor<float32> x) => RngBitsStateInit.Init([Scalar(4L), Scalar(4L)]);
+}
+
+/// <summary>A TRAINABLE float32 parameter whose initializer builds its value from BOTH a uniform
+/// draw and a raw-bits draw (bits → cast → float). Proves RandomBits can be an intermediate step
+/// toward a float trainable weight (the output is float32, so it is a valid trainable param), and
+/// that two different RNG ops coexist in one initializer (each keyed to its own sub-stream).</summary>
+[TrainableParamInitializer]
+public static partial class BitsIntermediateTrainableInit
+{
+    public static Tensor<float32> Inline(Vector<int64> shape)
+    {
+        var u = RandomUniform(shape, 0f, 1f);
+        var fromBits = RandomBits<uint32>(shape).Cast<float32>() * Scalar(1.0f / 4294967296.0f);  // uint32 → [0,1)
+        return u * fromBits;   // float32 output ⇒ valid trainable parameter
+    }
+}
+
+[Module]
+public partial class BitsIntermediateTrainableLayer
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var w = BitsIntermediateTrainableInit.Init(x.ShapeTensor());   // trainable [4,4] weight
+        return x * w;
+    }
+}
+
 /// <summary>
 /// End-to-end coverage for per-parameter initialization RNG (phase 2). Concretizes
 /// <see cref="RngInitTwoLinears"/> and initializes it under various
@@ -49,6 +90,62 @@ public class RngInitTests
             .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
             .Where(v => v.Length == 16)
             .ToArray();
+    }
+
+    private static uint[] MaterializeBitsState(RngConfig cfg)
+    {
+        var g = RngBitsInitLayer.ComputationGraph;
+        var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([sample]));
+        var pl = arch.InitializeTrainableParams(rngConfig: cfg);
+        return pl.ModelParams
+            .Select(p => p.ToTensorData())
+            .Where(td => td.DType == DType.UInt32)
+            .SelectMany(td => td.As<uint32>().AccessMemory().ToArray())
+            .ToArray();
+    }
+
+    [Fact]
+    public void TestTrainableInitUsesBitsIntermediateAndTwoRngOps()
+    {
+        // A float32 trainable weight whose initializer uses a uniform draw AND a bits draw:
+        // nothing in the trainable-param path forbids a non-float intermediate or more than one
+        // RNG op per initializer (each draw is keyed to a distinct sub-stream by ordinal).
+        float[] Materialize(RngConfig cfg)
+        {
+            var g = BitsIntermediateTrainableLayer.ComputationGraph;
+            var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
+            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([sample]));
+            var pl = arch.InitializeTrainableParams(rngConfig: cfg);
+            return pl.ModelParams
+                .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
+                .Single(v => v.Length == 16);   // the [4,4] trainable weight
+        }
+
+        var a = Materialize(new RngConfig { MasterSeed = 5 });
+        var b = Materialize(new RngConfig { MasterSeed = 5 });
+        var c = Materialize(new RngConfig { MasterSeed = 6 });
+
+        Assert.Equal(a, b);                          // reproducible for a config
+        Assert.NotEqual(a, c);                       // master seed re-randomizes
+        Assert.All(a, v => Assert.InRange(v, 0.0f, 1.0f));   // u * bits/2^32 ∈ [0,1)
+        Assert.Contains(a, v => v != 0.0f);          // real draws, not a zeroed fallback
+    }
+
+    [Fact]
+    public void TestBitsInitializerMaterializesKeyedAndReproducible()
+    {
+        // RandomBits<uint32> in a state-parameter initializer keys on the parameter's own init
+        // stream, materializes to real uint bits, is reproducible for a config, and re-rolls
+        // with the master seed — the raw-bits analogue of the uniform/normal init properties.
+        var a = MaterializeBitsState(new RngConfig { MasterSeed = 5 });
+        var b = MaterializeBitsState(new RngConfig { MasterSeed = 5 });
+        var c = MaterializeBitsState(new RngConfig { MasterSeed = 6 });
+
+        Assert.Equal(16, a.Length);            // the [4,4] uint32 state param materialized
+        Assert.Equal(a, b);                    // reproducible for a config
+        Assert.NotEqual(a, c);                 // master seed re-randomizes
+        Assert.Contains(a, v => v != 0u);      // real bits, not a zeroed fallback
     }
 
     [Fact]

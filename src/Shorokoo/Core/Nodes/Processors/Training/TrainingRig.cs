@@ -1535,8 +1535,9 @@ namespace Shorokoo
                     InternalOpCodes.STATE_UPDATE_LINK or InternalOpCodes.WITH_STATE_DEPS
                         => "module state (a StateUpdate)",
                     InternalOpCodes.SHRK_RANDOM_UNIFORM or InternalOpCodes.SHRK_RANDOM_NORMAL
+                        or InternalOpCodes.SHRK_RANDOM_BITS
                         or InternalOpCodes.SHRK_RNG_UNIFORM or InternalOpCodes.SHRK_RNG_NORMAL
-                        or InternalOpCodes.SHRK_RNG_SPLIT
+                        or InternalOpCodes.SHRK_RNG_BITS or InternalOpCodes.SHRK_RNG_SPLIT
                         => "an RNG draw",
                     _ => null,
                 };

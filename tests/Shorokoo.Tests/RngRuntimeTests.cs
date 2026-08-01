@@ -48,6 +48,17 @@ public partial class RtFcWithRngFeed
     }
 }
 
+/// <summary>Emits the in-graph raw-bits draws (U8/U16/U32/U64) at the input's shape.</summary>
+[Module] public partial class RtBitsU8Draw  { public static Tensor<uint8>  Inline(Tensor<float32> x) => RuntimeRng.BitsU8 (x.ShapeTensor(), Scalar(111L), Scalar(222L), Scalar(0L)); }
+[Module] public partial class RtBitsU16Draw { public static Tensor<uint16> Inline(Tensor<float32> x) => RuntimeRng.BitsU16(x.ShapeTensor(), Scalar(111L), Scalar(222L), Scalar(0L)); }
+[Module] public partial class RtBitsU32Draw { public static Tensor<uint32> Inline(Tensor<float32> x) => RuntimeRng.BitsU32(x.ShapeTensor(), Scalar(111L), Scalar(222L), Scalar(0L)); }
+[Module] public partial class RtBitsU64Draw { public static Tensor<uint64> Inline(Tensor<float32> x) => RuntimeRng.BitsU64(x.ShapeTensor(), Scalar(111L), Scalar(222L), Scalar(0L)); }
+
+/// <summary>A plain <c>Globals.RandomBits</c> feed — routed through the SHRK_RANDOM_BITS
+/// lowering (id-bearing keyed draw), i.e. the public runtime raw-bits path.</summary>
+[Module] public partial class RtLoweredBits   { public static Tensor<uint32> Inline(Tensor<float32> x) => RandomBits<uint32>(x.ShapeTensor()); }
+[Module] public partial class RtLoweredBits64 { public static Tensor<uint64> Inline(Tensor<float32> x) => RandomBits<uint64>(x.ShapeTensor()); }
+
 /// <summary>
 /// Coverage for the in-graph counter-based runtime RNG (<see cref="RuntimeRng"/>): the ONNX-op
 /// Threefry subgraph must reproduce the host generator (<see cref="Threefry2x32"/>) bit-for-bit
@@ -74,6 +85,54 @@ public class RngRuntimeTests
     {
         var (x0, _) = Threefry2x32.Bijection((uint)i, drawBase, k0, k1);
         return (x0 & 0x00FFFFFFu) * (1.0f / 16777216.0f);
+    }
+
+    // Host reference for the raw-bits scheme: element i draws one generator word pair; the
+    // narrow widths take the low bits of x0, U32 the whole word, U64 = x0 | (x1 << 32).
+    private static ulong HostBits(long i, int width, uint k0, uint k1, uint drawBase)
+    {
+        var (x0, x1) = Threefry2x32.Bijection((uint)i, drawBase, k0, k1);
+        return width switch
+        {
+            8 => (byte)x0,
+            16 => (ushort)x0,
+            32 => x0,
+            64 => x0 | ((ulong)x1 << 32),
+            _ => throw new ArgumentOutOfRangeException(nameof(width)),
+        };
+    }
+
+    private static TensorData RunDrawRaw<TModule>(long rows, long cols)
+    {
+        var g = ((ComputationGraph)typeof(TModule)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var input = TensorData([rows, cols], Enumerable.Repeat(0f, (int)(rows * cols)).ToArray());
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        return ComputeContext.Default.Execute(concrete, input)[0].ToTensorData();
+    }
+
+    [Fact]
+    public void TestInGraphBitsMatchHostBitExact()
+    {
+        var u8 = RunDrawRaw<RtBitsU8Draw>(4, 4);
+        Assert.Equal(DType.UInt8, u8.DType);
+        var u8v = u8.As<uint8>().AccessMemory().ToArray();
+        for (long i = 0; i < 16; i++) Assert.Equal((byte)HostBits(i, 8, 111, 222, 0), u8v[i]);
+
+        var u16 = RunDrawRaw<RtBitsU16Draw>(4, 4);
+        Assert.Equal(DType.UInt16, u16.DType);
+        var u16v = u16.As<uint16>().AccessMemory().ToArray();
+        for (long i = 0; i < 16; i++) Assert.Equal((ushort)HostBits(i, 16, 111, 222, 0), u16v[i]);
+
+        var u32 = RunDrawRaw<RtBitsU32Draw>(4, 4);
+        Assert.Equal(DType.UInt32, u32.DType);
+        var u32v = u32.As<uint32>().AccessMemory().ToArray();
+        for (long i = 0; i < 16; i++) Assert.Equal((uint)HostBits(i, 32, 111, 222, 0), u32v[i]);
+
+        var u64 = RunDrawRaw<RtBitsU64Draw>(4, 4);
+        Assert.Equal(DType.UInt64, u64.DType);
+        var u64v = u64.As<uint64>().AccessMemory().ToArray();
+        for (long i = 0; i < 16; i++) Assert.Equal(HostBits(i, 64, 111, 222, 0), u64v[i]);
     }
 
     [Fact]
@@ -126,6 +185,55 @@ public class RngRuntimeTests
         var (k0, k1) = RngConfig.Default.FoldRunKey([1]);   // the feed's site is slot 1
         for (long i = 0; i < 16; i++)
             Assert.Equal(HostUniform(i, k0, k1, 0), vals[i]);
+    }
+
+    [Fact]
+    public void TestLoweredRandomBitsIsDeterministicAndKeyed()
+    {
+        // The public RandomBits<uint32> feed lowers to the keyed in-graph bits draw under the
+        // default identity: deterministic across executions and bit-exactly the host fold of
+        // the default runtime master along the feed's ModelId, taken as the low 32 bits.
+        var a = RunDrawRaw<RtLoweredBits>(4, 4);
+        var b = RunDrawRaw<RtLoweredBits>(4, 4);
+        Assert.Equal(DType.UInt32, a.DType);
+        var av = a.As<uint32>().AccessMemory().ToArray();
+        var bv = b.As<uint32>().AccessMemory().ToArray();
+        Assert.Equal(av, bv);   // deterministic / portable
+        var (k0, k1) = RngConfig.Default.FoldRunKey([1]);   // single feed at slot 1
+        for (long i = 0; i < 16; i++)
+            Assert.Equal((uint)HostBits(i, 32, k0, k1, 0), av[i]);
+    }
+
+    [Fact]
+    public void TestLoweredRandomBitsU64SurvivesFullLowering()
+    {
+        // The U64 path (unsigned BitShift + BitwiseOr producing values above the int64 range)
+        // must survive the full public feed -> keyed draw -> width-specialized function call and
+        // stay bit-exact with the host x0 | (x1 << 32).
+        var a = RunDrawRaw<RtLoweredBits64>(4, 4);
+        Assert.Equal(DType.UInt64, a.DType);
+        var av = a.As<uint64>().AccessMemory().ToArray();
+        var (k0, k1) = RngConfig.Default.FoldRunKey([1]);
+        for (long i = 0; i < 16; i++)
+            Assert.Equal(HostBits(i, 64, k0, k1, 0), av[i]);
+    }
+
+    [Fact]
+    public void TestRngStreamReportLabelsBitsFeed()
+    {
+        // A bits feed must be classified and described as a "bits feed", not silently as the
+        // "normal feed" default the RngStreamKind switches fall through to.
+        var g = ((ComputationGraph)typeof(RtLoweredBits)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
+
+        var report = arch.GetRngStreamReport();
+        var bitsStreams = report.Streams.Where(s => s.Kind == RngStreamKind.BitsFeed).ToList();
+        Assert.NotEmpty(bitsStreams);                        // the feed is classified as bits
+        Assert.Contains("bits feed", report.ToString());     // and described as "bits feed",
+        Assert.Contains("bits feed", report.EmitPinSkeleton()); // not the "normal feed" default
+        Assert.DoesNotContain("normal feed", report.ToString());
     }
 
     [Fact]

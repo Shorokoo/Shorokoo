@@ -60,7 +60,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         public static IEnumerable<FastNode> IdBearingFeeds(InternalComputationGraph graph)
             => graph.Nodes.Where(n =>
                 (n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
-                 n.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL) &&
+                 n.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||
+                 n.OpCode == InternalOpCodes.SHRK_RANDOM_BITS) &&
                 n.Attributes.GetIntsVal(ShrkAttrLocalModelId) is { Length: > 0 });
 
         /// <summary>
@@ -129,7 +130,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             foreach (var node in graph.Nodes)
             {
                 bool isFeed = node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
-                              node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL;
+                              node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||
+                              node.OpCode == InternalOpCodes.SHRK_RANDOM_BITS;
                 var idVals = isFeed ? node.Attributes.GetIntsVal(ShrkAttrLocalModelId) : null;
                 if (idVals is not { Length: > 0 })
                 {

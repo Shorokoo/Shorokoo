@@ -150,7 +150,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 bool isUniform = node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM;
                 bool isNormal = node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL;
-                if (!isUniform && !isNormal)
+                bool isBits = node.OpCode == InternalOpCodes.SHRK_RANDOM_BITS;
+                if (!isUniform && !isNormal && !isBits)
                     continue;
 
                 var idVals = node.Attributes.GetIntsVal(ShrkAttrLocalModelId);

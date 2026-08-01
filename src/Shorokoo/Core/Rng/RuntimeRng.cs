@@ -139,4 +139,46 @@ internal static class RuntimeRng
         Vector<int64> shape, Scalar<int64> k0, Scalar<int64> k1, Scalar<int64> drawBase,
         Scalar<float32> mean, Scalar<float32> scale, int rounds = Threefry2x32.Rounds)
         => StandardNormal(shape, k0, k1, drawBase, rounds) * scale + mean;
+
+    // ── Raw random bits ─────────────────────────────────────────────────────────────────
+    // One generator draw per element (counter (i, drawBase), like uniform/normal). The
+    // generator's low word x0 is a uniformly-random 32-bit value; the narrow widths take its
+    // low W bits (all bits are equidistributed), U32 takes it whole, and U64 concatenates both
+    // words x0 | (x1 << 32). U64 is computed in uint64 because x0 | (x1<<32) exceeds the
+    // non-negative int64 range the rest of the generator stays within.
+
+    /// <summary>Raw uniform bits, U8 (the low 8 bits of the generator word), of the given shape.</summary>
+    public static Tensor<uint8> BitsU8(
+        Vector<int64> shape, Scalar<int64> k0, Scalar<int64> k1, Scalar<int64> drawBase, int rounds = Threefry2x32.Rounds)
+    {
+        var (x0, _) = Bijection(Counter(shape), drawBase, k0, k1, rounds);
+        return OnnxOp.Mod(x0, Scalar(0x100L)).int64().Cast<uint8>().Reshape(shape);
+    }
+
+    /// <summary>Raw uniform bits, U16 (the low 16 bits of the generator word), of the given shape.</summary>
+    public static Tensor<uint16> BitsU16(
+        Vector<int64> shape, Scalar<int64> k0, Scalar<int64> k1, Scalar<int64> drawBase, int rounds = Threefry2x32.Rounds)
+    {
+        var (x0, _) = Bijection(Counter(shape), drawBase, k0, k1, rounds);
+        return OnnxOp.Mod(x0, Scalar(0x1_0000L)).int64().Cast<uint16>().Reshape(shape);
+    }
+
+    /// <summary>Raw uniform bits, U32 (the whole generator word, already in [0, 2^32)), of the given shape.</summary>
+    public static Tensor<uint32> BitsU32(
+        Vector<int64> shape, Scalar<int64> k0, Scalar<int64> k1, Scalar<int64> drawBase, int rounds = Threefry2x32.Rounds)
+    {
+        var (x0, _) = Bijection(Counter(shape), drawBase, k0, k1, rounds);
+        return x0.Cast<uint32>().Reshape(shape);
+    }
+
+    /// <summary>Raw uniform bits, U64 (both generator words, x0 | (x1 &lt;&lt; 32)), of the given shape.</summary>
+    public static Tensor<uint64> BitsU64(
+        Vector<int64> shape, Scalar<int64> k0, Scalar<int64> k1, Scalar<int64> drawBase, int rounds = Threefry2x32.Rounds)
+    {
+        var (x0, x1) = Bijection(Counter(shape), drawBase, k0, k1, rounds);
+        var lo = x0.Cast<uint64>();
+        var hi = x1.Cast<uint64>();
+        var shifted = OnnxOp.BitShift(hi, Scalar(32UL), BitShiftDirection.Left);
+        return OnnxOp.BitwiseOr(lo, shifted).uint64().Reshape(shape);
+    }
 }

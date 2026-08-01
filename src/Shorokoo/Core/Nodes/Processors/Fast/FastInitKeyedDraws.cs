@@ -74,14 +74,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 .SelectMany(f => f!.ReferencedFunctions.Concat([f]))
                 .FirstOrDefault(f => f!.OriginalFastGraph.Nodes.Any(n =>
                     n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
-                    n.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL));
+                    n.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||
+                    n.OpCode == InternalOpCodes.SHRK_RANDOM_BITS));
             if (nested is not null)
                 throw new NotSupportedException(
                     $"Initializer '{fn.FriendlyName}' of parameter '{streamName}' draws randomness " +
                     $"inside the called function '{nested.FriendlyName}', which could not be inlined. " +
                     "The nested draw keeps no parameter key and would fall back to unkeyed, " +
-                    "non-reproducible backend randomness. Move the RandomUniform/RandomNormal " +
-                    "call directly into the initializer's body.");
+                    "non-reproducible backend randomness. Move the random draw " +
+                    "(RandomUniform/RandomNormal/RandomBits) directly into the initializer's body.");
 
             // Raw bits are a runtime feed, not initialization noise (init randomness is drawn
             // host-side and baked into weights), so they cannot be an initializer draw. Reject

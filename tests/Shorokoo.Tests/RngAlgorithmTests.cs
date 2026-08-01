@@ -44,7 +44,6 @@ public partial class RngKeyedNormalDraw
     }
 }
 
-/// <summary>
 /// <summary>Keyed raw-bits draw (U32) at the input's shape under a literal key (123, 456), drawBase 0.</summary>
 [Module]
 public partial class RngKeyedBitsDraw
@@ -57,6 +56,7 @@ public partial class RngKeyedBitsDraw
     }
 }
 
+/// <summary>
 /// Coverage for the named-algorithm keyed RNG operators (SHRK_RNG_SPLIT / UNIFORM / NORMAL)
 /// and their ONNX lowering: each op lowers at export to a call of the algorithm's
 /// <b>non-inlined</b> function (an ONNX local FunctionProto tagged with

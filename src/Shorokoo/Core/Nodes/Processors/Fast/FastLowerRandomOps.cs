@@ -113,15 +113,24 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
 
                 // Raw bits have no unkeyed fallback: unlike a float draw, a bit pattern is only
-                // meaningful under a stream key, and there is no ONNX bits-like op to defer to.
-                // An id-less (or chain-less) bits feed is therefore a hard error, never silent
-                // backend randomness.
+                // meaningful under a stream key, and there is no ONNX bits-like op to defer to. So
+                // a bits feed that lacks a keyed chain is always a hard error — but the two causes
+                // want different diagnostics.
                 if (isBits)
+                {
+                    if (idVals is { Length: > 0 })
+                        // Id-bearing but chain-less — the graph was modified since concretization
+                        // (the analogue of the float path's Debug.Assert corruption case).
+                        throw new InvalidOperationException(
+                            $"FastLowerRandomOps: the SHRK_RANDOM_BITS feed at ModelId " +
+                            $"[{string.Join(", ", idVals)}] is id-bearing but has no key derivation " +
+                            "chain — the graph was modified since concretization. Re-concretize " +
+                            "(ToConcreteArchitecture) before lowering.");
                     throw new InvalidOperationException(
-                        "FastLowerRandomOps: a SHRK_RANDOM_BITS feed reached lowering without a " +
-                        "stream identity / key derivation chain. Raw random bits require a keyed " +
-                        "RNG identity and have no unkeyed fallback — draw them inside a concrete, " +
-                        "id-bearing model.");
+                        "FastLowerRandomOps: a SHRK_RANDOM_BITS feed reached lowering with no stream " +
+                        "identity. Raw random bits require a keyed RNG identity and have no unkeyed " +
+                        "fallback — draw them inside a concrete, id-bearing model.");
+                }
 
                 // A float feed without stream identity (no ModelId, or no chain — e.g. inside
                 // an initializer function body): the ONNX fallback — ConstantOfShape +
@@ -208,8 +217,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var algorithm = node.Attributes.GetStringVal(ShrkAttrRngAlgorithm)
                 ?? RngAlgorithms.Default;
             // bits carries its output uint width in shrk_dtype; the other kinds have a fixed dtype.
+            // A missing width is a hard error (never a silent default) — the attribute is always
+            // set by the feed/factory, so its absence means graph corruption.
             DType? bitsDtype = node.OpCode == InternalOpCodes.SHRK_RNG_BITS
-                ? node.Attributes.GetDTypeVal(ShrkAttrDtype) ?? DType.UInt32
+                ? node.Attributes.GetDTypeVal(ShrkAttrDtype)
+                  ?? throw new InvalidOperationException(
+                      "FastLowerRandomOps: a SHRK_RNG_BITS node is missing its shrk_dtype (output width) attribute.")
                 : null;
             var (kind, dtype, rank) = node.OpCode switch
             {
@@ -217,7 +230,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 InternalOpCodes.SHRK_RNG_UNIFORM => (RngAlgorithms.KindUniform, DType.Float32, -1L),
                 InternalOpCodes.SHRK_RNG_NORMAL => (RngAlgorithms.KindNormal, DType.Float32, -1L),
                 InternalOpCodes.SHRK_RNG_BITS => (RngAlgorithms.KindBits, bitsDtype!, -1L),
-                _ => (RngAlgorithms.KindNormal, DType.Float32, -1L),
+                _ => throw new InvalidOperationException(
+                    $"LowerKeyedRngToFunctionCall: unexpected opcode '{node.OpCode}'."),
             };
             var fn = RngAlgorithms.GetFunction(algorithm, kind, bitsDtype);
 
@@ -285,7 +299,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         {
             var shapeInput = node.Inputs[0]
                 ?? throw new InvalidOperationException("SHRK_RANDOM_BITS has null shape input.");
-            var dtype = node.Attributes.GetDTypeVal(ShrkAttrDtype) ?? DType.UInt32;
+            var dtype = node.Attributes.GetDTypeVal(ShrkAttrDtype)
+                ?? throw new InvalidOperationException(
+                    "FastLowerRandomOps: a SHRK_RANDOM_BITS feed is missing its shrk_dtype (output width) attribute.");
             var drawBaseKey = node.Inputs.Count > 1 && node.Inputs[1] is { } db
                 ? db
                 : AppendScalarInt64(0L, newNodes);

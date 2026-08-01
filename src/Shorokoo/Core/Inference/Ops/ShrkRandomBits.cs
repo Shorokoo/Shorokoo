@@ -23,7 +23,8 @@ internal sealed class ShrkRandomBitsOp : QuickOp
     protected override RuntimeTensor[] Compute(RuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
     {
         var shapeInput = inputs[0];
-        var dtype = attrs.GetDTypeVal(OnnxOpAttributeNames.ShrkAttrDtype) ?? DType.UInt32;
+        var dtype = attrs.GetDTypeVal(OnnxOpAttributeNames.ShrkAttrDtype)
+            ?? throw new InvalidOperationException("SHRK_RANDOM_BITS is missing its shrk_dtype (output width) attribute.");
         Shape? shape = shapeInput?.IntData is { } s && s.All(d => d >= 0) ? new Shape(s.ToArray()) : null;
         var rt = RuntimeTensorFactory.Create(dtype, shape);
         // Shape values unknown but the shape input's own 1-D extent gives the output rank.

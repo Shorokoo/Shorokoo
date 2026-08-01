@@ -619,8 +619,11 @@ namespace Shorokoo
         /// bits have no unkeyed fallback: they are only meaningful under a stream key, so they must
         /// be drawn inside a concrete, id-bearing model.
         /// </summary>
-        public static Tensor<T> RandomBits<T>(Vector<int64> shape) where T : IVarType
+        public static Tensor<T> RandomBits<T>(Vector<int64> shape) where T : UnsignedIntLike
         {
+            // The UnsignedIntLike constraint admits exactly uint8/16/32/64 at compile time (uint4
+            // is only AnyUnsignedIntLike), matching the SHRK_RANDOM_BITS node's T2 constraint. The
+            // runtime check stays as defense-in-depth against any future widening of the marker.
             var dtype = OnnxUtils.GetDType<T>()
                 ?? throw new InvalidOperationException($"Cannot get DType for {typeof(T).Name}");
             if (!Shorokoo.Core.Rng.RngAlgorithms.IsSupportedBitsDtype(dtype))

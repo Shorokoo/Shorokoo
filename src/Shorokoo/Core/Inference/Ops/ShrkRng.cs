@@ -86,5 +86,6 @@ internal sealed class ShrkRngBitsOp : ShrkRngDrawOpBase
 {
     public override string OpCode => InternalOpCodes.SHRK_RNG_BITS;
     protected override DType OutputDType(OnnxCSharpAttributes attrs)
-        => attrs.GetDTypeVal(OnnxOpAttributeNames.ShrkAttrDtype) ?? DType.UInt32;
+        => attrs.GetDTypeVal(OnnxOpAttributeNames.ShrkAttrDtype)
+           ?? throw new InvalidOperationException("SHRK_RNG_BITS is missing its shrk_dtype (output width) attribute.");
 }

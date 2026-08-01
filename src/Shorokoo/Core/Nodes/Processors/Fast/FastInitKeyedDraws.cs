@@ -83,6 +83,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     "non-reproducible backend randomness. Move the RandomUniform/RandomNormal " +
                     "call directly into the initializer's body.");
 
+            // Raw bits are a runtime feed, not initialization noise (init randomness is drawn
+            // host-side and baked into weights), so they cannot be an initializer draw. Reject
+            // loudly and clearly here rather than leave the draw un-keyed to fail later at
+            // lowering with a confusing "no stream identity" error.
+            if (body.Nodes.Any(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_BITS))
+                throw new NotSupportedException(
+                    $"Initializer '{fn.FriendlyName}' of parameter '{streamName}' draws raw random " +
+                    "bits (RandomBits<T>). Raw bits are a runtime feed — initialization randomness " +
+                    "is drawn host-side and baked into weights — so they cannot be drawn in a " +
+                    "parameter initializer; draw them in the model's runtime forward path instead.");
+
             var (k0, k1) = streamKey;
 
             var newNodes = new List<FastNode>(body.Nodes.Count);

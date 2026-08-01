@@ -219,6 +219,24 @@ public class RngRuntimeTests
     }
 
     [Fact]
+    public void TestRngStreamReportLabelsBitsFeed()
+    {
+        // A bits feed must be classified and described as a "bits feed", not silently as the
+        // "normal feed" default the RngStreamKind switches fall through to.
+        var g = ((ComputationGraph)typeof(RtLoweredBits)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
+
+        var report = arch.GetRngStreamReport();
+        var bitsStreams = report.Streams.Where(s => s.Kind == RngStreamKind.BitsFeed).ToList();
+        Assert.NotEmpty(bitsStreams);                        // the feed is classified as bits
+        Assert.Contains("bits feed", report.ToString());     // and described as "bits feed",
+        Assert.Contains("bits feed", report.EmitPinSkeleton()); // not the "normal feed" default
+        Assert.DoesNotContain("normal feed", report.ToString());
+    }
+
+    [Fact]
     public void TestRngConfigRebindsInPlaceWithoutGraphChange()
     {
         // Re-binding is the RngSeed parameter's re-initialization: it replaces that one

@@ -386,7 +386,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
 
                 bool isRngFeed = fastNode.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
-                                 fastNode.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL;
+                                 fastNode.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||
+                                 fastNode.OpCode == InternalOpCodes.SHRK_RANDOM_BITS;
                 Debug.Assert(isRngFeed ||
                              fastNode.OpCode == InternalOpCodes.MODEL_PARAM_REF ||
                              fastNode.OpCode == InternalOpCodes.MODULE_SET_HYPERPARAMS);
@@ -477,7 +478,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             else if (node.OpCode == InternalOpCodes.MODEL_PARAM_REF)
                 inputIndex = 0;
             else if (node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
-                     node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL)
+                     node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||
+                     node.OpCode == InternalOpCodes.SHRK_RANDOM_BITS)
                 inputIndex = 2;   // [shape, drawBase, iterationIndices]
             else
                 throw new InvalidOperationException(
@@ -933,7 +935,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var node = subGraph.Nodes[i];
 
                 if (node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
-                    node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL)
+                    node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||
+                    node.OpCode == InternalOpCodes.SHRK_RANDOM_BITS)
                 {
                     // Runtime RNG feed site: prepend the parent path to its ModelId so its
                     // stream key stays unique per call site (same-object reuse shares the

@@ -82,7 +82,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             var feeds = graph.Nodes.Where(n =>
                 (n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
-                 n.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL) &&
+                 n.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||
+                 n.OpCode == InternalOpCodes.SHRK_RANDOM_BITS) &&
                 (n.Inputs.Count < 2 || n.Inputs[1] is null)).ToList();
             if (feeds.Count == 0) return;   // no feeds, or all already wired (idempotent)
 

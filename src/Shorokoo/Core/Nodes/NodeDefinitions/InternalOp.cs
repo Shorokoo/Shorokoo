@@ -358,6 +358,21 @@ internal static partial class InternalOp
             (ShrkAttrRngAlgorithm, algorithm)]);
 
     /// <summary>
+    /// A raw-bits random feed (unsigned integer of width <paramref name="dtype"/>) taking its
+    /// shape as a tensor input. An id-bearing feed lowers to the keyed deterministic bits draw
+    /// under the model's RNG identity; unlike the float feeds there is no unkeyed fallback.
+    /// </summary>
+    public static Variable RandomBits(Variable shape, DType dtype, Variable? drawBase = null, Variable? iterationIndices = null)
+        => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_BITS, [shape, drawBase, iterationIndices], [
+            (ShrkAttrDtype, dtype),
+            (ShrkAttrLocalModelId, (long[])[])]);
+
+    /// <summary>Keyed deterministic raw-bits draw (unsigned integer of width <paramref name="dtype"/>) of dynamic shape under the named algorithm.</summary>
+    public static Variable RngBits(Variable key, Variable drawBase, Variable shape, DType dtype, string algorithm)
+        => NodeBuilder.BuildNodeSingleOut(SHRK_RNG_BITS, [key, drawBase, shape], [
+            (ShrkAttrRngAlgorithm, algorithm), (ShrkAttrDtype, dtype)]);
+
+    /// <summary>
     /// Conv variant whose geometry (pads, strides, dilations, kernel_shape, group) is supplied
     /// as int64 tensor inputs rather than static attributes, so it can be computed in-graph.
     /// Lowered to standard ONNX Conv (geometry resolved to static attributes) by

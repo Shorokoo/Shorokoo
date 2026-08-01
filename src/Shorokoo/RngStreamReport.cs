@@ -14,6 +14,8 @@ public enum RngStreamKind
     UniformFeed,
     /// <summary>A runtime normal feed (drawn every execution).</summary>
     NormalFeed,
+    /// <summary>A runtime raw-bits feed (drawn every execution).</summary>
+    BitsFeed,
 }
 
 /// <summary>One RNG stream of a concrete architecture: who draws, from where in the ModelId

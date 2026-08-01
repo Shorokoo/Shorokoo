@@ -91,6 +91,15 @@ internal static class InternalOpCodes
     public const string SHRK_RANDOM_NORMAL = "shrk_RandomNormal";
 
     /// <summary>
+    /// Generates a tensor of raw uniform random bits as an unsigned integer of the width given
+    /// by the shrk_dtype attribute (U8/U16/U32/U64). Takes shape as a tensor input. Unlike the
+    /// float feeds there is no unkeyed fallback: raw bits are only meaningful under the model's
+    /// RNG identity, so an id-bearing bits feed lowers to the keyed deterministic draw and a
+    /// feed without stream identity is a build error.
+    /// </summary>
+    public const string SHRK_RANDOM_BITS = "shrk_RandomBits";
+
+    /// <summary>
     /// Splits an RNG stream key by index: child = Bijection(key, counter: index) under the
     /// named algorithm (shrk_rng_algorithm attribute). Key is an int64[2] vector of 32-bit
     /// words. Index-based random access: computing child i never computes any sibling.
@@ -114,6 +123,16 @@ internal static class InternalOpCodes
     /// Lowered at ONNX export to a call of the algorithm's non-inlined "normal" function.
     /// </summary>
     public const string SHRK_RNG_NORMAL = "shrk_RngNormal";
+
+    /// <summary>
+    /// Keyed deterministic raw-bits draw of dynamic shape under the named algorithm
+    /// (shrk_rng_algorithm attribute), output an unsigned integer of the width given by the
+    /// shrk_dtype attribute. Inputs: key int64[2], drawBase int64 scalar, shape int64[r].
+    /// Identical values on every execution provider and in QEE (ordinary integer/bit math, no
+    /// ONNX random op). Lowered at ONNX export to a call of the algorithm's non-inlined,
+    /// width-specialized "bits" function.
+    /// </summary>
+    public const string SHRK_RNG_BITS = "shrk_RngBits";
 
     /// <summary>
     /// Creates a TensorStruct from multiple input IValues.

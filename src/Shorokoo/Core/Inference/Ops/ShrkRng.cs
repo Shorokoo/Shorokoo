@@ -52,11 +52,14 @@ internal sealed class ShrkRngSplitOp : QuickOp
 /// </summary>
 internal abstract class ShrkRngDrawOpBase : QuickOp
 {
+    /// <summary>The draw's output dtype (uniform/normal are float32; bits is the shrk_dtype width).</summary>
+    protected virtual DType OutputDType(OnnxCSharpAttributes attrs) => DType.Float32;
+
     protected override RuntimeTensor[] Compute(RuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
     {
         var shapeInput = inputs[2];
         Shape? shape = shapeInput?.IntData is { } s && s.All(d => d >= 0) ? new Shape(s.ToArray()) : null;
-        var rt = RuntimeTensorFactory.Create(DType.Float32, shape);
+        var rt = RuntimeTensorFactory.Create(OutputDType(attrs), shape);
         // Shape values unknown but the shape input's own 1-D extent gives the output rank.
         if (shape is null && shapeInput?.Shape?.Dims is { Length: 1 } sd)
             rt = rt with { Rank = (int)sd[0], MaxRank = (int)sd[0] };
@@ -72,4 +75,16 @@ internal sealed class ShrkRngUniformOp : ShrkRngDrawOpBase
 internal sealed class ShrkRngNormalOp : ShrkRngDrawOpBase
 {
     public override string OpCode => InternalOpCodes.SHRK_RNG_NORMAL;
+}
+
+/// <summary>
+/// QEE implementation of SHRK_RNG_BITS: shape/rank propagation like the float draws, but the
+/// output dtype is the unsigned width from the shrk_dtype attribute. Bit values themselves come
+/// from the lowered, width-specialized "bits" function (integer/bit-exact), not from this op.
+/// </summary>
+internal sealed class ShrkRngBitsOp : ShrkRngDrawOpBase
+{
+    public override string OpCode => InternalOpCodes.SHRK_RNG_BITS;
+    protected override DType OutputDType(OnnxCSharpAttributes attrs)
+        => attrs.GetDTypeVal(OnnxOpAttributeNames.ShrkAttrDtype) ?? DType.UInt32;
 }

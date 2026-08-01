@@ -611,6 +611,26 @@ namespace Shorokoo
                 drawBase: null, iterationIndices: iterationIndices);
         }
 
+        /// <summary>
+        /// A runtime raw-bits random feed of dynamic shape: uniformly-random unsigned integers of
+        /// the width <typeparamref name="T"/> (<c>uint8</c>/<c>uint16</c>/<c>uint32</c>/<c>uint64</c>).
+        /// Keyed by the site's ModelId under the model's RNG identity — see
+        /// <see cref="RandomUniform(Vector{int64}, float, float)"/>. Unlike the float feeds, raw
+        /// bits have no unkeyed fallback: they are only meaningful under a stream key, so they must
+        /// be drawn inside a concrete, id-bearing model.
+        /// </summary>
+        public static Tensor<T> RandomBits<T>(Vector<int64> shape) where T : IVarType
+        {
+            var dtype = OnnxUtils.GetDType<T>()
+                ?? throw new InvalidOperationException($"Cannot get DType for {typeof(T).Name}");
+            if (!Shorokoo.Core.Rng.RngAlgorithms.IsSupportedBitsDtype(dtype))
+                throw new NotSupportedException(
+                    $"RandomBits<{typeof(T).Name}>: raw random bits require an unsigned integer width " +
+                    $"(uint8, uint16, uint32, or uint64); '{dtype}' is not supported.");
+            Vector<int64> iterationIndices = [.. LoopAPI.IterationIndices];
+            return InternalOp.RandomBits(shape, dtype, drawBase: null, iterationIndices: iterationIndices);
+        }
+
         /// <summary>Creates TensorData of the given dtype from boxed values.</summary>
         public static TensorData TensorData(DType type, long[] dims, params object[] vals)
         {

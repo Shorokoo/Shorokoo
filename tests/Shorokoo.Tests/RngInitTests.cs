@@ -22,6 +22,22 @@ public partial class RngInitTwoLinears
     }
 }
 
+/// <summary>A uint32 state parameter initialized with raw random bits: exercises RandomBits
+/// inside a (state) parameter initializer. Bits produce unsigned integers, so this must be a
+/// state parameter (trainable parameters are float — they carry gradients), keyed on the
+/// parameter's own init stream exactly like a uniform/normal init draw.</summary>
+[StateInitializer(Ownership = StateOwnership.ModuleOwned)]
+public static partial class RngBitsStateInit
+{
+    public static Tensor<uint32> Inline(Vector<int64> shape) => RandomBits<uint32>(shape);
+}
+
+[Module]
+public partial class RngBitsInitLayer
+{
+    public static Tensor<uint32> Inline(Tensor<float32> x) => RngBitsStateInit.Init([Scalar(4L), Scalar(4L)]);
+}
+
 /// <summary>
 /// End-to-end coverage for per-parameter initialization RNG (phase 2). Concretizes
 /// <see cref="RngInitTwoLinears"/> and initializes it under various
@@ -49,6 +65,35 @@ public class RngInitTests
             .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
             .Where(v => v.Length == 16)
             .ToArray();
+    }
+
+    private static uint[] MaterializeBitsState(RngConfig cfg)
+    {
+        var g = RngBitsInitLayer.ComputationGraph;
+        var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([sample]));
+        var pl = arch.InitializeTrainableParams(rngConfig: cfg);
+        return pl.ModelParams
+            .Select(p => p.ToTensorData())
+            .Where(td => td.DType == DType.UInt32)
+            .SelectMany(td => td.As<uint32>().AccessMemory().ToArray())
+            .ToArray();
+    }
+
+    [Fact]
+    public void TestBitsInitializerMaterializesKeyedAndReproducible()
+    {
+        // RandomBits<uint32> in a state-parameter initializer keys on the parameter's own init
+        // stream, materializes to real uint bits, is reproducible for a config, and re-rolls
+        // with the master seed — the raw-bits analogue of the uniform/normal init properties.
+        var a = MaterializeBitsState(new RngConfig { MasterSeed = 5 });
+        var b = MaterializeBitsState(new RngConfig { MasterSeed = 5 });
+        var c = MaterializeBitsState(new RngConfig { MasterSeed = 6 });
+
+        Assert.Equal(16, a.Length);            // the [4,4] uint32 state param materialized
+        Assert.Equal(a, b);                    // reproducible for a config
+        Assert.NotEqual(a, c);                 // master seed re-randomizes
+        Assert.Contains(a, v => v != 0u);      // real bits, not a zeroed fallback
     }
 
     [Fact]

@@ -84,17 +84,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     "non-reproducible backend randomness. Move the random draw " +
                     "(RandomUniform/RandomNormal/RandomBits) directly into the initializer's body.");
 
-            // Raw bits are a runtime feed, not initialization noise (init randomness is drawn
-            // host-side and baked into weights), so they cannot be an initializer draw. Reject
-            // loudly and clearly here rather than leave the draw un-keyed to fail later at
-            // lowering with a confusing "no stream identity" error.
-            if (body.Nodes.Any(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_BITS))
-                throw new NotSupportedException(
-                    $"Initializer '{fn.FriendlyName}' of parameter '{streamName}' draws raw random " +
-                    "bits (RandomBits<T>). Raw bits are a runtime feed — initialization randomness " +
-                    "is drawn host-side and baked into weights — so they cannot be drawn in a " +
-                    "parameter initializer; draw them in the model's runtime forward path instead.");
-
             var (k0, k1) = streamKey;
 
             var newNodes = new List<FastNode>(body.Nodes.Count);
@@ -104,7 +93,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 bool isUniform = node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM;
                 bool isNormal = node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL;
-                if (!isUniform && !isNormal)
+                bool isBits = node.OpCode == InternalOpCodes.SHRK_RANDOM_BITS;
+                if (!isUniform && !isNormal && !isBits)
                 {
                     newNodes.Add(node);
                     continue;
@@ -113,13 +103,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var shapeInput = node.Inputs[0]
                     ?? throw new InvalidOperationException("Random init node has null shape input.");
 
-                float a = isUniform
-                    ? node.Attributes.GetFloatVal(AttrLow) ?? 0.0f
-                    : node.Attributes.GetFloatVal(AttrMean) ?? 0.0f;
-                float b = isUniform
-                    ? node.Attributes.GetFloatVal(AttrHigh) ?? 1.0f
-                    : node.Attributes.GetFloatVal(AttrScale) ?? 1.0f;
-
                 // The parameter's own stream key as a [2] constant, and a distinct
                 // sub-stream (drawBase = ordinal) per draw within one initializer.
                 var keyKey = AppendConstant(new OnnxTensorData<int64>(
@@ -127,6 +110,38 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var drawBaseKey = AppendConstant(new OnnxTensorData<int64>(
                     new Shape(Array.Empty<long>()),
                     OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (long[])[randomOrdinal])), newNodes);
+
+                if (isBits)
+                {
+                    // Raw-bits init draw: keyed on the parameter's own stream, no distribution
+                    // bounds; the uint output width rides the shrk_dtype attribute. Mirrors the
+                    // runtime RewriteBitsFeedToKeyedDraw.
+                    var bitsDtype = node.Attributes.GetDTypeVal(ShrkAttrDtype)
+                        ?? throw new InvalidOperationException(
+                            "FastInitKeyedDraws: a SHRK_RANDOM_BITS init draw is missing its shrk_dtype (output width) attribute.");
+                    node.OpCode = InternalOpCodes.SHRK_RNG_BITS;
+                    node.Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                        new Dictionary<string, object?>
+                        {
+                            [ShrkAttrRngAlgorithm] = algorithm,
+                            [ShrkAttrDtype] = bitsDtype,
+                        },
+                        Definitions.NodeDefinitions[InternalOpCodes.SHRK_RNG_BITS].AttributeDefs);
+                    node.FullInputs = new Dictionary<string, List<FastTensorKey?>>
+                    {
+                        [""] = new List<FastTensorKey?> { keyKey, drawBaseKey, shapeInput }
+                    };
+                    newNodes.Add(node);
+                    randomOrdinal++;
+                    continue;
+                }
+
+                float a = isUniform
+                    ? node.Attributes.GetFloatVal(AttrLow) ?? 0.0f
+                    : node.Attributes.GetFloatVal(AttrMean) ?? 0.0f;
+                float b = isUniform
+                    ? node.Attributes.GetFloatVal(AttrHigh) ?? 1.0f
+                    : node.Attributes.GetFloatVal(AttrScale) ?? 1.0f;
                 var aKey = AppendConstant(new OnnxTensorData<float32>(
                     new Shape(Array.Empty<long>()),
                     OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (float[])[a])), newNodes);

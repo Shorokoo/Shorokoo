@@ -177,20 +177,10 @@ resolved key, in-loop sites derive per-iteration keys at runtime) — and can em
 `Rng.Pin` skeleton for freezing streams before a refactor (see
 [Pinning RNG streams](rng-pinning.md)).
 
-Building the report is cheap, and the pin skeleton never needs keys. **Key values are resolved
-lazily**, because a key is derived by *executing* its in-graph derivation — Shorokoo computes no
-randomness on the host — which needs a working execution provider and is far from free. So
-reading `KeyWords` (or calling `ResolveKeys()`) is what triggers that work, and the report's
-printed form shows `key=<unresolved>` until it happens:
-
-```csharp
-Console.WriteLine(report);                  // inventory, no keys, no execution
-Console.WriteLine(report.ResolveKeys());    // resolves every key, then prints them
-```
-
-Deliberately, neither `ToString()` nor the pin skeleton forces resolution: a log line or a
-debugger watch must never launch an execution or throw. Pass your own context if you have one:
-`GetRngStreamReport(config, computeContext)`.
+Resolving the keys **executes** each stream's in-graph derivation — Shorokoo computes no
+randomness on the host — so asking for a report *with* a config is a deliberately expensive
+call that needs a working execution provider. A report without one resolves nothing. Pass your
+own context if you have one: `GetRngStreamReport(config, computeContext)`.
 
 ## Without a config
 

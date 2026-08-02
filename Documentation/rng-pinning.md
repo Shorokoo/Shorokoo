@@ -92,11 +92,9 @@ that may create streams internally.
 
 **The report supplies slots, you supply names.** For bodies without a generated suggestion,
 the bind-time stream report (`arch.GetRngStreamReport(config)`) describes every slot — ModelId
-path, consumer kind, parameter name, shape, and (on request) the resolved key — and its
-`EmitPinSkeleton()` emits per-scope sparse skeletons with one placeholder per slot: fill each
-in with the variable that captured that consumer. Pinning needs only slots, so the skeleton
-never resolves keys; call `ResolveKeys()` first if you want to see them (see
-[Configuring RNG](rng-configuration.md#the-stream-report)).
+path, consumer kind, parameter name, shape, resolved key — and its `EmitPinSkeleton()` emits
+per-scope sparse skeletons with one placeholder per slot: fill each in with the variable
+that captured that consumer.
 
 ## The sparse form
 

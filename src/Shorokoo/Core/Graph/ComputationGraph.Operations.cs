@@ -207,14 +207,12 @@ namespace Shorokoo.Graph
         /// <paramref name="rngConfig"/> is supplied) the resolved stream key. Requires a
         /// <see cref="GraphKind.ConcreteArchitecture"/>.
         ///
-        /// <para>Building the report is cheap, and the pin workflow
-        /// (<see cref="RngStreamReport.EmitPinSkeleton"/>) never touches keys. Reading
-        /// <see cref="RngStreamInfo.KeyWords"/>, however, <b>executes</b> each stream's in-graph
-        /// key derivation (the host computes no RNG itself — see the graph-only RNG design), so
-        /// the first key read resolves the whole report (in bounded chunks) and costs execution passes;
-        /// it can also throw where a pure inventory could not (e.g. no usable execution
-        /// provider). Streams whose key is undefined — no config supplied, or an unrealized
-        /// in-loop feed site — report <c>null</c> without executing anything.</para>
+        /// <para>Resolving keys <b>executes</b> each stream's in-graph key derivation — the host
+        /// computes no RNG itself — so supplying <paramref name="rngConfig"/> makes this a
+        /// deliberately expensive call that requires a usable execution provider. All streams
+        /// resolve in one batch. Omit the config to get the inventory alone, which executes
+        /// nothing. Streams whose key is undefined (an unrealized in-loop feed site) report
+        /// <c>null</c>.</para>
         /// </summary>
         public RngStreamReport GetRngStreamReport(
             RngConfig? rngConfig = null, ComputeContext? computeContext = null)

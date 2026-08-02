@@ -233,28 +233,6 @@ public class RngPinTests
     }
 
     [Fact]
-    public void TestReportPrintsKeysOnlyAfterResolveKeys()
-    {
-        // Keys are lazy because resolving EXECUTES the derivation, so the printed form must not
-        // trigger it (a log line or debugger watch must never launch an execution or throw) —
-        // and ResolveKeys() is the explicit opt-in that brings the keyed view back.
-        var g = ((ComputationGraph)typeof(PinBaselineTwoLinears)
-            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
-        var input = TensorData([1L, 4L], 0.1f, 0.2f, 0.3f, 0.4f);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
-        var cfg = new RngConfig { MasterSeed = 3 };
-
-        var report = arch.GetRngStreamReport(cfg);
-        Assert.Contains("key=<unresolved>", report.ToString());
-        Assert.DoesNotContain("key=0x", report.ToString());
-        // The pin workflow must likewise never force resolution.
-        _ = report.EmitPinSkeleton();
-        Assert.Contains("key=<unresolved>", report.ToString());
-
-        Assert.Contains("key=0x", report.ResolveKeys().ToString());
-    }
-
-    [Fact]
     public void TestRngStreamReportResolvesRealizedRuntimeFeedKey()
     {
         // A realized (non-loop) runtime feed: its row carries a key resolved through RunKeySpec

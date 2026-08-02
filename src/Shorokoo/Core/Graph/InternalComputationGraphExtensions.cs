@@ -452,20 +452,20 @@ namespace Shorokoo.Graph
             this InternalComputationGraph graph, RngConfig? rngConfig = null,
             ComputeContext? computeContext = null)
         {
-            var streams = new List<RngStreamInfo>();
             // Keys are resolved by EXECUTING each stream's in-graph split chain (#136 — no
-            // host-side fold), which is expensive, so it is deferred to the first KeyWords read
-            // and batched: rows record their spec here and take a resolver closing over the
-            // shared lazy result. By the time anything reads a key both loops have filled the
-            // list, so the whole report resolves together (in bounded chunks).
+            // host-side fold), so they are gathered here and resolved in ONE batch after both
+            // loops, rather than a graph execution per stream. Asking for a report WITH a config
+            // is asking for resolved keys, and that is a deliberately expensive call; a report
+            // without one resolves nothing.
+            var rows = new List<(int keyIndex, Func<IReadOnlyList<long>?, RngStreamInfo> build)>();
             var keySpecs = new List<((uint k0, uint k1) root, IReadOnlyList<int> foldPath)>();
-            var resolvedKeys = new Lazy<IReadOnlyList<long[]>>(
-                () => Core.Rng.RngKeyResolver.Resolve(keySpecs, computeContext));
-            Func<IReadOnlyList<long>?>? KeyResolverFor(((uint k0, uint k1) root, IReadOnlyList<int> foldPath) spec)
+            void AddRow(
+                ((uint k0, uint k1) root, IReadOnlyList<int> foldPath)? spec,
+                Func<IReadOnlyList<long>?, RngStreamInfo> build)
             {
-                int index = keySpecs.Count;
-                keySpecs.Add(spec);
-                return () => resolvedKeys.Value[index];
+                int index = -1;
+                if (spec is { } s) { index = keySpecs.Count; keySpecs.Add(s); }
+                rows.Add((index, build));
             }
 
             foreach (var info in graph.GetConcreteModelParamInfos().ParamInfos)
@@ -476,18 +476,17 @@ namespace Shorokoo.Graph
                 // pin skeleton exactly like realized feed streams do.
                 var siteVals = info.ParamIdentifier.ModelIdTemplate.Vals;
                 var name = info.ToShorokooIdString();
-                streams.Add(new RngStreamInfo
+                var paramInfo = info;
+                AddRow(rngConfig?.InitKeySpec(info.ModelId.Vals), key => new RngStreamInfo
                 {
                     Collection = RngCollection.Params,
-                    ModelIdPath = info.ModelId.Vals,
-                    SitePath = siteVals.SequenceEqual(info.ModelId.Vals) ? null : siteVals,
+                    ModelIdPath = paramInfo.ModelId.Vals,
+                    SitePath = siteVals.SequenceEqual(paramInfo.ModelId.Vals) ? null : siteVals,
                     Kind = RngStreamKind.ParamInit,
                     Name = name,
-                    Shape = info.Shape.Dims,
-                    FrameworkOwned = FastInjectRngDrawCounter.IsExecutionCounter(info.ParamIdentifier),
-                    KeyResolver = rngConfig is null
-                        ? null
-                        : KeyResolverFor(rngConfig.InitKeySpec(info.ModelId.Vals)),
+                    Shape = paramInfo.Shape.Dims,
+                    FrameworkOwned = FastInjectRngDrawCounter.IsExecutionCounter(paramInfo.ParamIdentifier),
+                    KeyWords = key,
                 });
             }
 
@@ -521,19 +520,25 @@ namespace Shorokoo.Graph
 
                 if (!seenFeedPaths.Add(string.Join(",", idVals))) continue;
                 bool isRealized = System.Array.IndexOf(idVals, -1) < 0;
-                streams.Add(new RngStreamInfo
-                {
-                    Collection = RngCollection.Runtime,
-                    ModelIdPath = idVals,
-                    SitePath = null,
-                    Kind = kind,
-                    KeyResolver = rngConfig is null || !isRealized
-                        ? null
-                        : KeyResolverFor(rngConfig.RunKeySpec(idVals)),
-                });
+                var feedIdVals = idVals;
+                var feedKind = kind;
+                AddRow(rngConfig is null || !isRealized ? null : rngConfig.RunKeySpec(idVals),
+                    key => new RngStreamInfo
+                    {
+                        Collection = RngCollection.Runtime,
+                        ModelIdPath = feedIdVals,
+                        SitePath = null,
+                        Kind = feedKind,
+                        KeyWords = key,
+                    });
             }
 
-            return new RngStreamReport(streams);
+            // One batched resolution for the whole report, then build the rows.
+            var resolved = keySpecs.Count == 0
+                ? []
+                : Core.Rng.RngKeyResolver.Resolve(keySpecs, computeContext);
+            return new RngStreamReport(
+                rows.Select(r => r.build(r.keyIndex < 0 ? null : resolved[r.keyIndex])));
         }
 
         /// <summary>

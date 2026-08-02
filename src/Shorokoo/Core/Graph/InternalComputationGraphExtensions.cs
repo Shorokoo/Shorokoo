@@ -522,8 +522,10 @@ namespace Shorokoo.Graph
             }
 
             // Resolve every requested key by EXECUTING its in-graph SHRK_RNG_SPLIT derivation
-            // (one batched run) — the host never folds a key itself (#136), so a custom
-            // algorithm's key tree resolves here for free.
+            // (one batched run): the host never folds a key itself (#136), so the reported key
+            // is produced by the same graph op that keys real draws — there is no second
+            // implementation to drift. Rows are mutated before the report is constructed; the
+            // constructor's sort reorders these same references, so the indices stay valid.
             if (keySpecs.Count > 0)
             {
                 var resolved = Core.Rng.RngKeyResolver.Resolve([.. keySpecs.Select(s => s.spec)]);

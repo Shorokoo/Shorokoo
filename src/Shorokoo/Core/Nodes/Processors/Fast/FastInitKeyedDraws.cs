@@ -91,6 +91,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             var newNodes = new List<FastNode>(body.Nodes.Count);
             int randomOrdinal = 0;
+            FastTensorKey? keyChain = null;   // built lazily on the first draw, then shared
 
             foreach (var node in body.Nodes)
             {
@@ -106,22 +107,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var shapeInput = node.Inputs[0]
                     ?? throw new InvalidOperationException("Random init node has null shape input.");
 
-                // The parameter's own stream key: the root key words as a [2] constant, then
-                // the ModelId path folded in by an in-graph SHRK_RNG_SPLIT chain (one split per
-                // path element, constant counters). The fold is NOT computed host-side — this
-                // mirrors a runtime feed's chain (FastWireRngKeyDerivation), and since every
-                // input is constant the chain collapses to the same literal key at session
-                // build. An override / SharedKey spec carries an empty path, so the root IS
-                // the key and no split is emitted.
-                var keyKey = AppendConstant(new OnnxTensorData<int64>(
-                    new Shape(2), OnnxUtils.CreateTensorValue(new Shape(2), (long[])[k0, k1])), newNodes);
-                foreach (var pathVal in foldPath)
-                {
-                    var counterKey = AppendConstant(new OnnxTensorData<int64>(
-                        new Shape(Array.Empty<long>()),
-                        OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (long[])[pathVal])), newNodes);
-                    keyKey = AppendSplit(keyKey, counterKey, newNodes);
-                }
+                // Every draw in this initializer shares the parameter's ONE stream key (draws are
+                // separated by drawBase = ordinal, not by key), so the chain is built once, on
+                // first use, and reused — emitting it per draw would multiply the graph by the
+                // ModelId depth for no effect.
+                keyChain ??= BuildKeyChain(k0, k1, foldPath, newNodes);
+                var keyKey = keyChain.Value;
+
                 var drawBaseKey = AppendConstant(new OnnxTensorData<int64>(
                     new Shape(Array.Empty<long>()),
                     OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (long[])[randomOrdinal])), newNodes);
@@ -203,6 +195,30 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 defaultName: fn.DefaultName + "__rng__" + suffix,
                 friendlyName: fn.FriendlyName + "__rng__" + suffix,
                 fn.StateOwnership);
+        }
+
+        /// <summary>
+        /// The parameter's stream key as in-graph nodes: the root key words as a <c>[2]</c>
+        /// constant, then the ModelId path folded in by a <c>SHRK_RNG_SPLIT</c> chain (one split
+        /// per path element, constant counters). The fold is NOT computed host-side (#136) —
+        /// this mirrors a runtime feed's chain (<see cref="FastWireRngKeyDerivation"/>), and
+        /// since every input is constant the chain collapses to the same literal key at session
+        /// build. An override / <c>SharedKey</c> spec carries an empty path, so the root IS the
+        /// key and no split is emitted.
+        /// </summary>
+        private static FastTensorKey BuildKeyChain(
+            uint k0, uint k1, IReadOnlyList<int> foldPath, List<FastNode> newNodes)
+        {
+            var key = AppendConstant(new OnnxTensorData<int64>(
+                new Shape(2), OnnxUtils.CreateTensorValue(new Shape(2), (long[])[k0, k1])), newNodes);
+            foreach (var pathVal in foldPath)
+            {
+                var counter = AppendConstant(new OnnxTensorData<int64>(
+                    new Shape(Array.Empty<long>()),
+                    OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (long[])[pathVal])), newNodes);
+                key = AppendSplit(key, counter, newNodes);
+            }
+            return key;
         }
 
         /// <summary>

@@ -242,8 +242,8 @@ public class RngInitFrozenDerivationTests
     {
         // Layer 1: the key derivation alone (fold order, the "init" label, sub-master wiring).
         var cfg = new RngConfig { MasterSeed = 123 };
-        Assert.Equal((0x0177f47cu, 0x33e150fcu), cfg.FoldInitKey([1, 1]));
-        Assert.Equal((0x3c6c3147u, 0x2a93ecfcu), cfg.FoldInitKey([2, 1]));
+        Assert.Equal((0x0177f47cu, 0x33e150fcu), RngTestOracle.InitKey(cfg, [1, 1]));
+        Assert.Equal((0x3c6c3147u, 0x2a93ecfcu), RngTestOracle.InitKey(cfg, [2, 1]));
     }
 
     [Fact]

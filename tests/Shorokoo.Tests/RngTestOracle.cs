@@ -34,14 +34,14 @@ internal static class RngTestOracle
     }
 
     /// <summary>A trainable parameter's init stream key (oracle for the in-graph derivation).</summary>
-    public static (uint k0, uint k1) FoldInitKey(this RngConfig config, IReadOnlyList<int> modelIdVals)
+    public static (uint k0, uint k1) InitKey(RngConfig config, IReadOnlyList<int> modelIdVals)
         => Fold(config.InitKeySpec(modelIdVals));
 
     /// <summary>A runtime feed's stream key (oracle for the in-graph derivation).</summary>
-    public static (uint k0, uint k1) FoldRunKey(this RngConfig config, IReadOnlyList<int> modelIdVals)
+    public static (uint k0, uint k1) RunKey(RngConfig config, IReadOnlyList<int> modelIdVals)
         => Fold(config.RunKeySpec(modelIdVals));
 
     /// <summary>A runtime feed's stream key under an encoded identity (oracle).</summary>
-    public static (uint k0, uint k1) FoldRunKey(this RngRuntimeIdentity identity, IReadOnlyList<int> path)
+    public static (uint k0, uint k1) RunKey(RngRuntimeIdentity identity, IReadOnlyList<int> path)
         => Fold(identity.RunKeySpec(path));
 }

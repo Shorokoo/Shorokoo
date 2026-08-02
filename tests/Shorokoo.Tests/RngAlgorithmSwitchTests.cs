@@ -54,7 +54,7 @@ public class RngAlgorithmSwitchTests
         var feed = concrete.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
         var path = feed.Attributes.GetIntsVal(ShrkAttrLocalModelId)!;
         var decoded = RngRuntimeIdentity.Decode(concrete.TryGetRngSeed()!);
-        var (k0, k1) = decoded.FoldRunKey(path);
+        var (k0, k1) = RngTestOracle.RunKey(decoded, path);
         return [k0, k1];
     }
 

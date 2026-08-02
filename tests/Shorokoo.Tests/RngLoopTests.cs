@@ -127,7 +127,7 @@ public class RngLoopTests
         {
             // Feed ModelId is [1, -1, 1]: the runtime master folds slot 1, then the
             // iteration index, then the feed's slot under the loop (1).
-            var key = RngTestOracle.FoldKey(RngTestOracle.FoldKey(cfg.FoldRunKey([1]), i), 1);
+            var key = RngTestOracle.FoldKey(RngTestOracle.FoldKey(RngTestOracle.RunKey(cfg, [1]), i), 1);
             for (long e = 0; e < N; e++)
                 expected[e] += HostUniform(e, key);
         }
@@ -206,8 +206,8 @@ public class RngLoopTests
         for (int i = 0; i < 3; i++)
         {
             var key = i == 1
-                ? cfg.FoldRunKey([1, 1, 1])
-                : RngTestOracle.FoldKey(RngTestOracle.FoldKey(cfg.FoldRunKey([1]), i), 1);
+                ? RngTestOracle.RunKey(cfg, [1, 1, 1])
+                : RngTestOracle.FoldKey(RngTestOracle.FoldKey(RngTestOracle.RunKey(cfg, [1]), i), 1);
             for (long e = 0; e < N; e++)
                 expected[e] += HostUniform(e, key);
         }
@@ -236,8 +236,8 @@ public class RngLoopTests
         for (int i = 0; i < 3; i++)
         {
             var key = i == 1
-                ? cfgOv.FoldRunKey([1, 1, 1])
-                : RngTestOracle.FoldKey(RngTestOracle.FoldKey(cfgOv.FoldRunKey([1]), i), 1);
+                ? RngTestOracle.RunKey(cfgOv, [1, 1, 1])
+                : RngTestOracle.FoldKey(RngTestOracle.FoldKey(RngTestOracle.RunKey(cfgOv, [1]), i), 1);
             for (long e = 0; e < N; e++)
                 expected[e] += HostUniform(e, key);
         }
@@ -259,7 +259,7 @@ public class RngLoopTests
         Assert.Contains(concrete.Nodes, n => n.OpCode == OpCodes.LOOP_OPEN);
 
         var expected = (float[])XVals.Clone();
-        var key = cfg.FoldRunKey([1, 0, 1]);   // the override, not the master derivation
+        var key = RngTestOracle.RunKey(cfg, [1, 0, 1]);   // the override, not the master derivation
         for (long e = 0; e < N; e++)
             expected[e] += HostUniform(e, key);
         Assert.Equal(expected, output);

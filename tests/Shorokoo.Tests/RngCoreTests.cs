@@ -136,13 +136,13 @@ public class RngCoreTests
     public void TestKeyDerivationIsPathDerivedAndStable()
     {
         var cfg = new RngConfig { MasterSeed = 20260702 };
-        var k1 = cfg.FoldInitKey([3, 1, 1]);
-        var k2 = cfg.FoldInitKey([3, 1, 1]);
-        var k3 = cfg.FoldInitKey([3, 1, 2]);
+        var k1 = RngTestOracle.InitKey(cfg, [3, 1, 1]);
+        var k2 = RngTestOracle.InitKey(cfg, [3, 1, 1]);
+        var k3 = RngTestOracle.InitKey(cfg, [3, 1, 2]);
         Assert.Equal(k1, k2);                                 // stable for a path
         Assert.NotEqual(k1, k3);                              // sibling paths differ
         // Same path in the runtime collection is a different stream (distinct sub-master).
-        Assert.NotEqual(k1, cfg.FoldRunKey([3, 1, 1]));
+        Assert.NotEqual(k1, RngTestOracle.RunKey(cfg, [3, 1, 1]));
     }
 
     [Fact]
@@ -150,8 +150,8 @@ public class RngCoreTests
     {
         var a = new RngConfig { MasterSeed = 1 };
         var b = new RngConfig { MasterSeed = 2 };
-        Assert.NotEqual(a.FoldInitKey([1]), b.FoldInitKey([1]));
-        Assert.NotEqual(a.FoldRunKey([1]), b.FoldRunKey([1]));
+        Assert.NotEqual(RngTestOracle.InitKey(a, [1]), RngTestOracle.InitKey(b, [1]));
+        Assert.NotEqual(RngTestOracle.RunKey(a, [1]), RngTestOracle.RunKey(b, [1]));
     }
 
     [Fact]
@@ -163,17 +163,17 @@ public class RngCoreTests
 
         // The overridden stream changes; siblings, sub-paths, and the runtime collection
         // keep their derived keys (matching is exact and per-collection).
-        Assert.NotEqual(baseCfg.FoldInitKey([1, 1]), cfg.FoldInitKey([1, 1]));
-        Assert.Equal(baseCfg.FoldInitKey([1, 2]), cfg.FoldInitKey([1, 2]));
-        Assert.Equal(baseCfg.FoldInitKey([1, 1, 1]), cfg.FoldInitKey([1, 1, 1]));
-        Assert.Equal(baseCfg.FoldRunKey([1, 1]), cfg.FoldRunKey([1, 1]));
+        Assert.NotEqual(RngTestOracle.InitKey(baseCfg, [1, 1]), RngTestOracle.InitKey(cfg, [1, 1]));
+        Assert.Equal(RngTestOracle.InitKey(baseCfg, [1, 2]), RngTestOracle.InitKey(cfg, [1, 2]));
+        Assert.Equal(RngTestOracle.InitKey(baseCfg, [1, 1, 1]), RngTestOracle.InitKey(cfg, [1, 1, 1]));
+        Assert.Equal(RngTestOracle.RunKey(baseCfg, [1, 1]), RngTestOracle.RunKey(cfg, [1, 1]));
         Assert.True(cfg.HasOverride(RngCollection.Params, [1, 1]));
         Assert.False(cfg.HasOverride(RngCollection.Params, [1, 2]));
 
         // The override replaces the fully folded key, so it survives a master-seed change.
         var otherMaster = new RngConfig { MasterSeed = 8 }
             .Override(RngCollection.Params, [1, 1], seed: 1234);
-        Assert.Equal(cfg.FoldInitKey([1, 1]), otherMaster.FoldInitKey([1, 1]));
+        Assert.Equal(RngTestOracle.InitKey(cfg, [1, 1]), RngTestOracle.InitKey(otherMaster, [1, 1]));
     }
 
     [Fact]
@@ -221,7 +221,7 @@ public class RngRuntimeIdentityTests
         var decoded = RngRuntimeIdentity.Decode(RngRuntimeIdentity.Build(cfg));
         Assert.Equal(RngRuntimeIdentity.AlgorithmIdOf(cfg.Algorithm), decoded.AlgorithmId);
         foreach (var p in Paths)
-            Assert.Equal(cfg.FoldRunKey(p), decoded.FoldRunKey(p));
+            Assert.Equal(RngTestOracle.RunKey(cfg, p), RngTestOracle.RunKey(decoded, p));
     }
 
     [Fact]
@@ -243,7 +243,7 @@ public class RngRuntimeIdentityTests
 
         // An explicit run sub-master re-seeds the runtime tier and rides the same header.
         var subMaster = new RngConfig { MasterSeed = 42, RunMasterSeed = 777 };
-        Assert.NotEqual(cfg.FoldRunKey(Paths[0]), subMaster.FoldRunKey(Paths[0]));
+        Assert.NotEqual(RngTestOracle.RunKey(cfg, Paths[0]), RngTestOracle.RunKey(subMaster, Paths[0]));
         AssertRoundTrips(subMaster);
     }
 
@@ -273,8 +273,8 @@ public class RngRuntimeIdentityTests
         // Derivation round-trips: the overridden stream deviates, siblings stay derived.
         AssertRoundTrips(cfg);
         var noOverride = new RngConfig { MasterSeed = 42, RunMasterSeed = 777 };
-        Assert.Equal(noOverride.FoldRunKey([4, 0, 1]), decoded.FoldRunKey([4, 0, 1]));
-        Assert.NotEqual(noOverride.FoldRunKey([4, 1, 1]), decoded.FoldRunKey([4, 1, 1]));
+        Assert.Equal(RngTestOracle.RunKey(noOverride, [4, 0, 1]), RngTestOracle.RunKey(decoded, [4, 0, 1]));
+        Assert.NotEqual(RngTestOracle.RunKey(noOverride, [4, 1, 1]), RngTestOracle.RunKey(decoded, [4, 1, 1]));
     }
 
     [Fact]
@@ -333,8 +333,8 @@ public class RngSeedTransportTests
         // — the loaded model needs no config object.
         var decoded = RngRuntimeIdentity.Decode(carried!);
         Assert.Equal(RngRuntimeIdentity.AlgorithmIdOf(RngAlgorithm.Threefry2x32), decoded.AlgorithmId);
-        Assert.Equal(cfg.FoldRunKey([1, 1, 1]), decoded.FoldRunKey([1, 1, 1]));
-        Assert.Equal(cfg.FoldRunKey([1, 0, 1]), decoded.FoldRunKey([1, 0, 1]));
+        Assert.Equal(RngTestOracle.RunKey(cfg, [1, 1, 1]), RngTestOracle.RunKey(decoded, [1, 1, 1]));
+        Assert.Equal(RngTestOracle.RunKey(cfg, [1, 0, 1]), RngTestOracle.RunKey(decoded, [1, 0, 1]));
 
         // Exactly one RngSeed parameter after each save/load cycle — an ordinary initializer
         // never accumulates duplicates.

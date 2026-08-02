@@ -181,7 +181,7 @@ public class RngAlgorithmTests
         // FunctionProtos tagged with the algorithm name and function kind. (The split resolves
         // to a literal key only later, at ORT session build, not in this exported proto.)
         var rngFns = proto.Functions.Where(f => f.Name.Contains("ShrkRng_")).ToArray();
-        Assert.True(rngFns.Length >= 2,
+        Assert.True(rngFns.Length == 2,
             $"expected the split + uniform algorithm FunctionProtos; functions=[{string.Join(",", proto.Functions.Select(f => f.Name))}]");
         foreach (var fn in rngFns)
         {

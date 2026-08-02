@@ -16,12 +16,19 @@ namespace Shorokoo.Core.Rng;
 /// recomputing the key tree host-side (#136). Given derivation specs (a root key plus the
 /// ModelId path still to be folded), it builds one throwaway graph of <c>SHRK_RNG_SPLIT</c>
 /// chains, runs it through the ordinary execution path (which lowers each split to the
-/// algorithm's non-inlined <c>split</c> function), and reads the resulting key words back.
+/// registered <c>split</c> function), and reads the resulting key words back.
 ///
-/// <para>Because the algorithm's split is what actually runs, a custom algorithm's key tree
-/// resolves correctly here for free — the reason no host-side Threefry may remain. All inputs
-/// are constants, so the whole batch collapses to literals at session build; one run resolves
-/// every requested stream.</para>
+/// <para>The point is that there is <b>no second implementation</b> to drift: the key a caller
+/// sees is produced by the same graph op that keys real draws. Note the key tree is currently
+/// algorithm-INdependent by construction — <see cref="RngAlgorithms.GetFunction"/> pins
+/// <c>split</c> to <see cref="RngAlgorithms.Default"/> so switching the draw algorithm never
+/// re-keys a stream — so this resolver emits that same default split. When a custom algorithm
+/// may own its <c>split</c> (issue #122), the algorithm name must be threaded through the spec
+/// to here; executing the derivation rather than reimplementing it is what makes that a
+/// one-line change instead of a second port of the key tree.</para>
+///
+/// <para>All inputs are constants, so the whole batch collapses to literals at session build;
+/// one run resolves every requested stream.</para>
 ///
 /// <para>Diagnostic-path only (the RNG stream report / pin skeleton): nothing in model
 /// execution consumes these values.</para>

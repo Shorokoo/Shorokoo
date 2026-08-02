@@ -14,9 +14,9 @@ namespace Shorokoo.Core.Rng;
 /// <summary>
 /// Resolves concrete RNG stream keys <b>by executing their in-graph derivation</b> — never by
 /// recomputing the key tree host-side (#136). Given derivation specs (a root key plus the
-/// ModelId path still to be folded), it builds one throwaway graph of <c>SHRK_RNG_SPLIT</c>
-/// chains, runs it through the ordinary execution path (which lowers each split to the
-/// registered <c>split</c> function), and reads the resulting key words back.
+/// ModelId path still to be folded), it builds a throwaway graph that folds the key tree one
+/// LEVEL at a time — a single batched split per level over all streams of equal depth — runs it
+/// through the ordinary execution path, and reads the resulting key words back.
 ///
 /// <para>The point is that there is <b>no second implementation</b> to drift: the key a caller
 /// sees is produced by the same graph op that keys real draws. Note the key tree is currently
@@ -27,9 +27,11 @@ namespace Shorokoo.Core.Rng;
 /// to here; executing the derivation rather than reimplementing it is what makes that a
 /// one-line change instead of a second port of the key tree.</para>
 ///
-/// <para>All inputs are constants, so each batch collapses to literals at session build.
-/// Resolution is chunked (see <c>MaxSplitsPerChunk</c>): graph preparation is super-linear in
-/// node count, so a few bounded runs are dramatically faster than one giant one.</para>
+/// <para>Batching by level is what makes this affordable: graph preparation is super-linear in
+/// node count, so emitting one split per fold STEP made resolution scale with the number of
+/// streams (thousands of function-call nodes). One call per level instead makes the graph — and
+/// the cost — scale with ModelId depth alone, which is a single digit (#138). All inputs are
+/// constants, so each level collapses to literals at session build.</para>
 ///
 /// <para>Diagnostic-path only (the RNG stream report / pin skeleton): nothing in model
 /// execution consumes these values.</para>
@@ -60,66 +62,59 @@ internal static class RngKeyResolver
         }
         if (pending.Count == 0) return results;
 
-        // Resolve in bounded chunks. Graph preparation is super-linear in node count, so one
-        // giant batch is pathologically slow for a real model (measured: ~4x the time for each
-        // 2x the splits — 400 splits ≈ 105 s, extrapolating to tens of minutes for a few
-        // thousand). Chunking makes total cost grow linearly with the number of streams, at the
-        // price of one session per chunk. Sized in SPLITS, not specs, since a deep ModelId path
-        // contributes several nodes.
-        const int MaxSplitsPerChunk = 24;
-        if (pending.Count > 1)
-        {
-            var chunk = new List<int>();
-            int splits = 0;
-            foreach (var i in pending)
-            {
-                if (chunk.Count > 0 && splits + specs[i].foldPath.Count > MaxSplitsPerChunk)
-                {
-                    ResolveChunk(specs, chunk, results, computeContext);
-                    chunk.Clear();
-                    splits = 0;
-                }
-                chunk.Add(i);
-                splits += specs[i].foldPath.Count;
-            }
-            if (chunk.Count > 0) ResolveChunk(specs, chunk, results, computeContext);
-            return results;
-        }
-
-        ResolveChunk(specs, pending, results, computeContext);
+        // One execution per DEPTH group: every stream at a given depth folds together, level
+        // by level, so cost scales with the (small) set of distinct ModelId depths rather than
+        // with the number of streams.
+        foreach (var group in pending.GroupBy(i => specs[i].foldPath.Count))
+            ResolveGroup(specs, [.. group], results, computeContext);
         return results;
     }
 
-    /// <summary>Resolves one bounded batch of specs in a single graph execution.</summary>
-    private static void ResolveChunk(
+    /// <summary>
+    /// Resolves one group of equal-depth specs in a single graph execution: the group's M roots
+    /// enter as one <c>[2, M]</c> key block, and each tree LEVEL is one batched split
+    /// (<see cref="RngAlgorithms.KindSplitBatch"/>) folding all M streams at once. So the graph
+    /// holds ~2 nodes per level rather than 2 per fold step — the cost stops scaling with the
+    /// number of streams and scales only with depth.
+    /// </summary>
+    private static void ResolveGroup(
         IReadOnlyList<((uint k0, uint k1) root, IReadOnlyList<int> foldPath)> specs,
-        IReadOnlyList<int> pending,
+        IReadOnlyList<int> group,
         long[][] results,
         ComputeContext? computeContext)
     {
-        var graph = new InternalComputationGraph();
-        var nodes = new List<FastNode>();
-        var outputs = new List<FastTensorKey>();
-        foreach (var i in pending)
+        int m = group.Count;
+        int depth = specs[group[0]].foldPath.Count;
+
+        // Roots as one [2, M] block: row 0 = k0 words, row 1 = k1 words.
+        var rootWords = new long[2 * m];
+        for (int j = 0; j < m; j++)
         {
-            var (root, foldPath) = specs[i];
-            var key = AppendConstant(new OnnxTensorData<int64>(
-                new Shape(2), OnnxUtils.CreateTensorValue(new Shape(2), (long[])[root.k0, root.k1])), nodes);
-            foreach (var v in foldPath)
-            {
-                var counter = AppendConstant(new OnnxTensorData<int64>(
-                    new Shape(Array.Empty<long>()),
-                    OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (long[])[v])), nodes);
-                key = AppendSplit(key, counter, nodes);
-            }
-            outputs.Add(key);
+            rootWords[j] = specs[group[j]].root.k0;
+            rootWords[m + j] = specs[group[j]].root.k1;
+        }
+        var nodes = new List<FastNode>();
+        var keys = AppendConstant(new OnnxTensorData<int64>(
+            new Shape(2, m), OnnxUtils.CreateTensorValue(new Shape(2, m), rootWords)), nodes);
+
+        var batchSplit = RngAlgorithms.GetFunction(RngAlgorithms.Default, RngAlgorithms.KindSplitBatch);
+        for (int level = 0; level < depth; level++)
+        {
+            var counters = new long[m];
+            for (int j = 0; j < m; j++) counters[j] = specs[group[j]].foldPath[level];
+            var countersKey = AppendConstant(new OnnxTensorData<int64>(
+                new Shape(m), OnnxUtils.CreateTensorValue(new Shape(m), counters)), nodes);
+            keys = AppendBatchSplit(keys, countersKey, batchSplit, nodes);
         }
 
-        graph.Nodes = nodes;
-        graph.Inputs = [];
-        graph.InputUniqueNames = [];
-        graph.Outputs = outputs;
-        graph.OutputUniqueNames = outputs.Select(_ => (string?)null).ToList();
+        var graph = new InternalComputationGraph
+        {
+            Nodes = nodes,
+            Inputs = [],
+            InputUniqueNames = [],
+            Outputs = [keys],
+            OutputUniqueNames = [null],
+        };
 
         NamedModelParam[] run;
         try
@@ -137,36 +132,42 @@ internal static class RngKeyResolver
                 "resolved key words require execution. See the inner exception.", ex);
         }
 
-        // The mapping below is positional, so a length mismatch would silently mis-label keys —
+        // The unpacking below is positional, so a size mismatch would silently mis-label keys —
         // the one failure mode that looks plausible and that nothing downstream cross-checks.
-        if (run.Length != pending.Count)
+        if (run.Length != 1)
             throw new InvalidOperationException(
-                $"RngKeyResolver: expected {pending.Count} resolved key(s), got {run.Length}.");
+                $"RngKeyResolver: expected 1 resolved key block, got {run.Length}.");
+        var words = run[0].ToTensorData().As<int64>().AccessMemory().ToArray();
+        if (words.Length != 2 * m)
+            throw new InvalidOperationException(
+                $"RngKeyResolver: expected a [2, {m}] key block ({2 * m} words), got {words.Length}.");
 
-        for (int j = 0; j < pending.Count; j++)
-        {
-            var words = run[j].ToTensorData().As<int64>().AccessMemory().ToArray();
-            if (words.Length != 2)
-                throw new InvalidOperationException(
-                    $"RngKeyResolver: a resolved key must be 2 words, got {words.Length}.");
-            results[pending[j]] = [words[0], words[1]];
-        }
+        for (int j = 0; j < m; j++)
+            results[group[j]] = [words[j], words[m + j]];
     }
 
-    private static FastTensorKey AppendSplit(
-        FastTensorKey key, FastTensorKey counter, List<FastNode> nodes)
+    /// <summary>One batched key-tree level: <c>[2, M] keys x [M] counters -> [2, M]</c>, as a call
+    /// of the algorithm's non-inlined <c>splitBatch</c> function (never a host computation).</summary>
+    private static FastTensorKey AppendBatchSplit(
+        FastTensorKey keys, FastTensorKey counters, Function batchSplit, List<FastNode> nodes)
     {
-        var attrDefs = Definitions.NodeDefinitions[InternalOpCodes.SHRK_RNG_SPLIT].AttributeDefs;
+        var attrDefs = Definitions.NodeDefinitions[InternalOpCodes.FUNCTION_INVOKE].AttributeDefs;
         var nodeKey = FastNodeKey.New();
         var outKey = new FastTensorKey(nodeKey, 0);
         nodes.Add(new FastNode
         {
             Key = nodeKey,
-            OpCode = InternalOpCodes.SHRK_RNG_SPLIT,
+            OpCode = InternalOpCodes.FUNCTION_INVOKE,
             Attributes = OnnxCSharpAttributes.FromCSharpVals(
-                new Dictionary<string, object?> { [ShrkAttrRngAlgorithm] = RngAlgorithms.Default },
-                attrDefs),
-            FullInputs = { [""] = new List<FastTensorKey?> { key, counter } },
+                new Dictionary<string, object?>
+                {
+                    [ShrkAttrStructure] = (DataStructure[])[DataStructure.Tensor],
+                    [ShrkAttrDtype] = (DType[])[DType.Int64],
+                    [ShrkAttrRank] = (long[])[2L],
+                    [ShrkAttrGenericTypeArgs] = null,
+                }, attrDefs),
+            TargetFunction = batchSplit,
+            FullInputs = { [""] = new List<FastTensorKey?> { keys, counters } },
             FullOutputs = { [""] = new List<FastTensorKey?> { outKey } },
         });
         return outKey;

@@ -53,9 +53,20 @@ internal static class RuntimeRng
     /// Bit-for-bit identical to <see cref="Threefry2x32.Bijection(uint, uint, uint, uint, int)"/>.</summary>
     public static (Tensor<int64> x0, Tensor<int64> x1) Bijection(
         Tensor<int64> c0, Scalar<int64> drawBase, Scalar<int64> k0, Scalar<int64> k1, int rounds = Threefry2x32.Rounds)
+        => BijectionCore(c0, drawBase, k0, k1, rounds);
+
+    /// <summary>
+    /// The bijection with <b>per-element keys</b>: <paramref name="k0"/>/<paramref name="k1"/> are
+    /// tensors broadcast-compatible with the counter, so N independent (key, counter) pairs are
+    /// transformed in ONE pass. The math is elementwise, so this is the same computation the
+    /// scalar-key overload performs — that one simply broadcasts a single key over the counter.
+    /// Used to fold a whole key-tree level at once (see <see cref="BatchSplitKeys"/>).
+    /// </summary>
+    private static (Tensor<int64> x0, Tensor<int64> x1) BijectionCore(
+        Tensor<int64> c0, Tensor<int64> drawBase, Tensor<int64> k0, Tensor<int64> k1, int rounds)
     {
-        // Key schedule (host-foldable: keys are scalars). ks2 = parity ^ k0 ^ k1.
-        Scalar<int64> ks0 = k0, ks1 = k1, ks2 = Scalar(SkeinParity) ^ k0 ^ k1;
+        // Key schedule. ks2 = parity ^ k0 ^ k1.
+        Tensor<int64> ks0 = k0, ks1 = k1, ks2 = OnnxOp.BitwiseXor(OnnxOp.BitwiseXor(Scalar(SkeinParity), k0).int64(), k1).int64();
 
         var x0 = Mask32(c0 + ks0);                       // [N]
         var x1 = Mask32((c0 - c0) + drawBase + ks1);     // broadcast drawBase to [N]
@@ -69,8 +80,8 @@ internal static class RuntimeRng
             if ((r & 3) == 3)
             {
                 int inject = (r >> 2) + 1;
-                Scalar<int64> kA = KeyWord(ks0, ks1, ks2, inject % 3);
-                Scalar<int64> kB = KeyWord(ks0, ks1, ks2, (inject + 1) % 3);
+                Tensor<int64> kA = KeyWord(ks0, ks1, ks2, inject % 3);
+                Tensor<int64> kB = KeyWord(ks0, ks1, ks2, (inject + 1) % 3);
                 x0 = Mask32(x0 + kA);
                 x1 = Mask32(x1 + kB + Scalar((long)inject));
             }
@@ -78,7 +89,7 @@ internal static class RuntimeRng
         return (x0, x1);
     }
 
-    private static Scalar<int64> KeyWord(Scalar<int64> ks0, Scalar<int64> ks1, Scalar<int64> ks2, int i)
+    private static Tensor<int64> KeyWord(Tensor<int64> ks0, Tensor<int64> ks1, Tensor<int64> ks2, int i)
         => i == 0 ? ks0 : i == 1 ? ks1 : ks2;
 
     /// <summary>
@@ -95,6 +106,27 @@ internal static class RuntimeRng
         Vector<int64> ctr = [index];
         var (x0, x1) = Bijection(Mask32(ctr), Scalar(0L), k0, k1);
         return (x0.Vec()[0], x1.Vec()[0]);
+    }
+
+    /// <summary>
+    /// Splits a whole key-tree <b>level</b> in one pass: <paramref name="keys"/> is a
+    /// <c>[2, M]</c> block (row 0 = the k0 words, row 1 = the k1 words) of M independent parent
+    /// keys, <paramref name="indices"/> the M per-key split counters, and the result is the
+    /// <c>[2, M]</c> block of child keys in the same layout — so levels chain directly, output
+    /// into input.
+    ///
+    /// <para>Element <c>i</c> computes exactly <see cref="SplitKey"/> of <c>(keys[.., i],
+    /// indices[i])</c>: the same <see cref="BijectionCore"/> over the same counter
+    /// <c>(Mask32(index), 0)</c>, differing only in that the key words arrive as tensors rather
+    /// than broadcast scalars. Folding M streams costs ONE bijection instead of M.</para>
+    /// </summary>
+    public static Tensor<int64> BatchSplitKeys(Tensor<int64> keys, Vector<int64> indices)
+    {
+        var k0s = OnnxOp.Gather(keys, Scalar(0L), 0L).int64();   // [M]
+        var k1s = OnnxOp.Gather(keys, Scalar(1L), 0L).int64();   // [M]
+        var (x0, x1) = BijectionCore(Mask32(indices), Scalar(0L), k0s, k1s, Threefry2x32.Rounds);
+        Vector<int64> row = [Scalar(1L), Scalar(-1L)];
+        return OnnxOp.Concat([x0.Reshape(row), x1.Reshape(row)], 0L).int64();   // [2, M]
     }
 
     /// <summary>A [0,1) uniform from a 32-bit word: low 24 bits × 2⁻²⁴.</summary>

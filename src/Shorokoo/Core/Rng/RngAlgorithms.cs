@@ -36,6 +36,10 @@ internal static class RngAlgorithms
     public const string Default = Threefry2x32BoxMullerV1;
 
     public const string KindSplit = "split";
+    /// <summary>The batched key-tree fold: one pass folds a whole level (M parent keys x M
+    /// counters). Same math as <see cref="KindSplit"/> — see <c>RuntimeRng.BatchSplitKeys</c> —
+    /// and, like it, algorithm-independent.</summary>
+    public const string KindSplitBatch = "splitBatch";
     public const string KindUniform = "uniform";
     public const string KindNormal = "normal";
     public const string KindBits = "bits";
@@ -98,7 +102,7 @@ internal static class RngAlgorithms
         // The key tree is algorithm-independent: switching the draw algorithm must not re-key
         // any stream, so split (the in-graph key fold) is always the default 20-round Threefry
         // regardless of the configured draw algorithm. Only the draws vary by algorithm.
-        if (kind == KindSplit) algorithm = Default;
+        if (kind == KindSplit || kind == KindSplitBatch) algorithm = Default;
 
         lock (Gate)
         {
@@ -108,6 +112,7 @@ internal static class RngAlgorithms
             Delegate body = kind switch
             {
                 KindSplit => (Func<Vector<int64>, Scalar<int64>, Vector<int64>>)SplitImpl,
+                KindSplitBatch => (Func<Tensor<int64>, Vector<int64>, Tensor<int64>>)BatchSplitImpl,
                 KindUniform => r13
                     ? (Func<Vector<int64>, Scalar<int64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)Uniform13Impl
                     : (Func<Vector<int64>, Scalar<int64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)UniformImpl,
@@ -142,6 +147,10 @@ internal static class RngAlgorithms
         if (dtype == DType.UInt32) return r13 ? (Func<Vector<int64>, Scalar<int64>, Vector<int64>, Tensor<uint32>>)BitsU32Impl13 : BitsU32Impl;
         return r13 ? (Func<Vector<int64>, Scalar<int64>, Vector<int64>, Tensor<uint64>>)BitsU64Impl13 : BitsU64Impl;
     }
+
+    /// <summary>One pass folds a whole key-tree level; see <see cref="KindSplitBatch"/>.</summary>
+    private static Tensor<int64> BatchSplitImpl(Tensor<int64> keys, Vector<int64> indices)
+        => RuntimeRng.BatchSplitKeys(keys, indices);
 
     private static Vector<int64> SplitImpl(Vector<int64> key, Scalar<int64> index)
     {

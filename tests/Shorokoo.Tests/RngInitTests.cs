@@ -282,6 +282,38 @@ public class RngInitFrozenDerivationTests
     }
 
     [Fact]
+    public void TestBatchedKeyResolutionMatchesTheHostOracle()
+    {
+        // The resolver folds a whole tree LEVEL per batched split (#138), packing M streams into
+        // a [2, M] key block. That packing — k0 words in row 0, k1 words in row 1, unpacked as
+        // (words[j], words[M + j]) — is the new failure surface: a row/column mix-up, or a
+        // mis-grouped depth, would silently hand back another stream's key.
+        //
+        // So resolve a set that deliberately mixes depths (which is what splits the work into
+        // groups) and group sizes, and check every key against the independent host oracle.
+        var cfg = new RngConfig { MasterSeed = 77 };
+        int[][] paths =
+        [
+            [1], [2], [3],                     // depth 1, group of 3
+            [1, 1], [1, 2], [2, 1], [7, 9],    // depth 2, group of 4
+            [1, 2, 3],                         // depth 3, group of 1 (M == 1 edge case)
+            [4, 5, 6, 7, 8, 9],                // depth 6
+        ];
+
+        var keys = Core.Rng.RngKeyResolver.Resolve([.. paths.Select(p => cfg.InitKeySpec(p))]);
+
+        Assert.Equal(paths.Length, keys.Count);
+        for (int i = 0; i < paths.Length; i++)
+        {
+            var (k0, k1) = RngTestOracle.InitKey(cfg, paths[i]);
+            Assert.Equal([(long)k0, (long)k1], keys[i]);
+        }
+        // Distinct paths must stay distinct — a packing bug that returned one row for every
+        // stream would still satisfy a per-element check done carelessly.
+        Assert.Equal(paths.Length, keys.Select(k => (k[0], k[1])).Distinct().Count());
+    }
+
+    [Fact]
     public void TestMultiDrawInitValuesAreFrozen()
     {
         // Layer 3: an initializer that draws TWICE (a uniform and a raw-bits draw, combined).

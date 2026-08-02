@@ -83,10 +83,34 @@ internal static class RngKeyResolver
         graph.Outputs = outputs;
         graph.OutputUniqueNames = outputs.Select(_ => (string?)null).ToList();
 
-        var run = (computeContext ?? ComputeContext.Default).Run(graph);
+        NamedModelParam[] run;
+        try
+        {
+            run = (computeContext ?? ComputeContext.Default).Run(graph);
+        }
+        catch (Exception ex)
+        {
+            // Resolving a key executes a graph, so this can fail where the old host-side fold
+            // could not (no execution provider, session-build failure). Say which half failed:
+            // the stream inventory itself is fine, only the key values are unavailable.
+            throw new InvalidOperationException(
+                "RngKeyResolver: failed to resolve RNG stream keys by executing their in-graph " +
+                "derivation. The stream inventory (paths, kinds, names) is unaffected — only the " +
+                "resolved key words require execution. See the inner exception.", ex);
+        }
+
+        // The mapping below is positional, so a length mismatch would silently mis-label keys —
+        // the one failure mode that looks plausible and that nothing downstream cross-checks.
+        if (run.Length != pending.Count)
+            throw new InvalidOperationException(
+                $"RngKeyResolver: expected {pending.Count} resolved key(s), got {run.Length}.");
+
         for (int j = 0; j < pending.Count; j++)
         {
             var words = run[j].ToTensorData().As<int64>().AccessMemory().ToArray();
+            if (words.Length != 2)
+                throw new InvalidOperationException(
+                    $"RngKeyResolver: a resolved key must be 2 words, got {words.Length}.");
             results[pending[j]] = [words[0], words[1]];
         }
         return results;

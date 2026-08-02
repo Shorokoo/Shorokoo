@@ -449,12 +449,24 @@ namespace Shorokoo.Graph
         /// Requires a concrete architecture from <see cref="ToConcreteArchitecture"/>.
         /// </summary>
         internal static RngStreamReport GetRngStreamReport(
-            this InternalComputationGraph graph, RngConfig? rngConfig = null)
+            this InternalComputationGraph graph, RngConfig? rngConfig = null,
+            ComputeContext? computeContext = null)
         {
             var streams = new List<RngStreamInfo>();
-            // (stream row index, derivation spec) for every row whose key is resolved by
-            // executing its in-graph split chain after both loops (#136 — no host-side fold).
-            var keySpecs = new List<(int streamIndex, ((uint k0, uint k1) root, IReadOnlyList<int> foldPath) spec)>();
+            // Keys are resolved by EXECUTING each stream's in-graph split chain (#136 — no
+            // host-side fold), which is expensive, so it is deferred to the first KeyWords read
+            // and batched: rows record their spec here and take a resolver closing over the
+            // shared lazy result. By the time anything reads a key both loops have filled the
+            // list, so one run resolves the whole report.
+            var keySpecs = new List<((uint k0, uint k1) root, IReadOnlyList<int> foldPath)>();
+            var resolvedKeys = new Lazy<IReadOnlyList<long[]>>(
+                () => Core.Rng.RngKeyResolver.Resolve(keySpecs, computeContext));
+            Func<IReadOnlyList<long>?>? KeyResolverFor(((uint k0, uint k1) root, IReadOnlyList<int> foldPath) spec)
+            {
+                int index = keySpecs.Count;
+                keySpecs.Add(spec);
+                return () => resolvedKeys.Value[index];
+            }
 
             foreach (var info in graph.GetConcreteModelParamInfos().ParamInfos)
             {
@@ -473,10 +485,10 @@ namespace Shorokoo.Graph
                     Name = name,
                     Shape = info.Shape.Dims,
                     FrameworkOwned = FastInjectRngDrawCounter.IsExecutionCounter(info.ParamIdentifier),
-                    KeyWords = null,   // resolved below by executing the derivation (#136)
+                    KeyResolver = rngConfig is null
+                        ? null
+                        : KeyResolverFor(rngConfig.InitKeySpec(info.ModelId.Vals)),
                 });
-                if (rngConfig is not null)
-                    keySpecs.Add((streams.Count - 1, rngConfig.InitKeySpec(info.ModelId.Vals)));
             }
 
             // Runtime feeds: one row per SITE, straight off the feed nodes — no stored
@@ -515,22 +527,10 @@ namespace Shorokoo.Graph
                     ModelIdPath = idVals,
                     SitePath = null,
                     Kind = kind,
-                    KeyWords = null,   // resolved below by executing the derivation (#136)
+                    KeyResolver = rngConfig is null || !isRealized
+                        ? null
+                        : KeyResolverFor(rngConfig.RunKeySpec(idVals)),
                 });
-                if (rngConfig is not null && isRealized)
-                    keySpecs.Add((streams.Count - 1, rngConfig.RunKeySpec(idVals)));
-            }
-
-            // Resolve every requested key by EXECUTING its in-graph SHRK_RNG_SPLIT derivation
-            // (one batched run): the host never folds a key itself (#136), so the reported key
-            // is produced by the same graph op that keys real draws — there is no second
-            // implementation to drift. Rows are mutated before the report is constructed; the
-            // constructor's sort reorders these same references, so the indices stay valid.
-            if (keySpecs.Count > 0)
-            {
-                var resolved = Core.Rng.RngKeyResolver.Resolve([.. keySpecs.Select(s => s.spec)]);
-                for (int i = 0; i < keySpecs.Count; i++)
-                    streams[keySpecs[i].streamIndex].KeyWords = resolved[i];
             }
 
             return new RngStreamReport(streams);

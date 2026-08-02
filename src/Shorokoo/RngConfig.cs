@@ -82,12 +82,14 @@ public sealed class RngConfig
     public RngAlgorithm Algorithm { get; init; } = RngAlgorithm.Threefry2x32;
 
     /// <summary>
-    /// When <c>true</c>, every stream shares one key derived from <see cref="MasterSeed"/>
-    /// alone (name-independent), so two parameters of the same shape and distribution
+    /// When <c>true</c>, every <b>parameter-initialization</b> stream shares one key derived
+    /// from <see cref="MasterSeed"/> alone (name-independent), so two parameters of the same
+    /// shape and distribution
     /// receive identical values — the "tied" init that reproduces a layer's weights from a
     /// hand-built reference. Off by default (per-parameter, name-derived keys). Useful for
     /// closed-form reference tests and for debugging; not for real training, where distinct
-    /// parameters should differ.
+    /// parameters should differ. Note this applies to the <see cref="RngCollection.Params"/>
+    /// tier only — runtime feeds always fold along their ModelId path regardless.
     /// </summary>
     public bool SharedKey { get; init; }
 
@@ -210,7 +212,8 @@ public sealed class RngConfig
     // NOTE (#136): there is deliberately no host-side key fold here. The key tree is computed
     // exclusively in-graph by the algorithm's SHRK_RNG_SPLIT chain; a host consumer that needs
     // a concrete key resolves it by EXECUTING that derivation (see RngKeyResolver), never by
-    // running Threefry on the host. This is what lets a custom algorithm own its own split.
+    // running Threefry on the host. That removes the obstacle to a custom algorithm owning
+    // its own split (#122) — the key tree is still algorithm-independent today.
 
     /// <summary>
     /// A trainable parameter's init stream key expressed as a <b>derivation spec</b> rather
@@ -224,7 +227,7 @@ public sealed class RngConfig
     /// <see cref="SharedKey"/> mode skips the fold so same-shape params tie (test/debug only).
     /// The root words are pure marshalling (<see cref="Fold"/> is a SHA-256 XOR, not RNG).</para>
     /// </summary>
-    internal (( uint k0, uint k1) root, IReadOnlyList<int> foldPath) InitKeySpec(IEnumerable<int> modelIdVals)
+    internal ((uint k0, uint k1) root, IReadOnlyList<int> foldPath) InitKeySpec(IEnumerable<int> modelIdVals)
     {
         var vals = modelIdVals as IReadOnlyList<int> ?? new List<int>(modelIdVals);
         if (TryGetOverride(RngCollection.Params, vals, out var overridden))
@@ -239,7 +242,7 @@ public sealed class RngConfig
     /// report) resolve the same key by <em>executing</em> that derivation, never by
     /// recomputing it host-side.
     /// </summary>
-    internal (( uint k0, uint k1) root, IReadOnlyList<int> foldPath) RunKeySpec(IEnumerable<int> modelIdVals)
+    internal ((uint k0, uint k1) root, IReadOnlyList<int> foldPath) RunKeySpec(IEnumerable<int> modelIdVals)
     {
         var vals = modelIdVals as IReadOnlyList<int> ?? new List<int>(modelIdVals);
         if (TryGetOverride(RngCollection.Runtime, vals, out var overridden))

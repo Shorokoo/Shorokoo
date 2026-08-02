@@ -45,7 +45,22 @@ public sealed class RngStreamInfo
     /// in-loop feed SITE (a <c>-1</c> iteration slot present): its per-iteration keys derive
     /// at runtime from the iteration index (iteration <c>i</c>'s key is the runtime master
     /// folded along the path with <c>i</c> in the slot), so no single key describes the row.</summary>
-    public IReadOnlyList<long>? KeyWords { get; internal set; }
+    public IReadOnlyList<long>? KeyWords => _key is null ? null : _key.Value;
+
+    // Single source of truth for the key, so there is no two-field publication race and no
+    // ordering hazard between the two initializers below. Lazy<T> is thread-safe by default.
+    private readonly Lazy<IReadOnlyList<long>?>? _key;
+
+    /// <summary>Deferred key resolution — see <see cref="KeyWords"/>. Mutually exclusive with
+    /// <see cref="KeyWords"/>'s initializer; whichever is set last wins, so set exactly one.</summary>
+    internal Func<IReadOnlyList<long>?>? KeyResolver
+    {
+        init => _key = value is null ? null : new Lazy<IReadOnlyList<long>?>(value);
+    }
+
+    /// <summary>Whether this row's key has already been resolved. <see cref="ToString"/> uses
+    /// this to avoid triggering an execution as a side effect of logging or a debugger.</summary>
+    private bool KeyIsResolved => _key is null || _key.IsValueCreated;
 
     /// <summary>
     /// The stream's SITE id (the ModelId with <c>-1</c> iteration placeholders) when
@@ -80,11 +95,12 @@ public sealed class RngStreamInfo
         });
         if (Name is not null) sb.Append("  ").Append(Name);
         if (Shape is not null) sb.Append("  [").Append(string.Join(", ", Shape)).Append(']');
-        if (KeyWords is not null)
-        {
-            sb.Append("  key=0x").Append(((uint)KeyWords[1]).ToString("x8"))
-              .Append(((uint)KeyWords[0]).ToString("x8"));
-        }
+        // Deliberately does NOT force key resolution: resolving executes a graph, and a
+        // ToString() from a log line or a debugger watch window must never do that (nor throw).
+        // A caller that wants keys in the text reads KeyWords first, then formats.
+        if (!KeyIsResolved) sb.Append("  key=<unresolved>");
+        else if (KeyWords is { } k)
+            sb.Append("  key=0x").Append(((uint)k[1]).ToString("x8")).Append(((uint)k[0]).ToString("x8"));
         return sb.ToString();
     }
 }

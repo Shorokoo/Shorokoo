@@ -39,12 +39,24 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastInitKeyedDraws
     {
+        /// <summary>Whether an initializer draws randomness (so it needs a stream key).
+        /// Mirrors the flatten-then-scan the rewrite itself performs.</summary>
+        public static bool DrawsRandomness(Function fn)
+            => fn.GetFastFlattenedGraph().Nodes.Any(n =>
+                   n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
+                   n.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||
+                   n.OpCode == InternalOpCodes.SHRK_RANDOM_BITS)
+               || fn.ReferencedFunctions.Any(f => f.OriginalFastGraph.Nodes.Any(n =>
+                   n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
+                   n.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||
+                   n.OpCode == InternalOpCodes.SHRK_RANDOM_BITS));
+
         /// <summary>
         /// Returns a new initializer <see cref="Function"/> whose random draws are rewritten
-        /// to keyed in-graph draws on the parameter's own stream — derived in-graph by folding
-        /// <paramref name="foldPath"/> into <paramref name="rootKey"/> with a
-        /// <c>SHRK_RNG_SPLIT</c> chain (no host-side fold, #136) — under the named
-        /// <paramref name="algorithm"/>, or <c>null</c> if <paramref name="fn"/> contains no
+        /// to keyed in-graph draws on the parameter's own stream <paramref name="streamKey"/>
+        /// (resolved by the caller by EXECUTING the derivation — see
+        /// <c>FastInitializeModelParams.ResolveInitKeys</c>; the host folds nothing itself, #136)
+        /// under the named <paramref name="algorithm"/>, or <c>null</c> if it contains no
         /// random ops (the caller then keeps the original). Draws nested in called
         /// functions/sub-modules are reached by flattening the body first; a draw inside a
         /// call that survives flattening throws, since it carries no ModelId or key and would
@@ -52,8 +64,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// no error, no entry in the RNG stream report.
         /// </summary>
         public static Function? BuildKeyedDraws(
-            Function fn, (uint k0, uint k1) rootKey, IReadOnlyList<int> foldPath,
-            string streamName, string algorithm)
+            Function fn, (uint k0, uint k1) streamKey, string streamName, string algorithm)
         {
             // Flatten so a draw factored into a called function/sub-module becomes a
             // top-level node the substitution below can intercept. Shipping initializers
@@ -87,11 +98,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     "non-reproducible backend randomness. Move the random draw " +
                     "(RandomUniform/RandomNormal/RandomBits) directly into the initializer's body.");
 
-            var (k0, k1) = rootKey;
+            var (k0, k1) = streamKey;
 
             var newNodes = new List<FastNode>(body.Nodes.Count);
             int randomOrdinal = 0;
-            FastTensorKey? keyChain = null;   // built lazily on the first draw, then shared
 
             foreach (var node in body.Nodes)
             {
@@ -107,12 +117,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var shapeInput = node.Inputs[0]
                     ?? throw new InvalidOperationException("Random init node has null shape input.");
 
-                // Every draw in this initializer shares the parameter's ONE stream key (draws are
-                // separated by drawBase = ordinal, not by key), so the chain is built once, on
-                // first use, and reused — emitting it per draw would multiply the graph by the
-                // ModelId depth for no effect.
-                keyChain ??= BuildKeyChain(k0, k1, foldPath, newNodes);
-                var keyKey = keyChain.Value;
+                // The parameter's own stream key as a [2] constant, and a distinct sub-stream
+                // (drawBase = ordinal) per draw within one initializer. The constant is emitted
+                // per draw so it always sits in the draw's own control-flow scope.
+                var keyKey = AppendConstant(new OnnxTensorData<int64>(
+                    new Shape(2), OnnxUtils.CreateTensorValue(new Shape(2), (long[])[k0, k1])), newNodes);
 
                 var drawBaseKey = AppendConstant(new OnnxTensorData<int64>(
                     new Shape(Array.Empty<long>()),
@@ -195,30 +204,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 defaultName: fn.DefaultName + "__rng__" + suffix,
                 friendlyName: fn.FriendlyName + "__rng__" + suffix,
                 fn.StateOwnership);
-        }
-
-        /// <summary>
-        /// The parameter's stream key as in-graph nodes: the root key words as a <c>[2]</c>
-        /// constant, then the ModelId path folded in by a <c>SHRK_RNG_SPLIT</c> chain (one split
-        /// per path element, constant counters). The fold is NOT computed host-side (#136) —
-        /// this mirrors a runtime feed's chain (<see cref="FastWireRngKeyDerivation"/>), and
-        /// since every input is constant the chain collapses to the same literal key at session
-        /// build. An override / <c>SharedKey</c> spec carries an empty path, so the root IS the
-        /// key and no split is emitted.
-        /// </summary>
-        private static FastTensorKey BuildKeyChain(
-            uint k0, uint k1, IReadOnlyList<int> foldPath, List<FastNode> newNodes)
-        {
-            var key = AppendConstant(new OnnxTensorData<int64>(
-                new Shape(2), OnnxUtils.CreateTensorValue(new Shape(2), (long[])[k0, k1])), newNodes);
-            foreach (var pathVal in foldPath)
-            {
-                var counter = AppendConstant(new OnnxTensorData<int64>(
-                    new Shape(Array.Empty<long>()),
-                    OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (long[])[pathVal])), newNodes);
-                key = AppendSplit(key, counter, newNodes);
-            }
-            return key;
         }
 
         /// <summary>

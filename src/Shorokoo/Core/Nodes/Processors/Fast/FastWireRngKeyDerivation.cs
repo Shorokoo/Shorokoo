@@ -86,7 +86,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     new Dictionary<string, object?>
                     {
                         [ShrkAttrLocalModelId] = (long[])[0L],
-                        [ShrkAttrDtype] = DType.Int64,
+                        [ShrkAttrDtype] = DType.UInt64,
                         [ShrkAttrRank] = 1L,
                         [ShrkAttrIsTrainable] = false,
                     }, attrDefs),
@@ -191,16 +191,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// One feed's chain: root = the identity's master key words; one SHRK_RNG_SPLIT per
+        /// One feed's chain: root = the identity's master key; one SHRK_RNG_SPLIT per
         /// path element (constant counter for a static slot, the runtime iteration index for a
         /// -1 slot); then, for each override record whose path matches the site, a selector
-        /// that roots the key at the record's key words instead.
+        /// that roots the key at the record's key instead.
         /// </summary>
         private static FastTensorKey BuildChain(
             int[] idVals, FastTensorKey? iterIndices, FastTensorKey seedOut,
             IReadOnlyList<(int[] path, int keyOffset)> overrideRecords, List<FastNode> newNodes)
         {
-            var key = AppendGatherPair(seedOut, RngRuntimeIdentity.RunKeyIndex, newNodes);
+            var key = AppendGatherElement(seedOut, RngRuntimeIdentity.RunKeyIndex, newNodes);
 
             int iterSlot = 0;
             var iterElementKeys = new Dictionary<int, FastTensorKey>();   // iter position -> scalar index
@@ -209,13 +209,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 FastTensorKey counter;
                 if (idVals[i] == -1)
                 {
-                    counter = AppendGatherScalar(iterIndices!.Value, iterSlot, newNodes);
-                    iterElementKeys[iterSlot] = counter;
+                    var iterIdx = AppendGatherScalar(iterIndices!.Value, iterSlot, newNodes);
+                    iterElementKeys[iterSlot] = iterIdx;
+                    counter = AppendCastToUInt64(iterIdx, newNodes);
                     iterSlot++;
                 }
                 else
                 {
-                    counter = AppendScalarInt64(idVals[i], newNodes);
+                    counter = AppendScalarUInt64(unchecked((ulong)(long)idVals[i]), newNodes);
                 }
                 key = AppendSplit(key, counter, newNodes);
             }
@@ -223,7 +224,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             foreach (var (path, keyOffset) in overrideRecords)
             {
                 if (!PathMatchesSite(path, idVals)) continue;
-                var overrideKey = AppendGatherPair(seedOut, keyOffset, newNodes);
+                var overrideKey = AppendGatherElement(seedOut, keyOffset, newNodes);
                 if (iterElementKeys.Count == 0)
                 {
                     // Static site: the override replaces the fully folded key unconditionally.
@@ -242,7 +243,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     cond = cond is null ? eq : AppendBinaryOp(OpCodes.AND, cond.Value, eq, newNodes);
                     slot++;
                 }
-                key = AppendWhere(cond!.Value, overrideKey, key, newNodes);
+                key = AppendSelectKey(cond!.Value, overrideKey, key, newNodes);
             }
 
             return key;
@@ -261,15 +262,45 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return true;
         }
 
-        /// <summary>Gathers the [offset, offset+1] element pair of a rank-1 int64 vector — a key's two words.</summary>
-        private static FastTensorKey AppendGatherPair(
+        /// <summary>Gathers element <paramref name="offset"/> of the identity vector as a rank-0
+        /// scalar — one whole 64-bit key (keys are single values, not word pairs).</summary>
+        private static FastTensorKey AppendGatherElement(
             FastTensorKey vector, int offset, List<FastNode> newNodes)
         {
-            var indices = new OnnxTensorData<int64>(
-                new Shape(2), OnnxUtils.CreateTensorValue(new Shape(2), (long[])[offset, offset + 1]));
-            var indicesKey = AppendConstant(indices, newNodes);
+            var indexConst = AppendScalarInt64(offset, newNodes);
             return AppendBinaryOpWithAttrs(OpCodes.GATHER,
-                new Dictionary<string, object?> { [AttrAxis] = 0L }, vector, indicesKey, newNodes);
+                new Dictionary<string, object?> { [AttrAxis] = 0L }, vector, indexConst, newNodes);
+        }
+
+        /// <summary>A rank-0 uint64 constant (a split counter).</summary>
+        private static FastTensorKey AppendScalarUInt64(ulong value, List<FastNode> newNodes)
+        {
+            var data = new OnnxTensorData<uint64>(
+                new Shape(Array.Empty<long>()),
+                OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (ulong[])[value]));
+            return AppendConstant(data, newNodes);
+        }
+
+        /// <summary>Casts a value to uint64 — used to bring an int64 runtime iteration index into
+        /// the key tree's whole-64-bit split-counter type.</summary>
+        private static FastTensorKey AppendCastToUInt64(FastTensorKey value, List<FastNode> newNodes)
+            => AppendCast(value, DType.UInt64, newNodes);
+
+        private static FastTensorKey AppendCast(FastTensorKey value, DType to, List<FastNode> newNodes)
+        {
+            var attrDefs = Definitions.NodeDefinitions[OpCodes.CAST].AttributeDefs;
+            var nodeKey = FastNodeKey.New();
+            var outKey = new FastTensorKey(nodeKey, 0);
+            newNodes.Add(new FastNode
+            {
+                Key = nodeKey,
+                OpCode = OpCodes.CAST,
+                Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                    new Dictionary<string, object?> { [AttrTo] = to }, attrDefs),
+                FullInputs = { [""] = new List<FastTensorKey?> { value } },
+                FullOutputs = { [""] = new List<FastTensorKey?> { outKey } },
+            });
+            return outKey;
         }
 
         /// <summary>Gathers element <paramref name="index"/> of a rank-1 int64 vector as a rank-0 scalar.</summary>
@@ -313,6 +344,20 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             });
             return outKey;
         }
+
+        /// <summary>
+        /// Selects between two uint64 stream keys on a runtime condition. ONNX Runtime ships no
+        /// <c>Where</c> kernel for uint64, so the select runs on the keys' int64 bit patterns
+        /// and casts back: integer <c>Cast</c> is a C-style conversion (mod 2^64), so the round
+        /// trip is bit-preserving for every key value, not just small ones.
+        /// </summary>
+        private static FastTensorKey AppendSelectKey(
+            FastTensorKey cond, FastTensorKey ifTrue, FastTensorKey ifFalse, List<FastNode> newNodes)
+            => AppendCastToUInt64(
+                AppendWhere(cond,
+                    AppendCast(ifTrue, DType.Int64, newNodes),
+                    AppendCast(ifFalse, DType.Int64, newNodes), newNodes),
+                newNodes);
 
         private static FastTensorKey AppendWhere(
             FastTensorKey cond, FastTensorKey ifTrue, FastTensorKey ifFalse, List<FastNode> newNodes)

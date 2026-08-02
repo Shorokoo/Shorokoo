@@ -111,14 +111,14 @@ internal static class RngAlgorithms
             bool r13 = rounds == Threefry2x32.Rounds13;
             Delegate body = kind switch
             {
-                KindSplit => (Func<Vector<int64>, Scalar<int64>, Vector<int64>>)SplitImpl,
-                KindSplitBatch => (Func<Tensor<int64>, Vector<int64>, Tensor<int64>>)BatchSplitImpl,
+                KindSplit => (Func<Scalar<uint64>, Scalar<uint64>, Scalar<uint64>>)SplitImpl,
+                KindSplitBatch => (Func<Vector<uint64>, Vector<uint64>, Vector<uint64>>)BatchSplitImpl,
                 KindUniform => r13
-                    ? (Func<Vector<int64>, Scalar<int64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)Uniform13Impl
-                    : (Func<Vector<int64>, Scalar<int64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)UniformImpl,
+                    ? (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)Uniform13Impl
+                    : (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)UniformImpl,
                 KindNormal => r13
-                    ? (Func<Vector<int64>, Scalar<int64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)Normal13Impl
-                    : (Func<Vector<int64>, Scalar<int64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)NormalImpl,
+                    ? (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)Normal13Impl
+                    : (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)NormalImpl,
                 KindBits => BitsBody(r13, bitsDtype!),
                 _ => throw new NotSupportedException($"Unknown RNG function kind '{kind}'."),
             };
@@ -142,48 +142,45 @@ internal static class RngAlgorithms
     /// as <see cref="GraphBuilder.BuildInternalComputationGraphFromDelegate"/> requires).</summary>
     private static Delegate BitsBody(bool r13, DType dtype)
     {
-        if (dtype == DType.UInt8)  return r13 ? (Func<Vector<int64>, Scalar<int64>, Vector<int64>, Tensor<uint8>>)BitsU8Impl13   : BitsU8Impl;
-        if (dtype == DType.UInt16) return r13 ? (Func<Vector<int64>, Scalar<int64>, Vector<int64>, Tensor<uint16>>)BitsU16Impl13 : BitsU16Impl;
-        if (dtype == DType.UInt32) return r13 ? (Func<Vector<int64>, Scalar<int64>, Vector<int64>, Tensor<uint32>>)BitsU32Impl13 : BitsU32Impl;
-        return r13 ? (Func<Vector<int64>, Scalar<int64>, Vector<int64>, Tensor<uint64>>)BitsU64Impl13 : BitsU64Impl;
+        if (dtype == DType.UInt8)  return r13 ? (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Tensor<uint8>>)BitsU8Impl13   : BitsU8Impl;
+        if (dtype == DType.UInt16) return r13 ? (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Tensor<uint16>>)BitsU16Impl13 : BitsU16Impl;
+        if (dtype == DType.UInt32) return r13 ? (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Tensor<uint32>>)BitsU32Impl13 : BitsU32Impl;
+        return r13 ? (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Tensor<uint64>>)BitsU64Impl13 : BitsU64Impl;
     }
 
     /// <summary>One pass folds a whole key-tree level; see <see cref="KindSplitBatch"/>.</summary>
-    private static Tensor<int64> BatchSplitImpl(Tensor<int64> keys, Vector<int64> indices)
-        => RuntimeRng.BatchSplitKeys(keys, indices);
+    private static Vector<uint64> BatchSplitImpl(Vector<uint64> keys, Vector<uint64> indices)
+        => RuntimeRng.BatchSplitKeys(keys, indices).Vec();
 
-    private static Vector<int64> SplitImpl(Vector<int64> key, Scalar<int64> index)
-    {
-        var (k0, k1) = RuntimeRng.SplitKey(key[0], key[1], index);
-        return [k0, k1];
-    }
+    private static Scalar<uint64> SplitImpl(Scalar<uint64> key, Scalar<uint64> index)
+        => RuntimeRng.SplitKey(key, index);
 
     private static Tensor<float32> UniformImpl(
-        Vector<int64> key, Scalar<int64> drawBase, Vector<int64> shape,
+        Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape,
         Scalar<float32> low, Scalar<float32> high)
-        => RuntimeRng.Uniform(shape, key[0], key[1], drawBase, low, high, Threefry2x32.Rounds);
+        => RuntimeRng.Uniform(shape, key, drawBase, low, high, Threefry2x32.Rounds);
 
     private static Tensor<float32> NormalImpl(
-        Vector<int64> key, Scalar<int64> drawBase, Vector<int64> shape,
+        Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape,
         Scalar<float32> mean, Scalar<float32> scale)
-        => RuntimeRng.Normal(shape, key[0], key[1], drawBase, mean, scale, Threefry2x32.Rounds);
+        => RuntimeRng.Normal(shape, key, drawBase, mean, scale, Threefry2x32.Rounds);
 
     private static Tensor<float32> Uniform13Impl(
-        Vector<int64> key, Scalar<int64> drawBase, Vector<int64> shape,
+        Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape,
         Scalar<float32> low, Scalar<float32> high)
-        => RuntimeRng.Uniform(shape, key[0], key[1], drawBase, low, high, Threefry2x32.Rounds13);
+        => RuntimeRng.Uniform(shape, key, drawBase, low, high, Threefry2x32.Rounds13);
 
     private static Tensor<float32> Normal13Impl(
-        Vector<int64> key, Scalar<int64> drawBase, Vector<int64> shape,
+        Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape,
         Scalar<float32> mean, Scalar<float32> scale)
-        => RuntimeRng.Normal(shape, key[0], key[1], drawBase, mean, scale, Threefry2x32.Rounds13);
+        => RuntimeRng.Normal(shape, key, drawBase, mean, scale, Threefry2x32.Rounds13);
 
-    private static Tensor<uint8>  BitsU8Impl  (Vector<int64> key, Scalar<int64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU8 (shape, key[0], key[1], drawBase, Threefry2x32.Rounds);
-    private static Tensor<uint16> BitsU16Impl (Vector<int64> key, Scalar<int64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU16(shape, key[0], key[1], drawBase, Threefry2x32.Rounds);
-    private static Tensor<uint32> BitsU32Impl (Vector<int64> key, Scalar<int64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU32(shape, key[0], key[1], drawBase, Threefry2x32.Rounds);
-    private static Tensor<uint64> BitsU64Impl (Vector<int64> key, Scalar<int64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU64(shape, key[0], key[1], drawBase, Threefry2x32.Rounds);
-    private static Tensor<uint8>  BitsU8Impl13 (Vector<int64> key, Scalar<int64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU8 (shape, key[0], key[1], drawBase, Threefry2x32.Rounds13);
-    private static Tensor<uint16> BitsU16Impl13(Vector<int64> key, Scalar<int64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU16(shape, key[0], key[1], drawBase, Threefry2x32.Rounds13);
-    private static Tensor<uint32> BitsU32Impl13(Vector<int64> key, Scalar<int64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU32(shape, key[0], key[1], drawBase, Threefry2x32.Rounds13);
-    private static Tensor<uint64> BitsU64Impl13(Vector<int64> key, Scalar<int64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU64(shape, key[0], key[1], drawBase, Threefry2x32.Rounds13);
+    private static Tensor<uint8>  BitsU8Impl  (Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU8(shape, key, drawBase, Threefry2x32.Rounds);
+    private static Tensor<uint16> BitsU16Impl (Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU16(shape, key, drawBase, Threefry2x32.Rounds);
+    private static Tensor<uint32> BitsU32Impl (Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU32(shape, key, drawBase, Threefry2x32.Rounds);
+    private static Tensor<uint64> BitsU64Impl (Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU64(shape, key, drawBase, Threefry2x32.Rounds);
+    private static Tensor<uint8>  BitsU8Impl13 (Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU8(shape, key, drawBase, Threefry2x32.Rounds13);
+    private static Tensor<uint16> BitsU16Impl13(Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU16(shape, key, drawBase, Threefry2x32.Rounds13);
+    private static Tensor<uint32> BitsU32Impl13(Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU32(shape, key, drawBase, Threefry2x32.Rounds13);
+    private static Tensor<uint64> BitsU64Impl13(Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU64(shape, key, drawBase, Threefry2x32.Rounds13);
 }

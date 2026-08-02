@@ -272,12 +272,12 @@ namespace Shorokoo.Graph
         /// initializer). Null when the graph has no runtime random surface or no identity is
         /// bound yet. See <c>Core.Rng.RngRuntimeIdentity</c> for the encoding.
         /// </summary>
-        internal static long[]? TryGetRngSeed(this InternalComputationGraph graph)
+        internal static ulong[]? TryGetRngSeed(this InternalComputationGraph graph)
         {
             var node = FastWireRngKeyDerivation.FindRngSeedNode(graph);
             if (node is null || node.OpCode != InternalOpCodes.MODEL_PARAM_DATA) return null;
             return node.Attributes.GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData)
-                ?.As<int64>().AccessMemory().ToArray();
+                ?.As<uint64>().AccessMemory().ToArray();
         }
 
 
@@ -457,11 +457,11 @@ namespace Shorokoo.Graph
             // loops, rather than a graph execution per stream. Asking for a report WITH a config
             // is asking for resolved keys, and that is a deliberately expensive call; a report
             // without one resolves nothing.
-            var rows = new List<(int keyIndex, Func<IReadOnlyList<long>?, RngStreamInfo> build)>();
-            var keySpecs = new List<((uint k0, uint k1) root, IReadOnlyList<int> foldPath)>();
+            var rows = new List<(int keyIndex, Func<ulong?, RngStreamInfo> build)>();
+            var keySpecs = new List<(ulong root, IReadOnlyList<int> foldPath)>();
             void AddRow(
-                ((uint k0, uint k1) root, IReadOnlyList<int> foldPath)? spec,
-                Func<IReadOnlyList<long>?, RngStreamInfo> build)
+                (ulong root, IReadOnlyList<int> foldPath)? spec,
+                Func<ulong?, RngStreamInfo> build)
             {
                 int index = -1;
                 if (spec is { } s) { index = keySpecs.Count; keySpecs.Add(s); }
@@ -486,7 +486,7 @@ namespace Shorokoo.Graph
                     Name = name,
                     Shape = paramInfo.Shape.Dims,
                     FrameworkOwned = FastInjectRngDrawCounter.IsExecutionCounter(paramInfo.ParamIdentifier),
-                    KeyWords = key,
+                    Key = key,
                 });
             }
 
@@ -529,7 +529,7 @@ namespace Shorokoo.Graph
                         ModelIdPath = feedIdVals,
                         SitePath = null,
                         Kind = feedKind,
-                        KeyWords = key,
+                        Key = key,
                     });
             }
 

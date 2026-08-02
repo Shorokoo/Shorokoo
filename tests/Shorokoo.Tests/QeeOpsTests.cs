@@ -2,6 +2,7 @@ using System.Reflection;
 using Shorokoo.Runtime;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Core.Inference;
+using Shorokoo.Core.Inference.Helpers;
 
 namespace Shorokoo.Tests;
 
@@ -443,5 +444,76 @@ public class QeeOpsCoverageTests
             TensorData([3L], "1", "2", "3")]));
         Assert.True(QeeOnly<QeeStringNormalizerSplitCheck>([
             TensorData([2L], "Hello World", "the quick brown fox")]));
+    }
+}
+
+/// <summary>
+/// A <c>uint32</c> constant that has to survive host-side constant folding as a
+/// <c>uint32</c>: the constant sub-chain (a <c>uint64</c> literal narrowed to
+/// <c>uint32</c>) folds, and the folded value then feeds an <c>Add</c> whose other
+/// operand is genuinely runtime-valued, so the Add's type constraint sees the folded
+/// constant's dtype directly.
+/// </summary>
+[Module]
+public partial class QeeFoldedUnsignedConstant
+{
+    public static Tensor<uint32> Inline(Tensor<float32> x)
+    {
+        var runtime = OnnxOp.Range(Scalar(0L), x.ShapeTensor().Reduce(ReduceKind.Prod), Scalar(1L))
+            .int64().Cast<uint32>();
+        return runtime + Scalar(7UL).Cast<uint32>();
+    }
+}
+
+/// <summary>
+/// The QuickExecutionEngine stores every integer width in one <c>long</c> buffer, so an
+/// integer tensor's actual width lives ONLY in <see cref="RuntimeTensor.DType"/>. These
+/// tests pin that materializing a runtime tensor back to <see cref="TensorData"/> keeps
+/// that width instead of retyping every integer tensor as <c>int64</c> — which silently
+/// corrupts host constant folding: a folded <c>uint32</c> constant comes back typed
+/// <c>int64</c> and then violates its consumer's type constraint.
+/// </summary>
+[Trait("Domain", "Inference")]
+[Trait("Purpose", "Coverage")]
+public class QeeIntegerDTypeRoundTripTests
+{
+    [Fact]
+    public void TestRuntimeTensorRoundTripKeepsIntegerWidth()
+    {
+        (DType dtype, object[] vals)[] cases = [
+            (DType.Int8,   [(sbyte)-3, (sbyte)7]),
+            (DType.Int16,  [(short)-300, (short)700]),
+            (DType.Int32,  [-70000, 70000]),
+            (DType.Int64,  [-5_000_000_000L, 5_000_000_000L]),
+            (DType.UInt8,  [(byte)3, (byte)250]),
+            (DType.UInt16, [(ushort)7, (ushort)65000]),
+            (DType.UInt32, [7u, 4_000_000_000u]),
+            (DType.UInt64, [7UL, 18_000_000_000_000_000_000UL]),
+        ];
+        foreach (var (dtype, vals) in cases)
+        {
+            var td = TensorData(dtype, [2L], vals);
+            var rt = TensorDataConverter.ToRuntimeTensor(td, maxElements: 16);
+            var back = TensorDataConverter.ToTensorData(rt);
+            Assert.NotNull(back);
+            Assert.Equal(dtype, back!.DType);
+            Assert.Equal(td.AccessRawMemory().ToArray(), back.AccessRawMemory().ToArray());
+        }
+    }
+
+    [Fact]
+    public void TestFoldedUnsignedConstantKeepsItsDType()
+    {
+        // End-to-end consequence: building this model host-folds the uint32 constant and
+        // then re-derives the Add's output type from its inputs. If folding retyped the
+        // constant to int64 the Add's type constraint is violated at graph construction.
+        var g = ((ComputationGraph)typeof(QeeFoldedUnsignedConstant)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var input = TensorData([2L, 2L], 0f, 0f, 0f, 0f);
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        var outputs = ComputeContext.Default.Execute(concrete, input);
+        Assert.Equal(DType.UInt32, outputs[0].ToTensorData().DType);
+        Assert.Equal((uint[])[7u, 8u, 9u, 10u],
+            outputs[0].ToTensorData().As<uint32>().AccessMemory().ToArray());
     }
 }

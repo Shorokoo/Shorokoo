@@ -63,7 +63,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (seedNode.OpCode == InternalOpCodes.MODEL_PARAM)
                     WriteDefaultIdentity(seedNode);
                 var identityVec = seedNode.Attributes.GetTensorVal(ShrkAttrTensorData)
-                    ?.As<int64>().AccessMemory().ToArray();
+                    ?.As<uint64>().AccessMemory().ToArray();
                 if (identityVec is not null)
                 {
                     var identity = RngRuntimeIdentity.Decode(identityVec);
@@ -160,7 +160,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         private static void WriteDefaultIdentity(FastNode seedNode)
         {
             var identity = RngRuntimeIdentity.Build(RngConfig.Default);
-            var data = new OnnxTensorData<int64>(
+            var data = new OnnxTensorData<uint64>(
                 new Shape(identity.Length),
                 OnnxUtils.CreateTensorValue(new Shape(identity.Length), identity));
             var attrDefs = Definitions.NodeDefinitions[InternalOpCodes.MODEL_PARAM_DATA].AttributeDefs;
@@ -226,7 +226,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 : null;
             var (kind, dtype, rank) = node.OpCode switch
             {
-                InternalOpCodes.SHRK_RNG_SPLIT => (RngAlgorithms.KindSplit, DType.Int64, 1L),
+                InternalOpCodes.SHRK_RNG_SPLIT => (RngAlgorithms.KindSplit, DType.UInt64, 0L),
                 InternalOpCodes.SHRK_RNG_UNIFORM => (RngAlgorithms.KindUniform, DType.Float32, -1L),
                 InternalOpCodes.SHRK_RNG_NORMAL => (RngAlgorithms.KindNormal, DType.Float32, -1L),
                 InternalOpCodes.SHRK_RNG_BITS => (RngAlgorithms.KindBits, bitsDtype!, -1L),
@@ -254,8 +254,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// Rewrites an id-bearing SHRK_RANDOM_* feed in place to the SHRK_RNG_UNIFORM/NORMAL
         /// form (inputs <c>[key, drawBase, shape, a, b]</c>). The key is the feed's derivation
         /// chain (already wired as its key input); drawBase is the site's own counter input
-        /// when wired (e.g. the injected per-execution state counter) else a constant 0, and
+        /// when wired (e.g. the injected per-execution state counter) else 0, and
         /// the distribution bounds come off the node's attributes as f32 scalar constants.
+        ///
+        /// <para>The counter is the framework's own int64 execution ordinal, while a draw
+        /// position on the RNG algorithm interface is a whole uint64 — so this boundary is
+        /// where the two meet, and the cast happens here rather than leaking uint64 into the
+        /// framework's state plumbing.</para>
         /// </summary>
         private static void RewriteFeedToKeyedDraw(
             FastNode node, bool isUniform, FastTensorKey keySource,
@@ -272,8 +277,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 : node.Attributes.GetFloatVal(AttrScale) ?? 1.0f;
 
             var drawBaseKey = node.Inputs.Count > 1 && node.Inputs[1] is { } db
-                ? db
-                : AppendScalarInt64(0L, newNodes);
+                ? AppendCastToUInt64(db, newNodes)
+                : AppendScalarUInt64(0UL, newNodes);
             var aKey = AppendScalarFloat32(a, newNodes);
             var bKey = AppendScalarFloat32(b, newNodes);
 
@@ -303,8 +308,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 ?? throw new InvalidOperationException(
                     "FastLowerRandomOps: a SHRK_RANDOM_BITS feed is missing its shrk_dtype (output width) attribute.");
             var drawBaseKey = node.Inputs.Count > 1 && node.Inputs[1] is { } db
-                ? db
-                : AppendScalarInt64(0L, newNodes);
+                ? AppendCastToUInt64(db, newNodes)
+                : AppendScalarUInt64(0UL, newNodes);
 
             var attrDefs = Definitions.NodeDefinitions[InternalOpCodes.SHRK_RNG_BITS].AttributeDefs;
             node.OpCode = InternalOpCodes.SHRK_RNG_BITS;
@@ -320,12 +325,31 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             };
         }
 
-        private static FastTensorKey AppendScalarInt64(long value, List<FastNode> newNodes)
+        private static FastTensorKey AppendScalarUInt64(ulong value, List<FastNode> newNodes)
         {
-            var data = new OnnxTensorData<int64>(
+            var data = new OnnxTensorData<uint64>(
                 new Shape(Array.Empty<long>()),
-                OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (long[])[value]));
+                OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (ulong[])[value]));
             return AppendConstant(data, newNodes);
+        }
+
+        /// <summary>Casts the framework's int64 execution counter to the RNG interface's
+        /// uint64 draw position.</summary>
+        private static FastTensorKey AppendCastToUInt64(FastTensorKey value, List<FastNode> newNodes)
+        {
+            var attrDefs = Definitions.NodeDefinitions[OpCodes.CAST].AttributeDefs;
+            var nodeKey = FastNodeKey.New();
+            var outKey = new FastTensorKey(nodeKey, 0);
+            newNodes.Add(new FastNode
+            {
+                Key = nodeKey,
+                OpCode = OpCodes.CAST,
+                Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                    new Dictionary<string, object?> { [AttrTo] = DType.UInt64 }, attrDefs),
+                FullInputs = { [""] = new List<FastTensorKey?> { value } },
+                FullOutputs = { [""] = new List<FastTensorKey?> { outKey } },
+            });
+            return outKey;
         }
 
         private static FastTensorKey AppendScalarFloat32(float value, List<FastNode> newNodes)

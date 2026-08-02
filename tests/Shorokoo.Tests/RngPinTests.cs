@@ -177,8 +177,8 @@ public class RngPinTests
         Assert.Equal([2, 1], inits[1].ModelIdPath);
         Assert.All(inits, s => Assert.Contains("Linear", s.Name));
         Assert.All(inits, s => Assert.NotNull(s.Shape));
-        Assert.NotNull(inits[0].KeyWords);
-        Assert.NotEqual(inits[0].KeyWords, inits[1].KeyWords);
+        Assert.NotNull(inits[0].Key);
+        Assert.NotEqual(inits[0].Key, inits[1].Key);
 
         // The skeleton groups by scope (here just the module body) and lists each consumer's
         // local slot with the variable left as ?. The two Linears are top-level slots 1 and 2.
@@ -190,15 +190,15 @@ public class RngPinTests
         Assert.Contains("*/ ?)", skeleton);
 
         // Without a config, streams are listed but unkeyed.
-        Assert.All(arch.GetRngStreamReport().Streams, s => Assert.Null(s.KeyWords));
+        Assert.All(arch.GetRngStreamReport().Streams, s => Assert.Null(s.Key));
 
         // The reported keys are resolved by EXECUTING each stream's in-graph derivation (#136),
         // so pin them against the independent host oracle: a wrong root, a missed fold step, or
         // a mis-ordered resolver result would all still produce "non-null and distinct" above.
         foreach (var s in inits)
         {
-            var (k0, k1) = RngTestOracle.InitKey(cfg, s.ModelIdPath);
-            Assert.Equal([(long)k0, (long)k1], s.KeyWords);
+            var key = RngTestOracle.InitKey(cfg, s.ModelIdPath);
+            Assert.Equal(key, s.Key);
         }
     }
 
@@ -224,12 +224,12 @@ public class RngPinTests
         Assert.Equal(2, inits.Count);
 
         // The overridden stream's key IS the override seed's words — no fold applied.
-        var (o0, o1) = RngConfig.SplitWords(4242UL);
-        Assert.Equal([(long)o0, (long)o1], inits[0].KeyWords);
+        var overrideKey = 4242UL;
+        Assert.Equal(overrideKey, inits[0].Key);
         // ...while its sibling is still the master folded along its path.
-        var (s0, s1) = RngTestOracle.InitKey(cfg, inits[1].ModelIdPath);
-        Assert.Equal([(long)s0, (long)s1], inits[1].KeyWords);
-        Assert.NotEqual(inits[0].KeyWords, inits[1].KeyWords);
+        var siblingKey = RngTestOracle.InitKey(cfg, inits[1].ModelIdPath);
+        Assert.Equal(siblingKey, inits[1].Key);
+        Assert.NotEqual(inits[0].Key, inits[1].Key);
     }
 
     [Fact]
@@ -246,9 +246,9 @@ public class RngPinTests
         var feed = Assert.Single(arch.GetRngStreamReport(cfg).Streams
             .Where(s => s.Kind == RngStreamKind.UniformFeed));
 
-        Assert.NotNull(feed.KeyWords);
-        var (k0, k1) = RngTestOracle.RunKey(cfg, feed.ModelIdPath);
-        Assert.Equal([(long)k0, (long)k1], feed.KeyWords);
+        Assert.NotNull(feed.Key);
+        var key = RngTestOracle.RunKey(cfg, feed.ModelIdPath);
+        Assert.Equal(key, feed.Key);
     }
 
     [Fact]
@@ -276,7 +276,7 @@ public class RngPinTests
         var feed = Assert.Single(report.Streams, s => s.Kind == RngStreamKind.UniformFeed);
         Assert.Equal([1, -1, 1], feed.ModelIdPath);
         Assert.Null(feed.SitePath);      // the site row is its own site
-        Assert.Null(feed.KeyWords);      // per-iteration keys are runtime-derived, not listable
+        Assert.Null(feed.Key);      // per-iteration keys are runtime-derived, not listable
 
         // The skeleton groups the feed under its loop SCOPE [1, -1] with the feed's
         // local slot (1) — pins address sites, not iterations — and lists it once.

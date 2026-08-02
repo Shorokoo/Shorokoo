@@ -49,13 +49,12 @@ public class RngAlgorithmSwitchTests
 
     /// <summary>The feed's resolved stream key, derived from the graph's bound RngSeed
     /// identity — exactly what the feed's in-graph split chain derives at execution.</summary>
-    private static long[] ResolvedKey(InternalComputationGraph concrete)
+    private static ulong ResolvedKey(InternalComputationGraph concrete)
     {
         var feed = concrete.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
         var path = feed.Attributes.GetIntsVal(ShrkAttrLocalModelId)!;
         var decoded = RngRuntimeIdentity.Decode(concrete.TryGetRngSeed()!);
-        var (k0, k1) = RngTestOracle.RunKey(decoded, path);
-        return [k0, k1];
+        return RngTestOracle.RunKey(decoded, path);
     }
 
     private static string BoundAlgorithm(InternalComputationGraph concrete)
@@ -84,8 +83,8 @@ public class RngAlgorithmSwitchTests
         var key13 = ResolvedKey(concrete13);
         for (long i = 0; i < 16; i++)
         {
-            var (h20, _) = Threefry2x32.Bijection((uint)i, 0u, (uint)key20[0], (uint)key20[1], Threefry2x32.Rounds);
-            var (h13, _) = Threefry2x32.Bijection((uint)i, 0u, (uint)key13[0], (uint)key13[1], Threefry2x32.Rounds13);
+            var (h20, _) = Threefry2x32.Bijection((uint)i, 0u, (uint)key20, (uint)(key20 >> 32), Threefry2x32.Rounds);
+            var (h13, _) = Threefry2x32.Bijection((uint)i, 0u, (uint)key13, (uint)(key13 >> 32), Threefry2x32.Rounds13);
             Assert.Equal((h20 & 0x00FFFFFFu) * (1.0f / 16777216.0f), draws20[i]);
             Assert.Equal((h13 & 0x00FFFFFFu) * (1.0f / 16777216.0f), draws13[i]);
         }
@@ -138,7 +137,7 @@ public class RngAlgorithmSwitchTests
 
         // A model file written by a newer framework version: the RngSeed identity records an
         // algorithm id this version does not know.
-        const long newerId = 9999;
+        const ulong newerId = 9999;
         var identity = arch.TryGetRngSeed()!;
         identity[Shorokoo.Core.Rng.RngRuntimeIdentity.AlgorithmIdIndex] = newerId;
         var seedNode = arch.Nodes.Single(n =>
@@ -146,7 +145,7 @@ public class RngAlgorithmSwitchTests
                 .FastWireRngKeyDerivation.RngSeedIdentifierTemplate);
         seedNode.Attributes = seedNode.Attributes.SetAttributes(
             (ShrkAttrTensorData, (object?)Shorokoo.TensorData.Create(
-                new Shape(identity.Length), DType.Int64,
+                new Shape(identity.Length), DType.UInt64,
                 Shorokoo.Core.Utils.OnnxUtils.CreateTensorValue(new Shape(identity.Length), identity))));
 
         // No-config init trusts the bound identity's algorithm: an unreadable identity must

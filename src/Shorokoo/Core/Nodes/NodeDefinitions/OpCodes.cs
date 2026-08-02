@@ -101,16 +101,16 @@ internal static class InternalOpCodes
 
     /// <summary>
     /// Splits an RNG stream key by index: child = Bijection(key, counter: index) under the
-    /// named algorithm (shrk_rng_algorithm attribute). Key is an int64[2] vector of 32-bit
-    /// words. Index-based random access: computing child i never computes any sibling.
+    /// named algorithm (shrk_rng_algorithm attribute). Key and index are whole uint64
+    /// scalars. Index-based random access: computing child i never computes any sibling.
     /// Lowered at ONNX export to a call of the algorithm's non-inlined "split" function.
     /// </summary>
     public const string SHRK_RNG_SPLIT = "shrk_RngSplit";
 
     /// <summary>
     /// Keyed deterministic uniform draw U(low, high) of dynamic shape under the named
-    /// algorithm (shrk_rng_algorithm attribute). Inputs: key int64[2], drawBase int64
-    /// scalar (counter high word), shape int64[r], low f32, high f32. Identical values on
+    /// algorithm (shrk_rng_algorithm attribute). Inputs: key uint64 scalar, drawBase uint64
+    /// scalar (the draw's position), shape int64[r], low f32, high f32. Identical values on
     /// every execution provider and in QEE (ordinary integer/float math, no ONNX random op).
     /// Lowered at ONNX export to a call of the algorithm's non-inlined "uniform" function.
     /// </summary>
@@ -118,7 +118,7 @@ internal static class InternalOpCodes
 
     /// <summary>
     /// Keyed deterministic normal draw N(mean, scale) of dynamic shape under the named
-    /// algorithm (shrk_rng_algorithm attribute). Inputs: key int64[2], drawBase int64
+    /// algorithm (shrk_rng_algorithm attribute). Inputs: key uint64 scalar, drawBase uint64
     /// scalar, shape int64[r], mean f32, scale f32. See <see cref="SHRK_RNG_UNIFORM"/>.
     /// Lowered at ONNX export to a call of the algorithm's non-inlined "normal" function.
     /// </summary>
@@ -127,7 +127,7 @@ internal static class InternalOpCodes
     /// <summary>
     /// Keyed deterministic raw-bits draw of dynamic shape under the named algorithm
     /// (shrk_rng_algorithm attribute), output an unsigned integer of the width given by the
-    /// shrk_dtype attribute. Inputs: key int64[2], drawBase int64 scalar, shape int64[r].
+    /// shrk_dtype attribute. Inputs: key uint64 scalar, drawBase uint64 scalar, shape int64[r].
     /// Identical values on every execution provider and in QEE (ordinary integer/bit math, no
     /// ONNX random op). Lowered at ONNX export to a call of the algorithm's non-inlined,
     /// width-specialized "bits" function.

@@ -40,12 +40,12 @@ public sealed class RngStreamInfo
     /// <summary>The parameter's shape when known (feeds draw at runtime-computed shapes).</summary>
     public IReadOnlyList<long>? Shape { get; init; }
 
-    /// <summary>The stream key ([k0, k1] 32-bit words) resolved under the supplied config;
+    /// <summary>The stream key resolved under the supplied config;
     /// <c>null</c> when no config was supplied — or when <see cref="ModelIdPath"/> is an
     /// in-loop feed SITE (a <c>-1</c> iteration slot present): its per-iteration keys derive
     /// at runtime from the iteration index (iteration <c>i</c>'s key is the runtime master
     /// folded along the path with <c>i</c> in the slot), so no single key describes the row.</summary>
-    public IReadOnlyList<long>? KeyWords { get; init; }
+    public ulong? Key { get; init; }
 
     /// <summary>
     /// The stream's SITE id (the ModelId with <c>-1</c> iteration placeholders) when
@@ -80,11 +80,7 @@ public sealed class RngStreamInfo
         });
         if (Name is not null) sb.Append("  ").Append(Name);
         if (Shape is not null) sb.Append("  [").Append(string.Join(", ", Shape)).Append(']');
-        if (KeyWords is not null)
-        {
-            sb.Append("  key=0x").Append(((uint)KeyWords[1]).ToString("x8"))
-              .Append(((uint)KeyWords[0]).ToString("x8"));
-        }
+        if (Key is { } k) sb.Append("  key=0x").Append(k.ToString("x16"));
         return sb.ToString();
     }
 }

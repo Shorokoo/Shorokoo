@@ -113,9 +113,9 @@ public class RngLoopTests
     private static readonly float[] XVals = [10f, 20f, 30f, 40f, 50f, 60f, 70f, 80f];
 
     /// <summary>Host replica of one keyed uniform draw: element e -> counter (e, drawBase=0).</summary>
-    private static float HostUniform(long e, (uint k0, uint k1) key)
+    private static float HostUniform(long e, ulong key)
     {
-        var (x0, _) = Threefry2x32.Bijection((uint)e, 0u, key.k0, key.k1);
+        var (x0, _) = Threefry2x32.Bijection((uint)e, 0u, (uint)key, (uint)(key >> 32));
         return (x0 & 0x00FFFFFFu) * (1.0f / 16777216.0f);
     }
 
@@ -127,7 +127,7 @@ public class RngLoopTests
         {
             // Feed ModelId is [1, -1, 1]: the runtime master folds slot 1, then the
             // iteration index, then the feed's slot under the loop (1).
-            var key = RngTestOracle.FoldKey(RngTestOracle.FoldKey(RngTestOracle.RunKey(cfg, [1]), i), 1);
+            var key = RngTestOracle.FoldKey(RngTestOracle.FoldKey(RngTestOracle.RunKey(cfg, [1]), (ulong)i), 1);
             for (long e = 0; e < N; e++)
                 expected[e] += HostUniform(e, key);
         }
@@ -193,7 +193,7 @@ public class RngLoopTests
     public void TestPerIterationOverrideReSeedsExactlyOneStream()
     {
         // Override ITERATION 1 of the loop feed site [1, -1, 1] by its realized stream path.
-        // Override routing is structural: the site's chain selects the record's key words
+        // Override routing is structural: the site's chain selects the record's key
         // (at their fixed offset in the identity vector) when the runtime iteration index
         // matches the record's path, and the folded chain otherwise.
         var cfg = new RngConfig { MasterSeed = 11 };
@@ -207,7 +207,7 @@ public class RngLoopTests
         {
             var key = i == 1
                 ? RngTestOracle.RunKey(cfg, [1, 1, 1])
-                : RngTestOracle.FoldKey(RngTestOracle.FoldKey(RngTestOracle.RunKey(cfg, [1]), i), 1);
+                : RngTestOracle.FoldKey(RngTestOracle.FoldKey(RngTestOracle.RunKey(cfg, [1]), (ulong)i), 1);
             for (long e = 0; e < N; e++)
                 expected[e] += HostUniform(e, key);
         }
@@ -237,7 +237,7 @@ public class RngLoopTests
         {
             var key = i == 1
                 ? RngTestOracle.RunKey(cfgOv, [1, 1, 1])
-                : RngTestOracle.FoldKey(RngTestOracle.FoldKey(RngTestOracle.RunKey(cfgOv, [1]), i), 1);
+                : RngTestOracle.FoldKey(RngTestOracle.FoldKey(RngTestOracle.RunKey(cfgOv, [1]), (ulong)i), 1);
             for (long e = 0; e < N; e++)
                 expected[e] += HostUniform(e, key);
         }

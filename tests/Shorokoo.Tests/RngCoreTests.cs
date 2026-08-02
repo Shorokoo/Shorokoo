@@ -205,7 +205,7 @@ public class RngCoreTests
 /// <summary>
 /// The encoded runtime RNG identity — the value of the ordinary <c>RngSeed</c> parameter at
 /// reserved ModelId [0] (see <see cref="RngRuntimeIdentity"/>): an algorithm-id header, the
-/// runtime master key words, and canonically sorted per-stream override records at fixed
+/// runtime master key, and canonically sorted per-stream override records at fixed
 /// offsets. <see cref="RngRuntimeIdentity.Decode"/> must derive every runtime stream key
 /// bit-exactly like the encoding config. The init-collection identity is deliberately NOT
 /// encoded — nothing in a saved model consumes it.
@@ -229,16 +229,15 @@ public class RngRuntimeIdentityTests
     {
         var cfg = new RngConfig { MasterSeed = 42 };
         var vec = RngRuntimeIdentity.Build(cfg);
-        // Header only: [algId, runK0, runK1, 0 overrides].
+        // Header only: [algId, runKey, 0 overrides].
         Assert.Equal(RngRuntimeIdentity.HeaderLength, vec.Length);
-        Assert.Equal(0L, vec[RngRuntimeIdentity.AlgorithmIdIndex]);
-        Assert.Equal(cfg.RunMasterKey.k0, (uint)vec[RngRuntimeIdentity.RunKeyIndex]);
-        Assert.Equal(cfg.RunMasterKey.k1, (uint)vec[RngRuntimeIdentity.RunKeyIndex + 1]);
+        Assert.Equal(0UL, vec[RngRuntimeIdentity.AlgorithmIdIndex]);
+        Assert.Equal(cfg.RunMasterKey, vec[RngRuntimeIdentity.RunKeyIndex]);
         AssertRoundTrips(cfg);
 
         // The algorithm id header switches with the configured algorithm.
         var cfg13 = new RngConfig { MasterSeed = 42, Algorithm = RngAlgorithm.Threefry2x32Rounds13 };
-        Assert.Equal(1L, RngRuntimeIdentity.Build(cfg13)[RngRuntimeIdentity.AlgorithmIdIndex]);
+        Assert.Equal(1UL, RngRuntimeIdentity.Build(cfg13)[RngRuntimeIdentity.AlgorithmIdIndex]);
         AssertRoundTrips(cfg13);
 
         // An explicit run sub-master re-seeds the runtime tier and rides the same header.
@@ -257,18 +256,17 @@ public class RngRuntimeIdentityTests
                  .Override(RngCollection.Params, [2, 1], seed: 7UL);
 
         var vec = RngRuntimeIdentity.Build(cfg);
-        // Header + one record: length 3, its 3 path elements, 2 key words.
-        Assert.Equal(RngRuntimeIdentity.HeaderLength + 1 + 3 + 2, vec.Length);
-        Assert.Equal(1L, vec[RngRuntimeIdentity.HeaderLength - 1]);   // record count
+        // Header + one record: length 3, its 3 path elements, 1 key.
+        Assert.Equal(RngRuntimeIdentity.HeaderLength + 1 + 3 + 1, vec.Length);
+        Assert.Equal(1UL, vec[RngRuntimeIdentity.HeaderLength - 1]);   // record count
 
         var decoded = RngRuntimeIdentity.Decode(vec);
         var rec = Assert.Single(decoded.Overrides);
         Assert.Equal((int[])[4, 1, 1], rec.Path);
-        // The record replaces the fully folded key: its words are the override seed's words,
-        // and they sit at the record's fixed key offset in the vector.
-        Assert.Equal(RngConfig.SplitWords(424242UL), rec.Key);
-        Assert.Equal(rec.Key.k0, (uint)vec[rec.KeyOffset]);
-        Assert.Equal(rec.Key.k1, (uint)vec[rec.KeyOffset + 1]);
+        // The record replaces the fully folded key: it IS the override seed, and it sits at
+        // the record's fixed key offset in the vector.
+        Assert.Equal(424242UL, rec.Key);
+        Assert.Equal(rec.Key, vec[rec.KeyOffset]);
 
         // Derivation round-trips: the overridden stream deviates, siblings stay derived.
         AssertRoundTrips(cfg);

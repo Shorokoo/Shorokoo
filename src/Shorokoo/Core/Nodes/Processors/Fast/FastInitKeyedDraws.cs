@@ -64,7 +64,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// no error, no entry in the RNG stream report.
         /// </summary>
         public static Function? BuildKeyedDraws(
-            Function fn, (uint k0, uint k1) streamKey, string streamName, string algorithm)
+            Function fn, ulong streamKey, string streamName, string algorithm)
         {
             // Flatten so a draw factored into a called function/sub-module becomes a
             // top-level node the substitution below can intercept. Shipping initializers
@@ -98,7 +98,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     "non-reproducible backend randomness. Move the random draw " +
                     "(RandomUniform/RandomNormal/RandomBits) directly into the initializer's body.");
 
-            var (k0, k1) = streamKey;
 
             var newNodes = new List<FastNode>(body.Nodes.Count);
             int randomOrdinal = 0;
@@ -120,8 +119,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 // The parameter's own stream key as a [2] constant, and a distinct sub-stream
                 // (drawBase = ordinal) per draw within one initializer. The constant is emitted
                 // per draw so it always sits in the draw's own control-flow scope.
-                var keyKey = AppendConstant(new OnnxTensorData<int64>(
-                    new Shape(2), OnnxUtils.CreateTensorValue(new Shape(2), (long[])[k0, k1])), newNodes);
+                var keyKey = AppendConstant(new OnnxTensorData<uint64>(
+                    new Shape(System.Array.Empty<long>()),
+                    OnnxUtils.CreateTensorValue(new Shape(System.Array.Empty<long>()), (ulong[])[streamKey])), newNodes);
 
                 var drawBaseKey = AppendConstant(new OnnxTensorData<int64>(
                     new Shape(Array.Empty<long>()),

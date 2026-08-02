@@ -159,7 +159,7 @@ namespace Shorokoo.Graph
         /// by <see cref="WithRngConfig"/>; carried through save/load as an ordinary initializer).
         /// Null when the graph has no runtime random surface or no identity is bound yet.
         /// </summary>
-        public long[]? TryGetRngSeed() => ToInternal().TryGetRngSeed();
+        public ulong[]? TryGetRngSeed() => ToInternal().TryGetRngSeed();
 
         /// <summary>
         /// Returns metadata (ids and shapes) for every trainable parameter in a <b>concrete

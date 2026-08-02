@@ -184,6 +184,12 @@ internal static class TensorDataConverter
     /// <summary>
     /// Converts a <see cref="RuntimeTensor"/> back to <see cref="TensorData"/>. Returns null
     /// when the tensor has no concrete data (shape-only) or no known shape.
+    ///
+    /// <para>QEE holds every integer width in one <c>long</c> buffer, so an integer tensor's
+    /// actual width lives only in <see cref="RuntimeTensor.DType"/> — materializing from the
+    /// buffer alone would retype every non-<c>int64</c> integer tensor as <c>int64</c>. That
+    /// silently corrupts host constant folding, whose folded values re-enter the graph as
+    /// CONSTANT nodes and must still satisfy their consumers' type constraints.</para>
     /// </summary>
     public static TensorData? ToTensorData(RuntimeTensor rt)
     {
@@ -191,12 +197,33 @@ internal static class TensorDataConverter
         var dims = rt.Shape.Dims;
 
         if (rt.IntData is { } idata)
-            return TensorData(dims, idata.ToArray());
+            return FromIntData(dims, idata, rt.DType);
         if (rt.FloatData is { } fdata)
             return TensorData(dims, fdata.ToArray());
         if (rt.BoolData is { } bdata)
             return TensorData(dims, bdata.ToArray());
 
         return null;
+    }
+
+    /// <summary>
+    /// Materializes QEE's 64-bit integer buffer at <paramref name="dtype"/>'s own width.
+    /// Values wider than the target wrap (unchecked), which is the only thing a narrower
+    /// buffer can represent and matches what the ONNX runtimes produce. A dtype that is not
+    /// an integer width (a Bool or Float tensor whose data landed in the int buffer) keeps
+    /// the historical <c>int64</c> materialization.
+    /// </summary>
+    private static TensorData FromIntData(long[] dims, ImmutableArray<long> idata, DType dtype)
+    {
+        var n = idata.Length;
+        if (dtype == DType.Int64) return TensorData(dims, idata.ToArray());
+        if (dtype == DType.Int32) { var b = new int[n];    for (int i = 0; i < n; i++) b[i] = unchecked((int)idata[i]);    return TensorData(dims, b); }
+        if (dtype == DType.Int16) { var b = new short[n];  for (int i = 0; i < n; i++) b[i] = unchecked((short)idata[i]);  return TensorData(dims, b); }
+        if (dtype == DType.Int8)  { var b = new sbyte[n];  for (int i = 0; i < n; i++) b[i] = unchecked((sbyte)idata[i]);  return TensorData(dims, b); }
+        if (dtype == DType.UInt64){ var b = new ulong[n];  for (int i = 0; i < n; i++) b[i] = unchecked((ulong)idata[i]);  return TensorData(dims, b); }
+        if (dtype == DType.UInt32){ var b = new uint[n];   for (int i = 0; i < n; i++) b[i] = unchecked((uint)idata[i]);   return TensorData(dims, b); }
+        if (dtype == DType.UInt16){ var b = new ushort[n]; for (int i = 0; i < n; i++) b[i] = unchecked((ushort)idata[i]); return TensorData(dims, b); }
+        if (dtype == DType.UInt8) { var b = new byte[n];   for (int i = 0; i < n; i++) b[i] = unchecked((byte)idata[i]);   return TensorData(dims, b); }
+        return TensorData(dims, idata.ToArray());
     }
 }

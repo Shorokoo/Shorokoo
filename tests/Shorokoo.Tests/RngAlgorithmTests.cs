@@ -7,28 +7,28 @@ using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
 
-/// <summary>Keyed uniform draw at the input's shape under a literal key (123, 456), drawBase 0.</summary>
+/// <summary>Keyed uniform draw at the input's shape under a literal key, drawBase 0.</summary>
 [Module]
 public partial class RngKeyedUniformDraw
 {
     public static Tensor<float32> Inline(Tensor<float32> x)
     {
-        Vector<int64> key = [Scalar(123L), Scalar(456L)];
+        var key = Scalar(123UL | (456UL << 32));
         return (Tensor<float32>)InternalOp.RngUniform(
-            key, Scalar(0L), x.ShapeTensor(), Scalar(0f), Scalar(1f), RngAlgorithms.Default);
+            key, Scalar(0UL), x.ShapeTensor(), Scalar(0f), Scalar(1f), RngAlgorithms.Default);
     }
 }
 
-/// <summary>Splits key (7, 9) at index 5, then draws uniform under the child key.</summary>
+/// <summary>Splits a literal key at index 5, then draws uniform under the child key.</summary>
 [Module]
 public partial class RngSplitThenDraw
 {
     public static Tensor<float32> Inline(Tensor<float32> x)
     {
-        Vector<int64> parent = [Scalar(7L), Scalar(9L)];
-        var child = InternalOp.RngSplit(parent, Scalar(5L), RngAlgorithms.Default);
+        var parent = Scalar(7UL | (9UL << 32));
+        var child = InternalOp.RngSplit(parent, Scalar(5UL), RngAlgorithms.Default);
         return (Tensor<float32>)InternalOp.RngUniform(
-            child, Scalar(0L), x.ShapeTensor(), Scalar(0f), Scalar(1f), RngAlgorithms.Default);
+            child, Scalar(0UL), x.ShapeTensor(), Scalar(0f), Scalar(1f), RngAlgorithms.Default);
     }
 }
 
@@ -38,21 +38,21 @@ public partial class RngKeyedNormalDraw
 {
     public static Tensor<float32> Inline(Tensor<float32> x)
     {
-        Vector<int64> key = [Scalar(11L), Scalar(13L)];
+        var key = Scalar(11UL | (13UL << 32));
         return (Tensor<float32>)InternalOp.RngNormal(
-            key, Scalar(0L), x.ShapeTensor(), Scalar(0f), Scalar(1f), RngAlgorithms.Default);
+            key, Scalar(0UL), x.ShapeTensor(), Scalar(0f), Scalar(1f), RngAlgorithms.Default);
     }
 }
 
-/// <summary>Keyed raw-bits draw (U32) at the input's shape under a literal key (123, 456), drawBase 0.</summary>
+/// <summary>Keyed raw-bits draw (U32) at the input's shape under a literal key, drawBase 0.</summary>
 [Module]
 public partial class RngKeyedBitsDraw
 {
     public static Tensor<uint32> Inline(Tensor<float32> x)
     {
-        Vector<int64> key = [Scalar(123L), Scalar(456L)];
+        var key = Scalar(123UL | (456UL << 32));
         return (Tensor<uint32>)InternalOp.RngBits(
-            key, Scalar(0L), x.ShapeTensor(), DType.UInt32, RngAlgorithms.Default);
+            key, Scalar(0UL), x.ShapeTensor(), DType.UInt32, RngAlgorithms.Default);
     }
 }
 
@@ -78,9 +78,9 @@ public class RngAlgorithmTests
     }
 
     // Host reference: element i -> counter (i, drawBase); uniform = low 24 bits of x0 * 2^-24.
-    private static float HostUniform(long i, uint k0, uint k1, uint drawBase = 0)
+    private static float HostUniform(long i, ulong key, uint drawBase = 0)
     {
-        var (x0, _) = Threefry2x32.Bijection((uint)i, drawBase, k0, k1);
+        var (x0, _) = Threefry2x32.Bijection((uint)i, drawBase, (uint)key, (uint)(key >> 32));
         return (x0 & 0x00FFFFFFu) * (1.0f / 16777216.0f);
     }
 
@@ -100,7 +100,7 @@ public class RngAlgorithmTests
         var vals = RunDraw<RngKeyedUniformDraw>(4, 4);
         Assert.Equal(16, vals.Length);
         for (long i = 0; i < 16; i++)
-            Assert.Equal(HostUniform(i, 123, 456), vals[i]);
+            Assert.Equal(HostUniform(i, 123UL | (456UL << 32)), vals[i]);
     }
 
     [Fact]
@@ -133,13 +133,14 @@ public class RngAlgorithmTests
     [Fact]
     public void TestSplitThenDrawMatchesHostFold()
     {
-        // Child key = Bijection(counter: (5, 0), key: (7, 9)) — the split — then the draw
+        // Child key = Bijection(counter: 5, key) — the split — then the draw
         // under the child key must match the host generator keyed by that child.
         var (ck0, ck1) = Threefry2x32.Bijection(5u, 0u, 7u, 9u);
+        var childKey = ck0 | ((ulong)ck1 << 32);
         var vals = RunDraw<RngSplitThenDraw>(4, 4);
         Assert.Equal(16, vals.Length);
         for (long i = 0; i < 16; i++)
-            Assert.Equal(HostUniform(i, ck0, ck1), vals[i]);
+            Assert.Equal(HostUniform(i, childKey), vals[i]);
     }
 
     [Fact]
@@ -158,7 +159,9 @@ public class RngAlgorithmTests
         // An unknown algorithm name must fail loudly for every kind. The split kind remaps
         // the name to the default (the key tree is algorithm-independent), and that remap
         // must never launder an unrecognized name into a valid one.
-        foreach (var kind in (string[])[RngAlgorithms.KindSplit, RngAlgorithms.KindUniform, RngAlgorithms.KindNormal])
+        foreach (var kind in (string[])[
+            RngAlgorithms.KindSplit, RngAlgorithms.KindSplitBatch,
+            RngAlgorithms.KindUniform, RngAlgorithms.KindNormal])
         {
             var ex = Assert.Throws<NotSupportedException>(
                 () => RngAlgorithms.GetFunction("Threefry4x64-Ziggurat.v9", kind));

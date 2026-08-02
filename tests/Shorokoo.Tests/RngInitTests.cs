@@ -247,15 +247,12 @@ public class RngInitFrozenDerivationTests
         var cfg = new RngConfig { MasterSeed = 123 };
         var keys = Core.Rng.RngKeyResolver.Resolve(
             [cfg.InitKeySpec((int[])[1, 1]), cfg.InitKeySpec((int[])[2, 1])]);
-        Assert.Equal([0x0177f47cL, 0x33e150fcL], keys[0]);
-        Assert.Equal([0x3c6c3147L, 0x2a93ecfcL], keys[1]);
+        Assert.Equal(0x33e150fc_0177f47cUL, keys[0]);
+        Assert.Equal(0x2a93ecfc_3c6c3147UL, keys[1]);
 
         // ...and the independent host oracle agrees with what the graph computed.
         foreach (var (path, i) in new[] { ((int[])[1, 1], 0), ((int[])[2, 1], 1) })
-        {
-            var (k0, k1) = RngTestOracle.InitKey(cfg, path);
-            Assert.Equal([(long)k0, (long)k1], keys[i]);
-        }
+            Assert.Equal(RngTestOracle.InitKey(cfg, path), keys[i]);
     }
 
     [Fact]
@@ -304,13 +301,10 @@ public class RngInitFrozenDerivationTests
 
         Assert.Equal(paths.Length, keys.Count);
         for (int i = 0; i < paths.Length; i++)
-        {
-            var (k0, k1) = RngTestOracle.InitKey(cfg, paths[i]);
-            Assert.Equal([(long)k0, (long)k1], keys[i]);
-        }
+            Assert.Equal(RngTestOracle.InitKey(cfg, paths[i]), keys[i]);
         // Distinct paths must stay distinct — a packing bug that returned one row for every
         // stream would still satisfy a per-element check done carelessly.
-        Assert.Equal(paths.Length, keys.Select(k => (k[0], k[1])).Distinct().Count());
+        Assert.Equal(paths.Length, keys.Distinct().Count());
     }
 
     [Fact]

@@ -11,37 +11,39 @@ namespace Shorokoo.Tests;
 /// that needs a concrete key resolves it by <em>executing</em> that derivation
 /// (<c>RngKeyResolver</c>). These helpers reimplement the fold independently, on the host, so
 /// tests can assert the in-graph derivation against an oracle that does not share its
-/// implementation — which is exactly what makes the assertions meaningful.</para>
+/// implementation.</para>
 ///
-/// <para>They deliberately mirror the old <c>RngConfig.FoldInitKey</c>/<c>FoldRunKey</c>
-/// signatures so existing assertions read unchanged; the config now supplies only a derivation
-/// <em>spec</em> (root key + path still to fold), and the oracle folds it here.</para>
+/// <para>Keys and split indices are whole <c>ulong</c> values, matching the interface. The
+/// 32-bit word split is Threefry's own business and appears only inside <see cref="FoldKey"/>,
+/// where the reference generator requires it.</para>
 /// </summary>
 internal static class RngTestOracle
 {
-    /// <summary>One Threefry key-tree fold step: child = Bijection(counter: (index, 0), key).
-    /// Bit-identical to the in-graph <c>SHRK_RNG_SPLIT</c> (whose counter word is the index's
-    /// low 32 bits — the <c>uint</c> cast here matches its <c>Mask32</c>).</summary>
-    public static (uint k0, uint k1) FoldKey((uint k0, uint k1) key, long index)
-        => Threefry2x32.Bijection(unchecked((uint)index), 0u, key.k0, key.k1);
+    /// <summary>One Threefry key-tree fold step: <c>child = Bijection(counter: index, key)</c>.
+    /// The index occupies BOTH counter words, so the whole 64-bit range is distinct.</summary>
+    public static ulong FoldKey(ulong key, ulong index)
+    {
+        var (x0, x1) = Threefry2x32.Bijection(
+            (uint)index, (uint)(index >> 32), (uint)key, (uint)(key >> 32));
+        return x0 | ((ulong)x1 << 32);
+    }
 
-    private static (uint k0, uint k1) Fold(
-        ((uint k0, uint k1) root, IReadOnlyList<int> foldPath) spec)
+    private static ulong Fold((ulong root, IReadOnlyList<int> foldPath) spec)
     {
         var key = spec.root;
-        foreach (var v in spec.foldPath) key = FoldKey(key, v);
+        foreach (var v in spec.foldPath) key = FoldKey(key, unchecked((ulong)(long)v));
         return key;
     }
 
     /// <summary>A trainable parameter's init stream key (oracle for the in-graph derivation).</summary>
-    public static (uint k0, uint k1) InitKey(RngConfig config, IReadOnlyList<int> modelIdVals)
+    public static ulong InitKey(RngConfig config, IReadOnlyList<int> modelIdVals)
         => Fold(config.InitKeySpec(modelIdVals));
 
     /// <summary>A runtime feed's stream key (oracle for the in-graph derivation).</summary>
-    public static (uint k0, uint k1) RunKey(RngConfig config, IReadOnlyList<int> modelIdVals)
+    public static ulong RunKey(RngConfig config, IReadOnlyList<int> modelIdVals)
         => Fold(config.RunKeySpec(modelIdVals));
 
     /// <summary>A runtime feed's stream key under an encoded identity (oracle).</summary>
-    public static (uint k0, uint k1) RunKey(RngRuntimeIdentity identity, IReadOnlyList<int> path)
+    public static ulong RunKey(RngRuntimeIdentity identity, IReadOnlyList<int> path)
         => Fold(identity.RunKeySpec(path));
 }

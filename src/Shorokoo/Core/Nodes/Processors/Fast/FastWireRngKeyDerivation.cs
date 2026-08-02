@@ -20,7 +20,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// the feed's <b>runtime iteration index</b> (an element of its iteration-indices input) —
     /// so per-iteration streams need no enumeration, no key tables, and no stride arithmetic:
     /// iteration <c>i</c> derives <c>fold(..., i, ...)</c> on the fly, bit-identically to the
-    /// host-side <see cref="RngConfig.FoldRunKey"/>.
+    /// key derivation every other consumer resolves by executing this same chain.
     ///
     /// <para><b>Per-stream overrides route structurally.</b> An override record replaces the
     /// fully folded key of exactly one realized stream, so an overridden site's chain selects

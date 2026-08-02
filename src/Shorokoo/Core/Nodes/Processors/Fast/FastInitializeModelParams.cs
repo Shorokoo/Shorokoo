@@ -100,15 +100,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     if (node.TargetFunction is { } initFn)
                     {
                         // Stream key = init master folded along the parameter's ModelId path —
-                        // the RNG key tree IS the ModelId tree, host-side here (bit-identical
-                        // to the in-graph SHRK_RNG_SPLIT chain), so a param's init stream is
+                        // the RNG key tree IS the ModelId tree. The fold is emitted as an
+                        // in-graph SHRK_RNG_SPLIT chain (no host-side Threefry — see
+                        // RngConfig.InitKeySpec), so a param's init stream is still
                         // reconstructible offline from its ModelId alone.
-                        var key = rngConfig!.FoldInitKey(modelId.Vals);
+                        var keySpec = rngConfig!.InitKeySpec(modelId.Vals);
                         // Init draws under the configured algorithm's registry name (the key
-                        // itself is algorithm-independent — see RngConfig.FoldInitKey), so a
-                        // param's init values switch with the algorithm just like runtime feeds.
+                        // tree itself is algorithm-independent — the split is always the default
+                        // algorithm), so a param's init values switch with the algorithm just
+                        // like runtime feeds.
                         var injected = FastInitKeyedDraws.BuildKeyedDraws(
-                            initFn, key, info.ToShorokooIdString(),
+                            initFn, keySpec.root, keySpec.foldPath, info.ToShorokooIdString(),
                             Core.Rng.RngAlgorithms.NameOf(rngConfig.Algorithm));
                         if (injected is not null)
                             node.TargetFunction = injected;

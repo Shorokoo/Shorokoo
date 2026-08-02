@@ -45,7 +45,7 @@ public sealed class RngStreamInfo
     /// in-loop feed SITE (a <c>-1</c> iteration slot present): its per-iteration keys derive
     /// at runtime from the iteration index (iteration <c>i</c>'s key is the runtime master
     /// folded along the path with <c>i</c> in the slot), so no single key describes the row.</summary>
-    public IReadOnlyList<long>? KeyWords { get; init; }
+    public IReadOnlyList<long>? KeyWords { get; internal set; }
 
     /// <summary>
     /// The stream's SITE id (the ModelId with <c>-1</c> iteration placeholders) when

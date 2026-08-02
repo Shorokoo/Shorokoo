@@ -127,7 +127,7 @@ public class RngLoopTests
         {
             // Feed ModelId is [1, -1, 1]: the runtime master folds slot 1, then the
             // iteration index, then the feed's slot under the loop (1).
-            var key = RngConfig.FoldKey(RngConfig.FoldKey(cfg.FoldRunKey([1]), i), 1);
+            var key = RngTestOracle.FoldKey(RngTestOracle.FoldKey(cfg.FoldRunKey([1]), i), 1);
             for (long e = 0; e < N; e++)
                 expected[e] += HostUniform(e, key);
         }
@@ -207,7 +207,7 @@ public class RngLoopTests
         {
             var key = i == 1
                 ? cfg.FoldRunKey([1, 1, 1])
-                : RngConfig.FoldKey(RngConfig.FoldKey(cfg.FoldRunKey([1]), i), 1);
+                : RngTestOracle.FoldKey(RngTestOracle.FoldKey(cfg.FoldRunKey([1]), i), 1);
             for (long e = 0; e < N; e++)
                 expected[e] += HostUniform(e, key);
         }
@@ -237,7 +237,7 @@ public class RngLoopTests
         {
             var key = i == 1
                 ? cfgOv.FoldRunKey([1, 1, 1])
-                : RngConfig.FoldKey(RngConfig.FoldKey(cfgOv.FoldRunKey([1]), i), 1);
+                : RngTestOracle.FoldKey(RngTestOracle.FoldKey(cfgOv.FoldRunKey([1]), i), 1);
             for (long e = 0; e < N; e++)
                 expected[e] += HostUniform(e, key);
         }

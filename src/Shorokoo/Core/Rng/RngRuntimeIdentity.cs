@@ -74,7 +74,7 @@ internal sealed class RngRuntimeIdentity
     /// <summary>
     /// Encodes <paramref name="config"/>'s runtime identity as the <c>RngSeed</c> parameter
     /// value. <see cref="Decode"/> is the exact inverse; the decoded identity derives every
-    /// runtime stream key bit-identically to <see cref="RngConfig.FoldRunKey"/>.
+    /// runtime stream key bit-identically to the in-graph SHRK_RNG_SPLIT chain.
     /// </summary>
     public static long[] Build(RngConfig config)
     {
@@ -133,19 +133,17 @@ internal sealed class RngRuntimeIdentity
     }
 
     /// <summary>
-    /// A runtime stream's key under this identity: the matching override record's key words when
-    /// one exists, else the runtime master folded along the path — bit-identical to
-    /// <see cref="RngConfig.FoldRunKey"/> of the encoding config, and to the in-graph
-    /// SHRK_RNG_SPLIT chain the wiring emits.
+    /// A runtime stream's key derivation under this identity, as a <b>spec</b>: the matching
+    /// override record's key words (nothing left to fold) when one exists, else the runtime
+    /// master plus the path still to be folded. The fold itself happens in-graph
+    /// (<c>SHRK_RNG_SPLIT</c>) — this type performs no RNG computation (#136).
     /// </summary>
-    public (uint k0, uint k1) FoldRunKey(IReadOnlyList<int> path)
+    public ((uint k0, uint k1) root, IReadOnlyList<int> foldPath) RunKeySpec(IReadOnlyList<int> path)
     {
         foreach (var rec in Overrides)
             if (rec.Path.Length == path.Count && rec.Path.SequenceEqual(path))
-                return rec.Key;
-        var key = RunKey;
-        foreach (var v in path) key = RngConfig.FoldKey(key, v);
-        return key;
+                return (rec.Key, []);
+        return (RunKey, path);
     }
 
     /// <summary>Whether this identity's override PATH set equals <paramref name="paths"/> —

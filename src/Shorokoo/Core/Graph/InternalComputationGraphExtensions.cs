@@ -452,6 +452,9 @@ namespace Shorokoo.Graph
             this InternalComputationGraph graph, RngConfig? rngConfig = null)
         {
             var streams = new List<RngStreamInfo>();
+            // (stream row index, derivation spec) for every row whose key is resolved by
+            // executing its in-graph split chain after both loops (#136 — no host-side fold).
+            var keySpecs = new List<(int streamIndex, ((uint k0, uint k1) root, IReadOnlyList<int> foldPath) spec)>();
 
             foreach (var info in graph.GetConcreteModelParamInfos().ParamInfos)
             {
@@ -470,10 +473,10 @@ namespace Shorokoo.Graph
                     Name = name,
                     Shape = info.Shape.Dims,
                     FrameworkOwned = FastInjectRngDrawCounter.IsExecutionCounter(info.ParamIdentifier),
-                    KeyWords = rngConfig is null
-                        ? null
-                        : ToKeyWords(rngConfig.FoldInitKey(info.ModelId.Vals)),
+                    KeyWords = null,   // resolved below by executing the derivation (#136)
                 });
+                if (rngConfig is not null)
+                    keySpecs.Add((streams.Count - 1, rngConfig.InitKeySpec(info.ModelId.Vals)));
             }
 
             // Runtime feeds: one row per SITE, straight off the feed nodes — no stored
@@ -512,15 +515,23 @@ namespace Shorokoo.Graph
                     ModelIdPath = idVals,
                     SitePath = null,
                     Kind = kind,
-                    KeyWords = rngConfig is null || !isRealized
-                        ? null
-                        : ToKeyWords(rngConfig.FoldRunKey(idVals)),
+                    KeyWords = null,   // resolved below by executing the derivation (#136)
                 });
+                if (rngConfig is not null && isRealized)
+                    keySpecs.Add((streams.Count - 1, rngConfig.RunKeySpec(idVals)));
+            }
+
+            // Resolve every requested key by EXECUTING its in-graph SHRK_RNG_SPLIT derivation
+            // (one batched run) — the host never folds a key itself (#136), so a custom
+            // algorithm's key tree resolves here for free.
+            if (keySpecs.Count > 0)
+            {
+                var resolved = Core.Rng.RngKeyResolver.Resolve([.. keySpecs.Select(s => s.spec)]);
+                for (int i = 0; i < keySpecs.Count; i++)
+                    streams[keySpecs[i].streamIndex].KeyWords = resolved[i];
             }
 
             return new RngStreamReport(streams);
-
-            static long[] ToKeyWords((uint k0, uint k1) key) => [key.k0, key.k1];
         }
 
         /// <summary>

@@ -85,7 +85,7 @@ internal static class RuntimeRng
     /// Index-based key split: child key words = Bijection(counter: (index, 0), key).
     /// Random access — computing child <paramref name="index"/> never computes any sibling.
     /// The counter word is the index's LOW 32 BITS (<c>Mask32</c>, matching the host fold's
-    /// <c>uint</c> cast — see <c>RngConfig.FoldKey</c>), so indices <c>i</c> and
+    /// <c>uint</c> cast), so indices <c>i</c> and
     /// <c>i + 2^32</c> alias to the same child key. Unreachable in practice: split indices
     /// are ModelId slots and iteration indices, which are <c>int</c>-typed.
     /// </summary>

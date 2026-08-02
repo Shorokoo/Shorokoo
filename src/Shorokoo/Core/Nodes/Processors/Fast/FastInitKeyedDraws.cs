@@ -41,7 +41,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     {
         /// <summary>
         /// Returns a new initializer <see cref="Function"/> whose random draws are rewritten
-        /// to keyed in-graph draws on the stream <paramref name="streamKey"/> under the named
+        /// to keyed in-graph draws on the parameter's own stream — derived in-graph by folding
+        /// <paramref name="foldPath"/> into <paramref name="rootKey"/> with a
+        /// <c>SHRK_RNG_SPLIT</c> chain (no host-side fold, #136) — under the named
         /// <paramref name="algorithm"/>, or <c>null</c> if <paramref name="fn"/> contains no
         /// random ops (the caller then keeps the original). Draws nested in called
         /// functions/sub-modules are reached by flattening the body first; a draw inside a
@@ -50,7 +52,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// no error, no entry in the RNG stream report.
         /// </summary>
         public static Function? BuildKeyedDraws(
-            Function fn, (uint k0, uint k1) streamKey, string streamName, string algorithm)
+            Function fn, (uint k0, uint k1) rootKey, IReadOnlyList<int> foldPath,
+            string streamName, string algorithm)
         {
             // Flatten so a draw factored into a called function/sub-module becomes a
             // top-level node the substitution below can intercept. Shipping initializers
@@ -84,7 +87,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     "non-reproducible backend randomness. Move the random draw " +
                     "(RandomUniform/RandomNormal/RandomBits) directly into the initializer's body.");
 
-            var (k0, k1) = streamKey;
+            var (k0, k1) = rootKey;
 
             var newNodes = new List<FastNode>(body.Nodes.Count);
             int randomOrdinal = 0;
@@ -103,10 +106,22 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var shapeInput = node.Inputs[0]
                     ?? throw new InvalidOperationException("Random init node has null shape input.");
 
-                // The parameter's own stream key as a [2] constant, and a distinct
-                // sub-stream (drawBase = ordinal) per draw within one initializer.
+                // The parameter's own stream key: the root key words as a [2] constant, then
+                // the ModelId path folded in by an in-graph SHRK_RNG_SPLIT chain (one split per
+                // path element, constant counters). The fold is NOT computed host-side — this
+                // mirrors a runtime feed's chain (FastWireRngKeyDerivation), and since every
+                // input is constant the chain collapses to the same literal key at session
+                // build. An override / SharedKey spec carries an empty path, so the root IS
+                // the key and no split is emitted.
                 var keyKey = AppendConstant(new OnnxTensorData<int64>(
                     new Shape(2), OnnxUtils.CreateTensorValue(new Shape(2), (long[])[k0, k1])), newNodes);
+                foreach (var pathVal in foldPath)
+                {
+                    var counterKey = AppendConstant(new OnnxTensorData<int64>(
+                        new Shape(Array.Empty<long>()),
+                        OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (long[])[pathVal])), newNodes);
+                    keyKey = AppendSplit(keyKey, counterKey, newNodes);
+                }
                 var drawBaseKey = AppendConstant(new OnnxTensorData<int64>(
                     new Shape(Array.Empty<long>()),
                     OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (long[])[randomOrdinal])), newNodes);
@@ -188,6 +203,31 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 defaultName: fn.DefaultName + "__rng__" + suffix,
                 friendlyName: fn.FriendlyName + "__rng__" + suffix,
                 fn.StateOwnership);
+        }
+
+        /// <summary>
+        /// One in-graph key-tree fold step: <c>child = SHRK_RNG_SPLIT(key, counter)</c>. The
+        /// split is deliberately algorithm-independent (see <see cref="Rng.RngAlgorithms"/>) —
+        /// wired with the default name so an algorithm switch never re-keys an init stream,
+        /// matching the runtime chain in <see cref="FastWireRngKeyDerivation"/>.
+        /// </summary>
+        private static FastTensorKey AppendSplit(
+            FastTensorKey key, FastTensorKey counter, List<FastNode> newNodes)
+        {
+            var attrDefs = Definitions.NodeDefinitions[InternalOpCodes.SHRK_RNG_SPLIT].AttributeDefs;
+            var nodeKey = FastNodeKey.New();
+            var outKey = new FastTensorKey(nodeKey, 0);
+            newNodes.Add(new FastNode
+            {
+                Key = nodeKey,
+                OpCode = InternalOpCodes.SHRK_RNG_SPLIT,
+                Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                    new Dictionary<string, object?> { [ShrkAttrRngAlgorithm] = Rng.RngAlgorithms.Default },
+                    attrDefs),
+                FullInputs = { [""] = new List<FastTensorKey?> { key, counter } },
+                FullOutputs = { [""] = new List<FastTensorKey?> { outKey } },
+            });
+            return outKey;
         }
 
         private static FastTensorKey AppendConstant(TensorData data, List<FastNode> newNodes)

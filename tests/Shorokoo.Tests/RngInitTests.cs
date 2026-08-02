@@ -241,9 +241,21 @@ public class RngInitFrozenDerivationTests
     public void TestInitKeyDerivationIsFrozen()
     {
         // Layer 1: the key derivation alone (fold order, the "init" label, sub-master wiring).
+        // Resolved through PRODUCTION (RngKeyResolver executes the in-graph split chain, which is
+        // how a real init key is derived since #136) — asserting via the test oracle instead
+        // would pin only the oracle and stay green if the product's derivation changed.
         var cfg = new RngConfig { MasterSeed = 123 };
-        Assert.Equal((0x0177f47cu, 0x33e150fcu), cfg.FoldInitKey([1, 1]));
-        Assert.Equal((0x3c6c3147u, 0x2a93ecfcu), cfg.FoldInitKey([2, 1]));
+        var keys = Core.Rng.RngKeyResolver.Resolve(
+            [cfg.InitKeySpec((int[])[1, 1]), cfg.InitKeySpec((int[])[2, 1])]);
+        Assert.Equal([0x0177f47cL, 0x33e150fcL], keys[0]);
+        Assert.Equal([0x3c6c3147L, 0x2a93ecfcL], keys[1]);
+
+        // ...and the independent host oracle agrees with what the graph computed.
+        foreach (var (path, i) in new[] { ((int[])[1, 1], 0), ((int[])[2, 1], 1) })
+        {
+            var (k0, k1) = RngTestOracle.InitKey(cfg, path);
+            Assert.Equal([(long)k0, (long)k1], keys[i]);
+        }
     }
 
     [Fact]
@@ -267,6 +279,38 @@ public class RngInitFrozenDerivationTests
         Assert.Equal(2, ws.Length);
         Assert.Equal(expected0, ws[0]);   // weight at ModelId [1, 1]
         Assert.Equal(expected1, ws[1]);   // weight at ModelId [2, 1]
+    }
+
+    [Fact]
+    public void TestMultiDrawInitValuesAreFrozen()
+    {
+        // Layer 3: an initializer that draws TWICE (a uniform and a raw-bits draw, combined).
+        // Both draws share the parameter's ONE stream key and are separated only by their
+        // drawBase sub-stream ordinal, so this golden is what pins the ordinal assignment:
+        // renumber the draws (or key them identically) and every value here moves, while the
+        // relational assertions in TestTrainableInitUsesBitsIntermediateAndTwoRngOps — same
+        // config reproduces, a new seed re-randomizes, values stay in range — all still hold.
+        //
+        // Exact equality is safe cross-backend: Threefry integer ops, an IEEE
+        // round-to-nearest uint32 -> float32 conversion, and multiplies (one by a power of
+        // two, hence exact). No transcendental kernels involved.
+        float[] expected =
+        [
+            0.05584412f, 0.41466287f, 0.4716463f, 0.11957358f,
+            0.043343723f, 0.22659563f, 0.2775737f, 0.2173384f,
+            0.07509217f, 0.006857669f, 0.077552944f, 0.08531699f,
+            0.5348234f, 0.6136215f, 0.39926675f, 0.0016627111f,
+        ];
+
+        var g = BitsIntermediateTrainableLayer.ComputationGraph;
+        var sample = TensorData([4L, 4L], System.Linq.Enumerable.Repeat(1f, 16).ToArray());
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([sample]));
+        var pl = arch.InitializeTrainableParams(rngConfig: new RngConfig { MasterSeed = 123 });
+        var w = pl.ModelParams
+            .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
+            .Single(v => v.Length == 16);
+
+        Assert.Equal(expected, w);
     }
 }
 

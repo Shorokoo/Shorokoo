@@ -177,6 +177,11 @@ resolved key, in-loop sites derive per-iteration keys at runtime) — and can em
 `Rng.Pin` skeleton for freezing streams before a refactor (see
 [Pinning RNG streams](rng-pinning.md)).
 
+Resolving the keys **executes** each stream's in-graph derivation — Shorokoo computes no
+randomness on the host — so asking for a report *with* a config is a deliberately expensive
+call that needs a working execution provider. A report without one resolves nothing. Pass your
+own context if you have one: `GetRngStreamReport(config, computeContext)`.
+
 ## Without a config
 
 There is no unkeyed concrete model. A model concretized without a config gets the **default

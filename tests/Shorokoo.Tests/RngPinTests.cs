@@ -191,6 +191,64 @@ public class RngPinTests
 
         // Without a config, streams are listed but unkeyed.
         Assert.All(arch.GetRngStreamReport().Streams, s => Assert.Null(s.KeyWords));
+
+        // The reported keys are resolved by EXECUTING each stream's in-graph derivation (#136),
+        // so pin them against the independent host oracle: a wrong root, a missed fold step, or
+        // a mis-ordered resolver result would all still produce "non-null and distinct" above.
+        foreach (var s in inits)
+        {
+            var (k0, k1) = RngTestOracle.InitKey(cfg, s.ModelIdPath);
+            Assert.Equal([(long)k0, (long)k1], s.KeyWords);
+        }
+    }
+
+    [Fact]
+    public void TestRngStreamReportResolvesRuntimeFeedAndOverriddenKeys()
+    {
+        // Covers the two report paths the params-only test above never reaches: a REALIZED
+        // runtime feed (RunKeySpec -> executed split chain) and an OVERRIDDEN stream (empty fold
+        // path -> resolved directly, no split emitted). Mixing them in one report also exercises
+        // the resolver's direct/pending partition and its remap back to the original order —
+        // an off-by-one there would silently mislabel keys.
+        var g = ((ComputationGraph)typeof(PinBaselineTwoLinears)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var input = TensorData([1L, 4L], 0.1f, 0.2f, 0.3f, 0.4f);
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
+
+        // Override the FIRST param stream only: its row resolves directly while the second
+        // still needs a folded chain, so `pending` is deliberately not the identity permutation.
+        var cfg = new RngConfig { MasterSeed = 3 }.Override(RngCollection.Params, [1, 1], 4242UL);
+        var report = arch.GetRngStreamReport(cfg);
+
+        var inits = report.Streams.Where(s => s.Kind == RngStreamKind.ParamInit).ToList();
+        Assert.Equal(2, inits.Count);
+
+        // The overridden stream's key IS the override seed's words — no fold applied.
+        var (o0, o1) = RngConfig.SplitWords(4242UL);
+        Assert.Equal([(long)o0, (long)o1], inits[0].KeyWords);
+        // ...while its sibling is still the master folded along its path.
+        var (s0, s1) = RngTestOracle.InitKey(cfg, inits[1].ModelIdPath);
+        Assert.Equal([(long)s0, (long)s1], inits[1].KeyWords);
+        Assert.NotEqual(inits[0].KeyWords, inits[1].KeyWords);
+    }
+
+    [Fact]
+    public void TestRngStreamReportResolvesRealizedRuntimeFeedKey()
+    {
+        // A realized (non-loop) runtime feed: its row carries a key resolved through RunKeySpec
+        // + the executed split chain. This branch is otherwise never taken in the suite.
+        var g = ((ComputationGraph)typeof(RtLoweredUniform)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
+
+        var cfg = new RngConfig { MasterSeed = 7 };
+        var feed = Assert.Single(arch.GetRngStreamReport(cfg).Streams
+            .Where(s => s.Kind == RngStreamKind.UniformFeed));
+
+        Assert.NotNull(feed.KeyWords);
+        var (k0, k1) = RngTestOracle.RunKey(cfg, feed.ModelIdPath);
+        Assert.Equal([(long)k0, (long)k1], feed.KeyWords);
     }
 
     [Fact]

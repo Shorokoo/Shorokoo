@@ -318,7 +318,8 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
 
             // SHRK_RNG_SPLIT: index-based RNG key split, child = Bijection(key, counter: index)
             // under the named algorithm. Key = int64[2] (32-bit words). Lowered at ONNX export
-            // to a call of the algorithm's non-inlined "split" function; QEE computes it host-side.
+            // to a call of the algorithm's non-inlined "split" function. RNG is graph-only (#136):
+            // nothing computes a split host-side, so there is no QEE op for it.
             Op(SHRK_RNG_SPLIT)
                 .Tensor<int64>("T1")
                 .AttributeString(ShrkAttrRngAlgorithm)

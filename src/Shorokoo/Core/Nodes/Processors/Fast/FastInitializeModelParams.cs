@@ -62,6 +62,29 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 ? null
                 : paramInfos!.ParamInfos.ToDictionary(x => x.ModelId);
 
+            // Resolve every parameter's init key ONCE, up front, by executing one small graph of
+            // split chains (RngKeyResolver) — the host still computes no RNG itself (#136). Each
+            // initializer then embeds its key as a literal, as it always did.
+            //
+            // The alternative — emitting each parameter's split chain inside its own initializer
+            // body — is what a naive "move the fold in-graph" does, and it is materially worse:
+            // it multiplies THIS graph (which ORT must build and fold in one session) by the
+            // ModelId depth of every parameter, and it makes the shared chain's placement
+            // dependent on which control-flow scope the first draw happens to sit in.
+            // Only parameters whose initializer actually draws need a key; a constant-filled
+            // initializer (zeros/ones bias, etc.) would otherwise pay for a key nothing reads.
+            var initKeys = infoById is null
+                ? null
+                : ResolveInitKeys(
+                    workGraph.Nodes
+                        .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM &&
+                                    n.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId) is not [0] &&
+                                    n.TargetFunction is { } f && FastInitKeyedDraws.DrawsRandomness(f))
+                        .Select(n => new ModelId(
+                            n.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId).AssertNotNull()))
+                        .Distinct(),
+                    rngConfig!, computeContext);
+
             var collectedModelIds = new List<ModelId>();
             var collectedOutputKeys = new List<FastTensorKey>();
 
@@ -100,16 +123,19 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     if (node.TargetFunction is { } initFn)
                     {
                         // Stream key = init master folded along the parameter's ModelId path —
-                        // the RNG key tree IS the ModelId tree, host-side here (bit-identical
-                        // to the in-graph SHRK_RNG_SPLIT chain), so a param's init stream is
-                        // reconstructible offline from its ModelId alone.
-                        var key = rngConfig!.FoldInitKey(modelId.Vals);
+                        // the RNG key tree IS the ModelId tree — resolved above by executing the
+                        // derivation, so a param's init stream stays reconstructible offline
+                        // from its ModelId alone.
+                        // A non-drawing initializer has no key (none was resolved); BuildKeyedDraws
+                        // returns null for it anyway, so the value here is never consumed.
+                        var key = initKeys!.TryGetValue(modelId, out var k) ? k : default;
                         // Init draws under the configured algorithm's registry name (the key
-                        // itself is algorithm-independent — see RngConfig.FoldInitKey), so a
-                        // param's init values switch with the algorithm just like runtime feeds.
+                        // tree itself is algorithm-independent — the split is always the default
+                        // algorithm), so a param's init values switch with the algorithm just
+                        // like runtime feeds.
                         var injected = FastInitKeyedDraws.BuildKeyedDraws(
                             initFn, key, info.ToShorokooIdString(),
-                            Core.Rng.RngAlgorithms.NameOf(rngConfig.Algorithm));
+                            Core.Rng.RngAlgorithms.NameOf(rngConfig!.Algorithm));
                         if (injected is not null)
                             node.TargetFunction = injected;
                     }
@@ -178,5 +204,23 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return collectedModelIds.Zip(results)
                 .ToImmutableDictionary(x => x.First, x => x.Second.ToTensorData());
         }
+
+        /// <summary>
+        /// Resolves each parameter's init stream key by EXECUTING the in-graph derivation once
+        /// for the whole model (#136: the host runs no RNG itself), in bounded chunks — instead of
+        /// embedding a split chain per parameter in the much larger initialization graph.
+        /// </summary>
+        private static Dictionary<ModelId, (uint k0, uint k1)> ResolveInitKeys(
+            IEnumerable<ModelId> modelIds, RngConfig rngConfig, ComputeContext? computeContext)
+        {
+            var ids = modelIds.ToArray();
+            var resolved = Core.Rng.RngKeyResolver.Resolve(
+                [.. ids.Select(id => rngConfig.InitKeySpec(id.Vals))], computeContext);
+            var keys = new Dictionary<ModelId, (uint k0, uint k1)>(ids.Length);
+            for (int i = 0; i < ids.Length; i++)
+                keys[ids[i]] = ((uint)resolved[i][0], (uint)resolved[i][1]);
+            return keys;
+        }
+
     }
 }

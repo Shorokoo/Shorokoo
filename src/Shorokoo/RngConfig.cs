@@ -82,12 +82,14 @@ public sealed class RngConfig
     public RngAlgorithm Algorithm { get; init; } = RngAlgorithm.Threefry2x32;
 
     /// <summary>
-    /// When <c>true</c>, every stream shares one key derived from <see cref="MasterSeed"/>
-    /// alone (name-independent), so two parameters of the same shape and distribution
+    /// When <c>true</c>, every <b>parameter-initialization</b> stream shares one key derived
+    /// from <see cref="MasterSeed"/> alone (name-independent), so two parameters of the same
+    /// shape and distribution
     /// receive identical values — the "tied" init that reproduces a layer's weights from a
     /// hand-built reference. Off by default (per-parameter, name-derived keys). Useful for
     /// closed-form reference tests and for debugging; not for real training, where distinct
-    /// parameters should differ.
+    /// parameters should differ. Note this applies to the <see cref="RngCollection.Params"/>
+    /// tier only — runtime feeds always fold along their ModelId path regardless.
     /// </summary>
     public bool SharedKey { get; init; }
 
@@ -207,44 +209,45 @@ public sealed class RngConfig
     internal static (uint k0, uint k1) SplitWords(ulong key)
         => ((uint)(key & 0xFFFFFFFF), (uint)(key >> 32));
 
-    /// <summary>
-    /// Host-side index fold — one Threefry bijection, bit-identical to the in-graph
-    /// SHRK_RNG_SPLIT: child = Bijection(counter: (index, 0), key). The counter word is the
-    /// index's LOW 32 BITS (the <c>uint</c> cast, matching the in-graph split's
-    /// <c>Mask32</c>), so indices <c>i</c> and <c>i + 2^32</c> alias to the same child key —
-    /// unreachable in practice, since fold indices are ModelId slots and iteration indices,
-    /// which are <c>int</c>-typed.
-    /// </summary>
-    internal static (uint k0, uint k1) FoldKey((uint k0, uint k1) key, long index)
-        => Core.Rng.Threefry2x32.Bijection(unchecked((uint)index), 0u, key.k0, key.k1);
+    // NOTE (#136): there is deliberately no host-side key fold here. The key tree is computed
+    // exclusively in-graph by the algorithm's SHRK_RNG_SPLIT chain; a host consumer that needs
+    // a concrete key resolves it by EXECUTING that derivation (see RngKeyResolver), never by
+    // running Threefry on the host. That removes the obstacle to a custom algorithm owning
+    // its own split (#122) — the key tree is still algorithm-independent today.
 
     /// <summary>
-    /// A trainable parameter's stream key: an explicit per-stream override when one is set,
-    /// else the init master folded along the parameter's ModelId path (specific ids — loop
-    /// slots carry real iteration values). SharedKey mode skips the fold so same-shape
-    /// params tie (test/debug only).
+    /// A trainable parameter's init stream key expressed as a <b>derivation spec</b> rather
+    /// than a computed key: the root key words plus the ModelId path still to be folded into
+    /// them. The fold itself is performed <b>in-graph</b> by a <c>SHRK_RNG_SPLIT</c> chain
+    /// (see <c>FastInitKeyedDraws</c>) — no host-side Threefry — exactly as a runtime feed's
+    /// chain derives its key from the <c>RngSeed</c> parameter.
+    ///
+    /// <para>The two short-circuits the old host fold applied are carried here as an empty
+    /// fold path: an explicit per-stream override <b>replaces</b> the fully folded key, and
+    /// <see cref="SharedKey"/> mode skips the fold so same-shape params tie (test/debug only).
+    /// The root words are pure marshalling (<see cref="Fold"/> is a SHA-256 XOR, not RNG).</para>
     /// </summary>
-    internal (uint k0, uint k1) FoldInitKey(IEnumerable<int> modelIdVals)
+    internal ((uint k0, uint k1) root, IReadOnlyList<int> foldPath) InitKeySpec(IEnumerable<int> modelIdVals)
     {
         var vals = modelIdVals as IReadOnlyList<int> ?? new List<int>(modelIdVals);
-        if (TryGetOverride(RngCollection.Params, vals, out var overridden)) return overridden;
-        var key = InitMasterKey;
-        if (SharedKey) return key;
-        foreach (var v in vals) key = FoldKey(key, v);
-        return key;
+        if (TryGetOverride(RngCollection.Params, vals, out var overridden))
+            return (overridden, []);
+        return (InitMasterKey, SharedKey ? [] : vals);
     }
 
     /// <summary>
-    /// A runtime feed's stream key: an explicit per-stream override when one is set, else
-    /// the runtime master folded along the feed's ModelId path.
+    /// A runtime feed's stream key as a <b>derivation spec</b> — see
+    /// <see cref="InitKeySpec"/>. The fold is performed in-graph (the feed's
+    /// <c>SHRK_RNG_SPLIT</c> chain); this spec lets a host-side consumer (the RNG stream
+    /// report) resolve the same key by <em>executing</em> that derivation, never by
+    /// recomputing it host-side.
     /// </summary>
-    internal (uint k0, uint k1) FoldRunKey(IEnumerable<int> modelIdVals)
+    internal ((uint k0, uint k1) root, IReadOnlyList<int> foldPath) RunKeySpec(IEnumerable<int> modelIdVals)
     {
         var vals = modelIdVals as IReadOnlyList<int> ?? new List<int>(modelIdVals);
-        if (TryGetOverride(RngCollection.Runtime, vals, out var overridden)) return overridden;
-        var key = RunMasterKey;
-        foreach (var v in vals) key = FoldKey(key, v);
-        return key;
+        if (TryGetOverride(RngCollection.Runtime, vals, out var overridden))
+            return (overridden, []);
+        return (RunMasterKey, vals);
     }
 
     /// <summary>

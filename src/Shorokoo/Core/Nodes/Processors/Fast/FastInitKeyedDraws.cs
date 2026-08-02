@@ -39,10 +39,24 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastInitKeyedDraws
     {
+        /// <summary>Whether an initializer draws randomness (so it needs a stream key).
+        /// Mirrors the flatten-then-scan the rewrite itself performs.</summary>
+        public static bool DrawsRandomness(Function fn)
+            => fn.GetFastFlattenedGraph().Nodes.Any(n =>
+                   n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
+                   n.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||
+                   n.OpCode == InternalOpCodes.SHRK_RANDOM_BITS)
+               || fn.ReferencedFunctions.Any(f => f.OriginalFastGraph.Nodes.Any(n =>
+                   n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
+                   n.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||
+                   n.OpCode == InternalOpCodes.SHRK_RANDOM_BITS));
+
         /// <summary>
         /// Returns a new initializer <see cref="Function"/> whose random draws are rewritten
-        /// to keyed in-graph draws on the stream <paramref name="streamKey"/> under the named
-        /// <paramref name="algorithm"/>, or <c>null</c> if <paramref name="fn"/> contains no
+        /// to keyed in-graph draws on the parameter's own stream <paramref name="streamKey"/>
+        /// (resolved by the caller by EXECUTING the derivation — see
+        /// <c>FastInitializeModelParams.ResolveInitKeys</c>; the host folds nothing itself, #136)
+        /// under the named <paramref name="algorithm"/>, or <c>null</c> if it contains no
         /// random ops (the caller then keeps the original). Draws nested in called
         /// functions/sub-modules are reached by flattening the body first; a draw inside a
         /// call that survives flattening throws, since it carries no ModelId or key and would
@@ -103,10 +117,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var shapeInput = node.Inputs[0]
                     ?? throw new InvalidOperationException("Random init node has null shape input.");
 
-                // The parameter's own stream key as a [2] constant, and a distinct
-                // sub-stream (drawBase = ordinal) per draw within one initializer.
+                // The parameter's own stream key as a [2] constant, and a distinct sub-stream
+                // (drawBase = ordinal) per draw within one initializer. The constant is emitted
+                // per draw so it always sits in the draw's own control-flow scope.
                 var keyKey = AppendConstant(new OnnxTensorData<int64>(
                     new Shape(2), OnnxUtils.CreateTensorValue(new Shape(2), (long[])[k0, k1])), newNodes);
+
                 var drawBaseKey = AppendConstant(new OnnxTensorData<int64>(
                     new Shape(Array.Empty<long>()),
                     OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (long[])[randomOrdinal])), newNodes);

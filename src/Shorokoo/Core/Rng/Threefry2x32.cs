@@ -10,7 +10,7 @@ namespace Shorokoo.Core.Rng;
 /// a stream of period 2^64, and distinct keys give independent streams. That is what
 /// lets Shorokoo derive a per-parameter / per-site stream from a name and index a draw
 /// by (step, element) without threading generator state — and lets the identical
-/// integer math run host-side (initialization) or as an ONNX subgraph (runtime) with
+/// integer math run host-side (test oracle only — see #136) or as an ONNX subgraph (runtime) with
 /// bit-for-bit agreement.</para>
 ///
 /// <para>The bijection is parameterized by round count. The default 20-round form (the

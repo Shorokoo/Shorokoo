@@ -4679,6 +4679,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (IsModelInputOpCode(op) || op == InternalOpCodes.MODEL_PARAM_DATA)
                     continue;
 
+                // RNG is graph-only (#136): a SHRK_RNG_SPLIT is never a host-side constant. It
+                // resolves by executing the lowered graph (its `split` FUNCTION_INVOKE on ORT,
+                // whose session-build folding collapses constant key chains), exactly as the
+                // RngSeed-rooted seed-derivation chain already does — so it must not be host-folded.
+                if (op == InternalOpCodes.SHRK_RNG_SPLIT)
+                    continue;
+
                 if (op == InternalOpCodes.MODEL_PARAM
                     || op.EndsWith("#OPEN") || op.EndsWith("#CLOSE"))
                 {

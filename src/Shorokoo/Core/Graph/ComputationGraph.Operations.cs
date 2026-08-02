@@ -206,11 +206,19 @@ namespace Shorokoo.Graph
         /// ModelId path, consumer kind, parameter name/shape where known, and (when
         /// <paramref name="rngConfig"/> is supplied) the resolved stream key. Requires a
         /// <see cref="GraphKind.ConcreteArchitecture"/>.
+        ///
+        /// <para>Resolving keys <b>executes</b> each stream's in-graph key derivation — the host
+        /// computes no RNG itself — so supplying <paramref name="rngConfig"/> makes this a
+        /// deliberately expensive call that requires a usable execution provider. All streams
+        /// resolve in one batch. Omit the config to get the inventory alone, which executes
+        /// nothing. Streams whose key is undefined (an unrealized in-loop feed site) report
+        /// <c>null</c>.</para>
         /// </summary>
-        public RngStreamReport GetRngStreamReport(RngConfig? rngConfig = null)
+        public RngStreamReport GetRngStreamReport(
+            RngConfig? rngConfig = null, ComputeContext? computeContext = null)
         {
             RequireKind(GraphKind.ConcreteArchitecture, nameof(GetRngStreamReport), LoweringOrderHint);
-            return ToInternal().GetRngStreamReport(rngConfig);
+            return ToInternal().GetRngStreamReport(rngConfig, computeContext);
         }
 
         /// <summary>

@@ -182,7 +182,7 @@ public class RngRuntimeTests
 
         var vals = ComputeContext.Default.Execute(concrete, input)[0]
             .ToTensorData().As<float32>().AccessMemory().ToArray();
-        var (k0, k1) = RngConfig.Default.FoldRunKey([1]);   // the feed's site is slot 1
+        var (k0, k1) = RngTestOracle.RunKey(RngConfig.Default, [1]);   // the feed's site is slot 1
         for (long i = 0; i < 16; i++)
             Assert.Equal(HostUniform(i, k0, k1, 0), vals[i]);
     }
@@ -199,7 +199,7 @@ public class RngRuntimeTests
         var av = a.As<uint32>().AccessMemory().ToArray();
         var bv = b.As<uint32>().AccessMemory().ToArray();
         Assert.Equal(av, bv);   // deterministic / portable
-        var (k0, k1) = RngConfig.Default.FoldRunKey([1]);   // single feed at slot 1
+        var (k0, k1) = RngTestOracle.RunKey(RngConfig.Default, [1]);   // single feed at slot 1
         for (long i = 0; i < 16; i++)
             Assert.Equal((uint)HostBits(i, 32, k0, k1, 0), av[i]);
     }
@@ -213,7 +213,7 @@ public class RngRuntimeTests
         var a = RunDrawRaw<RtLoweredBits64>(4, 4);
         Assert.Equal(DType.UInt64, a.DType);
         var av = a.As<uint64>().AccessMemory().ToArray();
-        var (k0, k1) = RngConfig.Default.FoldRunKey([1]);
+        var (k0, k1) = RngTestOracle.RunKey(RngConfig.Default, [1]);
         for (long i = 0; i < 16; i++)
             Assert.Equal(HostBits(i, 64, k0, k1, 0), av[i]);
     }

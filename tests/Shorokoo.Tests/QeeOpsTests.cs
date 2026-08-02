@@ -517,3 +517,78 @@ public class QeeIntegerDTypeRoundTripTests
             outputs[0].ToTensorData().As<uint32>().AccessMemory().ToArray());
     }
 }
+
+/// <summary>
+/// A <c>uint32</c> chain that host-constant-folds only in part: a fully-constant Threefry
+/// bijection produces the key words, which then key a second bijection over a
+/// <b>runtime-shaped</b> counter. Only the first bijection (and the constant-only head of the
+/// second) folds host-side, so the folded values re-enter the graph and every later op reads
+/// them — including a right shift, which is where a value carrying bits above its declared
+/// 32-bit width becomes visible.
+/// </summary>
+[Module]
+public partial class QeePartiallyFoldedUInt32Chain
+{
+    public static Tensor<uint32> Inline(Tensor<float32> x)
+    {
+        var (a0, a1) = Shorokoo.Core.Rng.RuntimeRng.Bijection(
+            Scalar(0u), Scalar(0u), Scalar(123u), Scalar(456u));
+        var c0 = OnnxOp.Range(Scalar(0L), x.ShapeTensor().Reduce(ReduceKind.Prod), Scalar(1L))
+            .int64().Cast<uint32>();
+        var (b0, _) = Shorokoo.Core.Rng.RuntimeRng.Bijection(c0, Scalar(0u), a0, a1);
+        return b0;
+    }
+}
+
+/// <summary>
+/// The QuickExecutionEngine keeps every integer width in one <c>long</c> buffer. These tests
+/// pin that an op's result is narrowed to its tensor's <b>declared</b> width, not left carrying
+/// the extra bits an overflowing 64-bit computation produced. Leaked high bits are invisible to
+/// the next add (which is exact mod 2^32 either way) but not to a right shift, which pulls them
+/// straight down into the result — so a folded uint32 chain silently computed wrong values.
+/// </summary>
+[Trait("Domain", "Inference")]
+[Trait("Purpose", "Coverage")]
+public class QeeIntegerWidthTests
+{
+    [Fact]
+    public void TestOverflowingUnsignedAddDoesNotLeakIntoALaterShift()
+    {
+        // (2^32 - 1) + 1 is 0 in uint32; >> 4 of that is 0. Carrying the sum as 2^32 instead
+        // gives 2^28. Both operands are constants, so this folds host-side in QEE.
+        var g = ((ComputationGraph)typeof(QeeOverflowThenShift)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var input = TensorData([2L, 2L], 0f, 0f, 0f, 0f);
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        var got = ComputeContext.Default.Execute(concrete, input)[0]
+            .ToTensorData().As<uint32>().AccessMemory().ToArray();
+        Assert.Equal((uint[])[0u], got);
+    }
+
+    [Fact]
+    public void TestPartiallyFoldedUInt32ChainMatchesTheUnfoldedResult()
+    {
+        // Threefry is the real-world instance: RuntimeRng's rotate is a shift pair, so a leaked
+        // bit lands inside the result. Compared against the independent host generator.
+        var g = ((ComputationGraph)typeof(QeePartiallyFoldedUInt32Chain)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var input = TensorData([2L, 2L], 0f, 0f, 0f, 0f);
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        var got = ComputeContext.Default.Execute(concrete, input)[0]
+            .ToTensorData().As<uint32>().AccessMemory().ToArray();
+
+        var (a0, a1) = Shorokoo.Core.Rng.Threefry2x32.Bijection(0u, 0u, 123u, 456u);
+        var want = System.Linq.Enumerable.Range(0, 4)
+            .Select(i => Shorokoo.Core.Rng.Threefry2x32.Bijection((uint)i, 0u, a0, a1).Item1).ToArray();
+        Assert.Equal(want, got);
+    }
+}
+
+/// <summary>An all-constant uint32 add that overflows, then a right shift of the sum.</summary>
+[Module]
+public partial class QeeOverflowThenShift
+{
+    public static Tensor<uint32> Inline(Tensor<float32> x)
+        => OnnxOp.BitShift(Scalar(4_294_967_295u) + Scalar(1u), Scalar(4u), BitShiftDirection.Right)
+            .uint32().Reshape([Scalar(1L)]);
+}

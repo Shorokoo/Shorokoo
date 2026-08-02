@@ -77,6 +77,43 @@ internal static class RuntimeTensorFactory
     }
 
     /// <summary>
+    /// Narrows an integer tensor's data to its own declared width. QEE holds every integer
+    /// width in one <c>long</c> buffer, so an op that computes at 64 bits — a left shift, a
+    /// bitwise or/xor of already-widened operands — can leave bits above the declared width
+    /// set. Those bits are invisible to a later add (exact mod 2^w either way) but not to a
+    /// right shift, which pulls them straight down into the result. Applied to every op's
+    /// output, so no op has to remember to narrow; it is idempotent for the ops that already do.
+    ///
+    /// <para>Unsigned widths land in <c>[0, 2^w)</c> and signed widths sign-extend, matching
+    /// how <see cref="TensorDataConverter.ToRuntimeTensor"/> loads them. <c>Int64</c> and
+    /// <c>UInt64</c> are the buffer's own width and pass through untouched.</para>
+    /// </summary>
+    public static RuntimeTensor NarrowToDeclaredWidth(RuntimeTensor rt)
+    {
+        if (rt.IntData is not { } d || d.Length == 0) return rt;
+
+        System.Func<long, long>? narrow = null;
+        var t = rt.DType;
+        if (t == DType.Int32) narrow = v => unchecked((int)v);
+        else if (t == DType.Int16) narrow = v => unchecked((short)v);
+        else if (t == DType.Int8) narrow = v => unchecked((sbyte)v);
+        else if (t == DType.UInt32) narrow = v => unchecked((uint)v);
+        else if (t == DType.UInt16) narrow = v => unchecked((ushort)v);
+        else if (t == DType.UInt8) narrow = v => unchecked((byte)v);
+        if (narrow is null) return rt;
+
+        long[]? buf = null;
+        for (int i = 0; i < d.Length; i++)
+        {
+            var n = narrow(d[i]);
+            if (n == d[i] && buf is null) continue;
+            buf ??= d.ToArray();
+            buf[i] = n;
+        }
+        return buf is null ? rt : rt with { IntData = ImmutableArray.Create(buf) };
+    }
+
+    /// <summary>
     /// <see cref="IRuntimeTensor"/>-aware dispatch that returns a copy of <paramref name="rt"/>
     /// with data-size limit enforced on the plain tensor, the optional's value tensor, or every
     /// element / template tensor of a sequence.

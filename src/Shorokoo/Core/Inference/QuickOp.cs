@@ -58,9 +58,12 @@ internal abstract class QuickOp
 
     /// <summary>
     /// Shared tail used by every <see cref="Execute"/> override: delegates to
-    /// <see cref="ComputeWithLoopBack"/> and enforces the per-output data-size limit. Each op
-    /// is expected to emit <see cref="IRuntimeTensor"/> results with their dtype already
-    /// populated (no ReferenceTensor wiring — FastNode has no Variable objects).
+    /// <see cref="ComputeWithLoopBack"/>, narrows each integer output to its declared width,
+    /// and enforces the per-output data-size limit. Each op is expected to emit
+    /// <see cref="IRuntimeTensor"/> results with their dtype already populated (no
+    /// ReferenceTensor wiring — FastNode has no Variable objects), but not to remember that
+    /// QEE's shared 64-bit integer buffer is wider than most of the dtypes it carries — see
+    /// <see cref="RuntimeTensorFactory.NarrowToDeclaredWidth"/>.
     /// </summary>
     protected (IRuntimeTensor[] results, bool loopBack) RunCompute(
         IRuntimeTensor?[] inputs,
@@ -73,6 +76,7 @@ internal abstract class QuickOp
         {
             var rt = results[i];
             if (rt is null) continue;
+            if (rt is RuntimeTensor plain) rt = RuntimeTensorFactory.NarrowToDeclaredWidth(plain);
             results[i] = RuntimeTensorFactory.EnforceDataSizeLimit(rt, maxDataElements);
         }
 

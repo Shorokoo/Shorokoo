@@ -22,7 +22,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// ceiling and parallelizes on GPU).
     ///
     /// <para>The draw node is rewritten in place: its key input is the parameter's folded
-    /// init key as a <c>[2]</c> constant, its drawBase is the draw's ordinal within the
+    /// init key as a uint64 scalar constant, its drawBase is the draw's ordinal within the
     /// initializer (a distinct sub-stream per draw; every shipping initializer has exactly
     /// one, so ordinal 0 in practice), and its shape input and declared distribution
     /// bounds carry over — the initializer's downstream scaling math is unchanged.
@@ -116,16 +116,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var shapeInput = node.Inputs[0]
                     ?? throw new InvalidOperationException("Random init node has null shape input.");
 
-                // The parameter's own stream key as a [2] constant, and a distinct sub-stream
+                // The parameter's own stream key as a scalar constant, and a distinct sub-stream
                 // (drawBase = ordinal) per draw within one initializer. The constant is emitted
                 // per draw so it always sits in the draw's own control-flow scope.
                 var keyKey = AppendConstant(new OnnxTensorData<uint64>(
                     new Shape(System.Array.Empty<long>()),
                     OnnxUtils.CreateTensorValue(new Shape(System.Array.Empty<long>()), (ulong[])[streamKey])), newNodes);
 
-                var drawBaseKey = AppendConstant(new OnnxTensorData<int64>(
+                var drawBaseKey = AppendConstant(new OnnxTensorData<uint64>(
                     new Shape(Array.Empty<long>()),
-                    OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (long[])[randomOrdinal])), newNodes);
+                    OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (ulong[])[(ulong)randomOrdinal])), newNodes);
 
                 if (isBits)
                 {

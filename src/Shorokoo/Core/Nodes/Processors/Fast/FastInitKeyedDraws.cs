@@ -206,31 +206,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 fn.StateOwnership);
         }
 
-        /// <summary>
-        /// One in-graph key-tree fold step: <c>child = SHRK_RNG_SPLIT(key, counter)</c>. The
-        /// split is deliberately algorithm-independent (see <see cref="Rng.RngAlgorithms"/>) —
-        /// wired with the default name so an algorithm switch never re-keys an init stream,
-        /// matching the runtime chain in <see cref="FastWireRngKeyDerivation"/>.
-        /// </summary>
-        private static FastTensorKey AppendSplit(
-            FastTensorKey key, FastTensorKey counter, List<FastNode> newNodes)
-        {
-            var attrDefs = Definitions.NodeDefinitions[InternalOpCodes.SHRK_RNG_SPLIT].AttributeDefs;
-            var nodeKey = FastNodeKey.New();
-            var outKey = new FastTensorKey(nodeKey, 0);
-            newNodes.Add(new FastNode
-            {
-                Key = nodeKey,
-                OpCode = InternalOpCodes.SHRK_RNG_SPLIT,
-                Attributes = OnnxCSharpAttributes.FromCSharpVals(
-                    new Dictionary<string, object?> { [ShrkAttrRngAlgorithm] = Rng.RngAlgorithms.Default },
-                    attrDefs),
-                FullInputs = { [""] = new List<FastTensorKey?> { key, counter } },
-                FullOutputs = { [""] = new List<FastTensorKey?> { outKey } },
-            });
-            return outKey;
-        }
-
         private static FastTensorKey AppendConstant(TensorData data, List<FastNode> newNodes)
         {
             var constAttrDefs = Definitions.NodeDefinitions[OpCodes.CONSTANT].AttributeDefs;

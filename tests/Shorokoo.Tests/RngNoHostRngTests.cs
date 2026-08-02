@@ -135,10 +135,11 @@ public class RngNoHostRngTests
     [Fact]
     public void TestProductionExposesNoHostKeyFoldMethod()
     {
-        // The test oracle supplies FoldInitKey/FoldRunKey as EXTENSION methods. C# prefers an
-        // instance method over an extension, so if production ever re-added a member of that
-        // name, every oracle call site would silently rebind to it and the assertions would
-        // compare production against itself. Fail loudly instead.
+        // The host key fold was deleted (#136) and must not come back under its old names: a
+        // reintroduced FoldKey/FoldInitKey/FoldRunKey would recreate the second implementation
+        // this issue removed, and would be the natural thing for a future edit to reach for.
+        // (The test oracle deliberately uses different names — InitKey/RunKey — so it can never
+        // be confused for, or shadowed by, a production member.)
         var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static |
                     System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
         string[] forbidden = ["FoldKey", "FoldInitKey", "FoldRunKey"];

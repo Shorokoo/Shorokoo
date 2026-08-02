@@ -27,8 +27,9 @@ namespace Shorokoo.Core.Rng;
 /// to here; executing the derivation rather than reimplementing it is what makes that a
 /// one-line change instead of a second port of the key tree.</para>
 ///
-/// <para>All inputs are constants, so the whole batch collapses to literals at session build;
-/// one run resolves every requested stream.</para>
+/// <para>All inputs are constants, so each batch collapses to literals at session build.
+/// Resolution is chunked (see <c>MaxSplitsPerChunk</c>): graph preparation is super-linear in
+/// node count, so a few bounded runs are dramatically faster than one giant one.</para>
 ///
 /// <para>Diagnostic-path only (the RNG stream report / pin skeleton): nothing in model
 /// execution consumes these values.</para>
@@ -59,6 +60,43 @@ internal static class RngKeyResolver
         }
         if (pending.Count == 0) return results;
 
+        // Resolve in bounded chunks. Graph preparation is super-linear in node count, so one
+        // giant batch is pathologically slow for a real model (measured: ~4x the time for each
+        // 2x the splits — 400 splits ≈ 105 s, extrapolating to tens of minutes for a few
+        // thousand). Chunking makes total cost grow linearly with the number of streams, at the
+        // price of one session per chunk. Sized in SPLITS, not specs, since a deep ModelId path
+        // contributes several nodes.
+        const int MaxSplitsPerChunk = 24;
+        if (pending.Count > 1)
+        {
+            var chunk = new List<int>();
+            int splits = 0;
+            foreach (var i in pending)
+            {
+                if (chunk.Count > 0 && splits + specs[i].foldPath.Count > MaxSplitsPerChunk)
+                {
+                    ResolveChunk(specs, chunk, results, computeContext);
+                    chunk.Clear();
+                    splits = 0;
+                }
+                chunk.Add(i);
+                splits += specs[i].foldPath.Count;
+            }
+            if (chunk.Count > 0) ResolveChunk(specs, chunk, results, computeContext);
+            return results;
+        }
+
+        ResolveChunk(specs, pending, results, computeContext);
+        return results;
+    }
+
+    /// <summary>Resolves one bounded batch of specs in a single graph execution.</summary>
+    private static void ResolveChunk(
+        IReadOnlyList<((uint k0, uint k1) root, IReadOnlyList<int> foldPath)> specs,
+        IReadOnlyList<int> pending,
+        long[][] results,
+        ComputeContext? computeContext)
+    {
         var graph = new InternalComputationGraph();
         var nodes = new List<FastNode>();
         var outputs = new List<FastTensorKey>();
@@ -113,7 +151,6 @@ internal static class RngKeyResolver
                     $"RngKeyResolver: a resolved key must be 2 words, got {words.Length}.");
             results[pending[j]] = [words[0], words[1]];
         }
-        return results;
     }
 
     private static FastTensorKey AppendSplit(

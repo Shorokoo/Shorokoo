@@ -457,7 +457,7 @@ namespace Shorokoo.Graph
             // host-side fold), which is expensive, so it is deferred to the first KeyWords read
             // and batched: rows record their spec here and take a resolver closing over the
             // shared lazy result. By the time anything reads a key both loops have filled the
-            // list, so one run resolves the whole report.
+            // list, so the whole report resolves together (in bounded chunks).
             var keySpecs = new List<((uint k0, uint k1) root, IReadOnlyList<int> foldPath)>();
             var resolvedKeys = new Lazy<IReadOnlyList<long[]>>(
                 () => Core.Rng.RngKeyResolver.Resolve(keySpecs, computeContext));

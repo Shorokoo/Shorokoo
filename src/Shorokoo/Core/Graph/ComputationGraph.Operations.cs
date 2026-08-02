@@ -211,7 +211,7 @@ namespace Shorokoo.Graph
         /// (<see cref="RngStreamReport.EmitPinSkeleton"/>) never touches keys. Reading
         /// <see cref="RngStreamInfo.KeyWords"/>, however, <b>executes</b> each stream's in-graph
         /// key derivation (the host computes no RNG itself — see the graph-only RNG design), so
-        /// the first key read resolves the whole report in one run and costs an execution pass;
+        /// the first key read resolves the whole report (in bounded chunks) and costs execution passes;
         /// it can also throw where a pure inventory could not (e.g. no usable execution
         /// provider). Streams whose key is undefined — no config supplied, or an unrealized
         /// in-loop feed site — report <c>null</c> without executing anything.</para>

@@ -51,8 +51,9 @@ public sealed class RngStreamInfo
     // ordering hazard between the two initializers below. Lazy<T> is thread-safe by default.
     private readonly Lazy<IReadOnlyList<long>?>? _key;
 
-    /// <summary>Deferred key resolution — see <see cref="KeyWords"/>. Mutually exclusive with
-    /// <see cref="KeyWords"/>'s initializer; whichever is set last wins, so set exactly one.</summary>
+    /// <summary>Deferred key resolution — see <see cref="KeyWords"/>. Leave unset for a row whose
+    /// key is undefined (no config, or an unrealized in-loop site); such a row reports null and
+    /// never triggers an execution.</summary>
     internal Func<IReadOnlyList<long>?>? KeyResolver
     {
         init => _key = value is null ? null : new Lazy<IReadOnlyList<long>?>(value);
@@ -123,6 +124,22 @@ public sealed class RngStreamReport
             .OrderBy(s => s.Collection)
             .ThenBy(s => s.ModelIdPath, ModelIdPathComparer.Instance)
             .ToArray();
+    }
+
+    /// <summary>
+    /// Resolves every stream's key up front and returns this report, so the printed form shows
+    /// keys: <c>Console.WriteLine(report.ResolveKeys())</c>.
+    ///
+    /// <para>Keys are otherwise resolved lazily, because resolving <b>executes</b> each stream's
+    /// in-graph derivation — the host computes no RNG itself — and neither
+    /// <see cref="EmitPinSkeleton"/> nor <see cref="ToString"/> forces it (a log line or a
+    /// debugger must not launch an execution, nor throw). Call this when you actually want the
+    /// key values; it needs a working execution provider and throws if none is available.</para>
+    /// </summary>
+    public RngStreamReport ResolveKeys()
+    {
+        foreach (var s in Streams) _ = s.KeyWords;
+        return this;
     }
 
     /// <summary>

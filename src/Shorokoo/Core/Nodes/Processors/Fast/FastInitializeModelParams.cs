@@ -207,9 +207,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         /// <summary>
         /// Resolves each parameter's init stream key by EXECUTING the in-graph derivation once
-        /// for the whole model (#136: the host runs no RNG itself). One small session resolves
-        /// every parameter, instead of embedding a split chain per parameter in the much larger
-        /// initialization graph.
+        /// for the whole model (#136: the host runs no RNG itself), in bounded chunks — instead of
+        /// embedding a split chain per parameter in the much larger initialization graph.
         /// </summary>
         private static Dictionary<ModelId, (uint k0, uint k1)> ResolveInitKeys(
             IEnumerable<ModelId> modelIds, RngConfig rngConfig, ComputeContext? computeContext)

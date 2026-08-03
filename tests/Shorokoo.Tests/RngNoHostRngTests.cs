@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -70,6 +71,68 @@ public class RngNoHostRngTests
         .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}") &&
                     !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
         .ToArray();
+
+    /// <summary>
+    /// Every site that reads a model's RNG identity must go through
+    /// <c>RngRuntimeIdentity.ReadIdentityVector</c>, which rejects a layout this version cannot
+    /// read with an explanation. A second, unguarded <c>As&lt;uint64&gt;()</c> would hand a pre-v2
+    /// carrier a bare InvalidCastException from whichever door it happened to reach — which is
+    /// exactly what happened when the guard was first added at only one of the three sites.
+    ///
+    /// <para>Matching on the surrounding names cannot work: the shape that slipped through last
+    /// time read <c>data.As&lt;uint64&gt;()</c>, where nothing in the expression says "identity".
+    /// So this is an allowlist of the files permitted to materialize a uint64 tensor at all —
+    /// blunt on purpose, because a new decode site must be a conscious decision.</para>
+    /// </summary>
+    [Fact]
+    public void TestNoUnguardedIdentityReadSurvives()
+    {
+        // RngRuntimeIdentity   — defines the one guarded read.
+        // RngKeyResolver       — reads an execution RESULT (resolved keys), never a stored identity.
+        // CSharpModelBuilder   — emits a uint64 tensor attribute as C# source.
+        // TensorDataConversion — the generic per-dtype conversion table.
+        string[] allowed = ["RngRuntimeIdentity.cs", "RngKeyResolver.cs",
+                            "CSharpModelBuilder.cs", "TensorDataConversion.cs"];
+
+        var files = ProductionSourceFiles();
+        Assert.True(files.Length > 100,
+            $"Guard swept only {files.Length} production files — the source root looks wrong.");
+
+        var offenders = files
+            .Where(f => !allowed.Contains(Path.GetFileName(f)))
+            .SelectMany(f => Regex.Matches(StripCommentsAndStrings(File.ReadAllText(f)), UInt64Materialization)
+                .Select(m => $"{Path.GetFileName(f)}: {m.Value.Trim()}"))
+            .Distinct()
+            .ToArray();
+
+        Assert.True(offenders.Length == 0,
+            "A uint64 tensor is materialized outside the files allowed to do so. If this is an RNG " +
+            "identity, route it through RngRuntimeIdentity.ReadIdentityVector so an unreadable " +
+            "carrier gets one explanation instead of a bare InvalidCastException; if it is " +
+            "genuinely something else, add the file to the allowlist above. Offending reads:\n  " +
+            string.Join("\n  ", offenders));
+    }
+
+    /// <summary>The identity-read guard must catch both shapes that existed before it — including
+    /// the one whose expression mentions nothing RNG-related.</summary>
+    [Fact]
+    public void TestIdentityReadGuardDetectsBothPreGuardShapes()
+    {
+        string[] preGuard =
+        [
+            "var identityVec = seedNode.Attributes.GetTensorVal(ShrkAttrTensorData)?.As<uint64>().AccessMemory().ToArray();",
+            "return RngRuntimeIdentity.Decode(data.As<uint64>().AccessMemory().ToArray());",
+        ];
+        foreach (var sample in preGuard)
+            Assert.True(Regex.IsMatch(StripCommentsAndStrings(sample), UInt64Materialization),
+                $"Guard would not have caught a pre-guard identity read: {sample}");
+
+        // ...and does not fire on an unrelated typed read.
+        Assert.False(Regex.IsMatch(StripCommentsAndStrings("var v = td.As<int64>().AccessMemory();"),
+            UInt64Materialization));
+    }
+
+    private const string UInt64Materialization = @"\.\s*As<uint64>";
 
     [Fact]
     public void TestNoProductionCodeRunsTheRngAlgorithmHostSide()

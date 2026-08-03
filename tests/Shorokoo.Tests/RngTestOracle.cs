@@ -11,12 +11,16 @@ namespace Shorokoo.Tests;
 /// that needs a concrete key resolves it by <em>executing</em> that derivation
 /// (<c>RngKeyResolver</c>). These helpers reimplement the fold independently, on the host, so
 /// tests can assert the in-graph derivation against an oracle that does not share its
-/// implementation — which is exactly what makes the assertions meaningful. Never replace any
-/// of it with a call into the product.</para>
+/// implementation — which is exactly what makes the assertions meaningful. What must stay
+/// independent is the <em>derivation</em>: the fold order and counter scheme are rebuilt here by
+/// hand. (The underlying <see cref="Threefry2x32"/> bijection is shared — it is the reference
+/// generator, pinned to the published Random123 vectors.) Never resolve a key or a draw by
+/// calling into the graph.</para>
 ///
-/// <para>Keys and split indices are whole <c>ulong</c> values, matching the interface. The
-/// 32-bit word split is Threefry's own business and appears only inside <see cref="FoldKey"/>,
-/// where the reference generator requires it.</para>
+/// <para>Keys, split indices and draw positions are whole <c>ulong</c> values, matching the
+/// interface. The 32-bit word split is Threefry's own business and is confined to the few helpers
+/// that hand values to the reference generator (<see cref="FoldKey"/>, <see cref="DrawWords"/>)
+/// or repack its output (<see cref="DrawBits"/>).</para>
 /// </summary>
 internal static class RngTestOracle
 {

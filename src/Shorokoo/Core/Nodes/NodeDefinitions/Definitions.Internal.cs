@@ -331,8 +331,8 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Output("childKey", "TK", 0),
 
             // SHRK_RNG_UNIFORM: keyed deterministic U(low, high) draw of dynamic shape under
-            // the named algorithm. Counter = (flat element index, drawBase). Lowered at ONNX
-            // export to a call of the algorithm's non-inlined "uniform" function.
+            // the named algorithm. drawBase folds into the key; the counter is the whole flat
+            // element index. Lowered at ONNX export to a call of the "uniform" function.
             Op(SHRK_RNG_UNIFORM)
                 .Tensor<uint64>("TK")
                 .Tensor<int64>("TS")
@@ -360,9 +360,9 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Output("output", "T2", rank: "R"),
 
             // SHRK_RNG_BITS: keyed deterministic raw-bits draw of dynamic shape under the named
-            // algorithm; output an unsigned integer of the width in shrk_dtype. Counter = (flat
-            // element index, drawBase). Lowered at ONNX export to a call of the algorithm's
-            // non-inlined, width-specialized "bits" function.
+            // algorithm; output an unsigned integer of the width in shrk_dtype. drawBase folds
+            // into the key; the counter is the whole flat element index. Lowered at ONNX export
+            // to a call of the algorithm's non-inlined, width-specialized "bits" function.
             Op(SHRK_RNG_BITS)
                 .Tensor<uint64>("TK")
                 .Tensor<int64>("TS")

@@ -24,7 +24,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// and then, like every keyed SHRK_RNG_* op (the chain splits included), to a call of the
     /// named algorithm's non-inlined function: the exported model calls tagged local
     /// FunctionProtos, so its randomness is deterministic, portable, and identifiable. The
-    /// draw algorithm comes from the bound identity's algorithm id (<c>RngSeed[0]</c>); an
+    /// draw algorithm comes from the bound identity's algorithm id (<c>RngSeed[1]</c>); an
     /// unbound graph is bound to the DEFAULT identity here first — a concrete artifact is
     /// never unkeyed, and "no config" simply means the default deterministic identity.</para>
     ///

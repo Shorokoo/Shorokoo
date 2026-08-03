@@ -221,9 +221,11 @@ internal static class TensorDataConverter
     /// are float32-rounded — and <c>1e300</c> would come back <c>Infinity</c>. A wrong value
     /// wearing the right type is worse than no value: returning null means "no concrete data", so
     /// constant folding skips the tensor and the real ops survive to a backend that computes at
-    /// genuine float64. Float16/BFloat16 are safe by contrast — every value in the float buffer
-    /// converts to them exactly as the runtime would, and this is the conversion
-    /// <see cref="Ops.CastOp"/> documents as happening in the constant path.</para>
+    /// genuine float64. Float16/BFloat16 keep their dtype instead: the conversion is exact for any
+    /// single value, and it is the one <see cref="Ops.CastOp"/> documents as happening in the
+    /// constant path. Note it rounds once, at materialization — a multi-op constant chain at f16
+    /// dtype computes in the float32 buffer throughout, where a runtime would round every
+    /// intermediate.</para>
     /// </summary>
     private static TensorData? FromFloatData(long[] dims, ImmutableArray<float> fdata, DType dtype)
     {

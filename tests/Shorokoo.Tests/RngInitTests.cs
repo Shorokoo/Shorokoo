@@ -280,10 +280,10 @@ public class RngInitFrozenDerivationTests
     [Fact]
     public void TestBatchedKeyResolutionMatchesTheHostOracle()
     {
-        // The resolver folds a whole tree LEVEL per batched split (#138), packing M streams into
-        // a [2, M] key block. That packing — k0 words in row 0, k1 words in row 1, unpacked as
-        // (words[j], words[M + j]) — is the new failure surface: a row/column mix-up, or a
-        // mis-grouped depth, would silently hand back another stream's key.
+        // The resolver folds a whole tree LEVEL per batched split (#138): M parent keys and M
+        // counters in, M child keys out as one [M] uint64 vector. Grouping is the failure surface
+        // — specs are bucketed by depth and each group's results are scattered back by index, so
+        // a mis-grouped depth or an off-by-one scatter silently hands back another stream's key.
         //
         // So resolve a set that deliberately mixes depths (which is what splits the work into
         // groups) and group sizes, and check every key against the independent host oracle.

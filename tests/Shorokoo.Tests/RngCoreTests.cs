@@ -204,8 +204,8 @@ public class RngCoreTests
 
 /// <summary>
 /// The encoded runtime RNG identity — the value of the ordinary <c>RngSeed</c> parameter at
-/// reserved ModelId [0] (see <see cref="RngRuntimeIdentity"/>): an algorithm-id header, the
-/// runtime master key, and canonically sorted per-stream override records at fixed
+/// reserved ModelId [0] (see <see cref="RngRuntimeIdentity"/>): a scheme-version + algorithm-id
+/// header, the runtime master key, and canonically sorted per-stream override records at fixed
 /// offsets. <see cref="RngRuntimeIdentity.Decode"/> must derive every runtime stream key
 /// bit-exactly like the encoding config. The init-collection identity is deliberately NOT
 /// encoded — nothing in a saved model consumes it.
@@ -225,10 +225,12 @@ public class RngRuntimeIdentityTests
     }
 
     [Fact]
-    public void TestPreV2IdentityIsRejectedAtEveryDecodeSite()
+    public void TestPreV2IdentityIsRejectedWithAnExplanation()
     {
-        // A carrier written before the identity became uint64 must fail with an explanation, at
-        // every door — not with a bare InvalidCastException from whichever As<uint64>() it reached.
+        // A carrier written before the identity became uint64 must fail with an explanation, not
+        // a bare InvalidCastException. That every decode site routes through here is enforced
+        // structurally (one guarded read, no other As<uint64>() on the identity) rather than by
+        // this test — see TestNoUnguardedIdentityReadSurvives.
         var legacy = TensorData(DType.Int64, [3L], 0L, 42L, 0L);
         var ex = Assert.Throws<InvalidOperationException>(() => RngRuntimeIdentity.ReadIdentityVector(legacy));
         Assert.Contains("Int64", ex.Message);
@@ -243,10 +245,13 @@ public class RngRuntimeIdentityTests
     }
 
     [Fact]
-    public void TestSchemeVersionMovesWithDrawValuesNotJustLayout()
+    public void TestAlgorithmIdCannotStandInForTheSchemeVersion()
     {
-        // The algorithm id is stable across versions by construction (it maps the RngAlgorithm
-        // enum), so it cannot signal "these draws changed". The scheme version is what does.
+        // Why the version element exists: the algorithm id tracks the RngAlgorithm enum, so it
+        // varies with the CONFIGURED algorithm and not with the scheme. Two configs differing only
+        // in algorithm get different ids but the same scheme version — so an id can never signal
+        // "this build's draws differ from the one that wrote this". Only the version can, and
+        // keeping it in step with draw-value changes is a convention no test can enforce.
         var a = RngRuntimeIdentity.Build(new RngConfig { MasterSeed = 1 });
         var b = RngRuntimeIdentity.Build(new RngConfig { MasterSeed = 1, Algorithm = RngAlgorithm.Threefry2x32Rounds13 });
         Assert.Equal(RngRuntimeIdentity.SchemeVersion, a[RngRuntimeIdentity.SchemeVersionIndex]);
@@ -259,7 +264,7 @@ public class RngRuntimeIdentityTests
     {
         var cfg = new RngConfig { MasterSeed = 42 };
         var vec = RngRuntimeIdentity.Build(cfg);
-        // Header only: [algId, runKey, 0 overrides].
+        // Header only: [schemeVersion, algId, runKey, 0 overrides].
         Assert.Equal(RngRuntimeIdentity.HeaderLength, vec.Length);
         Assert.Equal(0UL, vec[RngRuntimeIdentity.AlgorithmIdIndex]);
         Assert.Equal(cfg.RunMasterKey, vec[RngRuntimeIdentity.RunKeyIndex]);
@@ -318,6 +323,11 @@ public class RngRuntimeIdentityTests
         Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([v, 0UL, 42UL, 1UL]));
         // Trailing garbage after the declared records.
         Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([v, 0UL, 42UL, 0UL, 99UL]));
+        // A record claiming a huge path length. The bound must be computed before narrowing to
+        // int, or `i + pathLen + 1` wraps negative, passes the check, and allocates the claim —
+        // turning a corrupt model file into an OutOfMemoryException instead of this error.
+        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([v, 0UL, 42UL, 1UL, int.MaxValue]));
+        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([v, 0UL, 42UL, 1UL, ulong.MaxValue]));
     }
 }
 

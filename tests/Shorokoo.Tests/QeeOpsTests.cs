@@ -566,11 +566,12 @@ public class QeeIntegerWidthTests
     }
 
     [Fact]
-    public void TestFoldedFloat64ConstantKeepsItsDType()
+    public void TestFloat64ConstantIsNotFoldedThroughTheFloat32Buffer()
     {
-        // The float buffer has the same shape of trap as the integer one: QEE keeps every float
-        // width in one float[] buffer, so materializing a folded Float64 constant as Float32
-        // violates its consumer's type constraint at graph construction.
+        // QEE's float buffer is float32, so a float64 constant cannot survive a host fold intact.
+        // Materializing it anyway is a choice between two wrongs — retype it (breaks the
+        // consumer's type constraint) or stamp Float64 on float32-rounded values (silently wrong,
+        // and 1e300 becomes Infinity). It must decline to fold instead.
         var g = ((ComputationGraph)typeof(QeeFoldedFloat64Constant)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([2L, 2L], 1f, 2f, 3f, 4f);
@@ -578,10 +579,19 @@ public class QeeIntegerWidthTests
         var td = ComputeContext.Default.Execute(concrete, input)[0].ToTensorData();
         Assert.Equal(DType.Float64, td.DType);
         Assert.Equal((double[])[7.0, 8.0, 9.0, 10.0], td.As<float64>().AccessMemory().ToArray());
+
+        // The discriminating half: a value the float32 buffer cannot hold. Folding it through
+        // that buffer would return Infinity; declining to fold keeps it exact.
+        var wide = ((ComputationGraph)typeof(QeeWideFloat64Constant)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var wideConcrete = wide.ToConcreteArchitecture(wide.FromOrderedInputs([input])).ToConcreteModel();
+        var wideTd = ComputeContext.Default.Execute(wideConcrete, input)[0].ToTensorData();
+        Assert.All(wideTd.As<float64>().AccessMemory().ToArray(), v => Assert.True(double.IsFinite(v)));
+        Assert.Equal(1e300, wideTd.As<float64>().AccessMemory().ToArray()[0]);
     }
 
     [Fact]
-    public void TestPartiallyFoldedUInt32ChainMatchesTheUnfoldedResult()
+    public void TestPartiallyFoldedUInt32ChainMatchesTheHostGenerator()
     {
         // Threefry is the real-world instance: RuntimeRng's rotate is a shift pair, so a leaked
         // bit lands inside the result. Compared against the independent host generator.
@@ -618,8 +628,22 @@ public partial class QeeOverflowThenShift
     }
 }
 
-/// <summary>The float analogue: a constant float64 sub-chain folds host-side and must come back
-/// typed float64, not retyped to float32 — its consumer's type constraint sees the dtype.</summary>
+/// <summary>Same shape, but with a constant beyond float32's range: 1e300 survives only if the
+/// chain is never routed through QEE's float32 buffer.</summary>
+[Module]
+public partial class QeeWideFloat64Constant
+{
+    public static Tensor<float64> Inline(Tensor<float32> x)
+    {
+        var runtime = x.Reshape([Scalar(-1L)]).Cast<float64>() * Scalar(0.0);
+        return runtime + (Scalar(1e300) * Scalar(1.0));
+    }
+}
+
+/// <summary>A constant float64 sub-chain feeding a runtime-valued float64 tensor. QEE's float
+/// buffer is float32, so it must NOT materialize this as a folded constant — neither retyped to
+/// Float32 (which violates the consumer's type constraint) nor stamped Float64 over float32-rounded
+/// values. Refusing to fold leaves the real ops for a backend that computes at genuine float64.</summary>
 [Module]
 public partial class QeeFoldedFloat64Constant
 {

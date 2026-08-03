@@ -82,8 +82,9 @@ internal static class RuntimeTensorFactory
     /// width in one <c>long</c> buffer, so an op that computes at 64 bits — a left shift, a
     /// bitwise or/xor of already-widened operands — can leave bits above the declared width
     /// set. Those bits are invisible to a later add (exact mod 2^w either way) but not to a
-    /// right shift, which pulls them straight down into the result. Applied to every op's
-    /// output, so no op has to remember to narrow; it is idempotent for the ops that already do.
+    /// right shift, which pulls them straight down into the result. Applied to every op's output
+    /// (see the <see cref="IRuntimeTensor"/> overload for optionals and sequences), so no op has
+    /// to remember to narrow; it is idempotent for the ops that already do.
     ///
     /// <para>Unsigned widths land in <c>[0, 2^w)</c> and signed widths sign-extend, matching
     /// how <see cref="TensorDataConverter.ToRuntimeTensor"/> loads them. <c>Int64</c> and
@@ -119,6 +120,32 @@ internal static class RuntimeTensorFactory
         // AsImmutableArray wraps buf in place; ImmutableArray.Create would copy it a second time.
         return buf is null ? rt : rt with { IntData = ImmutableCollectionsMarshal.AsImmutableArray(buf) };
     }
+
+    /// <summary>
+    /// <see cref="IRuntimeTensor"/>-aware dispatch for <see cref="NarrowToDeclaredWidth(RuntimeTensor)"/>,
+    /// mirroring the <see cref="EnforceDataSizeLimit(IRuntimeTensor, int)"/> dispatch: an
+    /// optional's value tensor and every element of a sequence get narrowed too. Without the
+    /// recursion an integer sequence element could still carry bits above its declared width —
+    /// exactly the case narrowing exists to rule out.
+    /// </summary>
+    public static IRuntimeTensor NarrowToDeclaredWidth(IRuntimeTensor rt)
+        => rt switch
+        {
+            RuntimeTensor plain => NarrowToDeclaredWidth(plain),
+            RuntimeOptionalTensor opt => opt.ValueTensor is null
+                ? opt
+                : opt with { ValueTensor = NarrowToDeclaredWidth(opt.ValueTensor) },
+            RuntimeSequenceTensor seq => seq with
+            {
+                Tensors = seq.Tensors is { } ts
+                    ? ts.Select(NarrowToDeclaredWidth).ToImmutableArray()
+                    : null,
+                TemplateTensor = seq.TemplateTensor is null
+                    ? null
+                    : NarrowToDeclaredWidth(seq.TemplateTensor),
+            },
+            _ => rt,
+        };
 
     /// <summary>
     /// <see cref="IRuntimeTensor"/>-aware dispatch that returns a copy of <paramref name="rt"/>

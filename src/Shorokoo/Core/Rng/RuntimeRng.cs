@@ -6,7 +6,10 @@ namespace Shorokoo.Core.Rng;
 
 /// <summary>
 /// In-graph counter-based RNG: builds an ONNX-op subgraph computing Threefry-2x32 over a
-/// per-element counter, entirely from ordinary integer graph math. Because it uses no ONNX
+/// per-element counter, entirely from ordinary integer/float graph math — the bit generator and
+/// the uniform transform are integer and exact, while the normal transform's Box-Muller step runs
+/// float32 Ln/Sqrt/Cos kernels (which is why the normal goldens carry a tolerance and the uniform
+/// ones do not). Because it uses no ONNX
 /// random op, the result is deterministic and identical across execution providers and the
 /// Quick Execution Engine, and an exported model's randomness is self-contained — unlike ONNX's
 /// <c>RandomUniformLike</c>, whose value depends on the runtime, EP, platform, and session

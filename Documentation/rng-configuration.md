@@ -37,7 +37,7 @@ Because the key tree *is* the ModelId tree:
 
 A model's entire runtime RNG identity lives in one ordinary non-trainable parameter,
 **`RngSeed`**, at the reserved ModelId `[0]` (slot 0 is never assigned to anything else).
-Its value encodes the runtime master key, any per-stream runtime overrides, and
+Its value encodes the RNG scheme version, the runtime master key, any per-stream overrides, and
 the algorithm id. Every feed's key is then **derived in-graph**: a chain of split
 operations rooted at the `RngSeed` parameter, one split per element of the feed's ModelId
 path — the fold described above, spelled out as graph ops.
@@ -122,8 +122,9 @@ counter (`RngExecutionCounter`, ordinary model state, an int64 scalar initialize
 advanced +1 per execution) and wires it into every feed. A draw folds its whole 64-bit
 `drawBase` into the stream key rather than spending a counter word on it, so execution *n*
 draws from its own substream of that stream and the element index gets the whole counter to
-itself. (The fold reuses the same bijection a key split uses, but it is a draw-internal step,
-not a node of the configurable key tree — a stream's key is unchanged by it.) Modules never
+itself. (The fold is a draw-internal step, not a node of the configurable key tree — a stream's
+key is unchanged by it, and unlike a key split it runs at the selected algorithm's own round
+count.) Modules never
 touch it — `Globals.RandomUniform` is all a consumer writes. Under the training rig the
 counter rides the checkpoint, so Dropout masks differ per step and a resumed run at step N
 draws exactly what the uninterrupted run would; in one-shot inference it is baked at 0, so
@@ -131,7 +132,9 @@ inference stays deterministic and stateless. One counter serves all feeds becaus
 already decorrelated by their stream keys; it costs the checkpoint a single scalar.
 Framework-managed counters like this one are 64-bit state end-to-end — the counter increments
 exactly, and the whole 64-bit value reaches the draw — so there is no float32-style
-saturation point, and no wrap point, past which masks would start repeating.
+saturation point, and no wrap point, past which a mask would repeat a mask it drew before.
+(Individual mask *values* still collide as often as chance dictates — a uniform keeps 24 bits.
+What does not repeat is the stream.)
 
 ## Feeds inside loops
 

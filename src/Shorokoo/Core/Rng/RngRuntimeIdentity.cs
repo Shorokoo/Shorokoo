@@ -62,7 +62,10 @@ internal sealed class RngRuntimeIdentity
     /// a carrier written before the identity became uint64 gets one explanatory error rather than
     /// a bare <c>InvalidCastException</c> from whichever door it happened to arrive at.
     /// </summary>
-    /// <exception cref="InvalidOperationException">The tensor is not a uint64 identity vector.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="data"/> is null.</exception>
+    /// <exception cref="InvalidOperationException">The tensor's element type is not uint64. The
+    /// vector's <em>contents</em> — length, scheme version, record structure — are validated by
+    /// <see cref="Decode"/>, not here.</exception>
     public static ulong[] ReadIdentityVector(TensorData data)
     {
         if (data is null) throw new ArgumentNullException(nameof(data));
@@ -166,9 +169,17 @@ internal sealed class RngRuntimeIdentity
         {
             if (i >= identity.Length)
                 throw new ArgumentException("Malformed RngSeed identity: truncated override record.", nameof(identity));
-            int pathLen = checked((int)identity[i++]);
-            if (pathLen <= 0 || i + pathLen + 1 > identity.Length)
+            // Bound the length against the vector BEFORE narrowing to int: a hostile or corrupt
+            // record can claim any uint64 path length, and `i + pathLen + 1` in int arithmetic
+            // would wrap negative, pass the check, and then allocate the claimed length.
+            ulong claimedPathLen = identity[i++];
+            // The record needs pathLen elements plus one key, so pathLen < remaining. Written as
+            // a comparison rather than `pathLen + 1 > remaining` because the claim is untrusted:
+            // adding to it overflows for a length near ulong.MaxValue and the check passes.
+            ulong remaining = (ulong)(identity.Length - i);
+            if (claimedPathLen == 0 || claimedPathLen >= remaining)
                 throw new ArgumentException("Malformed RngSeed identity: truncated override record.", nameof(identity));
+            int pathLen = (int)claimedPathLen;
             int[] path = new int[pathLen];
             for (int j = 0; j < pathLen; j++) path[j] = checked((int)unchecked((long)identity[i++]));
             int keyOffset = i;

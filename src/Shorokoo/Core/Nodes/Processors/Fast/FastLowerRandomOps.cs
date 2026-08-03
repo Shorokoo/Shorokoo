@@ -20,7 +20,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// <see cref="FastWireRngKeyDerivation"/>).
     ///
     /// <para><b>Keyed feeds</b> (id-bearing, chain wired) rewrite to the keyed deterministic
-    /// draw form <c>SHRK_RNG_UNIFORM/NORMAL</c> — inputs <c>[key, drawBase, shape, a, b]</c> —
+    /// draw form <c>SHRK_RNG_UNIFORM/NORMAL</c> — inputs <c>[key, substreamIndex, shape, a, b]</c> —
     /// and then, like every keyed SHRK_RNG_* op (the chain splits included), to a call of the
     /// named algorithm's non-inlined function: the exported model calls tagged local
     /// FunctionProtos, so its randomness is deterministic, portable, and identifiable. The
@@ -103,7 +103,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
 
                 var idVals = node.Attributes.GetIntsVal(ShrkAttrLocalModelId);
-                // The key input is the last input slot: [shape, drawBase, iterationIndices, key].
+                // The key input is the last input slot: [shape, substreamIndex, iterationIndices, key].
                 var keySource = node.Inputs.Count > 3 ? node.Inputs[3] : null;
                 if (idVals is { Length: > 0 } && keySource is { } ks)
                 {
@@ -254,8 +254,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         /// <summary>
         /// Rewrites an id-bearing SHRK_RANDOM_* feed in place to the SHRK_RNG_UNIFORM/NORMAL
-        /// form (inputs <c>[key, drawBase, shape, a, b]</c>). The key is the feed's derivation
-        /// chain (already wired as its key input); drawBase is the site's own counter input
+        /// form (inputs <c>[key, substreamIndex, shape, a, b]</c>). The key is the feed's derivation
+        /// chain (already wired as its key input); substreamIndex is the site's own counter input
         /// when wired (e.g. the injected per-execution state counter) else 0, and
         /// the distribution bounds come off the node's attributes as f32 scalar constants.
         ///
@@ -278,7 +278,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 ? node.Attributes.GetFloatVal(AttrHigh) ?? 1.0f
                 : node.Attributes.GetFloatVal(AttrScale) ?? 1.0f;
 
-            var drawBaseKey = node.Inputs.Count > 1 && node.Inputs[1] is { } db
+            var substreamIndexKey = node.Inputs.Count > 1 && node.Inputs[1] is { } db
                 ? AppendCastToUInt64(db, newNodes)
                 : AppendScalarUInt64(0UL, newNodes);
             var aKey = AppendScalarFloat32(a, newNodes);
@@ -292,13 +292,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 attrDefs);
             node.FullInputs = new Dictionary<string, List<FastTensorKey?>>
             {
-                [""] = new List<FastTensorKey?> { keySource, drawBaseKey, shapeInput, aKey, bKey }
+                [""] = new List<FastTensorKey?> { keySource, substreamIndexKey, shapeInput, aKey, bKey }
             };
         }
 
         /// <summary>
         /// Rewrites an id-bearing SHRK_RANDOM_BITS feed in place to the SHRK_RNG_BITS keyed draw
-        /// form (inputs <c>[key, drawBase, shape]</c>), carrying the feed's output uint width
+        /// form (inputs <c>[key, substreamIndex, shape]</c>), carrying the feed's output uint width
         /// (shrk_dtype) onto the keyed op. Bits carry no distribution bounds.
         /// </summary>
         private static void RewriteBitsFeedToKeyedDraw(
@@ -309,7 +309,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var dtype = node.Attributes.GetDTypeVal(ShrkAttrDtype)
                 ?? throw new InvalidOperationException(
                     "FastLowerRandomOps: a SHRK_RANDOM_BITS feed is missing its shrk_dtype (output width) attribute.");
-            var drawBaseKey = node.Inputs.Count > 1 && node.Inputs[1] is { } db
+            var substreamIndexKey = node.Inputs.Count > 1 && node.Inputs[1] is { } db
                 ? AppendCastToUInt64(db, newNodes)
                 : AppendScalarUInt64(0UL, newNodes);
 
@@ -323,7 +323,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }, attrDefs);
             node.FullInputs = new Dictionary<string, List<FastTensorKey?>>
             {
-                [""] = new List<FastTensorKey?> { keySource, drawBaseKey, shapeInput }
+                [""] = new List<FastTensorKey?> { keySource, substreamIndexKey, shapeInput }
             };
         }
 

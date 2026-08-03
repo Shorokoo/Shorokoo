@@ -328,8 +328,8 @@ internal static partial class InternalOp
     /// RNG identity; a feed without stream identity lowers to ConstantOfShape +
     /// RandomUniformLike.
     /// </summary>
-    public static Variable RandomUniform(Variable shape, float? high = null, float? low = null, Variable? drawBase = null, Variable? iterationIndices = null)
-        => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_UNIFORM, [shape, drawBase, iterationIndices], [
+    public static Variable RandomUniform(Variable shape, float? high = null, float? low = null, Variable? substreamIndex = null, Variable? iterationIndices = null)
+        => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_UNIFORM, [shape, substreamIndex, iterationIndices], [
             (AttrHigh, high), (AttrLow, low),
             (ShrkAttrLocalModelId, (long[])[])]);
 
@@ -337,8 +337,8 @@ internal static partial class InternalOp
     /// A normal random feed N(mean, scale) taking its shape as a tensor input; see
     /// <see cref="RandomUniform(Variable, float?, float?, Variable?, Variable?)"/>.
     /// </summary>
-    public static Variable RandomNormal(Variable shape, float? mean = null, float? scale = null, Variable? drawBase = null, Variable? iterationIndices = null)
-        => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_NORMAL, [shape, drawBase, iterationIndices], [
+    public static Variable RandomNormal(Variable shape, float? mean = null, float? scale = null, Variable? substreamIndex = null, Variable? iterationIndices = null)
+        => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_NORMAL, [shape, substreamIndex, iterationIndices], [
             (AttrMean, mean), (AttrScale, scale),
             (ShrkAttrLocalModelId, (long[])[])]);
 
@@ -348,13 +348,13 @@ internal static partial class InternalOp
             (ShrkAttrRngAlgorithm, algorithm)]);
 
     /// <summary>Keyed deterministic uniform draw U(low, high) of dynamic shape under the named algorithm.</summary>
-    public static Variable RngUniform(Variable key, Variable drawBase, Variable shape, Variable low, Variable high, string algorithm)
-        => NodeBuilder.BuildNodeSingleOut(SHRK_RNG_UNIFORM, [key, drawBase, shape, low, high], [
+    public static Variable RngUniform(Variable key, Variable substreamIndex, Variable shape, Variable low, Variable high, string algorithm)
+        => NodeBuilder.BuildNodeSingleOut(SHRK_RNG_UNIFORM, [key, substreamIndex, shape, low, high], [
             (ShrkAttrRngAlgorithm, algorithm)]);
 
     /// <summary>Keyed deterministic normal draw N(mean, scale) of dynamic shape under the named algorithm.</summary>
-    public static Variable RngNormal(Variable key, Variable drawBase, Variable shape, Variable mean, Variable scale, string algorithm)
-        => NodeBuilder.BuildNodeSingleOut(SHRK_RNG_NORMAL, [key, drawBase, shape, mean, scale], [
+    public static Variable RngNormal(Variable key, Variable substreamIndex, Variable shape, Variable mean, Variable scale, string algorithm)
+        => NodeBuilder.BuildNodeSingleOut(SHRK_RNG_NORMAL, [key, substreamIndex, shape, mean, scale], [
             (ShrkAttrRngAlgorithm, algorithm)]);
 
     /// <summary>
@@ -362,14 +362,14 @@ internal static partial class InternalOp
     /// shape as a tensor input. An id-bearing feed lowers to the keyed deterministic bits draw
     /// under the model's RNG identity; unlike the float feeds there is no unkeyed fallback.
     /// </summary>
-    public static Variable RandomBits(Variable shape, DType dtype, Variable? drawBase = null, Variable? iterationIndices = null)
-        => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_BITS, [shape, drawBase, iterationIndices], [
+    public static Variable RandomBits(Variable shape, DType dtype, Variable? substreamIndex = null, Variable? iterationIndices = null)
+        => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_BITS, [shape, substreamIndex, iterationIndices], [
             (ShrkAttrDtype, dtype),
             (ShrkAttrLocalModelId, (long[])[])]);
 
     /// <summary>Keyed deterministic raw-bits draw (unsigned integer of width <paramref name="dtype"/>) of dynamic shape under the named algorithm.</summary>
-    public static Variable RngBits(Variable key, Variable drawBase, Variable shape, DType dtype, string algorithm)
-        => NodeBuilder.BuildNodeSingleOut(SHRK_RNG_BITS, [key, drawBase, shape], [
+    public static Variable RngBits(Variable key, Variable substreamIndex, Variable shape, DType dtype, string algorithm)
+        => NodeBuilder.BuildNodeSingleOut(SHRK_RNG_BITS, [key, substreamIndex, shape], [
             (ShrkAttrRngAlgorithm, algorithm), (ShrkAttrDtype, dtype)]);
 
     /// <summary>

@@ -263,7 +263,7 @@ public class RngPinTests
         var cfg = new RngConfig { MasterSeed = 3 };
         var report = arch.GetRngStreamReport(cfg);
 
-        // Two streams: the generator's injected drawBase counter state (RngExecutionCounter —
+        // Two streams: the generator's injected substreamIndex counter state (RngExecutionCounter —
         // a draw-free zero fill, but it occupies an id slot, so the inventory lists it), plus
         // ONE row for the feed site [1, -1, 1]. The -1 iteration slot stays: the site's
         // per-iteration streams derive at runtime from the iteration index (an in-graph split

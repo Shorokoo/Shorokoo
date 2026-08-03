@@ -7,7 +7,7 @@ using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
 
-/// <summary>Keyed uniform draw at the input's shape under a literal key, drawBase 0.</summary>
+/// <summary>Keyed uniform draw at the input's shape under a literal key, substreamIndex 0.</summary>
 [Module]
 public partial class RngKeyedUniformDraw
 {
@@ -44,7 +44,7 @@ public partial class RngKeyedNormalDraw
     }
 }
 
-/// <summary>Keyed raw-bits draw (U32) at the input's shape under a literal key, drawBase 0.</summary>
+/// <summary>Keyed raw-bits draw (U32) at the input's shape under a literal key, substreamIndex 0.</summary>
 [Module]
 public partial class RngKeyedBitsDraw
 {
@@ -77,10 +77,10 @@ public class RngAlgorithmTests
         return outputs[0].ToTensorData().As<float32>().AccessMemory().ToArray();
     }
 
-    // Host reference: drawBase folds into the key, element i indexes the whole counter;
+    // Host reference: substreamIndex folds into the key, element i indexes the whole counter;
     // uniform = low 24 bits of x0 * 2^-24.
-    private static float HostUniform(long i, ulong key, ulong drawBase = 0)
-        => RngTestOracle.DrawUniform(key, drawBase, i);
+    private static float HostUniform(long i, ulong key, ulong substreamIndex = 0)
+        => RngTestOracle.DrawUniform(key, substreamIndex, i);
 
     private static uint[] RunDrawU32<TModule>(long rows, long cols)
     {

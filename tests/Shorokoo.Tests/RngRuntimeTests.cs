@@ -6,7 +6,7 @@ using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
 
-/// <summary>Emits the in-graph runtime uniform draw at the input's shape (fixed key/drawBase).</summary>
+/// <summary>Emits the in-graph runtime uniform draw at the input's shape (fixed key/substreamIndex).</summary>
 [Module]
 public partial class RtUniformDraw
 {
@@ -14,7 +14,7 @@ public partial class RtUniformDraw
         => RuntimeRng.StandardUniform(x.ShapeTensor(), Scalar(123UL | (456UL << 32)), Scalar(0UL));
 }
 
-/// <summary>Emits the in-graph runtime normal draw at the input's shape (fixed key/drawBase).</summary>
+/// <summary>Emits the in-graph runtime normal draw at the input's shape (fixed key/substreamIndex).</summary>
 [Module]
 public partial class RtNormalDraw
 {
@@ -79,15 +79,15 @@ public class RngRuntimeTests
         return outputs[0].ToTensorData().As<float32>().AccessMemory().ToArray();
     }
 
-    // Host reference for the runtime scheme: drawBase folds into the key, element i indexes
+    // Host reference for the runtime scheme: substreamIndex folds into the key, element i indexes
     // the whole counter; uniform = low 24 bits of x0 * 2^-24.
-    private static float HostUniform(long i, ulong key, ulong drawBase)
-        => RngTestOracle.DrawUniform(key, drawBase, i);
+    private static float HostUniform(long i, ulong key, ulong substreamIndex)
+        => RngTestOracle.DrawUniform(key, substreamIndex, i);
 
     // Host reference for the raw-bits scheme: element i draws one generator word pair; the
     // narrow widths take the low bits of x0, U32 the whole word, U64 = x0 | (x1 << 32).
-    private static ulong HostBits(long i, int width, ulong key, ulong drawBase)
-        => RngTestOracle.DrawBits(key, drawBase, i, width);
+    private static ulong HostBits(long i, int width, ulong key, ulong substreamIndex)
+        => RngTestOracle.DrawBits(key, substreamIndex, i, width);
 
     private static TensorData RunDrawRaw<TModule>(long rows, long cols)
     {
@@ -304,15 +304,15 @@ public class RngRuntimeTests
     [Fact]
     public void TestDrawPositionUsesTheWholeSixtyFourBitRange()
     {
-        // drawBase is the execution counter. Under the retired scheme it occupied one 32-bit
+        // substreamIndex is the execution counter. Under the retired scheme it occupied one 32-bit
         // counter word, so execution 2^32 repeated execution 0's draw exactly — the wrap the
         // user docs explicitly promised did not exist.
         const ulong key = 0xDEAD_BEEF_FEED_FACEUL;
-        static float[] Draw(ulong drawBase)
+        static float[] Draw(ulong substreamIndex)
         {
             var shape = Vector(4L);
             var g = new InternalComputationGraph([],
-                [RuntimeRng.StandardUniform(shape, Scalar(key), Scalar(drawBase))]);
+                [RuntimeRng.StandardUniform(shape, Scalar(key), Scalar(substreamIndex))]);
             return ComputeContext.Default.Execute(g)[0]
                 .ToTensorData().As<float32>().AccessMemory().ToArray();
         }

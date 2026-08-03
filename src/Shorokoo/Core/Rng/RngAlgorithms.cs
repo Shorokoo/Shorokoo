@@ -26,7 +26,7 @@ internal static class RngAlgorithms
 {
     /// <summary>Threefry-2x32 (Random123, 20 rounds) + torch-convention 24-bit uniform + Box–Muller normal.
     ///
-    /// <para><b>v2</b> supersedes <c>…v1</c>: a draw now folds its whole 64-bit <c>drawBase</c> into
+    /// <para><b>v2</b> supersedes <c>…v1</c>: a draw now folds its whole 64-bit <c>substreamIndex</c> into
     /// the key instead of spending one 32-bit counter word on it, so the element index gets the whole
     /// counter and neither aliases at 2³². That changes every drawn value, and the key/index/draw
     /// position types changed with it (two truncated int64s → one whole uint64), so a <c>…v1</c>
@@ -155,31 +155,31 @@ internal static class RngAlgorithms
         => RuntimeRng.SplitKey(key, index);
 
     private static Tensor<float32> UniformImpl(
-        Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape,
+        Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape,
         Scalar<float32> low, Scalar<float32> high)
-        => RuntimeRng.Uniform(shape, key, drawBase, low, high, Threefry2x32.Rounds);
+        => RuntimeRng.Uniform(shape, key, substreamIndex, low, high, Threefry2x32.Rounds);
 
     private static Tensor<float32> NormalImpl(
-        Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape,
+        Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape,
         Scalar<float32> mean, Scalar<float32> scale)
-        => RuntimeRng.Normal(shape, key, drawBase, mean, scale, Threefry2x32.Rounds);
+        => RuntimeRng.Normal(shape, key, substreamIndex, mean, scale, Threefry2x32.Rounds);
 
     private static Tensor<float32> Uniform13Impl(
-        Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape,
+        Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape,
         Scalar<float32> low, Scalar<float32> high)
-        => RuntimeRng.Uniform(shape, key, drawBase, low, high, Threefry2x32.Rounds13);
+        => RuntimeRng.Uniform(shape, key, substreamIndex, low, high, Threefry2x32.Rounds13);
 
     private static Tensor<float32> Normal13Impl(
-        Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape,
+        Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape,
         Scalar<float32> mean, Scalar<float32> scale)
-        => RuntimeRng.Normal(shape, key, drawBase, mean, scale, Threefry2x32.Rounds13);
+        => RuntimeRng.Normal(shape, key, substreamIndex, mean, scale, Threefry2x32.Rounds13);
 
-    private static Tensor<uint8>  BitsU8Impl  (Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU8(shape, key, drawBase, Threefry2x32.Rounds);
-    private static Tensor<uint16> BitsU16Impl (Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU16(shape, key, drawBase, Threefry2x32.Rounds);
-    private static Tensor<uint32> BitsU32Impl (Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU32(shape, key, drawBase, Threefry2x32.Rounds);
-    private static Tensor<uint64> BitsU64Impl (Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU64(shape, key, drawBase, Threefry2x32.Rounds);
-    private static Tensor<uint8>  BitsU8Impl13 (Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU8(shape, key, drawBase, Threefry2x32.Rounds13);
-    private static Tensor<uint16> BitsU16Impl13(Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU16(shape, key, drawBase, Threefry2x32.Rounds13);
-    private static Tensor<uint32> BitsU32Impl13(Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU32(shape, key, drawBase, Threefry2x32.Rounds13);
-    private static Tensor<uint64> BitsU64Impl13(Scalar<uint64> key, Scalar<uint64> drawBase, Vector<int64> shape) => RuntimeRng.BitsU64(shape, key, drawBase, Threefry2x32.Rounds13);
+    private static Tensor<uint8>  BitsU8Impl  (Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape) => RuntimeRng.BitsU8(shape, key, substreamIndex, Threefry2x32.Rounds);
+    private static Tensor<uint16> BitsU16Impl (Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape) => RuntimeRng.BitsU16(shape, key, substreamIndex, Threefry2x32.Rounds);
+    private static Tensor<uint32> BitsU32Impl (Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape) => RuntimeRng.BitsU32(shape, key, substreamIndex, Threefry2x32.Rounds);
+    private static Tensor<uint64> BitsU64Impl (Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape) => RuntimeRng.BitsU64(shape, key, substreamIndex, Threefry2x32.Rounds);
+    private static Tensor<uint8>  BitsU8Impl13 (Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape) => RuntimeRng.BitsU8(shape, key, substreamIndex, Threefry2x32.Rounds13);
+    private static Tensor<uint16> BitsU16Impl13(Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape) => RuntimeRng.BitsU16(shape, key, substreamIndex, Threefry2x32.Rounds13);
+    private static Tensor<uint32> BitsU32Impl13(Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape) => RuntimeRng.BitsU32(shape, key, substreamIndex, Threefry2x32.Rounds13);
+    private static Tensor<uint64> BitsU64Impl13(Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape) => RuntimeRng.BitsU64(shape, key, substreamIndex, Threefry2x32.Rounds13);
 }

@@ -59,23 +59,23 @@ internal static class RngTestOracle
     /// the whole 64-bit element index.
     /// </summary>
     public static (uint x0, uint x1) DrawWords(
-        ulong key, ulong drawBase, long i, int rounds = Threefry2x32.Rounds)
+        ulong key, ulong substreamIndex, long i, int rounds = Threefry2x32.Rounds)
     {
         var (dk0, dk1) = Threefry2x32.Bijection(
-            (uint)drawBase, (uint)(drawBase >> 32), (uint)key, (uint)(key >> 32), rounds);
+            (uint)substreamIndex, (uint)(substreamIndex >> 32), (uint)key, (uint)(key >> 32), rounds);
         return Threefry2x32.Bijection((uint)i, (uint)((ulong)i >> 32), dk0, dk1, rounds);
     }
 
     /// <summary>Element <paramref name="i"/> of a standard-uniform draw (low 24 bits × 2⁻²⁴).</summary>
     public static float DrawUniform(
-        ulong key, ulong drawBase, long i, int rounds = Threefry2x32.Rounds)
-        => (DrawWords(key, drawBase, i, rounds).x0 & 0x00FFFFFFu) * (1.0f / 16777216.0f);
+        ulong key, ulong substreamIndex, long i, int rounds = Threefry2x32.Rounds)
+        => (DrawWords(key, substreamIndex, i, rounds).x0 & 0x00FFFFFFu) * (1.0f / 16777216.0f);
 
     /// <summary>Element <paramref name="i"/> of a raw-bits draw of the given uint width.</summary>
     public static ulong DrawBits(
-        ulong key, ulong drawBase, long i, int width, int rounds = Threefry2x32.Rounds)
+        ulong key, ulong substreamIndex, long i, int width, int rounds = Threefry2x32.Rounds)
     {
-        var (x0, x1) = DrawWords(key, drawBase, i, rounds);
+        var (x0, x1) = DrawWords(key, substreamIndex, i, rounds);
         return width switch
         {
             8 => (byte)x0,

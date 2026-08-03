@@ -591,13 +591,13 @@ namespace Shorokoo
             // Capture the ambient loop context (exactly like trainable-param Init calls) so an
             // in-loop feed's ModelId gets an iteration slot and the runtime iteration index
             // can select its per-iteration stream (see FastApplyIdentifierTemplates /
-            // FastLowerRandomOps). The drawBase channel is NOT a caller concern: the RNG
+            // FastLowerRandomOps). The substreamIndex channel is NOT a caller concern: the RNG
             // system wires its own model-global execution counter into every feed at
             // concretization (FastInjectRngDrawCounter), giving per-step freshness under
             // training for free.
             Vector<int64> iterationIndices = [.. LoopAPI.IterationIndices];
             return InternalOp.RandomUniform(shape, high: high, low: low,
-                drawBase: null, iterationIndices: iterationIndices);
+                substreamIndex: null, iterationIndices: iterationIndices);
         }
 
         /// <summary>
@@ -608,7 +608,7 @@ namespace Shorokoo
         {
             Vector<int64> iterationIndices = [.. LoopAPI.IterationIndices];
             return InternalOp.RandomNormal(shape, mean: mean, scale: scale,
-                drawBase: null, iterationIndices: iterationIndices);
+                substreamIndex: null, iterationIndices: iterationIndices);
         }
 
         /// <summary>
@@ -631,7 +631,7 @@ namespace Shorokoo
                     $"RandomBits<{typeof(T).Name}>: raw random bits require an unsigned integer width " +
                     $"(uint8, uint16, uint32, or uint64); '{dtype}' is not supported.");
             Vector<int64> iterationIndices = [.. LoopAPI.IterationIndices];
-            return InternalOp.RandomBits(shape, dtype, drawBase: null, iterationIndices: iterationIndices);
+            return InternalOp.RandomBits(shape, dtype, substreamIndex: null, iterationIndices: iterationIndices);
         }
 
         /// <summary>Creates TensorData of the given dtype from boxed values.</summary>

@@ -58,7 +58,7 @@ public sealed class RngStreamInfo
     public IReadOnlyList<int>? SitePath { get; init; }
 
     /// <summary>
-    /// True for a framework-injected consumer (the <c>RngExecutionCounter</c> drawBase state):
+    /// True for a framework-injected consumer (the <c>RngExecutionCounter</c> substreamIndex state):
     /// listed for inventory completeness, but excluded from the pin skeleton — no source-level
     /// variable exists to pin it with, and the framework appends it after id assignment, so it
     /// never needs freezing.

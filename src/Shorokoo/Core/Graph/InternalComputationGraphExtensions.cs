@@ -80,7 +80,7 @@ namespace Shorokoo.Graph
             // MODULE_SET_HYPERPARAMS) so the next stages don't see ghost templates.
             FastProcessorHelper.RemoveUnreachableNodes(fastGraph);
 
-            // Generator-managed drawBase: inject the model-global execution counter and wire
+            // Generator-managed substreamIndex: inject the model-global execution counter and wire
             // it into every runtime random feed, BEFORE template extraction so the counter's
             // state param rides the normal trainable/state param pipeline from here on.
             FastInjectRngDrawCounter.Process(fastGraph);

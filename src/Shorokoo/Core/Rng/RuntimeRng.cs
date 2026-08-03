@@ -23,10 +23,12 @@ namespace Shorokoo.Core.Rng;
 /// means modular wraparound is the type's own semantics rather than an explicit mask after every
 /// operation, and a rotate is a genuine pair of shifts.</para>
 ///
-/// <para>A draw is keyed by <c>(key, drawBase)</c> and indexed by the flat element index
-/// <c>i</c>: <c>drawBase</c> (a per-execution value, e.g. the training step) folds into the key
+/// <para>A draw is keyed by <c>(key, substreamIndex)</c> and indexed by the flat element index
+/// <c>i</c>. <c>substreamIndex</c> selects which substream of the consumer's key to draw from — the
+/// execution counter for a runtime feed (so each execution draws fresh), the draw's ordinal within
+/// an initializer when one initializer draws more than once. It folds into the key
 /// and <c>i</c> occupies the whole counter, so successive executions draw fresh values while any
-/// fixed <c>(key, drawBase, i)</c> replays exactly. Bit→float is the low 24 bits × 2⁻²⁴;
+/// fixed <c>(key, substreamIndex, i)</c> replays exactly. Bit→float is the low 24 bits × 2⁻²⁴;
 /// the normal transform is Box–Muller with radius = √(−2·ln(1−u₁)). Mirrors
 /// <see cref="Threefry2x32"/> bit-for-bit (validated against the Random123 known-answer
 /// vectors — see <c>RngRuntimeTests</c>).</para>
@@ -141,16 +143,16 @@ internal static class RuntimeRng
     ///
     /// <para>The fold reuses the bijection, but it is <b>not</b> the key tree's split: it runs at
     /// this algorithm's <paramref name="rounds"/>, whereas a key split is pinned to the default
-    /// algorithm so switching generators never re-keys a stream. Nor is <c>drawBase = d</c> the
-    /// same as drawing at <c>drawBase = 0</c> under <c>split(key, d)</c> — that would fold twice
+    /// algorithm so switching generators never re-keys a stream. Nor is <c>substreamIndex = d</c> the
+    /// same as drawing at <c>substreamIndex = 0</c> under <c>split(key, d)</c> — that would fold twice
     /// (<c>B(0, B(d, key))</c>), and <c>B(0, ·)</c> is not the identity. The draw simply runs
     /// under the folded key <c>B(d, key)</c>.</para>
     /// </summary>
     private static (Tensor<uint32> x0, Tensor<uint32> x1) Draw(
-        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> drawBase, int rounds)
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds)
     {
         var (k0, k1) = Words(key);
-        var (d0, d1) = Words(drawBase);
+        var (d0, d1) = Words(substreamIndex);
         var (dk0, dk1) = Bijection(d0, d1, k0, k1, rounds);
 
         var (c0, c1) = Words(ElementIndex(shape));
@@ -159,17 +161,17 @@ internal static class RuntimeRng
 
     /// <summary>Standard uniform U(0,1) of the given shape (bit generator: Threefry-2x32-<paramref name="rounds"/>).</summary>
     public static Tensor<float32> StandardUniform(
-        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> drawBase, int rounds = Threefry2x32.Rounds)
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
     {
-        var (x0, _) = Draw(shape, key, drawBase, rounds);
+        var (x0, _) = Draw(shape, key, substreamIndex, rounds);
         return ToUniform(x0).Reshape(shape);
     }
 
     /// <summary>Standard normal N(0,1) of the given shape (per-element Box–Muller over Threefry-2x32-<paramref name="rounds"/>).</summary>
     public static Tensor<float32> StandardNormal(
-        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> drawBase, int rounds = Threefry2x32.Rounds)
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
     {
-        var (x0, x1) = Draw(shape, key, drawBase, rounds);
+        var (x0, x1) = Draw(shape, key, substreamIndex, rounds);
         var u1 = ToUniform(x0);
         var u2 = ToUniform(x1);
         var radius = ((-u1 + Scalar(1.0f)).Ln() * Scalar(-2.0f)).Sqrt();   // √(−2·ln(1−u₁))
@@ -179,15 +181,15 @@ internal static class RuntimeRng
 
     /// <summary>U(low, high) of the given shape.</summary>
     public static Tensor<float32> Uniform(
-        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> drawBase,
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex,
         Scalar<float32> low, Scalar<float32> high, int rounds = Threefry2x32.Rounds)
-        => StandardUniform(shape, key, drawBase, rounds) * (high - low) + low;
+        => StandardUniform(shape, key, substreamIndex, rounds) * (high - low) + low;
 
     /// <summary>N(mean, scale) of the given shape.</summary>
     public static Tensor<float32> Normal(
-        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> drawBase,
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex,
         Scalar<float32> mean, Scalar<float32> scale, int rounds = Threefry2x32.Rounds)
-        => StandardNormal(shape, key, drawBase, rounds) * scale + mean;
+        => StandardNormal(shape, key, substreamIndex, rounds) * scale + mean;
 
     // ── Raw random bits ─────────────────────────────────────────────────────────────────
     // One generator draw per element. The generator's low word x0 is a uniformly-random 32-bit
@@ -196,33 +198,33 @@ internal static class RuntimeRng
 
     /// <summary>Raw uniform bits, U8 (the low 8 bits of the generator word), of the given shape.</summary>
     public static Tensor<uint8> BitsU8(
-        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> drawBase, int rounds = Threefry2x32.Rounds)
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
     {
-        var (x0, _) = Draw(shape, key, drawBase, rounds);
+        var (x0, _) = Draw(shape, key, substreamIndex, rounds);
         return x0.Cast<uint8>().Reshape(shape);
     }
 
     /// <summary>Raw uniform bits, U16 (the low 16 bits of the generator word), of the given shape.</summary>
     public static Tensor<uint16> BitsU16(
-        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> drawBase, int rounds = Threefry2x32.Rounds)
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
     {
-        var (x0, _) = Draw(shape, key, drawBase, rounds);
+        var (x0, _) = Draw(shape, key, substreamIndex, rounds);
         return x0.Cast<uint16>().Reshape(shape);
     }
 
     /// <summary>Raw uniform bits, U32 (the whole generator word), of the given shape.</summary>
     public static Tensor<uint32> BitsU32(
-        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> drawBase, int rounds = Threefry2x32.Rounds)
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
     {
-        var (x0, _) = Draw(shape, key, drawBase, rounds);
+        var (x0, _) = Draw(shape, key, substreamIndex, rounds);
         return x0.Reshape(shape);
     }
 
     /// <summary>Raw uniform bits, U64 (both generator words), of the given shape.</summary>
     public static Tensor<uint64> BitsU64(
-        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> drawBase, int rounds = Threefry2x32.Rounds)
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
     {
-        var (x0, x1) = Draw(shape, key, drawBase, rounds);
+        var (x0, x1) = Draw(shape, key, substreamIndex, rounds);
         return Pack(x0, x1).Reshape(shape);
     }
 }

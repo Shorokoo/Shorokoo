@@ -259,7 +259,7 @@ public class RngInitFrozenDerivationTests
     public void TestInitValuesAreFrozen()
     {
         // Layer 2: the full materialized values (draw composition: counter scheme, rounds,
-        // uniform transform, drawBase ordinal, initializer scaling). REFERENCE: golden.
+        // uniform transform, substreamIndex ordinal, initializer scaling). REFERENCE: golden.
         // Exact equality is safe cross-backend: the uniform path is Threefry integer ops
         // plus IEEE-exact float multiply/add — no transcendental kernels involved.
         float[] expected0 = [-1.1163274f, 1.1247115f, -0.20118715f, -0.8630716f, 0.12048453f, 0.73705673f, -0.38930926f, -0.9366948f, 0.7735388f, -0.49744576f, -0.60573745f, -0.41470495f, -1.003003f, 0.19222532f, 0.8099788f, 0.49284714f];
@@ -311,7 +311,7 @@ public class RngInitFrozenDerivationTests
     {
         // Layer 3: an initializer that draws TWICE (a uniform and a raw-bits draw, combined).
         // Both draws share the parameter's ONE stream key and are separated only by their
-        // drawBase sub-stream ordinal, so this golden is what pins the ordinal assignment:
+        // substreamIndex sub-stream ordinal, so this golden is what pins the ordinal assignment:
         // renumber the draws (or key them identically) and every value here moves, while the
         // relational assertions in TestTrainableInitUsesBitsIntermediateAndTwoRngOps — same
         // config reproduces, a new seed re-randomizes, values stay in range — all still hold.
@@ -468,8 +468,8 @@ public partial class RngNormalBothCollections
 /// change: only value pins hold the convention fixed. Both consumers now draw via the same
 /// in-graph keyed lowering (fold → key constant/table → per-element SHRK lowering → ONNX
 /// Ln/Sqrt/Cos kernels): parameter initialization keys off the init sub-master with
-/// drawBase = the draw's ordinal, the runtime feed keys off the runtime sub-master with
-/// drawBase = the execution counter — distinct streams, pinned independently, never
+/// substreamIndex = the draw's ordinal, the runtime feed keys off the runtime sub-master with
+/// substreamIndex = the execution counter — distinct streams, pinned independently, never
 /// compared. One Fact covers both, at both round counts. All values are asserted at 1e-6
 /// (ORT transcendental kernels may drift in the last ULP across backends; a composition
 /// change shifts values by O(1)). A red here means "this seed no longer draws the normals

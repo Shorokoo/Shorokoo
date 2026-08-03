@@ -480,7 +480,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             else if (node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
                      node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||
                      node.OpCode == InternalOpCodes.SHRK_RANDOM_BITS)
-                inputIndex = 2;   // [shape, drawBase, iterationIndices]
+                inputIndex = 2;   // [shape, substreamIndex, iterationIndices]
             else
                 throw new InvalidOperationException(
                     $"FastApplyIdentifierTemplates: unexpected OpCode '{node.OpCode}'");
@@ -943,7 +943,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     // parent id, hence the stream), and combine iteration indices like a
                     // param ref — a feed inside a module called from a loop needs the call
                     // site's iteration scalars to realize the -1 slots the parent id brings.
-                    // Feed inputs: [shape, drawBase, iterationIndices].
+                    // Feed inputs: [shape, substreamIndex, iterationIndices].
                     var childFeedIterKey = node.Inputs.Count > 2 ? node.Inputs[2] : null;
                     var combinedFeedIterKey = CombineIterationIndices(
                         parentIterIndicesKey, childFeedIterKey,

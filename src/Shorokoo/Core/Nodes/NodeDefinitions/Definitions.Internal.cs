@@ -282,7 +282,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeFloat(AttrSeed)
                 .AttributeLongs(ShrkAttrLocalModelId)
                 .Input("shape", "T1", 1)
-                .Input("drawBase", "T1", 0)
+                .Input("substreamIndex", "T1", 0)
                 .Input("iterationIndices", "T1", 1)
                 .Input("key", "TK?", 0)
                 .Output("output", "T2", rank: "R"),
@@ -297,7 +297,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeFloat(AttrSeed)
                 .AttributeLongs(ShrkAttrLocalModelId)
                 .Input("shape", "T1", 1)
-                .Input("drawBase", "T1", 0)
+                .Input("substreamIndex", "T1", 0)
                 .Input("iterationIndices", "T1", 1)
                 .Input("key", "TK?", 0)
                 .Output("output", "T2", rank: "R"),
@@ -314,7 +314,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeDType(ShrkAttrDtype, "T2")
                 .AttributeLongs(ShrkAttrLocalModelId)
                 .Input("shape", "T1", 1)
-                .Input("drawBase", "T1", 0)
+                .Input("substreamIndex", "T1", 0)
                 .Input("iterationIndices", "T1", 1)
                 .Input("key", "TK?", 0)
                 .Output("output", "T2", rank: "R"),
@@ -331,7 +331,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Output("childKey", "TK", 0),
 
             // SHRK_RNG_UNIFORM: keyed deterministic U(low, high) draw of dynamic shape under
-            // the named algorithm. drawBase folds into the key; the counter is the whole flat
+            // the named algorithm. substreamIndex folds into the key; the counter is the whole flat
             // element index. Lowered at ONNX export to a call of the "uniform" function.
             Op(SHRK_RNG_UNIFORM)
                 .Tensor<uint64>("TK")
@@ -339,7 +339,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Tensor<float32>("T2")
                 .AttributeString(ShrkAttrRngAlgorithm)
                 .Input("key", "TK", 0)
-                .Input("drawBase", "TK", 0)
+                .Input("substreamIndex", "TK", 0)
                 .Input("shape", "TS", 1)
                 .Input("low", "T2", 0)
                 .Input("high", "T2", 0)
@@ -353,14 +353,14 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Tensor<float32>("T2")
                 .AttributeString(ShrkAttrRngAlgorithm)
                 .Input("key", "TK", 0)
-                .Input("drawBase", "TK", 0)
+                .Input("substreamIndex", "TK", 0)
                 .Input("shape", "TS", 1)
                 .Input("mean", "T2", 0)
                 .Input("scale", "T2", 0)
                 .Output("output", "T2", rank: "R"),
 
             // SHRK_RNG_BITS: keyed deterministic raw-bits draw of dynamic shape under the named
-            // algorithm; output an unsigned integer of the width in shrk_dtype. drawBase folds
+            // algorithm; output an unsigned integer of the width in shrk_dtype. substreamIndex folds
             // into the key; the counter is the whole flat element index. Lowered at ONNX export
             // to a call of the algorithm's non-inlined, width-specialized "bits" function.
             Op(SHRK_RNG_BITS)
@@ -370,7 +370,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeString(ShrkAttrRngAlgorithm)
                 .AttributeDType(ShrkAttrDtype, "T2")
                 .Input("key", "TK", 0)
-                .Input("drawBase", "TK", 0)
+                .Input("substreamIndex", "TK", 0)
                 .Input("shape", "TS", 1)
                 .Output("output", "T2", rank: "R"),
 

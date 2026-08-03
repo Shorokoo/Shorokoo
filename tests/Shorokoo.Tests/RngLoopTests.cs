@@ -112,9 +112,9 @@ public class RngLoopTests
 
     private static readonly float[] XVals = [10f, 20f, 30f, 40f, 50f, 60f, 70f, 80f];
 
-    /// <summary>Host replica of one keyed uniform draw at element e (drawBase 0).</summary>
+    /// <summary>Host replica of one keyed uniform draw at element e (substreamIndex 0).</summary>
     private static float HostUniform(long e, ulong key)
-        => RngTestOracle.DrawUniform(key, drawBase: 0, e);
+        => RngTestOracle.DrawUniform(key, substreamIndex: 0, e);
 
     /// <summary>x + sum of per-iteration draws, added in loop order (float order matters).</summary>
     private static float[] HostExpected(RngConfig cfg, int steps)

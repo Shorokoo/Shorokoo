@@ -77,7 +77,7 @@ public class RngAlgorithmSwitchTests
         Assert.NotEqual(draws20, draws13);
 
         // Bit-exact against the host generator at each algorithm's round count, using the
-        // feed's actually-resolved key (drawBase 0 — the injected counter is baked at 0 in
+        // feed's actually-resolved key (substreamIndex 0 — the injected counter is baked at 0 in
         // one-shot inference).
         var key20 = ResolvedKey(concrete20);
         var key13 = ResolvedKey(concrete13);

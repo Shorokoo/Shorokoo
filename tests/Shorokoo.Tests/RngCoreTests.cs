@@ -225,6 +225,36 @@ public class RngRuntimeIdentityTests
     }
 
     [Fact]
+    public void TestPreV2IdentityIsRejectedAtEveryDecodeSite()
+    {
+        // A carrier written before the identity became uint64 must fail with an explanation, at
+        // every door — not with a bare InvalidCastException from whichever As<uint64>() it reached.
+        var legacy = TensorData(DType.Int64, [3L], 0L, 42L, 0L);
+        var ex = Assert.Throws<InvalidOperationException>(() => RngRuntimeIdentity.ReadIdentityVector(legacy));
+        Assert.Contains("Int64", ex.Message);
+        Assert.Contains("v2", ex.Message);
+
+        // A correctly-typed vector from an older SCHEME is the case the element type cannot catch,
+        // which is exactly why the version rides in the vector.
+        var olderScheme = RngRuntimeIdentity.Build(new RngConfig { MasterSeed = 7 });
+        olderScheme[RngRuntimeIdentity.SchemeVersionIndex] = RngRuntimeIdentity.SchemeVersion - 1;
+        var ex2 = Assert.Throws<InvalidOperationException>(() => RngRuntimeIdentity.Decode(olderScheme));
+        Assert.Contains("scheme version", ex2.Message);
+    }
+
+    [Fact]
+    public void TestSchemeVersionMovesWithDrawValuesNotJustLayout()
+    {
+        // The algorithm id is stable across versions by construction (it maps the RngAlgorithm
+        // enum), so it cannot signal "these draws changed". The scheme version is what does.
+        var a = RngRuntimeIdentity.Build(new RngConfig { MasterSeed = 1 });
+        var b = RngRuntimeIdentity.Build(new RngConfig { MasterSeed = 1, Algorithm = RngAlgorithm.Threefry2x32Rounds13 });
+        Assert.Equal(RngRuntimeIdentity.SchemeVersion, a[RngRuntimeIdentity.SchemeVersionIndex]);
+        Assert.Equal(RngRuntimeIdentity.SchemeVersion, b[RngRuntimeIdentity.SchemeVersionIndex]);
+        Assert.NotEqual(a[RngRuntimeIdentity.AlgorithmIdIndex], b[RngRuntimeIdentity.AlgorithmIdIndex]);
+    }
+
+    [Fact]
     public void TestHeaderOnlyIdentity()
     {
         var cfg = new RngConfig { MasterSeed = 42 };
@@ -279,12 +309,15 @@ public class RngRuntimeIdentityTests
     public void TestMalformedIdentityFailsLoudly()
     {
         // Corrupt identities must throw, never silently fall back to a different derivation.
+        // These carry the current scheme version so they exercise the STRUCTURAL checks; a wrong
+        // scheme version is a different condition, covered by TestPreV2IdentityIsRejectedAtEveryDecodeSite.
+        const ulong v = RngRuntimeIdentity.SchemeVersion;
         Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([]));
-        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([0L, 1L, 2L]));
+        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([v, 0UL, 42UL]));   // shorter than the header
         // Truncated override record (claims one record, supplies nothing).
-        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([0L, 1L, 2L, 1L]));
+        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([v, 0UL, 42UL, 1UL]));
         // Trailing garbage after the declared records.
-        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([0L, 1L, 2L, 0L, 99L]));
+        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([v, 0UL, 42UL, 0UL, 99UL]));
     }
 }
 

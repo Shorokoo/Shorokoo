@@ -200,7 +200,7 @@ internal static class TensorDataConverter
         if (rt.IntData is { } idata)
             return FromIntData(dims, idata, rt.DType);
         if (rt.FloatData is { } fdata)
-            return FromFloatData(dims, fdata, rt.DType);
+            return FromFloatData(dims, fdata, rt.DType);   // null for Float64 — see FromFloatData
         if (rt.BoolData is { } bdata)
             return TensorData(dims, bdata.ToArray());
 
@@ -208,19 +208,31 @@ internal static class TensorDataConverter
     }
 
     /// <summary>
-    /// Materializes QEE's float buffer at <paramref name="dtype"/>'s own type. QEE keeps every
-    /// float width in one <c>float</c> buffer (<see cref="ToRuntimeTensor"/> narrows Float64 on
-    /// the way in), so the dtype lives only in <see cref="RuntimeTensor.DType"/> — the same trap
-    /// the integer side had: emitting Float32 for a Float64/Float16/BFloat16 tensor retypes it,
-    /// and a host-folded constant then violates its consumer's type constraint. Precision already
-    /// lost on load is not recovered here; only the type is kept honest.
+    /// Materializes QEE's float buffer at <paramref name="dtype"/>'s own type, or <c>null</c> when
+    /// that buffer cannot represent the dtype.
+    ///
+    /// <para>QEE keeps every float width in one <c>float</c> buffer, so the dtype lives only in
+    /// <see cref="RuntimeTensor.DType"/> — the same trap the integer side had: emitting Float32 for
+    /// a narrower-typed tensor retypes it, and a host-folded constant then violates its consumer's
+    /// type constraint.</para>
+    ///
+    /// <para><b>Float64 returns null on purpose.</b> <see cref="ToRuntimeTensor"/> narrows Float64
+    /// to <c>float</c> on the way in, so widening back would stamp <c>Float64</c> on values that
+    /// are float32-rounded — and <c>1e300</c> would come back <c>Infinity</c>. A wrong value
+    /// wearing the right type is worse than no value: returning null means "no concrete data", so
+    /// constant folding skips the tensor and the real ops survive to a backend that computes at
+    /// genuine float64. Float16/BFloat16 are safe by contrast — every value in the float buffer
+    /// converts to them exactly as the runtime would, and this is the conversion
+    /// <see cref="Ops.CastOp"/> documents as happening in the constant path.</para>
     /// </summary>
-    private static TensorData FromFloatData(long[] dims, ImmutableArray<float> fdata, DType dtype)
+    private static TensorData? FromFloatData(long[] dims, ImmutableArray<float> fdata, DType dtype)
     {
         var n = fdata.Length;
-        if (dtype == DType.Float64) { var b = new double[n]; for (int i = 0; i < n; i++) b[i] = fdata[i];              return TensorData(dims, b); }
+        if (dtype == DType.Float64) return null;
         if (dtype == DType.Float16) { var b = new Float16[n]; for (int i = 0; i < n; i++) b[i] = (Float16)fdata[i];    return TensorData(dims, b); }
         if (dtype == DType.BFloat16){ var b = new BFloat16[n]; for (int i = 0; i < n; i++) b[i] = (BFloat16)fdata[i];  return TensorData(dims, b); }
+        // Float32, or a non-float dtype whose data landed in the float buffer: emit as-is, the
+        // same fall-through FromIntData applies for an unexpected dtype.
         return TensorData(dims, fdata.ToArray());
     }
 

@@ -158,6 +158,12 @@ namespace Shorokoo.Graph
         /// Reads the model's bound RNG identity — the <c>RngSeed</c> parameter's value (written
         /// by <see cref="WithRngConfig"/>; carried through save/load as an ordinary initializer).
         /// Null when the graph has no runtime random surface or no identity is bound yet.
+        ///
+        /// <para>The <c>Try</c> here covers <em>absence</em>, not unreadability: a graph with no
+        /// identity returns null, but one carrying an identity this version cannot read throws
+        /// <see cref="System.InvalidOperationException"/> rather than reporting "none bound" — which
+        /// a caller probing for boundness would act on by binding a fresh identity, silently
+        /// re-keying every stream.</para>
         /// </summary>
         public ulong[]? TryGetRngSeed() => ToInternal().TryGetRngSeed();
 

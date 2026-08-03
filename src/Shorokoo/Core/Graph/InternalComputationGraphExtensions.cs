@@ -271,22 +271,19 @@ namespace Shorokoo.Graph
         /// by <see cref="ApplyRngConfig"/>; carried through save/load as an ordinary
         /// initializer). Null when the graph has no runtime random surface or no identity is
         /// bound yet. See <c>Core.Rng.RngRuntimeIdentity</c> for the encoding.
+        ///
+        /// <para>The <c>Try</c> here covers <em>absence</em>, not unreadability: a graph with no
+        /// identity returns null, but one carrying an identity this version cannot read throws
+        /// <see cref="System.InvalidOperationException"/> rather than reporting "none bound" — which
+        /// a caller probing for boundness would act on by binding a fresh identity, silently
+        /// re-keying every stream.</para>
         /// </summary>
         internal static ulong[]? TryGetRngSeed(this InternalComputationGraph graph)
         {
             var node = FastWireRngKeyDerivation.FindRngSeedNode(graph);
             if (node is null || node.OpCode != InternalOpCodes.MODEL_PARAM_DATA) return null;
             var data = node.Attributes.GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData);
-            if (data is null) return null;
-            // A model written before the identity became uint64 would otherwise surface as a bare
-            // InvalidCastException from As<uint64>(); say what actually happened instead.
-            if (data.DType != DType.UInt64)
-                throw new NotSupportedException(
-                    $"This model's RngSeed identity is {data.DType}, not UInt64: it was written by a " +
-                    "framework version whose RNG keys were a pair of truncated int64 words. That " +
-                    "layout and its draw values are superseded (see RngAlgorithms: '…v1' -> '…v2'); " +
-                    "rebuild the model from its architecture under an explicit RngConfig.");
-            return data.As<uint64>().AccessMemory().ToArray();
+            return data is null ? null : Core.Rng.RngRuntimeIdentity.ReadIdentityVector(data);
         }
 
 

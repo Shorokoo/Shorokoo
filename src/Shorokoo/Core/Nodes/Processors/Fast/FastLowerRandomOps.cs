@@ -62,8 +62,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 if (seedNode.OpCode == InternalOpCodes.MODEL_PARAM)
                     WriteDefaultIdentity(seedNode);
-                var identityVec = seedNode.Attributes.GetTensorVal(ShrkAttrTensorData)
-                    ?.As<uint64>().AccessMemory().ToArray();
+                var identityData = seedNode.Attributes.GetTensorVal(ShrkAttrTensorData);
+                var identityVec = identityData is null
+                    ? null
+                    : RngRuntimeIdentity.ReadIdentityVector(identityData);
                 if (identityVec is not null)
                 {
                     var identity = RngRuntimeIdentity.Decode(identityVec);

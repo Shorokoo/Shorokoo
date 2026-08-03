@@ -20,10 +20,10 @@ namespace Shorokoo.Core.Rng;
 /// means modular wraparound is the type's own semantics rather than an explicit mask after every
 /// operation, and a rotate is a genuine pair of shifts.</para>
 ///
-/// <para>Per element <c>i</c> the counter is <c>(i, drawBase)</c>: <c>i</c> (the flat element
-/// index) is the low counter word, <c>drawBase</c> (a per-execution value, e.g. the training
-/// step) the high word, so successive executions draw fresh values while any fixed
-/// <c>(key, drawBase, i)</c> replays exactly. Bit→float is the low 24 bits × 2⁻²⁴;
+/// <para>A draw is keyed by <c>(key, drawBase)</c> and indexed by the flat element index
+/// <c>i</c>: <c>drawBase</c> (a per-execution value, e.g. the training step) folds into the key
+/// and <c>i</c> occupies the whole counter, so successive executions draw fresh values while any
+/// fixed <c>(key, drawBase, i)</c> replays exactly. Bit→float is the low 24 bits × 2⁻²⁴;
 /// the normal transform is Box–Muller with radius = √(−2·ln(1−u₁)). Mirrors
 /// <see cref="Threefry2x32"/> bit-for-bit (validated against the Random123 known-answer
 /// vectors — see <c>RngRuntimeTests</c>).</para>
@@ -69,7 +69,7 @@ internal static class RuntimeRng
             ks2 = OnnxOp.BitwiseXor(OnnxOp.BitwiseXor(Scalar(SkeinParity), k0).uint32(), k1).uint32();
 
         var x0 = c0 + ks0;
-        var x1 = (c0 - c0) + c1 + ks1;   // broadcast c1 over c0's shape
+        var x1 = c1 + ks1;
 
         for (int r = 0; r < rounds; r++)
         {
@@ -118,19 +118,33 @@ internal static class RuntimeRng
     private static Tensor<float32> ToUniform(Tensor<uint32> word)
         => OnnxOp.BitwiseAnd(word, Scalar(0x00FF_FFFFu)).uint32().Cast<float32>() * Scalar(TwoPow24Inv);
 
-    /// <summary>The per-element flat draw position <c>[prod(shape)]</c>.</summary>
-    private static Tensor<uint32> Counter(Vector<int64> shape)
+    /// <summary>The per-element flat element index <c>[prod(shape)]</c>.</summary>
+    private static Tensor<uint64> ElementIndex(Vector<int64> shape)
     {
         Scalar<int64> n = shape.Reduce(ReduceKind.Prod);
-        return OnnxOp.Range(Scalar(0L), n, Scalar(1L)).int64().Cast<uint32>();   // [N]
+        return OnnxOp.Range(Scalar(0L), n, Scalar(1L)).int64().Cast<uint64>();   // [N]
     }
 
-    /// <summary>The generator words for a draw of the given shape under a whole 64-bit key.</summary>
+    /// <summary>
+    /// The generator words for a draw of the given shape under a whole 64-bit key.
+    ///
+    /// <para>The draw position is folded <b>into the key</b> — one bijection over scalars —
+    /// rather than spending a counter word on it. That leaves BOTH counter words for the
+    /// element index, so a draw position and an element index are each a whole 64-bit value
+    /// and neither aliases: the 2³²'th execution draws a fresh stream rather than repeating
+    /// the first, and a tensor of more than 2³² elements does not repeat within itself. The
+    /// fold is the same primitive as a key split, so <c>drawBase = d</c> draws exactly the
+    /// stream <c>split(key, d)</c> does at <c>drawBase = 0</c>.</para>
+    /// </summary>
     private static (Tensor<uint32> x0, Tensor<uint32> x1) Draw(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> drawBase, int rounds)
     {
         var (k0, k1) = Words(key);
-        return Bijection(Counter(shape), drawBase.Cast<uint32>(), k0, k1, rounds);
+        var (d0, d1) = Words(drawBase);
+        var (dk0, dk1) = Bijection(d0, d1, k0, k1, rounds);
+
+        var (c0, c1) = Words(ElementIndex(shape));
+        return Bijection(c0, c1, dk0, dk1, rounds);
     }
 
     /// <summary>Standard uniform U(0,1) of the given shape (bit generator: Threefry-2x32-<paramref name="rounds"/>).</summary>

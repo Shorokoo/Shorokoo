@@ -79,28 +79,15 @@ public class RngRuntimeTests
         return outputs[0].ToTensorData().As<float32>().AccessMemory().ToArray();
     }
 
-    // Host reference for the runtime scheme: element i -> counter (i, drawBase);
-    // uniform = low 24 bits of x0 * 2^-24.
-    private static float HostUniform(long i, ulong key, uint drawBase)
-    {
-        var (x0, _) = Threefry2x32.Bijection((uint)i, drawBase, (uint)key, (uint)(key >> 32));
-        return (x0 & 0x00FFFFFFu) * (1.0f / 16777216.0f);
-    }
+    // Host reference for the runtime scheme: drawBase folds into the key, element i indexes
+    // the whole counter; uniform = low 24 bits of x0 * 2^-24.
+    private static float HostUniform(long i, ulong key, ulong drawBase)
+        => RngTestOracle.DrawUniform(key, drawBase, i);
 
     // Host reference for the raw-bits scheme: element i draws one generator word pair; the
     // narrow widths take the low bits of x0, U32 the whole word, U64 = x0 | (x1 << 32).
-    private static ulong HostBits(long i, int width, ulong key, uint drawBase)
-    {
-        var (x0, x1) = Threefry2x32.Bijection((uint)i, drawBase, (uint)key, (uint)(key >> 32));
-        return width switch
-        {
-            8 => (byte)x0,
-            16 => (ushort)x0,
-            32 => x0,
-            64 => x0 | ((ulong)x1 << 32),
-            _ => throw new ArgumentOutOfRangeException(nameof(width)),
-        };
-    }
+    private static ulong HostBits(long i, int width, ulong key, ulong drawBase)
+        => RngTestOracle.DrawBits(key, drawBase, i, width);
 
     private static TensorData RunDrawRaw<TModule>(long rows, long cols)
     {

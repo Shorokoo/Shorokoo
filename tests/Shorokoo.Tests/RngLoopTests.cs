@@ -112,12 +112,9 @@ public class RngLoopTests
 
     private static readonly float[] XVals = [10f, 20f, 30f, 40f, 50f, 60f, 70f, 80f];
 
-    /// <summary>Host replica of one keyed uniform draw: element e -> counter (e, drawBase=0).</summary>
+    /// <summary>Host replica of one keyed uniform draw at element e (drawBase 0).</summary>
     private static float HostUniform(long e, ulong key)
-    {
-        var (x0, _) = Threefry2x32.Bijection((uint)e, 0u, (uint)key, (uint)(key >> 32));
-        return (x0 & 0x00FFFFFFu) * (1.0f / 16777216.0f);
-    }
+        => RngTestOracle.DrawUniform(key, drawBase: 0, e);
 
     /// <summary>x + sum of per-iteration draws, added in loop order (float order matters).</summary>
     private static float[] HostExpected(RngConfig cfg, int steps)

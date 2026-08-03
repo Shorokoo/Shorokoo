@@ -21,7 +21,9 @@ One `MasterSeed` derives everything. Two sub-masters split off it — one for th
 collection (initialization noise, drawn once at materialization) and one for the `runtime`
 collection (feeds, drawn every execution) — and each individual stream's key is the
 sub-master **folded along the consumer's ModelId path**: one Threefry-2x32 bijection per path
-index, `child = Bijection(key: parent, counter: index)`.
+index, `child = Bijection(key: parent, counter: index)`. A key, a split index and a draw
+position are each a whole 64-bit value — nothing is narrowed on the way in, so distinct
+indices give distinct children over the entire range.
 
 Because the key tree *is* the ModelId tree:
 
@@ -114,17 +116,20 @@ and the exported model calls — and is tagged with — the selected algorithm's
 values but not the algorithm (that re-bind fails loudly; rebuild from the architecture
 instead).
 
-Per-execution variation is carried by a separate **drawBase** counter, not by the key — and
-the RNG system manages it itself: concretization injects one model-global execution counter
-(`RngExecutionCounter`, ordinary model state, an int64 scalar initialized 0 and advanced +1
-per execution) and wires it into every feed. Modules never touch it — `Globals.RandomUniform`
-is all a consumer writes. Under the training rig the counter rides the checkpoint, so Dropout
-masks differ per step and a resumed run at step N draws exactly what the uninterrupted run
-would; in one-shot inference it is baked at 0, so inference stays deterministic and
-stateless. One counter serves all feeds because sites are already decorrelated by their
-stream keys; it costs the checkpoint a single scalar. Framework-managed counters like this
-one are int64 state end-to-end, so incrementing stays exact at any step count — there is no
-float32-style saturation point past which masks would stop varying.
+Per-execution variation is carried by a separate **drawBase** counter, not by the configured
+key — and the RNG system manages it itself: concretization injects one model-global execution
+counter (`RngExecutionCounter`, ordinary model state, an int64 scalar initialized 0 and
+advanced +1 per execution) and wires it into every feed. A draw folds its `drawBase` into the
+stream key — the same bijection a key split uses — so execution *n* draws from the substream
+`split(key, n)`, and the element index then addresses the whole 64-bit counter. Modules never
+touch it — `Globals.RandomUniform` is all a consumer writes. Under the training rig the
+counter rides the checkpoint, so Dropout masks differ per step and a resumed run at step N
+draws exactly what the uninterrupted run would; in one-shot inference it is baked at 0, so
+inference stays deterministic and stateless. One counter serves all feeds because sites are
+already decorrelated by their stream keys; it costs the checkpoint a single scalar.
+Framework-managed counters like this one are 64-bit state end-to-end — the counter increments
+exactly, and the whole 64-bit value reaches the draw — so there is no float32-style
+saturation point, and no wrap point, past which masks would start repeating.
 
 ## Feeds inside loops
 

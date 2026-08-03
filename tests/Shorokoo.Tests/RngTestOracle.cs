@@ -46,4 +46,38 @@ internal static class RngTestOracle
     /// <summary>A runtime feed's stream key under an encoded identity (oracle).</summary>
     public static ulong RunKey(RngRuntimeIdentity identity, IReadOnlyList<int> path)
         => Fold(identity.RunKeySpec(path));
+
+    /// <summary>
+    /// The generator word pair a draw produces for element <paramref name="i"/> — the host
+    /// oracle for <c>RuntimeRng.Draw</c>. The draw position folds into the key (the same
+    /// bijection a split uses, at the draw's own round count), leaving both counter words to
+    /// the whole 64-bit element index.
+    /// </summary>
+    public static (uint x0, uint x1) DrawWords(
+        ulong key, ulong drawBase, long i, int rounds = Threefry2x32.Rounds)
+    {
+        var (dk0, dk1) = Threefry2x32.Bijection(
+            (uint)drawBase, (uint)(drawBase >> 32), (uint)key, (uint)(key >> 32), rounds);
+        return Threefry2x32.Bijection((uint)i, (uint)((ulong)i >> 32), dk0, dk1, rounds);
+    }
+
+    /// <summary>Element <paramref name="i"/> of a standard-uniform draw (low 24 bits × 2⁻²⁴).</summary>
+    public static float DrawUniform(
+        ulong key, ulong drawBase, long i, int rounds = Threefry2x32.Rounds)
+        => (DrawWords(key, drawBase, i, rounds).x0 & 0x00FFFFFFu) * (1.0f / 16777216.0f);
+
+    /// <summary>Element <paramref name="i"/> of a raw-bits draw of the given uint width.</summary>
+    public static ulong DrawBits(
+        ulong key, ulong drawBase, long i, int width, int rounds = Threefry2x32.Rounds)
+    {
+        var (x0, x1) = DrawWords(key, drawBase, i, rounds);
+        return width switch
+        {
+            8 => (byte)x0,
+            16 => (ushort)x0,
+            32 => x0,
+            64 => x0 | ((ulong)x1 << 32),
+            _ => throw new System.ArgumentOutOfRangeException(nameof(width)),
+        };
+    }
 }

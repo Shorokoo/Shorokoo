@@ -83,10 +83,8 @@ public class RngAlgorithmSwitchTests
         var key13 = ResolvedKey(concrete13);
         for (long i = 0; i < 16; i++)
         {
-            var (h20, _) = Threefry2x32.Bijection((uint)i, 0u, (uint)key20, (uint)(key20 >> 32), Threefry2x32.Rounds);
-            var (h13, _) = Threefry2x32.Bijection((uint)i, 0u, (uint)key13, (uint)(key13 >> 32), Threefry2x32.Rounds13);
-            Assert.Equal((h20 & 0x00FFFFFFu) * (1.0f / 16777216.0f), draws20[i]);
-            Assert.Equal((h13 & 0x00FFFFFFu) * (1.0f / 16777216.0f), draws13[i]);
+            Assert.Equal(RngTestOracle.DrawUniform(key20, 0, i, Threefry2x32.Rounds), draws20[i]);
+            Assert.Equal(RngTestOracle.DrawUniform(key13, 0, i, Threefry2x32.Rounds13), draws13[i]);
         }
     }
 

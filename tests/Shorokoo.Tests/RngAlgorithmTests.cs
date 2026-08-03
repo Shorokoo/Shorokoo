@@ -77,12 +77,10 @@ public class RngAlgorithmTests
         return outputs[0].ToTensorData().As<float32>().AccessMemory().ToArray();
     }
 
-    // Host reference: element i -> counter (i, drawBase); uniform = low 24 bits of x0 * 2^-24.
-    private static float HostUniform(long i, ulong key, uint drawBase = 0)
-    {
-        var (x0, _) = Threefry2x32.Bijection((uint)i, drawBase, (uint)key, (uint)(key >> 32));
-        return (x0 & 0x00FFFFFFu) * (1.0f / 16777216.0f);
-    }
+    // Host reference: drawBase folds into the key, element i indexes the whole counter;
+    // uniform = low 24 bits of x0 * 2^-24.
+    private static float HostUniform(long i, ulong key, ulong drawBase = 0)
+        => RngTestOracle.DrawUniform(key, drawBase, i);
 
     private static uint[] RunDrawU32<TModule>(long rows, long cols)
     {
@@ -111,10 +109,7 @@ public class RngAlgorithmTests
         var vals = RunDrawU32<RngKeyedBitsDraw>(4, 4);
         Assert.Equal(16, vals.Length);
         for (long i = 0; i < 16; i++)
-        {
-            var (x0, _) = Threefry2x32.Bijection((uint)i, 0u, 123u, 456u);
-            Assert.Equal(x0, vals[i]);
-        }
+            Assert.Equal((uint)RngTestOracle.DrawBits(123UL | (456UL << 32), 0, i, 32), vals[i]);
     }
 
     [Fact]

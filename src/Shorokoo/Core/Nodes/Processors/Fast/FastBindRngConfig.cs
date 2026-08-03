@@ -199,7 +199,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (seedNode.OpCode != InternalOpCodes.MODEL_PARAM_DATA) return null;
             var data = seedNode.Attributes.GetTensorVal(ShrkAttrTensorData);
             if (data is null) return null;
-            return RngRuntimeIdentity.Decode(RngRuntimeIdentity.ReadIdentityVector(data));
+            return RngRuntimeIdentity.Decode(RngRuntimeIdentity.ReadRngSeedData(data));
         }
 
         private static bool SamePathSet(int[][] a, int[][] b)

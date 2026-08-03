@@ -74,7 +74,7 @@ public class RngNoHostRngTests
 
     /// <summary>
     /// Every site that reads a model's RNG identity must go through
-    /// <c>RngRuntimeIdentity.ReadIdentityVector</c>, which rejects a layout this version cannot
+    /// <c>RngRuntimeIdentity.ReadRngSeedData</c>, which rejects a layout this version cannot
     /// read with an explanation. A second, unguarded <c>As&lt;uint64&gt;()</c> would hand a pre-v2
     /// carrier a bare InvalidCastException from whichever door it happened to reach — which is
     /// exactly what happened when the guard was first added at only one of the three sites.
@@ -107,7 +107,7 @@ public class RngNoHostRngTests
 
         Assert.True(offenders.Length == 0,
             "A uint64 tensor is materialized outside the files allowed to do so. If this is an RNG " +
-            "identity, route it through RngRuntimeIdentity.ReadIdentityVector so an unreadable " +
+            "identity, route it through RngRuntimeIdentity.ReadRngSeedData so an unreadable " +
             "carrier gets one explanation instead of a bare InvalidCastException; if it is " +
             "genuinely something else, add the file to the allowlist above. Offending reads:\n  " +
             string.Join("\n  ", offenders));
@@ -120,7 +120,7 @@ public class RngNoHostRngTests
     {
         string[] preGuard =
         [
-            "var identityVec = seedNode.Attributes.GetTensorVal(ShrkAttrTensorData)?.As<uint64>().AccessMemory().ToArray();",
+            "var rngSeedData = seedNode.Attributes.GetTensorVal(ShrkAttrTensorData)?.As<uint64>().AccessMemory().ToArray();",
             "return RngRuntimeIdentity.Decode(data.As<uint64>().AccessMemory().ToArray());",
         ];
         foreach (var sample in preGuard)

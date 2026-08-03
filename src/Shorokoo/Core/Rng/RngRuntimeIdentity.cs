@@ -5,8 +5,15 @@ using System.Linq;
 namespace Shorokoo.Core.Rng;
 
 /// <summary>
-/// The encoded form of a model's <b>runtime</b> RNG identity — the value of the ordinary
-/// non-trainable <c>RngSeed</c> parameter at reserved ModelId <c>[0]</c> (uint64, shape [N]):
+/// A model's decoded <b>runtime</b> RNG identity, and the encoder/decoder for its stored form.
+///
+/// <para>Two names, deliberately distinct: <b>RngSeedData</b> is the stored <c>uint64[N]</c> — the
+/// value of the ordinary non-trainable <c>RngSeed</c> parameter at reserved ModelId <c>[0]</c> —
+/// and <see cref="RngRuntimeIdentity"/> is what it decodes to. Prefer "RngSeedData" over
+/// "identity vector" for the stored form: this codebase already has an ONNX <c>Identity</c> op and
+/// a <c>Vector&lt;T&gt;</c> type, so that phrase collides with two unrelated meanings.</para>
+///
+/// <para>Layout of the RngSeedData:</para>
 ///
 /// <code>
 ///   [0]              scheme version (see <see cref="SchemeVersion"/>)
@@ -17,7 +24,7 @@ namespace Shorokoo.Core.Rng;
 /// </code>
 ///
 /// Records carry <see cref="RngCollection.Runtime"/> overrides only and are written in a
-/// canonical sorted order, so the same config always encodes to the same vector and every
+/// canonical sorted order, so the same config always encodes to the same data and every
 /// record's key sits at a fixed, wiring-time-computable offset — an overridden feed's
 /// in-graph derivation chain roots at a <c>Gather</c> of that offset instead of the master
 /// elements (see <c>FastWireRngKeyDerivation</c>). The init-collection identity is
@@ -52,12 +59,12 @@ internal sealed class RngRuntimeIdentity
     /// <para>2: <c>Threefry2x32-BoxMuller.v2</c> — whole uint64 keys/indices/draw positions, and
     /// the draw position folded into the key. 1 was never written with a version element at all,
     /// so it is recognised by its Int64 element type instead (see
-    /// <see cref="ReadIdentityVector"/>).</para>
+    /// <see cref="ReadRngSeedData"/>).</para>
     /// </summary>
     public const ulong SchemeVersion = 2;
 
     /// <summary>
-    /// Reads an identity vector out of an <c>RngSeed</c> parameter's tensor data, rejecting a
+    /// Reads the <c>RngSeedData</c> out of an <c>RngSeed</c> parameter's tensor data, rejecting a
     /// layout this version cannot read. Every site that decodes an identity goes through here, so
     /// a carrier written before the identity became uint64 gets one explanatory error rather than
     /// a bare <c>InvalidCastException</c> from whichever door it happened to arrive at.
@@ -66,12 +73,12 @@ internal sealed class RngRuntimeIdentity
     /// <exception cref="InvalidOperationException">The tensor's element type is not uint64. The
     /// vector's <em>contents</em> — length, scheme version, record structure — are validated by
     /// <see cref="Decode"/>, not here.</exception>
-    public static ulong[] ReadIdentityVector(TensorData data)
+    public static ulong[] ReadRngSeedData(TensorData data)
     {
         if (data is null) throw new ArgumentNullException(nameof(data));
         if (data.DType != DType.UInt64)
             throw new InvalidOperationException(
-                $"This model's RngSeed identity is {data.DType}, not UInt64. A UInt64 identity is " +
+                $"This model's RngSeedData is {data.DType}, not UInt64. UInt64 RngSeedData is " +
                 "what every version from the 'Threefry2x32-BoxMuller.v2' algorithm on writes; an " +
                 "Int64 one was written before RNG keys became whole uint64 values, and its draw " +
                 "values are superseded (see RngAlgorithms: '...v1' -> '...v2'). Either way this " +
@@ -142,54 +149,54 @@ internal sealed class RngRuntimeIdentity
     }
 
     /// <summary>
-    /// Decodes an identity vector produced by <see cref="Build"/>. Malformed vectors throw —
+    /// Decodes the <c>RngSeedData</c> produced by <see cref="Build"/>. Malformed data throws —
     /// a corrupt identity must never silently fall back to a different derivation.
     /// </summary>
-    public static RngRuntimeIdentity Decode(ulong[] identity)
+    public static RngRuntimeIdentity Decode(ulong[] rngSeedData)
     {
-        if (identity is not { Length: >= HeaderLength })
+        if (rngSeedData is not { Length: >= HeaderLength })
             throw new ArgumentException(
-                $"Malformed RngSeed identity: length {identity?.Length ?? 0} " +
-                $"(expected at least the {HeaderLength}-element header).", nameof(identity));
+                $"Malformed RngSeedData: length {rngSeedData?.Length ?? 0} " +
+                $"(expected at least the {HeaderLength}-element header).", nameof(rngSeedData));
 
-        var schemeVersion = identity[SchemeVersionIndex];
+        var schemeVersion = rngSeedData[SchemeVersionIndex];
         if (schemeVersion != SchemeVersion)
             throw new InvalidOperationException(
-                $"This model's RngSeed identity was written under RNG scheme version " +
+                $"This model's RngSeedData was written under RNG scheme version " +
                 $"{schemeVersion}; this build writes and reads version {SchemeVersion}. The scheme " +
                 "version moves whenever the values a draw produces change, so running under it " +
                 "would silently draw different numbers. Rebuild the concrete model from its " +
                 "architecture under an explicit RngConfig.");
 
-        var runKey = identity[RunKeyIndex];
-        ulong count = identity[HeaderLength - 1];
+        var runKey = rngSeedData[RunKeyIndex];
+        ulong count = rngSeedData[HeaderLength - 1];
         var records = new List<RuntimeOverrideRecord>();
         int i = HeaderLength;
         for (ulong r = 0; r < count; r++)
         {
-            if (i >= identity.Length)
-                throw new ArgumentException("Malformed RngSeed identity: truncated override record.", nameof(identity));
-            // Bound the length against the vector BEFORE narrowing to int: a hostile or corrupt
+            if (i >= rngSeedData.Length)
+                throw new ArgumentException("Malformed RngSeedData: truncated override record.", nameof(rngSeedData));
+            // Bound the length against the data BEFORE narrowing to int: a hostile or corrupt
             // record can claim any uint64 path length, and `i + pathLen + 1` in int arithmetic
             // would wrap negative, pass the check, and then allocate the claimed length.
-            ulong claimedPathLen = identity[i++];
+            ulong claimedPathLen = rngSeedData[i++];
             // The record needs pathLen elements plus one key, so pathLen < remaining. Written as
             // a comparison rather than `pathLen + 1 > remaining` because the claim is untrusted:
             // adding to it overflows for a length near ulong.MaxValue and the check passes.
-            ulong remaining = (ulong)(identity.Length - i);
+            ulong remaining = (ulong)(rngSeedData.Length - i);
             if (claimedPathLen == 0 || claimedPathLen >= remaining)
-                throw new ArgumentException("Malformed RngSeed identity: truncated override record.", nameof(identity));
+                throw new ArgumentException("Malformed RngSeedData: truncated override record.", nameof(rngSeedData));
             int pathLen = (int)claimedPathLen;
             int[] path = new int[pathLen];
-            for (int j = 0; j < pathLen; j++) path[j] = checked((int)unchecked((long)identity[i++]));
+            for (int j = 0; j < pathLen; j++) path[j] = checked((int)unchecked((long)rngSeedData[i++]));
             int keyOffset = i;
-            var key = identity[i];
+            var key = rngSeedData[i];
             i += 1;
             records.Add(new RuntimeOverrideRecord(path, key, keyOffset));
         }
-        if (i != identity.Length)
-            throw new ArgumentException("Malformed RngSeed identity: trailing data after override records.", nameof(identity));
-        return new RngRuntimeIdentity(checked((long)identity[AlgorithmIdIndex]), runKey, records);
+        if (i != rngSeedData.Length)
+            throw new ArgumentException("Malformed RngSeedData: trailing data after override records.", nameof(rngSeedData));
+        return new RngRuntimeIdentity(checked((long)rngSeedData[AlgorithmIdIndex]), runKey, records);
     }
 
     /// <summary>

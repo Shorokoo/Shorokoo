@@ -63,18 +63,18 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (seedNode.OpCode == InternalOpCodes.MODEL_PARAM)
                     WriteDefaultIdentity(seedNode);
                 var identityData = seedNode.Attributes.GetTensorVal(ShrkAttrTensorData);
-                var identityVec = identityData is null
+                var rngSeedData = identityData is null
                     ? null
-                    : RngRuntimeIdentity.ReadIdentityVector(identityData);
-                if (identityVec is not null)
+                    : RngRuntimeIdentity.ReadRngSeedData(identityData);
+                if (rngSeedData is not null)
                 {
-                    var identity = RngRuntimeIdentity.Decode(identityVec);
+                    var identity = RngRuntimeIdentity.Decode(rngSeedData);
                     var boundAlgorithm = identity.Algorithm
                         ?? throw new NotSupportedException(
-                            "FastLowerRandomOps: the model's RngSeed identity records the " +
+                            "FastLowerRandomOps: the model's RngSeedData records the " +
                             $"unknown algorithm id {identity.AlgorithmId} (likely written by a " +
                             "newer framework version). Lowering under a substitute algorithm " +
-                            "would silently diverge from the recorded identity.");
+                            "would silently diverge from the recorded algorithm.");
                     algorithm = RngAlgorithms.NameOf(boundAlgorithm);
                 }
             }

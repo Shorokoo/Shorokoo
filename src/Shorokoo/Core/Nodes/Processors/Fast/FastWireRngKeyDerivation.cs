@@ -26,7 +26,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// fully folded key of exactly one realized stream, so an overridden site's chain selects
     /// (via <c>Where</c> on the runtime iteration indices, or unconditionally when the site has
     /// no iteration slots) a <c>Gather</c> of the record's fixed key offset in the
-    /// canonical identity vector instead of the folded chain. Changing override <em>values</em>
+    /// canonical <c>RngSeedData</c> instead of the folded chain. Changing override <em>values</em>
     /// is thereafter a parameter write; changing the override <em>set</em> re-runs this pass
     /// (the orphaned chain nodes are swept by ordinary reachability).</para>
     ///
@@ -48,7 +48,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         /// <summary>
         /// The graph's <c>RngSeed</c> node: a value-less <c>MODEL_PARAM</c> on a concrete
-        /// architecture, a <c>MODEL_PARAM_DATA</c> holding the identity vector once bound.
+        /// architecture, a <c>MODEL_PARAM_DATA</c> holding the <c>RngSeedData</c> once bound.
         /// Null when the graph has no runtime random surface (or predates concretization).
         /// </summary>
         public static FastNode? FindRngSeedNode(InternalComputationGraph graph)
@@ -103,7 +103,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <summary>
         /// (Re-)wires every id-bearing feed's key chain against the current identity layout.
         /// <paramref name="overrideRecords"/> lists the runtime override records — realized
-        /// stream path + the record's key offset in the identity vector (see
+        /// stream path + the record's key offset in the <c>RngSeedData</c> (see
         /// <see cref="RngRuntimeIdentity"/>) — in canonical order. Previously wired chain nodes
         /// become unreachable and are swept by the caller. <paramref name="validateStructure"/>
         /// enables the concretization-time slot check (an iteration-slot count that the feed's
@@ -262,7 +262,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return true;
         }
 
-        /// <summary>Gathers element <paramref name="offset"/> of the identity vector as a rank-0
+        /// <summary>Gathers element <paramref name="offset"/> of the RngSeedData vector as a rank-0
         /// scalar — one whole 64-bit key (keys are single values, not word pairs).</summary>
         private static FastTensorKey AppendGatherElement(
             FastTensorKey vector, int offset, List<FastNode> newNodes)

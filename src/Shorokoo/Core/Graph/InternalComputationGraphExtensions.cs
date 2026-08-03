@@ -283,7 +283,7 @@ namespace Shorokoo.Graph
             var node = FastWireRngKeyDerivation.FindRngSeedNode(graph);
             if (node is null || node.OpCode != InternalOpCodes.MODEL_PARAM_DATA) return null;
             var data = node.Attributes.GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData);
-            return data is null ? null : Core.Rng.RngRuntimeIdentity.ReadIdentityVector(data);
+            return data is null ? null : Core.Rng.RngRuntimeIdentity.ReadRngSeedData(data);
         }
 
 
@@ -411,14 +411,14 @@ namespace Shorokoo.Graph
         {
             AssertConcreteArchitecture(graph, nameof(InitializeTrainableParams));
             computeContext ??= ComputeContext.Default;
-            if (rngConfig is null && graph.TryGetRngSeed() is { } identityVec)
+            if (rngConfig is null && graph.TryGetRngSeed() is { } rngSeedData)
             {
-                var identity = Core.Rng.RngRuntimeIdentity.Decode(identityVec);
+                var identity = Core.Rng.RngRuntimeIdentity.Decode(rngSeedData);
                 rngConfig = new RngConfig
                 {
                     Algorithm = identity.Algorithm
                         ?? throw new System.NotSupportedException(
-                            "InitializeTrainableParams: the graph's RngSeed identity records the " +
+                            "InitializeTrainableParams: the graph's RngSeedData records the " +
                             $"unknown algorithm id {identity.AlgorithmId} (likely written by a newer " +
                             "framework version). Initializing under a substitute algorithm would " +
                             "silently diverge from the recorded identity; pass an explicit rngConfig " +

@@ -232,7 +232,7 @@ public class RngRuntimeIdentityTests
         // structurally (one guarded read, no other As<uint64>() on the identity) rather than by
         // this test — see TestNoUnguardedIdentityReadSurvives.
         var legacy = TensorData(DType.Int64, [3L], 0L, 42L, 0L);
-        var ex = Assert.Throws<InvalidOperationException>(() => RngRuntimeIdentity.ReadIdentityVector(legacy));
+        var ex = Assert.Throws<InvalidOperationException>(() => RngRuntimeIdentity.ReadRngSeedData(legacy));
         Assert.Contains("Int64", ex.Message);
         Assert.Contains("v2", ex.Message);
 
@@ -389,7 +389,7 @@ public class RngSeedTransportTests
     [Fact]
     public void TestNonDefaultAlgorithmSurvivesSaveLoadByIdAndByBehavior()
     {
-        // The algorithm identity rides the file in TWO forms — the RngSeed identity's
+        // The algorithm choice rides the file in TWO forms — the RngSeedData's
         // algorithm id (trusted by no-config parameter initialization and the lowering) and
         // the baked tagged draw functions (what the feeds actually execute) — and they can in
         // principle disagree. Bind the NON-default algorithm, round-trip the concrete model,

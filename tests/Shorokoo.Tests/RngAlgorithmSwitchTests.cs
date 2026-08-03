@@ -133,7 +133,7 @@ public class RngAlgorithmSwitchTests
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
         arch.ApplyRngConfig(Rounds20);
 
-        // A model file written by a newer framework version: the RngSeed identity records an
+        // A model file written by a newer framework version: the RngSeedData records an
         // algorithm id this version does not know.
         const ulong newerId = 9999;
         var identity = arch.TryGetRngSeed()!;

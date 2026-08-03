@@ -191,7 +191,7 @@ public class RngLoopTests
     {
         // Override ITERATION 1 of the loop feed site [1, -1, 1] by its realized stream path.
         // Override routing is structural: the site's chain selects the record's key
-        // (at their fixed offset in the identity vector) when the runtime iteration index
+        // (at their fixed offset in the RngSeedData) when the runtime iteration index
         // matches the record's path, and the folded chain otherwise.
         var cfg = new RngConfig { MasterSeed = 11 };
         cfg = cfg.Override(RngCollection.Runtime, [1, 1, 1], 424242UL);
@@ -215,7 +215,7 @@ public class RngLoopTests
     public void TestRebindWithChangedOverrideSetRewiresInPlace()
     {
         // Override routing is structural (an overridden site's chain roots at the record's
-        // offset in the identity vector), so a re-bind that CHANGES the override set re-runs
+        // offset in the RngSeedData), so a re-bind that CHANGES the override set re-runs
         // the wiring pass on the same in-memory model — draws honor the new set exactly, and
         // removing the override restores the master-derived chain bit-exactly.
         var cfg = new RngConfig { MasterSeed = 11 };

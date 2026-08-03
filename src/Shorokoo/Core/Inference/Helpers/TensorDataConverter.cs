@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using System.Runtime.InteropServices;
 using Shorokoo;
 using Shorokoo.Core;
+using Shorokoo.Core.Inference.Abstractions;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Core.Nodes.OnnxNodes;
 using Shorokoo.Graph;
@@ -199,11 +200,28 @@ internal static class TensorDataConverter
         if (rt.IntData is { } idata)
             return FromIntData(dims, idata, rt.DType);
         if (rt.FloatData is { } fdata)
-            return TensorData(dims, fdata.ToArray());
+            return FromFloatData(dims, fdata, rt.DType);
         if (rt.BoolData is { } bdata)
             return TensorData(dims, bdata.ToArray());
 
         return null;
+    }
+
+    /// <summary>
+    /// Materializes QEE's float buffer at <paramref name="dtype"/>'s own type. QEE keeps every
+    /// float width in one <c>float</c> buffer (<see cref="ToRuntimeTensor"/> narrows Float64 on
+    /// the way in), so the dtype lives only in <see cref="RuntimeTensor.DType"/> — the same trap
+    /// the integer side had: emitting Float32 for a Float64/Float16/BFloat16 tensor retypes it,
+    /// and a host-folded constant then violates its consumer's type constraint. Precision already
+    /// lost on load is not recovered here; only the type is kept honest.
+    /// </summary>
+    private static TensorData FromFloatData(long[] dims, ImmutableArray<float> fdata, DType dtype)
+    {
+        var n = fdata.Length;
+        if (dtype == DType.Float64) { var b = new double[n]; for (int i = 0; i < n; i++) b[i] = fdata[i];              return TensorData(dims, b); }
+        if (dtype == DType.Float16) { var b = new Float16[n]; for (int i = 0; i < n; i++) b[i] = (Float16)fdata[i];    return TensorData(dims, b); }
+        if (dtype == DType.BFloat16){ var b = new BFloat16[n]; for (int i = 0; i < n; i++) b[i] = (BFloat16)fdata[i];  return TensorData(dims, b); }
+        return TensorData(dims, fdata.ToArray());
     }
 
     /// <summary>

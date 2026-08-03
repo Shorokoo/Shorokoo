@@ -554,15 +554,30 @@ public class QeeIntegerWidthTests
     [Fact]
     public void TestOverflowingUnsignedAddDoesNotLeakIntoALaterShift()
     {
-        // (2^32 - 1) + 1 is 0 in uint32; >> 4 of that is 0. Carrying the sum as 2^32 instead
-        // gives 2^28. Both operands are constants, so this folds host-side in QEE.
+        // (2^32 - 1) + 1 is 0 in uint32, so >> 4 is 0 and the result is just the element index.
+        // Carrying the sum as 2^32 in QEE's 64-bit buffer instead makes the shift yield 2^28.
         var g = ((ComputationGraph)typeof(QeeOverflowThenShift)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([2L, 2L], 0f, 0f, 0f, 0f);
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
         var got = ComputeContext.Default.Execute(concrete, input)[0]
             .ToTensorData().As<uint32>().AccessMemory().ToArray();
-        Assert.Equal((uint[])[0u], got);
+        Assert.Equal((uint[])[0u, 1u, 2u, 3u], got);
+    }
+
+    [Fact]
+    public void TestFoldedFloat64ConstantKeepsItsDType()
+    {
+        // The float buffer has the same shape of trap as the integer one: QEE keeps every float
+        // width in one float[] buffer, so materializing a folded Float64 constant as Float32
+        // violates its consumer's type constraint at graph construction.
+        var g = ((ComputationGraph)typeof(QeeFoldedFloat64Constant)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var input = TensorData([2L, 2L], 1f, 2f, 3f, 4f);
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        var td = ComputeContext.Default.Execute(concrete, input)[0].ToTensorData();
+        Assert.Equal(DType.Float64, td.DType);
+        Assert.Equal((double[])[7.0, 8.0, 9.0, 10.0], td.As<float64>().AccessMemory().ToArray());
     }
 
     [Fact]
@@ -584,11 +599,76 @@ public class QeeIntegerWidthTests
     }
 }
 
-/// <summary>An all-constant uint32 add that overflows, then a right shift of the sum.</summary>
+/// <summary>
+/// A uint32 add that overflows, then a right shift of the sum — with the result added to a
+/// runtime-valued tensor so the constant sub-chain is actually FORCED through the host folder.
+/// (A fully-constant graph folds nothing: FastFoldConstants only materializes a constant that a
+/// non-constant node consumes, so the whole chain would fall through to ORT and pin nothing.)
+/// </summary>
 [Module]
 public partial class QeeOverflowThenShift
 {
     public static Tensor<uint32> Inline(Tensor<float32> x)
-        => OnnxOp.BitShift(Scalar(4_294_967_295u) + Scalar(1u), Scalar(4u), BitShiftDirection.Right)
-            .uint32().Reshape([Scalar(1L)]);
+    {
+        var folded = OnnxOp.BitShift(Scalar(4_294_967_295u) + Scalar(1u), Scalar(4u),
+            BitShiftDirection.Right).uint32();
+        var runtime = OnnxOp.Range(Scalar(0L), x.ShapeTensor().Reduce(ReduceKind.Prod), Scalar(1L))
+            .int64().Cast<uint32>();
+        return runtime + folded;
+    }
+}
+
+/// <summary>The float analogue: a constant float64 sub-chain folds host-side and must come back
+/// typed float64, not retyped to float32 — its consumer's type constraint sees the dtype.</summary>
+[Module]
+public partial class QeeFoldedFloat64Constant
+{
+    public static Tensor<float64> Inline(Tensor<float32> x)
+    {
+        var runtime = x.Reshape([Scalar(-1L)]).Cast<float64>();
+        return runtime + (Scalar(3.0) * Scalar(2.0));
+    }
+}
+
+/// <summary>A uint64 divide whose operands are constants, consumed by a runtime-valued tensor so
+/// the divide is forced through host constant folding. The dividend is above long.MaxValue.</summary>
+[Module]
+public partial class QeeUInt64SignedDivide
+{
+    public static Tensor<uint64> Inline(Tensor<float32> x)
+    {
+        var runtime = OnnxOp.Range(Scalar(0L), x.ShapeTensor().Reduce(ReduceKind.Prod), Scalar(1L))
+            .int64().Cast<uint64>();
+        var folded = OnnxOp.Div(Scalar(9223372036854775808UL), Scalar(2UL)).uint64();
+        return runtime + folded;
+    }
+}
+
+/// <summary>
+/// QEE holds every integer width in one <c>long</c> buffer, so a <c>uint64</c> above
+/// <c>long.MaxValue</c> is a negative bit-pattern long — and Div/Mod/Less/Greater/Sign/Abs read it
+/// with signed C# operators. Host constant folding runs those kernels and bakes the result into the
+/// graph, so the wrong value is persisted, not merely displayed.
+/// </summary>
+[Trait("Domain", "Inference")]
+[Trait("Purpose", "Coverage")]
+public class QeeUInt64SignedOperatorTests
+{
+    // Skipped against https://github.com/Shorokoo/Shorokoo/issues/141 — QEE's uint64 kernels use
+    // signed operators. Self-checking: deleting the Skip flips this green the moment #141 is fixed.
+    [Fact(Skip = "QEE uint64 kernels use signed operators — Shorokoo/Shorokoo#141")]
+    public void TestFoldedUInt64DivideUsesUnsignedSemantics()
+    {
+        var g = ((ComputationGraph)typeof(QeeUInt64SignedDivide)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var input = TensorData([2L, 2L], 0f, 0f, 0f, 0f);
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        var got = ComputeContext.Default.Execute(concrete, input)[0]
+            .ToTensorData().As<uint64>().AccessMemory().ToArray();
+
+        // 2^63 / 2 == 2^62, plus the element index. Signed division of the bit pattern gives
+        // -2^62, i.e. 2^64 - 2^62 = 13835058055282163712.
+        const ulong half = 4611686018427387904UL;   // 2^62
+        Assert.Equal((ulong[])[half, half + 1, half + 2, half + 3], got);
+    }
 }

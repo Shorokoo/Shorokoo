@@ -276,8 +276,17 @@ namespace Shorokoo.Graph
         {
             var node = FastWireRngKeyDerivation.FindRngSeedNode(graph);
             if (node is null || node.OpCode != InternalOpCodes.MODEL_PARAM_DATA) return null;
-            return node.Attributes.GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData)
-                ?.As<uint64>().AccessMemory().ToArray();
+            var data = node.Attributes.GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData);
+            if (data is null) return null;
+            // A model written before the identity became uint64 would otherwise surface as a bare
+            // InvalidCastException from As<uint64>(); say what actually happened instead.
+            if (data.DType != DType.UInt64)
+                throw new NotSupportedException(
+                    $"This model's RngSeed identity is {data.DType}, not UInt64: it was written by a " +
+                    "framework version whose RNG keys were a pair of truncated int64 words. That " +
+                    "layout and its draw values are superseded (see RngAlgorithms: '…v1' -> '…v2'); " +
+                    "rebuild the model from its architecture under an explicit RngConfig.");
+            return data.As<uint64>().AccessMemory().ToArray();
         }
 
 

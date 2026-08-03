@@ -14,7 +14,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// <summary>
     /// Wires every id-bearing runtime random feed's <b>in-graph key derivation chain</b>: a
     /// <c>SHRK_RNG_SPLIT</c> chain rooted at the model's <c>RngSeed</c> parameter (the ordinary
-    /// non-trainable int64 parameter at reserved ModelId [0] holding the runtime RNG identity —
+    /// non-trainable uint64 parameter at reserved ModelId [0] holding the runtime RNG identity —
     /// see <see cref="RngRuntimeIdentity"/>), one split per ModelId path element. A static path
     /// element enters as a constant split counter; a loop-iteration slot (<c>-1</c>) enters as
     /// the feed's <b>runtime iteration index</b> (an element of its iteration-indices input) —
@@ -25,7 +25,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// <para><b>Per-stream overrides route structurally.</b> An override record replaces the
     /// fully folded key of exactly one realized stream, so an overridden site's chain selects
     /// (via <c>Where</c> on the runtime iteration indices, or unconditionally when the site has
-    /// no iteration slots) a <c>Gather</c> of the record's fixed key-word offset in the
+    /// no iteration slots) a <c>Gather</c> of the record's fixed key offset in the
     /// canonical identity vector instead of the folded chain. Changing override <em>values</em>
     /// is thereafter a parameter write; changing the override <em>set</em> re-runs this pass
     /// (the orphaned chain nodes are swept by ordinary reachability).</para>
@@ -103,7 +103,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <summary>
         /// (Re-)wires every id-bearing feed's key chain against the current identity layout.
         /// <paramref name="overrideRecords"/> lists the runtime override records — realized
-        /// stream path + the record's key-word offset in the identity vector (see
+        /// stream path + the record's key offset in the identity vector (see
         /// <see cref="RngRuntimeIdentity"/>) — in canonical order. Previously wired chain nodes
         /// become unreachable and are swept by the caller. <paramref name="validateStructure"/>
         /// enables the concretization-time slot check (an iteration-slot count that the feed's

@@ -271,6 +271,66 @@ public class RngRuntimeTests
         Assert.Equal((ulong[])[x0 | ((ulong)x1 << 32)], child);
     }
 
+    [Theory]
+    // The pairs that ALIAS under a 32-bit index: same low word, different high word. Under the
+    // retired scheme the second counter word was hard-wired to 0 and the index was truncated, so
+    // split(key, i) and split(key, i + 2^32) were the same child key.
+    [InlineData(7UL, 7UL + (1UL << 32))]
+    [InlineData(0UL, 1UL << 32)]
+    // ...and a key/index in the top half of the range, where a signed reading would go negative.
+    [InlineData(0xFFFF_FFFF_FFFF_FFFEUL, 0xFFFF_FFFEUL)]
+    public void TestSplitIndexUsesTheWholeSixtyFourBitRange(ulong indexA, ulong indexB)
+    {
+        // The headline guarantee of the whole-uint64 interface: distinct indices give distinct
+        // children over the ENTIRE range, and each matches the host oracle's whole-64-bit fold.
+        const ulong key = 0x8000_0000_0000_0001UL;   // high bit set: no signed path may touch it
+
+        static ulong Split(ulong k, ulong index)
+        {
+            var node = Shorokoo.Core.Nodes.NodeDefinitions.InternalOp.RngSplit(
+                Scalar(k), Scalar(index), Shorokoo.Core.Rng.RngAlgorithms.Default);
+            return ComputeContext.Default.Execute(new InternalComputationGraph([], [node]))[0]
+                .ToTensorData().As<uint64>().AccessMemory().ToArray()[0];
+        }
+
+        var a = Split(key, indexA);
+        var b = Split(key, indexB);
+
+        Assert.Equal(RngTestOracle.FoldKey(key, indexA), a);
+        Assert.Equal(RngTestOracle.FoldKey(key, indexB), b);
+        Assert.NotEqual(a, b);
+    }
+
+    [Fact]
+    public void TestDrawPositionUsesTheWholeSixtyFourBitRange()
+    {
+        // drawBase is the execution counter. Under the retired scheme it occupied one 32-bit
+        // counter word, so execution 2^32 repeated execution 0's draw exactly — the wrap the
+        // user docs explicitly promised did not exist.
+        const ulong key = 0xDEAD_BEEF_FEED_FACEUL;
+        static float[] Draw(ulong drawBase)
+        {
+            var shape = Vector(4L);
+            var g = new InternalComputationGraph([],
+                [RuntimeRng.StandardUniform(shape, Scalar(key), Scalar(drawBase))]);
+            return ComputeContext.Default.Execute(g)[0]
+                .ToTensorData().As<float32>().AccessMemory().ToArray();
+        }
+
+        var atZero = Draw(0);
+        var atTwoPow32 = Draw(1UL << 32);
+        var atTop = Draw(0xFFFF_FFFF_FFFF_FFFFUL);
+
+        Assert.NotEqual(atZero, atTwoPow32);   // the wrap this change fixes
+        Assert.NotEqual(atZero, atTop);
+        for (long i = 0; i < 4; i++)
+        {
+            Assert.Equal(RngTestOracle.DrawUniform(key, 0, i), atZero[i]);
+            Assert.Equal(RngTestOracle.DrawUniform(key, 1UL << 32, i), atTwoPow32[i]);
+            Assert.Equal(RngTestOracle.DrawUniform(key, 0xFFFF_FFFF_FFFF_FFFFUL, i), atTop[i]);
+        }
+    }
+
     [Fact]
     public void TestInGraphNormalHasStandardMoments()
     {

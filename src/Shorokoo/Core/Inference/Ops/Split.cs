@@ -35,10 +35,12 @@ internal sealed class SplitOp : QuickOp
         var rtInputs = new RuntimeTensor?[inputs.Length];
         for (int i = 0; i < inputs.Length; i++) rtInputs[i] = inputs[i] as RuntimeTensor;
 
+        // Split overrides Execute only to reach the node's declared output count, which Compute's
+        // signature does not carry; the per-output tail must still be the shared one.
         var results = ComputeSplit(rtInputs, node.Attributes, maxDataElements, node.Outputs.Count);
         var asInterface = new IRuntimeTensor[results.Length];
-        for (int i = 0; i < results.Length; i++)
-            asInterface[i] = RuntimeTensorFactory.EnforceDataSizeLimit(results[i], maxDataElements);
+        for (int i = 0; i < results.Length; i++) asInterface[i] = results[i];
+        FinalizeOutputs(asInterface, maxDataElements);
         return (asInterface, false);
     }
 

@@ -131,9 +131,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         // A [1] int64 buffer: +1 is exact at every step count (a float32 counter saturates
-        // at 2^24, silently freezing per-step mask variation), and the state dtype matches
-        // the int64 drawBase input the sites consume, so no cast sits in between. This is
-        // the convention for framework-injected counters: int64 state, end to end.
+        // at 2^24, silently freezing per-step mask variation). This is the convention for
+        // framework-injected counters: int64 state, end to end. The RNG interface takes a
+        // uint64 draw position, so FastLowerRandomOps casts at that boundary rather than
+        // letting an unsigned type leak into the framework's own state plumbing.
         private static Tensor<int64> CounterInit(Vector<int64> shape)
             => Globals.TensorFill(shape, 0L);
     }

@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Runtime.InteropServices;
 using System.Linq;
 using Shorokoo;
 using Shorokoo.Core;
@@ -86,7 +87,11 @@ internal static class RuntimeTensorFactory
     ///
     /// <para>Unsigned widths land in <c>[0, 2^w)</c> and signed widths sign-extend, matching
     /// how <see cref="TensorDataConverter.ToRuntimeTensor"/> loads them. <c>Int64</c> and
-    /// <c>UInt64</c> are the buffer's own width and pass through untouched.</para>
+    /// <c>UInt64</c> are the buffer's own width and pass through untouched — which also means a
+    /// <c>UInt64</c> value above <c>long.MaxValue</c> stays a negative bit-pattern long, and the
+    /// kernels that use signed C# operators on it (Div, Mod, Less/Greater, Sign, Abs) read it as
+    /// negative. Narrowing gives the sub-64-bit unsigned widths correct signed-operator behaviour
+    /// for free; UInt64 is the one gap, tracked separately.</para>
     /// </summary>
     public static RuntimeTensor NarrowToDeclaredWidth(RuntimeTensor rt)
     {
@@ -106,11 +111,13 @@ internal static class RuntimeTensorFactory
         for (int i = 0; i < d.Length; i++)
         {
             var n = narrow(d[i]);
+            // Once buf exists the fast path is disabled, so no later index can be skipped.
             if (n == d[i] && buf is null) continue;
             buf ??= d.ToArray();
             buf[i] = n;
         }
-        return buf is null ? rt : rt with { IntData = ImmutableArray.Create(buf) };
+        // AsImmutableArray wraps buf in place; ImmutableArray.Create would copy it a second time.
+        return buf is null ? rt : rt with { IntData = ImmutableCollectionsMarshal.AsImmutableArray(buf) };
     }
 
     /// <summary>

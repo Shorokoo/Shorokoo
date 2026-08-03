@@ -131,10 +131,17 @@ internal static class RuntimeRng
     /// <para>The draw position is folded <b>into the key</b> — one bijection over scalars —
     /// rather than spending a counter word on it. That leaves BOTH counter words for the
     /// element index, so a draw position and an element index are each a whole 64-bit value
-    /// and neither aliases: the 2³²'th execution draws a fresh stream rather than repeating
-    /// the first, and a tensor of more than 2³² elements does not repeat within itself. The
-    /// fold is the same primitive as a key split, so <c>drawBase = d</c> draws exactly the
-    /// stream <c>split(key, d)</c> does at <c>drawBase = 0</c>.</para>
+    /// and neither aliases <em>as counters</em>: the 2³²'th execution draws a fresh stream rather
+    /// than repeating the first, and the generator's word pair stays distinct across more than 2³²
+    /// elements. (Distinct generator words, not distinct floats — <see cref="ToUniform"/> keeps 24
+    /// bits, so drawn values collide by pigeonhole long before that.)</para>
+    ///
+    /// <para>The fold reuses the bijection, but it is <b>not</b> the key tree's split: it runs at
+    /// this algorithm's <paramref name="rounds"/>, whereas a key split is pinned to the default
+    /// algorithm so switching generators never re-keys a stream. Nor is <c>drawBase = d</c> the
+    /// same as drawing at <c>drawBase = 0</c> under <c>split(key, d)</c> — that would fold twice
+    /// (<c>B(0, B(d, key))</c>), and <c>B(0, ·)</c> is not the identity. The draw simply runs
+    /// under the folded key <c>B(d, key)</c>.</para>
     /// </summary>
     private static (Tensor<uint32> x0, Tensor<uint32> x1) Draw(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> drawBase, int rounds)

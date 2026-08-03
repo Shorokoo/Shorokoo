@@ -36,8 +36,8 @@ internal sealed class RngRuntimeIdentity
     public const int RunKeyIndex = 1;
 
     /// <summary>One runtime override record: the overridden stream's realized ModelId path, the
-    /// replacement key (the override replaces the fully folded key), and the vector offset
-    /// of the record's first key word (for structural chain routing).</summary>
+    /// replacement key (the override replaces the fully folded key), and the key's offset
+    /// in the vector (for structural chain routing).</summary>
     public sealed record RuntimeOverrideRecord(int[] Path, ulong Key, int KeyOffset);
 
     public long AlgorithmId { get; }

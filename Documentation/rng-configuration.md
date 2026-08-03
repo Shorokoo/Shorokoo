@@ -119,9 +119,11 @@ instead).
 Per-execution variation is carried by a separate **drawBase** counter, not by the configured
 key — and the RNG system manages it itself: concretization injects one model-global execution
 counter (`RngExecutionCounter`, ordinary model state, an int64 scalar initialized 0 and
-advanced +1 per execution) and wires it into every feed. A draw folds its `drawBase` into the
-stream key — the same bijection a key split uses — so execution *n* draws from the substream
-`split(key, n)`, and the element index then addresses the whole 64-bit counter. Modules never
+advanced +1 per execution) and wires it into every feed. A draw folds its whole 64-bit
+`drawBase` into the stream key rather than spending a counter word on it, so execution *n*
+draws from its own substream of that stream and the element index gets the whole counter to
+itself. (The fold reuses the same bijection a key split uses, but it is a draw-internal step,
+not a node of the configurable key tree — a stream's key is unchanged by it.) Modules never
 touch it — `Globals.RandomUniform` is all a consumer writes. Under the training rig the
 counter rides the checkpoint, so Dropout masks differ per step and a resumed run at step N
 draws exactly what the uninterrupted run would; in one-shot inference it is baked at 0, so

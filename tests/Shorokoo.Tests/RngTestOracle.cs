@@ -11,7 +11,8 @@ namespace Shorokoo.Tests;
 /// that needs a concrete key resolves it by <em>executing</em> that derivation
 /// (<c>RngKeyResolver</c>). These helpers reimplement the fold independently, on the host, so
 /// tests can assert the in-graph derivation against an oracle that does not share its
-/// implementation.</para>
+/// implementation — which is exactly what makes the assertions meaningful. Never replace any
+/// of it with a call into the product.</para>
 ///
 /// <para>Keys and split indices are whole <c>ulong</c> values, matching the interface. The
 /// 32-bit word split is Threefry's own business and appears only inside <see cref="FoldKey"/>,

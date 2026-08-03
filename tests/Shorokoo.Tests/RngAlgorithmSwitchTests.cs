@@ -98,8 +98,8 @@ public class RngAlgorithmSwitchTests
         var concrete13 = FeedModel(Rounds13);
 
         Assert.Equal(ResolvedKey(concrete20), ResolvedKey(concrete13));
-        Assert.Equal(RngAlgorithms.Threefry2x32BoxMullerV1, BoundAlgorithm(concrete20));
-        Assert.Equal(RngAlgorithms.Threefry2x32x13BoxMullerV1, BoundAlgorithm(concrete13));
+        Assert.Equal(RngAlgorithms.Threefry2x32BoxMullerV2, BoundAlgorithm(concrete20));
+        Assert.Equal(RngAlgorithms.Threefry2x32x13BoxMullerV2, BoundAlgorithm(concrete13));
     }
 
     [Fact]
@@ -171,8 +171,8 @@ public class RngAlgorithmSwitchTests
         var (name20, algo20) = UniformFn(Rounds20);
         var (name13, algo13) = UniformFn(Rounds13);
 
-        Assert.Equal(RngAlgorithms.Threefry2x32BoxMullerV1, algo20);
-        Assert.Equal(RngAlgorithms.Threefry2x32x13BoxMullerV1, algo13);
+        Assert.Equal(RngAlgorithms.Threefry2x32BoxMullerV2, algo20);
+        Assert.Equal(RngAlgorithms.Threefry2x32x13BoxMullerV2, algo13);
         // The two algorithms export distinct, identifiable functions.
         Assert.Contains("Threefry2x32_13", name13);
         Assert.DoesNotContain("Threefry2x32_13", name20);

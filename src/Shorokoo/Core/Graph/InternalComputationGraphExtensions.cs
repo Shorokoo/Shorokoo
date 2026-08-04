@@ -80,7 +80,7 @@ namespace Shorokoo.Graph
             // MODULE_SET_HYPERPARAMS) so the next stages don't see ghost templates.
             FastProcessorHelper.RemoveUnreachableNodes(fastGraph);
 
-            // Generator-managed drawBase: inject the model-global execution counter and wire
+            // Generator-managed substreamIndex: inject the model-global execution counter and wire
             // it into every runtime random feed, BEFORE template extraction so the counter's
             // state param rides the normal trainable/state param pipeline from here on.
             FastInjectRngDrawCounter.Process(fastGraph);
@@ -272,12 +272,12 @@ namespace Shorokoo.Graph
         /// initializer). Null when the graph has no runtime random surface or no identity is
         /// bound yet. See <c>Core.Rng.RngRuntimeIdentity</c> for the encoding.
         /// </summary>
-        internal static long[]? TryGetRngSeed(this InternalComputationGraph graph)
+        internal static ulong[]? TryGetRngSeed(this InternalComputationGraph graph)
         {
             var node = FastWireRngKeyDerivation.FindRngSeedNode(graph);
             if (node is null || node.OpCode != InternalOpCodes.MODEL_PARAM_DATA) return null;
-            return node.Attributes.GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData)
-                ?.As<int64>().AccessMemory().ToArray();
+            var data = node.Attributes.GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData);
+            return data?.As<uint64>().AccessMemory().ToArray();
         }
 
 
@@ -392,9 +392,8 @@ namespace Shorokoo.Graph
         /// with the same bit generator the model's runtime feeds use. The init-collection
         /// identity itself is never persisted (initialization runs to concrete weight values),
         /// so re-running initialization under a specific seed takes an explicit config. An
-        /// identity recording an unknown algorithm (e.g. a model written by a newer framework
-        /// version) throws rather than initializing under a substitute; pass an explicit config
-        /// to deliberately re-key.
+        /// identity recording an algorithm id this build does not define throws rather than
+        /// initializing under a substitute; pass an explicit config to deliberately re-key.
         /// </param>
         /// <returns>The default trainable-parameter values, named.</returns>
         internal static ModelParamList InitializeTrainableParams(
@@ -405,16 +404,16 @@ namespace Shorokoo.Graph
         {
             AssertConcreteArchitecture(graph, nameof(InitializeTrainableParams));
             computeContext ??= ComputeContext.Default;
-            if (rngConfig is null && graph.TryGetRngSeed() is { } identityVec)
+            if (rngConfig is null && graph.TryGetRngSeed() is { } rngSeedData)
             {
-                var identity = Core.Rng.RngRuntimeIdentity.Decode(identityVec);
+                var identity = Core.Rng.RngRuntimeIdentity.Decode(rngSeedData);
                 rngConfig = new RngConfig
                 {
                     Algorithm = identity.Algorithm
                         ?? throw new System.NotSupportedException(
-                            "InitializeTrainableParams: the graph's RngSeed identity records the " +
-                            $"unknown algorithm id {identity.AlgorithmId} (likely written by a newer " +
-                            "framework version). Initializing under a substitute algorithm would " +
+                            "InitializeTrainableParams: the graph's RngSeedData records the " +
+                            $"unrecognized algorithm id {identity.AlgorithmId}. Initializing under " +
+                            "a substitute algorithm would " +
                             "silently diverge from the recorded identity; pass an explicit rngConfig " +
                             "to deliberately re-key the parameters."),
                 };
@@ -457,11 +456,11 @@ namespace Shorokoo.Graph
             // loops, rather than a graph execution per stream. Asking for a report WITH a config
             // is asking for resolved keys, and that is a deliberately expensive call; a report
             // without one resolves nothing.
-            var rows = new List<(int keyIndex, Func<IReadOnlyList<long>?, RngStreamInfo> build)>();
-            var keySpecs = new List<((uint k0, uint k1) root, IReadOnlyList<int> foldPath)>();
+            var rows = new List<(int keyIndex, Func<ulong?, RngStreamInfo> build)>();
+            var keySpecs = new List<(ulong root, IReadOnlyList<int> foldPath)>();
             void AddRow(
-                ((uint k0, uint k1) root, IReadOnlyList<int> foldPath)? spec,
-                Func<IReadOnlyList<long>?, RngStreamInfo> build)
+                (ulong root, IReadOnlyList<int> foldPath)? spec,
+                Func<ulong?, RngStreamInfo> build)
             {
                 int index = -1;
                 if (spec is { } s) { index = keySpecs.Count; keySpecs.Add(s); }
@@ -486,7 +485,7 @@ namespace Shorokoo.Graph
                     Name = name,
                     Shape = paramInfo.Shape.Dims,
                     FrameworkOwned = FastInjectRngDrawCounter.IsExecutionCounter(paramInfo.ParamIdentifier),
-                    KeyWords = key,
+                    Key = key,
                 });
             }
 
@@ -529,7 +528,7 @@ namespace Shorokoo.Graph
                         ModelIdPath = feedIdVals,
                         SitePath = null,
                         Kind = feedKind,
-                        KeyWords = key,
+                        Key = key,
                     });
             }
 

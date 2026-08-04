@@ -49,13 +49,12 @@ public class RngAlgorithmSwitchTests
 
     /// <summary>The feed's resolved stream key, derived from the graph's bound RngSeed
     /// identity — exactly what the feed's in-graph split chain derives at execution.</summary>
-    private static long[] ResolvedKey(InternalComputationGraph concrete)
+    private static ulong ResolvedKey(InternalComputationGraph concrete)
     {
         var feed = concrete.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
         var path = feed.Attributes.GetIntsVal(ShrkAttrLocalModelId)!;
         var decoded = RngRuntimeIdentity.Decode(concrete.TryGetRngSeed()!);
-        var (k0, k1) = RngTestOracle.RunKey(decoded, path);
-        return [k0, k1];
+        return RngTestOracle.RunKey(decoded, path);
     }
 
     private static string BoundAlgorithm(InternalComputationGraph concrete)
@@ -78,16 +77,14 @@ public class RngAlgorithmSwitchTests
         Assert.NotEqual(draws20, draws13);
 
         // Bit-exact against the host generator at each algorithm's round count, using the
-        // feed's actually-resolved key (drawBase 0 — the injected counter is baked at 0 in
+        // feed's actually-resolved key (substreamIndex 0 — the injected counter is baked at 0 in
         // one-shot inference).
         var key20 = ResolvedKey(concrete20);
         var key13 = ResolvedKey(concrete13);
         for (long i = 0; i < 16; i++)
         {
-            var (h20, _) = Threefry2x32.Bijection((uint)i, 0u, (uint)key20[0], (uint)key20[1], Threefry2x32.Rounds);
-            var (h13, _) = Threefry2x32.Bijection((uint)i, 0u, (uint)key13[0], (uint)key13[1], Threefry2x32.Rounds13);
-            Assert.Equal((h20 & 0x00FFFFFFu) * (1.0f / 16777216.0f), draws20[i]);
-            Assert.Equal((h13 & 0x00FFFFFFu) * (1.0f / 16777216.0f), draws13[i]);
+            Assert.Equal(RngTestOracle.DrawUniform(key20, 0, i, Threefry2x32.Rounds), draws20[i]);
+            Assert.Equal(RngTestOracle.DrawUniform(key13, 0, i, Threefry2x32.Rounds13), draws13[i]);
         }
     }
 
@@ -136,24 +133,24 @@ public class RngAlgorithmSwitchTests
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
         arch.ApplyRngConfig(Rounds20);
 
-        // A model file written by a newer framework version: the RngSeed identity records an
-        // algorithm id this version does not know.
-        const long newerId = 9999;
+        // A corrupt or hand-edited carrier: the RngSeedData records an algorithm id that
+        // maps to nothing.
+        const ulong unknownId = 9999;
         var identity = arch.TryGetRngSeed()!;
-        identity[Shorokoo.Core.Rng.RngRuntimeIdentity.AlgorithmIdIndex] = newerId;
+        identity[Shorokoo.Core.Rng.RngRuntimeIdentity.AlgorithmIdIndex] = unknownId;
         var seedNode = arch.Nodes.Single(n =>
             n.IdentifierTemplate == Shorokoo.Core.Nodes.Processors.Fast
                 .FastWireRngKeyDerivation.RngSeedIdentifierTemplate);
         seedNode.Attributes = seedNode.Attributes.SetAttributes(
             (ShrkAttrTensorData, (object?)Shorokoo.TensorData.Create(
-                new Shape(identity.Length), DType.Int64,
+                new Shape(identity.Length), DType.UInt64,
                 Shorokoo.Core.Utils.OnnxUtils.CreateTensorValue(new Shape(identity.Length), identity))));
 
         // No-config init trusts the bound identity's algorithm: an unreadable identity must
         // throw — never silently initialize under a substitute algorithm while the model
-        // keeps reporting the newer id.
+        // keeps reporting the unrecognized id.
         var ex = Assert.Throws<NotSupportedException>(() => arch.InitializeTrainableParams());
-        Assert.Contains(newerId.ToString(), ex.Message);
+        Assert.Contains(unknownId.ToString(), ex.Message);
 
         // The escape hatch for deliberately re-keying an unreadable file: an explicit config
         // bypasses the identity decode.

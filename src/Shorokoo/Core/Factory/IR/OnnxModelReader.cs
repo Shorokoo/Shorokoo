@@ -786,11 +786,6 @@ namespace Shorokoo.Core.Factory.IR
 
             foreach (var initializer in initializers)
             {
-                // (A legacy file's reserved-name RNG key vector — ShrkRngKeysTensorName —
-                // loads as an ordinary MODEL_PARAM_DATA below: nothing consumes it, and its
-                // presence is exactly what lets ApplyRngConfig recognize such a file and fail
-                // loudly instead of silently updating a recorded identity. Current files carry
-                // their identity as the ordinary RngSeed parameter initializer instead.)
                 var identifierTemplate = initializer.MetadataProps
                     .FirstOrDefault(x => x.Key == ShrkMetaNodeIdentifierTemplate)?.Value;
                 var isTrainableStr = initializer.MetadataProps

@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using System.Runtime.InteropServices;
 using Shorokoo;
 using Shorokoo.Core;
+using Shorokoo.Core.Inference.Abstractions;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Core.Nodes.OnnxNodes;
 using Shorokoo.Graph;
@@ -184,6 +185,12 @@ internal static class TensorDataConverter
     /// <summary>
     /// Converts a <see cref="RuntimeTensor"/> back to <see cref="TensorData"/>. Returns null
     /// when the tensor has no concrete data (shape-only) or no known shape.
+    ///
+    /// <para>QEE holds every integer width in one <c>long</c> buffer, so an integer tensor's
+    /// actual width lives only in <see cref="RuntimeTensor.DType"/> — materializing from the
+    /// buffer alone would retype every non-<c>int64</c> integer tensor as <c>int64</c>. That
+    /// silently corrupts host constant folding, whose folded values re-enter the graph as
+    /// CONSTANT nodes and must still satisfy their consumers' type constraints.</para>
     /// </summary>
     public static TensorData? ToTensorData(RuntimeTensor rt)
     {
@@ -191,12 +198,64 @@ internal static class TensorDataConverter
         var dims = rt.Shape.Dims;
 
         if (rt.IntData is { } idata)
-            return TensorData(dims, idata.ToArray());
+            return FromIntData(dims, idata, rt.DType);
         if (rt.FloatData is { } fdata)
-            return TensorData(dims, fdata.ToArray());
+            return FromFloatData(dims, fdata, rt.DType);   // null for Float64 — see FromFloatData
         if (rt.BoolData is { } bdata)
             return TensorData(dims, bdata.ToArray());
 
         return null;
+    }
+
+    /// <summary>
+    /// Materializes QEE's float buffer at <paramref name="dtype"/>'s own type, or <c>null</c> when
+    /// that buffer cannot represent the dtype.
+    ///
+    /// <para>QEE keeps every float width in one <c>float</c> buffer, so the dtype lives only in
+    /// <see cref="RuntimeTensor.DType"/> — the same trap the integer side had: emitting Float32 for
+    /// a narrower-typed tensor retypes it, and a host-folded constant then violates its consumer's
+    /// type constraint.</para>
+    ///
+    /// <para><b>Float64 returns null on purpose.</b> <see cref="ToRuntimeTensor"/> narrows Float64
+    /// to <c>float</c> on the way in, so widening back would stamp <c>Float64</c> on values that
+    /// are float32-rounded — and <c>1e300</c> would come back <c>Infinity</c>. A wrong value
+    /// wearing the right type is worse than no value: returning null means "no concrete data", so
+    /// constant folding skips the tensor and the real ops survive to a backend that computes at
+    /// genuine float64. Float16/BFloat16 keep their dtype instead: the conversion is exact for any
+    /// single value, and it is the one <see cref="Ops.CastOp"/> documents as happening in the
+    /// constant path. Note it rounds once, at materialization — a multi-op constant chain at f16
+    /// dtype computes in the float32 buffer throughout, where a runtime would round every
+    /// intermediate.</para>
+    /// </summary>
+    private static TensorData? FromFloatData(long[] dims, ImmutableArray<float> fdata, DType dtype)
+    {
+        var n = fdata.Length;
+        if (dtype == DType.Float64) return null;
+        if (dtype == DType.Float16) { var b = new Float16[n]; for (int i = 0; i < n; i++) b[i] = (Float16)fdata[i];    return TensorData(dims, b); }
+        if (dtype == DType.BFloat16){ var b = new BFloat16[n]; for (int i = 0; i < n; i++) b[i] = (BFloat16)fdata[i];  return TensorData(dims, b); }
+        // Float32, or a non-float dtype whose data landed in the float buffer: emit as-is, the
+        // same fall-through FromIntData applies for an unexpected dtype.
+        return TensorData(dims, fdata.ToArray());
+    }
+
+    /// <summary>
+    /// Materializes QEE's 64-bit integer buffer at <paramref name="dtype"/>'s own width.
+    /// Values wider than the target wrap (unchecked), which is the only thing a narrower
+    /// buffer can represent and matches what the ONNX runtimes produce. A dtype that is not
+    /// an integer width (a Bool or Float tensor whose data landed in the int buffer) keeps
+    /// the historical <c>int64</c> materialization.
+    /// </summary>
+    private static TensorData FromIntData(long[] dims, ImmutableArray<long> idata, DType dtype)
+    {
+        var n = idata.Length;
+        if (dtype == DType.Int64) return TensorData(dims, idata.ToArray());
+        if (dtype == DType.Int32) { var b = new int[n];    for (int i = 0; i < n; i++) b[i] = unchecked((int)idata[i]);    return TensorData(dims, b); }
+        if (dtype == DType.Int16) { var b = new short[n];  for (int i = 0; i < n; i++) b[i] = unchecked((short)idata[i]);  return TensorData(dims, b); }
+        if (dtype == DType.Int8)  { var b = new sbyte[n];  for (int i = 0; i < n; i++) b[i] = unchecked((sbyte)idata[i]);  return TensorData(dims, b); }
+        if (dtype == DType.UInt64){ var b = new ulong[n];  for (int i = 0; i < n; i++) b[i] = unchecked((ulong)idata[i]);  return TensorData(dims, b); }
+        if (dtype == DType.UInt32){ var b = new uint[n];   for (int i = 0; i < n; i++) b[i] = unchecked((uint)idata[i]);   return TensorData(dims, b); }
+        if (dtype == DType.UInt16){ var b = new ushort[n]; for (int i = 0; i < n; i++) b[i] = unchecked((ushort)idata[i]); return TensorData(dims, b); }
+        if (dtype == DType.UInt8) { var b = new byte[n];   for (int i = 0; i < n; i++) b[i] = unchecked((byte)idata[i]);   return TensorData(dims, b); }
+        return TensorData(dims, idata.ToArray());
     }
 }

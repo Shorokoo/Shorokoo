@@ -170,12 +170,12 @@ public sealed class RngConfig
     public bool HasOverride(RngCollection collection, int[] modelIdPath)
         => _overrides.ContainsKey((collection, PathKey(modelIdPath ?? throw new ArgumentNullException(nameof(modelIdPath)))));
 
-    private bool TryGetOverride(RngCollection collection, IReadOnlyList<int> modelIdPath, out (uint k0, uint k1) key)
+    private bool TryGetOverride(RngCollection collection, IReadOnlyList<int> modelIdPath, out ulong key)
     {
         if (_overrides.Count > 0 &&
             _overrides.TryGetValue((collection, PathKey(modelIdPath)), out var seed))
         {
-            key = SplitWords(seed);
+            key = seed;
             return true;
         }
         key = default;
@@ -183,14 +183,14 @@ public sealed class RngConfig
     }
 
     /// <summary>
-    /// The init-collection master key: two 32-bit words of <c>Fold(MasterSeed, "init")</c>.
+    /// The init-collection master key: <c>Fold(MasterSeed, "init")</c>.
     /// Every trainable-parameter stream folds from this along the parameter's ModelId path,
     /// so overriding the init sub-master re-rolls all weights while runtime streams stay put.
     /// </summary>
-    internal (uint k0, uint k1) InitMasterKey => SplitWords(InitMasterSeed ?? Fold(MasterSeed, "init"));
+    internal ulong InitMasterKey => InitMasterSeed ?? Fold(MasterSeed, "init");
 
-    /// <summary>The runtime-collection master key (Dropout masks, sampling, noise): words of <c>Fold(MasterSeed, "runtime")</c>.</summary>
-    internal (uint k0, uint k1) RunMasterKey => SplitWords(RunMasterSeed ?? Fold(MasterSeed, "runtime"));
+    /// <summary>The runtime-collection master key (Dropout masks, sampling, noise): <c>Fold(MasterSeed, "runtime")</c>.</summary>
+    internal ulong RunMasterKey => RunMasterSeed ?? Fold(MasterSeed, "runtime");
 
     /// <summary>
     /// The <see cref="RngCollection.Runtime"/> overrides in the canonical (sorted-by-path-text)
@@ -206,9 +206,6 @@ public sealed class RngConfig
             .Select(e => (e.Key.pathKey.Split(',').Select(int.Parse).ToArray(), e.Value))
             .ToArray();
 
-    internal static (uint k0, uint k1) SplitWords(ulong key)
-        => ((uint)(key & 0xFFFFFFFF), (uint)(key >> 32));
-
     // NOTE (#136): there is deliberately no host-side key fold here. The key tree is computed
     // exclusively in-graph by the algorithm's SHRK_RNG_SPLIT chain; a host consumer that needs
     // a concrete key resolves it by EXECUTING that derivation (see RngKeyResolver), never by
@@ -217,17 +214,17 @@ public sealed class RngConfig
 
     /// <summary>
     /// A trainable parameter's init stream key expressed as a <b>derivation spec</b> rather
-    /// than a computed key: the root key words plus the ModelId path still to be folded into
-    /// them. The fold itself is performed <b>in-graph</b> by a <c>SHRK_RNG_SPLIT</c> chain
+    /// than a computed key: the root key plus the ModelId path still to be folded into
+    /// it. The fold itself is performed <b>in-graph</b> by a <c>SHRK_RNG_SPLIT</c> chain
     /// (see <c>FastInitKeyedDraws</c>) — no host-side Threefry — exactly as a runtime feed's
     /// chain derives its key from the <c>RngSeed</c> parameter.
     ///
     /// <para>The two short-circuits the old host fold applied are carried here as an empty
     /// fold path: an explicit per-stream override <b>replaces</b> the fully folded key, and
     /// <see cref="SharedKey"/> mode skips the fold so same-shape params tie (test/debug only).
-    /// The root words are pure marshalling (<see cref="Fold"/> is a SHA-256 XOR, not RNG).</para>
+    /// The root key is pure marshalling (<see cref="Fold"/> is a SHA-256 XOR, not RNG).</para>
     /// </summary>
-    internal ((uint k0, uint k1) root, IReadOnlyList<int> foldPath) InitKeySpec(IEnumerable<int> modelIdVals)
+    internal (ulong root, IReadOnlyList<int> foldPath) InitKeySpec(IEnumerable<int> modelIdVals)
     {
         var vals = modelIdVals as IReadOnlyList<int> ?? new List<int>(modelIdVals);
         if (TryGetOverride(RngCollection.Params, vals, out var overridden))
@@ -242,7 +239,7 @@ public sealed class RngConfig
     /// report) resolve the same key by <em>executing</em> that derivation, never by
     /// recomputing it host-side.
     /// </summary>
-    internal ((uint k0, uint k1) root, IReadOnlyList<int> foldPath) RunKeySpec(IEnumerable<int> modelIdVals)
+    internal (ulong root, IReadOnlyList<int> foldPath) RunKeySpec(IEnumerable<int> modelIdVals)
     {
         var vals = modelIdVals as IReadOnlyList<int> ?? new List<int>(modelIdVals);
         if (TryGetOverride(RngCollection.Runtime, vals, out var overridden))

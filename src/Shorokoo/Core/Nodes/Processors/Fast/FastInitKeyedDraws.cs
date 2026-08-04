@@ -22,7 +22,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// ceiling and parallelizes on GPU).
     ///
     /// <para>The draw node is rewritten in place: its key input is the parameter's folded
-    /// init key as a <c>[2]</c> constant, its drawBase is the draw's ordinal within the
+    /// init key as a uint64 scalar constant, its substreamIndex is the draw's ordinal within the
     /// initializer (a distinct sub-stream per draw; every shipping initializer has exactly
     /// one, so ordinal 0 in practice), and its shape input and declared distribution
     /// bounds carry over — the initializer's downstream scaling math is unchanged.
@@ -64,7 +64,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// no error, no entry in the RNG stream report.
         /// </summary>
         public static Function? BuildKeyedDraws(
-            Function fn, (uint k0, uint k1) streamKey, string streamName, string algorithm)
+            Function fn, ulong streamKey, string streamName, string algorithm)
         {
             // Flatten so a draw factored into a called function/sub-module becomes a
             // top-level node the substitution below can intercept. Shipping initializers
@@ -98,7 +98,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     "non-reproducible backend randomness. Move the random draw " +
                     "(RandomUniform/RandomNormal/RandomBits) directly into the initializer's body.");
 
-            var (k0, k1) = streamKey;
 
             var newNodes = new List<FastNode>(body.Nodes.Count);
             int randomOrdinal = 0;
@@ -117,15 +116,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var shapeInput = node.Inputs[0]
                     ?? throw new InvalidOperationException("Random init node has null shape input.");
 
-                // The parameter's own stream key as a [2] constant, and a distinct sub-stream
-                // (drawBase = ordinal) per draw within one initializer. The constant is emitted
+                // The parameter's own stream key as a scalar constant, and a distinct sub-stream
+                // (substreamIndex = ordinal) per draw within one initializer. The constant is emitted
                 // per draw so it always sits in the draw's own control-flow scope.
-                var keyKey = AppendConstant(new OnnxTensorData<int64>(
-                    new Shape(2), OnnxUtils.CreateTensorValue(new Shape(2), (long[])[k0, k1])), newNodes);
+                var keyKey = AppendConstant(new OnnxTensorData<uint64>(
+                    new Shape(System.Array.Empty<long>()),
+                    OnnxUtils.CreateTensorValue(new Shape(System.Array.Empty<long>()), (ulong[])[streamKey])), newNodes);
 
-                var drawBaseKey = AppendConstant(new OnnxTensorData<int64>(
+                var substreamIndexKey = AppendConstant(new OnnxTensorData<uint64>(
                     new Shape(Array.Empty<long>()),
-                    OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (long[])[randomOrdinal])), newNodes);
+                    OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (ulong[])[(ulong)randomOrdinal])), newNodes);
 
                 if (isBits)
                 {
@@ -145,7 +145,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         Definitions.NodeDefinitions[InternalOpCodes.SHRK_RNG_BITS].AttributeDefs);
                     node.FullInputs = new Dictionary<string, List<FastTensorKey?>>
                     {
-                        [""] = new List<FastTensorKey?> { keyKey, drawBaseKey, shapeInput }
+                        [""] = new List<FastTensorKey?> { keyKey, substreamIndexKey, shapeInput }
                     };
                     newNodes.Add(node);
                     randomOrdinal++;
@@ -166,7 +166,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (float[])[b])), newNodes);
 
                 // Rewrite the random node in place to the keyed draw (inputs
-                // [key, drawBase, shape, a, b]), preserving its output key so downstream
+                // [key, substreamIndex, shape, a, b]), preserving its output key so downstream
                 // consumers stay valid. FastLowerRandomOps lowers it to the algorithm's
                 // function call at ONNX prep.
                 var newOp = isUniform ? InternalOpCodes.SHRK_RNG_UNIFORM : InternalOpCodes.SHRK_RNG_NORMAL;
@@ -176,7 +176,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     Definitions.NodeDefinitions[newOp].AttributeDefs);
                 node.FullInputs = new Dictionary<string, List<FastTensorKey?>>
                 {
-                    [""] = new List<FastTensorKey?> { keyKey, drawBaseKey, shapeInput, aKey, bKey }
+                    [""] = new List<FastTensorKey?> { keyKey, substreamIndexKey, shapeInput, aKey, bKey }
                 };
                 newNodes.Add(node);
                 randomOrdinal++;

@@ -275,29 +275,31 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             // function body) lowers to ConstantOfShape + RandomUniformLike.
             Op(SHRK_RANDOM_UNIFORM)
                 .Tensor<int64>("T1")
+                .Tensor<uint64>("TK")
                 .Tensor<float32>("T2")
                 .AttributeFloat(AttrHigh)
                 .AttributeFloat(AttrLow)
                 .AttributeFloat(AttrSeed)
                 .AttributeLongs(ShrkAttrLocalModelId)
                 .Input("shape", "T1", 1)
-                .Input("drawBase", "T1", 0)
+                .Input("substreamIndex", "T1", 0)
                 .Input("iterationIndices", "T1", 1)
-                .Input("key", "T1?", 1)
+                .Input("key", "TK?", 0)
                 .Output("output", "T2", rank: "R"),
 
             // SHRK_RANDOM_NORMAL: the normal-distribution runtime feed; see SHRK_RANDOM_UNIFORM.
             Op(SHRK_RANDOM_NORMAL)
                 .Tensor<int64>("T1")
+                .Tensor<uint64>("TK")
                 .Tensor<float32>("T2")
                 .AttributeFloat(AttrMean)
                 .AttributeFloat(AttrScale)
                 .AttributeFloat(AttrSeed)
                 .AttributeLongs(ShrkAttrLocalModelId)
                 .Input("shape", "T1", 1)
-                .Input("drawBase", "T1", 0)
+                .Input("substreamIndex", "T1", 0)
                 .Input("iterationIndices", "T1", 1)
-                .Input("key", "T1?", 1)
+                .Input("key", "TK?", 0)
                 .Output("output", "T2", rank: "R"),
 
             // SHRK_RANDOM_BITS: a raw-bits runtime feed with dynamic shape input; the output is
@@ -307,36 +309,38 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             // so an id-less bits feed is a hard build error, never RandomUniformLike.
             Op(SHRK_RANDOM_BITS)
                 .Tensor<int64>("T1")
+                .Tensor<uint64>("TK")
                 .Tensor<UnsignedIntLike>("T2")
                 .AttributeDType(ShrkAttrDtype, "T2")
                 .AttributeLongs(ShrkAttrLocalModelId)
                 .Input("shape", "T1", 1)
-                .Input("drawBase", "T1", 0)
+                .Input("substreamIndex", "T1", 0)
                 .Input("iterationIndices", "T1", 1)
-                .Input("key", "T1?", 1)
+                .Input("key", "TK?", 0)
                 .Output("output", "T2", rank: "R"),
 
             // SHRK_RNG_SPLIT: index-based RNG key split, child = Bijection(key, counter: index)
-            // under the named algorithm. Key = int64[2] (32-bit words). Lowered at ONNX export
+            // under the named algorithm. Key and index are whole uint64 scalars. Lowered at export
             // to a call of the algorithm's non-inlined "split" function. RNG is graph-only (#136):
             // nothing computes a split host-side, so there is no QEE op for it.
             Op(SHRK_RNG_SPLIT)
-                .Tensor<int64>("T1")
+                .Tensor<uint64>("TK")
                 .AttributeString(ShrkAttrRngAlgorithm)
-                .Input("key", "T1", 1)
-                .Input("index", "T1", 0)
-                .Output("childKey", "T1", 1),
+                .Input("key", "TK", 0)
+                .Input("index", "TK", 0)
+                .Output("childKey", "TK", 0),
 
             // SHRK_RNG_UNIFORM: keyed deterministic U(low, high) draw of dynamic shape under
-            // the named algorithm. Counter = (flat element index, drawBase). Lowered at ONNX
-            // export to a call of the algorithm's non-inlined "uniform" function.
+            // the named algorithm. substreamIndex folds into the key; the counter is the whole flat
+            // element index. Lowered at ONNX export to a call of the "uniform" function.
             Op(SHRK_RNG_UNIFORM)
-                .Tensor<int64>("T1")
+                .Tensor<uint64>("TK")
+                .Tensor<int64>("TS")
                 .Tensor<float32>("T2")
                 .AttributeString(ShrkAttrRngAlgorithm)
-                .Input("key", "T1", 1)
-                .Input("drawBase", "T1", 0)
-                .Input("shape", "T1", 1)
+                .Input("key", "TK", 0)
+                .Input("substreamIndex", "TK", 0)
+                .Input("shape", "TS", 1)
                 .Input("low", "T2", 0)
                 .Input("high", "T2", 0)
                 .Output("output", "T2", rank: "R"),
@@ -344,28 +348,30 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             // SHRK_RNG_NORMAL: keyed deterministic N(mean, scale) draw of dynamic shape under
             // the named algorithm (per-element-pair Box-Muller). See SHRK_RNG_UNIFORM.
             Op(SHRK_RNG_NORMAL)
-                .Tensor<int64>("T1")
+                .Tensor<uint64>("TK")
+                .Tensor<int64>("TS")
                 .Tensor<float32>("T2")
                 .AttributeString(ShrkAttrRngAlgorithm)
-                .Input("key", "T1", 1)
-                .Input("drawBase", "T1", 0)
-                .Input("shape", "T1", 1)
+                .Input("key", "TK", 0)
+                .Input("substreamIndex", "TK", 0)
+                .Input("shape", "TS", 1)
                 .Input("mean", "T2", 0)
                 .Input("scale", "T2", 0)
                 .Output("output", "T2", rank: "R"),
 
             // SHRK_RNG_BITS: keyed deterministic raw-bits draw of dynamic shape under the named
-            // algorithm; output an unsigned integer of the width in shrk_dtype. Counter = (flat
-            // element index, drawBase). Lowered at ONNX export to a call of the algorithm's
-            // non-inlined, width-specialized "bits" function.
+            // algorithm; output an unsigned integer of the width in shrk_dtype. substreamIndex folds
+            // into the key; the counter is the whole flat element index. Lowered at ONNX export
+            // to a call of the algorithm's non-inlined, width-specialized "bits" function.
             Op(SHRK_RNG_BITS)
-                .Tensor<int64>("T1")
+                .Tensor<uint64>("TK")
+                .Tensor<int64>("TS")
                 .Tensor<UnsignedIntLike>("T2")
                 .AttributeString(ShrkAttrRngAlgorithm)
                 .AttributeDType(ShrkAttrDtype, "T2")
-                .Input("key", "T1", 1)
-                .Input("drawBase", "T1", 0)
-                .Input("shape", "T1", 1)
+                .Input("key", "TK", 0)
+                .Input("substreamIndex", "TK", 0)
+                .Input("shape", "TS", 1)
                 .Output("output", "T2", rank: "R"),
 
             // SHRK_CONV: Conv variant taking geometry (pads/strides/dilations/kernel_shape/group)

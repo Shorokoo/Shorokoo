@@ -20,11 +20,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// <see cref="FastWireRngKeyDerivation"/>).
     ///
     /// <para><b>Keyed feeds</b> (id-bearing, chain wired) rewrite to the keyed deterministic
-    /// draw form <c>SHRK_RNG_UNIFORM/NORMAL</c> — inputs <c>[key, drawBase, shape, a, b]</c> —
+    /// draw form <c>SHRK_RNG_UNIFORM/NORMAL</c> — inputs <c>[key, substreamIndex, shape, a, b]</c> —
     /// and then, like every keyed SHRK_RNG_* op (the chain splits included), to a call of the
     /// named algorithm's non-inlined function: the exported model calls tagged local
     /// FunctionProtos, so its randomness is deterministic, portable, and identifiable. The
-    /// draw algorithm comes from the bound identity's algorithm id (<c>RngSeed[0]</c>); an
+    /// draw algorithm comes from the bound identity's algorithm id (<c>RngSeed[1]</c>); an
     /// unbound graph is bound to the DEFAULT identity here first — a concrete artifact is
     /// never unkeyed, and "no config" simply means the default deterministic identity.</para>
     ///
@@ -55,24 +55,24 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // The graph's identity: the RngSeed parameter's bound value. A still-unbound
             // RngSeed (a concrete architecture exported without a config) binds to the
             // default identity here: a concrete artifact is never unkeyed. An unknown
-            // algorithm id (a file written by a newer framework version) fails loudly —
+            // algorithm id (a corrupt or hand-edited carrier) fails loudly —
             // lowering under a substitute would silently diverge from the recorded identity.
             string algorithm = RngAlgorithms.Default;
             if (FastWireRngKeyDerivation.FindRngSeedNode(graph) is { } seedNode)
             {
                 if (seedNode.OpCode == InternalOpCodes.MODEL_PARAM)
                     WriteDefaultIdentity(seedNode);
-                var identityVec = seedNode.Attributes.GetTensorVal(ShrkAttrTensorData)
-                    ?.As<int64>().AccessMemory().ToArray();
-                if (identityVec is not null)
+                var rngSeedData = seedNode.Attributes.GetTensorVal(ShrkAttrTensorData)
+                    ?.As<uint64>().AccessMemory().ToArray();
+                if (rngSeedData is not null)
                 {
-                    var identity = RngRuntimeIdentity.Decode(identityVec);
+                    var identity = RngRuntimeIdentity.Decode(rngSeedData);
                     var boundAlgorithm = identity.Algorithm
                         ?? throw new NotSupportedException(
-                            "FastLowerRandomOps: the model's RngSeed identity records the " +
-                            $"unknown algorithm id {identity.AlgorithmId} (likely written by a " +
-                            "newer framework version). Lowering under a substitute algorithm " +
-                            "would silently diverge from the recorded identity.");
+                            "FastLowerRandomOps: the model's RngSeedData records the " +
+                            $"unrecognized algorithm id {identity.AlgorithmId}. Lowering under " +
+                            "a substitute algorithm " +
+                            "would silently diverge from the recorded algorithm.");
                     algorithm = RngAlgorithms.NameOf(boundAlgorithm);
                 }
             }
@@ -101,7 +101,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
 
                 var idVals = node.Attributes.GetIntsVal(ShrkAttrLocalModelId);
-                // The key input is the last input slot: [shape, drawBase, iterationIndices, key].
+                // The key input is the last input slot: [shape, substreamIndex, iterationIndices, key].
                 var keySource = node.Inputs.Count > 3 ? node.Inputs[3] : null;
                 if (idVals is { Length: > 0 } && keySource is { } ks)
                 {
@@ -160,7 +160,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         private static void WriteDefaultIdentity(FastNode seedNode)
         {
             var identity = RngRuntimeIdentity.Build(RngConfig.Default);
-            var data = new OnnxTensorData<int64>(
+            var data = new OnnxTensorData<uint64>(
                 new Shape(identity.Length),
                 OnnxUtils.CreateTensorValue(new Shape(identity.Length), identity));
             var attrDefs = Definitions.NodeDefinitions[InternalOpCodes.MODEL_PARAM_DATA].AttributeDefs;
@@ -226,7 +226,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 : null;
             var (kind, dtype, rank) = node.OpCode switch
             {
-                InternalOpCodes.SHRK_RNG_SPLIT => (RngAlgorithms.KindSplit, DType.Int64, 1L),
+                InternalOpCodes.SHRK_RNG_SPLIT => (RngAlgorithms.KindSplit, DType.UInt64, 0L),
                 InternalOpCodes.SHRK_RNG_UNIFORM => (RngAlgorithms.KindUniform, DType.Float32, -1L),
                 InternalOpCodes.SHRK_RNG_NORMAL => (RngAlgorithms.KindNormal, DType.Float32, -1L),
                 InternalOpCodes.SHRK_RNG_BITS => (RngAlgorithms.KindBits, bitsDtype!, -1L),
@@ -252,10 +252,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         /// <summary>
         /// Rewrites an id-bearing SHRK_RANDOM_* feed in place to the SHRK_RNG_UNIFORM/NORMAL
-        /// form (inputs <c>[key, drawBase, shape, a, b]</c>). The key is the feed's derivation
-        /// chain (already wired as its key input); drawBase is the site's own counter input
-        /// when wired (e.g. the injected per-execution state counter) else a constant 0, and
+        /// form (inputs <c>[key, substreamIndex, shape, a, b]</c>). The key is the feed's derivation
+        /// chain (already wired as its key input); substreamIndex is the site's own counter input
+        /// when wired (e.g. the injected per-execution state counter) else 0, and
         /// the distribution bounds come off the node's attributes as f32 scalar constants.
+        ///
+        /// <para>The counter is the framework's own int64 execution ordinal, while a draw
+        /// position on the RNG algorithm interface is a whole uint64 — so this boundary is
+        /// where the two meet, and the cast happens here rather than leaking uint64 into the
+        /// framework's state plumbing.</para>
         /// </summary>
         private static void RewriteFeedToKeyedDraw(
             FastNode node, bool isUniform, FastTensorKey keySource,
@@ -271,9 +276,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 ? node.Attributes.GetFloatVal(AttrHigh) ?? 1.0f
                 : node.Attributes.GetFloatVal(AttrScale) ?? 1.0f;
 
-            var drawBaseKey = node.Inputs.Count > 1 && node.Inputs[1] is { } db
-                ? db
-                : AppendScalarInt64(0L, newNodes);
+            var substreamIndexKey = node.Inputs.Count > 1 && node.Inputs[1] is { } db
+                ? AppendCastToUInt64(db, newNodes)
+                : AppendScalarUInt64(0UL, newNodes);
             var aKey = AppendScalarFloat32(a, newNodes);
             var bKey = AppendScalarFloat32(b, newNodes);
 
@@ -285,13 +290,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 attrDefs);
             node.FullInputs = new Dictionary<string, List<FastTensorKey?>>
             {
-                [""] = new List<FastTensorKey?> { keySource, drawBaseKey, shapeInput, aKey, bKey }
+                [""] = new List<FastTensorKey?> { keySource, substreamIndexKey, shapeInput, aKey, bKey }
             };
         }
 
         /// <summary>
         /// Rewrites an id-bearing SHRK_RANDOM_BITS feed in place to the SHRK_RNG_BITS keyed draw
-        /// form (inputs <c>[key, drawBase, shape]</c>), carrying the feed's output uint width
+        /// form (inputs <c>[key, substreamIndex, shape]</c>), carrying the feed's output uint width
         /// (shrk_dtype) onto the keyed op. Bits carry no distribution bounds.
         /// </summary>
         private static void RewriteBitsFeedToKeyedDraw(
@@ -302,9 +307,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var dtype = node.Attributes.GetDTypeVal(ShrkAttrDtype)
                 ?? throw new InvalidOperationException(
                     "FastLowerRandomOps: a SHRK_RANDOM_BITS feed is missing its shrk_dtype (output width) attribute.");
-            var drawBaseKey = node.Inputs.Count > 1 && node.Inputs[1] is { } db
-                ? db
-                : AppendScalarInt64(0L, newNodes);
+            var substreamIndexKey = node.Inputs.Count > 1 && node.Inputs[1] is { } db
+                ? AppendCastToUInt64(db, newNodes)
+                : AppendScalarUInt64(0UL, newNodes);
 
             var attrDefs = Definitions.NodeDefinitions[InternalOpCodes.SHRK_RNG_BITS].AttributeDefs;
             node.OpCode = InternalOpCodes.SHRK_RNG_BITS;
@@ -316,16 +321,35 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }, attrDefs);
             node.FullInputs = new Dictionary<string, List<FastTensorKey?>>
             {
-                [""] = new List<FastTensorKey?> { keySource, drawBaseKey, shapeInput }
+                [""] = new List<FastTensorKey?> { keySource, substreamIndexKey, shapeInput }
             };
         }
 
-        private static FastTensorKey AppendScalarInt64(long value, List<FastNode> newNodes)
+        private static FastTensorKey AppendScalarUInt64(ulong value, List<FastNode> newNodes)
         {
-            var data = new OnnxTensorData<int64>(
+            var data = new OnnxTensorData<uint64>(
                 new Shape(Array.Empty<long>()),
-                OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (long[])[value]));
+                OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (ulong[])[value]));
             return AppendConstant(data, newNodes);
+        }
+
+        /// <summary>Casts the framework's int64 execution counter to the RNG interface's
+        /// uint64 draw position.</summary>
+        private static FastTensorKey AppendCastToUInt64(FastTensorKey value, List<FastNode> newNodes)
+        {
+            var attrDefs = Definitions.NodeDefinitions[OpCodes.CAST].AttributeDefs;
+            var nodeKey = FastNodeKey.New();
+            var outKey = new FastTensorKey(nodeKey, 0);
+            newNodes.Add(new FastNode
+            {
+                Key = nodeKey,
+                OpCode = OpCodes.CAST,
+                Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                    new Dictionary<string, object?> { [AttrTo] = DType.UInt64 }, attrDefs),
+                FullInputs = { [""] = new List<FastTensorKey?> { value } },
+                FullOutputs = { [""] = new List<FastTensorKey?> { outKey } },
+            });
+            return outKey;
         }
 
         private static FastTensorKey AppendScalarFloat32(float value, List<FastNode> newNodes)

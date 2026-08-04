@@ -6,20 +6,20 @@ using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
 
-/// <summary>Emits the in-graph runtime uniform draw at the input's shape (fixed key/drawBase).</summary>
+/// <summary>Emits the in-graph runtime uniform draw at the input's shape (fixed key/substreamIndex).</summary>
 [Module]
 public partial class RtUniformDraw
 {
     public static Tensor<float32> Inline(Tensor<float32> x)
-        => RuntimeRng.StandardUniform(x.ShapeTensor(), Scalar(123L), Scalar(456L), Scalar(0L));
+        => RuntimeRng.StandardUniform(x.ShapeTensor(), Scalar(123UL | (456UL << 32)), Scalar(0UL));
 }
 
-/// <summary>Emits the in-graph runtime normal draw at the input's shape (fixed key/drawBase).</summary>
+/// <summary>Emits the in-graph runtime normal draw at the input's shape (fixed key/substreamIndex).</summary>
 [Module]
 public partial class RtNormalDraw
 {
     public static Tensor<float32> Inline(Tensor<float32> x)
-        => RuntimeRng.StandardNormal(x.ShapeTensor(), Scalar(7L), Scalar(9L), Scalar(0L));
+        => RuntimeRng.StandardNormal(x.ShapeTensor(), Scalar(7UL | (9UL << 32)), Scalar(0UL));
 }
 
 /// <summary>Emits a plain <c>Globals.RandomUniform</c> draw — routed through the SHRK_RANDOM
@@ -49,10 +49,10 @@ public partial class RtFcWithRngFeed
 }
 
 /// <summary>Emits the in-graph raw-bits draws (U8/U16/U32/U64) at the input's shape.</summary>
-[Module] public partial class RtBitsU8Draw  { public static Tensor<uint8>  Inline(Tensor<float32> x) => RuntimeRng.BitsU8 (x.ShapeTensor(), Scalar(111L), Scalar(222L), Scalar(0L)); }
-[Module] public partial class RtBitsU16Draw { public static Tensor<uint16> Inline(Tensor<float32> x) => RuntimeRng.BitsU16(x.ShapeTensor(), Scalar(111L), Scalar(222L), Scalar(0L)); }
-[Module] public partial class RtBitsU32Draw { public static Tensor<uint32> Inline(Tensor<float32> x) => RuntimeRng.BitsU32(x.ShapeTensor(), Scalar(111L), Scalar(222L), Scalar(0L)); }
-[Module] public partial class RtBitsU64Draw { public static Tensor<uint64> Inline(Tensor<float32> x) => RuntimeRng.BitsU64(x.ShapeTensor(), Scalar(111L), Scalar(222L), Scalar(0L)); }
+[Module] public partial class RtBitsU8Draw  { public static Tensor<uint8>  Inline(Tensor<float32> x) => RuntimeRng.BitsU8 (x.ShapeTensor(), Scalar(111UL | (222UL << 32)), Scalar(0UL)); }
+[Module] public partial class RtBitsU16Draw { public static Tensor<uint16> Inline(Tensor<float32> x) => RuntimeRng.BitsU16(x.ShapeTensor(), Scalar(111UL | (222UL << 32)), Scalar(0UL)); }
+[Module] public partial class RtBitsU32Draw { public static Tensor<uint32> Inline(Tensor<float32> x) => RuntimeRng.BitsU32(x.ShapeTensor(), Scalar(111UL | (222UL << 32)), Scalar(0UL)); }
+[Module] public partial class RtBitsU64Draw { public static Tensor<uint64> Inline(Tensor<float32> x) => RuntimeRng.BitsU64(x.ShapeTensor(), Scalar(111UL | (222UL << 32)), Scalar(0UL)); }
 
 /// <summary>A plain <c>Globals.RandomBits</c> feed — routed through the SHRK_RANDOM_BITS
 /// lowering (id-bearing keyed draw), i.e. the public runtime raw-bits path.</summary>
@@ -79,28 +79,15 @@ public class RngRuntimeTests
         return outputs[0].ToTensorData().As<float32>().AccessMemory().ToArray();
     }
 
-    // Host reference for the runtime scheme: element i -> counter (i, drawBase);
-    // uniform = low 24 bits of x0 * 2^-24.
-    private static float HostUniform(long i, uint k0, uint k1, uint drawBase)
-    {
-        var (x0, _) = Threefry2x32.Bijection((uint)i, drawBase, k0, k1);
-        return (x0 & 0x00FFFFFFu) * (1.0f / 16777216.0f);
-    }
+    // Host reference for the runtime scheme: substreamIndex folds into the key, element i indexes
+    // the whole counter; uniform = low 24 bits of x0 * 2^-24.
+    private static float HostUniform(long i, ulong key, ulong substreamIndex)
+        => RngTestOracle.DrawUniform(key, substreamIndex, i);
 
     // Host reference for the raw-bits scheme: element i draws one generator word pair; the
     // narrow widths take the low bits of x0, U32 the whole word, U64 = x0 | (x1 << 32).
-    private static ulong HostBits(long i, int width, uint k0, uint k1, uint drawBase)
-    {
-        var (x0, x1) = Threefry2x32.Bijection((uint)i, drawBase, k0, k1);
-        return width switch
-        {
-            8 => (byte)x0,
-            16 => (ushort)x0,
-            32 => x0,
-            64 => x0 | ((ulong)x1 << 32),
-            _ => throw new ArgumentOutOfRangeException(nameof(width)),
-        };
-    }
+    private static ulong HostBits(long i, int width, ulong key, ulong substreamIndex)
+        => RngTestOracle.DrawBits(key, substreamIndex, i, width);
 
     private static TensorData RunDrawRaw<TModule>(long rows, long cols)
     {
@@ -117,22 +104,22 @@ public class RngRuntimeTests
         var u8 = RunDrawRaw<RtBitsU8Draw>(4, 4);
         Assert.Equal(DType.UInt8, u8.DType);
         var u8v = u8.As<uint8>().AccessMemory().ToArray();
-        for (long i = 0; i < 16; i++) Assert.Equal((byte)HostBits(i, 8, 111, 222, 0), u8v[i]);
+        for (long i = 0; i < 16; i++) Assert.Equal((byte)HostBits(i, 8, 111UL | (222UL << 32), 0), u8v[i]);
 
         var u16 = RunDrawRaw<RtBitsU16Draw>(4, 4);
         Assert.Equal(DType.UInt16, u16.DType);
         var u16v = u16.As<uint16>().AccessMemory().ToArray();
-        for (long i = 0; i < 16; i++) Assert.Equal((ushort)HostBits(i, 16, 111, 222, 0), u16v[i]);
+        for (long i = 0; i < 16; i++) Assert.Equal((ushort)HostBits(i, 16, 111UL | (222UL << 32), 0), u16v[i]);
 
         var u32 = RunDrawRaw<RtBitsU32Draw>(4, 4);
         Assert.Equal(DType.UInt32, u32.DType);
         var u32v = u32.As<uint32>().AccessMemory().ToArray();
-        for (long i = 0; i < 16; i++) Assert.Equal((uint)HostBits(i, 32, 111, 222, 0), u32v[i]);
+        for (long i = 0; i < 16; i++) Assert.Equal((uint)HostBits(i, 32, 111UL | (222UL << 32), 0), u32v[i]);
 
         var u64 = RunDrawRaw<RtBitsU64Draw>(4, 4);
         Assert.Equal(DType.UInt64, u64.DType);
         var u64v = u64.As<uint64>().AccessMemory().ToArray();
-        for (long i = 0; i < 16; i++) Assert.Equal(HostBits(i, 64, 111, 222, 0), u64v[i]);
+        for (long i = 0; i < 16; i++) Assert.Equal(HostBits(i, 64, 111UL | (222UL << 32), 0), u64v[i]);
     }
 
     [Fact]
@@ -141,7 +128,7 @@ public class RngRuntimeTests
         var vals = RunDraw<RtUniformDraw>(4, 4);
         Assert.Equal(16, vals.Length);
         for (long i = 0; i < 16; i++)
-            Assert.Equal(HostUniform(i, 123, 456, 0), vals[i]);
+            Assert.Equal(HostUniform(i, 123UL | (456UL << 32), 0), vals[i]);
     }
 
     [Fact]
@@ -182,9 +169,9 @@ public class RngRuntimeTests
 
         var vals = ComputeContext.Default.Execute(concrete, input)[0]
             .ToTensorData().As<float32>().AccessMemory().ToArray();
-        var (k0, k1) = RngTestOracle.RunKey(RngConfig.Default, [1]);   // the feed's site is slot 1
+        var key = RngTestOracle.RunKey(RngConfig.Default, [1]);   // the feed's site is slot 1
         for (long i = 0; i < 16; i++)
-            Assert.Equal(HostUniform(i, k0, k1, 0), vals[i]);
+            Assert.Equal(HostUniform(i, key, 0), vals[i]);
     }
 
     [Fact]
@@ -199,9 +186,9 @@ public class RngRuntimeTests
         var av = a.As<uint32>().AccessMemory().ToArray();
         var bv = b.As<uint32>().AccessMemory().ToArray();
         Assert.Equal(av, bv);   // deterministic / portable
-        var (k0, k1) = RngTestOracle.RunKey(RngConfig.Default, [1]);   // single feed at slot 1
+        var key = RngTestOracle.RunKey(RngConfig.Default, [1]);   // single feed at slot 1
         for (long i = 0; i < 16; i++)
-            Assert.Equal((uint)HostBits(i, 32, k0, k1, 0), av[i]);
+            Assert.Equal((uint)HostBits(i, 32, key, 0), av[i]);
     }
 
     [Fact]
@@ -213,9 +200,9 @@ public class RngRuntimeTests
         var a = RunDrawRaw<RtLoweredBits64>(4, 4);
         Assert.Equal(DType.UInt64, a.DType);
         var av = a.As<uint64>().AccessMemory().ToArray();
-        var (k0, k1) = RngTestOracle.RunKey(RngConfig.Default, [1]);
+        var key = RngTestOracle.RunKey(RngConfig.Default, [1]);
         for (long i = 0; i < 16; i++)
-            Assert.Equal(HostBits(i, 64, k0, k1, 0), av[i]);
+            Assert.Equal(HostBits(i, 64, key, 0), av[i]);
     }
 
     [Fact]
@@ -273,15 +260,75 @@ public class RngRuntimeTests
         // SHRK_RNG_SPLIT folds its parent key input with the index — bit-exact with the host
         // bijection. The split function is the versioned in-graph form of the key tree's
         // derivation primitive (the lowering itself derives keys host-side from the carrier).
-        var parentKey = Vector(1L, 2L);
+        var parentKey = Scalar(1UL | (2UL << 32));
         var split = Shorokoo.Core.Nodes.NodeDefinitions.InternalOp.RngSplit(
-            parentKey, Scalar(7L), Shorokoo.Core.Rng.RngAlgorithms.Default);
+            parentKey, Scalar(7UL), Shorokoo.Core.Rng.RngAlgorithms.Default);
         var g = new InternalComputationGraph([], [split]);
 
-        var childWords = ComputeContext.Default.Execute(g)[0]
-            .ToTensorData().As<int64>().AccessMemory().ToArray();
+        var child = ComputeContext.Default.Execute(g)[0]
+            .ToTensorData().As<uint64>().AccessMemory().ToArray();
         var (x0, x1) = Threefry2x32.Bijection(7u, 0u, 1u, 2u);
-        Assert.Equal((long[])[x0, x1], childWords);
+        Assert.Equal((ulong[])[x0 | ((ulong)x1 << 32)], child);
+    }
+
+    [Theory]
+    // The pairs that ALIAS under a 32-bit index: same low word, different high word. Under the
+    // retired scheme the second counter word was hard-wired to 0 and the index was truncated, so
+    // split(key, i) and split(key, i + 2^32) were the same child key.
+    [InlineData(7UL, 7UL + (1UL << 32))]
+    [InlineData(0UL, 1UL << 32)]
+    // ...and a key/index in the top half of the range, where a signed reading would go negative.
+    [InlineData(0xFFFF_FFFF_FFFF_FFFEUL, 0xFFFF_FFFEUL)]
+    public void TestSplitIndexUsesTheWholeSixtyFourBitRange(ulong indexA, ulong indexB)
+    {
+        // The headline guarantee of the whole-uint64 interface: distinct indices give distinct
+        // children over the ENTIRE range, and each matches the host oracle's whole-64-bit fold.
+        const ulong key = 0x8000_0000_0000_0001UL;   // high bit set: no signed path may touch it
+
+        static ulong Split(ulong k, ulong index)
+        {
+            var node = Shorokoo.Core.Nodes.NodeDefinitions.InternalOp.RngSplit(
+                Scalar(k), Scalar(index), Shorokoo.Core.Rng.RngAlgorithms.Default);
+            return ComputeContext.Default.Execute(new InternalComputationGraph([], [node]))[0]
+                .ToTensorData().As<uint64>().AccessMemory().ToArray()[0];
+        }
+
+        var a = Split(key, indexA);
+        var b = Split(key, indexB);
+
+        Assert.Equal(RngTestOracle.FoldKey(key, indexA), a);
+        Assert.Equal(RngTestOracle.FoldKey(key, indexB), b);
+        Assert.NotEqual(a, b);
+    }
+
+    [Fact]
+    public void TestDrawPositionUsesTheWholeSixtyFourBitRange()
+    {
+        // substreamIndex is the execution counter. Under the retired scheme it occupied one 32-bit
+        // counter word, so execution 2^32 repeated execution 0's draw exactly — the wrap the
+        // user docs explicitly promised did not exist.
+        const ulong key = 0xDEAD_BEEF_FEED_FACEUL;
+        static float[] Draw(ulong substreamIndex)
+        {
+            var shape = Vector(4L);
+            var g = new InternalComputationGraph([],
+                [RuntimeRng.StandardUniform(shape, Scalar(key), Scalar(substreamIndex))]);
+            return ComputeContext.Default.Execute(g)[0]
+                .ToTensorData().As<float32>().AccessMemory().ToArray();
+        }
+
+        var atZero = Draw(0);
+        var atTwoPow32 = Draw(1UL << 32);
+        var atTop = Draw(0xFFFF_FFFF_FFFF_FFFFUL);
+
+        Assert.NotEqual(atZero, atTwoPow32);   // the wrap this change fixes
+        Assert.NotEqual(atZero, atTop);
+        for (long i = 0; i < 4; i++)
+        {
+            Assert.Equal(RngTestOracle.DrawUniform(key, 0, i), atZero[i]);
+            Assert.Equal(RngTestOracle.DrawUniform(key, 1UL << 32, i), atTwoPow32[i]);
+            Assert.Equal(RngTestOracle.DrawUniform(key, 0xFFFF_FFFF_FFFF_FFFFUL, i), atTop[i]);
+        }
     }
 
     [Fact]

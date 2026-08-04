@@ -210,15 +210,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// for the whole model (#136: the host runs no RNG itself), in bounded chunks — instead of
         /// embedding a split chain per parameter in the much larger initialization graph.
         /// </summary>
-        private static Dictionary<ModelId, (uint k0, uint k1)> ResolveInitKeys(
+        private static Dictionary<ModelId, ulong> ResolveInitKeys(
             IEnumerable<ModelId> modelIds, RngConfig rngConfig, ComputeContext? computeContext)
         {
             var ids = modelIds.ToArray();
             var resolved = Core.Rng.RngKeyResolver.Resolve(
                 [.. ids.Select(id => rngConfig.InitKeySpec(id.Vals))], computeContext);
-            var keys = new Dictionary<ModelId, (uint k0, uint k1)>(ids.Length);
+            var keys = new Dictionary<ModelId, ulong>(ids.Length);
             for (int i = 0; i < ids.Length; i++)
-                keys[ids[i]] = ((uint)resolved[i][0], (uint)resolved[i][1]);
+                keys[ids[i]] = resolved[i];
             return keys;
         }
 

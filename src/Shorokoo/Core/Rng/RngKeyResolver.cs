@@ -16,7 +16,7 @@ namespace Shorokoo.Core.Rng;
 /// recomputing the key tree host-side (#136). Given derivation specs (a root key plus the
 /// ModelId path still to be folded), it builds a throwaway graph that folds the key tree one
 /// LEVEL at a time — a single batched split per level over all streams of equal depth — runs it
-/// through the ordinary execution path, and reads the resulting key words back.
+/// through the ordinary execution path, and reads the resulting keys back.
 ///
 /// <para>The point is that there is <b>no second implementation</b> to drift: the key a caller
 /// sees is produced by the same graph op that keys real draws. Note the key tree is currently
@@ -40,25 +40,24 @@ internal static class RngKeyResolver
 {
     /// <summary>
     /// Resolves one key per spec, in order. A spec with an empty fold path (an override, or
-    /// SharedKey mode) resolves to its root words without emitting a split.
+    /// SharedKey mode) resolves to its root key without emitting a split.
     /// </summary>
-    public static IReadOnlyList<long[]> Resolve(
-        IReadOnlyList<((uint k0, uint k1) root, IReadOnlyList<int> foldPath)> specs,
+    public static IReadOnlyList<ulong> Resolve(
+        IReadOnlyList<(ulong root, IReadOnlyList<int> foldPath)> specs,
         ComputeContext? computeContext = null)
     {
         ArgumentNullException.ThrowIfNull(specs);
         if (specs.Count == 0) return [];
 
         // Specs needing no fold are answered directly — their root IS the key, so there is
-        // nothing to derive (and no RNG computation involved in reading two stored words).
-        var results = new long[specs.Count][];
+        // nothing to derive (and no RNG computation involved in reading a stored value).
+        var results = new ulong[specs.Count];
+        var resolved = new bool[specs.Count];
         var pending = new List<int>();
         for (int i = 0; i < specs.Count; i++)
         {
-            if (specs[i].foldPath.Count == 0)
-                results[i] = [specs[i].root.k0, specs[i].root.k1];
-            else
-                pending.Add(i);
+            if (specs[i].foldPath.Count == 0) { results[i] = specs[i].root; resolved[i] = true; }
+            else pending.Add(i);
         }
         if (pending.Count == 0) return results;
 
@@ -72,37 +71,33 @@ internal static class RngKeyResolver
 
     /// <summary>
     /// Resolves one group of equal-depth specs in a single graph execution: the group's M roots
-    /// enter as one <c>[2, M]</c> key block, and each tree LEVEL is one batched split
-    /// (<see cref="RngAlgorithms.KindSplitBatch"/>) folding all M streams at once. So the graph
-    /// holds ~2 nodes per level rather than 2 per fold step — the cost stops scaling with the
-    /// number of streams and scales only with depth.
+    /// enter as one <c>[M]</c> vector of whole 64-bit keys, and each tree LEVEL is one batched
+    /// split (<see cref="RngAlgorithms.KindSplitBatch"/>) folding all M streams at once. So the
+    /// graph holds ~2 nodes per level rather than 2 per fold step — the cost stops scaling with
+    /// the number of streams and scales only with depth.
     /// </summary>
     private static void ResolveGroup(
-        IReadOnlyList<((uint k0, uint k1) root, IReadOnlyList<int> foldPath)> specs,
+        IReadOnlyList<(ulong root, IReadOnlyList<int> foldPath)> specs,
         IReadOnlyList<int> group,
-        long[][] results,
+        ulong[] results,
         ComputeContext? computeContext)
     {
         int m = group.Count;
         int depth = specs[group[0]].foldPath.Count;
 
-        // Roots as one [2, M] block: row 0 = k0 words, row 1 = k1 words.
-        var rootWords = new long[2 * m];
-        for (int j = 0; j < m; j++)
-        {
-            rootWords[j] = specs[group[j]].root.k0;
-            rootWords[m + j] = specs[group[j]].root.k1;
-        }
+        // Roots as one [M] vector of whole 64-bit keys.
+        var roots = new ulong[m];
+        for (int j = 0; j < m; j++) roots[j] = specs[group[j]].root;
         var nodes = new List<FastNode>();
-        var keys = AppendConstant(new OnnxTensorData<int64>(
-            new Shape(2, m), OnnxUtils.CreateTensorValue(new Shape(2, m), rootWords)), nodes);
+        var keys = AppendConstant(new OnnxTensorData<uint64>(
+            new Shape(m), OnnxUtils.CreateTensorValue(new Shape(m), roots)), nodes);
 
         var batchSplit = RngAlgorithms.GetFunction(RngAlgorithms.Default, RngAlgorithms.KindSplitBatch);
         for (int level = 0; level < depth; level++)
         {
-            var counters = new long[m];
-            for (int j = 0; j < m; j++) counters[j] = specs[group[j]].foldPath[level];
-            var countersKey = AppendConstant(new OnnxTensorData<int64>(
+            var counters = new ulong[m];
+            for (int j = 0; j < m; j++) counters[j] = unchecked((ulong)specs[group[j]].foldPath[level]);
+            var countersKey = AppendConstant(new OnnxTensorData<uint64>(
                 new Shape(m), OnnxUtils.CreateTensorValue(new Shape(m), counters)), nodes);
             keys = AppendBatchSplit(keys, countersKey, batchSplit, nodes);
         }
@@ -129,7 +124,7 @@ internal static class RngKeyResolver
             throw new InvalidOperationException(
                 "RngKeyResolver: failed to resolve RNG stream keys by executing their in-graph " +
                 "derivation. The stream inventory (paths, kinds, names) is unaffected — only the " +
-                "resolved key words require execution. See the inner exception.", ex);
+                "resolved keys require execution. See the inner exception.", ex);
         }
 
         // The unpacking below is positional, so a size mismatch would silently mis-label keys —
@@ -137,16 +132,15 @@ internal static class RngKeyResolver
         if (run.Length != 1)
             throw new InvalidOperationException(
                 $"RngKeyResolver: expected 1 resolved key block, got {run.Length}.");
-        var words = run[0].ToTensorData().As<int64>().AccessMemory().ToArray();
-        if (words.Length != 2 * m)
+        var keyVals = run[0].ToTensorData().As<uint64>().AccessMemory().ToArray();
+        if (keyVals.Length != m)
             throw new InvalidOperationException(
-                $"RngKeyResolver: expected a [2, {m}] key block ({2 * m} words), got {words.Length}.");
+                $"RngKeyResolver: expected {m} resolved key(s), got {keyVals.Length}.");
 
-        for (int j = 0; j < m; j++)
-            results[group[j]] = [words[j], words[m + j]];
+        for (int j = 0; j < m; j++) results[group[j]] = keyVals[j];
     }
 
-    /// <summary>One batched key-tree level: <c>[2, M] keys x [M] counters -> [2, M]</c>, as a call
+    /// <summary>One batched key-tree level: <c>[M] keys x [M] counters -> [M]</c>, as a call
     /// of the algorithm's non-inlined <c>splitBatch</c> function (never a host computation).</summary>
     private static FastTensorKey AppendBatchSplit(
         FastTensorKey keys, FastTensorKey counters, Function batchSplit, List<FastNode> nodes)
@@ -162,8 +156,8 @@ internal static class RngKeyResolver
                 new Dictionary<string, object?>
                 {
                     [ShrkAttrStructure] = (DataStructure[])[DataStructure.Tensor],
-                    [ShrkAttrDtype] = (DType[])[DType.Int64],
-                    [ShrkAttrRank] = (long[])[2L],
+                    [ShrkAttrDtype] = (DType[])[DType.UInt64],
+                    [ShrkAttrRank] = (long[])[1L],
                     [ShrkAttrGenericTypeArgs] = null,
                 }, attrDefs),
             TargetFunction = batchSplit,

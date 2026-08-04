@@ -182,7 +182,7 @@ namespace Shorokoo.Core.Utils
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
-            // The RngSeed identity parameter at reserved ModelId [0] is not a weight
+            // The RngSeed parameter at reserved ModelId [0] is not a weight
             // (binding an RNG config IS its initialization, legitimate from architecture
             // stage on), so it never counts as an "initialized model parameter" here.
             //

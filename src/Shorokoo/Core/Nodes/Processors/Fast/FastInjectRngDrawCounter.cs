@@ -11,10 +11,10 @@ using static Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames;
 namespace Shorokoo.Core.Nodes.Processors.Fast
 {
     /// <summary>
-    /// Gives every runtime random feed its generator-managed <c>drawBase</c>: one
+    /// Gives every runtime random feed its generator-managed <c>substreamIndex</c>: one
     /// model-global execution counter — a framework-owned int64 state scalar
     /// (<c>RngExecutionCounter</c>, initialized 0, advanced +1 per execution via the
-    /// ordinary StateUpdate machinery) — wired as the drawBase input of every
+    /// ordinary StateUpdate machinery) — wired as the substreamIndex input of every
     /// <c>SHRK_RANDOM_*</c> feed that has none. Runs at concretization, right after module
     /// inlining, so the counter is a normal state parameter from then on: the training rig
     /// threads it through the checkpoint (masks vary per step, resumed runs draw exactly
@@ -25,7 +25,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// <para>The counter is the RNG system's responsibility, not the consumer's: modules
     /// just call <c>Globals.Random*</c> and per-step freshness comes from here. One counter
     /// serves all feeds — sites are already decorrelated by their stream KEYS, so sharing
-    /// the drawBase channel loses nothing and costs the checkpoint a single scalar. The
+    /// the substreamIndex channel loses nothing and costs the checkpoint a single scalar. The
     /// counter takes the next free top-level ModelId slot (its init is a draw-free zero
     /// fill, so it consumes no randomness and no config re-keys it).</para>
     /// </summary>
@@ -110,13 +110,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             // Prepend the counter nodes (top-level scope; they reference nothing in the host
             // graph) and wire its state-dependent int64 scalar output into every feed.
-            var drawBaseKey = counterGraph.Outputs[0];
+            var substreamIndexKey = counterGraph.Outputs[0];
             graph.Nodes.InsertRange(0, counterGraph.Nodes);
             foreach (var feed in feeds)
             {
                 var inputs = feed.FullInputs[""];
                 while (inputs.Count < 2) inputs.Add(null);
-                inputs[1] = drawBaseKey;
+                inputs[1] = substreamIndexKey;
             }
         }
 
@@ -131,9 +131,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         // A [1] int64 buffer: +1 is exact at every step count (a float32 counter saturates
-        // at 2^24, silently freezing per-step mask variation), and the state dtype matches
-        // the int64 drawBase input the sites consume, so no cast sits in between. This is
-        // the convention for framework-injected counters: int64 state, end to end.
+        // at 2^24, silently freezing per-step mask variation). This is the convention for
+        // framework-injected counters: int64 state, end to end. The RNG interface takes a
+        // uint64 draw position, so FastLowerRandomOps casts at that boundary rather than
+        // letting an unsigned type leak into the framework's own state plumbing.
         private static Tensor<int64> CounterInit(Vector<int64> shape)
             => Globals.TensorFill(shape, 0L);
     }

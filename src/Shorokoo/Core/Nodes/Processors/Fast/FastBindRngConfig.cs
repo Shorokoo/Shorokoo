@@ -32,8 +32,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// values every iteration), and a <see cref="RngCollection.Runtime"/> override that
     /// addresses no runtime stream of the graph throws instead of silently doing nothing.
     /// (<see cref="RngCollection.Params"/> overrides are validated where they are consumed:
-    /// parameter initialization.) A legacy file — saved before the RngSeed representation,
-    /// carrying baked key-table constants with nothing left to re-key — also fails loudly.</para>
+    /// parameter initialization.)</para>
     /// </summary>
     internal static class FastBindRngConfig
     {
@@ -48,16 +47,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             if (seedNode is null)
             {
-                if (graph.Nodes.Any(n => n.FriendlyName == ShrkRngKeysTensorName))
-                    throw new InvalidOperationException(
-                        "ApplyRngConfig: this graph was loaded from a file saved before the " +
-                        "RNG identity became the RngSeed parameter (it carries the legacy " +
-                        $"'{ShrkRngKeysTensorName}' identity tensor and baked key-table " +
-                        "constants). Its draws cannot be re-keyed — re-binding would update " +
-                        "only the recorded identity while every draw kept the old seed. " +
-                        "Load-and-run of the file is unaffected; to re-key, rebuild the " +
-                        "concrete model from its architecture under the new config.");
-
                 // No runtime random surface at all: binding is a no-op — but an override that
                 // addresses a stream of THIS graph cannot exist, so any Runtime override is
                 // the silent-no-op hazard and must fail loudly.
@@ -106,13 +95,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
             else
             {
-                // An already-lowered graph — e.g. a file saved before .srk persistence kept
-                // the feed ops verbatim (current saves preserve them, so freshly written
-                // files re-enter the feeds branch above on reload): the feeds are baked
-                // draw-function calls, but the symbolic chains and the RngSeed parameter
-                // persist — re-binding is a parameter write that re-keys every draw. What
-                // CANNOT change on such a graph is anything structural: the override set
-                // (its routing is wired) and the algorithm (its draw functions are baked).
+                // An already-lowered graph: the feeds are baked draw-function calls, but the
+                // symbolic chains and the RngSeed parameter persist — re-binding is a
+                // parameter write that re-keys every draw. What CANNOT change on such a
+                // graph is anything structural: the override set (its routing is wired) and
+                // the algorithm (its draw functions are baked).
                 var current = DecodeCurrentIdentity(seedNode)
                     ?? throw new InvalidOperationException(
                         "ApplyRngConfig: the RngSeed parameter carries no identity value on a " +
@@ -199,7 +186,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (seedNode.OpCode != InternalOpCodes.MODEL_PARAM_DATA) return null;
             var data = seedNode.Attributes.GetTensorVal(ShrkAttrTensorData);
             if (data is null) return null;
-            return RngRuntimeIdentity.Decode(data.As<int64>().AccessMemory().ToArray());
+            return RngRuntimeIdentity.Decode(data.As<uint64>().AccessMemory().ToArray());
         }
 
         private static bool SamePathSet(int[][] a, int[][] b)
@@ -213,9 +200,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// initialization (MODEL_PARAM → MODEL_PARAM_DATA on first bind, a value replacement
         /// thereafter). Identifier template and output key are preserved, so downstream
         /// consumers (the chains) stay wired.</summary>
-        private static void WriteIdentity(FastNode seedNode, long[] identity)
+        private static void WriteIdentity(FastNode seedNode, ulong[] identity)
         {
-            var data = new OnnxTensorData<int64>(
+            var data = new OnnxTensorData<uint64>(
                 new Shape(identity.Length),
                 OnnxUtils.CreateTensorValue(new Shape(identity.Length), identity));
             var attrDefs = Definitions.NodeDefinitions[InternalOpCodes.MODEL_PARAM_DATA].AttributeDefs;

@@ -247,26 +247,23 @@ public class RngInitFrozenDerivationTests
         var cfg = new RngConfig { MasterSeed = 123 };
         var keys = Core.Rng.RngKeyResolver.Resolve(
             [cfg.InitKeySpec((int[])[1, 1]), cfg.InitKeySpec((int[])[2, 1])]);
-        Assert.Equal([0x0177f47cL, 0x33e150fcL], keys[0]);
-        Assert.Equal([0x3c6c3147L, 0x2a93ecfcL], keys[1]);
+        Assert.Equal(0x33e150fc_0177f47cUL, keys[0]);
+        Assert.Equal(0x2a93ecfc_3c6c3147UL, keys[1]);
 
         // ...and the independent host oracle agrees with what the graph computed.
         foreach (var (path, i) in new[] { ((int[])[1, 1], 0), ((int[])[2, 1], 1) })
-        {
-            var (k0, k1) = RngTestOracle.InitKey(cfg, path);
-            Assert.Equal([(long)k0, (long)k1], keys[i]);
-        }
+            Assert.Equal(RngTestOracle.InitKey(cfg, path), keys[i]);
     }
 
     [Fact]
     public void TestInitValuesAreFrozen()
     {
         // Layer 2: the full materialized values (draw composition: counter scheme, rounds,
-        // uniform transform, drawBase ordinal, initializer scaling). REFERENCE: golden.
+        // uniform transform, substreamIndex ordinal, initializer scaling). REFERENCE: golden.
         // Exact equality is safe cross-backend: the uniform path is Threefry integer ops
         // plus IEEE-exact float multiply/add — no transcendental kernels involved.
-        float[] expected0 = [0.30900666f, 0.08134546f, 0.37910292f, 1.1605477f, 1.2190907f, 0.94080746f, -0.56461143f, 0.02709632f, -0.16446105f, -0.3000047f, -0.93130517f, -1.2191538f, -0.33175305f, 0.12972975f, -0.4290138f, -0.24179016f];
-        float[] expected1 = [-0.17985144f, 0.14574882f, 0.6254746f, 0.06555341f, 0.7384043f, -0.88358283f, -0.1497983f, -0.48929685f, -0.62437403f, -0.09688274f, 0.5977061f, -0.290067f, 0.7535605f, 0.69159126f, 1.0088426f, 1.2099534f];
+        float[] expected0 = [-1.1163274f, 1.1247115f, -0.20118715f, -0.8630716f, 0.12048453f, 0.73705673f, -0.38930926f, -0.9366948f, 0.7735388f, -0.49744576f, -0.60573745f, -0.41470495f, -1.003003f, 0.19222532f, 0.8099788f, 0.49284714f];
+        float[] expected1 = [-0.88179505f, 0.22158815f, 0.46890008f, 1.0455909f, -1.1027482f, 0.91218925f, -0.5450415f, 0.36076564f, -0.54581296f, 0.6172559f, -0.40583524f, 0.3620881f, -0.5337995f, -0.24915563f, 1.085321f, 0.67871165f];
 
         var g = RngInitTwoLinears.ComputationGraph;
         var sample = TensorData([4L, 4L], System.Linq.Enumerable.Repeat(1f, 16).ToArray());
@@ -275,7 +272,6 @@ public class RngInitFrozenDerivationTests
         var ws = pl.ModelParams
             .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
             .Where(v => v.Length == 16).ToArray();
-
         Assert.Equal(2, ws.Length);
         Assert.Equal(expected0, ws[0]);   // weight at ModelId [1, 1]
         Assert.Equal(expected1, ws[1]);   // weight at ModelId [2, 1]
@@ -284,10 +280,10 @@ public class RngInitFrozenDerivationTests
     [Fact]
     public void TestBatchedKeyResolutionMatchesTheHostOracle()
     {
-        // The resolver folds a whole tree LEVEL per batched split (#138), packing M streams into
-        // a [2, M] key block. That packing — k0 words in row 0, k1 words in row 1, unpacked as
-        // (words[j], words[M + j]) — is the new failure surface: a row/column mix-up, or a
-        // mis-grouped depth, would silently hand back another stream's key.
+        // The resolver folds a whole tree LEVEL per batched split (#138): M parent keys and M
+        // counters in, M child keys out as one [M] uint64 vector. Grouping is the failure surface
+        // — specs are bucketed by depth and each group's results are scattered back by index, so
+        // a mis-grouped depth or an off-by-one scatter silently hands back another stream's key.
         //
         // So resolve a set that deliberately mixes depths (which is what splits the work into
         // groups) and group sizes, and check every key against the independent host oracle.
@@ -304,13 +300,10 @@ public class RngInitFrozenDerivationTests
 
         Assert.Equal(paths.Length, keys.Count);
         for (int i = 0; i < paths.Length; i++)
-        {
-            var (k0, k1) = RngTestOracle.InitKey(cfg, paths[i]);
-            Assert.Equal([(long)k0, (long)k1], keys[i]);
-        }
+            Assert.Equal(RngTestOracle.InitKey(cfg, paths[i]), keys[i]);
         // Distinct paths must stay distinct — a packing bug that returned one row for every
         // stream would still satisfy a per-element check done carelessly.
-        Assert.Equal(paths.Length, keys.Select(k => (k[0], k[1])).Distinct().Count());
+        Assert.Equal(paths.Length, keys.Distinct().Count());
     }
 
     [Fact]
@@ -318,7 +311,7 @@ public class RngInitFrozenDerivationTests
     {
         // Layer 3: an initializer that draws TWICE (a uniform and a raw-bits draw, combined).
         // Both draws share the parameter's ONE stream key and are separated only by their
-        // drawBase sub-stream ordinal, so this golden is what pins the ordinal assignment:
+        // substreamIndex sub-stream ordinal, so this golden is what pins the ordinal assignment:
         // renumber the draws (or key them identically) and every value here moves, while the
         // relational assertions in TestTrainableInitUsesBitsIntermediateAndTwoRngOps — same
         // config reproduces, a new seed re-randomizes, values stay in range — all still hold.
@@ -327,12 +320,7 @@ public class RngInitFrozenDerivationTests
         // round-to-nearest uint32 -> float32 conversion, and multiplies (one by a power of
         // two, hence exact). No transcendental kernels involved.
         float[] expected =
-        [
-            0.05584412f, 0.41466287f, 0.4716463f, 0.11957358f,
-            0.043343723f, 0.22659563f, 0.2775737f, 0.2173384f,
-            0.07509217f, 0.006857669f, 0.077552944f, 0.08531699f,
-            0.5348234f, 0.6136215f, 0.39926675f, 0.0016627111f,
-        ];
+        [0.12127531f, 0.045944285f, 0.71740365f, 0.025424859f, 0.1510541f, 0.14533761f, 0.0006900568f, 0.3375456f, 0.34560895f, 0.17979373f, 0.14335075f, 0.010312658f, 0.112886935f, 0.4531033f, 0.27203277f, 0.15625617f];
 
         var g = BitsIntermediateTrainableLayer.ComputationGraph;
         var sample = TensorData([4L, 4L], System.Linq.Enumerable.Repeat(1f, 16).ToArray());
@@ -341,7 +329,6 @@ public class RngInitFrozenDerivationTests
         var w = pl.ModelParams
             .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
             .Single(v => v.Length == 16);
-
         Assert.Equal(expected, w);
     }
 }
@@ -481,8 +468,8 @@ public partial class RngNormalBothCollections
 /// change: only value pins hold the convention fixed. Both consumers now draw via the same
 /// in-graph keyed lowering (fold → key constant/table → per-element SHRK lowering → ONNX
 /// Ln/Sqrt/Cos kernels): parameter initialization keys off the init sub-master with
-/// drawBase = the draw's ordinal, the runtime feed keys off the runtime sub-master with
-/// drawBase = the execution counter — distinct streams, pinned independently, never
+/// substreamIndex = the draw's ordinal, the runtime feed keys off the runtime sub-master with
+/// substreamIndex = the execution counter — distinct streams, pinned independently, never
 /// compared. One Fact covers both, at both round counts. All values are asserted at 1e-6
 /// (ORT transcendental kernels may drift in the last ULP across backends; a composition
 /// change shifts values by O(1)). A red here means "this seed no longer draws the normals
@@ -516,10 +503,10 @@ public class RngNormalFrozenDerivationTests
     public void TestNormalInitAndDrawValuesAreFrozen()
     {
         // REFERENCE: golden — generated once from the implementation that defines the convention.
-        float[] init20 = [0.74819666f, 0.58009183f, -1.1170965f, 0.31675094f, 0.16639294f, 0.25455788f, 0.17528465f, -0.8868993f, 0.49657196f, 0.11392105f, 0.5931792f, 1.6939894f, 1.2556574f, -1.0003626f, 0.94420254f, 0.025948172f];
-        float[] feed20 = [-0.21420276f, -0.5717528f, 0.46444735f, -1.0332288f, 0.46397528f, 0.84883124f, 0.6769181f, -0.8103971f, 0.25310147f, 0.33421588f, 0.14988664f, 0.105597205f, -0.270022f, 0.26715103f, -0.052951735f, 0.9648315f];
-        float[] init13 = [0.5342924f, 0.969521f, -0.526292f, 0.013616675f, 1.076198f, -0.5106929f, -0.63540673f, -0.03083078f, 0.38398474f, -0.46663246f, -0.7689113f, -0.3363507f, -0.41424477f, 0.54753536f, 0.27235922f, -0.5393584f];
-        float[] feed13 = [-2.6632779f, -0.93596685f, 1.2713523f, 0.5301773f, -2.0887053f, 0.17946513f, 0.503763f, 0.6912192f, -2.0152493f, -0.9966242f, -0.23023638f, 0.6537417f, 0.16786636f, -0.09063158f, 0.575317f, 1.555586f];
+        float[] init20 = [0.12544397f, 0.2957119f, 1.614189f, -0.22173794f, -0.23703626f, -0.64295983f, -0.1786294f, -1.4764216f, 0.15099204f, -0.019193964f, -0.21473941f, 1.033891f, 1.3871936f, 0.59315336f, -0.41766375f, 0.006978817f];
+        float[] feed20 = [-0.2854576f, -1.0614587f, 0.69347787f, 1.1629281f, -0.63950145f, 1.7594889f, 1.6418929f, -2.4083176f, 0.79176825f, -0.48223278f, 0.48083737f, 0.38064465f, -0.3447332f, 0.0259849f, 0.062860526f, -0.43736157f];
+        float[] init13 = [0.10458848f, -1.9170773f, 0.12625404f, 0.056145065f, -1.4316688f, -0.37182125f, 0.019850086f, 0.9272645f, -1.0287207f, 1.1623243f, -0.9364095f, 0.21012756f, 0.55460495f, -0.6630122f, 0.30105424f, -0.8519283f];
+        float[] feed13 = [-0.2670085f, -0.9534051f, 0.28634885f, 0.93654203f, 0.9747834f, -0.14879523f, -1.5747236f, 0.99790245f, -1.1938162f, 0.9022896f, -0.8663206f, 0.3107173f, 1.0289081f, 1.3187166f, 0.5506851f, -0.7555348f];
 
         var (i20, f20) = Run(new RngConfig { MasterSeed = 123 });
         for (int i = 0; i < 16; i++)

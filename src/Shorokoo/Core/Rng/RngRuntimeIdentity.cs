@@ -5,19 +5,26 @@ using System.Linq;
 namespace Shorokoo.Core.Rng;
 
 /// <summary>
-/// The encoded form of a model's <b>runtime</b> RNG identity — the value of the ordinary
-/// non-trainable <c>RngSeed</c> parameter at reserved ModelId <c>[0]</c> (int64, shape [N]):
+/// A model's decoded <b>runtime</b> RNG identity, and the encoder/decoder for its stored form.
+///
+/// <para>Two names, deliberately distinct: <b>RngSeedData</b> is the stored <c>uint64[N]</c> — the
+/// value of the ordinary non-trainable <c>RngSeed</c> parameter at reserved ModelId <c>[0]</c> —
+/// and <see cref="RngRuntimeIdentity"/> is what it decodes to. Prefer "RngSeedData" over
+/// "identity vector" for the stored form: this codebase already has an ONNX <c>Identity</c> op and
+/// a <c>Vector&lt;T&gt;</c> type, so that phrase collides with two unrelated meanings.</para>
+///
+/// <para>Layout of the RngSeedData:</para>
 ///
 /// <code>
 ///   [0]              algorithm id (see <see cref="AlgorithmIdOf"/>)
-///   [1], [2]         runtime master key words (k0, k1), each in [0, 2^32)
-///   [3]              runtime override record count C
-///   per record:      [L, path element × L, key word k0, key word k1]
+///   [1]              runtime master key (one whole uint64)
+///   [2]              runtime override record count C
+///   per record:      [L, path element × L, key]
 /// </code>
 ///
 /// Records carry <see cref="RngCollection.Runtime"/> overrides only and are written in a
-/// canonical sorted order, so the same config always encodes to the same vector and every
-/// record's key words sit at a fixed, wiring-time-computable offset — an overridden feed's
+/// canonical sorted order, so the same config always encodes to the same data and every
+/// record's key sits at a fixed, wiring-time-computable offset — an overridden feed's
 /// in-graph derivation chain roots at a <c>Gather</c> of that offset instead of the master
 /// elements (see <c>FastWireRngKeyDerivation</c>). The init-collection identity is
 /// deliberately NOT encoded: initialization randomness is drawn host-side and baked into
@@ -26,25 +33,25 @@ namespace Shorokoo.Core.Rng;
 /// </summary>
 internal sealed class RngRuntimeIdentity
 {
-    /// <summary>Elements before the first override record: [algId, k0, k1, count].</summary>
-    public const int HeaderLength = 4;
+    /// <summary>Elements before the first override record: [algId, key, count].</summary>
+    public const int HeaderLength = 3;
 
     /// <summary>Index of the algorithm id element.</summary>
     public const int AlgorithmIdIndex = 0;
 
-    /// <summary>Index of the runtime master key's first word; the second word follows it.</summary>
+    /// <summary>Index of the runtime master key (a single whole uint64 element).</summary>
     public const int RunKeyIndex = 1;
 
     /// <summary>One runtime override record: the overridden stream's realized ModelId path, the
-    /// replacement key words (the override replaces the fully folded key), and the vector offset
-    /// of the record's first key word (for structural chain routing).</summary>
-    public sealed record RuntimeOverrideRecord(int[] Path, (uint k0, uint k1) Key, int KeyOffset);
+    /// replacement key (the override replaces the fully folded key), and the key's offset
+    /// in the vector (for structural chain routing).</summary>
+    public sealed record RuntimeOverrideRecord(int[] Path, ulong Key, int KeyOffset);
 
     public long AlgorithmId { get; }
-    public (uint k0, uint k1) RunKey { get; }
+    public ulong RunKey { get; }
     public IReadOnlyList<RuntimeOverrideRecord> Overrides { get; }
 
-    private RngRuntimeIdentity(long algorithmId, (uint k0, uint k1) runKey, IReadOnlyList<RuntimeOverrideRecord> overrides)
+    private RngRuntimeIdentity(long algorithmId, ulong runKey, IReadOnlyList<RuntimeOverrideRecord> overrides)
     {
         AlgorithmId = algorithmId;
         RunKey = runKey;
@@ -52,7 +59,7 @@ internal sealed class RngRuntimeIdentity
     }
 
     /// <summary>The configured algorithm, or null when the id is unknown (a file written by a
-    /// newer framework version). Consumers must fail loudly on null, never substitute.</summary>
+    /// id this build does not define). Consumers must fail loudly on null, never substitute.</summary>
     public RngAlgorithm? Algorithm => TryAlgorithmFromId(AlgorithmId);
 
     /// <summary>The stable identity-vector id of a configured algorithm.</summary>
@@ -76,69 +83,74 @@ internal sealed class RngRuntimeIdentity
     /// value. <see cref="Decode"/> is the exact inverse; the decoded identity derives every
     /// runtime stream key bit-identically to the in-graph SHRK_RNG_SPLIT chain.
     /// </summary>
-    public static long[] Build(RngConfig config)
+    public static ulong[] Build(RngConfig config)
     {
         ArgumentNullException.ThrowIfNull(config);
         var overrides = config.RuntimeOverridesSorted();
-        var vec = new List<long>
+        var vec = new List<ulong>
         {
-            AlgorithmIdOf(config.Algorithm),
-            config.RunMasterKey.k0,
-            config.RunMasterKey.k1,
-            overrides.Count,
+            (ulong)AlgorithmIdOf(config.Algorithm),
+            config.RunMasterKey,
+            (ulong)overrides.Count,
         };
         foreach (var (path, seed) in overrides)
         {
-            vec.Add(path.Length);
-            foreach (var p in path) vec.Add(p);
-            var (k0, k1) = RngConfig.SplitWords(seed);
-            vec.Add(k0);
-            vec.Add(k1);
+            vec.Add((ulong)path.Length);
+            foreach (var p in path) vec.Add(unchecked((ulong)(long)p));
+            vec.Add(seed);
         }
         return [.. vec];
     }
 
     /// <summary>
-    /// Decodes an identity vector produced by <see cref="Build"/>. Malformed vectors throw —
+    /// Decodes the <c>RngSeedData</c> produced by <see cref="Build"/>. Malformed data throws —
     /// a corrupt identity must never silently fall back to a different derivation.
     /// </summary>
-    public static RngRuntimeIdentity Decode(long[] identity)
+    public static RngRuntimeIdentity Decode(ulong[] rngSeedData)
     {
-        if (identity is not { Length: >= HeaderLength })
+        if (rngSeedData is not { Length: >= HeaderLength })
             throw new ArgumentException(
-                $"Malformed RngSeed identity: length {identity?.Length ?? 0} " +
-                $"(expected at least the {HeaderLength}-element header).", nameof(identity));
+                $"Malformed RngSeedData: length {rngSeedData?.Length ?? 0} " +
+                $"(expected at least the {HeaderLength}-element header).", nameof(rngSeedData));
 
-        var runKey = ((uint)identity[RunKeyIndex], (uint)identity[RunKeyIndex + 1]);
-        long count = identity[HeaderLength - 1];
+        var runKey = rngSeedData[RunKeyIndex];
+        ulong count = rngSeedData[HeaderLength - 1];
         var records = new List<RuntimeOverrideRecord>();
         int i = HeaderLength;
-        for (long r = 0; r < count; r++)
+        for (ulong r = 0; r < count; r++)
         {
-            if (i >= identity.Length)
-                throw new ArgumentException("Malformed RngSeed identity: truncated override record.", nameof(identity));
-            int pathLen = checked((int)identity[i++]);
-            if (pathLen <= 0 || i + pathLen + 2 > identity.Length)
-                throw new ArgumentException("Malformed RngSeed identity: truncated override record.", nameof(identity));
+            if (i >= rngSeedData.Length)
+                throw new ArgumentException("Malformed RngSeedData: truncated override record.", nameof(rngSeedData));
+            // Bound the length against the data BEFORE narrowing to int: a hostile or corrupt
+            // record can claim any uint64 path length, and `i + pathLen + 1` in int arithmetic
+            // would wrap negative, pass the check, and then allocate the claimed length.
+            ulong claimedPathLen = rngSeedData[i++];
+            // The record needs pathLen elements plus one key, so pathLen < remaining. Written as
+            // a comparison rather than `pathLen + 1 > remaining` because the claim is untrusted:
+            // adding to it overflows for a length near ulong.MaxValue and the check passes.
+            ulong remaining = (ulong)(rngSeedData.Length - i);
+            if (claimedPathLen == 0 || claimedPathLen >= remaining)
+                throw new ArgumentException("Malformed RngSeedData: truncated override record.", nameof(rngSeedData));
+            int pathLen = (int)claimedPathLen;
             int[] path = new int[pathLen];
-            for (int j = 0; j < pathLen; j++) path[j] = checked((int)identity[i++]);
+            for (int j = 0; j < pathLen; j++) path[j] = checked((int)unchecked((long)rngSeedData[i++]));
             int keyOffset = i;
-            var key = ((uint)identity[i], (uint)identity[i + 1]);
-            i += 2;
+            var key = rngSeedData[i];
+            i += 1;
             records.Add(new RuntimeOverrideRecord(path, key, keyOffset));
         }
-        if (i != identity.Length)
-            throw new ArgumentException("Malformed RngSeed identity: trailing data after override records.", nameof(identity));
-        return new RngRuntimeIdentity(identity[AlgorithmIdIndex], runKey, records);
+        if (i != rngSeedData.Length)
+            throw new ArgumentException("Malformed RngSeedData: trailing data after override records.", nameof(rngSeedData));
+        return new RngRuntimeIdentity(checked((long)rngSeedData[AlgorithmIdIndex]), runKey, records);
     }
 
     /// <summary>
     /// A runtime stream's key derivation under this identity, as a <b>spec</b>: the matching
-    /// override record's key words (nothing left to fold) when one exists, else the runtime
+    /// override record's key (nothing left to fold) when one exists, else the runtime
     /// master plus the path still to be folded. The fold itself happens in-graph
     /// (<c>SHRK_RNG_SPLIT</c>) — this type performs no RNG computation (#136).
     /// </summary>
-    public ((uint k0, uint k1) root, IReadOnlyList<int> foldPath) RunKeySpec(IReadOnlyList<int> path)
+    public (ulong root, IReadOnlyList<int> foldPath) RunKeySpec(IReadOnlyList<int> path)
     {
         foreach (var rec in Overrides)
             if (rec.Path.Length == path.Count && rec.Path.SequenceEqual(path))

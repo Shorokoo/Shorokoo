@@ -11,37 +11,78 @@ namespace Shorokoo.Tests;
 /// that needs a concrete key resolves it by <em>executing</em> that derivation
 /// (<c>RngKeyResolver</c>). These helpers reimplement the fold independently, on the host, so
 /// tests can assert the in-graph derivation against an oracle that does not share its
-/// implementation — which is exactly what makes the assertions meaningful.</para>
+/// implementation — which is exactly what makes the assertions meaningful. What must stay
+/// independent is the <em>derivation</em>: the fold order and counter scheme are rebuilt here by
+/// hand. (The underlying <see cref="Threefry2x32"/> bijection is shared — it is the reference
+/// generator, pinned to the published Random123 vectors.) Never resolve a key or a draw by
+/// calling into the graph.</para>
 ///
-/// <para>They deliberately mirror the old <c>RngConfig.FoldInitKey</c>/<c>FoldRunKey</c>
-/// signatures so existing assertions read unchanged; the config now supplies only a derivation
-/// <em>spec</em> (root key + path still to fold), and the oracle folds it here.</para>
+/// <para>Keys, split indices and draw positions are whole <c>ulong</c> values, matching the
+/// interface. The 32-bit word split is Threefry's own business and is confined to the few helpers
+/// that hand values to the reference generator (<see cref="FoldKey"/>, <see cref="DrawWords"/>)
+/// or repack its output (<see cref="DrawBits"/>).</para>
 /// </summary>
 internal static class RngTestOracle
 {
-    /// <summary>One Threefry key-tree fold step: child = Bijection(counter: (index, 0), key).
-    /// Bit-identical to the in-graph <c>SHRK_RNG_SPLIT</c> (whose counter word is the index's
-    /// low 32 bits — the <c>uint</c> cast here matches its <c>Mask32</c>).</summary>
-    public static (uint k0, uint k1) FoldKey((uint k0, uint k1) key, long index)
-        => Threefry2x32.Bijection(unchecked((uint)index), 0u, key.k0, key.k1);
+    /// <summary>One Threefry key-tree fold step: <c>child = Bijection(counter: index, key)</c>.
+    /// The index occupies BOTH counter words, so the whole 64-bit range is distinct.</summary>
+    public static ulong FoldKey(ulong key, ulong index)
+    {
+        var (x0, x1) = Threefry2x32.Bijection(
+            (uint)index, (uint)(index >> 32), (uint)key, (uint)(key >> 32));
+        return x0 | ((ulong)x1 << 32);
+    }
 
-    private static (uint k0, uint k1) Fold(
-        ((uint k0, uint k1) root, IReadOnlyList<int> foldPath) spec)
+    private static ulong Fold((ulong root, IReadOnlyList<int> foldPath) spec)
     {
         var key = spec.root;
-        foreach (var v in spec.foldPath) key = FoldKey(key, v);
+        foreach (var v in spec.foldPath) key = FoldKey(key, unchecked((ulong)(long)v));
         return key;
     }
 
     /// <summary>A trainable parameter's init stream key (oracle for the in-graph derivation).</summary>
-    public static (uint k0, uint k1) InitKey(RngConfig config, IReadOnlyList<int> modelIdVals)
+    public static ulong InitKey(RngConfig config, IReadOnlyList<int> modelIdVals)
         => Fold(config.InitKeySpec(modelIdVals));
 
     /// <summary>A runtime feed's stream key (oracle for the in-graph derivation).</summary>
-    public static (uint k0, uint k1) RunKey(RngConfig config, IReadOnlyList<int> modelIdVals)
+    public static ulong RunKey(RngConfig config, IReadOnlyList<int> modelIdVals)
         => Fold(config.RunKeySpec(modelIdVals));
 
     /// <summary>A runtime feed's stream key under an encoded identity (oracle).</summary>
-    public static (uint k0, uint k1) RunKey(RngRuntimeIdentity identity, IReadOnlyList<int> path)
+    public static ulong RunKey(RngRuntimeIdentity identity, IReadOnlyList<int> path)
         => Fold(identity.RunKeySpec(path));
+
+    /// <summary>
+    /// The generator word pair a draw produces for element <paramref name="i"/> — the host
+    /// oracle for <c>RuntimeRng.Draw</c>. The draw position folds into the key (the same
+    /// bijection a split uses, at the draw's own round count), leaving both counter words to
+    /// the whole 64-bit element index.
+    /// </summary>
+    public static (uint x0, uint x1) DrawWords(
+        ulong key, ulong substreamIndex, long i, int rounds = Threefry2x32.Rounds)
+    {
+        var (dk0, dk1) = Threefry2x32.Bijection(
+            (uint)substreamIndex, (uint)(substreamIndex >> 32), (uint)key, (uint)(key >> 32), rounds);
+        return Threefry2x32.Bijection((uint)i, (uint)((ulong)i >> 32), dk0, dk1, rounds);
+    }
+
+    /// <summary>Element <paramref name="i"/> of a standard-uniform draw (low 24 bits × 2⁻²⁴).</summary>
+    public static float DrawUniform(
+        ulong key, ulong substreamIndex, long i, int rounds = Threefry2x32.Rounds)
+        => (DrawWords(key, substreamIndex, i, rounds).x0 & 0x00FFFFFFu) * (1.0f / 16777216.0f);
+
+    /// <summary>Element <paramref name="i"/> of a raw-bits draw of the given uint width.</summary>
+    public static ulong DrawBits(
+        ulong key, ulong substreamIndex, long i, int width, int rounds = Threefry2x32.Rounds)
+    {
+        var (x0, x1) = DrawWords(key, substreamIndex, i, rounds);
+        return width switch
+        {
+            8 => (byte)x0,
+            16 => (ushort)x0,
+            32 => x0,
+            64 => x0 | ((ulong)x1 << 32),
+            _ => throw new System.ArgumentOutOfRangeException(nameof(width)),
+        };
+    }
 }

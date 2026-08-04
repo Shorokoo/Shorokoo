@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Runtime.InteropServices;
 using System.Linq;
 using Shorokoo;
 using Shorokoo.Core;
@@ -75,6 +76,76 @@ internal static class RuntimeTensorFactory
             return rt;
         return rt with { FloatData = null, IntData = null, StringData = null, BoolData = null };
     }
+
+    /// <summary>
+    /// Narrows an integer tensor's data to its own declared width. QEE holds every integer
+    /// width in one <c>long</c> buffer, so an op that computes at 64 bits — a left shift, a
+    /// bitwise or/xor of already-widened operands — can leave bits above the declared width
+    /// set. Those bits are invisible to a later add (exact mod 2^w either way) but not to a
+    /// right shift, which pulls them straight down into the result. Applied to every op's output
+    /// (see the <see cref="IRuntimeTensor"/> overload for optionals and sequences), so no op has
+    /// to remember to narrow; it is idempotent for the ops that already do.
+    ///
+    /// <para>Unsigned widths land in <c>[0, 2^w)</c> and signed widths sign-extend, matching
+    /// how <see cref="TensorDataConverter.ToRuntimeTensor"/> loads them. <c>Int64</c> and
+    /// <c>UInt64</c> are the buffer's own width and pass through untouched — which also means a
+    /// <c>UInt64</c> value above <c>long.MaxValue</c> stays a negative bit-pattern long, and the
+    /// kernels that use signed C# operators on it (Div, Mod, Less/Greater, Sign, Abs) read it as
+    /// negative. Narrowing gives the sub-64-bit unsigned widths correct signed-operator behaviour
+    /// for free; UInt64 is the one gap, tracked separately.</para>
+    /// </summary>
+    public static RuntimeTensor NarrowToDeclaredWidth(RuntimeTensor rt)
+    {
+        if (rt.IntData is not { } d || d.Length == 0) return rt;
+
+        System.Func<long, long>? narrow = null;
+        var t = rt.DType;
+        if (t == DType.Int32) narrow = v => unchecked((int)v);
+        else if (t == DType.Int16) narrow = v => unchecked((short)v);
+        else if (t == DType.Int8) narrow = v => unchecked((sbyte)v);
+        else if (t == DType.UInt32) narrow = v => unchecked((uint)v);
+        else if (t == DType.UInt16) narrow = v => unchecked((ushort)v);
+        else if (t == DType.UInt8) narrow = v => unchecked((byte)v);
+        if (narrow is null) return rt;
+
+        long[]? buf = null;
+        for (int i = 0; i < d.Length; i++)
+        {
+            var n = narrow(d[i]);
+            // Once buf exists the fast path is disabled, so no later index can be skipped.
+            if (n == d[i] && buf is null) continue;
+            buf ??= d.ToArray();
+            buf[i] = n;
+        }
+        // AsImmutableArray wraps buf in place; ImmutableArray.Create would copy it a second time.
+        return buf is null ? rt : rt with { IntData = ImmutableCollectionsMarshal.AsImmutableArray(buf) };
+    }
+
+    /// <summary>
+    /// <see cref="IRuntimeTensor"/>-aware dispatch for <see cref="NarrowToDeclaredWidth(RuntimeTensor)"/>,
+    /// mirroring the <see cref="EnforceDataSizeLimit(IRuntimeTensor, int)"/> dispatch: an
+    /// optional's value tensor and every element of a sequence get narrowed too. Without the
+    /// recursion an integer sequence element could still carry bits above its declared width —
+    /// exactly the case narrowing exists to rule out.
+    /// </summary>
+    public static IRuntimeTensor NarrowToDeclaredWidth(IRuntimeTensor rt)
+        => rt switch
+        {
+            RuntimeTensor plain => NarrowToDeclaredWidth(plain),
+            RuntimeOptionalTensor opt => opt.ValueTensor is null
+                ? opt
+                : opt with { ValueTensor = NarrowToDeclaredWidth(opt.ValueTensor) },
+            RuntimeSequenceTensor seq => seq with
+            {
+                Tensors = seq.Tensors is { } ts
+                    ? ts.Select(NarrowToDeclaredWidth).ToImmutableArray()
+                    : null,
+                TemplateTensor = seq.TemplateTensor is null
+                    ? null
+                    : NarrowToDeclaredWidth(seq.TemplateTensor),
+            },
+            _ => rt,
+        };
 
     /// <summary>
     /// <see cref="IRuntimeTensor"/>-aware dispatch that returns a copy of <paramref name="rt"/>

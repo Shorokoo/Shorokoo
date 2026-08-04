@@ -21,7 +21,9 @@ One `MasterSeed` derives everything. Two sub-masters split off it — one for th
 collection (initialization noise, drawn once at materialization) and one for the `runtime`
 collection (feeds, drawn every execution) — and each individual stream's key is the
 sub-master **folded along the consumer's ModelId path**: one Threefry-2x32 bijection per path
-index, `child = Bijection(key: parent, counter: index)`.
+index, `child = Bijection(key: parent, counter: index)`. A key, a split index and a draw
+position are each a whole 64-bit value — nothing is narrowed on the way in, so distinct
+indices give distinct children over the entire range.
 
 Because the key tree *is* the ModelId tree:
 
@@ -35,7 +37,7 @@ Because the key tree *is* the ModelId tree:
 
 A model's entire runtime RNG identity lives in one ordinary non-trainable parameter,
 **`RngSeed`**, at the reserved ModelId `[0]` (slot 0 is never assigned to anything else).
-Its value encodes the runtime master key, any per-stream runtime overrides, and
+Its value encodes the runtime master key, any per-stream overrides, and
 the algorithm id. Every feed's key is then **derived in-graph**: a chain of split
 operations rooted at the `RngSeed` parameter, one split per element of the feed's ModelId
 path — the fold described above, spelled out as graph ops.
@@ -114,17 +116,25 @@ and the exported model calls — and is tagged with — the selected algorithm's
 values but not the algorithm (that re-bind fails loudly; rebuild from the architecture
 instead).
 
-Per-execution variation is carried by a separate **drawBase** counter, not by the key — and
-the RNG system manages it itself: concretization injects one model-global execution counter
-(`RngExecutionCounter`, ordinary model state, an int64 scalar initialized 0 and advanced +1
-per execution) and wires it into every feed. Modules never touch it — `Globals.RandomUniform`
-is all a consumer writes. Under the training rig the counter rides the checkpoint, so Dropout
-masks differ per step and a resumed run at step N draws exactly what the uninterrupted run
-would; in one-shot inference it is baked at 0, so inference stays deterministic and
-stateless. One counter serves all feeds because sites are already decorrelated by their
-stream keys; it costs the checkpoint a single scalar. Framework-managed counters like this
-one are int64 state end-to-end, so incrementing stays exact at any step count — there is no
-float32-style saturation point past which masks would stop varying.
+Per-execution variation is carried by a separate **execution counter**, not by the configured
+key — and the RNG system manages it itself: concretization injects one model-global execution
+counter (`RngExecutionCounter`, ordinary model state, an int64 scalar initialized 0 and
+advanced +1 per execution) and wires it into every feed as the draw's substream index. A draw
+folds that whole 64-bit counter into the stream key rather than spending a counter word on it,
+so execution *n* draws from its own substream of that stream and the element index gets the
+whole counter to itself. (The fold is a draw-internal step, not a node of the configurable key
+tree — a stream's key is unchanged by it, and unlike a key split it runs at the selected
+algorithm's own round count.) Modules never
+touch it — `Globals.RandomUniform` is all a consumer writes. Under the training rig the
+counter rides the checkpoint, so Dropout masks differ per step and a resumed run at step N
+draws exactly what the uninterrupted run would; in one-shot inference it is baked at 0, so
+inference stays deterministic and stateless. One counter serves all feeds because sites are
+already decorrelated by their stream keys; it costs the checkpoint a single scalar.
+Framework-managed counters like this one are 64-bit state end-to-end — the counter increments
+exactly, and the whole 64-bit value reaches the draw — so there is no float32-style
+saturation point, and no wrap point, past which a mask would repeat a mask it drew before.
+(Individual mask *values* still collide as often as chance dictates — a uniform keeps 24 bits.
+What does not repeat is the stream.)
 
 ## Feeds inside loops
 

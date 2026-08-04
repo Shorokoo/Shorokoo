@@ -23,7 +23,7 @@ internal static class DropoutMasking
 {
     public static Tensor<float32> Mask(Vector<int64> maskShape, Scalar<float32> ratio, Scalar<bit> training)
     {
-        // Per-step mask freshness needs nothing here: the RNG system owns the drawBase.
+        // Per-step mask freshness needs nothing here: the RNG system owns the substreamIndex.
         // Concretization injects one model-global execution counter (state, +1 per step
         // under the training rig; frozen at 0 in one-shot inference) and wires it into
         // every feed — see FastInjectRngDrawCounter. The mask's stream is keyed by this

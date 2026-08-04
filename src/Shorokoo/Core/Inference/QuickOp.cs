@@ -58,9 +58,12 @@ internal abstract class QuickOp
 
     /// <summary>
     /// Shared tail used by every <see cref="Execute"/> override: delegates to
-    /// <see cref="ComputeWithLoopBack"/> and enforces the per-output data-size limit. Each op
-    /// is expected to emit <see cref="IRuntimeTensor"/> results with their dtype already
-    /// populated (no ReferenceTensor wiring — FastNode has no Variable objects).
+    /// <see cref="ComputeWithLoopBack"/>, narrows each integer output to its declared width,
+    /// and enforces the per-output data-size limit. Each op is expected to emit
+    /// <see cref="IRuntimeTensor"/> results with their dtype already populated (no
+    /// ReferenceTensor wiring — FastNode has no Variable objects), but not to remember that
+    /// QEE's shared 64-bit integer buffer is wider than most of the dtypes it carries — see
+    /// <see cref="RuntimeTensorFactory.NarrowToDeclaredWidth(IRuntimeTensor)"/>.
     /// </summary>
     protected (IRuntimeTensor[] results, bool loopBack) RunCompute(
         IRuntimeTensor?[] inputs,
@@ -68,15 +71,26 @@ internal abstract class QuickOp
         int maxDataElements)
     {
         var (results, loopBack) = ComputeWithLoopBack(inputs, node.Attributes, maxDataElements);
+        FinalizeOutputs(results, maxDataElements);
+        return (results, loopBack);
+    }
 
+    /// <summary>
+    /// The per-output tail every op's results must pass through, in place: enforce the data-size
+    /// limit first (a discarded buffer needs no further work), then narrow each surviving integer
+    /// buffer to its declared width — see <see cref="RuntimeTensorFactory.NarrowToDeclaredWidth(IRuntimeTensor)"/>.
+    /// <see cref="RunCompute"/> applies it for the ordinary path; an <see cref="Execute"/> override
+    /// that builds its results some other way must call this itself.
+    /// </summary>
+    protected static void FinalizeOutputs(IRuntimeTensor[] results, int maxDataElements)
+    {
         for (int i = 0; i < results.Length; i++)
         {
             var rt = results[i];
             if (rt is null) continue;
-            results[i] = RuntimeTensorFactory.EnforceDataSizeLimit(rt, maxDataElements);
+            rt = RuntimeTensorFactory.EnforceDataSizeLimit(rt, maxDataElements);
+            results[i] = RuntimeTensorFactory.NarrowToDeclaredWidth(rt);
         }
-
-        return (results, loopBack);
     }
 
     /// <summary>

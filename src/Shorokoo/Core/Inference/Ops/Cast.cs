@@ -45,9 +45,11 @@ internal sealed class CastOp : QuickOp
     /// <list type="bullet">
     ///   <item>float→int truncates toward zero; out-of-range values saturate at
     ///         <c>long.MinValue</c>/<c>long.MaxValue</c> and NaN becomes 0 (.NET's
-    ///         saturating float→integer conversion). Narrower int targets (int8…int32,
-    ///         unsigned) are NOT wrapped/clamped to their own range — QEE stores all
-    ///         integer data as 64-bit.</item>
+    ///         saturating float→integer conversion). This op writes the 64-bit buffer;
+    ///         the result is then wrapped to the target's own width by the shared op tail
+    ///         (<see cref="Helpers.RuntimeTensorFactory.NarrowToDeclaredWidth(RuntimeTensor)"/>), so a
+    ///         narrow int target ends up modular — e.g. float 1e30 → <c>long.MaxValue</c>
+    ///         → int32 <c>-1</c>.</item>
     ///   <item>x→bool is <c>x != 0</c>; bool→numeric is 1/0.</item>
     ///   <item>Float16/BFloat16 targets reuse the float32 storage unchanged — the
     ///         stored values do not model f16/bf16 rounding (real rounding happens in

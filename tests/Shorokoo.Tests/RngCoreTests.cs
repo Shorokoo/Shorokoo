@@ -205,7 +205,7 @@ public class RngCoreTests
 /// <summary>
 /// The encoded runtime RNG identity — the value of the ordinary <c>RngSeed</c> parameter at
 /// reserved ModelId [0] (see <see cref="RngRuntimeIdentity"/>): an algorithm-id header, the
-/// runtime master key words, and canonically sorted per-stream override records at fixed
+/// runtime master key, and canonically sorted per-stream override records at fixed
 /// offsets. <see cref="RngRuntimeIdentity.Decode"/> must derive every runtime stream key
 /// bit-exactly like the encoding config. The init-collection identity is deliberately NOT
 /// encoded — nothing in a saved model consumes it.
@@ -229,16 +229,15 @@ public class RngRuntimeIdentityTests
     {
         var cfg = new RngConfig { MasterSeed = 42 };
         var vec = RngRuntimeIdentity.Build(cfg);
-        // Header only: [algId, runK0, runK1, 0 overrides].
+        // Header only: [algId, runKey, 0 overrides].
         Assert.Equal(RngRuntimeIdentity.HeaderLength, vec.Length);
-        Assert.Equal(0L, vec[RngRuntimeIdentity.AlgorithmIdIndex]);
-        Assert.Equal(cfg.RunMasterKey.k0, (uint)vec[RngRuntimeIdentity.RunKeyIndex]);
-        Assert.Equal(cfg.RunMasterKey.k1, (uint)vec[RngRuntimeIdentity.RunKeyIndex + 1]);
+        Assert.Equal(0UL, vec[RngRuntimeIdentity.AlgorithmIdIndex]);
+        Assert.Equal(cfg.RunMasterKey, vec[RngRuntimeIdentity.RunKeyIndex]);
         AssertRoundTrips(cfg);
 
         // The algorithm id header switches with the configured algorithm.
         var cfg13 = new RngConfig { MasterSeed = 42, Algorithm = RngAlgorithm.Threefry2x32Rounds13 };
-        Assert.Equal(1L, RngRuntimeIdentity.Build(cfg13)[RngRuntimeIdentity.AlgorithmIdIndex]);
+        Assert.Equal(1UL, RngRuntimeIdentity.Build(cfg13)[RngRuntimeIdentity.AlgorithmIdIndex]);
         AssertRoundTrips(cfg13);
 
         // An explicit run sub-master re-seeds the runtime tier and rides the same header.
@@ -257,18 +256,17 @@ public class RngRuntimeIdentityTests
                  .Override(RngCollection.Params, [2, 1], seed: 7UL);
 
         var vec = RngRuntimeIdentity.Build(cfg);
-        // Header + one record: length 3, its 3 path elements, 2 key words.
-        Assert.Equal(RngRuntimeIdentity.HeaderLength + 1 + 3 + 2, vec.Length);
-        Assert.Equal(1L, vec[RngRuntimeIdentity.HeaderLength - 1]);   // record count
+        // Header + one record: length 3, its 3 path elements, 1 key.
+        Assert.Equal(RngRuntimeIdentity.HeaderLength + 1 + 3 + 1, vec.Length);
+        Assert.Equal(1UL, vec[RngRuntimeIdentity.HeaderLength - 1]);   // record count
 
         var decoded = RngRuntimeIdentity.Decode(vec);
         var rec = Assert.Single(decoded.Overrides);
         Assert.Equal((int[])[4, 1, 1], rec.Path);
-        // The record replaces the fully folded key: its words are the override seed's words,
-        // and they sit at the record's fixed key offset in the vector.
-        Assert.Equal(RngConfig.SplitWords(424242UL), rec.Key);
-        Assert.Equal(rec.Key.k0, (uint)vec[rec.KeyOffset]);
-        Assert.Equal(rec.Key.k1, (uint)vec[rec.KeyOffset + 1]);
+        // The record replaces the fully folded key: it IS the override seed, and it sits at
+        // the record's fixed key offset in the vector.
+        Assert.Equal(424242UL, rec.Key);
+        Assert.Equal(rec.Key, vec[rec.KeyOffset]);
 
         // Derivation round-trips: the overridden stream deviates, siblings stay derived.
         AssertRoundTrips(cfg);
@@ -282,11 +280,16 @@ public class RngRuntimeIdentityTests
     {
         // Corrupt identities must throw, never silently fall back to a different derivation.
         Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([]));
-        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([0L, 1L, 2L]));
+        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([0UL, 42UL]));   // shorter than the header
         // Truncated override record (claims one record, supplies nothing).
-        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([0L, 1L, 2L, 1L]));
+        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([0UL, 42UL, 1UL]));
         // Trailing garbage after the declared records.
-        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([0L, 1L, 2L, 0L, 99L]));
+        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([0UL, 42UL, 0UL, 99UL]));
+        // A record claiming a huge path length. The bound must be computed before narrowing to
+        // int, or `i + pathLen + 1` wraps negative, passes the check, and allocates the claim —
+        // turning a corrupt model file into an OutOfMemoryException instead of this error.
+        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([0UL, 42UL, 1UL, int.MaxValue]));
+        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([0UL, 42UL, 1UL, ulong.MaxValue]));
     }
 }
 
@@ -348,7 +351,7 @@ public class RngSeedTransportTests
     [Fact]
     public void TestNonDefaultAlgorithmSurvivesSaveLoadByIdAndByBehavior()
     {
-        // The algorithm identity rides the file in TWO forms — the RngSeed identity's
+        // The algorithm choice rides the file in TWO forms — the RngSeedData's
         // algorithm id (trusted by no-config parameter initialization and the lowering) and
         // the baked tagged draw functions (what the feeds actually execute) — and they can in
         // principle disagree. Bind the NON-default algorithm, round-trip the concrete model,
@@ -475,37 +478,6 @@ public class RngSeedTransportTests
     }
 
     [Fact]
-    public void TestLegacyBakedFileFailsRebindLoudly()
-    {
-        // A file saved before the RngSeed representation carries baked key-table constants
-        // plus the reserved-name identity initializer — nothing left to re-key. Loading such
-        // a file yields a graph with the legacy marker and no RngSeed parameter; binding it
-        // must throw naming the situation (the old behavior silently updated only the
-        // recorded identity). Simulate the loaded shape: no feeds, no RngSeed, the legacy
-        // reserved-name tensor present as an ordinary data node.
-        var g = (ComputationGraph)typeof(RtLoweredUniform)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
-        var input = TensorData([4L, 4L], new float[16]);
-        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([input]))
-            .ToConcreteModel(new RngConfig { MasterSeed = 1 });
-
-        // Strip the new representation down to the legacy shape (mutating node surgery, so
-        // work on a mutable copy of the loaded graph).
-        var legacy = CompressedFormatUtils.LoadFastGraphFromBinary(
-            CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true)).ToInternal();
-        var seedNode = legacy.Nodes.Single(n =>
-            n.IdentifierTemplate == Shorokoo.Core.Nodes.Processors.Fast
-                .FastWireRngKeyDerivation.RngSeedIdentifierTemplate);
-        seedNode.IdentifierTemplate = null;
-        seedNode.FriendlyName = OnnxOpAttributeNames.ShrkRngKeysTensorName;
-
-        var ex = Assert.Throws<System.InvalidOperationException>(
-            () => legacy.ApplyRngConfig(new RngConfig { MasterSeed = 2 }));
-        Assert.Contains(OnnxOpAttributeNames.ShrkRngKeysTensorName, ex.Message);
-        Assert.Contains("cannot be re-keyed", ex.Message);
-    }
-
-    [Fact]
     public void TestModelWithoutRandomFeedsCarriesNothingRngRelated()
     {
         // A model with no runtime random feeds contains no RngSeed param, no chains, and
@@ -522,8 +494,6 @@ public class RngSeedTransportTests
         var loaded = CompressedFormatUtils.LoadFastGraphFromBinary(
             CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true));
         Assert.Equal(0, RngSeedNodeCount(loaded));
-        Assert.DoesNotContain(loaded.ToInternal().Nodes, n =>
-            n.FriendlyName == OnnxOpAttributeNames.ShrkRngKeysTensorName);
 
         model = model.WithRngConfig(new RngConfig { MasterSeed = 8 });   // no-op, no throw
 

@@ -90,7 +90,7 @@ public class RngTrainingTests
         var (lossesA2, _, _) = TrainLosses(new RngConfig { MasterSeed = 5 }, steps: 3);
         var (lossesB, _, _) = TrainLosses(new RngConfig { MasterSeed = 6 }, steps: 3);
 
-        // The generator-managed drawBase: the injected RngExecutionCounter is ordinary model
+        // The generator-managed substreamIndex: the injected RngExecutionCounter is ordinary model
         // state riding the checkpoint, advanced +1 per step — after 3 steps it reads 3, so a
         // resumed run at step 4 draws exactly what the uninterrupted run would. The cast
         // pins the framework-counter convention — int64 state end-to-end (see
@@ -143,7 +143,7 @@ public class RngTrainingTests
     }
 
     /// <summary>
-    /// The drawBase counter's resume guarantee, pinned end-to-end on a rig that draws runtime
+    /// The substreamIndex counter's resume guarantee, pinned end-to-end on a rig that draws runtime
     /// randomness every step: save a Dropout rig's checkpoint mid-run, resume it in a
     /// brand-new rig + compiled graph, and the resumed run replays the uninterrupted run's
     /// remaining steps bit-exactly. Previously this held only by proxy (the counter was
@@ -169,7 +169,7 @@ public class RngTrainingTests
             ckpt.Save(path);
 
             // "Fresh process": a brand-new rig + compiled graph loads the checkpoint. The
-            // int64 drawBase counter rides in ModelState, so the resumed steps draw the
+            // int64 substreamIndex counter rides in ModelState, so the resumed steps draw the
             // masks of executions k, k+1, … — not 0, 1, … over again.
             var rigC = BuildDropoutRig(cfg);
             var resumed = rigC.LoadCheckpoint(path);

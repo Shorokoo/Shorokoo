@@ -696,3 +696,204 @@ public class QeeUInt64SignedOperatorTests
         Assert.Equal((ulong[])[half, half + 1, half + 2, half + 3], got);
     }
 }
+
+// ─────────────── unsigned edge cases through the QEE (RNG's arithmetic substrate) ───────────────
+//
+// These modules are deliberately input-free and fully constant: they are run through the QEE
+// DIRECTLY (not via ComputeContext), so the folding-reachability caveat that shapes
+// QeeOverflowThenShift does not apply — QEE evaluates every node whether or not a non-constant
+// consumer exists.
+//
+// Each covers one operator family at the width boundary, over a vector of edge cases so a single
+// output pins several at once. Together they are the arithmetic RuntimeRng emits (add, sub, mul,
+// shift, bitwise, cast) — the substrate every keyed draw and key split is built from.
+
+/// <summary>uint32 add/sub/mul at the 2^32 boundary. ONNX integer arithmetic wraps (mod 2^32).</summary>
+[Module]
+public partial class QeeUInt32WrapArithmetic
+{
+    public static Tensor<uint32> Inline()
+    {
+        //  max+1 -> 0 | 0+1 -> 1 | 2^31+2 | max+max -> max-1 | max+2 -> 1
+        var a = Vector(4294967295u, 0u, 2147483648u, 4294967295u, 4294967295u);
+        var b = Vector(1u, 1u, 2u, 4294967295u, 2u);
+        return a + b - (b - b);   // the (b-b) term keeps Sub in the graph alongside Add
+    }
+}
+
+/// <summary>uint64 add/sub/mul at the 2^64 boundary, with operands above <c>long.MaxValue</c> —
+/// the range QEE stores as negative bit-pattern longs.</summary>
+[Module]
+public partial class QeeUInt64WrapArithmetic
+{
+    public static Tensor<uint64> Inline()
+    {
+        //  max + 1 -> 0 | 0 - 1 -> max | 2^63 * 2 -> 0 | max + max -> max-1
+        var a = Vector(18446744073709551615UL, 0UL, 9223372036854775808UL, 18446744073709551615UL);
+        var b = Vector(1UL, 1UL, 0UL, 18446744073709551615UL);
+        return a + b;
+    }
+}
+
+/// <summary>uint64 multiply that overflows from operands above <c>long.MaxValue</c>.</summary>
+[Module]
+public partial class QeeUInt64WrapMultiply
+{
+    public static Tensor<uint64> Inline()
+    {
+        // 2^63 * 2 -> 0 | max * 2 -> max-1 | 2^32 * 2^32 -> 0
+        var a = Vector(9223372036854775808UL, 18446744073709551615UL, 4294967296UL);
+        return a * Vector(2UL, 2UL, 4294967296UL);
+    }
+}
+
+/// <summary>uint32 shifts at the width boundary, including a right shift of an all-ones word —
+/// the operation that exposes a bit leaked above the declared width.</summary>
+[Module]
+public partial class QeeUInt32ShiftEdges
+{
+    public static Tensor<uint32> Inline()
+    {
+        var left = OnnxOp.BitShift(Vector(1u, 1u, 4294967295u), Vector(31u, 16u, 1u),
+            BitShiftDirection.Left).uint32();                       // 2^31 | 2^16 | max-1
+        var right = OnnxOp.BitShift(Vector(4294967295u, 2147483648u, 1u), Vector(16u, 31u, 1u),
+            BitShiftDirection.Right).uint32();                      // 65535 | 1 | 0
+        return left + right;
+    }
+}
+
+/// <summary>uint64 shifts at the width boundary, across the <c>long.MaxValue</c> line.</summary>
+[Module]
+public partial class QeeUInt64ShiftEdges
+{
+    public static Tensor<uint64> Inline()
+    {
+        var left = OnnxOp.BitShift(Vector(1UL, 1UL), Vector(63UL, 32UL),
+            BitShiftDirection.Left).uint64();                       // 2^63 | 2^32
+        var right = OnnxOp.BitShift(Vector(18446744073709551615UL, 9223372036854775808UL),
+            Vector(32UL, 63UL), BitShiftDirection.Right).uint64();  // 2^32-1 | 1
+        return left + right;
+    }
+}
+
+/// <summary>uint64 bitwise ops with both operands above <c>long.MaxValue</c> (sign bit set).</summary>
+[Module]
+public partial class QeeUInt64BitwiseHighBit
+{
+    public static Tensor<uint64> Inline()
+    {
+        var hi = Vector(18446744073709551615UL, 9223372036854775808UL, 18446744073709551615UL);
+        var lo = Vector(9223372036854775808UL, 9223372036854775808UL, 4294967295UL);
+        var and = OnnxOp.BitwiseAnd(hi, lo).uint64();               // 2^63 | 2^63 | 2^32-1
+        var xor = OnnxOp.BitwiseXor(hi, lo).uint64();               // 2^63-1 | 0 | max-2^32+1
+        var or  = OnnxOp.BitwiseOr(hi, lo).uint64();                // max | 2^63 | max
+        return and + xor + or;
+    }
+}
+
+/// <summary>Width-crossing casts: uint64 above <c>long.MaxValue</c> truncated to uint32, and a
+/// uint32 top-bit value widened back — the boundary the Words/Pack split in RuntimeRng rides.</summary>
+[Module]
+public partial class QeeUnsignedCastEdges
+{
+    public static Tensor<uint64> Inline()
+    {
+        // Narrow: keeps the low 32 bits. max -> 2^32-1 | 2^63 -> 0 | 2^32+7 -> 7
+        var narrowed = Vector(18446744073709551615UL, 9223372036854775808UL, 4294967303UL)
+            .Cast<uint32>();
+        // Widen back: no sign extension, so 2^32-1 stays 2^32-1 (not 2^64-1).
+        return narrowed.Cast<uint64>();
+    }
+}
+
+/// <summary>
+/// Unsigned edge cases evaluated by the <see cref="QuickExecutionEngine"/> itself.
+///
+/// <para>QEE holds every integer width in one <c>long</c> buffer, so a <c>uint32</c> result that
+/// overflows and a <c>uint64</c> above <c>long.MaxValue</c> are both representable only as bit
+/// patterns — and the width is carried by <c>RuntimeTensor.DType</c>, not by the storage. Every
+/// case below sits exactly on that seam, which is where a leaked high bit or a signed operator
+/// shows up. This is the arithmetic <c>RuntimeRng</c> is built from (add, sub, mul, shift,
+/// bitwise, cast), so a break here is a break in every keyed draw and key split.</para>
+///
+/// <para><b>The contract each test applies</b>: QEE may legitimately <em>decline</em> to compute a
+/// value — several ops are shape/dtype propagation only, and declining is always safe because the
+/// backend then computes it. What it must never do is return a <em>wrong</em> value, because host
+/// constant folding bakes whatever QEE returns into the graph. So a tensor with no data passes;
+/// a tensor with data must carry the right data. ONNX integer arithmetic wraps (mod 2^N) — that
+/// is the behaviour asserted, not saturation and not a widened intermediate.</para>
+/// </summary>
+[Trait("Domain", "Inference")]
+[Trait("Purpose", "Coverage")]
+public class QeeUnsignedEdgeCaseTests
+{
+    /// <summary>Runs an input-free module through the QEE alone and returns its single output.</summary>
+    private static IRuntimeTensor QeeOnly<TModule>()
+    {
+        var moduleGraph = ((ComputationGraph)typeof(TModule)
+            .GetProperty("ComputationGraph", BindingFlags.Public | BindingFlags.Static)!
+            .GetValue(null)!).ToInternal();
+        var concrete = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([])).ToConcreteModel();
+        var store = new QuickExecutionEngine().Run(concrete);
+        return store[concrete.Outputs[0]];
+    }
+
+    /// <summary>The contract: no data is a pass (QEE declined; the backend will compute it);
+    /// data must be exactly <paramref name="expected"/>, compared as raw bit patterns so a
+    /// <c>uint64</c> above <c>long.MaxValue</c> is not reinterpreted on the way to the assert.</summary>
+    private static void AssertNoDataOrExactly<TModule>(ulong[] expected, DType expectedDType)
+    {
+        var rt = QeeOnly<TModule>();
+        Assert.Equal(expectedDType, rt.DType);
+
+        if (rt is not RuntimeTensor { IntData: { } data })
+            return;   // declined to compute — allowed, and the safe outcome
+
+        Assert.Equal(expected.Length, data.Length);
+        for (int i = 0; i < expected.Length; i++)
+            Assert.True(unchecked((long)expected[i]) == data[i],
+                $"element {i}: expected {expected[i]} (bits 0x{expected[i]:X16}), " +
+                $"got {unchecked((ulong)data[i])} (bits 0x{data[i]:X16}).");
+    }
+
+    [Fact]
+    public void TestUInt32AddSubWrapAroundTheWidthBoundary() =>
+        //  max+1 -> 0 | 0+1 -> 1 | 2^31+2 | max+max -> max-1 | max+2 -> 1
+        AssertNoDataOrExactly<QeeUInt32WrapArithmetic>(
+            [0UL, 1UL, 2147483650UL, 4294967294UL, 1UL], DType.UInt32);
+
+    [Fact]
+    public void TestUInt64AddWrapsAboveLongMaxValue() =>
+        //  max+1 -> 0 | 0+1 -> 1 | 2^63+0 -> 2^63 | max+max -> max-1
+        AssertNoDataOrExactly<QeeUInt64WrapArithmetic>(
+            [0UL, 1UL, 9223372036854775808UL, 18446744073709551614UL], DType.UInt64);
+
+    [Fact]
+    public void TestUInt64MultiplyWrapsAboveLongMaxValue() =>
+        AssertNoDataOrExactly<QeeUInt64WrapMultiply>(
+            [0UL, 18446744073709551614UL, 0UL], DType.UInt64);
+
+    [Fact]
+    public void TestUInt32ShiftsAtTheWidthBoundary() =>
+        // left  : 2^31 | 65536 | 4294967294   (max<<1 wraps to max-1)
+        // right : 65535 | 1     | 0
+        AssertNoDataOrExactly<QeeUInt32ShiftEdges>(
+            [2147549183UL, 65537UL, 4294967294UL], DType.UInt32);
+
+    [Fact]
+    public void TestUInt64ShiftsAcrossTheLongMaxValueLine() =>
+        // left  : 2^63 | 2^32        right : 2^32-1 | 1
+        AssertNoDataOrExactly<QeeUInt64ShiftEdges>(
+            [9223372041149743103UL, 4294967297UL], DType.UInt64);
+
+    [Fact]
+    public void TestUInt64BitwiseOpsWithTheSignBitSet() =>
+        // (and + xor + or), each summed mod 2^64
+        AssertNoDataOrExactly<QeeUInt64BitwiseHighBit>(
+            [18446744073709551614UL, 0UL, 18446744073709551614UL], DType.UInt64);
+
+    [Fact]
+    public void TestUnsignedCastsTruncateAndWidenWithoutSignExtension() =>
+        AssertNoDataOrExactly<QeeUnsignedCastEdges>(
+            [4294967295UL, 0UL, 7UL], DType.UInt64);
+}

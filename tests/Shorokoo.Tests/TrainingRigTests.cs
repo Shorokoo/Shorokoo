@@ -616,6 +616,85 @@ public class TrainingRigCoverageTests
         finally { if (File.Exists(path)) File.Delete(path); }
     }
 
+    /// <summary>
+    /// The scheduler constituent (#106) round-trips through a training <c>.skpt</c>: a rig whose
+    /// learning rate is a scheduler module persists that schedule as its own <c>models/scheduler.srk</c>
+    /// entry, and <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?)"/> rebuilds a rig
+    /// whose hyperparameter policy is the same function of the counters — recovered from the file alone,
+    /// with no schedule re-supplied by the host.
+    ///
+    /// <para>This is the one path #106 exists to deliver, and the only end-to-end exercise of
+    /// <c>BuildComposedSchedulerModel</c> → <c>models/scheduler.srk</c> →
+    /// <c>SplitSchedulerOutput</c>. The other scheduled-hyperparameter tests all build a rig in
+    /// memory and never persist it, so a break anywhere along that chain would leave them green.</para>
+    ///
+    /// <para>The schedule is checked by <em>behaviour</em>, not by inspecting the graph: the reloaded
+    /// rig must produce the original's weight at several <c>(step, epoch)</c> points. A scheduler that
+    /// round-tripped structurally but evaluated differently — the failure a graph-shape assertion would
+    /// miss — changes the weight.</para>
+    /// </summary>
+    [Fact]
+    public void TestScheduledHyperparameterSurvivesSkptRigRoundTripCoverage()
+    {
+        var (sample, inputBatch, targetBatch) = ScalarMultiplyBatches();
+
+        // StepEpochScheduler reads BOTH reserved counters (lr = 0.5 - 0.01*step - 0.1*epoch), so a
+        // reloaded schedule that dropped either counter — or its wiring — diverges below.
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            sample,
+            new SGDOptimizerHyperparameters
+            {
+                LearningRate = Hyperparameter.Scheduled(StepEpochScheduler.ComputationGraph),
+            });
+        string wName = rig.TrainableParamStructDef.Fields[0].Name;
+        var initial = rig.CreateInitialCheckpoint();
+
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_sched_rt_{Guid.NewGuid():N}.skpt");
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(initial, path);
+
+            // The scheduler really is a constituent on disk: its own models/ entry, named by the
+            // manifest's rig block, with the hyperparameter recorded as scheduled (not baked away).
+            using (var archive = System.IO.Compression.ZipFile.OpenRead(path))
+            {
+                Assert.NotNull(archive.GetEntry("models/scheduler.srk"));
+
+                using var configStream = archive.GetEntry("config.json")!.Open();
+                using var manifest = System.Text.Json.JsonDocument.Parse(configStream);
+                var rigBlock = manifest.RootElement.GetProperty("training").GetProperty("rig");
+                Assert.Equal("scheduler", rigBlock.GetProperty("schedulerModel").GetString());
+                Assert.Contains(
+                    rigBlock.GetProperty("hyperparameters").EnumerateArray(),
+                    h => h.GetProperty("kind").GetString() == "scheduled");
+            }
+
+            // Rebuild the whole rig from the file alone — no graphs, no schedule re-supplied.
+            var (reloaded, _) = TrainingRig.Load(path);
+            Assert.NotNull(reloaded);
+
+            // The recovered schedule is the same function of (step, epoch): stepping the reloaded rig
+            // from a checkpoint at each point must reproduce the original rig's weight. Epoch varies
+            // independently of step, so a schedule that lost the epoch counter fails here.
+            foreach (var (s, e) in ((long, long)[])[(0L, 0L), (3L, 1L), (7L, 4L)])
+            {
+                var at = new TrainingCheckpoint(
+                    initial.TrainableParams, initial.ModelState, initial.OptimizerState, step: s, epoch: e);
+
+                float wOriginal = ((TensorData<float32>)rig.TrainStep(at, inputBatch, targetBatch)
+                    .TrainableParams.Fields[wName]).AccessMemory()[0];
+                float wReloaded = ((TensorData<float32>)reloaded.TrainStep(at, inputBatch, targetBatch)
+                    .TrainableParams.Fields[wName]).AccessMemory()[0];
+
+                Assert.True(MathF.Abs(wOriginal - wReloaded) < 1e-6f,
+                    $"(step {s}, epoch {e}): reloaded-rig weight {wReloaded} vs original {wOriginal} " +
+                    "differ — the scheduler constituent did not survive the .skpt round trip.");
+            }
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
     // ─────────────── representative-input two-attribute split & serialization (#115) ───────────────
 
     private static long ProductOf(long[] shape)

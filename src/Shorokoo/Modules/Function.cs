@@ -69,8 +69,8 @@ namespace Shorokoo.Core
         /// Metadata property on FunctionProto: who updates the state a
         /// <see cref="Shorokoo.Core.Nodes.OnnxNodes.FunctionType.StateParamInitializer"/> creates
         /// ("ModuleOwned" / "OptimizerOwned", the <see cref="Shorokoo.Modules.StateOwnership"/>
-        /// names). Present only on state-initializer functions; when absent (including files
-        /// written before the tag existed) the reader falls back to the constructor default,
+        /// names). Present only on state-initializer functions; when absent the reader falls
+        /// back to the constructor default,
         /// <see cref="Shorokoo.Modules.StateOwnership.ModuleOwned"/>.
         /// </summary>
         public const string IRStateOwnershipParamName = "StateOwnership";

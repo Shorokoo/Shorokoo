@@ -1370,7 +1370,7 @@ public class TrainingRigCoverageTests
             Assert.Null(result.Srk);
 
             var info = result.TrainingCheckpoint!;
-            Assert.Equal(3, info.FormatVersion);   // v3 marker: int64 [version, step] + presence-gated epoch/batch/loss
+            Assert.Equal(1, info.FormatVersion);   // int64[2] [version, step] + presence-gated epoch/batch/loss
             Assert.Equal(5, info.Step);
             Assert.Null(info.Epoch);               // not set on this checkpoint → unknown (null), never a sentinel 0
             Assert.Null(info.BatchIndex);
@@ -1898,17 +1898,17 @@ public class TrainingRigCoverageTests
             trained.TrainableParams, trained.ModelState, trained.OptimizerState,
             step: bigStep, epoch: bigEpoch, batchIndex: bigBatch, rig: trained.Rig);
 
-        var legacyPath = Path.Combine(Path.GetTempPath(), $"shrk_i64_{Guid.NewGuid():N}.safetensors");
+        var flatPath = Path.Combine(Path.GetTempPath(), $"shrk_i64_{Guid.NewGuid():N}.safetensors");
         var skptPath = Path.Combine(Path.GetTempPath(), $"shrk_i64_{Guid.NewGuid():N}.skpt");
         try
         {
             // Legacy flat safetensors (v3 marker).
-            ckpt.Save(legacyPath);
-            var legacy = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(legacyPath);
-            Assert.Equal(bigStep, legacy.Step);
-            Assert.Equal(bigEpoch, legacy.Epoch);
-            Assert.Equal(bigBatch, legacy.BatchIndex);
-            Assert.Equal(3, Persistence.Inspect(legacyPath).TrainingCheckpoint!.FormatVersion);
+            ckpt.Save(flatPath);
+            var flat = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(flatPath);
+            Assert.Equal(bigStep, flat.Step);
+            Assert.Equal(bigEpoch, flat.Epoch);
+            Assert.Equal(bigBatch, flat.BatchIndex);
+            Assert.Equal(1, Persistence.Inspect(flatPath).TrainingCheckpoint!.FormatVersion);
 
             // Native .skpt manifest.
             Persistence.SaveTrainingCheckpointToSkpt(ckpt, skptPath);
@@ -1919,7 +1919,7 @@ public class TrainingRigCoverageTests
         }
         finally
         {
-            if (File.Exists(legacyPath)) File.Delete(legacyPath);
+            if (File.Exists(flatPath)) File.Delete(flatPath);
             if (File.Exists(skptPath)) File.Delete(skptPath);
         }
     }
@@ -2820,7 +2820,7 @@ public class TrainingRigCoverageTests
 
     /// <summary>
     /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?)"/> fails loudly when the
-    /// file carries no rig constituents to rebuild from: a legacy flat safetensors checkpoint (not a
+    /// file carries no rig constituents to rebuild from: a flat safetensors checkpoint (not a
     /// .skpt container at all), and an inference-only .skpt (no training/rig block). The from-file path
     /// is only for a training .skpt written with the rig; otherwise the host rebuilds the rig and uses
     /// <see cref="TrainingRig.LoadCheckpoint"/>.
@@ -3030,23 +3030,23 @@ public class TrainingRigCoverageTests
     }
 
     /// <summary>
-    /// Back-compat: <see cref="TrainingRig.LoadCheckpoint"/> and
-    /// <see cref="Persistence.LoadTrainingCheckpoint"/> still read a legacy flat safetensors
-    /// checkpoint (written by <see cref="TrainingCheckpoint.Save"/>) — the shape is detected from the
-    /// file, so old and new checkpoints load through one entry point.
+    /// <see cref="TrainingRig.LoadCheckpoint"/> and
+    /// <see cref="Persistence.LoadTrainingCheckpoint"/> read the flat safetensors checkpoint
+    /// (written by <see cref="TrainingCheckpoint.Save"/>) as well as the .skpt container — the
+    /// shape is detected from the file, so both load through one entry point.
     /// </summary>
     [Fact]
-    public void TestLegacyFlatCheckpointStillLoadsCoverage()
+    public void TestFlatCheckpointLoadsCoverage()
     {
         var (rig, ckpt, _, _) = BuildTrainedAdamRig(steps: 2);
-        var path = Path.Combine(Path.GetTempPath(), $"shrk_legacy_{Guid.NewGuid():N}.safetensors");
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_flat_{Guid.NewGuid():N}.safetensors");
         try
         {
-            Persistence.SaveTrainingCheckpoint(ckpt, path);   // legacy flat format
+            Persistence.SaveTrainingCheckpoint(ckpt, path);   // flat format
             Assert.Equal(ArtifactKind.TrainingCheckpoint, Persistence.Inspect(path).Kind);
 
             var rigB = BuildTrainedAdamRig(steps: 0).Rig;
-            var loaded = rigB.LoadCheckpoint(path);            // routes to the legacy reader
+            var loaded = rigB.LoadCheckpoint(path);            // routes to the flat reader
             Assert.Equal(2, loaded.Step);
             Assert.Equal(FlattenStruct(ckpt.TrainableParams), FlattenStruct(loaded.TrainableParams));
             Assert.Equal(FlattenStruct(ckpt.OptimizerState), FlattenStruct(loaded.OptimizerState));
@@ -3057,7 +3057,7 @@ public class TrainingRigCoverageTests
     /// <summary>
     /// Host-owned epoch/batch counters (issue #100) persist and restore in both checkpoint formats.
     /// A checkpoint saved at (step, epoch, batchIndex) reloads with all three through a fresh rig, the
-    /// .skpt and legacy flat formats agree, and <see cref="Persistence.Inspect"/> surfaces epoch and
+    /// .skpt and flat formats agree, and <see cref="Persistence.Inspect"/> surfaces epoch and
     /// batch from the manifest / marker alone (no tensor payload load — Observations stays empty).
     /// </summary>
     [Fact]
@@ -3073,7 +3073,7 @@ public class TrainingRigCoverageTests
         Assert.Equal(340, ckpt.BatchIndex);
 
         var skptPath = Path.Combine(Path.GetTempPath(), $"shrk_ctr_skpt_{Guid.NewGuid():N}.skpt");
-        var legacyPath = Path.Combine(Path.GetTempPath(), $"shrk_ctr_legacy_{Guid.NewGuid():N}.safetensors");
+        var flatPath = Path.Combine(Path.GetTempPath(), $"shrk_ctr_flat_{Guid.NewGuid():N}.safetensors");
         try
         {
             // --- .skpt format: manifest records the counters; a fresh rig restores them. ---
@@ -3089,16 +3089,16 @@ public class TrainingRigCoverageTests
             Assert.Equal(340, skptLoaded.BatchIndex);
 
             // --- Legacy flat safetensors format: same counters round-trip via the marker. ---
-            ckpt.Save(legacyPath);
-            var legacyLoaded = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(legacyPath);
-            Assert.Equal(4, legacyLoaded.Step);
-            Assert.Equal(7, legacyLoaded.Epoch);
-            Assert.Equal(340, legacyLoaded.BatchIndex);
+            ckpt.Save(flatPath);
+            var flatLoaded = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(flatPath);
+            Assert.Equal(4, flatLoaded.Step);
+            Assert.Equal(7, flatLoaded.Epoch);
+            Assert.Equal(340, flatLoaded.BatchIndex);
 
             // --- The two formats agree. ---
-            Assert.Equal(skptLoaded.Step, legacyLoaded.Step);
-            Assert.Equal(skptLoaded.Epoch, legacyLoaded.Epoch);
-            Assert.Equal(skptLoaded.BatchIndex, legacyLoaded.BatchIndex);
+            Assert.Equal(skptLoaded.Step, flatLoaded.Step);
+            Assert.Equal(skptLoaded.Epoch, flatLoaded.Epoch);
+            Assert.Equal(skptLoaded.BatchIndex, flatLoaded.BatchIndex);
 
             // --- Inspect reports them without loading tensor data. ---
             var skptInspect = Persistence.Inspect(skptPath);
@@ -3109,19 +3109,19 @@ public class TrainingRigCoverageTests
             Assert.Contains("epoch 7", skptText);
             Assert.Contains("batch index 340", skptText);
 
-            var legacyInspect = Persistence.Inspect(legacyPath);
-            Assert.Empty(legacyInspect.Observations);
-            Assert.Equal(3, legacyInspect.TrainingCheckpoint!.FormatVersion);
-            Assert.Equal(7, legacyInspect.TrainingCheckpoint.Epoch);
-            Assert.Equal(340, legacyInspect.TrainingCheckpoint.BatchIndex);
-            var legacyText = legacyInspect.ToString();
-            Assert.Contains("epoch: 7", legacyText);
-            Assert.Contains("batch index: 340", legacyText);
+            var flatInspect2 = Persistence.Inspect(flatPath);
+            Assert.Empty(flatInspect2.Observations);
+            Assert.Equal(1, flatInspect2.TrainingCheckpoint!.FormatVersion);
+            Assert.Equal(7, flatInspect2.TrainingCheckpoint.Epoch);
+            Assert.Equal(340, flatInspect2.TrainingCheckpoint.BatchIndex);
+            var flatText = flatInspect2.ToString();
+            Assert.Contains("epoch: 7", flatText);
+            Assert.Contains("batch index: 340", flatText);
         }
         finally
         {
             if (File.Exists(skptPath)) File.Delete(skptPath);
-            if (File.Exists(legacyPath)) File.Delete(legacyPath);
+            if (File.Exists(flatPath)) File.Delete(flatPath);
         }
     }
 
@@ -3204,20 +3204,20 @@ public class TrainingRigCoverageTests
         Assert.Null(ckpt.Epoch);
         Assert.Null(ckpt.BatchIndex);
 
-        var legacyPath = Path.Combine(Path.GetTempPath(), $"shrk_nullctr_{Guid.NewGuid():N}.safetensors");
+        var flatPath = Path.Combine(Path.GetTempPath(), $"shrk_nullctr_{Guid.NewGuid():N}.safetensors");
         var skptPath = Path.Combine(Path.GetTempPath(), $"shrk_nullctr_{Guid.NewGuid():N}.skpt");
         try
         {
             // Flat safetensors: the presence-gated epoch/batch scalars are absent, so they reload null.
-            ckpt.Save(legacyPath);
-            var legacy = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(legacyPath);
-            Assert.Equal(trained.Step, legacy.Step);   // step stays concrete
-            Assert.Null(legacy.Epoch);
-            Assert.Null(legacy.BatchIndex);
+            ckpt.Save(flatPath);
+            var flat = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(flatPath);
+            Assert.Equal(trained.Step, flat.Step);   // step stays concrete
+            Assert.Null(flat.Epoch);
+            Assert.Null(flat.BatchIndex);
 
-            var flatInspect = Persistence.Inspect(legacyPath);
+            var flatInspect = Persistence.Inspect(flatPath);
             Assert.Empty(flatInspect.Observations);
-            Assert.Equal(3, flatInspect.TrainingCheckpoint!.FormatVersion);
+            Assert.Equal(1, flatInspect.TrainingCheckpoint!.FormatVersion);
             Assert.Null(flatInspect.TrainingCheckpoint.Epoch);
             Assert.Null(flatInspect.TrainingCheckpoint.BatchIndex);
             Assert.Contains("epoch: unset", flatInspect.ToString());
@@ -3236,7 +3236,7 @@ public class TrainingRigCoverageTests
         }
         finally
         {
-            if (File.Exists(legacyPath)) File.Delete(legacyPath);
+            if (File.Exists(flatPath)) File.Delete(flatPath);
             if (File.Exists(skptPath)) File.Delete(skptPath);
         }
     }

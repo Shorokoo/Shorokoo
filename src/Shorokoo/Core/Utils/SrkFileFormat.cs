@@ -66,8 +66,8 @@ namespace Shorokoo.Core.Utils
         [JsonExtensionData]
         public Dictionary<string, JsonElement>? AdditionalFields { get; set; }
 
-        /// <summary>Parses <see cref="Stage"/>; null when the name is missing or unknown
-        /// (e.g. a stage introduced by a newer framework version).</summary>
+        /// <summary>Parses <see cref="Stage"/>; null when the name is missing or is not one
+        /// this build defines.</summary>
         public GraphKind? TryGetStage() => SrkFileFormat.TryParseStageName(Stage);
     }
 
@@ -134,7 +134,7 @@ namespace Shorokoo.Core.Utils
         /// (<c>MODEL_PARAM</c> nodes) present → <see cref="GraphKind.ConcreteArchitecture"/>;
         /// otherwise <see cref="GraphKind.ConcreteModel"/>. This is what the writer records
         /// in the header, and the fallback classification used when a file's recorded stage is
-        /// missing or unknown (e.g. written by a newer framework version).
+        /// missing or is not one this build defines.
         /// </summary>
         public static GraphKind DetectStage(InternalComputationGraph graph)
         {
@@ -154,8 +154,8 @@ namespace Shorokoo.Core.Utils
         /// <summary>
         /// Reads the graph-kind metadata tag (<see cref="Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkMetaGraphKind"/>)
         /// stamped into a serialized model by the ONNX builders, so a saved graph can be
-        /// reloaded as the same kind. Null when the model carries no (recognizable) tag —
-        /// foreign models, or files written before the tag existed.
+        /// reloaded as the same kind. Null when the model carries no (recognizable) tag, as a
+        /// foreign model does.
         /// </summary>
         internal static GraphKind? TryReadKindTag(Shorokoo.Core.Factory.IR.ModelProto model)
         {
@@ -420,8 +420,8 @@ namespace Shorokoo.Core.Utils
                 return;
             int version = data.Length > MagicPrefixLength ? data[MagicPrefixLength] : -1;
             throw new InvalidDataException(
-                $"'{origin}': .srk container major version {version} is not supported by this Shorokoo " +
-                $"build (supported: {CurrentVersion}). The file was likely written by a newer framework version.");
+                $"'{origin}': .srk container major version {version} is not readable by this Shorokoo " +
+                $"build, which reads version {CurrentVersion} only.");
         }
 
         /// <summary>
@@ -516,8 +516,7 @@ namespace Shorokoo.Core.Utils
                 CompressionZstd => (header, DecompressPayload(payload, origin)),
                 _ => throw new InvalidDataException(
                     $"'{origin}': .srk header declares unsupported compression " +
-                    $"'{header.Compression}' (supported: '{CompressionNone}', '{CompressionZstd}'). " +
-                    "The file was likely written by a newer Shorokoo version."),
+                    $"'{header.Compression}' (supported: '{CompressionNone}', '{CompressionZstd}')."),
             };
         }
 
@@ -556,11 +555,8 @@ namespace Shorokoo.Core.Utils
 
             if (header.SrkVersion != CurrentVersion)
                 throw new InvalidDataException(
-                    $"'{origin}': .srk container version {header.SrkVersion} is not supported by this Shorokoo " +
-                    $"build (supported: {CurrentVersion}). The file was written by " +
-                    (header.SrkVersion > CurrentVersion
-                        ? "a newer framework version."
-                        : "an older, unsupported framework version."));
+                    $"'{origin}': .srk container version {header.SrkVersion} is not readable by this " +
+                    $"Shorokoo build, which reads version {CurrentVersion} only.");
 
             return header;
         }

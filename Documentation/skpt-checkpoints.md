@@ -94,7 +94,7 @@ Persistence.SaveTrainingCheckpointToSkpt(checkpoint, "run.skpt");
 
 // Resume in a fresh process: rebuild the rig from the same graphs, then load.
 var rig     = TrainingRig.FromScratch(modelGraph, lossGraph, optimizerGraph, sample, hypers);
-var resumed = rig.LoadCheckpoint("run.skpt");   // reads .skpt or legacy flat, auto-detected
+var resumed = rig.LoadCheckpoint("run.skpt");   // reads .skpt or flat, auto-detected
 var next    = rig.TrainStep(resumed, inputBatch, targetBatch);   // trainstep compiled once internally
 ```
 
@@ -124,13 +124,13 @@ What the file carries:
   entry holds each kind, recorded in the manifest's `training` block (so `Persistence.Inspect`
   reports them without reading tensor data). Step, epoch and batch index are host-owned: the
   training loop advances them (`TrainStep` advances the step and carries epoch/batch through
-  unchanged), and they are persisted so a resumed run restores its position. Checkpoints written
-  before epoch/batch existed load with those counters defaulting to `0`.
+  unchanged), and they are persisted so a resumed run restores its position. A checkpoint whose
+  epoch/batch position is genuinely unknown omits them and reloads them as `null`.
 
 Round-trip is exact: reloaded trainable params, model state and optimizer state are
 bit-identical, the counters are preserved, and a resumed `TrainStep` reproduces the pre-save
 trajectory. Loading validates against the rig's struct definitions with the same fail-loud
-contract as the legacy flat format — a checkpoint from a different model or optimizer, a
+contract as the flat format — a checkpoint from a different model or optimizer, a
 missing kind, a rank mismatch, or a tampered entry (sha256) fails loudly.
 
 Reconstruct without a rig by supplying the struct defs directly:
@@ -140,11 +140,11 @@ TrainingCheckpoint ckpt = Persistence.LoadTrainingCheckpoint(
     "run.skpt", trainableParamDef, modelStateDef, optimizerStateDef);
 ```
 
-`Persistence.SaveTrainingCheckpoint(checkpoint, path)` still writes the **legacy flat**
+`Persistence.SaveTrainingCheckpoint(checkpoint, path)` writes the **flat**
 [safetensors format](training.md); the `.skpt` path is opt-in via
 `SaveTrainingCheckpointToSkpt` / `ForTrainingCheckpoint`. Both `LoadTrainingCheckpoint`
 and `TrainingRig.LoadCheckpoint` read either shape — the on-disk form is detected from the
-file — so old and new checkpoints load through one entry point.
+file — so both load through one entry point.
 
 ## Provenance metadata
 
@@ -470,8 +470,8 @@ model.skpt
   // Training block: present only in a training checkpoint (omitted for an inference
   // checkpoint). Records the host-owned run counters (step, epoch, batch index) and which
   // data entry holds each state kind — an empty kind (e.g. model state for a stateless
-  // model) is absent and has no entry. epoch/batchIndex are add-only: a checkpoint written
-  // before they existed omits them and reads them back as 0.
+  // model) is absent and has no entry. epoch/batchIndex are nullable: a checkpoint whose
+  // position is genuinely unknown omits them and reads them back as null.
   "training": {
     "checkpointVersion": 1,
     "step": 42,
@@ -489,8 +489,11 @@ model.skpt
 Rules:
 
 - **Keys are add-only.** A reader ignores unknown keys; removing or re-typing a key is
-  a major-version event (a bump of `skptVersion`). A file with a higher `skptVersion`
-  is refused with a clear message rather than half-read.
+  a major-version event (a bump of `skptVersion`). `skptVersion` is `1` — the only version
+  that has existed — and a file declaring any other value is refused with a clear message
+  rather than half-read. There is no read path for another version and no compatibility
+  shim: every format below is version 1, and stays there until a breaking change earns a
+  bump.
 - **Integrity is checked on load.** Every entry the manifest references must exist and
   match its recorded `sha256`; a missing entry, a hash mismatch, or a tensor mapping
   that does not cover the model's parameters exactly fails loudly, naming the

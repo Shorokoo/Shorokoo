@@ -120,9 +120,9 @@ namespace Shorokoo
 
         // ---- Training checkpoints ----
         // Training-run state (trainable params, model + optimizer state, global step) persists
-        // through this same facade in one of two on-disk shapes. The legacy shape is the
-        // self-contained flat sectioned-safetensors file TrainingCheckpoint owns; the native
-        // shape is a .skpt container (issue #95) that carries the concrete inference model plus
+        // through this same facade in one of two on-disk shapes. The flat shape is the
+        // self-contained sectioned-safetensors file TrainingCheckpoint owns; the container
+        // shape is a .skpt (issue #95) that carries the concrete inference model plus
         // the training state split into per-kind data entries, so a training checkpoint gains the
         // container's benefits (inspectable manifest, per-entry Zstd, atomic write, provenance
         // metadata) and shares one format with inference checkpoints. New saves opt into the .skpt
@@ -131,7 +131,7 @@ namespace Shorokoo
 
         /// <summary>
         /// Saves a <see cref="TrainingCheckpoint"/> — trainable parameters, model state, optimizer
-        /// state and the global step — in the legacy flat sectioned-safetensors format, so a
+        /// state and the global step — in the flat sectioned-safetensors format, so a
         /// training run can resume across process restarts. Delegates to
         /// <see cref="TrainingCheckpoint.Save(string, CheckpointComponents?)"/>; the write is atomic (temp file + rename). A
         /// <c>.safetensors</c> extension is conventional. To write the native .skpt container
@@ -146,7 +146,7 @@ namespace Shorokoo
 
         /// <summary>
         /// Loads a <see cref="TrainingCheckpoint"/> saved by either <see cref="SaveTrainingCheckpoint(TrainingCheckpoint, string)"/>
-        /// (the legacy flat safetensors file) or <see cref="SaveTrainingCheckpointToSkpt"/> (the
+        /// (the flat safetensors file) or <see cref="SaveTrainingCheckpointToSkpt"/> (the
         /// native .skpt container) — the shape is detected from the file's bytes. Either way the
         /// checkpoint is reconstructed against the given struct defs (which pin the expected shapes,
         /// so a checkpoint from a different model or optimizer fails loudly). The result carries no
@@ -172,7 +172,7 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// True if the file is a <c>.skpt</c> container (a zip archive) rather than a legacy flat
+        /// True if the file is a <c>.skpt</c> container (a zip archive) rather than a flat
         /// safetensors checkpoint — sniffed from the leading four bytes (a zip starts <c>PK\x03\x04</c>;
         /// the flat checkpoint is a safetensors file with an 8-byte header-length prefix).
         /// </summary>
@@ -212,11 +212,8 @@ namespace Shorokoo
                     $"'{filePath}': invalid .skpt manifest — required field 'skptVersion' is missing or zero.");
             if (manifest.SkptVersion != SkptFileFormat.CurrentVersion)
                 throw new InvalidDataException(
-                    $"'{filePath}': .skpt version {manifest.SkptVersion} is not supported by this Shorokoo " +
-                    $"build (supported: {SkptFileFormat.CurrentVersion}). The file was written by " +
-                    (manifest.SkptVersion > SkptFileFormat.CurrentVersion
-                        ? "a newer framework version."
-                        : "an older, unsupported framework version."));
+                    $"'{filePath}': .skpt version {manifest.SkptVersion} is not readable by this Shorokoo " +
+                    $"build, which reads version {SkptFileFormat.CurrentVersion} only.");
         }
 
         private static (string Key, SkptModelEntry Entry) SingleModel(SkptManifest manifest, string filePath)
@@ -239,8 +236,7 @@ namespace Shorokoo
             throw new InvalidDataException(
                 $"'{filePath}': the .skpt manifest declares {manifest.Models.Count} models but none named " +
                 $"'{SkptFileFormat.DefaultModelKey}'; this Shorokoo build loads single-model checkpoints " +
-                "(or a training checkpoint whose inference model is the 'model' entry) only. The file was " +
-                "likely written by a newer framework version.");
+                "(or a training checkpoint whose inference model is the 'model' entry) only.");
         }
 
         private static InternalComputationGraph LoadModelDefinition(
@@ -252,8 +248,7 @@ namespace Shorokoo
             if (modelEntry.Format != SkptFileFormat.ModelFormatSrk1)
                 throw new InvalidDataException(
                     $"'{filePath}': model '{modelKey}' uses unsupported serialization format " +
-                    $"'{modelEntry.Format}' (supported: '{SkptFileFormat.ModelFormatSrk1}'). " +
-                    "The file was likely written by a newer framework version.");
+                    $"'{modelEntry.Format}' (supported: '{SkptFileFormat.ModelFormatSrk1}').");
             if (SrkFileFormat.TryParseStageName(modelEntry.Stage) != GraphKind.ConcreteModel)
                 throw new InvalidDataException(
                     $"'{filePath}': model '{modelKey}' records stage '{modelEntry.Stage}', but this " +
@@ -370,8 +365,7 @@ namespace Shorokoo
             if (dataEntry.Format != SkptFileFormat.DataFormatSafeTensors)
                 throw new InvalidDataException(
                     $"'{filePath}': data entry '{dataKey}' uses unsupported storage format " +
-                    $"'{dataEntry.Format}' (supported: '{SkptFileFormat.DataFormatSafeTensors}'). " +
-                    "The file was likely written by a newer framework version.");
+                    $"'{dataEntry.Format}' (supported: '{SkptFileFormat.DataFormatSafeTensors}').");
             var storedBytes = ReadEntry(archive, dataEntry.Entry, $"data entry '{dataKey}'", filePath);
             // The manifest sha256 covers the entry's bytes as stored in the archive — for a
             // compressed entry, the compressed bytes — so integrity is checked here, before
@@ -432,8 +426,7 @@ namespace Shorokoo
                     throw new InvalidDataException(
                         $"'{filePath}': data entry '{dataKey}' declares unsupported compression " +
                         $"'{dataEntry.Compression}' (supported: '{SkptFileFormat.CompressionNone}', " +
-                        $"'{SkptFileFormat.CompressionZstd}'). " +
-                        "The file was likely written by a newer framework version.");
+                        $"'{SkptFileFormat.CompressionZstd}').");
             }
         }
 

@@ -230,8 +230,8 @@ namespace Shorokoo.Core.Factory.IR
                     fastGraph.OutputUniqueNames.Add(outputName);
                 }
 
-                // State-initializer ownership rides FunctionProto metadata; absent (e.g. files
-                // written before the tag existed) falls back to the constructor default,
+                // State-initializer ownership rides FunctionProto metadata; absent falls back to
+                // the constructor default,
                 // ModuleOwned. An explicitly present but unknown value fails loudly rather than
                 // silently re-tagging optimizer state as module state.
                 var ownershipName = functionProto.MetadataProps
@@ -243,8 +243,7 @@ namespace Shorokoo.Core.Factory.IR
                         throw new System.IO.InvalidDataException(
                             $"Function '{defaultName}': metadata '{Function.IRStateOwnershipParamName}' has " +
                             $"unknown value '{ownershipName}' (expected " +
-                            $"'{StateOwnership.ModuleOwned}' or '{StateOwnership.OptimizerOwned}'). " +
-                            "The file was likely written by a newer framework version.");
+                            $"'{StateOwnership.ModuleOwned}' or '{StateOwnership.OptimizerOwned}').");
                     stateOwnership = parsedOwnership;
                 }
 

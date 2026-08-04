@@ -255,8 +255,8 @@ namespace Shorokoo
         public long Step { get; }
 
         /// <summary>The 0-based epoch counter the checkpoint was saved at — a host-owned run counter
-        /// (issue #100) — or <c>null</c> when the manifest omits it (a checkpoint whose position is
-        /// unknown, or one written before the key existed — issue #111).</summary>
+        /// (issue #100) — or <c>null</c> when the manifest omits it, i.e. a checkpoint whose
+        /// position is genuinely unknown (issue #111).</summary>
         public long? Epoch { get; }
 
         /// <summary>The 0-based batch index within the current epoch the checkpoint was saved at — a
@@ -713,11 +713,9 @@ namespace Shorokoo
                             observations.Add("the container ends at its header — the graph payload " +
                                 "is empty (truncated file?).");
                         if (header.Compression is not ("none" or "zstd"))
-                            observations.Add($"the header declares unknown compression '{header.Compression}' " +
-                                "(likely written by a newer Shorokoo version).");
+                            observations.Add($"the header declares unknown compression '{header.Compression}'.");
                         if (header.Stage is not null && header.TryGetStage() is null)
-                            observations.Add($"the header records the unknown stage '{header.Stage}' " +
-                                "(likely written by a newer Shorokoo version).");
+                            observations.Add($"the header records the unknown stage '{header.Stage}'.");
                     }
                 }
             }
@@ -863,8 +861,7 @@ namespace Shorokoo
             else if (manifest.SkptVersion != SkptFileFormat.CurrentVersion)
                 observations.Add($".skpt version {manifest.SkptVersion} is not the version this " +
                     $"build reads ({SkptFileFormat.CurrentVersion}); Persistence.Load would refuse " +
-                    "the file" + (manifest.SkptVersion > SkptFileFormat.CurrentVersion
-                        ? " (likely written by a newer Shorokoo version)." : "."));
+                    "the file.");
 
             if (configCount > 1)
                 observations.Add($"the archive contains {configCount} entries named " +
@@ -902,10 +899,9 @@ namespace Shorokoo
                     referenced.Add(m.Entry);
                 if (m is not null && m.Format != SkptFileFormat.ModelFormatSrk1)
                     observations.Add($"model '{key}' uses the unknown serialization format " +
-                        $"'{m.Format ?? "<none>"}' (likely written by a newer Shorokoo version).");
+                        $"'{m.Format ?? "<none>"}'.");
                 if (m?.Stage is not null && SrkFileFormat.TryParseStageName(m.Stage) is null)
-                    observations.Add($"model '{key}' records the unknown stage '{m.Stage}' " +
-                        "(likely written by a newer Shorokoo version).");
+                    observations.Add($"model '{key}' records the unknown stage '{m.Stage}'.");
                 if (string.IsNullOrEmpty(m?.Sha256))
                     observations.Add($"the manifest records no sha256 for model '{key}' — " +
                         "required by .skpt version 1.");
@@ -927,16 +923,16 @@ namespace Shorokoo
                 else
                     referenced.Add(d.Entry);
                 // "json" is a known storage format for the host user-data entry (issue #101);
-                // any other non-safetensors format is unknown (likely a newer Shorokoo version).
+                // any other non-safetensors format is one this build does not define.
                 if (d is not null && d.Format != SkptFileFormat.DataFormatSafeTensors
                     && d.Format != SkptFileFormat.DataFormatJson)
                     observations.Add($"data entry '{key}' uses the unknown storage format " +
-                        $"'{d.Format ?? "<none>"}' (likely written by a newer Shorokoo version).");
+                        $"'{d.Format ?? "<none>"}'.");
                 if (d?.Compression is not null
                     && d.Compression != SkptFileFormat.CompressionNone
                     && d.Compression != SkptFileFormat.CompressionZstd)
                     observations.Add($"data entry '{key}' declares the unknown compression " +
-                        $"'{d.Compression}' (likely written by a newer Shorokoo version).");
+                        $"'{d.Compression}'.");
                 if (string.IsNullOrEmpty(d?.Sha256))
                     observations.Add($"the manifest records no sha256 for data entry '{key}' — " +
                         "required by .skpt version 1.");
@@ -1037,9 +1033,7 @@ namespace Shorokoo
                 else if (t.CheckpointVersion != SkptFileFormat.TrainingCheckpointVersion)
                     observations.Add($"training-checkpoint block version {t.CheckpointVersion} is not the " +
                         $"version this build reads ({SkptFileFormat.TrainingCheckpointVersion}); " +
-                        "Persistence.LoadTrainingCheckpoint would refuse the file" +
-                        (t.CheckpointVersion > SkptFileFormat.TrainingCheckpointVersion
-                            ? " (likely written by a newer Shorokoo version)." : "."));
+                        "Persistence.LoadTrainingCheckpoint would refuse the file.");
 
                 var kinds = new List<KeyValuePair<string, string>>();
                 foreach (var (kindName, dataKey) in t.Kinds ?? new())
@@ -1357,18 +1351,17 @@ namespace Shorokoo
             }
             long version = BitConverter.ToInt64(markerBytes, 0);
             long step = BitConverter.ToInt64(markerBytes, 8);
-            // Epoch and batch index are each their own presence-gated int64 scalar beside the marker
-            // (format v3): read the 8-byte payload of each when present, else null (an unknown position).
+            // Epoch and batch index are each their own presence-gated int64 scalar beside the marker:
+            // read the 8-byte payload of each when present, else null (an unknown position).
             long? epoch = TryReadInt64Scalar(stream, fileLen, dataStart, tensors, TrainingCheckpoint.CheckpointEpochName);
             long? batchIndex = TryReadInt64Scalar(stream, fileLen, dataStart, tensors, TrainingCheckpoint.CheckpointBatchName);
 
-            if (version > TrainingCheckpoint.CheckpointFormatVersion)
-                observations.Add($"checkpoint format version {version} is newer than this build reads " +
-                    $"({TrainingCheckpoint.CheckpointFormatVersion}); " +
-                    "the file may come from a newer Shorokoo version.");
-            else if (version < 1)
-                observations.Add($"checkpoint format version {version} is invalid " +
-                    "— not a readable Shorokoo training checkpoint.");
+            // One readable version, so anything else is unreadable — observed, not thrown, since
+            // Inspect reports on files it cannot load rather than refusing to describe them.
+            if (version != TrainingCheckpoint.CheckpointFormatVersion)
+                observations.Add($"checkpoint format version {version} is not the version this build " +
+                    $"reads ({TrainingCheckpoint.CheckpointFormatVersion}); " +
+                    "Persistence.LoadTrainingCheckpoint would refuse the file.");
 
             string[] sectionNames =
             [

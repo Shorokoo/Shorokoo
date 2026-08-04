@@ -185,8 +185,8 @@ namespace Shorokoo.Graph
 
         /// <summary>
         /// Returns this graph re-stamped as <paramref name="kind"/> — the escape hatch for
-        /// graphs whose stamp is missing or wrong (a legacy file whose header predates the
-        /// stamp, a foreign import classified by op-scanning). The target kind must be
+        /// graphs whose stamp is missing or wrong (a foreign import classified by
+        /// op-scanning). The target kind must be
         /// valid for the graph's content, checked structurally
         /// (<see cref="SrkFileFormat.DescribeKindViolation"/>): a module must not have
         /// initialized model parameters; a concrete architecture additionally needs a

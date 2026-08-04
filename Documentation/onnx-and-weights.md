@@ -191,7 +191,7 @@ so. Header fields (add-only across minor revisions; unknown fields are ignored):
   [inference.md](inference.md#the-lowering-pipeline)). The writer records the
   graph's **stamped** kind (`graph.Kind`), and the loader stamps the loaded
   graph's `Kind` from the header (falling back to op-scan classification for
-  legacy/foreign data), so loaders can refuse a mismatched file up front instead
+  foreign data), so loaders can refuse a mismatched file up front instead
   of failing at run time with `No Op registered for ShrkCreateModule`. Pass the
   optional `requiredStage` argument to enforce it:
 

@@ -212,12 +212,12 @@ namespace Shorokoo
         // '/'-free-name discipline as the loss/marker, so they can't be mistaken for section fields.
         internal const string CheckpointEpochName = "__shorokoo_epoch__";
         internal const string CheckpointBatchName = "__shorokoo_batch__";
-        // Version 3: the int64 marker carries only [version, step] (always present); epoch and batch
-        // moved out into their own presence-gated int64 scalars (v3), so an unknown epoch/batch reads
-        // back null instead of a misleading 0. Version 2 added the presence-gated loss tensor beside the
-        // then-int64[4] marker. No released users, so no back-compat shim — older files are neither
-        // produced nor read.
-        internal const long CheckpointFormatVersion = 3;
+        // The one and only checkpoint format: the int64[2] marker carries [version, step], always
+        // present; everything host-owned and optional (loss, epoch, batch) rides beside it as its
+        // own presence-gated scalar rather than being packed into the marker, so an absent value
+        // reads back null instead of a misleading 0. The format grows by adding scalars, which
+        // leaves the marker's shape fixed.
+        internal const long CheckpointFormatVersion = 1;
 
         /// <summary>
         /// Saves this checkpoint to a single SafeTensors file so training can resume across process
@@ -371,7 +371,7 @@ namespace Shorokoo
         /// <summary>
         /// Loads a checkpoint against <paramref name="rig"/>, whose struct definitions the sections are
         /// reconstructed against and whose model/loss/optimizer this checkpoint is attached to
-        /// (<see cref="Rig"/> is set on the result). Reads either on-disk shape — the legacy flat
+        /// (<see cref="Rig"/> is set on the result). Reads either on-disk shape — the flat
         /// sectioned-safetensors file (<see cref="Save(string, CheckpointComponents?)"/>) or the native
         /// <c>.skpt</c> container — detected automatically. <paramref name="components"/> selects which
         /// parts to load; <c>null</c> loads everything present. A component not present in the file is
@@ -427,7 +427,7 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Reads the legacy flat sectioned-safetensors checkpoint against the given defs, honoring
+        /// Reads the flat sectioned-safetensors checkpoint against the given defs, honoring
         /// <paramref name="components"/> (null ⇒ everything present). A component not present in the
         /// file (or not requested) is filled from <paramref name="rigForDefaults"/>'s initial values
         /// when a rig is supplied; without a rig, an absent-but-expected section fails loud.

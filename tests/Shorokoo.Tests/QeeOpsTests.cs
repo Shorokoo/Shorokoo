@@ -668,6 +668,35 @@ public partial class QeeUInt64SignedDivide
     }
 }
 
+/// <summary>A uint64 modulo whose operands are constants, forced through host constant folding the
+/// same way as <see cref="QeeUInt64SignedDivide"/>. Both dividends are above long.MaxValue.</summary>
+[Module]
+public partial class QeeUInt64SignedModulo
+{
+    public static Tensor<uint64> Inline(Tensor<float32> x)
+    {
+        var runtime = OnnxOp.Range(Scalar(0L), x.ShapeTensor().Reduce(ReduceKind.Prod), Scalar(1L))
+            .int64().Cast<uint64>();
+        // 2^63 % 1000 == 808 unsigned; the signed floored modulo of -2^63 gives 192 instead.
+        var folded = OnnxOp.Mod(Scalar(9223372036854775808UL), Scalar(1000UL)).uint64();
+        return runtime + folded;
+    }
+}
+
+/// <summary>A uint64 divide whose dividend is <c>ulong.MaxValue</c> — the all-ones bit pattern,
+/// which signed division reads as <c>-1</c> and so collapses to 0 for any divisor &gt; 1.</summary>
+[Module]
+public partial class QeeUInt64SignedDivideMaxValue
+{
+    public static Tensor<uint64> Inline(Tensor<float32> x)
+    {
+        var runtime = OnnxOp.Range(Scalar(0L), x.ShapeTensor().Reduce(ReduceKind.Prod), Scalar(1L))
+            .int64().Cast<uint64>();
+        var folded = OnnxOp.Div(Scalar(18446744073709551615UL), Scalar(3UL)).uint64();
+        return runtime + folded;
+    }
+}
+
 /// <summary>
 /// QEE holds every integer width in one <c>long</c> buffer, so a <c>uint64</c> above
 /// <c>long.MaxValue</c> is a negative bit-pattern long — and Div/Mod/Less/Greater/Sign/Abs read it
@@ -694,6 +723,43 @@ public class QeeUInt64SignedOperatorTests
         // -2^62, i.e. 2^64 - 2^62 = 13835058055282163712.
         const ulong half = 4611686018427387904UL;   // 2^62
         Assert.Equal((ulong[])[half, half + 1, half + 2, half + 3], got);
+    }
+
+    // Same fault, Mod rather than Div — pinned separately because #133's bits packing is specified
+    // as `(word / 2^(W*l)) mod 2^W`, so a literal implementation reaches BOTH operators.
+    [Fact(Skip = "QEE uint64 kernels use signed operators — Shorokoo/Shorokoo#141")]
+    public void TestFoldedUInt64ModuloUsesUnsignedSemantics()
+    {
+        var g = ((ComputationGraph)typeof(QeeUInt64SignedModulo)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var input = TensorData([2L, 2L], 0f, 0f, 0f, 0f);
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        var got = ComputeContext.Default.Execute(concrete, input)[0]
+            .ToTensorData().As<uint64>().AccessMemory().ToArray();
+
+        // 2^63 % 1000 == 808, plus the element index. Signed reads the bit pattern as -2^63, and
+        // ONNX Mod (fmod=0) is FLOORED rather than truncated, so it returns 1000 - 808 == 192 —
+        // a plausible-looking small remainder, which is what makes this one easy to miss.
+        const ulong rem = 808UL;
+        Assert.Equal((ulong[])[rem, rem + 1, rem + 2, rem + 3], got);
+    }
+
+    // The all-ones dividend: signed division reads ulong.MaxValue as -1, so ANY divisor > 1
+    // collapses the result to 0 — the most destructive shape of this bug, since it survives every
+    // "is it roughly right?" eyeball check.
+    [Fact(Skip = "QEE uint64 kernels use signed operators — Shorokoo/Shorokoo#141")]
+    public void TestFoldedUInt64DivideOfMaxValueUsesUnsignedSemantics()
+    {
+        var g = ((ComputationGraph)typeof(QeeUInt64SignedDivideMaxValue)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var input = TensorData([2L, 2L], 0f, 0f, 0f, 0f);
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        var got = ComputeContext.Default.Execute(concrete, input)[0]
+            .ToTensorData().As<uint64>().AccessMemory().ToArray();
+
+        // (2^64 - 1) / 3 == 6148914691236517205, plus the element index. Signed gives -1 / 3 == 0.
+        const ulong third = 6148914691236517205UL;
+        Assert.Equal((ulong[])[third, third + 1, third + 2, third + 3], got);
     }
 }
 

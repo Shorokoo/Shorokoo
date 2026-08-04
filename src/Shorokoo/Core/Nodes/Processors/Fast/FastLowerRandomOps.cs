@@ -55,25 +55,23 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // The graph's identity: the RngSeed parameter's bound value. A still-unbound
             // RngSeed (a concrete architecture exported without a config) binds to the
             // default identity here: a concrete artifact is never unkeyed. An unknown
-            // algorithm id (a file written by a newer framework version) fails loudly —
+            // algorithm id (a corrupt or hand-edited carrier) fails loudly —
             // lowering under a substitute would silently diverge from the recorded identity.
             string algorithm = RngAlgorithms.Default;
             if (FastWireRngKeyDerivation.FindRngSeedNode(graph) is { } seedNode)
             {
                 if (seedNode.OpCode == InternalOpCodes.MODEL_PARAM)
                     WriteDefaultIdentity(seedNode);
-                var identityData = seedNode.Attributes.GetTensorVal(ShrkAttrTensorData);
-                var rngSeedData = identityData is null
-                    ? null
-                    : RngRuntimeIdentity.ReadRngSeedData(identityData);
+                var rngSeedData = seedNode.Attributes.GetTensorVal(ShrkAttrTensorData)
+                    ?.As<uint64>().AccessMemory().ToArray();
                 if (rngSeedData is not null)
                 {
                     var identity = RngRuntimeIdentity.Decode(rngSeedData);
                     var boundAlgorithm = identity.Algorithm
                         ?? throw new NotSupportedException(
                             "FastLowerRandomOps: the model's RngSeedData records the " +
-                            $"unknown algorithm id {identity.AlgorithmId} (likely written by a " +
-                            "newer framework version). Lowering under a substitute algorithm " +
+                            $"unrecognized algorithm id {identity.AlgorithmId}. Lowering under " +
+                            "a substitute algorithm " +
                             "would silently diverge from the recorded algorithm.");
                     algorithm = RngAlgorithms.NameOf(boundAlgorithm);
                 }

@@ -185,7 +185,7 @@ public class RngAlgorithmTests
         {
             var algo = fn.MetadataProps.FirstOrDefault(p => p.Key == Function.IRRngAlgorithmParamName)?.Value;
             var kind = fn.MetadataProps.FirstOrDefault(p => p.Key == Function.IRRngFunctionKindParamName)?.Value;
-            Assert.Equal(RngAlgorithms.Threefry2x32BoxMullerV2, algo);
+            Assert.Equal(RngAlgorithms.Threefry2x32BoxMullerV1, algo);
             Assert.Contains(kind, (string[])[RngAlgorithms.KindSplit, RngAlgorithms.KindUniform, RngAlgorithms.KindNormal]);
         }
 

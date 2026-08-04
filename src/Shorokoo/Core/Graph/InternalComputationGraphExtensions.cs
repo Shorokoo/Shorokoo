@@ -271,19 +271,13 @@ namespace Shorokoo.Graph
         /// by <see cref="ApplyRngConfig"/>; carried through save/load as an ordinary
         /// initializer). Null when the graph has no runtime random surface or no identity is
         /// bound yet. See <c>Core.Rng.RngRuntimeIdentity</c> for the encoding.
-        ///
-        /// <para>The <c>Try</c> here covers <em>absence</em>, not unreadability: a graph with no
-        /// identity returns null, but one carrying an identity this version cannot read throws
-        /// <see cref="System.InvalidOperationException"/> rather than reporting "none bound" — which
-        /// a caller probing for boundness would act on by binding a fresh identity, silently
-        /// re-keying every stream.</para>
         /// </summary>
         internal static ulong[]? TryGetRngSeed(this InternalComputationGraph graph)
         {
             var node = FastWireRngKeyDerivation.FindRngSeedNode(graph);
             if (node is null || node.OpCode != InternalOpCodes.MODEL_PARAM_DATA) return null;
             var data = node.Attributes.GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData);
-            return data is null ? null : Core.Rng.RngRuntimeIdentity.ReadRngSeedData(data);
+            return data?.As<uint64>().AccessMemory().ToArray();
         }
 
 
@@ -398,9 +392,8 @@ namespace Shorokoo.Graph
         /// with the same bit generator the model's runtime feeds use. The init-collection
         /// identity itself is never persisted (initialization runs to concrete weight values),
         /// so re-running initialization under a specific seed takes an explicit config. An
-        /// identity recording an unknown algorithm (e.g. a model written by a newer framework
-        /// version) throws rather than initializing under a substitute; pass an explicit config
-        /// to deliberately re-key.
+        /// identity recording an algorithm id this build does not define throws rather than
+        /// initializing under a substitute; pass an explicit config to deliberately re-key.
         /// </param>
         /// <returns>The default trainable-parameter values, named.</returns>
         internal static ModelParamList InitializeTrainableParams(
@@ -419,8 +412,8 @@ namespace Shorokoo.Graph
                     Algorithm = identity.Algorithm
                         ?? throw new System.NotSupportedException(
                             "InitializeTrainableParams: the graph's RngSeedData records the " +
-                            $"unknown algorithm id {identity.AlgorithmId} (likely written by a newer " +
-                            "framework version). Initializing under a substitute algorithm would " +
+                            $"unrecognized algorithm id {identity.AlgorithmId}. Initializing under " +
+                            "a substitute algorithm would " +
                             "silently diverge from the recorded identity; pass an explicit rngConfig " +
                             "to deliberately re-key the parameters."),
                 };

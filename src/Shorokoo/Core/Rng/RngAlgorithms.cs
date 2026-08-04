@@ -24,24 +24,16 @@ namespace Shorokoo.Core.Rng;
 /// </summary>
 internal static class RngAlgorithms
 {
-    /// <summary>Threefry-2x32 (Random123, 20 rounds) + torch-convention 24-bit uniform + Box–Muller normal.
-    ///
-    /// <para><b>v2</b> supersedes <c>…v1</c>: a draw now folds its whole 64-bit <c>substreamIndex</c> into
-    /// the key instead of spending one 32-bit counter word on it, so the element index gets the whole
-    /// counter and neither aliases at 2³². That changes every drawn value, and the key/index/draw
-    /// position types changed with it (two truncated int64s → one whole uint64), so a <c>…v1</c>
-    /// carrier is not loadable under v2 — by design: it fails loudly rather than drawing different
-    /// numbers under a name that promised the same ones.</para></summary>
-    public const string Threefry2x32BoxMullerV2 = "Threefry2x32-BoxMuller.v2";
+    /// <summary>Threefry-2x32 (Random123, 20 rounds) + torch-convention 24-bit uniform + Box–Muller normal.</summary>
+    public const string Threefry2x32BoxMullerV1 = "Threefry2x32-BoxMuller.v1";
 
     /// <summary>Threefry-2x32 with the reduced 13-round bit generator (Random123 <c>threefry2x32x13</c>,
     /// still BigCrush-resistant, ~35% faster) + the same 24-bit uniform + Box–Muller normal. Only the
-    /// draw's round count differs from <see cref="Threefry2x32BoxMullerV2"/>; the key tree is shared.
-    /// Versioned in lockstep with it — see that constant for what v2 changed.</summary>
-    public const string Threefry2x32x13BoxMullerV2 = "Threefry2x32-13-BoxMuller.v2";
+    /// draw's round count differs from <see cref="Threefry2x32BoxMullerV1"/>; the key tree is shared.</summary>
+    public const string Threefry2x32x13BoxMullerV1 = "Threefry2x32-13-BoxMuller.v1";
 
     /// <summary>The default algorithm for keyed draws.</summary>
-    public const string Default = Threefry2x32BoxMullerV2;
+    public const string Default = Threefry2x32BoxMullerV1;
 
     public const string KindSplit = "split";
     /// <summary>The batched key-tree fold: one pass folds a whole level (M parent keys x M
@@ -59,8 +51,8 @@ internal static class RngAlgorithms
     /// <summary>The registry name of a configured <see cref="RngAlgorithm"/>.</summary>
     public static string NameOf(RngAlgorithm algorithm) => algorithm switch
     {
-        RngAlgorithm.Threefry2x32 => Threefry2x32BoxMullerV2,
-        RngAlgorithm.Threefry2x32Rounds13 => Threefry2x32x13BoxMullerV2,
+        RngAlgorithm.Threefry2x32 => Threefry2x32BoxMullerV1,
+        RngAlgorithm.Threefry2x32Rounds13 => Threefry2x32x13BoxMullerV1,
         _ => throw new NotSupportedException($"Unknown RNG algorithm '{algorithm}'."),
     };
 
@@ -68,8 +60,8 @@ internal static class RngAlgorithms
     // is deliberately NOT algorithm-dependent — see DrawRounds usage below.
     private static int DrawRounds(string algorithm) => algorithm switch
     {
-        Threefry2x32BoxMullerV2 => Threefry2x32.Rounds,          // 20
-        Threefry2x32x13BoxMullerV2 => Threefry2x32.Rounds13,     // 13
+        Threefry2x32BoxMullerV1 => Threefry2x32.Rounds,          // 20
+        Threefry2x32x13BoxMullerV1 => Threefry2x32.Rounds13,     // 13
         _ => throw new NotSupportedException($"Unknown RNG algorithm '{algorithm}'."),
     };
 
@@ -123,7 +115,7 @@ internal static class RngAlgorithms
             };
 
             // Sanitized, stable ONNX-safe name; the pretty algorithm name rides the metadata.
-            var tag = algorithm == Threefry2x32x13BoxMullerV2 ? "Threefry2x32_13_BoxMuller_v2" : "Threefry2x32_BoxMuller_v2";
+            var tag = algorithm == Threefry2x32x13BoxMullerV1 ? "Threefry2x32_13_BoxMuller_v1" : "Threefry2x32_BoxMuller_v1";
             var suffix = kind == KindBits ? "_" + bitsDtype!.ToString() : "";
             var name = "ShrkRng_" + tag + "_" + kind + suffix;
             var graph = GraphBuilder.BuildInternalComputationGraphFromDelegate(body);

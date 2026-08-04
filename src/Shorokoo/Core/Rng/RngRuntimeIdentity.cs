@@ -16,10 +16,9 @@ namespace Shorokoo.Core.Rng;
 /// <para>Layout of the RngSeedData:</para>
 ///
 /// <code>
-///   [0]              scheme version (see <see cref="SchemeVersion"/>)
-///   [1]              algorithm id (see <see cref="AlgorithmIdOf"/>)
-///   [2]              runtime master key (one whole uint64)
-///   [3]              runtime override record count C
+///   [0]              algorithm id (see <see cref="AlgorithmIdOf"/>)
+///   [1]              runtime master key (one whole uint64)
+///   [2]              runtime override record count C
 ///   per record:      [L, path element × L, key]
 /// </code>
 ///
@@ -34,58 +33,14 @@ namespace Shorokoo.Core.Rng;
 /// </summary>
 internal sealed class RngRuntimeIdentity
 {
-    /// <summary>Elements before the first override record: [schemeVersion, algId, key, count].</summary>
-    public const int HeaderLength = 4;
-
-    /// <summary>Index of the scheme version element.</summary>
-    public const int SchemeVersionIndex = 0;
+    /// <summary>Elements before the first override record: [algId, key, count].</summary>
+    public const int HeaderLength = 3;
 
     /// <summary>Index of the algorithm id element.</summary>
-    public const int AlgorithmIdIndex = 1;
+    public const int AlgorithmIdIndex = 0;
 
     /// <summary>Index of the runtime master key (a single whole uint64 element).</summary>
-    public const int RunKeyIndex = 2;
-
-    /// <summary>
-    /// The version of the RNG scheme this identity was written under. <b>Bump this whenever the
-    /// values a draw produces change</b>, not merely when the vector's layout changes.
-    ///
-    /// <para>The algorithm id alone cannot carry that: it maps <see cref="RngAlgorithm"/> to a
-    /// small integer that stays stable across versions, so an identity written under an older
-    /// scheme decodes as "algorithm 0" and silently means whatever "algorithm 0" means today. The
-    /// registry's contract — a change in produced values is a new algorithm <em>name</em>, never a
-    /// silent change — is only enforceable if something persisted moves with it. This is it.</para>
-    ///
-    /// <para>2: <c>Threefry2x32-BoxMuller.v2</c> — whole uint64 keys/indices/draw positions, and
-    /// the draw position folded into the key. 1 was never written with a version element at all,
-    /// so it is recognised by its Int64 element type instead (see
-    /// <see cref="ReadRngSeedData"/>).</para>
-    /// </summary>
-    public const ulong SchemeVersion = 2;
-
-    /// <summary>
-    /// Reads the <c>RngSeedData</c> out of an <c>RngSeed</c> parameter's tensor data, rejecting a
-    /// layout this version cannot read. Every site that decodes an identity goes through here, so
-    /// a carrier written before the identity became uint64 gets one explanatory error rather than
-    /// a bare <c>InvalidCastException</c> from whichever door it happened to arrive at.
-    /// </summary>
-    /// <exception cref="ArgumentNullException"><paramref name="data"/> is null.</exception>
-    /// <exception cref="InvalidOperationException">The tensor's element type is not uint64. The
-    /// vector's <em>contents</em> — length, scheme version, record structure — are validated by
-    /// <see cref="Decode"/>, not here.</exception>
-    public static ulong[] ReadRngSeedData(TensorData data)
-    {
-        if (data is null) throw new ArgumentNullException(nameof(data));
-        if (data.DType != DType.UInt64)
-            throw new InvalidOperationException(
-                $"This model's RngSeedData is {data.DType}, not UInt64. UInt64 RngSeedData is " +
-                "what every version from the 'Threefry2x32-BoxMuller.v2' algorithm on writes; an " +
-                "Int64 one was written before RNG keys became whole uint64 values, and its draw " +
-                "values are superseded (see RngAlgorithms: '...v1' -> '...v2'). Either way this " +
-                "carrier cannot be read or re-keyed here — rebuild the concrete model from its " +
-                "architecture under an explicit RngConfig.");
-        return data.As<uint64>().AccessMemory().ToArray();
-    }
+    public const int RunKeyIndex = 1;
 
     /// <summary>One runtime override record: the overridden stream's realized ModelId path, the
     /// replacement key (the override replaces the fully folded key), and the key's offset
@@ -104,7 +59,7 @@ internal sealed class RngRuntimeIdentity
     }
 
     /// <summary>The configured algorithm, or null when the id is unknown (a file written by a
-    /// newer framework version). Consumers must fail loudly on null, never substitute.</summary>
+    /// id this build does not define). Consumers must fail loudly on null, never substitute.</summary>
     public RngAlgorithm? Algorithm => TryAlgorithmFromId(AlgorithmId);
 
     /// <summary>The stable identity-vector id of a configured algorithm.</summary>
@@ -134,7 +89,6 @@ internal sealed class RngRuntimeIdentity
         var overrides = config.RuntimeOverridesSorted();
         var vec = new List<ulong>
         {
-            SchemeVersion,
             (ulong)AlgorithmIdOf(config.Algorithm),
             config.RunMasterKey,
             (ulong)overrides.Count,
@@ -158,15 +112,6 @@ internal sealed class RngRuntimeIdentity
             throw new ArgumentException(
                 $"Malformed RngSeedData: length {rngSeedData?.Length ?? 0} " +
                 $"(expected at least the {HeaderLength}-element header).", nameof(rngSeedData));
-
-        var schemeVersion = rngSeedData[SchemeVersionIndex];
-        if (schemeVersion != SchemeVersion)
-            throw new InvalidOperationException(
-                $"This model's RngSeedData was written under RNG scheme version " +
-                $"{schemeVersion}; this build writes and reads version {SchemeVersion}. The scheme " +
-                "version moves whenever the values a draw produces change, so running under it " +
-                "would silently draw different numbers. Rebuild the concrete model from its " +
-                "architecture under an explicit RngConfig.");
 
         var runKey = rngSeedData[RunKeyIndex];
         ulong count = rngSeedData[HeaderLength - 1];

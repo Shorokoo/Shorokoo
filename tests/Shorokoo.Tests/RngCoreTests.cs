@@ -204,8 +204,8 @@ public class RngCoreTests
 
 /// <summary>
 /// The encoded runtime RNG identity — the value of the ordinary <c>RngSeed</c> parameter at
-/// reserved ModelId [0] (see <see cref="RngRuntimeIdentity"/>): a scheme-version + algorithm-id
-/// header, the runtime master key, and canonically sorted per-stream override records at fixed
+/// reserved ModelId [0] (see <see cref="RngRuntimeIdentity"/>): an algorithm-id header, the
+/// runtime master key, and canonically sorted per-stream override records at fixed
 /// offsets. <see cref="RngRuntimeIdentity.Decode"/> must derive every runtime stream key
 /// bit-exactly like the encoding config. The init-collection identity is deliberately NOT
 /// encoded — nothing in a saved model consumes it.
@@ -225,46 +225,11 @@ public class RngRuntimeIdentityTests
     }
 
     [Fact]
-    public void TestPreV2IdentityIsRejectedWithAnExplanation()
-    {
-        // A carrier written before the identity became uint64 must fail with an explanation, not
-        // a bare InvalidCastException. That every decode site routes through here is enforced
-        // structurally (one guarded read, no other As<uint64>() on the identity) rather than by
-        // this test — see TestNoUnguardedIdentityReadSurvives.
-        var legacy = TensorData(DType.Int64, [3L], 0L, 42L, 0L);
-        var ex = Assert.Throws<InvalidOperationException>(() => RngRuntimeIdentity.ReadRngSeedData(legacy));
-        Assert.Contains("Int64", ex.Message);
-        Assert.Contains("v2", ex.Message);
-
-        // A correctly-typed vector from an older SCHEME is the case the element type cannot catch,
-        // which is exactly why the version rides in the vector.
-        var olderScheme = RngRuntimeIdentity.Build(new RngConfig { MasterSeed = 7 });
-        olderScheme[RngRuntimeIdentity.SchemeVersionIndex] = RngRuntimeIdentity.SchemeVersion - 1;
-        var ex2 = Assert.Throws<InvalidOperationException>(() => RngRuntimeIdentity.Decode(olderScheme));
-        Assert.Contains("scheme version", ex2.Message);
-    }
-
-    [Fact]
-    public void TestAlgorithmIdCannotStandInForTheSchemeVersion()
-    {
-        // Why the version element exists: the algorithm id tracks the RngAlgorithm enum, so it
-        // varies with the CONFIGURED algorithm and not with the scheme. Two configs differing only
-        // in algorithm get different ids but the same scheme version — so an id can never signal
-        // "this build's draws differ from the one that wrote this". Only the version can, and
-        // keeping it in step with draw-value changes is a convention no test can enforce.
-        var a = RngRuntimeIdentity.Build(new RngConfig { MasterSeed = 1 });
-        var b = RngRuntimeIdentity.Build(new RngConfig { MasterSeed = 1, Algorithm = RngAlgorithm.Threefry2x32Rounds13 });
-        Assert.Equal(RngRuntimeIdentity.SchemeVersion, a[RngRuntimeIdentity.SchemeVersionIndex]);
-        Assert.Equal(RngRuntimeIdentity.SchemeVersion, b[RngRuntimeIdentity.SchemeVersionIndex]);
-        Assert.NotEqual(a[RngRuntimeIdentity.AlgorithmIdIndex], b[RngRuntimeIdentity.AlgorithmIdIndex]);
-    }
-
-    [Fact]
     public void TestHeaderOnlyIdentity()
     {
         var cfg = new RngConfig { MasterSeed = 42 };
         var vec = RngRuntimeIdentity.Build(cfg);
-        // Header only: [schemeVersion, algId, runKey, 0 overrides].
+        // Header only: [algId, runKey, 0 overrides].
         Assert.Equal(RngRuntimeIdentity.HeaderLength, vec.Length);
         Assert.Equal(0UL, vec[RngRuntimeIdentity.AlgorithmIdIndex]);
         Assert.Equal(cfg.RunMasterKey, vec[RngRuntimeIdentity.RunKeyIndex]);
@@ -314,20 +279,17 @@ public class RngRuntimeIdentityTests
     public void TestMalformedIdentityFailsLoudly()
     {
         // Corrupt identities must throw, never silently fall back to a different derivation.
-        // These carry the current scheme version so they exercise the STRUCTURAL checks; a wrong
-        // scheme version is a different condition, covered by TestPreV2IdentityIsRejectedAtEveryDecodeSite.
-        const ulong v = RngRuntimeIdentity.SchemeVersion;
         Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([]));
-        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([v, 0UL, 42UL]));   // shorter than the header
+        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([0UL, 42UL]));   // shorter than the header
         // Truncated override record (claims one record, supplies nothing).
-        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([v, 0UL, 42UL, 1UL]));
+        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([0UL, 42UL, 1UL]));
         // Trailing garbage after the declared records.
-        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([v, 0UL, 42UL, 0UL, 99UL]));
+        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([0UL, 42UL, 0UL, 99UL]));
         // A record claiming a huge path length. The bound must be computed before narrowing to
         // int, or `i + pathLen + 1` wraps negative, passes the check, and allocates the claim —
         // turning a corrupt model file into an OutOfMemoryException instead of this error.
-        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([v, 0UL, 42UL, 1UL, int.MaxValue]));
-        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([v, 0UL, 42UL, 1UL, ulong.MaxValue]));
+        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([0UL, 42UL, 1UL, int.MaxValue]));
+        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([0UL, 42UL, 1UL, ulong.MaxValue]));
     }
 }
 
@@ -516,37 +478,6 @@ public class RngSeedTransportTests
     }
 
     [Fact]
-    public void TestLegacyBakedFileFailsRebindLoudly()
-    {
-        // A file saved before the RngSeed representation carries baked key-table constants
-        // plus the reserved-name identity initializer — nothing left to re-key. Loading such
-        // a file yields a graph with the legacy marker and no RngSeed parameter; binding it
-        // must throw naming the situation (the old behavior silently updated only the
-        // recorded identity). Simulate the loaded shape: no feeds, no RngSeed, the legacy
-        // reserved-name tensor present as an ordinary data node.
-        var g = (ComputationGraph)typeof(RtLoweredUniform)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
-        var input = TensorData([4L, 4L], new float[16]);
-        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([input]))
-            .ToConcreteModel(new RngConfig { MasterSeed = 1 });
-
-        // Strip the new representation down to the legacy shape (mutating node surgery, so
-        // work on a mutable copy of the loaded graph).
-        var legacy = CompressedFormatUtils.LoadFastGraphFromBinary(
-            CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true)).ToInternal();
-        var seedNode = legacy.Nodes.Single(n =>
-            n.IdentifierTemplate == Shorokoo.Core.Nodes.Processors.Fast
-                .FastWireRngKeyDerivation.RngSeedIdentifierTemplate);
-        seedNode.IdentifierTemplate = null;
-        seedNode.FriendlyName = OnnxOpAttributeNames.ShrkRngKeysTensorName;
-
-        var ex = Assert.Throws<System.InvalidOperationException>(
-            () => legacy.ApplyRngConfig(new RngConfig { MasterSeed = 2 }));
-        Assert.Contains(OnnxOpAttributeNames.ShrkRngKeysTensorName, ex.Message);
-        Assert.Contains("cannot be re-keyed", ex.Message);
-    }
-
-    [Fact]
     public void TestModelWithoutRandomFeedsCarriesNothingRngRelated()
     {
         // A model with no runtime random feeds contains no RngSeed param, no chains, and
@@ -563,8 +494,6 @@ public class RngSeedTransportTests
         var loaded = CompressedFormatUtils.LoadFastGraphFromBinary(
             CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true));
         Assert.Equal(0, RngSeedNodeCount(loaded));
-        Assert.DoesNotContain(loaded.ToInternal().Nodes, n =>
-            n.FriendlyName == OnnxOpAttributeNames.ShrkRngKeysTensorName);
 
         model = model.WithRngConfig(new RngConfig { MasterSeed = 8 });   // no-op, no throw
 

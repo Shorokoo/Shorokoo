@@ -233,8 +233,7 @@ public class ModulesCoverageTests
         // Exported form: the weights are graph initializers carrying IsTrainable=true and
         // the parameter-name metadata; no Constant op-node holds the [4,4] weight data.
         var proto = Shorokoo.Core.Factory.FastOnnxModelBuilder.BuildOnnxModel(concrete);
-        var inits = proto.Graph.Initializers
-            .Where(t => t.Name != OnnxOpAttributeNames.ShrkRngKeysTensorName).ToArray();
+        var inits = proto.Graph.Initializers.ToArray();
         Assert.Equal(2, inits.Length);
         Assert.All(inits, t =>
         {

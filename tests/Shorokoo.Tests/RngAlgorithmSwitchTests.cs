@@ -98,8 +98,8 @@ public class RngAlgorithmSwitchTests
         var concrete13 = FeedModel(Rounds13);
 
         Assert.Equal(ResolvedKey(concrete20), ResolvedKey(concrete13));
-        Assert.Equal(RngAlgorithms.Threefry2x32BoxMullerV2, BoundAlgorithm(concrete20));
-        Assert.Equal(RngAlgorithms.Threefry2x32x13BoxMullerV2, BoundAlgorithm(concrete13));
+        Assert.Equal(RngAlgorithms.Threefry2x32BoxMullerV1, BoundAlgorithm(concrete20));
+        Assert.Equal(RngAlgorithms.Threefry2x32x13BoxMullerV1, BoundAlgorithm(concrete13));
     }
 
     [Fact]
@@ -133,11 +133,11 @@ public class RngAlgorithmSwitchTests
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
         arch.ApplyRngConfig(Rounds20);
 
-        // A model file written by a newer framework version: the RngSeedData records an
-        // algorithm id this version does not know.
-        const ulong newerId = 9999;
+        // A corrupt or hand-edited carrier: the RngSeedData records an algorithm id that
+        // maps to nothing.
+        const ulong unknownId = 9999;
         var identity = arch.TryGetRngSeed()!;
-        identity[Shorokoo.Core.Rng.RngRuntimeIdentity.AlgorithmIdIndex] = newerId;
+        identity[Shorokoo.Core.Rng.RngRuntimeIdentity.AlgorithmIdIndex] = unknownId;
         var seedNode = arch.Nodes.Single(n =>
             n.IdentifierTemplate == Shorokoo.Core.Nodes.Processors.Fast
                 .FastWireRngKeyDerivation.RngSeedIdentifierTemplate);
@@ -148,9 +148,9 @@ public class RngAlgorithmSwitchTests
 
         // No-config init trusts the bound identity's algorithm: an unreadable identity must
         // throw — never silently initialize under a substitute algorithm while the model
-        // keeps reporting the newer id.
+        // keeps reporting the unrecognized id.
         var ex = Assert.Throws<NotSupportedException>(() => arch.InitializeTrainableParams());
-        Assert.Contains(newerId.ToString(), ex.Message);
+        Assert.Contains(unknownId.ToString(), ex.Message);
 
         // The escape hatch for deliberately re-keying an unreadable file: an explicit config
         // bypasses the identity decode.
@@ -171,8 +171,8 @@ public class RngAlgorithmSwitchTests
         var (name20, algo20) = UniformFn(Rounds20);
         var (name13, algo13) = UniformFn(Rounds13);
 
-        Assert.Equal(RngAlgorithms.Threefry2x32BoxMullerV2, algo20);
-        Assert.Equal(RngAlgorithms.Threefry2x32x13BoxMullerV2, algo13);
+        Assert.Equal(RngAlgorithms.Threefry2x32BoxMullerV1, algo20);
+        Assert.Equal(RngAlgorithms.Threefry2x32x13BoxMullerV1, algo13);
         // The two algorithms export distinct, identifiable functions.
         Assert.Contains("Threefry2x32_13", name13);
         Assert.DoesNotContain("Threefry2x32_13", name20);

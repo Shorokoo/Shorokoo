@@ -287,7 +287,7 @@ public static class OnnxOpAttributeNames
     public const string ShrkAttrDomainName = "shrk_domain_name";
     public const string ShrkAttrLocalModelId = "shrk_local_model_id";
 
-    /// <summary>The named RNG algorithm ("Threefry2x32-BoxMuller.v2") a SHRK_RNG_* op draws with.</summary>
+    /// <summary>The named RNG algorithm ("Threefry2x32-BoxMuller.v1") a SHRK_RNG_* op draws with.</summary>
     public const string ShrkAttrRngAlgorithm = "shrk_rng_algorithm";
     public const string ShrkAttrRelativeModelId = "shrk_relative_model_id";
     public const string ShrkAttrInputType = "shrk_input_type";
@@ -322,15 +322,6 @@ public static class OnnxOpAttributeNames
     /// instead of materializing a zero buffer.</summary>
     public const string ShrkMetaValuesElided = "ValuesElided";
 
-    /// <summary>
-    /// LEGACY: the reserved initializer name under which pre-RngSeed files (saved before the
-    /// RNG identity became the ordinary <c>RngSeed</c> parameter at ModelId [0]) carried the
-    /// model's compact RNG key vector. Never written anymore; kept only so <c>ApplyRngConfig</c>
-    /// can recognize such a file — whose key tables are baked constants with nothing left to
-    /// re-key — and fail loudly instead of silently updating a recorded identity.
-    /// </summary>
-    public const string ShrkRngKeysTensorName = "shorokoo.rng.keys";
-    
     // NodeKey metadata - stores the GUID for stable node identification
     public const string ShrkMetaNodeKey = "NodeKey";
     

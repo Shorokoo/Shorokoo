@@ -372,7 +372,7 @@ public class CompressedFormatUtilsCoverageTests
             CompressedFormatUtils.LoadFastGraphFromBinary(BuildRawSrkContainer("{not json", payload)));
         Assert.Contains("header", exJson.Message);
 
-        // Future container version is refused up front.
+        // A container version this build does not read is refused up front.
         var exVersion = Assert.Throws<InvalidDataException>(() =>
             CompressedFormatUtils.LoadFastGraphFromBinary(BuildRawSrkContainer(
                 $"{{\"srkVersion\":3,\"stage\":\"concrete-architecture\",\"compression\":\"zstd\",\"payloadSha256\":\"{Sha256Hex(payload)}\"}}",
@@ -387,7 +387,7 @@ public class CompressedFormatUtilsCoverageTests
         Assert.Contains("lz4", exCompression.Message);
 
         // Header missing srkVersion → a missing-field diagnostic, not a bogus "version 0
-        // ... newer framework version" message.
+        // is not readable" message.
         var exMissing = Assert.Throws<InvalidDataException>(() =>
             CompressedFormatUtils.LoadFastGraphFromBinary(BuildRawSrkContainer(
                 $"{{\"stage\":\"concrete-architecture\",\"compression\":\"none\",\"payloadSha256\":\"{Sha256Hex(payload)}\"}}",
@@ -605,13 +605,13 @@ public class CompressedFormatUtilsCoverageTests
     }
 
     /// <summary>
-    /// A container whose magic version byte is newer than this build understands fails with a
-    /// clear "unsupported major version" error — before header parsing — rather than falling
-    /// through to the legacy content shim and dying as unparseable protobuf. TryReadHeader and
-    /// its file variant reject it the same way instead of misreporting it as legacy (null).
+    /// A container whose magic version byte is not the one this build reads fails with a clear
+    /// "unsupported major version" error — before header parsing — rather than being fed to the
+    /// protobuf reader and dying as unparseable. TryReadHeader and its file variant reject it the
+    /// same way instead of returning null (which would read as "not a .srk container at all").
     /// </summary>
     [Fact]
-    public void TestSrkFutureContainerVersionFailsClearly()
+    public void TestSrkUnreadableContainerVersionFailsClearly()
     {
         var (_, arch, _) = BuildStageGraphs();
 
@@ -957,11 +957,11 @@ public class CompressedFormatUtilsCoverageTests
             Assert.Null(wrongDtype.TrainingCheckpoint);
             Assert.Contains(wrongDtype.Observations, o => o.Contains("malformed"));
 
-            // A future checkpoint format version still inspects as a checkpoint (version and
-            // step read from the marker) with an observation; a tensor outside the known
-            // sections is observed too. A future version keeps the fixed int64[2] = [version, step]
-            // marker and grows via new presence-gated scalars (the design's forward-compat story),
-            // so the marker here is the same shape this build writes, only with a newer version.
+            // A checkpoint format version this build does not read still inspects as a checkpoint
+            // (version and step read from the marker) with an observation; a tensor outside the
+            // known sections is observed too. The marker's int64[2] = [version, step] shape is
+            // fixed and the format grows via new presence-gated scalars, so the marker here is the
+            // same shape this build writes, only with an unreadable version.
             var w = TensorData([2L], 1.0f, 2.0f);
             var futureCkptPath = NextPath("future_checkpoint.safetensors");
             SafeTensorLoader.SaveSafeTensors(futureCkptPath, new List<SafeTensor>
@@ -1107,7 +1107,7 @@ public class CompressedFormatUtilsCoverageTests
             CompressedFormatUtils.SaveCompressedSafeTensors(ckptPath, new List<SafeTensor>
             {
                 new SafeTensor("trainable/w", w, "F32", w.Shape.Dims),
-                new SafeTensor("__shorokoo_checkpoint__", TensorData([4L], 1L, 7L, 0L, 0L), "I64", [4L]),
+                new SafeTensor("__shorokoo_checkpoint__", TensorData([2L], 1L, 7L), "I64", [2L]),
             });
             var ckpt = Persistence.Inspect(ckptPath);
             Assert.Equal(ArtifactKind.CompressedSafeTensors, ckpt.Kind);
@@ -1663,16 +1663,17 @@ public class CompressedFormatUtilsCoverageTests
                 Assert.Equal(bytes, loadedWeights[paramId]);
             Assert.Equal(ExecuteToBytes(model, numOut, input), ExecuteToBytes(loaded, numOut, input));
 
-            // Back-compat: a checkpoint whose model definition carries materialized
-            // zero placeholders without the values-elided marker — the shape every
-            // .skpt written before the marker existed has — still loads and binds
-            // identically. (Synthesized by re-stripping with full zero tensors and
-            // splicing the entry + its manifest hash into the archive.)
-            var legacyPath = Path.Combine(TempDir, "legacy-zero-placeholders.skpt");
+            // Binding is authoritative: whatever the model definition happens to carry for a
+            // weight parameter is overwritten by the data entry. A definition holding full-size
+            // zeros instead of the values-elided marker therefore loads and binds identically —
+            // the marker is a size optimization, not part of the load contract. (Synthesized by
+            // re-stripping with full zero tensors and splicing the entry + its manifest hash
+            // into the archive.)
+            var zerosPath = Path.Combine(TempDir, "materialized-zero-placeholders.skpt");
             try
             {
-                var legacyGraph = model.ToInternal().Clone();
-                foreach (var node in legacyGraph.Nodes)
+                var zerosGraph = model.ToInternal().Clone();
+                foreach (var node in zerosGraph.Nodes)
                 {
                     if (node.OpCode != InternalOpCodes.MODEL_PARAM_DATA
                         || !originalWeights.ContainsKey(node.IdentifierTemplate ?? "")) continue;
@@ -1681,26 +1682,26 @@ public class CompressedFormatUtilsCoverageTests
                         (OnnxOpAttributeNames.ShrkAttrTensorData,
                          (object?)TensorDataWithDefaultVals(data.DType, data.Shape.Dims)));
                 }
-                var legacyModelBytes = CompressedFormatUtils.SaveFastGraphToBinary(
-                    legacyGraph, GraphKind.ConcreteModel, compressed: true);
-                var legacyConfig = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
-                legacyConfig["models"]!["model"]!["sha256"] = SkptFileFormat.Sha256Hex(legacyModelBytes);
-                RewriteSkpt(legacyPath, entries.Select(e => (e.Key, e.Key switch
+                var zerosModelBytes = CompressedFormatUtils.SaveFastGraphToBinary(
+                    zerosGraph, GraphKind.ConcreteModel, compressed: true);
+                var zerosConfig = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
+                zerosConfig["models"]!["model"]!["sha256"] = SkptFileFormat.Sha256Hex(zerosModelBytes);
+                RewriteSkpt(zerosPath, entries.Select(e => (e.Key, e.Key switch
                 {
                     SkptFileFormat.ConfigEntryName =>
-                        System.Text.Encoding.UTF8.GetBytes(legacyConfig.ToJsonString()),
-                    SkptFileFormat.ModelEntryPath => legacyModelBytes,
+                        System.Text.Encoding.UTF8.GetBytes(zerosConfig.ToJsonString()),
+                    SkptFileFormat.ModelEntryPath => zerosModelBytes,
                     _ => e.Value,
                 })).ToList());
-                var legacyLoaded = Persistence.Load(legacyPath);
-                var legacyWeights = WeightBytesByParam(legacyLoaded);
-                Assert.Equal(originalWeights.Count, legacyWeights.Count);
+                var zerosLoaded = Persistence.Load(zerosPath);
+                var zerosWeights = WeightBytesByParam(zerosLoaded);
+                Assert.Equal(originalWeights.Count, zerosWeights.Count);
                 foreach (var (paramId, bytes) in originalWeights)
-                    Assert.Equal(bytes, legacyWeights[paramId]);
+                    Assert.Equal(bytes, zerosWeights[paramId]);
                 Assert.Equal(ExecuteToBytes(model, numOut, input),
-                    ExecuteToBytes(legacyLoaded, numOut, input));
+                    ExecuteToBytes(zerosLoaded, numOut, input));
             }
-            finally { if (File.Exists(legacyPath)) File.Delete(legacyPath); }
+            finally { if (File.Exists(zerosPath)) File.Delete(zerosPath); }
         }
         finally { if (File.Exists(path)) File.Delete(path); }
     }
@@ -1819,12 +1820,12 @@ public class CompressedFormatUtilsCoverageTests
             RewriteSkpt(tamperedPath, WithConfig(config.ToJsonString()));
             Assert.Equal(direct, ExecuteToBytes(Persistence.Load(tamperedPath), numOut, input));
 
-            // A future major version is refused with a clear message.
-            var futureConfig = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
-            futureConfig["skptVersion"] = SkptFileFormat.CurrentVersion + 1;
-            RewriteSkpt(tamperedPath, WithConfig(futureConfig.ToJsonString()));
+            // A major version this build does not read is refused with a clear message.
+            var otherVersionConfig = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
+            otherVersionConfig["skptVersion"] = SkptFileFormat.CurrentVersion + 1;
+            RewriteSkpt(tamperedPath, WithConfig(otherVersionConfig.ToJsonString()));
             var exVersion = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
-            Assert.Contains("newer framework version", exVersion.Message);
+            Assert.Contains($"reads version {SkptFileFormat.CurrentVersion} only", exVersion.Message);
 
             // A mapping missing one of the model's parameters names the parameter.
             var missingParamConfig = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;

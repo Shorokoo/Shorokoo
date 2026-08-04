@@ -71,7 +71,7 @@ namespace Shorokoo
         /// <summary>
         /// Serializes one training-state <see cref="TensorDataStruct"/> to safetensors bytes, keyed
         /// by struct field name (no section prefix — each kind is its own data entry). Fields must be
-        /// plain tensors; a nested-struct field fails loudly, mirroring the legacy flat writer.
+        /// plain tensors; a nested-struct field fails loudly, mirroring the flat writer.
         /// </summary>
         internal static byte[] SerializeTrainingKind(TensorDataStruct data, string kindLabel)
         {
@@ -144,17 +144,13 @@ namespace Shorokoo
             if (training.CheckpointVersion != SkptFileFormat.TrainingCheckpointVersion)
                 throw new InvalidDataException(
                     $"'{filePath}': training-checkpoint block version {training.CheckpointVersion} is not " +
-                    $"supported by this Shorokoo build (supported: {SkptFileFormat.TrainingCheckpointVersion}). " +
-                    "The file was likely written by " +
-                    (training.CheckpointVersion > SkptFileFormat.TrainingCheckpointVersion
-                        ? "a newer framework version." : "an older, unsupported framework version."));
+                    $"readable by this Shorokoo build, which reads version " +
+                    $"{SkptFileFormat.TrainingCheckpointVersion} only.");
 
-            // Step/epoch/batch are host-owned int64 scalars read straight from the manifest (the
-            // manifest training block has stored them as int64 since #102, so #105's in-memory int64
-            // widening needs no format change here — no truncation on read). Epoch and batchIndex are
-            // add-only, nullable fields (issues #100 / #111): a .skpt that omits them — one written
-            // before they existed, or one whose position is genuinely unknown — deserializes them to
-            // null, never a sentinel 0.
+            // Step/epoch/batch are host-owned int64 scalars read straight from the manifest, stored
+            // as int64 so the in-memory int64 counters survive the round trip with no truncation on
+            // read. Epoch and batchIndex are nullable: a .skpt whose position is genuinely unknown
+            // omits them, and they deserialize to null rather than a sentinel 0.
             var kinds = training.Kinds ?? new Dictionary<string, string>();
 
             bool Want(CheckpointComponents c) => components is null || (components.Value & c) != 0;
@@ -253,8 +249,7 @@ namespace Shorokoo
             if (dataEntry.Format != SkptFileFormat.DataFormatSafeTensors)
                 throw new InvalidDataException(
                     $"'{filePath}': data entry '{dataKey}' uses unsupported storage format " +
-                    $"'{dataEntry.Format}' (supported: '{SkptFileFormat.DataFormatSafeTensors}'). " +
-                    "The file was likely written by a newer framework version.");
+                    $"'{dataEntry.Format}' (supported: '{SkptFileFormat.DataFormatSafeTensors}').");
 
             var storedBytes = ReadEntry(archive, dataEntry.Entry, $"data entry '{dataKey}'", filePath);
             VerifySha256(storedBytes, dataEntry.Sha256, dataEntry.Entry, filePath);
@@ -303,7 +298,7 @@ namespace Shorokoo
         /// — with no host-supplied source graphs. The model-input shapes ride on the arch itself (its
         /// self-describing MODEL_TENSOR_INPUT nodes), not the manifest. Backs the static
         /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?)"/>. A file with no rig
-        /// block (a legacy flat checkpoint or a <c>.skpt</c> from a build predating #115) fails loudly.
+        /// block (a flat checkpoint, which carries training state only) fails loudly.
         /// </summary>
         internal static TrainingRig ReconstructRigFromSkpt(
             string filePath, ComputeContext mergeContext, ComputeContext runtimeContext)
@@ -325,18 +320,15 @@ namespace Shorokoo
                     "checkpoint, not a training checkpoint, so there is no rig to reconstruct.");
             var rig = training.Rig
                 ?? throw new InvalidDataException(
-                    $"'{filePath}': this training checkpoint stores no rig constituents (it was written " +
-                    "by a build predating Shorokoo/Shorokoo#115). Rebuild the rig from its source graphs " +
-                    "and resume with rig.LoadCheckpoint(path) instead.");
+                    $"'{filePath}': this training checkpoint stores no rig constituents. Rebuild the " +
+                    "rig from its source graphs and resume with rig.LoadCheckpoint(path) instead.");
             if (rig.RigVersion == 0)
                 throw new InvalidDataException(
                     $"'{filePath}': invalid rig block — required field 'rigVersion' is missing or zero.");
             if (rig.RigVersion != SkptFileFormat.TrainingRigVersion)
                 throw new InvalidDataException(
-                    $"'{filePath}': rig block version {rig.RigVersion} is not supported by this Shorokoo " +
-                    $"build (supported: {SkptFileFormat.TrainingRigVersion}). The file was likely written by " +
-                    (rig.RigVersion > SkptFileFormat.TrainingRigVersion
-                        ? "a newer framework version." : "an older, unsupported framework version."));
+                    $"'{filePath}': rig block version {rig.RigVersion} is not readable by this Shorokoo " +
+                    $"build, which reads version {SkptFileFormat.TrainingRigVersion} only.");
 
             var archGraph = LoadConstituentGraph(archive, manifest, rig.ArchModel ?? SkptFileFormat.ArchModelKey, filePath);
             var lossGraph = LoadConstituentGraph(archive, manifest, rig.LossModel ?? SkptFileFormat.LossModelKey, filePath);
@@ -374,7 +366,7 @@ namespace Shorokoo
                             names[h])),
                     _ => throw new InvalidDataException(
                         $"'{filePath}': hyperparameter '{names[h]}' records the unknown kind " +
-                        $"'{b.Kind ?? "<none>"}' (likely written by a newer framework version)."),
+                        $"'{b.Kind ?? "<none>"}'."),
                 };
             }
 
@@ -400,8 +392,7 @@ namespace Shorokoo
             if (entry.Format != SkptFileFormat.ModelFormatSrk1)
                 throw new InvalidDataException(
                     $"'{filePath}': rig model '{modelKey}' uses unsupported serialization format " +
-                    $"'{entry.Format}' (supported: '{SkptFileFormat.ModelFormatSrk1}'). " +
-                    "The file was likely written by a newer framework version.");
+                    $"'{entry.Format}' (supported: '{SkptFileFormat.ModelFormatSrk1}').");
 
             var bytes = ReadEntry(archive, entry.Entry, $"rig model '{modelKey}'", filePath);
             VerifySha256(bytes, entry.Sha256, entry.Entry, filePath);
@@ -419,8 +410,8 @@ namespace Shorokoo
             var algorithm = Enum.TryParse<RngAlgorithm>(info.Algorithm, out var a)
                 ? a
                 : throw new InvalidDataException(
-                    $"'{filePath}': the rig block records the unknown RNG algorithm '{info.Algorithm ?? "<none>"}' " +
-                    "(likely written by a newer framework version).");
+                    $"'{filePath}': the rig block records the unknown RNG algorithm " +
+                    $"'{info.Algorithm ?? "<none>"}'.");
             var config = new RngConfig
             {
                 MasterSeed = info.MasterSeed,

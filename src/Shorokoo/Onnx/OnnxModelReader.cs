@@ -126,8 +126,8 @@ namespace Shorokoo.Onnx
         /// <c>shrk_input_names</c> / <c>shrk_output_names</c> model metadata written by
         /// internal-dialect exports (whose graph-I/O ValueInfos must keep raw
         /// <c>N{k}_T{s}</c> tensor ids). Applied only when a list parses and its length
-        /// matches the reconstructed graph's I/O count; otherwise (foreign models, files
-        /// written before the tag existed) the proto names stand.
+        /// matches the reconstructed graph's I/O count; otherwise (a foreign model, say)
+        /// the proto names stand.
         /// </summary>
         private static void RestoreSignatureIONames(IR.ModelProto model, InternalComputationGraph graph)
         {

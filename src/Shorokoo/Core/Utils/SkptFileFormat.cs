@@ -106,8 +106,7 @@ namespace Shorokoo.Core.Utils
     /// <summary>
     /// The training-checkpoint block of a .skpt manifest (issue #95). Present only when the file
     /// persists a <see cref="Shorokoo.TrainingCheckpoint"/>; absent for an ordinary inference
-    /// checkpoint (so those stay byte-identical to files from builds predating this field). It
-    /// records the checkpoint's host-owned run counters (step, epoch, batch index) and which
+    /// checkpoint. It records the checkpoint's host-owned run counters (step, epoch, batch index) and which
     /// manifest data-registry entry holds each
     /// training-state kind — the trainable weights (which also serve as the model's default weight
     /// set), the model state, and the optimizer state. A kind whose struct is empty is omitted
@@ -128,8 +127,8 @@ namespace Shorokoo.Core.Utils
         /// <summary>The 0-based epoch counter the checkpoint sits at — a host-owned run counter
         /// (issue #100), or <c>null</c> when the position is genuinely unknown (a checkpoint trained
         /// without a data loader / explicit counter — issue #111). Add-only and nullable: the serializer
-        /// omits it when null (never a sentinel 0.0), and a manifest that omits it (a null value, or one
-        /// written before the key existed) reads back as <c>null</c>.</summary>
+        /// omits it when null (never a sentinel 0.0), and a manifest that omits it reads back as
+        /// <c>null</c>.</summary>
         [JsonPropertyName("epoch")]
         public long? Epoch { get; set; }
 
@@ -323,9 +322,8 @@ namespace Shorokoo.Core.Utils
         /// name, license, and arbitrary key/value pairs) recorded at save time. Purely
         /// informational — trusted only as far as its writer: it never affects manifest
         /// identity checks or weight binding, and its keys are add-only like the rest of the
-        /// manifest. Absent (null, and omitted from the JSON) unless the saver supplied it,
-        /// so a checkpoint written without metadata is byte-identical to one from a build
-        /// that predates this field.</summary>
+        /// manifest. Absent (null, and omitted from the JSON) unless the saver supplied
+        /// it.</summary>
         [JsonPropertyName("userMetadata")]
         public Dictionary<string, string>? UserMetadata { get; set; }
 
@@ -345,8 +343,7 @@ namespace Shorokoo.Core.Utils
 
         /// <summary>Training-checkpoint block (issue #95): present only when the file persists a
         /// <see cref="Shorokoo.TrainingCheckpoint"/>, recording its global step and per-kind data
-        /// entries. Absent (null, omitted from the JSON) for an inference checkpoint, so those stay
-        /// byte-identical to files from builds predating this field.</summary>
+        /// entries. Absent (null, omitted from the JSON) for an inference checkpoint.</summary>
         [JsonPropertyName("training")]
         public SkptTrainingInfo? Training { get; set; }
 
@@ -475,11 +472,10 @@ namespace Shorokoo.Core.Utils
         // rig from the file alone. These sit alongside the "model" inference-model entry, which stays
         // the one Persistence.Load binds; the constituents carry no tensor mapping (the rig re-derives).
 
-        /// <summary>Current rig-block version (see <see cref="SkptRigInfo"/>). Bumped to 2 when the
-        /// redundant per-input <c>inputShapes</c> field was removed: the arch's <c>MODEL_TENSOR_INPUT</c>
-        /// nodes now serialize as NodeProtos carrying their representative-input shape, so the arch is
-        /// self-describing. A version-1 rig block fails loud (its arch predates node-based inputs).</summary>
-        public const int TrainingRigVersion = 2;
+        /// <summary>Current rig-block version (see <see cref="SkptRigInfo"/>). The block carries no
+        /// per-input <c>inputShapes</c> field: the arch's <c>MODEL_TENSOR_INPUT</c> nodes serialize as
+        /// NodeProtos carrying their representative-input shape, so the arch is self-describing.</summary>
+        public const int TrainingRigVersion = 1;
 
         /// <summary>Model-registry key of the rig's concrete-architecture constituent.</summary>
         internal const string ArchModelKey = "modelArch";

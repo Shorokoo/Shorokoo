@@ -218,8 +218,8 @@ namespace Shorokoo.Core.Utils
         /// Shared load path: container payload extraction, header-first stage enforcement,
         /// and graph import. The returned kind is the header stage when the file carries a
         /// known one, else the op-scanned fallback
-        /// (<see cref="SrkFileFormat.DetectStage(InternalComputationGraph)"/>) — a header
-        /// written by a newer framework version may record a stage this build cannot name.
+        /// (<see cref="SrkFileFormat.DetectStage(InternalComputationGraph)"/>), used when a
+        /// header records a stage name this build does not define.
         /// </summary>
         internal static (InternalComputationGraph Graph, GraphKind Kind) LoadFastGraphCore(
             byte[] data, string origin, GraphKind? requiredStage)
@@ -229,9 +229,9 @@ namespace Shorokoo.Core.Utils
             if (requiredStage is not null)
             {
                 var stage = header.TryGetStage() ?? throw new InvalidDataException(
-                    $"'{origin}': the .srk header records the unknown stage '{header.Stage}' " +
-                    "(likely written by a newer Shorokoo version), so the required " +
-                    $"'{SrkFileFormat.StageName(requiredStage.Value)}' stage cannot be verified.");
+                    $"'{origin}': the .srk header records the unknown stage '{header.Stage}', " +
+                    $"so the required '{SrkFileFormat.StageName(requiredStage.Value)}' stage " +
+                    "cannot be verified.");
                 SrkFileFormat.EnforceStage(stage, requiredStage.Value, origin);
             }
 

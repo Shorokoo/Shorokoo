@@ -117,8 +117,8 @@ likewise refuses a module-kind graph up front with the same lowering hint.
 place return a new graph instead (e.g. `WithRngConfig`), so a graph's `Kind` can
 never be invalidated behind your back.
 
-If a graph arrives with the wrong kind — a legacy file saved before the kind
-existed, or a foreign import that op-scanning misjudged — re-stamp it with
+If a graph arrives with the wrong kind — a foreign import that op-scanning
+misjudged, say — re-stamp it with
 **`WithKind(kind)`**. The target kind is validated against the graph's content
 (a module must not have initialized parameters; a concrete architecture
 additionally needs a statically known parameter space; a concrete model needs

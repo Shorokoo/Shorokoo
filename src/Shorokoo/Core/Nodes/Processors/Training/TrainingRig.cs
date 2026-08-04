@@ -2199,7 +2199,7 @@ namespace Shorokoo
 
         /// <summary>
         /// Loads a checkpoint previously written by <see cref="TrainingCheckpoint.Save(string, CheckpointComponents?)"/>
-        /// (legacy flat safetensors) or <see cref="Persistence.SaveTrainingCheckpointToSkpt"/> (the
+        /// (flat safetensors) or <see cref="Persistence.SaveTrainingCheckpointToSkpt"/> (the
         /// native .skpt container) — the on-disk shape is detected automatically — reconstructing it
         /// against this rig's parameter/state struct definitions so training resumes exactly where it
         /// left off: trainable params, optimizer moments, model state, and the host-owned run counters
@@ -2378,9 +2378,9 @@ namespace Shorokoo
         /// <see cref="LoadCheckpoint"/> (which requires a pre-existing rig). The two compute contexts
         /// seed the rebuilt rig (rev 22; never persisted — a reloaded run gets fresh ones), each
         /// defaulting to <see cref="ComputeContext.Default"/>. The file must be a training <c>.skpt</c>
-        /// written with the rig constituents (this build always writes them); a legacy flat checkpoint,
-        /// or a <c>.skpt</c> from a build predating #115, has no constituents to rebuild from and fails
-        /// loudly — pass the rig and use <see cref="LoadCheckpoint"/> for those.
+        /// written with the rig constituents (every training <c>.skpt</c> carries them); a flat
+        /// checkpoint has no constituents to rebuild from and fails loudly — pass the rig and use
+        /// <see cref="LoadCheckpoint"/> for that shape.
         /// </summary>
         /// <returns>The reconstructed rig and the checkpoint resumed against it (its
         /// <see cref="TrainingCheckpoint.Rig"/> set to the rig).</returns>
@@ -2498,7 +2498,7 @@ namespace Shorokoo
 
             // Pass the concrete param infos so keyed per-parameter init actually engages:
             // FastInitializeModelParams keys init noise only when BOTH rngConfig and paramInfos
-            // are non-null. Without the infos the rig would silently fall back to the legacy
+            // are non-null. Without the infos the rig would silently fall back to unkeyed
             // seeded init, ignoring the config's master seed / algorithm for the weights.
             var paramInfos = rngConfig is null ? null : concreteArch.GetConcreteModelParamInfos();
             var paramValuesById = Shorokoo.Core.Nodes.Processors.Fast.FastInitializeModelParams.Process(

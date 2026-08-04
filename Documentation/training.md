@@ -283,8 +283,8 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
 - The file is a single SafeTensors file (every param/state field plus the run
   counters). The `int64` marker carries `[version, step]` (always present); epoch and batch index
   are each a **presence-gated** `int64` scalar beside it, written only when set — so an unknown
-  epoch/batch (a checkpoint trained without a loader / explicit counters, or one written before
-  those counters existed) is absent on disk and reloads as `null`, never a sentinel `0`. A concrete
+  epoch/batch (a checkpoint trained without a loader / explicit counters) is absent on disk and
+  reloads as `null`, never a sentinel `0`. A concrete
   `0` (e.g. a run resting at the start of an epoch) is written and reloads as `0`.
 - For the **native `.skpt` container** instead — the training state split into
   per-kind data entries alongside the concrete inference model, with the container's

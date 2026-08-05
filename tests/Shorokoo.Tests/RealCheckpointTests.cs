@@ -39,8 +39,7 @@ public class RealCheckpointTests
         var byName = tensors.ToDictionary(t => t.Name);
 
         // A standard ResNet18 state dict carries ~120 tensors.
-        Assert.True(tensors.Count >= 100,
-            $"expected a full ResNet18 state dict, got {tensors.Count} tensors");
+        Assert.True(tensors.Count >= 100);
 
         // Landmark tensors present in every torchvision/timm ResNet18, with canonical
         // shapes — proves names and shapes survived the parse intact.

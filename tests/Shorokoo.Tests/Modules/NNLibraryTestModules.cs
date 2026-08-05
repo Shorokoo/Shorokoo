@@ -539,7 +539,7 @@ public partial class NNInstanceNorm2dNormalizes
 // reference / a sibling norm with a relative-L1 penalty. Affine is off in the
 // value/equivalence checks so the bare normalization is what is measured; the
 // affine PARAM-COUNT discrimination needs a rig (NNLibrary*TrainingCoverageTests,
-// mirroring TestBatchNormAffineOnOff) and lives in the *Model modules below.
+// mirroring the affine on/off rig [Fact]) and lives in the *Model modules below.
 // ---------------------------------------------------------------------------
 
 // --- §7-1: per-region zero-mean/unit-var, InstanceNorm at ranks 3/4/5 ---
@@ -4950,7 +4950,7 @@ public partial class NNTripletMarginSwapMarginPChecks
 /// <c>Reduced(Mean) == Inline</c> (mean 0.8333333) and
 /// <c>Reduced(Sum)</c> equals the sum of the PerElement vector (2.5). The
 /// <c>Reduced(None)-throws</c> case is a C#-level [Fact]
-/// (TestTripletMarginReducedNoneThrows), not a graph check.
+/// (in the loss reduced-None throws group), not a graph check.
 /// </summary>
 [Module]
 public partial class NNTripletMarginReductionChecks

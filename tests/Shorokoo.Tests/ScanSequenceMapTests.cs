@@ -16,7 +16,6 @@ namespace Shorokoo.Tests;
 public class ScanSequenceMapTests
 {
     private const int FloatElem = 1;
-    private const int Int64Elem = 7;
 
     private static ValueInfoProto TensorInfo(string name, int elemType, params long[] dims)
     {

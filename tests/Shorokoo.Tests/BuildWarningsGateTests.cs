@@ -65,8 +65,7 @@ public class BuildWarningsGateTests
 
                 var (exitCode, output) = RunBuild(project, tempOut);
 
-                // On failure the offending diagnostics are the only thing worth reading.
-                Assert.Equal(string.Empty, exitCode == 0 ? string.Empty : ExtractDiagnostics(output));
+                Assert.Equal(0, exitCode);
             }
         }
         finally
@@ -115,19 +114,6 @@ public class BuildWarningsGateTests
         process.WaitForExit(); // flush async readers
 
         lock (sb) return (process.ExitCode, sb.ToString());
-    }
-
-    /// <summary>Keeps only the warning/error lines so the failure message is readable.</summary>
-    private static string ExtractDiagnostics(string buildOutput)
-    {
-        var lines = buildOutput
-            .Split('\n')
-            .Select(l => l.TrimEnd('\r'))
-            .Where(l => l.Contains(": warning ", StringComparison.Ordinal)
-                     || l.Contains(": error ", StringComparison.Ordinal))
-            .Distinct()
-            .ToArray();
-        return lines.Length > 0 ? string.Join('\n', lines) : buildOutput;
     }
 
     /// <summary>Walks up from the test output directory to the repo root (the dir holding Shorokoo.sln).</summary>

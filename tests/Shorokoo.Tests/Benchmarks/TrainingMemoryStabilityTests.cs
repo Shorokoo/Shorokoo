@@ -92,16 +92,8 @@ public class TrainingMemoryStabilityTests
         // last result can't be collected before we read the heap.
         Assert.NotNull(ckpt);
 
-        Assert.True(managedGrowth <= ManagedGrowthBudgetBytes,
-            $"Training loop leaked managed memory: live heap grew {Mib(managedGrowth)} over " +
-            $"{MeasuredSteps} steps ({managedBefore:N0} -> {managedAfter:N0} bytes), exceeding the " +
-            $"{Mib(ManagedGrowthBudgetBytes)} budget. A non-leaking loop returns to ~baseline after a " +
-            $"forced collection. (RSS moved {Mib(rssGrowth)}.)");
-
-        Assert.True(rssGrowth <= RssGrowthCeilingBytes,
-            $"Training loop working set grew {Mib(rssGrowth)} over {MeasuredSteps} steps " +
-            $"({rssBefore:N0} -> {rssAfter:N0} bytes), exceeding the {Mib(RssGrowthCeilingBytes)} " +
-            $"catastrophe ceiling — likely an unmanaged / handle leak. (Managed heap moved {Mib(managedGrowth)}.)");
+        Assert.True(managedGrowth <= ManagedGrowthBudgetBytes);
+        Assert.True(rssGrowth <= RssGrowthCeilingBytes);
     }
 
     /// <summary>Live managed bytes after a blocking full collection — drops transient garbage.</summary>

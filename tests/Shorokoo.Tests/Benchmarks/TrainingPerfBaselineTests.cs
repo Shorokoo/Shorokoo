@@ -90,18 +90,12 @@ public class TrainingPerfBaselineTests
 
     private static void AssertNotSlower(string phase, double measuredMs, double baselineMs, double factor)
     {
-        double budget = baselineMs * factor;
-        Assert.True(measuredMs <= budget,
-            $"{phase} regressed: {measuredMs:F1} ms > {factor:F1}× baseline {baselineMs:F1} ms (budget {budget:F1} ms). " +
-            $"If this is an accepted shift, re-record with SHOROKOO_UPDATE_PERF_BASELINE=1.");
+        Assert.True(measuredMs <= baselineMs * factor);
     }
 
     private static void AssertNotLessThroughput(string phase, double measured, double baseline, double factor)
     {
-        double floor = baseline / factor;
-        Assert.True(measured >= floor,
-            $"{phase} regressed: {measured:F0}/s < baseline {baseline:F0}/s ÷ {factor:F1} (floor {floor:F0}/s). " +
-            $"If this is an accepted shift, re-record with SHOROKOO_UPDATE_PERF_BASELINE=1.");
+        Assert.True(measured >= baseline / factor);
     }
 
     // ----- measurement -------------------------------------------------------

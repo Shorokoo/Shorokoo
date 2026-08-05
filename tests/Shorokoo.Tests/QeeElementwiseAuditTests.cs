@@ -53,6 +53,7 @@ public class QeeElementwiseAuditTests
 /// must produce.
 /// </summary>
 [Trait("Domain", "Core")]
+[Trait("Purpose", "Coverage")]
 public class ScalarVectorWrapperBugPinTests
 {
     [Fact]

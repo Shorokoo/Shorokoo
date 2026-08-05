@@ -29,18 +29,11 @@ internal static class OpRegistry
         return _ops.TryGetValue(opCode, out var op) ? op : null;
     }
 
-    public static bool Contains(string opCode)
-    {
-        if (_overrides is { } o && o.ContainsKey(opCode))
-            return true;
-        EnsureInitialized();
-        return _ops.ContainsKey(opCode);
-    }
-
     /// <summary>
     /// Replaces the handlers for <paramref name="ops"/> on the calling thread only, until the
-    /// returned scope is disposed. Unlike <see cref="Register"/> this is invisible to other
-    /// threads, so concurrent callers keep seeing the real implementations.
+    /// returned scope is disposed. Overrides are invisible to other threads, so concurrent
+    /// callers keep seeing the real implementations — and, unlike mutating the shared table,
+    /// this cannot race with the unsynchronized reads in <see cref="Get"/>.
     /// </summary>
     public static IDisposable Override(params QuickOp[] ops) => new OverrideScope(ops);
 
@@ -60,19 +53,6 @@ internal static class OpRegistry
         }
 
         public void Dispose() => _overrides = _previous;
-    }
-
-    public static IReadOnlyCollection<string> RegisteredOpCodes
-    {
-        get { EnsureInitialized(); return _ops.Keys; }
-    }
-
-    public static void Register(QuickOp op)
-    {
-        lock (_lock)
-        {
-            _ops[op.OpCode] = op;
-        }
     }
 
     private static void EnsureInitialized()

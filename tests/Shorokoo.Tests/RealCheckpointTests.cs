@@ -89,7 +89,7 @@ public class RealCheckpointTests
     private static void AssertTensor(
         IReadOnlyDictionary<string, SafeTensor> byName, string name, string dtype, params long[] shape)
     {
-        Assert.True(byName.TryGetValue(name, out var t), $"missing tensor '{name}'");
+        Assert.True(byName.TryGetValue(name, out var t));
         Assert.Equal(dtype, t!.DataType);
         Assert.Equal(shape, t.Shape);
     }

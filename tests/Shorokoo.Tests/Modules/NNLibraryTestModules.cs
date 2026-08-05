@@ -22,7 +22,7 @@ namespace Shorokoo.Tests.Modules;
 //
 // BatchNorm2d carries Globals.StateUpdate links (STATE_UPDATE_LINK is not an
 // executable ORT op in the plain inference pipeline), so it is exercised via
-// TrainingRig-based tests (NNLibraryTrainingCoverageTests) instead of AutoTest.
+// TrainingRig-based tests (NNLibrary*TrainingCoverageTests) instead of AutoTest.
 // ---------------------------------------------------------------------------
 
 /// <summary>Linear forward output on RangeTensor([2,3],0.5,-1) at MasterSeed=0 must match the
@@ -538,7 +538,7 @@ public partial class NNInstanceNorm2dNormalizes
 // ~unit variance (meanPen + varPen < 1e-2), OR compare against a hand-built
 // reference / a sibling norm with a relative-L1 penalty. Affine is off in the
 // value/equivalence checks so the bare normalization is what is measured; the
-// affine PARAM-COUNT discrimination needs a rig (NNLibraryTrainingCoverageTests,
+// affine PARAM-COUNT discrimination needs a rig (NNLibrary*TrainingCoverageTests,
 // mirroring TestBatchNormAffineOnOff) and lives in the *Model modules below.
 // ---------------------------------------------------------------------------
 
@@ -814,7 +814,7 @@ public partial class NNInstanceNorm3dAliasEquiv
 // …) fixes the affine bit. With affine:false, γ/β are pruned (dead branch, no
 // gradient) ⇒ the model's only trainable param is the scalar weight (1). With
 // affine:true, γ/β survive ⇒ 3 trainable params (scalar weight + γ + β). The
-// rig [Fact] in NNLibraryTrainingCoverageTests asserts the field counts.
+// rig [Fact] in NNLibrary*TrainingCoverageTests asserts the field counts.
 
 /// <summary>§7-2(b) InstanceNorm(affine:false) rig model: scalar pre-weight → InstanceNorm → per-(sample,channel) mean.
 /// γ/β are pruned (dead branch), so the only trainable param is the scalar weight.</summary>
@@ -2394,7 +2394,7 @@ public partial class NNRegressionReductionChecks
 // Rig-wrapper [Module]s for the loss-knobs (design §7 "Rig-path tests"). These
 // are tiny 2-input (predictions, targets) wrappers that BAKE the build-time
 // knobs / a constant weight tensor, so they satisfy the TrainingRig 2-input
-// scalar-loss contract. Driven by NNLibraryTrainingCoverageTests via
+// scalar-loss contract. Driven by NNLibrary*TrainingCoverageTests via
 // TrainingRig.FromScratch + a TrainStep.
 // ---------------------------------------------------------------------------
 
@@ -2482,7 +2482,7 @@ public partial class NNBatchNormTrainGradModel
 // ---------------------------------------------------------------------------
 // Generalized rank-generic BatchNorm coverage models (design §7 groups A–G).
 // Every BatchNorm graph carries Globals.StateUpdate links, so ALL of these run
-// through the rig (NNLibraryTrainingCoverageTests), not AutoTest — even the
+// through the rig (NNLibrary*TrainingCoverageTests), not AutoTest — even the
 // "pure" eval-path closed-form checks (the plain inference executor has no
 // STATE_UPDATE_LINK op). Hypers are fixed via BatchNorm.Model(...) so the model
 // graphs are inputs-only. Closed-form checks output (y − reference) so a zero
@@ -2866,7 +2866,7 @@ public partial class NNStaticWrapperPoolMathCheck
 // Analytic-check fixtures promoted from the 2026-06-12 framework behavior
 // test campaign.
 // The constant initializers make every gradient and 1–2-step optimizer update
-// hand-derivable, so NNLibraryTrainingCoverageTests can assert exact post-step
+// hand-derivable, so NNLibrary*TrainingCoverageTests can assert exact post-step
 // parameter/state values through real TrainStep execution.
 // ---------------------------------------------------------------------------
 
@@ -3328,7 +3328,7 @@ public partial class NNBinaryFocalLossChecks
 // init; op-level gradient coverage lives in AutoGradOpsTests. RNN has no QEE step
 // values, so value correctness comes from the ORT backend inside AdvancedTestGraph
 // (note [2] of the design). The relu / bidirectional BPTT-throws guards live as
-// [Fact]s in NNLibraryTrainingCoverageTests.
+// [Fact]s in NNLibrary*TrainingCoverageTests.
 // ---------------------------------------------------------------------------
 
 
@@ -3394,7 +3394,7 @@ public partial class RnnSingleStepAnchorTanh
 /// <summary>§7-3 relu nonlinearity (forward only): Recurrent.RNN(Relu) — frozen forward-value
 /// golden (self-generated): the configured layer's output must match the inlined reference.
 /// Forward-value check only (relu RNN BPTT throws AD003 — pinned separately in
-/// NNLibraryTrainingCoverageTests).</summary>
+/// NNLibrary*TrainingCoverageTests).</summary>
 [Module]
 public partial class RnnReluForwardGolden
 {
@@ -3465,7 +3465,7 @@ public partial class RnnReverseGolden
 /// <summary>§7-6 direction Bidirectional (forward inference only): Recurrent.RNN(Bidirectional) —
 /// frozen forward-value golden (self-generated): the configured layer's output must match the
 /// inlined reference. Forward-value only (bidirectional BPTT throws AD003 — pinned in
-/// NNLibraryTrainingCoverageTests).</summary>
+/// NNLibrary*TrainingCoverageTests).</summary>
 [Module]
 public partial class RnnBidirectionalGolden
 {
@@ -3563,7 +3563,7 @@ public partial class RnnBidirectionalBpttThrowCheck
 // op-level gradient coverage lives in AutoGradOpsTests. LSTM has no QEE step
 // values, so value correctness comes from the ORT backend inside AdvancedTestGraph.
 // The bidirectional BPTT-throws guard lives as a [Fact] in
-// NNLibraryTrainingCoverageTests.
+// NNLibrary*TrainingCoverageTests.
 // ---------------------------------------------------------------------------
 
 
@@ -3679,7 +3679,7 @@ public partial class LstmReverseGolden
 /// <summary>§7-5 direction Bidirectional (forward inference only): Recurrent.LSTM(Bidirectional) —
 /// frozen forward-value golden (self-generated): the configured layer's output must match the
 /// inlined reference. Forward-value only (bidirectional BPTT throws AD003 — pinned in
-/// NNLibraryTrainingCoverageTests).</summary>
+/// NNLibrary*TrainingCoverageTests).</summary>
 [Module]
 public partial class LstmBidirectionalGolden
 {
@@ -3789,7 +3789,7 @@ public partial class LstmBidirectionalBpttThrowCheck
 // correctness comes from the ORT backend inside AdvancedTestGraph. The
 // GRU-specific addition over the LSTM/RNN sets is the linearBeforeReset
 // both-forms check (GruLinearBeforeResetBothForms). The
-// bidirectional BPTT-throws guard lives as a [Fact] in NNLibraryTrainingCoverageTests.
+// bidirectional BPTT-throws guard lives as a [Fact] in NNLibrary*TrainingCoverageTests.
 // ---------------------------------------------------------------------------
 
 
@@ -3924,7 +3924,7 @@ public partial class GruReverseGolden
 /// <summary>§7-6 direction Bidirectional (forward inference only): Recurrent.GRU(Bidirectional) —
 /// frozen forward-value golden (self-generated): the configured layer's output must match the
 /// inlined reference. Forward-value only (bidirectional BPTT throws AD003 — pinned in
-/// NNLibraryTrainingCoverageTests).</summary>
+/// NNLibrary*TrainingCoverageTests).</summary>
 [Module]
 public partial class GruBidirectionalGolden
 {
@@ -4028,7 +4028,7 @@ public partial class GruBidirectionalBpttThrowCheck
 // op-level gradient coverage lives in AutoGradOpsTests. Cells have NO QEE step
 // values, so value correctness comes from the ORT backend inside
 // AdvancedTestGraph. The AD003 relu-cell BPTT-throws guard lives as a [Fact] in
-// NNLibraryTrainingCoverageTests.
+// NNLibrary*TrainingCoverageTests.
 // ---------------------------------------------------------------------------
 
 

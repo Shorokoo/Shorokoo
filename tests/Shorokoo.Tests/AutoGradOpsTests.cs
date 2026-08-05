@@ -1,3 +1,5 @@
+using static Shorokoo.Tests.AutoGradOpsRunners;
+
 namespace Shorokoo.Tests;
 
 /// <summary>
@@ -6,27 +8,30 @@ namespace Shorokoo.Tests;
 /// <c>Inline</c> embeds the AutoGrad operator under test and verifies its gradient in-graph;
 /// the AutoTester adds the ONNX roundtrip, CS roundtrip and QuickExecutionEngine runs.
 /// </summary>
-[Trait("Domain", "AutoDiff")]
-[Trait("Purpose", "Coverage")]
-public class AutoGradOpsCoverageTests
+internal static class AutoGradOpsRunners
 {
-    private static void Run<TModule>(params float[] scalars) =>
+    internal static void Run<TModule>(params float[] scalars) =>
         Assert.True(AutoTest.AdvancedTestGraph<TModule>(
             [], [.. scalars.Select(v => TensorData(DType.Float32, [], v))]));
 
-    private static void RunTensor<TModule>(long[] dims, params float[] vals) =>
+    internal static void RunTensor<TModule>(long[] dims, params float[] vals) =>
         Assert.True(AutoTest.AdvancedTestGraph<TModule>(
             [], [TensorData(DType.Float32, dims, [.. vals.Select(v => (object)v)])]));
 
-    private static void RunSmall<TModule>(long[] shape) =>
+    internal static void RunSmall<TModule>(long[] shape) =>
         Assert.True(AutoTest.AdvancedTestGraph<TModule>(
             [], [TensorDataWithSmallVals(DType.Float32, shape)]));
 
-    private static void RunSmallNoQee<TModule>(long[] shape) =>
+    internal static void RunSmallNoQee<TModule>(long[] shape) =>
         Assert.True(AutoTest.AdvancedTestGraph<TModule>(
             [], [TensorDataWithSmallVals(DType.Float32, shape)],
             testQuickEngineExecution: false));
+}
 
+[Trait("Domain", "AutoDiff")]
+[Trait("Purpose", "Coverage")]
+public class AutoGradElementwiseOpsCoverageTests
+{
     [Fact]
     public void TestAutoGradArithmeticAndTrigonometricGradients()
     {
@@ -130,49 +135,6 @@ public class AutoGradOpsCoverageTests
     }
 
     [Fact]
-    public void TestAutoGradConcatSplitAndIfElseGradients()
-    {
-        Run<AutoGradConcat2Check>(3f, 7f);
-        Run<AutoGradConcatWithScaleCheck>(3f, 7f);
-        Run<AutoGradConcat3Check>(1f, 2f, 3f);
-        Run<AutoGradConcatWithActivationCheck>(3f, -2f);
-        Run<AutoGradSplit2OutputsCheck>(3f);
-        Run<AutoGradSplit3OutputsCheck>(5f);
-        Run<AutoGradSplitWithScaleCheck>(1f);
-        Run<AutoGradSplitConcatRoundTripCheck>(2f);
-        Run<AutoGradIfTrueConditionCheck>(3f, 5f);
-        Run<AutoGradIfFalseConditionCheck>(3f, 5f);
-        Run<AutoGradIfSharedInputTrueCheck>(3f);
-        Run<AutoGradIfSharedInputFalseCheck>(3f);
-        Run<AutoGradIfWithDownstreamOpsCheck>(3f, 5f, 1f);
-        Run<AutoGradIfWithUpstreamOpsCheck>(3f, 5f);
-        Run<AutoGradIfMultiOutputPartiallyUsedCheck>(3f, 5f);
-    }
-
-    [Fact]
-    public void TestAutoGradPoolingAndMaxRoiPoolGradients()
-    {
-        Run<AutoGradGlobalAveragePoolCheck>(3f);
-        Run<AutoGradGlobalAveragePoolWithScaleCheck>(5f);
-        Run<AutoGradGlobalMaxPoolCheck>(3f);
-        Run<AutoGradGlobalAveragePoolExpChainCheck>(1f);
-        Run<AutoGradGlobalLpPoolP2Check>(3f);
-        Run<AutoGradGlobalLpPoolP1Check>(3f);
-        Run<AutoGradGlobalLpPoolP2WithScaleCheck>(5f);
-        Run<AutoGradLpPoolP2Check>(3f);
-        Run<AutoGradLpPoolP1Check>(3f);
-        Run<AutoGradLpPoolP2WithScaleCheck>(5f);
-        Run<AutoGradMaxUnpoolCheck>(3f);
-        Run<AutoGradMaxUnpoolWithScaleCheck>(5f);
-        Run<AutoGradMaxUnpoolChainCheck>(1f);
-        Run<AutoGradMaxRoiPoolPositiveCheck>(1f);
-        Run<AutoGradMaxRoiPoolGradientShapeCheck>(1f);
-        Run<AutoGradMaxRoiPoolMultiChannelCheck>(1f);
-        Run<AutoGradMaxRoiPoolMultipleRoisCheck>(1f);
-        Run<AutoGradMaxRoiPoolForwardSumCheck>(1f);
-    }
-
-    [Fact]
     public void TestAutoGradVariadicAndDropoutGradients()
     {
         Run<AutoGradDropoutInferenceCheck>(2f);
@@ -197,120 +159,44 @@ public class AutoGradOpsCoverageTests
     }
 
     [Fact]
-    public void TestAutoGradMatrixAndRoiAlignGradients()
+    public void TestAutoGradLossGradients()
     {
-        Run<AutoGradEinsumMatmulBasicCheck>(3.0f);
-        Run<AutoGradEinsumTransposeCheck>(5.0f);
-        Run<AutoGradEinsumImplicitModeCheck>(2.0f);
-        Run<AutoGradEinsumFreeIndexCheck>(2.5f);
-        Run<AutoGradGemmBasicCheck>(3f);
-        Run<AutoGradGemmWithAlphaCheck>(2f);
-        Run<AutoGradGemmWithBetaAndCCheck>(2f);
-        Run<AutoGradGemmTransACheck>(3f);
-        Run<AutoGradGemmTransBCheck>(2f);
-        Run<AutoGradMatMulKnownRankCheck>(2f);
-        Run<AutoGradMatMulUnknownRankBatchedCheck>(2f);
-        Run<AutoGradReduceSumExplicitAxesKeepdimsTrueCheck>(2f);
-        Run<AutoGradReduceSumExplicitAxesKeepdimsFalseCheck>(2f);
-        Run<AutoGradReduceMeanExplicitAxesCheck>(2f);
-        Run<AutoGradRoiAlignPositiveCheck>(1f);
-        Run<AutoGradRoiAlignSpatialScaleCheck>(1f);
-        Run<AutoGradRoiAlignMultiChannelCheck>(1f);
-        Run<AutoGradRoiAlignMultipleRoisCheck>(1f);
-        Run<AutoGradRoiAlignOutputHalfPixelCheck>(1f);
-        Run<AutoGradRoiAlignForwardSumCheck>(1f);
+        Run<AutoGradNegativeLogLikelihoodLossCheck>(1.5f);
+        Run<AutoGradNegativeLogLikelihoodLossMeanCheck>(1.5f);
+        Run<AutoGradNegativeLogLikelihoodLossNoneCheck>(1.5f);
+        Run<AutoGradNegativeLogLikelihoodLossWeightCheck>(1.5f);
+        Run<AutoGradNegativeLogLikelihoodLossIgnoreIndexCheck>(1.5f);
+        Run<AutoGradSoftmaxCrossEntropyLossCheck>(2f);
+        Run<AutoGradSoftmaxCrossEntropyLossLogProbCheck>(2f);
+        Run<AutoGradSoftmaxCrossEntropyLossOnlyLogProbCheck>(2f);
+        Run<AutoGradSoftmaxCrossEntropyLossMeanCheck>(2f);
+        Run<AutoGradSoftmaxCrossEntropyLossNoneCheck>(2f);
+        Run<AutoGradSoftmaxCrossEntropyLossWeightIgnoreCheck>(2f);
     }
+}
 
+[Trait("Domain", "AutoDiff")]
+[Trait("Purpose", "Coverage")]
+public class AutoGradTensorLayoutAndIndexingOpsCoverageTests
+{
     [Fact]
-    public void TestAutoGradConvPoolAndTensorInputGradients()
+    public void TestAutoGradConcatSplitAndIfElseGradients()
     {
-        Run<AutoGradAffineGridMultiBatchCheck>(0.5f);
-        Run<AutoGradReshapePassthroughCheck>(3f);
-        Run<AutoGradDeadParam>(7f, 2f);
-        RunSmall<AutoGradMatMulReduce>([4L, 3L]);
-        RunSmall<AutoGradTrainableParam>([4L, 3L]);
-        RunSmall<AutoGradSliceWithAxes>([3L, 4L]);
-        RunSmall<AutoGradConv>([1L, 3L, 5L, 5L]);
-        RunSmall<AutoGradConvWeight>([1L, 3L, 5L, 5L]);
-        RunSmall<AutoGradConvTranspose>([1L, 3L, 5L, 5L]);
-        RunSmall<AutoGradReduceMeanAllAxes>([3L, 4L]);
-        RunSmall<AutoGradSoftmax>([2L, 4L]);
-        RunSmall<AutoGradTransposePerm>([2L, 3L, 4L]);
-        RunSmall<AutoGradPadAxes>([3L, 4L]);
-        RunSmall<AutoGradTile>([2L, 3L]);
-        RunSmall<AutoGradAvgPool>([1L, 2L, 4L, 4L]);
-        RunSmallNoQee<AutoGradAvgPoolOverlap>([1L, 2L, 5L, 5L]);
-        RunSmallNoQee<AutoGradAvgPoolPadInclude>([1L, 2L, 4L, 4L]);
-        RunSmallNoQee<AutoGradAvgPoolPadExclude>([1L, 2L, 4L, 4L]);
-        RunSmallNoQee<AutoGradAvgPoolSameUpper>([1L, 2L, 5L, 5L]);
-        RunSmallNoQee<AutoGradAvgPoolSameLower>([1L, 2L, 5L, 5L]);
-        RunSmall<AutoGradMaxPool>([1L, 2L, 4L, 4L]);
-        Assert.True(AutoTest.AdvancedTestGraph<AutoGradGemmTrans>(
-            [], [TensorDataWithSmallVals(DType.Float32, [3L, 2L]),
-                 TensorDataWithSmallVals(DType.Float32, [4L, 3L])]));
-    }
-
-    [Fact]
-    public void TestAutoGradNormalizationGradients()
-    {
-        Run<AutoGradBatchNormSimpleCheck>(3f);
-        Run<AutoGradBatchNormWithScaleCheck>(2f);
-        Run<AutoGradBatchNorm3DCheck>(1f);
-        Run<AutoGradBatchNormExpChainCheck>(1f);
-        Run<AutoGradGroupNormBasicCheck>(3f);
-        Run<AutoGradGroupNormScaleCheck>(1f);
-        Run<AutoGradGroupNormNonConstInputCheck>(3f);
-        Run<AutoGradGroupNorm2GroupsCheck>(2f);
-        Run<AutoGradInstanceNormBasicCheck>(2f);
-        Run<AutoGradInstanceNormWithScaleCheck>(3f);
-        Run<AutoGradLpNormL2BasicCheck>(3f);
-        Run<AutoGradLpNormL2AsymmetricCheck>(3f);
-        Run<AutoGradLpNormL1BasicCheck>(3f);
-        Run<AutoGradLayerNormalizationCheck>(2f);
-        Run<AutoGradMeanVarianceNormalizationCheck>(2f);
-        Run<AutoGradLogSoftmaxCheck>(1f);
-        Run<AutoGradPReluCheck>(1.5f);
-    }
-
-    [Fact]
-    public void TestAutoGradGatherScatterAndTopKGradients()
-    {
-        Run<AutoGradGatherElementsAxis0Check>(2f);
-        Run<AutoGradGatherElementsAxis1Check>(1f);
-        Run<AutoGradGatherElementsWithScaleCheck>(3f);
-        Run<AutoGradScatterElementsAddCheck>(3f);
-        Run<AutoGradScatterElementsNoneCheck>(2f);
-        Run<AutoGradScatterElementsWithScaleCheck>(1f);
-        Run<AutoGradScatterNDAddCheck>(3f);
-        Run<AutoGradScatterNDNoneCheck>(2f);
-        Run<AutoGradScatterNDWithScaleCheck>(1f);
-        Run<AutoGradScatterNDReluChainCheck>(2f);
-        Run<AutoGradGatherAxis0Check>(4f);
-        Run<AutoGradGatherDuplicateIndicesCheck>(4f);
-        Run<AutoGradGatherAllIndicesCheck>(2f);
-        Run<AutoGradTopK1DLargestK1Check>(5.0f);
-        Run<AutoGradTopK1DLargestK2Check>(5.0f);
-        Run<AutoGradTopKNotSelectedCheck>(0.5f);
-        Run<AutoGradTopK2DAxis1Check>(7.0f);
-        Run<AutoGradTopKSmallestK1Check>(0.5f);
-    }
-
-    [Fact]
-    public void TestAutoGradGatherNDWhereAndUniqueGradients()
-    {
-        Run<AutoGradGatherAxis0MultiDimIndicesCheck>(2f);
-        Run<AutoGradGatherNonZeroAxisOneDimIndicesCheck>(3f);
-        Run<AutoGradGatherNonZeroAxisOneDimIndicesUnknownRankCheck>(3f);
-        Run<AutoGradGatherNonZeroAxisMultiDimIndicesCheck>(4f);
-        Run<AutoGradGatherNDCheck>(4f);
-        Run<AutoGradGatherNDDuplicateIndicesCheck>(2f);
-        Run<AutoGradGatherNDWithScaleCheck>(3f);
-        Run<AutoGradWhereTrueBranchCheck>(3f, 7f);
-        Run<AutoGradWhereFalseBranchCheck>(3f, 7f);
-        Run<AutoGradUniqueSingleElementCheck>(3f);
-        Run<AutoGradUniqueAllSameCheck>(2f);
-        Run<AutoGradUniqueWithAxisCheck>(1f);
-        Run<AutoGradUniqueDistinctCheck>(2f);
+        Run<AutoGradConcat2Check>(3f, 7f);
+        Run<AutoGradConcatWithScaleCheck>(3f, 7f);
+        Run<AutoGradConcat3Check>(1f, 2f, 3f);
+        Run<AutoGradConcatWithActivationCheck>(3f, -2f);
+        Run<AutoGradSplit2OutputsCheck>(3f);
+        Run<AutoGradSplit3OutputsCheck>(5f);
+        Run<AutoGradSplitWithScaleCheck>(1f);
+        Run<AutoGradSplitConcatRoundTripCheck>(2f);
+        Run<AutoGradIfTrueConditionCheck>(3f, 5f);
+        Run<AutoGradIfFalseConditionCheck>(3f, 5f);
+        Run<AutoGradIfSharedInputTrueCheck>(3f);
+        Run<AutoGradIfSharedInputFalseCheck>(3f);
+        Run<AutoGradIfWithDownstreamOpsCheck>(3f, 5f, 1f);
+        Run<AutoGradIfWithUpstreamOpsCheck>(3f, 5f);
+        Run<AutoGradIfMultiOutputPartiallyUsedCheck>(3f, 5f);
     }
 
     [Fact]
@@ -388,6 +274,175 @@ public class AutoGradOpsCoverageTests
     }
 
     [Fact]
+    public void TestAutoGradRuntimeInputDrivenGradients()
+    {
+        Run<AutoGradCastRoundTripCheck>(2.0f);
+        Run<AutoGradIfRuntimeConditionTrueCheck>(2.0f, 3.0f);
+        Run<AutoGradIfRuntimeConditionFalseCheck>(-1.0f, 3.0f);
+        Run<AutoGradDftWithDftLengthCheck>(3.0f);
+        Run<AutoGradConstantOfShapeRuntimeShapeCheck>(2.0f);
+        Run<AutoGradSeqAtRuntimeIdxCheck>(3.0f, 7.0f, 0.0f);
+        Run<AutoGradSeqInsertEraseRuntimeIdxCheck>(3.0f, 7.0f, 5.0f, 0.0f);
+        Run<AutoGradSeqInsertAppendCheck>(3.0f, 7.0f, 1.0f);
+        Run<AutoGradIfMultiOutputRuntimeCondPartiallyUsedCheck>(2.0f, 3.0f);
+    }
+
+    [Fact]
+    public void TestAutoGradGatherScatterAndTopKGradients()
+    {
+        Run<AutoGradGatherElementsAxis0Check>(2f);
+        Run<AutoGradGatherElementsAxis1Check>(1f);
+        Run<AutoGradGatherElementsWithScaleCheck>(3f);
+        Run<AutoGradScatterElementsAddCheck>(3f);
+        Run<AutoGradScatterElementsNoneCheck>(2f);
+        Run<AutoGradScatterElementsWithScaleCheck>(1f);
+        Run<AutoGradScatterNDAddCheck>(3f);
+        Run<AutoGradScatterNDNoneCheck>(2f);
+        Run<AutoGradScatterNDWithScaleCheck>(1f);
+        Run<AutoGradScatterNDReluChainCheck>(2f);
+        Run<AutoGradGatherAxis0Check>(4f);
+        Run<AutoGradGatherDuplicateIndicesCheck>(4f);
+        Run<AutoGradGatherAllIndicesCheck>(2f);
+        Run<AutoGradTopK1DLargestK1Check>(5.0f);
+        Run<AutoGradTopK1DLargestK2Check>(5.0f);
+        Run<AutoGradTopKNotSelectedCheck>(0.5f);
+        Run<AutoGradTopK2DAxis1Check>(7.0f);
+        Run<AutoGradTopKSmallestK1Check>(0.5f);
+    }
+
+    [Fact]
+    public void TestAutoGradGatherNDWhereAndUniqueGradients()
+    {
+        Run<AutoGradGatherAxis0MultiDimIndicesCheck>(2f);
+        Run<AutoGradGatherNonZeroAxisOneDimIndicesCheck>(3f);
+        Run<AutoGradGatherNonZeroAxisOneDimIndicesUnknownRankCheck>(3f);
+        Run<AutoGradGatherNonZeroAxisMultiDimIndicesCheck>(4f);
+        Run<AutoGradGatherNDCheck>(4f);
+        Run<AutoGradGatherNDDuplicateIndicesCheck>(2f);
+        Run<AutoGradGatherNDWithScaleCheck>(3f);
+        Run<AutoGradWhereTrueBranchCheck>(3f, 7f);
+        Run<AutoGradWhereFalseBranchCheck>(3f, 7f);
+        Run<AutoGradUniqueSingleElementCheck>(3f);
+        Run<AutoGradUniqueAllSameCheck>(2f);
+        Run<AutoGradUniqueWithAxisCheck>(1f);
+        Run<AutoGradUniqueDistinctCheck>(2f);
+    }
+}
+
+[Trait("Domain", "AutoDiff")]
+[Trait("Purpose", "Coverage")]
+public class AutoGradMatrixPoolingAndConvOpsCoverageTests
+{
+    [Fact]
+    public void TestAutoGradPoolingAndMaxRoiPoolGradients()
+    {
+        Run<AutoGradGlobalAveragePoolCheck>(3f);
+        Run<AutoGradGlobalAveragePoolWithScaleCheck>(5f);
+        Run<AutoGradGlobalMaxPoolCheck>(3f);
+        Run<AutoGradGlobalAveragePoolExpChainCheck>(1f);
+        Run<AutoGradGlobalLpPoolP2Check>(3f);
+        Run<AutoGradGlobalLpPoolP1Check>(3f);
+        Run<AutoGradGlobalLpPoolP2WithScaleCheck>(5f);
+        Run<AutoGradLpPoolP2Check>(3f);
+        Run<AutoGradLpPoolP1Check>(3f);
+        Run<AutoGradLpPoolP2WithScaleCheck>(5f);
+        Run<AutoGradMaxUnpoolCheck>(3f);
+        Run<AutoGradMaxUnpoolWithScaleCheck>(5f);
+        Run<AutoGradMaxUnpoolChainCheck>(1f);
+        Run<AutoGradMaxRoiPoolPositiveCheck>(1f);
+        Run<AutoGradMaxRoiPoolGradientShapeCheck>(1f);
+        Run<AutoGradMaxRoiPoolMultiChannelCheck>(1f);
+        Run<AutoGradMaxRoiPoolMultipleRoisCheck>(1f);
+        Run<AutoGradMaxRoiPoolForwardSumCheck>(1f);
+    }
+
+    [Fact]
+    public void TestAutoGradMatrixAndRoiAlignGradients()
+    {
+        Run<AutoGradEinsumMatmulBasicCheck>(3.0f);
+        Run<AutoGradEinsumTransposeCheck>(5.0f);
+        Run<AutoGradEinsumImplicitModeCheck>(2.0f);
+        Run<AutoGradEinsumFreeIndexCheck>(2.5f);
+        Run<AutoGradGemmBasicCheck>(3f);
+        Run<AutoGradGemmWithAlphaCheck>(2f);
+        Run<AutoGradGemmWithBetaAndCCheck>(2f);
+        Run<AutoGradGemmTransACheck>(3f);
+        Run<AutoGradGemmTransBCheck>(2f);
+        Run<AutoGradMatMulKnownRankCheck>(2f);
+        Run<AutoGradMatMulUnknownRankBatchedCheck>(2f);
+        Run<AutoGradReduceSumExplicitAxesKeepdimsTrueCheck>(2f);
+        Run<AutoGradReduceSumExplicitAxesKeepdimsFalseCheck>(2f);
+        Run<AutoGradReduceMeanExplicitAxesCheck>(2f);
+        Run<AutoGradRoiAlignPositiveCheck>(1f);
+        Run<AutoGradRoiAlignSpatialScaleCheck>(1f);
+        Run<AutoGradRoiAlignMultiChannelCheck>(1f);
+        Run<AutoGradRoiAlignMultipleRoisCheck>(1f);
+        Run<AutoGradRoiAlignOutputHalfPixelCheck>(1f);
+        Run<AutoGradRoiAlignForwardSumCheck>(1f);
+    }
+
+    [Fact]
+    public void TestAutoGradConvPoolAndTensorInputGradients()
+    {
+        Run<AutoGradAffineGridMultiBatchCheck>(0.5f);
+        Run<AutoGradReshapePassthroughCheck>(3f);
+        Run<AutoGradDeadParam>(7f, 2f);
+        RunSmall<AutoGradMatMulReduce>([4L, 3L]);
+        RunSmall<AutoGradTrainableParam>([4L, 3L]);
+        RunSmall<AutoGradSliceWithAxes>([3L, 4L]);
+        RunSmall<AutoGradConv>([1L, 3L, 5L, 5L]);
+        RunSmall<AutoGradConvWeight>([1L, 3L, 5L, 5L]);
+        RunSmall<AutoGradConvTranspose>([1L, 3L, 5L, 5L]);
+        RunSmall<AutoGradReduceMeanAllAxes>([3L, 4L]);
+        RunSmall<AutoGradSoftmax>([2L, 4L]);
+        RunSmall<AutoGradTransposePerm>([2L, 3L, 4L]);
+        RunSmall<AutoGradPadAxes>([3L, 4L]);
+        RunSmall<AutoGradTile>([2L, 3L]);
+        RunSmall<AutoGradAvgPool>([1L, 2L, 4L, 4L]);
+        RunSmallNoQee<AutoGradAvgPoolOverlap>([1L, 2L, 5L, 5L]);
+        RunSmallNoQee<AutoGradAvgPoolPadInclude>([1L, 2L, 4L, 4L]);
+        RunSmallNoQee<AutoGradAvgPoolPadExclude>([1L, 2L, 4L, 4L]);
+        RunSmallNoQee<AutoGradAvgPoolSameUpper>([1L, 2L, 5L, 5L]);
+        RunSmallNoQee<AutoGradAvgPoolSameLower>([1L, 2L, 5L, 5L]);
+        RunSmall<AutoGradMaxPool>([1L, 2L, 4L, 4L]);
+        Assert.True(AutoTest.AdvancedTestGraph<AutoGradGemmTrans>(
+            [], [TensorDataWithSmallVals(DType.Float32, [3L, 2L]),
+                 TensorDataWithSmallVals(DType.Float32, [4L, 3L])]));
+    }
+}
+
+[Trait("Domain", "AutoDiff")]
+[Trait("Purpose", "Coverage")]
+public class AutoGradNormalizationOpsCoverageTests
+{
+    [Fact]
+    public void TestAutoGradNormalizationGradients()
+    {
+        Run<AutoGradBatchNormSimpleCheck>(3f);
+        Run<AutoGradBatchNormWithScaleCheck>(2f);
+        Run<AutoGradBatchNorm3DCheck>(1f);
+        Run<AutoGradBatchNormExpChainCheck>(1f);
+        Run<AutoGradGroupNormBasicCheck>(3f);
+        Run<AutoGradGroupNormScaleCheck>(1f);
+        Run<AutoGradGroupNormNonConstInputCheck>(3f);
+        Run<AutoGradGroupNorm2GroupsCheck>(2f);
+        Run<AutoGradInstanceNormBasicCheck>(2f);
+        Run<AutoGradInstanceNormWithScaleCheck>(3f);
+        Run<AutoGradLpNormL2BasicCheck>(3f);
+        Run<AutoGradLpNormL2AsymmetricCheck>(3f);
+        Run<AutoGradLpNormL1BasicCheck>(3f);
+        Run<AutoGradLayerNormalizationCheck>(2f);
+        Run<AutoGradMeanVarianceNormalizationCheck>(2f);
+        Run<AutoGradLogSoftmaxCheck>(1f);
+        Run<AutoGradPReluCheck>(1.5f);
+    }
+}
+
+[Trait("Domain", "AutoDiff")]
+[Trait("Purpose", "Coverage")]
+public class AutoGradRecurrentOpsCoverageTests
+{
+    [Fact]
     public void TestAutoGradGruGradients()
     {
         Run<AutoGradGruXSeqLen1Check>(0.3f);
@@ -436,37 +491,12 @@ public class AutoGradOpsCoverageTests
         Run<AutoGradAffineGridAlignCornersFalseCheck>(0.5f);
         Run<AutoGradGridSampleAlignCornersFalseCheck>(1.0f);
     }
+}
 
-    [Fact]
-    public void TestAutoGradLossGradients()
-    {
-        Run<AutoGradNegativeLogLikelihoodLossCheck>(1.5f);
-        Run<AutoGradNegativeLogLikelihoodLossMeanCheck>(1.5f);
-        Run<AutoGradNegativeLogLikelihoodLossNoneCheck>(1.5f);
-        Run<AutoGradNegativeLogLikelihoodLossWeightCheck>(1.5f);
-        Run<AutoGradNegativeLogLikelihoodLossIgnoreIndexCheck>(1.5f);
-        Run<AutoGradSoftmaxCrossEntropyLossCheck>(2f);
-        Run<AutoGradSoftmaxCrossEntropyLossLogProbCheck>(2f);
-        Run<AutoGradSoftmaxCrossEntropyLossOnlyLogProbCheck>(2f);
-        Run<AutoGradSoftmaxCrossEntropyLossMeanCheck>(2f);
-        Run<AutoGradSoftmaxCrossEntropyLossNoneCheck>(2f);
-        Run<AutoGradSoftmaxCrossEntropyLossWeightIgnoreCheck>(2f);
-    }
-
-    [Fact]
-    public void TestAutoGradRuntimeInputDrivenGradients()
-    {
-        Run<AutoGradCastRoundTripCheck>(2.0f);
-        Run<AutoGradIfRuntimeConditionTrueCheck>(2.0f, 3.0f);
-        Run<AutoGradIfRuntimeConditionFalseCheck>(-1.0f, 3.0f);
-        Run<AutoGradDftWithDftLengthCheck>(3.0f);
-        Run<AutoGradConstantOfShapeRuntimeShapeCheck>(2.0f);
-        Run<AutoGradSeqAtRuntimeIdxCheck>(3.0f, 7.0f, 0.0f);
-        Run<AutoGradSeqInsertEraseRuntimeIdxCheck>(3.0f, 7.0f, 5.0f, 0.0f);
-        Run<AutoGradSeqInsertAppendCheck>(3.0f, 7.0f, 1.0f);
-        Run<AutoGradIfMultiOutputRuntimeCondPartiallyUsedCheck>(2.0f, 3.0f);
-    }
-
+[Trait("Domain", "AutoDiff")]
+[Trait("Purpose", "Coverage")]
+public class AutoGradNonDifferentiableStubOpsCoverageTests
+{
     [Fact]
     public void TestAutoGradNonDifferentiableAndStochasticStubGradients()
     {

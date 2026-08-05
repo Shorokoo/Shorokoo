@@ -66,7 +66,7 @@ public partial class RealCheckpointPredictionTests
         Assert.Equal(102, mapped.Count);                                     // full ResNet18 weight set
 
         var boundWeights = checkpointNames.Where(n => !n.EndsWith("num_batches_tracked")).ToHashSet();
-        Assert.True(boundWeights.SetEquals(mapped!), "every checkpoint weight tensor is bound");
+        Assert.True(boundWeights.SetEquals(mapped!));
     }
 
     /// <summary>
@@ -108,8 +108,8 @@ public partial class RealCheckpointPredictionTests
         var maxLogitDiff = Enumerable.Range(0, logits.Length).Max(i => Math.Abs(logits[i] - ReferenceLogits[i]));
         var maxProbDiff = Enumerable.Range(0, probs.Length).Max(i => Math.Abs(probs[i] - referenceProbs[i]));
 
-        Assert.True(maxLogitDiff < 1e-3, $"max |logit diff| = {maxLogitDiff:E4} (expected < 1e-3)");
-        Assert.True(maxProbDiff < 1e-4, $"max |prob diff| = {maxProbDiff:E4} (expected < 1e-4)");
+        Assert.True(maxLogitDiff < 1e-3);
+        Assert.True(maxProbDiff < 1e-4);
     }
 
     /// <summary>Binds the real checkpoint and runs the forward pass, returning the 1000 raw logits.</summary>

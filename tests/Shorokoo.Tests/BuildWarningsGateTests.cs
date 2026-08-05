@@ -61,13 +61,12 @@ public class BuildWarningsGateTests
             foreach (var relProject in ProductProjects)
             {
                 var project = Path.Combine(repoRoot, relProject);
-                Assert.True(File.Exists(project), $"product project not found at {project}");
+                Assert.True(File.Exists(project));
 
                 var (exitCode, output) = RunBuild(project, tempOut);
 
-                Assert.True(exitCode == 0,
-                    $"`dotnet build -c Release -warnaserror` of {relProject} failed (exit {exitCode}) — " +
-                    $"the shipping build is not warning-clean. Offending diagnostics:\n{ExtractDiagnostics(output)}");
+                // On failure the offending diagnostics are the only thing worth reading.
+                Assert.Equal(string.Empty, exitCode == 0 ? string.Empty : ExtractDiagnostics(output));
             }
         }
         finally
@@ -109,11 +108,10 @@ public class BuildWarningsGateTests
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
 
-        if (!process.WaitForExit((int)BuildTimeout.TotalMilliseconds))
-        {
+        var finished = process.WaitForExit((int)BuildTimeout.TotalMilliseconds);
+        if (!finished)
             try { process.Kill(entireProcessTree: true); } catch { /* best effort */ }
-            Assert.Fail($"`dotnet build` of {projectPath} did not finish within {BuildTimeout.TotalMinutes:F0} min.");
-        }
+        Assert.True(finished);
         process.WaitForExit(); // flush async readers
 
         lock (sb) return (process.ExitCode, sb.ToString());

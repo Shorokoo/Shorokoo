@@ -3,22 +3,22 @@ using Shorokoo.Runtime;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
 
+using static Shorokoo.Tests.NNLibraryFixtures;
+using static Shorokoo.Tests.NNLibraryTrainingFixtures;
+
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Coverage for the baseline NN library (Shorokoo.Modules Initializers / Layers / Losses):
+/// Inputs for the baseline NN library coverage (Shorokoo.Modules Initializers / Layers / Losses):
 /// each [Fact] drives self-checking modules from NNLibraryTestModules.cs through
-/// AutoTest.AdvancedTestGraph (ONNX roundtrip, CS codegen, QEE); the value correctness and
-/// its closed forms live inside those modules. BatchNorm is covered by the rig-based
-/// <see cref="NNLibraryTrainingCoverageTests"/> instead (its StateUpdate links are not
-/// executable in the plain inference pipeline).
+/// AutoTest.AdvancedTestGraph (ONNX roundtrip, CS codegen, QEE); the value correctness and its
+/// closed forms live inside those modules. BatchNorm is covered by the rig-based BatchNorm classes
+/// below instead (its StateUpdate links are not executable in the plain inference pipeline).
 /// </summary>
-[Trait("Domain", "Modules")]
-[Trait("Purpose", "Coverage")]
-public class NNLibraryCoverageTests
+internal static class NNLibraryFixtures
 {
     /// <summary>[i * scale + offset for i in 0..N) as a float32 TensorData.</summary>
-    private static TensorData RangeTensor(long[] dims, float scale = 1f, float offset = 0f)
+    internal static TensorData RangeTensor(long[] dims, float scale = 1f, float offset = 0f)
     {
         long total = 1;
         foreach (var d in dims) total *= d;
@@ -30,14 +30,19 @@ public class NNLibraryCoverageTests
     /// <see cref="RangeTensor"/> is degenerate for a frozen norm reference — mean-subtraction
     /// annihilates the per-slice offset, so every slice standardizes identically and the golden
     /// becomes invariant under an internal N/C transpose. The i² term keeps the slices distinct.</summary>
-    private static TensorData CurvedTensor(long[] dims, float scale, float offset, float curv)
+    internal static TensorData CurvedTensor(long[] dims, float scale, float offset, float curv)
     {
         long total = 1;
         foreach (var d in dims) total *= d;
         return TensorData(DType.Float32, dims,
             Enumerable.Range(0, (int)total).Select(i => (object)(i * scale + offset + curv * i * i)).ToArray());
     }
+}
 
+[Trait("Domain", "Modules")]
+[Trait("Purpose", "Coverage")]
+public class NNLibraryLayerAndInitializerCoverageTests
+{
     [Fact]
     public void TestLinearConvAndGeneralizedConvCoverage()
     {
@@ -142,6 +147,69 @@ public class NNLibraryCoverageTests
     }
 
     [Fact]
+    public void TestPoolingHelpersAndNNStaticWrapperOpsCoverage()
+    {
+        Assert.True(AutoTest.AdvancedTestGraph<NNPoolingHelpersChecks>(
+            hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 4L, 4L], 0.5f, -4f)]));
+        Assert.True(AutoTest.AdvancedTestGraph<NNPool1d3dClosedForm>(
+            hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 4L, 4L], 0.5f, -4f)]));
+        Assert.True(AutoTest.AdvancedTestGraph<NNLpPoolClosedFormAndGlobal>(
+            hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 4L, 4L], 0.5f, -4f)]));
+        Assert.True(AutoTest.AdvancedTestGraph<NNFullWindowEqualsGlobal>(
+            hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 4L, 4L], 0.5f, -4f)]));
+        Assert.True(AutoTest.AdvancedTestGraph<NNPoolScalarPerAxisAliasEquiv>(
+            hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 4L, 4L], 0.5f, -4f)]));
+        Assert.True(AutoTest.AdvancedTestGraph<NNPoolPerAxisGeometryMatchesCoreOp>(
+            hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 6L, 5L], 0.1f, -3f)]));
+        Assert.True(AutoTest.AdvancedTestGraph<NNMaxUnpoolRoundTrip>(
+            hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 4L, 4L], 0.5f, -4f)]));
+        Assert.True(AutoTest.AdvancedTestGraph<NNAvgPoolCountIncludePadToggle>(
+            hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 4L, 4L], 0.5f, -4f)]));
+
+        Assert.True(AutoTest.AdvancedTestGraph<NNStaticWrapperWindowEyeDetCheck>(
+            hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 2L], 1f, 1f)]));
+        Assert.True(AutoTest.AdvancedTestGraph<NNStaticWrapperPoolMathCheck>(
+            hyperparamInputs: [],
+            runtimeInputs: [
+                RangeTensor([1L, 2L, 4L, 4L], 0.5f, -4f),
+                TensorData(DType.Int64, [3L], 7L, 8L, 9L),
+                TensorData(DType.Int64, [3L], 2L, 3L, 4L)]));
+    }
+
+    /// <summary>Constant (the #440 op-name-collision regression guard), Orthogonal Gram ≈ I,
+    /// configurable UniformRange / NormalDist sample statistics, and the configurable-gain
+    /// Xavier/Kaiming sample std (which excludes the §4.1 √6-double-bake value).</summary>
+    [Fact]
+    public void TestInitializerCoverage()
+    {
+        var dummy = RangeTensor([2L, 3L], 0.5f, -1f);
+
+        Assert.True(AutoTest.AdvancedTestGraph<NNConstantInitFillsValue>(
+            hyperparamInputs: [], runtimeInputs: [dummy]));
+        Assert.True(AutoTest.AdvancedTestGraph<NNConstantInitRank1Negative>(
+            hyperparamInputs: [], runtimeInputs: [dummy]));
+        Assert.True(AutoTest.AdvancedTestGraph<NNConstantInitMatchesZerosOnes>(
+            hyperparamInputs: [], runtimeInputs: [dummy]));
+        Assert.True(AutoTest.AdvancedTestGraph<NNOrthogonalSquareGramIsIdentity>(
+            hyperparamInputs: [], runtimeInputs: [dummy]));
+        Assert.True(AutoTest.AdvancedTestGraph<NNOrthogonalTallGramIsIdentity>(
+            hyperparamInputs: [], runtimeInputs: [dummy]));
+        Assert.True(AutoTest.AdvancedTestGraph<NNOrthogonalWideGramIsIdentity>(
+            hyperparamInputs: [], runtimeInputs: [dummy]));
+        Assert.True(AutoTest.AdvancedTestGraph<NNUniformRangeInRange>(
+            hyperparamInputs: [], runtimeInputs: [dummy]));
+        Assert.True(AutoTest.AdvancedTestGraph<NNNormalDistMoments>(
+            hyperparamInputs: [], runtimeInputs: [dummy]));
+        Assert.True(AutoTest.AdvancedTestGraph<NNXavierKaimingGainStd>(
+            hyperparamInputs: [], runtimeInputs: [dummy]));
+    }
+}
+
+[Trait("Domain", "Modules")]
+[Trait("Purpose", "Coverage")]
+public class NNLibraryDropoutAndEmbeddingCoverageTests
+{
+    [Fact]
     public void TestDropoutEmbeddingBagKnobsAndActivationCoverage()
     {
         Assert.True(AutoTest.AdvancedTestGraph<NNDropoutChecks>(
@@ -235,37 +303,12 @@ public class NNLibraryCoverageTests
         Assert.True(AutoTest.AdvancedTestGraph<NNFeatureAlphaDropoutEvalIdentityAnyRank>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 3L], 0.5f, 1f)]));
     }
+}
 
-    [Fact]
-    public void TestPoolingHelpersAndNNStaticWrapperOpsCoverage()
-    {
-        Assert.True(AutoTest.AdvancedTestGraph<NNPoolingHelpersChecks>(
-            hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 4L, 4L], 0.5f, -4f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<NNPool1d3dClosedForm>(
-            hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 4L, 4L], 0.5f, -4f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<NNLpPoolClosedFormAndGlobal>(
-            hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 4L, 4L], 0.5f, -4f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<NNFullWindowEqualsGlobal>(
-            hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 4L, 4L], 0.5f, -4f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<NNPoolScalarPerAxisAliasEquiv>(
-            hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 4L, 4L], 0.5f, -4f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<NNPoolPerAxisGeometryMatchesCoreOp>(
-            hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 6L, 5L], 0.1f, -3f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<NNMaxUnpoolRoundTrip>(
-            hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 4L, 4L], 0.5f, -4f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<NNAvgPoolCountIncludePadToggle>(
-            hyperparamInputs: [], runtimeInputs: [RangeTensor([1L, 2L, 4L, 4L], 0.5f, -4f)]));
-
-        Assert.True(AutoTest.AdvancedTestGraph<NNStaticWrapperWindowEyeDetCheck>(
-            hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 2L], 1f, 1f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<NNStaticWrapperPoolMathCheck>(
-            hyperparamInputs: [],
-            runtimeInputs: [
-                RangeTensor([1L, 2L, 4L, 4L], 0.5f, -4f),
-                TensorData(DType.Int64, [3L], 7L, 8L, 9L),
-                TensorData(DType.Int64, [3L], 2L, 3L, 4L)]));
-    }
-
+[Trait("Domain", "Modules")]
+[Trait("Purpose", "Coverage")]
+public class NNLibraryLossCoverageTests
+{
     [Fact]
     public void TestLossClosedFormsEdgeCasesAndKnobsCoverage()
     {
@@ -356,7 +399,12 @@ public class NNLibraryCoverageTests
         Throws(() => CosineEmbeddingLoss.Reduced(Scalar(0f), Scalar(1e-8f), x1, x2, y,
             reduction: LossReduction.None));
     }
+}
 
+[Trait("Domain", "Modules")]
+[Trait("Purpose", "Coverage")]
+public class NNLibraryRecurrentLayerCoverageTests
+{
     /// <summary>Rnn / Lstm / Gru forward goldens: baseline + batchFirst, the single-step gate
     /// anchors, bias on/off, numLayers:2, Reverse + Bidirectional, the GRU linearBeforeReset
     /// both-forms crux, and the hN == y[-1] state contract.</summary>
@@ -418,7 +466,12 @@ public class NNLibraryCoverageTests
         Assert.True(AutoTest.AdvancedTestGraph<GruStateContractForwardSingleLayer>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([4L, 2L, 3L], 0.1f, -1f)]));
     }
+}
 
+[Trait("Domain", "Modules")]
+[Trait("Purpose", "Coverage")]
+public class NNLibraryRecurrentCellCoverageTests
+{
     /// <summary>RNNCell / LSTMCell / GRUCell single-step goldens with NONZERO previous state (so R
     /// is exercised): the tanh and relu closed forms, the LSTM i/o/f/c and GRU z/r/h gate packing,
     /// both linearBeforeReset forms, bias:false, the [N,H] shape contract, and the two-step
@@ -459,45 +512,90 @@ public class NNLibraryCoverageTests
         Assert.True(AutoTest.AdvancedTestGraph<GruCellStateThreading>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor([2L, 2L, 3L], 0.1f, -0.6f)]));
     }
-
-    /// <summary>Constant (the #440 op-name-collision regression guard), Orthogonal Gram ≈ I,
-    /// configurable UniformRange / NormalDist sample statistics, and the configurable-gain
-    /// Xavier/Kaiming sample std (which excludes the §4.1 √6-double-bake value).</summary>
-    [Fact]
-    public void TestInitializerCoverage()
-    {
-        var dummy = RangeTensor([2L, 3L], 0.5f, -1f);
-
-        Assert.True(AutoTest.AdvancedTestGraph<NNConstantInitFillsValue>(
-            hyperparamInputs: [], runtimeInputs: [dummy]));
-        Assert.True(AutoTest.AdvancedTestGraph<NNConstantInitRank1Negative>(
-            hyperparamInputs: [], runtimeInputs: [dummy]));
-        Assert.True(AutoTest.AdvancedTestGraph<NNConstantInitMatchesZerosOnes>(
-            hyperparamInputs: [], runtimeInputs: [dummy]));
-        Assert.True(AutoTest.AdvancedTestGraph<NNOrthogonalSquareGramIsIdentity>(
-            hyperparamInputs: [], runtimeInputs: [dummy]));
-        Assert.True(AutoTest.AdvancedTestGraph<NNOrthogonalTallGramIsIdentity>(
-            hyperparamInputs: [], runtimeInputs: [dummy]));
-        Assert.True(AutoTest.AdvancedTestGraph<NNOrthogonalWideGramIsIdentity>(
-            hyperparamInputs: [], runtimeInputs: [dummy]));
-        Assert.True(AutoTest.AdvancedTestGraph<NNUniformRangeInRange>(
-            hyperparamInputs: [], runtimeInputs: [dummy]));
-        Assert.True(AutoTest.AdvancedTestGraph<NNNormalDistMoments>(
-            hyperparamInputs: [], runtimeInputs: [dummy]));
-        Assert.True(AutoTest.AdvancedTestGraph<NNXavierKaimingGainStd>(
-            hyperparamInputs: [], runtimeInputs: [dummy]));
-    }
 }
 
 /// <summary>
-/// Training-rig coverage for the baseline NN library: optimizer rig construction and step
-/// numerics, end-to-end convergence runs, layer trainability (Bilinear / Embedding /
-/// EmbeddingBag / triplet + cosine embeddings / conv / recurrent), and the BatchNorm and
-/// Dropout gradient-flow + state-update paths.
+/// Shared rig plumbing for the training-side coverage of the baseline NN library: batch/struct
+/// construction, the fixed conv batch, the analytic multi-step TrainStep driver and its
+/// struct comparison.
+/// </summary>
+internal static class NNLibraryTrainingFixtures
+{
+    internal static TensorDataStruct MakeStruct(string structName, params (string name, TensorData data)[] fields)
+    {
+        TensorStructFieldDef[] defs =
+            [.. fields.Select(f => new TensorStructFieldDef(
+                f.name, DataStructure.Tensor, f.data.Shape.Dims.Length, f.data.DType))];
+        return new TensorDataStruct(new TensorStructDef(defs, structName),
+            fields.ToDictionary(f => f.name, f => (IData)f.data));
+    }
+
+    internal static TensorDataStruct MakeBatch(string fieldName, string structName, TensorData data)
+        => MakeStruct(structName, (fieldName, data));
+
+    internal static float[] Floats(IData data) => ((TensorData<float32>)data).AccessMemory().ToArray();
+
+    internal static bool AnyParamMoved(TrainingRig rig, TrainingCheckpoint before, TrainingCheckpoint after)
+        => rig.TrainableParamStructDef.Fields.Any(f =>
+            Floats(before.TrainableParams.Fields[f.Name])
+                .Zip(Floats(after.TrainableParams.Fields[f.Name]))
+                .Any(p => MathF.Abs(p.First - p.Second) > 1e-7f));
+
+    // 4 samples of [1,4,4]: class 0 lights the left two columns, class 1 the right two,
+    // at two different intensities.
+    internal static (TensorData input, TensorData target) MakeTinyConvBatch()
+    {
+        var vals = new float[4 * 16];
+        for (int s = 0; s < 4; s++)
+        {
+            float intensity = s < 2 ? 1f : 0.6f;
+            bool rightHalf = (s % 2) == 1;
+            for (int r = 0; r < 4; r++)
+                for (int c = 0; c < 4; c++)
+                    vals[s * 16 + r * 4 + c] = (rightHalf ? c >= 2 : c < 2) ? intensity : 0f;
+        }
+        long[] classes = [0L, 1L, 0L, 1L];
+        return (TensorData([4L, 1L, 4L, 4L], vals), TensorData([4L], classes));
+    }
+
+    /// <summary>Runs <paramref name="steps"/> TrainSteps of model + L2Loss + optimizer on one
+    /// fixed batch and returns the final checkpoint, so each analytic check is a one-liner.</summary>
+    internal static TrainingCheckpoint TrainAnalytic(
+        ComputationGraph modelGraph, ComputationGraph optimizerGraph, Hyperparameter[] hypers,
+        long[] inShape, float[] input, long[] outShape, float[] target, int steps)
+    {
+        var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, optimizerGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData(inShape, input))],
+            hypers);
+        var ckpt = rig.CreateInitialCheckpoint();
+        for (int i = 0; i < steps; i++)
+            ckpt = rig.TrainStep(ckpt,
+                MakeBatch("input", "AnalyticIn", TensorData(inShape, input)),
+                MakeBatch("targets", "AnalyticTg", TensorData(outShape, target)));
+        return ckpt;
+    }
+
+    /// <summary>Asserts the struct's fields, flattened in definition order, equal
+    /// <paramref name="expected"/> within <paramref name="tol"/>.</summary>
+    internal static void AssertStructIs(TensorDataStruct s, float[] expected, float tol)
+    {
+        var flat = s.Definition.Fields.SelectMany(f => Floats(s.Fields[f.Name])).ToArray();
+        Assert.Equal(expected.Length, flat.Length);
+        for (int i = 0; i < flat.Length; i++)
+            Assert.True(MathF.Abs(flat[i] - expected[i]) <= tol);
+    }
+
+    /// <summary>[i * scale + offset for i in 0..total).</summary>
+    internal static float[] Ramp(long total, float scale = 1f, float offset = 0f)
+        => Enumerable.Range(0, (int)total).Select(i => i * scale + offset).ToArray();
+}
+
+/// <summary>
+/// Optimizer rig construction, per-optimizer step numerics and end-to-end convergence runs.
 /// </summary>
 [Trait("Domain", "Training")]
 [Trait("Purpose", "Coverage")]
-public class NNLibraryTrainingCoverageTests
+public class NNLibraryOptimizerTrainingCoverageTests
 {
     private static void CoverFromScratch(
         ComputationGraph modelGraph,
@@ -519,26 +617,6 @@ public class NNLibraryTrainingCoverageTests
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
         Assert.NotNull(checkpoint.TrainableParams);
     }
-
-    private static TensorDataStruct MakeStruct(string structName, params (string name, TensorData data)[] fields)
-    {
-        TensorStructFieldDef[] defs =
-            [.. fields.Select(f => new TensorStructFieldDef(
-                f.name, DataStructure.Tensor, f.data.Shape.Dims.Length, f.data.DType))];
-        return new TensorDataStruct(new TensorStructDef(defs, structName),
-            fields.ToDictionary(f => f.name, f => (IData)f.data));
-    }
-
-    private static TensorDataStruct MakeBatch(string fieldName, string structName, TensorData data)
-        => MakeStruct(structName, (fieldName, data));
-
-    private static float[] Floats(IData data) => ((TensorData<float32>)data).AccessMemory().ToArray();
-
-    private static bool AnyParamMoved(TrainingRig rig, TrainingCheckpoint before, TrainingCheckpoint after)
-        => rig.TrainableParamStructDef.Fields.Any(f =>
-            Floats(before.TrainableParams.Fields[f.Name])
-                .Zip(Floats(after.TrainableParams.Fields[f.Name]))
-                .Any(p => MathF.Abs(p.First - p.Second) > 1e-7f));
 
     // --- Wide-regression convergence fixture -------------------------------------------------
     // 32 samples, 2 features in, 400 outputs out (matches NNWideRegressionModel). Deterministic
@@ -566,56 +644,12 @@ public class NNLibraryTrainingCoverageTests
         return (TensorData([(long)WideN, WideF], x), TensorData([(long)WideN, WideO], y));
     }
 
-    // 4 samples of [1,4,4]: class 0 lights the left two columns, class 1 the right two,
-    // at two different intensities.
-    private static (TensorData input, TensorData target) MakeTinyConvBatch()
-    {
-        var vals = new float[4 * 16];
-        for (int s = 0; s < 4; s++)
-        {
-            float intensity = s < 2 ? 1f : 0.6f;
-            bool rightHalf = (s % 2) == 1;
-            for (int r = 0; r < 4; r++)
-                for (int c = 0; c < 4; c++)
-                    vals[s * 16 + r * 4 + c] = (rightHalf ? c >= 2 : c < 2) ? intensity : 0f;
-        }
-        long[] classes = [0L, 1L, 0L, 1L];
-        return (TensorData([4L, 1L, 4L, 4L], vals), TensorData([4L], classes));
-    }
-
     // The starting loss of NNWideRegressionModel under its seeded KaimingUniform init is a
     // platform-stable quantity: across 150k simulated draws it is mean 1.184, σ 0.046, so the
     // central 1-in-100-billion (6.81σ) range is [0.871, 1.497]. Asserted a hair wider to absorb
     // float-vs-double and slight right-skew.
     private static void AssertWideStartLossInBand(float startLoss) =>
         Assert.True(startLoss is >= 0.85f and <= 1.52f);
-
-    /// <summary>Runs <paramref name="steps"/> TrainSteps of model + L2Loss + optimizer on one
-    /// fixed batch and returns the final checkpoint, so each analytic check is a one-liner.</summary>
-    private static TrainingCheckpoint TrainAnalytic(
-        ComputationGraph modelGraph, ComputationGraph optimizerGraph, Hyperparameter[] hypers,
-        long[] inShape, float[] input, long[] outShape, float[] target, int steps)
-    {
-        var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, optimizerGraph,
-            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData(inShape, input))],
-            hypers);
-        var ckpt = rig.CreateInitialCheckpoint();
-        for (int i = 0; i < steps; i++)
-            ckpt = rig.TrainStep(ckpt,
-                MakeBatch("input", "AnalyticIn", TensorData(inShape, input)),
-                MakeBatch("targets", "AnalyticTg", TensorData(outShape, target)));
-        return ckpt;
-    }
-
-    /// <summary>Asserts the struct's fields, flattened in definition order, equal
-    /// <paramref name="expected"/> within <paramref name="tol"/>.</summary>
-    private static void AssertStructIs(TensorDataStruct s, float[] expected, float tol)
-    {
-        var flat = s.Definition.Fields.SelectMany(f => Floats(s.Fields[f.Name])).ToArray();
-        Assert.Equal(expected.Length, flat.Length);
-        for (int i = 0; i < flat.Length; i++)
-            Assert.True(MathF.Abs(flat[i] - expected[i]) <= tol);
-    }
 
     /// <summary>Builds a rig for <paramref name="optimizerGraph"/>, asserts the trainable-param
     /// and optimizer-state structs are non-empty, then runs ONE TrainStep and asserts the loss is
@@ -717,81 +751,6 @@ public class NNLibraryTrainingCoverageTests
             [2L, 2L], [1f, 2f, 3f, 4f], [0f, 0f, 0f, 0f], 0.01f, 0.9f, 0.999f, 1e-6f, 0.01f);
     }
 
-    /// <summary>One TrainStep of <paramref name="model"/> + <paramref name="loss"/> +
-    /// <paramref name="optimizer"/> on a fixed batch: finite loss, threaded optimizer state (when the
-    /// optimizer has any), and the first rank-<paramref name="paramRank"/> trainable param moved.</summary>
-    private static void AssertTrainStepMovesParam(
-        ComputationGraph model, ComputationGraph loss, ComputationGraph optimizer,
-        (string name, long[] shape, float[] data)[] inputs, long[] targetShape,
-        int paramRank, bool statefulOptimizer, Hyperparameter[] hypers)
-    {
-        NamedModelParam[] sample =
-            [.. inputs.Select(i => new TensorDataModelParam(
-                i.name, ModelParamType.InputParam, TensorData(i.shape, i.data)))];
-        var rig = TrainingRig.FromScratch(model, loss, optimizer, sample, hypers);
-
-        var initial = rig.CreateInitialCheckpoint();
-        Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
-
-        string? wName = null;
-        foreach (var f in rig.TrainableParamStructDef.Fields)
-            if (initial.TrainableParams.Fields[f.Name] is TensorData td && td.Shape.Dims.Length == paramRank)
-            { wName = f.Name; break; }
-        Assert.NotNull(wName);
-        float[] w0 = Floats(initial.TrainableParams.Fields[wName]);
-        Assert.True(w0.Length >= 2);
-
-        long targetTotal = 1;
-        foreach (var d in targetShape) targetTotal *= d;
-        var step = rig.TrainStep(initial,
-            MakeStruct("ModelInput",
-                [.. inputs.Select(i => (i.name, (TensorData)TensorData(i.shape, i.data)))]),
-            MakeBatch("targets", "Target", TensorData(targetShape, new float[targetTotal])));
-        float[] w1 = Floats(step.TrainableParams.Fields[wName]);
-
-        Assert.True(float.IsFinite(step.Loss!.Value));
-        if (statefulOptimizer) Assert.NotEmpty(step.OptimizerState.Fields);
-        Assert.True(w0.Zip(w1).Any(p => MathF.Abs(p.First - p.Second) > 1e-7f));
-    }
-
-    /// <summary>Layer trainability: the rank-3 Bilinear A (the first module-level Einsum-autodiff
-    /// exercise), the paddingIdx-masked Embedding table, the EmbeddingBag Gather+Reduce table, and
-    /// the shared Linear embeddings behind the triplet-margin and cosine-embedding losses (the
-    /// "loss-is-the-model-tail" recipe) each move under one TrainStep.</summary>
-    [Fact]
-    public void TestLayerRigTrainStepsMoveWeights()
-    {
-        Hyperparameter[] adam = [0.01f, 0.9f, 0.999f, 1e-8f];
-
-        AssertTrainStepMovesParam(
-            BilinearRigModel.ComputationGraph, L2Loss.ComputationGraph, AdamOptimizer.ComputationGraph,
-            [("x1", [2L, 3L], [0.5f, -1f, 0.25f, 1f, -0.5f, 0.75f]),
-             ("x2", [2L, 4L], [0.3f, -0.5f, 0.2f, -0.1f, 0.4f, 0.6f, -0.2f, 0.8f])],
-            [2L], 3, true, adam);
-
-        AssertTrainStepMovesParam(
-            EmbeddingPaddingRigModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            [("x", [3L], [0.5f, -1f, 0.25f])], [3L], 2, false, [0.1f]);
-
-        AssertTrainStepMovesParam(
-            EmbeddingBagRigModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            [("x", [2L], [0.5f, -1f])], [2L], 2, false, [0.1f]);
-
-        // [3N, D] = [6, 2]: rows 0-1 anchor, 2-3 positive (near), 4-5 negative (far).
-        AssertTrainStepMovesParam(
-            NNTripletEmbeddingRigModel.ComputationGraph, NNIdentityScalarLoss.ComputationGraph,
-            AdamOptimizer.ComputationGraph,
-            [("x", [6L, 2L], [0.5f, 1.0f, -0.5f, -1.0f, 0.6f, 1.1f, -0.4f, -0.9f, 2.0f, -2.0f, 2.5f, 3.0f])],
-            [1L], 2, true, adam);
-
-        // [2N, D] = [4, 2]: rows 0-1 are x1, rows 2-3 are x2.
-        AssertTrainStepMovesParam(
-            NNCosineEmbeddingRigModel.ComputationGraph, NNIdentityScalarLoss.ComputationGraph,
-            AdamOptimizer.ComputationGraph,
-            [("x", [4L, 2L], [0.5f, 1.0f, -0.5f, -1.0f, 0.6f, 1.1f, -0.4f, -0.9f])],
-            [1L], 2, true, adam);
-    }
-
     /// <summary>End-to-end convergence. Adam and LAMB on the wide, perfectly realizable
     /// <c>[32,2] → [32,400]</c> regression fixture must start inside the platform-invariant
     /// 1-in-100-billion random-init band and fall below the ABSOLUTE 1e-2 target in 150 steps;
@@ -849,6 +808,231 @@ public class NNLibraryTrainingCoverageTests
         Assert.True(convLosses[^1] < convLosses[0]);
     }
 
+    // -----------------------------------------------------------------------
+    //  Analytic value checks. Every expectation is hand-computed from the fixtures' constant
+    //  initializers; gradients are inferred through real TrainStep execution (SGD:
+    //  w' = w − lr·grad, L2Loss = mean over ALL output elements so dL/dyᵢ = 2(yᵢ−tᵢ)/N).
+    // -----------------------------------------------------------------------
+
+    /// <summary>Autodiff gradient values (reverse-broadcast sum-reduction, Relu masking, MatMul's
+    /// xᵀ·gUp, gradient ACCUMULATION when a param is consumed twice, routing through
+    /// Reshape→Transpose→Reshape, and Slice) plus the core optimizer step values on y = w·x, w₀=1,
+    /// x=[1], t=[0] ⇒ grad = 2w: Adam's bias-correction timestep, SGD-momentum's velocity carry,
+    /// AdamW's decoupled-decay-then-uncorrected step, and Adam's first step being ≈ lr regardless of
+    /// the gradient magnitude (uncorrected it would be ≈ 3.16·lr).</summary>
+    [Fact]
+    public void TestAutodiffGradientAndCoreOptimizerValuesAnalytic()
+    {
+        // w=0.5, x=[1,2,3,4], t=0: dL/dyᵢ=yᵢ/2 → grad_w = Σ(yᵢ/2)·xᵢ = 7.5 → w' = 0.5 − 0.1·7.5
+        AssertStructIs(TrainAnalytic(AnalyticBroadcastMulModel.ComputationGraph, SGDOptimizer.ComputationGraph, [0.1f],
+            [4L], [1f, 2f, 3f, 4f], [4L], [0f, 0f, 0f, 0f], 1).TrainableParams, [-0.25f], 1e-5f);
+        // b=0.5: y=[1.5,2.5,3.5,4.5] → grad_b = Σ yᵢ/2 = 6 → b' = 0.5 − 0.6
+        AssertStructIs(TrainAnalytic(AnalyticBroadcastAddModel.ComputationGraph, SGDOptimizer.ComputationGraph, [0.1f],
+            [4L], [1f, 2f, 3f, 4f], [4L], [0f, 0f, 0f, 0f], 1).TrainableParams, [-0.1f], 1e-5f);
+        // w=[1,2,3,4], x=[1,−1,1,−1]: pre=[1,−2,3,−4], mask=[1,0,1,0] → grad=[0.5,0,1.5,0], lr=1
+        AssertStructIs(TrainAnalytic(AnalyticReluModel.ComputationGraph, SGDOptimizer.ComputationGraph, [1f],
+            [4L], [1f, -1f, 1f, -1f], [4L], [0f, 0f, 0f, 0f], 1).TrainableParams, [0.5f, 2f, 1.5f, 4f], 1e-5f);
+        // x=[[1,2],[3,4]], W=[[1,2],[3,4]]: y=[[7,10],[15,22]], grad_W = xᵀ·(y/2) = [[26,38],[37,54]], lr=0.01
+        AssertStructIs(TrainAnalytic(AnalyticMatMulModel.ComputationGraph, SGDOptimizer.ComputationGraph, [0.01f],
+            [2L, 2L], [1f, 2f, 3f, 4f], [2L, 2L], [0f, 0f, 0f, 0f], 1).TrainableParams, [0.74f, 1.62f, 2.63f, 3.46f], 1e-5f);
+        // w=0.5 used TWICE (w·x + w): grad_w = Σ(yᵢ/2)·(xᵢ+1) = 13.5 → w' = 0.5 − 1.35
+        // (mul-path-only would give −0.5; add-path-only +0.15 — accumulation is pinned exactly)
+        AssertStructIs(TrainAnalytic(AnalyticDoubleUseModel.ComputationGraph, SGDOptimizer.ComputationGraph, [0.1f],
+            [4L], [1f, 2f, 3f, 4f], [4L], [0f, 0f, 0f, 0f], 1).TrainableParams, [-0.85f], 1e-5f);
+        // w=[1,2,3,4] permuted to [w0,w2,w1,w3], x=[1,2,4,8]: dL/dwp=[0.5,6,16,128] routes back
+        // through the inverse permutation → grad_w=[0.5,16,6,128], lr=0.01
+        AssertStructIs(TrainAnalytic(AnalyticPermuteModel.ComputationGraph, SGDOptimizer.ComputationGraph, [0.01f],
+            [4L], [1f, 2f, 4f, 8f], [4L], [0f, 0f, 0f, 0f], 1).TrainableParams, [0.995f, 1.84f, 2.94f, 2.72f], 1e-5f);
+        // y = w[0:2]·x, x=[2,3]: grad = [y₀·x₀, y₁·x₁, 0, 0] = [4,18,0,0] → w'=[0.6,0.2,3,4], lr=0.1
+        AssertStructIs(TrainAnalytic(AnalyticSliceParamModel.ComputationGraph, SGDOptimizer.ComputationGraph, [0.1f],
+            [2L], [2f, 3f], [2L], [0f, 0f], 1).TrainableParams, [0.6f, 0.2f, 3f, 4f], 1e-5f);
+
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdamOptimizer.ComputationGraph,
+            [0.1f, 0.9f, 0.999f, 1e-8f], [1L], [1f], [1L], [0f], 2).TrainableParams, [0.8004123f], 2e-4f);
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, SGDMomentumOptimizer.ComputationGraph,
+            [0.1f, 0.9f], [1L], [1f], [1L], [0f], 2).TrainableParams, [0.46f], 1e-5f);
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            [0.1f, 0.9f, 0.999f, 1e-8f, 0.1f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.6737722f], 1e-4f);
+
+        // Adam bias correction: grad is large (15) yet the first step moves the weight by ≈ lr.
+        const float lr = 0.001f;
+        float[] biasIn = [1f, 2f, 3f, 4f];
+        var biasRig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], biasIn))],
+            lr, 0.9f, 0.999f, 1e-8f);
+        var biasInitial = biasRig.CreateInitialCheckpoint();
+        string biasW = biasRig.TrainableParamStructDef.Fields[0].Name;
+        float bw0 = Floats(biasInitial.TrainableParams.Fields[biasW])[0];
+        var biasStep = biasRig.TrainStep(biasInitial,
+            MakeBatch("input", "ModelInput", TensorData([4L], biasIn)),
+            MakeBatch("targets", "Target", TensorData([4L], new float[4])));
+        Assert.True(MathF.Abs((bw0 - Floats(biasStep.TrainableParams.Fields[biasW])[0]) - lr) < 5e-5f);
+        Assert.NotEmpty(biasStep.OptimizerState.Fields);
+    }
+
+    /// <summary>Per-step values for Adamax / NAdam / RAdam / Adadelta / Lion / Adafactor / LAMB on
+    /// y = w·x, w₀=1, x=[1], t=[0] ⇒ grad = 2w, all RE-DERIVED in double precision (adadelta's
+    /// design.md w₁ is 2× too large). Sharp discriminators: RAdam's step-1 UN-ADAPTED branch
+    /// (ρ_t=1 ≤ 5) lands at 0.8, Lion's 4-step w₄ = 0.0 fails any β1↔β2 swap, and LAMB's 0.81/0.729
+    /// fail a dropped trust ratio (plain Adam would give 0.8004123 at step 2). The LAMB zero-guard
+    /// (target == pred ⇒ ‖u‖ = 0) must leave w₁ = 1.0 exactly, not NaN.</summary>
+    [Fact]
+    public void TestExtendedOptimizerStepValuesAnalytic()
+    {
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdamaxOptimizer.ComputationGraph,
+            [0.1f, 0.9f, 0.999f, 1e-8f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.9f], 1e-5f);
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdamaxOptimizer.ComputationGraph,
+            [0.1f, 0.9f, 0.999f, 1e-8f], [1L], [1f], [1L], [0f], 2).TrainableParams, [0.80516833f], 1e-5f);
+
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, NAdamOptimizer.ComputationGraph,
+            [0.1f, 0.9f, 0.999f, 1e-8f, 0.004f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.89435482f], 1e-5f);
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, NAdamOptimizer.ComputationGraph,
+            [0.1f, 0.9f, 0.999f, 1e-8f, 0.004f], [1L], [1f], [1L], [0f], 2).TrainableParams, [0.81997307f], 1e-5f);
+
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, RAdamOptimizer.ComputationGraph,
+            [0.1f, 0.9f, 0.999f, 1e-8f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.8f], 1e-5f);
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, RAdamOptimizer.ComputationGraph,
+            [0.1f, 0.9f, 0.999f, 1e-8f], [1L], [1f], [1L], [0f], 2).TrainableParams, [0.62105263f], 1e-5f);
+
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdadeltaOptimizer.ComputationGraph,
+            [1.0f, 0.9f, 1e-6f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.99683773f], 1e-5f);
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdadeltaOptimizer.ComputationGraph,
+            [1.0f, 0.9f, 1e-6f], [1L], [1f], [1L], [0f], 2).TrainableParams, [0.99359817f], 1e-5f);
+
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, LionOptimizer.ComputationGraph,
+            [0.1f, 0.9f, 0.99f, 0.0f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.9f], 1e-5f);
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, LionOptimizer.ComputationGraph,
+            [0.1f, 0.9f, 0.99f, 0.0f], [1L], [1f], [1L], [0f], 2).TrainableParams, [0.8f], 1e-5f);
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, LionOptimizer.ComputationGraph,
+            [0.1f, 0.9f, 0.99f, 1.0f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.8f], 1e-5f);
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, LionOptimizer.ComputationGraph,
+            [0.5f, 0.9f, 0.99f, 0.0f], [1L], [1f], [1L], [0f], 4).TrainableParams, [0.0f], 1e-5f);
+
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdafactorOptimizer.ComputationGraph,
+            [0.01f, -0.8f, 1e-30f, 1e-3f, 1.0f, 0.0f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.99f], 1e-5f);
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdafactorOptimizer.ComputationGraph,
+            [0.01f, -0.8f, 1e-30f, 1e-3f, 1.0f, 0.0f], [1L], [1f], [1L], [0f], 2).TrainableParams, [0.98014250f], 1e-5f);
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdafactorOptimizer.ComputationGraph,
+            [0.01f, -0.8f, 1e-30f, 1e-3f, 0.5f, 0.0f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.995f], 1e-5f);
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdafactorOptimizer.ComputationGraph,
+            [0.01f, -0.8f, 1e-30f, 1e-3f, 1.0f, 0.5f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.985f], 1e-5f);
+
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, LambOptimizer.ComputationGraph,
+            [0.1f, 0.9f, 0.999f, 1e-6f, 0.0f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.9f], 1e-4f);
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, LambOptimizer.ComputationGraph,
+            [0.1f, 0.9f, 0.999f, 1e-6f, 0.0f], [1L], [1f], [1L], [0f], 2).TrainableParams, [0.81f], 1e-4f);
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, LambOptimizer.ComputationGraph,
+            [0.1f, 0.9f, 0.999f, 1e-6f, 0.0f], [1L], [1f], [1L], [0f], 3).TrainableParams, [0.729f], 1e-4f);
+
+        var zeroGuard = TrainAnalytic(AnalyticScalarWModel.ComputationGraph, LambOptimizer.ComputationGraph,
+            [0.1f, 0.9f, 0.999f, 1e-6f, 0.0f], [1L], [1f], [1L], [1f], 1).TrainableParams;
+        AssertStructIs(zeroGuard, [1.0f], 1e-6f);
+        Assert.True(float.IsFinite(Floats(zeroGuard.Fields[zeroGuard.Definition.Fields[0].Name])[0]));
+    }
+
+    /// <summary>LAMB weight decay on/off, MULTI-STEP and MULTI-ELEMENT: the 1-element vehicle hides
+    /// the WD term (trust·u = ‖w‖·sign(u) = w cancels it), so this uses AnalyticReluModel
+    /// (w₀ = [1,2,3,4], all-positive x so every relu mask is 1). With a genuine multi-element
+    /// ‖w‖/‖u‖ the single scalar trust ratio no longer cancels WD, so ‖w‖_on &lt; ‖w‖_off
+    /// (≈ 4.455 vs ≈ 4.541 at 2 steps) and every element stays finite.</summary>
+    [Fact]
+    public void TestLambWeightDecayDivergesMultiStep()
+    {
+        const int steps = 2;
+
+        var ckptOff = TrainAnalytic(AnalyticReluModel.ComputationGraph, LambOptimizer.ComputationGraph,
+            [0.1f, 0.9f, 0.999f, 1e-6f, 0.0f], [4L], [1f, 1f, 1f, 1f], [4L], [0f, 0f, 0f, 0f], steps).TrainableParams;
+        var ckptOn = TrainAnalytic(AnalyticReluModel.ComputationGraph, LambOptimizer.ComputationGraph,
+            [0.1f, 0.9f, 0.999f, 1e-6f, 0.5f], [4L], [1f, 1f, 1f, 1f], [4L], [0f, 0f, 0f, 0f], steps).TrainableParams;
+
+        string fName = ckptOff.Definition.Fields[0].Name;
+        float[] wOff = Floats(ckptOff.Fields[fName]);
+        float[] wOn = Floats(ckptOn.Fields[fName]);
+
+        Assert.Equal(4, wOff.Length);
+        Assert.All(wOff, x => Assert.True(float.IsFinite(x)));
+        Assert.All(wOn, x => Assert.True(float.IsFinite(x)));
+        Assert.True(MathF.Sqrt(wOn.Sum(x => x * x)) < MathF.Sqrt(wOff.Sum(x => x * x)));
+    }
+
+    /// <summary>Schedules.Linear(0.2, 0.1, 1) applies lr(0) at the FIRST step and lr(1) at the second
+    /// (w₀=1, t=3 ⇒ w₂ = 2.04; both off-by-one variants give 2.28 / 2.072); training-mode BatchNorm2d
+    /// follows the documented ONNX EMA with BIASED variance ([0.25, 1.025] for batch [1,2,3,4] at
+    /// momentum 0.9, isolated with lr=0); and ToConcreteModel binds W/b by ToShorokooIdString name so
+    /// the library Linear gives exactly x·Wᵀ + b = [13, 27].</summary>
+    [Fact]
+    public void TestScheduleBatchNormStateAndWeightBindingAnalytic()
+    {
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [Schedules.Linear(0.2f, 0.1f, 1)], [1L], [1f], [1L], [3f], 2).TrainableParams, [2.04f], 1e-5f);
+        AssertStructIs(TrainAnalytic(AnalyticBatchNormModel.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [0f], [1L, 1L, 2L, 2L], [1f, 2f, 3f, 4f], [1L, 1L, 2L, 2L], [0f, 0f, 0f, 0f], 1).ModelState,
+            [0.25f, 1.025f], 1e-4f);
+
+        var g = AnalyticBindLinearModel.ComputationGraph;
+        var x = TensorData([1L, 2L], 1f, 1f);
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x]));
+        var infos = arch.GetConcreteModelParamInfos().ParamInfos;
+        Assert.Equal(2, infos.Length);
+        var weights = new ModelParamList(
+            [
+                Tuple.Create(infos[0].ToShorokooIdString(), (TensorData)TensorData([2L, 2L], 1f, 2f, 3f, 4f)),
+                Tuple.Create(infos[1].ToShorokooIdString(), (TensorData)TensorData([2L], 10f, 20f)),
+            ],
+            ModelParamType.TrainableParam);
+        var y = new ComputeContext().Execute(arch.ToConcreteModel(weights), x)[0]
+            .ToTensorData().As<float32>().AccessMemory<float>().ToArray();
+        Assert.Equal(2, y.Length);
+        Assert.True(MathF.Abs(y[0] - 13f) < 1e-5f && MathF.Abs(y[1] - 27f) < 1e-5f);
+    }
+}
+
+/// <summary>
+/// Layer trainability through the rig: Bilinear / Embedding / EmbeddingBag / triplet + cosine
+/// embeddings, the generalized Convolution.Conv corner and the configurable CrossEntropy variants.
+/// </summary>
+[Trait("Domain", "Training")]
+[Trait("Purpose", "Coverage")]
+public class NNLibraryLayerTrainingCoverageTests
+{
+    /// <summary>One TrainStep of <paramref name="model"/> + <paramref name="loss"/> +
+    /// <paramref name="optimizer"/> on a fixed batch: finite loss, threaded optimizer state (when the
+    /// optimizer has any), and the first rank-<paramref name="paramRank"/> trainable param moved.</summary>
+    private static void AssertTrainStepMovesParam(
+        ComputationGraph model, ComputationGraph loss, ComputationGraph optimizer,
+        (string name, long[] shape, float[] data)[] inputs, long[] targetShape,
+        int paramRank, bool statefulOptimizer, Hyperparameter[] hypers)
+    {
+        NamedModelParam[] sample =
+            [.. inputs.Select(i => new TensorDataModelParam(
+                i.name, ModelParamType.InputParam, TensorData(i.shape, i.data)))];
+        var rig = TrainingRig.FromScratch(model, loss, optimizer, sample, hypers);
+
+        var initial = rig.CreateInitialCheckpoint();
+        Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
+
+        string? wName = null;
+        foreach (var f in rig.TrainableParamStructDef.Fields)
+            if (initial.TrainableParams.Fields[f.Name] is TensorData td && td.Shape.Dims.Length == paramRank)
+            { wName = f.Name; break; }
+        Assert.NotNull(wName);
+        float[] w0 = Floats(initial.TrainableParams.Fields[wName]);
+        Assert.True(w0.Length >= 2);
+
+        long targetTotal = 1;
+        foreach (var d in targetShape) targetTotal *= d;
+        var step = rig.TrainStep(initial,
+            MakeStruct("ModelInput",
+                [.. inputs.Select(i => (i.name, (TensorData)TensorData(i.shape, i.data)))]),
+            MakeBatch("targets", "Target", TensorData(targetShape, new float[targetTotal])));
+        float[] w1 = Floats(step.TrainableParams.Fields[wName]);
+
+        Assert.True(float.IsFinite(step.Loss!.Value));
+        if (statefulOptimizer) Assert.NotEmpty(step.OptimizerState.Fields);
+        Assert.True(w0.Zip(w1).Any(p => MathF.Abs(p.First - p.Second) > 1e-7f));
+    }
+
     private static void AssertTinyConvRigTrainStepFlows(ComputationGraph modelGraph, ComputationGraph lossGraph)
     {
         var (inputData, targetData) = MakeTinyConvBatch();
@@ -867,6 +1051,44 @@ public class NNLibraryTrainingCoverageTests
         Assert.True(AnyParamMoved(rig, initial, step));
     }
 
+    /// <summary>Layer trainability: the rank-3 Bilinear A (the first module-level Einsum-autodiff
+    /// exercise), the paddingIdx-masked Embedding table, the EmbeddingBag Gather+Reduce table, and
+    /// the shared Linear embeddings behind the triplet-margin and cosine-embedding losses (the
+    /// "loss-is-the-model-tail" recipe) each move under one TrainStep.</summary>
+    [Fact]
+    public void TestLayerRigTrainStepsMoveWeights()
+    {
+        Hyperparameter[] adam = [0.01f, 0.9f, 0.999f, 1e-8f];
+
+        AssertTrainStepMovesParam(
+            BilinearRigModel.ComputationGraph, L2Loss.ComputationGraph, AdamOptimizer.ComputationGraph,
+            [("x1", [2L, 3L], [0.5f, -1f, 0.25f, 1f, -0.5f, 0.75f]),
+             ("x2", [2L, 4L], [0.3f, -0.5f, 0.2f, -0.1f, 0.4f, 0.6f, -0.2f, 0.8f])],
+            [2L], 3, true, adam);
+
+        AssertTrainStepMovesParam(
+            EmbeddingPaddingRigModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [("x", [3L], [0.5f, -1f, 0.25f])], [3L], 2, false, [0.1f]);
+
+        AssertTrainStepMovesParam(
+            EmbeddingBagRigModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [("x", [2L], [0.5f, -1f])], [2L], 2, false, [0.1f]);
+
+        // [3N, D] = [6, 2]: rows 0-1 anchor, 2-3 positive (near), 4-5 negative (far).
+        AssertTrainStepMovesParam(
+            NNTripletEmbeddingRigModel.ComputationGraph, NNIdentityScalarLoss.ComputationGraph,
+            AdamOptimizer.ComputationGraph,
+            [("x", [6L, 2L], [0.5f, 1.0f, -0.5f, -1.0f, 0.6f, 1.1f, -0.4f, -0.9f, 2.0f, -2.0f, 2.5f, 3.0f])],
+            [1L], 2, true, adam);
+
+        // [2N, D] = [4, 2]: rows 0-1 are x1, rows 2-3 are x2.
+        AssertTrainStepMovesParam(
+            NNCosineEmbeddingRigModel.ComputationGraph, NNIdentityScalarLoss.ComputationGraph,
+            AdamOptimizer.ComputationGraph,
+            [("x", [4L, 2L], [0.5f, 1.0f, -0.5f, -1.0f, 0.6f, 1.1f, -0.4f, -0.9f])],
+            [1L], 2, true, adam);
+    }
+
     /// <summary>The generalized Convolution.Conv differentiable corner (groups:1, explicit pads,
     /// Zeros mode) trains, and the configurable CrossEntropy variants — baked
     /// <c>ignoreIndex:7 + reduction:Sum</c> and a baked-constant class <c>weight=[2,1]</c> — still
@@ -878,15 +1100,22 @@ public class NNLibraryTrainingCoverageTests
         AssertTinyConvRigTrainStepFlows(NNTinyConvClassifier.ComputationGraph, NNCrossEntropyIgnoreSumLoss.ComputationGraph);
         AssertTinyConvRigTrainStepFlows(NNTinyConvClassifier.ComputationGraph, NNCrossEntropyBakedWeightLoss.ComputationGraph);
     }
+}
 
-    // -----------------------------------------------------------------------
-    //  Generalized rank-generic BatchNorm coverage. Every BatchNorm graph carries StateUpdate
-    //  links, so ALL of these run through the rig (not AutoTest) — even the "pure" eval
-    //  closed-form checks. Closed-form / alias-equivalence models output (y − reference); a zero
-    //  target makes the L2 loss the mean squared elementwise deviation, so loss ≈ 0 pins exact
-    //  per-element equality.
-    // -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
+//  Generalized rank-generic BatchNorm coverage. Every BatchNorm graph carries StateUpdate
+//  links, so ALL of these run through the rig (not AutoTest) — even the "pure" eval
+//  closed-form checks. Closed-form / alias-equivalence models output (y − reference); a zero
+//  target makes the L2 loss the mean squared elementwise deviation, so loss ≈ 0 pins exact
+//  per-element equality.
+// -----------------------------------------------------------------------
 
+/// <summary>BatchNorm eval-path closed forms and aliases, plus the affine on/off param-count gate
+/// shared with InstanceNorm and GroupNorm.</summary>
+[Trait("Domain", "Training")]
+[Trait("Purpose", "Coverage")]
+public class NNLibraryBatchNormEvalTrainingCoverageTests
+{
     /// <summary>One L2 + SGD TrainStep of a residual model against a zero target; the returned
     /// checkpoint's Loss is the mean squared deviation from the model's reference.</summary>
     private static TrainingCheckpoint RunResidualStep(
@@ -902,10 +1131,6 @@ public class NNLibraryTrainingCoverageTests
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", targetData));
     }
-
-    /// <summary>[i * scale + offset for i in 0..total).</summary>
-    private static float[] Ramp(long total, float scale = 1f, float offset = 0f)
-        => Enumerable.Range(0, (int)total).Select(i => i * scale + offset).ToArray();
 
     private static int TrainableFieldCount(ComputationGraph modelGraph, TensorData inputData)
         => TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
@@ -996,7 +1221,14 @@ public class NNLibraryTrainingCoverageTests
         Assert.Equal(1, TrainableFieldCount(NNGroupNormAffineFalseParamModel.ComputationGraph, normInput));
         Assert.Equal(3, TrainableFieldCount(NNGroupNormAffineTrueParamModel.ComputationGraph, normInput));
     }
+}
 
+/// <summary>BatchNorm train-path normalization, EMA running stats and track/selection, plus the
+/// Dropout-family gradient-flow paths.</summary>
+[Trait("Domain", "Training")]
+[Trait("Purpose", "Coverage")]
+public class NNLibraryBatchNormTrainAndDropoutCoverageTests
+{
     /// <summary>One train step: the per-channel-mean output is ~0 (loss ~0 vs zero targets) and
     /// every ModelState field moves.</summary>
     private static void AssertTrainNormalizesAndMovesState(
@@ -1225,186 +1457,13 @@ public class NNLibraryTrainingCoverageTests
         AssertDropoutTrainStepMoves(NNAlphaDropoutTrainGradModel.ComputationGraph, [1L, 2L, 2L]);
         AssertDropoutTrainStepMoves(NNFeatureAlphaDropoutTrainGradModel.ComputationGraph, [1L, 2L, 2L]);
     }
+}
 
-    // -----------------------------------------------------------------------
-    //  Analytic value checks. Every expectation is hand-computed from the fixtures' constant
-    //  initializers; gradients are inferred through real TrainStep execution (SGD:
-    //  w' = w − lr·grad, L2Loss = mean over ALL output elements so dL/dyᵢ = 2(yᵢ−tᵢ)/N).
-    // -----------------------------------------------------------------------
-
-    /// <summary>Autodiff gradient values (reverse-broadcast sum-reduction, Relu masking, MatMul's
-    /// xᵀ·gUp, gradient ACCUMULATION when a param is consumed twice, routing through
-    /// Reshape→Transpose→Reshape, and Slice) plus the core optimizer step values on y = w·x, w₀=1,
-    /// x=[1], t=[0] ⇒ grad = 2w: Adam's bias-correction timestep, SGD-momentum's velocity carry,
-    /// AdamW's decoupled-decay-then-uncorrected step, and Adam's first step being ≈ lr regardless of
-    /// the gradient magnitude (uncorrected it would be ≈ 3.16·lr).</summary>
-    [Fact]
-    public void TestAutodiffGradientAndCoreOptimizerValuesAnalytic()
-    {
-        // w=0.5, x=[1,2,3,4], t=0: dL/dyᵢ=yᵢ/2 → grad_w = Σ(yᵢ/2)·xᵢ = 7.5 → w' = 0.5 − 0.1·7.5
-        AssertStructIs(TrainAnalytic(AnalyticBroadcastMulModel.ComputationGraph, SGDOptimizer.ComputationGraph, [0.1f],
-            [4L], [1f, 2f, 3f, 4f], [4L], [0f, 0f, 0f, 0f], 1).TrainableParams, [-0.25f], 1e-5f);
-        // b=0.5: y=[1.5,2.5,3.5,4.5] → grad_b = Σ yᵢ/2 = 6 → b' = 0.5 − 0.6
-        AssertStructIs(TrainAnalytic(AnalyticBroadcastAddModel.ComputationGraph, SGDOptimizer.ComputationGraph, [0.1f],
-            [4L], [1f, 2f, 3f, 4f], [4L], [0f, 0f, 0f, 0f], 1).TrainableParams, [-0.1f], 1e-5f);
-        // w=[1,2,3,4], x=[1,−1,1,−1]: pre=[1,−2,3,−4], mask=[1,0,1,0] → grad=[0.5,0,1.5,0], lr=1
-        AssertStructIs(TrainAnalytic(AnalyticReluModel.ComputationGraph, SGDOptimizer.ComputationGraph, [1f],
-            [4L], [1f, -1f, 1f, -1f], [4L], [0f, 0f, 0f, 0f], 1).TrainableParams, [0.5f, 2f, 1.5f, 4f], 1e-5f);
-        // x=[[1,2],[3,4]], W=[[1,2],[3,4]]: y=[[7,10],[15,22]], grad_W = xᵀ·(y/2) = [[26,38],[37,54]], lr=0.01
-        AssertStructIs(TrainAnalytic(AnalyticMatMulModel.ComputationGraph, SGDOptimizer.ComputationGraph, [0.01f],
-            [2L, 2L], [1f, 2f, 3f, 4f], [2L, 2L], [0f, 0f, 0f, 0f], 1).TrainableParams, [0.74f, 1.62f, 2.63f, 3.46f], 1e-5f);
-        // w=0.5 used TWICE (w·x + w): grad_w = Σ(yᵢ/2)·(xᵢ+1) = 13.5 → w' = 0.5 − 1.35
-        // (mul-path-only would give −0.5; add-path-only +0.15 — accumulation is pinned exactly)
-        AssertStructIs(TrainAnalytic(AnalyticDoubleUseModel.ComputationGraph, SGDOptimizer.ComputationGraph, [0.1f],
-            [4L], [1f, 2f, 3f, 4f], [4L], [0f, 0f, 0f, 0f], 1).TrainableParams, [-0.85f], 1e-5f);
-        // w=[1,2,3,4] permuted to [w0,w2,w1,w3], x=[1,2,4,8]: dL/dwp=[0.5,6,16,128] routes back
-        // through the inverse permutation → grad_w=[0.5,16,6,128], lr=0.01
-        AssertStructIs(TrainAnalytic(AnalyticPermuteModel.ComputationGraph, SGDOptimizer.ComputationGraph, [0.01f],
-            [4L], [1f, 2f, 4f, 8f], [4L], [0f, 0f, 0f, 0f], 1).TrainableParams, [0.995f, 1.84f, 2.94f, 2.72f], 1e-5f);
-        // y = w[0:2]·x, x=[2,3]: grad = [y₀·x₀, y₁·x₁, 0, 0] = [4,18,0,0] → w'=[0.6,0.2,3,4], lr=0.1
-        AssertStructIs(TrainAnalytic(AnalyticSliceParamModel.ComputationGraph, SGDOptimizer.ComputationGraph, [0.1f],
-            [2L], [2f, 3f], [2L], [0f, 0f], 1).TrainableParams, [0.6f, 0.2f, 3f, 4f], 1e-5f);
-
-        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdamOptimizer.ComputationGraph,
-            [0.1f, 0.9f, 0.999f, 1e-8f], [1L], [1f], [1L], [0f], 2).TrainableParams, [0.8004123f], 2e-4f);
-        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, SGDMomentumOptimizer.ComputationGraph,
-            [0.1f, 0.9f], [1L], [1f], [1L], [0f], 2).TrainableParams, [0.46f], 1e-5f);
-        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdamWOptimizer.ComputationGraph,
-            [0.1f, 0.9f, 0.999f, 1e-8f, 0.1f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.6737722f], 1e-4f);
-
-        // Adam bias correction: grad is large (15) yet the first step moves the weight by ≈ lr.
-        const float lr = 0.001f;
-        float[] biasIn = [1f, 2f, 3f, 4f];
-        var biasRig = TrainingRig.FromScratch(
-            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamOptimizer.ComputationGraph,
-            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], biasIn))],
-            lr, 0.9f, 0.999f, 1e-8f);
-        var biasInitial = biasRig.CreateInitialCheckpoint();
-        string biasW = biasRig.TrainableParamStructDef.Fields[0].Name;
-        float bw0 = Floats(biasInitial.TrainableParams.Fields[biasW])[0];
-        var biasStep = biasRig.TrainStep(biasInitial,
-            MakeBatch("input", "ModelInput", TensorData([4L], biasIn)),
-            MakeBatch("targets", "Target", TensorData([4L], new float[4])));
-        Assert.True(MathF.Abs((bw0 - Floats(biasStep.TrainableParams.Fields[biasW])[0]) - lr) < 5e-5f);
-        Assert.NotEmpty(biasStep.OptimizerState.Fields);
-    }
-
-    /// <summary>Per-step values for Adamax / NAdam / RAdam / Adadelta / Lion / Adafactor / LAMB on
-    /// y = w·x, w₀=1, x=[1], t=[0] ⇒ grad = 2w, all RE-DERIVED in double precision (adadelta's
-    /// design.md w₁ is 2× too large). Sharp discriminators: RAdam's step-1 UN-ADAPTED branch
-    /// (ρ_t=1 ≤ 5) lands at 0.8, Lion's 4-step w₄ = 0.0 fails any β1↔β2 swap, and LAMB's 0.81/0.729
-    /// fail a dropped trust ratio (plain Adam would give 0.8004123 at step 2). The LAMB zero-guard
-    /// (target == pred ⇒ ‖u‖ = 0) must leave w₁ = 1.0 exactly, not NaN.</summary>
-    [Fact]
-    public void TestExtendedOptimizerStepValuesAnalytic()
-    {
-        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdamaxOptimizer.ComputationGraph,
-            [0.1f, 0.9f, 0.999f, 1e-8f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.9f], 1e-5f);
-        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdamaxOptimizer.ComputationGraph,
-            [0.1f, 0.9f, 0.999f, 1e-8f], [1L], [1f], [1L], [0f], 2).TrainableParams, [0.80516833f], 1e-5f);
-
-        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, NAdamOptimizer.ComputationGraph,
-            [0.1f, 0.9f, 0.999f, 1e-8f, 0.004f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.89435482f], 1e-5f);
-        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, NAdamOptimizer.ComputationGraph,
-            [0.1f, 0.9f, 0.999f, 1e-8f, 0.004f], [1L], [1f], [1L], [0f], 2).TrainableParams, [0.81997307f], 1e-5f);
-
-        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, RAdamOptimizer.ComputationGraph,
-            [0.1f, 0.9f, 0.999f, 1e-8f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.8f], 1e-5f);
-        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, RAdamOptimizer.ComputationGraph,
-            [0.1f, 0.9f, 0.999f, 1e-8f], [1L], [1f], [1L], [0f], 2).TrainableParams, [0.62105263f], 1e-5f);
-
-        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdadeltaOptimizer.ComputationGraph,
-            [1.0f, 0.9f, 1e-6f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.99683773f], 1e-5f);
-        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdadeltaOptimizer.ComputationGraph,
-            [1.0f, 0.9f, 1e-6f], [1L], [1f], [1L], [0f], 2).TrainableParams, [0.99359817f], 1e-5f);
-
-        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, LionOptimizer.ComputationGraph,
-            [0.1f, 0.9f, 0.99f, 0.0f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.9f], 1e-5f);
-        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, LionOptimizer.ComputationGraph,
-            [0.1f, 0.9f, 0.99f, 0.0f], [1L], [1f], [1L], [0f], 2).TrainableParams, [0.8f], 1e-5f);
-        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, LionOptimizer.ComputationGraph,
-            [0.1f, 0.9f, 0.99f, 1.0f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.8f], 1e-5f);
-        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, LionOptimizer.ComputationGraph,
-            [0.5f, 0.9f, 0.99f, 0.0f], [1L], [1f], [1L], [0f], 4).TrainableParams, [0.0f], 1e-5f);
-
-        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdafactorOptimizer.ComputationGraph,
-            [0.01f, -0.8f, 1e-30f, 1e-3f, 1.0f, 0.0f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.99f], 1e-5f);
-        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdafactorOptimizer.ComputationGraph,
-            [0.01f, -0.8f, 1e-30f, 1e-3f, 1.0f, 0.0f], [1L], [1f], [1L], [0f], 2).TrainableParams, [0.98014250f], 1e-5f);
-        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdafactorOptimizer.ComputationGraph,
-            [0.01f, -0.8f, 1e-30f, 1e-3f, 0.5f, 0.0f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.995f], 1e-5f);
-        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdafactorOptimizer.ComputationGraph,
-            [0.01f, -0.8f, 1e-30f, 1e-3f, 1.0f, 0.5f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.985f], 1e-5f);
-
-        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, LambOptimizer.ComputationGraph,
-            [0.1f, 0.9f, 0.999f, 1e-6f, 0.0f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.9f], 1e-4f);
-        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, LambOptimizer.ComputationGraph,
-            [0.1f, 0.9f, 0.999f, 1e-6f, 0.0f], [1L], [1f], [1L], [0f], 2).TrainableParams, [0.81f], 1e-4f);
-        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, LambOptimizer.ComputationGraph,
-            [0.1f, 0.9f, 0.999f, 1e-6f, 0.0f], [1L], [1f], [1L], [0f], 3).TrainableParams, [0.729f], 1e-4f);
-
-        var zeroGuard = TrainAnalytic(AnalyticScalarWModel.ComputationGraph, LambOptimizer.ComputationGraph,
-            [0.1f, 0.9f, 0.999f, 1e-6f, 0.0f], [1L], [1f], [1L], [1f], 1).TrainableParams;
-        AssertStructIs(zeroGuard, [1.0f], 1e-6f);
-        Assert.True(float.IsFinite(Floats(zeroGuard.Fields[zeroGuard.Definition.Fields[0].Name])[0]));
-    }
-
-    /// <summary>LAMB weight decay on/off, MULTI-STEP and MULTI-ELEMENT: the 1-element vehicle hides
-    /// the WD term (trust·u = ‖w‖·sign(u) = w cancels it), so this uses AnalyticReluModel
-    /// (w₀ = [1,2,3,4], all-positive x so every relu mask is 1). With a genuine multi-element
-    /// ‖w‖/‖u‖ the single scalar trust ratio no longer cancels WD, so ‖w‖_on &lt; ‖w‖_off
-    /// (≈ 4.455 vs ≈ 4.541 at 2 steps) and every element stays finite.</summary>
-    [Fact]
-    public void TestLambWeightDecayDivergesMultiStep()
-    {
-        const int steps = 2;
-
-        var ckptOff = TrainAnalytic(AnalyticReluModel.ComputationGraph, LambOptimizer.ComputationGraph,
-            [0.1f, 0.9f, 0.999f, 1e-6f, 0.0f], [4L], [1f, 1f, 1f, 1f], [4L], [0f, 0f, 0f, 0f], steps).TrainableParams;
-        var ckptOn = TrainAnalytic(AnalyticReluModel.ComputationGraph, LambOptimizer.ComputationGraph,
-            [0.1f, 0.9f, 0.999f, 1e-6f, 0.5f], [4L], [1f, 1f, 1f, 1f], [4L], [0f, 0f, 0f, 0f], steps).TrainableParams;
-
-        string fName = ckptOff.Definition.Fields[0].Name;
-        float[] wOff = Floats(ckptOff.Fields[fName]);
-        float[] wOn = Floats(ckptOn.Fields[fName]);
-
-        Assert.Equal(4, wOff.Length);
-        Assert.All(wOff, x => Assert.True(float.IsFinite(x)));
-        Assert.All(wOn, x => Assert.True(float.IsFinite(x)));
-        Assert.True(MathF.Sqrt(wOn.Sum(x => x * x)) < MathF.Sqrt(wOff.Sum(x => x * x)));
-    }
-
-    /// <summary>Schedules.Linear(0.2, 0.1, 1) applies lr(0) at the FIRST step and lr(1) at the second
-    /// (w₀=1, t=3 ⇒ w₂ = 2.04; both off-by-one variants give 2.28 / 2.072); training-mode BatchNorm2d
-    /// follows the documented ONNX EMA with BIASED variance ([0.25, 1.025] for batch [1,2,3,4] at
-    /// momentum 0.9, isolated with lr=0); and ToConcreteModel binds W/b by ToShorokooIdString name so
-    /// the library Linear gives exactly x·Wᵀ + b = [13, 27].</summary>
-    [Fact]
-    public void TestScheduleBatchNormStateAndWeightBindingAnalytic()
-    {
-        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, SGDOptimizer.ComputationGraph,
-            [Schedules.Linear(0.2f, 0.1f, 1)], [1L], [1f], [1L], [3f], 2).TrainableParams, [2.04f], 1e-5f);
-        AssertStructIs(TrainAnalytic(AnalyticBatchNormModel.ComputationGraph, SGDOptimizer.ComputationGraph,
-            [0f], [1L, 1L, 2L, 2L], [1f, 2f, 3f, 4f], [1L, 1L, 2L, 2L], [0f, 0f, 0f, 0f], 1).ModelState,
-            [0.25f, 1.025f], 1e-4f);
-
-        var g = AnalyticBindLinearModel.ComputationGraph;
-        var x = TensorData([1L, 2L], 1f, 1f);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x]));
-        var infos = arch.GetConcreteModelParamInfos().ParamInfos;
-        Assert.Equal(2, infos.Length);
-        var weights = new ModelParamList(
-            [
-                Tuple.Create(infos[0].ToShorokooIdString(), (TensorData)TensorData([2L, 2L], 1f, 2f, 3f, 4f)),
-                Tuple.Create(infos[1].ToShorokooIdString(), (TensorData)TensorData([2L], 10f, 20f)),
-            ],
-            ModelParamType.TrainableParam);
-        var y = new ComputeContext().Execute(arch.ToConcreteModel(weights), x)[0]
-            .ToTensorData().As<float32>().AccessMemory<float>().ToArray();
-        Assert.Equal(2, y.Length);
-        Assert.True(MathF.Abs(y[0] - 13f) < 1e-5f && MathF.Abs(y[1] - 27f) < 1e-5f);
-    }
-
+/// <summary>Recurrent forward goldens, the BPTT-unsupported guards and recurrent rig trainability.</summary>
+[Trait("Domain", "Training")]
+[Trait("Purpose", "Coverage")]
+public class NNLibraryRecurrentTrainingCoverageTests
+{
     private static TensorData ProbeScalar() => TensorData(DType.Float32, [], 0.3f);
 
     /// <summary>Frozen forward goldens over a probed-scalar sequence for Recurrent.RNN / LSTM / GRU

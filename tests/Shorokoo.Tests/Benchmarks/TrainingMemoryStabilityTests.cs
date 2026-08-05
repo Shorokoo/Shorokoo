@@ -68,9 +68,9 @@ public class TrainingMemoryStabilityTests
             new AdamOptimizerHyperparameters { LearningRate = 1e-3f });
 
         var inputBatch = rig.InputDef.FromOrderedData(
-            TensorData(InputShape, new float[] { 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f }));
+            TensorData(InputShape, (float[])[1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f]));
         var targetBatch = rig.TargetDef.FromOrderedData(
-            TensorData(TargetShape, new float[] { 1f, 0f, 1f, 0f }));
+            TensorData(TargetShape, (float[])[1f, 0f, 1f, 0f]));
 
         var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < WarmupSteps; i++)

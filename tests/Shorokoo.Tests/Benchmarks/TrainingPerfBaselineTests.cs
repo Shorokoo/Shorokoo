@@ -156,8 +156,8 @@ public class TrainingPerfBaselineTests
             baseGraph.FromOrderedInputs([exampleInput]),
             new AdamOptimizerHyperparameters { LearningRate = 1e-3f });
 
-        var inputBatch = rig.InputDef.FromOrderedData(TensorData(InputShape, new float[] { 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f }));
-        var targetBatch = rig.TargetDef.FromOrderedData(TensorData(TargetShape, new float[] { 1f, 0f, 1f, 0f }));
+        var inputBatch = rig.InputDef.FromOrderedData(TensorData(InputShape, (float[])[1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f]));
+        var targetBatch = rig.TargetDef.FromOrderedData(TensorData(TargetShape, (float[])[1f, 0f, 1f, 0f]));
 
         var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < ThroughputWarmupSteps; i++)
@@ -181,7 +181,8 @@ public class TrainingPerfBaselineTests
     private static PerfMeasurement LoadBaseline()
     {
         var path = BaselineOutputPath;
-        Assert.True(File.Exists(path), $"perf baseline not found at {path} — record it with SHOROKOO_UPDATE_PERF_BASELINE=1.");
+        // Absent baseline: re-record it with SHOROKOO_UPDATE_PERF_BASELINE=1.
+        Assert.True(File.Exists(path));
         var json = File.ReadAllText(path);
         var baseline = JsonConvert.DeserializeObject<PerfMeasurement>(json);
         Assert.NotNull(baseline);

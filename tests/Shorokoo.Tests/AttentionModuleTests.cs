@@ -2,6 +2,8 @@ using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
 using Shorokoo.Runtime;
 
+using static Shorokoo.Tests.TransformerTrainingFixtures;
+
 namespace Shorokoo.Tests;
 
 /// <summary>
@@ -67,18 +69,44 @@ public class AttentionModuleTests
     }
 }
 
+internal static class TransformerTrainingFixtures
+{
+    internal static readonly TensorStructFieldDef[] TargetFields =
+        [new TensorStructFieldDef("targets", DataStructure.Tensor, 2, DType.Float32)];
+
+    internal static float[] Floats(int count, float seed)
+    {
+        var vals = new float[count];
+        for (var i = 0; i < count; i++)
+            vals[i] = seed * (((i * 7) % 11) - 5);
+        return vals;
+    }
+
+    internal static bool AnyFieldChanged(TensorDataStruct before, TensorDataStruct after)
+    {
+        foreach (var f in before.Definition.Fields)
+        {
+            if (after.Fields[f.Name] is not TensorData a || before.Fields[f.Name] is not TensorData b)
+                continue;
+            var av = a.As<float32>().AccessMemory<float>().ToArray();
+            var bv = b.As<float32>().AccessMemory<float>().ToArray();
+            for (var i = 0; i < av.Length && i < bv.Length; i++)
+                if (MathF.Abs(av[i] - bv[i]) > 1e-7f)
+                    return true;
+        }
+        return false;
+    }
+}
+
 /// <summary>
-/// Training-rig smoke coverage for the Transformer encoder / decoder layers: a tiny
-/// mean-pooling model is driven through <see cref="TrainingRig.FromScratch"/> +
-/// <c>CreateInitialCheckpoint</c> + one <see cref="TrainingRig.TrainStep"/>.
+/// Training-rig smoke coverage for the Transformer encoder layer: a tiny mean-pooling model is
+/// driven through <see cref="TrainingRig.FromScratch"/> + <c>CreateInitialCheckpoint</c> + one
+/// <see cref="TrainingRig.TrainStep"/>.
 /// </summary>
 [Trait("Domain", "Training")]
 [Trait("Purpose", "Coverage")]
-public class AttentionTrainingCoverageTests
+public class TransformerEncoderTrainingCoverageTests
 {
-    private static readonly TensorStructFieldDef[] TargetFields =
-        [new TensorStructFieldDef("targets", DataStructure.Tensor, 2, DType.Float32)];
-
     [Fact]
     public void TestTransformerEncoderLayerTrainStepCoverage()
     {
@@ -115,7 +143,17 @@ public class AttentionTrainingCoverageTests
         Assert.NotEmpty(encoderStep.TrainableParams.Fields);
         Assert.True(AnyFieldChanged(encoderInitial.TrainableParams, encoderStep.TrainableParams));
     }
+}
 
+/// <summary>
+/// Training-rig smoke coverage for the Transformer decoder layer: a tiny mean-pooling model is
+/// driven through <see cref="TrainingRig.FromScratch"/> + <c>CreateInitialCheckpoint</c> + one
+/// <see cref="TrainingRig.TrainStep"/>.
+/// </summary>
+[Trait("Domain", "Training")]
+[Trait("Purpose", "Coverage")]
+public class TransformerDecoderTrainingCoverageTests
+{
     [Fact]
     public void TestTransformerDecoderLayerTrainStepCoverage()
     {
@@ -160,28 +198,5 @@ public class AttentionTrainingCoverageTests
         Assert.True(float.IsFinite(decoderStep.Loss!.Value));
         Assert.NotEmpty(decoderStep.TrainableParams.Fields);
         Assert.True(AnyFieldChanged(decoderInitial.TrainableParams, decoderStep.TrainableParams));
-    }
-
-    private static float[] Floats(int count, float seed)
-    {
-        var vals = new float[count];
-        for (var i = 0; i < count; i++)
-            vals[i] = seed * (((i * 7) % 11) - 5);
-        return vals;
-    }
-
-    private static bool AnyFieldChanged(TensorDataStruct before, TensorDataStruct after)
-    {
-        foreach (var f in before.Definition.Fields)
-        {
-            if (after.Fields[f.Name] is not TensorData a || before.Fields[f.Name] is not TensorData b)
-                continue;
-            var av = a.As<float32>().AccessMemory<float>().ToArray();
-            var bv = b.As<float32>().AccessMemory<float>().ToArray();
-            for (var i = 0; i < av.Length && i < bv.Length; i++)
-                if (MathF.Abs(av[i] - bv[i]) > 1e-7f)
-                    return true;
-        }
-        return false;
     }
 }

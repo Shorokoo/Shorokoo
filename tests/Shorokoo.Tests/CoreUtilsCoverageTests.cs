@@ -18,6 +18,18 @@ namespace Shorokoo.Tests;
 [Trait("Purpose", "Coverage")]
 public class CoreUtilsCoverageTests
 {
+    private static InternalComputationGraph BoolGraph(IValue only) => new([], [only.ToVariable()]);
+
+    [Fact]
+    public void TestSelfCheckingGraphConventionRejectsAFalseBitAtAnyRank()
+    {
+        Assert.True(AutoTest.TestGraph(BoolGraph(Scalar(true))));
+        Assert.False(AutoTest.TestGraph(BoolGraph(Scalar(false))));
+        Assert.True(AutoTest.TestGraph(BoolGraph(Vector(true))));
+        Assert.False(AutoTest.TestGraph(BoolGraph(Vector(false))));
+        Assert.False(AutoTest.TestGraph(BoolGraph(Vector(true, false))));
+    }
+
     [Fact]
     public void TestExtensionsCoverage()
     {

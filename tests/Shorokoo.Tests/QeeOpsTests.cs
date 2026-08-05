@@ -590,6 +590,41 @@ public class QeeIntegerWidthTests
         Assert.Equal(1e300, wideTd.As<float64>().AccessMemory().ToArray()[0]);
     }
 
+    // QEE may decline to fold (no data — the backend computes it instead); it must never fold wrong.
+    private static void Qee<TModule>(DType dtype, params ulong[] expected)
+    {
+        var g = ((ComputationGraph)typeof(TModule)
+            .GetProperty("ComputationGraph", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!).ToInternal();
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([])).ToConcreteModel();
+        var rt = new QuickExecutionEngine().Run(concrete)[concrete.Outputs[0]];
+        Assert.Equal(dtype, rt.DType);
+        if (rt is RuntimeTensor { IntData: { } d })
+            Assert.Equal(expected, d.Select(v => unchecked((ulong)v)));
+    }
+
+    [Fact]
+    public void TestUInt32OpsWrapAtTheWidthBoundary()
+    {
+        Qee<QeeU32Add>(DType.UInt32, 0, 1, 2147483650, 4294967294, 1);
+        Qee<QeeU32Sub>(DType.UInt32, 4294967295, 4294967294, 4294967295, 0);
+        Qee<QeeU32Mul>(DType.UInt32, 0, 4294967294, 0, 1);
+        Qee<QeeU32Shift>(DType.UInt32, 2147483648, 65536, 4294967294, 65535, 1, 0);
+    }
+
+    [Fact]
+    public void TestUInt64OpsWrapAboveLongMaxValue()
+    {
+        Qee<QeeU64Add>(DType.UInt64, 0, 1, 9223372036854775808, 18446744073709551614);
+        Qee<QeeU64Sub>(DType.UInt64, 18446744073709551615, 18446744073709551614, 9223372036854775809, 0);
+        Qee<QeeU64Mul>(DType.UInt64, 0, 18446744073709551614, 0, 1);
+        Qee<QeeU64Shift>(DType.UInt64, 9223372036854775808, 4294967296, 4294967295, 1);
+        Qee<QeeU64Bitwise>(DType.UInt64,
+            9223372036854775808, 9223372036854775808, 4294967295,
+            9223372036854775807, 0, 18446744069414584320,
+            18446744073709551615, 9223372036854775808, 18446744073709551615);
+        Qee<QeeU64Cast>(DType.UInt64, 4294967295, 0, 7);
+    }
+
     [Fact]
     public void TestPartiallyFoldedUInt32ChainMatchesTheHostGenerator()
     {
@@ -668,6 +703,35 @@ public partial class QeeUInt64SignedDivide
     }
 }
 
+/// <summary>A uint64 modulo whose operands are constants, forced through host constant folding the
+/// same way as <see cref="QeeUInt64SignedDivide"/>. Both dividends are above long.MaxValue.</summary>
+[Module]
+public partial class QeeUInt64SignedModulo
+{
+    public static Tensor<uint64> Inline(Tensor<float32> x)
+    {
+        var runtime = OnnxOp.Range(Scalar(0L), x.ShapeTensor().Reduce(ReduceKind.Prod), Scalar(1L))
+            .int64().Cast<uint64>();
+        // 2^63 % 1000 == 808 unsigned; the signed floored modulo of -2^63 gives 192 instead.
+        var folded = OnnxOp.Mod(Scalar(9223372036854775808UL), Scalar(1000UL)).uint64();
+        return runtime + folded;
+    }
+}
+
+/// <summary>A uint64 divide whose dividend is <c>ulong.MaxValue</c> — the all-ones bit pattern,
+/// which signed division reads as <c>-1</c> and so collapses to 0 for any divisor &gt; 1.</summary>
+[Module]
+public partial class QeeUInt64SignedDivideMaxValue
+{
+    public static Tensor<uint64> Inline(Tensor<float32> x)
+    {
+        var runtime = OnnxOp.Range(Scalar(0L), x.ShapeTensor().Reduce(ReduceKind.Prod), Scalar(1L))
+            .int64().Cast<uint64>();
+        var folded = OnnxOp.Div(Scalar(18446744073709551615UL), Scalar(3UL)).uint64();
+        return runtime + folded;
+    }
+}
+
 /// <summary>
 /// QEE holds every integer width in one <c>long</c> buffer, so a <c>uint64</c> above
 /// <c>long.MaxValue</c> is a negative bit-pattern long — and Div/Mod/Less/Greater/Sign/Abs read it
@@ -695,4 +759,84 @@ public class QeeUInt64SignedOperatorTests
         const ulong half = 4611686018427387904UL;   // 2^62
         Assert.Equal((ulong[])[half, half + 1, half + 2, half + 3], got);
     }
+
+    // Same fault, Mod rather than Div — pinned separately because #133's bits packing is specified
+    // as `(word / 2^(W*l)) mod 2^W`, so a literal implementation reaches BOTH operators.
+    [Fact(Skip = "QEE uint64 kernels use signed operators — Shorokoo/Shorokoo#141")]
+    public void TestFoldedUInt64ModuloUsesUnsignedSemantics()
+    {
+        var g = ((ComputationGraph)typeof(QeeUInt64SignedModulo)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var input = TensorData([2L, 2L], 0f, 0f, 0f, 0f);
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        var got = ComputeContext.Default.Execute(concrete, input)[0]
+            .ToTensorData().As<uint64>().AccessMemory().ToArray();
+
+        // 2^63 % 1000 == 808, plus the element index. Signed reads the bit pattern as -2^63, and
+        // ONNX Mod (fmod=0) is FLOORED rather than truncated, so it returns 1000 - 808 == 192 —
+        // a plausible-looking small remainder, which is what makes this one easy to miss.
+        const ulong rem = 808UL;
+        Assert.Equal((ulong[])[rem, rem + 1, rem + 2, rem + 3], got);
+    }
+
+    // The all-ones dividend: signed division reads ulong.MaxValue as -1, so ANY divisor > 1
+    // collapses the result to 0 — the most destructive shape of this bug, since it survives every
+    // "is it roughly right?" eyeball check.
+    [Fact(Skip = "QEE uint64 kernels use signed operators — Shorokoo/Shorokoo#141")]
+    public void TestFoldedUInt64DivideOfMaxValueUsesUnsignedSemantics()
+    {
+        var g = ((ComputationGraph)typeof(QeeUInt64SignedDivideMaxValue)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var input = TensorData([2L, 2L], 0f, 0f, 0f, 0f);
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        var got = ComputeContext.Default.Execute(concrete, input)[0]
+            .ToTensorData().As<uint64>().AccessMemory().ToArray();
+
+        // (2^64 - 1) / 3 == 6148914691236517205, plus the element index. Signed gives -1 / 3 == 0.
+        const ulong third = 6148914691236517205UL;
+        Assert.Equal((ulong[])[third, third + 1, third + 2, third + 3], got);
+    }
 }
+
+[Module] public partial class QeeU32Add { public static Tensor<uint32> Inline()
+    => Vector(4294967295u, 0u, 2147483648u, 4294967295u, 4294967295u) + Vector(1u, 1u, 2u, 4294967295u, 2u); }
+
+[Module] public partial class QeeU32Sub { public static Tensor<uint32> Inline()
+    => Vector(0u, 0u, 1u, 4294967295u) - Vector(1u, 2u, 2u, 4294967295u); }
+
+[Module] public partial class QeeU32Mul { public static Tensor<uint32> Inline()
+    => Vector(2147483648u, 4294967295u, 65536u, 4294967295u) * Vector(2u, 2u, 65536u, 4294967295u); }
+
+[Module] public partial class QeeU32Shift { public static Tensor<uint32> Inline()
+    => (Tensor<uint32>)OnnxOp.Concat([
+        OnnxOp.BitShift(Vector(1u, 1u, 4294967295u), Vector(31u, 16u, 1u), BitShiftDirection.Left),
+        OnnxOp.BitShift(Vector(4294967295u, 2147483648u, 1u), Vector(16u, 31u, 1u), BitShiftDirection.Right)], axis: 0); }
+
+[Module] public partial class QeeU64Add { public static Tensor<uint64> Inline()
+    => Vector(18446744073709551615UL, 0UL, 9223372036854775808UL, 18446744073709551615UL)
+     + Vector(1UL, 1UL, 0UL, 18446744073709551615UL); }
+
+[Module] public partial class QeeU64Sub { public static Tensor<uint64> Inline()
+    => Vector(0UL, 0UL, 9223372036854775808UL, 18446744073709551615UL)
+     - Vector(1UL, 2UL, 18446744073709551615UL, 18446744073709551615UL); }
+
+[Module] public partial class QeeU64Mul { public static Tensor<uint64> Inline()
+    => Vector(9223372036854775808UL, 18446744073709551615UL, 4294967296UL, 18446744073709551615UL)
+     * Vector(2UL, 2UL, 4294967296UL, 18446744073709551615UL); }
+
+[Module] public partial class QeeU64Shift { public static Tensor<uint64> Inline()
+    => (Tensor<uint64>)OnnxOp.Concat([
+        OnnxOp.BitShift(Vector(1UL, 1UL), Vector(63UL, 32UL), BitShiftDirection.Left),
+        OnnxOp.BitShift(Vector(18446744073709551615UL, 9223372036854775808UL), Vector(32UL, 63UL),
+            BitShiftDirection.Right)], axis: 0); }
+
+[Module] public partial class QeeU64Bitwise { public static Tensor<uint64> Inline()
+{
+    var hi = Vector(18446744073709551615UL, 9223372036854775808UL, 18446744073709551615UL);
+    var lo = Vector(9223372036854775808UL, 9223372036854775808UL, 4294967295UL);
+    return (Tensor<uint64>)OnnxOp.Concat(
+        [OnnxOp.BitwiseAnd(hi, lo), OnnxOp.BitwiseXor(hi, lo), OnnxOp.BitwiseOr(hi, lo)], axis: 0);
+} }
+
+[Module] public partial class QeeU64Cast { public static Tensor<uint64> Inline()
+    => Vector(18446744073709551615UL, 9223372036854775808UL, 4294967303UL).Cast<uint32>().Cast<uint64>(); }

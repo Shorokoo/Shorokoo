@@ -1,3 +1,5 @@
+using static Shorokoo.Tests.Modules.QeeAuditVerdicts;
+
 namespace Shorokoo.Tests.Modules
 {
     // ===================================================================
@@ -43,11 +45,6 @@ namespace Shorokoo.Tests.Modules
                 FloatMismatch(xp.Reciprocal(), Vector(1f, 0.5f, 0.25f));
             return mismatch < Scalar(1L);
         }
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Rounding / sign / sigmoid-family unary float ops, incl. Round's
@@ -74,11 +71,6 @@ namespace Shorokoo.Tests.Modules
                 FloatMismatch(x.Relu(), Vector(0f, 0f, 0.5f, 1.5f, 2.5f));
             return mismatch < Scalar(1L);
         }
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Parametrized activations: Celu / Elu / Gelu (approximate none vs tanh —
@@ -152,14 +144,6 @@ namespace Shorokoo.Tests.Modules
                 IntMismatch((Tensor<int64>)OnnxOp.Max(ai, bi), Vector(7L, 2L, 9L));
             return mismatch < Scalar(1L);
         }
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
-            => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Comparisons (float, int and — for Equal — bool inputs, all → bool output)
@@ -218,9 +202,6 @@ namespace Shorokoo.Tests.Modules
                     Vector(0L, 0L, 1L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
-            => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Misc elementwise: IsInf via the Tensor wrapper (detect_positive /
@@ -255,9 +236,6 @@ namespace Shorokoo.Tests.Modules
         private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Tensor<float32> expected)
             => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
                 .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
-            => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
         private static Scalar<int64> BoolMismatch(Tensor<bit> actual, Vector<int64> expected)
             => (actual.Cast<int64>() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
@@ -351,10 +329,5 @@ namespace Shorokoo.Tests.Modules
                 FloatMismatch(xs.Max(ys), Vector(3f, 5f));
             return mismatch < Scalar(1L);
         }
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 }

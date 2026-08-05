@@ -1,8 +1,15 @@
 using Shorokoo.Modules.Initializers;
 using Shorokoo.Modules.Layers;
 using Shorokoo.Modules.Losses;
+using static Shorokoo.Tests.Modules.NNCheckVerdicts;
 
 namespace Shorokoo.Tests.Modules;
+
+internal static class NNCheckVerdicts
+{
+    internal static Scalar<int64> Within(Scalar<float32> dist, float bound)
+        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
+}
 
 // ---------------------------------------------------------------------------
 // Self-checking [Module]s for the baseline NN library (Shorokoo.Modules
@@ -1818,9 +1825,6 @@ public partial class NNPool1d3dClosedForm
         var touch = (x * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(4L);   // all 4 closed-form ok-bits + touch; > (5-1)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>§7-2 LpPool p=2 == √(Σx²). LpPool1d([2]) on x=[3,4] → √(9+16)=5; and a full-window
@@ -1846,9 +1850,6 @@ public partial class NNLpPoolClosedFormAndGlobal
 
         return okClosed + okEquiv > Scalar(1L);   // 2 ok-bits; > (2-1)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>§7-3 full-window pool == global pool on the runtime input x=[1,C,H,W]:
@@ -1974,9 +1975,6 @@ public partial class NNMaxUnpoolRoundTrip
                + Within(sumPen, 1e-3f);
         return ok > Scalar(2L);   // all 3 ok-bits; > (3-1)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>§7-7 count_include_pad toggle: AvgPool2d([2,2], padding:[1,1]) with
@@ -2012,9 +2010,6 @@ public partial class NNAvgPoolCountIncludePadToggle
         var touch = (x * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(3L);   // 3 ok-bits + touch (4); > (4-1)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>
@@ -2138,9 +2133,6 @@ public partial class NNCrossEntropyReductionWeightIgnoreChecks
         return ok + Within(touch, 1e-6f) > Scalar(10L);   // all 10 closed-form ok-bits + touch
     }
 
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
-
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
 }
@@ -2176,9 +2168,6 @@ public partial class NNCrossEntropyLabelSmoothingChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(2L);   // both closed-form ok-bits + touch
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>
@@ -2218,9 +2207,6 @@ public partial class NNCrossEntropyLabelSmoothWeightIgnoreChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(1L);   // closed-form ok-bit + touch
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>
@@ -2265,9 +2251,6 @@ public partial class NNNLLLossWeightIgnoreChecks
         return ok + Within(touch, 1e-6f) > Scalar(5L);   // all 5 closed-form ok-bits + touch
     }
 
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
-
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
 }
@@ -2305,9 +2288,6 @@ public partial class NNBCEWithLogitsPosWeightChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(3L);   // all 3 closed-form ok-bits + touch
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>
@@ -2338,9 +2318,6 @@ public partial class NNSmoothL1BetaChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(6L);   // 6 closed-form ok-bits (3 values + 3 bridges) + touch
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>
@@ -2385,9 +2362,6 @@ public partial class NNRegressionReductionChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(8L);   // all 8 closed-form ok-bits + touch
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 // ---------------------------------------------------------------------------
@@ -3022,9 +2996,6 @@ public partial class NNLossEdgeCaseChecks
         return ok > Scalar(8L);   // all 9 ok-bits required
     }
 
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
-
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
 }
@@ -3076,9 +3047,6 @@ public partial class NNLogCoshLossChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(8L);   // all 8 closed-form ok-bits + touch (9 total)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
@@ -3145,9 +3113,6 @@ public partial class NNPoissonNLLLossChecks
         return ok + Within(touch, 1e-6f) > Scalar(9L);   // all 9 ok-bits + touch
     }
 
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
-
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
 }
@@ -3202,9 +3167,6 @@ public partial class NNHingeLossChecks
         return ok + Within(touch, 1e-6f) > Scalar(10L);   // all 10 ok-bits + touch (11 total)
     }
 
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
-
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
 }
@@ -3254,9 +3216,6 @@ public partial class NNSquaredHingeLossChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(7L);   // all 7 ok-bits + touch (8 total)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
@@ -3308,9 +3267,6 @@ public partial class NNBinaryFocalLossChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(6L);   // all 6 ok-bits + touch (7 total)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
@@ -4536,9 +4492,6 @@ public partial class NNConstantInitRank1Negative
         var touch = (x * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(2L);   // both ok-bits + touch (3 total); > (3-1)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>Constant specializes Zeros and Ones: Constant.Init([2,3], Scalar(0f)) == Zeros.Init([2,3])
@@ -4564,9 +4517,6 @@ public partial class NNConstantInitMatchesZerosOnes
         var touch = (x * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(2L);   // both ok-bits + touch (3 total); > (3-1)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 // --- Orthogonal: the Björck approximation's convergence quality. Materialize
@@ -4684,9 +4634,6 @@ public partial class NNUniformRangeInRange
         return ok + Within(touch, 1e-6f) > Scalar(8L);   // all 8 ok-bits + touch (9 total); > (9-1)
     }
 
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
-
     private static Scalar<int64> AtMost(Scalar<float32> v, float bound)
         => (v <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 
@@ -4722,9 +4669,6 @@ public partial class NNNormalDistMoments
         var touch = (x * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(4L);   // all 4 ok-bits + touch (5 total); > (5-1)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 // ---------------------------------------------------------------------------
@@ -4793,9 +4737,6 @@ public partial class NNXavierKaimingGainStd
         var mean = w.Reduce(ReduceKind.Mean, keepDims: false).Scalar();
         return ((w * w).Reduce(ReduceKind.Mean, keepDims: false).Scalar() - mean * mean).Sqrt();
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 // ---------------------------------------------------------------------------
@@ -4874,9 +4815,6 @@ public partial class NNTripletMarginClosedFormChecks
         return (diff * diff).Reduce(ReduceKind.Sum, [Scalar(-1L)], keepDims: false).Sqrt();
     }
 
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
-
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
 }
@@ -4937,9 +4875,6 @@ public partial class NNTripletMarginSwapMarginPChecks
         return ok + Within(touch, 1e-6f) > Scalar(10L);   // all 10 ok-bits + touch (11 total); > (11-1)
     }
 
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
-
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
 }
@@ -4986,9 +4921,6 @@ public partial class NNTripletMarginReductionChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(4L);   // all 4 ok-bits + touch (5 total); > (5-1)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>
@@ -5055,9 +4987,6 @@ public partial class NNTripletMarginWithDistanceChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(6L);   // all 6 ok-bits + touch (7 total); > (7-1)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
@@ -5197,9 +5126,6 @@ public partial class NNCosineEmbeddingClosedFormChecks
     private static Scalar<float32> Slice1(Tensor<float32> v, long i)
         => ((Tensor<float32>)OnnxOp.Slice(v, Vector(i), Vector(i + 1L))).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
-
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
 }
@@ -5247,9 +5173,6 @@ public partial class NNCosineEmbeddingMarginGatingChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(5L);   // 5 ok-bits + touch (6 total); > (6-1)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>
@@ -5297,9 +5220,6 @@ public partial class NNCosineEmbeddingWhereSplitChecks
     private static Scalar<float32> Slice1(Tensor<float32> v, long i)
         => ((Tensor<float32>)OnnxOp.Slice(v, Vector(i), Vector(i + 1L))).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
-
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
 }
@@ -5339,9 +5259,6 @@ public partial class NNCosineEmbeddingReductionChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(4L);   // all 4 ok-bits + touch (5 total); > (5-1)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>
@@ -5416,9 +5333,6 @@ public partial class NNCosineSimilarityHelperChecks
 
     private static Scalar<float32> Slice1(Tensor<float32> v, long i)
         => ((Tensor<float32>)OnnxOp.Slice(v, Vector(i), Vector(i + 1L))).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));

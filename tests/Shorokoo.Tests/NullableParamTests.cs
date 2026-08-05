@@ -2,9 +2,7 @@ using System.Linq;
 using Shorokoo.Runtime;
 using Shorokoo.Core.Graph;
 using Shorokoo.Core.Inference;
-using Shorokoo.Core.Utils;
 using Shorokoo.Core.Factory.CSharpFactory;
-using Shorokoo.Core.Nodes.NodeDefinitions;
 
 namespace Shorokoo.Tests;
 

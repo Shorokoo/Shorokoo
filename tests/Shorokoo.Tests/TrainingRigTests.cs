@@ -3,6 +3,7 @@ using Shorokoo.Runtime;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
 using Shorokoo.Core.Nodes.Processors.Training;
+using static Shorokoo.Tests.TrainingRigHelpers;
 
 namespace Shorokoo.Tests;
 
@@ -151,48 +152,38 @@ public partial class ThreeInputMixedModel
     }
 }
 
-/// <summary>Coverage for the training rig: composition, training steps, schedules, data loaders,
-/// checkpoints (flat safetensors and native .skpt) and inference-model extraction.</summary>
-[Trait("Domain", "Training")]
-[Trait("Purpose", "Coverage")]
-public class TrainingRigCoverageTests
+internal static class TrainingRigHelpers
 {
-    private const string ReprInputAttr =
-        Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInput;
-    private const string ReprShapeAttr =
-        Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape;
-    private const string DtypeAttr =
-        Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.AttrDtype;
+    internal static readonly long[] ScalarInputShape = [4L];
 
-    private static readonly long[] ScalarInputShape = [4L];
-
-    private static readonly TensorStructDef ScalarInputDef = new(
+    internal static readonly TensorStructDef ScalarInputDef = new(
         [new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32)], "ModelInput");
-    private static readonly TensorStructDef ScalarTargetDef = new(
+
+    internal static readonly TensorStructDef ScalarTargetDef = new(
         [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)], "Target");
 
-    private static TensorDataStruct InBatch(params float[] values) => new(ScalarInputDef,
+    internal static TensorDataStruct InBatch(params float[] values) => new(ScalarInputDef,
         new Dictionary<string, IData> { { "input", TensorData([(long)values.Length], values) } });
 
-    private static TensorDataStruct TargetBatch(params float[] values) => new(ScalarTargetDef,
+    internal static TensorDataStruct TargetBatch(params float[] values) => new(ScalarTargetDef,
         new Dictionary<string, IData> { { "targets", TensorData([(long)values.Length], values) } });
 
-    private static long ProductOf(long[] shape)
+    internal static long ProductOf(long[] shape)
     {
         long p = 1;
         foreach (var d in shape) p *= d;
         return p;
     }
 
-    private static float[] FlattenStruct(TensorDataStruct s) =>
+    internal static float[] FlattenStruct(TensorDataStruct s) =>
         s.Definition.Fields
             .SelectMany(f => ((TensorData)s.Fields[f.Name]).As<float32>().AccessMemory<float>().ToArray())
             .ToArray();
 
-    private static string TempPath(string tag) =>
+    internal static string TempPath(string tag) =>
         Path.Combine(Path.GetTempPath(), $"shrk_{tag}_{Guid.NewGuid():N}");
 
-    private static (TrainingRig Rig, TrainingCheckpoint Ckpt) CoverFromScratch(
+    internal static (TrainingRig Rig, TrainingCheckpoint Ckpt) CoverFromScratch(
         ComputationGraph modelGraph,
         ComputationGraph lossGraph,
         ComputationGraph optimizerGraph,
@@ -212,6 +203,79 @@ public class TrainingRigCoverageTests
         return (rig, checkpoint);
     }
 
+    internal static (NamedModelParam[] sample, TensorDataStruct input, TensorDataStruct target) ScalarMultiplyBatches()
+    {
+        NamedModelParam[] sample =
+        [
+            new TensorDataModelParam("input", ModelParamType.InputParam,
+                TensorData([4L], [1f, 2f, 3f, 4f])),
+        ];
+        return (sample, InBatch(1f, 2f, 3f, 4f), TargetBatch(0f, 0f, 0f, 0f));
+    }
+
+    internal static float Weight(TrainingRig rig, TrainingCheckpoint ckpt) =>
+        ((TensorData<float32>)ckpt.TrainableParams.Fields[rig.TrainableParamStructDef.Fields[0].Name])
+            .AccessMemory()[0];
+
+    internal static TrainingRig LoaderRig(int batchSize, int features) =>
+        TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [
+                new TensorDataModelParam("input", ModelParamType.InputParam,
+                    TensorData([batchSize, features], new float[batchSize * features])),
+            ],
+            0.1f);
+
+    internal static (TensorDataStruct inputs, TensorDataStruct targets) IndexDataset(
+        TrainingRig rig, int n, int features)
+    {
+        float[] inVals = new float[n * features];
+        for (int i = 0; i < n; i++)
+            for (int f = 0; f < features; f++)
+                inVals[i * features + f] = i;
+        var inputs = new TensorDataStruct(rig.InputDef,
+            new Dictionary<string, IData> { { "input", TensorData([n, (long)features], inVals) } });
+        var targets = new TensorDataStruct(rig.TargetDef,
+            new Dictionary<string, IData> { { "targets", TensorData([n, (long)features], new float[n * features]) } });
+        return (inputs, targets);
+    }
+
+    internal static (TrainingRig Rig, TrainingCheckpoint Ckpt, TensorDataStruct In, TensorDataStruct Out)
+        BuildTrainedAdamRig(int steps)
+    {
+        NamedModelParam[] sample =
+        [
+            new TensorDataModelParam("input", ModelParamType.InputParam,
+                TensorData(ScalarInputShape, [1f, 2f, 3f, 4f])),
+        ];
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            AdamWOptimizer.ComputationGraph, sample,
+            new AdamWOptimizerHyperparameters { LearningRate = 0.1f });
+
+        var inBatch = InBatch(1f, 2f, 3f, 4f);
+        var outBatch = TargetBatch(2f, 4f, 6f, 8f);
+
+        var ckpt = rig.CreateInitialCheckpoint();
+        for (int i = 0; i < steps; i++)
+            ckpt = rig.TrainStep(ckpt, inBatch, outBatch);
+        return (rig, ckpt, inBatch, outBatch);
+    }
+
+    internal static byte[] ReadEntryBytesViaBcl(string path, string entryName)
+    {
+        using var zip = System.IO.Compression.ZipFile.OpenRead(path);
+        using var s = zip.GetEntry(entryName)!.Open();
+        using var buf = new MemoryStream();
+        s.CopyTo(buf);
+        return buf.ToArray();
+    }
+}
+
+[Trait("Domain", "Training")]
+[Trait("Purpose", "Coverage")]
+public class TrainingRigFromScratchCoverageTests
+{
     private static void CoverCheckpointRebind(
         ComputationGraph modelGraph,
         ComputationGraph lossGraph,
@@ -292,6 +356,20 @@ public class TrainingRigCoverageTests
         CoverCheckpointRebind(DigitClassifier.ComputationGraph, SoftmaxL2Loss.ComputationGraph,
             SGDOptimizer.ComputationGraph, [4L, 64L], 0.01f);
     }
+}
+
+[Trait("Domain", "Training")]
+[Trait("Purpose", "Coverage")]
+public class TrainingRigRepresentativeInputCoverageTests
+{
+    private const string ReprInputAttr =
+        Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInput;
+
+    private const string ReprShapeAttr =
+        Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape;
+
+    private const string DtypeAttr =
+        Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.AttrDtype;
 
     private static TrainingRig RigWithInputShape(long[] shape)
         => TrainingRig.FromScratch(
@@ -532,6 +610,196 @@ public class TrainingRigCoverageTests
             }
         }
     }
+}
+
+[Trait("Domain", "Training")]
+[Trait("Purpose", "Coverage")]
+public class TrainingRigCompositionCoverageTests
+{
+    [Fact]
+    public void TestFromScratchGraphKindsAndConvenienceApisCoverage()
+    {
+        var modelGraph = ScalarMultiplyModel.ComputationGraph;
+        var exampleInput = TensorData([4L], [1f, 2f, 3f, 4f]);
+
+        var rig = TrainingRig.FromScratch(
+            modelGraph, Losses.L2Loss, Optimizers.SGD,
+            modelGraph.FromOrderedInputs([exampleInput]),
+            0.01f);
+
+        var namedHyperRig = TrainingRig.FromScratch(
+            modelGraph, Losses.L2Loss, Optimizers.SGD,
+            modelGraph.FromOrderedInputs([exampleInput]),
+            new SGDOptimizerHyperparameters { LearningRate = 0.01f });
+        Assert.NotEmpty(namedHyperRig.TrainableParamStructDef.Fields);
+        Assert.Throws<ArgumentNullException>(() => TrainingRig.FromScratch(
+            modelGraph, Losses.L2Loss, Optimizers.SGD,
+            (ModelParamList)null!, new SGDOptimizerHyperparameters { LearningRate = 0.01f }));
+
+        Assert.NotNull(rig.InputDef);
+        Assert.Equal(1, rig.InputDef.Fields.Length);
+        Assert.Equal("input", rig.InputDef.Fields[0].Name);
+        Assert.NotNull(rig.TargetDef);
+        Assert.Equal(1, rig.TargetDef.Fields.Length);
+        Assert.Equal("targets", rig.TargetDef.Fields[0].Name);
+
+        var inputBatch = rig.InputDef.FromOrderedData(exampleInput);
+        var targetBatch = rig.TargetDef.FromOrderedData(TensorData([4L], new float[4]));
+        Assert.NotNull(inputBatch);
+        Assert.NotNull(targetBatch);
+        Assert.Same(rig.InputDef, inputBatch.Definition);
+        Assert.Same(rig.TargetDef, targetBatch.Definition);
+
+        var result = rig.Fit([inputBatch, inputBatch], [targetBatch, targetBatch], numEpochs: 1);
+        Assert.Single(result.EpochLosses);
+        Assert.True(float.IsFinite(result.EpochLosses[0]));
+
+        var arch = modelGraph.ToConcreteArchitecture(modelGraph.FromOrderedInputs([exampleInput]));
+        var sampleInput = new TensorDataModelParam("input", ModelParamType.InputParam, exampleInput);
+
+        var archRig = TrainingRig.FromScratch(
+            arch, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [sampleInput], 0.5f);
+        Assert.NotEmpty(archRig.TrainableParamStructDef.Fields);
+        Assert.Equal(GraphKind.ConcreteModel, archRig.TrainingStepPureGraph.Kind);
+        Assert.NotNull(archRig.CreateInitialCheckpoint().TrainableParams);
+
+        var exModel = Assert.Throws<InvalidOperationException>(() => TrainingRig.FromScratch(
+            arch.ToConcreteModel(), L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [sampleInput], 0.5f));
+        Assert.Contains("'concrete-model'", exModel.Message);
+        Assert.Contains("'concrete-architecture'", exModel.Message);
+
+        var exLoss = Assert.Throws<InvalidOperationException>(() => TrainingRig.FromScratch(
+            modelGraph, arch, SGDOptimizer.ComputationGraph,
+            [sampleInput], 0.5f));
+        Assert.Contains("'module'", exLoss.Message);
+    }
+
+    [Fact]
+    public void TestTrainingGraphLoweringBuilderOverloadsAndParamDiscoveryCoverage()
+    {
+        var trainingGraph = TrainingGraphBuilder.PrepareForTrainingAsFast(
+            ScalarMultiplyModel.ComputationGraph.ToInternal(),
+            L2Loss.ComputationGraph.ToInternal());
+        var lowered = TrainingLoop.LowerTrainingGraph(trainingGraph);
+        Assert.NotNull(lowered);
+        Assert.NotEmpty(lowered.Nodes);
+
+        var modelGraph = ScalarMultiplyModel.ComputationGraph.ToInternal();
+        Func<Tensor<float32>, Tensor<float32>, Scalar<float32>> lossFunc = L2Loss.Inline;
+        var funcTrainingGraph = TrainingGraphBuilder.PrepareForTrainingAsFast(modelGraph, lossFunc);
+        Assert.True(funcTrainingGraph.Inputs.Count >= 3);
+        Assert.True(funcTrainingGraph.Outputs.Count >= 2);
+
+        Assert.Throws<ArgumentNullException>(() =>
+            TrainingGraphBuilder.PrepareForTrainingAsFast<Tensor<float32>, Scalar<float32>>(modelGraph, null!));
+        Assert.Throws<ArgumentNullException>(() =>
+            TrainingGraphBuilder.PrepareForTrainingAsFast<Tensor<float32>, Scalar<float32>>(null!, lossFunc));
+
+        Func<Tensor<float32>, Tensor<float32>, Scalar<float32>> notAModule =
+            (pred, targ) => ((Tensor<float32>)OnnxOp.ReduceSum(pred - targ, keepdims: false)).Scalar();
+        Assert.Throws<ArgumentException>(() =>
+            TrainingGraphBuilder.PrepareForTrainingAsFast(modelGraph, notAModule));
+
+        var moduleGraph = CallsSimplestModule.ComputationGraph.ToInternal();
+        Assert.Contains(moduleGraph.Nodes, n =>
+            n.OpCode == InternalOpCodes.MODEL_INVOKE || n.OpCode == InternalOpCodes.FUNCTION_INVOKE);
+        Assert.Throws<System.InvalidOperationException>(() => moduleGraph.GetConcreteModelParamInfos());
+        Assert.Throws<System.InvalidOperationException>(() => moduleGraph.InitializeTrainableParams());
+
+        var arch = moduleGraph.ToConcreteArchitecture(
+            moduleGraph.FromOrderedInputs([TensorData([4L], [1f, 2f, 3f, 4f])]));
+        Assert.NotEmpty(arch.GetConcreteModelParamInfos().ParamInfos);
+        Assert.NotEmpty(arch.InitializeTrainableParams().ModelParams);
+    }
+
+    [Fact]
+    public void TestLossAndOptimizerHubsCoverage()
+    {
+        Assert.NotNull(Losses.L2Loss);
+        Assert.NotNull(Losses.L1Loss);
+        Assert.NotNull(Losses.CrossEntropy);
+        Assert.NotNull(Losses.BCE);
+        Assert.NotNull(Losses.BCEWithLogits);
+        Assert.NotNull(Losses.SmoothL1);
+        Assert.NotNull(Losses.Huber);
+        Assert.NotNull(Losses.Hinge);
+        Assert.NotNull(Losses.SquaredHinge);
+        Assert.NotNull(Losses.KLDiv);
+        Assert.NotNull(Losses.NLL);
+        Assert.NotNull(Losses.PoissonNLL);
+        Assert.NotNull(Losses.LogCosh);
+        Assert.NotNull(Losses.CosineEmbedding);
+        Assert.NotNull(Losses.TripletMargin);
+        Assert.NotNull(Losses.BinaryFocal);
+        Assert.Equal(2, Losses.L2Loss.ToInternal().Inputs.Count);
+        Assert.Equal(2, Losses.L1Loss.ToInternal().Inputs.Count);
+
+        Assert.NotNull(Optimizers.SGD);
+        Assert.NotNull(Optimizers.SGDMomentum);
+        Assert.NotNull(Optimizers.Adam);
+        Assert.NotNull(Optimizers.AdamW);
+        Assert.NotNull(Optimizers.Adamax);
+        Assert.NotNull(Optimizers.NAdam);
+        Assert.NotNull(Optimizers.Adagrad);
+        Assert.NotNull(Optimizers.Adadelta);
+        Assert.NotNull(Optimizers.RMSprop);
+        Assert.NotNull(Optimizers.RAdam);
+        Assert.NotNull(Optimizers.Lamb);
+        Assert.NotNull(Optimizers.Lion);
+        Assert.NotNull(Optimizers.Adafactor);
+    }
+
+    [Fact]
+    public void TestRigDerivationsShareConstituentsAndAreImmutableCoverage()
+    {
+        var (sample, input, target) = ScalarMultiplyBatches();
+        var model = ScalarMultiplyModel.ComputationGraph;
+        var loss = L2Loss.ComputationGraph;
+        var opt = SGDOptimizer.ComputationGraph;
+
+        var rig = TrainingRig.FromScratch(model, loss, opt, sample, 0.1f);
+
+        Assert.Same(model, rig.ModelConstituent);
+        Assert.Same(loss, rig.LossConstituent);
+        Assert.Same(opt, rig.OptimizerConstituent);
+        Assert.Equal(0UL, rig.RngConfig.MasterSeed);
+        Assert.Empty(rig.OptimizerStateDef.Fields);
+
+        var newLoss = Losses.L1Loss;
+        var lossRig = rig.WithLoss(newLoss);
+        Assert.NotSame(rig, lossRig);
+        Assert.Same(newLoss, lossRig.LossConstituent);
+        Assert.Same(model, lossRig.ModelConstituent);
+        Assert.Same(opt, lossRig.OptimizerConstituent);
+        Assert.Same(loss, rig.LossConstituent);
+
+        var momRig = rig.WithOptimizer(SGDMomentumOptimizer.ComputationGraph,
+            new SGDMomentumOptimizerHyperparameters { LearningRate = 0.5f, MomentumCoeff = 0.9f });
+        Assert.Same(model, momRig.ModelConstituent);
+        Assert.Same(loss, momRig.LossConstituent);
+        Assert.NotSame(opt, momRig.OptimizerConstituent);
+        Assert.NotEmpty(momRig.OptimizerStateDef.Fields);
+        Assert.Empty(rig.OptimizerStateDef.Fields);
+
+        var schedRig = rig.WithScheduler(
+            new SGDOptimizerHyperparameters { LearningRate = Schedules.Linear(0.2f, 0f, 4) });
+        Assert.Same(opt, schedRig.OptimizerConstituent);
+        Assert.Empty(schedRig.HyperparameterStructDef.Fields);
+
+        var reseeded = rig.WithSeed(new RngConfig { MasterSeed = 42 });
+        Assert.Same(model, reseeded.ModelConstituent);
+        Assert.Same(opt, reseeded.OptimizerConstituent);
+        Assert.Equal(42UL, reseeded.RngConfig.MasterSeed);
+        Assert.Equal(0UL, rig.RngConfig.MasterSeed);
+
+        foreach (var derived in (TrainingRig[])[lossRig, momRig, schedRig, reseeded])
+        {
+            var stepped = derived.TrainStep(derived.CreateInitialCheckpoint(), input, target);
+            Assert.True(float.IsFinite(stepped.Loss!.Value));
+        }
+    }
 
     [Fact]
     public void TestComputeContextsStoredPropagatedAndNeverPersistedCoverage()
@@ -583,287 +851,12 @@ public class TrainingRigCoverageTests
         }
         finally { if (File.Exists(path)) File.Delete(path); }
     }
+}
 
-    [Fact]
-    public void TestTrainStepAndTrainLoopCoverage()
-    {
-        var rig = TrainingRig.FromScratch(
-            ScalarMultiplyModel.ComputationGraph,
-            L2Loss.ComputationGraph,
-            SGDOptimizer.ComputationGraph,
-            [
-                new TensorDataModelParam("input", ModelParamType.InputParam,
-                    TensorData([4L], [1f, 2f, 3f, 4f])),
-            ],
-            0.1f);
-
-        var initial = rig.CreateInitialCheckpoint();
-        var inputBatch = InBatch(1f, 2f, 3f, 4f);
-        var targetBatch = TargetBatch(0f, 0f, 0f, 0f);
-
-        var trainResult = rig.Train(initial, [inputBatch], [targetBatch], numEpochs: 1);
-        Assert.Single(trainResult.EpochLosses);
-        Assert.NotNull(trainResult.FinalCheckpoint);
-
-        var stepResult = rig.TrainStep(initial, inputBatch, targetBatch);
-        Assert.NotNull(stepResult);
-        Assert.NotNull(stepResult.TrainableParams);
-        Assert.NotNull(stepResult.ModelState);
-        Assert.NotNull(stepResult.OptimizerState);
-        Assert.True(float.IsFinite(stepResult.Loss!.Value));
-
-        var graphs = new FastTrainingGraphs(
-            ScalarMultiplyModel.ComputationGraph.ToInternal(),
-            L2Loss.ComputationGraph.ToInternal(),
-            SGDOptimizer.ComputationGraph.ToInternal());
-        Assert.NotNull(graphs.ModelGraph);
-        Assert.NotNull(graphs.LossGraph);
-        Assert.NotNull(graphs.OptimizerGraph);
-    }
-
-    [Fact]
-    public void TestCheckpointSaveLoadResumeAndAdamScalarStepCoverage()
-    {
-        NamedModelParam[] sample =
-        [
-            new TensorDataModelParam("input", ModelParamType.InputParam,
-                TensorData([4L], [1f, 2f, 3f, 4f])),
-        ];
-        TrainingRig AdamWRig() => TrainingRig.FromScratch(
-            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
-            AdamWOptimizer.ComputationGraph, sample,
-            new AdamWOptimizerHyperparameters { LearningRate = 0.1f });
-        TrainingRig AdamRig() => TrainingRig.FromScratch(
-            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
-            AdamOptimizer.ComputationGraph, sample,
-            new AdamOptimizerHyperparameters { LearningRate = 0.1f });
-
-        var inputBatch = InBatch(1f, 2f, 3f, 4f);
-        var targetBatch = TargetBatch(2f, 4f, 6f, 8f);
-
-        var path = TempPath("ckpt") + ".safetensors";
-        try
-        {
-            var rigA = AdamWRig();
-            var ckpt = rigA.CreateInitialCheckpoint();
-            for (int i = 0; i < 2; i++)
-                ckpt = rigA.TrainStep(ckpt, inputBatch, targetBatch);
-            Assert.Equal(2, ckpt.Step);
-            ckpt.Save(path);
-            Assert.True(File.Exists(path));
-
-            var rigB = AdamWRig();
-            var loaded = rigB.LoadCheckpoint(path);
-
-            Assert.Equal(2, loaded.Step);
-            Assert.Equal(FlattenStruct(ckpt.TrainableParams), FlattenStruct(loaded.TrainableParams));
-            Assert.Equal(FlattenStruct(ckpt.OptimizerState), FlattenStruct(loaded.OptimizerState));
-            Assert.NotEmpty(loaded.OptimizerState.Fields);
-
-            var resumed = rigB.TrainStep(loaded, inputBatch, targetBatch);
-            Assert.Equal(3, resumed.Step);
-            Assert.True(float.IsFinite(resumed.Loss!.Value));
-
-            var bnRig = TrainingRig.FromScratch(
-                ScalarMultiplyWithBatchNormModel.ComputationGraph, L2Loss.ComputationGraph,
-                SGDMomentumOptimizer.ComputationGraph,
-                [
-                    new TensorDataModelParam("input", ModelParamType.InputParam,
-                        TensorData([8L], new float[8])),
-                ],
-                0.5f, 0.9f);
-            var bnPath = TempPath("ckpt_bn") + ".safetensors";
-            try
-            {
-                var bnCkpt = bnRig.CreateInitialCheckpoint();
-                Assert.NotEmpty(bnCkpt.ModelState.Fields);
-                bnCkpt.Save(bnPath);
-                var bnLoaded = bnRig.LoadCheckpoint(bnPath);
-                Assert.Equal(FlattenStruct(bnCkpt.ModelState), FlattenStruct(bnLoaded.ModelState));
-                Assert.Equal(FlattenStruct(bnCkpt.OptimizerState), FlattenStruct(bnLoaded.OptimizerState));
-
-                Assert.Throws<InvalidOperationException>(() => bnRig.LoadCheckpoint(path));
-            }
-            finally { if (File.Exists(bnPath)) File.Delete(bnPath); }
-        }
-        finally { if (File.Exists(path)) File.Delete(path); }
-
-        var adamRig = AdamRig();
-        Assert.Equal(3, adamRig.OptimizerStateDef.Fields.Length);
-        var stepField = adamRig.OptimizerStateDef.Fields[2];
-        Assert.Equal(0, stepField.Rank);
-
-        var adamCkpt = adamRig.CreateInitialCheckpoint();
-        for (int i = 0; i < 2; i++)
-            adamCkpt = adamRig.TrainStep(adamCkpt, inputBatch, targetBatch);
-
-        var stepData = (TensorData)adamCkpt.OptimizerState.Fields[stepField.Name];
-        Assert.Empty(stepData.Shape.Dims);
-        Assert.Equal(2f, stepData.As<float32>().AccessMemory()[0]);
-
-        var adamPath = TempPath("adam_scalar") + ".safetensors";
-        try
-        {
-            adamCkpt.Save(adamPath);
-
-            var loaded = AdamRig().LoadCheckpoint(adamPath);
-            Assert.Equal(2, loaded.Step);
-            Assert.Equal(FlattenStruct(adamCkpt.OptimizerState), FlattenStruct(loaded.OptimizerState));
-            Assert.Equal(FlattenStruct(adamCkpt.TrainableParams), FlattenStruct(loaded.TrainableParams));
-            Assert.Empty(((TensorData)loaded.OptimizerState.Fields[stepField.Name]).Shape.Dims);
-        }
-        finally { if (File.Exists(adamPath)) File.Delete(adamPath); }
-    }
-
-    [Fact]
-    public void TestCheckpointSaveAtomicityAndTruncatedLoadFailsLoudlyCoverage()
-    {
-        var rig = TrainingRig.FromScratch(
-            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
-            SGDOptimizer.ComputationGraph,
-            [
-                new TensorDataModelParam("input", ModelParamType.InputParam,
-                    TensorData([4L], [1f, 2f, 3f, 4f])),
-            ],
-            0.1f);
-
-        var truncPath = TempPath("ckpt_trunc") + ".safetensors";
-        try
-        {
-            rig.CreateInitialCheckpoint().Save(truncPath);
-            var full = File.ReadAllBytes(truncPath);
-            File.WriteAllBytes(truncPath, full[..^8]);
-
-            var ex = Assert.Throws<ModelException>(() => rig.LoadCheckpoint(truncPath));
-            Assert.Equal(ErrorCodes.ST003, ex.ErrorCode);
-            Assert.Contains("truncated", ex.Message);
-            Assert.Contains(truncPath, ex.Message);
-            Assert.Contains($"{full.Length} bytes", ex.Message);
-            Assert.Contains($"{full.Length - 8} bytes", ex.Message);
-        }
-        finally { if (File.Exists(truncPath)) File.Delete(truncPath); }
-
-        var ckptV1 = rig.CreateInitialCheckpoint();
-        var ckptV2 = new TrainingCheckpoint(
-            ckptV1.TrainableParams, ckptV1.ModelState, ckptV1.OptimizerState, step: 7);
-
-        var dir = TempPath("ckpt_atomic");
-        Directory.CreateDirectory(dir);
-        try
-        {
-            var path = Path.Combine(dir, "ckpt.safetensors");
-            ckptV1.Save(path);
-            Assert.Equal(0, rig.LoadCheckpoint(path).Step);
-
-            AtomicFileWriter.CommitFaultInjection = p =>
-            {
-                if (p.StartsWith(dir, StringComparison.Ordinal)) throw new IOException("injected crash");
-            };
-            try
-            {
-                Assert.Throws<IOException>(() => ckptV2.Save(path));
-            }
-            finally { AtomicFileWriter.CommitFaultInjection = null; }
-            Assert.Equal(0, rig.LoadCheckpoint(path).Step);
-
-            var stale = Path.Combine(dir, $".tmp-ckpt.safetensors-{Guid.NewGuid():N}");
-            File.WriteAllText(stale, "partial");
-            ckptV2.Save(path);
-            Assert.Equal(7, rig.LoadCheckpoint(path).Step);
-            Assert.False(File.Exists(stale));
-            Assert.Empty(Directory.GetFileSystemEntries(dir, ".tmp-*"));
-
-            Assert.Throws<DirectoryNotFoundException>(
-                () => ckptV1.Save(Path.Combine(dir, "missing", "ckpt.safetensors")));
-            Assert.False(Directory.Exists(Path.Combine(dir, "missing")));
-        }
-        finally { Directory.Delete(dir, recursive: true); }
-    }
-
-    [Fact]
-    public void TestCheckpointInspectRecognizesSavedCheckpoint()
-    {
-        var rig = TrainingRig.FromScratch(
-            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
-            SGDMomentumOptimizer.ComputationGraph,
-            [
-                new TensorDataModelParam("input", ModelParamType.InputParam,
-                    TensorData([4L], [1f, 2f, 3f, 4f])),
-            ],
-            0.5f, 0.9f);
-        var ckpt0 = rig.CreateInitialCheckpoint();
-        var ckpt = new TrainingCheckpoint(
-            ckpt0.TrainableParams, ckpt0.ModelState, ckpt0.OptimizerState, step: 5);
-
-        var path = TempPath("inspect") + ".safetensors";
-        try
-        {
-            ckpt.Save(path);
-            var result = Persistence.Inspect(path);
-
-            Assert.Equal(ArtifactKind.TrainingCheckpoint, result.Kind);
-            Assert.Empty(result.Observations);
-            Assert.NotNull(result.SafeTensors);
-            Assert.Null(result.Srk);
-
-            var info = result.TrainingCheckpoint!;
-            Assert.Equal(1, info.FormatVersion);
-            Assert.Equal(5, info.Step);
-            Assert.Null(info.Epoch);
-            Assert.Null(info.BatchIndex);
-
-            string[] sectionNames = ["trainable", "model_state", "opt_state"];
-            Assert.Equal(sectionNames.Length, info.Sections.Count);
-            foreach (var section in sectionNames)
-                Assert.Contains(section, info.Sections.Keys);
-            Assert.Equal(
-                rig.TrainableParamStructDef.Fields.Select(f => f.Name),
-                info.Sections["trainable"].Select(t => t.Name));
-            Assert.Equal(
-                rig.ModelStateDef.Fields.Select(f => f.Name),
-                info.Sections["model_state"].Select(t => t.Name));
-            Assert.Equal(
-                rig.OptimizerStateDef.Fields.Select(f => f.Name),
-                info.Sections["opt_state"].Select(t => t.Name));
-            Assert.NotEmpty(info.Sections["opt_state"]);
-
-            var trainableField = rig.TrainableParamStructDef.Fields[0];
-            var written = (TensorData)ckpt.TrainableParams.Fields[trainableField.Name];
-            var listed = info.Sections["trainable"].Single(t => t.Name == trainableField.Name);
-            Assert.Equal(written.Shape.Dims, listed.Shape);
-            Assert.Equal("F32", listed.DType);
-
-            var text = result.ToString();
-            Assert.Contains("training checkpoint", text);
-            Assert.Contains("global step: 5", text);
-
-            var plainPath = TempPath("inspect_plain") + ".safetensors";
-            try
-            {
-                List<SafeTensor> plainTensors =
-                [
-                    new SafeTensor(trainableField.Name, written,
-                        SafeTensorLoader.DTypeToSafeTensorDType(written.DType), written.Shape.Dims),
-                ];
-                SafeTensorLoader.SaveSafeTensors(plainPath, plainTensors);
-                Assert.Equal(ArtifactKind.SafeTensors, Persistence.Inspect(plainPath).Kind);
-                Assert.Null(Persistence.Inspect(plainPath).TrainingCheckpoint);
-            }
-            finally { if (File.Exists(plainPath)) File.Delete(plainPath); }
-        }
-        finally { if (File.Exists(path)) File.Delete(path); }
-    }
-
-    private static (NamedModelParam[] sample, TensorDataStruct input, TensorDataStruct target) ScalarMultiplyBatches()
-    {
-        NamedModelParam[] sample =
-        [
-            new TensorDataModelParam("input", ModelParamType.InputParam,
-                TensorData([4L], [1f, 2f, 3f, 4f])),
-        ];
-        return (sample, InBatch(1f, 2f, 3f, 4f), TargetBatch(0f, 0f, 0f, 0f));
-    }
-
+[Trait("Domain", "Training")]
+[Trait("Purpose", "Coverage")]
+public class TrainingRigScheduleCoverageTests
+{
     private static ComputationGraph SchedulerModule(Func<Scalar<int64>, Scalar<float32>> body)
     {
         var step = InputScalar<int64>("step");
@@ -873,10 +866,6 @@ public class TrainingRigCoverageTests
 
     private static ComputationGraph SchedulerModuleRaw(Variable[] inputs, Variable[] outputs)
         => new(new InternalComputationGraph([.. inputs], [.. outputs]), GraphKind.Module);
-
-    private static float Weight(TrainingRig rig, TrainingCheckpoint ckpt) =>
-        ((TensorData<float32>)ckpt.TrainableParams.Fields[rig.TrainableParamStructDef.Fields[0].Name])
-            .AccessMemory()[0];
 
     [Fact]
     public void TestScheduleCombinatorsCoverage()
@@ -1112,6 +1101,48 @@ public class TrainingRigCoverageTests
             Assert.Contains("pure", impureEx.Message);
         }
     }
+}
+
+[Trait("Domain", "Training")]
+[Trait("Purpose", "Coverage")]
+public class TrainingRigTrainingLoopCoverageTests
+{
+    [Fact]
+    public void TestTrainStepAndTrainLoopCoverage()
+    {
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph,
+            L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph,
+            [
+                new TensorDataModelParam("input", ModelParamType.InputParam,
+                    TensorData([4L], [1f, 2f, 3f, 4f])),
+            ],
+            0.1f);
+
+        var initial = rig.CreateInitialCheckpoint();
+        var inputBatch = InBatch(1f, 2f, 3f, 4f);
+        var targetBatch = TargetBatch(0f, 0f, 0f, 0f);
+
+        var trainResult = rig.Train(initial, [inputBatch], [targetBatch], numEpochs: 1);
+        Assert.Single(trainResult.EpochLosses);
+        Assert.NotNull(trainResult.FinalCheckpoint);
+
+        var stepResult = rig.TrainStep(initial, inputBatch, targetBatch);
+        Assert.NotNull(stepResult);
+        Assert.NotNull(stepResult.TrainableParams);
+        Assert.NotNull(stepResult.ModelState);
+        Assert.NotNull(stepResult.OptimizerState);
+        Assert.True(float.IsFinite(stepResult.Loss!.Value));
+
+        var graphs = new FastTrainingGraphs(
+            ScalarMultiplyModel.ComputationGraph.ToInternal(),
+            L2Loss.ComputationGraph.ToInternal(),
+            SGDOptimizer.ComputationGraph.ToInternal());
+        Assert.NotNull(graphs.ModelGraph);
+        Assert.NotNull(graphs.LossGraph);
+        Assert.NotNull(graphs.OptimizerGraph);
+    }
 
     [Fact]
     public void TestTrainStepAndCheckpointCounterSemanticsCoverage()
@@ -1183,316 +1214,6 @@ public class TrainingRigCoverageTests
         Assert.Equal(0, ck.WithEpoch(7).Step);
         Assert.Equal(4, ck.WithBatchIndex(4).BatchIndex);
         Assert.Equal(0, ck.WithBatchIndex(4).Step);
-    }
-
-    [Fact]
-    public void TestCheckpointCountersPersistAcrossFormatsCoverage()
-    {
-        var (_, trained, _, _) = BuildTrainedAdamRig(steps: 4);
-        var loaderRig = BuildTrainedAdamRig(steps: 0).Rig;
-
-        long bigStep = 5_000_000_000L;
-        long bigEpoch = 3_000_000_000L;
-        long bigBatch = (long)int.MaxValue + 7L;
-        var big = new TrainingCheckpoint(
-            trained.TrainableParams, trained.ModelState, trained.OptimizerState,
-            step: bigStep, epoch: bigEpoch, batchIndex: bigBatch, rig: trained.Rig);
-
-        var bigFlat = TempPath("i64") + ".safetensors";
-        var bigSkpt = TempPath("i64") + ".skpt";
-        try
-        {
-            big.Save(bigFlat);
-            var flat = loaderRig.LoadCheckpoint(bigFlat);
-            Assert.Equal(bigStep, flat.Step);
-            Assert.Equal(bigEpoch, flat.Epoch);
-            Assert.Equal(bigBatch, flat.BatchIndex);
-            Assert.Equal(1, Persistence.Inspect(bigFlat).TrainingCheckpoint!.FormatVersion);
-
-            Persistence.SaveTrainingCheckpointToSkpt(big, bigSkpt);
-            var skpt = loaderRig.LoadCheckpoint(bigSkpt);
-            Assert.Equal(bigStep, skpt.Step);
-            Assert.Equal(bigEpoch, skpt.Epoch);
-            Assert.Equal(bigBatch, skpt.BatchIndex);
-        }
-        finally
-        {
-            if (File.Exists(bigFlat)) File.Delete(bigFlat);
-            if (File.Exists(bigSkpt)) File.Delete(bigSkpt);
-        }
-
-        var ckpt = new TrainingCheckpoint(
-            trained.TrainableParams, trained.ModelState, trained.OptimizerState,
-            step: trained.Step, epoch: 7, batchIndex: 340, rig: trained.Rig);
-        Assert.Equal(4, ckpt.Step);
-        Assert.Equal(7, ckpt.Epoch);
-        Assert.Equal(340, ckpt.BatchIndex);
-
-        var skptPath = TempPath("ctr_skpt") + ".skpt";
-        var flatPath = TempPath("ctr_flat") + ".safetensors";
-        try
-        {
-            Persistence.SaveTrainingCheckpointToSkpt(ckpt, skptPath);
-            var manifest = SkptFileFormat.ParseManifest(
-                ReadEntryBytesViaBcl(skptPath, SkptFileFormat.ConfigEntryName), skptPath);
-            Assert.Equal(7, manifest.Training!.Epoch);
-            Assert.Equal(340, manifest.Training.BatchIndex);
-
-            var skptLoaded = loaderRig.LoadCheckpoint(skptPath);
-            Assert.Equal(4, skptLoaded.Step);
-            Assert.Equal(7, skptLoaded.Epoch);
-            Assert.Equal(340, skptLoaded.BatchIndex);
-
-            ckpt.Save(flatPath);
-            var flatLoaded = loaderRig.LoadCheckpoint(flatPath);
-            Assert.Equal(4, flatLoaded.Step);
-            Assert.Equal(7, flatLoaded.Epoch);
-            Assert.Equal(340, flatLoaded.BatchIndex);
-
-            Assert.Equal(skptLoaded.Step, flatLoaded.Step);
-            Assert.Equal(skptLoaded.Epoch, flatLoaded.Epoch);
-            Assert.Equal(skptLoaded.BatchIndex, flatLoaded.BatchIndex);
-
-            var skptInspect = Persistence.Inspect(skptPath);
-            Assert.Empty(skptInspect.Observations);
-            Assert.Equal(7, skptInspect.Skpt!.Training!.Epoch);
-            Assert.Equal(340, skptInspect.Skpt.Training.BatchIndex);
-            Assert.Contains("epoch 7", skptInspect.ToString());
-            Assert.Contains("batch index 340", skptInspect.ToString());
-
-            var flatInspect = Persistence.Inspect(flatPath);
-            Assert.Empty(flatInspect.Observations);
-            Assert.Equal(1, flatInspect.TrainingCheckpoint!.FormatVersion);
-            Assert.Equal(7, flatInspect.TrainingCheckpoint.Epoch);
-            Assert.Equal(340, flatInspect.TrainingCheckpoint.BatchIndex);
-            Assert.Contains("epoch: 7", flatInspect.ToString());
-            Assert.Contains("batch index: 340", flatInspect.ToString());
-        }
-        finally
-        {
-            if (File.Exists(skptPath)) File.Delete(skptPath);
-            if (File.Exists(flatPath)) File.Delete(flatPath);
-        }
-
-        var unset = new TrainingCheckpoint(
-            trained.TrainableParams, trained.ModelState, trained.OptimizerState,
-            step: trained.Step, rig: trained.Rig);
-        Assert.Null(unset.Epoch);
-        Assert.Null(unset.BatchIndex);
-
-        var nullFlat = TempPath("nullctr") + ".safetensors";
-        var nullSkpt = TempPath("nullctr") + ".skpt";
-        try
-        {
-            unset.Save(nullFlat);
-            var flat = loaderRig.LoadCheckpoint(nullFlat);
-            Assert.Equal(trained.Step, flat.Step);
-            Assert.Null(flat.Epoch);
-            Assert.Null(flat.BatchIndex);
-
-            var flatInspect = Persistence.Inspect(nullFlat);
-            Assert.Empty(flatInspect.Observations);
-            Assert.Equal(1, flatInspect.TrainingCheckpoint!.FormatVersion);
-            Assert.Null(flatInspect.TrainingCheckpoint.Epoch);
-            Assert.Null(flatInspect.TrainingCheckpoint.BatchIndex);
-            Assert.Contains("epoch: unset", flatInspect.ToString());
-
-            Persistence.SaveTrainingCheckpointToSkpt(unset, nullSkpt);
-            var manifest = SkptFileFormat.ParseManifest(
-                ReadEntryBytesViaBcl(nullSkpt, SkptFileFormat.ConfigEntryName), nullSkpt);
-            Assert.Null(manifest.Training!.Epoch);
-            Assert.Null(manifest.Training.BatchIndex);
-
-            var skptLoaded = loaderRig.LoadCheckpoint(nullSkpt);
-            Assert.Equal(trained.Step, skptLoaded.Step);
-            Assert.Null(skptLoaded.Epoch);
-            Assert.Null(skptLoaded.BatchIndex);
-        }
-        finally
-        {
-            if (File.Exists(nullFlat)) File.Delete(nullFlat);
-            if (File.Exists(nullSkpt)) File.Delete(nullSkpt);
-        }
-
-        const int features = 4;
-        var rig = LoaderRig(batchSize: 2, features);
-        var (inputs, targets) = IndexDataset(rig, n: 6, features);
-        var final = rig.Fit(new InMemoryDataLoader(inputs, targets, batchSize: 2), numEpochs: 1).FinalCheckpoint;
-        Assert.Equal(0, final.Epoch);
-        Assert.Equal(2, final.BatchIndex);
-
-        var concretePath = TempPath("concctr") + ".safetensors";
-        try
-        {
-            final.Save(concretePath);
-            var loaded = LoaderRig(batchSize: 2, features).LoadCheckpoint(concretePath);
-            Assert.Equal(0, loaded.Epoch);
-            Assert.Equal(2, loaded.BatchIndex);
-
-            var inspect = Persistence.Inspect(concretePath);
-            Assert.Empty(inspect.Observations);
-            Assert.Equal(0, inspect.TrainingCheckpoint!.Epoch);
-            Assert.Equal(2, inspect.TrainingCheckpoint.BatchIndex);
-        }
-        finally { if (File.Exists(concretePath)) File.Delete(concretePath); }
-    }
-
-    [Fact]
-    public void TestTrainingGraphLoweringBuilderOverloadsAndParamDiscoveryCoverage()
-    {
-        var trainingGraph = TrainingGraphBuilder.PrepareForTrainingAsFast(
-            ScalarMultiplyModel.ComputationGraph.ToInternal(),
-            L2Loss.ComputationGraph.ToInternal());
-        var lowered = TrainingLoop.LowerTrainingGraph(trainingGraph);
-        Assert.NotNull(lowered);
-        Assert.NotEmpty(lowered.Nodes);
-
-        var modelGraph = ScalarMultiplyModel.ComputationGraph.ToInternal();
-        Func<Tensor<float32>, Tensor<float32>, Scalar<float32>> lossFunc = L2Loss.Inline;
-        var funcTrainingGraph = TrainingGraphBuilder.PrepareForTrainingAsFast(modelGraph, lossFunc);
-        Assert.True(funcTrainingGraph.Inputs.Count >= 3);
-        Assert.True(funcTrainingGraph.Outputs.Count >= 2);
-
-        Assert.Throws<ArgumentNullException>(() =>
-            TrainingGraphBuilder.PrepareForTrainingAsFast<Tensor<float32>, Scalar<float32>>(modelGraph, null!));
-        Assert.Throws<ArgumentNullException>(() =>
-            TrainingGraphBuilder.PrepareForTrainingAsFast<Tensor<float32>, Scalar<float32>>(null!, lossFunc));
-
-        Func<Tensor<float32>, Tensor<float32>, Scalar<float32>> notAModule =
-            (pred, targ) => ((Tensor<float32>)OnnxOp.ReduceSum(pred - targ, keepdims: false)).Scalar();
-        Assert.Throws<ArgumentException>(() =>
-            TrainingGraphBuilder.PrepareForTrainingAsFast(modelGraph, notAModule));
-
-        var moduleGraph = CallsSimplestModule.ComputationGraph.ToInternal();
-        Assert.Contains(moduleGraph.Nodes, n =>
-            n.OpCode == InternalOpCodes.MODEL_INVOKE || n.OpCode == InternalOpCodes.FUNCTION_INVOKE);
-        Assert.Throws<System.InvalidOperationException>(() => moduleGraph.GetConcreteModelParamInfos());
-        Assert.Throws<System.InvalidOperationException>(() => moduleGraph.InitializeTrainableParams());
-
-        var arch = moduleGraph.ToConcreteArchitecture(
-            moduleGraph.FromOrderedInputs([TensorData([4L], [1f, 2f, 3f, 4f])]));
-        Assert.NotEmpty(arch.GetConcreteModelParamInfos().ParamInfos);
-        Assert.NotEmpty(arch.InitializeTrainableParams().ModelParams);
-    }
-
-    [Fact]
-    public void TestLossAndOptimizerHubsCoverage()
-    {
-        Assert.NotNull(Losses.L2Loss);
-        Assert.NotNull(Losses.L1Loss);
-        Assert.NotNull(Losses.CrossEntropy);
-        Assert.NotNull(Losses.BCE);
-        Assert.NotNull(Losses.BCEWithLogits);
-        Assert.NotNull(Losses.SmoothL1);
-        Assert.NotNull(Losses.Huber);
-        Assert.NotNull(Losses.Hinge);
-        Assert.NotNull(Losses.SquaredHinge);
-        Assert.NotNull(Losses.KLDiv);
-        Assert.NotNull(Losses.NLL);
-        Assert.NotNull(Losses.PoissonNLL);
-        Assert.NotNull(Losses.LogCosh);
-        Assert.NotNull(Losses.CosineEmbedding);
-        Assert.NotNull(Losses.TripletMargin);
-        Assert.NotNull(Losses.BinaryFocal);
-        Assert.Equal(2, Losses.L2Loss.ToInternal().Inputs.Count);
-        Assert.Equal(2, Losses.L1Loss.ToInternal().Inputs.Count);
-
-        Assert.NotNull(Optimizers.SGD);
-        Assert.NotNull(Optimizers.SGDMomentum);
-        Assert.NotNull(Optimizers.Adam);
-        Assert.NotNull(Optimizers.AdamW);
-        Assert.NotNull(Optimizers.Adamax);
-        Assert.NotNull(Optimizers.NAdam);
-        Assert.NotNull(Optimizers.Adagrad);
-        Assert.NotNull(Optimizers.Adadelta);
-        Assert.NotNull(Optimizers.RMSprop);
-        Assert.NotNull(Optimizers.RAdam);
-        Assert.NotNull(Optimizers.Lamb);
-        Assert.NotNull(Optimizers.Lion);
-        Assert.NotNull(Optimizers.Adafactor);
-    }
-
-    [Fact]
-    public void TestFromScratchGraphKindsAndConvenienceApisCoverage()
-    {
-        var modelGraph = ScalarMultiplyModel.ComputationGraph;
-        var exampleInput = TensorData([4L], [1f, 2f, 3f, 4f]);
-
-        var rig = TrainingRig.FromScratch(
-            modelGraph, Losses.L2Loss, Optimizers.SGD,
-            modelGraph.FromOrderedInputs([exampleInput]),
-            0.01f);
-
-        var namedHyperRig = TrainingRig.FromScratch(
-            modelGraph, Losses.L2Loss, Optimizers.SGD,
-            modelGraph.FromOrderedInputs([exampleInput]),
-            new SGDOptimizerHyperparameters { LearningRate = 0.01f });
-        Assert.NotEmpty(namedHyperRig.TrainableParamStructDef.Fields);
-        Assert.Throws<ArgumentNullException>(() => TrainingRig.FromScratch(
-            modelGraph, Losses.L2Loss, Optimizers.SGD,
-            (ModelParamList)null!, new SGDOptimizerHyperparameters { LearningRate = 0.01f }));
-
-        Assert.NotNull(rig.InputDef);
-        Assert.Equal(1, rig.InputDef.Fields.Length);
-        Assert.Equal("input", rig.InputDef.Fields[0].Name);
-        Assert.NotNull(rig.TargetDef);
-        Assert.Equal(1, rig.TargetDef.Fields.Length);
-        Assert.Equal("targets", rig.TargetDef.Fields[0].Name);
-
-        var inputBatch = rig.InputDef.FromOrderedData(exampleInput);
-        var targetBatch = rig.TargetDef.FromOrderedData(TensorData([4L], new float[4]));
-        Assert.NotNull(inputBatch);
-        Assert.NotNull(targetBatch);
-        Assert.Same(rig.InputDef, inputBatch.Definition);
-        Assert.Same(rig.TargetDef, targetBatch.Definition);
-
-        var result = rig.Fit([inputBatch, inputBatch], [targetBatch, targetBatch], numEpochs: 1);
-        Assert.Single(result.EpochLosses);
-        Assert.True(float.IsFinite(result.EpochLosses[0]));
-
-        var arch = modelGraph.ToConcreteArchitecture(modelGraph.FromOrderedInputs([exampleInput]));
-        var sampleInput = new TensorDataModelParam("input", ModelParamType.InputParam, exampleInput);
-
-        var archRig = TrainingRig.FromScratch(
-            arch, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            [sampleInput], 0.5f);
-        Assert.NotEmpty(archRig.TrainableParamStructDef.Fields);
-        Assert.Equal(GraphKind.ConcreteModel, archRig.TrainingStepPureGraph.Kind);
-        Assert.NotNull(archRig.CreateInitialCheckpoint().TrainableParams);
-
-        var exModel = Assert.Throws<InvalidOperationException>(() => TrainingRig.FromScratch(
-            arch.ToConcreteModel(), L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            [sampleInput], 0.5f));
-        Assert.Contains("'concrete-model'", exModel.Message);
-        Assert.Contains("'concrete-architecture'", exModel.Message);
-
-        var exLoss = Assert.Throws<InvalidOperationException>(() => TrainingRig.FromScratch(
-            modelGraph, arch, SGDOptimizer.ComputationGraph,
-            [sampleInput], 0.5f));
-        Assert.Contains("'module'", exLoss.Message);
-    }
-
-    private static TrainingRig LoaderRig(int batchSize, int features) =>
-        TrainingRig.FromScratch(
-            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            [
-                new TensorDataModelParam("input", ModelParamType.InputParam,
-                    TensorData([batchSize, features], new float[batchSize * features])),
-            ],
-            0.1f);
-
-    private static (TensorDataStruct inputs, TensorDataStruct targets) IndexDataset(
-        TrainingRig rig, int n, int features)
-    {
-        float[] inVals = new float[n * features];
-        for (int i = 0; i < n; i++)
-            for (int f = 0; f < features; f++)
-                inVals[i * features + f] = i;
-        var inputs = new TensorDataStruct(rig.InputDef,
-            new Dictionary<string, IData> { { "input", TensorData([n, (long)features], inVals) } });
-        var targets = new TensorDataStruct(rig.TargetDef,
-            new Dictionary<string, IData> { { "targets", TensorData([n, (long)features], new float[n * features]) } });
-        return (inputs, targets);
     }
 
     private static int[] EpochIndexSequence(InMemoryDataLoader loader, int features)
@@ -1747,38 +1468,577 @@ public class TrainingRigCoverageTests
         for (int i = 0; i < twoExpected.Length; i++)
             Assert.True(MathF.Abs(twoExpected[i] - twoOut[i]) < 1e-5f);
     }
+}
 
-    private static (TrainingRig Rig, TrainingCheckpoint Ckpt, TensorDataStruct In, TensorDataStruct Out)
-        BuildTrainedAdamRig(int steps)
+[Trait("Domain", "Training")]
+[Trait("Purpose", "Coverage")]
+public class TrainingRigCheckpointCoverageTests
+{
+    [Fact]
+    public void TestCheckpointSaveLoadResumeAndAdamScalarStepCoverage()
     {
         NamedModelParam[] sample =
         [
             new TensorDataModelParam("input", ModelParamType.InputParam,
-                TensorData(ScalarInputShape, [1f, 2f, 3f, 4f])),
+                TensorData([4L], [1f, 2f, 3f, 4f])),
         ];
-        var rig = TrainingRig.FromScratch(
+        TrainingRig AdamWRig() => TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
             AdamWOptimizer.ComputationGraph, sample,
             new AdamWOptimizerHyperparameters { LearningRate = 0.1f });
+        TrainingRig AdamRig() => TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            AdamOptimizer.ComputationGraph, sample,
+            new AdamOptimizerHyperparameters { LearningRate = 0.1f });
 
-        var inBatch = InBatch(1f, 2f, 3f, 4f);
-        var outBatch = TargetBatch(2f, 4f, 6f, 8f);
+        var inputBatch = InBatch(1f, 2f, 3f, 4f);
+        var targetBatch = TargetBatch(2f, 4f, 6f, 8f);
 
-        var ckpt = rig.CreateInitialCheckpoint();
-        for (int i = 0; i < steps; i++)
-            ckpt = rig.TrainStep(ckpt, inBatch, outBatch);
-        return (rig, ckpt, inBatch, outBatch);
+        var path = TempPath("ckpt") + ".safetensors";
+        try
+        {
+            var rigA = AdamWRig();
+            var ckpt = rigA.CreateInitialCheckpoint();
+            for (int i = 0; i < 2; i++)
+                ckpt = rigA.TrainStep(ckpt, inputBatch, targetBatch);
+            Assert.Equal(2, ckpt.Step);
+            ckpt.Save(path);
+            Assert.True(File.Exists(path));
+
+            var rigB = AdamWRig();
+            var loaded = rigB.LoadCheckpoint(path);
+
+            Assert.Equal(2, loaded.Step);
+            Assert.Equal(FlattenStruct(ckpt.TrainableParams), FlattenStruct(loaded.TrainableParams));
+            Assert.Equal(FlattenStruct(ckpt.OptimizerState), FlattenStruct(loaded.OptimizerState));
+            Assert.NotEmpty(loaded.OptimizerState.Fields);
+
+            var resumed = rigB.TrainStep(loaded, inputBatch, targetBatch);
+            Assert.Equal(3, resumed.Step);
+            Assert.True(float.IsFinite(resumed.Loss!.Value));
+
+            var bnRig = TrainingRig.FromScratch(
+                ScalarMultiplyWithBatchNormModel.ComputationGraph, L2Loss.ComputationGraph,
+                SGDMomentumOptimizer.ComputationGraph,
+                [
+                    new TensorDataModelParam("input", ModelParamType.InputParam,
+                        TensorData([8L], new float[8])),
+                ],
+                0.5f, 0.9f);
+            var bnPath = TempPath("ckpt_bn") + ".safetensors";
+            try
+            {
+                var bnCkpt = bnRig.CreateInitialCheckpoint();
+                Assert.NotEmpty(bnCkpt.ModelState.Fields);
+                bnCkpt.Save(bnPath);
+                var bnLoaded = bnRig.LoadCheckpoint(bnPath);
+                Assert.Equal(FlattenStruct(bnCkpt.ModelState), FlattenStruct(bnLoaded.ModelState));
+                Assert.Equal(FlattenStruct(bnCkpt.OptimizerState), FlattenStruct(bnLoaded.OptimizerState));
+
+                Assert.Throws<InvalidOperationException>(() => bnRig.LoadCheckpoint(path));
+            }
+            finally { if (File.Exists(bnPath)) File.Delete(bnPath); }
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+
+        var adamRig = AdamRig();
+        Assert.Equal(3, adamRig.OptimizerStateDef.Fields.Length);
+        var stepField = adamRig.OptimizerStateDef.Fields[2];
+        Assert.Equal(0, stepField.Rank);
+
+        var adamCkpt = adamRig.CreateInitialCheckpoint();
+        for (int i = 0; i < 2; i++)
+            adamCkpt = adamRig.TrainStep(adamCkpt, inputBatch, targetBatch);
+
+        var stepData = (TensorData)adamCkpt.OptimizerState.Fields[stepField.Name];
+        Assert.Empty(stepData.Shape.Dims);
+        Assert.Equal(2f, stepData.As<float32>().AccessMemory()[0]);
+
+        var adamPath = TempPath("adam_scalar") + ".safetensors";
+        try
+        {
+            adamCkpt.Save(adamPath);
+
+            var loaded = AdamRig().LoadCheckpoint(adamPath);
+            Assert.Equal(2, loaded.Step);
+            Assert.Equal(FlattenStruct(adamCkpt.OptimizerState), FlattenStruct(loaded.OptimizerState));
+            Assert.Equal(FlattenStruct(adamCkpt.TrainableParams), FlattenStruct(loaded.TrainableParams));
+            Assert.Empty(((TensorData)loaded.OptimizerState.Fields[stepField.Name]).Shape.Dims);
+        }
+        finally { if (File.Exists(adamPath)) File.Delete(adamPath); }
     }
 
-    private static byte[] ReadEntryBytesViaBcl(string path, string entryName)
+    [Fact]
+    public void TestCheckpointSaveAtomicityAndTruncatedLoadFailsLoudlyCoverage()
     {
-        using var zip = System.IO.Compression.ZipFile.OpenRead(path);
-        using var s = zip.GetEntry(entryName)!.Open();
-        using var buf = new MemoryStream();
-        s.CopyTo(buf);
-        return buf.ToArray();
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph,
+            [
+                new TensorDataModelParam("input", ModelParamType.InputParam,
+                    TensorData([4L], [1f, 2f, 3f, 4f])),
+            ],
+            0.1f);
+
+        var truncPath = TempPath("ckpt_trunc") + ".safetensors";
+        try
+        {
+            rig.CreateInitialCheckpoint().Save(truncPath);
+            var full = File.ReadAllBytes(truncPath);
+            File.WriteAllBytes(truncPath, full[..^8]);
+
+            var ex = Assert.Throws<ModelException>(() => rig.LoadCheckpoint(truncPath));
+            Assert.Equal(ErrorCodes.ST003, ex.ErrorCode);
+            Assert.Contains("truncated", ex.Message);
+            Assert.Contains(truncPath, ex.Message);
+            Assert.Contains($"{full.Length} bytes", ex.Message);
+            Assert.Contains($"{full.Length - 8} bytes", ex.Message);
+        }
+        finally { if (File.Exists(truncPath)) File.Delete(truncPath); }
+
+        var ckptV1 = rig.CreateInitialCheckpoint();
+        var ckptV2 = new TrainingCheckpoint(
+            ckptV1.TrainableParams, ckptV1.ModelState, ckptV1.OptimizerState, step: 7);
+
+        var dir = TempPath("ckpt_atomic");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var path = Path.Combine(dir, "ckpt.safetensors");
+            ckptV1.Save(path);
+            Assert.Equal(0, rig.LoadCheckpoint(path).Step);
+
+            AtomicFileWriter.CommitFaultInjection = p =>
+            {
+                if (p.StartsWith(dir, StringComparison.Ordinal)) throw new IOException("injected crash");
+            };
+            try
+            {
+                Assert.Throws<IOException>(() => ckptV2.Save(path));
+            }
+            finally { AtomicFileWriter.CommitFaultInjection = null; }
+            Assert.Equal(0, rig.LoadCheckpoint(path).Step);
+
+            var stale = Path.Combine(dir, $".tmp-ckpt.safetensors-{Guid.NewGuid():N}");
+            File.WriteAllText(stale, "partial");
+            ckptV2.Save(path);
+            Assert.Equal(7, rig.LoadCheckpoint(path).Step);
+            Assert.False(File.Exists(stale));
+            Assert.Empty(Directory.GetFileSystemEntries(dir, ".tmp-*"));
+
+            Assert.Throws<DirectoryNotFoundException>(
+                () => ckptV1.Save(Path.Combine(dir, "missing", "ckpt.safetensors")));
+            Assert.False(Directory.Exists(Path.Combine(dir, "missing")));
+        }
+        finally { Directory.Delete(dir, recursive: true); }
     }
 
+    [Fact]
+    public void TestCheckpointInspectRecognizesSavedCheckpoint()
+    {
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDMomentumOptimizer.ComputationGraph,
+            [
+                new TensorDataModelParam("input", ModelParamType.InputParam,
+                    TensorData([4L], [1f, 2f, 3f, 4f])),
+            ],
+            0.5f, 0.9f);
+        var ckpt0 = rig.CreateInitialCheckpoint();
+        var ckpt = new TrainingCheckpoint(
+            ckpt0.TrainableParams, ckpt0.ModelState, ckpt0.OptimizerState, step: 5);
+
+        var path = TempPath("inspect") + ".safetensors";
+        try
+        {
+            ckpt.Save(path);
+            var result = Persistence.Inspect(path);
+
+            Assert.Equal(ArtifactKind.TrainingCheckpoint, result.Kind);
+            Assert.Empty(result.Observations);
+            Assert.NotNull(result.SafeTensors);
+            Assert.Null(result.Srk);
+
+            var info = result.TrainingCheckpoint!;
+            Assert.Equal(1, info.FormatVersion);
+            Assert.Equal(5, info.Step);
+            Assert.Null(info.Epoch);
+            Assert.Null(info.BatchIndex);
+
+            string[] sectionNames = ["trainable", "model_state", "opt_state"];
+            Assert.Equal(sectionNames.Length, info.Sections.Count);
+            foreach (var section in sectionNames)
+                Assert.Contains(section, info.Sections.Keys);
+            Assert.Equal(
+                rig.TrainableParamStructDef.Fields.Select(f => f.Name),
+                info.Sections["trainable"].Select(t => t.Name));
+            Assert.Equal(
+                rig.ModelStateDef.Fields.Select(f => f.Name),
+                info.Sections["model_state"].Select(t => t.Name));
+            Assert.Equal(
+                rig.OptimizerStateDef.Fields.Select(f => f.Name),
+                info.Sections["opt_state"].Select(t => t.Name));
+            Assert.NotEmpty(info.Sections["opt_state"]);
+
+            var trainableField = rig.TrainableParamStructDef.Fields[0];
+            var written = (TensorData)ckpt.TrainableParams.Fields[trainableField.Name];
+            var listed = info.Sections["trainable"].Single(t => t.Name == trainableField.Name);
+            Assert.Equal(written.Shape.Dims, listed.Shape);
+            Assert.Equal("F32", listed.DType);
+
+            var text = result.ToString();
+            Assert.Contains("training checkpoint", text);
+            Assert.Contains("global step: 5", text);
+
+            var plainPath = TempPath("inspect_plain") + ".safetensors";
+            try
+            {
+                List<SafeTensor> plainTensors =
+                [
+                    new SafeTensor(trainableField.Name, written,
+                        SafeTensorLoader.DTypeToSafeTensorDType(written.DType), written.Shape.Dims),
+                ];
+                SafeTensorLoader.SaveSafeTensors(plainPath, plainTensors);
+                Assert.Equal(ArtifactKind.SafeTensors, Persistence.Inspect(plainPath).Kind);
+                Assert.Null(Persistence.Inspect(plainPath).TrainingCheckpoint);
+            }
+            finally { if (File.Exists(plainPath)) File.Delete(plainPath); }
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    [Fact]
+    public void TestCheckpointCountersPersistAcrossFormatsCoverage()
+    {
+        var (_, trained, _, _) = BuildTrainedAdamRig(steps: 4);
+        var loaderRig = BuildTrainedAdamRig(steps: 0).Rig;
+
+        long bigStep = 5_000_000_000L;
+        long bigEpoch = 3_000_000_000L;
+        long bigBatch = (long)int.MaxValue + 7L;
+        var big = new TrainingCheckpoint(
+            trained.TrainableParams, trained.ModelState, trained.OptimizerState,
+            step: bigStep, epoch: bigEpoch, batchIndex: bigBatch, rig: trained.Rig);
+
+        var bigFlat = TempPath("i64") + ".safetensors";
+        var bigSkpt = TempPath("i64") + ".skpt";
+        try
+        {
+            big.Save(bigFlat);
+            var flat = loaderRig.LoadCheckpoint(bigFlat);
+            Assert.Equal(bigStep, flat.Step);
+            Assert.Equal(bigEpoch, flat.Epoch);
+            Assert.Equal(bigBatch, flat.BatchIndex);
+            Assert.Equal(1, Persistence.Inspect(bigFlat).TrainingCheckpoint!.FormatVersion);
+
+            Persistence.SaveTrainingCheckpointToSkpt(big, bigSkpt);
+            var skpt = loaderRig.LoadCheckpoint(bigSkpt);
+            Assert.Equal(bigStep, skpt.Step);
+            Assert.Equal(bigEpoch, skpt.Epoch);
+            Assert.Equal(bigBatch, skpt.BatchIndex);
+        }
+        finally
+        {
+            if (File.Exists(bigFlat)) File.Delete(bigFlat);
+            if (File.Exists(bigSkpt)) File.Delete(bigSkpt);
+        }
+
+        var ckpt = new TrainingCheckpoint(
+            trained.TrainableParams, trained.ModelState, trained.OptimizerState,
+            step: trained.Step, epoch: 7, batchIndex: 340, rig: trained.Rig);
+        Assert.Equal(4, ckpt.Step);
+        Assert.Equal(7, ckpt.Epoch);
+        Assert.Equal(340, ckpt.BatchIndex);
+
+        var skptPath = TempPath("ctr_skpt") + ".skpt";
+        var flatPath = TempPath("ctr_flat") + ".safetensors";
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, skptPath);
+            var manifest = SkptFileFormat.ParseManifest(
+                ReadEntryBytesViaBcl(skptPath, SkptFileFormat.ConfigEntryName), skptPath);
+            Assert.Equal(7, manifest.Training!.Epoch);
+            Assert.Equal(340, manifest.Training.BatchIndex);
+
+            var skptLoaded = loaderRig.LoadCheckpoint(skptPath);
+            Assert.Equal(4, skptLoaded.Step);
+            Assert.Equal(7, skptLoaded.Epoch);
+            Assert.Equal(340, skptLoaded.BatchIndex);
+
+            ckpt.Save(flatPath);
+            var flatLoaded = loaderRig.LoadCheckpoint(flatPath);
+            Assert.Equal(4, flatLoaded.Step);
+            Assert.Equal(7, flatLoaded.Epoch);
+            Assert.Equal(340, flatLoaded.BatchIndex);
+
+            Assert.Equal(skptLoaded.Step, flatLoaded.Step);
+            Assert.Equal(skptLoaded.Epoch, flatLoaded.Epoch);
+            Assert.Equal(skptLoaded.BatchIndex, flatLoaded.BatchIndex);
+
+            var skptInspect = Persistence.Inspect(skptPath);
+            Assert.Empty(skptInspect.Observations);
+            Assert.Equal(7, skptInspect.Skpt!.Training!.Epoch);
+            Assert.Equal(340, skptInspect.Skpt.Training.BatchIndex);
+            Assert.Contains("epoch 7", skptInspect.ToString());
+            Assert.Contains("batch index 340", skptInspect.ToString());
+
+            var flatInspect = Persistence.Inspect(flatPath);
+            Assert.Empty(flatInspect.Observations);
+            Assert.Equal(1, flatInspect.TrainingCheckpoint!.FormatVersion);
+            Assert.Equal(7, flatInspect.TrainingCheckpoint.Epoch);
+            Assert.Equal(340, flatInspect.TrainingCheckpoint.BatchIndex);
+            Assert.Contains("epoch: 7", flatInspect.ToString());
+            Assert.Contains("batch index: 340", flatInspect.ToString());
+        }
+        finally
+        {
+            if (File.Exists(skptPath)) File.Delete(skptPath);
+            if (File.Exists(flatPath)) File.Delete(flatPath);
+        }
+
+        var unset = new TrainingCheckpoint(
+            trained.TrainableParams, trained.ModelState, trained.OptimizerState,
+            step: trained.Step, rig: trained.Rig);
+        Assert.Null(unset.Epoch);
+        Assert.Null(unset.BatchIndex);
+
+        var nullFlat = TempPath("nullctr") + ".safetensors";
+        var nullSkpt = TempPath("nullctr") + ".skpt";
+        try
+        {
+            unset.Save(nullFlat);
+            var flat = loaderRig.LoadCheckpoint(nullFlat);
+            Assert.Equal(trained.Step, flat.Step);
+            Assert.Null(flat.Epoch);
+            Assert.Null(flat.BatchIndex);
+
+            var flatInspect = Persistence.Inspect(nullFlat);
+            Assert.Empty(flatInspect.Observations);
+            Assert.Equal(1, flatInspect.TrainingCheckpoint!.FormatVersion);
+            Assert.Null(flatInspect.TrainingCheckpoint.Epoch);
+            Assert.Null(flatInspect.TrainingCheckpoint.BatchIndex);
+            Assert.Contains("epoch: unset", flatInspect.ToString());
+
+            Persistence.SaveTrainingCheckpointToSkpt(unset, nullSkpt);
+            var manifest = SkptFileFormat.ParseManifest(
+                ReadEntryBytesViaBcl(nullSkpt, SkptFileFormat.ConfigEntryName), nullSkpt);
+            Assert.Null(manifest.Training!.Epoch);
+            Assert.Null(manifest.Training.BatchIndex);
+
+            var skptLoaded = loaderRig.LoadCheckpoint(nullSkpt);
+            Assert.Equal(trained.Step, skptLoaded.Step);
+            Assert.Null(skptLoaded.Epoch);
+            Assert.Null(skptLoaded.BatchIndex);
+        }
+        finally
+        {
+            if (File.Exists(nullFlat)) File.Delete(nullFlat);
+            if (File.Exists(nullSkpt)) File.Delete(nullSkpt);
+        }
+
+        const int features = 4;
+        var rig = LoaderRig(batchSize: 2, features);
+        var (inputs, targets) = IndexDataset(rig, n: 6, features);
+        var final = rig.Fit(new InMemoryDataLoader(inputs, targets, batchSize: 2), numEpochs: 1).FinalCheckpoint;
+        Assert.Equal(0, final.Epoch);
+        Assert.Equal(2, final.BatchIndex);
+
+        var concretePath = TempPath("concctr") + ".safetensors";
+        try
+        {
+            final.Save(concretePath);
+            var loaded = LoaderRig(batchSize: 2, features).LoadCheckpoint(concretePath);
+            Assert.Equal(0, loaded.Epoch);
+            Assert.Equal(2, loaded.BatchIndex);
+
+            var inspect = Persistence.Inspect(concretePath);
+            Assert.Empty(inspect.Observations);
+            Assert.Equal(0, inspect.TrainingCheckpoint!.Epoch);
+            Assert.Equal(2, inspect.TrainingCheckpoint.BatchIndex);
+        }
+        finally { if (File.Exists(concretePath)) File.Delete(concretePath); }
+    }
+
+    [Fact]
+    public void TestFlatCheckpointLoadsCoverage()
+    {
+        var (_, ckpt, _, _) = BuildTrainedAdamRig(steps: 2);
+        var path = TempPath("flat") + ".safetensors";
+        try
+        {
+            Persistence.SaveTrainingCheckpoint(ckpt, path);
+            Assert.Equal(ArtifactKind.TrainingCheckpoint, Persistence.Inspect(path).Kind);
+
+            var loaded = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(path);
+            Assert.Equal(2, loaded.Step);
+            Assert.Equal(FlattenStruct(ckpt.TrainableParams), FlattenStruct(loaded.TrainableParams));
+            Assert.Equal(FlattenStruct(ckpt.OptimizerState), FlattenStruct(loaded.OptimizerState));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    [Fact]
+    public void TestCheckpointCarriesRigLossAndInitialFactoryCoverage()
+    {
+        var (sample, input, target) = ScalarMultiplyBatches();
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            sample, 0.1f);
+
+        var initial = rig.CreateInitialCheckpoint();
+        Assert.NotNull(initial.TrainableParams);
+        Assert.Same(rig, initial.Rig);
+        Assert.Null(initial.Loss);
+
+        var stepped = rig.TrainStep(initial, input, target);
+        Assert.Same(rig, stepped.Rig);
+        Assert.NotNull(stepped.Loss);
+        Assert.True(float.IsFinite(stepped.Loss!.Value));
+
+        var moved = stepped.WithStep(42);
+        Assert.Same(rig, moved.Rig);
+        Assert.Equal(stepped.Loss, moved.Loss);
+        Assert.Equal(stepped.Loss, stepped.WithEpoch(3).Loss);
+
+        var bare = new TrainingCheckpoint(initial.TrainableParams, initial.ModelState, initial.OptimizerState);
+        Assert.Null(bare.Rig);
+
+        var runtimeRig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, InitFromHyperOptimizer.ComputationGraph,
+            sample, new InitFromHyperOptimizerHyperparameters { LearningRate = Hyperparameter.Runtime() });
+        Assert.NotNull(runtimeRig.CreateInitialCheckpoint(runtimeRig.MakeHyperparameters(0.3f)).OptimizerState);
+    }
+
+    [Fact]
+    public void TestAdoptCheckpointCoverage()
+    {
+        var (sample, _, _) = ScalarMultiplyBatches();
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            sample, 0.1f);
+        var seed = rig.CreateInitialCheckpoint();
+
+        var bare = new TrainingCheckpoint(
+            seed.TrainableParams, seed.ModelState, seed.OptimizerState, step: 5, epoch: 2, batchIndex: 1);
+        Assert.Null(bare.Rig);
+        Assert.Throws<InvalidOperationException>(() => bare.ToInferenceModel());
+
+        var adopted = rig.AdoptCheckpoint(bare);
+        Assert.NotSame(bare, adopted);
+        Assert.Same(rig, adopted.Rig);
+        Assert.Equal(5, adopted.Step);
+        Assert.Equal(2, adopted.Epoch);
+        Assert.Equal(1, adopted.BatchIndex);
+        Assert.Null(bare.Rig);
+        Assert.NotNull(adopted.ToInferenceModel());
+
+        var bnRig = TrainingRig.FromScratch(
+            ScalarMultiplyWithBatchNormModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDMomentumOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([8L], new float[8]))],
+            0.5f, 0.9f);
+        Assert.Throws<ArgumentException>(() => bnRig.AdoptCheckpoint(bare));
+    }
+
+    [Fact]
+    public void TestSaveLoadComponentsSubsetCoverage()
+    {
+        var (rigA, trained, _, _) = BuildTrainedAdamRig(steps: 3);
+        Assert.NotEmpty(trained.OptimizerState.Fields);
+        var initialOpt = FlattenStruct(rigA.CreateInitialCheckpoint().OptimizerState);
+        Assert.NotEqual(FlattenStruct(trained.OptimizerState), initialOpt);
+
+        var path = TempPath("subset") + ".safetensors";
+        try
+        {
+            trained.Save(path, CheckpointComponents.InferenceState);
+
+            var rigB = BuildTrainedAdamRig(steps: 0).Rig;
+            var loaded = rigB.LoadCheckpoint(path);
+            Assert.Same(rigB, loaded.Rig);
+            Assert.Equal(FlattenStruct(trained.TrainableParams), FlattenStruct(loaded.TrainableParams));
+            Assert.Equal(0, loaded.Step);
+            Assert.Equal(initialOpt, FlattenStruct(loaded.OptimizerState));
+
+            var ex = Assert.Throws<NotSupportedException>(
+                () => trained.Save(path, CheckpointComponents.All));
+            Assert.Contains("#115", ex.Message);
+
+            var loadRigEx = Assert.Throws<NotSupportedException>(
+                () => rigB.LoadCheckpoint(path, CheckpointComponents.TrainingRig));
+            Assert.Contains("#115", loadRigEx.Message);
+            Assert.Throws<NotSupportedException>(() => rigB.LoadCheckpoint(path, CheckpointComponents.All));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    [Fact]
+    public void TestCheckpointLossPersistsCoverage()
+    {
+        var (rigA, trained, _, _) = BuildTrainedAdamRig(steps: 3);
+        Assert.NotNull(trained.Loss);
+        float loss = trained.Loss!.Value;
+        Assert.True(trained.Step > 0);
+        var initial = rigA.CreateInitialCheckpoint();
+        Assert.Null(initial.Loss);
+        var reader = BuildTrainedAdamRig(steps: 0).Rig;
+
+        var flatPath = TempPath("loss_flat") + ".safetensors";
+        var flatInitPath = TempPath("loss_flatinit") + ".safetensors";
+        var flatCountersOnlyPath = TempPath("loss_flatco") + ".safetensors";
+        var flatLossOnlyPath = TempPath("loss_flatlo") + ".safetensors";
+        var flatNullLossReqPath = TempPath("loss_flatnull") + ".safetensors";
+        var skptPath = TempPath("loss_skpt") + ".skpt";
+        var skptInitPath = TempPath("loss_skptinit") + ".skpt";
+        try
+        {
+            trained.Save(flatPath);
+            var full = reader.LoadCheckpoint(flatPath);
+            Assert.Equal(loss, full.Loss!.Value);
+            Assert.Equal(trained.Step, full.Step);
+
+            initial.Save(flatInitPath);
+            Assert.Null(reader.LoadCheckpoint(flatInitPath).Loss);
+
+            trained.Save(flatCountersOnlyPath,
+                CheckpointComponents.InferenceState | CheckpointComponents.Counters);
+            var countersOnly = reader.LoadCheckpoint(flatCountersOnlyPath);
+            Assert.Equal(trained.Step, countersOnly.Step);
+            Assert.Null(countersOnly.Loss);
+
+            trained.Save(flatLossOnlyPath,
+                CheckpointComponents.InferenceState | CheckpointComponents.Loss);
+            var lossOnly = reader.LoadCheckpoint(flatLossOnlyPath);
+            Assert.Equal(loss, lossOnly.Loss!.Value);
+            Assert.Equal(0, lossOnly.Step);
+
+            initial.Save(flatNullLossReqPath, CheckpointComponents.InferenceState | CheckpointComponents.Loss);
+            Assert.Null(reader.LoadCheckpoint(flatNullLossReqPath).Loss);
+
+            Persistence.SaveTrainingCheckpointToSkpt(trained, skptPath);
+            Assert.Equal(loss, reader.LoadCheckpoint(skptPath).Loss!.Value);
+            var skptNoLoss = reader.LoadCheckpoint(
+                skptPath, CheckpointComponents.InferenceState | CheckpointComponents.OptimizerState | CheckpointComponents.Counters);
+            Assert.Equal(trained.Step, skptNoLoss.Step);
+            Assert.Null(skptNoLoss.Loss);
+
+            Persistence.SaveTrainingCheckpointToSkpt(initial, skptInitPath);
+            Assert.Null(reader.LoadCheckpoint(skptInitPath).Loss);
+        }
+        finally
+        {
+            string[] paths =
+                [flatPath, flatInitPath, flatCountersOnlyPath, flatLossOnlyPath, flatNullLossReqPath, skptPath, skptInitPath];
+            foreach (var p in paths)
+                if (File.Exists(p)) File.Delete(p);
+        }
+    }
+}
+
+[Trait("Domain", "Training")]
+[Trait("Purpose", "Coverage")]
+public class TrainingRigSkptCheckpointCoverageTests
+{
     private static int IndexOfSubsequence(byte[] haystack, byte[] needle)
     {
         if (needle.Length == 0 || haystack.Length < needle.Length) return -1;
@@ -2164,230 +2424,5 @@ public class TrainingRigCoverageTests
             }
         }
         finally { if (File.Exists(stepEpochPath)) File.Delete(stepEpochPath); }
-    }
-
-    [Fact]
-    public void TestFlatCheckpointLoadsCoverage()
-    {
-        var (_, ckpt, _, _) = BuildTrainedAdamRig(steps: 2);
-        var path = TempPath("flat") + ".safetensors";
-        try
-        {
-            Persistence.SaveTrainingCheckpoint(ckpt, path);
-            Assert.Equal(ArtifactKind.TrainingCheckpoint, Persistence.Inspect(path).Kind);
-
-            var loaded = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(path);
-            Assert.Equal(2, loaded.Step);
-            Assert.Equal(FlattenStruct(ckpt.TrainableParams), FlattenStruct(loaded.TrainableParams));
-            Assert.Equal(FlattenStruct(ckpt.OptimizerState), FlattenStruct(loaded.OptimizerState));
-        }
-        finally { if (File.Exists(path)) File.Delete(path); }
-    }
-
-    [Fact]
-    public void TestRigDerivationsShareConstituentsAndAreImmutableCoverage()
-    {
-        var (sample, input, target) = ScalarMultiplyBatches();
-        var model = ScalarMultiplyModel.ComputationGraph;
-        var loss = L2Loss.ComputationGraph;
-        var opt = SGDOptimizer.ComputationGraph;
-
-        var rig = TrainingRig.FromScratch(model, loss, opt, sample, 0.1f);
-
-        Assert.Same(model, rig.ModelConstituent);
-        Assert.Same(loss, rig.LossConstituent);
-        Assert.Same(opt, rig.OptimizerConstituent);
-        Assert.Equal(0UL, rig.RngConfig.MasterSeed);
-        Assert.Empty(rig.OptimizerStateDef.Fields);
-
-        var newLoss = Losses.L1Loss;
-        var lossRig = rig.WithLoss(newLoss);
-        Assert.NotSame(rig, lossRig);
-        Assert.Same(newLoss, lossRig.LossConstituent);
-        Assert.Same(model, lossRig.ModelConstituent);
-        Assert.Same(opt, lossRig.OptimizerConstituent);
-        Assert.Same(loss, rig.LossConstituent);
-
-        var momRig = rig.WithOptimizer(SGDMomentumOptimizer.ComputationGraph,
-            new SGDMomentumOptimizerHyperparameters { LearningRate = 0.5f, MomentumCoeff = 0.9f });
-        Assert.Same(model, momRig.ModelConstituent);
-        Assert.Same(loss, momRig.LossConstituent);
-        Assert.NotSame(opt, momRig.OptimizerConstituent);
-        Assert.NotEmpty(momRig.OptimizerStateDef.Fields);
-        Assert.Empty(rig.OptimizerStateDef.Fields);
-
-        var schedRig = rig.WithScheduler(
-            new SGDOptimizerHyperparameters { LearningRate = Schedules.Linear(0.2f, 0f, 4) });
-        Assert.Same(opt, schedRig.OptimizerConstituent);
-        Assert.Empty(schedRig.HyperparameterStructDef.Fields);
-
-        var reseeded = rig.WithSeed(new RngConfig { MasterSeed = 42 });
-        Assert.Same(model, reseeded.ModelConstituent);
-        Assert.Same(opt, reseeded.OptimizerConstituent);
-        Assert.Equal(42UL, reseeded.RngConfig.MasterSeed);
-        Assert.Equal(0UL, rig.RngConfig.MasterSeed);
-
-        foreach (var derived in (TrainingRig[])[lossRig, momRig, schedRig, reseeded])
-        {
-            var stepped = derived.TrainStep(derived.CreateInitialCheckpoint(), input, target);
-            Assert.True(float.IsFinite(stepped.Loss!.Value));
-        }
-    }
-
-    [Fact]
-    public void TestCheckpointCarriesRigLossAndInitialFactoryCoverage()
-    {
-        var (sample, input, target) = ScalarMultiplyBatches();
-        var rig = TrainingRig.FromScratch(
-            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            sample, 0.1f);
-
-        var initial = rig.CreateInitialCheckpoint();
-        Assert.NotNull(initial.TrainableParams);
-        Assert.Same(rig, initial.Rig);
-        Assert.Null(initial.Loss);
-
-        var stepped = rig.TrainStep(initial, input, target);
-        Assert.Same(rig, stepped.Rig);
-        Assert.NotNull(stepped.Loss);
-        Assert.True(float.IsFinite(stepped.Loss!.Value));
-
-        var moved = stepped.WithStep(42);
-        Assert.Same(rig, moved.Rig);
-        Assert.Equal(stepped.Loss, moved.Loss);
-        Assert.Equal(stepped.Loss, stepped.WithEpoch(3).Loss);
-
-        var bare = new TrainingCheckpoint(initial.TrainableParams, initial.ModelState, initial.OptimizerState);
-        Assert.Null(bare.Rig);
-
-        var runtimeRig = TrainingRig.FromScratch(
-            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, InitFromHyperOptimizer.ComputationGraph,
-            sample, new InitFromHyperOptimizerHyperparameters { LearningRate = Hyperparameter.Runtime() });
-        Assert.NotNull(runtimeRig.CreateInitialCheckpoint(runtimeRig.MakeHyperparameters(0.3f)).OptimizerState);
-    }
-
-    [Fact]
-    public void TestAdoptCheckpointCoverage()
-    {
-        var (sample, _, _) = ScalarMultiplyBatches();
-        var rig = TrainingRig.FromScratch(
-            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            sample, 0.1f);
-        var seed = rig.CreateInitialCheckpoint();
-
-        var bare = new TrainingCheckpoint(
-            seed.TrainableParams, seed.ModelState, seed.OptimizerState, step: 5, epoch: 2, batchIndex: 1);
-        Assert.Null(bare.Rig);
-        Assert.Throws<InvalidOperationException>(() => bare.ToInferenceModel());
-
-        var adopted = rig.AdoptCheckpoint(bare);
-        Assert.NotSame(bare, adopted);
-        Assert.Same(rig, adopted.Rig);
-        Assert.Equal(5, adopted.Step);
-        Assert.Equal(2, adopted.Epoch);
-        Assert.Equal(1, adopted.BatchIndex);
-        Assert.Null(bare.Rig);
-        Assert.NotNull(adopted.ToInferenceModel());
-
-        var bnRig = TrainingRig.FromScratch(
-            ScalarMultiplyWithBatchNormModel.ComputationGraph, L2Loss.ComputationGraph,
-            SGDMomentumOptimizer.ComputationGraph,
-            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([8L], new float[8]))],
-            0.5f, 0.9f);
-        Assert.Throws<ArgumentException>(() => bnRig.AdoptCheckpoint(bare));
-    }
-
-    [Fact]
-    public void TestSaveLoadComponentsSubsetCoverage()
-    {
-        var (rigA, trained, _, _) = BuildTrainedAdamRig(steps: 3);
-        Assert.NotEmpty(trained.OptimizerState.Fields);
-        var initialOpt = FlattenStruct(rigA.CreateInitialCheckpoint().OptimizerState);
-        Assert.NotEqual(FlattenStruct(trained.OptimizerState), initialOpt);
-
-        var path = TempPath("subset") + ".safetensors";
-        try
-        {
-            trained.Save(path, CheckpointComponents.InferenceState);
-
-            var rigB = BuildTrainedAdamRig(steps: 0).Rig;
-            var loaded = rigB.LoadCheckpoint(path);
-            Assert.Same(rigB, loaded.Rig);
-            Assert.Equal(FlattenStruct(trained.TrainableParams), FlattenStruct(loaded.TrainableParams));
-            Assert.Equal(0, loaded.Step);
-            Assert.Equal(initialOpt, FlattenStruct(loaded.OptimizerState));
-
-            var ex = Assert.Throws<NotSupportedException>(
-                () => trained.Save(path, CheckpointComponents.All));
-            Assert.Contains("#115", ex.Message);
-
-            var loadRigEx = Assert.Throws<NotSupportedException>(
-                () => rigB.LoadCheckpoint(path, CheckpointComponents.TrainingRig));
-            Assert.Contains("#115", loadRigEx.Message);
-            Assert.Throws<NotSupportedException>(() => rigB.LoadCheckpoint(path, CheckpointComponents.All));
-        }
-        finally { if (File.Exists(path)) File.Delete(path); }
-    }
-
-    [Fact]
-    public void TestCheckpointLossPersistsCoverage()
-    {
-        var (rigA, trained, _, _) = BuildTrainedAdamRig(steps: 3);
-        Assert.NotNull(trained.Loss);
-        float loss = trained.Loss!.Value;
-        Assert.True(trained.Step > 0);
-        var initial = rigA.CreateInitialCheckpoint();
-        Assert.Null(initial.Loss);
-        var reader = BuildTrainedAdamRig(steps: 0).Rig;
-
-        var flatPath = TempPath("loss_flat") + ".safetensors";
-        var flatInitPath = TempPath("loss_flatinit") + ".safetensors";
-        var flatCountersOnlyPath = TempPath("loss_flatco") + ".safetensors";
-        var flatLossOnlyPath = TempPath("loss_flatlo") + ".safetensors";
-        var flatNullLossReqPath = TempPath("loss_flatnull") + ".safetensors";
-        var skptPath = TempPath("loss_skpt") + ".skpt";
-        var skptInitPath = TempPath("loss_skptinit") + ".skpt";
-        try
-        {
-            trained.Save(flatPath);
-            var full = reader.LoadCheckpoint(flatPath);
-            Assert.Equal(loss, full.Loss!.Value);
-            Assert.Equal(trained.Step, full.Step);
-
-            initial.Save(flatInitPath);
-            Assert.Null(reader.LoadCheckpoint(flatInitPath).Loss);
-
-            trained.Save(flatCountersOnlyPath,
-                CheckpointComponents.InferenceState | CheckpointComponents.Counters);
-            var countersOnly = reader.LoadCheckpoint(flatCountersOnlyPath);
-            Assert.Equal(trained.Step, countersOnly.Step);
-            Assert.Null(countersOnly.Loss);
-
-            trained.Save(flatLossOnlyPath,
-                CheckpointComponents.InferenceState | CheckpointComponents.Loss);
-            var lossOnly = reader.LoadCheckpoint(flatLossOnlyPath);
-            Assert.Equal(loss, lossOnly.Loss!.Value);
-            Assert.Equal(0, lossOnly.Step);
-
-            initial.Save(flatNullLossReqPath, CheckpointComponents.InferenceState | CheckpointComponents.Loss);
-            Assert.Null(reader.LoadCheckpoint(flatNullLossReqPath).Loss);
-
-            Persistence.SaveTrainingCheckpointToSkpt(trained, skptPath);
-            Assert.Equal(loss, reader.LoadCheckpoint(skptPath).Loss!.Value);
-            var skptNoLoss = reader.LoadCheckpoint(
-                skptPath, CheckpointComponents.InferenceState | CheckpointComponents.OptimizerState | CheckpointComponents.Counters);
-            Assert.Equal(trained.Step, skptNoLoss.Step);
-            Assert.Null(skptNoLoss.Loss);
-
-            Persistence.SaveTrainingCheckpointToSkpt(initial, skptInitPath);
-            Assert.Null(reader.LoadCheckpoint(skptInitPath).Loss);
-        }
-        finally
-        {
-            string[] paths =
-                [flatPath, flatInitPath, flatCountersOnlyPath, flatLossOnlyPath, flatNullLossReqPath, skptPath, skptInitPath];
-            foreach (var p in paths)
-                if (File.Exists(p)) File.Delete(p);
-        }
     }
 }

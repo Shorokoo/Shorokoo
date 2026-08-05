@@ -1,10 +1,6 @@
 using Shorokoo.Core.Graph;
-using Shorokoo.Graph;
-using Shorokoo.Onnx;
 using Shorokoo.Runtime;
-using Shorokoo.Tests.Utils;
 using RetinaNet.Models;
-using static Shorokoo.Globals;
 
 namespace Shorokoo.Tests;
 

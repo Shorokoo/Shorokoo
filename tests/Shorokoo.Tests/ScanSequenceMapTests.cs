@@ -1,6 +1,7 @@
 using Shorokoo.Core.Factory.IR;
 using Shorokoo.Core.Inference;
 using Shorokoo.Runtime;
+using static Shorokoo.Tests.OnnxProtoBuilders;
 
 namespace Shorokoo.Tests;
 
@@ -16,21 +17,6 @@ namespace Shorokoo.Tests;
 public class ScanSequenceMapTests
 {
     private const int FloatElem = 1;
-
-    private static ValueInfoProto TensorInfo(string name, int elemType, params long[] dims)
-    {
-        var shape = new TensorShapeProto();
-        foreach (var d in dims)
-            shape.Dims.Add(new TensorShapeProto.Dimension { DimValue = d });
-        return new ValueInfoProto
-        {
-            Name = name,
-            Type = new TypeProto
-            {
-                TensorType = new TypeProto.Tensor { ElemType = elemType, Shape = shape },
-            },
-        };
-    }
 
     private static ValueInfoProto SequenceInfo(string name, int elemType)
         => new ValueInfoProto
@@ -55,20 +41,6 @@ public class ScanSequenceMapTests
         node.Outputs.AddRange(outputs);
         node.Attributes.AddRange(attrs);
         return node;
-    }
-
-    private static ModelProto WrapModel(GraphProto graph)
-    {
-        var model = new ModelProto { IrVersion = 10, Graph = graph };
-        model.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
-        return model;
-    }
-
-    private static InternalComputationGraph Import(ModelProto model)
-    {
-        using var ms = new MemoryStream();
-        ProtoBuf.Serializer.Serialize(ms, model);
-        return OnnxModelImporter.FromOnnxModelToInternalGraph(ms.ToArray());
     }
 
     /// <summary>Running-sum Scan: s_out = s_in + x_t; y_t = Identity(s_out), over a [3,4] tensor.</summary>

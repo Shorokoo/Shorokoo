@@ -6,7 +6,6 @@ using System.Text.RegularExpressions;
 using Shorokoo.Core.Rng;
 using Shorokoo.Core.Graph;
 using Shorokoo.Core.Nodes.Processors.Fast;
-using Shorokoo.Graph;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;

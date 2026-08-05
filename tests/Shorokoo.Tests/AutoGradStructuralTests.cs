@@ -1,3 +1,5 @@
+using static Shorokoo.Tests.AutoGradOpsRunners;
+
 namespace Shorokoo.Tests;
 
 /// <summary>
@@ -12,18 +14,10 @@ namespace Shorokoo.Tests;
 [Trait("Purpose", "Coverage")]
 public class AutoGradStructuralTests
 {
-    private static void Run<TModule>(params float[] scalars) =>
-        Assert.True(AutoTest.AdvancedTestGraph<TModule>(
-            [], [.. scalars.Select(v => TensorData(DType.Float32, [], v))]));
-
     private static void RunNoQee<TModule>(params float[] scalars) =>
         Assert.True(AutoTest.AdvancedTestGraph<TModule>(
             [], [.. scalars.Select(v => TensorData(DType.Float32, [], v))],
             testQuickEngineExecution: false));
-
-    private static void RunSmall<TModule>(long[] shape) =>
-        Assert.True(AutoTest.AdvancedTestGraph<TModule>(
-            [], [TensorDataWithSmallVals(DType.Float32, shape)]));
 
     [Fact]
     public void TestAutoGradStructuralConvAndConvTransposeGradients()

@@ -1,3 +1,5 @@
+using static Shorokoo.Tests.Modules.QeeAuditVerdicts;
+
 namespace Shorokoo.Tests.Modules
 {
     // ===================================================================
@@ -102,9 +104,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(cropResize, Vector(1L, 1L, 4L, 4L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Resize with NEGATIVE axes (spec opset 18+: counted from the back) — QEE-only:
@@ -134,9 +133,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(negSizes, Vector(1L, 1L, 3L, 5L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Upsample (deprecated — exported to ORT via the LowerUpsampleToResize
@@ -172,9 +168,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(sampledNearest, Vector(1L, 2L, 3L, 5L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>AffineGrid 3-D (theta [N,3,4], size [N,C,D,H,W] → grid [N,D,H,W,3]) and the
@@ -198,9 +191,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(sampled5, Vector(1L, 1L, 2L, 3L, 4L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>RoiAlign shape audit: output is [num_rois, C, output_height, output_width]
@@ -225,9 +215,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(max, Vector(3L, 2L, 2L, 2L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>NonMaxSuppression against real ORT execution: the [n,3] output shape with
@@ -257,9 +244,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(nmsCenter, Vector(1L, 3L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>NonMaxSuppression with the max_output_boxes_per_class input ABSENT — the
@@ -326,9 +310,6 @@ namespace Shorokoo.Tests.Modules
 
         private static Scalar<float32> Sum(Tensor<float32> t)
             => t.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Random-generator family shape/dtype audit (values are nondeterministic and
@@ -379,9 +360,6 @@ namespace Shorokoo.Tests.Modules
                 ((eyeDown.Reduce(ReduceKind.Sum, keepDims: false).Scalar() - Scalar(1L)).Abs() < Scalar(1L));
             return (mismatch < Scalar(1L)) & eyeValuesOk;
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Seeded determinism (ORT-only — QEE never computes random values): two
@@ -440,9 +418,6 @@ namespace Shorokoo.Tests.Modules
                 ((cosBool.Cast<int64>().Reduce(ReduceKind.Sum, keepDims: false).Scalar() - Scalar(4L)).Abs() < Scalar(1L));
             return (shapeMismatch < Scalar(1L)) & valuesOk;
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Constant value_string / value_strings branches — output inspected directly
@@ -491,9 +466,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch((Tensor<float32>)yh3, Vector(2L, 2L, 5L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>GRU shape audit (ORT-validated): forward with linear_before_reset and
@@ -520,9 +492,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch((Tensor<float32>)yh2, Vector(2L, 2L, 5L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>QEE-only recurrent variants that ORT's CPU kernels reject: hidden_size
@@ -576,9 +545,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch((Tensor<float32>)ycLstmL, Vector(2L, 1L, 5L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>LSTM shape audit: forward with every optional input wired (B,
@@ -613,9 +579,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch((Tensor<float32>)yc2, Vector(2L, 2L, 5L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
 }

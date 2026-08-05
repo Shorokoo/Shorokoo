@@ -1,13 +1,28 @@
 using System;
 using System.Linq;
 using Shorokoo.Core.Factory;
-using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Core.Rng;
 using Shorokoo.Modules.Layers;
 using Shorokoo.Runtime;
 using static Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames;
+using static Shorokoo.Tests.RngDrawRunners;
 
 namespace Shorokoo.Tests;
+
+internal static class RngDrawRunners
+{
+    internal static TensorData RunDrawRaw<TModule>(long rows, long cols)
+    {
+        var g = ((ComputationGraph)typeof(TModule)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var input = TensorData([rows, cols], Enumerable.Repeat(0f, (int)(rows * cols)).ToArray());
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        return ComputeContext.Default.Execute(concrete, input)[0].ToTensorData();
+    }
+
+    internal static float[] RunDraw<TModule>(long rows, long cols)
+        => RunDrawRaw<TModule>(rows, cols).As<float32>().AccessMemory().ToArray();
+}
 
 /// <summary>Keyed uniform draw at the input's shape under a literal key, substreamIndex 0.</summary>
 [Module]
@@ -78,18 +93,6 @@ public partial class SwitchInitLinear
 [Trait("Purpose", "Coverage")]
 public class RngAlgorithmTests
 {
-    private static TensorData RunDrawRaw<TModule>(long rows, long cols)
-    {
-        var g = ((ComputationGraph)typeof(TModule)
-            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
-        var input = TensorData([rows, cols], Enumerable.Repeat(0f, (int)(rows * cols)).ToArray());
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
-        return ComputeContext.Default.Execute(concrete, input)[0].ToTensorData();
-    }
-
-    private static float[] RunDraw<TModule>(long rows, long cols)
-        => RunDrawRaw<TModule>(rows, cols).As<float32>().AccessMemory().ToArray();
-
     // Host reference: substreamIndex folds into the key, element i indexes the whole counter;
     // uniform = low 24 bits of x0 * 2^-24.
     private static float HostUniform(long i, ulong key) => RngTestOracle.DrawUniform(key, 0, i);

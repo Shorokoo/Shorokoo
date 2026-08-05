@@ -1,11 +1,9 @@
 using System.Collections.Generic;
-using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Core.Nodes.Processors.Training;
 using Shorokoo.Modules.Layers;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
 using Shorokoo.Runtime;
-using Shorokoo.Tests.Modules;
 using static Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames;
 
 namespace Shorokoo.Tests;

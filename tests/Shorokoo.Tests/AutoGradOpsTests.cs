@@ -177,7 +177,7 @@ public class AutoGradElementwiseOpsCoverageTests
 
 [Trait("Domain", "AutoDiff")]
 [Trait("Purpose", "Coverage")]
-public class AutoGradTensorLayoutAndIndexingOpsCoverageTests
+public class AutoGradConcatSplitAndControlFlowOpsCoverageTests
 {
     [Fact]
     public void TestAutoGradConcatSplitAndIfElseGradients()
@@ -198,7 +198,12 @@ public class AutoGradTensorLayoutAndIndexingOpsCoverageTests
         Run<AutoGradIfWithUpstreamOpsCheck>(3f, 5f);
         Run<AutoGradIfMultiOutputPartiallyUsedCheck>(3f, 5f);
     }
+}
 
+[Trait("Domain", "AutoDiff")]
+[Trait("Purpose", "Coverage")]
+public class AutoGradTensorLayoutOpsCoverageTests
+{
     [Fact]
     public void TestAutoGradReshapePadResizeSliceTileAndTriluGradients()
     {
@@ -252,7 +257,12 @@ public class AutoGradTensorLayoutAndIndexingOpsCoverageTests
         Run<AutoGradCol2ImWithPaddingCheck>(1f);
         Run<AutoGradCol2Im1x1BlockCheck>(4f);
     }
+}
 
+[Trait("Domain", "AutoDiff")]
+[Trait("Purpose", "Coverage")]
+public class AutoGradSequenceDftAndRuntimeInputOpsCoverageTests
+{
     [Fact]
     public void TestAutoGradSequenceOpsDftAndConstantOfShapeGradients()
     {
@@ -286,7 +296,12 @@ public class AutoGradTensorLayoutAndIndexingOpsCoverageTests
         Run<AutoGradSeqInsertAppendCheck>(3.0f, 7.0f, 1.0f);
         Run<AutoGradIfMultiOutputRuntimeCondPartiallyUsedCheck>(2.0f, 3.0f);
     }
+}
 
+[Trait("Domain", "AutoDiff")]
+[Trait("Purpose", "Coverage")]
+public class AutoGradIndexingOpsCoverageTests
+{
     [Fact]
     public void TestAutoGradGatherScatterAndTopKGradients()
     {

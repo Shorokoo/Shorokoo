@@ -1,3 +1,5 @@
+using static Shorokoo.Tests.Modules.QeeAuditVerdicts;
+
 namespace Shorokoo.Tests.Modules
 {
     // Coverage audit modules for the decomposable members of the opset 22-26 op
@@ -26,11 +28,6 @@ namespace Shorokoo.Tests.Modules
                 FloatMismatch(NN.Swish(x, alpha: 2.0f), Vector(-0.035972f, -0.119203f, 0f, 0.880797f, 1.964028f));
             return mismatch < Scalar(1L);
         }
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>RMSNormalization VALUES (small-vector closed forms):
@@ -60,10 +57,5 @@ namespace Shorokoo.Tests.Modules
         }
 
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 }

@@ -1,8 +1,8 @@
 using System;
 using System.Linq;
-using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Core.Rng;
 using Shorokoo.Runtime;
+using static Shorokoo.Tests.RngDrawRunners;
 
 namespace Shorokoo.Tests;
 
@@ -69,18 +69,6 @@ public class RngRuntimeTests
 {
     private const ulong BitsKey = 111UL | (222UL << 32);
     private const ulong UniformKey = 123UL | (456UL << 32);
-
-    private static TensorData RunDrawRaw<TModule>(long rows, long cols)
-    {
-        var g = ((ComputationGraph)typeof(TModule)
-            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
-        var input = TensorData([rows, cols], Enumerable.Repeat(0f, (int)(rows * cols)).ToArray());
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
-        return ComputeContext.Default.Execute(concrete, input)[0].ToTensorData();
-    }
-
-    private static float[] RunDraw<TModule>(long rows, long cols)
-        => RunDrawRaw<TModule>(rows, cols).As<float32>().AccessMemory().ToArray();
 
     // Host reference for the runtime scheme: substreamIndex folds into the key, element i
     // indexes the whole counter; uniform = low 24 bits of x0 * 2^-24.

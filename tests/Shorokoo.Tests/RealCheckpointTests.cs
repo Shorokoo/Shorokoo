@@ -1,6 +1,3 @@
-using Shorokoo.Onnx;
-using Shorokoo.Tests.Utils;
-
 namespace Shorokoo.Tests;
 
 /// <summary>

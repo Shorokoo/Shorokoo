@@ -3,6 +3,7 @@ using Shorokoo.Core.Factory.IR;
 using Shorokoo.Core.Inference;
 using Shorokoo.Core.Graph;
 using Shorokoo.Runtime;
+using static Shorokoo.Tests.OnnxProtoBuilders;
 
 namespace Shorokoo.Tests;
 
@@ -18,36 +19,11 @@ public class Opset26ImportAttrTests
     private const int FloatElem = 1;
     private const int UInt8Elem = 2;
 
-    private static ValueInfoProto TensorInfo(string name, int elemType, params long[] dims)
-    {
-        var shape = new TensorShapeProto();
-        foreach (var d in dims)
-            shape.Dims.Add(new TensorShapeProto.Dimension { DimValue = d });
-        return new ValueInfoProto
-        {
-            Name = name,
-            Type = new TypeProto
-            {
-                TensorType = new TypeProto.Tensor { ElemType = elemType, Shape = shape },
-            },
-        };
-    }
-
     private static AttributeProto IntAttr(string name, long value)
         => new AttributeProto { Name = name, Type = AttributeProto.AttributeType.Int, I = value };
 
     private static AttributeProto StringAttr(string name, string value)
         => new AttributeProto { Name = name, Type = AttributeProto.AttributeType.String, S = System.Text.Encoding.UTF8.GetBytes(value) };
-
-    private static TensorProto Init(string name, int elemType, long[] dims, byte[] raw)
-        => new TensorProto { Name = name, data_type = elemType, Dims = dims, RawData = raw };
-
-    private static InternalComputationGraph Import(ModelProto model)
-    {
-        using var ms = new MemoryStream();
-        ProtoBuf.Serializer.Serialize(ms, model);
-        return OnnxModelImporter.FromOnnxModelToInternalGraph(ms.ToArray());
-    }
 
     private static ModelProto WrapModel(GraphProto graph, long opset)
     {

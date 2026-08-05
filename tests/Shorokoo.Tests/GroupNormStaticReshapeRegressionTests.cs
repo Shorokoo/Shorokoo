@@ -1,7 +1,5 @@
 using System.Linq;
 using Shorokoo.Modules.Layers;
-using Shorokoo.Tests.Utils;
-using static Shorokoo.Globals;
 
 namespace Shorokoo.Tests;
 

@@ -1,8 +1,20 @@
 using Shorokoo.Runtime;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
+using static Shorokoo.Tests.ModuleTestInputs;
 
 namespace Shorokoo.Tests;
+
+internal static class ModuleTestInputs
+{
+    internal static TensorData RangeTensor(long[] dims, float scale = 1f, float offset = 0f)
+    {
+        long total = 1;
+        foreach (var d in dims) total *= d;
+        return TensorData(DType.Float32, dims,
+            Enumerable.Range(0, (int)total).Select(i => (object)(i * scale + offset)).ToArray());
+    }
+}
 
 /// <summary>
 /// Coverage for the classic layers added on top of the baseline NN library. Conv3d is
@@ -14,14 +26,6 @@ namespace Shorokoo.Tests;
 [Trait("Purpose", "Coverage")]
 public class ClassicLayerModuleTests
 {
-    private static TensorData RangeTensor(long[] dims, float scale = 1f, float offset = 0f)
-    {
-        long total = 1;
-        foreach (var d in dims) total *= d;
-        return TensorData(DType.Float32, dims,
-            Enumerable.Range(0, (int)total).Select(i => (object)(i * scale + offset)).ToArray());
-    }
-
     [Fact]
     public void TestConv3dLayerCoverage()
     {

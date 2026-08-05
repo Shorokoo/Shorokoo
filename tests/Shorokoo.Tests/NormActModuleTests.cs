@@ -1,6 +1,7 @@
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
 using Shorokoo.Runtime;
+using static Shorokoo.Tests.ModuleTestInputs;
 
 namespace Shorokoo.Tests;
 
@@ -15,15 +16,6 @@ namespace Shorokoo.Tests;
 [Trait("Purpose", "Coverage")]
 public class NormActModuleTests
 {
-    /// <summary>[i * scale + offset for i in 0..N) as a float32 TensorData.</summary>
-    private static TensorData RangeTensor(long[] dims, float scale = 1f, float offset = 0f)
-    {
-        long total = 1;
-        foreach (var d in dims) total *= d;
-        return TensorData(DType.Float32, dims,
-            Enumerable.Range(0, (int)total).Select(i => (object)(i * scale + offset)).ToArray());
-    }
-
     private static void Run<TModule>(long[] dims, float scale, float offset)
         => Assert.True(AutoTest.AdvancedTestGraph<TModule>(
             hyperparamInputs: [], runtimeInputs: [RangeTensor(dims, scale, offset)]));

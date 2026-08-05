@@ -1,9 +1,46 @@
 using System.IO;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Factory.IR;
+using Shorokoo.Core.Inference;
 using Shorokoo.Runtime;
+using static Shorokoo.Tests.OnnxProtoBuilders;
 
 namespace Shorokoo.Tests;
+
+internal static class OnnxProtoBuilders
+{
+    internal static ValueInfoProto TensorInfo(string name, int elemType, params long[] dims)
+    {
+        var shape = new TensorShapeProto();
+        foreach (var d in dims)
+            shape.Dims.Add(new TensorShapeProto.Dimension { DimValue = d });
+        return new ValueInfoProto
+        {
+            Name = name,
+            Type = new TypeProto
+            {
+                TensorType = new TypeProto.Tensor { ElemType = elemType, Shape = shape },
+            },
+        };
+    }
+
+    internal static TensorProto Init(string name, int elemType, long[] dims, byte[] raw)
+        => new TensorProto { Name = name, data_type = elemType, Dims = dims, RawData = raw };
+
+    internal static ModelProto WrapModel(GraphProto graph)
+    {
+        var model = new ModelProto { IrVersion = 10, Graph = graph };
+        model.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+        return model;
+    }
+
+    internal static InternalComputationGraph Import(ModelProto model)
+    {
+        using var ms = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(ms, model);
+        return OnnxModelImporter.FromOnnxModelToInternalGraph(ms.ToArray());
+    }
+}
 
 /// <summary>
 /// The standard ONNX external-data mechanism (issue #38): initializer bytes stored in a side
@@ -19,37 +56,12 @@ public class OnnxExternalDataTests
     private const int Int64Elem = 7;    // INT64
     private const int Float16Elem = 10; // FLOAT16
 
-    private static ValueInfoProto TensorInfo(string name, int elemType, params long[] dims)
-    {
-        var shape = new TensorShapeProto();
-        foreach (var d in dims)
-            shape.Dims.Add(new TensorShapeProto.Dimension { DimValue = d });
-        return new ValueInfoProto
-        {
-            Name = name,
-            Type = new TypeProto
-            {
-                TensorType = new TypeProto.Tensor { ElemType = elemType, Shape = shape },
-            },
-        };
-    }
-
-    private static TensorProto Init(string name, int elemType, long[] dims, byte[] raw)
-        => new TensorProto { Name = name, data_type = elemType, Dims = dims, RawData = raw };
-
     private static NodeProto Node(string opType, string name, string[] inputs, string[] outputs)
     {
         var n = new NodeProto { OpType = opType, Name = name };
         n.Inputs.AddRange(inputs);
         n.Outputs.AddRange(outputs);
         return n;
-    }
-
-    private static ModelProto WrapModel(GraphProto graph)
-    {
-        var model = new ModelProto { IrVersion = 10, Graph = graph };
-        model.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
-        return model;
     }
 
     /// <summary>x:float[4] plus initializers w and (optionally) b, chained Adds into y.</summary>

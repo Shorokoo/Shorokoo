@@ -1,3 +1,5 @@
+using static Shorokoo.Tests.Modules.QeeAuditVerdicts;
+
 namespace Shorokoo.Tests.Modules
 {
     // ===================================================================
@@ -54,9 +56,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(indices, Vector(1L, 1L, 5L, 5L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>AveragePool shape audit: dilations (since opset 19), ceil_mode with
@@ -91,9 +90,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(valid, Vector(1L, 1L, 4L, 4L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>LpPool (ceil_mode clamp + dilations) and the three global pools
@@ -124,9 +120,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(glp, Vector(1L, 3L, 1L, 1L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Conv shape audit: group (output channels = W.shape[0]), dilations,
@@ -165,9 +158,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(valid, Vector(1L, 2L, 7L, 7L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>ConvTranspose shape audit: output_padding + asymmetric-capable pads,
@@ -217,9 +207,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(grouped, Vector(1L, 6L, 6L, 6L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>ConvInteger (int32 output dtype) and QLinearConv (output dtype follows
@@ -256,9 +243,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(qlcAsym, Vector(1L, 1L, 7L, 6L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>MaxRoiPool shape audit: output is [num_rois, C, *pooled_shape]. Inputs:
@@ -316,8 +300,5 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(overridden, Vector(1L, 1L, 5L, 5L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 }

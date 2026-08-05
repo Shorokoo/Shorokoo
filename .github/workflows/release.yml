@@ -51,6 +51,16 @@ jobs:
           --filter "Purpose=Coverage"
           -c Release --logger "console;verbosity=minimal"
 
+      # The Purpose=Gate tests measure wall clock, process-wide memory, and a clean
+      # product build. They are meaningless under contention, so they get the box to
+      # themselves: one worker, and after the parallel pass has finished.
+      - name: Gate tests (serial)
+        run: >
+          dotnet test tests/Shorokoo.Tests/Shorokoo.Tests.csproj
+          --filter "Purpose=Gate"
+          -c Release --logger "console;verbosity=minimal" --no-build
+          -- xUnit.MaxParallelThreads=1 xUnit.ParallelizeTestCollections=false
+
       - name: Pack
         run: dotnet pack Shorokoo.sln -c Release -o artifacts/nupkgs
 

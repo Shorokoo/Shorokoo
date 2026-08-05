@@ -50,7 +50,7 @@ public partial class PerfBaselineLinearModel
 /// </para>
 /// </summary>
 [Trait("Domain", "Training")]
-[Trait("Purpose", "Coverage")]
+[Trait("Purpose", "Gate")]
 public class TrainingPerfBaselineTests
 {
     /// <summary>Current must not be slower than this multiple of the baseline.</summary>

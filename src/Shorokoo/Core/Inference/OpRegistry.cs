@@ -10,19 +10,56 @@ namespace Shorokoo.Core.Inference;
 internal static class OpRegistry
 {
     private static readonly Dictionary<string, QuickOp> _ops = new(StringComparer.Ordinal);
-    private static bool _initialized;
+    private static volatile bool _initialized;
     private static readonly object _lock = new();
+
+    /// <summary>
+    /// Thread-scoped handler overrides installed by <see cref="Override"/>. Consulted ahead of
+    /// the process-wide table so a caller can swap an op's implementation — for fault injection —
+    /// without other threads observing the swap.
+    /// </summary>
+    [ThreadStatic]
+    private static Dictionary<string, QuickOp>? _overrides;
 
     public static QuickOp? Get(string opCode)
     {
+        if (_overrides is { } o && o.TryGetValue(opCode, out var overridden))
+            return overridden;
         EnsureInitialized();
         return _ops.TryGetValue(opCode, out var op) ? op : null;
     }
 
     public static bool Contains(string opCode)
     {
+        if (_overrides is { } o && o.ContainsKey(opCode))
+            return true;
         EnsureInitialized();
         return _ops.ContainsKey(opCode);
+    }
+
+    /// <summary>
+    /// Replaces the handlers for <paramref name="ops"/> on the calling thread only, until the
+    /// returned scope is disposed. Unlike <see cref="Register"/> this is invisible to other
+    /// threads, so concurrent callers keep seeing the real implementations.
+    /// </summary>
+    public static IDisposable Override(params QuickOp[] ops) => new OverrideScope(ops);
+
+    private sealed class OverrideScope : IDisposable
+    {
+        private readonly Dictionary<string, QuickOp>? _previous;
+
+        internal OverrideScope(QuickOp[] ops)
+        {
+            _previous = _overrides;
+            var next = _previous is null
+                ? new Dictionary<string, QuickOp>(StringComparer.Ordinal)
+                : new Dictionary<string, QuickOp>(_previous, StringComparer.Ordinal);
+            foreach (var op in ops)
+                next[op.OpCode] = op;
+            _overrides = next;
+        }
+
+        public void Dispose() => _overrides = _previous;
     }
 
     public static IReadOnlyCollection<string> RegisteredOpCodes

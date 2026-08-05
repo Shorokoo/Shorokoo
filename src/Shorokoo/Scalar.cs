@@ -67,13 +67,20 @@ namespace Shorokoo
         public override bool Equals(object? obj) => obj is Scalar<T> t && Equals(inner, t.inner);
         public override int GetHashCode() => inner?.GetHashCode() ?? 0;
 
-        private static Scalar<T>? unit; 
+        // Published through a reference holder: a Nullable<Scalar<T>> is two fields, so a
+        // concurrent reader could observe HasValue before inner, and dereference null.
+        private static readonly object unitGate = new();
+        private static System.Runtime.CompilerServices.StrongBox<Scalar<T>>? unitBox;
         /// <summary>A cached constant scalar of value 1 (true for bit).</summary>
         public static Scalar<T> Unit
         {
             get
             {
-                if (Shorokoo.Scalar<T>.unit is null)
+                if (unitBox is { } cached) return cached.Value;
+                lock (unitGate)
+                {
+                if (unitBox is { } raced) return raced.Value;
+                Scalar<T>? unit = null;
                 {
                     var type = OnnxUtils.GetDType<T>();
                     if (type == DType.BFloat16) unit = (Scalar<T>)(object)Shorokoo.Globals.Scalar(BFloat16.One);
@@ -97,8 +104,10 @@ namespace Shorokoo
                     else if (type == DType.Invalid) unit = (Scalar<T>)(object)Shorokoo.Globals.Scalar(1);
                 }
 
-                Debug.Assert(Shorokoo.Scalar<T>.unit is not null);
-                return Shorokoo.Scalar<T>.unit!.Value;
+                Debug.Assert(unit is not null);
+                unitBox = new System.Runtime.CompilerServices.StrongBox<Scalar<T>>(unit!.Value);
+                return unitBox.Value;
+                }
             }
         }
 

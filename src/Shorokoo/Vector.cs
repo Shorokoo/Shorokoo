@@ -74,7 +74,10 @@ namespace Shorokoo
 
         #region Unit and Empty vectors
 
-        private static Vector<T>? unit;
+        // Published through a reference holder: a Nullable<Vector<T>> is two fields, so a
+        // concurrent reader could observe HasValue before inner, and dereference null.
+        private static readonly object unitGate = new();
+        private static System.Runtime.CompilerServices.StrongBox<Vector<T>>? unitBox;
 
         /// <summary>
         /// A tensor of shape (1,) containing a single element of value 1 (or true).
@@ -83,7 +86,11 @@ namespace Shorokoo
         {
             get
             {
-                if (Vector<T>.unit is null)
+                if (unitBox is { } cached) return cached.Value;
+                lock (unitGate)
+                {
+                if (unitBox is { } raced) return raced.Value;
+                Vector<T>? unit = null;
                 {
                     var type = OnnxUtils.GetDType<T>();
                     if (type == DType.BFloat16) unit = (Vector<T>)(object)Vector(BFloat16.One);
@@ -112,18 +119,25 @@ namespace Shorokoo
                     else if (type == DType.Invalid) unit = (Vector<T>)(object)Vector(1);
                 }
 
-                Debug.Assert(Vector<T>.unit is not null);
-                return Vector<T>.unit!.Value;
+                Debug.Assert(unit is not null);
+                unitBox = new System.Runtime.CompilerServices.StrongBox<Vector<T>>(unit!.Value);
+                return unitBox.Value;
+                }
             }
         }
 
-        private static Vector<T>? empty;
+        private static readonly object emptyGate = new();
+        private static System.Runtime.CompilerServices.StrongBox<Vector<T>>? emptyBox;
         /// <summary>A cached vector of shape (0,) containing no elements.</summary>
         public static Vector<T> Empty
         {
             get
             {
-                if (Vector<T>.empty is null)
+                if (emptyBox is { } cached) return cached.Value;
+                lock (emptyGate)
+                {
+                if (emptyBox is { } raced) return raced.Value;
+                Vector<T>? empty = null;
                 {
                     var type = OnnxUtils.GetDType<T>();
                     if (type == DType.BFloat16) empty = (Vector<T>)(object)Vector(new BFloat16[] { });
@@ -152,8 +166,10 @@ namespace Shorokoo
                     else if (type == DType.Invalid) empty = (Vector<T>)(object)Vector(new int[] {});
                 }
 
-                Debug.Assert(Vector<T>.empty is not null);
-                return Vector<T>.empty!.Value;
+                Debug.Assert(empty is not null);
+                emptyBox = new System.Runtime.CompilerServices.StrongBox<Vector<T>>(empty!.Value);
+                return emptyBox.Value;
+                }
             }
         }
 

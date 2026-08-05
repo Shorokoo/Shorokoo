@@ -35,7 +35,7 @@ namespace Shorokoo.Tests;
 /// </para>
 /// </summary>
 [Trait("Domain", "Core")]
-[Trait("Purpose", "Coverage")]
+[Trait("Purpose", "Gate")]
 public class BuildWarningsGateTests
 {
     /// <summary>

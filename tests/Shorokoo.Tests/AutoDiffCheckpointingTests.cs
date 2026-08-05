@@ -122,7 +122,7 @@ public class AutoDiffCheckpointingCoverageTests
             epsilon: 1e-5f, momentum: null, trainingMode: null);
         var lrn = OnnxOp.Lrn(x, size: 3);
         var det = OnnxOp.Det(a);
-        var (topVals, topIdx) = OnnxOp.TopK(v, OnnxOp.Constant(new long[] { 2 }), axis: -1, largest: true, sorted: true);
+        var (topVals, topIdx) = OnnxOp.TopK(v, OnnxOp.Constant((long[])[2L]), axis: -1, largest: true, sorted: true);
         var resized = OnnxOp.Resize(x, null, OnnxOp.Constant(new float[] { 1f, 1f, 2f, 2f }), null,
             antialias: null, axes: null, coordinateTransformationMode: null, cubicCoeffA: null,
             excludeOutside: null, extrapolationValue: null, keepAspectRatioPolicy: null,
@@ -170,10 +170,8 @@ public class AutoDiffCheckpointingCoverageTests
     /// <summary>
     /// Drives <see cref="ShapeInferenceInterpreter"/>'s ORT fallback chain
     /// (FallbackResolveNode → ProcessConstant / ExecuteNode, including the
-    /// SEQUENCE_CONSTRUCT multi-output wrap and its mixed-dtype retry) by temporarily
-    /// replacing the QEE handlers for Det / TopK / Constant with always-throwing stubs.
-    /// Tests run single-threaded (xunit.runner.json), and the original handlers are
-    /// restored in a finally block, so the registry swap cannot leak.
+    /// SEQUENCE_CONSTRUCT multi-output wrap and its mixed-dtype retry) by replacing the QEE
+    /// handlers for Det / TopK / Constant with always-throwing stubs on this thread only.
     /// </summary>
     [Fact]
     public void TestShapeInferenceOrtFallbackCoverage()
@@ -182,7 +180,7 @@ public class AutoDiffCheckpointingCoverageTests
         var v = InputVector<float32>("v");           // [6]
 
         var det = OnnxOp.Det(x);
-        var (topVals, topIdx) = OnnxOp.TopK(v, OnnxOp.Constant(new long[] { 2 }), axis: -1, largest: true, sorted: true);
+        var (topVals, topIdx) = OnnxOp.TopK(v, OnnxOp.Constant((long[])[2L]), axis: -1, largest: true, sorted: true);
         var constTensor = OnnxOp.Constant(Globals.TensorData(DType.Float32, [2L], 5f, 6f)); // value (tensor) branch
         var constInt = OnnxOp.Constant(7L);    // value_int branch
         var constFloat = OnnxOp.Constant(2.5f); // value_float branch
@@ -191,25 +189,15 @@ public class AutoDiffCheckpointingCoverageTests
             [x, v],
             [det, topVals, topIdx, constTensor, constInt, constFloat]);
 
-        var origDet = OpRegistry.Get(OpCodes.DET)!;
-        var origTopK = OpRegistry.Get(OpCodes.TOPK)!;
-        var origConstant = OpRegistry.Get(OpCodes.CONSTANT)!;
         ShapeInferenceResult shapeInfo;
-        try
+        using (OpRegistry.Override(
+            new QeeFailStub(OpCodes.DET),
+            new QeeFailStub(OpCodes.TOPK),
+            new QeeFailStub(OpCodes.CONSTANT)))
         {
-            OpRegistry.Register(new QeeFailStub(OpCodes.DET));
-            OpRegistry.Register(new QeeFailStub(OpCodes.TOPK));
-            OpRegistry.Register(new QeeFailStub(OpCodes.CONSTANT));
-
             shapeInfo = new ShapeInferenceInterpreter(CpuContext).Infer(graph,
                 Globals.TensorDataWithSmallVals(DType.Float32, [3, 3]),
                 Globals.TensorDataWithSmallVals(DType.Float32, [6]));
-        }
-        finally
-        {
-            OpRegistry.Register(origDet);
-            OpRegistry.Register(origTopK);
-            OpRegistry.Register(origConstant);
         }
 
         // Det: single-output ORT fallback (no sequence wrap) — scalar result.

@@ -10,7 +10,7 @@ namespace Shorokoo.Tests.Modules
     //
     //  Driven by QeeSeqStringSignalAuditTests: ORT-runnable modules go
     //  through AdvancedTestGraph (validating the expectations against
-    //  real ONNX Runtime) plus the strict QeeSelfCheck; modules built on
+    //  real ONNX Runtime) plus the strict QeeAudit strict-QEE; modules built on
     //  Shorokoo-internal ops or @string runtime inputs (which carry no
     //  data into QEE/ORT result comparison) use the QeeOnly-style strict
     //  check instead.
@@ -348,15 +348,15 @@ namespace Shorokoo.Tests.Modules
         {
             var v1 = (Tensor<float32>)OnnxOp.TfIdfVectorizer(xi,
                 maxGramLength: 2L, maxSkipCount: 0L, minGramLength: 1L, mode: "TF",
-                ngramCounts: new long[] { 0L, 2L },
-                ngramIndexes: new long[] { 2L, 0L, 4L },
-                poolInt64s: new long[] { 1L, 2L, 3L, 4L },
+                ngramCounts: [0L, 2L],
+                ngramIndexes: [2L, 0L, 4L],
+                poolInt64s: [1L, 2L, 3L, 4L],
                 poolStrings: null, weights: null);
             var v2 = (Tensor<float32>)OnnxOp.TfIdfVectorizer(xi.Reshape(Vector(1L, 4L)),
                 maxGramLength: 2L, maxSkipCount: 0L, minGramLength: 1L, mode: "TF",
-                ngramCounts: new long[] { 0L, 2L },
-                ngramIndexes: new long[] { 2L, 0L, 4L },
-                poolInt64s: new long[] { 1L, 2L, 3L, 4L },
+                ngramCounts: [0L, 2L],
+                ngramIndexes: [2L, 0L, 4L],
+                poolInt64s: [1L, 2L, 3L, 4L],
                 poolStrings: null, weights: null);
 
             var mismatch =
@@ -385,7 +385,7 @@ namespace Shorokoo.Tests.Modules
             var norm = (Tensor<@string>)OnnxOp.StringNormalizer(x, caseChangeAction: "LOWER");
             var normStop = (Tensor<@string>)OnnxOp.StringNormalizer(x,
                 caseChangeAction: "LOWER", isCaseSensitive: 0L, locale: "en_US",
-                stopwords: new[] { "the" });
+                stopwords: ["the"]);
             var regex = (Tensor<bit>)OnnxOp.RegexFullMatch(concat, pattern: ".*");
             var (splitY, numSplits) = OnnxOp.StringSplit(x, delimiter: " ", maxsplit: 2L);
 

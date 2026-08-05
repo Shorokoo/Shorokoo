@@ -51,10 +51,18 @@ jobs:
           --filter "Purpose=Coverage"
           -c Release --logger "console;verbosity=minimal"
 
-      # The Purpose=Gate tests measure wall clock, process-wide memory, and a clean
-      # product build. They are meaningless under contention, so they get the box to
-      # themselves: one worker, and after the parallel pass has finished.
-      - name: Gate tests (serial)
+      # Purpose=Benchmark measures wall clock and process-wide memory, so it needs the
+      # box to itself: one worker, its own process, and nothing else running. It must
+      # come before the Purpose=Gate step — that one shells out to a full parallel
+      # `dotnet build`, whose MSBuild workers wreck any measurement sharing its process.
+      - name: Benchmark gates (serial, isolated)
+        run: >
+          dotnet test tests/Shorokoo.Tests/Shorokoo.Tests.csproj
+          --filter "Purpose=Benchmark"
+          -c Release --logger "console;verbosity=minimal" --no-build
+          -- xUnit.MaxParallelThreads=1 xUnit.ParallelizeTestCollections=false
+
+      - name: Build-hygiene gate (serial)
         run: >
           dotnet test tests/Shorokoo.Tests/Shorokoo.Tests.csproj
           --filter "Purpose=Gate"

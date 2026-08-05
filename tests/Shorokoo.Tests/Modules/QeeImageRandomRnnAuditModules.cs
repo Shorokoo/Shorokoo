@@ -11,7 +11,7 @@ namespace Shorokoo.Tests.Modules
     //
     //  Driven two ways by QeeImageRandomRnnAuditTests: AdvancedTestGraph
     //  validates the expectations against real ONNX Runtime execution,
-    //  and QeeSelfCheck validates that QuickExecutionEngine reproduces
+    //  and QeeAudit strict-QEE validates that QuickExecutionEngine reproduces
     //  them (Shape ops read the QEE-inferred shape, so a wrong inferred
     //  dim flips the bit to false). Modules whose checks are not
     //  QEE-computable (data-dependent NMS shapes, nondeterministic
@@ -109,7 +109,7 @@ namespace Shorokoo.Tests.Modules
 
     /// <summary>Resize with NEGATIVE axes (spec opset 18+: counted from the back) — QEE-only:
     /// ONNX Runtime 1.25.1's Resize kernel rejects negative axes ("Scale value should be
-    /// greater than 0"), so this module is driven through QeeSelfCheck without ORT.
+    /// greater than 0"), so this module is driven through QeeAudit strict-QEE without ORT.
     /// Input x is expected as [1,1,8,8].</summary>
     [Module]
     public partial class QeeResizeNegativeAxesAuditCheck
@@ -264,7 +264,7 @@ namespace Shorokoo.Tests.Modules
 
     /// <summary>NonMaxSuppression with the max_output_boxes_per_class input ABSENT — the
     /// spec default is 0 = "no output", so the result is exactly [0,3] and QEE can pin the
-    /// full shape (this branch IS QeeSelfCheck-able, unlike the data-dependent ones).</summary>
+    /// full shape (this branch IS QeeAudit strict-QEE-able, unlike the data-dependent ones).</summary>
     [Module]
     public partial class QeeNmsEmptyAuditCheck
     {
@@ -349,9 +349,11 @@ namespace Shorokoo.Tests.Modules
                 dtype: null, seed: 3f);
             var rnl = (Tensor<float32>)OnnxOp.RandomNormalLike(probs, mean: 0f, scale: 1f,
                 dtype: null, seed: 1f);
-            // dtype override on the Like-variant.
+            // dtype override on the Like-variant, then the same op inheriting the input dtype.
             var rul = (Tensor<float64>)OnnxOp.RandomUniformLike(probs, high: 1f, low: 0f,
                 dtype: DType.Float64, seed: 2f);
+            var rulLike = (Tensor<float32>)OnnxOp.RandomUniformLike(probs, high: 1f, low: 0f,
+                dtype: null, seed: 2f);
             var bern = (Tensor<float32>)OnnxOp.Bernoulli(probs, dtype: null, seed: 7f);
             var bernInt = (Tensor<int32>)OnnxOp.Bernoulli(probs, dtype: DType.Int32, seed: 7f);
             // No dtype → int32 per spec (the node-def default branch used to be unresolvable).
@@ -366,6 +368,7 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(ru, Vector(3L)) +
                 ShapeMismatch(rnl, Vector(2L, 3L)) +
                 ShapeMismatch(rul, Vector(2L, 3L)) +
+                ShapeMismatch(rulLike, Vector(2L, 3L)) +
                 ShapeMismatch(bern, Vector(2L, 3L)) +
                 ShapeMismatch(bernInt, Vector(2L, 3L)) +
                 ShapeMismatch(mult, Vector(2L, 5L)) +
@@ -450,7 +453,7 @@ namespace Shorokoo.Tests.Modules
         public static (Tensor<@string>, Tensor<@string>) Inline()
         {
             var cs = (Tensor<@string>)OnnxOp.Constant("hello");
-            var css = (Tensor<@string>)OnnxOp.Constant(new[] { "a", "b", "c" });
+            var css = (Tensor<@string>)OnnxOp.Constant((string[])["a", "b", "c"]);
             return (cs, css);
         }
     }

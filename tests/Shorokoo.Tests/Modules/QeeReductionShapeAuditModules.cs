@@ -9,7 +9,7 @@ namespace Shorokoo.Tests.Modules
     //
     //  Driven two ways by QeeReductionShapeAuditTests: AdvancedTestGraph
     //  validates the expected values against real ONNX Runtime execution,
-    //  and the QeeSelfCheck bit-check validates that QuickExecutionEngine
+    //  and the QeeAudit strict-QEE bit-check validates that QuickExecutionEngine
     //  computes the same concrete values (every op in the comparison
     //  chain propagates concrete data, so a wrong or missing QEE value
     //  flips the bit or leaves it uncomputed, failing the test).
@@ -307,7 +307,7 @@ namespace Shorokoo.Tests.Modules
         public static Scalar<bit> Inline(Tensor<float32> v7)
         {
             var sp3 = v7.Split(3);
-            var spE = v7.Split(new long[] { 2, 5 });
+            var spE = v7.Split((long[])[2, 5]);
             var m24 = Vector(1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f).Reshape(Vector(2L, 4L));
             var sp2 = m24.Split(2, axis: 1);
             var t2a = Vector(1f, 2f, 3f, 4f).Reshape(Vector(2L, 2L));

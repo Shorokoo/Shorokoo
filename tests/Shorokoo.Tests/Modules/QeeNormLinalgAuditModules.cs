@@ -10,7 +10,7 @@ namespace Shorokoo.Tests.Modules
     //
     //  Driven two ways by QeeNormLinalgAuditTests: AdvancedTestGraph
     //  validates the expected values/shapes against real ONNX Runtime
-    //  execution, and the QeeSelfCheck bit-check validates that
+    //  execution, and the QeeAudit strict-QEE bit-check validates that
     //  QuickExecutionEngine computes the same concrete values (a wrong
     //  or missing QEE value/shape flips the bit or leaves it uncomputed,
     //  failing the test). Ops whose QEE path is shape-only (losses,
@@ -61,7 +61,7 @@ namespace Shorokoo.Tests.Modules
                 Vector(1f, 1f, 1f, 1f), Vector(0f, 0f, 0f, 0f), numGroups: 2);
             var lrn = (Tensor<float32>)OnnxOp.Lrn(xg, alpha: 1e-4f, beta: 0.75f, bias: 1f, size: 3L);
             var lpNorm = (Tensor<float32>)OnnxOp.LpNormalization(x, axis: 0, p: 1);
-            var mvn = x3.MeanVarianceNormalization(new long[] { 0, 2 });
+            var mvn = x3.MeanVarianceNormalization((long[])[0, 2]);
 
             var mismatch =
                 FloatMismatch(Flat(bnInfer), Vector(1f, -1f, 5f, -0.5f)) +

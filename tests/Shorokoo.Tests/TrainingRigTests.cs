@@ -1423,6 +1423,15 @@ public class TrainingRigCoverageTests
             modelGraph.FromOrderedInputs([exampleInput]),
             0.01f);
 
+        var namedHyperRig = TrainingRig.FromScratch(
+            modelGraph, Losses.L2Loss, Optimizers.SGD,
+            modelGraph.FromOrderedInputs([exampleInput]),
+            new SGDOptimizerHyperparameters { LearningRate = 0.01f });
+        Assert.NotEmpty(namedHyperRig.TrainableParamStructDef.Fields);
+        Assert.Throws<ArgumentNullException>(() => TrainingRig.FromScratch(
+            modelGraph, Losses.L2Loss, Optimizers.SGD,
+            (ModelParamList)null!, new SGDOptimizerHyperparameters { LearningRate = 0.01f }));
+
         Assert.NotNull(rig.InputDef);
         Assert.Equal(1, rig.InputDef.Fields.Length);
         Assert.Equal("input", rig.InputDef.Fields[0].Name);

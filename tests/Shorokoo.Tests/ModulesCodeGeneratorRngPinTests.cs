@@ -5,12 +5,11 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Unit tests for the MSG004 <c>Rng.Pin</c> suggestion builder
+/// The MSG004 <c>Rng.Pin</c> suggestion builder
 /// (<see cref="ModuleSourceGenerator.TryBuildRngPinSuggestion"/>), driven directly on parsed
-/// module snippets — the builder is syntax-only, so no compilation is needed. The contract:
-/// suggest one compilable pin per scope when every RNG consumer (Model / Init / feed capture,
-/// nested Iterate loop) is provably nameable; refuse (null) when anything is not, because a
-/// wrong pin silently re-keys.
+/// module snippets. It suggests one compilable pin per scope when every RNG consumer (Model /
+/// Init / feed capture, nested Iterate loop) is provably nameable, and refuses (null) when
+/// anything is not — a wrong pin silently re-keys.
 /// </summary>
 [Trait("Domain", "Modules")]
 [Trait("Purpose", "Coverage")]
@@ -23,10 +22,18 @@ public class ModulesCodeGeneratorRngPinTests
         return ModuleSourceGenerator.TryBuildRngPinSuggestion(classDecl);
     }
 
-    [Fact]
-    public void TestCapturedModelAndInitGetPositionalPin()
+    private static void AssertSuggests(string classBody, params string[] fragments)
     {
-        var s = Suggest("""
+        var s = Suggest(classBody);
+        Assert.NotNull(s);
+        foreach (var f in fragments) Assert.Contains(f, s);
+    }
+
+    [Fact]
+    public void TestPinnableSites()
+    {
+        // Captured Model + Init at module scope.
+        AssertSuggests("""
             public partial class M
             {
                 public static Tensor<float32> Inline(Tensor<float32> x)
@@ -36,17 +43,10 @@ public class ModulesCodeGeneratorRngPinTests
                     return a.Call(x) + w.Reduce(ReduceKind.Sum);
                 }
             }
-            """);
-        Assert.NotNull(s);
-        Assert.Contains("Rng.Pin(a, w);", s);
-    }
+            """, "Rng.Pin(a, w);");
 
-    [Fact]
-    public void TestCapturedFeedIsPinnableLikeAnInit()
-    {
-        // A feed is a ModelId-based consumer exactly like a param: captured in a local, it
-        // takes a slot and is named in the pin — it must not disqualify the module.
-        var s = Suggest("""
+        // A captured feed is a consumer exactly like an Init.
+        AssertSuggests("""
             public partial class M
             {
                 public static Tensor<float32> Inline(Tensor<float32> x)
@@ -56,15 +56,10 @@ public class ModulesCodeGeneratorRngPinTests
                     return x + u + w.Reduce(ReduceKind.Sum);
                 }
             }
-            """);
-        Assert.NotNull(s);
-        Assert.Contains("Rng.Pin(w, u);", s);
-    }
+            """, "Rng.Pin(w, u);");
 
-    [Fact]
-    public void TestGlobalsQualifiedFeedIsPinnable()
-    {
-        var s = Suggest("""
+        // Globals-qualified feed.
+        AssertSuggests("""
             public partial class M
             {
                 public static Tensor<float32> Inline(Tensor<float32> x)
@@ -73,15 +68,10 @@ public class ModulesCodeGeneratorRngPinTests
                     return x + u;
                 }
             }
-            """);
-        Assert.NotNull(s);
-        Assert.Contains("Rng.Pin(u);", s);
-    }
+            """, "Rng.Pin(u);");
 
-    [Fact]
-    public void TestCapturedFeedInsideLoopGetsLoopScopedPin()
-    {
-        var s = Suggest("""
+        // A captured feed inside a loop gets a loop-scoped pin.
+        AssertSuggests("""
             public partial class M
             {
                 public static Tensor<float32> Inline(Tensor<float32> x, Scalar<int64> steps)
@@ -97,39 +87,10 @@ public class ModulesCodeGeneratorRngPinTests
                     return acc;
                 }
             }
-            """);
-        Assert.NotNull(s);
-        Assert.Contains("Rng.Pin(w, u);", s);
-        Assert.Contains("inside `foreach", s);
-    }
+            """, "Rng.Pin(w, u);", "inside `foreach");
 
-    [Fact]
-    public void TestCallOnUncountedReceiverRefuses()
-    {
-        // m comes from an opaque bare helper call, not a counted Recv.Model(...) capture —
-        // its .Call may create streams the pin would silently omit. A lowercase receiver
-        // alone proves nothing, so the suggestion is withheld.
-        var s = Suggest("""
-            public partial class M
-            {
-                public static Tensor<float32> Inline(Tensor<float32> x)
-                {
-                    var m = MakeModel();
-                    var w = InitSimple.Init([Scalar(2L)]);
-                    return m.Call(x) + w.Reduce(ReduceKind.Sum);
-                }
-            }
-            """);
-        Assert.Null(s);
-    }
-
-    [Fact]
-    public void TestCallOnCountedModelInsideLoopIsTrusted()
-    {
-        // A model captured at module scope and re-invoked inside a loop body: the counted
-        // capture flows into the nested scope, so the .Call is provably stream-free and
-        // both scopes get their pins.
-        var s = Suggest("""
+        // A counted capture re-invoked inside a loop is trusted to be stream-free.
+        AssertSuggests("""
             public partial class M
             {
                 public static Tensor<float32> Inline(Tensor<float32> x, Scalar<int64> steps)
@@ -145,18 +106,28 @@ public class ModulesCodeGeneratorRngPinTests
                     return acc;
                 }
             }
-            """);
-        Assert.NotNull(s);
-        Assert.Contains("Rng.Pin(u);", s);
-        Assert.Contains("inside `foreach", s);
+            """, "Rng.Pin(u);", "inside `foreach");
     }
 
     [Fact]
-    public void TestUncapturedFeedStillRefuses()
+    public void TestRefusedSites()
     {
-        // An inline (uncaptured) feed has no name a pin could use — the whole suggestion is
-        // withheld rather than emitting a pin that silently omits a consumer.
-        var s = Suggest("""
+        // .Call on an uncounted receiver; an uncaptured (unnameable) feed; an opaque
+        // uppercase helper call; and a body that already carries a pin.
+        string[] refused =
+        [
+            """
+            public partial class M
+            {
+                public static Tensor<float32> Inline(Tensor<float32> x)
+                {
+                    var m = MakeModel();
+                    var w = InitSimple.Init([Scalar(2L)]);
+                    return m.Call(x) + w.Reduce(ReduceKind.Sum);
+                }
+            }
+            """,
+            """
             public partial class M
             {
                 public static Tensor<float32> Inline(Tensor<float32> x)
@@ -165,33 +136,8 @@ public class ModulesCodeGeneratorRngPinTests
                     return x + RandomUniform(x.ShapeTensor(), 0f, 1f) + w.Reduce(ReduceKind.Sum);
                 }
             }
-            """);
-        Assert.Null(s);
-    }
-
-    [Fact]
-    public void TestExistingPinSuppressesTheSuggestion()
-    {
-        var s = Suggest("""
-            public partial class M
-            {
-                public static Tensor<float32> Inline(Tensor<float32> x)
-                {
-                    var u = RandomUniform(x.ShapeTensor(), 0f, 1f);
-                    Rng.Pin(u);
-                    return x + u;
-                }
-            }
-            """);
-        Assert.Null(s);
-    }
-
-    [Fact]
-    public void TestOpaqueHelperCallRefuses()
-    {
-        // An uppercase static-helper call may create streams internally — nothing an
-        // end-of-body pin could name, so the suggestion is withheld.
-        var s = Suggest("""
+            """,
+            """
             public partial class M
             {
                 public static Tensor<float32> Inline(Tensor<float32> x)
@@ -201,7 +147,19 @@ public class ModulesCodeGeneratorRngPinTests
                     return y + w.Reduce(ReduceKind.Sum);
                 }
             }
-            """);
-        Assert.Null(s);
+            """,
+            """
+            public partial class M
+            {
+                public static Tensor<float32> Inline(Tensor<float32> x)
+                {
+                    var u = RandomUniform(x.ShapeTensor(), 0f, 1f);
+                    Rng.Pin(u);
+                    return x + u;
+                }
+            }
+            """,
+        ];
+        foreach (var body in refused) Assert.Null(Suggest(body));
     }
 }

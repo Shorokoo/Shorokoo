@@ -5,240 +5,168 @@ using Shorokoo.Runtime;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Coverage for the Transformer / Attention stack
-/// (<see cref="Shorokoo.Modules.Layers.Attention"/>,
-/// <see cref="Shorokoo.Modules.Layers.MultiHeadAttention"/>,
-/// <see cref="Shorokoo.Modules.Layers.TransformerEncoderLayer"/>). The self-checking
-/// modules embed their value validation inside the module's <c>Inline</c> (returning a
+/// Coverage for the Transformer / Attention stack. The self-checking modules embed
+/// their value validation inside the module's <c>Inline</c> (returning a
 /// <c>Scalar&lt;bit&gt;</c>), so each AutoTest call is a one-liner asserting the check bit.
-///
-/// <para>SDPA/MHA inputs use per-element-distinct values (not the all-0.1 of
-/// <c>TensorDataWithSmallVals</c>) so the softmax is non-uniform and the attention math is
-/// genuinely exercised — equal logits would make every reference trivially match.</para>
+/// Inputs are per-element-distinct so the softmax is non-uniform.
 /// </summary>
 [Trait("Domain", "Modules")]
 [Trait("Purpose", "Coverage")]
 public class AttentionModuleTests
 {
+    private static TensorData Sdpa3x2() => TensorData(DType.Float32, [1L, 1L, 3L, 2L],
+        0.1f, 0.9f, 0.5f, -0.3f, -0.7f, 0.4f);
+
+    private static TensorData Mha3x4() => TensorData(DType.Float32, [1L, 3L, 4L],
+        0.1f, 0.2f, -0.3f, 0.4f,
+        0.5f, -0.6f, 0.7f, 0.8f,
+        -0.9f, 0.15f, 0.25f, -0.35f);
+
+    private static TensorData RoPE3x4() => TensorData(DType.Float32, [1L, 1L, 3L, 4L],
+        0.1f, 0.9f, 0.5f, -0.3f,
+        -0.7f, 0.4f, 0.2f, 0.8f,
+        0.6f, -0.5f, 0.35f, -0.15f);
+
+    private static TensorData RoPE2x4() => TensorData(DType.Float32, [1L, 1L, 2L, 4L],
+        0.1f, 0.9f, 0.5f, -0.3f,
+        -0.7f, 0.4f, 0.2f, 0.8f);
+
+    private static TensorData Memory5x4() => TensorData(DType.Float32, [1L, 5L, 4L],
+        0.3f, -0.1f, 0.45f, -0.2f,
+        0.6f, 0.05f, -0.55f, 0.15f,
+        -0.25f, 0.7f, 0.1f, -0.4f,
+        0.8f, -0.3f, 0.2f, 0.55f,
+        -0.65f, 0.35f, -0.05f, 0.5f);
+
     [Fact]
-    public void TestScaledDotProductAttentionCoverage()
+    public void TestSdpaMhaAndRoPECoverage()
     {
-        // [1, 1, L=3, d=2] with distinct entries → a non-uniform attention pattern.
         Assert.True(AutoTest.AdvancedTestGraph<AttnSdpaForwardGolden>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Float32, [1L, 1L, 3L, 2L],
-                0.1f, 0.9f, 0.5f, -0.3f, -0.7f, 0.4f)]));
-
+            hyperparamInputs: [], runtimeInputs: [Sdpa3x2()]));
         Assert.True(AutoTest.AdvancedTestGraph<AttnSdpaCausalMasksFuture>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Float32, [1L, 1L, 3L, 2L],
-                0.1f, 0.9f, 0.5f, -0.3f, -0.7f, 0.4f)]));
-    }
-
-    [Fact]
-    public void TestMultiHeadAttentionCoverage()
-    {
-        // [N=1, L=3, embedDim=4], distinct entries.
+            hyperparamInputs: [], runtimeInputs: [Sdpa3x2()]));
         Assert.True(AutoTest.AdvancedTestGraph<MhaForwardGolden>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Float32, [1L, 3L, 4L],
-                0.1f, 0.2f, -0.3f, 0.4f,
-                0.5f, -0.6f, 0.7f, 0.8f,
-                -0.9f, 0.15f, 0.25f, -0.35f)]));
-    }
-
-    [Fact]
-    public void TestRoPECoverage()
-    {
-        // [N=1, H=1, L=3, d=4] with per-element-distinct values → a non-trivial rotation.
-        // Position 0 is the identity (mθ = 0 ⇒ cos = 1, sin = 0).
+            hyperparamInputs: [], runtimeInputs: [Mha3x4()]));
         Assert.True(AutoTest.AdvancedTestGraph<RoPEPositionZeroIsIdentity>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Float32, [1L, 1L, 3L, 4L],
-                0.1f, 0.9f, 0.5f, -0.3f,
-                -0.7f, 0.4f, 0.2f, 0.8f,
-                0.6f, -0.5f, 0.35f, -0.15f)]));
-
-        // RoPE is an orthogonal rotation ⇒ it preserves each position's vector norm.
+            hyperparamInputs: [], runtimeInputs: [RoPE3x4()]));
         Assert.True(AutoTest.AdvancedTestGraph<RoPEPreservesNorm>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Float32, [1L, 1L, 3L, 4L],
-                0.1f, 0.9f, 0.5f, -0.3f,
-                -0.7f, 0.4f, 0.2f, 0.8f,
-                0.6f, -0.5f, 0.35f, -0.15f)]));
-
-        // Closed-form rotation at sequence position 1 (d = 4, base = 10000 ⇒ θ0 = 1, θ1 = 0.01):
-        // pins the half-split pairing (0,2)/(1,3), the frequency formula and the sign convention.
-        // Input is [1, 1, 2, 4] (L = 2 so position 1 exists).
+            hyperparamInputs: [], runtimeInputs: [RoPE3x4()]));
         Assert.True(AutoTest.AdvancedTestGraph<RoPEClosedFormPositionOne>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Float32, [1L, 1L, 2L, 4L],
-                0.1f, 0.9f, 0.5f, -0.3f,
-                -0.7f, 0.4f, 0.2f, 0.8f)]));
+            hyperparamInputs: [], runtimeInputs: [RoPE2x4()]));
     }
 
     [Fact]
     public void TestTransformerDecoderLayerCoverage()
     {
-        // Shape: tgt [N=1, Lt=3, E=4] + memory [N=1, Lm=5, E=4] with Lt != Lm ⇒ out [1, 3, 4].
         Assert.True(AutoTest.AdvancedTestGraph<DecoderLayerShapeCheck>(
-            hyperparamInputs: [],
-            runtimeInputs:
-            [
-                TensorData(DType.Float32, [1L, 3L, 4L],
-                    0.1f, 0.2f, -0.3f, 0.4f,
-                    0.5f, -0.6f, 0.7f, 0.8f,
-                    -0.9f, 0.15f, 0.25f, -0.35f),
-                TensorData(DType.Float32, [1L, 5L, 4L],
-                    0.3f, -0.1f, 0.45f, -0.2f,
-                    0.6f, 0.05f, -0.55f, 0.15f,
-                    -0.25f, 0.7f, 0.1f, -0.4f,
-                    0.8f, -0.3f, 0.2f, 0.55f,
-                    -0.65f, 0.35f, -0.05f, 0.5f),
-            ]));
-
-        // Structural closed-form re-derivation (Lt != Lm), no bias.
+            hyperparamInputs: [], runtimeInputs: [Mha3x4(), Memory5x4()]));
         Assert.True(AutoTest.AdvancedTestGraph<DecoderLayerNoBiasGolden>(
-            hyperparamInputs: [],
-            runtimeInputs:
-            [
-                TensorData(DType.Float32, [1L, 3L, 4L],
-                    0.1f, 0.2f, -0.3f, 0.4f,
-                    0.5f, -0.6f, 0.7f, 0.8f,
-                    -0.9f, 0.15f, 0.25f, -0.35f),
-                TensorData(DType.Float32, [1L, 5L, 4L],
-                    0.3f, -0.1f, 0.45f, -0.2f,
-                    0.6f, 0.05f, -0.55f, 0.15f,
-                    -0.25f, 0.7f, 0.1f, -0.4f,
-                    0.8f, -0.3f, 0.2f, 0.55f,
-                    -0.65f, 0.35f, -0.05f, 0.5f),
-            ]));
-
-        // Same structural closed-form with useBias = true (zero biases added everywhere).
+            hyperparamInputs: [], runtimeInputs: [Mha3x4(), Memory5x4()]));
         Assert.True(AutoTest.AdvancedTestGraph<DecoderLayerWithBiasGolden>(
-            hyperparamInputs: [],
-            runtimeInputs:
-            [
-                TensorData(DType.Float32, [1L, 3L, 4L],
-                    0.1f, 0.2f, -0.3f, 0.4f,
-                    0.5f, -0.6f, 0.7f, 0.8f,
-                    -0.9f, 0.15f, 0.25f, -0.35f),
-                TensorData(DType.Float32, [1L, 5L, 4L],
-                    0.3f, -0.1f, 0.45f, -0.2f,
-                    0.6f, 0.05f, -0.55f, 0.15f,
-                    -0.25f, 0.7f, 0.1f, -0.4f,
-                    0.8f, -0.3f, 0.2f, 0.55f,
-                    -0.65f, 0.35f, -0.05f, 0.5f),
-            ]));
+            hyperparamInputs: [], runtimeInputs: [Mha3x4(), Memory5x4()]));
     }
 }
 
 /// <summary>
-/// Training-rig smoke coverage for <see cref="Shorokoo.Modules.Layers.TransformerEncoderLayer"/>:
-/// a tiny model (<see cref="TransformerEncoderMeanPoolModel"/>) wrapping one encoder layer is
-/// driven through <see cref="TrainingRig.FromScratch"/> + <c>CreateInitialCheckpoint</c> + one
-/// <see cref="TrainingRig.TrainStep"/>, asserting a finite loss and that a trainable parameter
-/// actually moved. Mirrors the helper-driven style of
-/// <see cref="Shorokoo.Tests.TrainingRigCoverageTests"/>.
+/// Training-rig smoke coverage for the Transformer encoder / decoder layers: a tiny
+/// mean-pooling model is driven through <see cref="TrainingRig.FromScratch"/> +
+/// <c>CreateInitialCheckpoint</c> + one <see cref="TrainingRig.TrainStep"/>.
 /// </summary>
 [Trait("Domain", "Training")]
 [Trait("Purpose", "Coverage")]
 public class AttentionTrainingCoverageTests
 {
+    private static readonly TensorStructFieldDef[] TargetFields =
+        [new TensorStructFieldDef("targets", DataStructure.Tensor, 2, DType.Float32)];
+
     [Fact]
     public void TestTransformerEncoderLayerTrainStepCoverage()
     {
-        long[] inputShape = [2L, 3L, 4L];   // [N, L, embedDim]
-        long[] outShape = [2L, 4L];         // mean-pooled [N, embedDim]
+        long[] inputShape = [2L, 3L, 4L];
+        long[] outShape = [2L, 4L];
 
-        var sample = new NamedModelParam[]
-        {
+        NamedModelParam[] encoderSample =
+        [
             new TensorDataModelParam("input", ModelParamType.InputParam,
                 TensorData(inputShape, Floats(24, seed: 0.07f))),
-        };
+        ];
 
-        var rig = TrainingRig.FromScratch(
+        var encoderRig = TrainingRig.FromScratch(
             TransformerEncoderMeanPoolModel.ComputationGraph,
             L2Loss.ComputationGraph,
             SGDOptimizer.ComputationGraph,
-            sample, 0.01f);
+            encoderSample, 0.01f);
 
-        var initial = rig.CreateInitialCheckpoint();
-        Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
+        var encoderInitial = encoderRig.CreateInitialCheckpoint();
+        Assert.NotEmpty(encoderRig.TrainableParamStructDef.Fields);
 
-        var modelInputDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 3, DType.Float32) }, "ModelInput");
-        var targetDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("targets", DataStructure.Tensor, 2, DType.Float32) }, "Target");
-        var inputBatch = new TensorDataStruct(modelInputDef,
-            new Dictionary<string, IData> { { "input", TensorData(inputShape, Floats(24, seed: 0.07f)) } });
-        var targetBatch = new TensorDataStruct(targetDef,
-            new Dictionary<string, IData> { { "targets", TensorData(outShape, new float[8]) } });
+        TensorStructFieldDef[] encoderInputFields =
+            [new TensorStructFieldDef("input", DataStructure.Tensor, 3, DType.Float32)];
+        var targetDef = new TensorStructDef(TargetFields, "Target");
 
-        var step = rig.TrainStep(initial, inputBatch, targetBatch);
+        var encoderStep = encoderRig.TrainStep(
+            encoderInitial,
+            new TensorDataStruct(new TensorStructDef(encoderInputFields, "ModelInput"),
+                new Dictionary<string, IData> { { "input", TensorData(inputShape, Floats(24, seed: 0.07f)) } }),
+            new TensorDataStruct(targetDef,
+                new Dictionary<string, IData> { { "targets", TensorData(outShape, new float[8]) } }));
 
-        Assert.True(float.IsFinite(step.Loss!.Value));
-        Assert.NotEmpty(step.TrainableParams.Fields);
-        Assert.True(AnyFieldChanged(initial.TrainableParams, step.TrainableParams),
-            "no trainable parameter moved after a TrainStep (gradient did not flow)");
+        Assert.True(float.IsFinite(encoderStep.Loss!.Value));
+        Assert.NotEmpty(encoderStep.TrainableParams.Fields);
+        Assert.True(AnyFieldChanged(encoderInitial.TrainableParams, encoderStep.TrainableParams));
     }
 
     [Fact]
     public void TestTransformerDecoderLayerTrainStepCoverage()
     {
-        long[] tgtShape = [2L, 3L, 4L];     // [N, Lt, embedDim]
-        long[] memShape = [2L, 5L, 4L];     // [N, Lm, embedDim]
-        long[] outShape = [2L, 4L];         // mean-pooled over Lt → [N, embedDim]
+        long[] inputShape = [2L, 3L, 4L];
+        long[] memShape = [2L, 5L, 4L];
+        long[] outShape = [2L, 4L];
 
-        // Two graph inputs (tgt, memory) — names must match the model's Inline params.
-        var sample = new NamedModelParam[]
-        {
+        NamedModelParam[] decoderSample =
+        [
             new TensorDataModelParam("tgt", ModelParamType.InputParam,
-                TensorData(tgtShape, Floats(24, seed: 0.07f))),
+                TensorData(inputShape, Floats(24, seed: 0.07f))),
             new TensorDataModelParam("memory", ModelParamType.InputParam,
                 TensorData(memShape, Floats(40, seed: 0.05f))),
-        };
+        ];
 
-        var rig = TrainingRig.FromScratch(
+        var decoderRig = TrainingRig.FromScratch(
             TransformerDecoderMeanPoolModel.ComputationGraph,
             L2Loss.ComputationGraph,
             SGDOptimizer.ComputationGraph,
-            sample, 0.01f);
+            decoderSample, 0.01f);
 
-        var initial = rig.CreateInitialCheckpoint();
-        Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
+        var decoderInitial = decoderRig.CreateInitialCheckpoint();
+        Assert.NotEmpty(decoderRig.TrainableParamStructDef.Fields);
 
-        var modelInputDef = new TensorStructDef(
-            new[]
-            {
-                new TensorStructFieldDef("tgt", DataStructure.Tensor, 3, DType.Float32),
-                new TensorStructFieldDef("memory", DataStructure.Tensor, 3, DType.Float32),
-            }, "ModelInput");
-        var targetDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("targets", DataStructure.Tensor, 2, DType.Float32) }, "Target");
-        var inputBatch = new TensorDataStruct(modelInputDef,
-            new Dictionary<string, IData>
-            {
-                { "tgt", TensorData(tgtShape, Floats(24, seed: 0.07f)) },
-                { "memory", TensorData(memShape, Floats(40, seed: 0.05f)) },
-            });
-        var targetBatch = new TensorDataStruct(targetDef,
-            new Dictionary<string, IData> { { "targets", TensorData(outShape, new float[8]) } });
+        TensorStructFieldDef[] decoderInputFields =
+        [
+            new TensorStructFieldDef("tgt", DataStructure.Tensor, 3, DType.Float32),
+            new TensorStructFieldDef("memory", DataStructure.Tensor, 3, DType.Float32),
+        ];
 
-        var step = rig.TrainStep(initial, inputBatch, targetBatch);
+        var decoderStep = decoderRig.TrainStep(
+            decoderInitial,
+            new TensorDataStruct(new TensorStructDef(decoderInputFields, "ModelInput"),
+                new Dictionary<string, IData>
+                {
+                    { "tgt", TensorData(inputShape, Floats(24, seed: 0.07f)) },
+                    { "memory", TensorData(memShape, Floats(40, seed: 0.05f)) },
+                }),
+            new TensorDataStruct(new TensorStructDef(TargetFields, "Target"),
+                new Dictionary<string, IData> { { "targets", TensorData(outShape, new float[8]) } }));
 
-        Assert.True(float.IsFinite(step.Loss!.Value));
-        Assert.NotEmpty(step.TrainableParams.Fields);
-        Assert.True(AnyFieldChanged(initial.TrainableParams, step.TrainableParams),
-            "no trainable parameter moved after a TrainStep (gradient did not flow)");
+        Assert.True(float.IsFinite(decoderStep.Loss!.Value));
+        Assert.NotEmpty(decoderStep.TrainableParams.Fields);
+        Assert.True(AnyFieldChanged(decoderInitial.TrainableParams, decoderStep.TrainableParams));
     }
 
-    /// <summary>Deterministic small distinct floats so the attention/FFN path is non-degenerate.</summary>
     private static float[] Floats(int count, float seed)
     {
         var vals = new float[count];
         for (var i = 0; i < count; i++)
-            vals[i] = seed * (((i * 7) % 11) - 5);   // spread over [-5·seed, 5·seed], distinct pattern
+            vals[i] = seed * (((i * 7) % 11) - 5);
         return vals;
     }
 

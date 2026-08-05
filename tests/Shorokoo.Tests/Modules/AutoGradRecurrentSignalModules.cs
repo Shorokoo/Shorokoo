@@ -19,18 +19,14 @@ namespace Shorokoo.Tests.Modules
     //  derivative, matching the (QEE-A2-fixed) forward.
     // ===================================================================
 
-    /// <summary>loss = gelu(x, approximate="tanh"). Self-checking at any smooth x —
-    /// the FD probes the tanh-approx FORWARD, so an exact-erf gradient (the old
-    /// behavior, which ignored the attribute) fails the directional check.</summary>
+    /// <summary>loss = Σ gelu(x, approximate="tanh") over a vector spanning both signs —
+    /// the FD probes the tanh-approx FORWARD element-wise, so an exact-erf gradient (the
+    /// old behavior, which ignored the attribute) fails the directional check.</summary>
     [Module]
     public partial class AutoGradGeluTanhCheck
     {
-        public static Scalar<bit> Inline(Scalar<float32> x)
-        {
-            Func<Scalar<float32>, Scalar<float32>> f = z => z.Gelu(GeluApproximate.Tanh);
-            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, f(x));
-            return AutoGradCheckHelpers.ScalarDirectionalDerivCheck(x, grad, f);
-        }
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => z.Gelu(GeluApproximate.Tanh));
     }
 
     // ===================================================================

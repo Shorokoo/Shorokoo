@@ -377,31 +377,4 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary>DeformConv on a 1x1x4x4 input and 1x1x3x3 weight, with the input built
-    /// from x. Side-branch masked to zero (×0), but the masked branch still routes a
-    /// real (zero-valued) gradient into DeformConv — and since AD-B3 replaced the
-    /// silent ZERO-STUB with an AD003 guard, the AUTO_GRAD lowering now throws
-    /// (asserted via Assert.Throws in TestAutoGradDetectionStubsCoverage). The bit
-    /// check below is never reached.</summary>
-    [Module]
-    public partial class AutoGradDeformConvStubCheck
-    {
-        public static Scalar<bit> Inline(Tensor<float32> x)
-        {
-            // Build minimal-shape Conv inputs from x. Spatial output for stride=1, pad=0
-            // on a 4x4 input with a 3x3 kernel is 2x2; offset shape must be
-            // [N, 2 * kH * kW * offset_group, H_out, W_out] = [1, 18, 2, 2].
-            var input4d = (Tensor<float32>)OnnxOp.Reshape(x, Vector(1L, 1L, 4L, 4L), allowZero: false);
-            var w = (Tensor<float32>)OnnxOp.Expand(Scalar(1f), Vector(1L, 1L, 3L, 3L));
-            var offset = (Tensor<float32>)OnnxOp.Expand(Scalar(0f), Vector(1L, 18L, 2L, 2L));
-            var dc = (Tensor<float32>)OnnxOp.DeformConv(input4d, w, offset, b: null, mask: null,
-                dilations: null, group: null, kernelShape: null, offsetGroup: null,
-                pads: null, strides: null);
-            var maskScaled = dc.Reduce(ReduceKind.Sum, keepDims: false).Scalar() * Scalar(0f);
-            var loss = x.Reduce(ReduceKind.Sum, keepDims: false).Scalar() + maskScaled;
-            var grad = (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, loss);
-            var expected = (Tensor<float32>)OnnxOp.Expand(Scalar(1f), x.DShape);
-            return (grad - expected).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-4f);
-        }
-    }
 }

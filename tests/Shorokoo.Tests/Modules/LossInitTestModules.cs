@@ -31,12 +31,12 @@ public partial class KLDivClosedForm
         var ln2 = Scalar(0.69314718f);
 
         // p = q: KL = 0.
-        var logqUniform = Tensor(new long[] { 1L, 2L }, -0.69314718f, -0.69314718f);
-        var pUniform = Tensor(new long[] { 1L, 2L }, 0.5f, 0.5f);
+        var logqUniform = Tensor([1L, 2L], -0.69314718f, -0.69314718f);
+        var pUniform = Tensor([1L, 2L], 0.5f, 0.5f);
         var pen = (KLDivLoss.Inline(logqUniform, pUniform) - Scalar(0f)).Abs();
 
         // p = [1, 0] against uniform q: KL = ln 2.
-        var pOneHot = Tensor(new long[] { 1L, 2L }, 1f, 0f);
+        var pOneHot = Tensor([1L, 2L], 1f, 0f);
         pen = pen + (KLDivLoss.Inline(logqUniform, pOneHot) - ln2).Abs();
 
         return pen < Scalar(1e-4f);

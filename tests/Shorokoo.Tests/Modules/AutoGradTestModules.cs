@@ -697,16 +697,19 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary>loss = |x| → dL/dx = sign(x), checked at both positive and negative x.</summary>
+    /// <summary>
+    /// loss = Σ|x| → dL/dx = sign(x) element-wise. Driven with a vector spanning both
+    /// signs, so one graph checks both sides of the Sign in the Abs gradient.
+    /// </summary>
     [Module]
     public partial class AutoGradAbsCheck
     {
-        public static Scalar<bit> Inline(Scalar<float32> x)
+        public static Scalar<bit> Inline(Tensor<float32> x)
         {
-            var loss = x.Abs();
-            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, loss);
-            var expected = ((Tensor<float32>)OnnxOp.Sign((Tensor<float32>)x)).Scalar();
-            return (grad - expected).Abs() < Scalar(1e-4f);
+            var loss = x.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, loss);
+            var diff = (grad - x.Sign()).Abs();
+            return diff.Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-4f);
         }
     }
 
@@ -817,18 +820,34 @@ namespace Shorokoo.Tests.Modules
             var gradNormSq = grad * grad;
             return (deriv - gradNormSq).Abs() < Scalar(1e-3f) * (gradNormSq.Abs() + Scalar(1f));
         }
+
+        /// <summary>
+        /// Vector form of <see cref="ScalarDirectionalDerivCheck"/> for an element-wise
+        /// <paramref name="f"/>: loss = Σ f(x), so dL/dx_i = f'(x_i) and the two-sided
+        /// probe (f(x + h·g) − f(x − h·g))/(2h) ≈ g² holds element-wise (no cross-element
+        /// cancellation — the worst element decides). One vector spanning several regimes
+        /// therefore checks every branch of a piecewise f in a single graph.
+        /// </summary>
+        public static Scalar<bit> ElementwiseDirectionalDerivCheck(
+            Tensor<float32> x, Func<Tensor<float32>, Tensor<float32>> f)
+        {
+            var loss = f(x).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, loss);
+            var h = Scalar(1e-3f);
+            var pert = h * grad;
+            var deriv = (f(x + pert) - f(x - pert)) / (Scalar(2f) * h);
+            var gradSq = grad * grad;
+            var slack = Scalar(1e-3f) * (gradSq + Scalar(1f)) - (deriv - gradSq).Abs();
+            return slack.Reduce(ReduceKind.Min, keepDims: false).Scalar() > Scalar(0f);
+        }
     }
 
-    /// <summary>loss = relu(x). Self-checking at any smooth x.</summary>
+    /// <summary>loss = Σ relu(x). Vector input spans x&gt;0 and x&lt;0 (both Where branches).</summary>
     [Module]
     public partial class AutoGradReluCheck
     {
-        public static Scalar<bit> Inline(Scalar<float32> x)
-        {
-            Func<Scalar<float32>, Scalar<float32>> f = z => z.Relu();
-            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, f(x));
-            return AutoGradCheckHelpers.ScalarDirectionalDerivCheck(x, grad, f);
-        }
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => z.Relu());
     }
 
     /// <summary>loss = relu(a − 1)·2. dL/da = 2·1[a&gt;1].</summary>
@@ -843,76 +862,52 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary>loss = sigmoid(x). dL/dx = sig·(1−sig).</summary>
+    /// <summary>loss = Σ sigmoid(x). dL/dx = sig·(1−sig), checked element-wise over the vector.</summary>
     [Module]
     public partial class AutoGradSigmoidCheck
     {
-        public static Scalar<bit> Inline(Scalar<float32> x)
-        {
-            Func<Scalar<float32>, Scalar<float32>> f = z => z.Sigmoid();
-            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, f(x));
-            return AutoGradCheckHelpers.ScalarDirectionalDerivCheck(x, grad, f);
-        }
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => z.Sigmoid());
     }
 
-    /// <summary>loss = leakyRelu(x, 0.1). Self-checking at any smooth x.</summary>
+    /// <summary>loss = Σ leakyRelu(x, 0.1). Vector input spans both sides of the slope switch.</summary>
     [Module]
     public partial class AutoGradLeakyReluCheck
     {
-        public static Scalar<bit> Inline(Scalar<float32> x)
-        {
-            Func<Scalar<float32>, Scalar<float32>> f = z => z.LeakyRelu(0.1f);
-            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, f(x));
-            return AutoGradCheckHelpers.ScalarDirectionalDerivCheck(x, grad, f);
-        }
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => z.LeakyRelu(0.1f));
     }
 
-    /// <summary>loss = gelu(x). Self-checking at any smooth x.</summary>
+    /// <summary>loss = Σ gelu(x). Checked element-wise over the vector.</summary>
     [Module]
     public partial class AutoGradGeluCheck
     {
-        public static Scalar<bit> Inline(Scalar<float32> x)
-        {
-            Func<Scalar<float32>, Scalar<float32>> f = z => z.Gelu();
-            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, f(x));
-            return AutoGradCheckHelpers.ScalarDirectionalDerivCheck(x, grad, f);
-        }
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => z.Gelu());
     }
 
-    /// <summary>loss = elu(x, 1.0). Self-checking at any smooth x.</summary>
+    /// <summary>loss = Σ elu(x, 1.0). Vector input spans both sides of the exponential switch.</summary>
     [Module]
     public partial class AutoGradEluCheck
     {
-        public static Scalar<bit> Inline(Scalar<float32> x)
-        {
-            Func<Scalar<float32>, Scalar<float32>> f = z => z.Elu(1.0f);
-            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, f(x));
-            return AutoGradCheckHelpers.ScalarDirectionalDerivCheck(x, grad, f);
-        }
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => z.Elu(1.0f));
     }
 
-    /// <summary>loss = selu(x). Self-checking at any smooth x.</summary>
+    /// <summary>loss = Σ selu(x). Vector input spans both sides of the exponential switch.</summary>
     [Module]
     public partial class AutoGradSeluCheck
     {
-        public static Scalar<bit> Inline(Scalar<float32> x)
-        {
-            Func<Scalar<float32>, Scalar<float32>> f = z => z.Selu();
-            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, f(x));
-            return AutoGradCheckHelpers.ScalarDirectionalDerivCheck(x, grad, f);
-        }
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => z.Selu());
     }
 
-    /// <summary>loss = celu(x, 1.0). Self-checking at any smooth x.</summary>
+    /// <summary>loss = Σ celu(x, 1.0). Vector input spans both sides of the exponential switch.</summary>
     [Module]
     public partial class AutoGradCeluCheck
     {
-        public static Scalar<bit> Inline(Scalar<float32> x)
-        {
-            Func<Scalar<float32>, Scalar<float32>> f = z => z.Celu(1.0f);
-            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, f(x));
-            return AutoGradCheckHelpers.ScalarDirectionalDerivCheck(x, grad, f);
-        }
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => z.Celu(1.0f));
     }
 
     /// <summary>loss = hardSigmoid(x). Piecewise-linear; smooth in (-2.5, 2.5).</summary>
@@ -927,76 +922,52 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary>loss = hardSwish(x). Smooth in (-3, 3) except at boundaries.</summary>
+    /// <summary>loss = Σ hardSwish(x). Vector input spans both sides of 0, smooth in (-3, 3).</summary>
     [Module]
     public partial class AutoGradHardSwishCheck
     {
-        public static Scalar<bit> Inline(Scalar<float32> x)
-        {
-            Func<Scalar<float32>, Scalar<float32>> f = z => z.HardSwish();
-            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, f(x));
-            return AutoGradCheckHelpers.ScalarDirectionalDerivCheck(x, grad, f);
-        }
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => z.HardSwish());
     }
 
-    /// <summary>loss = mish(x). Smooth everywhere.</summary>
+    /// <summary>loss = Σ mish(x). Smooth everywhere; vector input spans both signs.</summary>
     [Module]
     public partial class AutoGradMishCheck
     {
-        public static Scalar<bit> Inline(Scalar<float32> x)
-        {
-            Func<Scalar<float32>, Scalar<float32>> f = z => z.Mish();
-            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, f(x));
-            return AutoGradCheckHelpers.ScalarDirectionalDerivCheck(x, grad, f);
-        }
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => z.Mish());
     }
 
-    /// <summary>loss = softplus(x). Smooth everywhere.</summary>
+    /// <summary>loss = Σ softplus(x). Smooth everywhere; vector input spans both signs.</summary>
     [Module]
     public partial class AutoGradSoftplusCheck
     {
-        public static Scalar<bit> Inline(Scalar<float32> x)
-        {
-            Func<Scalar<float32>, Scalar<float32>> f = z => z.Softplus();
-            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, f(x));
-            return AutoGradCheckHelpers.ScalarDirectionalDerivCheck(x, grad, f);
-        }
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => z.Softplus());
     }
 
-    /// <summary>loss = softsign(x). Smooth everywhere.</summary>
+    /// <summary>loss = Σ softsign(x). Smooth everywhere; vector input spans both signs.</summary>
     [Module]
     public partial class AutoGradSoftsignCheck
     {
-        public static Scalar<bit> Inline(Scalar<float32> x)
-        {
-            Func<Scalar<float32>, Scalar<float32>> f = z => z.Softsign();
-            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, f(x));
-            return AutoGradCheckHelpers.ScalarDirectionalDerivCheck(x, grad, f);
-        }
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => z.Softsign());
     }
 
-    /// <summary>loss = thresholdedRelu(x, 0.5). Smooth at any x != 0.5.</summary>
+    /// <summary>loss = Σ thresholdedRelu(x, 0.5). Vector input spans above and below the threshold.</summary>
     [Module]
     public partial class AutoGradThresholdedReluCheck
     {
-        public static Scalar<bit> Inline(Scalar<float32> x)
-        {
-            Func<Scalar<float32>, Scalar<float32>> f = z => z.ThresholdedRelu(0.5f);
-            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, f(x));
-            return AutoGradCheckHelpers.ScalarDirectionalDerivCheck(x, grad, f);
-        }
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => z.ThresholdedRelu(0.5f));
     }
 
-    /// <summary>loss = shrink(x, bias=0.1, lambd=0.4). Smooth except at ±lambd.</summary>
+    /// <summary>loss = Σ shrink(x, bias=0.1, lambd=0.4). Vector input spans x&gt;lambd, x&lt;−lambd and the dead zone.</summary>
     [Module]
     public partial class AutoGradShrinkCheck
     {
-        public static Scalar<bit> Inline(Scalar<float32> x)
-        {
-            Func<Scalar<float32>, Scalar<float32>> f = z => z.Shrink(0.1f, 0.4f);
-            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, f(x));
-            return AutoGradCheckHelpers.ScalarDirectionalDerivCheck(x, grad, f);
-        }
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => z.Shrink(0.1f, 0.4f));
     }
 
     /// <summary>loss = sigmoid(exp(x)). Chained sigmoid+exp gradient check.</summary>
@@ -1160,16 +1131,12 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary>loss = tanh(x). Self-checking.</summary>
+    /// <summary>loss = Σ tanh(x). Checked element-wise over the vector.</summary>
     [Module]
     public partial class AutoGradTanhCheck
     {
-        public static Scalar<bit> Inline(Scalar<float32> x)
-        {
-            Func<Scalar<float32>, Scalar<float32>> f = z => z.Tanh();
-            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, f(x));
-            return AutoGradCheckHelpers.ScalarDirectionalDerivCheck(x, grad, f);
-        }
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => z.Tanh());
     }
 
     /// <summary>loss = sin(x)·cos(x). Chained sin+cos gradient check.</summary>
@@ -1349,16 +1316,12 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary>loss = clip(x, 0, 10). Self-checking at smooth points (in-range or saturated).</summary>
+    /// <summary>loss = Σ clip(x, 0, 10). Vector input spans in-range, clipped-low and clipped-high.</summary>
     [Module]
     public partial class AutoGradClipCheck
     {
-        public static Scalar<bit> Inline(Scalar<float32> x)
-        {
-            Func<Scalar<float32>, Scalar<float32>> f = z => z.Clip(Scalar(0f), Scalar(10f));
-            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, f(x));
-            return AutoGradCheckHelpers.ScalarDirectionalDerivCheck(x, grad, f);
-        }
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => z.Clip(Scalar(0f), Scalar(10f)));
     }
 
     /// <summary>

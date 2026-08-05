@@ -6,25 +6,18 @@ namespace Shorokoo.Tests;
 
 /// <summary>
 /// Coverage for the KLDivLoss closed forms and the extra initializers
-/// (TruncatedNormal / LeCunNormal), in the one-liner self-checking-module style
-/// (each [Fact] drives a Scalar&lt;bit&gt; module from LossInitTestModules.cs
-/// through <see cref="AutoTest.AdvancedTestGraph{TModule}"/>). The exact closed
-/// forms / properties checked live inside the modules.
+/// (TruncatedNormal / LeCunNormal); the exact closed forms live inside the
+/// self-checking modules in LossInitTestModules.cs.
 /// </summary>
 [Trait("Domain", "Modules")]
 [Trait("Purpose", "Coverage")]
 public class LossInitModuleTests
 {
     [Fact]
-    public void TestKLDivLossClosedFormCoverage()
+    public void TestKLDivLossClosedFormAndInitializerPropsCoverage()
     {
         Assert.True(AutoTest.AdvancedTestGraph<KLDivClosedForm>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [1L], 0f)]));
-    }
-
-    [Fact]
-    public void TestInitializerPropsCoverage()
-    {
         Assert.True(AutoTest.AdvancedTestGraph<InitializerProps>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [1L], 0f)]));
     }
@@ -33,53 +26,46 @@ public class LossInitModuleTests
 /// <summary>
 /// Training-rig smoke coverage for KLDivLoss: it satisfies the rig's
 /// (predictions, targets) → scalar loss contract, so it composes through
-/// <see cref="TrainingRig.FromScratch"/> + one <c>TrainStep</c>. The model
-/// (<see cref="Shorokoo.Tests.Modules.ScalarMultiplyModel"/>, weight init 1.0)
-/// passes the input through unchanged, so feeding log-probabilities as input
-/// keeps the KL term well-defined; the targets are a valid probability
-/// distribution (non-negative, summing to 1). The step's loss must be finite.
+/// <see cref="TrainingRig.FromScratch"/> + one <c>TrainStep</c>.
 /// </summary>
 [Trait("Domain", "Training")]
 [Trait("Purpose", "Coverage")]
 public class LossInitTrainingTests
 {
     [Fact]
-    public void TestKLDivLossThroughTrainingRig()
+    public void TestKLDivLossThroughTrainingRigProducesFiniteLoss()
     {
-        // input = log-probabilities of a uniform 2-way distribution (ln 0.5).
-        var inputData = TensorData([2L], new float[] { -0.6931472f, -0.6931472f });
-        // targets = valid probabilities (non-negative, sum to 1).
-        var targetData = TensorData([2L], new float[] { 0.5f, 0.5f });
+        float[] logProbs = [-0.6931472f, -0.6931472f];
+        float[] probs = [0.5f, 0.5f];
+        var inputData = TensorData([2L], logProbs);
+        var targetData = TensorData([2L], probs);
+
+        NamedModelParam[] sample =
+            [new TensorDataModelParam("input", ModelParamType.InputParam, inputData)];
 
         var rig = TrainingRig.FromScratch(
             Shorokoo.Tests.Modules.ScalarMultiplyModel.ComputationGraph,
             KLDivLoss.ComputationGraph,
             SGDOptimizer.ComputationGraph,
-            new NamedModelParam[]
-            {
-                new TensorDataModelParam("input", ModelParamType.InputParam, inputData),
-            },
+            sample,
             0.01f);
 
         var initial = rig.CreateInitialCheckpoint();
 
-        var modelInputDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32) },
-            "ModelInput");
-        var targetDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32) },
-            "Target");
+        TensorStructFieldDef[] inputFields =
+            [new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32)];
+        TensorStructFieldDef[] targetFields =
+            [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)];
 
-        var inputBatch = new TensorDataStruct(modelInputDef,
-            new Dictionary<string, IData> { { "input", inputData } });
-        var targetBatch = new TensorDataStruct(targetDef,
-            new Dictionary<string, IData> { { "targets", targetData } });
-
-        var step = rig.TrainStep(initial, inputBatch, targetBatch);
+        var step = rig.TrainStep(
+            initial,
+            new TensorDataStruct(new TensorStructDef(inputFields, "ModelInput"),
+                new Dictionary<string, IData> { { "input", inputData } }),
+            new TensorDataStruct(new TensorStructDef(targetFields, "Target"),
+                new Dictionary<string, IData> { { "targets", targetData } }));
 
         Assert.NotNull(step);
         Assert.NotNull(step.TrainableParams);
-        Assert.True(float.IsFinite(step.Loss!.Value),
-            $"KLDivLoss must produce a finite loss through the rig; got {step.Loss!.Value}");
+        Assert.True(float.IsFinite(step.Loss!.Value));
     }
 }

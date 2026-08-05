@@ -157,10 +157,59 @@ public partial class SiblingNestedLoopsPin
 }
 
 /// <summary>
+/// Loop between two Linears, natural source order and no pin. A <c>LoopAPI.Iterate</c> loop
+/// occupies exactly one top-level id slot at its source position: a → slot 1, loop → slot 2,
+/// b → slot 3. This is the invariant the codegen pin suggestion relies on to emit correct
+/// sparse slots for loop-containing bodies.
+/// </summary>
+[Module]
+public partial class LoopPinBaseline
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var a = Linear.Model(Scalar(2L), Scalar(false));      // slot 1
+        var acc = a.Call(x);
+        foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))       // slot 2 (Init inside)
+        {
+            var w = InitSimple.Init(acc.ShapeTensor());
+            acc = acc * w;
+            ctx.ContinueWhile(Scalar(true));
+        }
+        var b = Linear.Model(Scalar(3L), Scalar(false));      // slot 3
+        return acc.Concat(-1L, b.Call(acc));
+    }
+}
+
+/// <summary>
+/// The same three consumers with <c>a</c> and <c>b</c> created in the opposite order, then
+/// pinned with the exact sparse statement the codegen suggestion emits for the baseline.
+/// </summary>
+[Module]
+public partial class LoopPinReordered
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var b = Linear.Model(Scalar(3L), Scalar(false));      // created 1st — would be slot 1 unpinned
+        var a = Linear.Model(Scalar(2L), Scalar(false));      // created 2nd
+        var acc = a.Call(x);
+        foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
+        {
+            var w = InitSimple.Init(acc.ShapeTensor());
+            acc = acc * w;
+            ctx.ContinueWhile(Scalar(true));
+        }
+        Rng.Pin(([1], a), ([3], b));                           // codegen's suggested sparse pin
+        return acc.Concat(-1L, b.Call(acc));
+    }
+}
+
+/// <summary>
 /// Pins written INSIDE loop bodies reshape only that loop's local id slots — across sibling
 /// loops and any nesting depth — while leaving the loop's own (parent-scope) slot alone. Each
-/// loop body is traced several times during construction; the pin records only in the
-/// canonical pass, so it resolves to the surviving nodes exactly once.
+/// loop body is traced several times during construction; the pin records only in the canonical
+/// pass, so it resolves to the surviving nodes exactly once. Also the slot model behind the
+/// codegen pin suggestion: a loop is one top-level slot, and a sparse pin around it freezes the
+/// nameable consumers without disturbing the loop's own streams.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -178,110 +227,95 @@ public class RngLoopBodyPinTests
             .ToArray();
     }
 
-    // The loop-local slot (last id element) that the rank-1 param of a given size landed on.
-    // Loop init params here are all vectors, so rank-1 + size uniquely identifies one.
-    private static int LocalSlotOfShape((int[] id, long[] shape)[] ps, long size)
+    // The id element at position `index` for the rank-1 param of a given size. Loop init params
+    // here are all vectors, so rank-1 + size uniquely identifies one; the value must agree
+    // across every unrolled iteration.
+    private static int IdElemOfShape((int[] id, long[] shape)[] ps, long size, int index)
     {
         var hit = ps.Where(p => p.shape.Length == 1 && p.shape[0] == size).ToArray();
         Assert.NotEmpty(hit);
-        var slots = hit.Select(p => p.id[^1]).Distinct().ToArray();
-        Assert.Single(slots);   // same local slot in every unrolled iteration
-        return slots[0];
-    }
-
-    // The top-level loop slot (first id element) of the rank-1 param of a given size.
-    private static int TopSlotOfShape((int[] id, long[] shape)[] ps, long size)
-    {
-        var tops = ps.Where(p => p.shape.Length == 1 && p.shape[0] == size)
-            .Select(p => p.id[0]).Distinct().ToArray();
-        Assert.Single(tops);
-        return tops[0];
-    }
-
-    [Fact]
-    public void TestLoopBodyPositionalPinSwapsLocalSlotsAndKeepsLoopSlot()
-    {
-        var baseline = Params<LoopBodyNoPin>();
-        // Baseline creation order: w[2] -> local slot 1, w2[3] -> local slot 2.
-        Assert.Equal(1, LocalSlotOfShape(baseline, 2));
-        Assert.Equal(2, LocalSlotOfShape(baseline, 3));
-
-        var pinned = Params<LoopBodyPositionalPin>();
-        // Pin(w2, w) -> w2[3] to local slot 1, w[2] to local slot 2.
-        Assert.Equal(1, LocalSlotOfShape(pinned, 3));
-        Assert.Equal(2, LocalSlotOfShape(pinned, 2));
-        // The loop's own top-level slot is unchanged: the Linear ([2,4]) still holds slot 1.
-        Assert.Contains(pinned, p => p.shape.SequenceEqual((long[])[2L, 4L]) && p.id.SequenceEqual((int[])[1, 1]));
-    }
-
-    [Fact]
-    public void TestLoopBodySparsePinTakesNamedLocalSlot()
-    {
-        var ps = Params<LoopBodySparsePin>();
-        // Pin(([2], w)) -> w[2] at local slot 2; w2[3] fills the free local slot 1.
-        Assert.Equal(2, LocalSlotOfShape(ps, 2));
-        Assert.Equal(1, LocalSlotOfShape(ps, 3));
-    }
-
-    [Fact]
-    public void TestSiblingLoopsPinIndependently()
-    {
-        var ps = Params<SiblingLoopsPin>();
-        // Loop A: Pin(q, p) -> q[3] local 1, p[2] local 2.
-        Assert.Equal(1, LocalSlotOfShape(ps, 3));
-        Assert.Equal(2, LocalSlotOfShape(ps, 2));
-        // Loop B: Pin(r, s) -> creation order kept: r[4] local 1, s[5] local 2.
-        Assert.Equal(1, LocalSlotOfShape(ps, 4));
-        Assert.Equal(2, LocalSlotOfShape(ps, 5));
-        // Distinct top-level loop slots (A's params start with 1, B's with 2).
-        Assert.Equal(1, TopSlotOfShape(ps, 3));
-        Assert.Equal(2, TopSlotOfShape(ps, 4));
-    }
-
-    [Fact]
-    public void TestNestedLoopPinReshapesInnerScope()
-    {
-        var ps = Params<NestedLoopPin>();
-        // Inner Pin(v, u) -> v[3] inner-local slot 1, u[2] inner-local slot 2.
-        Assert.Equal(1, LocalSlotOfShape(ps, 3));
-        Assert.Equal(2, LocalSlotOfShape(ps, 2));
-    }
-
-    // The id element at position `index` for the rank-1 param of a given size.
-    private static int IdElemOfShape((int[] id, long[] shape)[] ps, long size, int index)
-    {
-        var vals = ps.Where(p => p.shape.Length == 1 && p.shape[0] == size)
-            .Select(p => p.id[index]).Distinct().ToArray();
+        var vals = hit.Select(p => p.id[index >= 0 ? index : p.id.Length + index]).Distinct().ToArray();
         Assert.Single(vals);
         return vals[0];
     }
 
-    [Fact]
-    public void TestSiblingLoopsWithTwoLevelNestingPinAtEveryDepth()
-    {
-        var ps = Params<SiblingNestedLoopsPin>();
+    // The loop-local slot (last id element) / the top-level loop slot (first id element).
+    private static int LocalSlotOfShape((int[] id, long[] shape)[] ps, long size)
+        => IdElemOfShape(ps, size, -1);
+    private static int TopSlotOfShape((int[] id, long[] shape)[] ps, long size)
+        => IdElemOfShape(ps, size, 0);
 
-        // Sibling loops occupy distinct top-level slots: A's params start with 1, B's with 2.
+    [Fact]
+    public void TestLoopBodyPinsTakeLocalSlotsAndKeepTheLoopsOwnSlot()
+    {
+        // Baseline creation order: w[2] -> local slot 1, w2[3] -> local slot 2.
+        var baseline = Params<LoopBodyNoPin>();
+        Assert.Equal(1, LocalSlotOfShape(baseline, 2));
+        Assert.Equal(2, LocalSlotOfShape(baseline, 3));
+
+        // Pin(w2, w) -> w2[3] to local slot 1, w[2] to local slot 2; the loop's own top-level
+        // slot is unchanged (the Linear's [2,4] weight still holds slot 1).
+        var pinned = Params<LoopBodyPositionalPin>();
+        Assert.Equal(1, LocalSlotOfShape(pinned, 3));
+        Assert.Equal(2, LocalSlotOfShape(pinned, 2));
+        Assert.Contains(pinned, p => p.shape.SequenceEqual((long[])[2L, 4L]) && p.id.SequenceEqual((int[])[1, 1]));
+
+        // Pin(([2], w)) -> w[2] at local slot 2; w2[3] fills the free local slot 1.
+        var sparse = Params<LoopBodySparsePin>();
+        Assert.Equal(2, LocalSlotOfShape(sparse, 2));
+        Assert.Equal(1, LocalSlotOfShape(sparse, 3));
+    }
+
+    [Fact]
+    public void TestPinsInSiblingAndNestedLoopScopesApplyIndependentlyAtEveryDepth()
+    {
+        // Sibling loops, one swapping (Pin(q, p)) and one keeping creation order (Pin(r, s)),
+        // at distinct top-level slots.
+        var siblings = Params<SiblingLoopsPin>();
+        Assert.Equal(1, LocalSlotOfShape(siblings, 3));
+        Assert.Equal(2, LocalSlotOfShape(siblings, 2));
+        Assert.Equal(1, LocalSlotOfShape(siblings, 4));
+        Assert.Equal(2, LocalSlotOfShape(siblings, 5));
+        Assert.Equal(1, TopSlotOfShape(siblings, 3));
+        Assert.Equal(2, TopSlotOfShape(siblings, 4));
+
+        // Inner Pin(v, u) -> v[3] inner-local slot 1, u[2] inner-local slot 2.
+        var nested = Params<NestedLoopPin>();
+        Assert.Equal(1, LocalSlotOfShape(nested, 3));
+        Assert.Equal(2, LocalSlotOfShape(nested, 2));
+
+        // Two sibling loops nested two levels deep, pinned at several scope depths.
+        var ps = Params<SiblingNestedLoopsPin>();
         Assert.Equal(1, TopSlotOfShape(ps, 2));   // a1 in loop A
         Assert.Equal(1, TopSlotOfShape(ps, 3));   // a2 in loop A
         Assert.Equal(2, TopSlotOfShape(ps, 4));   // b0 in loop B
         Assert.Equal(2, TopSlotOfShape(ps, 5));   // b1 in loop B
         Assert.Equal(2, TopSlotOfShape(ps, 6));   // b2 in loop B
-
-        // Inner A: Pin(a2, a1) -> a2[3] inner-local slot 1, a1[2] inner-local slot 2.
-        Assert.Equal(1, LocalSlotOfShape(ps, 3));
+        Assert.Equal(1, LocalSlotOfShape(ps, 3)); // inner A: Pin(a2, a1)
         Assert.Equal(2, LocalSlotOfShape(ps, 2));
-
-        // Inner B: Pin(b2, b1) -> b2[6] inner-local slot 1, b1[5] inner-local slot 2.
-        Assert.Equal(1, LocalSlotOfShape(ps, 6));
+        Assert.Equal(1, LocalSlotOfShape(ps, 6)); // inner B: Pin(b2, b1)
         Assert.Equal(2, LocalSlotOfShape(ps, 5));
-
-        // Outer B: Pin(([2], b0)) -> b0[4] takes outer-B local slot 2, so the inner B loop is
-        // pushed to outer-B local slot 1. The outer-B-local slot is id element index 2 (after
-        // the first -1). b0's path is [2, -1, 2]; b1/b2's paths run through the inner loop at
-        // outer-B-local slot 1, so their element at index 2 is 1.
-        Assert.Equal(2, IdElemOfShape(ps, 4, 2));   // b0 -> outer-B local slot 2
-        Assert.Equal(1, IdElemOfShape(ps, 5, 2));   // inner-B loop -> outer-B local slot 1
+        // Outer B: Pin(([2], b0)) -> b0 takes outer-B local slot 2 (id element index 2, after
+        // the first -1), pushing the inner B loop to outer-B local slot 1.
+        Assert.Equal(2, IdElemOfShape(ps, 4, 2));
+        Assert.Equal(1, IdElemOfShape(ps, 5, 2));
         Assert.Equal(1, IdElemOfShape(ps, 6, 2));
+    }
+
+    [Fact]
+    public void TestLoopOccupiesOneTopSlotAndASparsePinFreezesTheNamedConsumersAroundIt()
+    {
+        // Baseline: a (out=2) → slot 1, loop → slot 2, b (out=3) → slot 3. Despite b being
+        // created first in the reordered module, the sparse pin reproduces that mapping.
+        static void AssertSlots((int[] id, long[] shape)[] ps)
+        {
+            long OutAt(int[] path) => ps.Single(p => p.id.SequenceEqual(path)).shape[0];
+            Assert.Equal(2L, OutAt([1, 1]));
+            Assert.Equal(3L, OutAt([3, 1]));
+            // The loop occupies slot 2; its (unrolled) interior params live under [2, *].
+            Assert.Contains(ps, p => p.id.Length >= 2 && p.id[0] == 2);
+        }
+        AssertSlots(Params<LoopPinBaseline>());
+        AssertSlots(Params<LoopPinReordered>());
     }
 }

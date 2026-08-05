@@ -4,23 +4,15 @@ using Shorokoo.Core.Rng;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Host-side RNG key oracle — <b>test-only</b>.
-///
-/// <para>Production code performs no host-side Threefry (#136): the key tree is computed
-/// exclusively in-graph by the algorithm's <c>SHRK_RNG_SPLIT</c> chain, and any host consumer
-/// that needs a concrete key resolves it by <em>executing</em> that derivation
-/// (<c>RngKeyResolver</c>). These helpers reimplement the fold independently, on the host, so
-/// tests can assert the in-graph derivation against an oracle that does not share its
-/// implementation — which is exactly what makes the assertions meaningful. What must stay
-/// independent is the <em>derivation</em>: the fold order and counter scheme are rebuilt here by
-/// hand. (The underlying <see cref="Threefry2x32"/> bijection is shared — it is the reference
-/// generator, pinned to the published Random123 vectors.) Never resolve a key or a draw by
-/// calling into the graph.</para>
-///
-/// <para>Keys, split indices and draw positions are whole <c>ulong</c> values, matching the
-/// interface. The 32-bit word split is Threefry's own business and is confined to the few helpers
-/// that hand values to the reference generator (<see cref="FoldKey"/>, <see cref="DrawWords"/>)
-/// or repack its output (<see cref="DrawBits"/>).</para>
+/// Host-side RNG key oracle — <b>test-only</b>. Production code performs no host-side Threefry
+/// (#136): the key tree is computed in-graph by the algorithm's <c>SHRK_RNG_SPLIT</c> chain and
+/// host consumers resolve keys by <em>executing</em> that derivation (<c>RngKeyResolver</c>).
+/// These helpers rebuild the fold order and counter scheme by hand so assertions do not compare
+/// the graph against itself. (The <see cref="Threefry2x32"/> bijection is shared — it is the
+/// reference generator, pinned to the published Random123 vectors.) Never resolve a key or a
+/// draw by calling into the graph. Keys, split indices and draw positions are whole
+/// <c>ulong</c>s; the 32-bit word split is confined to the helpers that hand values to the
+/// reference generator or repack its output.
 /// </summary>
 internal static class RngTestOracle
 {
@@ -54,9 +46,8 @@ internal static class RngTestOracle
 
     /// <summary>
     /// The generator word pair a draw produces for element <paramref name="i"/> — the host
-    /// oracle for <c>RuntimeRng.Draw</c>. The draw position folds into the key (the same
-    /// bijection a split uses, at the draw's own round count), leaving both counter words to
-    /// the whole 64-bit element index.
+    /// oracle for <c>RuntimeRng.Draw</c>. The draw position folds into the key, leaving both
+    /// counter words to the whole 64-bit element index.
     /// </summary>
     public static (uint x0, uint x1) DrawWords(
         ulong key, ulong substreamIndex, long i, int rounds = Threefry2x32.Rounds)

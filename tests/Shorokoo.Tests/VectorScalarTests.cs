@@ -4,22 +4,12 @@ using static Shorokoo.Tests.Utils.SelfCheck;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Coverage-purpose tests for <see cref="Vector{T}"/> and <see cref="Scalar{T}"/>
-/// in <c>Core/Vector.cs</c>, <c>Core/Vector.Index.cs</c>, and <c>Core/Scalar.cs</c>.
-/// The static Unit/Empty per-DType arms, operator overloads (including
-/// <see cref="PrimitiveParam"/> and bare-primitive variants),
-/// ONNX op shortcut wrappers, and indexer overloads are exercised inside the
-/// <c>Inline</c> bodies of <c>[Module]</c>-attributed classes.
-///
-/// <para>
-/// Each module returns a <see cref="Scalar{T}"/> verdict that is <c>1</c> only when the
-/// exercised values match their references — so the exercised nodes are reachable graph
-/// outputs that actually execute (no pruning), and a broken op fails the test instead of
-/// hiding behind a discarded result (see issue #4). Each module keeps a <c>Tensor</c> input
-/// (folded into the verdict via <see cref="SelfCheck.Nan"/>, which contributes 0) so the graph
-/// retains a runtime input and the input-free C# codegen round-trip stays skipped, exactly as
-/// the original passthrough modules did.
-/// </para>
+/// Coverage for <see cref="Vector{T}"/> and <see cref="Scalar{T}"/> (<c>Core/Vector.cs</c>,
+/// <c>Core/Vector.Index.cs</c>, <c>Core/Scalar.cs</c>): the per-DType Unit/Empty arms, the operator
+/// overloads (including <see cref="PrimitiveParam"/> and bare-primitive variants), the ONNX op
+/// shortcut wrappers and the indexer overloads, driven from the <c>Inline</c> bodies of the
+/// self-checking <c>[Module]</c>s below (each returns a verdict that is <c>1</c> only when every
+/// exercised value matches its reference, so nothing can be pruned away).
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -27,55 +17,29 @@ public class VectorScalarCoverageTests
 {
     private static TensorData[] Input => [TensorDataWithSmallVals(DType.Float32, [4L])];
 
-    // One self-checking module per test so a fault in one surfaces independently of the others.
+    private static void Run<TModule>()
+        => Assert.True(AutoTest.AdvancedTestGraph<TModule>(hyperparamInputs: [], runtimeInputs: Input));
 
     [Fact]
-    public void TestVectorUnitEmptyDispatch()
-        => Assert.True(AutoTest.AdvancedTestGraph<VectorUnitEmptyDispatchModel>(hyperparamInputs: [], runtimeInputs: Input));
+    public void TestVectorAndTensorCoverage()
+    {
+        Run<VectorUnitEmptyDispatchModel>();
+        Run<VectorOperatorsModel>();
+        Run<VectorOnnxOpsModel>();
+        Run<VectorIndexerModel>();
+        Run<VectorModModel>();
+        Run<TensorIndexerModel>();
+    }
 
     [Fact]
-    public void TestVectorOperators()
-        => Assert.True(AutoTest.AdvancedTestGraph<VectorOperatorsModel>(hyperparamInputs: [], runtimeInputs: Input));
-
-    [Fact]
-    public void TestVectorOnnxOps()
-        => Assert.True(AutoTest.AdvancedTestGraph<VectorOnnxOpsModel>(hyperparamInputs: [], runtimeInputs: Input));
-
-    [Fact]
-    public void TestScalarUnitDispatch()
-        => Assert.True(AutoTest.AdvancedTestGraph<ScalarUnitDispatchModel>(hyperparamInputs: [], runtimeInputs: Input));
-
-    [Fact]
-    public void TestScalarOperators()
-        => Assert.True(AutoTest.AdvancedTestGraph<ScalarOperatorsModel>(hyperparamInputs: [], runtimeInputs: Input));
-
-    [Fact]
-    public void TestScalarImplicitPrimitiveConversion()
-        => Assert.True(AutoTest.AdvancedTestGraph<ScalarImplicitPrimitiveConversionModel>(hyperparamInputs: [], runtimeInputs: []));
-
-    // VectorIndexerModel exercises every Vector indexer read/write path with the issue-#3 direct
-    // API (read returns the value with no .T; an indexer-set assigns with struct value semantics),
-    // and asserts the Eval'd values. The step-slice/gather/slice-write faults #3 tracked are fixed.
-    [Fact]
-    public void TestVectorIndexerCoverage()
-        => Assert.True(AutoTest.AdvancedTestGraph<VectorIndexerModel>(hyperparamInputs: [], runtimeInputs: Input));
-
-    // float32 % is exercised over constant operands so Shorokoo's evaluator folds and validates
-    // the result by value. (It computes correctly; its ONNX export — a Mod node with fmod=false,
-    // which ONNX Runtime rejects for floats — is a separate limitation not covered here.)
-    [Fact]
-    public void TestVectorMod()
-        => Assert.True(AutoTest.AdvancedTestGraph<VectorModModel>(hyperparamInputs: [], runtimeInputs: Input));
-
-    [Fact]
-    public void TestScalarMod()
-        => Assert.True(AutoTest.AdvancedTestGraph<ScalarModModel>(hyperparamInputs: [], runtimeInputs: Input));
-
-    // Tensor<T> multi-axis indexer (issue #3): direct slice/gather reads and indexer-set
-    // assignment with value semantics, every path Eval'd and asserted by value.
-    [Fact]
-    public void TestTensorIndexerCoverage()
-        => Assert.True(AutoTest.AdvancedTestGraph<TensorIndexerModel>(hyperparamInputs: [], runtimeInputs: Input));
+    public void TestScalarCoverage()
+    {
+        Run<ScalarUnitDispatchModel>();
+        Run<ScalarOperatorsModel>();
+        Run<ScalarModModel>();
+        Assert.True(AutoTest.AdvancedTestGraph<ScalarImplicitPrimitiveConversionModel>(
+            hyperparamInputs: [], runtimeInputs: []));
+    }
 }
 
 /// <summary>
@@ -199,7 +163,8 @@ public partial class VectorOnnxOpsModel
         // Split — three overloads, each yields [1,2] and [3,4].
         var sp2 = v.Split(2);
         err = err + L1(sp2[0], Vector(1f, 2f)) + L1(sp2[1], Vector(3f, 4f));
-        var sp3 = v.Split(new long[] { 2L, 2L });
+        long[] splitSizes = [2L, 2L];
+        var sp3 = v.Split(splitSizes);
         err = err + L1(sp3[0], Vector(1f, 2f)) + L1(sp3[1], Vector(3f, 4f));
         var sp4 = v.Split(Vector(2L, 2L), 2L);
         err = err + L1(sp4[0], Vector(1f, 2f)) + L1(sp4[1], Vector(3f, 4f));
@@ -340,7 +305,9 @@ public partial class VectorIndexerModel
         // VectorIndexerParam implicit operators — each builds a param struct, used below.
         VectorIndexerParam p1 = 1..3;
         VectorIndexerParam p4 = Vector(0L, 2L, 4L);
-        VectorIndexerParam p5 = new long[] { 0L, 1L };
+        long[] indexPair = [0L, 1L];
+        long[] indexEnds = [0L, 4L];
+        VectorIndexerParam p5 = indexPair;
         VectorIndexerParam p6 = Range.All;
 
         Scalar<float32> err = Scalar(0f);
@@ -365,7 +332,7 @@ public partial class VectorIndexerModel
         err = err + L1(v[p4], Vector(1f, 3f, 5f));
         err = err + L1(v[Vector(0L, 1L)], Vector(1f, 2f));
         err = err + L1(v[p5], Vector(1f, 2f));
-        err = err + L1(v[new long[] { 0L, 4L }], Vector(1f, 5f));
+        err = err + L1(v[indexEnds], Vector(1f, 5f));
 
         // Strided slice read: v[(0..5, 2L)] == [1, 3, 5].
         err = err + L1(v[(0..5, 2L)], Vector(1f, 3f, 5f));

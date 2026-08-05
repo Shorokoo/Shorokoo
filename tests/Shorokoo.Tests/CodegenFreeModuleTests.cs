@@ -9,13 +9,12 @@ using Shorokoo.Runtime;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Coverage-purpose parity tests for the codegen-free module path
-/// (<see cref="ModuleFactory"/> / <c>GraphBuilder.BuildInternalComputationGraphFromDelegate</c>):
-/// the same small models are built once from a <c>[Module]</c> class and once from a plain
-/// delegate, and must execute identically; the delegate-built graphs must also train through
-/// <see cref="TrainingRig"/>, export to ONNX via <c>FastOnnxModelBuilder</c>, and survive the
-/// <see cref="AutoTest"/> roundtrips, with trainable-param initializers, <c>[Hyper]</c>
-/// parameters, and <c>Globals.StateUpdate</c> behaving exactly as in <c>Inline</c> methods.
+/// Parity coverage for the codegen-free module path (<see cref="ModuleFactory"/> /
+/// <c>GraphBuilder.BuildInternalComputationGraphFromDelegate</c>): the same small models built once
+/// from a <c>[Module]</c> class and once from a plain delegate must execute identically, and the
+/// delegate-built graphs must train through <see cref="TrainingRig"/>, export to ONNX, and survive
+/// the <see cref="AutoTest"/> roundtrips — with trainable-param initializers, <c>[Hyper]</c>
+/// parameters and <c>Globals.StateUpdate</c> behaving exactly as in <c>Inline</c> methods.
 /// </summary>
 [Trait("Domain", "Modules")]
 [Trait("Purpose", "Coverage")]
@@ -87,9 +86,8 @@ public class CodegenFreeModuleTests
     }
 
     /// <summary>
-    /// In-loop StateUpdate misuse: the updated value (<c>state + 1</c>) is recomputed each
-    /// iteration but never carried across iterations nor consumed after the loop, so it does
-    /// not surface as a loop output and has no post-loop value to register.
+    /// In-loop StateUpdate misuse: the updated value is recomputed each iteration but never
+    /// carried nor consumed after the loop, so it has no post-loop value to register.
     /// </summary>
     private static Tensor<float32> StateUpdateInsideLoopBody(Tensor<float32> input)
     {
@@ -103,10 +101,7 @@ public class CodegenFreeModuleTests
         return acc;
     }
 
-    /// <summary>
-    /// In-loop StateUpdate misuse: the updated value is a scanned result, whose post-loop
-    /// form is the stacked per-iteration tensor rather than a final value.
-    /// </summary>
+    /// <summary>In-loop StateUpdate misuse: the updated value is a scanned result.</summary>
     private static Tensor<float32> StateUpdateOnScanInsideLoopBody(Tensor<float32> input)
     {
         var state = InitBnRunningMean.Init(Vector(1L));
@@ -119,10 +114,7 @@ public class CodegenFreeModuleTests
         return input * Scalar(2f);
     }
 
-    /// <summary>
-    /// In-loop StateUpdate sugar, happy path: the updated value is a carried loop variable,
-    /// so the call registers its post-loop value. Per execution: state ← state + 10 + 3.
-    /// </summary>
+    /// <summary>In-loop StateUpdate happy path: state ← state + 10 + 3 per execution.</summary>
     private static Tensor<float32> StateUpdateInLoopCarriedBody(Tensor<float32> input)
     {
         var state = InitBnRunningMean.Init(Vector(1L));
@@ -135,11 +127,7 @@ public class CodegenFreeModuleTests
         return input * Scalar(2f);
     }
 
-    /// <summary>
-    /// The documented after-the-loop pattern for the exact loop of
-    /// <see cref="StateUpdateInLoopCarriedBody"/> — the in-loop sugar must produce an
-    /// identically-behaving graph.
-    /// </summary>
+    /// <summary>The documented after-the-loop spelling of <see cref="StateUpdateInLoopCarriedBody"/>.</summary>
     private static Tensor<float32> StateUpdateAfterLoopCarriedBody(Tensor<float32> input)
     {
         var state = InitBnRunningMean.Init(Vector(1L));
@@ -152,11 +140,7 @@ public class CodegenFreeModuleTests
         return input * Scalar(2f);
     }
 
-    /// <summary>
-    /// In-loop StateUpdate sugar across two nesting levels: the carried value is translated
-    /// through the inner loop's close output to the outer loop's close output.
-    /// Per execution: state ← state + 10 + 2·3.
-    /// </summary>
+    /// <summary>Two nesting levels: state ← state + 10 + 2·3 per execution.</summary>
     private static Tensor<float32> StateUpdateInNestedLoopBody(Tensor<float32> input)
     {
         var state = InitBnRunningMean.Init(Vector(1L));
@@ -172,11 +156,7 @@ public class CodegenFreeModuleTests
         return input * Scalar(2f);
     }
 
-    /// <summary>
-    /// In-loop StateUpdate sugar with a loop that runs zero iterations: the carried
-    /// variable's close output falls back to its initializer (per the LoopAPI.Init rules),
-    /// so per execution: state ← state + 10.
-    /// </summary>
+    /// <summary>Zero iterations: the close output falls back to the initializer, so state ← state + 10.</summary>
     private static Tensor<float32> StateUpdateInZeroIterationLoopBody(Tensor<float32> input)
     {
         var state = InitBnRunningMean.Init(Vector(1L));
@@ -190,9 +170,8 @@ public class CodegenFreeModuleTests
     }
 
     /// <summary>
-    /// A loop-construction failure striking after the in-loop StateUpdate has recorded:
-    /// the throw fires on the fourth body trace, i.e. after the canonical (third) pass
-    /// recorded the pending registration but before the loop completes and resolves it.
+    /// A loop-construction failure striking on the fourth body trace — after the canonical (third)
+    /// pass recorded the pending registration, before the loop completes and resolves it.
     /// </summary>
     private static Tensor<float32> StateUpdateInLoopThenFourthPassThrowBody(Tensor<float32> input)
     {
@@ -211,7 +190,6 @@ public class CodegenFreeModuleTests
 
     // ───────────────────────────────── helpers ─────────────────────────────────
 
-    /// <summary>Concretizes a module graph with the given ordered inputs and executes it.</summary>
     private static byte[][] ExecuteConcretized(ComputationGraph moduleGraph, params TensorData[] inputs)
     {
         var concreteModel = moduleGraph
@@ -222,29 +200,35 @@ public class CodegenFreeModuleTests
             .ToArray();
     }
 
-    /// <summary>Wraps a constant-fed module output into a no-input graph, concretizes, executes.</summary>
     private static byte[][] ExecuteOutputs(params Variable[] outputs)
         => ExecuteConcretized(new InternalComputationGraph([], [.. outputs]).ToComputationGraph(GraphKind.Module));
 
-    /// <summary>Reads the single state param's current scalar value from a concretized graph.</summary>
     private static float StateValue(ComputationGraph graph) =>
         graph.ToInternal().GetStateParamDataNodes()[0].Attributes
             .GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData)!
             .As<float32>().AccessMemory()[0];
 
+    private static ComputationGraph Concretize(
+        Func<Tensor<float32>, Tensor<float32>> body, string? name, TensorData input)
+    {
+        var graph = ModuleFactory.ComputationGraph(body, name);
+        return graph.ToConcreteArchitecture(graph.FromOrderedInputs([input])).ToConcreteModel();
+    }
+
+    private static float[] Floats(byte[] bytes) => MemoryMarshal.Cast<byte, float>(bytes).ToArray();
+
     // ─────────────────────────────────── tests ───────────────────────────────────
 
     /// <summary>
-    /// Deliverable parity check: the same model built via the <c>[Module]</c> source generator
-    /// (<see cref="SimplestLayer"/>.ComputationGraph), via a static method group, and via a
-    /// non-capturing static lambda must produce byte-identical execution results. The lambda
-    /// variant proves the delegate-target invoke path (compiler lambdas are instance methods
-    /// on a display-class singleton, not static methods).
+    /// A model built via the <c>[Module]</c> source generator, via a static method group and via a
+    /// non-capturing static lambda executes byte-identically (the lambda proves the delegate-target
+    /// invoke path); the <c>FromFunc(...).SetHyperparams().Call(x)</c> spelling matches the
+    /// generated <c>Foo.Model().Call(x)</c>; and bound <c>[Hyper]</c> values flow through the call.
     /// </summary>
     [Fact]
-    public void TestFromFuncGraphMatchesModuleClassExecution()
+    public void TestFromFuncParityAndCallPaths()
     {
-        var input = TensorData([4L], new float[] { 1f, 2f, 3f, 4f });
+        var input = TensorData([4L], 1f, 2f, 3f, 4f);
 
         var codegen = ExecuteConcretized(SimplestLayer.ComputationGraph, input);
         var methodGroup = ExecuteConcretized(
@@ -262,88 +246,49 @@ public class CodegenFreeModuleTests
             Assert.Equal(codegen[i], methodGroup[i]);
             Assert.Equal(codegen[i], lambda[i]);
         }
-    }
 
-    /// <summary>
-    /// Parity on the Model/Call invocation path: <c>ModuleFactory.FromFunc(...).SetHyperparams()
-    /// .Call(x)</c> (the codegen-free spelling of the generated <c>Foo.Model().Call(x)</c>) must
-    /// execute identically to the generated members. Also exercises the multi-input tuple
-    /// overload via the <c>Model&lt;T1, T2, TOut&gt;</c> two-argument Call binding.
-    /// </summary>
-    [Fact]
-    public void TestFromFuncModelCallPathParity()
-    {
-        // Single input: generated SimplestLayer.Model().Call vs FromFunc path.
+        // Single input: generated SimplestLayer.Model().Call vs the FromFunc path.
         var viaCodegen = SimplestLayer.Model().Call(Tensor([4L], 1f, 2f, 3f, 4f));
         var viaFactory = ModuleFactory.FromFunc<Tensor<float32>, Tensor<float32>>(SimplestBody)
             .SetHyperparams()
             .Call(Tensor([4L], 1f, 2f, 3f, 4f));
-
         Assert.Equal(ExecuteOutputs(viaCodegen)[0], ExecuteOutputs(viaFactory)[0]);
 
-        // Two inputs: FromFunc<T1, T2, TOut> with a Model<T1, T2, TOut> for a 2-arg Call.
+        // Two inputs: FromFunc<T1, T2, TOut> with a Model<T1, T2, TOut> for a 2-arg Call;
+        // weights init to 1 → (a + b) * 1.
         var pairModule = ModuleFactory.FromFunc<Tensor<float32>, Tensor<float32>, Tensor<float32>>(WeightedSumBody);
         var pairModel = pairModule.SetHyperparams<Model<Tensor<float32>, Tensor<float32>, Tensor<float32>>>();
         var pairOut = pairModel.Call(Tensor([3L], 1f, 2f, 3f), Tensor([3L], 10f, 20f, 30f));
+        Assert.Equal(TensorData([3L], 11f, 22f, 33f).AccessRawMemory().ToArray(), ExecuteOutputs(pairOut)[0]);
 
-        // weights init to 1 → (a + b) * 1.
-        var expected = TensorData([3L], new float[] { 11f, 22f, 33f }).AccessRawMemory().ToArray();
-        Assert.Equal(expected, ExecuteOutputs(pairOut)[0]);
-    }
-
-    /// <summary>
-    /// FromFunc module WITH hyperparameters: model creation binds the hypers via
-    /// <c>SetHyperparams((factor, bias))</c> and the bound values flow through the call —
-    /// y = x * (1 * 2 + 0.5) = 2.5x. The hyper split comes from the [Hyper] attributes on the
-    /// delegate's parameters, including on an explicitly-typed lambda's parameters. The hypered
-    /// module graph also runs the full AutoTest ONNX/CS/QEE roundtrip.
-    /// </summary>
-    [Fact]
-    public void TestFromFuncWithHypersModelCreationAndCall()
-    {
-        var module = ModuleFactory.FromFuncWithHypers<Tensor<float32>, Scalar<float32>, Scalar<float32>, Tensor<float32>>(
+        // Hypers bound via SetHyperparams((factor, bias)): y = x * (1 * 2 + 0.5) = 2.5x.
+        var hypered = ModuleFactory.FromFuncWithHypers<Tensor<float32>, Scalar<float32>, Scalar<float32>, Tensor<float32>>(
             ScaleAndShiftBody, "CodegenFreeScaleAndShift");
-        var model = module.SetHyperparams((Scalar(2f), Scalar(0.5f)));
-        var output = model.Call(Tensor([4L], 1f, 2f, 3f, 4f));
-
-        var expected = TensorData([4L], new float[] { 2.5f, 5f, 7.5f, 10f }).AccessRawMemory().ToArray();
-        Assert.Equal(expected, ExecuteOutputs(output)[0]);
+        var hyperedOut = hypered.SetHyperparams((Scalar(2f), Scalar(0.5f))).Call(Tensor([4L], 1f, 2f, 3f, 4f));
+        Assert.Equal(TensorData([4L], 2.5f, 5f, 7.5f, 10f).AccessRawMemory().ToArray(), ExecuteOutputs(hyperedOut)[0]);
 
         // [Hyper] on an explicitly-typed lambda parameter is honored too: y = x * k.
         var lambdaModule = ModuleFactory.FromFuncWithHypers<Tensor<float32>, Scalar<float32>, Tensor<float32>>(
             static (Tensor<float32> x, [Hyper] Scalar<float32> k) => x * k);
         var lambdaOut = lambdaModule.SetHyperparams(Scalar(3f)).Call(Tensor([2L], 1f, 2f));
-        Assert.Equal(
-            TensorData([2L], new float[] { 3f, 6f }).AccessRawMemory().ToArray(),
-            ExecuteOutputs(lambdaOut)[0]);
-
-        // Full AutoTester roundtrip over the hypered module graph (hyperparams stay ordinary
-        // graph inputs post-concretization, mirroring the generated-module coverage tests).
-        Assert.True(AutoTest.AdvancedTestGraph(
-            ModuleFactory.ComputationGraph(
-                (Func<Tensor<float32>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)ScaleAndShiftBody),
-            hyperparamInputs: [TensorData(DType.Float32, [], 2f), TensorData(DType.Float32, [], 0.5f)],
-            runtimeInputs: [TensorDataWithSmallVals(DType.Float32, [5L])]));
+        Assert.Equal(TensorData([2L], 3f, 6f).AccessRawMemory().ToArray(), ExecuteOutputs(lambdaOut)[0]);
     }
 
     /// <summary>
-    /// A FromFunc-built model graph trains one step through <see cref="TrainingRig"/>: the rig
-    /// builds, the default checkpoint carries the initializer value (1.0), and one SGD step on a
-    /// non-zero-gradient batch produces a finite loss and moves the weight.
+    /// A FromFunc-built model trains one step through <see cref="TrainingRig"/>, exports to ONNX and
+    /// passes the <see cref="AutoTest"/> pipeline for the one- and two-input shapes; its constraint
+    /// surface rejects capturing lambdas, mismatched <c>[Hyper]</c> splits and tuple parameters; and
+    /// <c>Globals.StateUpdate</c> inside a delegate body registers state as in an Inline method.
     /// </summary>
     [Fact]
-    public void TestFromFuncTrainsOneStepThroughTrainingRig()
+    public void TestFromFuncTrainingExportAndConstraints()
     {
         var modelGraph = ModuleFactory.ComputationGraph(
             (Func<Tensor<float32>, Tensor<float32>>)ScalarMultiplyBody, "CodegenFreeScalarMultiply");
 
         var rig = TrainingRig.FromScratch(
             modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            new NamedModelParam[]
-            {
-                new TensorDataModelParam("input", ModelParamType.InputParam,
-                    TensorData([4L], new float[] { 1f, 2f, 3f, 4f })),
-            },
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], 1f, 2f, 3f, 4f))],
             0.1f);
 
         var initial = rig.CreateInitialCheckpoint();
@@ -353,89 +298,66 @@ public class CodegenFreeModuleTests
         Assert.Equal(1.0f, initialWeight);
 
         var modelInputDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32) },
-            "ModelInput");
+            [new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32)], "ModelInput");
         var targetDef = new TensorStructDef(
-            new[] { new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32) },
-            "Target");
+            [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)], "Target");
         var inputBatch = new TensorDataStruct(modelInputDef,
-            new Dictionary<string, IData> { { "input", TensorData([4L], new float[] { 1f, 2f, 3f, 4f }) } });
+            new Dictionary<string, IData> { { "input", TensorData([4L], 1f, 2f, 3f, 4f) } });
         var targetBatch = new TensorDataStruct(targetDef,
-            new Dictionary<string, IData> { { "targets", TensorData([4L], new float[] { 0f, 0f, 0f, 0f }) } });
+            new Dictionary<string, IData> { { "targets", TensorData([4L], 0f, 0f, 0f, 0f) } });
 
         var stepResult = rig.TrainStep(initial, inputBatch, targetBatch);
-
         Assert.True(float.IsFinite(stepResult.Loss!.Value));
-        var steppedWeight = ((TensorData<float32>)stepResult.TrainableParams.Fields[weightField]).AccessMemory()[0];
-        Assert.NotEqual(initialWeight, steppedWeight);
-    }
+        Assert.NotEqual(initialWeight,
+            ((TensorData<float32>)stepResult.TrainableParams.Fields[weightField]).AccessMemory()[0]);
 
-    /// <summary>
-    /// FromFunc graphs export to ONNX (<c>FastOnnxModelBuilder.BuildOnnxModel</c> succeeds on the
-    /// concrete model) and pass the standard <see cref="AutoTest"/> pipeline (ONNX roundtrip, CS
-    /// codegen, QEE) for both the single-input and the two-input module shapes.
-    /// </summary>
-    [Fact]
-    public void TestFromFuncOnnxExportAndAutoTest()
-    {
+        // ONNX export + the standard AutoTest pipeline, single- and two-input shapes.
         Func<Tensor<float32>, Tensor<float32>> simplest = SimplestBody;
-        var moduleGraph = ModuleFactory.ComputationGraph(simplest);
+        var simplestGraph = ModuleFactory.ComputationGraph(simplest);
         var sampleInput = TensorDataWithSmallVals(DType.Float32, [5L]);
-        var concreteModel = moduleGraph
-            .ToConcreteArchitecture(moduleGraph.FromOrderedInputs([sampleInput]))
+        var concreteModel = simplestGraph
+            .ToConcreteArchitecture(simplestGraph.FromOrderedInputs([sampleInput]))
             .ToConcreteModel();
 
         var proto = FastOnnxModelBuilder.BuildOnnxModel(concreteModel);
         Assert.NotNull(proto);
         Assert.NotNull(proto.Graph);
-
         Assert.True(AutoTest.TestGraph(concreteModel, sampleInputs: [sampleInput]));
-
         Assert.True(AutoTest.AdvancedTestGraph(
             ModuleFactory.ComputationGraph(simplest),
-            hyperparamInputs: [],
-            runtimeInputs: [TensorDataWithSmallVals(DType.Float32, [5L])]));
+            hyperparamInputs: [], runtimeInputs: [TensorDataWithSmallVals(DType.Float32, [5L])]));
         Assert.True(AutoTest.AdvancedTestGraph(
             ModuleFactory.ComputationGraph(
                 (Func<Tensor<float32>, Tensor<float32>, Tensor<float32>>)WeightedSumBody),
             hyperparamInputs: [],
             runtimeInputs: [TensorDataWithSmallVals(DType.Float32, [5L]), TensorDataWithSmallVals(DType.Float32, [5L])]));
-    }
 
-    /// <summary>
-    /// Constraint surface of the codegen-free path: capturing lambdas are rejected (the body is
-    /// reflected + cached by MethodInfo); the [Hyper] annotations on the delegate must match the
-    /// factory overload's hyper split in both directions; tuple-typed parameters are rejected in
-    /// favor of the flattened overloads. Also verifies <c>Globals.StateUpdate</c> inside a
-    /// delegate body registers state exactly as in an Inline method (STATE_UPDATE_LINK reachable
-    /// from the outputs via WITH_STATE_DEPS wrapping).
-    /// </summary>
-    [Fact]
-    public void TestFromFuncConstraintsAndStateUpdates()
-    {
-        // Capturing lambda → rejected with the documented error.
+        // Hyperparams stay ordinary graph inputs post-concretization.
+        Assert.True(AutoTest.AdvancedTestGraph(
+            ModuleFactory.ComputationGraph(
+                (Func<Tensor<float32>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)ScaleAndShiftBody),
+            hyperparamInputs: [TensorData(DType.Float32, [], 2f), TensorData(DType.Float32, [], 0.5f)],
+            runtimeInputs: [TensorDataWithSmallVals(DType.Float32, [5L])]));
+
+        // Capturing lambda → rejected (the body is reflected + cached by MethodInfo).
         var captured = Scalar(2f);
         Assert.Throws<InvalidOperationException>(() =>
             ModuleFactory.FromFunc<Tensor<float32>, Tensor<float32>>(x => x * captured));
-
-        // FromFuncWithHypers without [Hyper] annotations → rejected.
+        // FromFuncWithHypers without [Hyper] annotations, and a [Hyper]-annotated body handed to
+        // the no-hyper FromFunc → both rejected.
         Assert.Throws<ArgumentException>(() =>
             ModuleFactory.FromFuncWithHypers<Scalar<float32>, Tensor<float32>, Tensor<float32>>(
                 static (h, x) => x * h));
-
-        // [Hyper]-annotated body handed to the no-hyper FromFunc → rejected.
         Assert.Throws<ArgumentException>(() =>
             ModuleFactory.FromFunc<Tensor<float32>, Scalar<float32>, Scalar<float32>, Tensor<float32>>(
                 ScaleAndShiftBody));
-
         // Tuple-typed parameter → rejected (bodies take flattened parameters).
         Assert.Throws<ArgumentException>(() =>
             ModuleFactory.FromFunc<(Tensor<float32>, Tensor<float32>), Tensor<float32>>(
                 static t => t.Item1 + t.Item2));
 
-        // Globals.StateUpdate works inside the delegate body: the built graph carries the
-        // STATE_UPDATE_LINK and the outputs are wrapped with WITH_STATE_DEPS, exactly as for a
-        // [Module] Inline body using state initializers.
+        // Globals.StateUpdate inside a delegate body carries the STATE_UPDATE_LINK and wraps the
+        // outputs with WITH_STATE_DEPS, exactly as for a [Module] Inline body.
         var statefulGraph = ModuleFactory.ComputationGraph(
             (Func<Tensor<float32>, Tensor<float32>>)StatefulBody);
         Assert.Contains(statefulGraph.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.STATE_UPDATE_LINK);
@@ -451,31 +373,20 @@ public class CodegenFreeModuleTests
         => Vector(1f, 2f) * factor;
 
     /// <summary>
-    /// Covers the no-runtime-input module classes in <c>Core.ModuleBaseTypes</c>:
-    /// <c>CallbackModule&lt;TOut&gt;</c> (via <see cref="ModuleFactory.FromFunc{TOut}"/>) +
-    /// <c>BaseModel&lt;TOut&gt;</c>/<c>Model&lt;TOutputs&gt;.Call</c>, the hyperparam-only
+    /// The no-runtime-input module classes in <c>Core.ModuleBaseTypes</c>:
+    /// <c>CallbackModule&lt;TOut&gt;</c> + <c>Model&lt;TOutputs&gt;.Call</c>, the hyperparam-only
     /// <c>CallbackModule&lt;THyper, TOut&gt;</c> + <c>SetHyperparams(hyper)</c>, and the
-    /// <c>InputType</c>-based constructors that source-generated nested-module signatures use.
+    /// <c>InputType</c>-based constructors source-generated nested-module signatures use.
     /// </summary>
     [Fact]
     public void TestNoInputAndHyperOnlyCallbackModulesCoverage()
     {
-        // CallbackModule<TOut>: no hyperparams, no runtime inputs.
         var noInput = ModuleFactory.FromFunc<Tensor<float32>>(NoInputBody);
-        var noInputOut = noInput.SetHyperparams().Call();
-        var noInputBytes = ExecuteOutputs(noInputOut);
-        Assert.Equal(new float[] { 2f, 4f, 6f },
-            MemoryMarshal.Cast<byte, float>(noInputBytes[0]).ToArray());
+        Assert.Equal<float>([2f, 4f, 6f], Floats(ExecuteOutputs(noInput.SetHyperparams().Call())[0]));
 
-        // CallbackModule<THyper, TOut>: hyperparam-only signature, no runtime inputs.
         var hyperOnly = new CallbackModule<Scalar<float32>, Tensor<float32>>(HyperOnlyBody);
-        var hyperOut = hyperOnly.SetHyperparams(Scalar(3f)).Call();
-        var hyperBytes = ExecuteOutputs(hyperOut);
-        Assert.Equal(new float[] { 3f, 6f },
-            MemoryMarshal.Cast<byte, float>(hyperBytes[0]).ToArray());
+        Assert.Equal<float>([3f, 6f], Floats(ExecuteOutputs(hyperOnly.SetHyperparams(Scalar(3f)).Call())[0]));
 
-        // InputType-based constructors (the nested-module input spelling): each must
-        // produce a usable module/model variable.
         Assert.NotNull(new CallbackModule<Tensor<float32>>(InputType.ReadyInput).ModuleVariable);
         Assert.NotNull(new CallbackModule<Scalar<float32>, Tensor<float32>>(InputType.ReadyInput).ModuleVariable);
         Assert.NotNull(new Module<Tensor<float32>, Tensor<float32>>(InputType.ReadyInput).ModuleVariable);
@@ -485,222 +396,132 @@ public class CodegenFreeModuleTests
     }
 
     /// <summary>
-    /// Executes the stateful delegate-built graph through
-    /// <see cref="ComputeContext.ExecuteWithState(ComputationGraph, TensorData[])"/>,
-    /// covering the Fast state pipeline end-to-end: <c>FastLowerStateUpdateNodes</c>
-    /// (STATE_UPDATE_LINK/WITH_STATE_DEPS → IDENTITY + extra state outputs) and the
-    /// <c>InternalComputationGraph</c> state surface (<c>GetStateParamDataNodes</c> /
-    /// <c>GetStateUpdateOutputCount</c> / <c>WithUpdatedStates</c>). The state starts at 0
-    /// (InitBnRunningMean) and increments by 1 per execution while the main output stays
-    /// input * 2.
+    /// The Fast state pipeline end-to-end via
+    /// <see cref="ComputeContext.ExecuteWithState(ComputationGraph, TensorData[])"/>:
+    /// <c>FastLowerStateUpdateNodes</c> plus the <c>InternalComputationGraph</c> state surface. The
+    /// state starts at 0 and increments by 1 per execution while the output stays input * 2.
     /// </summary>
     [Fact]
     public void TestStatefulGraphExecuteWithStateCoverage()
     {
-        var moduleGraph = ModuleFactory.ComputationGraph(
-            (Func<Tensor<float32>, Tensor<float32>>)StatefulBody);
-        var input = TensorData([4L], new float[] { 1f, 2f, 3f, 4f });
-        var concrete = moduleGraph
-            .ToConcreteArchitecture(moduleGraph.FromOrderedInputs([input]))
-            .ToConcreteModel();
+        var input = TensorData([4L], 1f, 2f, 3f, 4f);
+        var concrete = Concretize(StatefulBody, null, input);
 
         Assert.Equal(1, concrete.ToInternal().GetStateUpdateOutputCount());
-        var stateNodes = concrete.ToInternal().GetStateParamDataNodes();
-        Assert.Single(stateNodes);
-
-        float StateValue(ComputationGraph g) =>
-            g.ToInternal().GetStateParamDataNodes()[0].Attributes
-                .GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData)!
-                .As<float32>().AccessMemory()[0];
-
+        Assert.Single(concrete.ToInternal().GetStateParamDataNodes());
         Assert.Equal(0f, StateValue(concrete));
 
         var (outputs1, updated1) = ComputeContext.Default.ExecuteWithState(concrete, input);
         Assert.Single(outputs1);
-        Assert.Equal(new float[] { 2f, 4f, 6f, 8f },
-            MemoryMarshal.Cast<byte, float>(outputs1[0].ToTensorData().AccessRawMemory()).ToArray());
+        Assert.Equal<float>([2f, 4f, 6f, 8f], Floats(outputs1[0].ToTensorData().AccessRawMemory().ToArray()));
         Assert.Equal(1f, StateValue(updated1));
 
         var (outputs2, updated2) = ComputeContext.Default.ExecuteWithState(updated1, input);
-        Assert.Equal(new float[] { 2f, 4f, 6f, 8f },
-            MemoryMarshal.Cast<byte, float>(outputs2[0].ToTensorData().AccessRawMemory()).ToArray());
+        Assert.Equal<float>([2f, 4f, 6f, 8f], Floats(outputs2[0].ToTensorData().AccessRawMemory().ToArray()));
         Assert.Equal(2f, StateValue(updated2));
     }
 
     /// <summary>
-    /// <see cref="Globals.StateUpdate{T}(T, T)"/> only accepts state variables — tensors created
-    /// by a [StateInitializer] class's Init method. Targeting a runtime input or a trainable
-    /// parameter must throw <see cref="InvalidStateUpdateException"/> at graph-build time, with
-    /// declaration instructions in the message; the correct pattern (including a state variable
-    /// reaching StateUpdate through the Identity node a .Vec() rank-cast inserts) still builds.
+    /// <see cref="Globals.StateUpdate{T}(T, T)"/> only accepts state variables — tensors created by
+    /// a [StateInitializer] class's Init method — and only inside a module build in progress.
+    /// Targeting a runtime input or a trainable parameter throws at graph-build time with
+    /// declaration instructions; the correct pattern (including through a .Vec() Identity) builds.
     /// </summary>
     [Fact]
     public void TestStateUpdateRejectsNonStateVariables()
     {
-        // A runtime input is not a state variable.
         var inputEx = Assert.Throws<InvalidStateUpdateException>(() =>
             ModuleFactory.ComputationGraph(
                 (Func<Tensor<float32>, Tensor<float32>>)StateUpdateOnInputBody));
         Assert.Equal(ErrorCodes.SU001, inputEx.ErrorCode);
         Assert.Contains("[StateInitializer]", inputEx.Message);
 
-        // A trainable parameter is not a state variable either.
         var trainableEx = Assert.Throws<InvalidStateUpdateException>(() =>
             ModuleFactory.ComputationGraph(
                 (Func<Tensor<float32>, Tensor<float32>>)StateUpdateOnTrainableBody));
         Assert.Equal(ErrorCodes.SU002, trainableEx.ErrorCode);
         Assert.Contains("trainable parameter", trainableEx.Message);
 
-        // The correct pattern still builds, .Vec() Identity included.
         Assert.NotNull(ModuleFactory.ComputationGraph(
             (Func<Tensor<float32>, Tensor<float32>>)StateUpdateThroughVecBody, "CodegenFreeVecState"));
-    }
 
-    /// <summary>
-    /// The uniform ambient-recording contract of <see cref="Shorokoo.Core.ModuleBuildContext"/>:
-    /// <c>Globals.StateUpdate</c> requires a module build in progress. Called with none active,
-    /// the registration could never be harvested into any module's graph (it used to sit in a
-    /// thread-static list forever — neither applied nor rejected), so it throws at the call site.
-    /// </summary>
-    [Fact]
-    public void TestStateUpdateWithNoModuleBuildInProgressThrows()
-    {
-        var ex = Assert.Throws<InvalidOperationException>(
+        // With no module build active the registration could never be harvested, so it throws at
+        // the call site rather than sitting in a thread-static list forever.
+        var noBuildEx = Assert.Throws<InvalidOperationException>(
             () => Globals.StateUpdate(Scalar(1f), Scalar(2f)));
-        Assert.Contains("inside a module body", ex.Message);
+        Assert.Contains("inside a module body", noBuildEx.Message);
     }
 
     /// <summary>
-    /// <c>Globals.StateUpdate</c> inside a <c>LoopAPI.Iterate</c> body is sugar for
-    /// registering the post-loop value of the updated tensor. Single loop: the carried
-    /// variable's close-node output is registered, so each execution advances the state by
-    /// the loop's full effect (+10 initializer, +1 × 3 iterations) exactly once — and the
-    /// produced graph behaves identically to the documented after-the-loop pattern.
+    /// <c>Globals.StateUpdate</c> inside a <c>LoopAPI.Iterate</c> body registers the post-loop value
+    /// of the updated tensor: a single loop's carried close output (identical to the documented
+    /// after-the-loop pattern), the outer close output across two nesting levels, and — at zero
+    /// iterations — the carried variable's pre-loop initializer.
     /// </summary>
     [Fact]
-    public void TestStateUpdateInsideLoopRegistersPostLoopValue()
+    public void TestStateUpdateInLoopsRegistersPostLoopValue()
     {
-        var input = TensorData([4L], new float[] { 1f, 2f, 3f, 4f });
+        var input = TensorData([4L], 1f, 2f, 3f, 4f);
 
-        ComputationGraph Concretize(Func<Tensor<float32>, Tensor<float32>> body, string name)
-        {
-            var graph = ModuleFactory.ComputationGraph(body, name);
-            return graph.ToConcreteArchitecture(graph.FromOrderedInputs([input])).ToConcreteModel();
-        }
-
-        var sugar = Concretize(StateUpdateInLoopCarriedBody, "CodegenFreeInLoopState");
-        var afterLoop = Concretize(StateUpdateAfterLoopCarriedBody, "CodegenFreeAfterLoopState");
-
-        ComputationGraph[] variants = [sugar, afterLoop];
-        foreach (var concrete in variants)
+        ComputationGraph[] singleLoopVariants =
+        [
+            Concretize(StateUpdateInLoopCarriedBody, "CodegenFreeInLoopState", input),
+            Concretize(StateUpdateAfterLoopCarriedBody, "CodegenFreeAfterLoopState", input),
+        ];
+        foreach (var concrete in singleLoopVariants)
         {
             Assert.Equal(1, concrete.ToInternal().GetStateUpdateOutputCount());
             Assert.Equal(0f, StateValue(concrete));
 
             var (outputs1, updated1) = ComputeContext.Default.ExecuteWithState(concrete, input);
-            Assert.Equal(new float[] { 2f, 4f, 6f, 8f },
-                MemoryMarshal.Cast<byte, float>(outputs1[0].ToTensorData().AccessRawMemory()).ToArray());
-            Assert.Equal(13f, StateValue(updated1));
+            Assert.Equal<float>([2f, 4f, 6f, 8f], Floats(outputs1[0].ToTensorData().AccessRawMemory().ToArray()));
+            Assert.Equal(13f, StateValue(updated1));   // +10 initializer, +1 × 3 iterations
 
-            // The second step re-reads the updated state: 13 + 10 + 3.
             var (_, updated2) = ComputeContext.Default.ExecuteWithState(updated1, input);
-            Assert.Equal(26f, StateValue(updated2));
+            Assert.Equal(26f, StateValue(updated2));   // re-reads the updated state: 13 + 10 + 3
         }
+
+        var nested = Concretize(StateUpdateInNestedLoopBody, null, input);
+        Assert.Equal(1, nested.ToInternal().GetStateUpdateOutputCount());
+        Assert.Equal(0f, StateValue(nested));
+        var (nestedOutputs, nested1) = ComputeContext.Default.ExecuteWithState(nested, input);
+        Assert.Equal<float>([2f, 4f, 6f, 8f], Floats(nestedOutputs[0].ToTensorData().AccessRawMemory().ToArray()));
+        Assert.Equal(16f, StateValue(nested1));        // +10, then +1 × 2·3
+        var (_, nested2) = ComputeContext.Default.ExecuteWithState(nested1, input);
+        Assert.Equal(32f, StateValue(nested2));
+
+        var zeroIter = Concretize(StateUpdateInZeroIterationLoopBody, null, input);
+        Assert.Equal(0f, StateValue(zeroIter));
+        var (_, zero1) = ComputeContext.Default.ExecuteWithState(zeroIter, input);
+        Assert.Equal(10f, StateValue(zero1));          // the body contributes nothing
+        var (_, zero2) = ComputeContext.Default.ExecuteWithState(zero1, input);
+        Assert.Equal(20f, StateValue(zero2));
     }
 
     /// <summary>
-    /// In-loop StateUpdate sugar across nested loops: the recorded in-body value is
-    /// translated through the inner loop's close output to the outer loop's close output,
-    /// so each execution advances the state by the whole nest's effect (+10, then +1 × 2·3).
+    /// In-loop StateUpdate rejections: an updated value that never surfaces as a loop output, and a
+    /// scanned result whose post-loop form is the stacked per-iteration tensor, both fail the module
+    /// build with an error naming the fix. A loop-construction failure that strikes after the
+    /// registration recorded must surface as-is, not as the misleading "never resolved" error.
     /// </summary>
     [Fact]
-    public void TestStateUpdateInsideNestedLoopsRegistersPostLoopValue()
+    public void TestStateUpdateInLoopsRejectsUnresolvableValues()
     {
-        var moduleGraph = ModuleFactory.ComputationGraph(
-            (Func<Tensor<float32>, Tensor<float32>>)StateUpdateInNestedLoopBody);
-        var input = TensorData([4L], new float[] { 1f, 2f, 3f, 4f });
-        var concrete = moduleGraph
-            .ToConcreteArchitecture(moduleGraph.FromOrderedInputs([input]))
-            .ToConcreteModel();
-
-        Assert.Equal(1, concrete.ToInternal().GetStateUpdateOutputCount());
-        Assert.Equal(0f, StateValue(concrete));
-
-        var (outputs1, updated1) = ComputeContext.Default.ExecuteWithState(concrete, input);
-        Assert.Equal(new float[] { 2f, 4f, 6f, 8f },
-            MemoryMarshal.Cast<byte, float>(outputs1[0].ToTensorData().AccessRawMemory()).ToArray());
-        Assert.Equal(16f, StateValue(updated1));
-
-        var (_, updated2) = ComputeContext.Default.ExecuteWithState(updated1, input);
-        Assert.Equal(32f, StateValue(updated2));
-    }
-
-    /// <summary>
-    /// In-loop StateUpdate sugar when the loop runs zero iterations: the carried variable's
-    /// close output falls back to its pre-loop initializer (the LoopAPI.Init rules), so the
-    /// state advances by +10 per execution — the loop body contributes nothing.
-    /// </summary>
-    [Fact]
-    public void TestStateUpdateInsideZeroIterationLoopUsesCarriedInitializer()
-    {
-        var moduleGraph = ModuleFactory.ComputationGraph(
-            (Func<Tensor<float32>, Tensor<float32>>)StateUpdateInZeroIterationLoopBody);
-        var input = TensorData([4L], new float[] { 1f, 2f, 3f, 4f });
-        var concrete = moduleGraph
-            .ToConcreteArchitecture(moduleGraph.FromOrderedInputs([input]))
-            .ToConcreteModel();
-
-        Assert.Equal(0f, StateValue(concrete));
-        var (_, updated1) = ComputeContext.Default.ExecuteWithState(concrete, input);
-        Assert.Equal(10f, StateValue(updated1));
-        var (_, updated2) = ComputeContext.Default.ExecuteWithState(updated1, input);
-        Assert.Equal(20f, StateValue(updated2));
-    }
-
-    /// <summary>
-    /// In-loop StateUpdate rejection: an updated value that never surfaces as a loop output
-    /// (recomputed each iteration, neither carried nor consumed after the loop) has no
-    /// post-loop value, so the module build fails with an error naming the fix — not the old
-    /// blanket "not supported".
-    /// </summary>
-    [Fact]
-    public void TestStateUpdateInLoopOnUncarriedValueFailsTheModuleBuild()
-    {
-        var ex = Assert.Throws<InvalidOperationException>(() =>
+        var uncarried = Assert.Throws<InvalidOperationException>(() =>
             ModuleFactory.ComputationGraph(
                 (Func<Tensor<float32>, Tensor<float32>>)StateUpdateInsideLoopBody));
-        Assert.Contains("does not surface as a loop output", ex.Message);
-        Assert.Contains("LoopAPI.Iterate", ex.Message);
-    }
+        Assert.Contains("does not surface as a loop output", uncarried.Message);
+        Assert.Contains("LoopAPI.Iterate", uncarried.Message);
 
-    /// <summary>
-    /// A failure that strikes after an in-loop StateUpdate has recorded (canonical pass
-    /// done, loop not yet complete) must surface as-is. The unresolved pending
-    /// registration is discarded along with the failed build's trace; it must not be
-    /// re-reported from the harvest as the misleading "never resolved" error, which
-    /// would mask the real exception.
-    /// </summary>
-    [Fact]
-    public void TestLoopConstructionFailureAfterInLoopStateUpdateIsNotMasked()
-    {
-        var ex = Assert.Throws<FormatException>(() =>
-            ModuleFactory.ComputationGraph(
-                (Func<Tensor<float32>, Tensor<float32>>)StateUpdateInLoopThenFourthPassThrowBody));
-        Assert.Equal("simulated fourth-pass loop-construction failure", ex.Message);
-    }
-
-    /// <summary>
-    /// In-loop StateUpdate rejection: a scanned result's post-loop form is the stacked
-    /// per-iteration tensor (empty at zero iterations), not a final value, so the module
-    /// build fails rather than defaulting.
-    /// </summary>
-    [Fact]
-    public void TestStateUpdateInLoopOnScannedValueFailsTheModuleBuild()
-    {
-        var ex = Assert.Throws<InvalidOperationException>(() =>
+        var scanned = Assert.Throws<InvalidOperationException>(() =>
             ModuleFactory.ComputationGraph(
                 (Func<Tensor<float32>, Tensor<float32>>)StateUpdateOnScanInsideLoopBody));
-        Assert.Contains("scanned", ex.Message);
-        Assert.Contains("LoopAPI.Iterate", ex.Message);
+        Assert.Contains("scanned", scanned.Message);
+        Assert.Contains("LoopAPI.Iterate", scanned.Message);
+
+        var masked = Assert.Throws<FormatException>(() =>
+            ModuleFactory.ComputationGraph(
+                (Func<Tensor<float32>, Tensor<float32>>)StateUpdateInLoopThenFourthPassThrowBody));
+        Assert.Equal("simulated fourth-pass loop-construction failure", masked.Message);
     }
 }

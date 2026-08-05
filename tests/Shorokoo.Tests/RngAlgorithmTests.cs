@@ -3,7 +3,9 @@ using System.Linq;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Core.Rng;
+using Shorokoo.Modules.Layers;
 using Shorokoo.Runtime;
+using static Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames;
 
 namespace Shorokoo.Tests;
 
@@ -56,86 +58,61 @@ public partial class RngKeyedBitsDraw
     }
 }
 
+/// <summary>A single Linear whose weight is drawn by a random initializer — so its init values
+/// change when the RNG algorithm changes.</summary>
+[Module]
+public partial class SwitchInitLinear
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => Linear.Model(Scalar(4L), Scalar(false)).Call(x);
+}
+
 /// <summary>
-/// Coverage for the named-algorithm keyed RNG operators (SHRK_RNG_SPLIT / UNIFORM / NORMAL)
-/// and their ONNX lowering: each op lowers at export to a call of the algorithm's
-/// <b>non-inlined</b> function (an ONNX local FunctionProto tagged with
-/// RngAlgorithm / RngFunctionKind metadata), and the executed values reproduce the host
-/// Threefry generator bit-for-bit — including through an index-based key split.
+/// The named-algorithm keyed RNG operators (SHRK_RNG_SPLIT / UNIFORM / NORMAL / BITS) and their
+/// ONNX lowering: each op lowers at export to a call of the algorithm's <b>non-inlined</b>
+/// function (an ONNX local FunctionProto tagged with RngAlgorithm / RngFunctionKind metadata),
+/// and the executed values reproduce the host Threefry generator bit-for-bit — including
+/// through an index-based key split.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
 public class RngAlgorithmTests
 {
-    private static float[] RunDraw<TModule>(long rows, long cols)
+    private static TensorData RunDrawRaw<TModule>(long rows, long cols)
     {
         var g = ((ComputationGraph)typeof(TModule)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([rows, cols], Enumerable.Repeat(0f, (int)(rows * cols)).ToArray());
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
-        var outputs = ComputeContext.Default.Execute(concrete, input);
-        return outputs[0].ToTensorData().As<float32>().AccessMemory().ToArray();
+        return ComputeContext.Default.Execute(concrete, input)[0].ToTensorData();
     }
+
+    private static float[] RunDraw<TModule>(long rows, long cols)
+        => RunDrawRaw<TModule>(rows, cols).As<float32>().AccessMemory().ToArray();
 
     // Host reference: substreamIndex folds into the key, element i indexes the whole counter;
     // uniform = low 24 bits of x0 * 2^-24.
-    private static float HostUniform(long i, ulong key, ulong substreamIndex = 0)
-        => RngTestOracle.DrawUniform(key, substreamIndex, i);
-
-    private static uint[] RunDrawU32<TModule>(long rows, long cols)
-    {
-        var g = ((ComputationGraph)typeof(TModule)
-            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
-        var input = TensorData([rows, cols], Enumerable.Repeat(0f, (int)(rows * cols)).ToArray());
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
-        return ComputeContext.Default.Execute(concrete, input)[0]
-            .ToTensorData().As<uint32>().AccessMemory().ToArray();
-    }
+    private static float HostUniform(long i, ulong key) => RngTestOracle.DrawUniform(key, 0, i);
 
     [Fact]
-    public void TestKeyedUniformMatchesHostBitExact()
+    public void TestKeyedUniformBitsAndSplitThenDrawMatchTheHostGeneratorBitExactly()
     {
-        var vals = RunDraw<RngKeyedUniformDraw>(4, 4);
-        Assert.Equal(16, vals.Length);
-        for (long i = 0; i < 16; i++)
-            Assert.Equal(HostUniform(i, 123UL | (456UL << 32)), vals[i]);
-    }
+        const ulong key = 123UL | (456UL << 32);
 
-    [Fact]
-    public void TestKeyedBitsMatchesHostBitExact()
-    {
-        // The keyed raw-bits draw (InternalOp.RngBits) executes to the whole generator word x0
-        // under the literal key, bit-for-bit — the raw-bits analogue of the uniform keyed draw.
-        var vals = RunDrawU32<RngKeyedBitsDraw>(4, 4);
-        Assert.Equal(16, vals.Length);
-        for (long i = 0; i < 16; i++)
-            Assert.Equal((uint)RngTestOracle.DrawBits(123UL | (456UL << 32), 0, i, 32), vals[i]);
-    }
+        var uniform = RunDraw<RngKeyedUniformDraw>(4, 4);
+        Assert.Equal(16, uniform.Length);
+        for (long i = 0; i < 16; i++) Assert.Equal(HostUniform(i, key), uniform[i]);
 
-    [Fact]
-    public void TestGetFunctionBitsValidatesWidth()
-    {
-        // bits requires a supported uint width...
-        Assert.Throws<NotSupportedException>(
-            () => RngAlgorithms.GetFunction(RngAlgorithms.Default, RngAlgorithms.KindBits, DType.Float32));
-        Assert.Throws<NotSupportedException>(
-            () => RngAlgorithms.GetFunction(RngAlgorithms.Default, RngAlgorithms.KindBits, null));
-        // ...and a bitsDtype must not be supplied for a non-bits kind.
-        Assert.Throws<ArgumentException>(
-            () => RngAlgorithms.GetFunction(RngAlgorithms.Default, RngAlgorithms.KindUniform, DType.UInt32));
-    }
+        var bits = RunDrawRaw<RngKeyedBitsDraw>(4, 4).As<uint32>().AccessMemory().ToArray();
+        Assert.Equal(16, bits.Length);
+        for (long i = 0; i < 16; i++) Assert.Equal((uint)RngTestOracle.DrawBits(key, 0, i, 32), bits[i]);
 
-    [Fact]
-    public void TestSplitThenDrawMatchesHostFold()
-    {
-        // Child key = Bijection(counter: 5, key) — the split — then the draw
-        // under the child key must match the host generator keyed by that child.
+        // Child key = Bijection(counter: 5, key) — the split — then the draw under the child.
         var (ck0, ck1) = Threefry2x32.Bijection(5u, 0u, 7u, 9u);
         var childKey = ck0 | ((ulong)ck1 << 32);
-        var vals = RunDraw<RngSplitThenDraw>(4, 4);
-        Assert.Equal(16, vals.Length);
-        for (long i = 0; i < 16; i++)
-            Assert.Equal(HostUniform(i, childKey), vals[i]);
+        var split = RunDraw<RngSplitThenDraw>(4, 4);
+        Assert.Equal(16, split.Length);
+        for (long i = 0; i < 16; i++) Assert.Equal(HostUniform(i, childKey), split[i]);
     }
 
     [Fact]
@@ -149,11 +126,19 @@ public class RngAlgorithmTests
     }
 
     [Fact]
-    public void TestGetFunctionRejectsUnknownAlgorithmForEveryKind()
+    public void TestGetFunctionValidatesTheBitsWidthAndRejectsUnknownAlgorithmsForEveryKind()
     {
-        // An unknown algorithm name must fail loudly for every kind. The split kind remaps
-        // the name to the default (the key tree is algorithm-independent), and that remap
-        // must never launder an unrecognized name into a valid one.
+        // bits requires a supported uint width...
+        Assert.Throws<NotSupportedException>(
+            () => RngAlgorithms.GetFunction(RngAlgorithms.Default, RngAlgorithms.KindBits, DType.Float32));
+        Assert.Throws<NotSupportedException>(
+            () => RngAlgorithms.GetFunction(RngAlgorithms.Default, RngAlgorithms.KindBits, null));
+        // ...and a bitsDtype must not be supplied for a non-bits kind.
+        Assert.Throws<ArgumentException>(
+            () => RngAlgorithms.GetFunction(RngAlgorithms.Default, RngAlgorithms.KindUniform, DType.UInt32));
+
+        // The split kinds remap the name to the default (the key tree is algorithm-independent);
+        // that remap must never launder an unrecognized name into a valid one.
         foreach (var kind in (string[])[
             RngAlgorithms.KindSplit, RngAlgorithms.KindSplitBatch,
             RngAlgorithms.KindUniform, RngAlgorithms.KindNormal])
@@ -174,13 +159,11 @@ public class RngAlgorithmTests
 
         var proto = FastOnnxModelBuilder.BuildOnnxModel(concrete);
 
-        // RNG is graph-only (#136): the split no longer constant-folds host-side. Both the
-        // split AND the draw survive as calls of the algorithm's NON-INLINED functions — local
-        // FunctionProtos tagged with the algorithm name and function kind. (The split resolves
-        // to a literal key only later, at ORT session build, not in this exported proto.)
+        // RNG is graph-only (#136): the split no longer constant-folds host-side. Both the split
+        // AND the draw survive as calls of the algorithm's NON-INLINED functions — local
+        // FunctionProtos tagged with the algorithm name and function kind.
         var rngFns = proto.Functions.Where(f => f.Name.Contains("ShrkRng_")).ToArray();
-        Assert.True(rngFns.Length == 2,
-            $"expected the split + uniform algorithm FunctionProtos; functions=[{string.Join(",", proto.Functions.Select(f => f.Name))}]");
+        Assert.Equal(2, rngFns.Length);
         foreach (var fn in rngFns)
         {
             var algo = fn.MetadataProps.FirstOrDefault(p => p.Key == Function.IRRngAlgorithmParamName)?.Value;
@@ -190,10 +173,145 @@ public class RngAlgorithmTests
         }
 
         // The main graph CALLS both the split and the draw (Functions-domain call nodes), not
-        // their spliced bodies; and no raw SHRK_RNG_SPLIT opcode survives (it was lowered).
+        // their spliced bodies; no raw SHRK_RNG_SPLIT opcode survives.
         var callOps = proto.Graph.Nodes.Where(n => n.Domain == "Functions").Select(n => n.OpType).ToArray();
         Assert.Contains(callOps, op => op.Contains("uniform"));
-        Assert.Contains(callOps, op => op.Contains("split"));   // #136: split now exported as a call, not folded away
+        Assert.Contains(callOps, op => op.Contains("split"));
         Assert.DoesNotContain(proto.Graph.Nodes, n => n.OpType.Contains("RngSplit"));
+    }
+}
+
+/// <summary>
+/// Switching the configured <see cref="RngAlgorithm"/> between the default 20-round Threefry
+/// draw and the reduced 13-round variant: it must change the numbers drawn (runtime feeds and
+/// parameter init alike), stay deterministic per algorithm, export the selected algorithm's
+/// tagged function, and — because the key tree is algorithm-independent — leave every stream's
+/// resolved key untouched.
+/// </summary>
+[Trait("Domain", "Core")]
+[Trait("Purpose", "Coverage")]
+public class RngAlgorithmSwitchTests
+{
+    private static readonly RngConfig Rounds20 = new() { MasterSeed = 5, Algorithm = RngAlgorithm.Threefry2x32 };
+    private static readonly RngConfig Rounds13 = new() { MasterSeed = 5, Algorithm = RngAlgorithm.Threefry2x32Rounds13 };
+
+    private static InternalComputationGraph FeedModel(RngConfig cfg)
+    {
+        var g = ((ComputationGraph)typeof(RtLoweredUniform)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
+        return g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel(cfg);
+    }
+
+    private static float[] RunFeed(InternalComputationGraph concrete)
+    {
+        var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
+        return ComputeContext.Default.Execute(concrete, input)[0]
+            .ToTensorData().As<float32>().AccessMemory().ToArray();
+    }
+
+    /// <summary>The feed's resolved stream key, derived from the graph's bound RngSeed identity
+    /// — exactly what the feed's in-graph split chain derives at execution.</summary>
+    private static ulong ResolvedKey(InternalComputationGraph concrete)
+    {
+        var feed = concrete.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
+        var path = feed.Attributes.GetIntsVal(ShrkAttrLocalModelId)!;
+        return RngTestOracle.RunKey(RngRuntimeIdentity.Decode(concrete.TryGetRngSeed()!), path);
+    }
+
+    private static string BoundAlgorithm(InternalComputationGraph concrete)
+        => RngAlgorithms.NameOf(
+            RngRuntimeIdentity.Decode(concrete.TryGetRngSeed()!).Algorithm!.Value);
+
+    [Fact]
+    public void TestRuntimeFeedDrawSwitchesWithAlgorithmStaysDeterministicAndKeepsTheStreamKey()
+    {
+        var concrete20 = FeedModel(Rounds20);
+        var concrete13 = FeedModel(Rounds13);
+
+        var draws20 = RunFeed(concrete20);
+        var draws13 = RunFeed(concrete13);
+
+        Assert.Equal(draws20, RunFeed(concrete20));   // deterministic per algorithm
+        Assert.Equal(draws13, RunFeed(concrete13));
+        Assert.NotEqual(draws20, draws13);            // same stream, different bit generator
+
+        // The resolved stream key is identical across algorithms (the key tree is fixed); only
+        // the carrier's algorithm tag differs.
+        var key20 = ResolvedKey(concrete20);
+        var key13 = ResolvedKey(concrete13);
+        Assert.Equal(key20, key13);
+        Assert.Equal(RngAlgorithms.Threefry2x32BoxMullerV1, BoundAlgorithm(concrete20));
+        Assert.Equal(RngAlgorithms.Threefry2x32x13BoxMullerV1, BoundAlgorithm(concrete13));
+
+        // Bit-exact against the host generator at each algorithm's round count (substreamIndex 0
+        // — the injected counter is baked at 0 in one-shot inference).
+        for (long i = 0; i < 16; i++)
+        {
+            Assert.Equal(RngTestOracle.DrawUniform(key20, 0, i, Threefry2x32.Rounds), draws20[i]);
+            Assert.Equal(RngTestOracle.DrawUniform(key13, 0, i, Threefry2x32.Rounds13), draws13[i]);
+        }
+    }
+
+    [Fact]
+    public void TestInitDrawsSwitchWithAlgorithmAndATamperedIdentityAlgorithmFailsLoudly()
+    {
+        var ig = ((ComputationGraph)typeof(SwitchInitLinear)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var initInput = TensorData([1L, 3L], 0.1f, 0.2f, 0.3f);
+        var initArch = ig.ToConcreteArchitecture(ig.FromOrderedInputs([initInput]));
+
+        float[] Weight(RngConfig cfg) =>
+            initArch.InitializeTrainableParams(rngConfig: cfg).ModelParams[0]
+                .ToTensorData<float32>().AccessMemory().ToArray();
+
+        var w20 = Weight(Rounds20);
+        var w13 = Weight(Rounds13);
+        Assert.Equal(w20, Weight(Rounds20));   // deterministic per algorithm
+        Assert.Equal(w13, Weight(Rounds13));
+        Assert.NotEqual(w20, w13);             // init noise honors the switched algorithm
+
+        // SwitchInitLinear has no runtime feeds, so no RngSeed exists to tamper with; use a
+        // model that carries one — no-config init reads its algorithm.
+        var g = ((ComputationGraph)typeof(RtLoweredUniform)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([4L, 4L], new float[16])]));
+        arch.ApplyRngConfig(Rounds20);
+
+        const ulong unknownId = 9999;
+        var identity = arch.TryGetRngSeed()!;
+        identity[RngRuntimeIdentity.AlgorithmIdIndex] = unknownId;
+        var seedNode = arch.Nodes.Single(n =>
+            n.IdentifierTemplate == Shorokoo.Core.Nodes.Processors.Fast
+                .FastWireRngKeyDerivation.RngSeedIdentifierTemplate);
+        seedNode.Attributes = seedNode.Attributes.SetAttributes(
+            (ShrkAttrTensorData, (object?)Shorokoo.TensorData.Create(
+                new Shape(identity.Length), DType.UInt64,
+                Shorokoo.Core.Utils.OnnxUtils.CreateTensorValue(new Shape(identity.Length), identity))));
+
+        var ex = Assert.Throws<NotSupportedException>(() => arch.InitializeTrainableParams());
+        Assert.Contains(unknownId.ToString(), ex.Message);
+        // The escape hatch: an explicit config bypasses the identity decode.
+        Assert.NotEmpty(arch.InitializeTrainableParams(rngConfig: Rounds20).ModelParams);
+    }
+
+    [Fact]
+    public void TestExportTagsTheSelectedAlgorithmFunction()
+    {
+        static (string name, string algo) UniformFn(RngConfig cfg)
+        {
+            var proto = FastOnnxModelBuilder.BuildOnnxModel(FeedModel(cfg));
+            var fn = proto.Functions.Single(f => f.Name.Contains("ShrkRng_") && f.Name.Contains("uniform"));
+            return (fn.Name, fn.MetadataProps.First(p => p.Key == Function.IRRngAlgorithmParamName).Value);
+        }
+
+        var (name20, algo20) = UniformFn(Rounds20);
+        var (name13, algo13) = UniformFn(Rounds13);
+
+        Assert.Equal(RngAlgorithms.Threefry2x32BoxMullerV1, algo20);
+        Assert.Equal(RngAlgorithms.Threefry2x32x13BoxMullerV1, algo13);
+        Assert.Contains("Threefry2x32_13", name13);
+        Assert.DoesNotContain("Threefry2x32_13", name20);
+        Assert.NotEqual(name20, name13);
     }
 }

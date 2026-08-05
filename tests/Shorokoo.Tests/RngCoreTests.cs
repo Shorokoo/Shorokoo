@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Immutable;
+using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using Shorokoo.Core.Rng;
 using Shorokoo.Core.Graph;
 using Shorokoo.Core.Nodes.Processors.Fast;
@@ -10,144 +12,81 @@ using Shorokoo.Runtime;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Coverage tests for the host RNG core (<see cref="Threefry2x32"/>, the bit generator
-/// behind the key folds) and the <see cref="RngConfig"/> key-derivation surface. The
-/// Threefry tests pin the implementation against the Random123 known-answer vectors; the
-/// rest assert the properties the RNG design relies on — determinism, name-derived
-/// independence, and override isolation.
+/// The host RNG core: the <see cref="Threefry2x32"/> bit generator (pinned to the Random123
+/// known-answer vectors) and the <see cref="RngConfig"/> key-derivation surface.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
 public class RngCoreTests
 {
-    /// <summary>
-    /// The framework-injected RNG execution counter is identified <b>structurally</b> — its leaf
-    /// parameter part is named <c>RngExecutionCounter</c> under the <c>TrainableParam</c> category
-    /// — not by a substring scan of the identifier string. So the false positives the old
-    /// <c>name.Contains("RngExecutionCounter")</c> match produced (the counter name appearing as a
-    /// module path segment or a mere name substring) are correctly rejected.
-    /// </summary>
     [Fact]
-    public void TestExecutionCounterIsIdentifiedStructurallyNotBySubstring()
+    public void TestExecutionCounterIsIdentifiedStructurallyNotBySubstringAndInitializesToInt64Zero()
     {
-        // The real counter (at any dynamically-assigned slot) is recognized.
         var counter = ModelParamIdentifierTemplate.LocalTrainableParam(
             new ModelId(3), FastInjectRngDrawCounter.CounterName, 0, ImmutableArray<int>.Empty);
-        Assert.True(FastInjectRngDrawCounter.IsExecutionCounter(counter));
-
-        // A user parameter whose leaf name only CONTAINS the counter name is not the counter.
         var lookalike = ModelParamIdentifierTemplate.LocalTrainableParam(
             new ModelId(4), FastInjectRngDrawCounter.CounterName + "Stat", 0, ImmutableArray<int>.Empty);
-        Assert.False(FastInjectRngDrawCounter.IsExecutionCounter(lookalike));
-
-        // The strongest old false positive: an ordinary "weight" parameter nested in a user
-        // MODULE that happens to be named RngExecutionCounter. Its path string contains the
-        // counter name (so the old Contains match fired), but its leaf part is "weight".
-        var moduleNamedLikeCounter = ModelParamIdentifierTemplate.LocalModule(
-            new ModelId(4), FastInjectRngDrawCounter.CounterName, 0, ImmutableArray<int>.Empty);
-        var nestedWeight = ModelParamIdentifierTemplate.LocalTrainableParam(
-            new ModelId(0), "weight", 0, ImmutableArray<int>.Empty);
-        var nested = new ModelParamIdentifierTemplate(moduleNamedLikeCounter, nestedWeight);
-        Assert.Contains(FastInjectRngDrawCounter.CounterName, nested.ToString());   // old Contains would fire
-        Assert.False(FastInjectRngDrawCounter.IsExecutionCounter(nested));          // structural match does not
-
-        // An ordinary weight is not the counter.
+        var nested = new ModelParamIdentifierTemplate(
+            ModelParamIdentifierTemplate.LocalModule(
+                new ModelId(4), FastInjectRngDrawCounter.CounterName, 0, ImmutableArray<int>.Empty),
+            ModelParamIdentifierTemplate.LocalTrainableParam(
+                new ModelId(0), "weight", 0, ImmutableArray<int>.Empty));
         var weight = ModelParamIdentifierTemplate.LocalTrainableParam(
             new ModelId(1), "weight", 0, ImmutableArray<int>.Empty);
-        Assert.False(FastInjectRngDrawCounter.IsExecutionCounter(weight));
-
-        // A non-TrainableParam parameter whose leaf is exactly the counter name is not the
-        // counter either — the category clause is load-bearing.
         var stateNamedLikeCounter = ModelParamIdentifierTemplate.LocalStateParam(
             new ModelId(5), FastInjectRngDrawCounter.CounterName, 0, ImmutableArray<int>.Empty);
+
+        Assert.True(FastInjectRngDrawCounter.IsExecutionCounter(counter));
+        Assert.False(FastInjectRngDrawCounter.IsExecutionCounter(lookalike));
+        Assert.Contains(FastInjectRngDrawCounter.CounterName, nested.ToString());
+        Assert.False(FastInjectRngDrawCounter.IsExecutionCounter(nested));
+        Assert.False(FastInjectRngDrawCounter.IsExecutionCounter(weight));
         Assert.False(FastInjectRngDrawCounter.IsExecutionCounter(stateNamedLikeCounter));
-
-        // A null identifier is not the counter.
         Assert.False(FastInjectRngDrawCounter.IsExecutionCounter((ModelParamIdentifierTemplate?)null));
-    }
 
-    /// <summary>
-    /// The execution counter's materialization fallback value is an <c>int64[1]</c> zero — it must
-    /// match what <c>CounterInit</c> produces, or a safetensors round-trip (which omits the counter
-    /// and refills it from this value) would bind a wrong-shaped or wrong-valued counter.
-    /// </summary>
-    [Fact]
-    public void TestExecutionCounterInitialValueIsInt64ScalarZero()
-    {
         var v = FastInjectRngDrawCounter.ExecutionCounterInitialValue();
         Assert.Equal((long[])[1L], v.Shape.Dims.ToArray());
-        // As<int64> also asserts the dtype (it throws on a non-int64 tensor).
         Assert.Equal((long[])[0L], v.As<int64>().AccessMemory().ToArray());
     }
 
-    // Random123 known-answer test vectors for threefry2x32, 20 rounds
-    // (tests/kat_vectors in DEShawResearch/random123): counter, key -> output.
-    [Theory]
-    [InlineData(0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x6b200159u, 0x99ba4efeu)]
-    [InlineData(0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0x1cb996fcu, 0xbb002be7u)]
-    [InlineData(0x243f6a88u, 0x85a308d3u, 0x13198a2eu, 0x03707344u, 0xc4923a9cu, 0x483df7a0u)]
-    public void TestThreefry2x32KnownAnswerVectors(
-        uint c0, uint c1, uint k0, uint k1, uint expected0, uint expected1)
-    {
-        var (x0, x1) = Threefry2x32.Bijection(c0, c1, k0, k1);
-        Assert.Equal(expected0, x0);
-        Assert.Equal(expected1, x1);
-    }
-
-    // Random123 known-answer vectors for threefry2x32, 13 rounds (the Crush-resistant fast
-    // variant, RngAlgorithm.Threefry2x32Rounds13). The all-zero vector (9d1c5ec6, 8bd50731)
-    // is the published threefry2x32x13 KAT; the others pin the reduced-round output against
-    // regression. This anchors the 13-round injection schedule (after rounds 4/8/12, none
-    // trailing) to a reference, not just to self-agreement with the in-graph lowering.
-    [Theory]
-    [InlineData(0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x9d1c5ec6u, 0x8bd50731u)]
-    [InlineData(0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xfd36d048u, 0x2d17272cu)]
-    [InlineData(0x243f6a88u, 0x85a308d3u, 0x13198a2eu, 0x03707344u, 0xba3e4725u, 0xf27d669eu)]
-    public void TestThreefry2x32Rounds13KnownAnswerVectors(
-        uint c0, uint c1, uint k0, uint k1, uint expected0, uint expected1)
-    {
-        var (x0, x1) = Threefry2x32.Bijection(c0, c1, k0, k1, Threefry2x32.Rounds13);
-        Assert.Equal(expected0, x0);
-        Assert.Equal(expected1, x1);
-        // The round count genuinely changes the output (guards against an ignored/miswired
-        // rounds parameter that would make the 13-round algorithm alias the 20-round default).
-        Assert.NotEqual((x0, x1), Threefry2x32.Bijection(c0, c1, k0, k1, Threefry2x32.Rounds));
-    }
-
+    // Random123 known-answer vectors (tests/kat_vectors in DEShawResearch/random123) for
+    // threefry2x32 at 20 and 13 rounds: counter, key, rounds -> output.
     [Fact]
-    public void TestThreefryIsPureFunction()
+    public void TestThreefry2x32MatchesKnownAnswerVectorsAtBothRoundCountsAndIsAPureFunction()
     {
+        (uint c0, uint c1, uint k0, uint k1, int rounds, uint e0, uint e1)[] kat =
+        [
+            (0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, Threefry2x32.Rounds, 0x6b200159u, 0x99ba4efeu),
+            (0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, Threefry2x32.Rounds, 0x1cb996fcu, 0xbb002be7u),
+            (0x243f6a88u, 0x85a308d3u, 0x13198a2eu, 0x03707344u, Threefry2x32.Rounds, 0xc4923a9cu, 0x483df7a0u),
+            (0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, Threefry2x32.Rounds13, 0x9d1c5ec6u, 0x8bd50731u),
+            (0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, Threefry2x32.Rounds13, 0xfd36d048u, 0x2d17272cu),
+            (0x243f6a88u, 0x85a308d3u, 0x13198a2eu, 0x03707344u, Threefry2x32.Rounds13, 0xba3e4725u, 0xf27d669eu),
+        ];
+        foreach (var (c0, c1, k0, k1, rounds, e0, e1) in kat)
+        {
+            Assert.Equal((e0, e1), Threefry2x32.Bijection(c0, c1, k0, k1, rounds));
+            if (rounds == Threefry2x32.Rounds13)
+                Assert.NotEqual((e0, e1), Threefry2x32.Bijection(c0, c1, k0, k1, Threefry2x32.Rounds));
+        }
+
         var a = Threefry2x32.Bijection(7, 42, 123, 456);
-        var b = Threefry2x32.Bijection(7, 42, 123, 456);
-        Assert.Equal(a, b);
-        // Distinct counters (same key) and distinct keys (same counter) both diverge.
+        Assert.Equal(a, Threefry2x32.Bijection(7, 42, 123, 456));
         Assert.NotEqual(a, Threefry2x32.Bijection(8, 42, 123, 456));
         Assert.NotEqual(a, Threefry2x32.Bijection(7, 42, 124, 456));
     }
 
     [Fact]
-    public void TestConfigDefaultIsDeterministicMasterSeedZero()
+    public void TestDefaultConfigAndPathDerivedKeysAreStableSiblingDistinctAndMasterSeeded()
     {
         Assert.Equal(0ul, RngConfig.Default.MasterSeed);
         Assert.Equal(RngAlgorithm.Threefry2x32, RngConfig.Default.Algorithm);
-    }
 
-    [Fact]
-    public void TestKeyDerivationIsPathDerivedAndStable()
-    {
         var cfg = new RngConfig { MasterSeed = 20260702 };
-        var k1 = RngTestOracle.InitKey(cfg, [3, 1, 1]);
-        var k2 = RngTestOracle.InitKey(cfg, [3, 1, 1]);
-        var k3 = RngTestOracle.InitKey(cfg, [3, 1, 2]);
-        Assert.Equal(k1, k2);                                 // stable for a path
-        Assert.NotEqual(k1, k3);                              // sibling paths differ
-        // Same path in the runtime collection is a different stream (distinct sub-master).
-        Assert.NotEqual(k1, RngTestOracle.RunKey(cfg, [3, 1, 1]));
-    }
+        Assert.Equal(RngTestOracle.InitKey(cfg, [3, 1, 1]), RngTestOracle.InitKey(cfg, [3, 1, 1]));
+        Assert.NotEqual(RngTestOracle.InitKey(cfg, [3, 1, 1]), RngTestOracle.InitKey(cfg, [3, 1, 2]));
+        Assert.NotEqual(RngTestOracle.InitKey(cfg, [3, 1, 1]), RngTestOracle.RunKey(cfg, [3, 1, 1]));
 
-    [Fact]
-    public void TestMasterSeedChangeRerandomizesEveryStream()
-    {
         var a = new RngConfig { MasterSeed = 1 };
         var b = new RngConfig { MasterSeed = 2 };
         Assert.NotEqual(RngTestOracle.InitKey(a, [1]), RngTestOracle.InitKey(b, [1]));
@@ -155,14 +94,11 @@ public class RngCoreTests
     }
 
     [Fact]
-    public void TestOverrideIsolatesASingleStream()
+    public void TestOverrideIsolatesOneStreamAndReturnsACopyLeavingTheReceiverUntouched()
     {
         var baseCfg = new RngConfig { MasterSeed = 7 };
-        var cfg = new RngConfig { MasterSeed = 7 }
-            .Override(RngCollection.Params, [1, 1], seed: 1234);
+        var cfg = new RngConfig { MasterSeed = 7 }.Override(RngCollection.Params, [1, 1], seed: 1234);
 
-        // The overridden stream changes; siblings, sub-paths, and the runtime collection
-        // keep their derived keys (matching is exact and per-collection).
         Assert.NotEqual(RngTestOracle.InitKey(baseCfg, [1, 1]), RngTestOracle.InitKey(cfg, [1, 1]));
         Assert.Equal(RngTestOracle.InitKey(baseCfg, [1, 2]), RngTestOracle.InitKey(cfg, [1, 2]));
         Assert.Equal(RngTestOracle.InitKey(baseCfg, [1, 1, 1]), RngTestOracle.InitKey(cfg, [1, 1, 1]));
@@ -171,27 +107,16 @@ public class RngCoreTests
         Assert.False(cfg.HasOverride(RngCollection.Params, [1, 2]));
 
         // The override replaces the fully folded key, so it survives a master-seed change.
-        var otherMaster = new RngConfig { MasterSeed = 8 }
-            .Override(RngCollection.Params, [1, 1], seed: 1234);
+        var otherMaster = new RngConfig { MasterSeed = 8 }.Override(RngCollection.Params, [1, 1], seed: 1234);
         Assert.Equal(RngTestOracle.InitKey(cfg, [1, 1]), RngTestOracle.InitKey(otherMaster, [1, 1]));
-    }
 
-    [Fact]
-    public void TestOverrideReturnsACopyAndNeverMutatesTheReceiver()
-    {
-        // Configs are immutable values: Override returns a modified copy carrying every
-        // property, and the receiver — crucially including the process-wide Default — is
-        // untouched. (Guards against the shared-mutable-singleton hazard: one caller's
-        // fluent tweak must never re-key another model's streams.)
-        var baseCfg = new RngConfig { MasterSeed = 7, Algorithm = RngAlgorithm.Threefry2x32Rounds13 };
-        var derived = baseCfg.Override(RngCollection.Params, [1, 1], seed: 1234);
-
-        Assert.False(baseCfg.HasOverride(RngCollection.Params, [1, 1]));
+        var typed = new RngConfig { MasterSeed = 7, Algorithm = RngAlgorithm.Threefry2x32Rounds13 };
+        var derived = typed.Override(RngCollection.Params, [1, 1], seed: 1234);
+        Assert.False(typed.HasOverride(RngCollection.Params, [1, 1]));
         Assert.True(derived.HasOverride(RngCollection.Params, [1, 1]));
-        Assert.Equal(baseCfg.MasterSeed, derived.MasterSeed);
-        Assert.Equal(baseCfg.Algorithm, derived.Algorithm);
+        Assert.Equal(typed.MasterSeed, derived.MasterSeed);
+        Assert.Equal(typed.Algorithm, derived.Algorithm);
 
-        // Stacking builds on the copy; earlier copies stay at their own override sets.
         var stacked = derived.Override(RngCollection.Runtime, [2], seed: 9);
         Assert.False(derived.HasOverride(RngCollection.Runtime, [2]));
         Assert.True(stacked.HasOverride(RngCollection.Params, [1, 1]));
@@ -205,10 +130,7 @@ public class RngCoreTests
 /// <summary>
 /// The encoded runtime RNG identity — the value of the ordinary <c>RngSeed</c> parameter at
 /// reserved ModelId [0] (see <see cref="RngRuntimeIdentity"/>): an algorithm-id header, the
-/// runtime master key, and canonically sorted per-stream override records at fixed
-/// offsets. <see cref="RngRuntimeIdentity.Decode"/> must derive every runtime stream key
-/// bit-exactly like the encoding config. The init-collection identity is deliberately NOT
-/// encoded — nothing in a saved model consumes it.
+/// runtime master key, and canonically sorted per-stream override records at fixed offsets.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -225,80 +147,66 @@ public class RngRuntimeIdentityTests
     }
 
     [Fact]
-    public void TestHeaderOnlyIdentity()
+    public void TestHeaderAndOverrideRecordsEncodeAtFixedOffsetsAndRoundTrip()
     {
         var cfg = new RngConfig { MasterSeed = 42 };
         var vec = RngRuntimeIdentity.Build(cfg);
-        // Header only: [algId, runKey, 0 overrides].
         Assert.Equal(RngRuntimeIdentity.HeaderLength, vec.Length);
         Assert.Equal(0UL, vec[RngRuntimeIdentity.AlgorithmIdIndex]);
         Assert.Equal(cfg.RunMasterKey, vec[RngRuntimeIdentity.RunKeyIndex]);
         AssertRoundTrips(cfg);
 
-        // The algorithm id header switches with the configured algorithm.
         var cfg13 = new RngConfig { MasterSeed = 42, Algorithm = RngAlgorithm.Threefry2x32Rounds13 };
         Assert.Equal(1UL, RngRuntimeIdentity.Build(cfg13)[RngRuntimeIdentity.AlgorithmIdIndex]);
         AssertRoundTrips(cfg13);
 
-        // An explicit run sub-master re-seeds the runtime tier and rides the same header.
         var subMaster = new RngConfig { MasterSeed = 42, RunMasterSeed = 777 };
         Assert.NotEqual(RngTestOracle.RunKey(cfg, Paths[0]), RngTestOracle.RunKey(subMaster, Paths[0]));
         AssertRoundTrips(subMaster);
-    }
 
-    [Fact]
-    public void TestOverrideRecordsEncodeAtFixedOffsets()
-    {
-        // Runtime overrides only — a Params override is init-side material and must NOT be
-        // persisted in the runtime identity.
-        var cfg = new RngConfig { MasterSeed = 42, RunMasterSeed = 777 };
-        cfg = cfg.Override(RngCollection.Runtime, [4, 1, 1], seed: 424242UL)
-                 .Override(RngCollection.Params, [2, 1], seed: 7UL);
+        // Runtime overrides are encoded; a Params override is init-side material and is not.
+        var withOverrides = subMaster
+            .Override(RngCollection.Runtime, [4, 1, 1], seed: 424242UL)
+            .Override(RngCollection.Params, [2, 1], seed: 7UL);
+        var ovVec = RngRuntimeIdentity.Build(withOverrides);
+        Assert.Equal(RngRuntimeIdentity.HeaderLength + 1 + 3 + 1, ovVec.Length);
+        Assert.Equal(1UL, ovVec[RngRuntimeIdentity.HeaderLength - 1]);
 
-        var vec = RngRuntimeIdentity.Build(cfg);
-        // Header + one record: length 3, its 3 path elements, 1 key.
-        Assert.Equal(RngRuntimeIdentity.HeaderLength + 1 + 3 + 1, vec.Length);
-        Assert.Equal(1UL, vec[RngRuntimeIdentity.HeaderLength - 1]);   // record count
-
-        var decoded = RngRuntimeIdentity.Decode(vec);
+        var decoded = RngRuntimeIdentity.Decode(ovVec);
         var rec = Assert.Single(decoded.Overrides);
         Assert.Equal((int[])[4, 1, 1], rec.Path);
-        // The record replaces the fully folded key: it IS the override seed, and it sits at
-        // the record's fixed key offset in the vector.
         Assert.Equal(424242UL, rec.Key);
-        Assert.Equal(rec.Key, vec[rec.KeyOffset]);
-
-        // Derivation round-trips: the overridden stream deviates, siblings stay derived.
-        AssertRoundTrips(cfg);
-        var noOverride = new RngConfig { MasterSeed = 42, RunMasterSeed = 777 };
-        Assert.Equal(RngTestOracle.RunKey(noOverride, [4, 0, 1]), RngTestOracle.RunKey(decoded, [4, 0, 1]));
-        Assert.NotEqual(RngTestOracle.RunKey(noOverride, [4, 1, 1]), RngTestOracle.RunKey(decoded, [4, 1, 1]));
+        Assert.Equal(rec.Key, ovVec[rec.KeyOffset]);
+        AssertRoundTrips(withOverrides);
+        Assert.Equal(RngTestOracle.RunKey(subMaster, [4, 0, 1]), RngTestOracle.RunKey(decoded, [4, 0, 1]));
+        Assert.NotEqual(RngTestOracle.RunKey(subMaster, [4, 1, 1]), RngTestOracle.RunKey(decoded, [4, 1, 1]));
     }
 
     [Fact]
     public void TestMalformedIdentityFailsLoudly()
     {
-        // Corrupt identities must throw, never silently fall back to a different derivation.
-        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([]));
-        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([0UL, 42UL]));   // shorter than the header
-        // Truncated override record (claims one record, supplies nothing).
-        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([0UL, 42UL, 1UL]));
-        // Trailing garbage after the declared records.
-        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([0UL, 42UL, 0UL, 99UL]));
-        // A record claiming a huge path length. The bound must be computed before narrowing to
-        // int, or `i + pathLen + 1` wraps negative, passes the check, and allocates the claim —
-        // turning a corrupt model file into an OutOfMemoryException instead of this error.
-        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([0UL, 42UL, 1UL, int.MaxValue]));
-        Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode([0UL, 42UL, 1UL, ulong.MaxValue]));
+        // Empty; shorter than the header; a truncated record; trailing garbage; and records
+        // claiming a huge path length (the bound must be computed before narrowing to int, or
+        // `i + pathLen + 1` wraps negative and the claim is allocated).
+        ulong[][] malformed =
+        [
+            [],
+            [0UL, 42UL],
+            [0UL, 42UL, 1UL],
+            [0UL, 42UL, 0UL, 99UL],
+            [0UL, 42UL, 1UL, int.MaxValue],
+            [0UL, 42UL, 1UL, ulong.MaxValue],
+        ];
+        foreach (var v in malformed)
+            Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode(v));
     }
 }
 
 /// <summary>
 /// The identity transport: WithRngConfig writes the runtime identity into the ordinary
-/// <c>RngSeed</c> parameter at reserved ModelId [0] — serialized as a plain initializer with
-/// no reserved-name handling; it survives save/load bit-exactly and without duplication, the
-/// loaded model's randomness is reproducible with no config object, and re-binding a LOADED
-/// model is a parameter write that re-keys every draw (the re-bind-after-load pin).
+/// <c>RngSeed</c> parameter at reserved ModelId [0] — a plain initializer that survives
+/// save/load bit-exactly and without duplication, makes a loaded model reproducible with no
+/// config object, and re-keys every draw when a LOADED model is re-bound.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -309,180 +217,98 @@ public class RngSeedTransportTests
             n.IdentifierTemplate == Shorokoo.Core.Nodes.Processors.Fast
                 .FastWireRngKeyDerivation.RngSeedIdentifierTemplate);
 
-    [Fact]
-    public void TestRngSeedIdentityRoundTripsWithoutDuplication()
+    private static ComputationGraph LoopFeedArch()
     {
         var g = (ComputationGraph)typeof(RngRuntimeLoopFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
-        var x = TensorData([8L], new float[8]);
-        var steps = TensorData(System.Array.Empty<long>(), 2L);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps]));
+        return g.ToConcreteArchitecture(g.FromOrderedInputs(
+            [TensorData([8L], new float[8]), TensorData(Array.Empty<long>(), 2L)]));
+    }
 
-        var cfg = new RngConfig { MasterSeed = 11 };
-        cfg = cfg.Override(RngCollection.Runtime, [1, 1, 1], seed: 424242UL);
-        arch = arch.WithRngConfig(cfg);
+    private static ComputationGraph LoopFeedModel(RngConfig cfg) => LoopFeedArch().ToConcreteModel(cfg);
 
-        // Exactly one RngSeed parameter, holding the encoded identity.
+    private static float[] Run(ComputationGraph m) => ComputeContext.Default
+        .Execute(m, TensorData([8L], new float[8]), TensorData(Array.Empty<long>(), 2L))[0]
+        .ToTensorData().As<float32>().AccessMemory().ToArray();
+
+    [Fact]
+    public void TestRngSeedIdentityRoundTripsWithoutDuplicationAndRebindingReplacesItsValue()
+    {
+        var cfg = new RngConfig { MasterSeed = 11 }.Override(RngCollection.Runtime, [1, 1, 1], seed: 424242UL);
+        var arch = LoopFeedArch().WithRngConfig(cfg);
+
         Assert.Equal(1, RngSeedNodeCount(arch));
         Assert.Equal(RngRuntimeIdentity.Build(cfg), arch.TryGetRngSeed());
 
-        var data = CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: true);
-        var loaded = CompressedFormatUtils.LoadFastGraphFromBinary(data);
+        var loaded = CompressedFormatUtils.LoadFastGraphFromBinary(
+            CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: true));
         var carried = loaded.TryGetRngSeed();
         Assert.NotNull(carried);
         Assert.Equal(arch.TryGetRngSeed(), carried);
 
-        // The decoded identity reproduces the config's runtime derivation, override included
-        // — the loaded model needs no config object.
+        // The decoded identity reproduces the config's runtime derivation, override included.
         var decoded = RngRuntimeIdentity.Decode(carried!);
         Assert.Equal(RngRuntimeIdentity.AlgorithmIdOf(RngAlgorithm.Threefry2x32), decoded.AlgorithmId);
         Assert.Equal(RngTestOracle.RunKey(cfg, [1, 1, 1]), RngTestOracle.RunKey(decoded, [1, 1, 1]));
         Assert.Equal(RngTestOracle.RunKey(cfg, [1, 0, 1]), RngTestOracle.RunKey(decoded, [1, 0, 1]));
 
-        // Exactly one RngSeed parameter after each save/load cycle — an ordinary initializer
-        // never accumulates duplicates.
         Assert.Equal(1, RngSeedNodeCount(loaded));
         var loaded2 = CompressedFormatUtils.LoadFastGraphFromBinary(
             CompressedFormatUtils.SaveFastGraphToBinary(loaded, compressed: true));
         Assert.Equal(1, RngSeedNodeCount(loaded2));
         Assert.Equal(carried, loaded2.TryGetRngSeed());
+
+        var rebound = LoopFeedArch().WithRngConfig(new RngConfig { MasterSeed = 11 });
+        Assert.Equal(RngRuntimeIdentity.Build(new RngConfig { MasterSeed = 11 }), rebound.TryGetRngSeed());
+        rebound = rebound.WithRngConfig(new RngConfig { MasterSeed = 12 });
+        Assert.Equal(RngRuntimeIdentity.Build(new RngConfig { MasterSeed = 12 }), rebound.TryGetRngSeed());
+        Assert.Equal(1, RngSeedNodeCount(rebound));
     }
 
     [Fact]
-    public void TestNonDefaultAlgorithmSurvivesSaveLoadByIdAndByBehavior()
+    public void TestSaveLoadCarriesTheAlgorithmAndRebindingALoadedModelRekeysEveryDraw()
     {
-        // The algorithm choice rides the file in TWO forms — the RngSeedData's
-        // algorithm id (trusted by no-config parameter initialization and the lowering) and
-        // the baked tagged draw functions (what the feeds actually execute) — and they can in
-        // principle disagree. Bind the NON-default algorithm, round-trip the concrete model,
-        // and pin both: the id decodes exactly, and the loaded model still draws 13-round
-        // values (equal to its own pre-save draws, different from a default-algorithm model
-        // under the same seed).
-        var g = (ComputationGraph)typeof(RngRuntimeLoopFeed)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
-        var x = TensorData([8L], new float[8]);
-        var steps = TensorData(System.Array.Empty<long>(), 2L);
-
-        ComputationGraph Concrete(RngConfig cfg) =>
-            g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps])).ToConcreteModel(cfg);
-        float[] Run(ComputationGraph m) => ComputeContext.Default.Execute(m, x, steps)[0]
-            .ToTensorData().As<float32>().AccessMemory().ToArray();
-
-        var m13 = Concrete(new RngConfig { MasterSeed = 11, Algorithm = RngAlgorithm.Threefry2x32Rounds13 });
-        var before = Run(m13);
-        var draws20 = Run(Concrete(new RngConfig { MasterSeed = 11 }));   // same seed, default rounds
-        Assert.NotEqual(before, draws20);   // guard: the two algorithms genuinely differ here
-
-        var loaded = CompressedFormatUtils.LoadFastGraphFromBinary(
-            CompressedFormatUtils.SaveFastGraphToBinary(m13, compressed: true));
-
-        var carried = loaded.TryGetRngSeed();
-        Assert.NotNull(carried);
-        Assert.Equal(RngRuntimeIdentity.AlgorithmIdOf(RngAlgorithm.Threefry2x32Rounds13),
-            RngRuntimeIdentity.Decode(carried!).AlgorithmId);
-
-        var after = Run(loaded);
-        Assert.Equal(before, after);        // still draws its pre-save 13-round values
-        Assert.NotEqual(draws20, after);    // and not the default algorithm's
-    }
-
-    [Fact]
-    public void TestRebindingReplacesTheIdentityValue()
-    {
-        var g = (ComputationGraph)typeof(RngRuntimeLoopFeed)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
-        var x = TensorData([8L], new float[8]);
-        var steps = TensorData(System.Array.Empty<long>(), 2L);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps]));
-
-        arch = arch.WithRngConfig(new RngConfig { MasterSeed = 11 });
-        Assert.Equal(RngRuntimeIdentity.Build(new RngConfig { MasterSeed = 11 }), arch.TryGetRngSeed());
-
-        arch = arch.WithRngConfig(new RngConfig { MasterSeed = 12 });
-        Assert.Equal(RngRuntimeIdentity.Build(new RngConfig { MasterSeed = 12 }), arch.TryGetRngSeed());
-        Assert.Equal(1, RngSeedNodeCount(arch));
-    }
-
-    [Fact]
-    public void TestRebindAfterSaveLoadRekeysEveryDraw()
-    {
-        // THE re-bind-after-load pin: bind seed A -> save -> load -> WithRngConfig(B) ->
-        // every draw changes AND matches a model bound to B directly. With the identity as an
-        // ordinary parameter and keys derived in-graph from it, re-binding a loaded model is
-        // a parameter write that re-keys every draw by construction — the divergence class
-        // where a loaded model's recorded identity updated while the draws kept the old seed
-        // is structurally impossible.
-        var g = (ComputationGraph)typeof(RngRuntimeLoopFeed)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
-        var x = TensorData([8L], new float[8]);
-        var steps = TensorData(System.Array.Empty<long>(), 2L);
-
-        ComputationGraph Concrete(RngConfig cfg) =>
-            g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps])).ToConcreteModel(cfg);
-        float[] Run(ComputationGraph m) => ComputeContext.Default.Execute(m, x, steps)[0]
-            .ToTensorData().As<float32>().AccessMemory().ToArray();
-
         var seedA = new RngConfig { MasterSeed = 11 };
         var seedB = new RngConfig { MasterSeed = 12 };
+        var alg13 = new RngConfig { MasterSeed = 11, Algorithm = RngAlgorithm.Threefry2x32Rounds13 };
 
-        var modelA = Concrete(seedA);
-        var drawsA = Run(modelA);
+        var draws20 = Run(LoopFeedModel(seedA));
+        var m13 = LoopFeedModel(alg13);
+        var before = Run(m13);
+        Assert.NotEqual(before, draws20);
 
-        var loaded = CompressedFormatUtils.LoadFastGraphFromBinary(
-            CompressedFormatUtils.SaveFastGraphToBinary(modelA, compressed: true));
-        Assert.Equal(drawsA, Run(loaded));            // load-and-run reproduces seed A
+        var loaded13 = CompressedFormatUtils.LoadFastGraphFromBinary(
+            CompressedFormatUtils.SaveFastGraphToBinary(m13, compressed: true));
+        var carried13 = loaded13.TryGetRngSeed();
+        Assert.NotNull(carried13);
+        Assert.Equal(RngRuntimeIdentity.AlgorithmIdOf(RngAlgorithm.Threefry2x32Rounds13),
+            RngRuntimeIdentity.Decode(carried13!).AlgorithmId);
+        Assert.Equal(before, Run(loaded13));
+        Assert.NotEqual(draws20, Run(loaded13));
 
-        loaded = loaded.WithRngConfig(seedB);         // a parameter write on the loaded graph
-        var rekeyed = Run(loaded);
-        Assert.NotEqual(drawsA, rekeyed);             // every draw changed
-        Assert.Equal(Run(Concrete(seedB)), rekeyed);  // and matches a direct seed-B model
+        var loadedA = CompressedFormatUtils.LoadFastGraphFromBinary(
+            CompressedFormatUtils.SaveFastGraphToBinary(LoopFeedModel(seedA), compressed: true));
+        Assert.Equal(draws20, Run(loadedA));
 
-        // Round-trip again after the re-bind: the new identity is what persists.
-        var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(
-            CompressedFormatUtils.SaveFastGraphToBinary(loaded, compressed: true));
-        Assert.Equal(rekeyed, Run(reloaded));
+        var rebound = loadedA.WithRngConfig(seedB);
+        var rekeyed = Run(rebound);
+        Assert.NotEqual(draws20, rekeyed);
+        Assert.Equal(Run(LoopFeedModel(seedB)), rekeyed);
+        Assert.Equal(rekeyed, Run(CompressedFormatUtils.LoadFastGraphFromBinary(
+            CompressedFormatUtils.SaveFastGraphToBinary(rebound, compressed: true))));
+
+        // A loaded model keeps its feed ops (#59), so a re-bind may also change the override
+        // SET and the draw algorithm, matching a model built under that config directly.
+        var withOverride = seedA.Override(RngCollection.Runtime, [1, 1, 1], 42UL);
+        Assert.Equal(Run(LoopFeedModel(withOverride)), Run(loadedA.WithRngConfig(withOverride)));
+        var reboundTo13 = Run(loadedA.WithRngConfig(alg13));
+        Assert.Equal(Run(LoopFeedModel(alg13)), reboundTo13);
+        Assert.NotEqual(draws20, reboundTo13);
     }
 
     [Fact]
-    public void TestRebindOnLoadedModelSupportsOverrideSetAndAlgorithmChanges()
+    public void TestModelWithoutRandomFeedsCarriesNothingRngRelatedAndBindingRequiresRealizedStreams()
     {
-        // Since .srk persistence stopped lowering the SHRK_RANDOM_* feeds (issue #59 —
-        // saved graphs keep the feed ops and their key-derivation chains verbatim), a
-        // loaded model is no longer "baked": re-binding may change not only seed VALUES
-        // but also the override SET (the routing is re-wired) and the draw algorithm —
-        // and the result must be bit-identical to a model built under that config
-        // directly. (Files written by pre-#59 versions still carry lowered draw-function
-        // calls and keep the fail-loud structural-rebind guard in FastBindRngConfig.)
-        var g = (ComputationGraph)typeof(RngRuntimeLoopFeed)
-            .GetProperty("ComputationGraph")!.GetValue(null)!;
-        var x = TensorData([8L], new float[8]);
-        var steps = TensorData(System.Array.Empty<long>(), 2L);
-
-        ComputationGraph Concrete(RngConfig cfg) =>
-            g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps])).ToConcreteModel(cfg);
-        float[] Run(ComputationGraph m) => ComputeContext.Default.Execute(m, x, steps)[0]
-            .ToTensorData().As<float32>().AccessMemory().ToArray();
-
-        var loaded = CompressedFormatUtils.LoadFastGraphFromBinary(
-            CompressedFormatUtils.SaveFastGraphToBinary(
-                Concrete(new RngConfig { MasterSeed = 11 }), compressed: true));
-
-        var withOverride = new RngConfig { MasterSeed = 11 }
-            .Override(RngCollection.Runtime, [1, 1, 1], 42UL);
-        Assert.Equal(Run(Concrete(withOverride)), Run(loaded.WithRngConfig(withOverride)));
-
-        var otherAlg = new RngConfig { MasterSeed = 11, Algorithm = RngAlgorithm.Threefry2x32Rounds13 };
-        Assert.Equal(Run(Concrete(otherAlg)), Run(loaded.WithRngConfig(otherAlg)));
-        Assert.NotEqual(Run(Concrete(new RngConfig { MasterSeed = 11 })),
-            Run(loaded.WithRngConfig(otherAlg)));
-    }
-
-    [Fact]
-    public void TestModelWithoutRandomFeedsCarriesNothingRngRelated()
-    {
-        // A model with no runtime random feeds contains no RngSeed param, no chains, and
-        // nothing RNG-related in its saved form; binding a config to it is a harmless no-op —
-        // but a Runtime override, which can match nothing, still fails loudly.
         var g = (ComputationGraph)typeof(RngInitTwoLinears)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
@@ -491,31 +317,123 @@ public class RngSeedTransportTests
 
         Assert.Equal(0, RngSeedNodeCount(model));
         Assert.Null(model.TryGetRngSeed());
-        var loaded = CompressedFormatUtils.LoadFastGraphFromBinary(
-            CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true));
-        Assert.Equal(0, RngSeedNodeCount(loaded));
+        Assert.Equal(0, RngSeedNodeCount(CompressedFormatUtils.LoadFastGraphFromBinary(
+            CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true))));
 
         model = model.WithRngConfig(new RngConfig { MasterSeed = 8 });   // no-op, no throw
-
-        var ex = Assert.Throws<System.InvalidOperationException>(
+        var unmatched = Assert.Throws<InvalidOperationException>(
             () => model.WithRngConfig(new RngConfig { MasterSeed = 8 }
                 .Override(RngCollection.Runtime, [1], 1UL)));
-        Assert.Contains("matches no runtime stream", ex.Message);
-    }
+        Assert.Contains("matches no runtime stream", unmatched.Message);
 
-    [Fact]
-    public void TestBindingRequiresRealizedStreams()
-    {
-        // The concreteness contract at bind: an id-bearing feed without its key derivation
-        // chain (a graph that never went through ToConcreteArchitecture) fails loudly.
+        // An id-bearing feed with no key-derivation chain (never concretized) fails loudly.
         var draw = RandomUniform(Vector(4L), 0f, 1f);
         var graph = new InternalComputationGraph([], [draw]);
         var feed = graph.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
         feed.Attributes = feed.Attributes.SetAttributes(
             (OnnxOpAttributeNames.ShrkAttrLocalModelId, (long[])[1]));
-
-        var ex = Assert.Throws<System.InvalidOperationException>(
+        var unrealized = Assert.Throws<InvalidOperationException>(
             () => graph.ApplyRngConfig(new RngConfig { MasterSeed = 1 }));
-        Assert.Contains("no realized stream ids", ex.Message);
+        Assert.Contains("no realized stream ids", unrealized.Message);
+    }
+}
+
+/// <summary>
+/// The graph-only-RNG guard (#136): no production code may run the RNG algorithm host-side.
+/// Key splits/folds and draws alike are computed by the in-graph tagged functions; a host
+/// consumer that needs a concrete key resolves it by <em>executing</em> that derivation
+/// (<c>RngKeyResolver</c>). The C# <see cref="Threefry2x32"/> generator survives only as a
+/// test oracle (<see cref="RngTestOracle"/>). Source-level rather than behavioural: a
+/// reintroduced host fold computes the same numbers for the built-ins and would only break
+/// once a custom algorithm exists.
+/// </summary>
+[Trait("Domain", "Core")]
+[Trait("Purpose", "Coverage")]
+public class RngNoHostRngTests
+{
+    private static string ProductionSourceRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "src", "Shorokoo")))
+            dir = dir.Parent;
+        Assert.NotNull(dir);
+        return Path.Combine(dir!.FullName, "src", "Shorokoo");
+    }
+
+    // `Rounds`/`Rounds13` are round-count constants parameterising the in-graph function
+    // builders, so they are exempt — but only as exact member names.
+    private static readonly Regex[] HostRngUse =
+    [
+        new(@"Threefry2x32\s*\.\s*(?!Rounds13\b|Rounds\b)\w+", RegexOptions.Compiled),
+        new(@"using\s+static\s+[\w\.]*\bThreefry2x32\s*;", RegexOptions.Compiled),
+        new(@"using\s+\w+\s*=\s*[\w\.]*\bThreefry2x32\s*;", RegexOptions.Compiled),
+    ];
+
+    // Strips comments and string literals so prose does not trip the guard, and so a call
+    // split across lines is still seen as one text.
+    private static string StripCommentsAndStrings(string source)
+    {
+        source = Regex.Replace(source, @"/\*.*?\*/", " ", RegexOptions.Singleline);
+        source = Regex.Replace(source, @"//[^\n]*", " ");
+        source = Regex.Replace(source, @"@""(?:[^""]|"""")*""", " ");
+        source = Regex.Replace(source, @"""(?:\\.|[^""\\])*""", " ");
+        return source;
+    }
+
+    private static string[] ProductionSourceFiles() => Directory
+        .EnumerateFiles(ProductionSourceRoot(), "*.cs", SearchOption.AllDirectories)
+        .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}") &&
+                    !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
+        .ToArray();
+
+    [Fact]
+    public void TestNoProductionCodeRunsTheRngAlgorithmHostSideAndTheGuardStillDetectsEveryEvasion()
+    {
+        var files = ProductionSourceFiles();
+        // A guard that silently scans nothing is worse than no guard.
+        Assert.True(files.Length > 100);
+
+        var offenders = files
+            // Threefry2x32.cs DEFINES the generator; defining it is not calling it. Everything
+            // else in that file is still swept.
+            .SelectMany(f => HostRngUse
+                .SelectMany(rx => rx.Matches(StripCommentsAndStrings(File.ReadAllText(f)))
+                    .Where(_ => Path.GetFileName(f) != "Threefry2x32.cs" || !rx.ToString().StartsWith("Threefry2x32"))
+                    .Select(m => $"{Path.GetFileName(f)}: {m.Value.Trim()}")))
+            .Distinct()
+            .ToArray();
+        Assert.Empty(offenders);
+
+        string[] mustFlag =
+        [
+            "var k = Threefry2x32.Bijection(a, b, c, d);",
+            "var k = Shorokoo.Core.Rng.Threefry2x32.Bijection(a, b, c, d);",
+            "var k = Threefry2x32\n    .Bijection(a, b, c, d);",
+            "using static Shorokoo.Core.Rng.Threefry2x32;",
+            "using TF = Shorokoo.Core.Rng.Threefry2x32;",
+            "var k = Threefry2x32.RoundsFold(key, i);",
+        ];
+        foreach (var sample in mustFlag)
+            Assert.True(HostRngUse.Any(rx => rx.IsMatch(StripCommentsAndStrings(sample))));
+
+        string[] mustNotFlag =
+        [
+            "int rounds = Threefry2x32.Rounds;",
+            "int rounds = Threefry2x32.Rounds13;",
+            "// see Threefry2x32.Bijection for the host oracle",
+            "/* Threefry2x32.Bijection */",
+            "var name = \"Threefry2x32.Bijection\";",
+        ];
+        foreach (var sample in mustNotFlag)
+            Assert.False(HostRngUse.Any(rx => rx.IsMatch(StripCommentsAndStrings(sample))));
+
+        // The deleted host key fold must not come back under its old names.
+        var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static |
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+        foreach (var name in (string[])["FoldKey", "FoldInitKey", "FoldRunKey"])
+        {
+            Assert.Null(typeof(RngConfig).GetMethod(name, flags));
+            Assert.Null(typeof(RngRuntimeIdentity).GetMethod(name, flags));
+        }
     }
 }

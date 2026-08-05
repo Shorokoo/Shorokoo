@@ -7,16 +7,10 @@ using Shorokoo.Core.Nodes.Processors.Helpers;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Coverage-purpose tests for the AutoDiffCheckpointing chain — exercises
-/// <see cref="ShapeInferenceInterpreter"/>, <see cref="GraphEvaluator"/>
-/// (transitively <c>UnaryElementwisePerf</c>, <c>BinaryElementwisePerf</c>,
-/// <c>LinearAlgebraPerf</c>, <c>TensorManipulationPerf</c>, <c>ReductionPerf</c>,
-/// <c>PoolingNormPerf</c>), <see cref="MemoryAwareScheduler"/>,
-/// <see cref="Rematerializer"/>, <see cref="SimpleBackpropOptimizer"/>, and
-/// the umbrella <see cref="MemoryAwareGraphOptimizer"/>. A single small diamond
-/// graph (Relu + 2×Add + final Add + MatMul) is enough to drive every entry
-/// point; high memory factors force the rematerializer to actually insert
-/// recomputation nodes rather than fall through the no-op path.
+/// Coverage for the AutoDiffCheckpointing chain — <see cref="ShapeInferenceInterpreter"/>,
+/// <see cref="GraphEvaluator"/> (and the <c>OpsPerf</c> estimators behind it),
+/// <see cref="MemoryAwareScheduler"/>, <see cref="Rematerializer"/>,
+/// <see cref="SimpleBackpropOptimizer"/> and <see cref="MemoryAwareGraphOptimizer"/>.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -25,7 +19,7 @@ public class AutoDiffCheckpointingCoverageTests
     private static ComputeContext CpuContext => new ComputeContext();
 
     [Fact]
-    public void TestAutoDiffCheckpointingChainCoverage()
+    public void TestAutoDiffCheckpointingChainAndOpsPerfEstimatorBranchesCoverage()
     {
         var input = InputTensor<float32>("input", rank: 2);
         var weights = InputTensor<float32>("weights", rank: 2);
@@ -81,30 +75,18 @@ public class AutoDiffCheckpointingCoverageTests
         var directEval = fullOptimizer.EvaluateGraph(graph, inputData, weightsData, biasData, biasData);
         Assert.True(directEval.PeakMemoryBytes > 0);
         Assert.True(fullOptimizer.ComputeCombinedMetric(directEval) > 0);
-    }
 
-    /// <summary>
-    /// Widens the GraphEvaluator/OpsPerf coverage beyond the diamond graph above: one
-    /// graph carrying Conv / ConvTranspose / Gemm(transA+transB) / Einsum
-    /// (<c>LinearAlgebraPerf</c>'s four remaining estimators), windowed + global pooling
-    /// and BatchNorm/LRN (<c>PoolingNormPerf</c>'s three branches), and
-    /// Det / TopK / Resize / RandomNormalLike / Constant (<c>MiscPerf</c>'s per-op
-    /// branches). QEE resolves every shape, so this stays ORT-free.
-    /// </summary>
-    [Fact]
-    public void TestOpsPerfEstimatorBranchesCoverage()
-    {
-        var x = InputTensor<float32>("x", rank: 4);          // [1,2,8,8]
-        var w = InputTensor<float32>("w", rank: 4);          // [3,2,3,3]
-        var convBias = InputVector<float32>("convBias");     // [3]
-        var deconvBias = InputVector<float32>("deconvBias"); // [2]
-        var a = InputTensor<float32>("a", rank: 2);          // [4,4]
-        var b = InputTensor<float32>("b", rank: 2);          // [4,4]
-        var scale = InputVector<float32>("scale");           // [2]
-        var bias = InputVector<float32>("bias");             // [2]
-        var mean = InputVector<float32>("mean");             // [2]
-        var variance = InputVector<float32>("variance");     // [2]
-        var v = InputVector<float32>("v");                   // [6]
+        var x = InputTensor<float32>("x", rank: 4);
+        var w = InputTensor<float32>("w", rank: 4);
+        var convBias = InputVector<float32>("convBias");
+        var deconvBias = InputVector<float32>("deconvBias");
+        var a = InputTensor<float32>("a", rank: 2);
+        var b = InputTensor<float32>("b", rank: 2);
+        var scale = InputVector<float32>("scale");
+        var bias = InputVector<float32>("bias");
+        var mean = InputVector<float32>("mean");
+        var variance = InputVector<float32>("variance");
+        var v = InputVector<float32>("v");
 
         var conv = OnnxOp.Conv(x, w, convBias, AutoPad.NotSet,
             dilations: [1L, 1L], group: 1, kernelShape: [3L, 3L], pads: [1L, 1L, 1L, 1L], strides: [1L, 1L]);
@@ -123,18 +105,18 @@ public class AutoDiffCheckpointingCoverageTests
         var lrn = OnnxOp.Lrn(x, size: 3);
         var det = OnnxOp.Det(a);
         var (topVals, topIdx) = OnnxOp.TopK(v, OnnxOp.Constant((long[])[2L]), axis: -1, largest: true, sorted: true);
-        var resized = OnnxOp.Resize(x, null, OnnxOp.Constant(new float[] { 1f, 1f, 2f, 2f }), null,
+        var resized = OnnxOp.Resize(x, null, OnnxOp.Constant((float[])[1f, 1f, 2f, 2f]), null,
             antialias: null, axes: null, coordinateTransformationMode: null, cubicCoeffA: null,
             excludeOutside: null, extrapolationValue: null, keepAspectRatioPolicy: null,
             mode: null, nearestMode: null);
         var randomLike = OnnxOp.RandomNormalLike(x, seed: 11f);
 
-        var graph = new InternalComputationGraph(
+        var perfGraph = new InternalComputationGraph(
             [x, w, convBias, deconvBias, a, b, scale, bias, mean, variance, v],
             [conv, deconv, gemm, einsum, maxPool, avgPool, globalLp, globalMax, globalAvg,
              bn, lrn, det, topVals, topIdx, resized, randomLike]);
 
-        var shapeInfo = new ShapeInferenceInterpreter(CpuContext).Infer(graph,
+        var perfShapeInfo = new ShapeInferenceInterpreter(CpuContext).Infer(perfGraph,
             Globals.TensorDataWithSmallVals(DType.Float32, [1, 2, 8, 8]),
             Globals.TensorDataWithSmallVals(DType.Float32, [3, 2, 3, 3]),
             Globals.TensorDataWithSmallVals(DType.Float32, [3]),
@@ -146,18 +128,15 @@ public class AutoDiffCheckpointingCoverageTests
             Globals.TensorDataWithSmallVals(DType.Float32, [2]),
             Globals.TensorDataWithSmallVals(DType.Float32, [2]),
             Globals.TensorDataWithSmallVals(DType.Float32, [6]));
-        Assert.True(shapeInfo.TensorCount > 0);
+        Assert.True(perfShapeInfo.TensorCount > 0);
 
-        var eval = new GraphEvaluator().Evaluate(graph, shapeInfo);
-        Assert.True(eval.TotalComputeTime > 0);
-        Assert.True(eval.PeakMemoryBytes > 0);
+        var perfEval = new GraphEvaluator().Evaluate(perfGraph, perfShapeInfo);
+        Assert.True(perfEval.TotalComputeTime > 0);
+        Assert.True(perfEval.PeakMemoryBytes > 0);
     }
 
-    /// <summary>
-    /// QuickOp stub whose Compute always throws, so QEE writes Invalid placeholders for
-    /// the op's outputs and <see cref="ShapeInferenceInterpreter"/> must fall back to
-    /// per-node ONNX Runtime execution for them.
-    /// </summary>
+    /// <summary>QuickOp stub whose Compute always throws, forcing QEE to write Invalid
+    /// placeholders so <see cref="ShapeInferenceInterpreter"/> falls back to ORT.</summary>
     private sealed class QeeFailStub : QuickOp
     {
         private readonly string _opCode;
@@ -167,23 +146,17 @@ public class AutoDiffCheckpointingCoverageTests
             => throw new InvalidOperationException("forced QEE failure for ORT-fallback coverage");
     }
 
-    /// <summary>
-    /// Drives <see cref="ShapeInferenceInterpreter"/>'s ORT fallback chain
-    /// (FallbackResolveNode → ProcessConstant / ExecuteNode, including the
-    /// SEQUENCE_CONSTRUCT multi-output wrap and its mixed-dtype retry) by replacing the QEE
-    /// handlers for Det / TopK / Constant with always-throwing stubs on this thread only.
-    /// </summary>
     [Fact]
-    public void TestShapeInferenceOrtFallbackCoverage()
+    public void TestShapeInferenceOrtFallbackResolvesDetTopKAndConstantCoverage()
     {
-        var x = InputTensor<float32>("x", rank: 2);  // [3,3]
-        var v = InputVector<float32>("v");           // [6]
+        var x = InputTensor<float32>("x", rank: 2);
+        var v = InputVector<float32>("v");
 
         var det = OnnxOp.Det(x);
         var (topVals, topIdx) = OnnxOp.TopK(v, OnnxOp.Constant((long[])[2L]), axis: -1, largest: true, sorted: true);
-        var constTensor = OnnxOp.Constant(Globals.TensorData(DType.Float32, [2L], 5f, 6f)); // value (tensor) branch
-        var constInt = OnnxOp.Constant(7L);    // value_int branch
-        var constFloat = OnnxOp.Constant(2.5f); // value_float branch
+        var constTensor = OnnxOp.Constant(Globals.TensorData(DType.Float32, [2L], 5f, 6f));
+        var constInt = OnnxOp.Constant(7L);
+        var constFloat = OnnxOp.Constant(2.5f);
 
         var graph = new InternalComputationGraph(
             [x, v],
@@ -200,25 +173,21 @@ public class AutoDiffCheckpointingCoverageTests
                 Globals.TensorDataWithSmallVals(DType.Float32, [6]));
         }
 
-        // Det: single-output ORT fallback (no sequence wrap) — scalar result.
         var detInfo = shapeInfo.GetTensorInfo(graph.Outputs[0]);
         Assert.NotNull(detInfo);
         Assert.Empty(detInfo!.Shape.Dims);
 
-        // TopK: two mixed-dtype outputs — the sequence wrap is rejected by ORT and the
-        // direct-outputs retry resolves both values and indices.
         var valsInfo = shapeInfo.GetTensorInfo(graph.Outputs[1]);
         var idxInfo = shapeInfo.GetTensorInfo(graph.Outputs[2]);
         Assert.NotNull(valsInfo);
         Assert.NotNull(idxInfo);
-        Assert.Equal(new long[] { 2 }, valsInfo!.Shape.Dims);
-        Assert.Equal(new long[] { 2 }, idxInfo!.Shape.Dims);
+        Assert.Equal((long[])[2], valsInfo!.Shape.Dims);
+        Assert.Equal((long[])[2], idxInfo!.Shape.Dims);
         Assert.Equal(DType.Int64, idxInfo.DType);
 
-        // Constants resolved via ProcessConstant's tensor / value_int / value_float branches.
         var tensorConstInfo = shapeInfo.GetTensorInfo(graph.Outputs[3]);
         Assert.NotNull(tensorConstInfo);
-        Assert.Equal(new long[] { 2 }, tensorConstInfo!.Shape.Dims);
+        Assert.Equal((long[])[2], tensorConstInfo!.Shape.Dims);
         var intConstInfo = shapeInfo.GetTensorInfo(graph.Outputs[4]);
         Assert.NotNull(intConstInfo);
         Assert.Equal(DType.Int64, intConstInfo!.DType);

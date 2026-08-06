@@ -190,14 +190,24 @@ internal abstract class CompareOp : QuickOp
 internal abstract class ReduceOpBase : QuickOp
 {
     protected abstract float Reduce(IEnumerable<float> values);
-    protected virtual long ReduceInt(IEnumerable<long> values) => (long)Reduce(values.Select(v => (float)v));
+
+    /// <summary>
+    /// The integer accumulator. <paramref name="dtype"/> carries the operand's declared width,
+    /// which an accumulator needs only when it applies a step that does not commute with
+    /// truncation to that width — see <see cref="IntSemantics.NarrowToWidth"/>. Sum, Prod,
+    /// SumSquare and L1 accumulate through +, - and * alone, so they can ignore it and let the
+    /// op's tail narrow the result.
+    /// </summary>
+    protected virtual long ReduceInt(IEnumerable<long> values, DType dtype)
+        => (long)Reduce(values.Select(v => (float)v));
 
     /// <summary>
     /// The unsigned-dtype path. Like <see cref="ReduceInt"/> it defaults to the float
     /// accumulator, but converts from the lane's true magnitude rather than its signed
     /// reinterpretation. Subclasses with an exact integer accumulator override both.
     /// </summary>
-    protected virtual ulong ReduceUInt(IEnumerable<ulong> values) => (ulong)Reduce(values.Select(v => (float)v));
+    protected virtual ulong ReduceUInt(IEnumerable<ulong> values, DType dtype)
+        => (ulong)Reduce(values.Select(v => (float)v));
 
     protected override RuntimeTensor[] Compute(RuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
     {
@@ -289,8 +299,8 @@ internal abstract class ReduceOpBase : QuickOp
             {
                 var group = EnumerateGroup(idata, srcBase, axisShape, axisStrides);
                 return unsigned
-                    ? IntSemantics.S(ReduceUInt(group.Select(IntSemantics.U)))
-                    : ReduceInt(group);
+                    ? IntSemantics.S(ReduceUInt(group.Select(IntSemantics.U), x.DType))
+                    : ReduceInt(group, x.DType);
             }, outBuf);
             return [rt with { IntData = ImmutableArray.Create(outBuf) }];
         }
@@ -303,7 +313,7 @@ internal abstract class ReduceOpBase : QuickOp
             var outBuf = new bool[keptCount];
             ReduceInto(inDims, inStrides, axisSet, keptCount, (long srcBase, int[] axisShape, long[] axisStrides) =>
             {
-                return ReduceInt(EnumerateGroup(idataFromBool, srcBase, axisShape, axisStrides)) != 0;
+                return ReduceInt(EnumerateGroup(idataFromBool, srcBase, axisShape, axisStrides), DType.Int64) != 0;
             }, outBuf);
             return [rt with { BoolData = ImmutableArray.Create(outBuf) }];
         }

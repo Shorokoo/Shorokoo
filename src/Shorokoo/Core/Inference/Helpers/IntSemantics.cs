@@ -37,6 +37,34 @@ internal static class IntSemantics
     public static IComparer<long> Comparer(bool unsigned)
         => unsigned ? UnsignedComparer.Instance : System.Collections.Generic.Comparer<long>.Default;
 
+    /// <summary>
+    /// The truncation to <paramref name="dtype"/>'s declared width, or null for the widths that
+    /// are the buffer's own (Int64/UInt64) and the non-integer dtypes. Single definition of
+    /// "declared width", shared by the per-op narrowing tail
+    /// (<see cref="RuntimeTensorFactory.NarrowToDeclaredWidth(RuntimeTensor)"/>) and by the
+    /// kernels that must re-enter the width mid-computation.
+    /// </summary>
+    public static Func<long, long>? Narrower(DType dtype)
+    {
+        if (dtype == DType.Int32) return v => unchecked((int)v);
+        if (dtype == DType.Int16) return v => unchecked((short)v);
+        if (dtype == DType.Int8) return v => unchecked((sbyte)v);
+        if (dtype == DType.UInt32) return v => unchecked((uint)v);
+        if (dtype == DType.UInt16) return v => unchecked((ushort)v);
+        if (dtype == DType.UInt8) return v => unchecked((byte)v);
+        return null;
+    }
+
+    /// <summary>
+    /// Truncates a single value to <paramref name="dtype"/>'s declared width. Needed wherever a
+    /// kernel applies an operation that does <em>not</em> commute with that truncation — division
+    /// and ordering — to an intermediate it computed itself in the 64-bit buffer. Addition,
+    /// subtraction and multiplication do commute, so they can overflow freely and let the op's
+    /// tail narrow the result.
+    /// </summary>
+    public static long NarrowToWidth(DType dtype, long value)
+        => Narrower(dtype) is { } narrow ? narrow(value) : value;
+
     private sealed class UnsignedComparer : IComparer<long>
     {
         public static readonly UnsignedComparer Instance = new();

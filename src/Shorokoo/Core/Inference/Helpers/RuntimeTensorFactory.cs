@@ -98,15 +98,7 @@ internal static class RuntimeTensorFactory
     {
         if (rt.IntData is not { } d || d.Length == 0) return rt;
 
-        System.Func<long, long>? narrow = null;
-        var t = rt.DType;
-        if (t == DType.Int32) narrow = v => unchecked((int)v);
-        else if (t == DType.Int16) narrow = v => unchecked((short)v);
-        else if (t == DType.Int8) narrow = v => unchecked((sbyte)v);
-        else if (t == DType.UInt32) narrow = v => unchecked((uint)v);
-        else if (t == DType.UInt16) narrow = v => unchecked((ushort)v);
-        else if (t == DType.UInt8) narrow = v => unchecked((byte)v);
-        if (narrow is null) return rt;
+        if (IntSemantics.Narrower(rt.DType) is not { } narrow) return rt;
 
         long[]? buf = null;
         for (int i = 0; i < d.Length; i++)

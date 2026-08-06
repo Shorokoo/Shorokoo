@@ -303,15 +303,26 @@ public class QeeIntegerWidthTests
         Qee<QeeU64ToFloatAndBack>(DType.UInt64, 4611686018427387904, 2);
     }
 
-    // FAILING: QEE accumulates a reduction in the 64-bit buffer and narrows only at the op's tail.
-    // That is exact for Sum/Prod/SumSquare — truncation commutes with +, -, * — but not for Mean,
-    // whose divide lands on an accumulator that has already left the declared width, so the folded
-    // constant disagrees with what the backend computes for the same graph.
+    // Mean is the one reduction whose accumulator must re-enter the declared width before the
+    // final step: truncation commutes with the sum but not with the divide. int64 has no narrower
+    // width to re-enter, so it guards the other direction — that the narrowing is not applied there.
     [Fact]
     public void TestFoldedIntegerReduceMeanMatchesTheBackend()
     {
-        var vals = TensorData(DType.Int32, [2L], 2147483647, 2147483647);
-        Assert.Equal(Backend<QeeI32ReduceMeanRuntime>(vals), Folded<QeeI32ReduceMeanFolded>(DType.Int32));
+        Assert.Equal(Backend<QeeI32ReduceMeanRuntime>(TensorData(DType.Int32, [2L], 2147483647, 2147483647)),
+                     Folded<QeeI32ReduceMeanFolded>(DType.Int32));
+        Assert.Equal(-1L, Backend<QeeI64ReduceMeanRuntime>(TensorData(DType.Int64, [2L], long.MaxValue, long.MaxValue)));
+        Qee<QeeI64ReduceMeanFolded>(DType.Int64, unchecked((ulong)-1L));
+    }
+
+    // The widths ONNX's Mean type constraint rejects, so there is no backend to compare against —
+    // the declared-width rule is what keeps them self-consistent. Sums overflow every width here.
+    [Fact]
+    public void TestFoldedNarrowReduceMeanStaysInTheDeclaredWidth()
+    {
+        Qee<QeeU8ReduceMeanFolded>(DType.UInt8, 127);
+        Qee<QeeI8ReduceMeanFolded>(DType.Int8, unchecked((ulong)-1L));
+        Qee<QeeU16ReduceMeanFolded>(DType.UInt16, 32767);
     }
 
     // The width-boundary cases where folding and the backend must agree: +, -, * and Sum all
@@ -341,9 +352,12 @@ public class QeeIntegerWidthTests
             .GetProperty("ComputationGraph", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!).ToInternal();
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([.. inputs])).ToConcreteModel();
         var outData = ComputeContext.Default.Execute(concrete, inputs)[0].ToTensorData();
-        return outData.DType == DType.UInt32
-            ? outData.As<uint32>().AccessMemory().ToArray()[0]
-            : outData.As<int32>().AccessMemory().ToArray()[0];
+        return outData.DType switch
+        {
+            var d when d == DType.UInt32 => outData.As<uint32>().AccessMemory().ToArray()[0],
+            var d when d == DType.Int64 => outData.As<int64>().AccessMemory().ToArray()[0],
+            _ => outData.As<int32>().AccessMemory().ToArray()[0],
+        };
     }
 
     private static long Folded<TModule>(DType dtype)
@@ -644,3 +658,20 @@ public class QeeUInt64SignedOperatorTests
 [Module] public partial class QeeU32AddThenDivRuntime {
     public static Tensor<uint32> Inline(Tensor<uint32> a, Tensor<uint32> b, Tensor<uint32> c)
         => OnnxOp.Div(a + b, c).uint32(); }
+
+// Mean at the widths the declared-width rule has to reach.
+// Consumed by TestFoldedIntegerReduceMeanMatchesTheBackend / …StaysInTheDeclaredWidth.
+
+[Module] public partial class QeeI64ReduceMeanFolded { public static Tensor<int64> Inline()
+    => Vector(9223372036854775807L, 9223372036854775807L).Reduce(ReduceKind.Mean); }
+[Module] public partial class QeeI64ReduceMeanRuntime { public static Tensor<int64> Inline(Tensor<int64> v)
+    => v.Reduce(ReduceKind.Mean, null, true); }
+
+[Module] public partial class QeeU8ReduceMeanFolded { public static Tensor<uint8> Inline()
+    => Vector(255u, 255u).Cast<uint8>().Reduce(ReduceKind.Mean); }
+
+[Module] public partial class QeeI8ReduceMeanFolded { public static Tensor<int8> Inline()
+    => Vector(127, 127).Cast<int8>().Reduce(ReduceKind.Mean); }
+
+[Module] public partial class QeeU16ReduceMeanFolded { public static Tensor<uint16> Inline()
+    => Vector(65535u, 65535u).Cast<uint16>().Reduce(ReduceKind.Mean); }

@@ -9,6 +9,6 @@ internal sealed class ReduceMaxOp : ReduceOpBase
 {
     public override string OpCode => OpCodes.REDUCE_MAX;
     protected override float Reduce(IEnumerable<float> values) => values.Max();
-    protected override long ReduceInt(IEnumerable<long> values) => values.Max();
-    protected override ulong ReduceUInt(IEnumerable<ulong> values) => values.Max();
+    protected override long ReduceInt(IEnumerable<long> values, DType dtype) => values.Max();
+    protected override ulong ReduceUInt(IEnumerable<ulong> values, DType dtype) => values.Max();
 }

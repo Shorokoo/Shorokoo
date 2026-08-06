@@ -329,6 +329,10 @@ public class QeeIntegerWidthTests
         Assert.Equal(Backend<QeeU32MulRuntime>(U32(65536), U32(65536)), Folded<QeeU32MulFolded>(DType.UInt32));
         Assert.Equal(Backend<QeeI32ReduceSumRuntime>(TensorData(DType.Int32, [2L], 2147483647, 2147483647)),
                      Folded<QeeI32ReduceSumFolded>(DType.Int32));
+        Assert.Equal(Backend<QeeI32AddThenDivRuntime>(I32(2147483647), I32(1), I32(5)),
+                     Folded<QeeI32AddThenDivFolded>(DType.Int32));
+        Assert.Equal(Backend<QeeU32AddThenDivRuntime>(U32(4294967295), U32(2), U32(5)),
+                     Folded<QeeU32AddThenDivFolded>(DType.UInt32));
     }
 
     private static long Backend<TModule>(params TensorData[] inputs)
@@ -624,3 +628,19 @@ public class QeeUInt64SignedOperatorTests
 [Module] public partial class QeeU32MulFolded { public static Tensor<uint32> Inline(Tensor<float32> x)
     => RuntimeU32(x) * (Vector(65536u) * Vector(65536u)); }
 [Module] public partial class QeeU32MulRuntime { public static Tensor<uint32> Inline(Tensor<uint32> a, Tensor<uint32> b) => a * b; }
+
+// An add that overflows the declared width feeding a divide. Two ops, so the narrowing tail runs
+// between them and the divide sees the wrapped value.
+// Consumed by TestFoldedIntegerArithmeticMatchesTheBackend.
+
+[Module] public partial class QeeI32AddThenDivFolded { public static Tensor<int32> Inline(Tensor<float32> x)
+    => Runtime32(x) * OnnxOp.Div(Vector(2147483647) + Vector(1), Vector(5)).int32(); }
+[Module] public partial class QeeI32AddThenDivRuntime {
+    public static Tensor<int32> Inline(Tensor<int32> a, Tensor<int32> b, Tensor<int32> c)
+        => OnnxOp.Div(a + b, c).int32(); }
+
+[Module] public partial class QeeU32AddThenDivFolded { public static Tensor<uint32> Inline(Tensor<float32> x)
+    => RuntimeU32(x) * OnnxOp.Div(Vector(4294967295u) + Vector(2u), Vector(5u)).uint32(); }
+[Module] public partial class QeeU32AddThenDivRuntime {
+    public static Tensor<uint32> Inline(Tensor<uint32> a, Tensor<uint32> b, Tensor<uint32> c)
+        => OnnxOp.Div(a + b, c).uint32(); }

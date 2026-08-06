@@ -168,23 +168,57 @@ internal static class RuntimeRng
         return Pack(x0, x1).Vec();
     }
 
-    /// <summary>Standard uniform U(0,1) of the given shape (bit generator: Threefry-2x32-<paramref name="rounds"/>).</summary>
-    public static Tensor<float32> StandardUniform(
-        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
+    // ── Packing ─────────────────────────────────────────────────────────────────────────
+    // A position costs one bijection and yields 64 bits, and the two words are inseparable —
+    // Threefry's rounds feed x0 and x1 through each other, so x1 is already computed by the
+    // time x0 exists and discarding it saves nothing. Every consumer therefore takes as many
+    // elements from a position as its element width allows: E = 64/W lanes, low lane first,
+    // so element i is bits [i*W, (i+1)*W) of the draw's bit stream. The counter is a linear
+    // index into that stream rather than resumable state, so this is only a choice of the
+    // elements-per-position ratio; every bit the generator produces is equidistributed, so a
+    // lane is as uniform as the whole value.
+
+    /// <summary>
+    /// <c>prod(shape)</c> lanes of <paramref name="width"/> bits, packed E = 64/<paramref
+    /// name="width"/> per generator value, each carrying its value in the low bits (whatever
+    /// rides above is the caller's to mask or narrow away).
+    /// </summary>
+    private static Vector<uint64> PackedLanes(
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int width, int rounds)
     {
-        return ToUniform(Draw(ElementCount(shape), key, substreamIndex, rounds)).Reshape(shape);
+        long lanes = 64 / width;
+        Scalar<int64> n = ElementCount(shape);
+        var v = Draw((n + Scalar(lanes - 1)) / Scalar(lanes), key, substreamIndex, rounds);   // [ceil(N/E)]
+
+        // The [M,1] values against the [E] lane offsets broadcast to [M,E], whose row-major
+        // flatten lands lane l of value j at element j*E + l — the low-lane-first convention.
+        var perLane = ShiftDown(v.Reshape(Vector(-1L, 1L)), VectorRange(0UL, 64UL, (ulong)width));
+        return perLane.Reshape(Vector(-1L)).Vec().Slice(Scalar(0L), n);
     }
 
-    /// <summary>Standard normal N(0,1) of the given shape (per-element Box–Muller over Threefry-2x32-<paramref name="rounds"/>).</summary>
+    /// <summary>Standard uniform U(0,1) of the given shape (bit generator: Threefry-2x32-<paramref name="rounds"/>).
+    /// A uniform keeps 24 bits, so two fit in a position's 64 — one per 32-bit lane.</summary>
+    public static Tensor<float32> StandardUniform(
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
+        => ToUniform(PackedLanes(shape, key, substreamIndex, 32, rounds)).Reshape(shape);
+
+    /// <summary>Standard normal N(0,1) of the given shape (Box–Muller over Threefry-2x32-<paramref name="rounds"/>).
+    /// Box–Muller turns a position's two uniforms into a <em>pair</em> of independent normals — the
+    /// cosine and sine arms — so a position yields two elements: element 2j is the cosine arm of
+    /// position j and element 2j+1 the sine arm.</summary>
     public static Tensor<float32> StandardNormal(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
     {
-        var v = Draw(ElementCount(shape), key, substreamIndex, rounds);
+        Scalar<int64> n = ElementCount(shape);
+        var v = Draw((n + Scalar(1L)) / Scalar(2L), key, substreamIndex, rounds);   // [ceil(N/2)]
         var u1 = ToUniform(v);                                  // low 32-bit lane
         var u2 = ToUniform(ShiftDown(v, Scalar(32UL)));         // high 32-bit lane
         var radius = ((-u1 + Scalar(1.0f)).Ln() * Scalar(-2.0f)).Sqrt();   // √(−2·ln(1−u₁))
         var theta = u2 * Scalar(2.0f * System.MathF.PI);
-        return (radius * theta.Cos()).Reshape(shape);
+
+        var arms = (radius * theta.Cos()).Reshape(Vector(-1L, 1L))
+            .Concat(1, (radius * theta.Sin()).Reshape(Vector(-1L, 1L)));   // [M,2]
+        return arms.Reshape(Vector(-1L)).Vec().Slice(Scalar(0L), n).Reshape(shape);
     }
 
     /// <summary>U(low, high) of the given shape.</summary>
@@ -200,47 +234,24 @@ internal static class RuntimeRng
         => StandardNormal(shape, key, substreamIndex, rounds) * scale + mean;
 
     // ── Raw random bits ─────────────────────────────────────────────────────────────────
-    // A position yields 64 bits and raw bits want all of them, so every width below U64 PACKS:
-    // E = 64/W elements ride each generator value, low lane first — element i is bits
-    // [i*W, (i+1)*W) of the draw's bit stream. A draw of N elements costs ceil(N/E) generator
-    // evaluations: N/8 for U8, N/4 for U16, N/2 for U32. U64 is one whole value per element and
-    // has nothing to pack. The counter is a linear index into the output stream and not
-    // resumable state, so packing is only a change of the elements-per-position ratio from 1:1
-    // to E:1; every bit the generator produces is equidistributed, so a lane is as uniform as
-    // the whole value.
-
-    /// <summary>
-    /// <c>prod(shape)</c> elements of raw <paramref name="width"/>-bit bits packed
-    /// E = 64/<paramref name="width"/> per generator value, as uint64 lanes carrying their value
-    /// in the low bits (the caller's narrowing cast drops the rest).
-    /// </summary>
-    private static Vector<uint64> PackedBits(
-        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int width, int rounds)
-    {
-        long lanes = 64 / width;
-        Scalar<int64> n = ElementCount(shape);
-        var v = Draw((n + Scalar(lanes - 1)) / Scalar(lanes), key, substreamIndex, rounds);   // [ceil(N/E)]
-
-        // The [M,1] values against the [E] lane offsets broadcast to [M,E], whose row-major
-        // flatten lands lane l of value j at element j*E + l — the low-lane-first convention.
-        var perLane = ShiftDown(v.Reshape(Vector(-1L, 1L)), VectorRange(0UL, 64UL, (ulong)width));
-        return perLane.Reshape(Vector(-1L)).Vec().Slice(Scalar(0L), n);
-    }
+    // Raw bits are lanes straight out of the packing above, narrowed to the requested width:
+    // N/8 positions for U8, N/4 for U16, N/2 for U32. U64 is one whole value per element and
+    // has nothing to pack.
 
     /// <summary>Raw uniform bits, U8 (8 elements packed per generator value), of the given shape.</summary>
     public static Tensor<uint8> BitsU8(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
-        => PackedBits(shape, key, substreamIndex, 8, rounds).Cast<uint8>().Reshape(shape);
+        => PackedLanes(shape, key, substreamIndex, 8, rounds).Cast<uint8>().Reshape(shape);
 
     /// <summary>Raw uniform bits, U16 (4 elements packed per generator value), of the given shape.</summary>
     public static Tensor<uint16> BitsU16(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
-        => PackedBits(shape, key, substreamIndex, 16, rounds).Cast<uint16>().Reshape(shape);
+        => PackedLanes(shape, key, substreamIndex, 16, rounds).Cast<uint16>().Reshape(shape);
 
     /// <summary>Raw uniform bits, U32 (2 elements packed per generator value), of the given shape.</summary>
     public static Tensor<uint32> BitsU32(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
-        => PackedBits(shape, key, substreamIndex, 32, rounds).Cast<uint32>().Reshape(shape);
+        => PackedLanes(shape, key, substreamIndex, 32, rounds).Cast<uint32>().Reshape(shape);
 
     /// <summary>Raw uniform bits, U64 (one whole generator value per element), of the given shape.</summary>
     public static Tensor<uint64> BitsU64(

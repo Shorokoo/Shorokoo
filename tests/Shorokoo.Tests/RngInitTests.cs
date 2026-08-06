@@ -208,8 +208,8 @@ public class RngInitFrozenDerivationTests
         // Layer 2: the full materialized values (counter scheme, rounds, uniform transform,
         // substreamIndex ordinal, initializer scaling). REFERENCE: golden. Exact equality is
         // safe cross-backend — Threefry integer ops plus IEEE-exact float multiply/add.
-        float[] expected0 = [-1.1163274f, 1.1247115f, -0.20118715f, -0.8630716f, 0.12048453f, 0.73705673f, -0.38930926f, -0.9366948f, 0.7735388f, -0.49744576f, -0.60573745f, -0.41470495f, -1.003003f, 0.19222532f, 0.8099788f, 0.49284714f];
-        float[] expected1 = [-0.88179505f, 0.22158815f, 0.46890008f, 1.0455909f, -1.1027482f, 0.91218925f, -0.5450415f, 0.36076564f, -0.54581296f, 0.6172559f, -0.40583524f, 0.3620881f, -0.5337995f, -0.24915563f, 1.085321f, 0.67871165f];
+        float[] expected0 = [-1.1163274f, -1.0427806f, 1.1247115f, 1.122655f, -0.20118715f, 0.31345984f, -0.8630716f, -0.211842f, 0.12048453f, 0.16257894f, 0.73705673f, -0.79936993f, -0.38930926f, 1.0228006f, -0.9366948f, 0.4855287f];
+        float[] expected1 = [-0.88179505f, -0.3804724f, 0.22158815f, 0.11840518f, 0.46890008f, -0.49590558f, 1.0455909f, -0.3013879f, -1.1027482f, -0.85744005f, 0.91218925f, 0.97619444f, -0.5450415f, 0.38157165f, 0.36076564f, 1.0169905f];
 
         var g = RngInitTwoLinears.ComputationGraph;
         var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
@@ -225,7 +225,7 @@ public class RngInitFrozenDerivationTests
         // key and are separated only by their substreamIndex ordinal — this golden pins that
         // ordinal assignment, which the relational assertions above cannot see.
         float[] multiDraw =
-        [0.12127531f, 0.08646331f, 0.35760066f, 0.03610372f, 0.19694349f, 0.22681566f, 0.009163281f, 0.6841878f, 0.2204708f, 0.16420957f, 0.2884086f, 0.12671219f, 0.017829021f, 0.27713433f, 0.15357554f, 0.040258627f];
+        [0.12127531f, 0.1524629f, 0.045944285f, 0.3500487f, 0.71740365f, 0.61752975f, 0.025424859f, 0.44749263f, 0.1510541f, 0.5826684f, 0.14533761f, 0.09279725f, 0.0006900568f, 0.32372388f, 0.3375456f, 0.057386715f];
 
         var mg = BitsIntermediateTrainableLayer.ComputationGraph;
         var w = mg.ToConcreteArchitecture(mg.FromOrderedInputs([sample]))
@@ -371,10 +371,10 @@ public class RngNormalFrozenDerivationTests
     public void TestNormalInitAndDrawValuesAreFrozen()
     {
         // REFERENCE: golden — generated once from the implementation that defines the convention.
-        float[] init20 = [0.12544397f, 0.2957119f, 1.614189f, -0.22173794f, -0.23703626f, -0.64295983f, -0.1786294f, -1.4764216f, 0.15099204f, -0.019193964f, -0.21473941f, 1.033891f, 1.3871936f, 0.59315336f, -0.41766375f, 0.006978817f];
-        float[] feed20 = [-0.2854576f, -1.0614587f, 0.69347787f, 1.1629281f, -0.63950145f, 1.7594889f, 1.6418929f, -2.4083176f, 0.79176825f, -0.48223278f, 0.48083737f, 0.38064465f, -0.3447332f, 0.0259849f, 0.062860526f, -0.43736157f];
-        float[] init13 = [0.10458848f, -1.9170773f, 0.12625404f, 0.056145065f, -1.4316688f, -0.37182125f, 0.019850086f, 0.9272645f, -1.0287207f, 1.1623243f, -0.9364095f, 0.21012756f, 0.55460495f, -0.6630122f, 0.30105424f, -0.8519283f];
-        float[] feed13 = [-0.2670085f, -0.9534051f, 0.28634885f, 0.93654203f, 0.9747834f, -0.14879523f, -1.5747236f, 0.99790245f, -1.1938162f, 0.9022896f, -0.8663206f, 0.3107173f, 1.0289081f, 1.3187166f, 0.5506851f, -0.7555348f];
+        float[] init20 = [0.12544397f, 0.59807384f, 0.2957119f, -0.20960884f, 1.614189f, -0.7554585f, -0.22173794f, -0.22014548f, -0.23703626f, -0.49906766f, -0.64295983f, 0.06861053f, -0.1786294f, -0.046800803f, -1.4764216f, -0.9564582f];
+        float[] feed20 = [-0.2854576f, 0.65583193f, -1.0614587f, -0.03878308f, 0.69347787f, 0.8564616f, 1.1629281f, -0.8222845f, -0.63950145f, -1.1571254f, 1.7594889f, -0.15773669f, 1.6418929f, -0.7435761f, -2.4083176f, 0.3980155f];
+        float[] init13 = [0.10458848f, 0.055649098f, -1.9170773f, 0.26574802f, 0.12625404f, 0.60822326f, 0.056145065f, -0.33660004f, -1.4316688f, 0.20787944f, -0.37182125f, 0.027622167f, 0.019850086f, 0.10199225f, 0.9272645f, 0.32426614f];
+        float[] feed13 = [-0.2670085f, 0.89447904f, -0.9534051f, -0.477906f, 0.28634885f, 1.2033268f, 0.93654203f, 0.35694414f, 0.9747834f, -1.1445638f, -0.14879523f, 0.6172115f, -1.5747236f, 0.3697578f, 0.99790245f, -0.7079824f];
 
         var (i20, f20) = Run(new RngConfig { MasterSeed = 123 });
         var (i13, f13) = Run(new RngConfig { MasterSeed = 123, Algorithm = RngAlgorithm.Threefry2x32Rounds13 });

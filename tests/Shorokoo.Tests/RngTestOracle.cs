@@ -58,24 +58,43 @@ internal static class RngTestOracle
         return x0 | ((ulong)x1 << 32);
     }
 
-    /// <summary>Element <paramref name="i"/> of a standard-uniform draw: the low 32-bit lane's low
-    /// 24 bits × 2⁻²⁴, one position per element.</summary>
-    public static float DrawUniform(
-        ulong key, ulong substreamIndex, long i, int rounds = Threefry2x32.Rounds)
-        => (DrawValue(key, substreamIndex, i, rounds) & 0x00FFFFFFuL) * (1.0f / 16777216.0f);
-
     /// <summary>
-    /// Element <paramref name="i"/> of a raw-bits draw of the given uint width. E = 64/W elements
-    /// pack into each generator value, low lane first, so element <c>i</c> is lane <c>i % E</c> of
-    /// the value at position <c>i / E</c> — which degenerates to one whole value per element at
-    /// U64.
+    /// Lane <paramref name="i"/> of a draw cut into <paramref name="width"/>-bit lanes: E = 64/W
+    /// lanes pack into each generator value, low lane first, so lane <c>i</c> is bits
+    /// <c>[i*W, (i+1)*W)</c> of the stream — the value at position <c>i / E</c>, shifted down by
+    /// <c>(i % E) * W</c>. Degenerates to one whole value per element at W = 64.
     /// </summary>
-    public static ulong DrawBits(
+    public static ulong DrawLane(
         ulong key, ulong substreamIndex, long i, int width, int rounds = Threefry2x32.Rounds)
     {
         if (width is not (8 or 16 or 32 or 64)) throw new System.ArgumentOutOfRangeException(nameof(width));
         long lanes = 64 / width;
         return (DrawValue(key, substreamIndex, i / lanes, rounds) >> (int)(i % lanes) * width)
                & (ulong.MaxValue >> (64 - width));
+    }
+
+    /// <summary>Element <paramref name="i"/> of a raw-bits draw of the given uint width.</summary>
+    public static ulong DrawBits(
+        ulong key, ulong substreamIndex, long i, int width, int rounds = Threefry2x32.Rounds)
+        => DrawLane(key, substreamIndex, i, width, rounds);
+
+    /// <summary>Element <paramref name="i"/> of a standard-uniform draw: a 32-bit lane's low 24
+    /// bits × 2⁻²⁴, so two uniforms come out of each generator value.</summary>
+    public static float DrawUniform(
+        ulong key, ulong substreamIndex, long i, int rounds = Threefry2x32.Rounds)
+        => (DrawLane(key, substreamIndex, i, 32, rounds) & 0x00FFFFFFuL) * (1.0f / 16777216.0f);
+
+    /// <summary>Element <paramref name="i"/> of a standard-normal draw. Box–Muller turns the two
+    /// uniforms of position <c>i / 2</c> into a pair: even <paramref name="i"/> is the cosine arm,
+    /// odd the sine arm.</summary>
+    public static float DrawNormal(
+        ulong key, ulong substreamIndex, long i, int rounds = Threefry2x32.Rounds)
+    {
+        ulong v = DrawValue(key, substreamIndex, i / 2, rounds);
+        float u1 = (v & 0x00FFFFFFuL) * (1.0f / 16777216.0f);
+        float u2 = ((v >> 32) & 0x00FFFFFFuL) * (1.0f / 16777216.0f);
+        float radius = System.MathF.Sqrt(-2.0f * System.MathF.Log(1.0f - u1));
+        float theta = u2 * (2.0f * System.MathF.PI);
+        return radius * (i % 2 == 0 ? System.MathF.Cos(theta) : System.MathF.Sin(theta));
     }
 }

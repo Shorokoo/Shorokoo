@@ -81,18 +81,6 @@ public sealed class RngConfig
     /// <summary>The bit generator. Default <see cref="RngAlgorithm.Threefry2x32"/>.</summary>
     public RngAlgorithm Algorithm { get; init; } = RngAlgorithm.Threefry2x32;
 
-    /// <summary>
-    /// When <c>true</c>, every <b>parameter-initialization</b> stream shares one key derived
-    /// from <see cref="MasterSeed"/> alone (name-independent), so two parameters of the same
-    /// shape and distribution
-    /// receive identical values — the "tied" init that reproduces a layer's weights from a
-    /// hand-built reference. Off by default (per-parameter, name-derived keys). Useful for
-    /// closed-form reference tests and for debugging; not for real training, where distinct
-    /// parameters should differ. Note this applies to the <see cref="RngCollection.Params"/>
-    /// tier only — runtime feeds always fold along their ModelId path regardless.
-    /// </summary>
-    public bool SharedKey { get; init; }
-
     // (collection, ModelId path) -> seed. Immutable, like the config itself: Override
     // returns a copy carrying an extended dictionary.
     private readonly ImmutableDictionary<(RngCollection collection, string pathKey), ulong> _overrides
@@ -109,7 +97,6 @@ public sealed class RngConfig
         InitMasterSeed = source.InitMasterSeed;
         RunMasterSeed = source.RunMasterSeed;
         Algorithm = source.Algorithm;
-        SharedKey = source.SharedKey;
         _overrides = overrides;
     }
 
@@ -219,17 +206,16 @@ public sealed class RngConfig
     /// (see <c>FastInitKeyedDraws</c>) — no host-side Threefry — exactly as a runtime feed's
     /// chain derives its key from the <c>RngSeed</c> parameter.
     ///
-    /// <para>The two short-circuits the old host fold applied are carried here as an empty
-    /// fold path: an explicit per-stream override <b>replaces</b> the fully folded key, and
-    /// <see cref="SharedKey"/> mode skips the fold so same-shape params tie (test/debug only).
-    /// The root key is pure marshalling (<see cref="Fold"/> is a SHA-256 XOR, not RNG).</para>
+    /// <para>The short-circuit the old host fold applied is carried here as an empty fold
+    /// path: an explicit per-stream override <b>replaces</b> the fully folded key. The root
+    /// key is pure marshalling (<see cref="Fold"/> is a SHA-256 XOR, not RNG).</para>
     /// </summary>
     internal (ulong root, IReadOnlyList<int> foldPath) InitKeySpec(IEnumerable<int> modelIdVals)
     {
         var vals = modelIdVals as IReadOnlyList<int> ?? new List<int>(modelIdVals);
         if (TryGetOverride(RngCollection.Params, vals, out var overridden))
             return (overridden, []);
-        return (InitMasterKey, SharedKey ? [] : vals);
+        return (InitMasterKey, vals);
     }
 
     /// <summary>

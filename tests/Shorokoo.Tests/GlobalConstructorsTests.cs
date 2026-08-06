@@ -205,6 +205,18 @@ public partial class ScalarAndFillDispatcherModel
         acc = acc + NanAny(VectorFill(slen, 9f));
         acc = acc + NanAny(VectorFill(slen, 10.0));
 
+        // VectorRange(start, limit, delta) — 8 typed arms plus the generic Scalar<T> form.
+        // Value-checked: [0, 4) stepping 1 is [0,1,2,3], which sums to 6.
+        acc = acc + (VectorRange((sbyte)0, (sbyte)4, (sbyte)1).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(6f)).Abs();
+        acc = acc + (VectorRange((short)0, (short)4, (short)1).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(6f)).Abs();
+        acc = acc + (VectorRange(0, 4, 1).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(6f)).Abs();
+        acc = acc + (VectorRange(0L, 4L, 1L).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(6f)).Abs();
+        acc = acc + (VectorRange((byte)0, (byte)4, (byte)1).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(6f)).Abs();
+        acc = acc + (VectorRange((ushort)0, (ushort)4, (ushort)1).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(6f)).Abs();
+        acc = acc + (VectorRange(0u, 4u, 1u).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(6f)).Abs();
+        acc = acc + (VectorRange(0UL, 4UL, 1UL).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(6f)).Abs();
+        acc = acc + (VectorRange(Scalar(0f), Scalar(4f), Scalar(1f)).Reduce(ReduceKind.Sum) - Scalar(6f)).Abs();
+
         return (acc + Nan(input)) < Scalar(1e-3f);
     }
 }

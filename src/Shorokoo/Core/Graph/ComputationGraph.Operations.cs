@@ -155,11 +155,77 @@ namespace Shorokoo.Graph
         }
 
         /// <summary>
-        /// Reads the model's bound RNG identity — the <c>RngSeed</c> parameter's value (written
-        /// by <see cref="WithRngConfig"/>; carried through save/load as an ordinary initializer).
-        /// Null when the graph has no runtime random surface or no identity is bound yet.
+        /// Returns a copy of the graph with one runtime stream re-keyed to <paramref name="seed"/>,
+        /// leaving every other stream — and the model's weights — as they are. The graph-level
+        /// counterpart of <see cref="RngConfig.Override"/>, for the common case where the config
+        /// that produced the model is long gone: the override is applied on top of the bound
+        /// identity (<see cref="TryGetRngIdentity"/>) rather than a config rebuilt from scratch,
+        /// so the untouched streams keep their exact keys.
+        ///
+        /// <para>Overriding a stream that is already overridden replaces its key; that, like a
+        /// master-key change, is a pure parameter write. Adding or removing an override re-wires
+        /// the derivation chains, which a loaded model whose draws are already lowered refuses
+        /// (loudly) — rebuild from the architecture to change which streams are overridden.</para>
         /// </summary>
-        public ulong[]? TryGetRngSeed() => ToInternal().TryGetRngSeed();
+        /// <param name="collection">Must be <see cref="RngCollection.Runtime"/>: a model records
+        /// no <see cref="RngCollection.Params"/> identity to override (see <see cref="RngIdentity"/>).</param>
+        /// <param name="modelIdPath">The stream's absolute ModelId path, as listed by
+        /// <see cref="GetRngStreamReport"/>. One that addresses no runtime stream throws.</param>
+        /// <param name="seed">The key to install, replacing the stream's fully folded key.</param>
+        public ComputationGraph WithRngOverride(RngCollection collection, int[] modelIdPath, ulong seed)
+        {
+            ArgumentNullException.ThrowIfNull(modelIdPath);
+            if (collection != RngCollection.Runtime)
+                throw new ArgumentException(
+                    "WithRngOverride can only override a Runtime stream: a model records no " +
+                    "Params-collection identity (initialization randomness is baked into the " +
+                    "weights). Re-initialize from the concrete architecture under an RngConfig " +
+                    "carrying the Params override instead.", nameof(collection));
+            RequireConcretized(nameof(WithRngOverride),
+                "The RNG key-derivation chains it binds to are wired at concretization; " +
+                "lower the graph with ToConcreteArchitecture(inputHints, ...) first.");
+            var identity = TryGetRngIdentity()
+                ?? throw new InvalidOperationException(
+                    "WithRngOverride: this graph carries no bound RNG identity to override " +
+                    "(it has no runtime random feeds, or no config has been bound yet). Bind one " +
+                    "with WithRngConfig first.");
+            return WithRngConfig(identity.ToRuntimeConfig()
+                .Override(RngCollection.Runtime, modelIdPath, seed));
+        }
+
+        /// <summary>
+        /// Reads the model's bound RNG identity — which bit generator it draws with, which runtime
+        /// master key its feeds fold from, and which streams it overrides. Decoded from the
+        /// <c>RngSeed</c> parameter written by <see cref="WithRngConfig"/> and carried through
+        /// save/load as an ordinary initializer. Null when the graph has no runtime random surface
+        /// or no identity is bound yet.
+        ///
+        /// <para>An identity is deliberately narrower than the <see cref="RngConfig"/> that
+        /// produced it — see <see cref="RngIdentity"/> for what a model does not record.</para>
+        /// </summary>
+        /// <exception cref="NotSupportedException">The recorded algorithm id is one this build does
+        /// not define (a corrupt identity). Reporting a substitute generator would misdescribe
+        /// every draw the model makes.</exception>
+        public RngIdentity? TryGetRngIdentity()
+        {
+            if (TryGetRngSeed() is not { } rngSeedData) return null;
+            var identity = Core.Rng.RngRuntimeIdentity.Decode(rngSeedData);
+            return new RngIdentity(
+                identity.Algorithm ?? throw new NotSupportedException(
+                    $"TryGetRngIdentity: the graph's RngSeedData records the unrecognized " +
+                    $"algorithm id {identity.AlgorithmId}."),
+                identity.RunKey,
+                identity.Overrides.Select(o => new RngStreamOverride(o.Path, o.Key)));
+        }
+
+        /// <summary>
+        /// The model's bound RNG identity in its raw encoded form — the <c>RngSeed</c> parameter's
+        /// value. Internal on purpose: the encoding is an implementation detail this subsystem
+        /// changes freely, and nothing on disk records which layout a file was written with, so no
+        /// caller outside the framework should hold it. <see cref="TryGetRngIdentity"/> is the
+        /// supported reader.
+        /// </summary>
+        internal ulong[]? TryGetRngSeed() => ToInternal().TryGetRngSeed();
 
         /// <summary>
         /// Returns metadata (ids and shapes) for every trainable parameter in a <b>concrete

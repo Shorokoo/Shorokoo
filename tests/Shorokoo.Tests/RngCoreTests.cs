@@ -306,6 +306,76 @@ public class RngSeedTransportTests
     }
 
     [Fact]
+    public void TestRngIdentityProjectsTheBoundConfigsRuntimeTierAndReproducesIt()
+    {
+        var cfg = new RngConfig { MasterSeed = 11, Algorithm = RngAlgorithm.Threefry2x32Rounds13 }
+            .Override(RngCollection.Runtime, [1, 1, 1], seed: 424242UL);
+        var model = LoopFeedModel(cfg);
+        var identity = model.TryGetRngIdentity()!;
+
+        Assert.Equal(RngAlgorithm.Threefry2x32Rounds13, identity.Algorithm);
+        Assert.Equal(cfg.RunMasterKey, identity.RunMasterKey);
+        Assert.Equal((int[])[1, 1, 1], Assert.Single(identity.Overrides).ModelIdPath);
+        Assert.Equal(424242UL, identity.TryGetOverride([1, 1, 1]));
+        Assert.Null(identity.TryGetOverride([1, 0, 1]));
+
+        // The projection is lossless over the runtime tier: rebinding it changes no draw.
+        Assert.Equal(model.TryGetRngSeed(), model.WithRngConfig(identity.ToRuntimeConfig()).TryGetRngSeed());
+        Assert.Equal(Run(model), Run(model.WithRngConfig(identity.ToRuntimeConfig())));
+
+        // The init tier is not recorded, so it cannot surface in the identity either.
+        Assert.Equal(model.TryGetRngSeed(),
+            LoopFeedArch().WithRngConfig(cfg.Override(RngCollection.Params, [1, 0], 7UL)).TryGetRngSeed());
+
+        Assert.Null(LoopFeedArch().TryGetRngIdentity());   // wired, not yet bound
+    }
+
+    [Fact]
+    public void TestWithRngOverrideRekeysOneStreamAndLeavesTheRestOfTheIdentityIntact()
+    {
+        var cfg = new RngConfig { MasterSeed = 11 }.Override(RngCollection.Runtime, [1, 1, 1], seed: 424242UL);
+        var model = LoopFeedModel(cfg);
+
+        var added = model.WithRngOverride(RngCollection.Runtime, [1, 0, 1], 99UL);
+        var addedIdentity = added.TryGetRngIdentity()!;
+        Assert.Equal(cfg.RunMasterKey, addedIdentity.RunMasterKey);
+        Assert.Equal(424242UL, addedIdentity.TryGetOverride([1, 1, 1]));
+        Assert.Equal(99UL, addedIdentity.TryGetOverride([1, 0, 1]));
+        Assert.Equal(Run(LoopFeedModel(cfg.Override(RngCollection.Runtime, [1, 0, 1], 99UL))), Run(added));
+
+        var replaced = added.WithRngOverride(RngCollection.Runtime, [1, 1, 1], 7UL);
+        Assert.Equal(7UL, replaced.TryGetRngIdentity()!.TryGetOverride([1, 1, 1]));
+        Assert.Equal(99UL, replaced.TryGetRngIdentity()!.TryGetOverride([1, 0, 1]));
+        Assert.Equal(1, RngSeedNodeCount(replaced));
+        Assert.Equal(Run(model), Run(replaced.WithRngConfig(cfg)));   // weights and wiring untouched
+
+        Assert.Contains("matches no runtime stream", Assert.Throws<InvalidOperationException>(
+            () => model.WithRngOverride(RngCollection.Runtime, [9], 1UL)).Message);
+        Assert.Contains("records no Params-collection identity", Assert.Throws<ArgumentException>(
+            () => model.WithRngOverride(RngCollection.Params, [1, 1, 1], 1UL)).Message);
+    }
+
+    [Fact]
+    public void TestRngIdentityRefusesAnUnrecognizedAlgorithmIdRatherThanSubstitutingOne()
+    {
+        const ulong unknownId = 9999;
+        var arch = LoopFeedArch().WithRngConfig(RngConfig.Default).ToInternal();
+        var seedData = arch.TryGetRngSeed()!;
+        seedData[RngRuntimeIdentity.AlgorithmIdIndex] = unknownId;
+        var seedNode = arch.Nodes.Single(n =>
+            n.IdentifierTemplate == Shorokoo.Core.Nodes.Processors.Fast
+                .FastWireRngKeyDerivation.RngSeedIdentifierTemplate);
+        seedNode.Attributes = seedNode.Attributes.SetAttributes(
+            (OnnxOpAttributeNames.ShrkAttrTensorData, (object?)TensorData.Create(
+                new Shape(seedData.Length), DType.UInt64,
+                OnnxUtils.CreateTensorValue(new Shape(seedData.Length), seedData))));
+
+        var tampered = ComputationGraph.FromInternal(arch, GraphKind.ConcreteArchitecture);
+        var ex = Assert.Throws<NotSupportedException>(() => tampered.TryGetRngIdentity());
+        Assert.Contains(unknownId.ToString(), ex.Message);
+    }
+
+    [Fact]
     public void TestModelWithoutRandomFeedsCarriesNothingRngRelatedAndBindingRequiresRealizedStreams()
     {
         var g = (ComputationGraph)typeof(RngInitTwoLinears)
@@ -316,6 +386,9 @@ public class RngSeedTransportTests
 
         Assert.Equal(0, RngSeedNodeCount(model));
         Assert.Null(model.TryGetRngSeed());
+        Assert.Null(model.TryGetRngIdentity());
+        Assert.Contains("no bound RNG identity", Assert.Throws<InvalidOperationException>(
+            () => model.WithRngOverride(RngCollection.Runtime, [1], 1UL)).Message);
         Assert.Equal(0, RngSeedNodeCount(CompressedFormatUtils.LoadFastGraphFromBinary(
             CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true))));
 

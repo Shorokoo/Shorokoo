@@ -45,41 +45,37 @@ internal static class RngTestOracle
         => Fold(identity.RunKeySpec(path));
 
     /// <summary>
-    /// The generator word pair a draw produces at stream position <paramref name="p"/> — the host
-    /// oracle for <c>RuntimeRng.Draw</c>. The substream index folds into the key, leaving both
-    /// counter words to the whole 64-bit position.
+    /// The whole 64 bits a draw produces at stream position <paramref name="p"/> — the host oracle
+    /// for <c>RuntimeRng.Draw</c>. The substream index folds into the key, leaving both counter
+    /// words to the whole 64-bit position.
     /// </summary>
-    public static (uint x0, uint x1) DrawWords(
+    public static ulong DrawValue(
         ulong key, ulong substreamIndex, long p, int rounds = Threefry2x32.Rounds)
     {
         var (dk0, dk1) = Threefry2x32.Bijection(
             (uint)substreamIndex, (uint)(substreamIndex >> 32), (uint)key, (uint)(key >> 32), rounds);
-        return Threefry2x32.Bijection((uint)p, (uint)((ulong)p >> 32), dk0, dk1, rounds);
+        var (x0, x1) = Threefry2x32.Bijection((uint)p, (uint)((ulong)p >> 32), dk0, dk1, rounds);
+        return x0 | ((ulong)x1 << 32);
     }
 
-    /// <summary>Element <paramref name="i"/> of a standard-uniform draw (low 24 bits × 2⁻²⁴).</summary>
+    /// <summary>Element <paramref name="i"/> of a standard-uniform draw: the low 32-bit lane's low
+    /// 24 bits × 2⁻²⁴, one position per element.</summary>
     public static float DrawUniform(
         ulong key, ulong substreamIndex, long i, int rounds = Threefry2x32.Rounds)
-        => (DrawWords(key, substreamIndex, i, rounds).x0 & 0x00FFFFFFu) * (1.0f / 16777216.0f);
+        => (DrawValue(key, substreamIndex, i, rounds) & 0x00FFFFFFuL) * (1.0f / 16777216.0f);
 
     /// <summary>
-    /// Element <paramref name="i"/> of a raw-bits draw of the given uint width. U64 spends a whole
-    /// position per element; the narrower widths pack E = 32/W elements into each generator word,
-    /// low lane first, so element <c>i</c> is lane <c>i % E</c> of the word at position
-    /// <c>i / E</c>.
+    /// Element <paramref name="i"/> of a raw-bits draw of the given uint width. E = 64/W elements
+    /// pack into each generator value, low lane first, so element <c>i</c> is lane <c>i % E</c> of
+    /// the value at position <c>i / E</c> — which degenerates to one whole value per element at
+    /// U64.
     /// </summary>
     public static ulong DrawBits(
         ulong key, ulong substreamIndex, long i, int width, int rounds = Threefry2x32.Rounds)
     {
-        if (width == 64)
-        {
-            var (w0, w1) = DrawWords(key, substreamIndex, i, rounds);
-            return w0 | ((ulong)w1 << 32);
-        }
-        if (width is not (8 or 16 or 32)) throw new System.ArgumentOutOfRangeException(nameof(width));
-
-        long lanes = 32 / width;
-        return (DrawWords(key, substreamIndex, i / lanes, rounds).x0 >> (int)(i % lanes) * width)
+        if (width is not (8 or 16 or 32 or 64)) throw new System.ArgumentOutOfRangeException(nameof(width));
+        long lanes = 64 / width;
+        return (DrawValue(key, substreamIndex, i / lanes, rounds) >> (int)(i % lanes) * width)
                & (ulong.MaxValue >> (64 - width));
     }
 }

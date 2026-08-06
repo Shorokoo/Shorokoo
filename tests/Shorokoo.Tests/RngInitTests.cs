@@ -225,7 +225,7 @@ public class RngInitFrozenDerivationTests
         // key and are separated only by their substreamIndex ordinal — this golden pins that
         // ordinal assignment, which the relational assertions above cannot see.
         float[] multiDraw =
-        [0.12127531f, 0.045944285f, 0.71740365f, 0.025424859f, 0.1510541f, 0.14533761f, 0.0006900568f, 0.3375456f, 0.34560895f, 0.17979373f, 0.14335075f, 0.010312658f, 0.112886935f, 0.4531033f, 0.27203277f, 0.15625617f];
+        [0.12127531f, 0.08646331f, 0.35760066f, 0.03610372f, 0.19694349f, 0.22681566f, 0.009163281f, 0.6841878f, 0.2204708f, 0.16420957f, 0.2884086f, 0.12671219f, 0.017829021f, 0.27713433f, 0.15357554f, 0.040258627f];
 
         var mg = BitsIntermediateTrainableLayer.ComputationGraph;
         var w = mg.ToConcreteArchitecture(mg.FromOrderedInputs([sample]))

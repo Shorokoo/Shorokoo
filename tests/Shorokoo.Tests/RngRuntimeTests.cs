@@ -75,8 +75,8 @@ public class RngRuntimeTests
     private static float HostUniform(long i, ulong key, ulong substreamIndex)
         => RngTestOracle.DrawUniform(key, substreamIndex, i);
 
-    // Host reference for the raw-bits scheme: the narrow widths take the low bits of x0, U32
-    // the whole word, U64 = x0 | (x1 << 32).
+    // Host reference for the raw-bits scheme: E = 64/W elements pack into each generator value,
+    // low lane first, so element i is lane i%E of the value at position i/E.
     private static ulong HostBits(long i, int width, ulong key, ulong substreamIndex)
         => RngTestOracle.DrawBits(key, substreamIndex, i, width);
 
@@ -109,20 +109,31 @@ public class RngRuntimeTests
     }
 
     [Fact]
-    public void TestNarrowBitsDrawsPackLanesLowFirstIntoTheGeneratorWordAndSliceTheTail()
+    public void TestBitsDrawsPackLanesLowFirstIntoTheSixtyFourBitDrawValueAndSliceTheTail()
     {
-        var words = RunDrawRaw<RtBitsU32Draw>(4, 4).As<uint32>().AccessMemory().ToArray();
+        var values = RunDrawRaw<RtBitsU64Draw>(4, 4).As<uint64>().AccessMemory().ToArray();
         var u8 = RunDrawRaw<RtBitsU8Draw>(4, 4).As<uint8>().AccessMemory().ToArray();
         var u16 = RunDrawRaw<RtBitsU16Draw>(4, 4).As<uint16>().AccessMemory().ToArray();
+        var u32 = RunDrawRaw<RtBitsU32Draw>(4, 4).As<uint32>().AccessMemory().ToArray();
 
-        for (int j = 0; j < 4; j++)
-            Assert.Equal(words[j], u8[4 * j] | ((uint)u8[4 * j + 1] << 8)
-                                             | ((uint)u8[4 * j + 2] << 16) | ((uint)u8[4 * j + 3] << 24));
-        for (int j = 0; j < 8; j++)
-            Assert.Equal(words[j], u16[2 * j] | ((uint)u16[2 * j + 1] << 16));
+        void AssertPacksInto(int width, Func<int, ulong> element)
+        {
+            int lanes = 64 / width;
+            for (int j = 0; j < 16 / lanes; j++)
+            {
+                ulong packed = 0;
+                for (int l = 0; l < lanes; l++) packed |= element(j * lanes + l) << (l * width);
+                Assert.Equal(values[j], packed);
+            }
+        }
+
+        AssertPacksInto(8, i => u8[i]);
+        AssertPacksInto(16, i => u16[i]);
+        AssertPacksInto(32, i => u32[i]);
 
         Assert.Equal(u8.Take(5).ToArray(), RunDrawRaw<RtBitsU8Draw>(1, 5).As<uint8>().AccessMemory().ToArray());
         Assert.Equal(u16.Take(5).ToArray(), RunDrawRaw<RtBitsU16Draw>(1, 5).As<uint16>().AccessMemory().ToArray());
+        Assert.Equal(u32.Take(5).ToArray(), RunDrawRaw<RtBitsU32Draw>(1, 5).As<uint32>().AccessMemory().ToArray());
     }
 
     [Fact]

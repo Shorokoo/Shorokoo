@@ -1,7 +1,5 @@
 using System.Linq;
 using Shorokoo.Modules.Layers;
-using Shorokoo.Tests.Utils;
-using static Shorokoo.Globals;
 
 namespace Shorokoo.Tests;
 
@@ -57,38 +55,17 @@ public class GroupNormStaticReshapeRegressionTests
         return TensorData(DType.Float32, dims, Enumerable.Range(0, (int)total).Select(i => (object)(i * scale + offset)).ToArray());
     }
 
-    /// <summary>
-    /// Reshaping GroupNorm's (live-Shape-fed) output to a static shape must execute and survive
-    /// the ONNX round-trips — i.e. the FastComposeContiguousReshapes prep pass keeps the exported
-    /// model clear of the ORT ReshapeFusion crash described in Shorokoo/Shorokoo#10.
-    /// </summary>
     [Fact]
-    public void GroupNormOutputStaticReshapeLoadsAndRuns()
-        => Assert.True(AutoTest.AdvancedTestGraph<GroupNormStaticReshapeRepro>(
-            hyperparamInputs: [], runtimeInputs: [Range([2L, 4L, 3L, 3L], 0.7f, -10f)]));
-
-    /// <summary>
-    /// Same ORT ReshapeFusion crash, one Identity deeper: a STATEFUL module's output is
-    /// WITH_STATE_DEPS-wrapped, which the inference lowering turns into an IDENTITY sitting
-    /// between GroupNorm's dynamic restore reshape and the user's static reshape. ORT's
-    /// EliminateIdentity runs in the same L1 loop as ReshapeFusion, so the crashing adjacency
-    /// re-forms inside ORT unless FastComposeContiguousReshapes walks through same-scope
-    /// identities too.
-    /// </summary>
-    [Fact]
-    public void StatefulGroupNormOutputStaticReshapeLoadsAndRuns()
-        => Assert.True(AutoTest.AdvancedTestGraph<StatefulGroupNormStaticReshapeRepro>(
-            hyperparamInputs: [], runtimeInputs: [Range([2L, 4L, 3L, 3L], 0.7f, -10f)]));
-
-    /// <summary>
-    /// The copy-dim spelling of the #10 flatten (a 0 entry in the shape input, via keepDims)
-    /// must also load and run: FastComposeContiguousReshapes declines to compose 0-targets, and
-    /// this pins that ORT's ReshapeFusion declines them too (Shorokoo/Shorokoo#12).
-    /// </summary>
-    [Fact]
-    public void GroupNormOutputKeepDimsReshapeLoadsAndRuns()
-        => Assert.True(AutoTest.AdvancedTestGraph<GroupNormKeepDimsReshapeRepro>(
-            hyperparamInputs: [], runtimeInputs: [Range([2L, 4L, 3L, 3L], 0.7f, -10f)]));
+    public void GroupNormStaticStatefulAndKeepDimsReshapesLoadAndRun()
+    {
+        var x = Range([2L, 4L, 3L, 3L], 0.7f, -10f);
+        Assert.True(AutoTest.AdvancedTestGraph<GroupNormStaticReshapeRepro>(hyperparamInputs: [], runtimeInputs: [x]));
+        // One IDENTITY deeper: a STATEFUL module's WITH_STATE_DEPS wrapper lowers to an Identity
+        // between the dynamic restore reshape and the static one, which ORT's EliminateIdentity
+        // re-fuses unless FastComposeContiguousReshapes walks through same-scope identities.
+        Assert.True(AutoTest.AdvancedTestGraph<StatefulGroupNormStaticReshapeRepro>(hyperparamInputs: [], runtimeInputs: [x]));
+        Assert.True(AutoTest.AdvancedTestGraph<GroupNormKeepDimsReshapeRepro>(hyperparamInputs: [], runtimeInputs: [x]));
+    }
 }
 
 // Stateful GroupNorm: the StateUpdate forces the module's output to be wrapped in

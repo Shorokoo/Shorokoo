@@ -8,29 +8,34 @@ using Shorokoo.Runtime;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Coverage-purpose tests for <see cref="CompressedFormatUtils"/> covering the
-/// three format families it supports: raw zstd byte streams, .zsrk compressed
-/// architecture, and .zsafetensor compressed tensor archives. Mirrors the most
-/// coverage-rich roundtrip tests in <c>CompressedFormatUtilsTests</c> so the
-/// curated Coverage scan picks the file up.
+/// The persisted artifact formats: raw zstd streams, the .srk graph container, .safetensors /
+/// .zsafetensor archives, the .skpt checkpoint container, the SafeTensors and ONNX exchange
+/// boundaries, and <c>Persistence.Inspect</c> over all of them.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
-public class CompressedFormatUtilsCoverageTests
+public class CompressedFormatUtilsCoverageTests : IDisposable
 {
-    private static readonly string TempDir = Path.Combine(Path.GetTempPath(), "ShorokooCompressedCoverageTests");
+    private readonly string _tempDir =
+        Path.Combine(Path.GetTempPath(), $"ShorokooCompressedCoverage_{Guid.NewGuid():N}");
 
-    public CompressedFormatUtilsCoverageTests()
+    public CompressedFormatUtilsCoverageTests() => Directory.CreateDirectory(_tempDir);
+
+    public void Dispose() => Directory.Delete(_tempDir, recursive: true);
+
+    private string P(string name) => Path.Combine(_tempDir, name);
+
+    private static void AssertInspection(ArtifactInspection result, ArtifactKind kind,
+        params string[][] observationsContainingAll)
     {
-        Directory.CreateDirectory(TempDir);
+        Assert.Equal(kind, result.Kind);
+        foreach (var group in observationsContainingAll)
+            Assert.Contains(result.Observations, o => group.All(f => o.Contains(f)));
     }
 
     [Fact]
-    public void TestCompressedFormatUtilsCoverage()
+    public void TestRawZstdArchitectureJsonAndSafeTensorsRoundTrips()
     {
-        // ──────────────────────────────────────────────────────────────────
-        // Raw zstd: Compress / Decompress / CompressToFile / DecompressFile
-        // ──────────────────────────────────────────────────────────────────
         var originalBytes = new byte[10000];
         for (int i = 0; i < originalBytes.Length; i++)
             originalBytes[i] = (byte)(i % 10);
@@ -38,18 +43,12 @@ public class CompressedFormatUtilsCoverageTests
         Assert.True(compressed.Length < originalBytes.Length);
         Assert.Equal(originalBytes, CompressedFormatUtils.Decompress(compressed));
 
-        var zstPath = Path.Combine(TempDir, "test_roundtrip.zst");
-        try
-        {
-            CompressedFormatUtils.CompressToFile(zstPath, originalBytes);
-            Assert.Equal(originalBytes, CompressedFormatUtils.DecompressFile(zstPath));
-        }
-        finally { if (File.Exists(zstPath)) File.Delete(zstPath); }
-
+        var zstPath = P("test_roundtrip.zst");
+        CompressedFormatUtils.CompressToFile(zstPath, originalBytes);
+        Assert.Equal(originalBytes, CompressedFormatUtils.DecompressFile(zstPath));
         Assert.Throws<FileNotFoundException>(
-            () => CompressedFormatUtils.DecompressFile(Path.Combine(TempDir, "nope.zst")));
+            () => CompressedFormatUtils.DecompressFile(P("nope.zst")));
 
-        // Stream variants: CompressToStream + DecompressStream
         using (var memStream = new MemoryStream())
         {
             CompressedFormatUtils.CompressToStream(memStream, originalBytes);
@@ -57,88 +56,49 @@ public class CompressedFormatUtilsCoverageTests
             Assert.Equal(originalBytes, CompressedFormatUtils.DecompressStream(memStream));
         }
 
-        // ──────────────────────────────────────────────────────────────────
-        // Architecture: SaveFastGraphTo{File,Binary} / LoadFastGraphFrom{File,Binary}
-        // ──────────────────────────────────────────────────────────────────
         var input = InputTensor<float32>("input");
         var output = input + Scalar(1.0f);
         var graph = new InternalComputationGraph([input], [output]);
         var fastGraph = (graph);
 
-        // SaveFastGraphToFile + matching LoadFastGraphFromFile (v2 container).
-        // .zsrk written this way is also what ToJson / GetNodeAndTensorNameListing
-        // read — they extract the ONNX payload from any .srk layout by content.
-        var zsrkPath = Path.Combine(TempDir, "test_arch.zsrk");
-        var zsrkPath2 = Path.Combine(TempDir, "test_arch2.zsrk");
-        var binPath = Path.Combine(TempDir, "test_arch.bin");
-        try
-        {
-            CompressedFormatUtils.SaveFastGraphToFile(zsrkPath, fastGraph);
-            var loaded = CompressedFormatUtils.LoadFastGraphFromFile(zsrkPath);
-            Assert.Equal(graph.InputTensors.Count(), loaded.ToInternal().InputTensors.Count());
-            Assert.Equal(graph.OutputTensors.Count(), loaded.ToInternal().OutputTensors.Count());
+        var zsrkPath = P("test_arch.zsrk");
+        var zsrkPath2 = P("test_arch2.zsrk");
+        CompressedFormatUtils.SaveFastGraphToFile(zsrkPath, fastGraph);
+        var loaded = CompressedFormatUtils.LoadFastGraphFromFile(zsrkPath);
+        Assert.Equal(graph.InputTensors.Count(), loaded.ToInternal().InputTensors.Count());
+        Assert.Equal(graph.OutputTensors.Count(), loaded.ToInternal().OutputTensors.Count());
+        File.WriteAllBytes(P("test_arch.bin"), CompressedFormatUtils.SaveFastGraphToBinary(fastGraph));
 
-            var uncompressedBytes = CompressedFormatUtils.SaveFastGraphToBinary(fastGraph);
-            File.WriteAllBytes(binPath, uncompressedBytes);
+        var json = CompressedFormatUtils.ToJson(zsrkPath);
+        Assert.False(string.IsNullOrEmpty(json));
+        Assert.Contains("Graph", json);
 
-            // ──────────────────────────────────────────────────────────────
-            // JSON helpers on SaveFastGraphToFile output (single-wrap).
-            // ToJson / SaveAsJson / CompareJson / FindFirstJsonDiff /
-            // GetNodeAndTensorNameListing.
-            // ──────────────────────────────────────────────────────────────
-            var json = CompressedFormatUtils.ToJson(zsrkPath);
-            Assert.False(string.IsNullOrEmpty(json));
-            Assert.Contains("Graph", json);
+        var jsonPath = P("test_arch.json");
+        Assert.Equal(jsonPath, CompressedFormatUtils.SaveAsJson(zsrkPath, jsonPath));
+        Assert.True(File.Exists(jsonPath));
+        var derivedPath = CompressedFormatUtils.SaveAsJson(zsrkPath);
+        Assert.True(File.Exists(derivedPath));
+        Assert.EndsWith(".json", derivedPath);
 
-            // SaveAsJson with explicit targetPath.
-            var jsonPath = Path.Combine(TempDir, "test_arch.json");
-            try
-            {
-                var savedPath = CompressedFormatUtils.SaveAsJson(zsrkPath, jsonPath);
-                Assert.Equal(jsonPath, savedPath);
-                Assert.True(File.Exists(jsonPath));
-                // SaveAsJson with null targetPath derives from sourcePath.
-                var derivedPath = CompressedFormatUtils.SaveAsJson(zsrkPath);
-                Assert.True(File.Exists(derivedPath));
-                Assert.EndsWith(".json", derivedPath);
-                if (File.Exists(derivedPath)) File.Delete(derivedPath);
-            }
-            finally { if (File.Exists(jsonPath)) File.Delete(jsonPath); }
+        var input2 = InputTensor<float32>("input");
+        var output2 = input2 * Scalar(2.0f);
+        var graph2 = (new InternalComputationGraph([input2], [output2]));
+        CompressedFormatUtils.SaveFastGraphToFile(zsrkPath2, graph2);
 
-            // Save a second graph that differs in structure → CompareJson false
-            // and FindFirstJsonDiff returns the first differing line.
-            var input2 = InputTensor<float32>("input");
-            var output2 = input2 * Scalar(2.0f);
-            var graph2 = (new InternalComputationGraph([input2], [output2]));
-            CompressedFormatUtils.SaveFastGraphToFile(zsrkPath2, graph2);
+        Assert.True(CompressedFormatUtils.CompareJson(zsrkPath, zsrkPath));
+        Assert.False(CompressedFormatUtils.CompareJson(zsrkPath, zsrkPath2));
+        Assert.Null(CompressedFormatUtils.FindFirstJsonDiff(zsrkPath, zsrkPath));
+        var diff = CompressedFormatUtils.FindFirstJsonDiff(zsrkPath, zsrkPath2);
+        Assert.NotNull(diff);
+        Assert.True(diff!.Value.LineNumber > 0);
 
-            Assert.True(CompressedFormatUtils.CompareJson(zsrkPath, zsrkPath));
-            Assert.False(CompressedFormatUtils.CompareJson(zsrkPath, zsrkPath2));
-
-            Assert.Null(CompressedFormatUtils.FindFirstJsonDiff(zsrkPath, zsrkPath));
-            var diff = CompressedFormatUtils.FindFirstJsonDiff(zsrkPath, zsrkPath2);
-            Assert.NotNull(diff);
-            Assert.True(diff!.Value.LineNumber > 0);
-
-            // GetNodeAndTensorNameListing.
-            var listing = CompressedFormatUtils.GetNodeAndTensorNameListing(zsrkPath);
-            Assert.False(string.IsNullOrEmpty(listing));
-            Assert.Contains("\n", listing);
-        }
-        finally
-        {
-            if (File.Exists(zsrkPath)) File.Delete(zsrkPath);
-            if (File.Exists(zsrkPath2)) File.Delete(zsrkPath2);
-            if (File.Exists(binPath)) File.Delete(binPath);
-        }
+        var listing = CompressedFormatUtils.GetNodeAndTensorNameListing(zsrkPath);
+        Assert.False(string.IsNullOrEmpty(listing));
+        Assert.Contains("\n", listing);
 
         Assert.Throws<FileNotFoundException>(
-            () => CompressedFormatUtils.LoadFastGraphFromFile(Path.Combine(TempDir, "nope.zsrk")));
+            () => CompressedFormatUtils.LoadFastGraphFromFile(P("nope.zsrk")));
 
-        // ──────────────────────────────────────────────────────────────────
-        // SafeTensors: SaveCompressedSafeTensors / Load* family +
-        // SaveCompressedModelParamSet / LoadCompressedModelParamSet.
-        // ──────────────────────────────────────────────────────────────────
         var t1 = TensorData([2, 3], 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f);
         var t2 = TensorData([3], 7.0f, 8.0f, 9.0f);
         var tensors = new List<SafeTensor>
@@ -146,56 +106,33 @@ public class CompressedFormatUtilsCoverageTests
             new SafeTensor("tensor1", t1, "F32", t1.Shape.Dims),
             new SafeTensor("tensor2", t2, "F32", t2.Shape.Dims),
         };
-        var zsafePath = Path.Combine(TempDir, "test_tensors.zsafetensor");
-        var zsafeSinglePath = Path.Combine(TempDir, "test_single.zsafetensor");
-        var paramSetPath = Path.Combine(TempDir, "test_params.zsafetensor");
-        try
-        {
-            CompressedFormatUtils.SaveCompressedSafeTensors(zsafePath, tensors);
-            Assert.Equal(2, CompressedFormatUtils.LoadCompressedSafeTensors(zsafePath).Count);
-            var dict = CompressedFormatUtils.LoadCompressedTensorDictionary(zsafePath);
-            Assert.True(dict.ContainsKey("tensor1") && dict.ContainsKey("tensor2"));
-            Assert.Throws<InvalidOperationException>(
-                () => CompressedFormatUtils.LoadCompressedSingleTensor(zsafePath));
+        var zsafePath = P("test_tensors.zsafetensor");
+        CompressedFormatUtils.SaveCompressedSafeTensors(zsafePath, tensors);
+        Assert.Equal(2, CompressedFormatUtils.LoadCompressedSafeTensors(zsafePath).Count);
+        var dict = CompressedFormatUtils.LoadCompressedTensorDictionary(zsafePath);
+        Assert.True(dict.ContainsKey("tensor1") && dict.ContainsKey("tensor2"));
+        Assert.Throws<InvalidOperationException>(
+            () => CompressedFormatUtils.LoadCompressedSingleTensor(zsafePath));
 
-            var singleTensor = new List<SafeTensor>
-            {
-                new SafeTensor("only", t1, "F32", t1.Shape.Dims),
-            };
-            CompressedFormatUtils.SaveCompressedSafeTensors(zsafeSinglePath, singleTensor);
-            var loadedSingle = CompressedFormatUtils.LoadCompressedSingleTensor(zsafeSinglePath);
-            Assert.Equal(t1.Shape.Dims, loadedSingle.Shape.Dims);
+        var zsafeSinglePath = P("test_single.zsafetensor");
+        CompressedFormatUtils.SaveCompressedSafeTensors(zsafeSinglePath,
+            new List<SafeTensor> { new SafeTensor("only", t1, "F32", t1.Shape.Dims) });
+        Assert.Equal(t1.Shape.Dims,
+            CompressedFormatUtils.LoadCompressedSingleTensor(zsafeSinglePath).Shape.Dims);
 
-            // SaveCompressedModelParamSet + LoadCompressedModelParamSet.
-            var paramList = new ModelParamList(
-                new (string name, TensorData data)[] { ("p1", t1), ("p2", t2) },
-                ModelParamType.TrainableParam);
-            CompressedFormatUtils.SaveCompressedModelParamSet(paramSetPath, paramList);
-            var loadedParams = CompressedFormatUtils.LoadCompressedModelParamSet(paramSetPath);
-            Assert.Equal(2, loadedParams.ModelParams.Length);
-            Assert.NotNull(loadedParams.Find("p1"));
-            Assert.NotNull(loadedParams.Find("p2"));
-        }
-        finally
-        {
-            if (File.Exists(zsafePath)) File.Delete(zsafePath);
-            if (File.Exists(zsafeSinglePath)) File.Delete(zsafeSinglePath);
-            if (File.Exists(paramSetPath)) File.Delete(paramSetPath);
-        }
+        var paramSetPath = P("test_params.zsafetensor");
+        (string name, TensorData data)[] paramPairs = [("p1", t1), ("p2", t2)];
+        var paramList = new ModelParamList(paramPairs, ModelParamType.TrainableParam);
+        CompressedFormatUtils.SaveCompressedModelParamSet(paramSetPath, paramList);
+        var loadedParams = CompressedFormatUtils.LoadCompressedModelParamSet(paramSetPath);
+        Assert.Equal(2, loadedParams.ModelParams.Length);
+        Assert.NotNull(loadedParams.Find("p1"));
+        Assert.NotNull(loadedParams.Find("p2"));
 
-        // ──────────────────────────────────────────────────────────────────
-        // Format-detection helpers.
-        // ──────────────────────────────────────────────────────────────────
         Assert.True(CompressedFormatUtils.IsCompressedSafeTensor("foo.zsafetensor"));
         Assert.False(CompressedFormatUtils.IsCompressedSafeTensor("foo.safetensors"));
     }
 
-    // ──────────────────────────────────────────────────────────────────────
-    // .srk container (issue #34): self-describing header, stage marker,
-    // single header-declared compression layer. There is no legacy read path.
-    // ──────────────────────────────────────────────────────────────────────
-
-    /// <summary>Builds the same small graph at all three lifecycle stages.</summary>
     private static (ComputationGraph Module, ComputationGraph Arch, ComputationGraph Model)
         BuildStageGraphs()
     {
@@ -206,17 +143,11 @@ public class CompressedFormatUtilsCoverageTests
         return (moduleGraph, arch, model);
     }
 
-    /// <summary>
-    /// A v2 file round-trips (save → load → identical graph) with and without
-    /// compression for all three stages, and its header records srkVersion, stage,
-    /// compression and producer info. Also covers stage detection itself.
-    /// </summary>
     [Fact]
-    public void TestSrkV2RoundtripAllStagesAndHeader()
+    public void TestSrkRoundtripAllStagesHeaderPeekAndRenamedFiles()
     {
         var (moduleGraph, arch, model) = BuildStageGraphs();
 
-        // Op-scan detection agrees with the stamped kind at every stage.
         Assert.Equal(GraphKind.Module, SrkFileFormat.DetectStage(moduleGraph.ToInternal()));
         Assert.Equal(GraphKind.ConcreteArchitecture, SrkFileFormat.DetectStage(arch.ToInternal()));
         Assert.Equal(GraphKind.ConcreteModel, SrkFileFormat.DetectStage(model.ToInternal()));
@@ -241,17 +172,11 @@ public class CompressedFormatUtilsCoverageTests
             Assert.Equal(compressed ? "zstd" : "none", header.Compression);
             Assert.False(string.IsNullOrEmpty(header.PayloadSha256));
             Assert.NotNull(header.Producer);
-            // The header records the same framework version the ONNX exporter stamps as
-            // producer_version — one source of truth, no "+build-metadata".
             Assert.Equal(Shorokoo.ShorokooVersion.VersionString, header.Producer!.Shorokoo);
             Assert.True(header.Producer.IrVersion > 0);
             Assert.NotNull(header.Producer.Opsets);
             Assert.NotEmpty(header.Producer.Opsets!);
 
-            // The loaded graph comes back at the same lifecycle stage. (Structural
-            // JSON identity does not survive a reload — the importer assigns fresh
-            // node/tensor keys — so graph identity is asserted below by bit-identical
-            // execution of the concrete model instead.)
             var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(bytes);
             Assert.NotEmpty(reloaded.ToInternal().Nodes);
             Assert.Equal(stage, reloaded.Kind);
@@ -268,51 +193,74 @@ public class CompressedFormatUtilsCoverageTests
             }
         }
 
-        // A reloaded module graph continues through the normal lowering pipeline.
         var reloadedModule = CompressedFormatUtils.LoadFastGraphFromBinary(
             CompressedFormatUtils.SaveFastGraphToBinary(moduleGraph));
         var rearch = reloadedModule.ToConcreteArchitecture(
             reloadedModule.FromOrderedInputs([TensorData([2], 1.0f, 2.0f)]));
         Assert.Equal(GraphKind.ConcreteArchitecture, rearch.Kind);
         Assert.Equal(GraphKind.ConcreteArchitecture, SrkFileFormat.DetectStage(rearch.ToInternal()));
+
+        var srcPath = P("renamed_src.zsrk");
+        string[] renamedPaths = [P("renamed_copy.srk"), P("renamed_copy.bin"), P("renamed_copy")];
+        CompressedFormatUtils.SaveFastGraphToFile(srcPath, arch, compressed: true, overrideExtension: false);
+        var referenceJson = CompressedFormatUtils.ToJson(srcPath);
+        foreach (var renamed in renamedPaths)
+        {
+            File.Copy(srcPath, renamed, overwrite: true);
+            Assert.NotEmpty(CompressedFormatUtils.LoadFastGraphFromFile(renamed).ToInternal().Nodes);
+            Assert.Equal(referenceJson, CompressedFormatUtils.ToJson(renamed));
+        }
+
+        var peeked = SrkFileFormat.TryReadHeaderFromFile(srcPath);
+        Assert.NotNull(peeked);
+        Assert.Equal(SrkFileFormat.CurrentVersion, peeked!.SrkVersion);
+        Assert.Equal(GraphKind.ConcreteArchitecture, peeked.TryGetStage());
+        Assert.Equal("zstd", peeked.Compression);
+
+        var barePath = P("peek_bare.zsrk");
+        File.WriteAllBytes(barePath, CompressedFormatUtils.Compress(SrkFileFormat.Read(
+            CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: false)).OnnxBytes));
+        Assert.Null(SrkFileFormat.TryReadHeaderFromFile(barePath));
     }
 
-    /// <summary>
-    /// A renamed .srk file (wrong or no extension) loads identically — content, not
-    /// extension, decides how the file parses.
-    /// </summary>
     [Fact]
-    public void TestSrkV2RenamedFileLoadsIdentically()
+    public void TestSrkStageGateAtLoadTimeAndExtensionNormalizationKeepsUnrelatedFile()
     {
-        var (_, arch, _) = BuildStageGraphs();
+        var (moduleGraph, arch, model) = BuildStageGraphs();
 
-        var zsrkPath = Path.Combine(TempDir, "renamed_src.zsrk");
-        string[] renamedPaths =
-            [Path.Combine(TempDir, "renamed_copy.srk"),
-             Path.Combine(TempDir, "renamed_copy.bin"),
-             Path.Combine(TempDir, "renamed_copy")];
-        try
-        {
-            CompressedFormatUtils.SaveFastGraphToFile(zsrkPath, arch, compressed: true, overrideExtension: false);
-            var referenceJson = CompressedFormatUtils.ToJson(zsrkPath);
+        var moduleBytes = CompressedFormatUtils.SaveFastGraphToBinary(moduleGraph);
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            CompressedFormatUtils.LoadFastGraphFromBinary(moduleBytes, requiredStage: GraphKind.ConcreteModel));
+        Assert.Contains("'module'", ex.Message);
+        Assert.Contains("'concrete-model'", ex.Message);
 
-            foreach (var renamed in renamedPaths)
-            {
-                File.Copy(zsrkPath, renamed, overwrite: true);
-                var loaded = CompressedFormatUtils.LoadFastGraphFromFile(renamed);
-                Assert.NotEmpty(loaded.ToInternal().Nodes);
-                Assert.Equal(referenceJson, CompressedFormatUtils.ToJson(renamed));
-            }
-        }
-        finally
-        {
-            if (File.Exists(zsrkPath)) File.Delete(zsrkPath);
-            foreach (var renamed in renamedPaths)
-                if (File.Exists(renamed)) File.Delete(renamed);
-        }
+        var modulePath = P("stage_module.zsrk");
+        CompressedFormatUtils.SaveFastGraphToFile(modulePath, moduleGraph, compressed: true, overrideExtension: false);
+        var exFile = Assert.Throws<InvalidOperationException>(() =>
+            CompressedFormatUtils.LoadFastGraphFromFile(modulePath, requiredStage: GraphKind.ConcreteModel));
+        Assert.Contains(modulePath, exFile.Message);
+
+        Assert.NotEmpty(CompressedFormatUtils.LoadFastGraphFromBinary(
+            moduleBytes, requiredStage: GraphKind.Module).ToInternal().Nodes);
+        Assert.NotEmpty(CompressedFormatUtils.LoadFastGraphFromBinary(
+            CompressedFormatUtils.SaveFastGraphToBinary(arch),
+            requiredStage: GraphKind.ConcreteArchitecture).ToInternal().Nodes);
+        Assert.NotEmpty(CompressedFormatUtils.LoadFastGraphFromBinary(
+            CompressedFormatUtils.SaveFastGraphToBinary(model),
+            requiredStage: GraphKind.ConcreteModel).ToInternal().Nodes);
+
+        // Default overrideExtension:true normalizes .onnx → .zsrk; the caller's .onnx survives.
+        var onnxPath = P("sentinel_model.onnx");
+        var zsrkPath = Path.ChangeExtension(onnxPath, ".zsrk");
+        byte[] sentinel = [1, 2, 3, 4];
+        File.WriteAllBytes(onnxPath, sentinel);
+        Assert.Equal(zsrkPath, CompressedFormatUtils.SaveFastGraphToFile(onnxPath, arch, compressed: true));
+        Assert.True(File.Exists(onnxPath));
+        Assert.Equal(sentinel, File.ReadAllBytes(onnxPath));
+        Assert.True(File.Exists(zsrkPath));
+        Assert.NotEmpty(CompressedFormatUtils.LoadFastGraphFromFile(zsrkPath).ToInternal().Nodes);
     }
 
-    /// <summary>Hand-assembles a v2 container around an arbitrary header, for fault injection.</summary>
     private static byte[] BuildRawSrkContainer(string headerJson, byte[] payload)
     {
         var headerBytes = System.Text.Encoding.UTF8.GetBytes(headerJson);
@@ -328,83 +276,72 @@ public class CompressedFormatUtilsCoverageTests
     private static string Sha256Hex(byte[] payload)
         => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(payload)).ToLowerInvariant();
 
-    /// <summary>
-    /// Corrupt, truncated and mismatching v2 files fail loudly with a message naming
-    /// the file (or origin) and the failure: payload corruption → SHA-256 mismatch;
-    /// truncation inside the header → truncation error; malformed header JSON,
-    /// unsupported future container version and unknown compression each name the
-    /// offending value.
-    /// </summary>
     [Fact]
-    public void TestSrkV2CorruptionFailsLoudly()
+    public void TestSrkCorruptFutureAndNonContainerDataFailLoudly()
     {
         var (_, arch, _) = BuildStageGraphs();
         var bytes = CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: true);
+        byte[] payload = [.. bytes.Skip(6 + (bytes[4] | (bytes[5] << 8)))];
 
-        // Payload corruption: flip the last byte → SHA-256 mismatch naming the origin.
+        static void FromBinary(byte[] data, params string[] fragments)
+        {
+            var ex = Assert.Throws<InvalidDataException>(
+                () => CompressedFormatUtils.LoadFastGraphFromBinary(data));
+            foreach (var fragment in fragments)
+                Assert.Contains(fragment, ex.Message);
+        }
+
+        void FromFile(string name, byte[] data, params string[] fragments)
+        {
+            var path = P(name);
+            File.WriteAllBytes(path, data);
+            var ex = Assert.Throws<InvalidDataException>(
+                () => CompressedFormatUtils.LoadFastGraphFromFile(path));
+            Assert.Contains(path, ex.Message);
+            foreach (var fragment in fragments)
+                Assert.Contains(fragment, ex.Message);
+        }
+
         var corrupt = (byte[])bytes.Clone();
         corrupt[^1] ^= 0xFF;
-        var corruptPath = Path.Combine(TempDir, "corrupt.zsrk");
-        try
-        {
-            File.WriteAllBytes(corruptPath, corrupt);
-            var ex = Assert.Throws<InvalidDataException>(
-                () => CompressedFormatUtils.LoadFastGraphFromFile(corruptPath));
-            Assert.Contains("SHA-256 mismatch", ex.Message);
-            Assert.Contains(corruptPath, ex.Message);
-        }
-        finally { if (File.Exists(corruptPath)) File.Delete(corruptPath); }
+        var garbage = new byte[64];
+        Array.Fill(garbage, (byte)0x77);
+        var bareZstd = CompressedFormatUtils.Compress(SrkFileFormat.Read(
+            CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: false)).OnnxBytes);
 
-        // Truncated payload → SHA-256 mismatch (truncation detection).
-        var truncated = bytes[..^16];
-        var exTrunc = Assert.Throws<InvalidDataException>(
-            () => CompressedFormatUtils.LoadFastGraphFromBinary(truncated));
-        Assert.Contains("corrupt or truncated", exTrunc.Message);
+        FromFile("corrupt.zsrk", corrupt, "SHA-256 mismatch");
+        FromFile("garbage.srk", garbage);
+        FromBinary(bytes[..^16], "corrupt or truncated");
+        FromBinary(bytes[..8], "truncated");
+        FromBinary([], "empty");
+        FromBinary(bareZstd, "not a Shorokoo .srk container");
+        FromBinary(BuildRawSrkContainer("{not json", payload), "header");
+        FromBinary(BuildRawSrkContainer(
+            $"{{\"srkVersion\":3,\"stage\":\"concrete-architecture\",\"compression\":\"zstd\",\"payloadSha256\":\"{Sha256Hex(payload)}\"}}",
+            payload), "version 3");
+        FromBinary(BuildRawSrkContainer(
+            $"{{\"srkVersion\":1,\"stage\":\"concrete-architecture\",\"compression\":\"lz4\",\"payloadSha256\":\"{Sha256Hex(payload)}\"}}",
+            payload), "lz4");
+        FromBinary(BuildRawSrkContainer(
+            $"{{\"stage\":\"concrete-architecture\",\"compression\":\"none\",\"payloadSha256\":\"{Sha256Hex(payload)}\"}}",
+            payload), "'srkVersion'", "missing or zero");
 
-        // Truncated inside the header → explicit truncation error.
-        var exHeader = Assert.Throws<InvalidDataException>(
-            () => CompressedFormatUtils.LoadFastGraphFromBinary(bytes[..8]));
-        Assert.Contains("truncated", exHeader.Message);
-
-        // Malformed header JSON.
-        byte[] payload = [.. bytes.Skip(6 + (bytes[4] | (bytes[5] << 8)))];
-        var exJson = Assert.Throws<InvalidDataException>(() =>
-            CompressedFormatUtils.LoadFastGraphFromBinary(BuildRawSrkContainer("{not json", payload)));
-        Assert.Contains("header", exJson.Message);
-
-        // A container version this build does not read is refused up front.
-        var exVersion = Assert.Throws<InvalidDataException>(() =>
-            CompressedFormatUtils.LoadFastGraphFromBinary(BuildRawSrkContainer(
-                $"{{\"srkVersion\":3,\"stage\":\"concrete-architecture\",\"compression\":\"zstd\",\"payloadSha256\":\"{Sha256Hex(payload)}\"}}",
-                payload)));
-        Assert.Contains("version 3", exVersion.Message);
-
-        // Unknown compression scheme is named in the error.
-        var exCompression = Assert.Throws<InvalidDataException>(() =>
-            CompressedFormatUtils.LoadFastGraphFromBinary(BuildRawSrkContainer(
-                $"{{\"srkVersion\":1,\"stage\":\"concrete-architecture\",\"compression\":\"lz4\",\"payloadSha256\":\"{Sha256Hex(payload)}\"}}",
-                payload)));
-        Assert.Contains("lz4", exCompression.Message);
-
-        // Header missing srkVersion → a missing-field diagnostic, not a bogus "version 0
-        // is not readable" message.
-        var exMissing = Assert.Throws<InvalidDataException>(() =>
-            CompressedFormatUtils.LoadFastGraphFromBinary(BuildRawSrkContainer(
-                $"{{\"stage\":\"concrete-architecture\",\"compression\":\"none\",\"payloadSha256\":\"{Sha256Hex(payload)}\"}}",
-                payload)));
-        Assert.Contains("'srkVersion'", exMissing.Message);
-        Assert.Contains("missing or zero", exMissing.Message);
+        // A magic version byte this build does not read is refused up front, never as a null.
+        var v3 = (byte[])bytes.Clone();
+        v3[3] = 3;
+        Assert.False(SrkFileFormat.IsSrkContainer(v3));
+        FromBinary(v3, "major version 3");
+        Assert.Contains("major version 3",
+            Assert.Throws<InvalidDataException>(() => SrkFileFormat.TryReadHeader(v3)).Message);
+        FromFile("future.srk", v3, "major version 3");
+        var exPeek = Assert.Throws<InvalidDataException>(
+            () => SrkFileFormat.TryReadHeaderFromFile(P("future.srk")));
+        Assert.Contains(P("future.srk"), exPeek.Message);
+        Assert.Contains("major version 3", exPeek.Message);
     }
 
-    /// <summary>
-    /// A truncated .safetensors file fails loudly with a diagnostic naming truncation and
-    /// the declared vs. actual byte counts, at every cut point: inside the tensor data
-    /// (ST003), inside the JSON header (ST002), and before the 8-byte length field (ST001).
-    /// File-path loads name the offending file in the message; the untruncated bytes still
-    /// parse (the checks are prefix/length-only and cost the valid path nothing).
-    /// </summary>
     [Fact]
-    public void TestSafeTensorTruncationFailsLoudly()
+    public void TestSafeTensorTruncationAndMissingMetadataFailLoudly()
     {
         var tensors = new List<SafeTensor>
         {
@@ -414,464 +351,62 @@ public class CompressedFormatUtilsCoverageTests
         using var stream = new MemoryStream();
         SafeTensorLoader.SaveSafeTensorsToStream(stream, tensors);
         var bytes = stream.ToArray();
+        long headerLen = BitConverter.ToInt64(bytes, 0);
 
-        // The intact buffer parses; truncation checks must not disturb the valid path.
         Assert.Equal(2, SafeTensorLoader.ParseSafeTensorBytes(bytes).Count);
 
-        // Cut inside the tensor data → the affected tensor's declared range vs. the actual length.
-        var exData = Assert.Throws<ModelException>(() => SafeTensorLoader.ParseSafeTensorBytes(bytes[..^4]));
-        Assert.Equal(ErrorCodes.ST003, exData.ErrorCode);
-        Assert.Contains("truncated", exData.Message);
-        Assert.Contains("'b'", exData.Message);
-        Assert.Contains($"{bytes.Length} bytes", exData.Message);       // declared (required) size
-        Assert.Contains($"{bytes.Length - 4} bytes", exData.Message);   // actual size
-
-        // Cut inside the JSON header → declared header length vs. the bytes that follow.
-        long headerLen = BitConverter.ToInt64(bytes, 0);
-        var exHeader = Assert.Throws<ModelException>(() => SafeTensorLoader.ParseSafeTensorBytes(bytes[..10]));
-        Assert.Equal(ErrorCodes.ST002, exHeader.ErrorCode);
-        Assert.Contains("truncated", exHeader.Message);
-        Assert.Contains($"declares {headerLen} bytes", exHeader.Message);
-        Assert.Contains("only 2 byte(s)", exHeader.Message);
-
-        // Cut before the length field even completes.
-        var exTiny = Assert.Throws<ModelException>(() => SafeTensorLoader.ParseSafeTensorBytes(bytes[..5]));
-        Assert.Equal(ErrorCodes.ST001, exTiny.ErrorCode);
-        Assert.Contains("truncated", exTiny.Message);
-
-        // File-path load: the error names the offending file.
-        var truncPath = Path.Combine(TempDir, "truncated.safetensors");
-        try
+        static void Truncated(byte[] data, string code, params string[] fragments)
         {
-            File.WriteAllBytes(truncPath, bytes[..^4]);
-            var exFile = Assert.Throws<ModelException>(() => SafeTensorLoader.LoadSafeTensors(truncPath));
-            Assert.Equal(ErrorCodes.ST003, exFile.ErrorCode);
-            Assert.Contains(truncPath, exFile.Message);
-            Assert.Contains("truncated", exFile.Message);
+            var ex = Assert.Throws<ModelException>(() => SafeTensorLoader.ParseSafeTensorBytes(data));
+            Assert.Equal(code, ex.ErrorCode);
+            foreach (var fragment in fragments)
+                Assert.Contains(fragment, ex.Message);
         }
-        finally { if (File.Exists(truncPath)) File.Delete(truncPath); }
 
-        // Compressed (.zsafetensor) load of truncated content: the error still names the
-        // file the caller passed, not an in-memory placeholder.
-        var zPath = Path.Combine(TempDir, "truncated.zsafetensor");
-        try
-        {
-            CompressedFormatUtils.CompressToFile(zPath, bytes[..^4]);
-            var exZ = Assert.Throws<ModelException>(() => CompressedFormatUtils.LoadCompressedSafeTensors(zPath));
-            Assert.Equal(ErrorCodes.ST003, exZ.ErrorCode);
-            Assert.Contains(zPath, exZ.Message);
-            Assert.Contains("truncated", exZ.Message);
-        }
-        finally { if (File.Exists(zPath)) File.Delete(zPath); }
-    }
+        Truncated(bytes[..^4], ErrorCodes.ST003, "truncated", "'b'",
+            $"{bytes.Length} bytes", $"{bytes.Length - 4} bytes");
+        Truncated(bytes[..10], ErrorCodes.ST002, "truncated",
+            $"declares {headerLen} bytes", "only 2 byte(s)");
+        Truncated(bytes[..5], ErrorCodes.ST001, "truncated");
 
-    /// <summary>
-    /// A tensor entry missing a required metadata field (shape / data_offsets / dtype) is
-    /// refused loudly. The loader previously fabricated defaults ([1] / [0, 4) / F32), which
-    /// let a corrupt header validate against invented offsets and load garbage silently.
-    /// </summary>
-    [Fact]
-    public void TestSafeTensorMissingMetadataFailsLoudly()
-    {
+        var truncPath = P("truncated.safetensors");
+        File.WriteAllBytes(truncPath, bytes[..^4]);
+        var exFile = Assert.Throws<ModelException>(() => SafeTensorLoader.LoadSafeTensors(truncPath));
+        Assert.Equal(ErrorCodes.ST003, exFile.ErrorCode);
+        Assert.Contains(truncPath, exFile.Message);
+        Assert.Contains("truncated", exFile.Message);
+
+        var zPath = P("truncated.zsafetensor");
+        CompressedFormatUtils.CompressToFile(zPath, bytes[..^4]);
+        var exZ = Assert.Throws<ModelException>(() => CompressedFormatUtils.LoadCompressedSafeTensors(zPath));
+        Assert.Equal(ErrorCodes.ST003, exZ.ErrorCode);
+        Assert.Contains(zPath, exZ.Message);
+        Assert.Contains("truncated", exZ.Message);
+
         static byte[] Build(string headerJson, int payloadBytes)
         {
             var headerBytes = System.Text.Encoding.UTF8.GetBytes(headerJson);
             return [.. BitConverter.GetBytes((long)headerBytes.Length), .. headerBytes, .. new byte[payloadBytes]];
         }
 
-        var noOffsets = Build("{\"w\":{\"dtype\":\"F32\",\"shape\":[1]}}", 4);
-        var exOffsets = Assert.Throws<InvalidOperationException>(
-            () => SafeTensorLoader.ParseSafeTensorBytes(noOffsets));
-        Assert.Contains("data_offsets", exOffsets.Message);
-        Assert.Contains("'w'", exOffsets.Message);
+        static void MissingField(string headerJson, params string[] fragments)
+        {
+            var ex = Assert.Throws<InvalidOperationException>(
+                () => SafeTensorLoader.ParseSafeTensorBytes(Build(headerJson, 4)));
+            foreach (var fragment in fragments)
+                Assert.Contains(fragment, ex.Message);
+        }
 
-        var noDtype = Build("{\"w\":{\"shape\":[1],\"data_offsets\":[0,4]}}", 4);
-        var exDtype = Assert.Throws<InvalidOperationException>(
-            () => SafeTensorLoader.ParseSafeTensorBytes(noDtype));
-        Assert.Contains("dtype", exDtype.Message);
+        MissingField("{\"w\":{\"dtype\":\"F32\",\"shape\":[1]}}", "data_offsets", "'w'");
+        MissingField("{\"w\":{\"shape\":[1],\"data_offsets\":[0,4]}}", "dtype");
+        MissingField("{\"w\":{\"dtype\":\"F32\",\"data_offsets\":[0,4]}}", "shape");
 
-        var noShape = Build("{\"w\":{\"dtype\":\"F32\",\"data_offsets\":[0,4]}}", 4);
-        var exShape = Assert.Throws<InvalidOperationException>(
-            () => SafeTensorLoader.ParseSafeTensorBytes(noShape));
-        Assert.Contains("shape", exShape.Message);
-
-        // A rank-0 scalar's empty shape ("shape": []) is valid, not "missing" — it must load.
-        var scalar = Build("{\"s\":{\"dtype\":\"F32\",\"shape\":[],\"data_offsets\":[0,4]}}", 4);
-        var loaded = SafeTensorLoader.ParseSafeTensorBytes(scalar);
-        Assert.Empty(loaded.Single().Data.Shape.Dims);
+        // A rank-0 scalar's empty shape ("shape": []) is valid, not "missing".
+        var scalar = SafeTensorLoader.ParseSafeTensorBytes(
+            Build("{\"s\":{\"dtype\":\"F32\",\"shape\":[],\"data_offsets\":[0,4]}}", 4));
+        Assert.Empty(scalar.Single().Data.Shape.Dims);
     }
 
-    /// <summary>
-    /// The header-peek API reads a real .srk header (identifying stage/compression/producer)
-    /// and returns null for non-container data (e.g. a bare Zstd frame).
-    /// </summary>
-    [Fact]
-    public void TestSrkHeaderPeekIdentifiesContainer()
-    {
-        var (_, arch, _) = BuildStageGraphs();
-
-        var v2Path = Path.Combine(TempDir, "peek.zsrk");
-        var v1Path = Path.Combine(TempDir, "peek_v1.zsrk");
-        try
-        {
-            CompressedFormatUtils.SaveFastGraphToFile(v2Path, arch, compressed: true, overrideExtension: false);
-            var header = SrkFileFormat.TryReadHeaderFromFile(v2Path);
-            Assert.NotNull(header);
-            Assert.Equal(SrkFileFormat.CurrentVersion, header!.SrkVersion);
-            Assert.Equal(GraphKind.ConcreteArchitecture, header.TryGetStage());
-            Assert.Equal("zstd", header.Compression);
-
-            // A non-container file (a bare Zstd frame) has no container header → null.
-            var bare = SrkFileFormat.Read(
-                CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: false)).OnnxBytes;
-            File.WriteAllBytes(v1Path, CompressedFormatUtils.Compress(bare));
-            Assert.Null(SrkFileFormat.TryReadHeaderFromFile(v1Path));
-        }
-        finally
-        {
-            if (File.Exists(v2Path)) File.Delete(v2Path);
-            if (File.Exists(v1Path)) File.Delete(v1Path);
-        }
-    }
-
-    /// <summary>
-    /// Loading a module-stage graph through an API that requires a concrete graph
-    /// produces a clear stage-mismatch error at load time — from the container header
-    /// (before the payload is parsed), naming both stages. Matching stages load normally.
-    /// </summary>
-    [Fact]
-    public void TestSrkStageMismatchIsRejectedAtLoadTime()
-    {
-        var (moduleGraph, arch, model) = BuildStageGraphs();
-
-        // Header-based refusal, error names both stages.
-        var moduleBytes = CompressedFormatUtils.SaveFastGraphToBinary(moduleGraph);
-        var ex = Assert.Throws<InvalidOperationException>(() =>
-            CompressedFormatUtils.LoadFastGraphFromBinary(moduleBytes, requiredStage: GraphKind.ConcreteModel));
-        Assert.Contains("'module'", ex.Message);
-        Assert.Contains("'concrete-model'", ex.Message);
-
-        // File variant names the file.
-        var modulePath = Path.Combine(TempDir, "stage_module.zsrk");
-        try
-        {
-            CompressedFormatUtils.SaveFastGraphToFile(modulePath, moduleGraph, compressed: true, overrideExtension: false);
-            var exFile = Assert.Throws<InvalidOperationException>(() =>
-                CompressedFormatUtils.LoadFastGraphFromFile(modulePath, requiredStage: GraphKind.ConcreteModel));
-            Assert.Contains(modulePath, exFile.Message);
-        }
-        finally { if (File.Exists(modulePath)) File.Delete(modulePath); }
-
-        // Matching required stages load fine, for all three stages.
-        Assert.NotEmpty(CompressedFormatUtils.LoadFastGraphFromBinary(
-            moduleBytes, requiredStage: GraphKind.Module).ToInternal().Nodes);
-        Assert.NotEmpty(CompressedFormatUtils.LoadFastGraphFromBinary(
-            CompressedFormatUtils.SaveFastGraphToBinary(arch), requiredStage: GraphKind.ConcreteArchitecture).ToInternal().Nodes);
-        Assert.NotEmpty(CompressedFormatUtils.LoadFastGraphFromBinary(
-            CompressedFormatUtils.SaveFastGraphToBinary(model), requiredStage: GraphKind.ConcreteModel).ToInternal().Nodes);
-    }
-
-    /// <summary>
-    /// Saving with the default extension normalization must not delete an unrelated file
-    /// sitting at the caller's original path: SaveFastGraphToFile("x.onnx", …) writes
-    /// x.zsrk and leaves x.onnx untouched.
-    /// </summary>
-    [Fact]
-    public void TestSaveFastGraphToFileDoesNotDeleteUnrelatedFile()
-    {
-        var (_, arch, _) = BuildStageGraphs();
-        var onnxPath = Path.Combine(TempDir, "sentinel_model.onnx");
-        var zsrkPath = Path.ChangeExtension(onnxPath, ".zsrk");
-        try
-        {
-            byte[] sentinel = [1, 2, 3, 4];
-            File.WriteAllBytes(onnxPath, sentinel);
-
-            // Default overrideExtension:true normalizes .onnx → .zsrk. The original
-            // .onnx is a different file and must survive.
-            var written = CompressedFormatUtils.SaveFastGraphToFile(onnxPath, arch, compressed: true);
-
-            Assert.Equal(zsrkPath, written);
-            Assert.True(File.Exists(onnxPath), "SaveFastGraphToFile deleted the caller's unrelated .onnx file");
-            Assert.Equal(sentinel, File.ReadAllBytes(onnxPath));
-            Assert.True(File.Exists(zsrkPath));
-            Assert.NotEmpty(CompressedFormatUtils.LoadFastGraphFromFile(zsrkPath).ToInternal().Nodes);
-        }
-        finally
-        {
-            if (File.Exists(onnxPath)) File.Delete(onnxPath);
-            if (File.Exists(zsrkPath)) File.Delete(zsrkPath);
-        }
-    }
-
-    /// <summary>
-    /// A container whose magic version byte is not the one this build reads fails with a clear
-    /// "unsupported major version" error — before header parsing — rather than being fed to the
-    /// protobuf reader and dying as unparseable. TryReadHeader and its file variant reject it the
-    /// same way instead of returning null (which would read as "not a .srk container at all").
-    /// </summary>
-    [Fact]
-    public void TestSrkUnreadableContainerVersionFailsClearly()
-    {
-        var (_, arch, _) = BuildStageGraphs();
-
-        // A real .srk container with the magic's major-version byte bumped 1 → 3.
-        var v3 = (byte[])CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: true).Clone();
-        v3[3] = 3;
-
-        Assert.False(SrkFileFormat.IsSrkContainer(v3));
-
-        var exLoad = Assert.Throws<InvalidDataException>(
-            () => CompressedFormatUtils.LoadFastGraphFromBinary(v3));
-        Assert.Contains("major version 3", exLoad.Message);
-
-        var exHeader = Assert.Throws<InvalidDataException>(() => SrkFileFormat.TryReadHeader(v3));
-        Assert.Contains("major version 3", exHeader.Message);
-
-        var path = Path.Combine(TempDir, "future.srk");
-        try
-        {
-            File.WriteAllBytes(path, v3);
-            var exFile = Assert.Throws<InvalidDataException>(() => SrkFileFormat.TryReadHeaderFromFile(path));
-            Assert.Contains(path, exFile.Message);
-            Assert.Contains("major version 3", exFile.Message);
-            Assert.Throws<InvalidDataException>(() => CompressedFormatUtils.LoadFastGraphFromFile(path));
-        }
-        finally { if (File.Exists(path)) File.Delete(path); }
-    }
-
-    /// <summary>
-    /// Non-container data fails loudly with an InvalidDataException naming the origin: an
-    /// empty file, non-.srk garbage, and a bare Zstd frame each produce a clear message
-    /// instead of a bare protobuf/index exception. There is no legacy read path — anything
-    /// that does not open with the container magic is refused up front.
-    /// </summary>
-    [Fact]
-    public void TestSrkNonContainerDataFailsLoudly()
-    {
-        // Empty input.
-        var exEmpty = Assert.Throws<InvalidDataException>(
-            () => CompressedFormatUtils.LoadFastGraphFromBinary([]));
-        Assert.Contains("empty", exEmpty.Message);
-
-        // Non-.srk garbage (not SRK-prefixed, not Zstd): refused with the origin named.
-        var garbage = new byte[64];
-        Array.Fill(garbage, (byte)0x77);
-        var garbagePath = Path.Combine(TempDir, "garbage.srk");
-        try
-        {
-            File.WriteAllBytes(garbagePath, garbage);
-            var exGarbage = Assert.Throws<InvalidDataException>(
-                () => CompressedFormatUtils.LoadFastGraphFromFile(garbagePath));
-            Assert.Contains(garbagePath, exGarbage.Message);
-        }
-        finally { if (File.Exists(garbagePath)) File.Delete(garbagePath); }
-
-        // A bare Zstd frame (a plausible pre-container layout) is no longer a .srk file:
-        // it does not open with the container magic, so it is refused up front.
-        var (_, arch, _) = BuildStageGraphs();
-        var bare = SrkFileFormat.Read(
-            CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: false)).OnnxBytes;
-        var zstdFramed = CompressedFormatUtils.Compress(bare);
-        var exZstd = Assert.Throws<InvalidDataException>(
-            () => CompressedFormatUtils.LoadFastGraphFromBinary(zstdFramed));
-        Assert.Contains("not a Shorokoo .srk container", exZstd.Message);
-    }
-
-    // ──────────────────────────────────────────────────────────────────────
-    // Persistence.Inspect (issue #57): identify and summarize artifacts from
-    // headers/prefixes only, never loading tensor payloads.
-    // ──────────────────────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Inspect identifies .srk graph files. Containers (compressed and uncompressed, i.e.
-    /// SaveFastGraphToFile's two modes) report the header metadata that was written — stage,
-    /// compression, producer, payload hash. A corrupt payload does not disturb inspection
-    /// (payload bytes are never read — the same file fails a full load on its hash check),
-    /// and corrupt headers / future versions yield structured results instead of exceptions.
-    /// </summary>
-    [Fact]
-    public void TestCheckpointInspectSrkArtifacts()
-    {
-        var (_, arch, _) = BuildStageGraphs();
-
-        // Container round-trip, compressed and uncompressed.
-        bool[] compressionModes = [true, false];
-        foreach (var compressed in compressionModes)
-        {
-            var path = Path.Combine(TempDir, $"inspect_{compressed}.zsrk");
-            try
-            {
-                CompressedFormatUtils.SaveFastGraphToFile(path, arch, compressed, overrideExtension: false);
-                var result = Persistence.Inspect(path);
-
-                Assert.Equal(ArtifactKind.SrkGraph, result.Kind);
-                Assert.Equal(path, result.FilePath);
-                Assert.Equal(new FileInfo(path).Length, result.FileSizeBytes);
-                Assert.NotNull(result.Srk);
-                Assert.Null(result.SafeTensors);
-                Assert.Null(result.TrainingCheckpoint);
-                Assert.Empty(result.Observations);
-
-                var header = result.Srk!.Header;
-                Assert.NotNull(header);
-                Assert.Equal(SrkFileFormat.CurrentVersion, header!.SrkVersion);
-                Assert.Equal(GraphKind.ConcreteArchitecture, header.TryGetStage());
-                Assert.Equal(compressed ? "zstd" : "none", header.Compression);
-                Assert.False(string.IsNullOrEmpty(header.PayloadSha256));
-                Assert.Equal(Shorokoo.ShorokooVersion.VersionString, header.Producer!.Shorokoo);
-                Assert.True(result.Srk.PayloadSizeBytes > 0);
-
-                var text = result.ToString();
-                Assert.Contains("concrete-architecture", text);
-                Assert.Contains(compressed ? "zstd" : "none", text);
-
-                // Corrupt the payload's last byte: a full load fails on the SHA-256 check,
-                // but Inspect — which never touches payload bytes — still reads the header.
-                var corrupt = File.ReadAllBytes(path);
-                corrupt[^1] ^= 0xFF;
-                var corruptPath = Path.Combine(TempDir, $"inspect_corrupt_{compressed}.zsrk");
-                try
-                {
-                    File.WriteAllBytes(corruptPath, corrupt);
-                    Assert.Throws<InvalidDataException>(
-                        () => CompressedFormatUtils.LoadFastGraphFromFile(corruptPath));
-                    var corruptResult = Persistence.Inspect(corruptPath);
-                    Assert.Equal(ArtifactKind.SrkGraph, corruptResult.Kind);
-                    Assert.Equal(header.PayloadSha256, corruptResult.Srk!.Header!.PayloadSha256);
-                }
-                finally { if (File.Exists(corruptPath)) File.Delete(corruptPath); }
-            }
-            finally { if (File.Exists(path)) File.Delete(path); }
-        }
-
-        // A future container version and a truncated container yield structured results
-        // with an observation naming the problem — never an exception.
-        var srkBytes = CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: false);
-        var future = (byte[])srkBytes.Clone();
-        future[3] = 3;
-        (string Name, byte[] Bytes)[] damaged =
-            [("future", future), ("truncated", srkBytes[..5])];
-        foreach (var (name, bytes) in damaged)
-        {
-            var path = Path.Combine(TempDir, $"inspect_{name}.srk");
-            try
-            {
-                File.WriteAllBytes(path, bytes);
-                var result = Persistence.Inspect(path);
-                Assert.Equal(ArtifactKind.SrkGraph, result.Kind);
-                Assert.Null(result.Srk!.Header);
-                Assert.Null(result.Srk.PayloadSizeBytes);   // unknown, no longer a 0 sentinel
-                Assert.Contains(result.Observations, o => o.Contains("header is not readable"));
-            }
-            finally { if (File.Exists(path)) File.Delete(path); }
-        }
-
-        // Garbage and empty files: the structured "not recognized" outcome, no exception.
-        var garbagePath = Path.Combine(TempDir, "inspect_garbage.bin");
-        var emptyPath = Path.Combine(TempDir, "inspect_empty.bin");
-        try
-        {
-            var garbage = new byte[64];
-            Array.Fill(garbage, (byte)0x77);
-            File.WriteAllBytes(garbagePath, garbage);
-            var garbageResult = Persistence.Inspect(garbagePath);
-            Assert.Equal(ArtifactKind.NotRecognized, garbageResult.Kind);
-            Assert.NotEmpty(garbageResult.Observations);
-            Assert.Contains("not recognized", garbageResult.ToString());
-
-            File.WriteAllBytes(emptyPath, []);
-            var emptyResult = Persistence.Inspect(emptyPath);
-            Assert.Equal(ArtifactKind.NotRecognized, emptyResult.Kind);
-            Assert.Contains(emptyResult.Observations, o => o.Contains("empty"));
-        }
-        finally
-        {
-            if (File.Exists(garbagePath)) File.Delete(garbagePath);
-            if (File.Exists(emptyPath)) File.Delete(emptyPath);
-        }
-
-        // A missing file is the one thing that still throws.
-        Assert.Throws<FileNotFoundException>(
-            () => Persistence.Inspect(Path.Combine(TempDir, "inspect_nope.srk")));
-    }
-
-    /// <summary>
-    /// Inspect identifies SaveSafeTensors output from the 8-byte length prefix + JSON
-    /// header alone: the tensor listing (name, dtype, shape, byte size) and total payload
-    /// size match what was written, a rank-0 scalar reports its empty shape, and the cheap
-    /// sanity observations fire — declared extents past the end of a truncated file, and
-    /// trailing bytes beyond the declared data.
-    /// </summary>
-    [Fact]
-    public void TestCheckpointInspectSafeTensorsArtifacts()
-    {
-        var t1 = TensorData([2, 3], 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f);
-        var t2 = TensorData([3], 7.0f, 8.0f, 9.0f);
-        var scalar = TensorData([], 42.0f);
-        var tensors = new List<SafeTensor>
-        {
-            new SafeTensor("tensor1", t1, "F32", t1.Shape.Dims),
-            new SafeTensor("tensor2", t2, "F32", t2.Shape.Dims),
-            new SafeTensor("scalar", scalar, "F32", scalar.Shape.Dims),
-        };
-
-        var path = Path.Combine(TempDir, "inspect_weights.safetensors");
-        var truncatedPath = Path.Combine(TempDir, "inspect_weights_truncated.safetensors");
-        var trailingPath = Path.Combine(TempDir, "inspect_weights_trailing.safetensors");
-        try
-        {
-            SafeTensorLoader.SaveSafeTensors(path, tensors);
-            var result = Persistence.Inspect(path);
-
-            Assert.Equal(ArtifactKind.SafeTensors, result.Kind);
-            Assert.Null(result.Srk);
-            Assert.Null(result.TrainingCheckpoint);
-            Assert.Empty(result.Observations);
-
-            var st = result.SafeTensors!;
-            Assert.True(st.HeaderSizeBytes > 0);
-            Assert.Equal(3, st.Tensors.Count);
-            Assert.Equal(6 * 4 + 3 * 4 + 4, st.TotalTensorBytes);
-
-            var byName = st.Tensors.ToDictionary(t => t.Name);
-            long[] expectedShape1 = [2, 3];
-            long[] expectedShape2 = [3];
-            Assert.Equal("F32", byName["tensor1"].DType);
-            Assert.Equal(expectedShape1, byName["tensor1"].Shape);
-            Assert.Equal(24, byName["tensor1"].ByteSize);
-            Assert.Equal(expectedShape2, byName["tensor2"].Shape);
-            Assert.Empty(byName["scalar"].Shape);   // rank-0 scalar: empty shape, 4 bytes
-            Assert.Equal(4, byName["scalar"].ByteSize);
-
-            var text = result.ToString();
-            Assert.Contains("SafeTensors", text);
-            Assert.Contains("tensor1: F32[2, 3], 24 bytes", text);
-
-            // Truncation: declared extents point past the end of the file → observation,
-            // still recognized, no exception.
-            var bytes = File.ReadAllBytes(path);
-            File.WriteAllBytes(truncatedPath, bytes[..^8]);
-            var truncated = Persistence.Inspect(truncatedPath);
-            Assert.Equal(ArtifactKind.SafeTensors, truncated.Kind);
-            Assert.Contains(truncated.Observations, o => o.Contains("past the end"));
-
-            // Trailing bytes beyond the declared data → observation.
-            File.WriteAllBytes(trailingPath, [.. bytes, 0, 0, 0, 0]);
-            var trailing = Persistence.Inspect(trailingPath);
-            Assert.Equal(ArtifactKind.SafeTensors, trailing.Kind);
-            Assert.Contains(trailing.Observations, o => o.Contains("trailing"));
-        }
-        finally
-        {
-            if (File.Exists(path)) File.Delete(path);
-            if (File.Exists(truncatedPath)) File.Delete(truncatedPath);
-            if (File.Exists(trailingPath)) File.Delete(trailingPath);
-        }
-    }
-
-    /// <summary>Hand-assembles a SafeTensors file (8-byte length prefix + JSON header + payload)
-    /// around an arbitrary header, for fault injection.</summary>
     private static byte[] BuildRawSafeTensors(string headerJson, byte[] payload)
     {
         var headerBytes = System.Text.Encoding.UTF8.GetBytes(headerJson);
@@ -882,300 +417,306 @@ public class CompressedFormatUtilsCoverageTests
         return result;
     }
 
-    /// <summary>
-    /// Inspect stays structured — no exception — on hostile and edge inputs, and reports
-    /// them honestly. Regressions pinned: a marker whose declared offset is near
-    /// long.MaxValue used to wrap past the bounds guard and crash on the seek; a huge
-    /// declared end offset used to wrap the extent arithmetic and misreport truncation as
-    /// negative "trailing bytes"; a Zstd file whose decompressed prefix merely starts 0x08
-    /// (e.g. a .zsafetensor with header length ≡ 8 mod 256) used to be mislabeled a legacy
-    /// .srk graph. Also covers the paths the first round of tests missed: a malformed
-    /// marker degrades to plain SafeTensors, a future checkpoint version is observed, and
-    /// __metadata__ is surfaced.
-    /// </summary>
     [Fact]
-    public void TestCheckpointInspectHostileAndEdgeInputs()
+    public void TestInspectSrkAndSafeTensorsArtifacts()
     {
-        var paths = new List<string>();
-        string NextPath(string name)
+        var (_, arch, _) = BuildStageGraphs();
+
+        bool[] compressionModes = [true, false];
+        foreach (var compressed in compressionModes)
         {
-            var p = Path.Combine(TempDir, name);
-            paths.Add(p);
-            return p;
-        }
+            var path = P($"inspect_{compressed}.zsrk");
+            CompressedFormatUtils.SaveFastGraphToFile(path, arch, compressed, overrideExtension: false);
+            var result = Persistence.Inspect(path);
 
-        try
-        {
-            // Marker offset near long.MaxValue: markerStart + 32 wraps, which used to
-            // bypass the bounds guard and crash in the seek/read. Iterate because the
-            // offset's digits feed back into the header length.
-            static string MarkerJson(long start) =>
-                $"{{\"__shorokoo_checkpoint__\":{{\"dtype\":\"I64\",\"shape\":[4],\"data_offsets\":[{start},{start + 32}]}}}}";
-            var markerHeader = MarkerJson(long.MaxValue / 2);
-            for (int i = 0; i < 4; i++)
-            {
-                long dataStart = 8 + System.Text.Encoding.UTF8.GetByteCount(markerHeader);
-                markerHeader = MarkerJson(long.MaxValue - dataStart - 8);
-            }
-            var overflowMarkerPath = NextPath("hostile_marker_offset.safetensors");
-            File.WriteAllBytes(overflowMarkerPath, BuildRawSafeTensors(markerHeader, new byte[32]));
-            var overflowMarker = Persistence.Inspect(overflowMarkerPath);
-            Assert.Equal(ArtifactKind.SafeTensors, overflowMarker.Kind);
-            Assert.Null(overflowMarker.TrainingCheckpoint);
-            Assert.Contains(overflowMarker.Observations, o => o.Contains("malformed"));
-
-            // Huge declared end offset: dataStart + maxEnd wraps, which used to report
-            // nonsense negative "trailing bytes" instead of the truncation warning.
-            var hugeEndPath = NextPath("hostile_huge_end.safetensors");
-            File.WriteAllBytes(hugeEndPath, BuildRawSafeTensors(
-                "{\"t\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,9223372036854775800]}}",
-                new byte[8]));
-            var hugeEnd = Persistence.Inspect(hugeEndPath);
-            Assert.Equal(ArtifactKind.SafeTensors, hugeEnd.Kind);
-            Assert.Contains(hugeEnd.Observations, o => o.Contains("past the end"));
-            Assert.DoesNotContain(hugeEnd.Observations, o => o.Contains("trailing"));
-
-            // Reversed and wrapping data_offsets pairs: flagged as invalid extents with the
-            // reported size clamped to zero.
-            var badExtentPath = NextPath("hostile_bad_extent.safetensors");
-            File.WriteAllBytes(badExtentPath, BuildRawSafeTensors(
-                "{\"a\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[10,2]}," +
-                "\"b\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[-9223372036854775808,8]}}",
-                new byte[16]));
-            var badExtent = Persistence.Inspect(badExtentPath);
-            Assert.Equal(ArtifactKind.SafeTensors, badExtent.Kind);
-            Assert.Equal(2, badExtent.Observations.Count(o => o.Contains("invalid extent")));
-            Assert.All(badExtent.SafeTensors!.Tensors, t => Assert.Equal(0, t.ByteSize));
-
-            // A marker with the wrong dtype degrades to plain SafeTensors + observation.
-            var wrongDtypePath = NextPath("hostile_marker_dtype.safetensors");
-            File.WriteAllBytes(wrongDtypePath, BuildRawSafeTensors(
-                "{\"__shorokoo_checkpoint__\":{\"dtype\":\"F32\",\"shape\":[4],\"data_offsets\":[0,32]}}",
-                new byte[32]));
-            var wrongDtype = Persistence.Inspect(wrongDtypePath);
-            Assert.Equal(ArtifactKind.SafeTensors, wrongDtype.Kind);
-            Assert.Null(wrongDtype.TrainingCheckpoint);
-            Assert.Contains(wrongDtype.Observations, o => o.Contains("malformed"));
-
-            // A checkpoint format version this build does not read still inspects as a checkpoint
-            // (version and step read from the marker) with an observation; a tensor outside the
-            // known sections is observed too. The marker's int64[2] = [version, step] shape is
-            // fixed and the format grows via new presence-gated scalars, so the marker here is the
-            // same shape this build writes, only with an unreadable version.
-            var w = TensorData([2L], 1.0f, 2.0f);
-            var futureCkptPath = NextPath("future_checkpoint.safetensors");
-            SafeTensorLoader.SaveSafeTensors(futureCkptPath, new List<SafeTensor>
-            {
-                new SafeTensor("trainable/w", w, "F32", w.Shape.Dims),
-                new SafeTensor("stray", w, "F32", w.Shape.Dims),
-                new SafeTensor("__shorokoo_checkpoint__", TensorData([2L], 99L, 3L), "I64", [2L]),
-            });
-            var futureCkpt = Persistence.Inspect(futureCkptPath);
-            Assert.Equal(ArtifactKind.TrainingCheckpoint, futureCkpt.Kind);
-            Assert.Equal(99, futureCkpt.TrainingCheckpoint!.FormatVersion);
-            Assert.Equal(3, futureCkpt.TrainingCheckpoint.Step);
-            Assert.Single(futureCkpt.TrainingCheckpoint.Sections["trainable"]);
-            Assert.Contains(futureCkpt.Observations, o => o.Contains("format version 99"));
-            Assert.Contains(futureCkpt.Observations, o => o.Contains("'stray'"));
-
-            // Zstd-compressed non-SafeTensors data is NotRecognized — including the near-miss
-            // whose decompressed prefix starts 0x08 (a .zsafetensor header-length prefix
-            // with headerLen ≡ 8 mod 256): its inner content is not a SafeTensors header.
-            byte[] textBytes = System.Text.Encoding.UTF8.GetBytes("clearly not a model, just some text.");
-            byte[] nearMiss = [0x08, 0x01, 0, 0, 0, 0, 0, 0, 0x7B, 0x22];
-            (string Name, byte[] Inner)[] zstdCases =
-                [("zstd_text.bin", textBytes), ("zstd_nearmiss.zsafetensor", nearMiss)];
-            foreach (var (name, inner) in zstdCases)
-            {
-                var p = NextPath(name);
-                File.WriteAllBytes(p, CompressedFormatUtils.Compress(inner));
-                var r = Persistence.Inspect(p);
-                Assert.Equal(ArtifactKind.NotRecognized, r.Kind);
-                Assert.Contains(r.Observations, o => o.Contains("Zstd frame"));
-            }
-
-            // __metadata__ entries are surfaced.
-            var metaPath = NextPath("with_metadata.safetensors");
-            SafeTensorLoader.SaveSafeTensors(metaPath,
-                new List<SafeTensor> { new SafeTensor("w", w, "F32", w.Shape.Dims) },
-                new Dictionary<string, object> { ["format"] = "shorokoo-test" });
-            var meta = Persistence.Inspect(metaPath);
-            Assert.Equal(ArtifactKind.SafeTensors, meta.Kind);
-            Assert.Equal("shorokoo-test", meta.SafeTensors!.GlobalMetadata!["format"]);
-        }
-        finally
-        {
-            foreach (var p in paths)
-                if (File.Exists(p)) File.Delete(p);
-        }
-    }
-
-    /// <summary>
-    /// Inspect positively identifies .zsafetensor archives (issue #70): the frame's inner
-    /// 8-byte length prefix and JSON header are stream-decompressed — bounded reads, never
-    /// the tensor payload — and parsed with the shared SafeTensors header logic. Covers:
-    /// a real SaveCompressedSafeTensors round-trip recognized with the correct tensor
-    /// listing and metadata; proof the payload is untouched (an archive whose compressed
-    /// tail is chopped off still inspects, while a full load fails); a compressed training
-    /// checkpoint reporting the archive kind plus an observation instead of version/step
-    /// (the marker payload is not boundedly reachable through the non-seekable stream);
-    /// and corrupt/truncated compressed files yielding structured non-throwing results.
-    /// </summary>
-    [Fact]
-    public void TestCheckpointInspectCompressedSafeTensorsArtifacts()
-    {
-        var paths = new List<string>();
-        string NextPath(string name)
-        {
-            var p = Path.Combine(TempDir, name);
-            paths.Add(p);
-            return p;
-        }
-
-        try
-        {
-            // Real round-trip: written by the actual saver, recognized with the full
-            // tensor listing and the __metadata__ entries, no observations.
-            var t1 = TensorData([2, 3], 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f);
-            var t2 = TensorData([3], 7.0f, 8.0f, 9.0f);
-            var zPath = NextPath("inspect_weights.zsafetensor");
-            CompressedFormatUtils.SaveCompressedSafeTensors(zPath, new List<SafeTensor>
-            {
-                new SafeTensor("tensor1", t1, "F32", t1.Shape.Dims),
-                new SafeTensor("tensor2", t2, "F32", t2.Shape.Dims),
-            }, new Dictionary<string, object> { ["format"] = "shorokoo-test" });
-
-            var result = Persistence.Inspect(zPath);
-            Assert.Equal(ArtifactKind.CompressedSafeTensors, result.Kind);
-            Assert.Equal(zPath, result.FilePath);
-            Assert.Equal(new FileInfo(zPath).Length, result.FileSizeBytes);
-            Assert.Null(result.Srk);
+            Assert.Equal(ArtifactKind.SrkGraph, result.Kind);
+            Assert.Equal(path, result.FilePath);
+            Assert.Equal(new FileInfo(path).Length, result.FileSizeBytes);
+            Assert.NotNull(result.Srk);
+            Assert.Null(result.SafeTensors);
             Assert.Null(result.TrainingCheckpoint);
             Assert.Empty(result.Observations);
 
-            var st = result.SafeTensors!;
-            Assert.True(st.HeaderSizeBytes > 0);
-            Assert.Equal(2, st.Tensors.Count);
-            Assert.Equal(6 * 4 + 3 * 4, st.TotalTensorBytes);
-            var byName = st.Tensors.ToDictionary(t => t.Name);
-            long[] expectedShape1 = [2, 3];
-            Assert.Equal("F32", byName["tensor1"].DType);
-            Assert.Equal(expectedShape1, byName["tensor1"].Shape);
-            Assert.Equal(24, byName["tensor1"].ByteSize);
-            Assert.Equal("shorokoo-test", st.GlobalMetadata!["format"]);
+            var header = result.Srk!.Header;
+            Assert.NotNull(header);
+            Assert.Equal(SrkFileFormat.CurrentVersion, header!.SrkVersion);
+            Assert.Equal(GraphKind.ConcreteArchitecture, header.TryGetStage());
+            Assert.Equal(compressed ? "zstd" : "none", header.Compression);
+            Assert.False(string.IsNullOrEmpty(header.PayloadSha256));
+            Assert.Equal(Shorokoo.ShorokooVersion.VersionString, header.Producer!.Shorokoo);
+            Assert.True(result.Srk.PayloadSizeBytes > 0);
 
             var text = result.ToString();
-            Assert.Contains("Zstd-compressed SafeTensors archive", text);
-            Assert.Contains("tensor1: F32[2, 3], 24 bytes", text);
+            Assert.Contains("concrete-architecture", text);
+            Assert.Contains(compressed ? "zstd" : "none", text);
 
-            // Payload untouched: an incompressible multi-block payload whose compressed
-            // tail is chopped off. A full load fails on the broken frame, but Inspect —
-            // which decompresses only the prefix + header from the intact leading blocks —
-            // still recognizes the archive. (Zstd blocks hold at most 128 KB decompressed,
-            // so a ~1.2 MB payload guarantees the header and the chopped tail sit in
-            // different blocks.)
-            var bigValues = new float[300_000];
-            uint seed = 1;
-            for (int i = 0; i < bigValues.Length; i++)
-            {
-                seed = seed * 747796405u + 2891336453u;   // cheap PCG-ish, incompressible
-                bigValues[i] = BitConverter.UInt32BitsToSingle((seed >> 9) | 0x3F800000u);
-            }
-            var big = TensorData([300_000L], bigValues);
-            var bigPath = NextPath("inspect_big.zsafetensor");
-            CompressedFormatUtils.SaveCompressedSafeTensors(bigPath, new List<SafeTensor>
-            {
-                new SafeTensor("big", big, "F32", big.Shape.Dims),
-            });
-            var bigBytes = File.ReadAllBytes(bigPath);
-            Assert.True(bigBytes.Length > 256 * 1024);   // really multi-block
-            var choppedPath = NextPath("inspect_big_chopped.zsafetensor");
-            File.WriteAllBytes(choppedPath, bigBytes[..^64]);
-            Assert.ThrowsAny<Exception>(
-                () => CompressedFormatUtils.LoadCompressedSafeTensors(choppedPath));
-            var chopped = Persistence.Inspect(choppedPath);
-            Assert.Equal(ArtifactKind.CompressedSafeTensors, chopped.Kind);
-            Assert.Equal("big", Assert.Single(chopped.SafeTensors!.Tensors).Name);
-            Assert.Equal(300_000L * 4, chopped.SafeTensors.TotalTensorBytes);
-
-            // A checkpoint saved compressed: the marker is visible in the header, but its
-            // [version, step] payload sits inside the compressed tensor
-            // data, beyond the bounded header read — the archive kind is reported,
-            // TrainingCheckpoint stays null, and an observation says why.
-            var w = TensorData([2L], 1.0f, 2.0f);
-            var ckptPath = NextPath("inspect_ckpt.zsafetensor");
-            CompressedFormatUtils.SaveCompressedSafeTensors(ckptPath, new List<SafeTensor>
-            {
-                new SafeTensor("trainable/w", w, "F32", w.Shape.Dims),
-                new SafeTensor("__shorokoo_checkpoint__", TensorData([2L], 1L, 7L), "I64", [2L]),
-            });
-            var ckpt = Persistence.Inspect(ckptPath);
-            Assert.Equal(ArtifactKind.CompressedSafeTensors, ckpt.Kind);
-            Assert.Null(ckpt.TrainingCheckpoint);
-            Assert.Contains(ckpt.SafeTensors!.Tensors, t => t.Name == "__shorokoo_checkpoint__");
-            Assert.Contains(ckpt.Observations,
-                o => o.Contains("__shorokoo_checkpoint__") && o.Contains("bounded"));
-
-            // A Zstd frame truncated to its first bytes fails to decompress → structured
-            // NotRecognized, no exception.
-            var stubPath = NextPath("inspect_stub.zsafetensor");
-            File.WriteAllBytes(stubPath, bigBytes[..5]);
-            var stub = Persistence.Inspect(stubPath);
-            Assert.Equal(ArtifactKind.NotRecognized, stub.Kind);
-            Assert.Contains(stub.Observations, o => o.Contains("Zstd frame"));
-
-            // A frame that decompresses cleanly but ends inside its declared SafeTensors
-            // header (the compressed analogue of a truncated header) → structured
-            // NotRecognized naming the truncation.
-            byte[] shortDecl = [.. BitConverter.GetBytes(1000L), 0x7B, 0x22, 0x74];
-            var shortPath = NextPath("inspect_short.zsafetensor");
-            File.WriteAllBytes(shortPath, CompressedFormatUtils.Compress(shortDecl));
-            var shortResult = Persistence.Inspect(shortPath);
-            Assert.Equal(ArtifactKind.NotRecognized, shortResult.Kind);
-            Assert.Contains(shortResult.Observations, o => o.Contains("ends after"));
-
-            // Amplification guard: a small file declaring a near-cap (99 MB) header must
-            // yield the same structured result without the declaration costing 99 MB of
-            // allocation — the header buffer grows with what the stream delivers (here
-            // 200 KB), which also exercises the growth path across block boundaries.
-            var hugeDecl = new byte[8 + 200_000];
-            BitConverter.GetBytes(99_000_000L).CopyTo(hugeDecl, 0);
-            var hugePath = NextPath("inspect_huge_decl.zsafetensor");
-            File.WriteAllBytes(hugePath, CompressedFormatUtils.Compress(hugeDecl));
-            var hugeResult = Persistence.Inspect(hugePath);
-            Assert.Equal(ArtifactKind.NotRecognized, hugeResult.Kind);
-            Assert.Contains(hugeResult.Observations, o => o.Contains("ends after 200000"));
-
-            // A bare Zstd frame whose decompressed content is a serialized ONNX model (no
-            // SafeTensors header) is not a Shorokoo artifact — there is no legacy .srk read
-            // path — so it inspects as NotRecognized, not a graph.
-            var (_, arch, _) = BuildStageGraphs();
-            var bare = SrkFileFormat.Read(
-                CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: false)).OnnxBytes;
-            var framedPath = NextPath("inspect_zstd_onnx.srk");
-            File.WriteAllBytes(framedPath, CompressedFormatUtils.Compress(bare));
-            var framed = Persistence.Inspect(framedPath);
-            Assert.Equal(ArtifactKind.NotRecognized, framed.Kind);
-            Assert.Contains(framed.Observations, o => o.Contains("not a SafeTensors archive"));
+            // Inspect never touches payload bytes: a corrupt payload still reads its header.
+            var corrupt = File.ReadAllBytes(path);
+            corrupt[^1] ^= 0xFF;
+            var corruptPath = P($"inspect_corrupt_{compressed}.zsrk");
+            File.WriteAllBytes(corruptPath, corrupt);
+            Assert.Throws<InvalidDataException>(
+                () => CompressedFormatUtils.LoadFastGraphFromFile(corruptPath));
+            var corruptResult = Persistence.Inspect(corruptPath);
+            Assert.Equal(ArtifactKind.SrkGraph, corruptResult.Kind);
+            Assert.Equal(header.PayloadSha256, corruptResult.Srk!.Header!.PayloadSha256);
         }
-        finally
+
+        var srkBytes = CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: false);
+        var future = (byte[])srkBytes.Clone();
+        future[3] = 3;
+        (string Name, byte[] Bytes)[] damaged = [("future", future), ("truncated", srkBytes[..5])];
+        foreach (var (name, bytes) in damaged)
         {
-            foreach (var p in paths)
-                if (File.Exists(p)) File.Delete(p);
+            var path = P($"inspect_{name}.srk");
+            File.WriteAllBytes(path, bytes);
+            var result = Persistence.Inspect(path);
+            AssertInspection(result, ArtifactKind.SrkGraph, ["header is not readable"]);
+            Assert.Null(result.Srk!.Header);
+            Assert.Null(result.Srk.PayloadSizeBytes);
         }
+
+        var garbagePath = P("inspect_garbage.bin");
+        var garbage = new byte[64];
+        Array.Fill(garbage, (byte)0x77);
+        File.WriteAllBytes(garbagePath, garbage);
+        var garbageResult = Persistence.Inspect(garbagePath);
+        Assert.Equal(ArtifactKind.NotRecognized, garbageResult.Kind);
+        Assert.NotEmpty(garbageResult.Observations);
+        Assert.Contains("not recognized", garbageResult.ToString());
+
+        var emptyPath = P("inspect_empty.bin");
+        File.WriteAllBytes(emptyPath, []);
+        AssertInspection(Persistence.Inspect(emptyPath), ArtifactKind.NotRecognized, ["empty"]);
+
+        Assert.Throws<FileNotFoundException>(() => Persistence.Inspect(P("inspect_nope.srk")));
+
+        var t1 = TensorData([2, 3], 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f);
+        var t2 = TensorData([3], 7.0f, 8.0f, 9.0f);
+        var scalar = TensorData([], 42.0f);
+        var stPath = P("inspect_weights.safetensors");
+        SafeTensorLoader.SaveSafeTensors(stPath, new List<SafeTensor>
+        {
+            new SafeTensor("tensor1", t1, "F32", t1.Shape.Dims),
+            new SafeTensor("tensor2", t2, "F32", t2.Shape.Dims),
+            new SafeTensor("scalar", scalar, "F32", scalar.Shape.Dims),
+        });
+        var stResult = Persistence.Inspect(stPath);
+
+        Assert.Equal(ArtifactKind.SafeTensors, stResult.Kind);
+        Assert.Null(stResult.Srk);
+        Assert.Null(stResult.TrainingCheckpoint);
+        Assert.Empty(stResult.Observations);
+
+        var st = stResult.SafeTensors!;
+        Assert.True(st.HeaderSizeBytes > 0);
+        Assert.Equal(3, st.Tensors.Count);
+        Assert.Equal(6 * 4 + 3 * 4 + 4, st.TotalTensorBytes);
+
+        var byName = st.Tensors.ToDictionary(t => t.Name);
+        long[] expectedShape1 = [2, 3];
+        long[] expectedShape2 = [3];
+        Assert.Equal("F32", byName["tensor1"].DType);
+        Assert.Equal(expectedShape1, byName["tensor1"].Shape);
+        Assert.Equal(24, byName["tensor1"].ByteSize);
+        Assert.Equal(expectedShape2, byName["tensor2"].Shape);
+        Assert.Empty(byName["scalar"].Shape);
+        Assert.Equal(4, byName["scalar"].ByteSize);
+
+        var stText = stResult.ToString();
+        Assert.Contains("SafeTensors", stText);
+        Assert.Contains("tensor1: F32[2, 3], 24 bytes", stText);
+
+        var stBytes = File.ReadAllBytes(stPath);
+        var truncatedPath = P("inspect_weights_truncated.safetensors");
+        File.WriteAllBytes(truncatedPath, stBytes[..^8]);
+        AssertInspection(Persistence.Inspect(truncatedPath), ArtifactKind.SafeTensors, ["past the end"]);
+
+        var trailingPath = P("inspect_weights_trailing.safetensors");
+        File.WriteAllBytes(trailingPath, [.. stBytes, 0, 0, 0, 0]);
+        AssertInspection(Persistence.Inspect(trailingPath), ArtifactKind.SafeTensors, ["trailing"]);
+    }
+
+    [Fact]
+    public void TestInspectCompressedSafeTensorsAndHostileInputs()
+    {
+        var t1 = TensorData([2, 3], 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f);
+        var t2 = TensorData([3], 7.0f, 8.0f, 9.0f);
+        var zPath = P("inspect_weights.zsafetensor");
+        CompressedFormatUtils.SaveCompressedSafeTensors(zPath, new List<SafeTensor>
+        {
+            new SafeTensor("tensor1", t1, "F32", t1.Shape.Dims),
+            new SafeTensor("tensor2", t2, "F32", t2.Shape.Dims),
+        }, new Dictionary<string, object> { ["format"] = "shorokoo-test" });
+
+        var result = Persistence.Inspect(zPath);
+        Assert.Equal(ArtifactKind.CompressedSafeTensors, result.Kind);
+        Assert.Equal(zPath, result.FilePath);
+        Assert.Equal(new FileInfo(zPath).Length, result.FileSizeBytes);
+        Assert.Null(result.Srk);
+        Assert.Null(result.TrainingCheckpoint);
+        Assert.Empty(result.Observations);
+
+        var st = result.SafeTensors!;
+        Assert.True(st.HeaderSizeBytes > 0);
+        Assert.Equal(2, st.Tensors.Count);
+        Assert.Equal(6 * 4 + 3 * 4, st.TotalTensorBytes);
+        var byName = st.Tensors.ToDictionary(t => t.Name);
+        long[] expectedShape1 = [2, 3];
+        Assert.Equal("F32", byName["tensor1"].DType);
+        Assert.Equal(expectedShape1, byName["tensor1"].Shape);
+        Assert.Equal(24, byName["tensor1"].ByteSize);
+        Assert.Equal("shorokoo-test", st.GlobalMetadata!["format"]);
+
+        var text = result.ToString();
+        Assert.Contains("Zstd-compressed SafeTensors archive", text);
+        Assert.Contains("tensor1: F32[2, 3], 24 bytes", text);
+
+        // Payload untouched: this ~1.2 MB incompressible payload spans several Zstd blocks, so a
+        // chopped tail breaks a full load while the header still inspects.
+        var bigValues = new float[300_000];
+        uint seed = 1;
+        for (int i = 0; i < bigValues.Length; i++)
+        {
+            seed = seed * 747796405u + 2891336453u;
+            bigValues[i] = BitConverter.UInt32BitsToSingle((seed >> 9) | 0x3F800000u);
+        }
+        var big = TensorData([300_000L], bigValues);
+        var bigPath = P("inspect_big.zsafetensor");
+        CompressedFormatUtils.SaveCompressedSafeTensors(bigPath, new List<SafeTensor>
+        {
+            new SafeTensor("big", big, "F32", big.Shape.Dims),
+        });
+        var bigBytes = File.ReadAllBytes(bigPath);
+        Assert.True(bigBytes.Length > 256 * 1024);
+        var choppedPath = P("inspect_big_chopped.zsafetensor");
+        File.WriteAllBytes(choppedPath, bigBytes[..^64]);
+        Assert.ThrowsAny<Exception>(() => CompressedFormatUtils.LoadCompressedSafeTensors(choppedPath));
+        var chopped = Persistence.Inspect(choppedPath);
+        Assert.Equal(ArtifactKind.CompressedSafeTensors, chopped.Kind);
+        Assert.Equal("big", Assert.Single(chopped.SafeTensors!.Tensors).Name);
+        Assert.Equal(300_000L * 4, chopped.SafeTensors.TotalTensorBytes);
+
+        // Compressed checkpoint: the marker shows in the header, its [version, step] payload
+        // sits beyond the bounded header read.
+        var w = TensorData([2L], 1.0f, 2.0f);
+        var ckptPath = P("inspect_ckpt.zsafetensor");
+        CompressedFormatUtils.SaveCompressedSafeTensors(ckptPath, new List<SafeTensor>
+        {
+            new SafeTensor("trainable/w", w, "F32", w.Shape.Dims),
+            new SafeTensor("__shorokoo_checkpoint__", TensorData([2L], 1L, 7L), "I64", [2L]),
+        });
+        var ckpt = Persistence.Inspect(ckptPath);
+        AssertInspection(ckpt, ArtifactKind.CompressedSafeTensors, ["__shorokoo_checkpoint__", "bounded"]);
+        Assert.Null(ckpt.TrainingCheckpoint);
+        Assert.Contains(ckpt.SafeTensors!.Tensors, t => t.Name == "__shorokoo_checkpoint__");
+
+        var stubPath = P("inspect_stub.zsafetensor");
+        File.WriteAllBytes(stubPath, bigBytes[..5]);
+        AssertInspection(Persistence.Inspect(stubPath), ArtifactKind.NotRecognized, ["Zstd frame"]);
+
+        byte[] shortDecl = [.. BitConverter.GetBytes(1000L), 0x7B, 0x22, 0x74];
+        var shortPath = P("inspect_short.zsafetensor");
+        File.WriteAllBytes(shortPath, CompressedFormatUtils.Compress(shortDecl));
+        AssertInspection(Persistence.Inspect(shortPath), ArtifactKind.NotRecognized, ["ends after"]);
+
+        // Amplification guard: a declared near-cap (99 MB) header must not cost 99 MB of
+        // allocation — the buffer grows with what the stream delivers (200 KB here).
+        var hugeDecl = new byte[8 + 200_000];
+        BitConverter.GetBytes(99_000_000L).CopyTo(hugeDecl, 0);
+        var hugePath = P("inspect_huge_decl.zsafetensor");
+        File.WriteAllBytes(hugePath, CompressedFormatUtils.Compress(hugeDecl));
+        AssertInspection(Persistence.Inspect(hugePath), ArtifactKind.NotRecognized, ["ends after 200000"]);
+
+        var (_, arch, _) = BuildStageGraphs();
+        var framedPath = P("inspect_zstd_onnx.srk");
+        File.WriteAllBytes(framedPath, CompressedFormatUtils.Compress(SrkFileFormat.Read(
+            CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: false)).OnnxBytes));
+        AssertInspection(Persistence.Inspect(framedPath), ArtifactKind.NotRecognized,
+            ["not a SafeTensors archive"]);
+
+        // Marker offset near long.MaxValue: markerStart + 32 wraps past the bounds guard.
+        // Iterate — the offset's digits feed back into the header length.
+        static string MarkerJson(long start) =>
+            $"{{\"__shorokoo_checkpoint__\":{{\"dtype\":\"I64\",\"shape\":[4],\"data_offsets\":[{start},{start + 32}]}}}}";
+        var markerHeader = MarkerJson(long.MaxValue / 2);
+        for (int i = 0; i < 4; i++)
+        {
+            long dataStart = 8 + System.Text.Encoding.UTF8.GetByteCount(markerHeader);
+            markerHeader = MarkerJson(long.MaxValue - dataStart - 8);
+        }
+        var overflowMarkerPath = P("hostile_marker_offset.safetensors");
+        File.WriteAllBytes(overflowMarkerPath, BuildRawSafeTensors(markerHeader, new byte[32]));
+        var overflowMarker = Persistence.Inspect(overflowMarkerPath);
+        AssertInspection(overflowMarker, ArtifactKind.SafeTensors, ["malformed"]);
+        Assert.Null(overflowMarker.TrainingCheckpoint);
+
+        // Huge declared end offset: dataStart + maxEnd wraps — truncation, not negative trailing.
+        var hugeEndPath = P("hostile_huge_end.safetensors");
+        File.WriteAllBytes(hugeEndPath, BuildRawSafeTensors(
+            "{\"t\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,9223372036854775800]}}",
+            new byte[8]));
+        var hugeEnd = Persistence.Inspect(hugeEndPath);
+        AssertInspection(hugeEnd, ArtifactKind.SafeTensors, ["past the end"]);
+        Assert.DoesNotContain(hugeEnd.Observations, o => o.Contains("trailing"));
+
+        var badExtentPath = P("hostile_bad_extent.safetensors");
+        File.WriteAllBytes(badExtentPath, BuildRawSafeTensors(
+            "{\"a\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[10,2]}," +
+            "\"b\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[-9223372036854775808,8]}}",
+            new byte[16]));
+        var badExtent = Persistence.Inspect(badExtentPath);
+        Assert.Equal(ArtifactKind.SafeTensors, badExtent.Kind);
+        Assert.Equal(2, badExtent.Observations.Count(o => o.Contains("invalid extent")));
+        Assert.All(badExtent.SafeTensors!.Tensors, t => Assert.Equal(0, t.ByteSize));
+
+        var wrongDtypePath = P("hostile_marker_dtype.safetensors");
+        File.WriteAllBytes(wrongDtypePath, BuildRawSafeTensors(
+            "{\"__shorokoo_checkpoint__\":{\"dtype\":\"F32\",\"shape\":[4],\"data_offsets\":[0,32]}}",
+            new byte[32]));
+        var wrongDtype = Persistence.Inspect(wrongDtypePath);
+        AssertInspection(wrongDtype, ArtifactKind.SafeTensors, ["malformed"]);
+        Assert.Null(wrongDtype.TrainingCheckpoint);
+
+        // An unreadable format version still inspects as a checkpoint; a stray tensor is observed.
+        var futureCkptPath = P("future_checkpoint.safetensors");
+        SafeTensorLoader.SaveSafeTensors(futureCkptPath, new List<SafeTensor>
+        {
+            new SafeTensor("trainable/w", w, "F32", w.Shape.Dims),
+            new SafeTensor("stray", w, "F32", w.Shape.Dims),
+            new SafeTensor("__shorokoo_checkpoint__", TensorData([2L], 99L, 3L), "I64", [2L]),
+        });
+        var futureCkpt = Persistence.Inspect(futureCkptPath);
+        AssertInspection(futureCkpt, ArtifactKind.TrainingCheckpoint, ["format version 99"], ["'stray'"]);
+        Assert.Equal(99, futureCkpt.TrainingCheckpoint!.FormatVersion);
+        Assert.Equal(3, futureCkpt.TrainingCheckpoint.Step);
+        Assert.Single(futureCkpt.TrainingCheckpoint.Sections["trainable"]);
+
+        // Zstd-compressed non-SafeTensors data, including a near-miss prefix starting 0x08.
+        byte[] textBytes = System.Text.Encoding.UTF8.GetBytes("clearly not a model, just some text.");
+        byte[] nearMiss = [0x08, 0x01, 0, 0, 0, 0, 0, 0, 0x7B, 0x22];
+        (string Name, byte[] Inner)[] zstdCases =
+            [("zstd_text.bin", textBytes), ("zstd_nearmiss.zsafetensor", nearMiss)];
+        foreach (var (name, inner) in zstdCases)
+        {
+            var p = P(name);
+            File.WriteAllBytes(p, CompressedFormatUtils.Compress(inner));
+            AssertInspection(Persistence.Inspect(p), ArtifactKind.NotRecognized, ["Zstd frame"]);
+        }
+
+        var metaPath = P("with_metadata.safetensors");
+        SafeTensorLoader.SaveSafeTensors(metaPath,
+            new List<SafeTensor> { new SafeTensor("w", w, "F32", w.Shape.Dims) },
+            new Dictionary<string, object> { ["format"] = "shorokoo-test" });
+        var meta = Persistence.Inspect(metaPath);
+        Assert.Equal(ArtifactKind.SafeTensors, meta.Kind);
+        Assert.Equal("shorokoo-test", meta.SafeTensors!.GlobalMetadata!["format"]);
     }
 
     private static Tensor<float32> ParamlessDouble(Tensor<float32> x) => x + x;
 
-    /// <summary>
-    /// Issue #54: a parameterless module lowers to a concrete architecture whose
-    /// op-scan classification says "concrete-model" (there are no MODEL_PARAM nodes
-    /// to see), so the stamped kind is the only reliable answer. The writer records
-    /// the stamp in the header and the loader stamps Kind from the header, so the
-    /// kind survives the .srk round-trip even with no op-scan evidence.
-    /// </summary>
     [Fact]
-    public void TestStampedKindSurvivesSrkRoundtripWithoutOpScanEvidence()
+    public void TestStampedGraphKindSurvivesSrkAndOnnxWithoutOpScanEvidence()
     {
         var moduleGraph = ModuleFactory.ComputationGraph(
             (Func<Tensor<float32>, Tensor<float32>>)ParamlessDouble);
@@ -1184,72 +725,41 @@ public class CompressedFormatUtilsCoverageTests
         var arch = moduleGraph.ToConcreteArchitecture(
             moduleGraph.FromOrderedInputs([TensorData([2L], 1.0f, 2.0f)]));
         Assert.Equal(GraphKind.ConcreteArchitecture, arch.Kind);
-        // No trainable params -> op-scanning misclassifies this architecture.
+        // No trainable params → op-scanning misclassifies this architecture.
         Assert.Equal(GraphKind.ConcreteModel, SrkFileFormat.DetectStage(arch.ToInternal()));
 
         var bytes = CompressedFormatUtils.SaveFastGraphToBinary(arch, compressed: false);
         Assert.Equal(GraphKind.ConcreteArchitecture, SrkFileFormat.TryReadHeader(bytes)!.TryGetStage());
-
         var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(bytes);
         Assert.Equal(GraphKind.ConcreteArchitecture, reloaded.Kind);
-
-        // The stamped kind is authoritative on the reloaded graph too: it may
-        // continue the pipeline exactly like the in-memory architecture.
         Assert.Equal(GraphKind.ConcreteModel, reloaded.ToConcreteModel().Kind);
+
+        (ComputationGraph Graph, GraphKind Kind)[] cases =
+            [(moduleGraph, GraphKind.Module), (arch, GraphKind.ConcreteArchitecture)];
+        foreach (var (graph, kind) in cases)
+        {
+            var proto = FastOnnxModelBuilder.BuildInternalOnnxModel(graph.ToInternal(), stage: graph.Kind);
+            using var ms = new MemoryStream();
+            ProtoBuf.Serializer.Serialize(ms, proto);
+            var viaOnnx = OnnxModelImporter.FromOnnxModel(ms.ToArray());
+            Assert.Equal(kind, viaOnnx.Kind);
+            Assert.Equal(GraphKind.ConcreteModel, SrkFileFormat.DetectStage(viaOnnx.ToInternal()));
+        }
+
+        // Module machinery tagged concrete-model is structurally impossible: refused at import.
+        var lyingProto = FastOnnxModelBuilder.BuildInternalOnnxModel(
+            ScalarMultiplyModel.ComputationGraph.ToInternal(), stage: GraphKind.ConcreteModel);
+        using var lyingMs = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(lyingMs, lyingProto);
+        var ex = Assert.Throws<InvalidDataException>(
+            () => OnnxModelImporter.FromOnnxModel(lyingMs.ToArray()));
+        Assert.Contains("shrk_graph_kind", ex.Message);
+        Assert.Contains("module-stage op", ex.Message);
     }
 
-
-    // ──────────────────────────────────────────────────────────────────────
-    // Module-stage .srk round-trip fidelity audit (issue #59).
-    //
-    // The construct inventory, and where each construct's save → load coverage
-    // lives:
-    //
-    //  1. Optional/absent tensor arguments on module-stage ops — the absent
-    //     optional model slot of MODEL_PARAM_MODEL_REF (every top-level
-    //     initializer call, e.g. ScalarMultiplyModel), the absent optional
-    //     "key" input of the SHRK_RANDOM_* runtime feeds (pre-concretization),
-    //     and an OptionalTensor model input (MODEL_OPTIONAL_INPUT,
-    //     NullableBiasLayer): TestModuleStageSrkRoundTripStructuralFidelity
-    //     (the structure descriptor records the null-slot pattern of every
-    //     node) + TestModuleStageSrkRoundTripLoweredExecutionMatches.
-    //  2. State-initializer ownership tags (StateOwnership.ModuleOwned /
-    //     OptimizerOwned on StateParamInitializer functions):
-    //     TestModuleStageSrkRoundTripPreservesStateInitializerOwnership.
-    //  3. Struct definitions and struct-typed values — a TensorStruct model
-    //     input (MODEL_TENSORSTRUCT_INPUT + TensorStructDef metadata,
-    //     SimplePairSum) and TENSOR_STRUCT_CREATE / TENSOR_STRUCT_GETFIELD
-    //     values (TensorStructLoopCarry): structural fidelity + lowered
-    //     execution below; the load-side arch pipeline is additionally covered
-    //     by ModulesTests.TestModuleGraphSaveLoadOnlyCoverage.
-    //  4. Loop/scope structure with module-stage ops inside loop bodies —
-    //     MODEL_PARAM_MODEL_REF in nested LOOP bands (TrainablesInBothLoopLevels)
-    //     and TENSOR_STRUCT_CREATE/GETFIELD in a loop band (TensorStructLoopCarry):
-    //     structural fidelity + lowered execution below.
-    //  5. RNG-related module-stage constructs — a runtime feed inside a loop
-    //     body (RngRuntimeLoopFeed; at module stage the feed has no key-derivation
-    //     chain yet, so the optional key slot is absent) and random trainable-param
-    //     initializers (RngInitTwoLinears): lowered execution equality below
-    //     proves the reloaded module derives the same keyed streams (RngSeed at
-    //     ModelId [0], split chains) and draws identical values.
-    //  6. Generic-typed module graphs (GENERIC_TYPE_INPUT placeholders,
-    //     GenericRecordSumCaller pre-specialization): structural fidelity below.
-    //  7. Sub-module invocation machinery (MODEL_INVOKE / SUBMODEL# /
-    //     CREATE_MODULE / MODULE_SET_HYPERPARAMS / MODEL_HYPERPARAM /
-    //     FUNCTION_INVOKE): structural fidelity + lowered execution below;
-    //     end-to-end also ModulesTests.TestModuleGraphOnnxRoundtripCoverage.
-    //  8. Hyperparameter defaults ([Hyper(v)] → ShrkAttrDefaultValue):
-    //     NullableParamTests.DefaultedHyper_DefaultValue_SurvivesOnnxBinaryRoundtrip
-    //     (pre-existing pin); DefaultedHyperLayer also rides the structural set.
-    // ──────────────────────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Order-independent structure descriptor of a module graph: per-node
-    /// opcode + per-input-slot present/absent pattern (multiset), plus the graph
-    /// I/O signature names. Node/tensor keys are freshly assigned on load, so the
-    /// descriptor deliberately excludes them; execution equality (below) covers
-    /// value-level semantics the descriptor abstracts away.
-    /// </summary>
+    /// <summary>Order-independent structure descriptor: per-node opcode + per-input-slot
+    /// present/absent pattern, plus the graph I/O signature names. Node/tensor keys are
+    /// freshly assigned on load, so they are deliberately excluded.</summary>
     private static string DescribeModuleGraphStructure(ComputationGraph graph)
     {
         var g = graph.ToInternal();
@@ -1260,13 +770,9 @@ public class CompressedFormatUtilsCoverageTests
              + string.Join("\n", nodeLines);
     }
 
-    /// <summary>
-    /// Saves a module graph to .srk, asserts the header stamps the module stage,
-    /// reloads, and asserts (a) the reloaded graph is stamped Module, (b) its
-    /// structure descriptor is unchanged, and (c) a second save → load → save is a
-    /// byte-level fixed point — so nothing the first load produced is lost or
-    /// mutated by another cycle. Returns the reloaded graph.
-    /// </summary>
+    /// <summary>Saves to .srk, checks the header stamps the module stage, reloads, checks the
+    /// structure descriptor is unchanged and that save → load → save is a byte-level fixed
+    /// point. Returns the reloaded graph.</summary>
     private static ComputationGraph AssertModuleStageSrkRoundTrip(ComputationGraph moduleGraph)
     {
         Assert.Equal(GraphKind.Module, moduleGraph.Kind);
@@ -1280,43 +786,72 @@ public class CompressedFormatUtilsCoverageTests
         var bytes2 = CompressedFormatUtils.SaveFastGraphToBinary(reloaded, compressed: false);
         var bytes3 = CompressedFormatUtils.SaveFastGraphToBinary(
             CompressedFormatUtils.LoadFastGraphFromBinary(bytes2), compressed: false);
-        Assert.True(bytes2.SequenceEqual(bytes3),
-            "save → load → save is not a fixed point: a load/save cycle keeps changing the serialized module graph.");
+        Assert.True(bytes2.SequenceEqual(bytes3));
         return reloaded;
     }
 
-    /// <summary>
-    /// Issue #59 construct inventory, structural leg: every inventoried module-level
-    /// construct survives save → load with an unchanged structure descriptor (see the
-    /// inventory comment above for the construct ↔ fixture mapping).
-    /// </summary>
+    /// <summary>Op-code + dtype of each top-level graph input, in graph-input order.</summary>
+    private static List<(string OpCode, DType? DType)> DescribeTopLevelInputs(InternalComputationGraph g)
+        => g.Inputs
+            .Select(key =>
+            {
+                var node = g.Nodes.First(n => n.Outputs.Any(o => o.HasValue && o.Value.Equals(key)));
+                return (node.OpCode, node.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype));
+            })
+            .ToList();
+
     [Fact]
-    public void TestModuleStageSrkRoundTripStructuralFidelity()
+    public void TestModuleStageSrkRoundTripStructureInputKindsAndStateOwnership()
     {
         ComputationGraph[] moduleGraphs =
         [
-            ScalarMultiplyModel.ComputationGraph,            // absent optional model slot on MODEL_PARAM_MODEL_REF
-            ScalarMultiplyWithBatchNormModel.ComputationGraph, // module-owned state initializers
-            StepCountingSgdOptimizer.ComputationGraph,       // optimizer-owned state initializer + defaulted hyper
-            NullableBiasLayer.ComputationGraph,              // MODEL_OPTIONAL_INPUT (optional model input)
-            DefaultedHyperLayer.ComputationGraph,            // [Hyper(3f)] default on MODEL_TENSOR_INPUT
-            SimplePairSum.ComputationGraph,                  // MODEL_TENSORSTRUCT_INPUT + TENSOR_STRUCT_GETFIELD
-            TensorStructLoopCarry.ComputationGraph,          // TENSOR_STRUCT_CREATE/GETFIELD inside a LOOP band
-            TrainablesInBothLoopLevels.ComputationGraph,     // MODEL_PARAM_MODEL_REF in nested LOOP bodies
-            RngRuntimeLoopFeed.ComputationGraph,             // SHRK_RANDOM_UNIFORM feed (absent key) in a LOOP body
-            RngInitTwoLinears.ComputationGraph,              // sub-module invokes + random param initializers
-            GenericRecordSumCaller.ComputationGraph,         // GENERIC_TYPE_INPUT + struct-typed sub-module call
+            ScalarMultiplyModel.ComputationGraph,               // absent optional model slot on MODEL_PARAM_MODEL_REF
+            ScalarMultiplyWithBatchNormModel.ComputationGraph,  // module-owned state initializers
+            StepCountingSgdOptimizer.ComputationGraph,          // optimizer-owned state initializer + defaulted hyper
+            NullableBiasLayer.ComputationGraph,                 // MODEL_OPTIONAL_INPUT
+            DefaultedHyperLayer.ComputationGraph,               // [Hyper(3f)] default on MODEL_TENSOR_INPUT
+            SimplePairSum.ComputationGraph,                     // MODEL_TENSORSTRUCT_INPUT + TENSOR_STRUCT_GETFIELD
+            TensorStructLoopCarry.ComputationGraph,             // TENSOR_STRUCT_CREATE/GETFIELD inside a LOOP band
+            TrainablesInBothLoopLevels.ComputationGraph,        // MODEL_PARAM_MODEL_REF in nested LOOP bodies
+            RngRuntimeLoopFeed.ComputationGraph,                // SHRK_RANDOM_UNIFORM feed (absent key) in a LOOP body
+            RngInitTwoLinears.ComputationGraph,                 // sub-module invokes + random param initializers
+            GenericRecordSumCaller.ComputationGraph,            // GENERIC_TYPE_INPUT + struct-typed sub-module call
         ];
         foreach (var moduleGraph in moduleGraphs)
             AssertModuleStageSrkRoundTrip(moduleGraph);
+
+        (ComputationGraph Graph, string ExpectedKind)[] inputKinds =
+        [
+            (NullableBiasLayer.ComputationGraph, InternalOpCodes.MODEL_OPTIONAL_INPUT),
+            (SeqHypersLayer.ComputationGraph, InternalOpCodes.MODEL_SEQUENCE_INPUT),
+            (SimplePairSum.ComputationGraph, InternalOpCodes.MODEL_TENSORSTRUCT_INPUT),
+            (GenericRecordSumCaller.ComputationGraph, InternalOpCodes.GENERIC_TYPE_INPUT),
+        ];
+        foreach (var (graph, expectedKind) in inputKinds)
+        {
+            var before = DescribeTopLevelInputs(graph.ToInternal());
+            Assert.Contains(expectedKind, before.Select(d => d.OpCode));
+            var after = DescribeTopLevelInputs(AssertModuleStageSrkRoundTrip(graph).ToInternal());
+            Assert.Equal(before, after);
+            Assert.Contains(expectedKind, after.Select(d => d.OpCode));
+        }
+
+        (ComputationGraph Module, StateOwnership Expected)[] ownership =
+        [
+            (StepCountingSgdOptimizer.ComputationGraph, StateOwnership.OptimizerOwned),
+            (ScalarMultiplyWithBatchNormModel.ComputationGraph, StateOwnership.ModuleOwned),
+        ];
+        foreach (var (moduleGraph, expected) in ownership)
+        {
+            var stateInits = AssertModuleStageSrkRoundTrip(moduleGraph).ToInternal().Nodes
+                .Select(n => n.TargetFunction)
+                .Where(fn => fn is { FunctionType: FunctionType.StateParamInitializer })
+                .ToArray();
+            Assert.NotEmpty(stateInits);
+            Assert.All(stateInits, fn => Assert.Equal(expected, fn!.StateOwnership));
+        }
     }
 
-    /// <summary>
-    /// Issue #59 construct inventory, execution leg: for every lowerable fixture,
-    /// the original and the reloaded module graph lower to concrete models that
-    /// execute bit-identically (same inputs, same RngConfig — covering keyed init
-    /// draws, runtime feeds and loop unrolling on both sides).
-    /// </summary>
     [Fact]
     public void TestModuleStageSrkRoundTripLoweredExecutionMatches()
     {
@@ -1352,125 +887,10 @@ public class CompressedFormatUtilsCoverageTests
         }
     }
 
-    /// <summary>Op-code + dtype of each top-level graph input, in graph-input order.</summary>
-    private static List<(string OpCode, DType? DType)> DescribeTopLevelInputs(InternalComputationGraph g)
-        => g.Inputs
-            .Select(key =>
-            {
-                var node = g.Nodes.First(n => n.Outputs.Any(o => o.HasValue && o.Value.Equals(key)));
-                return (node.OpCode, node.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype));
-            })
-            .ToList();
-
-    /// <summary>
-    /// Issue #115, node-emission path for the NON-tensor top-level graph-input kinds. In the native
-    /// <c>.srk</c> dialect every model-input op — <c>MODEL_TENSOR_INPUT</c>, <c>MODEL_OPTIONAL_INPUT</c>,
-    /// <c>MODEL_SEQUENCE_INPUT</c>, <c>MODEL_TENSORSTRUCT_INPUT</c> and <c>GENERIC_TYPE_INPUT</c> — is
-    /// serialized as an ordinary <c>NodeProto</c> in graph-input order (the non-tensor kinds previously
-    /// rode the graph-input <c>ValueInfoProto</c> path). For a fixture carrying each kind as a top-level
-    /// input, the graph's input list — its op-kind sequence, order and per-input dtype — survives a
-    /// save → load. All four kinds are constructed from existing module fixtures: an optional tensor input
-    /// (<see cref="NullableBiasLayer"/>), a top-level sequence input (<see cref="SeqHypersLayer"/>'s
-    /// <c>[Hyper] TensorSequence</c>), a tensorstruct input (<see cref="SimplePairSum"/>) and a
-    /// generic-type input (<see cref="GenericRecordSumCaller"/>'s <c>GenericType_T</c> placeholder).
-    /// </summary>
-    [Fact]
-    public void TestNonTensorTopLevelInputKindsSrkNodeRoundTripCoverage()
-    {
-        (ComputationGraph Graph, string ExpectedKind)[] cases =
-        [
-            (NullableBiasLayer.ComputationGraph, InternalOpCodes.MODEL_OPTIONAL_INPUT),    // (x, OptionalTensor bias)
-            (SeqHypersLayer.ComputationGraph, InternalOpCodes.MODEL_SEQUENCE_INPUT),       // (input, [Hyper] TensorSequence scales)
-            (SimplePairSum.ComputationGraph, InternalOpCodes.MODEL_TENSORSTRUCT_INPUT),    // (GenericPairStruct pair)
-            (GenericRecordSumCaller.ComputationGraph, InternalOpCodes.GENERIC_TYPE_INPUT), // Inline<T>() → GenericType_T
-        ];
-
-        foreach (var (graph, expectedKind) in cases)
-        {
-            // The kind under test is genuinely a top-level graph input of the fixture …
-            var before = DescribeTopLevelInputs(graph.ToInternal());
-            Assert.Contains(expectedKind, before.Select(d => d.OpCode));
-
-            // … and after the .srk round-trip the input list's op-kind sequence, order and per-input
-            // dtype are unchanged, and the kind under test is still present.
-            var reloaded = AssertModuleStageSrkRoundTrip(graph);
-            var after = DescribeTopLevelInputs(reloaded.ToInternal());
-            Assert.Equal(before, after);
-            Assert.Contains(expectedKind, after.Select(d => d.OpCode));
-        }
-    }
-
-    /// <summary>
-    /// Issue #59, construct 2: the StateOwnership tag of a state-initializer function
-    /// survives save → load at module stage — an OptimizerOwned initializer must not
-    /// silently reload as the ModuleOwned default (the TrainingRig's ownership checks
-    /// branch on it), and ModuleOwned must stay ModuleOwned.
-    /// </summary>
-    [Fact]
-    public void TestModuleStageSrkRoundTripPreservesStateInitializerOwnership()
-    {
-        (ComputationGraph Module, StateOwnership Expected)[] cases =
-        [
-            (StepCountingSgdOptimizer.ComputationGraph, StateOwnership.OptimizerOwned),
-            (ScalarMultiplyWithBatchNormModel.ComputationGraph, StateOwnership.ModuleOwned),
-        ];
-        foreach (var (moduleGraph, expected) in cases)
-        {
-            var reloaded = AssertModuleStageSrkRoundTrip(moduleGraph);
-            var stateInits = reloaded.ToInternal().Nodes
-                .Select(n => n.TargetFunction)
-                .Where(fn => fn is { FunctionType: FunctionType.StateParamInitializer })
-                .ToArray();
-            Assert.NotEmpty(stateInits);
-            Assert.All(stateInits, fn => Assert.Equal(expected, fn!.StateOwnership));
-        }
-    }
-
-    /// <summary>
-    /// The graph kind rides ONNX serialization as a model metadata tag, so a graph
-    /// reloads as the kind it was saved with even as a bare ONNX payload — including
-    /// exactly the graphs op-scanning misclassifies (machinery-free module bodies and
-    /// parameterless architectures both scan as concrete-model). A tag that is
-    /// structurally impossible for the content fails loudly instead of stamping a lie.
-    /// </summary>
-    [Fact]
-    public void TestGraphKindMetadataTagRoundtripsThroughOnnx()
-    {
-        var moduleGraph = ModuleFactory.ComputationGraph(
-            (Func<Tensor<float32>, Tensor<float32>>)ParamlessDouble);
-        var arch = moduleGraph.ToConcreteArchitecture(
-            moduleGraph.FromOrderedInputs([TensorData([2L], 1.0f, 2.0f)]));
-
-        (ComputationGraph Graph, GraphKind Kind)[] cases =
-            [(moduleGraph, GraphKind.Module), (arch, GraphKind.ConcreteArchitecture)];
-        foreach (var (graph, kind) in cases)
-        {
-            var proto = FastOnnxModelBuilder.BuildInternalOnnxModel(graph.ToInternal(), stage: graph.Kind);
-            using var ms = new MemoryStream();
-            ProtoBuf.Serializer.Serialize(ms, proto);
-            var reloaded = OnnxModelImporter.FromOnnxModel(ms.ToArray());
-            Assert.Equal(kind, reloaded.Kind);
-            // The tag is doing the work: op-scanning the same content misclassifies it.
-            Assert.Equal(GraphKind.ConcreteModel, SrkFileFormat.DetectStage(reloaded.ToInternal()));
-        }
-
-        // Impossible tag: module machinery tagged concrete-model is refused at import.
-        var lyingProto = FastOnnxModelBuilder.BuildInternalOnnxModel(
-            ScalarMultiplyModel.ComputationGraph.ToInternal(), stage: GraphKind.ConcreteModel);
-        using var lyingMs = new MemoryStream();
-        ProtoBuf.Serializer.Serialize(lyingMs, lyingProto);
-        var ex = Assert.Throws<InvalidDataException>(
-            () => OnnxModelImporter.FromOnnxModel(lyingMs.ToArray()));
-        Assert.Contains("shrk_graph_kind", ex.Message);
-        Assert.Contains("module-stage op", ex.Message);
-    }
-
     // ──────────────────────────────────────────────────────────────────────
-    // .skpt single-file checkpoint container (issue #58): STORED zip +
-    // config.json manifest, concrete-model save/load with execution parity.
+    // .skpt single-file checkpoint container: STORED zip + config.json manifest.
     // ──────────────────────────────────────────────────────────────────────
 
-    /// <summary>Builds a small concrete FCLayer model plus the sample inputs to execute it.</summary>
     private static (ComputationGraph Model, TensorData NumOut, TensorData Input) BuildSkptModel()
     {
         var numOut = TensorData(DType.Int64, [], 4L);
@@ -1484,8 +904,8 @@ public class CompressedFormatUtilsCoverageTests
         => ComputeContext.Default.Execute(model, numOut, input)[0]
             .ToTensorData().AccessRawMemory().ToArray();
 
-    /// <summary>The model's weight tensors (raw bytes) keyed by parameter identifier,
-    /// excluding the RNG identity parameter — the set a .skpt stores in its data tree.</summary>
+    /// <summary>The model's weight tensors (raw bytes) keyed by parameter identifier, excluding
+    /// the RNG identity parameter — the set a .skpt stores in its data tree.</summary>
     private static Dictionary<string, byte[]> WeightBytesByParam(ComputationGraph model)
         => model.ToInternal().Nodes
             .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_DATA
@@ -1512,8 +932,8 @@ public class CompressedFormatUtilsCoverageTests
         return result;
     }
 
-    /// <summary>Rebuilds a .skpt archive from raw entries (for tamper/corruption cases),
-    /// re-aligning data-tree entries the way the real writer does.</summary>
+    /// <summary>Rebuilds a .skpt archive from raw entries, re-aligning data-tree entries the
+    /// way the real writer does.</summary>
     private static void RewriteSkpt(string path, IReadOnlyList<(string Name, byte[] Data)> entries)
     {
         using var stream = File.Create(path);
@@ -1524,8 +944,8 @@ public class CompressedFormatUtilsCoverageTests
             DateTime.UtcNow);
     }
 
-    /// <summary>Walks the raw local file headers of a zip (no library involved), returning
-    /// each entry's name, compression method, absolute payload offset and stored size.</summary>
+    /// <summary>Walks the raw local file headers of a zip (no library involved), returning each
+    /// entry's name, compression method, absolute payload offset and stored size.</summary>
     private static List<(string Name, ushort Method, long DataOffset, uint Size)> ParseLocalZipHeaders(byte[] zip)
     {
         var headers = new List<(string, ushort, long, uint)>();
@@ -1544,184 +964,133 @@ public class CompressedFormatUtilsCoverageTests
         return headers;
     }
 
-    /// <summary>
-    /// The .skpt acceptance round-trip: a concrete model saves to a single file that is a
-    /// standard zip of STORED-only entries (data payload 64-byte aligned), whose manifest
-    /// wires model → format/stage/hash and parameters → data tensors; the weights entry is
-    /// byte-identical to the model's parameters while the model entry carries only
-    /// metadata-only placeholders (no duplicated weight bytes, no materialized zero
-    /// buffers); and loading rebinds the weights into a concrete model that executes
-    /// bit-identically to the original.
-    /// </summary>
     [Fact]
-    public void TestSkptRoundTripConcreteModel()
+    public void TestSkptRoundTripConcreteModelBuilderGatesAndAtomicSave()
     {
         var (model, numOut, input) = BuildSkptModel();
-        var path = Path.Combine(TempDir, "roundtrip.skpt");
-        try
+        var path = P("roundtrip.skpt");
+        Persistence.From(model).WithModel().WithWeights().Save(path);
+
+        var originalWeights = WeightBytesByParam(model);
+        Assert.Equal(2, originalWeights.Count);
+        // Non-zero default weights: the byte-identity checks below cannot pass vacuously.
+        Assert.Contains(originalWeights.Values, bytes => bytes.Any(b => b != 0));
+
+        var entries = ReadZipEntries(path);
+        string[] expectedEntries =
+            [SkptFileFormat.ConfigEntryName, SkptFileFormat.WeightsEntryPath, SkptFileFormat.ModelEntryPath];
+        Assert.Equal(expectedEntries.OrderBy(n => n, StringComparer.Ordinal),
+            entries.Keys.OrderBy(n => n, StringComparer.Ordinal));
+
+        var fileBytes = File.ReadAllBytes(path);
+        var localHeaders = ParseLocalZipHeaders(fileBytes);
+        Assert.Equal(entries.Count, localHeaders.Count);
+        Assert.All(localHeaders, h => Assert.Equal(0, h.Method));
+        var weightsHeader = localHeaders.Single(h => h.Name == SkptFileFormat.WeightsEntryPath);
+        Assert.Equal(0L, weightsHeader.DataOffset % SkptFileFormat.DataAlignment);
+        Assert.Equal(entries[SkptFileFormat.WeightsEntryPath],
+            fileBytes.AsSpan((int)weightsHeader.DataOffset, (int)weightsHeader.Size).ToArray());
+
+        var manifest = SkptFileFormat.ParseManifest(entries[SkptFileFormat.ConfigEntryName], path);
+        Assert.Equal(SkptFileFormat.FormatName, manifest.Format);
+        Assert.Equal(SkptFileFormat.CurrentVersion, manifest.SkptVersion);
+        Assert.False(string.IsNullOrEmpty(manifest.CreatedUtc));
+        Assert.Equal(Shorokoo.ShorokooVersion.VersionString, manifest.Producer?.Shorokoo);
+        var modelEntry = Assert.Single(manifest.Models!).Value;
+        Assert.Equal(SkptFileFormat.ModelEntryPath, modelEntry.Entry);
+        Assert.Equal(SkptFileFormat.ModelFormatSrk1, modelEntry.Format);
+        Assert.Equal(SrkFileFormat.StageName(GraphKind.ConcreteModel), modelEntry.Stage);
+        Assert.Equal(SkptFileFormat.Sha256Hex(entries[SkptFileFormat.ModelEntryPath]), modelEntry.Sha256);
+        var dataEntry = Assert.Single(manifest.Data!).Value;
+        Assert.Equal(SkptFileFormat.WeightsEntryPath, dataEntry.Entry);
+        Assert.Equal(SkptFileFormat.DataFormatSafeTensors, dataEntry.Format);
+        Assert.Equal(SkptFileFormat.CompressionNone, dataEntry.Compression);
+        Assert.Equal(SkptFileFormat.Sha256Hex(entries[SkptFileFormat.WeightsEntryPath]), dataEntry.Sha256);
+        var mapping = manifest.TensorMappings!["model"]["default"].Tensors!;
+        Assert.Equal(originalWeights.Keys.OrderBy(k => k, StringComparer.Ordinal),
+            mapping.Keys.OrderBy(k => k, StringComparer.Ordinal));
+        Assert.All(mapping.Values, r => Assert.Equal("weights", r.Data));
+
+        var storedTensors = SafeTensorLoader.ParseSafeTensorBytes(entries[SkptFileFormat.WeightsEntryPath])
+            .ToDictionary(t => t.Name, t => t.Data.AccessRawMemory().ToArray(), StringComparer.Ordinal);
+        Assert.Equal(originalWeights.Count, storedTensors.Count);
+        foreach (var (paramId, bytes) in originalWeights)
+            Assert.Equal(bytes, storedTensors[mapping[paramId].Tensor!]);
+
+        // The model entry is definition-only: dtype/shape-true placeholders with elided storage.
+        var strippedDefinition = CompressedFormatUtils.LoadFastGraphFromBinary(
+            entries[SkptFileFormat.ModelEntryPath], GraphKind.ConcreteModel);
+        var originalParams = model.ToInternal().Nodes
+            .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_DATA)
+            .ToDictionary(n => n.IdentifierTemplate!, n => n.GetTensorData()!, StringComparer.Ordinal);
+        var strippedWeightParams = strippedDefinition.ToInternal().Nodes
+            .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_DATA
+                && n.IdentifierTemplate !=
+                    Shorokoo.Core.Nodes.Processors.Fast.FastWireRngKeyDerivation.RngSeedIdentifierTemplate)
+            .ToList();
+        Assert.Equal(originalWeights.Count, strippedWeightParams.Count);
+        foreach (var param in strippedWeightParams)
         {
-            Persistence.From(model).WithModel().WithWeights().Save(path);
-
-            var originalWeights = WeightBytesByParam(model);
-            Assert.Equal(2, originalWeights.Count);
-            // Default-initialized FCLayer weights are non-zero, so the byte-identity and
-            // placeholder assertions below cannot pass vacuously.
-            Assert.Contains(originalWeights.Values, bytes => bytes.Any(b => b != 0));
-
-            // Standard zip, exactly the documented entries (read via the BCL, not our writer).
-            var entries = ReadZipEntries(path);
-            string[] expectedEntries =
-                [SkptFileFormat.ConfigEntryName, SkptFileFormat.WeightsEntryPath, SkptFileFormat.ModelEntryPath];
-            Assert.Equal(expectedEntries.OrderBy(n => n, StringComparer.Ordinal),
-                entries.Keys.OrderBy(n => n, StringComparer.Ordinal));
-
-            // All entries STORED; the data payload starts 64-byte aligned and verbatim.
-            var fileBytes = File.ReadAllBytes(path);
-            var localHeaders = ParseLocalZipHeaders(fileBytes);
-            Assert.Equal(entries.Count, localHeaders.Count);
-            Assert.All(localHeaders, h => Assert.Equal(0, h.Method));
-            var weightsHeader = localHeaders.Single(h => h.Name == SkptFileFormat.WeightsEntryPath);
-            Assert.Equal(0L, weightsHeader.DataOffset % SkptFileFormat.DataAlignment);
-            Assert.Equal(entries[SkptFileFormat.WeightsEntryPath],
-                fileBytes.AsSpan((int)weightsHeader.DataOffset, (int)weightsHeader.Size).ToArray());
-
-            // The manifest is the wiring: format/version identity, model registry entry
-            // (srk1, concrete-model, entry hash), data registry entry (safetensors,
-            // uncompressed, entry hash), and the default mapping set covering every parameter.
-            var manifest = SkptFileFormat.ParseManifest(entries[SkptFileFormat.ConfigEntryName], path);
-            Assert.Equal(SkptFileFormat.FormatName, manifest.Format);
-            Assert.Equal(SkptFileFormat.CurrentVersion, manifest.SkptVersion);
-            Assert.False(string.IsNullOrEmpty(manifest.CreatedUtc));
-            Assert.Equal(Shorokoo.ShorokooVersion.VersionString, manifest.Producer?.Shorokoo);
-            var modelEntry = Assert.Single(manifest.Models!).Value;
-            Assert.Equal(SkptFileFormat.ModelEntryPath, modelEntry.Entry);
-            Assert.Equal(SkptFileFormat.ModelFormatSrk1, modelEntry.Format);
-            Assert.Equal(SrkFileFormat.StageName(GraphKind.ConcreteModel), modelEntry.Stage);
-            Assert.Equal(SkptFileFormat.Sha256Hex(entries[SkptFileFormat.ModelEntryPath]), modelEntry.Sha256);
-            var dataEntry = Assert.Single(manifest.Data!).Value;
-            Assert.Equal(SkptFileFormat.WeightsEntryPath, dataEntry.Entry);
-            Assert.Equal(SkptFileFormat.DataFormatSafeTensors, dataEntry.Format);
-            Assert.Equal(SkptFileFormat.CompressionNone, dataEntry.Compression);
-            Assert.Equal(SkptFileFormat.Sha256Hex(entries[SkptFileFormat.WeightsEntryPath]), dataEntry.Sha256);
-            var mapping = manifest.TensorMappings!["model"]["default"].Tensors!;
-            Assert.Equal(originalWeights.Keys.OrderBy(k => k, StringComparer.Ordinal),
-                mapping.Keys.OrderBy(k => k, StringComparer.Ordinal));
-            Assert.All(mapping.Values, r => Assert.Equal("weights", r.Data));
-
-            // The weights entry is plain safetensors holding byte-identical tensors.
-            var storedTensors = SafeTensorLoader.ParseSafeTensorBytes(entries[SkptFileFormat.WeightsEntryPath])
-                .ToDictionary(t => t.Name, t => t.Data.AccessRawMemory().ToArray(), StringComparer.Ordinal);
-            Assert.Equal(originalWeights.Count, storedTensors.Count);
-            foreach (var (paramId, bytes) in originalWeights)
-                Assert.Equal(bytes, storedTensors[mapping[paramId].Tensor!]);
-
-            // The model entry is definition-only: a loadable concrete model whose weight
-            // parameters are dtype/shape-true metadata-only placeholders — the real bytes
-            // live once, in the data tree, and neither save nor load materializes a
-            // weight-sized buffer for a placeholder (issue #69): its storage is elided
-            // entirely, so accessing its values fails loudly.
-            var strippedDefinition = CompressedFormatUtils.LoadFastGraphFromBinary(
-                entries[SkptFileFormat.ModelEntryPath], GraphKind.ConcreteModel);
-            var originalParams = model.ToInternal().Nodes
-                .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_DATA)
-                .ToDictionary(n => n.IdentifierTemplate!, n => n.GetTensorData()!, StringComparer.Ordinal);
-            var strippedWeightParams = strippedDefinition.ToInternal().Nodes
-                .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_DATA
-                    && n.IdentifierTemplate !=
-                        Shorokoo.Core.Nodes.Processors.Fast.FastWireRngKeyDerivation.RngSeedIdentifierTemplate)
-                .ToList();
-            Assert.Equal(originalWeights.Count, strippedWeightParams.Count);
-            foreach (var param in strippedWeightParams)
-            {
-                var placeholder = Assert.IsType<WeightPlaceholderTensorData>(param.GetTensorData());
-                var original = originalParams[param.IdentifierTemplate!];
-                Assert.Equal(original.DType.ToIVarType(), placeholder.DType.ToIVarType());
-                Assert.Equal(original.Shape.Dims, placeholder.Shape.Dims);
-                var exElided = Assert.Throws<InvalidOperationException>(
-                    () => { placeholder.AccessRawMemory(); });
-                Assert.Contains("placeholder", exElided.Message);
-            }
-            // Stripping touches exactly the weight parameters: the stripped definition
-            // declares the same parameter set as the original, and any non-weight
-            // parameter (e.g. an RNG identity, when the model carries one) stays
-            // embedded with real values, never a placeholder.
-            var strippedAllParams = strippedDefinition.ToInternal().Nodes
-                .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_DATA)
-                .ToList();
-            Assert.Equal(originalParams.Count, strippedAllParams.Count);
-            Assert.All(
-                strippedAllParams.Where(n => !originalWeights.ContainsKey(n.IdentifierTemplate!)),
-                n => Assert.IsNotType<WeightPlaceholderTensorData>(n.GetTensorData()));
-
-            // Load: a runnable concrete model, weights bound byte-identically, and
-            // bit-identical execution on the sample input.
-            var loaded = Persistence.Load(path);
-            Assert.Equal(GraphKind.ConcreteModel, loaded.Kind);
-            var loadedWeights = WeightBytesByParam(loaded);
-            Assert.Equal(originalWeights.Count, loadedWeights.Count);
-            foreach (var (paramId, bytes) in originalWeights)
-                Assert.Equal(bytes, loadedWeights[paramId]);
-            Assert.Equal(ExecuteToBytes(model, numOut, input), ExecuteToBytes(loaded, numOut, input));
-
-            // Binding is authoritative: whatever the model definition happens to carry for a
-            // weight parameter is overwritten by the data entry. A definition holding full-size
-            // zeros instead of the values-elided marker therefore loads and binds identically —
-            // the marker is a size optimization, not part of the load contract. (Synthesized by
-            // re-stripping with full zero tensors and splicing the entry + its manifest hash
-            // into the archive.)
-            var zerosPath = Path.Combine(TempDir, "materialized-zero-placeholders.skpt");
-            try
-            {
-                var zerosGraph = model.ToInternal().Clone();
-                foreach (var node in zerosGraph.Nodes)
-                {
-                    if (node.OpCode != InternalOpCodes.MODEL_PARAM_DATA
-                        || !originalWeights.ContainsKey(node.IdentifierTemplate ?? "")) continue;
-                    var data = node.GetTensorData()!;
-                    node.Attributes = node.Attributes.SetAttributes(
-                        (OnnxOpAttributeNames.ShrkAttrTensorData,
-                         (object?)TensorDataWithDefaultVals(data.DType, data.Shape.Dims)));
-                }
-                var zerosModelBytes = CompressedFormatUtils.SaveFastGraphToBinary(
-                    zerosGraph, GraphKind.ConcreteModel, compressed: true);
-                var zerosConfig = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
-                zerosConfig["models"]!["model"]!["sha256"] = SkptFileFormat.Sha256Hex(zerosModelBytes);
-                RewriteSkpt(zerosPath, entries.Select(e => (e.Key, e.Key switch
-                {
-                    SkptFileFormat.ConfigEntryName =>
-                        System.Text.Encoding.UTF8.GetBytes(zerosConfig.ToJsonString()),
-                    SkptFileFormat.ModelEntryPath => zerosModelBytes,
-                    _ => e.Value,
-                })).ToList());
-                var zerosLoaded = Persistence.Load(zerosPath);
-                var zerosWeights = WeightBytesByParam(zerosLoaded);
-                Assert.Equal(originalWeights.Count, zerosWeights.Count);
-                foreach (var (paramId, bytes) in originalWeights)
-                    Assert.Equal(bytes, zerosWeights[paramId]);
-                Assert.Equal(ExecuteToBytes(model, numOut, input),
-                    ExecuteToBytes(zerosLoaded, numOut, input));
-            }
-            finally { if (File.Exists(zerosPath)) File.Delete(zerosPath); }
+            var placeholder = Assert.IsType<WeightPlaceholderTensorData>(param.GetTensorData());
+            var original = originalParams[param.IdentifierTemplate!];
+            Assert.Equal(original.DType.ToIVarType(), placeholder.DType.ToIVarType());
+            Assert.Equal(original.Shape.Dims, placeholder.Shape.Dims);
+            var exElided = Assert.Throws<InvalidOperationException>(
+                () => { placeholder.AccessRawMemory(); });
+            Assert.Contains("placeholder", exElided.Message);
         }
-        finally { if (File.Exists(path)) File.Delete(path); }
-    }
+        var strippedAllParams = strippedDefinition.ToInternal().Nodes
+            .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_DATA)
+            .ToList();
+        Assert.Equal(originalParams.Count, strippedAllParams.Count);
+        Assert.All(
+            strippedAllParams.Where(n => !originalWeights.ContainsKey(n.IdentifierTemplate!)),
+            n => Assert.IsNotType<WeightPlaceholderTensorData>(n.GetTensorData()));
 
-    /// <summary>
-    /// The builder admits exactly the supported checkpoint shape (concrete model in,
-    /// .WithModel().WithWeights() selected), and Save commits atomically: a crash in the
-    /// commit window leaves the previous checkpoint bytes untouched and loadable.
-    /// </summary>
-    [Fact]
-    public void TestSkptBuilderGatesAndAtomicSave()
-    {
-        var (model, numOut, input) = BuildSkptModel();
+        var loaded = Persistence.Load(path);
+        Assert.Equal(GraphKind.ConcreteModel, loaded.Kind);
+        var loadedWeights = WeightBytesByParam(loaded);
+        Assert.Equal(originalWeights.Count, loadedWeights.Count);
+        foreach (var (paramId, bytes) in originalWeights)
+            Assert.Equal(bytes, loadedWeights[paramId]);
+        var direct = ExecuteToBytes(model, numOut, input);
+        Assert.Equal(direct, ExecuteToBytes(loaded, numOut, input));
 
-        // Only a concrete model can start a checkpoint.
+        // Binding is authoritative: a definition holding full-size zeros binds identically —
+        // the elided marker is a size optimization, not part of the load contract.
+        var zerosPath = P("materialized-zero-placeholders.skpt");
+        var zerosGraph = model.ToInternal().Clone();
+        foreach (var node in zerosGraph.Nodes)
+        {
+            if (node.OpCode != InternalOpCodes.MODEL_PARAM_DATA
+                || !originalWeights.ContainsKey(node.IdentifierTemplate ?? "")) continue;
+            var data = node.GetTensorData()!;
+            node.Attributes = node.Attributes.SetAttributes(
+                (OnnxOpAttributeNames.ShrkAttrTensorData,
+                 (object?)TensorDataWithDefaultVals(data.DType, data.Shape.Dims)));
+        }
+        var zerosModelBytes = CompressedFormatUtils.SaveFastGraphToBinary(
+            zerosGraph, GraphKind.ConcreteModel, compressed: true);
+        var zerosConfig = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
+        zerosConfig["models"]!["model"]!["sha256"] = SkptFileFormat.Sha256Hex(zerosModelBytes);
+        RewriteSkpt(zerosPath, entries.Select(e => (e.Key, e.Key switch
+        {
+            SkptFileFormat.ConfigEntryName =>
+                System.Text.Encoding.UTF8.GetBytes(zerosConfig.ToJsonString()),
+            SkptFileFormat.ModelEntryPath => zerosModelBytes,
+            _ => e.Value,
+        })).ToList());
+        var zerosLoaded = Persistence.Load(zerosPath);
+        var zerosWeights = WeightBytesByParam(zerosLoaded);
+        Assert.Equal(originalWeights.Count, zerosWeights.Count);
+        foreach (var (paramId, bytes) in originalWeights)
+            Assert.Equal(bytes, zerosWeights[paramId]);
+        Assert.Equal(direct, ExecuteToBytes(zerosLoaded, numOut, input));
+
+        // Builder gates: only a concrete model starts a checkpoint, and only model + weights saves.
         var exKind = Assert.Throws<InvalidOperationException>(() => Persistence.From(FCLayer.ComputationGraph));
         Assert.Contains("concrete-model", exKind.Message);
-
-        // This version writes exactly one shape: model + weights, both selected.
-        var incompletePath = Path.Combine(TempDir, "incomplete.skpt");
+        var incompletePath = P("incomplete.skpt");
         var exNone = Assert.Throws<InvalidOperationException>(() => Persistence.From(model).Save(incompletePath));
         Assert.Contains("WithModel", exNone.Message);
         Assert.Throws<InvalidOperationException>(() => Persistence.From(model).WithModel().Save(incompletePath));
@@ -1730,135 +1099,35 @@ public class CompressedFormatUtilsCoverageTests
 
         // The atomic writer stages in the target's directory, so it must exist up front.
         Assert.Throws<DirectoryNotFoundException>(() => Persistence.From(model).WithModel().WithWeights()
-            .Save(Path.Combine(TempDir, "no-such-dir", "model.skpt")));
+            .Save(P(Path.Combine("no-such-dir", "model.skpt"))));
 
         // A simulated crash between staging and commit leaves the existing checkpoint intact.
-        var path = Path.Combine(TempDir, "atomic.skpt");
+        var atomicPath = P("atomic.skpt");
+        Persistence.From(model).WithModel().WithWeights().Save(atomicPath);
+        var committed = File.ReadAllBytes(atomicPath);
+        AtomicFileWriter.CommitFaultInjection = tempPath =>
+        {
+            if (tempPath.Contains("atomic.skpt")) throw new IOException("simulated commit crash");
+        };
         try
         {
-            Persistence.From(model).WithModel().WithWeights().Save(path);
-            var committed = File.ReadAllBytes(path);
-
-            AtomicFileWriter.CommitFaultInjection = tempPath =>
-            {
-                if (tempPath.Contains("atomic.skpt")) throw new IOException("simulated commit crash");
-            };
-            try
-            {
-                Assert.Throws<IOException>(() => Persistence.From(model).WithModel().WithWeights().Save(path));
-            }
-            finally { AtomicFileWriter.CommitFaultInjection = null; }
-
-            Assert.Equal(committed, File.ReadAllBytes(path));
-            var loaded = Persistence.Load(path);
-            Assert.Equal(ExecuteToBytes(model, numOut, input), ExecuteToBytes(loaded, numOut, input));
+            Assert.Throws<IOException>(
+                () => Persistence.From(model).WithModel().WithWeights().Save(atomicPath));
         }
-        finally { if (File.Exists(path)) File.Delete(path); }
+        finally { AtomicFileWriter.CommitFaultInjection = null; }
+        Assert.Equal(committed, File.ReadAllBytes(atomicPath));
+        Assert.Equal(direct, ExecuteToBytes(Persistence.Load(atomicPath), numOut, input));
     }
 
-    /// <summary>
-    /// Load-side contract of the manifest: unknown keys anywhere are ignored (keys are
-    /// add-only), while real faults fail loudly naming the offender — a non-zip file, a
-    /// missing manifest, a manifest referencing a missing entry, an entry failing its
-    /// SHA-256, an unsupported future version, and a tensor mapping that does not match
-    /// the model's parameters.
-    /// </summary>
-    [Fact]
-    public void TestSkptLoadValidationAndUnknownKeyTolerance()
-    {
-        var (model, numOut, input) = BuildSkptModel();
-        var path = Path.Combine(TempDir, "validation.skpt");
-        var tamperedPath = Path.Combine(TempDir, "tampered.skpt");
-        try
-        {
-            Persistence.From(model).WithModel().WithWeights().Save(path);
-            var entries = ReadZipEntries(path);
-            var direct = ExecuteToBytes(model, numOut, input);
-            List<(string Name, byte[] Data)> Without(string name) =>
-                entries.Where(e => e.Key != name).Select(e => (e.Key, e.Value)).ToList();
-            List<(string Name, byte[] Data)> WithConfig(string configJson) =>
-                entries.Select(e => (e.Key, e.Key == SkptFileFormat.ConfigEntryName
-                    ? System.Text.Encoding.UTF8.GetBytes(configJson) : e.Value)).ToList();
-
-            // Not a zip at all.
-            File.WriteAllBytes(tamperedPath, [1, 2, 3, 4]);
-            var exNotZip = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
-            Assert.Contains("zip", exNotZip.Message);
-
-            // A zip without the manifest is not a checkpoint.
-            RewriteSkpt(tamperedPath, Without(SkptFileFormat.ConfigEntryName));
-            var exNoConfig = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
-            Assert.Contains(SkptFileFormat.ConfigEntryName, exNoConfig.Message);
-
-            // A manifest referencing a missing entry names the entry.
-            RewriteSkpt(tamperedPath, Without(SkptFileFormat.WeightsEntryPath));
-            var exMissing = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
-            Assert.Contains(SkptFileFormat.WeightsEntryPath, exMissing.Message);
-
-            // A tampered entry fails its SHA-256 check, naming the entry.
-            var flipped = entries.Select(e =>
-            {
-                if (e.Key != SkptFileFormat.WeightsEntryPath) return (e.Key, e.Value);
-                var copy = e.Value.ToArray();
-                copy[^1] ^= 0xFF;
-                return (e.Key, copy);
-            }).ToList();
-            RewriteSkpt(tamperedPath, flipped);
-            var exSha = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
-            Assert.Contains("SHA-256", exSha.Message);
-            Assert.Contains(SkptFileFormat.WeightsEntryPath, exSha.Message);
-
-            // Unknown keys at every level are ignored: the manifest's keys are add-only.
-            var config = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
-            config["futureTopLevelKey"] = "ignored";
-            config["models"]!["model"]!["futureModelKey"] = 42;
-            config["data"]!["weights"]!["futureDataKey"] = true;
-            config["tensorMappings"]!["model"]!["default"]!["futureSetKey"] = "ignored";
-            var firstParam = ((JsonObject)config["tensorMappings"]!["model"]!["default"]!["tensors"]!)
-                .First().Key;
-            config["tensorMappings"]!["model"]!["default"]!["tensors"]![firstParam]!["futureRefKey"] = 1;
-            RewriteSkpt(tamperedPath, WithConfig(config.ToJsonString()));
-            Assert.Equal(direct, ExecuteToBytes(Persistence.Load(tamperedPath), numOut, input));
-
-            // A major version this build does not read is refused with a clear message.
-            var otherVersionConfig = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
-            otherVersionConfig["skptVersion"] = SkptFileFormat.CurrentVersion + 1;
-            RewriteSkpt(tamperedPath, WithConfig(otherVersionConfig.ToJsonString()));
-            var exVersion = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
-            Assert.Contains($"reads version {SkptFileFormat.CurrentVersion} only", exVersion.Message);
-
-            // A mapping missing one of the model's parameters names the parameter.
-            var missingParamConfig = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
-            ((JsonObject)missingParamConfig["tensorMappings"]!["model"]!["default"]!["tensors"]!)
-                .Remove(firstParam);
-            RewriteSkpt(tamperedPath, WithConfig(missingParamConfig.ToJsonString()));
-            var exUnmapped = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
-            Assert.Contains(firstParam, exUnmapped.Message);
-
-            // A mapping entry for a parameter the model does not declare names the stray.
-            var strayConfig = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
-            strayConfig["tensorMappings"]!["model"]!["default"]!["tensors"]!["not_a_real_param"] =
-                new JsonObject { ["data"] = "weights", ["tensor"] = "not_a_real_param" };
-            RewriteSkpt(tamperedPath, WithConfig(strayConfig.ToJsonString()));
-            var exStray = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
-            Assert.Contains("not_a_real_param", exStray.Message);
-        }
-        finally
-        {
-            if (File.Exists(path)) File.Delete(path);
-            if (File.Exists(tamperedPath)) File.Delete(tamperedPath);
-        }
-    }
-
-    /// <summary>Builds a concrete FCLayer model (32 output features, [32,32] input) whose
-    /// weight tensors are overwritten with a deterministic repeating non-zero pattern —
-    /// large enough and compressible enough that Zstd reliably shrinks the data entry,
-    /// and distinct from the zero placeholders the model entry stores.</summary>
+    /// <summary>An FCLayer model (32 output features, [32,32] input) whose weights carry a
+    /// deterministic repeating non-zero pattern — compressible enough that Zstd reliably
+    /// shrinks the data entry, and distinct from the zero placeholders the model entry
+    /// stores.</summary>
     private static (ComputationGraph Model, TensorData NumOut, TensorData Input) BuildCompressibleSkptModel()
     {
         var numOut = TensorData(DType.Int64, [], 32L);
         var input = TensorDataWithSmallVals(DType.Float32, [32L, 32L]);
-        var g = FCLayer.ComputationGraph;   // two trainable params: weights [32,32], bias [32]
+        var g = FCLayer.ComputationGraph;
         var model = g.ToConcreteArchitecture(g.FromOrderedInputs([numOut, input])).ToConcreteModel();
         foreach (var node in model.ToInternal().Nodes)
         {
@@ -1875,702 +1144,409 @@ public class CompressedFormatUtilsCoverageTests
         return (model, numOut, input);
     }
 
-    /// <summary>
-    /// Opt-in per-entry Zstd compression (issue #75): .WithZstdCompressedData() shrinks the
-    /// weights data entry, records compression "zstd" and a stored-bytes (compressed) sha256
-    /// in the manifest, leaves config.json / models/*.srk and the STORED zip framing
-    /// untouched (the file still reads through the BCL zip reader), keeps the default save
-    /// byte-equivalent to the feature-less output, and round-trips bit-identically.
-    /// </summary>
     [Fact]
-    public void TestSkptZstdCompressedDataRoundTrip()
-    {
-        var (model, numOut, input) = BuildCompressibleSkptModel();
-        var plainPath = Path.Combine(TempDir, "zstd-plain.skpt");
-        var zstdPath = Path.Combine(TempDir, "zstd-on.skpt");
-        try
-        {
-            Persistence.From(model).WithModel().WithWeights().Save(plainPath);
-            Persistence.From(model).WithModel().WithWeights().WithZstdCompressedData().Save(zstdPath);
-
-            // Both files stay standard zips (read via the BCL, not our writer) with the same
-            // entry set, and every entry remains method-0 STORED — the Zstd layer lives
-            // inside the data entry's bytes, not in the zip framing.
-            var plainEntries = ReadZipEntries(plainPath);
-            var zstdEntries = ReadZipEntries(zstdPath);
-            Assert.Equal(plainEntries.Keys.OrderBy(n => n, StringComparer.Ordinal),
-                zstdEntries.Keys.OrderBy(n => n, StringComparer.Ordinal));
-            var zstdFileBytes = File.ReadAllBytes(zstdPath);
-            Assert.All(ParseLocalZipHeaders(zstdFileBytes), h => Assert.Equal(0, h.Method));
-
-            // Compression touches only the weights data entry: models/*.srk is byte-identical
-            // across the two saves, and decompressing the compressed entry yields exactly the
-            // default save's uncompressed entry — the default output is byte-unchanged by the
-            // feature (its own layout is pinned by TestSkptRoundTripConcreteModel).
-            Assert.Equal(plainEntries[SkptFileFormat.ModelEntryPath],
-                zstdEntries[SkptFileFormat.ModelEntryPath]);
-            var storedWeights = zstdEntries[SkptFileFormat.WeightsEntryPath];
-            Assert.True(SkptFileFormat.LooksLikeZstdFrame(storedWeights));
-            Assert.Equal(plainEntries[SkptFileFormat.WeightsEntryPath],
-                CompressedFormatUtils.Decompress(storedWeights));
-
-            // Compressible data: the compressed entry — and the whole file — is smaller.
-            Assert.True(storedWeights.Length < plainEntries[SkptFileFormat.WeightsEntryPath].Length);
-            Assert.True(zstdFileBytes.Length < new FileInfo(plainPath).Length);
-
-            // Manifest: compression is recorded per entry ("none" by default, "zstd" when
-            // opted in — never inferred from the entry name), and the compressed entry's
-            // sha256 covers the stored (compressed) bytes, so integrity checking does not
-            // require decompression.
-            var plainData = Assert.Single(
-                SkptFileFormat.ParseManifest(plainEntries[SkptFileFormat.ConfigEntryName], plainPath).Data!).Value;
-            Assert.Equal(SkptFileFormat.CompressionNone, plainData.Compression);
-            var zstdData = Assert.Single(
-                SkptFileFormat.ParseManifest(zstdEntries[SkptFileFormat.ConfigEntryName], zstdPath).Data!).Value;
-            Assert.Equal(SkptFileFormat.CompressionZstd, zstdData.Compression);
-            Assert.Equal(SkptFileFormat.Sha256Hex(storedWeights), zstdData.Sha256);
-
-            // Round-trip: weights bound byte-identically and bit-identical execution. The
-            // pattern weights are non-zero, so byte-identity cannot pass via the model
-            // entry's zero placeholders.
-            var originalWeights = WeightBytesByParam(model);
-            Assert.All(originalWeights.Values, bytes => Assert.Contains(bytes, b => b != 0));
-            var loaded = Persistence.Load(zstdPath);
-            var loadedWeights = WeightBytesByParam(loaded);
-            Assert.Equal(originalWeights.Count, loadedWeights.Count);
-            foreach (var (paramId, bytes) in originalWeights)
-                Assert.Equal(bytes, loadedWeights[paramId]);
-            Assert.Equal(ExecuteToBytes(model, numOut, input), ExecuteToBytes(loaded, numOut, input));
-
-            // An out-of-range compression level is rejected up front.
-            Assert.Throws<ArgumentOutOfRangeException>(() =>
-                Persistence.From(model).WithZstdCompressedData(compressionLevel: 0));
-            Assert.Throws<ArgumentOutOfRangeException>(() =>
-                Persistence.From(model).WithZstdCompressedData(compressionLevel: 23));
-        }
-        finally
-        {
-            if (File.Exists(plainPath)) File.Delete(plainPath);
-            if (File.Exists(zstdPath)) File.Delete(zstdPath);
-        }
-    }
-
-    /// <summary>
-    /// A manifest/stored compression mismatch fails loud naming the entry, in both
-    /// directions: an entry declared "zstd" whose stored bytes are raw, an entry declared
-    /// "none" whose stored bytes are a Zstd frame, an unknown compression name, and a
-    /// declared-zstd entry whose frame is corrupt past its magic (with a matching sha256,
-    /// so the failure comes from decompression, not the integrity check).
-    /// </summary>
-    [Fact]
-    public void TestSkptCompressionMismatchFailsLoud()
-    {
-        var (model, _, _) = BuildCompressibleSkptModel();
-        var plainPath = Path.Combine(TempDir, "mismatch-plain.skpt");
-        var zstdPath = Path.Combine(TempDir, "mismatch-zstd.skpt");
-        var tamperedPath = Path.Combine(TempDir, "mismatch-tampered.skpt");
-        try
-        {
-            Persistence.From(model).WithModel().WithWeights().Save(plainPath);
-            Persistence.From(model).WithModel().WithWeights().WithZstdCompressedData().Save(zstdPath);
-            var plainEntries = ReadZipEntries(plainPath);
-            var zstdEntries = ReadZipEntries(zstdPath);
-
-            void RewriteWith(Dictionary<string, byte[]> source, string configJson, byte[]? weights = null)
-                => RewriteSkpt(tamperedPath, source.Select(e => (e.Key,
-                    e.Key == SkptFileFormat.ConfigEntryName ? System.Text.Encoding.UTF8.GetBytes(configJson)
-                    : e.Key == SkptFileFormat.WeightsEntryPath && weights is not null ? weights
-                    : e.Value)).ToList());
-
-            // Declared "zstd", stored raw: the sha256 still matches the raw stored bytes, so
-            // the mismatch is caught by the framing cross-check, naming the entry.
-            var rawAsZstd = JsonNode.Parse(plainEntries[SkptFileFormat.ConfigEntryName])!;
-            rawAsZstd["data"]!["weights"]!["compression"] = SkptFileFormat.CompressionZstd;
-            RewriteWith(plainEntries, rawAsZstd.ToJsonString());
-            var exRaw = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
-            Assert.Contains(SkptFileFormat.WeightsEntryPath, exRaw.Message);
-            Assert.Contains("not a Zstd frame", exRaw.Message);
-
-            // Declared "none", stored compressed: fails loud naming the entry instead of
-            // feeding a Zstd frame to the safetensors parser.
-            var zstdAsRaw = JsonNode.Parse(zstdEntries[SkptFileFormat.ConfigEntryName])!;
-            zstdAsRaw["data"]!["weights"]!["compression"] = SkptFileFormat.CompressionNone;
-            RewriteWith(zstdEntries, zstdAsRaw.ToJsonString());
-            var exZstd = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
-            Assert.Contains(SkptFileFormat.WeightsEntryPath, exZstd.Message);
-            Assert.Contains("Zstd frame", exZstd.Message);
-
-            // An unknown compression name is refused as unsupported (future-format skew).
-            var unknown = JsonNode.Parse(plainEntries[SkptFileFormat.ConfigEntryName])!;
-            unknown["data"]!["weights"]!["compression"] = "lz4";
-            RewriteWith(plainEntries, unknown.ToJsonString());
-            var exUnknown = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
-            Assert.Contains("lz4", exUnknown.Message);
-            Assert.Contains("unsupported compression", exUnknown.Message);
-
-            // A corrupt Zstd frame (truncated past the magic) with a recomputed, matching
-            // sha256: the integrity check passes and decompression fails loud, naming the
-            // entry — never returning garbage bytes.
-            var truncated = zstdEntries[SkptFileFormat.WeightsEntryPath]
-                .Take(zstdEntries[SkptFileFormat.WeightsEntryPath].Length / 2).ToArray();
-            Assert.True(SkptFileFormat.LooksLikeZstdFrame(truncated));
-            var corrupt = JsonNode.Parse(zstdEntries[SkptFileFormat.ConfigEntryName])!;
-            corrupt["data"]!["weights"]!["sha256"] = SkptFileFormat.Sha256Hex(truncated);
-            RewriteWith(zstdEntries, corrupt.ToJsonString(), truncated);
-            var exCorrupt = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
-            Assert.Contains(SkptFileFormat.WeightsEntryPath, exCorrupt.Message);
-            Assert.Contains("Zstd-decompress", exCorrupt.Message);
-        }
-        finally
-        {
-            if (File.Exists(plainPath)) File.Delete(plainPath);
-            if (File.Exists(zstdPath)) File.Delete(zstdPath);
-            if (File.Exists(tamperedPath)) File.Delete(tamperedPath);
-        }
-    }
-
-    /// <summary>
-    /// Persistence.Inspect recognizes the .skpt container (issue #73): a checkpoint written
-    /// by the Save path inspects to SkptCheckpoint with the manifest's whole-archive
-    /// metadata, model and data registries (sha256 reported as recorded, never verified)
-    /// and mapping-set names — reading only the zip central directory plus config.json, so
-    /// a corrupt tensor payload does not disturb inspection (the same payload-untouched
-    /// technique as the .srk corruption case). Cheap sanity observations fire on
-    /// manifest/archive mismatches in both directions, unknown keys, a future version,
-    /// STORED-expectation violations and empty trees; and a non-.skpt zip, a foreign
-    /// config.json, a garbage manifest and a truncated archive all yield structured
-    /// NotRecognized results — never an exception.
-    /// </summary>
-    [Fact]
-    public void TestCheckpointInspectSkptArtifacts()
-    {
-        var (model, _, _) = BuildSkptModel();
-        var path = Path.Combine(TempDir, "inspect.skpt");
-        var variantPath = Path.Combine(TempDir, "inspect_variant.skpt");
-        try
-        {
-            Persistence.From(model).WithModel().WithWeights().Save(path);
-            var entries = ReadZipEntries(path);
-            var manifest = SkptFileFormat.ParseManifest(entries[SkptFileFormat.ConfigEntryName], path);
-            List<(string Name, byte[] Data)> WithConfig(string configJson) =>
-                entries.Select(e => (e.Key, e.Key == SkptFileFormat.ConfigEntryName
-                    ? System.Text.Encoding.UTF8.GetBytes(configJson) : e.Value)).ToList();
-
-            // The clean checkpoint: new kind, whole-archive metadata, both registries and
-            // the mapping-set names all match what Save wrote; no observations.
-            var result = Persistence.Inspect(path);
-            Assert.Equal(ArtifactKind.SkptCheckpoint, result.Kind);
-            Assert.Equal(path, result.FilePath);
-            Assert.Equal(new FileInfo(path).Length, result.FileSizeBytes);
-            Assert.Null(result.Srk);
-            Assert.Null(result.SafeTensors);
-            Assert.Null(result.TrainingCheckpoint);
-            Assert.Empty(result.Observations);
-
-            var skpt = result.Skpt!;
-            Assert.NotNull(skpt);
-            Assert.Equal(SkptFileFormat.FormatName, skpt.FormatName);
-            Assert.Equal(SkptFileFormat.CurrentVersion, skpt.SkptVersion);
-            Assert.Equal(manifest.CreatedUtc, skpt.CreatedUtc);
-            Assert.Equal(Shorokoo.ShorokooVersion.VersionString, skpt.Producer);
-
-            var modelSummary = Assert.Single(skpt.Models);
-            Assert.Equal("model", modelSummary.Key);
-            Assert.Equal(SkptFileFormat.ModelEntryPath, modelSummary.EntryPath);
-            Assert.Equal(SkptFileFormat.ModelFormatSrk1, modelSummary.Format);
-            Assert.Equal(SrkFileFormat.StageName(GraphKind.ConcreteModel), modelSummary.Stage);
-            Assert.Equal(SkptFileFormat.Sha256Hex(entries[SkptFileFormat.ModelEntryPath]),
-                modelSummary.GraphHash);
-
-            var dataSummary = Assert.Single(skpt.DataEntries);
-            Assert.Equal("weights", dataSummary.Key);
-            Assert.Equal(SkptFileFormat.WeightsEntryPath, dataSummary.EntryPath);
-            Assert.Equal(SkptFileFormat.DataFormatSafeTensors, dataSummary.Format);
-            Assert.Equal(SkptFileFormat.CompressionNone, dataSummary.Compression);
-            Assert.Equal(entries[SkptFileFormat.WeightsEntryPath].LongLength,
-                dataSummary.DeclaredSizeBytes);
-            Assert.Equal(SkptFileFormat.Sha256Hex(entries[SkptFileFormat.WeightsEntryPath]),
-                dataSummary.Sha256);
-
-            string[] expectedSets = ["default"];
-            Assert.Equal(expectedSets, skpt.MappingSetNames);
-
-            // ToString renders the model + data inventory.
-            var text = result.ToString();
-            Assert.Contains(".skpt", text);
-            Assert.Contains(SkptFileFormat.ModelEntryPath, text);
-            Assert.Contains(SkptFileFormat.WeightsEntryPath, text);
-            Assert.Contains("unverified", text);
-            Assert.Contains("mapping sets: default", text);
-
-            // Payload untouched: corrupt one byte inside the weights payload — a full load
-            // fails its SHA-256 check, but Inspect (which never reads payload bytes) returns
-            // the same clean summary, recorded hash included.
-            var fileBytes = File.ReadAllBytes(path);
-            var weightsHeader = ParseLocalZipHeaders(fileBytes)
-                .Single(h => h.Name == SkptFileFormat.WeightsEntryPath);
-            fileBytes[weightsHeader.DataOffset + weightsHeader.Size - 1] ^= 0xFF;
-            File.WriteAllBytes(variantPath, fileBytes);
-            Assert.Throws<InvalidDataException>(() => Persistence.Load(variantPath));
-            var corrupt = Persistence.Inspect(variantPath);
-            Assert.Equal(ArtifactKind.SkptCheckpoint, corrupt.Kind);
-            Assert.Empty(corrupt.Observations);
-            Assert.Equal(dataSummary.Sha256, Assert.Single(corrupt.Skpt!.DataEntries).Sha256);
-
-            // Manifest/archive mismatches in both directions are observed; the file still
-            // inspects as a .skpt.
-            var mismatched = entries.Where(e => e.Key != SkptFileFormat.WeightsEntryPath)
-                .Select(e => (e.Key, e.Value)).Append(("data/stray.bin", new byte[16])).ToList();
-            RewriteSkpt(variantPath, mismatched);
-            var mismatch = Persistence.Inspect(variantPath);
-            Assert.Equal(ArtifactKind.SkptCheckpoint, mismatch.Kind);
-            Assert.Contains(mismatch.Observations,
-                o => o.Contains(SkptFileFormat.WeightsEntryPath) && o.Contains("no such entry"));
-            Assert.Contains(mismatch.Observations,
-                o => o.Contains("data/stray.bin") && o.Contains("not referenced"));
-            Assert.Null(Assert.Single(mismatch.Skpt!.DataEntries).DeclaredSizeBytes);
-
-            // Unknown manifest keys and a future version are observations, not failures.
-            var futureConfig = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
-            futureConfig["futureTopLevelKey"] = "??";
-            futureConfig["skptVersion"] = SkptFileFormat.CurrentVersion + 1;
-            RewriteSkpt(variantPath, WithConfig(futureConfig.ToJsonString()));
-            var future = Persistence.Inspect(variantPath);
-            Assert.Equal(ArtifactKind.SkptCheckpoint, future.Kind);
-            Assert.Equal(SkptFileFormat.CurrentVersion + 1, future.Skpt!.SkptVersion);
-            Assert.Contains(future.Observations, o => o.Contains("futureTopLevelKey"));
-            Assert.Contains(future.Observations,
-                o => o.Contains($"version {SkptFileFormat.CurrentVersion + 1}"));
-
-            // STORED-expectation violation: the same entries written deflated (via the BCL
-            // writer) still inspect as a .skpt, with observations naming compressed entries.
-            using (var deflated = new ZipArchive(File.Create(variantPath), ZipArchiveMode.Create))
-            {
-                foreach (var (name, data) in entries)
-                {
-                    using var s = deflated.CreateEntry(name, CompressionLevel.SmallestSize).Open();
-                    s.Write(data);
-                }
-            }
-            var storedViolation = Persistence.Inspect(variantPath);
-            Assert.Equal(ArtifactKind.SkptCheckpoint, storedViolation.Kind);
-            Assert.Contains(storedViolation.Observations, o => o.Contains("expected STORED"));
-
-            // Empty trees: a bare identity-only manifest inspects with observations for the
-            // missing models / data / mapping sets.
-            RewriteSkpt(variantPath, [(SkptFileFormat.ConfigEntryName,
-                System.Text.Encoding.UTF8.GetBytes("{\"format\":\"skpt\",\"skptVersion\":1}"))]);
-            var empty = Persistence.Inspect(variantPath);
-            Assert.Equal(ArtifactKind.SkptCheckpoint, empty.Kind);
-            Assert.Contains(empty.Observations, o => o.Contains("no models"));
-            Assert.Contains(empty.Observations, o => o.Contains("no data entries"));
-            Assert.Contains(empty.Observations, o => o.Contains("no tensor mapping sets"));
-
-            // Non-.skpt zips: no config.json, a foreign tool's config.json, and a manifest
-            // that is not JSON — structured NotRecognized every time, never an exception.
-            RewriteSkpt(variantPath,
-                [("readme.txt", System.Text.Encoding.UTF8.GetBytes("just a zip"))]);
-            var noConfig = Persistence.Inspect(variantPath);
-            Assert.Equal(ArtifactKind.NotRecognized, noConfig.Kind);
-            Assert.Contains(noConfig.Observations, o => o.Contains(SkptFileFormat.ConfigEntryName));
-
-            RewriteSkpt(variantPath, [(SkptFileFormat.ConfigEntryName,
-                System.Text.Encoding.UTF8.GetBytes("{\"name\":\"some-other-tool\"}"))]);
-            var foreign = Persistence.Inspect(variantPath);
-            Assert.Equal(ArtifactKind.NotRecognized, foreign.Kind);
-            Assert.Contains(foreign.Observations, o => o.Contains("format"));
-
-            RewriteSkpt(variantPath, [(SkptFileFormat.ConfigEntryName,
-                System.Text.Encoding.UTF8.GetBytes("not json at all"))]);
-            var badJson = Persistence.Inspect(variantPath);
-            Assert.Equal(ArtifactKind.NotRecognized, badJson.Kind);
-            Assert.Contains(badJson.Observations, o => o.Contains("not a readable"));
-
-            // Truncated and garbage files with a zip signature: structured NotRecognized.
-            File.WriteAllBytes(variantPath, File.ReadAllBytes(path)[..40]);
-            var truncated = Persistence.Inspect(variantPath);
-            Assert.Equal(ArtifactKind.NotRecognized, truncated.Kind);
-            Assert.Contains(truncated.Observations, o => o.Contains("not readable"));
-
-            byte[] garbageZip = [0x50, 0x4B, 0x03, 0x04, 0xDE, 0xAD, 0xBE, 0xEF];
-            File.WriteAllBytes(variantPath, garbageZip);
-            var garbage = Persistence.Inspect(variantPath);
-            Assert.Equal(ArtifactKind.NotRecognized, garbage.Kind);
-            Assert.NotEmpty(garbage.Observations);
-        }
-        finally
-        {
-            if (File.Exists(path)) File.Delete(path);
-            if (File.Exists(variantPath)) File.Delete(variantPath);
-        }
-    }
-
-    /// <summary>
-    /// Optional user provenance metadata (issue #87): the checkpoint builder accepts a
-    /// string→string bag — well-known keys (git commit, dataset id, run name, license)
-    /// surfaced as named parameters plus arbitrary pairs — recorded under the manifest's
-    /// dedicated <c>userMetadata</c> key and echoed by Inspect, distinct from the auto
-    /// producer/created fields. The metadata is purely informational: a checkpoint saved
-    /// with it loads and binds identically to one saved without, and supplying none leaves
-    /// the output byte-identical (the key is simply absent). Every supplied key/value
-    /// round-trips through save → inspect unchanged, and because values are echoed into the
-    /// human-readable summary, a value bearing control characters is sanitized in
-    /// <c>ToString()</c> — it cannot forge a line — while the structured property keeps it raw.
-    /// </summary>
-    [Fact]
-    public void TestSkptUserProvenanceMetadata()
+    public void TestSkptLoadValidationZstdDataAndCompressionFaults()
     {
         var (model, numOut, input) = BuildSkptModel();
-        var plainPath = Path.Combine(TempDir, "provenance_plain.skpt");
-        var metaPath = Path.Combine(TempDir, "provenance_meta.skpt");
-        try
+        var path = P("validation.skpt");
+        var tamperedPath = P("tampered.skpt");
+        Persistence.From(model).WithModel().WithWeights().Save(path);
+        var entries = ReadZipEntries(path);
+        var direct = ExecuteToBytes(model, numOut, input);
+
+        List<(string Name, byte[] Data)> Without(string name) =>
+            entries.Where(e => e.Key != name).Select(e => (e.Key, e.Value)).ToList();
+        List<(string Name, byte[] Data)> WithConfig(string configJson) =>
+            entries.Select(e => (e.Key, e.Key == SkptFileFormat.ConfigEntryName
+                ? System.Text.Encoding.UTF8.GetBytes(configJson) : e.Value)).ToList();
+        void Refused(List<(string Name, byte[] Data)> tampered, params string[] fragments)
         {
-            // ── No metadata → the manifest carries no userMetadata key, and Inspect reports
-            // none. Byte-identity of the no-metadata output is proven deterministically at the
-            // serialization boundary (the file's createdUtc/zip timestamps are not): declaring
-            // the nullable field changes nothing when it is left null, because the manifest
-            // serializer omits nulls — so a null field and an absent field are the same bytes.
-            Persistence.From(model).WithModel().WithWeights().Save(plainPath);
-            var plainEntries = ReadZipEntries(plainPath);
-            var plainConfig = plainEntries[SkptFileFormat.ConfigEntryName];
-            Assert.DoesNotContain("userMetadata", System.Text.Encoding.UTF8.GetString(plainConfig));
-
-            SkptManifest Template() => new()
-            {
-                Format = SkptFileFormat.FormatName,
-                SkptVersion = SkptFileFormat.CurrentVersion,
-                CreatedUtc = "2026-07-22T00:00:00Z",
-                Producer = new SkptProducerInfo { Shorokoo = "x" },
-            };
-            var absentBytes = SkptFileFormat.SerializeManifest(Template());
-            var withNull = Template();
-            withNull.UserMetadata = null;
-            Assert.Equal(absentBytes, SkptFileFormat.SerializeManifest(withNull));
-            Assert.DoesNotContain("userMetadata", System.Text.Encoding.UTF8.GetString(absentBytes));
-
-            var plainInspect = Persistence.Inspect(plainPath);
-            Assert.Equal(ArtifactKind.SkptCheckpoint, plainInspect.Kind);
-            Assert.Null(plainInspect.Skpt!.UserMetadata);
-            Assert.DoesNotContain("user metadata", plainInspect.ToString());
-
-            // ── With metadata: well-known keys as named parameters + arbitrary extra pairs,
-            // and a named parameter overriding a same-key entry in the map.
-            var extra = new Dictionary<string, string>(StringComparer.Ordinal)
-            {
-                ["experiment"] = "ablation-7",
-                [SkptFileFormat.MetadataLicenseKey] = "OVERRIDDEN",   // named param wins below
-            };
-            Persistence.From(model).WithModel().WithWeights()
-                .WithMetadata(extra,
-                    gitCommit: "9f3c1ba",
-                    datasetId: "imagenet-1k@v2",
-                    runName: "nightly-run-42",
-                    license: "Apache-2.0")
-                .Save(metaPath);
-
-            // The manifest records every key under the dedicated userMetadata key.
-            var metaEntries = ReadZipEntries(metaPath);
-            var metaManifest = SkptFileFormat.ParseManifest(
-                metaEntries[SkptFileFormat.ConfigEntryName], metaPath);
-            var recorded = metaManifest.UserMetadata!;
-            Assert.Equal("9f3c1ba", recorded[SkptFileFormat.MetadataGitCommitKey]);
-            Assert.Equal("imagenet-1k@v2", recorded[SkptFileFormat.MetadataDatasetIdKey]);
-            Assert.Equal("nightly-run-42", recorded[SkptFileFormat.MetadataRunNameKey]);
-            Assert.Equal("Apache-2.0", recorded[SkptFileFormat.MetadataLicenseKey]);   // override applied
-            Assert.Equal("ablation-7", recorded["experiment"]);
-
-            // Inspect echoes every key/value in the structured property, round-tripped
-            // unchanged, and distinct from the producer/created fields it also reports.
-            var metaInspect = Persistence.Inspect(metaPath);
-            Assert.Equal(ArtifactKind.SkptCheckpoint, metaInspect.Kind);
-            var userMeta = metaInspect.Skpt!.UserMetadata!;
-            Assert.NotNull(userMeta);
-            Assert.Equal(5, userMeta.Count);
-            foreach (var (k, v) in recorded)
-                Assert.Equal(v, userMeta[k]);
-            Assert.Empty(metaInspect.Observations);
-            // Producer/created remain their own, separate fields — metadata does not bleed in.
-            Assert.Equal(Shorokoo.ShorokooVersion.VersionString, metaInspect.Skpt.Producer);
-            Assert.False(userMeta.ContainsKey("shorokoo"));
-
-            // ToString renders each provenance pair on its own line, in a section distinct
-            // from the producer/created line.
-            var metaText = metaInspect.ToString();
-            Assert.Contains("user metadata", metaText);
-            Assert.Contains($"{SkptFileFormat.MetadataGitCommitKey}: 9f3c1ba", metaText);
-            Assert.Contains($"{SkptFileFormat.MetadataDatasetIdKey}: imagenet-1k@v2", metaText);
-            Assert.Contains($"{SkptFileFormat.MetadataRunNameKey}: nightly-run-42", metaText);
-            Assert.Contains($"{SkptFileFormat.MetadataLicenseKey}: Apache-2.0", metaText);
-            Assert.Contains("experiment: ablation-7", metaText);
-
-            // ── Load is identical with or without metadata: metadata wires nothing, so both
-            // checkpoints bind the same weights and execute bit-identically.
-            var plainLoaded = Persistence.Load(plainPath);
-            var metaLoaded = Persistence.Load(metaPath);
-            var plainWeights = WeightBytesByParam(plainLoaded);
-            var metaWeights = WeightBytesByParam(metaLoaded);
-            Assert.Equal(plainWeights.Count, metaWeights.Count);
-            foreach (var (paramId, bytes) in plainWeights)
-                Assert.Equal(bytes, metaWeights[paramId]);
-            var reference = ExecuteToBytes(model, numOut, input);
-            Assert.Equal(reference, ExecuteToBytes(plainLoaded, numOut, input));
-            Assert.Equal(reference, ExecuteToBytes(metaLoaded, numOut, input));
-
-            // ── Input guards: an empty key and a null value are rejected (the only structural
-            // checks; values are otherwise uninterpreted).
-            Assert.Throws<ArgumentException>(() =>
-                Persistence.From(model).WithMetadata(
-                    new Dictionary<string, string> { [""] = "v" }));
-            Assert.Throws<ArgumentNullException>(() =>
-                Persistence.From(model).WithMetadata(
-                    new Dictionary<string, string> { ["k"] = null! }));
-
-            // ── A large metadata map is rendered bounded: ToString lists at most the same cap
-            // as the other registries, then elides the rest (a hostile manifest could carry a
-            // very large map, bounded only by the config-read cap).
-            var bigPath = Path.Combine(TempDir, "provenance_big.skpt");
-            try
-            {
-                var big = new Dictionary<string, string>(StringComparer.Ordinal);
-                for (int i = 0; i < 200; i++) big[$"k{i:D3}"] = $"v{i}";
-                Persistence.From(model).WithModel().WithWeights().WithMetadata(big).Save(bigPath);
-                var bigInspect = Persistence.Inspect(bigPath);
-                Assert.Equal(200, bigInspect.Skpt!.UserMetadata!.Count);   // structured: all present
-                var bigText = bigInspect.ToString();
-                Assert.Contains("user metadata (200", bigText);
-                Assert.Contains("more", bigText);                          // rendering elided
-                // The rendered metadata lines are capped, not one-per-entry.
-                var metaLineCount = bigText.Split('\n').Count(l => l.TrimStart().StartsWith("k0"));
-                Assert.True(metaLineCount <= 50, $"expected <= 50 rendered keys, got {metaLineCount}");
-            }
-            finally
-            {
-                if (File.Exists(bigPath)) File.Delete(bigPath);
-            }
-
-            // ── Hostile value/key bearing control characters: preserved raw in the structured
-            // property, but sanitized in ToString so it cannot forge a line (an embedded
-            // newline+"note:" must not manufacture a fake observation line, a tab/NUL/C1 char
-            // must not survive into the rendered text).
-            var hostilePath = Path.Combine(TempDir, "provenance_hostile.skpt");
-            const string hostileValue = "clean\n  note: forged\ttab\u0000nul\u0085nel\u009Fc1\u007Fdel";
-            const string hostileKey = "e\nvil";
-            try
-            {
-                var hostile = new Dictionary<string, string>(StringComparer.Ordinal)
-                {
-                    [SkptFileFormat.MetadataRunNameKey] = hostileValue,
-                    [hostileKey] = "hk",
-                };
-                Persistence.From(model).WithModel().WithWeights()
-                    .WithMetadata(hostile).Save(hostilePath);
-
-                var hostileInspect = Persistence.Inspect(hostilePath);
-                var hostileMeta = hostileInspect.Skpt!.UserMetadata!;
-                // Structured property keeps the value and key byte-for-byte, control chars intact.
-                Assert.Equal(hostileValue, hostileMeta[SkptFileFormat.MetadataRunNameKey]);
-                Assert.True(hostileMeta.ContainsKey(hostileKey));
-
-                var hostileText = hostileInspect.ToString();
-                // The embedded newline+"note:" did not manufacture a line; the raw control
-                // characters (newline-then-indent, tab) are gone from the rendered output.
-                Assert.DoesNotContain("\n  note: forged", hostileText);
-                Assert.DoesNotContain("forged\ttab", hostileText);
-                Assert.DoesNotContain("e\nvil", hostileText);
-                // C0, C1 and DEL control characters are all stripped from the rendered text.
-                Assert.DoesNotContain('\u0000', hostileText);   // C0 (NUL)
-                Assert.DoesNotContain('\u0085', hostileText);   // C1 (NEL)
-                Assert.DoesNotContain('\u009F', hostileText);   // C1
-                Assert.DoesNotContain('\u007F', hostileText);   // DEL
-                // Sanitized characters render as the Unicode replacement character.
-                Assert.Contains('�', hostileText);
-                // And loading still ignores the metadata entirely.
-                Assert.Equal(reference,
-                    ExecuteToBytes(Persistence.Load(hostilePath), numOut, input));
-            }
-            finally
-            {
-                if (File.Exists(hostilePath)) File.Delete(hostilePath);
-            }
+            RewriteSkpt(tamperedPath, tampered);
+            var ex = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
+            foreach (var fragment in fragments)
+                Assert.Contains(fragment, ex.Message);
         }
-        finally
+
+        File.WriteAllBytes(tamperedPath, [1, 2, 3, 4]);
+        Assert.Contains("zip",
+            Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath)).Message);
+
+        Refused(Without(SkptFileFormat.ConfigEntryName), SkptFileFormat.ConfigEntryName);
+        Refused(Without(SkptFileFormat.WeightsEntryPath), SkptFileFormat.WeightsEntryPath);
+        Refused(entries.Select(e =>
         {
-            if (File.Exists(plainPath)) File.Delete(plainPath);
-            if (File.Exists(metaPath)) File.Delete(metaPath);
+            if (e.Key != SkptFileFormat.WeightsEntryPath) return (e.Key, e.Value);
+            var copy = e.Value.ToArray();
+            copy[^1] ^= 0xFF;
+            return (e.Key, copy);
+        }).ToList(), "SHA-256", SkptFileFormat.WeightsEntryPath);
+
+        // Unknown keys at every level are ignored: the manifest's keys are add-only.
+        var config = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
+        config["futureTopLevelKey"] = "ignored";
+        config["models"]!["model"]!["futureModelKey"] = 42;
+        config["data"]!["weights"]!["futureDataKey"] = true;
+        config["tensorMappings"]!["model"]!["default"]!["futureSetKey"] = "ignored";
+        var firstParam = ((JsonObject)config["tensorMappings"]!["model"]!["default"]!["tensors"]!)
+            .First().Key;
+        config["tensorMappings"]!["model"]!["default"]!["tensors"]![firstParam]!["futureRefKey"] = 1;
+        RewriteSkpt(tamperedPath, WithConfig(config.ToJsonString()));
+        Assert.Equal(direct, ExecuteToBytes(Persistence.Load(tamperedPath), numOut, input));
+
+        var otherVersionConfig = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
+        otherVersionConfig["skptVersion"] = SkptFileFormat.CurrentVersion + 1;
+        Refused(WithConfig(otherVersionConfig.ToJsonString()),
+            $"reads version {SkptFileFormat.CurrentVersion} only");
+
+        var missingParamConfig = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
+        ((JsonObject)missingParamConfig["tensorMappings"]!["model"]!["default"]!["tensors"]!)
+            .Remove(firstParam);
+        Refused(WithConfig(missingParamConfig.ToJsonString()), firstParam);
+
+        var strayConfig = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
+        strayConfig["tensorMappings"]!["model"]!["default"]!["tensors"]!["not_a_real_param"] =
+            new JsonObject { ["data"] = "weights", ["tensor"] = "not_a_real_param" };
+        Refused(WithConfig(strayConfig.ToJsonString()), "not_a_real_param");
+
+        // ── Opt-in per-entry Zstd compression of the data tree.
+        var (zModel, zNumOut, zInput) = BuildCompressibleSkptModel();
+        var plainPath = P("zstd-plain.skpt");
+        var zstdPath = P("zstd-on.skpt");
+        Persistence.From(zModel).WithModel().WithWeights().Save(plainPath);
+        Persistence.From(zModel).WithModel().WithWeights().WithZstdCompressedData().Save(zstdPath);
+
+        var plainEntries = ReadZipEntries(plainPath);
+        var zstdEntries = ReadZipEntries(zstdPath);
+        Assert.Equal(plainEntries.Keys.OrderBy(n => n, StringComparer.Ordinal),
+            zstdEntries.Keys.OrderBy(n => n, StringComparer.Ordinal));
+        var zstdFileBytes = File.ReadAllBytes(zstdPath);
+        Assert.All(ParseLocalZipHeaders(zstdFileBytes), h => Assert.Equal(0, h.Method));
+
+        // Compression touches only the weights data entry; the default output is unchanged.
+        Assert.Equal(plainEntries[SkptFileFormat.ModelEntryPath],
+            zstdEntries[SkptFileFormat.ModelEntryPath]);
+        var storedWeights = zstdEntries[SkptFileFormat.WeightsEntryPath];
+        Assert.True(SkptFileFormat.LooksLikeZstdFrame(storedWeights));
+        Assert.Equal(plainEntries[SkptFileFormat.WeightsEntryPath],
+            CompressedFormatUtils.Decompress(storedWeights));
+        Assert.True(storedWeights.Length < plainEntries[SkptFileFormat.WeightsEntryPath].Length);
+        Assert.True(zstdFileBytes.Length < new FileInfo(plainPath).Length);
+
+        var plainData = Assert.Single(
+            SkptFileFormat.ParseManifest(plainEntries[SkptFileFormat.ConfigEntryName], plainPath).Data!).Value;
+        Assert.Equal(SkptFileFormat.CompressionNone, plainData.Compression);
+        var zstdData = Assert.Single(
+            SkptFileFormat.ParseManifest(zstdEntries[SkptFileFormat.ConfigEntryName], zstdPath).Data!).Value;
+        Assert.Equal(SkptFileFormat.CompressionZstd, zstdData.Compression);
+        Assert.Equal(SkptFileFormat.Sha256Hex(storedWeights), zstdData.Sha256);
+
+        var zOriginalWeights = WeightBytesByParam(zModel);
+        Assert.All(zOriginalWeights.Values, bytes => Assert.Contains(bytes, b => b != 0));
+        var zLoadedWeights = WeightBytesByParam(Persistence.Load(zstdPath));
+        Assert.Equal(zOriginalWeights.Count, zLoadedWeights.Count);
+        foreach (var (paramId, bytes) in zOriginalWeights)
+            Assert.Equal(bytes, zLoadedWeights[paramId]);
+        Assert.Equal(ExecuteToBytes(zModel, zNumOut, zInput),
+            ExecuteToBytes(Persistence.Load(zstdPath), zNumOut, zInput));
+
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            Persistence.From(zModel).WithZstdCompressedData(compressionLevel: 0));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            Persistence.From(zModel).WithZstdCompressedData(compressionLevel: 23));
+
+        // ── Manifest/stored compression mismatches, in both directions.
+        void RewriteWith(Dictionary<string, byte[]> source, string configJson, byte[]? weights = null)
+            => RewriteSkpt(tamperedPath, source.Select(e => (e.Key,
+                e.Key == SkptFileFormat.ConfigEntryName ? System.Text.Encoding.UTF8.GetBytes(configJson)
+                : e.Key == SkptFileFormat.WeightsEntryPath && weights is not null ? weights
+                : e.Value)).ToList());
+        void RefusedLoad(params string[] fragments)
+        {
+            var ex = Assert.Throws<InvalidDataException>(() => Persistence.Load(tamperedPath));
+            foreach (var fragment in fragments)
+                Assert.Contains(fragment, ex.Message);
         }
+
+        var rawAsZstd = JsonNode.Parse(plainEntries[SkptFileFormat.ConfigEntryName])!;
+        rawAsZstd["data"]!["weights"]!["compression"] = SkptFileFormat.CompressionZstd;
+        RewriteWith(plainEntries, rawAsZstd.ToJsonString());
+        RefusedLoad(SkptFileFormat.WeightsEntryPath, "not a Zstd frame");
+
+        var zstdAsRaw = JsonNode.Parse(zstdEntries[SkptFileFormat.ConfigEntryName])!;
+        zstdAsRaw["data"]!["weights"]!["compression"] = SkptFileFormat.CompressionNone;
+        RewriteWith(zstdEntries, zstdAsRaw.ToJsonString());
+        RefusedLoad(SkptFileFormat.WeightsEntryPath, "Zstd frame");
+
+        var unknown = JsonNode.Parse(plainEntries[SkptFileFormat.ConfigEntryName])!;
+        unknown["data"]!["weights"]!["compression"] = "lz4";
+        RewriteWith(plainEntries, unknown.ToJsonString());
+        RefusedLoad("lz4", "unsupported compression");
+
+        // A corrupt Zstd frame with a matching sha256: integrity passes, decompression fails loud.
+        var truncated = storedWeights.Take(storedWeights.Length / 2).ToArray();
+        Assert.True(SkptFileFormat.LooksLikeZstdFrame(truncated));
+        var corrupt = JsonNode.Parse(zstdEntries[SkptFileFormat.ConfigEntryName])!;
+        corrupt["data"]!["weights"]!["sha256"] = SkptFileFormat.Sha256Hex(truncated);
+        RewriteWith(zstdEntries, corrupt.ToJsonString(), truncated);
+        RefusedLoad(SkptFileFormat.WeightsEntryPath, "Zstd-decompress");
     }
 
-    /// <summary>
-    /// Host user-data bag (issue #101): the checkpoint builder attaches an arbitrary JSON object
-    /// — the one part of a run Shorokoo cannot reconstruct (the data-pipeline state) — stored as
-    /// the reserved <c>data/user-data.json</c> entry and wired into the manifest's data registry
-    /// (<c>format: "json"</c>, sha256). This test proves the whole contract from the issue's
-    /// acceptance criteria: a JSON object round-trips unchanged through save → Inspect
-    /// <c>UserData</c>/<c>GetUserData</c>; a non-object root (and a null value) is rejected at
-    /// save; a <c>$</c>-prefixed top-level host key is rejected as reserved; supplying none leaves
-    /// the <c>.skpt</c> byte-identical to today; the bag never affects a Load; Inspect summarizes
-    /// it as a one-line key count (never a nested dump); and the <see cref="JsonObject"/> overload
-    /// snapshots against later mutation.
-    /// </summary>
+    /// <summary>The model's weight tensors (TensorData) keyed by parameter identifier, excluding
+    /// the RNG identity parameter — the values an additional mapping set is built over.</summary>
+    private static Dictionary<string, TensorData> WeightDataByParam(ComputationGraph model)
+        => model.ToInternal().Nodes
+            .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_DATA
+                && n.IdentifierTemplate !=
+                    Shorokoo.Core.Nodes.Processors.Fast.FastWireRngKeyDerivation.RngSeedIdentifierTemplate)
+            .ToDictionary(n => n.IdentifierTemplate!, n => n.GetTensorData()!, StringComparer.Ordinal);
+
     [Fact]
-    public void TestSkptHostUserDataBag()
+    public void TestInspectSkptArtifactsAndNamedMappingSets()
     {
         var (model, numOut, input) = BuildSkptModel();
-        var plainPath = Path.Combine(TempDir, "userdata_plain.skpt");
-        var dataPath = Path.Combine(TempDir, "userdata_bag.skpt");
-        try
+        var path = P("inspect.skpt");
+        var variantPath = P("inspect_variant.skpt");
+        Persistence.From(model).WithModel().WithWeights().Save(path);
+        var entries = ReadZipEntries(path);
+        var manifest = SkptFileFormat.ParseManifest(entries[SkptFileFormat.ConfigEntryName], path);
+
+        var result = Persistence.Inspect(path);
+        Assert.Equal(ArtifactKind.SkptCheckpoint, result.Kind);
+        Assert.Equal(path, result.FilePath);
+        Assert.Equal(new FileInfo(path).Length, result.FileSizeBytes);
+        Assert.Null(result.Srk);
+        Assert.Null(result.SafeTensors);
+        Assert.Null(result.TrainingCheckpoint);
+        Assert.Empty(result.Observations);
+
+        var skpt = result.Skpt!;
+        Assert.NotNull(skpt);
+        Assert.Equal(SkptFileFormat.FormatName, skpt.FormatName);
+        Assert.Equal(SkptFileFormat.CurrentVersion, skpt.SkptVersion);
+        Assert.Equal(manifest.CreatedUtc, skpt.CreatedUtc);
+        Assert.Equal(Shorokoo.ShorokooVersion.VersionString, skpt.Producer);
+
+        var modelSummary = Assert.Single(skpt.Models);
+        Assert.Equal("model", modelSummary.Key);
+        Assert.Equal(SkptFileFormat.ModelEntryPath, modelSummary.EntryPath);
+        Assert.Equal(SkptFileFormat.ModelFormatSrk1, modelSummary.Format);
+        Assert.Equal(SrkFileFormat.StageName(GraphKind.ConcreteModel), modelSummary.Stage);
+        Assert.Equal(SkptFileFormat.Sha256Hex(entries[SkptFileFormat.ModelEntryPath]), modelSummary.GraphHash);
+
+        var dataSummary = Assert.Single(skpt.DataEntries);
+        Assert.Equal("weights", dataSummary.Key);
+        Assert.Equal(SkptFileFormat.WeightsEntryPath, dataSummary.EntryPath);
+        Assert.Equal(SkptFileFormat.DataFormatSafeTensors, dataSummary.Format);
+        Assert.Equal(SkptFileFormat.CompressionNone, dataSummary.Compression);
+        Assert.Equal(entries[SkptFileFormat.WeightsEntryPath].LongLength, dataSummary.DeclaredSizeBytes);
+        Assert.Equal(SkptFileFormat.Sha256Hex(entries[SkptFileFormat.WeightsEntryPath]), dataSummary.Sha256);
+
+        string[] expectedSets = ["default"];
+        Assert.Equal(expectedSets, skpt.MappingSetNames);
+
+        var text = result.ToString();
+        Assert.Contains(".skpt", text);
+        Assert.Contains(SkptFileFormat.ModelEntryPath, text);
+        Assert.Contains(SkptFileFormat.WeightsEntryPath, text);
+        Assert.Contains("unverified", text);
+        Assert.Contains("mapping sets: default", text);
+
+        // Payload untouched: a corrupt weights payload fails a full load but inspects the same.
+        var fileBytes = File.ReadAllBytes(path);
+        var weightsHeader = ParseLocalZipHeaders(fileBytes)
+            .Single(h => h.Name == SkptFileFormat.WeightsEntryPath);
+        fileBytes[weightsHeader.DataOffset + weightsHeader.Size - 1] ^= 0xFF;
+        File.WriteAllBytes(variantPath, fileBytes);
+        Assert.Throws<InvalidDataException>(() => Persistence.Load(variantPath));
+        var corrupt = Persistence.Inspect(variantPath);
+        Assert.Equal(ArtifactKind.SkptCheckpoint, corrupt.Kind);
+        Assert.Empty(corrupt.Observations);
+        Assert.Equal(dataSummary.Sha256, Assert.Single(corrupt.Skpt!.DataEntries).Sha256);
+
+        ArtifactInspection Rewritten(List<(string Name, byte[] Data)> variantEntries)
         {
-            // ── No user data → no user-data.json entry, no manifest data key, and the output is
-            // byte-identical to a checkpoint saved without it. Byte-identity is proven at the
-            // serialization boundary (the file's createdUtc/zip timestamps are not deterministic):
-            // an unset bag adds no entry and no data-registry record.
-            Persistence.From(model).WithModel().WithWeights().Save(plainPath);
-            var plainEntries = ReadZipEntries(plainPath);
-            Assert.False(plainEntries.ContainsKey(SkptFileFormat.UserDataEntryPath));
-            Assert.DoesNotContain("user-data.json",
-                System.Text.Encoding.UTF8.GetString(plainEntries[SkptFileFormat.ConfigEntryName]));
+            RewriteSkpt(variantPath, variantEntries);
+            return Persistence.Inspect(variantPath);
+        }
+        List<(string Name, byte[] Data)> WithConfig(string configJson) =>
+            entries.Select(e => (e.Key, e.Key == SkptFileFormat.ConfigEntryName
+                ? System.Text.Encoding.UTF8.GetBytes(configJson) : e.Value)).ToList();
+        static List<(string Name, byte[] Data)> Only(string name, string content) =>
+            [(name, System.Text.Encoding.UTF8.GetBytes(content))];
 
-            var plainInspect = Persistence.Inspect(plainPath);
-            Assert.Equal(ArtifactKind.SkptCheckpoint, plainInspect.Kind);
-            Assert.Null(plainInspect.Skpt!.UserData);
-            Assert.Null(plainInspect.Skpt.GetUserData<PipelineState>());
-            Assert.DoesNotContain("user-data:", plainInspect.ToString());
+        // Manifest/archive mismatches in both directions are observed, both ways round.
+        var mismatch = Rewritten(entries.Where(e => e.Key != SkptFileFormat.WeightsEntryPath)
+            .Select(e => (e.Key, e.Value)).Append(("data/stray.bin", new byte[16])).ToList());
+        AssertInspection(mismatch, ArtifactKind.SkptCheckpoint,
+            [SkptFileFormat.WeightsEntryPath, "no such entry"], ["data/stray.bin", "not referenced"]);
+        Assert.Null(Assert.Single(mismatch.Skpt!.DataEntries).DeclaredSizeBytes);
 
-            // ── A JSON object attached at save round-trips unchanged. The bag carries nested and
-            // heterogeneous values (object, array, number, string, bool, null) — all valid JSON,
-            // none of which Shorokoo interprets.
-            var bag = new JsonObject
+        var futureConfig = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
+        futureConfig["futureTopLevelKey"] = "??";
+        futureConfig["skptVersion"] = SkptFileFormat.CurrentVersion + 1;
+        var future = Rewritten(WithConfig(futureConfig.ToJsonString()));
+        AssertInspection(future, ArtifactKind.SkptCheckpoint,
+            ["futureTopLevelKey"], [$"version {SkptFileFormat.CurrentVersion + 1}"]);
+        Assert.Equal(SkptFileFormat.CurrentVersion + 1, future.Skpt!.SkptVersion);
+
+        // STORED-expectation violation: the same entries written deflated by the BCL writer.
+        using (var deflated = new ZipArchive(File.Create(variantPath), ZipArchiveMode.Create))
+        {
+            foreach (var (name, data) in entries)
             {
-                ["corpus"] = "imagenet-1k",
-                ["shuffleSeed"] = 12345,
-                ["epoch"] = 3,
-                ["done"] = false,
-                ["cursor"] = null,
-                ["shards"] = new JsonArray("a.tar", "b.tar", "c.tar"),
-                ["augment"] = new JsonObject { ["flip"] = true, ["crop"] = 224 },
-            };
-            Persistence.From(model).WithModel().WithWeights().WithUserData(bag).Save(dataPath);
-
-            // The archive carries the reserved entry, and the manifest wires it into the data
-            // registry with format "json" and a sha256 covering the stored bytes.
-            var dataEntries = ReadZipEntries(dataPath);
-            Assert.True(dataEntries.ContainsKey(SkptFileFormat.UserDataEntryPath));
-            var manifest = SkptFileFormat.ParseManifest(
-                dataEntries[SkptFileFormat.ConfigEntryName], dataPath);
-            var udEntry = manifest.Data![SkptFileFormat.UserDataDataKey];
-            Assert.Equal(SkptFileFormat.UserDataEntryPath, udEntry.Entry);
-            Assert.Equal(SkptFileFormat.DataFormatJson, udEntry.Format);
-            Assert.Equal(SkptFileFormat.CompressionNone, udEntry.Compression);
-            Assert.Equal(
-                SkptFileFormat.Sha256Hex(dataEntries[SkptFileFormat.UserDataEntryPath]),
-                udEntry.Sha256);
-
-            // Read back via the DOM: every value survives verbatim.
-            var inspect = Persistence.Inspect(dataPath);
-            Assert.Empty(inspect.Observations);
-            var read = inspect.Skpt!.UserData!;
-            Assert.NotNull(read);
-            Assert.Equal(7, read.Count);
-            Assert.Equal("imagenet-1k", (string?)read["corpus"]);
-            Assert.Equal(12345, (int?)read["shuffleSeed"]);
-            Assert.Equal(3, (int?)read["epoch"]);
-            Assert.False((bool?)read["done"]);
-            Assert.Null(read["cursor"]);
-            Assert.Equal(3, read["shards"]!.AsArray().Count);
-            Assert.Equal("b.tar", (string?)read["shards"]![1]);
-            Assert.True((bool?)read["augment"]!["flip"]);
-            Assert.Equal(224, (int?)read["augment"]!["crop"]);
-
-            // Inspect summarizes the bag as a one-line key count — never a nested dump.
-            var text = inspect.ToString();
-            Assert.Contains("user-data: 7 keys", text);
-            Assert.DoesNotContain("imagenet-1k", text);   // values are not dumped
-            Assert.DoesNotContain("shuffleSeed", text);
-
-            // ── The bag never affects a Load: the checkpoint binds identical weights and executes
-            // bit-identically with or without it.
-            var reference = ExecuteToBytes(model, numOut, input);
-            var plainWeights = WeightBytesByParam(Persistence.Load(plainPath));
-            var dataWeights = WeightBytesByParam(Persistence.Load(dataPath));
-            Assert.Equal(plainWeights.Count, dataWeights.Count);
-            foreach (var (paramId, bytes) in plainWeights)
-                Assert.Equal(bytes, dataWeights[paramId]);
-            Assert.Equal(reference, ExecuteToBytes(Persistence.Load(dataPath), numOut, input));
-
-            // ── The generic overload accepts a POCO whose root is an object.
-            var pocoPath = Path.Combine(TempDir, "userdata_poco.skpt");
-            try
-            {
-                var state = new PipelineState
-                {
-                    Corpus = "c4",
-                    ShuffleSeed = 7,
-                    Epoch = 1,
-                    Shards = ["x", "y"],
-                };
-                Persistence.From(model).WithModel().WithWeights().WithUserData(state).Save(pocoPath);
-                var pocoBack = Persistence.Inspect(pocoPath).Skpt!.GetUserData<PipelineState>()!;
-                Assert.Equal("c4", pocoBack.Corpus);
-                Assert.Equal(7, pocoBack.ShuffleSeed);
-                Assert.Equal(["x", "y"], pocoBack.Shards);
-            }
-            finally
-            {
-                if (File.Exists(pocoPath)) File.Delete(pocoPath);
-            }
-
-            // ── A non-object serialized root is rejected at save (a list, a scalar, and JSON
-            // null all fail with a clear ArgumentException — the only structural check).
-            Assert.Throws<ArgumentException>(() =>
-                Persistence.From(model).WithUserData((int[])[1, 2, 3]));
-            Assert.Throws<ArgumentException>(() =>
-                Persistence.From(model).WithUserData("just a string"));
-            Assert.Throws<ArgumentException>(() =>
-                Persistence.From(model).WithUserData(42));
-            Assert.Throws<ArgumentException>(() =>
-                Persistence.From(model).WithUserData<object?>(null));
-            Assert.Throws<ArgumentNullException>(() =>
-                Persistence.From(model).WithUserData((JsonObject)null!));
-
-            // ── A $-prefixed top-level key is reserved for Shorokoo and rejected, through both
-            // the DOM overload and the generic path; nested $-keys are allowed (values are never
-            // interpreted).
-            Assert.Throws<ArgumentException>(() =>
-                Persistence.From(model).WithUserData(new JsonObject { ["$reserved"] = 1 }));
-            Assert.Throws<ArgumentException>(() =>
-                Persistence.From(model).WithUserData(
-                    new Dictionary<string, int> { ["$nope"] = 1 }));
-            // Nested "$" keys are fine — only the root is reserved.
-            Persistence.From(model).WithUserData(
-                new JsonObject { ["ok"] = new JsonObject { ["$inner"] = 1 } });
-
-            // ── The JsonObject overload snapshots: mutating the caller's object after the call
-            // does not change what was stored.
-            var mutPath = Path.Combine(TempDir, "userdata_mut.skpt");
-            try
-            {
-                var live = new JsonObject { ["v"] = 1 };
-                var builder = Persistence.From(model).WithModel().WithWeights().WithUserData(live);
-                live["v"] = 999;          // mutate after attaching
-                live["added"] = "late";
-                builder.Save(mutPath);
-                var snap = Persistence.Inspect(mutPath).Skpt!.UserData!;
-                Assert.Equal(1, (int?)snap["v"]);
-                Assert.False(snap.ContainsKey("added"));
-            }
-            finally
-            {
-                if (File.Exists(mutPath)) File.Delete(mutPath);
+                using var s = deflated.CreateEntry(name, CompressionLevel.SmallestSize).Open();
+                s.Write(data);
             }
         }
-        finally
+        AssertInspection(Persistence.Inspect(variantPath), ArtifactKind.SkptCheckpoint, ["expected STORED"]);
+
+        AssertInspection(
+            Rewritten(Only(SkptFileFormat.ConfigEntryName, "{\"format\":\"skpt\",\"skptVersion\":1}")),
+            ArtifactKind.SkptCheckpoint, ["no models"], ["no data entries"], ["no tensor mapping sets"]);
+        AssertInspection(Rewritten(Only("readme.txt", "just a zip")),
+            ArtifactKind.NotRecognized, [SkptFileFormat.ConfigEntryName]);
+        AssertInspection(Rewritten(Only(SkptFileFormat.ConfigEntryName, "{\"name\":\"some-other-tool\"}")),
+            ArtifactKind.NotRecognized, ["format"]);
+        AssertInspection(Rewritten(Only(SkptFileFormat.ConfigEntryName, "not json at all")),
+            ArtifactKind.NotRecognized, ["not a readable"]);
+
+        File.WriteAllBytes(variantPath, File.ReadAllBytes(path)[..40]);
+        AssertInspection(Persistence.Inspect(variantPath), ArtifactKind.NotRecognized, ["not readable"]);
+
+        byte[] garbageZip = [0x50, 0x4B, 0x03, 0x04, 0xDE, 0xAD, 0xBE, 0xEF];
+        File.WriteAllBytes(variantPath, garbageZip);
+        var garbage = Persistence.Inspect(variantPath);
+        Assert.Equal(ArtifactKind.NotRecognized, garbage.Kind);
+        Assert.NotEmpty(garbage.Observations);
+
+        // ── Named mapping sets over shared data: an "ema" set with one distinct tensor (its
+        // own data entry) and one byte-identical to the default (shared, stored once).
+        var setsPath = P("named-sets.skpt");
+        var defaultOnlyPath = P("named-sets-default-only.skpt");
+        var modelData = WeightDataByParam(model);
+        Assert.Equal(2, modelData.Count);
+        var distinctId = modelData
+            .OrderByDescending(kv => kv.Value.Shape.Dims.Aggregate(1L, (a, d) => a * d))
+            .First().Key;
+        var sharedId = modelData.Keys.Single(k => k != distinctId);
+
+        var emaValues = new Dictionary<string, TensorData>(StringComparer.Ordinal);
+        foreach (var (id, data) in modelData)
         {
-            if (File.Exists(plainPath)) File.Delete(plainPath);
-            if (File.Exists(dataPath)) File.Delete(dataPath);
+            if (id == distinctId)
+            {
+                var dims = data.Shape.Dims;
+                var vals = new float[dims.Aggregate(1L, (a, d) => a * d)];
+                for (int i = 0; i < vals.Length; i++) vals[i] = 2.0f + i * 0.5f;
+                emaValues[id] = TensorData(dims, vals);
+            }
+            else
+            {
+                emaValues[id] = data;
+            }
         }
+        Assert.NotEqual(modelData[distinctId].AccessRawMemory().ToArray(),
+            emaValues[distinctId].AccessRawMemory().ToArray());
+
+        Persistence.From(model).WithModel().WithWeights().WithWeights("ema", emaValues).Save(setsPath);
+        Persistence.From(model).WithModel().WithWeights().Save(defaultOnlyPath);
+
+        var setEntries = ReadZipEntries(setsPath);
+        var defaultOnlyEntries = ReadZipEntries(defaultOnlyPath);
+        const string emaEntryPath = "data/ema.safetensors";
+        Assert.Equal(
+            ((string[])[SkptFileFormat.ConfigEntryName, SkptFileFormat.ModelEntryPath,
+                        SkptFileFormat.WeightsEntryPath, emaEntryPath])
+                .OrderBy(n => n, StringComparer.Ordinal),
+            setEntries.Keys.OrderBy(n => n, StringComparer.Ordinal));
+        Assert.Equal(
+            ((string[])[SkptFileFormat.ConfigEntryName, SkptFileFormat.ModelEntryPath,
+                        SkptFileFormat.WeightsEntryPath])
+                .OrderBy(n => n, StringComparer.Ordinal),
+            defaultOnlyEntries.Keys.OrderBy(n => n, StringComparer.Ordinal));
+
+        Assert.Equal(defaultOnlyEntries[SkptFileFormat.ModelEntryPath],
+            setEntries[SkptFileFormat.ModelEntryPath]);
+        Assert.Equal(defaultOnlyEntries[SkptFileFormat.WeightsEntryPath],
+            setEntries[SkptFileFormat.WeightsEntryPath]);
+
+        var emaStored = SafeTensorLoader.ParseSafeTensorBytes(setEntries[emaEntryPath])
+            .ToDictionary(t => t.Name, t => t.Data.AccessRawMemory().ToArray(), StringComparer.Ordinal);
+        Assert.Equal((string[])[distinctId], emaStored.Keys.ToArray());
+        Assert.DoesNotContain(sharedId, emaStored.Keys);
+
+        var setManifest = SkptFileFormat.ParseManifest(setEntries[SkptFileFormat.ConfigEntryName], setsPath);
+        var sets = setManifest.TensorMappings!["model"];
+        Assert.Equal((string[])["default", "ema"], sets.Keys.ToArray());
+        Assert.Equal(2, setManifest.Data!.Count);
+        Assert.Equal(emaEntryPath, setManifest.Data["ema"].Entry);
+        var emaRefs = sets["ema"].Tensors!;
+        Assert.Equal(SkptFileFormat.DefaultDataKey, emaRefs[sharedId].Data);
+        Assert.Equal(sharedId, emaRefs[sharedId].Tensor);
+        Assert.Equal("ema", emaRefs[distinctId].Data);
+        Assert.Equal(distinctId, emaRefs[distinctId].Tensor);
+
+        var originalBytes = WeightBytesByParam(model);
+        var loadedDefault = WeightBytesByParam(Persistence.Load(setsPath));
+        Assert.Equal(originalBytes.Count, loadedDefault.Count);
+        foreach (var (id, bytes) in originalBytes)
+            Assert.Equal(bytes, loadedDefault[id]);
+
+        var loadedEma = WeightBytesByParam(Persistence.Load(setsPath, "ema"));
+        Assert.Equal(emaValues[distinctId].AccessRawMemory().ToArray(), loadedEma[distinctId]);
+        Assert.Equal(originalBytes[sharedId], loadedEma[sharedId]);
+        Assert.NotEqual(loadedDefault[distinctId], loadedEma[distinctId]);
+        Assert.Equal(ExecuteToBytes(model, numOut, input),
+            ExecuteToBytes(Persistence.Load(setsPath, "default"), numOut, input));
+
+        var exAbsent = Assert.Throws<InvalidDataException>(() => Persistence.Load(setsPath, "nope"));
+        Assert.Contains("nope", exAbsent.Message);
+        Assert.Contains("default", exAbsent.Message);
+        Assert.Contains("ema", exAbsent.Message);
+
+        var inspected = Persistence.Inspect(setsPath);
+        Assert.Equal(ArtifactKind.SkptCheckpoint, inspected.Kind);
+        Assert.Equal((string[])["default", "ema"], inspected.Skpt!.MappingSetNames.ToArray());
+        Assert.Contains("mapping sets: default, ema", inspected.ToString());
+
+        // A set fully shared with the default weights adds no data entry, yet still loads.
+        var sharedOnlyPath = P("named-sets-shared-only.skpt");
+        Persistence.From(model).WithModel().WithWeights()
+            .WithWeights("shadow", modelData).Save(sharedOnlyPath);
+        var sharedEntries = ReadZipEntries(sharedOnlyPath);
+        Assert.DoesNotContain("data/shadow.safetensors", sharedEntries.Keys);
+        Assert.Equal(defaultOnlyEntries.Keys.OrderBy(n => n, StringComparer.Ordinal),
+            sharedEntries.Keys.OrderBy(n => n, StringComparer.Ordinal));
+        var sharedManifest = SkptFileFormat.ParseManifest(
+            sharedEntries[SkptFileFormat.ConfigEntryName], sharedOnlyPath);
+        Assert.Equal((string[])["default", "shadow"],
+            sharedManifest.TensorMappings!["model"].Keys.ToArray());
+        Assert.Equal((string[])[SkptFileFormat.DefaultDataKey], sharedManifest.Data!.Keys.ToArray());
+        Assert.All(sharedManifest.TensorMappings["model"]["shadow"].Tensors!.Values,
+            r => Assert.Equal(SkptFileFormat.DefaultDataKey, r.Data));
+        var shadowBytes = WeightBytesByParam(Persistence.Load(sharedOnlyPath, "shadow"));
+        foreach (var (id, bytes) in originalBytes)
+            Assert.Equal(bytes, shadowBytes[id]);
+
+        // Builder validation: reserved names, an incomplete set and a stray parameter fail up front.
+        Assert.Throws<ArgumentException>(() => Persistence.From(model).WithWeights("default", emaValues));
+        Assert.Throws<ArgumentException>(() => Persistence.From(model).WithWeights("weights", emaValues));
+        Assert.Throws<ArgumentException>(() => Persistence.From(model).WithWeights("bad/name", emaValues));
+        var incompletePath = P("named-sets-incomplete.skpt");
+        var missing = new Dictionary<string, TensorData>(StringComparer.Ordinal)
+            { [distinctId] = emaValues[distinctId] };
+        var exMissing = Assert.Throws<InvalidOperationException>(() =>
+            Persistence.From(model).WithModel().WithWeights().WithWeights("ema", missing).Save(incompletePath));
+        Assert.Contains(sharedId, exMissing.Message);
+        var stray = new Dictionary<string, TensorData>(emaValues, StringComparer.Ordinal)
+            { ["not_a_real_param"] = emaValues[distinctId] };
+        var exStray = Assert.Throws<InvalidOperationException>(() =>
+            Persistence.From(model).WithModel().WithWeights().WithWeights("ema", stray).Save(incompletePath));
+        Assert.Contains("not_a_real_param", exStray.Message);
+        Assert.False(File.Exists(incompletePath));
     }
 
-    /// <summary>A host pipeline-state POCO used to exercise the generic
+    /// <summary>A host pipeline-state POCO for the generic
     /// <c>WithUserData&lt;T&gt;</c> / <c>GetUserData&lt;T&gt;</c> round-trip.</summary>
     private sealed class PipelineState
     {
@@ -2580,211 +1556,239 @@ public class CompressedFormatUtilsCoverageTests
         public string[] Shards { get; set; } = [];
     }
 
-    /// <summary>The model's weight tensors (TensorData) keyed by parameter identifier,
-    /// excluding the RNG identity parameter — the values an additional set is built over.</summary>
-    private static Dictionary<string, TensorData> WeightDataByParam(ComputationGraph model)
-        => model.ToInternal().Nodes
-            .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_DATA
-                && n.IdentifierTemplate !=
-                    Shorokoo.Core.Nodes.Processors.Fast.FastWireRngKeyDerivation.RngSeedIdentifierTemplate)
-            .ToDictionary(n => n.IdentifierTemplate!, n => n.GetTensorData()!, StringComparer.Ordinal);
-
-    /// <summary>
-    /// Multiple named mapping sets over shared data (issue #86): a checkpoint carries a
-    /// <c>default</c> set (the model's raw weights) plus an additional <c>ema</c> set whose
-    /// tensors bind to the same parameters, one byte-identical to the default (shared, stored
-    /// once) and one distinct (stored once, in the set's own data entry). config.json records
-    /// both sets; the default set's model and weights entries stay byte-unchanged by the extra
-    /// set (so a default-only save is byte-identical to the single-set output); a shared data
-    /// item is not duplicated in the data tree; <c>Load(path)</c> binds default while
-    /// <c>Load(path, "ema")</c> binds ema, each correctly; selecting an absent set fails loud
-    /// naming the available sets; and Inspect lists every set present. The builder also rejects
-    /// a malformed additional set up front (reserved name, incomplete or stray parameter).
-    /// </summary>
     [Fact]
-    public void TestSkptNamedMappingSetsSharedData()
+    public void TestSkptUserProvenanceMetadataAndHostUserDataBag()
     {
         var (model, numOut, input) = BuildSkptModel();
-        var path = Path.Combine(TempDir, "named-sets.skpt");
-        var defaultOnlyPath = Path.Combine(TempDir, "named-sets-default-only.skpt");
-        try
+        var plainPath = P("provenance_plain.skpt");
+        var metaPath = P("provenance_meta.skpt");
+        var reference = ExecuteToBytes(model, numOut, input);
+
+        Persistence.From(model).WithModel().WithWeights().Save(plainPath);
+        var plainEntries = ReadZipEntries(plainPath);
+        var plainConfig = plainEntries[SkptFileFormat.ConfigEntryName];
+        Assert.DoesNotContain("userMetadata", System.Text.Encoding.UTF8.GetString(plainConfig));
+        Assert.False(plainEntries.ContainsKey(SkptFileFormat.UserDataEntryPath));
+        Assert.DoesNotContain("user-data.json", System.Text.Encoding.UTF8.GetString(plainConfig));
+
+        // Byte-identity is proven at the serialization boundary (the file's createdUtc/zip
+        // timestamps are not): the serializer omits nulls, so null and absent are the same bytes.
+        SkptManifest Template() => new()
         {
-            // Build the ema set over the model's parameters: the largest parameter (weights
-            // [4,4]) gets a distinct pattern; the other (bias [4]) is left byte-identical to
-            // the default, so it must be shared rather than stored twice.
-            var modelData = WeightDataByParam(model);
-            Assert.Equal(2, modelData.Count);
-            var distinctId = modelData
-                .OrderByDescending(kv => kv.Value.Shape.Dims.Aggregate(1L, (a, d) => a * d))
-                .First().Key;
-            var sharedId = modelData.Keys.Single(k => k != distinctId);
+            Format = SkptFileFormat.FormatName,
+            SkptVersion = SkptFileFormat.CurrentVersion,
+            CreatedUtc = "2026-07-22T00:00:00Z",
+            Producer = new SkptProducerInfo { Shorokoo = "x" },
+        };
+        var absentBytes = SkptFileFormat.SerializeManifest(Template());
+        var withNull = Template();
+        withNull.UserMetadata = null;
+        Assert.Equal(absentBytes, SkptFileFormat.SerializeManifest(withNull));
+        Assert.DoesNotContain("userMetadata", System.Text.Encoding.UTF8.GetString(absentBytes));
 
-            var emaValues = new Dictionary<string, TensorData>(StringComparer.Ordinal);
-            foreach (var (id, data) in modelData)
-            {
-                if (id == distinctId)
-                {
-                    var dims = data.Shape.Dims;
-                    var vals = new float[dims.Aggregate(1L, (a, d) => a * d)];
-                    for (int i = 0; i < vals.Length; i++) vals[i] = 2.0f + i * 0.5f;
-                    emaValues[id] = TensorData(dims, vals);
-                }
-                else
-                {
-                    emaValues[id] = data;   // identical bytes → shared data item
-                }
-            }
-            // The distinct ema tensor must differ from the model's own, or "load ema" could not
-            // be told apart from "load default".
-            Assert.NotEqual(modelData[distinctId].AccessRawMemory().ToArray(),
-                emaValues[distinctId].AccessRawMemory().ToArray());
+        var plainInspect = Persistence.Inspect(plainPath);
+        Assert.Equal(ArtifactKind.SkptCheckpoint, plainInspect.Kind);
+        Assert.Null(plainInspect.Skpt!.UserMetadata);
+        Assert.Null(plainInspect.Skpt.UserData);
+        Assert.Null(plainInspect.Skpt.GetUserData<PipelineState>());
+        Assert.DoesNotContain("user metadata", plainInspect.ToString());
+        Assert.DoesNotContain("user-data:", plainInspect.ToString());
 
-            Persistence.From(model).WithModel().WithWeights()
-                .WithWeights("ema", emaValues).Save(path);
-            Persistence.From(model).WithModel().WithWeights().Save(defaultOnlyPath);
-
-            // The archive carries the default entries plus exactly one extra data entry for the
-            // ema set's distinct tensor; a default-only save carries only the default three.
-            var entries = ReadZipEntries(path);
-            var defaultOnlyEntries = ReadZipEntries(defaultOnlyPath);
-            const string emaEntryPath = "data/ema.safetensors";
-            Assert.Equal(
-                ((string[])[SkptFileFormat.ConfigEntryName, SkptFileFormat.ModelEntryPath,
-                            SkptFileFormat.WeightsEntryPath, emaEntryPath])
-                    .OrderBy(n => n, StringComparer.Ordinal),
-                entries.Keys.OrderBy(n => n, StringComparer.Ordinal));
-            Assert.Equal(
-                ((string[])[SkptFileFormat.ConfigEntryName, SkptFileFormat.ModelEntryPath,
-                            SkptFileFormat.WeightsEntryPath])
-                    .OrderBy(n => n, StringComparer.Ordinal),
-                defaultOnlyEntries.Keys.OrderBy(n => n, StringComparer.Ordinal));
-
-            // The extra set leaves the default output byte-unchanged: the model definition and
-            // the default weights entry are byte-identical to the default-only save (the shared
-            // bias bytes live once, in the untouched weights entry).
-            Assert.Equal(defaultOnlyEntries[SkptFileFormat.ModelEntryPath],
-                entries[SkptFileFormat.ModelEntryPath]);
-            Assert.Equal(defaultOnlyEntries[SkptFileFormat.WeightsEntryPath],
-                entries[SkptFileFormat.WeightsEntryPath]);
-
-            // No duplication: the ema data entry holds ONLY the distinct tensor — the shared
-            // bias is absent from it (it is referenced back into the weights entry).
-            var emaStored = SafeTensorLoader.ParseSafeTensorBytes(entries[emaEntryPath])
-                .ToDictionary(t => t.Name, t => t.Data.AccessRawMemory().ToArray(), StringComparer.Ordinal);
-            Assert.Equal((string[])[distinctId], emaStored.Keys.ToArray());
-            Assert.DoesNotContain(sharedId, emaStored.Keys);
-
-            // config.json records both sets; the ema mapping shares the bias (data "weights")
-            // and points the distinct weight tensor at its own "ema" data entry.
-            var manifest = SkptFileFormat.ParseManifest(entries[SkptFileFormat.ConfigEntryName], path);
-            var sets = manifest.TensorMappings!["model"];
-            Assert.Equal((string[])["default", "ema"], sets.Keys.ToArray());
-            Assert.Equal(2, manifest.Data!.Count);
-            Assert.Equal(emaEntryPath, manifest.Data["ema"].Entry);
-            var emaRefs = sets["ema"].Tensors!;
-            Assert.Equal(SkptFileFormat.DefaultDataKey, emaRefs[sharedId].Data);
-            Assert.Equal(sharedId, emaRefs[sharedId].Tensor);
-            Assert.Equal("ema", emaRefs[distinctId].Data);
-            Assert.Equal(distinctId, emaRefs[distinctId].Tensor);
-
-            // Load default: the raw weights bind, both parameters equal to the model's originals.
-            var originalBytes = WeightBytesByParam(model);
-            var loadedDefault = WeightBytesByParam(Persistence.Load(path));
-            Assert.Equal(originalBytes.Count, loadedDefault.Count);
-            foreach (var (id, bytes) in originalBytes)
-                Assert.Equal(bytes, loadedDefault[id]);
-
-            // Load ema: the distinct tensor binds the ema bytes, the shared one binds the same
-            // bias as default — proving correct per-set selection over shared data. The
-            // parameterless overload is unchanged (still default), and executes bit-identically.
-            var loadedEma = WeightBytesByParam(Persistence.Load(path, "ema"));
-            Assert.Equal(emaValues[distinctId].AccessRawMemory().ToArray(), loadedEma[distinctId]);
-            Assert.Equal(originalBytes[sharedId], loadedEma[sharedId]);
-            Assert.NotEqual(loadedDefault[distinctId], loadedEma[distinctId]);
-            Assert.Equal(ExecuteToBytes(model, numOut, input),
-                ExecuteToBytes(Persistence.Load(path, "default"), numOut, input));
-
-            // Selecting an absent set fails loud, naming the requested set and the available ones.
-            var exAbsent = Assert.Throws<InvalidDataException>(() => Persistence.Load(path, "nope"));
-            Assert.Contains("nope", exAbsent.Message);
-            Assert.Contains("default", exAbsent.Message);
-            Assert.Contains("ema", exAbsent.Message);
-
-            // Inspect lists every set present (issue #73), not just default.
-            var inspected = Persistence.Inspect(path);
-            Assert.Equal(ArtifactKind.SkptCheckpoint, inspected.Kind);
-            Assert.Equal((string[])["default", "ema"], inspected.Skpt!.MappingSetNames.ToArray());
-            Assert.Contains("mapping sets: default, ema", inspected.ToString());
-
-            // A set fully shared with the default weights adds NO data entry — every tensor is
-            // referenced back into the "weights" entry — yet still loads correctly.
-            var sharedOnlyPath = Path.Combine(TempDir, "named-sets-shared-only.skpt");
-            try
-            {
-                Persistence.From(model).WithModel().WithWeights()
-                    .WithWeights("shadow", modelData).Save(sharedOnlyPath);
-                var sharedEntries = ReadZipEntries(sharedOnlyPath);
-                Assert.DoesNotContain("data/shadow.safetensors", sharedEntries.Keys);
-                Assert.Equal(defaultOnlyEntries.Keys.OrderBy(n => n, StringComparer.Ordinal),
-                    sharedEntries.Keys.OrderBy(n => n, StringComparer.Ordinal));
-                var sharedManifest = SkptFileFormat.ParseManifest(
-                    sharedEntries[SkptFileFormat.ConfigEntryName], sharedOnlyPath);
-                Assert.Equal((string[])["default", "shadow"],
-                    sharedManifest.TensorMappings!["model"].Keys.ToArray());
-                Assert.Equal((string[])[SkptFileFormat.DefaultDataKey], sharedManifest.Data!.Keys.ToArray());
-                Assert.All(sharedManifest.TensorMappings["model"]["shadow"].Tensors!.Values,
-                    r => Assert.Equal(SkptFileFormat.DefaultDataKey, r.Data));
-                var shadowBytes = WeightBytesByParam(Persistence.Load(sharedOnlyPath, "shadow"));
-                foreach (var (id, bytes) in originalBytes)
-                    Assert.Equal(bytes, shadowBytes[id]);
-            }
-            finally { if (File.Exists(sharedOnlyPath)) File.Delete(sharedOnlyPath); }
-
-            // Builder validation: reserved names, an incomplete set, and a stray parameter all
-            // fail up front before any file is written.
-            Assert.Throws<ArgumentException>(() =>
-                Persistence.From(model).WithWeights("default", emaValues));
-            Assert.Throws<ArgumentException>(() =>
-                Persistence.From(model).WithWeights("weights", emaValues));
-            Assert.Throws<ArgumentException>(() =>
-                Persistence.From(model).WithWeights("bad/name", emaValues));
-            var incompletePath = Path.Combine(TempDir, "named-sets-incomplete.skpt");
-            var missing = new Dictionary<string, TensorData>(StringComparer.Ordinal)
-                { [distinctId] = emaValues[distinctId] };
-            var exMissing = Assert.Throws<InvalidOperationException>(() =>
-                Persistence.From(model).WithModel().WithWeights()
-                    .WithWeights("ema", missing).Save(incompletePath));
-            Assert.Contains(sharedId, exMissing.Message);
-            var stray = new Dictionary<string, TensorData>(emaValues, StringComparer.Ordinal)
-                { ["not_a_real_param"] = emaValues[distinctId] };
-            var exStray = Assert.Throws<InvalidOperationException>(() =>
-                Persistence.From(model).WithModel().WithWeights()
-                    .WithWeights("ema", stray).Save(incompletePath));
-            Assert.Contains("not_a_real_param", exStray.Message);
-            Assert.False(File.Exists(incompletePath));
-        }
-        finally
+        // Well-known keys as named parameters + extra pairs; a named parameter wins over the map.
+        var extra = new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            if (File.Exists(path)) File.Delete(path);
-            if (File.Exists(defaultOnlyPath)) File.Delete(defaultOnlyPath);
-        }
+            ["experiment"] = "ablation-7",
+            [SkptFileFormat.MetadataLicenseKey] = "OVERRIDDEN",
+        };
+        Persistence.From(model).WithModel().WithWeights()
+            .WithMetadata(extra,
+                gitCommit: "9f3c1ba",
+                datasetId: "imagenet-1k@v2",
+                runName: "nightly-run-42",
+                license: "Apache-2.0")
+            .Save(metaPath);
+
+        var metaEntries = ReadZipEntries(metaPath);
+        var metaManifest = SkptFileFormat.ParseManifest(
+            metaEntries[SkptFileFormat.ConfigEntryName], metaPath);
+        var recorded = metaManifest.UserMetadata!;
+        Assert.Equal("9f3c1ba", recorded[SkptFileFormat.MetadataGitCommitKey]);
+        Assert.Equal("imagenet-1k@v2", recorded[SkptFileFormat.MetadataDatasetIdKey]);
+        Assert.Equal("nightly-run-42", recorded[SkptFileFormat.MetadataRunNameKey]);
+        Assert.Equal("Apache-2.0", recorded[SkptFileFormat.MetadataLicenseKey]);
+        Assert.Equal("ablation-7", recorded["experiment"]);
+
+        var metaInspect = Persistence.Inspect(metaPath);
+        Assert.Equal(ArtifactKind.SkptCheckpoint, metaInspect.Kind);
+        var userMeta = metaInspect.Skpt!.UserMetadata!;
+        Assert.NotNull(userMeta);
+        Assert.Equal(5, userMeta.Count);
+        foreach (var (k, v) in recorded)
+            Assert.Equal(v, userMeta[k]);
+        Assert.Empty(metaInspect.Observations);
+        Assert.Equal(Shorokoo.ShorokooVersion.VersionString, metaInspect.Skpt.Producer);
+        Assert.False(userMeta.ContainsKey("shorokoo"));
+
+        var metaText = metaInspect.ToString();
+        Assert.Contains("user metadata", metaText);
+        Assert.Contains($"{SkptFileFormat.MetadataGitCommitKey}: 9f3c1ba", metaText);
+        Assert.Contains($"{SkptFileFormat.MetadataDatasetIdKey}: imagenet-1k@v2", metaText);
+        Assert.Contains($"{SkptFileFormat.MetadataRunNameKey}: nightly-run-42", metaText);
+        Assert.Contains($"{SkptFileFormat.MetadataLicenseKey}: Apache-2.0", metaText);
+        Assert.Contains("experiment: ablation-7", metaText);
+
+        var plainLoaded = Persistence.Load(plainPath);
+        var metaLoaded = Persistence.Load(metaPath);
+        var plainWeights = WeightBytesByParam(plainLoaded);
+        var metaWeights = WeightBytesByParam(metaLoaded);
+        Assert.Equal(plainWeights.Count, metaWeights.Count);
+        foreach (var (paramId, bytes) in plainWeights)
+            Assert.Equal(bytes, metaWeights[paramId]);
+        Assert.Equal(reference, ExecuteToBytes(plainLoaded, numOut, input));
+        Assert.Equal(reference, ExecuteToBytes(metaLoaded, numOut, input));
+
+        Assert.Throws<ArgumentException>(() =>
+            Persistence.From(model).WithMetadata(new Dictionary<string, string> { [""] = "v" }));
+        Assert.Throws<ArgumentNullException>(() =>
+            Persistence.From(model).WithMetadata(new Dictionary<string, string> { ["k"] = null! }));
+
+        // A large metadata map renders bounded: capped like the other registries, then elided.
+        var bigPath = P("provenance_big.skpt");
+        var big = new Dictionary<string, string>(StringComparer.Ordinal);
+        for (int i = 0; i < 200; i++) big[$"k{i:D3}"] = $"v{i}";
+        Persistence.From(model).WithModel().WithWeights().WithMetadata(big).Save(bigPath);
+        var bigInspect = Persistence.Inspect(bigPath);
+        Assert.Equal(200, bigInspect.Skpt!.UserMetadata!.Count);
+        var bigText = bigInspect.ToString();
+        Assert.Contains("user metadata (200", bigText);
+        Assert.Contains("more", bigText);
+        Assert.True(bigText.Split('\n').Count(l => l.TrimStart().StartsWith("k0")) <= 50);
+
+        // Control characters stay raw in the structured property, sanitized in ToString.
+        var hostilePath = P("provenance_hostile.skpt");
+        const string hostileValue = "clean\n  note: forged\ttab\u0000nul\u0085nel\u009Fc1\u007Fdel";
+        const string hostileKey = "e\nvil";
+        Persistence.From(model).WithModel().WithWeights()
+            .WithMetadata(new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [SkptFileFormat.MetadataRunNameKey] = hostileValue,
+                [hostileKey] = "hk",
+            }).Save(hostilePath);
+
+        var hostileInspect = Persistence.Inspect(hostilePath);
+        var hostileMeta = hostileInspect.Skpt!.UserMetadata!;
+        Assert.Equal(hostileValue, hostileMeta[SkptFileFormat.MetadataRunNameKey]);
+        Assert.True(hostileMeta.ContainsKey(hostileKey));
+        var hostileText = hostileInspect.ToString();
+        Assert.DoesNotContain("\n  note: forged", hostileText);
+        Assert.DoesNotContain("forged\ttab", hostileText);
+        Assert.DoesNotContain("e\nvil", hostileText);
+        Assert.DoesNotContain('\u0000', hostileText);   // C0 (NUL)
+        Assert.DoesNotContain('\u0085', hostileText);   // C1 (NEL)
+        Assert.DoesNotContain('\u009F', hostileText);   // C1
+        Assert.DoesNotContain('\u007F', hostileText);   // DEL
+        Assert.Contains('�', hostileText);
+        Assert.Equal(reference, ExecuteToBytes(Persistence.Load(hostilePath), numOut, input));
+
+        // ── Host user-data bag: an arbitrary JSON object stored as data/user-data.json and
+        // wired into the manifest's data registry.
+        var dataPath = P("userdata_bag.skpt");
+        var bag = new JsonObject
+        {
+            ["corpus"] = "imagenet-1k",
+            ["shuffleSeed"] = 12345,
+            ["epoch"] = 3,
+            ["done"] = false,
+            ["cursor"] = null,
+            ["shards"] = new JsonArray("a.tar", "b.tar", "c.tar"),
+            ["augment"] = new JsonObject { ["flip"] = true, ["crop"] = 224 },
+        };
+        Persistence.From(model).WithModel().WithWeights().WithUserData(bag).Save(dataPath);
+
+        var dataEntries = ReadZipEntries(dataPath);
+        Assert.True(dataEntries.ContainsKey(SkptFileFormat.UserDataEntryPath));
+        var dataManifest = SkptFileFormat.ParseManifest(
+            dataEntries[SkptFileFormat.ConfigEntryName], dataPath);
+        var udEntry = dataManifest.Data![SkptFileFormat.UserDataDataKey];
+        Assert.Equal(SkptFileFormat.UserDataEntryPath, udEntry.Entry);
+        Assert.Equal(SkptFileFormat.DataFormatJson, udEntry.Format);
+        Assert.Equal(SkptFileFormat.CompressionNone, udEntry.Compression);
+        Assert.Equal(SkptFileFormat.Sha256Hex(dataEntries[SkptFileFormat.UserDataEntryPath]), udEntry.Sha256);
+
+        var inspect = Persistence.Inspect(dataPath);
+        Assert.Empty(inspect.Observations);
+        var read = inspect.Skpt!.UserData!;
+        Assert.NotNull(read);
+        Assert.Equal(7, read.Count);
+        Assert.Equal("imagenet-1k", (string?)read["corpus"]);
+        Assert.Equal(12345, (int?)read["shuffleSeed"]);
+        Assert.Equal(3, (int?)read["epoch"]);
+        Assert.False((bool?)read["done"]);
+        Assert.Null(read["cursor"]);
+        Assert.Equal(3, read["shards"]!.AsArray().Count);
+        Assert.Equal("b.tar", (string?)read["shards"]![1]);
+        Assert.True((bool?)read["augment"]!["flip"]);
+        Assert.Equal(224, (int?)read["augment"]!["crop"]);
+
+        // Inspect summarizes the bag as a one-line key count — never a nested dump.
+        var dataText = inspect.ToString();
+        Assert.Contains("user-data: 7 keys", dataText);
+        Assert.DoesNotContain("imagenet-1k", dataText);
+        Assert.DoesNotContain("shuffleSeed", dataText);
+
+        var dataWeights = WeightBytesByParam(Persistence.Load(dataPath));
+        Assert.Equal(plainWeights.Count, dataWeights.Count);
+        foreach (var (paramId, bytes) in plainWeights)
+            Assert.Equal(bytes, dataWeights[paramId]);
+        Assert.Equal(reference, ExecuteToBytes(Persistence.Load(dataPath), numOut, input));
+
+        var pocoPath = P("userdata_poco.skpt");
+        Persistence.From(model).WithModel().WithWeights().WithUserData(new PipelineState
+        {
+            Corpus = "c4",
+            ShuffleSeed = 7,
+            Epoch = 1,
+            Shards = ["x", "y"],
+        }).Save(pocoPath);
+        var pocoBack = Persistence.Inspect(pocoPath).Skpt!.GetUserData<PipelineState>()!;
+        Assert.Equal("c4", pocoBack.Corpus);
+        Assert.Equal(7, pocoBack.ShuffleSeed);
+        Assert.Equal(["x", "y"], pocoBack.Shards);
+
+        Assert.Throws<ArgumentException>(() => Persistence.From(model).WithUserData((int[])[1, 2, 3]));
+        Assert.Throws<ArgumentException>(() => Persistence.From(model).WithUserData("just a string"));
+        Assert.Throws<ArgumentException>(() => Persistence.From(model).WithUserData(42));
+        Assert.Throws<ArgumentException>(() => Persistence.From(model).WithUserData<object?>(null));
+        Assert.Throws<ArgumentNullException>(() => Persistence.From(model).WithUserData((JsonObject)null!));
+
+        // Only the root's $-prefixed keys are reserved; nested ones are ordinary data.
+        Assert.Throws<ArgumentException>(() =>
+            Persistence.From(model).WithUserData(new JsonObject { ["$reserved"] = 1 }));
+        Assert.Throws<ArgumentException>(() =>
+            Persistence.From(model).WithUserData(new Dictionary<string, int> { ["$nope"] = 1 }));
+        Persistence.From(model).WithUserData(
+            new JsonObject { ["ok"] = new JsonObject { ["$inner"] = 1 } });
+
+        // The JsonObject overload snapshots: later mutation does not change what was stored.
+        var mutPath = P("userdata_mut.skpt");
+        var live = new JsonObject { ["v"] = 1 };
+        var builder = Persistence.From(model).WithModel().WithWeights().WithUserData(live);
+        live["v"] = 999;
+        live["added"] = "late";
+        builder.Save(mutPath);
+        var snap = Persistence.Inspect(mutPath).Skpt!.UserData!;
+        Assert.Equal(1, (int?)snap["v"]);
+        Assert.False(snap.ContainsKey("added"));
     }
 
     // ──────────────────────────────────────────────────────────────────────
-    // SafeTensors weight exchange (issue #74): ExportSafeTensors writes a
-    // model's weights to a standard .safetensors file (canonical names or a
-    // naming scheme); ImportSafeTensors binds a foreign .safetensors onto a
-    // concrete architecture with strict fail-loud mapping checks; the
-    // one-call .skpt landing reuses the container writer.
+    // SafeTensors weight exchange: ExportSafeTensors / ImportSafeTensors, with
+    // canonical names or a naming scheme, plus the one-call .skpt landing.
     // ──────────────────────────────────────────────────────────────────────
 
-    /// <summary>The two canonical FCLayer parameter ids (weights [4,4] and bias [4]) —
-    /// what the canonical naming scheme produces for the architecture's two params.</summary>
     private const string FcWeightsId = "TrainableParam#0.InitSimple#0";
     private const string FcBiasId = "TrainableParam#0.InitSimple#1";
 
-    /// <summary>Builds the FCLayer architecture + concrete model + sample inputs the
-    /// safetensors exchange tests share.</summary>
     private static (ComputationGraph Arch, ComputationGraph Model, TensorData NumOut, TensorData Input)
         BuildSafeTensorsExchangeModel()
     {
@@ -2795,16 +1799,13 @@ public class CompressedFormatUtilsCoverageTests
         return (arch, arch.ToConcreteModel(), numOut, input);
     }
 
-    /// <summary>The model's weight bytes keyed by <b>canonical</b> parameter name — the
-    /// graph nodes carry the serialized "[ModelId]:parts" identifier; the canonical name
-    /// (what export writes and naming schemes match) is the parts portion.</summary>
+    /// <summary>The model's weight bytes keyed by canonical parameter name — graph nodes carry
+    /// the serialized "[ModelId]:parts" identifier; the canonical name is the parts portion.</summary>
     private static Dictionary<string, byte[]> CanonicalWeightBytes(ComputationGraph model)
         => WeightBytesByParam(model).ToDictionary(
             kv => kv.Key[(kv.Key.IndexOf("]:", StringComparison.Ordinal) + 2)..],
             kv => kv.Value, StringComparer.Ordinal);
 
-    /// <summary>A PyTorch-style naming scheme for the FCLayer architecture: the two
-    /// canonical parameter ids map to torch-conventional <c>fc.weight</c> / <c>fc.bias</c>.</summary>
     private static SimplePatternNamingScheme BuildFcTorchScheme(ComputationGraph arch)
     {
         SimplePatternScheme[] patterns =
@@ -2816,333 +1817,185 @@ public class CompressedFormatUtilsCoverageTests
             patterns, arch.GetShorokooIdNamingScheme(), ModuleParamSetNamingScheme.PyTorchFrameworkId);
     }
 
-    /// <summary>
-    /// The export → import acceptance round-trip, in both naming modes. Canonical:
-    /// ExportSafeTensors writes one tensor per weight parameter under its canonical
-    /// Shorokoo id, byte-identical to the model's weights, into a plain safetensors
-    /// file (read back with the independent loader); ImportSafeTensors binds it onto
-    /// the architecture and the imported model executes bit-identically. Scheme: the
-    /// same round-trip through PyTorch-style names (fc.weight / fc.bias) with the
-    /// scheme applied at both boundaries.
-    /// </summary>
     [Fact]
-    public void TestSafeTensorsExportImportRoundTrip()
+    public void TestSafeTensorsExportImportRoundTripSchemesAndCheckpointLanding()
     {
         var (arch, model, numOut, input) = BuildSafeTensorsExchangeModel();
-        var canonicalPath = Path.Combine(TempDir, "exchange_canonical.safetensors");
-        var torchPath = Path.Combine(TempDir, "exchange_torch.safetensors");
-        try
-        {
-            var originalWeights = CanonicalWeightBytes(model);
-            var direct = ExecuteToBytes(model, numOut, input);
-            Assert.Equal([FcWeightsId, FcBiasId],
-                originalWeights.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
+        var canonicalPath = P("exchange_canonical.safetensors");
+        var torchPath = P("exchange_torch.safetensors");
+        var originalWeights = CanonicalWeightBytes(model);
+        var direct = ExecuteToBytes(model, numOut, input);
+        Assert.Equal([FcWeightsId, FcBiasId],
+            originalWeights.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
 
-            // ── Canonical names (no scheme) ────────────────────────────────
-            Persistence.ExportSafeTensors(model, canonicalPath);
-            var storedCanonical = SafeTensorLoader.LoadSafeTensors(canonicalPath)
-                .ToDictionary(t => t.Name, t => t.Data.AccessRawMemory().ToArray(), StringComparer.Ordinal);
-            Assert.Equal(originalWeights.Keys.OrderBy(k => k, StringComparer.Ordinal),
-                storedCanonical.Keys.OrderBy(k => k, StringComparer.Ordinal));
-            foreach (var (paramId, bytes) in originalWeights)
-                Assert.Equal(bytes, storedCanonical[paramId]);
+        Persistence.ExportSafeTensors(model, canonicalPath);
+        var storedCanonical = SafeTensorLoader.LoadSafeTensors(canonicalPath)
+            .ToDictionary(t => t.Name, t => t.Data.AccessRawMemory().ToArray(), StringComparer.Ordinal);
+        Assert.Equal(originalWeights.Keys.OrderBy(k => k, StringComparer.Ordinal),
+            storedCanonical.Keys.OrderBy(k => k, StringComparer.Ordinal));
+        foreach (var (paramId, bytes) in originalWeights)
+            Assert.Equal(bytes, storedCanonical[paramId]);
 
-            var importedCanonical = Persistence.ImportSafeTensors(arch, canonicalPath);
-            Assert.Equal(GraphKind.ConcreteModel, importedCanonical.Kind);
-            Assert.Equal(originalWeights, CanonicalWeightBytes(importedCanonical));
-            Assert.Equal(direct, ExecuteToBytes(importedCanonical, numOut, input));
+        var importedCanonical = Persistence.ImportSafeTensors(arch, canonicalPath);
+        Assert.Equal(GraphKind.ConcreteModel, importedCanonical.Kind);
+        Assert.Equal(originalWeights, CanonicalWeightBytes(importedCanonical));
+        Assert.Equal(direct, ExecuteToBytes(importedCanonical, numOut, input));
 
-            // A __metadata__ block is metadata, not a tensor — a file carrying one imports
-            // unchanged (it must not trip the unmapped-source-tensor check).
-            var withMetadata = SafeTensorLoader.LoadSafeTensors(canonicalPath);
-            SafeTensorLoader.SaveSafeTensors(canonicalPath, withMetadata,
-                new Dictionary<string, object> { ["format"] = "pt", ["producer"] = "unit-test" });
-            var importedWithMetadata = Persistence.ImportSafeTensors(arch, canonicalPath);
-            Assert.Equal(direct, ExecuteToBytes(importedWithMetadata, numOut, input));
+        // A __metadata__ block is metadata, not a tensor: it must not trip the unmapped check.
+        var withMetadata = SafeTensorLoader.LoadSafeTensors(canonicalPath);
+        SafeTensorLoader.SaveSafeTensors(canonicalPath, withMetadata,
+            new Dictionary<string, object> { ["format"] = "pt", ["producer"] = "unit-test" });
+        Assert.Equal(direct,
+            ExecuteToBytes(Persistence.ImportSafeTensors(arch, canonicalPath), numOut, input));
 
-            // ── PyTorch-style names via a naming scheme ────────────────────
-            var scheme = BuildFcTorchScheme(arch);
-            Persistence.ExportSafeTensors(model, torchPath, scheme);
-            var storedTorch = SafeTensorLoader.LoadSafeTensors(torchPath)
-                .ToDictionary(t => t.Name, t => t.Data.AccessRawMemory().ToArray(), StringComparer.Ordinal);
-            Assert.Equal(["fc.bias", "fc.weight"],
-                storedTorch.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
-            Assert.Equal(originalWeights[FcWeightsId], storedTorch["fc.weight"]);
-            Assert.Equal(originalWeights[FcBiasId], storedTorch["fc.bias"]);
+        var scheme = BuildFcTorchScheme(arch);
+        Persistence.ExportSafeTensors(model, torchPath, scheme);
+        var storedTorch = SafeTensorLoader.LoadSafeTensors(torchPath)
+            .ToDictionary(t => t.Name, t => t.Data.AccessRawMemory().ToArray(), StringComparer.Ordinal);
+        Assert.Equal(["fc.bias", "fc.weight"],
+            storedTorch.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
+        Assert.Equal(originalWeights[FcWeightsId], storedTorch["fc.weight"]);
+        Assert.Equal(originalWeights[FcBiasId], storedTorch["fc.bias"]);
 
-            var importedTorch = Persistence.ImportSafeTensors(arch, torchPath, scheme);
-            Assert.Equal(originalWeights, CanonicalWeightBytes(importedTorch));
-            Assert.Equal(direct, ExecuteToBytes(importedTorch, numOut, input));
+        var importedTorch = Persistence.ImportSafeTensors(arch, torchPath, scheme);
+        Assert.Equal(originalWeights, CanonicalWeightBytes(importedTorch));
+        Assert.Equal(direct, ExecuteToBytes(importedTorch, numOut, input));
 
-            // The ModelId format DSL binds at the import boundary too: the same torch-named
-            // file imports under a ModelIdNamingScheme keyed on the params' ModelIds ([1]/[2]).
-            ModelIdFormat[] formats =
-            [
-                new ModelIdFormat(match: "[1]", format: "fc.weight"),
-                new ModelIdFormat(match: "[2]", format: "fc.bias"),
-            ];
-            var formatScheme = new ModelIdNamingScheme(
-                formats, ModuleParamSetNamingScheme.PyTorchFrameworkId);
-            var importedFormat = Persistence.ImportSafeTensors(arch, torchPath, formatScheme);
-            Assert.Equal(originalWeights, CanonicalWeightBytes(importedFormat));
-            Assert.Equal(direct, ExecuteToBytes(importedFormat, numOut, input));
-        }
-        finally
-        {
-            if (File.Exists(canonicalPath)) File.Delete(canonicalPath);
-            if (File.Exists(torchPath)) File.Delete(torchPath);
-        }
-    }
+        // The ModelId format DSL binds at the import boundary too.
+        ModelIdFormat[] formats =
+        [
+            new ModelIdFormat(match: "[1]", format: "fc.weight"),
+            new ModelIdFormat(match: "[2]", format: "fc.bias"),
+        ];
+        var importedFormat = Persistence.ImportSafeTensors(arch, torchPath,
+            new ModelIdNamingScheme(formats, ModuleParamSetNamingScheme.PyTorchFrameworkId));
+        Assert.Equal(originalWeights, CanonicalWeightBytes(importedFormat));
+        Assert.Equal(direct, ExecuteToBytes(importedFormat, numOut, input));
 
-    /// <summary>
-    /// ExportSafeTensors excludes the framework-injected RngExecutionCounter — it is RNG
-    /// bookkeeping (an int64[1] draw counter), not an interchange weight — while still exporting
-    /// the model's trainable weights. The file round-trips onto a fresh architecture: the
-    /// materialization fills the absent counter from its initializer default (0), so the imported
-    /// model binds and executes bit-identically to the original. Contrast the native .skpt, which
-    /// keeps the counter in model_state for exact resume.
-    /// </summary>
-    [Fact]
-    public void TestSafeTensorsExportExcludesRngExecutionCounter()
-    {
-        var numOut = TensorData(DType.Int64, [], 4L);
-        var input = TensorDataWithSmallVals(DType.Float32, [4L, 4L]);
-        var g = RtFcWithRngFeed.ComputationGraph;
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([numOut, input]));
-        var model = arch.ToConcreteModel();
-        var path = Path.Combine(TempDir, "rng_feed_exchange.safetensors");
-        try
-        {
-            var direct = ExecuteToBytes(model, numOut, input);
+        // The one-call native landing writes the bound result straight to a .skpt.
+        var skptPath = P("exchange_landing.skpt");
+        var landed = Persistence.ImportSafeTensorsToCheckpoint(arch, torchPath, skptPath, scheme);
+        Assert.Equal(GraphKind.ConcreteModel, landed.Kind);
+        Assert.Equal(direct, ExecuteToBytes(landed, numOut, input));
+        var reloaded = Persistence.Load(skptPath);
+        Assert.Equal(GraphKind.ConcreteModel, reloaded.Kind);
+        Assert.Equal(WeightBytesByParam(model), WeightBytesByParam(reloaded));
+        Assert.Equal(direct, ExecuteToBytes(reloaded, numOut, input));
 
-            Persistence.ExportSafeTensors(model, path);
-            var names = SafeTensorLoader.LoadSafeTensors(path).Select(t => t.Name).ToList();
-            Assert.NotEmpty(names);   // the trainable weight is still exported
-            Assert.DoesNotContain(names, n => n.Contains(
-                Shorokoo.Core.Nodes.Processors.Fast.FastInjectRngDrawCounter.CounterName));
-
-            // With the counter absent, the file still binds onto a fresh architecture (the
-            // materialization supplies the counter's default) and executes identically.
-            var imported = Persistence.ImportSafeTensors(arch, path);
-            Assert.Equal(GraphKind.ConcreteModel, imported.Kind);
-            Assert.Equal(direct, ExecuteToBytes(imported, numOut, input));
-        }
-        finally
-        {
-            if (File.Exists(path)) File.Delete(path);
-        }
-    }
-
-    /// <summary>
-    /// Import fails loudly, naming the offending tensor, on every mapping-mismatch
-    /// class: a source tensor that maps to no parameter (with a dedicated hint when the
-    /// file is a training checkpoint), a required parameter with no source tensor, a
-    /// dtype mismatch, a shape mismatch, an ambiguous scheme mapping two parameters to
-    /// one name, and a scheme that fails to name a required parameter. Kind gates
-    /// refuse the wrong graph stage up front, and validation always precedes binding.
-    /// </summary>
-    [Fact]
-    public void TestImportSafeTensorsFailsLoudOnMappingMismatches()
-    {
-        var (arch, model, _, _) = BuildSafeTensorsExchangeModel();
-        var path = Path.Combine(TempDir, "exchange_good.safetensors");
-        var badPath = Path.Combine(TempDir, "exchange_bad.safetensors");
-        try
-        {
-            Persistence.ExportSafeTensors(model, path);
-            var good = SafeTensorLoader.LoadSafeTensors(path);
-            const string weightsId = FcWeightsId;
-            const string biasId = FcBiasId;
-
-            // A source tensor mapping to nothing names the tensor (and the file).
-            var withStray = good.ToList();
-            withStray.Add(new SafeTensor("not.a.param", TensorData([2L], 1f, 2f), "F32", [2L]));
-            SafeTensorLoader.SaveSafeTensors(badPath, withStray);
-            var exStray = Assert.Throws<InvalidDataException>(() => Persistence.ImportSafeTensors(arch, badPath));
-            Assert.Contains("not.a.param", exStray.Message);
-            Assert.Contains(badPath, exStray.Message);
-
-            // A required parameter with no source tensor names the parameter.
-            SafeTensorLoader.SaveSafeTensors(badPath, good.Where(t => t.Name != biasId).ToList());
-            var exMissing = Assert.Throws<InvalidDataException>(() => Persistence.ImportSafeTensors(arch, badPath));
-            Assert.Contains(biasId, exMissing.Message);
-
-            // A dtype mismatch after mapping names the tensor and both dtypes.
-            var wrongDtype = good.Select(t => t.Name != weightsId ? t
-                : new SafeTensor(t.Name, TensorDataWithSmallVals(DType.Int64, [4L, 4L]), "I64", [4L, 4L])).ToList();
-            SafeTensorLoader.SaveSafeTensors(badPath, wrongDtype);
-            var exDtype = Assert.Throws<InvalidDataException>(() => Persistence.ImportSafeTensors(arch, badPath));
-            Assert.Contains(weightsId, exDtype.Message);
-            Assert.Contains("dtype", exDtype.Message);
-
-            // A shape mismatch after mapping names the tensor and both shapes.
-            var wrongShape = good.Select(t => t.Name != weightsId ? t
-                : new SafeTensor(t.Name, TensorDataWithSmallVals(DType.Float32, [2L, 8L]), "F32", [2L, 8L])).ToList();
-            SafeTensorLoader.SaveSafeTensors(badPath, wrongShape);
-            var exShape = Assert.Throws<InvalidDataException>(() => Persistence.ImportSafeTensors(arch, badPath));
-            Assert.Contains(weightsId, exShape.Message);
-            Assert.Contains("[2,8]", exShape.Message);
-            Assert.Contains("[4,4]", exShape.Message);
-
-            // A scheme mapping two parameters onto one source name is ambiguous —
-            // refused naming both parameters, before any tensor lookup can pick one.
-            SimplePatternScheme[] colliding =
-            [
-                new SimplePatternScheme("TrainableParam#0.InitSimple#{p}", "fc.same"),
-            ];
-            var ambiguous = new SimplePatternNamingScheme(
-                colliding, arch.GetShorokooIdNamingScheme(), ModuleParamSetNamingScheme.PyTorchFrameworkId);
-            var exAmbiguous = Assert.Throws<InvalidDataException>(
-                () => Persistence.ImportSafeTensors(arch, path, ambiguous));
-            Assert.Contains(weightsId, exAmbiguous.Message);
-            Assert.Contains(biasId, exAmbiguous.Message);
-            Assert.Contains("fc.same", exAmbiguous.Message);
-
-            // A scheme covering only some parameters names the uncovered one — even when
-            // every tensor the file does carry maps cleanly.
-            SimplePatternScheme[] partial =
-            [
-                new SimplePatternScheme(weightsId, "fc.weight"),
-            ];
-            var partialScheme = new SimplePatternNamingScheme(
-                partial, arch.GetShorokooIdNamingScheme(), ModuleParamSetNamingScheme.PyTorchFrameworkId);
-            var weightsOnly = good.Single(t => t.Name == weightsId);
-            SafeTensorLoader.SaveSafeTensors(badPath,
-                [new SafeTensor("fc.weight", weightsOnly.Data, weightsOnly.DataType, weightsOnly.Shape)]);
-            var exUncovered = Assert.Throws<InvalidDataException>(
-                () => Persistence.ImportSafeTensors(arch, badPath, partialScheme));
-            Assert.Contains(biasId, exUncovered.Message);
-            Assert.Contains("naming scheme", exUncovered.Message);
-
-            // A training checkpoint is recognized by its marker and redirected.
-            SafeTensorLoader.SaveSafeTensors(badPath,
-                [new SafeTensor("__shorokoo_checkpoint__", TensorData([2L], 1L, 0L), "I64", [2L])]);
-            var exCheckpoint = Assert.Throws<InvalidDataException>(() => Persistence.ImportSafeTensors(arch, badPath));
-            Assert.Contains("training checkpoint", exCheckpoint.Message);
-
-            // Kind gates: import takes a concrete architecture, export a concrete model.
-            var exImportKind = Assert.Throws<InvalidOperationException>(
-                () => Persistence.ImportSafeTensors(FCLayer.ComputationGraph, path));
-            Assert.Contains("concrete-architecture", exImportKind.Message);
-            var exImportModel = Assert.Throws<InvalidOperationException>(
-                () => Persistence.ImportSafeTensors(model, path));
-            Assert.Contains("concrete-architecture", exImportModel.Message);
-            var exExportKind = Assert.Throws<InvalidOperationException>(
-                () => Persistence.ExportSafeTensors(arch, badPath));
-            Assert.Contains("concrete-model", exExportKind.Message);
-        }
-        finally
-        {
-            if (File.Exists(path)) File.Delete(path);
-            if (File.Exists(badPath)) File.Delete(badPath);
-        }
-    }
-
-    /// <summary>
-    /// Export-side fail-loud checks: a scheme that leaves a parameter unnamed refuses
-    /// the export naming the parameter (weights are never silently dropped); two
-    /// parameters colliding on one exported name are refused naming both; and a
-    /// ModelId-keyed scheme — which cannot translate the canonical id strings a bound
-    /// model carries — is refused with the supported alternative named. A failed
-    /// export writes nothing (the atomic writer never commits).
-    /// </summary>
-    [Fact]
-    public void TestExportSafeTensorsFailsLoudOnSchemeGaps()
-    {
-        var (arch, model, _, _) = BuildSafeTensorsExchangeModel();
-        var path = Path.Combine(TempDir, "exchange_export_fail.safetensors");
-        const string weightsId = FcWeightsId;
-        const string biasId = FcBiasId;
-
-        // Scheme gap: the bias has no rule → refused naming the parameter.
-        SimplePatternScheme[] partial = [new SimplePatternScheme(weightsId, "fc.weight")];
+        // A failed import lands nothing: the previously written checkpoint is untouched.
+        var committed = File.ReadAllBytes(skptPath);
+        SimplePatternScheme[] partial = [new SimplePatternScheme(FcWeightsId, "fc.weight")];
         var partialScheme = new SimplePatternNamingScheme(
             partial, arch.GetShorokooIdNamingScheme(), ModuleParamSetNamingScheme.PyTorchFrameworkId);
-        var exGap = Assert.Throws<InvalidOperationException>(
-            () => Persistence.ExportSafeTensors(model, path, partialScheme));
-        Assert.Contains(biasId, exGap.Message);
+        Assert.Throws<InvalidDataException>(
+            () => Persistence.ImportSafeTensorsToCheckpoint(arch, torchPath, skptPath, partialScheme));
+        Assert.Equal(committed, File.ReadAllBytes(skptPath));
 
-        // Name collision after remapping → refused naming both parameters and the name.
+        // The injected RngExecutionCounter is bookkeeping, not a weight: export excludes it and
+        // the import fills it from its initializer default.
+        var rngNumOut = TensorData(DType.Int64, [], 4L);
+        var rngInput = TensorDataWithSmallVals(DType.Float32, [4L, 4L]);
+        var rngG = RtFcWithRngFeed.ComputationGraph;
+        var rngArch = rngG.ToConcreteArchitecture(rngG.FromOrderedInputs([rngNumOut, rngInput]));
+        var rngModel = rngArch.ToConcreteModel();
+        var rngPath = P("rng_feed_exchange.safetensors");
+        var rngDirect = ExecuteToBytes(rngModel, rngNumOut, rngInput);
+        Persistence.ExportSafeTensors(rngModel, rngPath);
+        var names = SafeTensorLoader.LoadSafeTensors(rngPath).Select(t => t.Name).ToList();
+        Assert.NotEmpty(names);
+        Assert.DoesNotContain(names, n => n.Contains(
+            Shorokoo.Core.Nodes.Processors.Fast.FastInjectRngDrawCounter.CounterName));
+        var rngImported = Persistence.ImportSafeTensors(rngArch, rngPath);
+        Assert.Equal(GraphKind.ConcreteModel, rngImported.Kind);
+        Assert.Equal(rngDirect, ExecuteToBytes(rngImported, rngNumOut, rngInput));
+    }
+
+    [Fact]
+    public void TestSafeTensorsExchangeFailsLoudOnMappingMismatchesAndSchemeGaps()
+    {
+        var (arch, model, _, _) = BuildSafeTensorsExchangeModel();
+        var path = P("exchange_good.safetensors");
+        var badPath = P("exchange_bad.safetensors");
+        Persistence.ExportSafeTensors(model, path);
+        var good = SafeTensorLoader.LoadSafeTensors(path);
+
+        void ImportRefused(IReadOnlyList<SafeTensor> tensors, params string[] fragments)
+        {
+            SafeTensorLoader.SaveSafeTensors(badPath, [.. tensors]);
+            var ex = Assert.Throws<InvalidDataException>(
+                () => Persistence.ImportSafeTensors(arch, badPath));
+            foreach (var fragment in fragments)
+                Assert.Contains(fragment, ex.Message);
+        }
+
+        var withStray = good.ToList();
+        withStray.Add(new SafeTensor("not.a.param", TensorData([2L], 1f, 2f), "F32", [2L]));
+        ImportRefused(withStray, "not.a.param", badPath);
+        ImportRefused(good.Where(t => t.Name != FcBiasId).ToList(), FcBiasId);
+        ImportRefused(good.Select(t => t.Name != FcWeightsId ? t
+            : new SafeTensor(t.Name, TensorDataWithSmallVals(DType.Int64, [4L, 4L]), "I64", [4L, 4L])).ToList(),
+            FcWeightsId, "dtype");
+        ImportRefused(good.Select(t => t.Name != FcWeightsId ? t
+            : new SafeTensor(t.Name, TensorDataWithSmallVals(DType.Float32, [2L, 8L]), "F32", [2L, 8L])).ToList(),
+            FcWeightsId, "[2,8]", "[4,4]");
+        // A training checkpoint is recognized by its marker and redirected.
+        ImportRefused([new SafeTensor("__shorokoo_checkpoint__", TensorData([2L], 1L, 0L), "I64", [2L])],
+            "training checkpoint");
+
+        // Two parameters onto one source name is ambiguous — refused before any tensor lookup.
         SimplePatternScheme[] colliding =
         [
             new SimplePatternScheme("TrainableParam#0.InitSimple#{p}", "fc.same"),
         ];
         var collidingScheme = new SimplePatternNamingScheme(
             colliding, arch.GetShorokooIdNamingScheme(), ModuleParamSetNamingScheme.PyTorchFrameworkId);
+        var exAmbiguous = Assert.Throws<InvalidDataException>(
+            () => Persistence.ImportSafeTensors(arch, path, collidingScheme));
+        Assert.Contains(FcWeightsId, exAmbiguous.Message);
+        Assert.Contains(FcBiasId, exAmbiguous.Message);
+        Assert.Contains("fc.same", exAmbiguous.Message);
+
+        // A partial scheme names the uncovered parameter, even when every tensor maps cleanly.
+        SimplePatternScheme[] partial = [new SimplePatternScheme(FcWeightsId, "fc.weight")];
+        var partialScheme = new SimplePatternNamingScheme(
+            partial, arch.GetShorokooIdNamingScheme(), ModuleParamSetNamingScheme.PyTorchFrameworkId);
+        var weightsOnly = good.Single(t => t.Name == FcWeightsId);
+        SafeTensorLoader.SaveSafeTensors(badPath,
+            [new SafeTensor("fc.weight", weightsOnly.Data, weightsOnly.DataType, weightsOnly.Shape)]);
+        var exUncovered = Assert.Throws<InvalidDataException>(
+            () => Persistence.ImportSafeTensors(arch, badPath, partialScheme));
+        Assert.Contains(FcBiasId, exUncovered.Message);
+        Assert.Contains("naming scheme", exUncovered.Message);
+
+        // Kind gates: import takes a concrete architecture, export a concrete model.
+        Assert.Contains("concrete-architecture", Assert.Throws<InvalidOperationException>(
+            () => Persistence.ImportSafeTensors(FCLayer.ComputationGraph, path)).Message);
+        Assert.Contains("concrete-architecture", Assert.Throws<InvalidOperationException>(
+            () => Persistence.ImportSafeTensors(model, path)).Message);
+        Assert.Contains("concrete-model", Assert.Throws<InvalidOperationException>(
+            () => Persistence.ExportSafeTensors(arch, badPath)).Message);
+
+        // Export-side gaps: unnamed parameter, name collision, and a ModelId-keyed scheme (which
+        // cannot translate the canonical id strings a bound model carries). None commits.
+        var exportPath = P("exchange_export_fail.safetensors");
+        Assert.Contains(FcBiasId, Assert.Throws<InvalidOperationException>(
+            () => Persistence.ExportSafeTensors(model, exportPath, partialScheme)).Message);
         var exCollision = Assert.Throws<InvalidOperationException>(
-            () => Persistence.ExportSafeTensors(model, path, collidingScheme));
-        Assert.Contains(weightsId, exCollision.Message);
-        Assert.Contains(biasId, exCollision.Message);
+            () => Persistence.ExportSafeTensors(model, exportPath, collidingScheme));
+        Assert.Contains(FcWeightsId, exCollision.Message);
+        Assert.Contains(FcBiasId, exCollision.Message);
         Assert.Contains("fc.same", exCollision.Message);
-
-        // A ModelId-keyed scheme cannot run in the export direction: a bound model
-        // carries canonical id strings, not ModelIds.
-        var modelIdScheme = new ModelIdNamingScheme(
-            [new ModelIdFormat(format: "x")], ModuleParamSetNamingScheme.PyTorchFrameworkId);
-        Assert.Throws<NotSupportedException>(
-            () => Persistence.ExportSafeTensors(model, path, modelIdScheme));
-
-        // No failed attempt above committed a file.
-        Assert.False(File.Exists(path));
-    }
-
-    /// <summary>
-    /// The one-call native landing: ImportSafeTensorsToCheckpoint imports a foreign
-    /// (PyTorch-named) safetensors file under a scheme and writes the bound result
-    /// straight to a .skpt via the standard container writer. The returned model, the
-    /// reloaded checkpoint, and the original model all execute bit-identically, and
-    /// the checkpoint's weights are byte-identical to the source tensors.
-    /// </summary>
-    [Fact]
-    public void TestImportSafeTensorsToCheckpointRoundTrip()
-    {
-        var (arch, model, numOut, input) = BuildSafeTensorsExchangeModel();
-        var torchPath = Path.Combine(TempDir, "exchange_landing.safetensors");
-        var skptPath = Path.Combine(TempDir, "exchange_landing.skpt");
-        try
-        {
-            var scheme = BuildFcTorchScheme(arch);
-            Persistence.ExportSafeTensors(model, torchPath, scheme);
-
-            var imported = Persistence.ImportSafeTensorsToCheckpoint(arch, torchPath, skptPath, scheme);
-            Assert.Equal(GraphKind.ConcreteModel, imported.Kind);
-
-            var direct = ExecuteToBytes(model, numOut, input);
-            Assert.Equal(direct, ExecuteToBytes(imported, numOut, input));
-
-            var reloaded = Persistence.Load(skptPath);
-            Assert.Equal(GraphKind.ConcreteModel, reloaded.Kind);
-            Assert.Equal(WeightBytesByParam(model), WeightBytesByParam(reloaded));
-            Assert.Equal(direct, ExecuteToBytes(reloaded, numOut, input));
-
-            // A failed import lands nothing: reusing the paths with a scheme gap leaves
-            // the previously written checkpoint bytes untouched.
-            var committed = File.ReadAllBytes(skptPath);
-            SimplePatternScheme[] partial =
-            [
-                new SimplePatternScheme(FcWeightsId, "fc.weight"),
-            ];
-            var partialScheme = new SimplePatternNamingScheme(
-                partial, arch.GetShorokooIdNamingScheme(), ModuleParamSetNamingScheme.PyTorchFrameworkId);
-            Assert.Throws<InvalidDataException>(
-                () => Persistence.ImportSafeTensorsToCheckpoint(arch, torchPath, skptPath, partialScheme));
-            Assert.Equal(committed, File.ReadAllBytes(skptPath));
-        }
-        finally
-        {
-            if (File.Exists(torchPath)) File.Delete(torchPath);
-            if (File.Exists(skptPath)) File.Delete(skptPath);
-        }
+        Assert.Throws<NotSupportedException>(() => Persistence.ExportSafeTensors(model, exportPath,
+            new ModelIdNamingScheme([new ModelIdFormat(format: "x")],
+                ModuleParamSetNamingScheme.PyTorchFrameworkId)));
+        Assert.False(File.Exists(exportPath));
     }
 
     // ──────────────────────────────────────────────────────────────────────
-    // ONNX exchange boundary (issue #85): ExportOnnx writes a concrete model
-    // to a standard vanilla .onnx; ImportOnnx turns a foreign vanilla .onnx
-    // back into a native runnable graph (initializer names adopted as param
-    // identifiers at the boundary); ImportOnnxToCheckpoint lands it as .skpt.
+    // ONNX exchange boundary: ExportOnnx writes a standard vanilla .onnx;
+    // ImportOnnx turns a foreign vanilla .onnx into a native runnable graph.
     // ──────────────────────────────────────────────────────────────────────
 
-    /// <summary>A float[4] ValueInfo for a third-party ONNX model's I/O.</summary>
     private static ValueInfoProto OnnxFloatVec(string name, long len)
     {
         var shape = new TensorShapeProto();
@@ -3161,8 +2014,8 @@ public class CompressedFormatUtilsCoverageTests
         return bytes;
     }
 
-    /// <summary>A minimal third-party-style vanilla ONNX model: y = x + w, with w a plain
-    /// named initializer (no Shorokoo metadata — exactly what a foreign exporter writes).</summary>
+    /// <summary>A minimal third-party-style vanilla ONNX model: y = x + w, with w a plain named
+    /// initializer and no Shorokoo metadata.</summary>
     private static ModelProto BuildForeignAddModel(string initName, float[] wVals)
     {
         var g = new GraphProto { Name = "foreign" };
@@ -3176,6 +2029,21 @@ public class CompressedFormatUtilsCoverageTests
         add.Outputs.Add("y");
         g.Nodes.Add(add);
         g.Outputs.Add(OnnxFloatVec("y", wVals.Length));
+        var model = new ModelProto { IrVersion = 10, Graph = g };
+        model.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+        return model;
+    }
+
+    /// <summary>A vanilla ONNX model whose only node is an op the reader cannot ingest.</summary>
+    private static ModelProto BuildUnsupportedOpModel()
+    {
+        var g = new GraphProto { Name = "bogus" };
+        g.Inputs.Add(OnnxFloatVec("x", 4));
+        var node = new NodeProto { OpType = "TotallyMadeUpOp", Name = "n0" };
+        node.Inputs.Add("x");
+        node.Outputs.Add("y");
+        g.Nodes.Add(node);
+        g.Outputs.Add(OnnxFloatVec("y", 4));
         var model = new ModelProto { IrVersion = 10, Graph = g };
         model.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
         return model;
@@ -3195,220 +2063,96 @@ public class CompressedFormatUtilsCoverageTests
             .AccessMemory().ToArray();
     }
 
-    /// <summary>
-    /// The acceptance round-trip against export at the concrete-inference level: a
-    /// weight-filled concrete model exports to a standard vanilla .onnx and re-imports to a
-    /// runnable concrete model whose outputs match the original on a sample input. Vanilla
-    /// ONNX is lossy by design (module structure/hyper defaults are dropped), so this is
-    /// value-level parity, not a structural round-trip. The exported file is also loadable
-    /// by the low-level importer directly — proof it is standard, not a Shorokoo dialect.
-    /// </summary>
     [Fact]
-    public void TestOnnxExportImportRoundTrip()
+    public void TestOnnxExportImportRoundTripThirdPartyModelsAndCheckpointLanding()
     {
         var (model, numOut, input) = BuildSkptModel();
-        var onnxPath = Path.Combine(TempDir, "roundtrip.onnx");
-        try
-        {
-            var direct = ExecuteToBytes(model, numOut, input);
+        var onnxPath = P("roundtrip.onnx");
+        var direct = ExecuteToBytes(model, numOut, input);
 
-            Persistence.ExportOnnx(model, onnxPath);
-            Assert.True(File.Exists(onnxPath));
+        Persistence.ExportOnnx(model, onnxPath);
+        Assert.True(File.Exists(onnxPath));
+        var imported = Persistence.ImportOnnx(onnxPath);
+        Assert.Equal(GraphKind.ConcreteModel, imported.Kind);
+        Assert.Equal(direct, ExecuteToBytes(imported, numOut, input));
 
-            var imported = Persistence.ImportOnnx(onnxPath);
-            Assert.Equal(GraphKind.ConcreteModel, imported.Kind);
-            Assert.Equal(direct, ExecuteToBytes(imported, numOut, input));
+        // The same file loads through the low-level importer — it is a plain vanilla .onnx.
+        Assert.Equal(direct, ExecuteToBytes(OnnxModelImporter.FromOnnxModel(onnxPath), numOut, input));
 
-            // The same file loads through the low-level importer unchanged — it is a plain
-            // vanilla .onnx any conforming runtime could read.
-            var viaReader = OnnxModelImporter.FromOnnxModel(onnxPath);
-            Assert.Equal(direct, ExecuteToBytes(viaReader, numOut, input));
-        }
-        finally
-        {
-            if (File.Exists(onnxPath)) File.Delete(onnxPath);
-        }
+        // A third-party y = x + w model: the foreign initializer's ONNX name becomes the param id.
+        var foreignPath = P("foreign.onnx");
+        float[] w = [10f, 20f, 30f, 40f];
+        WriteOnnx(foreignPath, BuildForeignAddModel("w", w));
+        var foreign = Persistence.ImportOnnx(foreignPath);
+        Assert.Equal([11f, 22f, 33f, 44f], RunFloatVecModel(foreign, 1f, 2f, 3f, 4f));
+        Assert.Equal(["[1]:TrainableParam#0.w#0"], WeightBytesByParam(foreign).Keys.ToArray());
+
+        SimplePatternScheme[] patterns = [new SimplePatternScheme("w", "TrainableParam#0.MyWeight#0")];
+        var scheme = new SimplePatternNamingScheme(
+            patterns, new ModelIdNamingScheme([], ModuleParamSetNamingScheme.PyTorchFrameworkId),
+            ModuleParamSetNamingScheme.PyTorchFrameworkId);
+        var renamed = Persistence.ImportOnnx(foreignPath, scheme);
+        Assert.Equal(["[1]:TrainableParam#0.MyWeight#0"], WeightBytesByParam(renamed).Keys.ToArray());
+        Assert.Equal([11f, 22f, 33f, 44f], RunFloatVecModel(renamed, 1f, 2f, 3f, 4f));
+
+        // The one-call native landing.
+        var skptPath = P("landing.skpt");
+        var landed = Persistence.ImportOnnxToCheckpoint(foreignPath, skptPath);
+        Assert.Equal(GraphKind.ConcreteModel, landed.Kind);
+        var expected = RunFloatVecModel(Persistence.ImportOnnx(foreignPath), 1f, 2f, 3f, 4f);
+        Assert.Equal(expected, RunFloatVecModel(landed, 1f, 2f, 3f, 4f));
+        var reloaded = Persistence.Load(skptPath);
+        Assert.Equal(GraphKind.ConcreteModel, reloaded.Kind);
+        Assert.Equal(WeightBytesByParam(landed), WeightBytesByParam(reloaded));
+        Assert.Equal(expected, RunFloatVecModel(reloaded, 1f, 2f, 3f, 4f));
+
+        // A failed import lands nothing: the committed checkpoint is untouched.
+        var committed = File.ReadAllBytes(skptPath);
+        var badPath = WriteOnnx(P("landing_bad.onnx"), BuildUnsupportedOpModel());
+        Assert.Throws<InvalidDataException>(() => Persistence.ImportOnnxToCheckpoint(badPath, skptPath));
+        Assert.Equal(committed, File.ReadAllBytes(skptPath));
+
+        // Composition with ONNX external data: w's bytes live in a .data side file.
+        var inlinePath = P("xd_inline.onnx");
+        var extPath = P("xd_external.onnx");
+        var xdSkptPath = P("xd.skpt");
+        float[] xw = [0.5f, -1.5f, 2.5f, 3.5f];
+        WriteOnnx(inlinePath, BuildForeignAddModel("w", xw));
+        var extModel = BuildForeignAddModel("w", xw);
+        File.WriteAllBytes(P("xd_external.onnx.data"), OnnxFloatBytes(xw));
+        var wInit = extModel.Graph.Initializers.Single();
+        wInit.RawData = null!;
+        wInit.data_location = TensorProto.DataLocation.External;
+        wInit.ExternalDatas.Add(new StringStringEntryProto { Key = "location", Value = "xd_external.onnx.data" });
+        wInit.ExternalDatas.Add(new StringStringEntryProto { Key = "offset", Value = "0" });
+        wInit.ExternalDatas.Add(new StringStringEntryProto
+        { Key = "length", Value = (xw.Length * sizeof(float)).ToString() });
+        WriteOnnx(extPath, extModel);
+
+        var inlineOut = RunFloatVecModel(Persistence.ImportOnnx(inlinePath), 1f, 1f, 1f, 1f);
+        Assert.Equal(inlineOut, RunFloatVecModel(Persistence.ImportOnnx(extPath), 1f, 1f, 1f, 1f));
+        var xdLanded = Persistence.ImportOnnxToCheckpoint(extPath, xdSkptPath);
+        Assert.Equal(inlineOut, RunFloatVecModel(Persistence.Load(xdSkptPath), 1f, 1f, 1f, 1f));
+        Assert.Equal(GraphKind.ConcreteModel, xdLanded.Kind);
     }
 
-    /// <summary>
-    /// A representative third-party .onnx (a plain y = x + w model carrying no Shorokoo
-    /// metadata) imports and executes: the boundary adopts the foreign initializer's ONNX
-    /// name ("w") as its parameter identifier, so the imported concrete model both runs and
-    /// is nameable for a native checkpoint.
-    /// </summary>
-    [Fact]
-    public void TestThirdPartyOnnxImportsAndExecutes()
-    {
-        var onnxPath = Path.Combine(TempDir, "foreign.onnx");
-        try
-        {
-            float[] w = [10f, 20f, 30f, 40f];
-            WriteOnnx(onnxPath, BuildForeignAddModel("w", w));
-
-            var imported = Persistence.ImportOnnx(onnxPath);
-            Assert.Equal([11f, 22f, 33f, 44f], RunFloatVecModel(imported, 1f, 2f, 3f, 4f));
-
-            // The foreign initializer was promoted to a canonical parameter identifier at the
-            // boundary, carrying the ONNX name ("w") as its template part.
-            var paramIds = WeightBytesByParam(imported).Keys.ToArray();
-            Assert.Equal(["[1]:TrainableParam#0.w#0"], paramIds);
-
-            // With a naming scheme, the ONNX name maps onto a canonical Shorokoo name.
-            SimplePatternScheme[] patterns = [new SimplePatternScheme("w", "TrainableParam#0.MyWeight#0")];
-            var scheme = new SimplePatternNamingScheme(
-                patterns, new ModelIdNamingScheme([], ModuleParamSetNamingScheme.PyTorchFrameworkId),
-                ModuleParamSetNamingScheme.PyTorchFrameworkId);
-            var renamed = Persistence.ImportOnnx(onnxPath, scheme);
-            Assert.Equal(["[1]:TrainableParam#0.MyWeight#0"], WeightBytesByParam(renamed).Keys.ToArray());
-            Assert.Equal([11f, 22f, 33f, 44f], RunFloatVecModel(renamed, 1f, 2f, 3f, 4f));
-        }
-        finally
-        {
-            if (File.Exists(onnxPath)) File.Delete(onnxPath);
-        }
-    }
-
-    /// <summary>
-    /// Import fails loudly, naming the offending op and the file, on a construct the reader
-    /// cannot ingest (an op outside the vanilla ONNX dialect); a garbage file and a truncated
-    /// file each fail loudly naming the file.
-    /// </summary>
     [Fact]
     public void TestImportOnnxFailsLoud()
     {
-        var badOpPath = Path.Combine(TempDir, "badop.onnx");
-        var garbagePath = Path.Combine(TempDir, "garbage.onnx");
-        var truncPath = Path.Combine(TempDir, "trunc.onnx");
-        try
-        {
-            // Unsupported op: names the op and the file.
-            var g = new GraphProto { Name = "bogus" };
-            g.Inputs.Add(OnnxFloatVec("x", 4));
-            var node = new NodeProto { OpType = "TotallyMadeUpOp", Name = "n0" };
-            node.Inputs.Add("x");
-            node.Outputs.Add("y");
-            g.Nodes.Add(node);
-            g.Outputs.Add(OnnxFloatVec("y", 4));
-            var badOpModel = new ModelProto { IrVersion = 10, Graph = g };
-            badOpModel.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
-            WriteOnnx(badOpPath, badOpModel);
+        var badOpPath = WriteOnnx(P("badop.onnx"), BuildUnsupportedOpModel());
+        var exOp = Assert.Throws<InvalidDataException>(() => Persistence.ImportOnnx(badOpPath));
+        Assert.Contains("TotallyMadeUpOp", exOp.Message);
+        Assert.Contains(badOpPath, exOp.Message);
 
-            var exOp = Assert.Throws<InvalidDataException>(() => Persistence.ImportOnnx(badOpPath));
-            Assert.Contains("TotallyMadeUpOp", exOp.Message);
-            Assert.Contains(badOpPath, exOp.Message);
+        var garbagePath = P("garbage.onnx");
+        File.WriteAllBytes(garbagePath, Enumerable.Range(0, 256).Select(i => (byte)(i * 7 + 1)).ToArray());
+        Assert.Contains(garbagePath,
+            Assert.Throws<InvalidDataException>(() => Persistence.ImportOnnx(garbagePath)).Message);
 
-            // Garbage bytes: not a readable ONNX model, named by file.
-            File.WriteAllBytes(garbagePath, Enumerable.Range(0, 256).Select(i => (byte)(i * 7 + 1)).ToArray());
-            var exGarbage = Assert.Throws<InvalidDataException>(() => Persistence.ImportOnnx(garbagePath));
-            Assert.Contains(garbagePath, exGarbage.Message);
-
-            // Truncated valid model: fails, named by file.
-            var whole = File.ReadAllBytes(WriteOnnx(truncPath, BuildForeignAddModel("w", [1f, 2f, 3f, 4f])));
-            File.WriteAllBytes(truncPath, whole[..(whole.Length / 2)]);
-            var exTrunc = Assert.Throws<InvalidDataException>(() => Persistence.ImportOnnx(truncPath));
-            Assert.Contains(truncPath, exTrunc.Message);
-        }
-        finally
-        {
-            foreach (var p in (string[])[badOpPath, garbagePath, truncPath])
-                if (File.Exists(p)) File.Delete(p);
-        }
+        var truncPath = P("trunc.onnx");
+        var whole = File.ReadAllBytes(WriteOnnx(truncPath, BuildForeignAddModel("w", [1f, 2f, 3f, 4f])));
+        File.WriteAllBytes(truncPath, whole[..(whole.Length / 2)]);
+        Assert.Contains(truncPath,
+            Assert.Throws<InvalidDataException>(() => Persistence.ImportOnnx(truncPath)).Message);
     }
-
-    /// <summary>
-    /// The one-call native landing: ImportOnnxToCheckpoint imports a foreign .onnx and writes
-    /// the imported concrete model straight to a .skpt via the standard container writer. The
-    /// returned model, the reloaded checkpoint, and a direct import all execute identically,
-    /// and the checkpoint's weights are byte-identical to the foreign initializer. A failed
-    /// import (unsupported op) lands nothing — a previously written checkpoint is untouched.
-    /// </summary>
-    [Fact]
-    public void TestImportOnnxToCheckpointRoundTrip()
-    {
-        var onnxPath = Path.Combine(TempDir, "landing.onnx");
-        var badPath = Path.Combine(TempDir, "landing_bad.onnx");
-        var skptPath = Path.Combine(TempDir, "landing.skpt");
-        try
-        {
-            float[] w = [10f, 20f, 30f, 40f];
-            WriteOnnx(onnxPath, BuildForeignAddModel("w", w));
-
-            var imported = Persistence.ImportOnnxToCheckpoint(onnxPath, skptPath);
-            Assert.Equal(GraphKind.ConcreteModel, imported.Kind);
-            var expected = RunFloatVecModel(Persistence.ImportOnnx(onnxPath), 1f, 2f, 3f, 4f);
-            Assert.Equal(expected, RunFloatVecModel(imported, 1f, 2f, 3f, 4f));
-
-            var reloaded = Persistence.Load(skptPath);
-            Assert.Equal(GraphKind.ConcreteModel, reloaded.Kind);
-            Assert.Equal(WeightBytesByParam(imported), WeightBytesByParam(reloaded));
-            Assert.Equal(expected, RunFloatVecModel(reloaded, 1f, 2f, 3f, 4f));
-
-            // A failed import leaves the previously committed checkpoint untouched.
-            var committed = File.ReadAllBytes(skptPath);
-            var bogus = new GraphProto { Name = "bogus" };
-            bogus.Inputs.Add(OnnxFloatVec("x", 4));
-            var bn = new NodeProto { OpType = "TotallyMadeUpOp", Name = "n0" };
-            bn.Inputs.Add("x");
-            bn.Outputs.Add("y");
-            bogus.Nodes.Add(bn);
-            bogus.Outputs.Add(OnnxFloatVec("y", 4));
-            var bogusModel = new ModelProto { IrVersion = 10, Graph = bogus };
-            bogusModel.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
-            WriteOnnx(badPath, bogusModel);
-            Assert.Throws<InvalidDataException>(
-                () => Persistence.ImportOnnxToCheckpoint(badPath, skptPath));
-            Assert.Equal(committed, File.ReadAllBytes(skptPath));
-        }
-        finally
-        {
-            foreach (var p in (string[])[onnxPath, badPath, skptPath])
-                if (File.Exists(p)) File.Delete(p);
-        }
-    }
-
-    /// <summary>
-    /// ImportOnnx composes with ONNX external-data reading (#38): a foreign model whose
-    /// initializer bytes live in a <c>.data</c> side file (referenced from
-    /// <c>TensorProto.external_data</c>) imports through the same path and executes
-    /// identically to the inline form, and lands as a native .skpt.
-    /// </summary>
-    [Fact]
-    public void TestImportOnnxComposesWithExternalData()
-    {
-        var inlinePath = Path.Combine(TempDir, "xd_inline.onnx");
-        var extPath = Path.Combine(TempDir, "xd_external.onnx");
-        var dataPath = Path.Combine(TempDir, "xd_external.onnx.data");
-        var skptPath = Path.Combine(TempDir, "xd.skpt");
-        try
-        {
-            float[] w = [0.5f, -1.5f, 2.5f, 3.5f];
-            WriteOnnx(inlinePath, BuildForeignAddModel("w", w));
-
-            // Same model, but w's bytes moved to a side file referenced as external data.
-            var extModel = BuildForeignAddModel("w", w);
-            File.WriteAllBytes(dataPath, OnnxFloatBytes(w));
-            var wInit = extModel.Graph.Initializers.Single();
-            wInit.RawData = null!;
-            wInit.data_location = TensorProto.DataLocation.External;
-            wInit.ExternalDatas.Add(new StringStringEntryProto { Key = "location", Value = "xd_external.onnx.data" });
-            wInit.ExternalDatas.Add(new StringStringEntryProto { Key = "offset", Value = "0" });
-            wInit.ExternalDatas.Add(new StringStringEntryProto { Key = "length", Value = (w.Length * sizeof(float)).ToString() });
-            WriteOnnx(extPath, extModel);
-
-            var inlineOut = RunFloatVecModel(Persistence.ImportOnnx(inlinePath), 1f, 1f, 1f, 1f);
-            var externalOut = RunFloatVecModel(Persistence.ImportOnnx(extPath), 1f, 1f, 1f, 1f);
-            Assert.Equal(inlineOut, externalOut);
-
-            // The external-data model lands natively too.
-            var imported = Persistence.ImportOnnxToCheckpoint(extPath, skptPath);
-            Assert.Equal(inlineOut, RunFloatVecModel(Persistence.Load(skptPath), 1f, 1f, 1f, 1f));
-            Assert.Equal(GraphKind.ConcreteModel, imported.Kind);
-        }
-        finally
-        {
-            foreach (var p in (string[])[inlinePath, extPath, dataPath, skptPath])
-                if (File.Exists(p)) File.Delete(p);
-        }
-    }
-
 }

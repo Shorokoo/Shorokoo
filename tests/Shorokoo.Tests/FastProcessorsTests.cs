@@ -3,197 +3,93 @@ using Shorokoo.Core.Nodes.Processors.Helpers;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Coverage-purpose tests that drive <see cref="AutoTest.AdvancedTestGraph{TModule}"/>
-/// against modules whose graph shape targets specific uncovered branches in
-/// <c>Shorokoo.Core.Nodes.Processors.Fast.FastProcessors</c>. The modules surface
-/// bare TensorStruct slots in LOOP / IF control flow, exercising
-/// <c>FastUnpackTensorStructs.ExpandLoopOpenStructLoopVars</c>,
-/// <c>ExpandLoopCloseStructLoopVars</c>, and <c>ExpandIfCloseStructBranches</c> —
-/// expansion paths that the existing sequence-of-struct B2b tests don't reach.
+/// Modules whose graph shape targets otherwise-uncovered branches of
+/// <c>Shorokoo.Core.Nodes.Processors.Fast.FastProcessors</c> — TensorStruct slots in LOOP / IF
+/// control flow, TensorStruct-typed sequence ops, constant-loop unrolling edge cases, module
+/// reparenting and static trainable-param selection — driven through
+/// <see cref="AutoTest.AdvancedTestGraph{TModule}"/>.
 /// </summary>
 [Trait("Domain", "Modules")]
 [Trait("Purpose", "Coverage")]
 public class FastProcessorsCoverageTests
 {
+    private static TensorData Scalar32(float v) => TensorData(DType.Float32, [], v);
+    private static TensorData Flag(bool v) => TensorData(DType.Bool, [], v);
+
     [Fact]
-    public void TestBareTensorStructInControlFlowCoverage()
+    public void TestTensorStructInControlFlow()
     {
+        // Bare TensorStruct loop vars / IF branches: ExpandLoopOpenStructLoopVars,
+        // ExpandLoopCloseStructLoopVars, ExpandIfCloseStructBranches.
         Assert.True(AutoTest.AdvancedTestGraph<TensorStructLoopCarry>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Float32, [], 1.0f), TensorData(DType.Float32, [], 2.0f)]));
+            hyperparamInputs: [], runtimeInputs: [Scalar32(1f), Scalar32(2f)]));
         Assert.True(AutoTest.AdvancedTestGraph<TensorStructIfElseReturn>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Bool, [], true), TensorData(DType.Float32, [], 3.0f), TensorData(DType.Float32, [], 5.0f)]));
+            hyperparamInputs: [], runtimeInputs: [Flag(true), Scalar32(3f), Scalar32(5f)]));
         Assert.True(AutoTest.AdvancedTestGraph<MixedTensorStructLoop>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Float32, [], 1.0f), TensorData(DType.Float32, [], 2.0f)]));
-    }
+            hyperparamInputs: [], runtimeInputs: [Scalar32(1f), Scalar32(2f)]));
 
-    /// <summary>
-    /// Drives the sequence-of-struct branches of
-    /// <c>FastUnpackTensorStructs.ExpandLoopOpenStructLoopVars</c>,
-    /// <c>ExpandLoopCloseStructLoopVars</c>, the plain-tensor passthrough
-    /// <c>else</c> branch of <c>ExpandIfCloseStructBranches</c> (hit only when
-    /// an IF returns a mix of struct + plain slots), and the scan-output
-    /// expansion block at the tail of <c>ExpandLoopCloseStructLoopVars</c> (hit
-    /// only when a struct-loop-var LOOP also has a <c>ctx.Scan</c> output). The
-    /// pure <c>Sequence&lt;TensorStruct&gt;</c>-from-IF case lives in
-    /// <see cref="TestSequenceOfStructIfElseReturnCoverage"/>.
-    /// </summary>
-    [Fact]
-    public void TestSequenceOfTensorStructInControlFlowCoverage()
-    {
+        // Sequence-of-struct loop vars, the plain-tensor passthrough else branch of
+        // ExpandIfCloseStructBranches, and the scan-output tail of ExpandLoopCloseStructLoopVars.
         Assert.True(AutoTest.AdvancedTestGraph<SequenceOfStructLoopCarry>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Float32, [], 1.0f), TensorData(DType.Float32, [], 2.0f)]));
+            hyperparamInputs: [], runtimeInputs: [Scalar32(1f), Scalar32(2f)]));
         Assert.True(AutoTest.AdvancedTestGraph<IfElseMixedStructAndPlainSlots>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Bool, [], true), TensorData(DType.Float32, [], 3.0f), TensorData(DType.Float32, [], 5.0f)]));
+            hyperparamInputs: [], runtimeInputs: [Flag(true), Scalar32(3f), Scalar32(5f)]));
         Assert.True(AutoTest.AdvancedTestGraph<TensorStructLoopCarryWithScanOutput>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Float32, [], 1.0f), TensorData(DType.Float32, [], 2.0f)]));
-    }
+            hyperparamInputs: [], runtimeInputs: [Scalar32(1f), Scalar32(2f)]));
 
-    /// <summary>
-    /// Coverage for an IfElse returning a <c>Sequence&lt;TensorStruct&gt;</c> from each
-    /// branch. Drives the sequence-of-struct branch of
-    /// <c>FastUnpackTensorStructs.ExpandIfCloseStructBranches</c> and exercises the
-    /// full ONNX save/reload + CS roundtrip + QEE on a graph whose top-level node
-    /// order includes a <c>CONSTANT</c> (the <c>Scalar(0L)</c> index for the trailing
-    /// <c>SEQUENCE_AT</c>) positionally after an <c>IF_CLOSE</c> — covering the
-    /// <c>FastOnnxModelReader</c> topological re-tour
-    /// (<c>BuildTempNodeGraph</c> + <c>NodeGuide.GiveTour</c>) constant-placement
-    /// path and the <c>IfCloseOp</c> sequence-typed branch handling that the
-    /// base-class IRuntimeTensor→RuntimeTensor cast would otherwise strip to
-    /// <c>null</c>.
-    /// </summary>
-    [Fact]
-    public void TestSequenceOfStructIfElseReturnCoverage()
-    {
+        // Sequence<TensorStruct> out of both IF branches, with a CONSTANT positioned after the
+        // IF_CLOSE — the FastOnnxModelReader topological re-tour + IfCloseOp sequence branch.
         Assert.True(AutoTest.AdvancedTestGraph<SequenceOfStructIfElseReturn>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Bool, [], true), TensorData(DType.Float32, [], 3.0f), TensorData(DType.Float32, [], 5.0f)]));
-    }
+            hyperparamInputs: [], runtimeInputs: [Flag(true), Scalar32(3f), Scalar32(5f)]));
 
-
-    /// <summary>
-    /// Drives the <c>MODULE_SET_HYPERPARAMS</c> arm of
-    /// <c>FastInlineModulesAndFunctions.FastReparentToCallSite</c>
-    /// (~L703-727 of <c>FastProcessors.cs</c>) — the mirror of the
-    /// <c>MODEL_PARAM_REF</c> arm at L676-702 hit by
-    /// <c>CallsSimplestModule</c>. Needs three call levels: the outer
-    /// module inlines the middle module, whose body contains the inner
-    /// module's <c>MODULE_SET_HYPERPARAMS</c> node that the reparenter
-    /// rewrites with the call-site's iteration indices and prepended
-    /// model-id.
-    /// </summary>
-    [Fact]
-    public void TestModuleOnHyperparamModuleCoverage()
-    {
-        Assert.True(AutoTest.AdvancedTestGraph<CallsHypersLayer>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorDataWithSmallVals(DType.Float32, [5L])]));
-        Assert.True(AutoTest.AdvancedTestGraph<CallsCallsHypersLayer>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorDataWithSmallVals(DType.Float32, [5L])]));
-    }
-
-    /// <summary>
-    /// Drives the TensorStruct-typed branches of <c>SEQUENCE_CONSTRUCT</c>,
-    /// <c>SEQUENCE_AT</c>, <c>SEQUENCE_EMPTY</c>, <c>SEQUENCE_INSERT</c>,
-    /// <c>SEQUENCE_ERASE</c>, and <c>SEQUENCE_LENGTH</c> handlers in
-    /// <c>FastUnpackTensorStructs.Process</c> — the unified topological walk
-    /// that rewrites each sequence op into one parallel op per struct field
-    /// (or, for LENGTH, collapses to a single read from field[0]).
-    /// </summary>
-    [Fact]
-    public void TestSequenceOfTensorStructCoverage()
-    {
+        // TensorStruct-typed SEQUENCE_CONSTRUCT / AT / EMPTY / INSERT / ERASE / LENGTH.
         Assert.True(AutoTest.AdvancedTestGraph<SequenceOpsOnStructs>(
             hyperparamInputs: [],
-            runtimeInputs: [
-                TensorData(DType.Float32, [], 1.0f), TensorData(DType.Float32, [], 2.0f),
-                TensorData(DType.Float32, [], 3.0f), TensorData(DType.Float32, [], 4.0f)]));
-    }
+            runtimeInputs: [Scalar32(1f), Scalar32(2f), Scalar32(3f), Scalar32(4f)]));
 
-    /// <summary>
-    /// Drives the four "non-happy-path" shapes in
-    /// <c>FastFoldConstantIterationLoops.UnrollOne</c>: zero-iteration early return,
-    /// seed-<c>true</c> CONSTANT for the AND-chain when OPEN has no initial cond
-    /// (paired with per-loop-var <c>WHERE</c> + per-iter <c>AND</c> gating from a
-    /// dynamic body break), per-iter <c>UNSQUEEZE</c> + final <c>CONCAT</c>
-    /// for a non-empty scan output, and the scope-pair propagation arm that
-    /// walks a nested <c>IF_CLOSE</c>'s paired <c>IF_OPEN</c> inputs back into
-    /// the loop-dep set when the inner control flow's condition itself
-    /// depends on the iteration index.
-    /// </summary>
-    [Fact]
-    public void TestConstantLoopEdgeCasesCoverage()
-    {
-        Assert.True(AutoTest.AdvancedTestGraph<ZeroIterConstLoopLayer>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Float32, [], 42.0f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<ConstLoopWithScanOutput>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Float32, [], 0.0f)]));
-        Assert.True(AutoTest.AdvancedTestGraph<ConstLoopWithDynamicBreak>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Float32, [], 0.0f), TensorData(DType.Bool, [], true)]));
-        Assert.True(AutoTest.AdvancedTestGraph<ConstLoopWithNestedIterDependentIf>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Float32, [], 0.0f)]));
-    }
-
-    /// <summary>
-    /// Drives the <c>hasStructInput</c> pre-pass in <c>FastUnpackTensorStructs.Process</c>
-    /// (~L1500-1584 of <c>FastProcessors.cs</c>): when the graph's input list contains a
-    /// <c>MODEL_TENSORSTRUCT_INPUT</c> producer, that node is rewritten into one
-    /// <c>MODEL_TENSOR_INPUT</c> per struct field and the graph's <c>Inputs</c> list is
-    /// rebuilt to reference the per-field keys. <see cref="SimplePairSum"/> is the only
-    /// existing [Module] whose signature takes a <c>GenericPairStruct</c> directly, so its
-    /// <see cref="SimplePairSum.ComputationGraph"/> exercises this branch end-to-end. Runs
-    /// the architecture pipeline only — execution requires a <c>TensorDataStruct</c>
-    /// shape that <see cref="AutoTest.AdvancedTestGraph"/>'s flat <c>TensorData[]</c>
-    /// API does not model.
-    /// </summary>
-    [Fact]
-    public void TestTensorStructAsModuleInputCoverage()
-    {
+        // MODEL_TENSORSTRUCT_INPUT producer in the graph's input list is rewritten into one
+        // MODEL_TENSOR_INPUT per struct field (architecture pipeline only — execution would need
+        // a TensorDataStruct shape AdvancedTestGraph's flat TensorData[] API cannot model).
         var graph = SimplePairSum.ComputationGraph;
         Assert.Contains(graph.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.MODEL_TENSORSTRUCT_INPUT);
-
         var concreteArch = graph.ToConcreteArchitecture(new ModelParamList());
-
         Assert.DoesNotContain(concreteArch.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.MODEL_TENSORSTRUCT_INPUT);
         Assert.DoesNotContain(concreteArch.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.TENSOR_STRUCT_CREATE);
         Assert.DoesNotContain(concreteArch.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.TENSOR_STRUCT_GETFIELD);
     }
 
-    /// <summary>
-    /// Pins trainable-param value selection on the feed convention (Shorokoo/Shorokoo#22):
-    /// a static param site — one not enclosed in a loop, the overwhelmingly common case —
-    /// materializes its value through a <b>direct reference</b> to its own
-    /// <c>MODEL_PARAM</c>, never a selection over a global sequence indexed across the joint
-    /// id space. A model whose only params are static therefore concretizes with <b>no</b>
-    /// <c>SEQUENCE_CONSTRUCT</c>/<c>SEQUENCE_AT</c> param-selection ops, and each param keeps
-    /// its own canonical model id (the extraction identity this convergence is the clean
-    /// substrate for, §5.8.2). Uses a two-static-param Conv module (weight + bias).
-    /// </summary>
     [Fact]
-    public void TestStaticTrainableParamSelectsByDirectReferenceCoverage()
+    public void TestModuleAndConstantLoopEdges()
     {
+        // MODULE_SET_HYPERPARAMS arm of FastReparentToCallSite: three call levels are needed so
+        // the middle module's body carries the inner module's node for the reparenter to rewrite.
+        Assert.True(AutoTest.AdvancedTestGraph<CallsHypersLayer>(
+            hyperparamInputs: [], runtimeInputs: [TensorDataWithSmallVals(DType.Float32, [5L])]));
+        Assert.True(AutoTest.AdvancedTestGraph<CallsCallsHypersLayer>(
+            hyperparamInputs: [], runtimeInputs: [TensorDataWithSmallVals(DType.Float32, [5L])]));
+
+        // FastFoldConstantIterationLoops.UnrollOne non-happy paths: zero-iteration early return,
+        // scan-output UNSQUEEZE+CONCAT, dynamic-break WHERE/AND gating, and the scope-pair
+        // propagation arm for a nested iteration-index-dependent IF.
+        Assert.True(AutoTest.AdvancedTestGraph<ZeroIterConstLoopLayer>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(42f)]));
+        Assert.True(AutoTest.AdvancedTestGraph<ConstLoopWithScanOutput>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(0f)]));
+        Assert.True(AutoTest.AdvancedTestGraph<ConstLoopWithDynamicBreak>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(0f), Flag(true)]));
+        Assert.True(AutoTest.AdvancedTestGraph<ConstLoopWithNestedIterDependentIf>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(0f)]));
+
+        // Shorokoo/Shorokoo#22: a static param site materializes through a direct MODEL_PARAM
+        // reference, so no sequence param-selection machinery survives and each param keeps its
+        // own canonical model id.
         var g = ((ComputationGraph)typeof(AutoGradStructConvStridePadCheck)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var x = TensorData([1L, 2L, 5L, 5L], new float[1 * 2 * 5 * 5]);
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x]));
-
-        // Static selection is a direct reference: no sequence machinery survives for params.
         Assert.DoesNotContain(arch.Nodes, n => n.OpCode == OpCodes.SEQUENCE_AT);
         Assert.DoesNotContain(arch.Nodes, n => n.OpCode == OpCodes.SEQUENCE_CONSTRUCT);
-
-        // The two params (Conv weight + bias) are realized, each with its own canonical id.
-        var paramIds = arch.GetConcreteModelParamInfos().ParamInfos
-            .Select(p => p.ModelId).Distinct().ToArray();
-        Assert.Equal(2, paramIds.Length);
+        Assert.Equal(2, arch.GetConcreteModelParamInfos().ParamInfos
+            .Select(p => p.ModelId).Distinct().Count());
     }
 }

@@ -1,8 +1,15 @@
 using Shorokoo.Modules.Initializers;
 using Shorokoo.Modules.Layers;
 using Shorokoo.Modules.Losses;
+using static Shorokoo.Tests.Modules.NNCheckVerdicts;
 
 namespace Shorokoo.Tests.Modules;
+
+internal static class NNCheckVerdicts
+{
+    internal static Scalar<int64> Within(Scalar<float32> dist, float bound)
+        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
+}
 
 // ---------------------------------------------------------------------------
 // Self-checking [Module]s for the baseline NN library (Shorokoo.Modules
@@ -22,7 +29,7 @@ namespace Shorokoo.Tests.Modules;
 //
 // BatchNorm2d carries Globals.StateUpdate links (STATE_UPDATE_LINK is not an
 // executable ORT op in the plain inference pipeline), so it is exercised via
-// TrainingRig-based tests (NNLibraryTrainingCoverageTests) instead of AutoTest.
+// TrainingRig-based tests (NNLibrary*TrainingCoverageTests) instead of AutoTest.
 // ---------------------------------------------------------------------------
 
 /// <summary>Linear forward output on RangeTensor([2,3],0.5,-1) at MasterSeed=0 must match the
@@ -433,7 +440,7 @@ public partial class ConvScalarOverloadGolden
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
         // Literal constant input → build-time-known rank 4, so the scalar overload can read Rank()-2.
-        var c = Tensor(new long[] { 1L, 1L, 3L, 3L }, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f);
+        var c = Tensor([1L, 1L, 3L, 3L], 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f);
         var outChannels = 2L;
         var scalar = Convolution.Conv(c, outChannels, kernelSize: 3L, padding: 1L);
         // Fold a trivial dependence on x so AutoTest has a runtime input to feed.
@@ -538,8 +545,8 @@ public partial class NNInstanceNorm2dNormalizes
 // ~unit variance (meanPen + varPen < 1e-2), OR compare against a hand-built
 // reference / a sibling norm with a relative-L1 penalty. Affine is off in the
 // value/equivalence checks so the bare normalization is what is measured; the
-// affine PARAM-COUNT discrimination needs a rig (NNLibraryTrainingCoverageTests,
-// mirroring TestBatchNormAffineOnOff) and lives in the *Model modules below.
+// affine PARAM-COUNT discrimination needs a rig (NNLibrary*TrainingCoverageTests,
+// mirroring the affine on/off rig [Fact]) and lives in the *Model modules below.
 // ---------------------------------------------------------------------------
 
 // --- §7-1: per-region zero-mean/unit-var, InstanceNorm at ranks 3/4/5 ---
@@ -814,7 +821,7 @@ public partial class NNInstanceNorm3dAliasEquiv
 // …) fixes the affine bit. With affine:false, γ/β are pruned (dead branch, no
 // gradient) ⇒ the model's only trainable param is the scalar weight (1). With
 // affine:true, γ/β survive ⇒ 3 trainable params (scalar weight + γ + β). The
-// rig [Fact] in NNLibraryTrainingCoverageTests asserts the field counts.
+// rig [Fact] in NNLibrary*TrainingCoverageTests asserts the field counts.
 
 /// <summary>§7-2(b) InstanceNorm(affine:false) rig model: scalar pre-weight → InstanceNorm → per-(sample,channel) mean.
 /// γ/β are pruned (dead branch), so the only trainable param is the scalar weight.</summary>
@@ -1716,7 +1723,7 @@ public partial class EmbeddingBagRigModel
 {
     public static Tensor<float32> Inline(Tensor<float32> x)
     {
-        Tensor<int64> indices = Tensor(new long[] { 2L, 2L }, 0L, 1L, 2L, 3L);   // [2, 2] bags
+        Tensor<int64> indices = Tensor([2L, 2L], 0L, 1L, 2L, 3L);   // [2, 2] bags
         var bag = EmbeddingBag.Bag(indices, 5L, 3L, BagMode.Sum);                // [2, 3]
         Vector<int64> lastAxis = [Scalar(1L)];
         var pooled = bag.Reduce(ReduceKind.Mean, lastAxis, keepDims: false);     // [2]
@@ -1799,16 +1806,16 @@ public partial class NNPool1d3dClosedForm
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
         // 1-D: x = [[[1,3,2,4]]], kernel [2], stride defaults to 2.
-        var x1 = Tensor(new long[] { 1L, 1L, 4L }, 1f, 3f, 2f, 4f);
-        var mp1 = Pooling.MaxPool1d(x1, new long[] { 2L });   // [3,4]
-        var ap1 = Pooling.AvgPool1d(x1, new long[] { 2L });   // [2,3]
-        var mp1Ref = Tensor(new long[] { 1L, 1L, 2L }, 3f, 4f);
-        var ap1Ref = Tensor(new long[] { 1L, 1L, 2L }, 2f, 3f);
+        var x1 = Tensor([1L, 1L, 4L], 1f, 3f, 2f, 4f);
+        var mp1 = Pooling.MaxPool1d(x1, [2L]);   // [3,4]
+        var ap1 = Pooling.AvgPool1d(x1, [2L]);   // [2,3]
+        var mp1Ref = Tensor([1L, 1L, 2L], 3f, 4f);
+        var ap1Ref = Tensor([1L, 1L, 2L], 2f, 3f);
 
         // 3-D: [1,1,2,2,2] cube of 1..8, full window [2,2,2] → max 8, mean 4.5.
-        var x3 = Tensor(new long[] { 1L, 1L, 2L, 2L, 2L }, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f);
-        var mp3 = Pooling.MaxPool3d(x3, new long[] { 2L, 2L, 2L }).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-        var ap3 = Pooling.AvgPool3d(x3, new long[] { 2L, 2L, 2L }).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        var x3 = Tensor([1L, 1L, 2L, 2L, 2L], 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f);
+        var mp3 = Pooling.MaxPool3d(x3, [2L, 2L, 2L]).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        var ap3 = Pooling.AvgPool3d(x3, [2L, 2L, 2L]).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
         var ok = Within((mp1 - mp1Ref).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar(), 1e-4f)
                + Within((ap1 - ap1Ref).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar(), 1e-4f)
@@ -1818,9 +1825,6 @@ public partial class NNPool1d3dClosedForm
         var touch = (x * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(4L);   // all 4 closed-form ok-bits + touch; > (5-1)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>§7-2 LpPool p=2 == √(Σx²). LpPool1d([2]) on x=[3,4] → √(9+16)=5; and a full-window
@@ -1832,8 +1836,8 @@ public partial class NNLpPoolClosedFormAndGlobal
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
         // Closed form: x = [[[3,4]]], kernel [2] → sqrt(9+16) = 5.
-        var x1 = Tensor(new long[] { 1L, 1L, 2L }, 3f, 4f);
-        var lp1 = Pooling.LpPool1d(x1, new long[] { 2L }).Reduce(ReduceKind.Sum, keepDims: false).Scalar();   // 5
+        var x1 = Tensor([1L, 1L, 2L], 3f, 4f);
+        var lp1 = Pooling.LpPool1d(x1, [2L]).Reduce(ReduceKind.Sum, keepDims: false).Scalar();   // 5
         var okClosed = Within((lp1 - Scalar(5f)).Abs(), 1e-4f);
 
         // Full-window LpPool2d == GlobalLpPool (p=2) on the runtime input x = [1, C, H, W].
@@ -1846,9 +1850,6 @@ public partial class NNLpPoolClosedFormAndGlobal
 
         return okClosed + okEquiv > Scalar(1L);   // 2 ok-bits; > (2-1)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>§7-3 full-window pool == global pool on the runtime input x=[1,C,H,W]:
@@ -1890,22 +1891,22 @@ public partial class NNPoolScalarPerAxisAliasEquiv
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
         // Literal constant input → build-time-known rank 4 for the scalar overloads.
-        var c = Tensor(new long[] { 1L, 1L, 4L, 4L },
+        var c = Tensor([1L, 1L, 4L, 4L],
             1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f);
 
         var maxS = Pooling.MaxPool2d(c, kernelSize: 2L);                  // historical scalar 2d
-        var maxA = Pooling.MaxPool2d(c, kernelSize: new long[] { 2L, 2L });
+        var maxA = Pooling.MaxPool2d(c, kernelSize: [2L, 2L]);
         var avgS = Pooling.AvgPool2d(c, kernelSize: 2L);                  // historical scalar 2d
-        var avgA = Pooling.AvgPool2d(c, kernelSize: new long[] { 2L, 2L });
+        var avgA = Pooling.AvgPool2d(c, kernelSize: [2L, 2L]);
         // LpPool has no historical scalar *2d* overload; the scalar form is the generic
         // LpPool(c, long) which broadcasts via x.Rank()-2.
         var lpS = Pooling.LpPool(c, kernelSize: 2L);
-        var lpA = Pooling.LpPool2d(c, kernelSize: new long[] { 2L, 2L });
+        var lpA = Pooling.LpPool2d(c, kernelSize: [2L, 2L]);
 
         // Per-rank alias: MaxPool1d(x1,[2]) == MaxPool(x1,[2]) (rank inferred from kernel).
-        var c1 = Tensor(new long[] { 1L, 1L, 4L }, 1f, 3f, 2f, 4f);
-        var max1Alias = Pooling.MaxPool1d(c1, new long[] { 2L });
-        var max1Generic = Pooling.MaxPool(c1, new long[] { 2L });
+        var c1 = Tensor([1L, 1L, 4L], 1f, 3f, 2f, 4f);
+        var max1Alias = Pooling.MaxPool1d(c1, [2L]);
+        var max1Generic = Pooling.MaxPool(c1, [2L]);
 
         var pen = (maxS - maxA).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar()
                 + (avgS - avgA).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar()
@@ -1925,16 +1926,16 @@ public partial class NNPoolPerAxisGeometryMatchesCoreOp
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // runtime input [1,2,6,5]
     {
-        var y = Pooling.MaxPool2d(x, kernelSize: new long[] { 3L, 2L },
-            stride: new long[] { 2L, 1L }, padding: new long[] { 1L, 0L });
+        var y = Pooling.MaxPool2d(x, kernelSize: [3L, 2L],
+            stride: [2L, 1L], padding: [1L, 0L]);
 
         // padding [1,0] (length spatialRank, symmetric) → ONNX begin..end [1,0,1,0].
         var yRef = NN.MaxPool(x, ceilMode: false,
-            dilations: new long[] { 1L, 1L },
-            kernelShape: new long[] { 3L, 2L },
-            pads: new long[] { 1L, 0L, 1L, 0L },
+            dilations: [1L, 1L],
+            kernelShape: [3L, 2L],
+            pads: [1L, 0L, 1L, 0L],
             storageOrder: 0L,
-            strides: new long[] { 2L, 1L });
+            strides: [2L, 1L]);
 
         var diff = (y - yRef).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
         return diff < Scalar(1e-3f) * (Scalar(1f) + yRef.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar());
@@ -1952,8 +1953,8 @@ public partial class NNMaxUnpoolRoundTrip
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // runtime input [1,2,4,4]
     {
-        var (vals, idx) = Pooling.MaxPoolWithIndices(x, new long[] { 2L, 2L });
-        var u = Pooling.MaxUnpool(vals, idx, new long[] { 2L, 2L }, outputShape: x.ShapeTensor());
+        var (vals, idx) = Pooling.MaxPoolWithIndices(x, [2L, 2L]);
+        var u = Pooling.MaxUnpool(vals, idx, [2L, 2L], outputShape: x.ShapeTensor());
 
         // (a) shape match.
         var shapePen = (u.ShapeTensor() - x.ShapeTensor()).Abs()
@@ -1974,9 +1975,6 @@ public partial class NNMaxUnpoolRoundTrip
                + Within(sumPen, 1e-3f);
         return ok > Scalar(2L);   // all 3 ok-bits; > (3-1)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>§7-7 count_include_pad toggle: AvgPool2d([2,2], padding:[1,1]) with
@@ -1991,15 +1989,15 @@ public partial class NNAvgPoolCountIncludePadToggle
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
-        var c = Tensor(new long[] { 1L, 1L, 2L, 2L }, 1f, 2f, 3f, 4f);
+        var c = Tensor([1L, 1L, 2L, 2L], 1f, 2f, 3f, 4f);
 
-        var apFalse = Pooling.AvgPool2d(c, kernelSize: new long[] { 2L, 2L },
-            padding: new long[] { 1L, 1L }, countIncludePad: false);
-        var apTrue = Pooling.AvgPool2d(c, kernelSize: new long[] { 2L, 2L },
-            padding: new long[] { 1L, 1L }, countIncludePad: true);
+        var apFalse = Pooling.AvgPool2d(c, kernelSize: [2L, 2L],
+            padding: [1L, 1L], countIncludePad: false);
+        var apTrue = Pooling.AvgPool2d(c, kernelSize: [2L, 2L],
+            padding: [1L, 1L], countIncludePad: true);
 
-        var falseRef = Tensor(new long[] { 1L, 1L, 2L, 2L }, 1f, 2f, 3f, 4f);          // /1 real cell
-        var trueRef = Tensor(new long[] { 1L, 1L, 2L, 2L }, 0.25f, 0.5f, 0.75f, 1f);   // /4 full window
+        var falseRef = Tensor([1L, 1L, 2L, 2L], 1f, 2f, 3f, 4f);          // /1 real cell
+        var trueRef = Tensor([1L, 1L, 2L, 2L], 0.25f, 0.5f, 0.75f, 1f);   // /4 full window
 
         var falsePen = (apFalse - falseRef).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
         var truePen = (apTrue - trueRef).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
@@ -2012,9 +2010,6 @@ public partial class NNAvgPoolCountIncludePadToggle
         var touch = (x * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(3L);   // 3 ok-bits + touch (4); > (4-1)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>
@@ -2032,31 +2027,31 @@ public partial class NNLossClosedFormChecks
     {
         var ln2 = Scalar(0.69314718f);
 
-        var t1 = Tensor(new long[] { 2L }, 0f, 1f);
+        var t1 = Tensor([2L], 0f, 1f);
         var pen = (L1Loss.Inline(p, t1) - Scalar(1.5f)).Abs();
 
-        var t2 = Tensor(new long[] { 2L }, 1f, 1f);
+        var t2 = Tensor([2L], 1f, 1f);
         pen = pen + (HuberLoss.Inline(p, t2, Scalar(1f)) - Scalar(0.75f)).Abs();
         pen = pen + (SmoothL1Loss.Inline(p, t2) - Scalar(0.75f)).Abs();
 
-        var logits = Tensor(new long[] { 1L, 2L }, 0f, 0f);
+        var logits = Tensor([1L, 2L], 0f, 0f);
         pen = pen + (CrossEntropyLoss.Inline(logits, Vector(0L)) - ln2).Abs();
 
-        var logProbs = Tensor(new long[] { 1L, 2L }, -1f, -2f);
+        var logProbs = Tensor([1L, 2L], -1f, -2f);
         pen = pen + (NLLLoss.Inline(logProbs, Vector(1L)) - Scalar(2f)).Abs();
 
-        var probs = Tensor(new long[] { 2L }, 0.5f, 0.5f);
-        var tb = Tensor(new long[] { 2L }, 1f, 0f);
+        var probs = Tensor([2L], 0.5f, 0.5f);
+        var tb = Tensor([2L], 1f, 0f);
         pen = pen + (BCELoss.Inline(probs, tb) - ln2).Abs();
 
-        var rawLogits = Tensor(new long[] { 2L }, 0f, 0f);
+        var rawLogits = Tensor([2L], 0f, 0f);
         pen = pen + (BCEWithLogitsLoss.Inline(rawLogits, tb) - ln2).Abs();
 
         // L2 over rank-2 predictions reduces over ALL elements:
         // mean([[1,2],[3,4]]²) = (1+4+9+16)/4 = 7.5. (Pins the former axis-0-only
         // reduction, which made rank-2+ predictions unusable.)
-        var p22 = Tensor(new long[] { 2L, 2L }, 1f, 2f, 3f, 4f);
-        var z22 = Tensor(new long[] { 2L, 2L }, 0f, 0f, 0f, 0f);
+        var p22 = Tensor([2L, 2L], 1f, 2f, 3f, 4f);
+        var z22 = Tensor([2L, 2L], 0f, 0f, 0f, 0f);
         pen = pen + (L2Loss.Inline(p22, z22) - Scalar(7.5f)).Abs();
 
         return pen < Scalar(1e-4f);
@@ -2094,10 +2089,10 @@ public partial class NNCrossEntropyReductionWeightIgnoreChecks
     public static Scalar<bit> Inline(Tensor<float32> t)
     {
         var ln2 = Scalar(0.69314718f);
-        var logits2 = Tensor(new long[] { 2L, 2L }, 0f, 0f, 0f, 0f);   // [[0,0],[0,0]]
+        var logits2 = Tensor([2L, 2L], 0f, 0f, 0f, 0f);   // [[0,0],[0,0]]
         var tgt01 = Vector(0L, 1L);
         var tgt00 = Vector(0L, 0L);
-        var weight = Tensor(new long[] { 2L }, 2f, 1f);                // [2,1]
+        var weight = Tensor([2L], 2f, 1f);                // [2,1]
 
         // reduction Mean / Sum on uniform logits.
         var ceMean = CrossEntropyLoss.Reduced(logits2, tgt01, reduction: LossReduction.Mean);
@@ -2115,7 +2110,7 @@ public partial class NNCrossEntropyReductionWeightIgnoreChecks
         var wSum01 = CrossEntropyLoss.Reduced(logits2, tgt01, weight: weight, reduction: LossReduction.Sum);
 
         // ignore_index: mean over the 2 non-ignored = ln2 (denominator excludes ignored).
-        var logits3 = Tensor(new long[] { 3L, 2L }, 0f, 0f, 0f, 0f, 0f, 0f);
+        var logits3 = Tensor([3L, 2L], 0f, 0f, 0f, 0f, 0f, 0f);
         var tgtIg = Vector(0L, 7L, 1L);
         var ceIgMean = CrossEntropyLoss.Reduced(logits3, tgtIg, ignoreIndex: 7L, reduction: LossReduction.Mean);
         // PerElement returns 0 at the ignored position (index 1).
@@ -2137,9 +2132,6 @@ public partial class NNCrossEntropyReductionWeightIgnoreChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(10L);   // all 10 closed-form ok-bits + touch
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
@@ -2163,11 +2155,11 @@ public partial class NNCrossEntropyLabelSmoothingChecks
         var ln2 = Scalar(0.69314718f);
 
         // Nontrivial blend: logits [[2,0]], target 0, α=0.2.
-        var logitsA = Tensor(new long[] { 1L, 2L }, 2f, 0f);
+        var logitsA = Tensor([1L, 2L], 2f, 0f);
         var lsA = CrossEntropyLoss.Reduced(logitsA, Vector(0L), labelSmoothing: 0.2f, reduction: LossReduction.Mean);
 
         // Uniform-logit collapse: logits [[0,0]], target 0, α=0.1 → ln2.
-        var logitsU = Tensor(new long[] { 1L, 2L }, 0f, 0f);
+        var logitsU = Tensor([1L, 2L], 0f, 0f);
         var lsU = CrossEntropyLoss.Reduced(logitsU, Vector(0L), labelSmoothing: 0.1f, reduction: LossReduction.Mean);
 
         var ok = Within((lsA - Scalar(0.3269280f)).Abs(), 1e-4f)
@@ -2176,9 +2168,6 @@ public partial class NNCrossEntropyLabelSmoothingChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(2L);   // both closed-form ok-bits + touch
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>
@@ -2206,9 +2195,9 @@ public partial class NNCrossEntropyLabelSmoothWeightIgnoreChecks
 {
     public static Scalar<bit> Inline(Tensor<float32> t)
     {
-        var logits = Tensor(new long[] { 3L, 2L }, 2f, 0f, 0f, 0f, 1f, 3f);
+        var logits = Tensor([3L, 2L], 2f, 0f, 0f, 0f, 1f, 3f);
         var targets = Vector(0L, 7L, 1L);
-        var weight = Tensor(new long[] { 2L }, 2f, 1f);
+        var weight = Tensor([2L], 2f, 1f);
 
         var loss = CrossEntropyLoss.Reduced(
             logits, targets, weight: weight, ignoreIndex: 7L,
@@ -2218,9 +2207,6 @@ public partial class NNCrossEntropyLabelSmoothWeightIgnoreChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(1L);   // closed-form ok-bit + touch
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>
@@ -2239,14 +2225,14 @@ public partial class NNNLLLossWeightIgnoreChecks
     {
         var ln2 = Scalar(0.69314718f);
         var nl2 = Scalar(-0.69314718f);
-        var logp2 = Tensor(new long[] { 2L, 2L }, -0.69314718f, -0.69314718f, -0.69314718f, -0.69314718f);
+        var logp2 = Tensor([2L, 2L], -0.69314718f, -0.69314718f, -0.69314718f, -0.69314718f);
         var tgt01 = Vector(0L, 1L);
-        var weight = Tensor(new long[] { 2L }, 2f, 1f);
+        var weight = Tensor([2L], 2f, 1f);
 
         var wMean = NLLLoss.Reduced(logp2, tgt01, weight: weight, reduction: LossReduction.Mean);
         var wSum = NLLLoss.Reduced(logp2, tgt01, weight: weight, reduction: LossReduction.Sum);
 
-        var logp3 = Tensor(new long[] { 3L, 2L },
+        var logp3 = Tensor([3L, 2L],
             -0.69314718f, -0.69314718f, -0.69314718f, -0.69314718f, -0.69314718f, -0.69314718f);
         var tgtIg = Vector(0L, 7L, 1L);
         var igMean = NLLLoss.Reduced(logp3, tgtIg, ignoreIndex: 7L, reduction: LossReduction.Mean);
@@ -2265,9 +2251,6 @@ public partial class NNNLLLossWeightIgnoreChecks
         return ok + Within(touch, 1e-6f) > Scalar(5L);   // all 5 closed-form ok-bits + touch
     }
 
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
-
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
 }
@@ -2284,18 +2267,18 @@ public partial class NNBCEWithLogitsPosWeightChecks
     public static Scalar<bit> Inline(Tensor<float32> t)
     {
         var ln2 = Scalar(0.69314718f);
-        var posW = Tensor(new long[] { 1L }, 2f);
+        var posW = Tensor([1L], 2f);
 
         // Per-element at t=1 (= 2·ln2) and t=0 (= ln2), posWeight=2.
-        var perPos = BCEWithLogitsLoss.PerElement(Tensor(new long[] { 1L }, 0f), Tensor(new long[] { 1L }, 1f), posWeight: posW)
+        var perPos = BCEWithLogitsLoss.PerElement(Tensor([1L], 0f), Tensor([1L], 1f), posWeight: posW)
             .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-        var perNeg = BCEWithLogitsLoss.PerElement(Tensor(new long[] { 1L }, 0f), Tensor(new long[] { 1L }, 0f), posWeight: posW)
+        var perNeg = BCEWithLogitsLoss.PerElement(Tensor([1L], 0f), Tensor([1L], 0f), posWeight: posW)
             .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
         // Mean over [t=1, t=0] with posWeight=2 → 1.5·ln2.
-        var posW2 = Tensor(new long[] { 2L }, 2f, 2f);
+        var posW2 = Tensor([2L], 2f, 2f);
         var meanMix = BCEWithLogitsLoss.Reduced(
-            Tensor(new long[] { 2L }, 0f, 0f), Tensor(new long[] { 2L }, 1f, 0f),
+            Tensor([2L], 0f, 0f), Tensor([2L], 1f, 0f),
             posWeight: posW2, reduction: LossReduction.Mean);
 
         var ok = Within((perPos - Scalar(2f) * ln2).Abs(), 1e-4f)
@@ -2305,9 +2288,6 @@ public partial class NNBCEWithLogitsPosWeightChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(3L);   // all 3 closed-form ok-bits + touch
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>
@@ -2323,8 +2303,8 @@ public partial class NNSmoothL1BetaChecks
 {
     public static Scalar<bit> Inline(Tensor<float32> t)
     {
-        var pred = Tensor(new long[] { 1L }, 2f);
-        var tgt = Tensor(new long[] { 1L }, 0f);
+        var pred = Tensor([1L], 2f);
+        var tgt = Tensor([1L], 0f);
 
         Scalar<int64> CheckBeta(float beta, float expected)
         {
@@ -2338,9 +2318,6 @@ public partial class NNSmoothL1BetaChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(6L);   // 6 closed-form ok-bits (3 values + 3 bridges) + touch
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>
@@ -2355,8 +2332,8 @@ public partial class NNRegressionReductionChecks
 {
     public static Scalar<bit> Inline(Tensor<float32> t)
     {
-        var p1 = Tensor(new long[] { 2L }, 1f, 3f);
-        var t1 = Tensor(new long[] { 2L }, 0f, 1f);
+        var p1 = Tensor([2L], 1f, 3f);
+        var t1 = Tensor([2L], 0f, 1f);
 
         var l1Mean = L1Loss.Reduced(p1, t1, reduction: LossReduction.Mean);
         var l1Sum = L1Loss.Reduced(p1, t1, reduction: LossReduction.Sum);
@@ -2364,8 +2341,8 @@ public partial class NNRegressionReductionChecks
         var l1Per0 = ((Tensor<float32>)OnnxOp.Slice(l1Per, Vector(0L), Vector(1L))).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
         var l1Per1 = ((Tensor<float32>)OnnxOp.Slice(l1Per, Vector(1L), Vector(2L))).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        var p22 = Tensor(new long[] { 2L, 2L }, 1f, 2f, 3f, 4f);
-        var z22 = Tensor(new long[] { 2L, 2L }, 0f, 0f, 0f, 0f);
+        var p22 = Tensor([2L, 2L], 1f, 2f, 3f, 4f);
+        var z22 = Tensor([2L, 2L], 0f, 0f, 0f, 0f);
         var l2Mean = L2Loss.Reduced(p22, z22, reduction: LossReduction.Mean);
         var l2Sum = L2Loss.Reduced(p22, z22, reduction: LossReduction.Sum);
 
@@ -2385,16 +2362,13 @@ public partial class NNRegressionReductionChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(8L);   // all 8 closed-form ok-bits + touch
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 // ---------------------------------------------------------------------------
 // Rig-wrapper [Module]s for the loss-knobs (design §7 "Rig-path tests"). These
 // are tiny 2-input (predictions, targets) wrappers that BAKE the build-time
 // knobs / a constant weight tensor, so they satisfy the TrainingRig 2-input
-// scalar-loss contract. Driven by NNLibraryTrainingCoverageTests via
+// scalar-loss contract. Driven by NNLibrary*TrainingCoverageTests via
 // TrainingRig.FromScratch + a TrainStep.
 // ---------------------------------------------------------------------------
 
@@ -2421,7 +2395,7 @@ public partial class NNCrossEntropyBakedWeightLoss
 {
     public static Scalar<float32> Inline(Tensor<float32> predictions, Tensor<int64> targets)
         => CrossEntropyLoss.Reduced(predictions, targets,
-            weight: Tensor(new long[] { 2L }, 2f, 1f), reduction: LossReduction.Mean);
+            weight: Tensor([2L], 2f, 1f), reduction: LossReduction.Mean);
 }
 
 // ---------------------------------------------------------------------------
@@ -2482,7 +2456,7 @@ public partial class NNBatchNormTrainGradModel
 // ---------------------------------------------------------------------------
 // Generalized rank-generic BatchNorm coverage models (design §7 groups A–G).
 // Every BatchNorm graph carries Globals.StateUpdate links, so ALL of these run
-// through the rig (NNLibraryTrainingCoverageTests), not AutoTest — even the
+// through the rig (NNLibrary*TrainingCoverageTests), not AutoTest — even the
 // "pure" eval-path closed-form checks (the plain inference executor has no
 // STATE_UPDATE_LINK op). Hypers are fixed via BatchNorm.Model(...) so the model
 // graphs are inputs-only. Closed-form checks output (y − reference) so a zero
@@ -2835,7 +2809,7 @@ public partial class NNStaticWrapperWindowEyeDetCheck
         var det = NN.DeterminantMatrix(sq);
         var eye = NN.EyeLike<float32>(sq);
         var eyeShifted = NN.EyeLike<int64>((Variable)sq, k: 1);
-        var cat = NN.Concat(new[] { sq, sq }, axis: 0);
+        var cat = NN.Concat([sq, sq], axis: 0);
         return (blackman, blackman32, hamming, hann, det, eye, eyeShifted, cat);
     }
 }
@@ -2866,7 +2840,7 @@ public partial class NNStaticWrapperPoolMathCheck
 // Analytic-check fixtures promoted from the 2026-06-12 framework behavior
 // test campaign.
 // The constant initializers make every gradient and 1–2-step optimizer update
-// hand-derivable, so NNLibraryTrainingCoverageTests can assert exact post-step
+// hand-derivable, so NNLibrary*TrainingCoverageTests can assert exact post-step
 // parameter/state values through real TrainStep execution.
 // ---------------------------------------------------------------------------
 
@@ -2892,7 +2866,7 @@ public static partial class AnalyticInitOne
 public static partial class AnalyticInitRange4
 {
     public static Tensor<float32> Inline(Vector<int64> shape)
-        => Tensor<float32>.Fill(shape, Globals.TensorData(1, 1.0f)) * Tensor(new long[] { 4L }, 1f, 2f, 3f, 4f);
+        => Tensor<float32>.Fill(shape, Globals.TensorData(1, 1.0f)) * Tensor([4L], 1f, 2f, 3f, 4f);
 }
 
 /// <summary>Constant [[1,2],[3,4]].</summary>
@@ -2900,7 +2874,7 @@ public static partial class AnalyticInitRange4
 public static partial class AnalyticInitRange22
 {
     public static Tensor<float32> Inline(Vector<int64> shape)
-        => Tensor<float32>.Fill(shape, Globals.TensorData(1, 1.0f)) * Tensor(new long[] { 2L, 2L }, 1f, 2f, 3f, 4f);
+        => Tensor<float32>.Fill(shape, Globals.TensorData(1, 1.0f)) * Tensor([2L, 2L], 1f, 2f, 3f, 4f);
 }
 
 /// <summary>y = w[1] · x (broadcast): grad_w must sum-reduce over the broadcast axis.</summary>
@@ -3003,14 +2977,14 @@ public partial class NNLossEdgeCaseChecks
 {
     public static Scalar<bit> Inline(Tensor<float32> d)   // d = [0.5, 2]
     {
-        var z1 = Tensor(new long[] { 1L }, 0f);
+        var z1 = Tensor([1L], 0f);
         var quad = SmoothL1Loss.Inline((Tensor<float32>)OnnxOp.Slice(d, Vector(0L), Vector(1L)), z1);
         var lin = SmoothL1Loss.Inline((Tensor<float32>)OnnxOp.Slice(d, Vector(1L), Vector(2L)), z1);
-        var bceClamped = BCELoss.Inline(Tensor(new long[] { 2L }, 0f, 1f), Tensor(new long[] { 2L }, 0f, 1f));
-        var bceWrong = BCELoss.Inline(Tensor(new long[] { 1L }, 0f), Tensor(new long[] { 1L }, 1f));
-        var bwlHi = BCEWithLogitsLoss.Inline(Tensor(new long[] { 1L }, 100f), Tensor(new long[] { 1L }, 1f));
-        var bwlLo = BCEWithLogitsLoss.Inline(Tensor(new long[] { 1L }, -100f), Tensor(new long[] { 1L }, 1f));
-        var ce = CrossEntropyLoss.Inline(Tensor(new long[] { 1L, 3L }, 1f, 2f, 3f), Vector(0L));
+        var bceClamped = BCELoss.Inline(Tensor([2L], 0f, 1f), Tensor([2L], 0f, 1f));
+        var bceWrong = BCELoss.Inline(Tensor([1L], 0f), Tensor([1L], 1f));
+        var bwlHi = BCEWithLogitsLoss.Inline(Tensor([1L], 100f), Tensor([1L], 1f));
+        var bwlLo = BCEWithLogitsLoss.Inline(Tensor([1L], -100f), Tensor([1L], 1f));
+        var ce = CrossEntropyLoss.Inline(Tensor([1L, 3L], 1f, 2f, 3f), Vector(0L));
 
         var ok = Within((quad - Scalar(0.125f)).Abs(), 1e-5f)
                + Within((lin - Scalar(1.5f)).Abs(), 1e-5f)
@@ -3021,9 +2995,6 @@ public partial class NNLossEdgeCaseChecks
                + Within((ce - Scalar(2.4076059f)).Abs(), 1e-4f);
         return ok > Scalar(8L);   // all 9 ok-bits required
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
@@ -3049,8 +3020,8 @@ public partial class NNLogCoshLossChecks
     public static Scalar<bit> Inline(Tensor<float32> t)
     {
         // d = [0, 1]: pred=[0,1], target=[0,0].
-        var pred01 = Tensor(new long[] { 2L }, 0f, 1f);
-        var zero2 = Tensor(new long[] { 2L }, 0f, 0f);
+        var pred01 = Tensor([2L], 0f, 1f);
+        var zero2 = Tensor([2L], 0f, 0f);
 
         var mean = LogCoshLoss.Inline(pred01, zero2);                                  // 0.21689042
         var sum = LogCoshLoss.Reduced(pred01, zero2, reduction: LossReduction.Sum);    // 0.43378083
@@ -3061,10 +3032,10 @@ public partial class NNLogCoshLossChecks
         var per1 = ((Tensor<float32>)OnnxOp.Slice(per, Vector(1L), Vector(2L))).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
         // Mid d=2 (pred=[2], target=[0]): log(cosh 2) = 1.3250027.
-        var mid = LogCoshLoss.Inline(Tensor(new long[] { 1L }, 2f), Tensor(new long[] { 1L }, 0f));
+        var mid = LogCoshLoss.Inline(Tensor([1L], 2f), Tensor([1L], 0f));
 
         // Stability d=100 (pred=[100], target=[0]): ≈ 100 − log2 = 99.30685, finite (no overflow/NaN).
-        var stab = LogCoshLoss.Inline(Tensor(new long[] { 1L }, 100f), Tensor(new long[] { 1L }, 0f));
+        var stab = LogCoshLoss.Inline(Tensor([1L], 100f), Tensor([1L], 0f));
 
         var ok = Within((mean - Scalar(0.21689042f)).Abs(), 1e-5f)
                + Within((sum - Scalar(0.43378083f)).Abs(), 1e-5f)
@@ -3076,9 +3047,6 @@ public partial class NNLogCoshLossChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(8L);   // all 8 closed-form ok-bits + touch (9 total)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
@@ -3108,8 +3076,8 @@ public partial class NNPoissonNLLLossChecks
     public static Scalar<bit> Inline(Tensor<float32> t)
     {
         // logInput=true (default): pred=[0,1], target=[1,2].
-        var predLog = Tensor(new long[] { 2L }, 0f, 1f);
-        var tgtLog = Tensor(new long[] { 2L }, 1f, 2f);
+        var predLog = Tensor([2L], 0f, 1f);
+        var tgtLog = Tensor([2L], 1f, 2f);
 
         var mean = PoissonNLLLoss.Inline(predLog, tgtLog);                                 // 0.85914091
         var sum = PoissonNLLLoss.Reduced(predLog, tgtLog, reduction: LossReduction.Sum);   // 1.71828183
@@ -3120,12 +3088,12 @@ public partial class NNPoissonNLLLossChecks
         var per1 = ((Tensor<float32>)OnnxOp.Slice(per, Vector(1L), Vector(2L))).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
         // logInput=false: pred=[1,2] (>0), target=[1,2], default eps=1e-8. mean = 0.80685281.
-        var predRate = Tensor(new long[] { 2L }, 1f, 2f);
+        var predRate = Tensor([2L], 1f, 2f);
         var noLogMean = PoissonNLLLoss.Reduced(predRate, tgtLog, logInput: false, reduction: LossReduction.Mean);
 
         // full=true Stirling on target=[0,1,3], pred=[0,0,0] (base = exp0 − t·0 = 1 each).
-        var predZ = Tensor(new long[] { 3L }, 0f, 0f, 0f);
-        var tgtF = Tensor(new long[] { 3L }, 0f, 1f, 3f);
+        var predZ = Tensor([3L], 0f, 0f, 0f);
+        var tgtF = Tensor([3L], 0f, 1f, 3f);
         var perFull = PoissonNLLLoss.PerElement(predZ, tgtF, logInput: true, full: true);   // [1, 1, 2.7640816]
         var full0 = ((Tensor<float32>)OnnxOp.Slice(perFull, Vector(0L), Vector(1L))).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
         var full1 = ((Tensor<float32>)OnnxOp.Slice(perFull, Vector(1L), Vector(2L))).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
@@ -3144,9 +3112,6 @@ public partial class NNPoissonNLLLossChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(9L);   // all 9 ok-bits + touch
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
@@ -3172,8 +3137,8 @@ public partial class NNHingeLossChecks
     public static Scalar<bit> Inline(Tensor<float32> t)
     {
         // pred=[0.5,−0.5,2], target=[1,1,1] → per-elem [0.5,1.5,0].
-        var pred = Tensor(new long[] { 3L }, 0.5f, -0.5f, 2f);
-        var tgt = Tensor(new long[] { 3L }, 1f, 1f, 1f);
+        var pred = Tensor([3L], 0.5f, -0.5f, 2f);
+        var tgt = Tensor([3L], 1f, 1f, 1f);
 
         var mean = HingeLoss.Inline(pred, tgt);                                  // 0.66666667
         var sum = HingeLoss.Reduced(pred, tgt, reduction: LossReduction.Sum);    // 2.0
@@ -3185,10 +3150,10 @@ public partial class NNHingeLossChecks
         var per2 = ((Tensor<float32>)OnnxOp.Slice(per, Vector(2L), Vector(3L))).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
         // Negative-class: pred=[−2], target=[−1] → relu(1−2) = 0.
-        var neg = HingeLoss.Inline(Tensor(new long[] { 1L }, -2f), Tensor(new long[] { 1L }, -1f));
+        var neg = HingeLoss.Inline(Tensor([1L], -2f), Tensor([1L], -1f));
 
         // Exact-margin edge: pred=[1], target=[1] → relu(0) = 0.
-        var edge = HingeLoss.Inline(Tensor(new long[] { 1L }, 1f), Tensor(new long[] { 1L }, 1f));
+        var edge = HingeLoss.Inline(Tensor([1L], 1f), Tensor([1L], 1f));
 
         var ok = Within((mean - Scalar(0.66666667f)).Abs(), 1e-5f)
                + Within((sum - Scalar(2f)).Abs(), 1e-5f)
@@ -3201,9 +3166,6 @@ public partial class NNHingeLossChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(10L);   // all 10 ok-bits + touch (11 total)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
@@ -3227,8 +3189,8 @@ public partial class NNSquaredHingeLossChecks
     public static Scalar<bit> Inline(Tensor<float32> t)
     {
         // pred=[0.5,−0.5,2], target=[1,1,1] → per-elem [0.25,2.25,0].
-        var pred = Tensor(new long[] { 3L }, 0.5f, -0.5f, 2f);
-        var tgt = Tensor(new long[] { 3L }, 1f, 1f, 1f);
+        var pred = Tensor([3L], 0.5f, -0.5f, 2f);
+        var tgt = Tensor([3L], 1f, 1f, 1f);
 
         var mean = SquaredHingeLoss.Inline(pred, tgt);                                  // 0.83333333
         var sum = SquaredHingeLoss.Reduced(pred, tgt, reduction: LossReduction.Sum);    // 2.5
@@ -3240,8 +3202,8 @@ public partial class NNSquaredHingeLossChecks
         var per2 = ((Tensor<float32>)OnnxOp.Slice(per, Vector(2L), Vector(3L))).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
         // Keras cross-check: target=[−1,1,1], pred=[0.6,−0.7,−0.5] → mean 2.56666667.
-        var kerasPred = Tensor(new long[] { 3L }, 0.6f, -0.7f, -0.5f);
-        var kerasTgt = Tensor(new long[] { 3L }, -1f, 1f, 1f);
+        var kerasPred = Tensor([3L], 0.6f, -0.7f, -0.5f);
+        var kerasTgt = Tensor([3L], -1f, 1f, 1f);
         var keras = SquaredHingeLoss.Inline(kerasPred, kerasTgt);   // 2.56666667
 
         var ok = Within((mean - Scalar(0.83333333f)).Abs(), 1e-5f)
@@ -3254,9 +3216,6 @@ public partial class NNSquaredHingeLossChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(7L);   // all 7 ok-bits + touch (8 total)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
@@ -3283,9 +3242,9 @@ public partial class NNBinaryFocalLossChecks
 {
     public static Scalar<bit> Inline(Tensor<float32> t)
     {
-        var logit0 = Tensor(new long[] { 1L }, 0f);
-        var tgt1 = Tensor(new long[] { 1L }, 1f);
-        var tgt0 = Tensor(new long[] { 1L }, 0f);
+        var logit0 = Tensor([1L], 0f);
+        var tgt1 = Tensor([1L], 1f);
+        var tgt0 = Tensor([1L], 0f);
 
         // Inline defaults (α=0.25, γ=2), logit=0, t=1 → 0.04332170.
         var inline = BinaryFocalLoss.Inline(logit0, tgt1);
@@ -3309,9 +3268,6 @@ public partial class NNBinaryFocalLossChecks
         return ok + Within(touch, 1e-6f) > Scalar(6L);   // all 6 ok-bits + touch (7 total)
     }
 
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
-
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
 }
@@ -3328,7 +3284,7 @@ public partial class NNBinaryFocalLossChecks
 // init; op-level gradient coverage lives in AutoGradOpsTests. RNN has no QEE step
 // values, so value correctness comes from the ORT backend inside AdvancedTestGraph
 // (note [2] of the design). The relu / bidirectional BPTT-throws guards live as
-// [Fact]s in NNLibraryTrainingCoverageTests.
+// [Fact]s in NNLibrary*TrainingCoverageTests.
 // ---------------------------------------------------------------------------
 
 
@@ -3394,7 +3350,7 @@ public partial class RnnSingleStepAnchorTanh
 /// <summary>§7-3 relu nonlinearity (forward only): Recurrent.RNN(Relu) — frozen forward-value
 /// golden (self-generated): the configured layer's output must match the inlined reference.
 /// Forward-value check only (relu RNN BPTT throws AD003 — pinned separately in
-/// NNLibraryTrainingCoverageTests).</summary>
+/// NNLibrary*TrainingCoverageTests).</summary>
 [Module]
 public partial class RnnReluForwardGolden
 {
@@ -3465,7 +3421,7 @@ public partial class RnnReverseGolden
 /// <summary>§7-6 direction Bidirectional (forward inference only): Recurrent.RNN(Bidirectional) —
 /// frozen forward-value golden (self-generated): the configured layer's output must match the
 /// inlined reference. Forward-value only (bidirectional BPTT throws AD003 — pinned in
-/// NNLibraryTrainingCoverageTests).</summary>
+/// NNLibrary*TrainingCoverageTests).</summary>
 [Module]
 public partial class RnnBidirectionalGolden
 {
@@ -3563,7 +3519,7 @@ public partial class RnnBidirectionalBpttThrowCheck
 // op-level gradient coverage lives in AutoGradOpsTests. LSTM has no QEE step
 // values, so value correctness comes from the ORT backend inside AdvancedTestGraph.
 // The bidirectional BPTT-throws guard lives as a [Fact] in
-// NNLibraryTrainingCoverageTests.
+// NNLibrary*TrainingCoverageTests.
 // ---------------------------------------------------------------------------
 
 
@@ -3679,7 +3635,7 @@ public partial class LstmReverseGolden
 /// <summary>§7-5 direction Bidirectional (forward inference only): Recurrent.LSTM(Bidirectional) —
 /// frozen forward-value golden (self-generated): the configured layer's output must match the
 /// inlined reference. Forward-value only (bidirectional BPTT throws AD003 — pinned in
-/// NNLibraryTrainingCoverageTests).</summary>
+/// NNLibrary*TrainingCoverageTests).</summary>
 [Module]
 public partial class LstmBidirectionalGolden
 {
@@ -3789,7 +3745,7 @@ public partial class LstmBidirectionalBpttThrowCheck
 // correctness comes from the ORT backend inside AdvancedTestGraph. The
 // GRU-specific addition over the LSTM/RNN sets is the linearBeforeReset
 // both-forms check (GruLinearBeforeResetBothForms). The
-// bidirectional BPTT-throws guard lives as a [Fact] in NNLibraryTrainingCoverageTests.
+// bidirectional BPTT-throws guard lives as a [Fact] in NNLibrary*TrainingCoverageTests.
 // ---------------------------------------------------------------------------
 
 
@@ -3924,7 +3880,7 @@ public partial class GruReverseGolden
 /// <summary>§7-6 direction Bidirectional (forward inference only): Recurrent.GRU(Bidirectional) —
 /// frozen forward-value golden (self-generated): the configured layer's output must match the
 /// inlined reference. Forward-value only (bidirectional BPTT throws AD003 — pinned in
-/// NNLibraryTrainingCoverageTests).</summary>
+/// NNLibrary*TrainingCoverageTests).</summary>
 [Module]
 public partial class GruBidirectionalGolden
 {
@@ -4028,7 +3984,7 @@ public partial class GruBidirectionalBpttThrowCheck
 // op-level gradient coverage lives in AutoGradOpsTests. Cells have NO QEE step
 // values, so value correctness comes from the ORT backend inside
 // AdvancedTestGraph. The AD003 relu-cell BPTT-throws guard lives as a [Fact] in
-// NNLibraryTrainingCoverageTests.
+// NNLibrary*TrainingCoverageTests.
 // ---------------------------------------------------------------------------
 
 
@@ -4043,7 +3999,7 @@ public partial class RnnCellClosedFormTanh
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [N=1, in]
     {
         long hv = 2L;
-        var h = Tensor(new long[] { 1L, 2L }, 0.3f, -0.4f);   // nonzero previous state [N, H]
+        var h = Tensor([1L, 2L], 0.3f, -0.4f);   // nonzero previous state [N, H]
         var hOut = Recurrent.RNNCell(x, h, hiddenSize: hv);   // [N, H]
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
         var reference = Vector(-0.29498315f, -0.20810449f);
@@ -4061,7 +4017,7 @@ public partial class RnnCellClosedFormRelu
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [N=1, in]
     {
         long hv = 2L;
-        var h = Tensor(new long[] { 1L, 2L }, 0.3f, -0.4f);   // nonzero previous state
+        var h = Tensor([1L, 2L], 0.3f, -0.4f);   // nonzero previous state
         var hOut = Recurrent.RNNCell(x, h, hiddenSize: hv, nonlinearity: RnnNonlinearity.Relu);
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
         var reference = Vector(1.6354389f, 0f);
@@ -4194,7 +4150,7 @@ public partial class RnnCellReluBpttThrowCheck
     {
         var zv = (Tensor<float32>)OnnxOp.Unsqueeze(v, Vector(0L));
         var x = ((Tensor<float32>)OnnxOp.Concat([zv, Vector(0.4f)], axis: 0)).Reshape([Scalar(1L), Scalar(2L)]);
-        var h = Tensor(new long[] { 1L, 2L }, 0.3f, -0.2f);
+        var h = Tensor([1L, 2L], 0.3f, -0.2f);
         var hOut = Recurrent.RNNCell(x, h, hiddenSize: 2L, nonlinearity: RnnNonlinearity.Relu);
         var loss = hOut.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
         var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(v, loss);
@@ -4215,8 +4171,8 @@ public partial class LstmCellClosedFormGateAnchor
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [N=1, in]
     {
         long hv = 2L;
-        var prevH = Tensor(new long[] { 1L, 2L }, 0.3f, -0.4f);   // nonzero [N, H]
-        var prevC = Tensor(new long[] { 1L, 2L }, -0.1f, 0.5f);   // nonzero [N, H]
+        var prevH = Tensor([1L, 2L], 0.3f, -0.4f);   // nonzero [N, H]
+        var prevC = Tensor([1L, 2L], -0.1f, 0.5f);   // nonzero [N, H]
         var (hOut, cOut) = Recurrent.LSTMCell(x, prevH, prevC, hiddenSize: hv);
         var flat = hOut.Reshape([Scalar(-1L)]).Concat(0L, cOut.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
@@ -4356,7 +4312,7 @@ public partial class GruCellClosedFormLbrTrue
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [N=1, in]
     {
         long hv = 2L;
-        var prevH = Tensor(new long[] { 1L, 2L }, 0.3f, -0.4f);   // nonzero [N, H]
+        var prevH = Tensor([1L, 2L], 0.3f, -0.4f);   // nonzero [N, H]
         var hOut = Recurrent.GRUCell(x, prevH, hiddenSize: hv, linearBeforeReset: true);
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
         var reference = Vector(-0.021481082f, 0.086837545f);
@@ -4375,7 +4331,7 @@ public partial class GruCellClosedFormLbrFalse
     public static Scalar<bit> Inline(Tensor<float32> x)   // x is [N=1, in]
     {
         long hv = 2L;
-        var prevH = Tensor(new long[] { 1L, 2L }, 0.3f, -0.4f);   // nonzero [N, H]
+        var prevH = Tensor([1L, 2L], 0.3f, -0.4f);   // nonzero [N, H]
         var hLbrFalse = Recurrent.GRUCell(x, prevH, hiddenSize: hv, linearBeforeReset: false);
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
         var reference = Vector(-0.020215541f, 0.085180506f);
@@ -4536,9 +4492,6 @@ public partial class NNConstantInitRank1Negative
         var touch = (x * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(2L);   // both ok-bits + touch (3 total); > (3-1)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>Constant specializes Zeros and Ones: Constant.Init([2,3], Scalar(0f)) == Zeros.Init([2,3])
@@ -4564,9 +4517,6 @@ public partial class NNConstantInitMatchesZerosOnes
         var touch = (x * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(2L);   // both ok-bits + touch (3 total); > (3-1)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 // --- Orthogonal: the Björck approximation's convergence quality. Materialize
@@ -4684,9 +4634,6 @@ public partial class NNUniformRangeInRange
         return ok + Within(touch, 1e-6f) > Scalar(8L);   // all 8 ok-bits + touch (9 total); > (9-1)
     }
 
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
-
     private static Scalar<int64> AtMost(Scalar<float32> v, float bound)
         => (v <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 
@@ -4722,9 +4669,6 @@ public partial class NNNormalDistMoments
         var touch = (x * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(4L);   // all 4 ok-bits + touch (5 total); > (5-1)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 // ---------------------------------------------------------------------------
@@ -4793,9 +4737,6 @@ public partial class NNXavierKaimingGainStd
         var mean = w.Reduce(ReduceKind.Mean, keepDims: false).Scalar();
         return ((w * w).Reduce(ReduceKind.Mean, keepDims: false).Scalar() - mean * mean).Sqrt();
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 // ---------------------------------------------------------------------------
@@ -4829,11 +4770,11 @@ public partial class NNTripletMarginClosedFormChecks
 {
     public static Scalar<bit> Inline(Tensor<float32> t)
     {
-        var anchor = Tensor(new long[] { 3L, 3L },
+        var anchor = Tensor([3L, 3L],
             0f, 0f, 0f,  0f, 0f, 0f,  0f, 0f, 0f);
-        var positive = Tensor(new long[] { 3L, 3L },
+        var positive = Tensor([3L, 3L],
             1f, 0f, 0f,  2f, 0f, 0f,  2f, 0f, 0f);
-        var negative = Tensor(new long[] { 3L, 3L },
+        var negative = Tensor([3L, 3L],
             0f, 2f, 0f,  2.5f, 0f, 0f,  1f, 0f, 0f);
 
         var margin = Scalar(1f);
@@ -4874,9 +4815,6 @@ public partial class NNTripletMarginClosedFormChecks
         return (diff * diff).Reduce(ReduceKind.Sum, [Scalar(-1L)], keepDims: false).Sqrt();
     }
 
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
-
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
 }
@@ -4904,24 +4842,24 @@ public partial class NNTripletMarginSwapMarginPChecks
         var eps = Scalar(1e-6f);
 
         // --- swap on/off: d(p,n) < d(a,n) so swap shrinks dNeg and grows the loss.
-        var a = Tensor(new long[] { 1L, 3L }, 0f, 0f, 0f);
-        var pos = Tensor(new long[] { 1L, 3L }, 2f, 0f, 0f);
-        var neg = Tensor(new long[] { 1L, 3L }, 3f, 0f, 0f);
+        var a = Tensor([1L, 3L], 0f, 0f, 0f);
+        var pos = Tensor([1L, 3L], 2f, 0f, 0f);
+        var neg = Tensor([1L, 3L], 3f, 0f, 0f);
         var swapOff = TripletMarginLoss.Call(Scalar(1f), Scalar(2f), eps, Scalar(false), a, pos, neg); // 0
         var swapOn = TripletMarginLoss.Call(Scalar(1f), Scalar(2f), eps, Scalar(true), a, pos, neg);   // 2
 
         // --- margin sweep on a fixed violating triplet (dAp=2, dAn=2.5).
-        var ma = Tensor(new long[] { 1L, 3L }, 0f, 0f, 0f);
-        var mp = Tensor(new long[] { 1L, 3L }, 2f, 0f, 0f);
-        var mn = Tensor(new long[] { 1L, 3L }, 2.5f, 0f, 0f);
+        var ma = Tensor([1L, 3L], 0f, 0f, 0f);
+        var mp = Tensor([1L, 3L], 2f, 0f, 0f);
+        var mn = Tensor([1L, 3L], 2.5f, 0f, 0f);
         var m0 = TripletMarginLoss.Call(Scalar(0f), Scalar(2f), eps, Scalar(false), ma, mp, mn); // 0
         var m1 = TripletMarginLoss.Call(Scalar(1f), Scalar(2f), eps, Scalar(false), ma, mp, mn); // 0.5
         var m2 = TripletMarginLoss.Call(Scalar(2f), Scalar(2f), eps, Scalar(false), ma, mp, mn); // 1.5
 
         // --- p variation where L1 ≠ L2 (a=[0,0], p=[1,1], n=[1,2]).
-        var pa = Tensor(new long[] { 1L, 2L }, 0f, 0f);
-        var pp = Tensor(new long[] { 1L, 2L }, 1f, 1f);
-        var pn = Tensor(new long[] { 1L, 2L }, 1f, 2f);
+        var pa = Tensor([1L, 2L], 0f, 0f);
+        var pp = Tensor([1L, 2L], 1f, 1f);
+        var pn = Tensor([1L, 2L], 1f, 2f);
         var lP2 = TripletMarginLoss.Call(Scalar(1f), Scalar(2f), eps, Scalar(false), pa, pp, pn); // 0.1781456
         var lP1 = TripletMarginLoss.Call(Scalar(1f), Scalar(1f), eps, Scalar(false), pa, pp, pn); // 0
 
@@ -4937,9 +4875,6 @@ public partial class NNTripletMarginSwapMarginPChecks
         return ok + Within(touch, 1e-6f) > Scalar(10L);   // all 10 ok-bits + touch (11 total); > (11-1)
     }
 
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
-
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
 }
@@ -4950,18 +4885,18 @@ public partial class NNTripletMarginSwapMarginPChecks
 /// <c>Reduced(Mean) == Inline</c> (mean 0.8333333) and
 /// <c>Reduced(Sum)</c> equals the sum of the PerElement vector (2.5). The
 /// <c>Reduced(None)-throws</c> case is a C#-level [Fact]
-/// (TestTripletMarginReducedNoneThrows), not a graph check.
+/// (in the loss reduced-None throws group), not a graph check.
 /// </summary>
 [Module]
 public partial class NNTripletMarginReductionChecks
 {
     public static Scalar<bit> Inline(Tensor<float32> t)
     {
-        var anchor = Tensor(new long[] { 3L, 3L },
+        var anchor = Tensor([3L, 3L],
             0f, 0f, 0f,  0f, 0f, 0f,  0f, 0f, 0f);
-        var positive = Tensor(new long[] { 3L, 3L },
+        var positive = Tensor([3L, 3L],
             1f, 0f, 0f,  2f, 0f, 0f,  2f, 0f, 0f);
-        var negative = Tensor(new long[] { 3L, 3L },
+        var negative = Tensor([3L, 3L],
             0f, 2f, 0f,  2.5f, 0f, 0f,  1f, 0f, 0f);
 
         var margin = Scalar(1f);
@@ -4986,9 +4921,6 @@ public partial class NNTripletMarginReductionChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(4L);   // all 4 ok-bits + touch (5 total); > (5-1)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>
@@ -5019,18 +4951,18 @@ public partial class NNTripletMarginWithDistanceChecks
             (x, y) => { var d = x - y; return (d * d).Reduce(ReduceKind.Sum, [Scalar(-1L)], keepDims: false).Sqrt(); };
 
         // --- custom squared-L2 closed form: a=[0], p=[2], n=[2.2] → L=0.16.
-        var a1 = Tensor(new long[] { 1L, 1L }, 0f);
-        var p1 = Tensor(new long[] { 1L, 1L }, 2f);
-        var n1 = Tensor(new long[] { 1L, 1L }, 2.2f);
+        var a1 = Tensor([1L, 1L], 0f);
+        var p1 = Tensor([1L, 1L], 2f);
+        var n1 = Tensor([1L, 1L], 2.2f);
         var custom = TripletMarginWithDistance.PerElement(sqL2, 1f, false, a1, p1, n1)
             .Reduce(ReduceKind.Sum, keepDims: false).Scalar();   // 0.16
 
         // --- equivalence: euclid Func == built-in TripletMarginLoss(p=2) on §9.1 batch.
-        var anchor = Tensor(new long[] { 3L, 3L },
+        var anchor = Tensor([3L, 3L],
             0f, 0f, 0f,  0f, 0f, 0f,  0f, 0f, 0f);
-        var positive = Tensor(new long[] { 3L, 3L },
+        var positive = Tensor([3L, 3L],
             1f, 0f, 0f,  2f, 0f, 0f,  2f, 0f, 0f);
-        var negative = Tensor(new long[] { 3L, 3L },
+        var negative = Tensor([3L, 3L],
             0f, 2f, 0f,  2.5f, 0f, 0f,  1f, 0f, 0f);
         var withDist = TripletMarginWithDistance.Reduced(euclid, 1f, false, anchor, positive, negative,
             reduction: LossReduction.Mean);                                                          // 0.8333333
@@ -5038,9 +4970,9 @@ public partial class NNTripletMarginWithDistanceChecks
             anchor, positive, negative);
 
         // --- swap on the custom (squared-L2) distance: a=[0,0,0],p=[2,0,0],n=[3,0,0].
-        var sa = Tensor(new long[] { 1L, 3L }, 0f, 0f, 0f);
-        var sp = Tensor(new long[] { 1L, 3L }, 2f, 0f, 0f);
-        var sn = Tensor(new long[] { 1L, 3L }, 3f, 0f, 0f);
+        var sa = Tensor([1L, 3L], 0f, 0f, 0f);
+        var sp = Tensor([1L, 3L], 2f, 0f, 0f);
+        var sn = Tensor([1L, 3L], 3f, 0f, 0f);
         var sOff = TripletMarginWithDistance.PerElement(sqL2, 1f, false, sa, sp, sn)
             .Reduce(ReduceKind.Sum, keepDims: false).Scalar();   // 0
         var sOn = TripletMarginWithDistance.PerElement(sqL2, 1f, true, sa, sp, sn)
@@ -5055,9 +4987,6 @@ public partial class NNTripletMarginWithDistanceChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(6L);   // all 6 ok-bits + touch (7 total); > (7-1)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
@@ -5142,11 +5071,11 @@ public partial class NNCosineEmbeddingClosedFormChecks
 {
     public static Scalar<bit> Inline(Tensor<float32> t)
     {
-        var x1 = Tensor(new long[] { 6L, 2L },
+        var x1 = Tensor([6L, 2L],
             1f, 0f,  1f, 0f,  1f, 0f,  1f, 0f,  1f, 0f,  1f, 0f);
-        var x2 = Tensor(new long[] { 6L, 2L },
+        var x2 = Tensor([6L, 2L],
             2f, 0f,  0f, 1f,  -1f, 0f,  1f, 1f,  2f, 0f,  1f, 1f);
-        var y = Tensor(new long[] { 6L },
+        var y = Tensor([6L],
             1f, 1f, 1f, 1f, -1f, -1f);
 
         var margin = Scalar(0f);
@@ -5197,9 +5126,6 @@ public partial class NNCosineEmbeddingClosedFormChecks
     private static Scalar<float32> Slice1(Tensor<float32> v, long i)
         => ((Tensor<float32>)OnnxOp.Slice(v, Vector(i), Vector(i + 1L))).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
-
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
 }
@@ -5222,11 +5148,11 @@ public partial class NNCosineEmbeddingMarginGatingChecks
 {
     public static Scalar<bit> Inline(Tensor<float32> t)
     {
-        var x1 = Tensor(new long[] { 1L, 2L }, 1f, 0f);
-        var x2 = Tensor(new long[] { 1L, 2L }, 1f, 1f);   // cos = 0.70710678
+        var x1 = Tensor([1L, 2L], 1f, 0f);
+        var x2 = Tensor([1L, 2L], 1f, 1f);   // cos = 0.70710678
         var eps = Scalar(1e-8f);
-        var yNeg = Tensor(new long[] { 1L }, -1f);
-        var yPos = Tensor(new long[] { 1L }, 1f);
+        var yNeg = Tensor([1L], -1f);
+        var yPos = Tensor([1L], 1f);
 
         // y=−1 arm: margin shifts the hinge by exactly the margin (active for both).
         var neg0 = CosineEmbeddingLoss.Call(Scalar(0f), eps, x1, x2, yNeg);     // 0.70710678
@@ -5247,9 +5173,6 @@ public partial class NNCosineEmbeddingMarginGatingChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(5L);   // 5 ok-bits + touch (6 total); > (6-1)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>
@@ -5269,13 +5192,13 @@ public partial class NNCosineEmbeddingWhereSplitChecks
 {
     public static Scalar<bit> Inline(Tensor<float32> t)
     {
-        var x1 = Tensor(new long[] { 2L, 2L }, 1f, 0f,  1f, 0f);
-        var x2 = Tensor(new long[] { 2L, 2L }, 2f, 0f,  0f, 1f);   // cos = [1, 0]
+        var x1 = Tensor([2L, 2L], 1f, 0f,  1f, 0f);
+        var x2 = Tensor([2L, 2L], 2f, 0f,  0f, 1f);   // cos = [1, 0]
         var eps = Scalar(1e-8f);
         var margin = Scalar(0f);
 
-        var yA = Tensor(new long[] { 2L }, 1f, -1f);    // → [0, 0]
-        var yB = Tensor(new long[] { 2L }, -1f, 1f);    // → [1, 1]
+        var yA = Tensor([2L], 1f, -1f);    // → [0, 0]
+        var yB = Tensor([2L], -1f, 1f);    // → [1, 1]
 
         var perA = CosineEmbeddingLoss.PerElement(margin, eps, x1, x2, yA);
         var perB = CosineEmbeddingLoss.PerElement(margin, eps, x1, x2, yB);
@@ -5297,9 +5220,6 @@ public partial class NNCosineEmbeddingWhereSplitChecks
     private static Scalar<float32> Slice1(Tensor<float32> v, long i)
         => ((Tensor<float32>)OnnxOp.Slice(v, Vector(i), Vector(i + 1L))).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
-
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
 }
@@ -5317,9 +5237,9 @@ public partial class NNCosineEmbeddingReductionChecks
 {
     public static Scalar<bit> Inline(Tensor<float32> t)
     {
-        var x1 = Tensor(new long[] { 3L, 2L }, 1f, 0f,  1f, 0f,  1f, 0f);
-        var x2 = Tensor(new long[] { 3L, 2L }, 2f, 0f,  0f, 1f,  1f, 1f);   // cos = [1, 0, 0.70710678]
-        var y = Tensor(new long[] { 3L }, 1f, 1f, 1f);                      // all pull → [0, 1, 0.29289322]
+        var x1 = Tensor([3L, 2L], 1f, 0f,  1f, 0f,  1f, 0f);
+        var x2 = Tensor([3L, 2L], 2f, 0f,  0f, 1f,  1f, 1f);   // cos = [1, 0, 0.70710678]
+        var y = Tensor([3L], 1f, 1f, 1f);                      // all pull → [0, 1, 0.29289322]
         var margin = Scalar(0f);
         var eps = Scalar(1e-8f);
 
@@ -5339,9 +5259,6 @@ public partial class NNCosineEmbeddingReductionChecks
         var touch = (t * Scalar(0f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar().Abs();
         return ok + Within(touch, 1e-6f) > Scalar(4L);   // all 4 ok-bits + touch (5 total); > (5-1)
     }
-
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>
@@ -5365,9 +5282,9 @@ public partial class NNCosineSimilarityHelperChecks
         var eps = Scalar(1e-8f);
 
         // Base batch: cos = [1, 0, -1, 0.70710678, 1]
-        var a = Tensor(new long[] { 5L, 2L },
+        var a = Tensor([5L, 2L],
             1f, 0f,  1f, 0f,  1f, 0f,  1f, 0f,  3f, 4f);
-        var b = Tensor(new long[] { 5L, 2L },
+        var b = Tensor([5L, 2L],
             1f, 0f,  0f, 1f,  -1f, 0f,  1f, 1f,  3f, 4f);
         var cos = CosineEmbeddingLoss.CosineSimilarity(a, b, eps);   // [5]
         var cosRef = Cos(a, b);                                      // raw-op reference [5]
@@ -5379,16 +5296,16 @@ public partial class NNCosineSimilarityHelperChecks
         var c3 = Slice1(cos, 3L);
 
         // SCALE-INVARIANCE: cos([3,4],[3,4]) == cos([6,8],[3,4]) (positive scale).
-        var s1 = Tensor(new long[] { 1L, 2L }, 3f, 4f);
-        var s2 = Tensor(new long[] { 1L, 2L }, 3f, 4f);
-        var s1Scaled = Tensor(new long[] { 1L, 2L }, 6f, 8f);   // 2 * [3,4]
+        var s1 = Tensor([1L, 2L], 3f, 4f);
+        var s2 = Tensor([1L, 2L], 3f, 4f);
+        var s1Scaled = Tensor([1L, 2L], 6f, 8f);   // 2 * [3,4]
         var cosPlain = CosineEmbeddingLoss.CosineSimilarity(s1, s2, eps).Reduce(ReduceKind.Sum, keepDims: false).Scalar();    // 1
         var cosScaled = CosineEmbeddingLoss.CosineSimilarity(s1Scaled, s2, eps).Reduce(ReduceKind.Sum, keepDims: false).Scalar(); // 1
         var scaleInvariant = (cosPlain - cosScaled).Abs();   // == 0
 
         // EPS guard: a zero row does not NaN — cos = 0, finite.
-        var z1 = Tensor(new long[] { 1L, 2L }, 0f, 0f);
-        var z2 = Tensor(new long[] { 1L, 2L }, 1f, 0f);
+        var z1 = Tensor([1L, 2L], 0f, 0f);
+        var z2 = Tensor([1L, 2L], 1f, 0f);
         var cosZero = CosineEmbeddingLoss.CosineSimilarity(z1, z2, eps).Reduce(ReduceKind.Sum, keepDims: false).Scalar(); // 0, finite
 
         var ok = Within(refMismatch, 1e-4f)                 // helper == raw-op cosine
@@ -5417,9 +5334,6 @@ public partial class NNCosineSimilarityHelperChecks
     private static Scalar<float32> Slice1(Tensor<float32> v, long i)
         => ((Tensor<float32>)OnnxOp.Slice(v, Vector(i), Vector(i + 1L))).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
-
     private static Scalar<int64> AtLeastZero(Scalar<float32> v)
         => (v >= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
 }
@@ -5447,7 +5361,7 @@ public partial class NNCosineEmbeddingRigModel
         // y=−1 (dissimilar arm) with margin=−1 keeps the hinge relu(cos−margin)
         // active for ANY cos ∈ [−1,1] (cos − (−1) = cos + 1 ≥ 0, strictly > 0 unless
         // cos=−1), so the loss is a real, nonzero objective and the gradient flows.
-        var y = Tensor(new long[] { 2L }, -1f, -1f);
+        var y = Tensor([2L], -1f, -1f);
         return CosineEmbeddingLoss.Call(Scalar(-1f), Scalar(1e-8f), e1, e2, y);
     }
 }

@@ -1,6 +1,4 @@
-using Shorokoo.Core;
 using Shorokoo.Core.Graph;
-using Shorokoo.Graph;
 
 namespace Shorokoo.Tests;
 

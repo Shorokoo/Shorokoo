@@ -14,32 +14,13 @@ namespace Shorokoo.Tests;
 public class ConvVariantTests
 {
     [Fact]
-    public void ConvVariant_LowersAndMatchesStandardConv()
+    public void ConvVariant_LowersAndResolvesStandardShapeAndLoopIndexAttrs()
     {
         var x = TensorData(DType.Float32, [1L, 3L, 5L, 5L],
             Enumerable.Range(0, 75).Select(i => (object)(float)i).ToArray());
 
-        Assert.True(AutoTest.AdvancedTestGraph<ConvVariantMatchesStandard>(
-            hyperparamInputs: [], runtimeInputs: [x]));
-    }
-
-    [Fact]
-    public void ConvVariant_ResolvesShapeDependentAttrs()
-    {
-        var x = TensorData(DType.Float32, [1L, 3L, 5L, 5L],
-            Enumerable.Range(0, 75).Select(i => (object)(float)i).ToArray());
-
-        Assert.True(AutoTest.AdvancedTestGraph<ConvVariantShapeDependentAttrs>(
-            hyperparamInputs: [], runtimeInputs: [x]));
-    }
-
-    [Fact]
-    public void ConvVariant_ResolvesLoopShapeAndIndexDependentAttrs()
-    {
-        var x = TensorData(DType.Float32, [1L, 3L, 5L, 5L],
-            Enumerable.Range(0, 75).Select(i => (object)(float)i).ToArray());
-
-        Assert.True(AutoTest.AdvancedTestGraph<ConvVariantLoopShapeAndIndexAttrs>(
-            hyperparamInputs: [], runtimeInputs: [x]));
+        Assert.True(AutoTest.AdvancedTestGraph<ConvVariantMatchesStandard>(hyperparamInputs: [], runtimeInputs: [x]));
+        Assert.True(AutoTest.AdvancedTestGraph<ConvVariantShapeDependentAttrs>(hyperparamInputs: [], runtimeInputs: [x]));
+        Assert.True(AutoTest.AdvancedTestGraph<ConvVariantLoopShapeAndIndexAttrs>(hyperparamInputs: [], runtimeInputs: [x]));
     }
 }

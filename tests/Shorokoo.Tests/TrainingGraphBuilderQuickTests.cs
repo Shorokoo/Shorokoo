@@ -3,11 +3,7 @@ using System.Collections.Immutable;
 
 namespace Shorokoo.Tests;
 
-/// <summary>
-/// Simple sum-of-squared-differences loss: sum((pred - target)^2).
-/// Takes two tensor inputs and returns a scalar loss.
-/// Must be at namespace level for the source generator to work.
-/// </summary>
+/// <summary>Sum of squared differences: sum((pred - target)^2). Namespace level for the generator.</summary>
 [Module]
 public partial class SimpleSumSquaredLoss
 {
@@ -21,142 +17,63 @@ public partial class SimpleSumSquaredLoss
 }
 
 /// <summary>
-/// Quick tier tests for TrainingGraphBuilder.PrepareForTrainingAsFast.
-/// Verifies that a model computation graph can be composed with a loss function
-/// and automatic differentiation to produce a high-level training graph with correct
-/// inputs (model input, targets, trainable param struct) and outputs (loss, gradient struct).
-/// The returned graph contains AUTO_GRAD nodes that have not been lowered.
+/// <c>TrainingGraphBuilder.PrepareForTrainingAsFast</c>: a model graph composed with a loss and
+/// automatic differentiation yields a high-level training graph whose inputs cover model input,
+/// targets and the trainable param struct, whose outputs cover loss and gradient struct, and
+/// whose AUTO_GRAD nodes are not yet lowered.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
 public class TrainingGraphBuilderQuickTests
 {
-    #region PrepareForTrainingAsFast with InternalComputationGraph Loss Overload
-
-    /// <summary>
-    /// Verifies that PrepareForTrainingAsFast produces a high-level graph with correct structure:
-    /// inputs include model input, targets, and trainable param struct;
-    /// outputs include loss and gradient struct;
-    /// graph contains AUTO_GRAD nodes (not lowered).
-    /// </summary>
-    [Fact]
-    public void PrepareForTraining_GraphOverload_ProducesCorrectStructure()
+    private static void AssertTrainingGraphStructure(InternalComputationGraph trainingGraph)
     {
-        // PrepareForTrainingAsFast is typed on the mutable internal graph; hand it
-        // deep copies of the shared cached module graphs.
-        var modelGraph = SimplestLayer.ComputationGraph.ToInternal();
-        var lossGraph = SimpleSumSquaredLoss.ComputationGraph.ToInternal();
-
-        var trainingGraph = TrainingGraphBuilder.PrepareForTrainingAsFast(modelGraph, lossGraph);
-
-        // Should have 3 inputs: model input, targets, param struct
-        Assert.True(trainingGraph.Inputs.Count >= 3,
-            $"Expected at least 3 inputs, got {trainingGraph.Inputs.Count}");
-
-        // Should have 2 outputs: loss and gradient struct
-        Assert.True(trainingGraph.Outputs.Count >= 2,
-            $"Expected at least 2 outputs, got {trainingGraph.Outputs.Count}");
-
-        // The high-level graph should still contain AUTO_GRAD nodes (not lowered)
-        var hasAutoGrad = trainingGraph.Nodes
-            .Any(n => n.OpCode == InternalOpCodes.AUTO_GRAD);
-        Assert.True(hasAutoGrad,
-            "Expected the training graph to contain AUTO_GRAD nodes (high-level, not lowered)");
+        Assert.True(trainingGraph.Inputs.Count >= 3);
+        Assert.True(trainingGraph.Outputs.Count >= 2);
+        Assert.Contains(trainingGraph.Nodes, n => n.OpCode == InternalOpCodes.AUTO_GRAD);
     }
 
-    /// <summary>
-    /// Verifies that PrepareForTrainingAsFast throws when the model graph has no trainable parameters.
-    /// </summary>
     [Fact]
-    public void PrepareForTraining_NoTrainableParams_Throws()
+    public void PrepareForTraining_ProducesCorrectStructure()
     {
-        // A simple identity-like model with no trainable params
-        var input = Globals.InputTensor<float32>("input", rank: 1);
-        var output = OnnxOp.Identity(input, null);
-        var modelGraph = new InternalComputationGraph(
-            ImmutableArray.Create<Variable>(input),
-            ImmutableArray.Create(output));
-
-        var lossGraph = SimpleSumSquaredLoss.ComputationGraph.ToInternal();
-
-        Assert.Throws<InvalidOperationException>(() =>
-            TrainingGraphBuilder.PrepareForTrainingAsFast(modelGraph, lossGraph));
-    }
-
-    #endregion
-
-    #region PrepareForTrainingAsFast with Func Loss Overload
-
-    /// <summary>
-    /// Verifies that PrepareForTrainingAsFast with a Func delegate correctly extracts the
-    /// InternalComputationGraph from the module and produces a valid high-level training graph.
-    /// </summary>
-    [Fact]
-    public void PrepareForTraining_FuncOverload_ProducesCorrectStructure()
-    {
-        var modelGraph = SimplestLayer.ComputationGraph.ToInternal();
+        // PrepareForTrainingAsFast is typed on the mutable internal graph; hand it deep copies
+        // of the shared cached module graphs.
+        AssertTrainingGraphStructure(TrainingGraphBuilder.PrepareForTrainingAsFast(
+            SimplestLayer.ComputationGraph.ToInternal(),
+            SimpleSumSquaredLoss.ComputationGraph.ToInternal()));
 
         Func<Tensor<float32>, Tensor<float32>, Scalar<float32>> lossFunc = SimpleSumSquaredLoss.Inline;
-
-        var trainingGraph = TrainingGraphBuilder.PrepareForTrainingAsFast(modelGraph, lossFunc);
-
-        // Same structural checks as graph overload
-        Assert.True(trainingGraph.Inputs.Count >= 3,
-            $"Expected at least 3 inputs, got {trainingGraph.Inputs.Count}");
-        Assert.True(trainingGraph.Outputs.Count >= 2,
-            $"Expected at least 2 outputs, got {trainingGraph.Outputs.Count}");
-
-        // The high-level graph should still contain AUTO_GRAD nodes (not lowered)
-        var hasAutoGrad = trainingGraph.Nodes
-            .Any(n => n.OpCode == InternalOpCodes.AUTO_GRAD);
-        Assert.True(hasAutoGrad,
-            "Expected the training graph to contain AUTO_GRAD nodes (high-level, not lowered)");
+        AssertTrainingGraphStructure(TrainingGraphBuilder.PrepareForTrainingAsFast(
+            SimplestLayer.ComputationGraph.ToInternal(), lossFunc));
     }
 
-    /// <summary>
-    /// Verifies that the Func overload throws when the delegate doesn't reference
-    /// a module's Inline method.
-    /// </summary>
     [Fact]
-    public void PrepareForTraining_NonModuleFunc_Throws()
+    public void PrepareForTraining_InvalidInputs_Throw()
     {
-        var modelGraph = SimplestLayer.ComputationGraph.ToInternal();
+        var input = Globals.InputTensor<float32>("input", rank: 1);
+        var noParamsGraph = new InternalComputationGraph(
+            ImmutableArray.Create<Variable>(input),
+            ImmutableArray.Create(OnnxOp.Identity(input, null)));
+        Assert.Throws<InvalidOperationException>(() =>
+            TrainingGraphBuilder.PrepareForTrainingAsFast(
+                noParamsGraph, SimpleSumSquaredLoss.ComputationGraph.ToInternal()));
 
-        // A lambda is not a module Inline method — its method name won't be "Inline"
+        // A lambda is not a module Inline method — its method name won't be "Inline".
         Func<Tensor<float32>, Tensor<float32>, Scalar<float32>> notAModule =
             (pred, targ) => ((Tensor<float32>)OnnxOp.ReduceSum(pred - targ, keepdims: false)).Scalar();
-
         Assert.Throws<ArgumentException>(() =>
-            TrainingGraphBuilder.PrepareForTrainingAsFast(modelGraph, notAModule));
-    }
-
-    #endregion
-
-    #region Null Argument Validation
-
-    [Fact]
-    public void PrepareForTraining_NullModelGraph_Throws()
-    {
-        var lossGraph = SimpleSumSquaredLoss.ComputationGraph.ToInternal();
-        Assert.Throws<ArgumentNullException>(() =>
-            TrainingGraphBuilder.PrepareForTrainingAsFast(null!, lossGraph));
+            TrainingGraphBuilder.PrepareForTrainingAsFast(SimplestLayer.ComputationGraph.ToInternal(), notAModule));
     }
 
     [Fact]
-    public void PrepareForTraining_NullLossGraph_Throws()
+    public void PrepareForTraining_NullArgs_Throw()
     {
-        var modelGraph = SimplestLayer.ComputationGraph.ToInternal();
+        Assert.Throws<ArgumentNullException>(() => TrainingGraphBuilder.PrepareForTrainingAsFast(
+            null!, SimpleSumSquaredLoss.ComputationGraph.ToInternal()));
+        Assert.Throws<ArgumentNullException>(() => TrainingGraphBuilder.PrepareForTrainingAsFast(
+            SimplestLayer.ComputationGraph.ToInternal(), (InternalComputationGraph)null!));
         Assert.Throws<ArgumentNullException>(() =>
-            TrainingGraphBuilder.PrepareForTrainingAsFast(modelGraph, (InternalComputationGraph)null!));
+            TrainingGraphBuilder.PrepareForTrainingAsFast<Tensor<float32>, Scalar<float32>>(
+                SimplestLayer.ComputationGraph.ToInternal(), null!));
     }
-
-    [Fact]
-    public void PrepareForTraining_NullLossFunc_Throws()
-    {
-        var modelGraph = SimplestLayer.ComputationGraph.ToInternal();
-        Assert.Throws<ArgumentNullException>(() =>
-            TrainingGraphBuilder.PrepareForTrainingAsFast<Tensor<float32>, Scalar<float32>>(modelGraph, null!));
-    }
-
-    #endregion
 }

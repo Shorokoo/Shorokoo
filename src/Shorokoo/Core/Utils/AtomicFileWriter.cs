@@ -28,17 +28,19 @@ namespace Shorokoo.Core.Utils
         /// <summary>
         /// Test hook: invoked with the staged temp path after the content is written and
         /// flushed but before the commit rename. Throwing here simulates a crash in the
-        /// commit window. Hooks must filter on the path they receive (tests can run in
-        /// parallel) and be reset in a <c>finally</c>.
+        /// commit window. Thread-scoped, so a hook installed by one parallel test is invisible
+        /// to every other thread; still reset it in a <c>finally</c>.
         /// </summary>
+        [ThreadStatic]
         internal static Action<string>? CommitFaultInjection;
 
         /// <summary>
         /// Test hook: invoked at the start of rotation — i.e. after the new file has already been
         /// committed — with the committed path. Throwing here simulates a rotation failure, used to
-        /// verify rotation never fails the save. Hooks must filter on the path they receive (tests
-        /// can run in parallel) and be reset in a <c>finally</c>.
+        /// verify rotation never fails the save. Thread-scoped, so a hook installed by one parallel
+        /// test is invisible to every other thread; still reset it in a <c>finally</c>.
         /// </summary>
+        [ThreadStatic]
         internal static Action<string>? RotationFaultInjection;
 
         /// <summary>True if <paramref name="name"/> is a staged (uncommitted) sibling name.</summary>

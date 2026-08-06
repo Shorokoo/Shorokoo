@@ -34,7 +34,8 @@ namespace Shorokoo.Tests.Benchmarks;
 /// </list>
 /// </summary>
 [Trait("Domain", "Training")]
-[Trait("Purpose", "Coverage")]
+[Trait("Purpose", "Benchmark")]
+[Collection(SerialMeasurement.Name)]
 public class TrainingMemoryStabilityTests
 {
     // Pinned scenario geometry — identical to the R-1 throughput gate.
@@ -68,9 +69,9 @@ public class TrainingMemoryStabilityTests
             new AdamOptimizerHyperparameters { LearningRate = 1e-3f });
 
         var inputBatch = rig.InputDef.FromOrderedData(
-            TensorData(InputShape, new float[] { 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f }));
+            TensorData(InputShape, (float[])[1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f]));
         var targetBatch = rig.TargetDef.FromOrderedData(
-            TensorData(TargetShape, new float[] { 1f, 0f, 1f, 0f }));
+            TensorData(TargetShape, (float[])[1f, 0f, 1f, 0f]));
 
         var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < WarmupSteps; i++)
@@ -92,16 +93,8 @@ public class TrainingMemoryStabilityTests
         // last result can't be collected before we read the heap.
         Assert.NotNull(ckpt);
 
-        Assert.True(managedGrowth <= ManagedGrowthBudgetBytes,
-            $"Training loop leaked managed memory: live heap grew {Mib(managedGrowth)} over " +
-            $"{MeasuredSteps} steps ({managedBefore:N0} -> {managedAfter:N0} bytes), exceeding the " +
-            $"{Mib(ManagedGrowthBudgetBytes)} budget. A non-leaking loop returns to ~baseline after a " +
-            $"forced collection. (RSS moved {Mib(rssGrowth)}.)");
-
-        Assert.True(rssGrowth <= RssGrowthCeilingBytes,
-            $"Training loop working set grew {Mib(rssGrowth)} over {MeasuredSteps} steps " +
-            $"({rssBefore:N0} -> {rssAfter:N0} bytes), exceeding the {Mib(RssGrowthCeilingBytes)} " +
-            $"catastrophe ceiling — likely an unmanaged / handle leak. (Managed heap moved {Mib(managedGrowth)}.)");
+        Assert.True(managedGrowth <= ManagedGrowthBudgetBytes);
+        Assert.True(rssGrowth <= RssGrowthCeilingBytes);
     }
 
     /// <summary>Live managed bytes after a blocking full collection — drops transient garbage.</summary>

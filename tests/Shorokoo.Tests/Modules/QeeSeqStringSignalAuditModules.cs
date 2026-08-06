@@ -1,3 +1,5 @@
+using static Shorokoo.Tests.Modules.QeeAuditVerdicts;
+
 namespace Shorokoo.Tests.Modules
 {
     // ===================================================================
@@ -10,7 +12,7 @@ namespace Shorokoo.Tests.Modules
     //
     //  Driven by QeeSeqStringSignalAuditTests: ORT-runnable modules go
     //  through AdvancedTestGraph (validating the expectations against
-    //  real ONNX Runtime) plus the strict QeeSelfCheck; modules built on
+    //  real ONNX Runtime) plus the strict QeeAudit strict-QEE; modules built on
     //  Shorokoo-internal ops or @string runtime inputs (which carry no
     //  data into QEE/ORT result comparison) use the QeeOnly-style strict
     //  check instead.
@@ -68,18 +70,6 @@ namespace Shorokoo.Tests.Modules
         }
 
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
-
-        private static Scalar<int64> IntMismatch1(Scalar<int64> actual, long expected)
-            => (actual.Reshape(Vector(1L)) - Vector(expected)).Abs()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>SplitToSequence: default (no split → size-1 chunks, keepdims=1 keeps the
@@ -130,18 +120,6 @@ namespace Shorokoo.Tests.Modules
         }
 
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
-
-        private static Scalar<int64> IntMismatch1(Scalar<int64> actual, long expected)
-            => (actual.Reshape(Vector(1L)) - Vector(expected)).Abs()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Spec conformance for the SplitToSequence keepdims/split interaction:
@@ -163,14 +141,6 @@ namespace Shorokoo.Tests.Modules
                 FloatMismatch(last.Reshape(Vector(-1L)), Vector(3f, 6f));
             return mismatch < Scalar(1L);
         }
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>ReverseSequence VALUES: batch_axis=0/time_axis=1 (the spec's "batchwise"
@@ -204,14 +174,6 @@ namespace Shorokoo.Tests.Modules
         }
 
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Optional family: Optional(x) → OptionalHasElement is concretely TRUE and
@@ -238,14 +200,6 @@ namespace Shorokoo.Tests.Modules
         }
 
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Window VALUES against the spec formulas (size is a runtime input so the
@@ -280,14 +234,6 @@ namespace Shorokoo.Tests.Modules
         }
 
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>DFT VALUES (real [1,4,1] input, default axis −2): forward complex output
@@ -327,14 +273,6 @@ namespace Shorokoo.Tests.Modules
         }
 
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>TfIdfVectorizer output extent = max(ngram_indexes) + 1 (= 5 here), NOT the
@@ -348,15 +286,15 @@ namespace Shorokoo.Tests.Modules
         {
             var v1 = (Tensor<float32>)OnnxOp.TfIdfVectorizer(xi,
                 maxGramLength: 2L, maxSkipCount: 0L, minGramLength: 1L, mode: "TF",
-                ngramCounts: new long[] { 0L, 2L },
-                ngramIndexes: new long[] { 2L, 0L, 4L },
-                poolInt64s: new long[] { 1L, 2L, 3L, 4L },
+                ngramCounts: [0L, 2L],
+                ngramIndexes: [2L, 0L, 4L],
+                poolInt64s: [1L, 2L, 3L, 4L],
                 poolStrings: null, weights: null);
             var v2 = (Tensor<float32>)OnnxOp.TfIdfVectorizer(xi.Reshape(Vector(1L, 4L)),
                 maxGramLength: 2L, maxSkipCount: 0L, minGramLength: 1L, mode: "TF",
-                ngramCounts: new long[] { 0L, 2L },
-                ngramIndexes: new long[] { 2L, 0L, 4L },
-                poolInt64s: new long[] { 1L, 2L, 3L, 4L },
+                ngramCounts: [0L, 2L],
+                ngramIndexes: [2L, 0L, 4L],
+                poolInt64s: [1L, 2L, 3L, 4L],
                 poolStrings: null, weights: null);
 
             var mismatch =
@@ -364,9 +302,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(v2, Vector(1L, 5L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>@string-input ops (QeeOnly-strict: string runtime data never reaches QEE or
@@ -385,7 +320,7 @@ namespace Shorokoo.Tests.Modules
             var norm = (Tensor<@string>)OnnxOp.StringNormalizer(x, caseChangeAction: "LOWER");
             var normStop = (Tensor<@string>)OnnxOp.StringNormalizer(x,
                 caseChangeAction: "LOWER", isCaseSensitive: 0L, locale: "en_US",
-                stopwords: new[] { "the" });
+                stopwords: ["the"]);
             var regex = (Tensor<bit>)OnnxOp.RegexFullMatch(concat, pattern: ".*");
             var (splitY, numSplits) = OnnxOp.StringSplit(x, delimiter: " ", maxsplit: 2L);
 
@@ -396,9 +331,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch((Tensor<int64>)numSplits, Vector(2L));
             return (mismatch < Scalar(1L), normStop, (Tensor<@string>)splitY);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Shorokoo-internal control-flow/lowering ops (QeeOnly-strict — ORT has no
@@ -447,16 +379,5 @@ namespace Shorokoo.Tests.Modules
         }
 
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
-            => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 }

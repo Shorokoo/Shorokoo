@@ -15,7 +15,10 @@ public static class TestDataPaths
 
     /// <summary>Combine <see cref="Root"/> with the given relative parts.</summary>
     public static string Of(params string[] relativeParts)
-        => Path.Combine(new[] { Root }.Concat(relativeParts).ToArray());
+    {
+        string[] parts = [Root, .. relativeParts];
+        return Path.Combine(parts);
+    }
 
     private static string ResolveRoot()
     {

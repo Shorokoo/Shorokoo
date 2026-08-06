@@ -1,3 +1,5 @@
+using static Shorokoo.Tests.Modules.QeeAuditVerdicts;
+
 namespace Shorokoo.Tests.Modules
 {
     // ===================================================================
@@ -9,7 +11,7 @@ namespace Shorokoo.Tests.Modules
     //
     //  Driven two ways by QeeElementwiseAuditTests: AdvancedTestGraph
     //  validates the expected values against real ONNX Runtime execution,
-    //  and the QeeSelfCheck bit-check validates that QuickExecutionEngine
+    //  and the QeeAudit strict-QEE bit-check validates that QuickExecutionEngine
     //  computes the same concrete values (every op in the comparison
     //  chain — Sub/Abs/Greater/Cast/Reduce/Less — propagates concrete
     //  data, so a wrong or missing QEE value flips the bit or leaves it
@@ -43,11 +45,6 @@ namespace Shorokoo.Tests.Modules
                 FloatMismatch(xp.Reciprocal(), Vector(1f, 0.5f, 0.25f));
             return mismatch < Scalar(1L);
         }
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Rounding / sign / sigmoid-family unary float ops, incl. Round's
@@ -74,11 +71,6 @@ namespace Shorokoo.Tests.Modules
                 FloatMismatch(x.Relu(), Vector(0f, 0f, 0.5f, 1.5f, 2.5f));
             return mismatch < Scalar(1L);
         }
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Parametrized activations: Celu / Elu / Gelu (approximate none vs tanh —
@@ -120,8 +112,9 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>Binary + variadic arithmetic: Add / Sub / Mul / Div (float and trunc-toward-
-    /// zero int) / Pow / Mod (fmod=0 sign-of-DIVISOR int default, fmod=1 sign-of-dividend
-    /// for int and float) / Min / Max / Sum / Mean (3 inputs with a broadcast scalar).
+    /// zero int) / Pow / Mod (fmod=0 sign-of-DIVISOR int default including exact division,
+    /// fmod=1 sign-of-dividend for int and float) / Min / Max / Sum / Mean (3 inputs with a
+    /// broadcast scalar).
     /// Inputs: af = [7.5, -5.5, 9.25], bf = [2, 3, -4], ai = [7, -7, 9], bi = [2, 2, -4].</summary>
     [Module]
     public partial class QeeBinaryArithValueAuditCheck
@@ -138,6 +131,8 @@ namespace Shorokoo.Tests.Modules
                 FloatMismatch(af.Pow(Vector(2f, 1f, 0.5f)), Vector(56.25f, -5.5f, 3.041381f)) +
                 // fmod unset → 0 → numpy.mod (sign of divisor): [-7 mod 2, 9 mod -4] = [1, -3].
                 IntMismatch((Tensor<int64>)OnnxOp.Mod(ai, bi), Vector(1L, 1L, -3L)) +
+                // Exact division short-circuits the sign correction, whatever the signs.
+                IntMismatch((Tensor<int64>)OnnxOp.Mod(ai, Vector(7L, 7L, -3L)), Vector(0L, 0L, 0L)) +
                 // fmod=1 → C fmod (sign of dividend).
                 IntMismatch((Tensor<int64>)OnnxOp.Mod(ai, bi, fmod: true), Vector(1L, -1L, 1L)) +
                 FloatMismatch((Tensor<float32>)OnnxOp.Mod(af, bf, fmod: true), Vector(1.5f, -2.5f, 1.25f)) +
@@ -149,14 +144,6 @@ namespace Shorokoo.Tests.Modules
                 IntMismatch((Tensor<int64>)OnnxOp.Max(ai, bi), Vector(7L, 2L, 9L));
             return mismatch < Scalar(1L);
         }
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
-            => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Comparisons (float, int and — for Equal — bool inputs, all → bool output)
@@ -212,18 +199,23 @@ namespace Shorokoo.Tests.Modules
                 IntMismatch(((Tensor<uint32>)OnnxOp.BitShift(ua, ub, BitShiftDirection.Left)).Cast<int64>(),
                     Vector(12288L, 320L, 120L)) +
                 IntMismatch(((Tensor<uint32>)OnnxOp.BitShift(ua, ub, BitShiftDirection.Right)).Cast<int64>(),
+                    Vector(0L, 0L, 1L)) +
+                // uint64 arm: 64 bits is the runtime buffer's own width, so it takes a
+                // different masking path from the narrower unsigned widths.
+                IntMismatch(((Tensor<uint64>)OnnxOp.BitShift(
+                        ua.Cast<uint64>(), ub.Cast<uint64>(), BitShiftDirection.Left)).Cast<int64>(),
+                    Vector(12288L, 320L, 120L)) +
+                IntMismatch(((Tensor<uint64>)OnnxOp.BitShift(
+                        ua.Cast<uint64>(), ub.Cast<uint64>(), BitShiftDirection.Right)).Cast<int64>(),
                     Vector(0L, 0L, 1L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
-            => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
-    /// <summary>Misc elementwise: IsInf (detect_positive / detect_negative variants over
-    /// [inf, -inf, NaN, 2] built via division), IsNaN, Cast (float→int64 trunc-toward-zero,
-    /// int64→float, float→bool), CastLike, Where (float / int / bool 3-way broadcast
-    /// select), Expand. Inputs: wv = [1, -1, 0, 2], wd = [0, 0, 0, 1], pw = [T, F, T, F].</summary>
+    /// <summary>Misc elementwise: IsInf via the Tensor wrapper (detect_positive /
+    /// detect_negative variants over [inf, -inf, NaN, 2] built via division), IsNaN,
+    /// Cast (float→int64 trunc-toward-zero, int64→float, float→bool), CastLike,
+    /// Where (float / int / bool 3-way broadcast select), Expand. Inputs: wv = [1, -1, 0, 2], wd = [0, 0, 0, 1], pw = [T, F, T, F].</summary>
     [Module]
     public partial class QeeMiscElementwiseValueAuditCheck
     {
@@ -233,9 +225,9 @@ namespace Shorokoo.Tests.Modules
             var scaled = wv * Scalar(1.7f); // [1.7, -1.7, 0, 3.4]
             var castI = scaled.Cast<int64>(); // trunc toward zero → [1, -1, 0, 3]
             var mismatch =
-                BoolMismatch((Tensor<bit>)OnnxOp.IsInf(q), Vector(1L, 1L, 0L, 0L)) +
-                BoolMismatch((Tensor<bit>)OnnxOp.IsInf(q, detectNegative: false, detectPositive: true), Vector(1L, 0L, 0L, 0L)) +
-                BoolMismatch((Tensor<bit>)OnnxOp.IsInf(q, detectNegative: true, detectPositive: false), Vector(0L, 1L, 0L, 0L)) +
+                BoolMismatch(q.IsInf(), Vector(1L, 1L, 0L, 0L)) +
+                BoolMismatch(q.IsInf(detectNegative: false, detectPositive: true), Vector(1L, 0L, 0L, 0L)) +
+                BoolMismatch(q.IsInf(detectNegative: true, detectPositive: false), Vector(0L, 1L, 0L, 0L)) +
                 BoolMismatch((Tensor<bit>)OnnxOp.IsNaN(q), Vector(0L, 0L, 1L, 0L)) +
                 IntMismatch(castI, Vector(1L, -1L, 0L, 3L)) +
                 FloatMismatch(castI.Cast<float32>(), Vector(1f, -1f, 0f, 3f)) +
@@ -253,16 +245,13 @@ namespace Shorokoo.Tests.Modules
             => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
                 .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
-        private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
-            => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
         private static Scalar<int64> BoolMismatch(Tensor<bit> actual, Vector<int64> expected)
             => (actual.Cast<int64>() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Where with BOOL then/else values: <c>Where([T,F,T,F], p, Not(p))</c> →
     /// all-true. ONNX Runtime's CPU EP has no bool-typed Where kernel, so this module is
-    /// driven only by the QeeSelfCheck pass (QEE's BoolWhere path). Input pw = [T, F, T, F].</summary>
+    /// driven only by the QeeAudit strict-QEE pass (QEE's BoolWhere path). Input pw = [T, F, T, F].</summary>
     [Module]
     public partial class QeeWhereBoolValueAuditCheck
     {
@@ -348,10 +337,5 @@ namespace Shorokoo.Tests.Modules
                 FloatMismatch(xs.Max(ys), Vector(3f, 5f));
             return mismatch < Scalar(1L);
         }
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 }

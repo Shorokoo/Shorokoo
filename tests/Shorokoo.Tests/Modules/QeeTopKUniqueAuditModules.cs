@@ -1,3 +1,5 @@
+using static Shorokoo.Tests.Modules.QeeAuditVerdicts;
+
 namespace Shorokoo.Tests.Modules
 {
     // Phase-4 follow-up audit modules for TopK and Unique (both were missed by the
@@ -45,14 +47,6 @@ namespace Shorokoo.Tests.Modules
 
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
         private static Tensor<int64> FlatI(Tensor<int64> t) => t.Reshape(Vector(-1L));
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
-            => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Unique axis-form SHAPES (data-dependent extent — checked under real ORT
@@ -76,8 +70,5 @@ namespace Shorokoo.Tests.Modules
                 IntMismatch(vals.ShapeTensor(), Vector(2L, 2L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
-            => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 }

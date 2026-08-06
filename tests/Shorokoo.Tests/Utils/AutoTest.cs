@@ -40,15 +40,16 @@ namespace Shorokoo.Tests.Utils
             var originalTensorData = resultA.Select(x => x.ToTensorData()).ToArray();
             originalResults = originalTensorData.Select(td => td.AccessRawMemory().ToArray()).ToArray();
 
-            // Convention: a graph whose sole output is a Scalar<bit> is treated as a
-            // self-checking computation — the bit must be 1 (true). Lets module-shaped
-            // coverage tests embed their result validation inside the module's Inline
-            // method and keep the xUnit test as a one-liner.
+            // Convention: a graph whose sole output is a bool is treated as a self-checking
+            // computation — every bit must be true. Lets module-shaped coverage tests embed
+            // their result validation inside the module's Inline method and keep the xUnit
+            // test as a one-liner. Any shape counts, not just rank 0: a check module miswired
+            // to return e.g. a [1]-shaped bool would otherwise degrade silently to
+            // roundtrip-only validation and pass without its value check ever running.
             if (originalTensorData.Length == 1
                 && originalTensorData[0].DType == DType.Bool
-                && originalTensorData[0].Shape.Dims.Length == 0
                 && originalResults[0].Length > 0
-                && originalResults[0][0] == 0)
+                && Array.IndexOf<byte>(originalResults[0], 0) >= 0)
                 return false;
 
             if (testOnnxRoundtrip)

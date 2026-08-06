@@ -4,20 +4,10 @@ using static Shorokoo.Tests.Utils.SelfCheck;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Coverage-purpose tests for <see cref="Globals"/> constructor methods in
-/// <c>Core/Global.Constructors.cs</c>. The bulk of that file is a per-DType
-/// constructor catalog (13 arms per concept) that the broader Modules
-/// coverage suite only exercises for Float32 and Int64. This file packs the
-/// remaining DType arms into a few <c>[Module]</c> modules.
-///
-/// <para>
-/// Each module returns a <see cref="Scalar{T}"/> verdict that depends on every constructed
-/// value it exercises (folded via <see cref="SelfCheck"/>), so the constructed nodes are
-/// reachable graph outputs that actually execute (no pruning) instead of being discarded into
-/// <c>_</c> and silently dropped during concretization (see issue #4). A <c>Tensor</c> input is
-/// folded into each verdict (contributing 0) so the graph keeps a runtime input and the
-/// input-free C# codegen round-trip stays skipped, as the original passthrough modules did.
-/// </para>
+/// Coverage for the <see cref="Globals"/> constructor catalog (13 per-DType arms per concept),
+/// of which the broader Modules coverage suite only exercises Float32 and Int64. The remaining
+/// arms are packed into the self-checking <c>[Module]</c>s below, each folding every constructed
+/// value into its verdict so nothing can be pruned during concretization.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -25,21 +15,20 @@ public class GlobalConstructorsCoverageTests
 {
     private static TensorData[] Input => [TensorDataWithSmallVals(DType.Float32, [5L])];
 
+    private static void Run<TModule>()
+        => Assert.True(AutoTest.AdvancedTestGraph<TModule>(hyperparamInputs: [], runtimeInputs: Input));
+
+    // Kept on its own: the dispatcher module alone runs several seconds.
     [Fact]
-    public void TestScalarAndFillDispatcher()
-        => Assert.True(AutoTest.AdvancedTestGraph<ScalarAndFillDispatcherModel>(hyperparamInputs: [], runtimeInputs: Input));
+    public void TestScalarAndFillDispatcher() => Run<ScalarAndFillDispatcherModel>();
 
     [Fact]
-    public void TestPureDataConstructor()
-        => Assert.True(AutoTest.AdvancedTestGraph<PureDataConstructorModel>(hyperparamInputs: [], runtimeInputs: Input));
-
-    [Fact]
-    public void TestTensorStructFactory()
-        => Assert.True(AutoTest.AdvancedTestGraph<TensorStructFactoryModel>(hyperparamInputs: [], runtimeInputs: Input));
-
-    [Fact]
-    public void TestVariableAndInputConstructors()
-        => Assert.True(AutoTest.AdvancedTestGraph<VariableAndInputConstructorsModel>(hyperparamInputs: [], runtimeInputs: Input));
+    public void TestDataStructAndVariableConstructors()
+    {
+        Run<PureDataConstructorModel>();
+        Run<TensorStructFactoryModel>();
+        Run<VariableAndInputConstructorsModel>();
+    }
 }
 
 /// <summary>
@@ -239,7 +228,7 @@ public partial class PureDataConstructorModel
 {
     public static Scalar<bit> Inline(Tensor<float32> input)
     {
-        var dims = new long[] { 1L };
+        long[] dims = [1L];
         Scalar<float32> acc = Scalar(0f);
 
         // TensorData(DType, dims, params object[]) -> materialize each as a constant and fold.
@@ -258,38 +247,38 @@ public partial class PureDataConstructorModel
         acc = acc + NanAny((Tensor<float64>)Tensor(TensorData(DType.Float64, dims, (object)10.0)));
 
         // Enc/Dec round-trip — value-checked: encode then decode preserves the original values.
-        acc = acc + (Vector(Dec<bool>(Enc(new bool[] { true }))).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(1f)).Abs();
-        acc = acc + (Vector(Dec<sbyte>(Enc(new sbyte[] { 1 }))).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(1f)).Abs();
-        acc = acc + (Vector(Dec<short>(Enc(new short[] { 2 }))).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(2f)).Abs();
-        acc = acc + (Vector(Dec<int>(Enc(new int[] { 3 }))).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(3f)).Abs();
-        acc = acc + (Vector(Dec<long>(Enc(new long[] { 4 }))).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(4f)).Abs();
-        acc = acc + (Vector(Dec<byte>(Enc(new byte[] { 5 }))).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(5f)).Abs();
-        acc = acc + (Vector(Dec<ushort>(Enc(new ushort[] { 6 }))).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(6f)).Abs();
-        acc = acc + (Vector(Dec<uint>(Enc(new uint[] { 7 }))).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(7f)).Abs();
-        acc = acc + (Vector(Dec<ulong>(Enc(new ulong[] { 8 }))).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(8f)).Abs();
-        acc = acc + NanAny(Vector(Dec<BFloat16>(Enc(new BFloat16[] { (BFloat16)0.5f }))));
-        acc = acc + NanAny(Vector(Dec<Float16>(Enc(new Float16[] { (Float16)0.5f }))));
-        acc = acc + (Vector(Dec<float>(Enc(new float[] { 9f }))).Reduce(ReduceKind.Sum) - Scalar(9f)).Abs();
-        acc = acc + (Vector(Dec<double>(Enc(new double[] { 10.0 }))).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(10f)).Abs();
+        acc = acc + (Vector(Dec<bool>(Enc<bool>([true]))).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(1f)).Abs();
+        acc = acc + (Vector(Dec<sbyte>(Enc<sbyte>([1]))).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(1f)).Abs();
+        acc = acc + (Vector(Dec<short>(Enc<short>([2]))).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(2f)).Abs();
+        acc = acc + (Vector(Dec<int>(Enc<int>([3]))).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(3f)).Abs();
+        acc = acc + (Vector(Dec<long>(Enc<long>([4]))).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(4f)).Abs();
+        acc = acc + (Vector(Dec<byte>(Enc<byte>([5]))).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(5f)).Abs();
+        acc = acc + (Vector(Dec<ushort>(Enc<ushort>([6]))).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(6f)).Abs();
+        acc = acc + (Vector(Dec<uint>(Enc<uint>([7]))).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(7f)).Abs();
+        acc = acc + (Vector(Dec<ulong>(Enc<ulong>([8]))).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(8f)).Abs();
+        acc = acc + NanAny(Vector(Dec<BFloat16>(Enc<BFloat16>([(BFloat16)0.5f]))));
+        acc = acc + NanAny(Vector(Dec<Float16>(Enc<Float16>([(Float16)0.5f]))));
+        acc = acc + (Vector(Dec<float>(Enc<float>([9f]))).Reduce(ReduceKind.Sum) - Scalar(9f)).Abs();
+        acc = acc + (Vector(Dec<double>(Enc<double>([10.0]))).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(10f)).Abs();
 
         // TensorData(DType, dims, byte[]) and TensorData(DType, dims, base64IR) per DType — both
         // route through Dec<T>; materialize each via Tensor(data) and fold.
-        acc = acc + NanAny((Tensor<bit>)Tensor(TensorData(DType.Bool, dims, Enc(new bool[] { true }))));
-        acc = acc + NanAny((Tensor<int8>)Tensor(TensorData(DType.Int8, dims, Enc(new sbyte[] { 1 }))));
-        acc = acc + NanAny((Tensor<int16>)Tensor(TensorData(DType.Int16, dims, Enc(new short[] { 2 }))));
-        acc = acc + NanAny((Tensor<int32>)Tensor(TensorData(DType.Int32, dims, Enc(new int[] { 3 }))));
-        acc = acc + NanAny((Tensor<int64>)Tensor(TensorData(DType.Int64, dims, Enc(new long[] { 4 }))));
-        acc = acc + NanAny((Tensor<uint8>)Tensor(TensorData(DType.UInt8, dims, Enc(new byte[] { 5 }))));
-        acc = acc + NanAny((Tensor<uint16>)Tensor(TensorData(DType.UInt16, dims, Enc(new ushort[] { 6 }))));
-        acc = acc + NanAny((Tensor<uint32>)Tensor(TensorData(DType.UInt32, dims, Enc(new uint[] { 7 }))));
-        acc = acc + NanAny((Tensor<uint64>)Tensor(TensorData(DType.UInt64, dims, Enc(new ulong[] { 8 }))));
-        acc = acc + NanAny((Tensor<bfloat16>)Tensor(TensorData(DType.BFloat16, dims, Enc(new BFloat16[] { (BFloat16)0.5f }))));
-        acc = acc + NanAny((Tensor<float16>)Tensor(TensorData(DType.Float16, dims, Enc(new Float16[] { (Float16)0.5f }))));
-        acc = acc + NanAny((Tensor<float32>)Tensor(TensorData(DType.Float32, dims, Enc(new float[] { 9f }))));
-        acc = acc + NanAny((Tensor<float64>)Tensor(TensorData(DType.Float64, dims, Enc(new double[] { 10.0 }))));
+        acc = acc + NanAny((Tensor<bit>)Tensor(TensorData(DType.Bool, dims, Enc<bool>([true]))));
+        acc = acc + NanAny((Tensor<int8>)Tensor(TensorData(DType.Int8, dims, Enc<sbyte>([1]))));
+        acc = acc + NanAny((Tensor<int16>)Tensor(TensorData(DType.Int16, dims, Enc<short>([2]))));
+        acc = acc + NanAny((Tensor<int32>)Tensor(TensorData(DType.Int32, dims, Enc<int>([3]))));
+        acc = acc + NanAny((Tensor<int64>)Tensor(TensorData(DType.Int64, dims, Enc<long>([4]))));
+        acc = acc + NanAny((Tensor<uint8>)Tensor(TensorData(DType.UInt8, dims, Enc<byte>([5]))));
+        acc = acc + NanAny((Tensor<uint16>)Tensor(TensorData(DType.UInt16, dims, Enc<ushort>([6]))));
+        acc = acc + NanAny((Tensor<uint32>)Tensor(TensorData(DType.UInt32, dims, Enc<uint>([7]))));
+        acc = acc + NanAny((Tensor<uint64>)Tensor(TensorData(DType.UInt64, dims, Enc<ulong>([8]))));
+        acc = acc + NanAny((Tensor<bfloat16>)Tensor(TensorData(DType.BFloat16, dims, Enc<BFloat16>([(BFloat16)0.5f]))));
+        acc = acc + NanAny((Tensor<float16>)Tensor(TensorData(DType.Float16, dims, Enc<Float16>([(Float16)0.5f]))));
+        acc = acc + NanAny((Tensor<float32>)Tensor(TensorData(DType.Float32, dims, Enc<float>([9f]))));
+        acc = acc + NanAny((Tensor<float64>)Tensor(TensorData(DType.Float64, dims, Enc<double>([10.0]))));
 
         // base64 IR form (string overload) for a representative dtype.
-        acc = acc + NanAny((Tensor<float32>)Tensor(TensorData(DType.Float32, dims, Convert.ToBase64String(Enc(new float[] { 9f })))));
+        acc = acc + NanAny((Tensor<float32>)Tensor(TensorData(DType.Float32, dims, Convert.ToBase64String(Enc<float>([9f])))));
 
         // TensorDataWithDefaultVals / TensorDataWithSmallVals / TensorDataForConstantOfShapeFill —
         // materialize via Tensor(data) (cast to the concrete element type) and fold, for the DTypes
@@ -324,9 +313,10 @@ public partial class PureDataConstructorModel
 
         // TensorDataForConstantOfShapeFill — pure data (no graph node); exercised at build time for
         // every DType arm (its single-element fill value is what ConstantOfShape would broadcast).
-        foreach (var dt in new[] { DType.Bool, DType.Int8, DType.Int16, DType.Int32, DType.Int64,
-                                   DType.UInt8, DType.UInt16, DType.UInt32, DType.UInt64,
-                                   DType.BFloat16, DType.Float16, DType.Float32, DType.Float64 })
+        DType[] allDTypes = [DType.Bool, DType.Int8, DType.Int16, DType.Int32, DType.Int64,
+                             DType.UInt8, DType.UInt16, DType.UInt32, DType.UInt64,
+                             DType.BFloat16, DType.Float16, DType.Float32, DType.Float64];
+        foreach (var dt in allDTypes)
             Assert.NotNull(TensorDataForConstantOfShapeFill(dt));
 
         // TensorData(DType) — empty 0-dim variant (pure data, build-time coverage).
@@ -398,13 +388,14 @@ public partial class VariableAndInputConstructorsModel
 
         // Constant / param-valued constructors — folded into the verdict so they are reachable.
         Scalar<float32> acc = Scalar(0f);
-        acc = acc + NanAny(DefaultTensor<float32>(new long[] { 2L, 3L }));
-        acc = acc + NanAny((Tensor<float32>)DefaultTensor(DType.Float32, new long[] { 2L, 3L }));
+        long[] shape23 = [2L, 3L];
+        acc = acc + NanAny(DefaultTensor<float32>(shape23));
+        acc = acc + NanAny((Tensor<float32>)DefaultTensor(DType.Float32, shape23));
         acc = acc + NanAny(DefaultVector<float32>(3L));
 
         // TrainableTensor materializes its initializer data ([1,2]); fold both overloads.
-        acc = acc + NanAny((Tensor<float32>)TrainableTensor(TensorData(new long[] { 2L }, 1.0f, 2.0f)));
-        acc = acc + NanAny(TrainableTensor<float32>(TensorData(new long[] { 2L }, 1.0f, 2.0f)));
+        acc = acc + NanAny((Tensor<float32>)TrainableTensor(TensorData([2L], 1.0f, 2.0f)));
+        acc = acc + NanAny(TrainableTensor<float32>(TensorData([2L], 1.0f, 2.0f)));
 
         return (acc + Nan(input)) < Scalar(1e-3f);
     }

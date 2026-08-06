@@ -35,7 +35,7 @@ namespace Shorokoo.Tests;
 /// </para>
 /// </summary>
 [Trait("Domain", "Core")]
-[Trait("Purpose", "Coverage")]
+[Trait("Purpose", "Gate")]
 public class BuildWarningsGateTests
 {
     /// <summary>
@@ -61,13 +61,11 @@ public class BuildWarningsGateTests
             foreach (var relProject in ProductProjects)
             {
                 var project = Path.Combine(repoRoot, relProject);
-                Assert.True(File.Exists(project), $"product project not found at {project}");
+                Assert.True(File.Exists(project));
 
                 var (exitCode, output) = RunBuild(project, tempOut);
 
-                Assert.True(exitCode == 0,
-                    $"`dotnet build -c Release -warnaserror` of {relProject} failed (exit {exitCode}) — " +
-                    $"the shipping build is not warning-clean. Offending diagnostics:\n{ExtractDiagnostics(output)}");
+                Assert.Equal(0, exitCode);
             }
         }
         finally
@@ -109,27 +107,13 @@ public class BuildWarningsGateTests
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
 
-        if (!process.WaitForExit((int)BuildTimeout.TotalMilliseconds))
-        {
+        var finished = process.WaitForExit((int)BuildTimeout.TotalMilliseconds);
+        if (!finished)
             try { process.Kill(entireProcessTree: true); } catch { /* best effort */ }
-            Assert.Fail($"`dotnet build` of {projectPath} did not finish within {BuildTimeout.TotalMinutes:F0} min.");
-        }
+        Assert.True(finished);
         process.WaitForExit(); // flush async readers
 
         lock (sb) return (process.ExitCode, sb.ToString());
-    }
-
-    /// <summary>Keeps only the warning/error lines so the failure message is readable.</summary>
-    private static string ExtractDiagnostics(string buildOutput)
-    {
-        var lines = buildOutput
-            .Split('\n')
-            .Select(l => l.TrimEnd('\r'))
-            .Where(l => l.Contains(": warning ", StringComparison.Ordinal)
-                     || l.Contains(": error ", StringComparison.Ordinal))
-            .Distinct()
-            .ToArray();
-        return lines.Length > 0 ? string.Join('\n', lines) : buildOutput;
     }
 
     /// <summary>Walks up from the test output directory to the repo root (the dir holding Shorokoo.sln).</summary>

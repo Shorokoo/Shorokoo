@@ -1,11 +1,9 @@
 using System.Collections.Generic;
-using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Core.Nodes.Processors.Training;
 using Shorokoo.Modules.Layers;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
 using Shorokoo.Runtime;
-using Shorokoo.Tests.Modules;
 using static Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames;
 
 namespace Shorokoo.Tests;
@@ -25,10 +23,10 @@ public partial class RngRigDropoutModel
 
 /// <summary>
 /// End-to-end determinism of a keyed training rig: binding an <see cref="RngConfig"/> at
-/// <see cref="TrainingRig.FromScratch"/> keys the model's runtime feeds (Dropout masks)
-/// before loss composition and autodiff, so the whole trajectory — losses and updated
-/// weights across steps — reproduces bit-for-bit from the master seed, and re-keys under a
-/// different one.
+/// <see cref="TrainingRig.FromScratch"/> keys the model's runtime feeds (Dropout masks) and its
+/// parameter initialization before loss composition and autodiff, so the whole trajectory —
+/// losses and updated weights across steps — reproduces bit-for-bit from the master seed,
+/// re-keys under a different one, and resumes exactly from a mid-run checkpoint.
 /// </summary>
 [Trait("Domain", "Training")]
 [Trait("Purpose", "Coverage")]
@@ -47,7 +45,7 @@ public class RngTrainingTests
         var sample = new NamedModelParam[]
         {
             new TensorDataModelParam("input", ModelParamType.InputParam,
-                TensorData([8L], new float[] { 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f })),
+                TensorData([8L], 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f)),
         };
         return TrainingRig.FromScratch(
             RngRigDropoutModel.ComputationGraph, L2Loss.ComputationGraph,
@@ -58,7 +56,7 @@ public class RngTrainingTests
     {
         var inputBatch = new TensorDataStruct(ModelInputDef,
             new Dictionary<string, IData>
-                { { "input", TensorData([8L], new float[] { 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f }) } });
+                { { "input", TensorData([8L], 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f) } });
         var targetBatch = new TensorDataStruct(TargetDef,
             new Dictionary<string, IData>
                 { { "targets", TensorData([8L], new float[8]) } });
@@ -72,7 +70,6 @@ public class RngTrainingTests
         var (inputBatch, targetBatch) = MakeBatches();
 
         var checkpoint = rig.CreateInitialCheckpoint();
-
         var losses = new float[steps];
         for (int i = 0; i < steps; i++)
         {
@@ -84,41 +81,28 @@ public class RngTrainingTests
     }
 
     [Fact]
-    public void TestKeyedRigTrainsDeterministicallyAndRekeysUnderNewMaster()
+    public void TestKeyedRigTrainsDeterministicallyRekeysUnderANewMasterAndKeysInitialization()
     {
         var (lossesA1, rigA, finalA) = TrainLosses(new RngConfig { MasterSeed = 5 }, steps: 3);
         var (lossesA2, _, _) = TrainLosses(new RngConfig { MasterSeed = 5 }, steps: 3);
         var (lossesB, _, _) = TrainLosses(new RngConfig { MasterSeed = 6 }, steps: 3);
 
-        // The generator-managed substreamIndex: the injected RngExecutionCounter is ordinary model
-        // state riding the checkpoint, advanced +1 per step — after 3 steps it reads 3, so a
-        // resumed run at step 4 draws exactly what the uninterrupted run would. The cast
-        // pins the framework-counter convention — int64 state end-to-end (see
-        // FastInjectRngDrawCounter.CounterInit for the saturation rationale).
+        // The generator-managed substreamIndex: the injected RngExecutionCounter is ordinary
+        // int64 model state riding the checkpoint, advanced +1 per step.
         var counterField = finalA.ModelState.Fields.Single(f => f.Key.Contains("RngExecutionCounter"));
-        var counterValue = ((TensorData<int64>)counterField.Value).AccessMemory()[0];
-        Assert.Equal(3L, counterValue);
+        Assert.Equal(3L, ((TensorData<int64>)counterField.Value).AccessMemory()[0]);
 
-        // The RngSeed parameter rides through loss composition and autodiff into the
-        // training-step graph — the step graph itself carries the model's RNG identity,
-        // which is what its Dropout feeds' key chains derive from.
+        // The RngSeed parameter rides through loss composition and autodiff into the training
+        // step graph, which is what its Dropout feeds' key chains derive from.
         Assert.NotNull(rigA.TrainingStepPureGraph.TryGetRngSeed());
         Assert.Contains(rigA.TrainingStepPureGraph.ToInternal().Nodes, n =>
             n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
 
-        // Same master seed -> bit-identical trajectory across independent rig builds.
-        Assert.Equal(lossesA1, lossesA2);
-        // Different master seed -> different Dropout streams -> different trajectory.
-        Assert.NotEqual(lossesA1, lossesB);
+        Assert.Equal(lossesA1, lossesA2);      // same master -> bit-identical trajectory
+        Assert.NotEqual(lossesA1, lossesB);    // different master -> different Dropout streams
         Assert.All(lossesA1, l => Assert.True(float.IsFinite(l)));
-    }
 
-    [Fact]
-    public void TestKeyedRigInitializesWeightsFromTheMasterSeed()
-    {
-        // The rig's RngConfig must key parameter INITIALIZATION, not only runtime feeds:
-        // a random initializer's weights come from the config's master seed. (SwitchInitLinear
-        // is a single Linear whose weight is drawn by KaimingUniform — a random initializer.)
+        // The rig's RngConfig must key parameter INITIALIZATION too, not only runtime feeds.
         float[] InitialWeight(RngConfig cfg)
         {
             var sample = new NamedModelParam[]
@@ -135,21 +119,10 @@ public class RngTrainingTests
         }
 
         var w5 = InitialWeight(new RngConfig { MasterSeed = 5 });
-        var w5again = InitialWeight(new RngConfig { MasterSeed = 5 });
-        var w6 = InitialWeight(new RngConfig { MasterSeed = 6 });
-
-        Assert.Equal(w5, w5again);   // deterministic under a fixed master seed
-        Assert.NotEqual(w5, w6);     // init weights are keyed by the master seed (not constant)
+        Assert.Equal(w5, InitialWeight(new RngConfig { MasterSeed = 5 }));
+        Assert.NotEqual(w5, InitialWeight(new RngConfig { MasterSeed = 6 }));
     }
 
-    /// <summary>
-    /// The substreamIndex counter's resume guarantee, pinned end-to-end on a rig that draws runtime
-    /// randomness every step: save a Dropout rig's checkpoint mid-run, resume it in a
-    /// brand-new rig + compiled graph, and the resumed run replays the uninterrupted run's
-    /// remaining steps bit-exactly. Previously this held only by proxy (the counter was
-    /// checked to increment and ride the checkpoint; save/load resume was covered only on a
-    /// randomness-free model).
-    /// </summary>
     [Fact]
     public void TestMidRunCheckpointResumeReplaysUninterruptedTrajectoryExactly()
     {
@@ -157,9 +130,7 @@ public class RngTrainingTests
         var cfg = new RngConfig { MasterSeed = 5 };
 
         var (fullLosses, _, _) = TrainLosses(cfg, totalSteps);
-
-        // A second, independent rig (built inside TrainLosses) trains to step k and
-        // checkpoints there.
+        // A second, independent rig trains to step k and checkpoints there.
         var (_, _, ckpt) = TrainLosses(cfg, resumeAt);
         var (inputBatch, targetBatch) = MakeBatches();
 
@@ -168,9 +139,9 @@ public class RngTrainingTests
         {
             ckpt.Save(path);
 
-            // "Fresh process": a brand-new rig + compiled graph loads the checkpoint. The
-            // int64 substreamIndex counter rides in ModelState, so the resumed steps draw the
-            // masks of executions k, k+1, … — not 0, 1, … over again.
+            // "Fresh process": a brand-new rig + compiled graph loads the checkpoint. The int64
+            // substreamIndex counter rides in ModelState, so the resumed steps draw the masks of
+            // executions k, k+1, … — not 0, 1, … over again.
             var rigC = BuildDropoutRig(cfg);
             var resumed = rigC.LoadCheckpoint(path);
             Assert.Equal(resumeAt, resumed.Step);
@@ -183,10 +154,8 @@ public class RngTrainingTests
                 resumed = step;
             }
 
-            // Bit-exact continuation: the resumed losses ARE the uninterrupted run's steps
-            // k..N. The NotEqual keeps that Equal non-vacuous: it pins that the trajectory
-            // isn't periodic (the opening steps don't repeat at k..N), so per-step mask
-            // variation is real and matching the tail is a genuine resume signal.
+            // The NotEqual keeps the Equal non-vacuous: the trajectory isn't periodic, so
+            // matching the tail is a genuine resume signal.
             Assert.Equal(fullLosses[resumeAt..], resumedLosses);
             Assert.NotEqual(fullLosses[..(totalSteps - resumeAt)], resumedLosses);
         }

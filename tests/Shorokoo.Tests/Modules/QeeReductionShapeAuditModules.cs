@@ -1,5 +1,25 @@
+using static Shorokoo.Tests.Modules.QeeAuditVerdicts;
+
 namespace Shorokoo.Tests.Modules
 {
+    internal static class QeeAuditVerdicts
+    {
+        internal static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
+            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+
+        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
+        internal static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
+            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
+                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+
+        internal static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
+            => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+
+        internal static Scalar<int64> IntMismatch1(Scalar<int64> actual, long expected)
+            => (actual.Reshape(Vector(1L)) - Vector(expected)).Abs()
+                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+    }
+
     // ===================================================================
     //  Self-checking VALUE-audit modules for the Phase 4 QEE-A3 batch
     //  (reductions + shape/data-movement family, ONNX opset 21). Like the
@@ -9,7 +29,7 @@ namespace Shorokoo.Tests.Modules
     //
     //  Driven two ways by QeeReductionShapeAuditTests: AdvancedTestGraph
     //  validates the expected values against real ONNX Runtime execution,
-    //  and the QeeSelfCheck bit-check validates that QuickExecutionEngine
+    //  and the QeeAudit strict-QEE bit-check validates that QuickExecutionEngine
     //  computes the same concrete values (every op in the comparison
     //  chain propagates concrete data, so a wrong or missing QEE value
     //  flips the bit or leaves it uncomputed, failing the test).
@@ -50,17 +70,6 @@ namespace Shorokoo.Tests.Modules
         }
 
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
-            => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>ArgMax / ArgMin (axis incl. negative, keepdims, select_last_index ties,
@@ -93,17 +102,6 @@ namespace Shorokoo.Tests.Modules
 
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
         private static Tensor<int64> FlatI(Tensor<int64> t) => t.Reshape(Vector(-1L));
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
-            => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Reshape (keepDims copy-dim positions, -1, literal 0 on an empty tensor), Flatten (negative axis,
@@ -163,17 +161,6 @@ namespace Shorokoo.Tests.Modules
         }
 
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
-            => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Slice (negative steps — full reverse via huge-negative end, start clamped
@@ -225,14 +212,6 @@ namespace Shorokoo.Tests.Modules
         }
 
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>ScatterElements (reduction none/add/mul/min/max, negative indices, axis 1),
@@ -288,14 +267,6 @@ namespace Shorokoo.Tests.Modules
         }
 
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Split (num_outputs with UNEVEN last chunk [3,3,1], explicit split input,
@@ -307,7 +278,7 @@ namespace Shorokoo.Tests.Modules
         public static Scalar<bit> Inline(Tensor<float32> v7)
         {
             var sp3 = v7.Split(3);
-            var spE = v7.Split(new long[] { 2, 5 });
+            var spE = v7.Split((long[])[2, 5]);
             var m24 = Vector(1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f).Reshape(Vector(2L, 4L));
             var sp2 = m24.Split(2, axis: 1);
             var t2a = Vector(1f, 2f, 3f, 4f).Reshape(Vector(2L, 2L));
@@ -350,17 +321,6 @@ namespace Shorokoo.Tests.Modules
         }
 
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
-            => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>OneHot (default axis −1, axis 0 and negative axis −2, custom off/on
@@ -407,16 +367,5 @@ namespace Shorokoo.Tests.Modules
 
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
         private static Tensor<int64> FlatI(Tensor<int64> t) => t.Reshape(Vector(-1L));
-
-        // NaN-safe: Not(<= tol) counts a NaN diff as a mismatch; a plain "> tol" would pass it (IEEE).
-        private static Scalar<int64> FloatMismatch(Tensor<float32> actual, Vector<float32> expected)
-            => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
-                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
-            => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 }

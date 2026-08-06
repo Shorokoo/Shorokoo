@@ -1,223 +1,122 @@
 namespace Shorokoo.Tests.Modules
 {
     // ===================================================================
-    //  Modules that exercise QuickExecutionEngine op handlers which the
-    //  AutoGrad-focused Coverage suite never touches. Each module chains
-    //  several related op invocations so a single Coverage test (driving
-    //  one Module class) widens QEE coverage across multiple branches.
+    //  Modules for the QuickExecutionEngine op handlers that no
+    //  Qee*AuditModules module reaches. Everything else these files once
+    //  covered is subsumed by the self-checking audit modules, which drive
+    //  the same handlers with in-graph value/shape assertions.
     // ===================================================================
 
-    /// <summary>ArgMax/ArgMin in their four shape variants (axis 0 vs -1; keepdims true vs false).</summary>
+    /// <summary>InternalOp.SequenceSlice + InternalOp.SequenceConcat (runtime int64 bounds
+    /// keep them alive through FastFoldSequences). No ONNX op-set registration, so this runs
+    /// QEE-only.</summary>
     [Module]
-    public partial class QeeArgOpsCheck
+    public partial class QeeInternalSequenceOpsCheck
     {
-        public static (Tensor<int64>, Tensor<int64>, Tensor<int64>, Tensor<int64>) Inline(Tensor<float32> x)
-        {
-            var amax0 = (Tensor<int64>)OnnxOp.ArgMax(x, axis: 0, keepdims: false, selectLastIndex: false);
-            var amaxK = (Tensor<int64>)OnnxOp.ArgMax(x, axis: -1, keepdims: true, selectLastIndex: true);
-            var amin0 = (Tensor<int64>)OnnxOp.ArgMin(x, axis: 0, keepdims: false, selectLastIndex: false);
-            var aminK = (Tensor<int64>)OnnxOp.ArgMin(x, axis: -1, keepdims: true, selectLastIndex: false);
-            return (amax0, amaxK, amin0, aminK);
-        }
-    }
-
-    /// <summary>EyeLike with default dtype + EyeLike with explicit Int64 dtype and a non-zero diagonal offset.</summary>
-    [Module]
-    public partial class QeeEyeLikeOpsCheck
-    {
-        public static (Tensor<float32>, Tensor<int64>) Inline(Tensor<float32> x)
-        {
-            var e1 = (Tensor<float32>)OnnxOp.EyeLike(x, dtype: null, k: 0);
-            var e2 = (Tensor<int64>)OnnxOp.EyeLike(x, dtype: DType.Int64, k: 1);
-            return (e1, e2);
-        }
-    }
-
-    /// <summary>
-    /// RandomNormal / RandomUniform (attribute-based shape) + RandomNormalLike / RandomUniformLike
-    /// (input-shape) — covers every Random* op in one module.
-    /// </summary>
-    [Module]
-    public partial class QeeRandomOpsCheck
-    {
-        public static (Tensor<float32>, Tensor<float32>, Tensor<float32>, Tensor<float32>) Inline(Tensor<float32> x)
-        {
-            var rn = (Tensor<float32>)OnnxOp.RandomNormal(new long[] { 2L, 3L }, mean: 0f, scale: 1f, dtype: DType.Float32, seed: 42f);
-            var ru = (Tensor<float32>)OnnxOp.RandomUniform(new long[] { 2L, 3L }, high: 1f, low: 0f, dtype: DType.Float32, seed: 7f);
-            var rnl = (Tensor<float32>)OnnxOp.RandomNormalLike(x, mean: 0f, scale: 1f, dtype: null, seed: 1f);
-            var rul = (Tensor<float32>)OnnxOp.RandomUniformLike(x, high: 1f, low: 0f, dtype: null, seed: 1f);
-            return (rn, ru, rnl, rul);
-        }
-    }
-
-    /// <summary>shrk_RandomNormal + shrk_RandomUniform (dynamic-shape Shorokoo-internal variants).</summary>
-    [Module]
-    public partial class QeeShrkRandomOpsCheck
-    {
-        public static (Tensor<float32>, Tensor<float32>) Inline(Vector<int64> shape)
-        {
-            var srn = (Tensor<float32>)InternalOp.RandomNormal(shape, mean: 0f, scale: 1f);
-            var sru = (Tensor<float32>)InternalOp.RandomUniform(shape, high: 1f, low: 0f);
-            return (srn, sru);
-        }
-    }
-
-    /// <summary>OptionalHasElement on an Optional-wrapped runtime input.</summary>
-    [Module]
-    public partial class QeeOptionalHasElementCheck
-    {
-        public static Scalar<bit> Inline(Tensor<float32> x)
-        {
-            var opt = OnnxOp.Optional(x, DataStructure.Tensor, DType.Float32);
-            return (Scalar<bit>)OnnxOp.OptionalHasElement(opt);
-        }
-    }
-
-    /// <summary>
-    /// Shorokoo-internal ops that never reach ORT: SequenceSlice + SequenceConcat
-    /// (runtime int64 bounds keep them alive through FastFoldSequences), plus the Loop
-    /// placeholder ops (LoopScanZombie, LoopFakeInput, LoopIndexVariable). Routed via
-    /// the QeeOnly helper since AdvancedTestGraph's leading ComputeContext.Execute
-    /// can't run these op codes.
-    /// </summary>
-    [Module]
-    public partial class QeeInternalSequenceLoopOpsCheck
-    {
-        public static (Tensor<float32>, Tensor<float32>, Tensor<float32>, Tensor<float32>, Tensor<int64>) Inline(
-            Tensor<float32> x, Scalar<float32> a, Scalar<float32> b, Scalar<float32> c)
+        public static (Tensor<float32>, Tensor<float32>) Inline(
+            Scalar<float32> a, Scalar<float32> b, Scalar<float32> c)
         {
             var aV = (Tensor<float32>)OnnxOp.Reshape(a, Vector(1L), allowZero: false);
             var bV = (Tensor<float32>)OnnxOp.Reshape(b, Vector(1L), allowZero: false);
             var cV = (Tensor<float32>)OnnxOp.Reshape(c, Vector(1L), allowZero: false);
 
-            // SequenceSlice with runtime int64 bounds.
             var seq = OnnxOp.SequenceConstruct(aV, bV, cV);
-            var startL = Scalar(0f).Cast<int64>();
-            var endL = Scalar(2f).Cast<int64>();
-            var sliced = InternalOp.SequenceSlice(seq, startL, endL);
+            var sliced = InternalOp.SequenceSlice(seq, Scalar(0f).Cast<int64>(), Scalar(2f).Cast<int64>());
             var sliceElem = (Tensor<float32>)OnnxOp.SequenceAt(sliced, Scalar(0f).Cast<int64>());
 
-            // SequenceConcat of two single-element sequences.
-            var seq1 = OnnxOp.SequenceConstruct(aV);
-            var seq2 = OnnxOp.SequenceConstruct(bV);
-            var merged = InternalOp.SequenceConcat(new[] { seq1, seq2 });
+            var merged = InternalOp.SequenceConcat([OnnxOp.SequenceConstruct(aV), OnnxOp.SequenceConstruct(bV)]);
             var concatElem = (Tensor<float32>)OnnxOp.SequenceAt(merged, Scalar(0f).Cast<int64>());
 
-            // Standalone Loop placeholder ops.
-            var scanZombie = (Tensor<float32>)OnnxOp.LoopScanZombie(x);
-            var fakeInput = (Tensor<float32>)OnnxOp.LoopFakeInput(DType.Float32, rank: 2, DataStructure.Tensor);
-            var loopIdx = (Tensor<int64>)OnnxOp.LoopIndexVariable();
-
-            return (sliceElem, concatElem, scanZombie, fakeInput, loopIdx);
+            return (sliceElem, concatElem);
         }
     }
 
-    /// <summary>Constant op with every typed attribute branch: value_int, value_ints, value_float, value_floats.</summary>
+    /// <summary>Constant value_int / value_ints / value_float / value_floats (the audit
+    /// modules cover only value_string / value_strings).</summary>
     [Module]
     public partial class QeeConstantOpsCheck
     {
         public static (Tensor<int64>, Tensor<int64>, Tensor<float32>, Tensor<float32>) Inline()
-        {
-            var ci = (Tensor<int64>)OnnxOp.Constant(42L);
-            var cis = (Tensor<int64>)OnnxOp.Constant(new long[] { 1L, 2L, 3L });
-            var cf = (Tensor<float32>)OnnxOp.Constant(2.5f);
-            var cfs = (Tensor<float32>)OnnxOp.Constant(new float[] { 1.5f, 2.5f, 3.5f });
-            return (ci, cis, cf, cfs);
-        }
+            => (
+                (Tensor<int64>)OnnxOp.Constant(42L),
+                (Tensor<int64>)OnnxOp.Constant((long[])[1L, 2L, 3L]),
+                (Tensor<float32>)OnnxOp.Constant(2.5f),
+                (Tensor<float32>)OnnxOp.Constant((float[])[1.5f, 2.5f, 3.5f])
+            );
     }
 
-    /// <summary>Integer Abs / Neg / Sign — hit UnaryNumericOp.IntData / ApplyInt.</summary>
+    /// <summary>NegOp.ApplyInt + SignOp.ApplyInt + PowOp.ApplyInt — the audit modules only
+    /// reach the float arms of these three.</summary>
     [Module]
-    public partial class QeeIntUnaryOpsCheck
+    public partial class QeeIntArithmeticOpsCheck
     {
-        public static (Tensor<int64>, Tensor<int64>, Tensor<int64>) Inline(Tensor<int64> x)
-        {
-            var a = (Tensor<int64>)OnnxOp.Abs(x);
-            var n = (Tensor<int64>)OnnxOp.Neg(x);
-            var s = (Tensor<int64>)OnnxOp.Sign(x);
-            return (a, n, s);
-        }
+        public static (Tensor<int64>, Tensor<int64>, Tensor<int64>) Inline(
+            Tensor<int64> x, Tensor<int64> a, Tensor<int64> b)
+            => (
+                (Tensor<int64>)OnnxOp.Neg(x),
+                (Tensor<int64>)OnnxOp.Sign(x),
+                (Tensor<int64>)OnnxOp.Pow(a, b)
+            );
     }
 
-    /// <summary>Integer Less / LessOrEqual — hit CompareOp.CompareInt.</summary>
+    /// <summary>BitwiseNot on int64 — the unmasked arm (the audit module uses uint32, which
+    /// takes the width-masked arm).</summary>
     [Module]
-    public partial class QeeIntCompareOpsCheck
+    public partial class QeeBitwiseNotInt64Check
     {
-        public static (Tensor<bit>, Tensor<bit>) Inline(Tensor<int64> a, Tensor<int64> b)
-        {
-            var lt = (Tensor<bit>)OnnxOp.Less(a, b);
-            var le = (Tensor<bit>)OnnxOp.LessOrEqual(a, b);
-            return (lt, le);
-        }
+        public static Tensor<int64> Inline(Tensor<int64> a) => (Tensor<int64>)OnnxOp.BitwiseNot(a);
     }
 
-    /// <summary>Integer Pow / Mod — hit BinaryNumericOp.ApplyInt.</summary>
-    [Module]
-    public partial class QeeIntBinaryOpsCheck
-    {
-        public static (Tensor<int64>, Tensor<int64>) Inline(Tensor<int64> a, Tensor<int64> b)
-        {
-            var p = (Tensor<int64>)OnnxOp.Pow(a, b);
-            var m = (Tensor<int64>)OnnxOp.Mod(a, b, fmod: false);
-            return (p, m);
-        }
-    }
-
-    /// <summary>BitwiseAnd / Or / Xor / Not on int64.</summary>
-    [Module]
-    public partial class QeeBitwiseOpsCheck
-    {
-        public static (Tensor<int64>, Tensor<int64>, Tensor<int64>, Tensor<int64>) Inline(Tensor<int64> a, Tensor<int64> b)
-        {
-            var bAnd = (Tensor<int64>)OnnxOp.BitwiseAnd(a, b);
-            var bOr = (Tensor<int64>)OnnxOp.BitwiseOr(a, b);
-            var bXor = (Tensor<int64>)OnnxOp.BitwiseXor(a, b);
-            var bNot = (Tensor<int64>)OnnxOp.BitwiseNot(a);
-            return (bAnd, bOr, bXor, bNot);
-        }
-    }
-
-    /// <summary>
-    /// Float Ceil + bool Xor + Range over floats — three small ops that share no input dtype,
-    /// so they coexist in one module via separate parameters.
-    /// </summary>
-    [Module]
-    public partial class QeeMiscFloatBoolOpsCheck
-    {
-        public static (Tensor<float32>, Tensor<bit>, Tensor<float32>) Inline(Tensor<float32> f, Tensor<bit> b1, Tensor<bit> b2)
-        {
-            var c = (Tensor<float32>)OnnxOp.Ceil(f);
-            var x = (Tensor<bit>)OnnxOp.Xor(b1, b2);
-            var r = (Tensor<float32>)OnnxOp.Range(Scalar(0f), Scalar(5f), Scalar(0.5f));
-            return (c, x, r);
-        }
-    }
-
-    /// <summary>Celu / Elu / Selu / LeakyRelu — every FloatData inner loop in the activations group.</summary>
-    [Module]
-    public partial class QeeActivationsCheck
-    {
-        public static (Tensor<float32>, Tensor<float32>, Tensor<float32>, Tensor<float32>) Inline(Tensor<float32> x)
-        {
-            var celu = (Tensor<float32>)OnnxOp.Celu(x, alpha: 1.0f);
-            var elu = (Tensor<float32>)OnnxOp.Elu(x, alpha: 1.5f);
-            var selu = (Tensor<float32>)OnnxOp.Selu(x, alpha: 1.0507f, gamma: 1.6732f);
-            var lr = (Tensor<float32>)OnnxOp.LeakyRelu(x, alpha: 0.01f);
-            return (celu, elu, selu, lr);
-        }
-    }
-
-    /// <summary>Cast to Bool from each source dtype (float / int / bool) — Cast.cs Bool-target branch.</summary>
+    /// <summary>Cast int→bool and bool→bool (the audit module covers only float→bool).</summary>
     [Module]
     public partial class QeeCastToBoolOpsCheck
     {
-        public static (Tensor<bit>, Tensor<bit>, Tensor<bit>) Inline(Tensor<float32> f, Tensor<int64> i, Tensor<bit> b)
-        {
-            var cf = (Tensor<bit>)OnnxOp.Cast(f, saturate: null, to: DType.Bool);
-            var ci = (Tensor<bit>)OnnxOp.Cast(i, saturate: null, to: DType.Bool);
-            var cb = (Tensor<bit>)OnnxOp.Cast(b, saturate: null, to: DType.Bool);
-            return (cf, ci, cb);
-        }
+        public static (Tensor<bit>, Tensor<bit>) Inline(Tensor<int64> i, Tensor<bit> b)
+            => (
+                (Tensor<bit>)OnnxOp.Cast(i, saturate: null, to: DType.Bool),
+                (Tensor<bit>)OnnxOp.Cast(b, saturate: null, to: DType.Bool)
+            );
+    }
+
+    /// <summary>EyeLike with the k=0 main diagonal (the audit module uses k=1 and k=-1).</summary>
+    [Module]
+    public partial class QeeEyeLikeOpsCheck
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+            => (Tensor<float32>)OnnxOp.EyeLike(x, dtype: null, k: 0);
+    }
+
+    /// <summary>Einsum trace form "ij,ji-&gt;" — the only equation with EMPTY output labels.</summary>
+    [Module]
+    public partial class QeeEinsumTraceCheck
+    {
+        public static Tensor<float32> Inline(Tensor<float32> mat)
+            => (Tensor<float32>)OnnxOp.Einsum((Variable[])[mat, mat], equation: "ij,ji->");
+    }
+
+    /// <summary>OnnxOp.Size — the audit modules use SizeTensor(), which lowers to
+    /// Shape + ReduceProd rather than a SIZE node.</summary>
+    [Module]
+    public partial class QeeSizeCheck
+    {
+        public static Tensor<int64> Inline(Tensor<float32> x) => (Tensor<int64>)OnnxOp.Size(x);
+    }
+
+    /// <summary>Multinomial with an EXPLICIT dtype (the audit module leaves it unset, taking
+    /// the int32-default arm).</summary>
+    [Module]
+    public partial class QeeMultinomialCheck
+    {
+        public static Tensor<int64> Inline(Tensor<float32> input)
+            => (Tensor<int64>)OnnxOp.Multinomial(input, dtype: DType.Int64, sampleSize: 5L, seed: 42f);
+    }
+
+    /// <summary>ImageDecoder shape inference. Driven by QeeImageRandomRnnAuditTests.</summary>
+    [Module]
+    public partial class QeeImageDecoderCheck
+    {
+        public static Tensor<uint8> Inline(Vector<uint8> encoded)
+            => (Tensor<uint8>)OnnxOp.ImageDecoder(encoded, pixelFormat: "RGB");
     }
 
     /// <summary>
@@ -241,10 +140,8 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary>
-    /// Routes inputs of every signed non-{float32,int64} dtype through QEE so the
-    /// Float64 / Int32 / Int16 / Int8 branches in TensorDataConverter.ToRuntimeTensor fire.
-    /// </summary>
+    /// <summary>The Float64 / Int32 / Int16 / Int8 branches of
+    /// TensorDataConverter.ToRuntimeTensor.</summary>
     [Module]
     public partial class QeeDtypeIdentitySignedOpsCheck
     {
@@ -258,10 +155,8 @@ namespace Shorokoo.Tests.Modules
             );
     }
 
-    /// <summary>
-    /// Routes inputs of every unsigned dtype plus Bool through QEE so the
-    /// UInt8 / UInt16 / UInt32 / UInt64 / Bool branches in TensorDataConverter.ToRuntimeTensor fire.
-    /// </summary>
+    /// <summary>The UInt8 / UInt16 / UInt32 / UInt64 / Bool branches of
+    /// TensorDataConverter.ToRuntimeTensor.</summary>
     [Module]
     public partial class QeeDtypeIdentityUnsignedOpsCheck
     {

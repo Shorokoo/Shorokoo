@@ -1,4 +1,6 @@
+using System;
 using System.Linq;
+using System.Text;
 using Shorokoo.Modules.Layers;
 using Shorokoo.Runtime;
 
@@ -54,11 +56,9 @@ public static partial class PinWipeFreshInit
 }
 
 /// <summary>
-/// Pins recorded BEFORE a nested first-use build must survive it. Building a not-yet-cached
-/// sub-module/initializer mid-trace re-enters the graph builder on the same thread; its entry-time
-/// pin clearing used to wipe the outer body's already-recorded pins, silently deactivating them
-/// (and cache-order-dependently: a warm Function cache hid the loss). Pin(b, a) then first-use
-/// a fresh initializer: b must still take the first id slot.
+/// Pins recorded BEFORE a nested first-use build must survive it: building a not-yet-cached
+/// sub-module/initializer mid-trace re-enters the graph builder on the same thread, and its
+/// entry-time pin clearing used to wipe the outer body's already-recorded pins.
 /// </summary>
 [Module]
 public partial class PinSurvivesNestedFirstUseBuild
@@ -102,9 +102,10 @@ public partial class PinUnresolvableInput
 /// <summary>
 /// Rng.Pin reshapes ModelId (hence RNG stream) assignment without touching the graph's
 /// dataflow: pinned items take the module-local id slots in pin order, so a pinned module's
-/// streams no longer depend on creation position. Verified structurally — the out-features
-/// of the param at id path [1, 1] flip from a's (2) to b's (3) under Pin(b, a) — and
-/// behaviorally: the pinned module still executes.
+/// streams no longer depend on creation position. Verified structurally — the out-features of
+/// the param at id path [1, 1] flip from a's (2) to b's (3) under Pin(b, a) — and behaviorally:
+/// the pinned module still executes. Plus the RNG stream report / pin skeleton those pins are
+/// authored against, and the loud failures a pin that could never apply must produce.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -118,70 +119,85 @@ public class RngPinTests
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
 
         // The weight of the FIRST-id Linear ([1, 1] = sub-model 1's param 1) has shape [out, in].
-        var infos = arch.GetConcreteModelParamInfos().ParamInfos;
-        var firstWeight = infos.Single(i => i.ModelId.Vals.SequenceEqual((int[])[1, 1]));
-        var outFeatures = firstWeight.Shape.Dims[0];
+        var firstWeight = arch.GetConcreteModelParamInfos().ParamInfos
+            .Single(i => i.ModelId.Vals.SequenceEqual((int[])[1, 1]));
 
-        var concrete = arch.ToConcreteModel(RngConfig.Default);
-        var output = ComputeContext.Default.Execute(concrete, input)[0]
+        var output = ComputeContext.Default.Execute(arch.ToConcreteModel(RngConfig.Default), input)[0]
             .ToTensorData().As<float32>().AccessMemory().ToArray();
-        return (outFeatures, output);
+        return (firstWeight.Shape.Dims[0], output);
+    }
+
+    private static InternalComputationGraph Arch<TModule>(params TensorData[] inputs)
+    {
+        var g = ((ComputationGraph)typeof(TModule)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        return g.ToConcreteArchitecture(g.FromOrderedInputs([.. inputs]));
+    }
+
+    private static string AllMessages(Exception ex)
+    {
+        var sb = new StringBuilder();
+        for (Exception? e = ex; e is not null; e = e.InnerException) sb.AppendLine(e.Message);
+        return sb.ToString();
+    }
+
+    private static void AssertFailsAnyWith(Action act, string fragment)
+        => Assert.Contains(fragment, AllMessages(Assert.ThrowsAny<Exception>(act)));
+
+    private static void AssertFailsWith<TException>(Action act, params string[] fragments)
+        where TException : Exception
+    {
+        var msg = AllMessages(Assert.Throws<TException>(act));
+        foreach (var f in fragments) Assert.Contains(f, msg);
     }
 
     [Fact]
-    public void TestPinReordersIdAssignment()
+    public void TestPinReordersIdAssignmentReservesSparseSlotsAndSurvivesANestedFirstUseBuild()
     {
+        // Baseline: a (out=2) was created first -> id [1]. Pin(b, a) gives b (out=3) that slot.
         var (baselineFirst, baselineOut) = Probe<PinBaselineTwoLinears>();
         var (pinnedFirst, pinnedOut) = Probe<PinSwappedTwoLinears>();
-
-        // Baseline: a (out=2) was created first -> id [1]; its weight is [2, in].
         Assert.Equal(2L, baselineFirst);
-        // Pinned: Pin(b, a) gives b (out=3) the first slot -> id [1]; its weight is [3, in].
         Assert.Equal(3L, pinnedFirst);
-
-        // Dataflow untouched: both produce [1, 5] outputs and execute fine.
-        Assert.Equal(5, baselineOut.Length);
+        Assert.Equal(5, baselineOut.Length);   // dataflow untouched: both produce [1, 5]
         Assert.Equal(5, pinnedOut.Length);
+
+        // Pin(([2], a)) RESERVES slot 2 for a (out=2); unlisted b (out=3) fills the first FREE
+        // slot, 1 — so a sparse pin that RELOCATES an item displaces (re-keys) the unlisted
+        // consumer whose slot it takes.
+        var (sparseFirst, sparseOut) = Probe<PinSparseTwoLinears>();
+        Assert.Equal(3L, sparseFirst);
+        Assert.Equal(5, sparseOut.Length);
+
+        // Pin(b, a) recorded, then a first-use of an uncached initializer builds a body graph
+        // mid-trace: the pin must survive that nested build.
+        var (nestedFirst, nestedOut) = Probe<PinSurvivesNestedFirstUseBuild>();
+        Assert.Equal(3L, nestedFirst);
+        Assert.Equal(5, nestedOut.Length);
     }
 
     [Fact]
-    public void TestSparsePinReservesItsSlotAndUnlistedConsumersFillFreeSlots()
+    public void TestRngStreamReportDescribesStreamsAndResolvesInitFeedAndOverriddenKeys()
     {
-        // Pin(([2], a)) RESERVES slot 2 for a (out=2); unlisted b (out=3) fills the first
-        // FREE slot, 1. Note that b MOVED — unpinned it sat at slot 2 — so a sparse pin
-        // that relocates an item displaces (re-keys) the unlisted consumer whose slot it
-        // takes. Only pinning items to their CURRENT slots (the skeleton workflow) leaves
-        // unlisted consumers untouched; a relocation must list every consumer it disturbs.
-        // The docs state this reservation rule — this test pins the displacement behavior.
-        var (firstSlotOutFeatures, output) = Probe<PinSparseTwoLinears>();
-        Assert.Equal(3L, firstSlotOutFeatures);
-        Assert.Equal(5, output.Length);
-    }
-
-    [Fact]
-    public void TestRngStreamReportDescribesStreamsAndEmitsPinSkeleton()
-    {
-        var g = ((ComputationGraph)typeof(PinBaselineTwoLinears)
-            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([1L, 4L], 0.1f, 0.2f, 0.3f, 0.4f);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
-
+        var arch = Arch<PinBaselineTwoLinears>(input);
         var cfg = new RngConfig { MasterSeed = 3 };
         var report = arch.GetRngStreamReport(cfg);
 
-        // Two Linears, one weight each: two init streams at [1, 1] and [2, 1], named,
-        // shaped, and keyed distinctly under the config.
+        // Two Linears, one weight each: two init streams at [1, 1] and [2, 1], named, shaped,
+        // and keyed distinctly under the config.
         var inits = report.Streams.Where(s => s.Kind == RngStreamKind.ParamInit).ToList();
         Assert.Equal(2, inits.Count);
         Assert.Equal([1, 1], inits[0].ModelIdPath);
         Assert.Equal([2, 1], inits[1].ModelIdPath);
         Assert.All(inits, s => Assert.Contains("Linear", s.Name));
         Assert.All(inits, s => Assert.NotNull(s.Shape));
-        Assert.NotNull(inits[0].Key);
         Assert.NotEqual(inits[0].Key, inits[1].Key);
+        // The reported keys are resolved by EXECUTING each stream's in-graph derivation (#136),
+        // so pin them against the independent host oracle.
+        foreach (var s in inits) Assert.Equal(RngTestOracle.InitKey(cfg, s.ModelIdPath), s.Key);
 
-        // The skeleton groups by scope (here just the module body) and lists each consumer's
-        // local slot with the variable left as ?. The two Linears are top-level slots 1 and 2.
+        // The skeleton groups by scope and lists each consumer's local slot, variable left as ?.
         var skeleton = report.EmitPinSkeleton();
         Assert.Contains("// at the end of Inline:", skeleton);
         Assert.Contains("Rng.Pin(", skeleton);
@@ -192,117 +208,59 @@ public class RngPinTests
         // Without a config, streams are listed but unkeyed.
         Assert.All(arch.GetRngStreamReport().Streams, s => Assert.Null(s.Key));
 
-        // The reported keys are resolved by EXECUTING each stream's in-graph derivation (#136),
-        // so pin them against the independent host oracle: a wrong root, a missed fold step, or
-        // a mis-ordered resolver result would all still produce "non-null and distinct" above.
-        foreach (var s in inits)
-        {
-            var key = RngTestOracle.InitKey(cfg, s.ModelIdPath);
-            Assert.Equal(key, s.Key);
-        }
-    }
+        // Overriding the FIRST param stream only: its row resolves directly (empty fold path)
+        // while the second still needs a folded chain, so the resolver's direct/pending
+        // partition and its remap back to the original order are exercised too.
+        var ovCfg = cfg.Override(RngCollection.Params, [1, 1], 4242UL);
+        var ovInits = Arch<PinBaselineTwoLinears>(input).GetRngStreamReport(ovCfg).Streams
+            .Where(s => s.Kind == RngStreamKind.ParamInit).ToList();
+        Assert.Equal(2, ovInits.Count);
+        Assert.Equal(4242UL, ovInits[0].Key);   // the override seed itself — no fold applied
+        Assert.Equal(RngTestOracle.InitKey(ovCfg, ovInits[1].ModelIdPath), ovInits[1].Key);
+        Assert.NotEqual(ovInits[0].Key, ovInits[1].Key);
 
-    [Fact]
-    public void TestRngStreamReportResolvesRuntimeFeedAndOverriddenKeys()
-    {
-        // Covers the two report paths the params-only test above never reaches: a REALIZED
-        // runtime feed (RunKeySpec -> executed split chain) and an OVERRIDDEN stream (empty fold
-        // path -> resolved directly, no split emitted). Mixing them in one report also exercises
-        // the resolver's direct/pending partition and its remap back to the original order —
-        // an off-by-one there would silently mislabel keys.
-        var g = ((ComputationGraph)typeof(PinBaselineTwoLinears)
-            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
-        var input = TensorData([1L, 4L], 0.1f, 0.2f, 0.3f, 0.4f);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
-
-        // Override the FIRST param stream only: its row resolves directly while the second
-        // still needs a folded chain, so `pending` is deliberately not the identity permutation.
-        var cfg = new RngConfig { MasterSeed = 3 }.Override(RngCollection.Params, [1, 1], 4242UL);
-        var report = arch.GetRngStreamReport(cfg);
-
-        var inits = report.Streams.Where(s => s.Kind == RngStreamKind.ParamInit).ToList();
-        Assert.Equal(2, inits.Count);
-
-        // The overridden stream's key IS the override seed's words — no fold applied.
-        var overrideKey = 4242UL;
-        Assert.Equal(overrideKey, inits[0].Key);
-        // ...while its sibling is still the master folded along its path.
-        var siblingKey = RngTestOracle.InitKey(cfg, inits[1].ModelIdPath);
-        Assert.Equal(siblingKey, inits[1].Key);
-        Assert.NotEqual(inits[0].Key, inits[1].Key);
-    }
-
-    [Fact]
-    public void TestRngStreamReportResolvesRealizedRuntimeFeedKey()
-    {
         // A realized (non-loop) runtime feed: its row carries a key resolved through RunKeySpec
-        // + the executed split chain. This branch is otherwise never taken in the suite.
-        var g = ((ComputationGraph)typeof(RtLoweredUniform)
-            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
-        var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
-
-        var cfg = new RngConfig { MasterSeed = 7 };
-        var feed = Assert.Single(arch.GetRngStreamReport(cfg).Streams
+        // plus the executed split chain.
+        var feedCfg = new RngConfig { MasterSeed = 7 };
+        var feedArch = Arch<RtLoweredUniform>(TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray()));
+        var feed = Assert.Single(feedArch.GetRngStreamReport(feedCfg).Streams
             .Where(s => s.Kind == RngStreamKind.UniformFeed));
-
         Assert.NotNull(feed.Key);
-        var key = RngTestOracle.RunKey(cfg, feed.ModelIdPath);
-        Assert.Equal(key, feed.Key);
+        Assert.Equal(RngTestOracle.RunKey(feedCfg, feed.ModelIdPath), feed.Key);
     }
 
     [Fact]
-    public void TestRngStreamReportShowsLoopFeedSite()
+    public void TestPinSkeletonGroupsLoopScopesForFeedsAndInLoopParamsAlike()
     {
-        var g = ((ComputationGraph)typeof(RngRuntimeLoopFeed)
-            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var x = TensorData([8L], new float[8]);
-        var steps = TensorData(System.Array.Empty<long>(), 2L);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps]));
+        var steps = TensorData(Array.Empty<long>(), 2L);
 
-        var cfg = new RngConfig { MasterSeed = 3 };
-        var report = arch.GetRngStreamReport(cfg);
-
-        // Two streams: the generator's injected substreamIndex counter state (RngExecutionCounter —
-        // a draw-free zero fill, but it occupies an id slot, so the inventory lists it), plus
-        // ONE row for the feed site [1, -1, 1]. The -1 iteration slot stays: the site's
-        // per-iteration streams derive at runtime from the iteration index (an in-graph split
-        // chain), so the realized set is unbounded and no enumeration exists to list; the
-        // per-iteration key for iteration i is the host fold fold(fold(fold(runMaster, 1), i), 1),
-        // addressable by Override at the realized path [1, i, 1].
+        // Two streams: the injected substreamIndex counter state (RngExecutionCounter — a
+        // draw-free zero fill that still occupies an id slot) plus ONE row for the feed site
+        // [1, -1, 1]. The -1 iteration slot stays: per-iteration streams derive at runtime from
+        // the iteration index, so the realized set is unbounded and no enumeration exists.
+        var feedArch = Arch<RngRuntimeLoopFeed>(x, steps);
+        var report = feedArch.GetRngStreamReport(new RngConfig { MasterSeed = 3 });
         Assert.Equal(2, report.Streams.Count);
         Assert.Contains(report.Streams, s =>
             s.Kind == RngStreamKind.ParamInit && s.Name!.Contains("RngExecutionCounter"));
         var feed = Assert.Single(report.Streams, s => s.Kind == RngStreamKind.UniformFeed);
         Assert.Equal([1, -1, 1], feed.ModelIdPath);
-        Assert.Null(feed.SitePath);      // the site row is its own site
-        Assert.Null(feed.Key);      // per-iteration keys are runtime-derived, not listable
+        Assert.Null(feed.SitePath);   // the site row is its own site
+        Assert.Null(feed.Key);        // per-iteration keys are runtime-derived, not listable
 
-        // The skeleton groups the feed under its loop SCOPE [1, -1] with the feed's
-        // local slot (1) — pins address sites, not iterations — and lists it once.
-        var skeleton = arch.GetRngStreamReport().EmitPinSkeleton();
-        Assert.Contains("// inside the loop body at ModelId path [1, -1]:", skeleton);
-        Assert.Contains("([1], /* uniform feed */ ?)", skeleton);
-    }
+        // The skeleton groups the feed under its loop SCOPE [1, -1] at its local slot — pins
+        // address sites, not iterations — and lists it once.
+        var feedSkeleton = feedArch.GetRngStreamReport().EmitPinSkeleton();
+        Assert.Contains("// inside the loop body at ModelId path [1, -1]:", feedSkeleton);
+        Assert.Contains("([1], /* uniform feed */ ?)", feedSkeleton);
 
-    [Fact]
-    public void TestPinSkeletonGroupsInLoopParamsLikeFeeds()
-    {
-        // A param AND a feed inside ONE runtime loop: both consumer kinds carry the same
-        // site identity ([1, -1, localSlot]) and the skeleton groups both under the
-        // loop-body scope at their local slots. Previously an in-loop param — whose
-        // realized ModelId carries no -1 — was mis-slotted to module scope under the
-        // loop's own slot (an unusable handle) and its sibling iterations were dropped.
-        var g = ((ComputationGraph)typeof(RngRuntimeLoopParamAndFeed)
-            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
-        var x = TensorData([8L], new float[8]);
-        var steps = TensorData(System.Array.Empty<long>(), 2L);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps]));
-
-        var report = arch.GetRngStreamReport();
-
-        // Realized in-loop param rows carry their site id exactly like realized feed rows.
-        var paramRows = report.Streams
+        // A param AND a feed inside ONE runtime loop: both consumer kinds carry the same site
+        // identity ([1, -1, localSlot]) and group under the loop-body scope at their local
+        // slots. An in-loop param used to be mis-slotted to module scope under the loop's own
+        // slot (an unusable handle) with its sibling iterations dropped.
+        var bothReport = Arch<RngRuntimeLoopParamAndFeed>(x, steps).GetRngStreamReport();
+        var paramRows = bothReport.Streams
             .Where(s => s.Kind == RngStreamKind.ParamInit && !s.FrameworkOwned).ToList();
         Assert.Equal(2, paramRows.Count);
         for (int i = 0; i < 2; i++)
@@ -311,97 +269,44 @@ public class RngPinTests
             Assert.Equal([1, -1, 1], paramRows[i].SitePath);
         }
 
-        // One pin per scope: the loop body lists the param (local slot 1) and the feed
-        // (local slot 2) once each. Module scope has no author-pinnable consumer — the
-        // framework-owned RngExecutionCounter is excluded — so no module block is emitted.
-        var skeleton = report.EmitPinSkeleton();
-        Assert.Contains("// inside the loop body at ModelId path [1, -1]:", skeleton);
-        Assert.Contains("([1], /*", skeleton);
-        Assert.Contains("InitSimple", skeleton);
-        Assert.Contains("([2], /* uniform feed */ ?)", skeleton);
-        Assert.DoesNotContain("// at the end of Inline:", skeleton);
-        Assert.DoesNotContain("RngExecutionCounter", skeleton);
+        // Module scope has no author-pinnable consumer — the framework-owned
+        // RngExecutionCounter is excluded — so no module block is emitted.
+        var bothSkeleton = bothReport.EmitPinSkeleton();
+        Assert.Contains("// inside the loop body at ModelId path [1, -1]:", bothSkeleton);
+        Assert.Contains("([1], /*", bothSkeleton);
+        Assert.Contains("InitSimple", bothSkeleton);
+        Assert.Contains("([2], /* uniform feed */ ?)", bothSkeleton);
+        Assert.DoesNotContain("// at the end of Inline:", bothSkeleton);
+        Assert.DoesNotContain("RngExecutionCounter", bothSkeleton);
     }
 
     [Fact]
-    public void TestPinSurvivesNestedFirstUseModuleBuild()
+    public void TestPinsThatCouldNeverApplyFailLoudly()
     {
-        // Pin(b, a) is recorded, then the body first-uses PinWipeFreshInit — whose Function is
-        // uncached (it is referenced nowhere else), so its body graph builds mid-trace. The pin
-        // must survive that nested build: b (out=3) takes id slot 1. Before the fix, the nested
-        // build's entry-time clear wiped the recorded pins and creation order won (a first).
-        var (firstSlotOutFeatures, output) = Probe<PinSurvivesNestedFirstUseBuild>();
-        Assert.Equal(3L, firstSlotOutFeatures);
-        Assert.Equal(5, output.Length);
-    }
+        // Mixed forms in one scope: sparse reservations would shift positional pins off the
+        // first id slots, silently re-keying the streams the positional pin froze. (Different
+        // scopes may still use different forms — see SiblingNestedLoopsPin.)
+        AssertFailsAnyWith(
+            () => _ = typeof(PinMixedFormsOneScope).GetProperty("ComputationGraph")!.GetValue(null),
+            "cannot be mixed within one scope");
+        // Pinning something with no RNG stream (the module input).
+        AssertFailsAnyWith(
+            () => _ = typeof(PinUnresolvableInput).GetProperty("ComputationGraph")!.GetValue(null),
+            "Rng.Pin");
+        // ModelId slots are numbered from 1; slot 0 at every level is the RngSeed parameter.
+        AssertFailsWith<ArgumentException>(() => Rng.Pin(([0], new object())), "reserved", "RngSeed");
+        // Both pin forms need a module build in progress, or they could never be applied.
+        AssertFailsWith<InvalidOperationException>(() => Rng.Pin(new object()), "inside a module body");
+        AssertFailsWith<InvalidOperationException>(() => Rng.Pin(([1], new object())), "inside a module body");
 
-    [Fact]
-    public void TestMixedFormPinsInOneScopeFailTheModuleBuild()
-    {
-        // In one scope, sparse reservations shift positional pins off the first id slots
-        // (they take the first UNRESERVED slots), silently re-keying the streams the
-        // positional pin froze — so a scope pinned both ways is rejected at build. Different
-        // scopes may still use different forms (covered by SiblingNestedLoopsPin).
-        var ex = Assert.ThrowsAny<Exception>(() =>
-            _ = typeof(PinMixedFormsOneScope).GetProperty("ComputationGraph")!.GetValue(null));
-        for (Exception? e = ex; e is not null; e = e.InnerException)
-            if (e.Message.Contains("cannot be mixed within one scope")) return;
-        Assert.Fail($"expected the mixed-form Rng.Pin build error, got: {ex}");
-    }
-
-    [Fact]
-    public void TestUnresolvablePinFailsTheModuleBuild()
-    {
-        // Pinning something with no RNG stream (here: the module input) must fail the build
-        // loudly — a silently inactive pin is exactly the re-keying hazard Pin guards against.
-        var ex = Assert.ThrowsAny<Exception>(() =>
-            _ = typeof(PinUnresolvableInput).GetProperty("ComputationGraph")!.GetValue(null));
-        for (Exception? e = ex; e is not null; e = e.InnerException)
-            if (e.Message.Contains("Rng.Pin")) return;
-        Assert.Fail($"expected an Rng.Pin build error, got: {ex}");
-    }
-
-    [Fact]
-    public void TestPinToReservedSlotZeroThrows()
-    {
-        // The [0] reservation: ModelId slots are numbered from 1, and slot 0 — at every
-        // level — is the RngSeed parameter (the model's RNG identity). Sparse pins are the
-        // one path that could mint an explicit slot, so a 0 (or negative) slot is rejected
-        // at the call site, naming the reservation.
-        var ex = Assert.Throws<ArgumentException>(() => Rng.Pin(([0], new object())));
-        Assert.Contains("reserved", ex.Message);
-        Assert.Contains("RngSeed", ex.Message);
-    }
-
-    [Fact]
-    public void TestPinWithNoModuleBuildInProgressThrows()
-    {
-        // The uniform ModuleBuildContext contract: a pin recorded with no module build in
-        // progress could never be applied — the module the author believes is pinned would
-        // silently re-key on the next refactor (it used to be permanently orphaned in a
-        // thread-static list) — so both forms throw at the call site instead.
-        var positionalEx = Assert.Throws<InvalidOperationException>(
-            () => Rng.Pin(new object()));
-        Assert.Contains("inside a module body", positionalEx.Message);
-
-        var sparseEx = Assert.Throws<InvalidOperationException>(
-            () => Rng.Pin(([1], new object())));
-        Assert.Contains("inside a module body", sparseEx.Message);
-    }
-
-    [Fact]
-    public void TestPinInsideStandaloneLoopTraceThrows()
-    {
-        // A standalone LoopAPI.Iterate (hand-built graph, no module build) traces in an
-        // isolated ModuleBuildContext with no harvester, so a pin recorded there could never
-        // be applied either — same loud failure, on every construction pass.
+        // A standalone LoopAPI.Iterate traces in an isolated ModuleBuildContext with no
+        // harvester, so a pin recorded there could never be applied either.
         Scalar<int64> counter = Scalar(0L);
         foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
         {
             LoopAPI.Init(counter);
             counter = counter + Scalar(1L);
-            var ex = Assert.Throws<InvalidOperationException>(() => Rng.Pin(new object()));
-            Assert.Contains("inside a module body", ex.Message);
+            AssertFailsWith<InvalidOperationException>(() => Rng.Pin(new object()), "inside a module body");
         }
     }
 }

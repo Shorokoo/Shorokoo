@@ -74,7 +74,10 @@ namespace Shorokoo
 
         #region Unit and Empty vectors
 
-        private static Vector<T>? unit;
+        // Published through a reference holder: a Nullable<Vector<T>> is two fields, so a
+        // concurrent reader could observe HasValue before inner, and dereference null.
+        private static readonly object unitGate = new();
+        private static System.Runtime.CompilerServices.StrongBox<Vector<T>>? unitBox;
 
         /// <summary>
         /// A tensor of shape (1,) containing a single element of value 1 (or true).
@@ -83,8 +86,12 @@ namespace Shorokoo
         {
             get
             {
-                if (Vector<T>.unit is null)
+                if (unitBox is { } cached) return cached.Value;
+                lock (unitGate)
                 {
+                    if (unitBox is { } raced) return raced.Value;
+
+                    Vector<T>? unit = null;
                     var type = OnnxUtils.GetDType<T>();
                     if (type == DType.BFloat16) unit = (Vector<T>)(object)Vector(BFloat16.One);
                     else if (type == DType.Float16) unit = (Vector<T>)(object)Vector(Float16.One);
@@ -110,50 +117,57 @@ namespace Shorokoo
                     else if (type == DType.Complex128) 
                         throw new UnsupportedDTypeException(ErrorCodes.VT005, type.ToString(), "Unit Vector", "Complex128 numbers are not supported for unit vector creation");
                     else if (type == DType.Invalid) unit = (Vector<T>)(object)Vector(1);
-                }
 
-                Debug.Assert(Vector<T>.unit is not null);
-                return Vector<T>.unit!.Value;
+                    Debug.Assert(unit is not null);
+                    unitBox = new System.Runtime.CompilerServices.StrongBox<Vector<T>>(unit!.Value);
+                    return unitBox.Value;
+                }
             }
         }
 
-        private static Vector<T>? empty;
+        private static readonly object emptyGate = new();
+        private static System.Runtime.CompilerServices.StrongBox<Vector<T>>? emptyBox;
         /// <summary>A cached vector of shape (0,) containing no elements.</summary>
         public static Vector<T> Empty
         {
             get
             {
-                if (Vector<T>.empty is null)
+                if (emptyBox is { } cached) return cached.Value;
+                lock (emptyGate)
                 {
+                    if (emptyBox is { } raced) return raced.Value;
+
+                    Vector<T>? empty = null;
                     var type = OnnxUtils.GetDType<T>();
-                    if (type == DType.BFloat16) empty = (Vector<T>)(object)Vector(new BFloat16[] { });
-                    else if (type == DType.Float16) empty = (Vector<T>)(object)Vector(new Float16[] {});
-                    else if (type == DType.Float32) empty = (Vector<T>)(object)Vector(new float[] {});
-                    else if (type == DType.Float64) empty = (Vector<T>)(object)Vector(new double[] {});
+                    if (type == DType.BFloat16) empty = (Vector<T>)(object)Vector((BFloat16[])[]);
+                    else if (type == DType.Float16) empty = (Vector<T>)(object)Vector((Float16[])[]);
+                    else if (type == DType.Float32) empty = (Vector<T>)(object)Vector((float[])[]);
+                    else if (type == DType.Float64) empty = (Vector<T>)(object)Vector((double[])[]);
                     else if (type == DType.Int4) 
                         throw new UnsupportedDTypeException(ErrorCodes.VT006, type.ToString(), "Empty Vector", "Int4 precision is not supported for empty vector creation");
-                    else if (type == DType.Int8) empty = (Vector<T>)(object)Vector(new sbyte[] {});
-                    else if (type == DType.Int16) empty = (Vector<T>)(object)Vector(new short[] {});
-                    else if (type == DType.Int32) empty = (Vector<T>)(object)Vector(new int[] {});
-                    else if (type == DType.Int64) empty = (Vector<T>)(object)Vector(new long[] {});
+                    else if (type == DType.Int8) empty = (Vector<T>)(object)Vector((sbyte[])[]);
+                    else if (type == DType.Int16) empty = (Vector<T>)(object)Vector((short[])[]);
+                    else if (type == DType.Int32) empty = (Vector<T>)(object)Vector((int[])[]);
+                    else if (type == DType.Int64) empty = (Vector<T>)(object)Vector((long[])[]);
                     else if (type == DType.UInt4) 
                         throw new UnsupportedDTypeException(ErrorCodes.VT007, type.ToString(), "Empty Vector", "UInt4 precision is not supported for empty vector creation");
-                    else if (type == DType.UInt8) empty = (Vector<T>)(object)Vector(new byte[] {});
-                    else if (type == DType.UInt16) empty = (Vector<T>)(object)Vector(new ushort[] {});
-                    else if (type == DType.UInt32) empty = (Vector<T>)(object)Vector(new uint[] {});
-                    else if (type == DType.UInt64) empty = (Vector<T>)(object)Vector(new ulong[] {});
+                    else if (type == DType.UInt8) empty = (Vector<T>)(object)Vector((byte[])[]);
+                    else if (type == DType.UInt16) empty = (Vector<T>)(object)Vector((ushort[])[]);
+                    else if (type == DType.UInt32) empty = (Vector<T>)(object)Vector((uint[])[]);
+                    else if (type == DType.UInt64) empty = (Vector<T>)(object)Vector((ulong[])[]);
                     else if (type == DType.String)
                         throw new UnsupportedDTypeException(ErrorCodes.VT008, type.ToString(), "Empty Vector", "String type is not supported for empty vector creation");
-                    else if (type == DType.Bool) empty = (Vector<T>)(object)Vector(new bool[] {});
+                    else if (type == DType.Bool) empty = (Vector<T>)(object)Vector((bool[])[]);
                     else if (type == DType.Complex64) 
                         throw new UnsupportedDTypeException(ErrorCodes.VT009, type.ToString(), "Empty Vector", "Complex64 numbers are not supported for empty vector creation");
                     else if (type == DType.Complex128) 
                         throw new UnsupportedDTypeException(ErrorCodes.VT010, type.ToString(), "Empty Vector", "Complex128 numbers are not supported for empty vector creation");
-                    else if (type == DType.Invalid) empty = (Vector<T>)(object)Vector(new int[] {});
-                }
+                    else if (type == DType.Invalid) empty = (Vector<T>)(object)Vector((int[])[]);
 
-                Debug.Assert(Vector<T>.empty is not null);
-                return Vector<T>.empty!.Value;
+                    Debug.Assert(empty is not null);
+                    emptyBox = new System.Runtime.CompilerServices.StrongBox<Vector<T>>(empty!.Value);
+                    return emptyBox.Value;
+                }
             }
         }
 

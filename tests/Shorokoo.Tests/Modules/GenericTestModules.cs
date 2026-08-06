@@ -486,10 +486,10 @@ namespace Shorokoo.Tests.Modules
         public static Tensor<T> Inline<T>(Tensor<T> input) where T : FloatLike
         {
             // Create a dynamic struct definition with a concrete float32 field
-            var fields = new[]
-            {
+            TensorStructFieldDef[] fields =
+            [
                 new TensorStructFieldDef("Data", DataStructure.Tensor, rank: null, DType.Float32),
-            };
+            ];
             var def = new TensorStructDef(fields, "GenericDataStruct");
             var dtype = DType.GetOrCreateForTensorStruct(def);
 

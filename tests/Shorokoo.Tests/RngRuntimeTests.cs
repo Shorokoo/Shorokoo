@@ -1,8 +1,8 @@
 using System;
 using System.Linq;
-using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Core.Rng;
 using Shorokoo.Runtime;
+using static Shorokoo.Tests.RngDrawRunners;
 
 namespace Shorokoo.Tests;
 
@@ -34,8 +34,7 @@ public partial class RtLoweredUniform
 
 /// <summary>A trainable weight plus a runtime RNG feed: the feed forces the framework to inject
 /// the <c>RngExecutionCounter</c> as model state, while the draw is zeroed so the model's output
-/// is exactly the linear transform. Used to exercise safetensors export/import of a model that
-/// carries the execution counter.</summary>
+/// is exactly the linear transform.</summary>
 [Module]
 public partial class RtFcWithRngFeed
 {
@@ -60,176 +59,124 @@ public partial class RtFcWithRngFeed
 [Module] public partial class RtLoweredBits64 { public static Tensor<uint64> Inline(Tensor<float32> x) => RandomBits<uint64>(x.ShapeTensor()); }
 
 /// <summary>
-/// Coverage for the in-graph counter-based runtime RNG (<see cref="RuntimeRng"/>): the ONNX-op
-/// Threefry subgraph must reproduce the host generator (<see cref="Threefry2x32"/>) bit-for-bit
-/// — proving the novel integer-op PRNG is correct and execution-provider-independent — and
-/// produce well-distributed draws.
+/// The in-graph counter-based runtime RNG (<see cref="RuntimeRng"/>): the ONNX-op Threefry
+/// subgraph must reproduce the host generator (<see cref="Threefry2x32"/>) bit-for-bit —
+/// execution-provider-independent — and produce well-distributed draws.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
 public class RngRuntimeTests
 {
-    private static float[] RunDraw<TModule>(long rows, long cols)
-    {
-        var g = ((ComputationGraph)typeof(TModule)
-            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
-        var input = TensorData([rows, cols], Enumerable.Repeat(0f, (int)(rows * cols)).ToArray());
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
-        var outputs = ComputeContext.Default.Execute(concrete, input);
-        return outputs[0].ToTensorData().As<float32>().AccessMemory().ToArray();
-    }
+    private const ulong BitsKey = 111UL | (222UL << 32);
+    private const ulong UniformKey = 123UL | (456UL << 32);
 
-    // Host reference for the runtime scheme: substreamIndex folds into the key, element i indexes
-    // the whole counter; uniform = low 24 bits of x0 * 2^-24.
+    // Host reference for the runtime scheme: substreamIndex folds into the key, element i
+    // indexes the whole counter; uniform = low 24 bits of x0 * 2^-24.
     private static float HostUniform(long i, ulong key, ulong substreamIndex)
         => RngTestOracle.DrawUniform(key, substreamIndex, i);
 
-    // Host reference for the raw-bits scheme: element i draws one generator word pair; the
-    // narrow widths take the low bits of x0, U32 the whole word, U64 = x0 | (x1 << 32).
+    // Host reference for the raw-bits scheme: the narrow widths take the low bits of x0, U32
+    // the whole word, U64 = x0 | (x1 << 32).
     private static ulong HostBits(long i, int width, ulong key, ulong substreamIndex)
         => RngTestOracle.DrawBits(key, substreamIndex, i, width);
 
-    private static TensorData RunDrawRaw<TModule>(long rows, long cols)
-    {
-        var g = ((ComputationGraph)typeof(TModule)
-            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
-        var input = TensorData([rows, cols], Enumerable.Repeat(0f, (int)(rows * cols)).ToArray());
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
-        return ComputeContext.Default.Execute(concrete, input)[0].ToTensorData();
-    }
-
     [Fact]
-    public void TestInGraphBitsMatchHostBitExact()
+    public void TestInGraphBitsAndUniformDrawsMatchTheHostGeneratorBitExactly()
     {
         var u8 = RunDrawRaw<RtBitsU8Draw>(4, 4);
         Assert.Equal(DType.UInt8, u8.DType);
         var u8v = u8.As<uint8>().AccessMemory().ToArray();
-        for (long i = 0; i < 16; i++) Assert.Equal((byte)HostBits(i, 8, 111UL | (222UL << 32), 0), u8v[i]);
+        for (long i = 0; i < 16; i++) Assert.Equal((byte)HostBits(i, 8, BitsKey, 0), u8v[i]);
 
         var u16 = RunDrawRaw<RtBitsU16Draw>(4, 4);
         Assert.Equal(DType.UInt16, u16.DType);
         var u16v = u16.As<uint16>().AccessMemory().ToArray();
-        for (long i = 0; i < 16; i++) Assert.Equal((ushort)HostBits(i, 16, 111UL | (222UL << 32), 0), u16v[i]);
+        for (long i = 0; i < 16; i++) Assert.Equal((ushort)HostBits(i, 16, BitsKey, 0), u16v[i]);
 
         var u32 = RunDrawRaw<RtBitsU32Draw>(4, 4);
         Assert.Equal(DType.UInt32, u32.DType);
         var u32v = u32.As<uint32>().AccessMemory().ToArray();
-        for (long i = 0; i < 16; i++) Assert.Equal((uint)HostBits(i, 32, 111UL | (222UL << 32), 0), u32v[i]);
+        for (long i = 0; i < 16; i++) Assert.Equal((uint)HostBits(i, 32, BitsKey, 0), u32v[i]);
 
         var u64 = RunDrawRaw<RtBitsU64Draw>(4, 4);
         Assert.Equal(DType.UInt64, u64.DType);
         var u64v = u64.As<uint64>().AccessMemory().ToArray();
-        for (long i = 0; i < 16; i++) Assert.Equal(HostBits(i, 64, 111UL | (222UL << 32), 0), u64v[i]);
-    }
+        for (long i = 0; i < 16; i++) Assert.Equal(HostBits(i, 64, BitsKey, 0), u64v[i]);
 
-    [Fact]
-    public void TestInGraphUniformMatchesHostBitExact()
-    {
         var vals = RunDraw<RtUniformDraw>(4, 4);
         Assert.Equal(16, vals.Length);
-        for (long i = 0; i < 16; i++)
-            Assert.Equal(HostUniform(i, 123UL | (456UL << 32), 0), vals[i]);
+        for (long i = 0; i < 16; i++) Assert.Equal(HostUniform(i, UniformKey, 0), vals[i]);
     }
 
     [Fact]
-    public void TestInGraphUniformIsInRangeAndSpread()
+    public void TestInGraphUniformIsInRangeAndSpreadAndNormalHasStandardMoments()
     {
-        var vals = RunDraw<RtUniformDraw>(8, 8);
-        Assert.All(vals, v => Assert.InRange(v, 0.0f, 0.99999997f));
-        Assert.InRange(vals.Average(), 0.4f, 0.6f);
+        var uniform = RunDraw<RtUniformDraw>(8, 8);
+        Assert.All(uniform, v => Assert.InRange(v, 0.0f, 0.99999997f));
+        Assert.InRange(uniform.Average(), 0.4f, 0.6f);
+
+        var normal = RunDraw<RtNormalDraw>(40, 40);
+        double mean = normal.Average();
+        double variance = normal.Select(v => (v - mean) * (v - mean)).Average();
+        Assert.InRange(mean, -0.1, 0.1);
+        Assert.InRange(variance, 0.85, 1.15);
     }
 
     [Fact]
-    public void TestLoweredRandomUniformIsDeterministicAndInRange()
+    public void TestLoweredFeedsAreDeterministicAndKeyedUnderTheDefaultIdentity()
     {
-        // A plain Globals.RandomUniform draw now lowers to the in-graph counter-based RNG, so
-        // it is bit-reproducible across executions (the old ONNX RandomUniformLike advanced its
-        // own state per Run and would differ). Two runs must be identical, in range, and spread.
+        // A plain Globals.RandomUniform draw lowers to the in-graph counter-based RNG, so it is
+        // bit-reproducible across executions (ONNX RandomUniformLike advanced state per Run).
         var a = RunDraw<RtLoweredUniform>(8, 8);
-        var b = RunDraw<RtLoweredUniform>(8, 8);
         Assert.Equal(64, a.Length);
-        Assert.Equal(a, b);                                        // deterministic / portable
+        Assert.Equal(a, RunDraw<RtLoweredUniform>(8, 8));
         Assert.All(a, v => Assert.InRange(v, 0.0f, 0.99999997f));
-        Assert.InRange(a.Average(), 0.3f, 0.7f);   // 64-sample mean; loose (the point is determinism + range)
-    }
+        Assert.InRange(a.Average(), 0.3f, 0.7f);
 
-    [Fact]
-    public void TestNoConfigModelDrawsKeyedThreefryUnderTheDefaultIdentity()
-    {
-        // "No config" means the DEFAULT deterministic identity (master seed 0), never the
-        // ONNX random fallback: a concrete model built without any RngConfig carries the
-        // default identity, and its feed draws are bit-exactly the host fold of the
-        // default runtime master along the feed's ModelId — reconstructible offline.
+        // "No config" means the DEFAULT deterministic identity (master seed 0), never the ONNX
+        // random fallback: the draws are bit-exactly the host fold of the default runtime
+        // master along the feed's ModelId (slot 1) — reconstructible offline.
         var g = ((ComputationGraph)typeof(RtLoweredUniform)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
-
-        Assert.NotNull(concrete.TryGetRngSeed());   // the default identity, recorded
-
+        Assert.NotNull(concrete.TryGetRngSeed());
+        var defaultKey = RngTestOracle.RunKey(RngConfig.Default, [1]);
         var vals = ComputeContext.Default.Execute(concrete, input)[0]
             .ToTensorData().As<float32>().AccessMemory().ToArray();
-        var key = RngTestOracle.RunKey(RngConfig.Default, [1]);   // the feed's site is slot 1
-        for (long i = 0; i < 16; i++)
-            Assert.Equal(HostUniform(i, key, 0), vals[i]);
+        for (long i = 0; i < 16; i++) Assert.Equal(HostUniform(i, defaultKey, 0), vals[i]);
+
+        var bits = RunDrawRaw<RtLoweredBits>(4, 4);
+        Assert.Equal(DType.UInt32, bits.DType);
+        var bv = bits.As<uint32>().AccessMemory().ToArray();
+        Assert.Equal(bv, RunDrawRaw<RtLoweredBits>(4, 4).As<uint32>().AccessMemory().ToArray());
+        for (long i = 0; i < 16; i++) Assert.Equal((uint)HostBits(i, 32, defaultKey, 0), bv[i]);
+
+        // The U64 path (unsigned BitShift + BitwiseOr above the int64 range) must survive the
+        // full public feed -> keyed draw -> width-specialized function call.
+        var bits64 = RunDrawRaw<RtLoweredBits64>(4, 4);
+        Assert.Equal(DType.UInt64, bits64.DType);
+        var b64 = bits64.As<uint64>().AccessMemory().ToArray();
+        for (long i = 0; i < 16; i++) Assert.Equal(HostBits(i, 64, defaultKey, 0), b64[i]);
     }
 
     [Fact]
-    public void TestLoweredRandomBitsIsDeterministicAndKeyed()
-    {
-        // The public RandomBits<uint32> feed lowers to the keyed in-graph bits draw under the
-        // default identity: deterministic across executions and bit-exactly the host fold of
-        // the default runtime master along the feed's ModelId, taken as the low 32 bits.
-        var a = RunDrawRaw<RtLoweredBits>(4, 4);
-        var b = RunDrawRaw<RtLoweredBits>(4, 4);
-        Assert.Equal(DType.UInt32, a.DType);
-        var av = a.As<uint32>().AccessMemory().ToArray();
-        var bv = b.As<uint32>().AccessMemory().ToArray();
-        Assert.Equal(av, bv);   // deterministic / portable
-        var key = RngTestOracle.RunKey(RngConfig.Default, [1]);   // single feed at slot 1
-        for (long i = 0; i < 16; i++)
-            Assert.Equal((uint)HostBits(i, 32, key, 0), av[i]);
-    }
-
-    [Fact]
-    public void TestLoweredRandomBitsU64SurvivesFullLowering()
-    {
-        // The U64 path (unsigned BitShift + BitwiseOr producing values above the int64 range)
-        // must survive the full public feed -> keyed draw -> width-specialized function call and
-        // stay bit-exact with the host x0 | (x1 << 32).
-        var a = RunDrawRaw<RtLoweredBits64>(4, 4);
-        Assert.Equal(DType.UInt64, a.DType);
-        var av = a.As<uint64>().AccessMemory().ToArray();
-        var key = RngTestOracle.RunKey(RngConfig.Default, [1]);
-        for (long i = 0; i < 16; i++)
-            Assert.Equal(HostBits(i, 64, key, 0), av[i]);
-    }
-
-    [Fact]
-    public void TestRngStreamReportLabelsBitsFeed()
+    public void TestBitsFeedIsLabelledAsSuchAndRebindingReplacesOnlyTheIdentityValue()
     {
         // A bits feed must be classified and described as a "bits feed", not silently as the
         // "normal feed" default the RngStreamKind switches fall through to.
-        var g = ((ComputationGraph)typeof(RtLoweredBits)
+        var bg = ((ComputationGraph)typeof(RtLoweredBits)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
-        var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
-
-        var report = arch.GetRngStreamReport();
+        var bitsInput = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
+        var report = bg.ToConcreteArchitecture(bg.FromOrderedInputs([bitsInput])).GetRngStreamReport();
         var bitsStreams = report.Streams.Where(s => s.Kind == RngStreamKind.BitsFeed).ToList();
-        Assert.NotEmpty(bitsStreams);                        // the feed is classified as bits
-        Assert.Contains("bits feed", report.ToString());     // and described as "bits feed",
-        Assert.Contains("bits feed", report.EmitPinSkeleton()); // not the "normal feed" default
+        Assert.NotEmpty(bitsStreams);
+        Assert.Contains("bits feed", report.ToString());
+        Assert.Contains("bits feed", report.EmitPinSkeleton());
         Assert.DoesNotContain("normal feed", report.ToString());
-    }
 
-    [Fact]
-    public void TestRngConfigRebindsInPlaceWithoutGraphChange()
-    {
-        // Re-binding is the RngSeed parameter's re-initialization: it replaces that one
-        // parameter's value, and every draw's key — a split chain rooted at the parameter —
-        // re-derives from it. No node is added or removed and no feed is touched; parameter
-        // values would be untouched too (this model has none to re-key).
+        // Re-binding is the RngSeed parameter's re-initialization: every draw's key — a split
+        // chain rooted at that parameter — re-derives from it, with no node added or removed.
         var g = ((ComputationGraph)typeof(RtLoweredUniform)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
@@ -244,75 +191,55 @@ public class RngRuntimeTests
         var underSeed1 = Run();
 
         concrete.ApplyRngConfig(new RngConfig { MasterSeed = 2 });
-        Assert.Equal(nodeCount, concrete.Nodes.Count);   // re-binding replaces one node
+        Assert.Equal(nodeCount, concrete.Nodes.Count);
         Assert.Contains(concrete.Nodes, n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
-        var underSeed2 = Run();
-        Assert.NotEqual(underSeed1, underSeed2);         // new master -> new stream
+        Assert.NotEqual(underSeed1, Run());
 
         concrete.ApplyRngConfig(new RngConfig { MasterSeed = 1 });
-        var underSeed1Again = Run();
-        Assert.Equal(underSeed1, underSeed1Again);       // re-binding is exact, not approximate
+        Assert.Equal(underSeed1, Run());   // re-binding is exact, not approximate
     }
 
     [Fact]
-    public void TestSplitDerivesChildKeyFromParentKeyInput()
+    public void TestSplitIndexAndDrawPositionUseTheWholeSixtyFourBitRange()
     {
-        // SHRK_RNG_SPLIT folds its parent key input with the index — bit-exact with the host
-        // bijection. The split function is the versioned in-graph form of the key tree's
-        // derivation primitive (the lowering itself derives keys host-side from the carrier).
-        var parentKey = Scalar(1UL | (2UL << 32));
-        var split = Shorokoo.Core.Nodes.NodeDefinitions.InternalOp.RngSplit(
-            parentKey, Scalar(7UL), Shorokoo.Core.Rng.RngAlgorithms.Default);
-        var g = new InternalComputationGraph([], [split]);
-
-        var child = ComputeContext.Default.Execute(g)[0]
-            .ToTensorData().As<uint64>().AccessMemory().ToArray();
-        var (x0, x1) = Threefry2x32.Bijection(7u, 0u, 1u, 2u);
-        Assert.Equal((ulong[])[x0 | ((ulong)x1 << 32)], child);
-    }
-
-    [Theory]
-    // The pairs that ALIAS under a 32-bit index: same low word, different high word. Under the
-    // retired scheme the second counter word was hard-wired to 0 and the index was truncated, so
-    // split(key, i) and split(key, i + 2^32) were the same child key.
-    [InlineData(7UL, 7UL + (1UL << 32))]
-    [InlineData(0UL, 1UL << 32)]
-    // ...and a key/index in the top half of the range, where a signed reading would go negative.
-    [InlineData(0xFFFF_FFFF_FFFF_FFFEUL, 0xFFFF_FFFEUL)]
-    public void TestSplitIndexUsesTheWholeSixtyFourBitRange(ulong indexA, ulong indexB)
-    {
-        // The headline guarantee of the whole-uint64 interface: distinct indices give distinct
-        // children over the ENTIRE range, and each matches the host oracle's whole-64-bit fold.
-        const ulong key = 0x8000_0000_0000_0001UL;   // high bit set: no signed path may touch it
-
         static ulong Split(ulong k, ulong index)
         {
-            var node = Shorokoo.Core.Nodes.NodeDefinitions.InternalOp.RngSplit(
-                Scalar(k), Scalar(index), Shorokoo.Core.Rng.RngAlgorithms.Default);
+            var node = InternalOp.RngSplit(Scalar(k), Scalar(index), RngAlgorithms.Default);
             return ComputeContext.Default.Execute(new InternalComputationGraph([], [node]))[0]
                 .ToTensorData().As<uint64>().AccessMemory().ToArray()[0];
         }
 
-        var a = Split(key, indexA);
-        var b = Split(key, indexB);
+        // SHRK_RNG_SPLIT folds its parent key input with the index, bit-exact with the host
+        // bijection (the split function is the versioned in-graph derivation primitive).
+        var (px0, px1) = Threefry2x32.Bijection(7u, 0u, 1u, 2u);
+        Assert.Equal(px0 | ((ulong)px1 << 32), Split(1UL | (2UL << 32), 7UL));
 
-        Assert.Equal(RngTestOracle.FoldKey(key, indexA), a);
-        Assert.Equal(RngTestOracle.FoldKey(key, indexB), b);
-        Assert.NotEqual(a, b);
-    }
+        // Distinct indices give distinct children over the ENTIRE range. The first two pairs
+        // ALIAS under a 32-bit index (same low word, different high word); the third is in the
+        // top half, where a signed reading would go negative. key's high bit is set too.
+        const ulong key = 0x8000_0000_0000_0001UL;
+        (ulong a, ulong b)[] pairs =
+        [
+            (7UL, 7UL + (1UL << 32)),
+            (0UL, 1UL << 32),
+            (0xFFFF_FFFF_FFFF_FFFEUL, 0xFFFF_FFFEUL),
+        ];
+        foreach (var (ia, ib) in pairs)
+        {
+            var a = Split(key, ia);
+            var b = Split(key, ib);
+            Assert.Equal(RngTestOracle.FoldKey(key, ia), a);
+            Assert.Equal(RngTestOracle.FoldKey(key, ib), b);
+            Assert.NotEqual(a, b);
+        }
 
-    [Fact]
-    public void TestDrawPositionUsesTheWholeSixtyFourBitRange()
-    {
-        // substreamIndex is the execution counter. Under the retired scheme it occupied one 32-bit
-        // counter word, so execution 2^32 repeated execution 0's draw exactly — the wrap the
-        // user docs explicitly promised did not exist.
-        const ulong key = 0xDEAD_BEEF_FEED_FACEUL;
+        // substreamIndex is the execution counter; under a 32-bit counter word, execution 2^32
+        // repeated execution 0's draw exactly.
+        const ulong drawKey = 0xDEAD_BEEF_FEED_FACEUL;
         static float[] Draw(ulong substreamIndex)
         {
-            var shape = Vector(4L);
             var g = new InternalComputationGraph([],
-                [RuntimeRng.StandardUniform(shape, Scalar(key), Scalar(substreamIndex))]);
+                [RuntimeRng.StandardUniform(Vector(4L), Scalar(drawKey), Scalar(substreamIndex))]);
             return ComputeContext.Default.Execute(g)[0]
                 .ToTensorData().As<float32>().AccessMemory().ToArray();
         }
@@ -320,24 +247,13 @@ public class RngRuntimeTests
         var atZero = Draw(0);
         var atTwoPow32 = Draw(1UL << 32);
         var atTop = Draw(0xFFFF_FFFF_FFFF_FFFFUL);
-
-        Assert.NotEqual(atZero, atTwoPow32);   // the wrap this change fixes
+        Assert.NotEqual(atZero, atTwoPow32);
         Assert.NotEqual(atZero, atTop);
         for (long i = 0; i < 4; i++)
         {
-            Assert.Equal(RngTestOracle.DrawUniform(key, 0, i), atZero[i]);
-            Assert.Equal(RngTestOracle.DrawUniform(key, 1UL << 32, i), atTwoPow32[i]);
-            Assert.Equal(RngTestOracle.DrawUniform(key, 0xFFFF_FFFF_FFFF_FFFFUL, i), atTop[i]);
+            Assert.Equal(RngTestOracle.DrawUniform(drawKey, 0, i), atZero[i]);
+            Assert.Equal(RngTestOracle.DrawUniform(drawKey, 1UL << 32, i), atTwoPow32[i]);
+            Assert.Equal(RngTestOracle.DrawUniform(drawKey, 0xFFFF_FFFF_FFFF_FFFFUL, i), atTop[i]);
         }
-    }
-
-    [Fact]
-    public void TestInGraphNormalHasStandardMoments()
-    {
-        var vals = RunDraw<RtNormalDraw>(40, 40);
-        double mean = vals.Average();
-        double variance = vals.Select(v => (v - mean) * (v - mean)).Average();
-        Assert.InRange(mean, -0.1, 0.1);
-        Assert.InRange(variance, 0.85, 1.15);
     }
 }

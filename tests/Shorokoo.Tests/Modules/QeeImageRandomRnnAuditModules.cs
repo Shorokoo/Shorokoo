@@ -1,3 +1,5 @@
+using static Shorokoo.Tests.Modules.QeeAuditVerdicts;
+
 namespace Shorokoo.Tests.Modules
 {
     // ===================================================================
@@ -11,7 +13,7 @@ namespace Shorokoo.Tests.Modules
     //
     //  Driven two ways by QeeImageRandomRnnAuditTests: AdvancedTestGraph
     //  validates the expectations against real ONNX Runtime execution,
-    //  and QeeSelfCheck validates that QuickExecutionEngine reproduces
+    //  and QeeAudit strict-QEE validates that QuickExecutionEngine reproduces
     //  them (Shape ops read the QEE-inferred shape, so a wrong inferred
     //  dim flips the bit to false). Modules whose checks are not
     //  QEE-computable (data-dependent NMS shapes, nondeterministic
@@ -102,14 +104,11 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(cropResize, Vector(1L, 1L, 4L, 4L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Resize with NEGATIVE axes (spec opset 18+: counted from the back) — QEE-only:
     /// ONNX Runtime 1.25.1's Resize kernel rejects negative axes ("Scale value should be
-    /// greater than 0"), so this module is driven through QeeSelfCheck without ORT.
+    /// greater than 0"), so this module is driven through QeeAudit strict-QEE without ORT.
     /// Input x is expected as [1,1,8,8].</summary>
     [Module]
     public partial class QeeResizeNegativeAxesAuditCheck
@@ -134,9 +133,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(negSizes, Vector(1L, 1L, 3L, 5L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Upsample (deprecated — exported to ORT via the LowerUpsampleToResize
@@ -172,9 +168,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(sampledNearest, Vector(1L, 2L, 3L, 5L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>AffineGrid 3-D (theta [N,3,4], size [N,C,D,H,W] → grid [N,D,H,W,3]) and the
@@ -198,9 +191,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(sampled5, Vector(1L, 1L, 2L, 3L, 4L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>RoiAlign shape audit: output is [num_rois, C, output_height, output_width]
@@ -225,9 +215,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(max, Vector(3L, 2L, 2L, 2L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>NonMaxSuppression against real ORT execution: the [n,3] output shape with
@@ -257,14 +244,11 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(nmsCenter, Vector(1L, 3L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>NonMaxSuppression with the max_output_boxes_per_class input ABSENT — the
     /// spec default is 0 = "no output", so the result is exactly [0,3] and QEE can pin the
-    /// full shape (this branch IS QeeSelfCheck-able, unlike the data-dependent ones).</summary>
+    /// full shape (this branch IS QeeAudit strict-QEE-able, unlike the data-dependent ones).</summary>
     [Module]
     public partial class QeeNmsEmptyAuditCheck
     {
@@ -326,9 +310,6 @@ namespace Shorokoo.Tests.Modules
 
         private static Scalar<float32> Sum(Tensor<float32> t)
             => t.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Random-generator family shape/dtype audit (values are nondeterministic and
@@ -349,9 +330,11 @@ namespace Shorokoo.Tests.Modules
                 dtype: null, seed: 3f);
             var rnl = (Tensor<float32>)OnnxOp.RandomNormalLike(probs, mean: 0f, scale: 1f,
                 dtype: null, seed: 1f);
-            // dtype override on the Like-variant.
+            // dtype override on the Like-variant, then the same op inheriting the input dtype.
             var rul = (Tensor<float64>)OnnxOp.RandomUniformLike(probs, high: 1f, low: 0f,
                 dtype: DType.Float64, seed: 2f);
+            var rulLike = (Tensor<float32>)OnnxOp.RandomUniformLike(probs, high: 1f, low: 0f,
+                dtype: null, seed: 2f);
             var bern = (Tensor<float32>)OnnxOp.Bernoulli(probs, dtype: null, seed: 7f);
             var bernInt = (Tensor<int32>)OnnxOp.Bernoulli(probs, dtype: DType.Int32, seed: 7f);
             // No dtype → int32 per spec (the node-def default branch used to be unresolvable).
@@ -366,6 +349,7 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(ru, Vector(3L)) +
                 ShapeMismatch(rnl, Vector(2L, 3L)) +
                 ShapeMismatch(rul, Vector(2L, 3L)) +
+                ShapeMismatch(rulLike, Vector(2L, 3L)) +
                 ShapeMismatch(bern, Vector(2L, 3L)) +
                 ShapeMismatch(bernInt, Vector(2L, 3L)) +
                 ShapeMismatch(mult, Vector(2L, 5L)) +
@@ -376,9 +360,6 @@ namespace Shorokoo.Tests.Modules
                 ((eyeDown.Reduce(ReduceKind.Sum, keepDims: false).Scalar() - Scalar(1L)).Abs() < Scalar(1L));
             return (mismatch < Scalar(1L)) & eyeValuesOk;
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Seeded determinism (ORT-only — QEE never computes random values): two
@@ -437,9 +418,6 @@ namespace Shorokoo.Tests.Modules
                 ((cosBool.Cast<int64>().Reduce(ReduceKind.Sum, keepDims: false).Scalar() - Scalar(4L)).Abs() < Scalar(1L));
             return (shapeMismatch < Scalar(1L)) & valuesOk;
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>Constant value_string / value_strings branches — output inspected directly
@@ -450,7 +428,7 @@ namespace Shorokoo.Tests.Modules
         public static (Tensor<@string>, Tensor<@string>) Inline()
         {
             var cs = (Tensor<@string>)OnnxOp.Constant("hello");
-            var css = (Tensor<@string>)OnnxOp.Constant(new[] { "a", "b", "c" });
+            var css = (Tensor<@string>)OnnxOp.Constant((string[])["a", "b", "c"]);
             return (cs, css);
         }
     }
@@ -488,9 +466,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch((Tensor<float32>)yh3, Vector(2L, 2L, 5L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>GRU shape audit (ORT-validated): forward with linear_before_reset and
@@ -517,9 +492,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch((Tensor<float32>)yh2, Vector(2L, 2L, 5L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>QEE-only recurrent variants that ORT's CPU kernels reject: hidden_size
@@ -573,9 +545,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch((Tensor<float32>)ycLstmL, Vector(2L, 1L, 5L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
     /// <summary>LSTM shape audit: forward with every optional input wired (B,
@@ -610,9 +579,6 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch((Tensor<float32>)yc2, Vector(2L, 2L, 5L));
             return mismatch < Scalar(1L);
         }
-
-        private static Scalar<int64> ShapeMismatch(ITensor t, Vector<int64> expected)
-            => (t.TShape - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
 }

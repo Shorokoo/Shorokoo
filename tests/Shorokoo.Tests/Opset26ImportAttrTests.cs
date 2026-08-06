@@ -3,55 +3,27 @@ using Shorokoo.Core.Factory.IR;
 using Shorokoo.Core.Inference;
 using Shorokoo.Core.Graph;
 using Shorokoo.Runtime;
+using static Shorokoo.Tests.OnnxProtoBuilders;
 
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Import tolerance for the new optional attributes that opsets 22-26 added to
-/// EXISTING ops (the only non-dtype changes in the whole 21→26 respec):
+/// Import tolerance for the optional attributes opsets 22-26 added to existing ops:
 /// DequantizeLinear-23 <c>output_dtype</c>, QuantizeLinear-23 <c>precision</c>,
-/// Cast-24 <c>round_mode</c>. Models setting them must import without error,
-/// resolve the right output dtypes, and execute.
+/// Cast-24 <c>round_mode</c>.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
 public class Opset26ImportAttrTests
 {
-    private const int FloatElem = 1;   // TensorProto.DataType.FLOAT
-    private const int UInt8Elem = 2;   // UINT8
-
-    private static ValueInfoProto TensorInfo(string name, int elemType, params long[] dims)
-    {
-        var shape = new TensorShapeProto();
-        foreach (var d in dims)
-            shape.Dims.Add(new TensorShapeProto.Dimension { DimValue = d });
-        return new ValueInfoProto
-        {
-            Name = name,
-            Type = new TypeProto
-            {
-                TensorType = new TypeProto.Tensor { ElemType = elemType, Shape = shape },
-            },
-        };
-    }
+    private const int FloatElem = 1;
+    private const int UInt8Elem = 2;
 
     private static AttributeProto IntAttr(string name, long value)
         => new AttributeProto { Name = name, Type = AttributeProto.AttributeType.Int, I = value };
 
     private static AttributeProto StringAttr(string name, string value)
         => new AttributeProto { Name = name, Type = AttributeProto.AttributeType.String, S = System.Text.Encoding.UTF8.GetBytes(value) };
-
-    private static TensorProto Init(string name, int elemType, long[] dims, byte[] raw)
-        => new TensorProto { Name = name, data_type = elemType, Dims = dims, RawData = raw };
-
-    private static InternalComputationGraph Import(ModelProto model)
-    {
-        using var ms = new MemoryStream();
-        ProtoBuf.Serializer.Serialize(ms, model);
-        // Internal-graph importer: these tests read graph internals (fast.Outputs)
-        // and drive the internal-typed Execute/QEE.Run overloads.
-        return OnnxModelImporter.FromOnnxModelToInternalGraph(ms.ToArray());
-    }
 
     private static ModelProto WrapModel(GraphProto graph, long opset)
     {
@@ -61,68 +33,59 @@ public class Opset26ImportAttrTests
     }
 
     [Fact]
-    public void TestDequantizeLinearOutputDtypeImports()
+    public void TestDequantizeOutputDtypeQuantizePrecisionAndCastRoundModeImport()
     {
-        // x: uint8 [4], scale: float scalar, output_dtype = FLOAT (1).
-        var g = new GraphProto { Name = "dq" };
-        g.Inputs.Add(TensorInfo("x", UInt8Elem, 4));
-        g.Initializers.Add(Init("scale", FloatElem, [], System.BitConverter.GetBytes(0.5f)));
-        var n = new NodeProto { OpType = "DequantizeLinear", Name = "dq0" };
-        n.Inputs.AddRange(new[] { "x", "scale" });
-        n.Outputs.Add("y");
-        n.Attributes.Add(IntAttr("output_dtype", 1));
-        g.Nodes.Add(n);
-        g.Outputs.Add(TensorInfo("y", FloatElem, 4));
+        string[] xScaleInputs = ["x", "scale"];
 
-        var fast = Import(WrapModel(g, 23));
-        var results = ComputeContext.Default.Execute(fast,
-            new IData[] { TensorData(DType.UInt8, [4L], (byte)2, (byte)4, (byte)6, (byte)8) });
-        var td = (TensorData<float32>)results[0].ToTensorData();
-        Assert.Equal(new[] { 1f, 2f, 3f, 4f }, td.AccessMemory().ToArray());
+        var dq = new GraphProto { Name = "dq" };
+        dq.Inputs.Add(TensorInfo("x", UInt8Elem, 4));
+        dq.Initializers.Add(Init("scale", FloatElem, [], System.BitConverter.GetBytes(0.5f)));
+        var dqNode = new NodeProto { OpType = "DequantizeLinear", Name = "dq0" };
+        dqNode.Inputs.AddRange(xScaleInputs);
+        dqNode.Outputs.Add("y");
+        dqNode.Attributes.Add(IntAttr("output_dtype", 1));
+        dq.Nodes.Add(dqNode);
+        dq.Outputs.Add(TensorInfo("y", FloatElem, 4));
 
-        // QEE dtype propagation honors the attribute as well.
-        var qee = new QuickExecutionEngine();
-        var store = qee.Run(fast, new TensorData[] { TensorData(DType.UInt8, [4L], (byte)2, (byte)4, (byte)6, (byte)8) });
-        Assert.Equal(DType.Float32, store[fast.Outputs[0]].DType);
-    }
+        var dqGraph = Import(WrapModel(dq, 23));
+        IData[] dqInputs = [TensorData(DType.UInt8, [4L], (byte)2, (byte)4, (byte)6, (byte)8)];
+        float[] dqExpected = [1f, 2f, 3f, 4f];
+        Assert.Equal(dqExpected,
+            ((TensorData<float32>)ComputeContext.Default.Execute(dqGraph, dqInputs)[0].ToTensorData())
+                .AccessMemory().ToArray());
 
-    [Fact]
-    public void TestQuantizeLinearPrecisionImports()
-    {
-        var g = new GraphProto { Name = "q" };
-        g.Inputs.Add(TensorInfo("x", FloatElem, 4));
-        g.Initializers.Add(Init("scale", FloatElem, [], System.BitConverter.GetBytes(0.5f)));
-        var n = new NodeProto { OpType = "QuantizeLinear", Name = "q0" };
-        n.Inputs.AddRange(new[] { "x", "scale" });
-        n.Outputs.Add("y");
-        n.Attributes.Add(IntAttr("precision", 0)); // default-valued, must be tolerated
-        g.Nodes.Add(n);
-        g.Outputs.Add(TensorInfo("y", UInt8Elem, 4));
+        TensorData[] dqQeeInputs = [TensorData(DType.UInt8, [4L], (byte)2, (byte)4, (byte)6, (byte)8)];
+        var dqStore = new QuickExecutionEngine().Run(dqGraph, dqQeeInputs);
+        Assert.Equal(DType.Float32, dqStore[dqGraph.Outputs[0]].DType);
 
-        var fast = Import(WrapModel(g, 23));
-        var results = ComputeContext.Default.Execute(fast,
-            new IData[] { TensorData(DType.Float32, [4L], 1f, 2f, 3f, 4f) });
-        var td = results[0].ToTensorData();
-        Assert.Equal(DType.UInt8, td.DType);
-    }
+        var q = new GraphProto { Name = "q" };
+        q.Inputs.Add(TensorInfo("x", FloatElem, 4));
+        q.Initializers.Add(Init("scale", FloatElem, [], System.BitConverter.GetBytes(0.5f)));
+        var qNode = new NodeProto { OpType = "QuantizeLinear", Name = "q0" };
+        qNode.Inputs.AddRange(xScaleInputs);
+        qNode.Outputs.Add("y");
+        qNode.Attributes.Add(IntAttr("precision", 0));
+        q.Nodes.Add(qNode);
+        q.Outputs.Add(TensorInfo("y", UInt8Elem, 4));
 
-    [Fact]
-    public void TestCastRoundModeImports()
-    {
-        var g = new GraphProto { Name = "c" };
-        g.Inputs.Add(TensorInfo("x", FloatElem, 2));
-        var n = new NodeProto { OpType = "Cast", Name = "c0" };
-        n.Inputs.Add("x");
-        n.Outputs.Add("y");
-        n.Attributes.Add(IntAttr("to", FloatElem));
-        n.Attributes.Add(StringAttr("round_mode", "up")); // default-valued; float8e8m0-only semantics
-        g.Nodes.Add(n);
-        g.Outputs.Add(TensorInfo("y", FloatElem, 2));
+        IData[] qInputs = [TensorData(DType.Float32, [4L], 1f, 2f, 3f, 4f)];
+        Assert.Equal(DType.UInt8,
+            ComputeContext.Default.Execute(Import(WrapModel(q, 23)), qInputs)[0].ToTensorData().DType);
 
-        var fast = Import(WrapModel(g, 24));
-        var results = ComputeContext.Default.Execute(fast,
-            new IData[] { TensorData(DType.Float32, [2L], 1.5f, -2.5f) });
-        var td = (TensorData<float32>)results[0].ToTensorData();
-        Assert.Equal(new[] { 1.5f, -2.5f }, td.AccessMemory().ToArray());
+        var c = new GraphProto { Name = "c" };
+        c.Inputs.Add(TensorInfo("x", FloatElem, 2));
+        var cNode = new NodeProto { OpType = "Cast", Name = "c0" };
+        cNode.Inputs.Add("x");
+        cNode.Outputs.Add("y");
+        cNode.Attributes.Add(IntAttr("to", FloatElem));
+        cNode.Attributes.Add(StringAttr("round_mode", "up"));
+        c.Nodes.Add(cNode);
+        c.Outputs.Add(TensorInfo("y", FloatElem, 2));
+
+        IData[] cInputs = [TensorData(DType.Float32, [2L], 1.5f, -2.5f)];
+        float[] cExpected = [1.5f, -2.5f];
+        Assert.Equal(cExpected,
+            ((TensorData<float32>)ComputeContext.Default.Execute(Import(WrapModel(c, 24)), cInputs)[0].ToTensorData())
+                .AccessMemory().ToArray());
     }
 }

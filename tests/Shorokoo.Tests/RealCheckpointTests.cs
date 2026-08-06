@@ -1,6 +1,3 @@
-using Shorokoo.Onnx;
-using Shorokoo.Tests.Utils;
-
 namespace Shorokoo.Tests;
 
 /// <summary>
@@ -39,8 +36,7 @@ public class RealCheckpointTests
         var byName = tensors.ToDictionary(t => t.Name);
 
         // A standard ResNet18 state dict carries ~120 tensors.
-        Assert.True(tensors.Count >= 100,
-            $"expected a full ResNet18 state dict, got {tensors.Count} tensors");
+        Assert.True(tensors.Count >= 100);
 
         // Landmark tensors present in every torchvision/timm ResNet18, with canonical
         // shapes — proves names and shapes survived the parse intact.
@@ -89,7 +85,7 @@ public class RealCheckpointTests
     private static void AssertTensor(
         IReadOnlyDictionary<string, SafeTensor> byName, string name, string dtype, params long[] shape)
     {
-        Assert.True(byName.TryGetValue(name, out var t), $"missing tensor '{name}'");
+        Assert.True(byName.TryGetValue(name, out var t));
         Assert.Equal(dtype, t!.DataType);
         Assert.Equal(shape, t.Shape);
     }

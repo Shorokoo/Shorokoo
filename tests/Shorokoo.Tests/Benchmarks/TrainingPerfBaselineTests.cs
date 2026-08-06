@@ -50,7 +50,8 @@ public partial class PerfBaselineLinearModel
 /// </para>
 /// </summary>
 [Trait("Domain", "Training")]
-[Trait("Purpose", "Coverage")]
+[Trait("Purpose", "Benchmark")]
+[Collection(SerialMeasurement.Name)]
 public class TrainingPerfBaselineTests
 {
     /// <summary>Current must not be slower than this multiple of the baseline.</summary>
@@ -90,18 +91,12 @@ public class TrainingPerfBaselineTests
 
     private static void AssertNotSlower(string phase, double measuredMs, double baselineMs, double factor)
     {
-        double budget = baselineMs * factor;
-        Assert.True(measuredMs <= budget,
-            $"{phase} regressed: {measuredMs:F1} ms > {factor:F1}× baseline {baselineMs:F1} ms (budget {budget:F1} ms). " +
-            $"If this is an accepted shift, re-record with SHOROKOO_UPDATE_PERF_BASELINE=1.");
+        Assert.True(measuredMs <= baselineMs * factor);
     }
 
     private static void AssertNotLessThroughput(string phase, double measured, double baseline, double factor)
     {
-        double floor = baseline / factor;
-        Assert.True(measured >= floor,
-            $"{phase} regressed: {measured:F0}/s < baseline {baseline:F0}/s ÷ {factor:F1} (floor {floor:F0}/s). " +
-            $"If this is an accepted shift, re-record with SHOROKOO_UPDATE_PERF_BASELINE=1.");
+        Assert.True(measured >= baseline / factor);
     }
 
     // ----- measurement -------------------------------------------------------
@@ -156,8 +151,8 @@ public class TrainingPerfBaselineTests
             baseGraph.FromOrderedInputs([exampleInput]),
             new AdamOptimizerHyperparameters { LearningRate = 1e-3f });
 
-        var inputBatch = rig.InputDef.FromOrderedData(TensorData(InputShape, new float[] { 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f }));
-        var targetBatch = rig.TargetDef.FromOrderedData(TensorData(TargetShape, new float[] { 1f, 0f, 1f, 0f }));
+        var inputBatch = rig.InputDef.FromOrderedData(TensorData(InputShape, (float[])[1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f]));
+        var targetBatch = rig.TargetDef.FromOrderedData(TensorData(TargetShape, (float[])[1f, 0f, 1f, 0f]));
 
         var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < ThroughputWarmupSteps; i++)
@@ -181,7 +176,8 @@ public class TrainingPerfBaselineTests
     private static PerfMeasurement LoadBaseline()
     {
         var path = BaselineOutputPath;
-        Assert.True(File.Exists(path), $"perf baseline not found at {path} — record it with SHOROKOO_UPDATE_PERF_BASELINE=1.");
+        // Absent baseline: re-record it with SHOROKOO_UPDATE_PERF_BASELINE=1.
+        Assert.True(File.Exists(path));
         var json = File.ReadAllText(path);
         var baseline = JsonConvert.DeserializeObject<PerfMeasurement>(json);
         Assert.NotNull(baseline);

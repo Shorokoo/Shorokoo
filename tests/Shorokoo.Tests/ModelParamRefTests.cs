@@ -74,24 +74,15 @@ public partial class NestedParamRefMatchesManualMatMul
 [Trait("Purpose", "Coverage")]
 public class ModelParamRefTests
 {
+    // RngConfig.Default forces per-parameter init (NOT the shared-key fixture): the reference
+    // uses the model's actual weight, so it must match without same-shape params being tied.
     [Fact]
-    public void TestLinearParamRefMatchesUnderPerParameterInit()
+    public void TestParamRefFlatAndTwoLevelsDeepUnderPerParameterInit()
     {
-        // Force per-parameter init (NOT the shared-key fixture): the reference uses the
-        // model's actual weight, so it must still match — proving the check no longer
-        // depends on same-shape params being tied.
+        var x = TensorData(DType.Float32, [2L, 3L], 0.5f, -1f, 2f, 0.3f, -0.5f, 1.5f);
         Assert.True(AutoTest.AdvancedTestGraph<LinearParamRefMatchesManualMatMul>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Float32, [2L, 3L], 0.5f, -1f, 2f, 0.3f, -0.5f, 1.5f)],
-            rngConfig: RngConfig.Default));
-    }
-
-    [Fact]
-    public void TestNestedParamRefTwoLevelsDeepUnderPerParameterInit()
-    {
+            hyperparamInputs: [], runtimeInputs: [x], rngConfig: RngConfig.Default));
         Assert.True(AutoTest.AdvancedTestGraph<NestedParamRefMatchesManualMatMul>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Float32, [2L, 3L], 0.5f, -1f, 2f, 0.3f, -0.5f, 1.5f)],
-            rngConfig: RngConfig.Default));
+            hyperparamInputs: [], runtimeInputs: [x], rngConfig: RngConfig.Default));
     }
 }

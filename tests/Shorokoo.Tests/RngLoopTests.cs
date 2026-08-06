@@ -1,17 +1,16 @@
 using System;
 using System.Linq;
-using Shorokoo.Core.Nodes.NodeDefinitions;
+using System.Text;
 using Shorokoo.Core.Nodes.Processors.Fast;
 using Shorokoo.Core.Rng;
 using Shorokoo.Modules.Initializers;
 using Shorokoo.Runtime;
-using Shorokoo.Tests.Modules;
 
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Adds <c>steps</c> keyed uniform draws to <c>x</c> inside a RUNTIME loop — the trip count
-/// is a graph input, so the loop survives concretization and executes as an ONNX Loop.
+/// Adds <c>steps</c> keyed uniform draws to <c>x</c> inside a RUNTIME loop — the trip count is a
+/// graph input, so the loop survives concretization and executes as an ONNX Loop.
 /// </summary>
 [Module]
 public partial class RngRuntimeLoopFeed
@@ -30,10 +29,9 @@ public partial class RngRuntimeLoopFeed
 }
 
 /// <summary>
-/// A trainable param AND a runtime feed inside one RUNTIME loop — the fixture for asserting
-/// that the two consumer kinds get identical ModelId treatment (realization, padding,
-/// reporting, pin-skeleton grouping). Loop = top slot 1; in the loop body the param takes
-/// local slot 1 and the feed local slot 2 (creation order).
+/// A trainable param AND a runtime feed inside one RUNTIME loop — the fixture for asserting that
+/// the two consumer kinds get identical ModelId treatment. Loop = top slot 1; in the loop body
+/// the param takes local slot 1 and the feed local slot 2 (creation order).
 /// </summary>
 [Module]
 public partial class RngRuntimeLoopParamAndFeed
@@ -53,15 +51,11 @@ public partial class RngRuntimeLoopParamAndFeed
 }
 
 /// <summary>
-/// An in-loop trainable param whose value DIFFERS per iteration (a random init draws a distinct
-/// value on each per-iteration ModelId's own stream), combined into an ORDER-sensitive recurrence
-/// <c>acc = acc*2 + w_i</c>. The trip count is a runtime graph input so the loop survives
-/// concretization: at each runtime iteration the in-loop MODEL_PARAM_ID_REF must select THAT
-/// iteration's realized param. Because the recurrence weights iteration <c>i</c>'s param by
-/// <c>2^(N-1-i)</c> (all distinct), selecting the wrong per-iteration slot — or an empty filler —
-/// changes the executed output; a pure sum could not tell a permutation apart. Multiplying by the
-/// exact power of two 2 keeps <c>acc*2</c> rounding-free, so the host recurrence reproduces the
-/// float32 execution bit-for-bit (FMA-agnostic).
+/// An in-loop trainable param whose value DIFFERS per iteration, combined into an
+/// ORDER-sensitive recurrence <c>acc = acc*2 + w_i</c>: iteration <c>i</c>'s param is weighted by
+/// <c>2^(N-1-i)</c>, so selecting the wrong per-iteration slot — or an empty filler — changes the
+/// executed output, which a pure sum could not detect. Multiplying by the exact power of two
+/// keeps <c>acc*2</c> rounding-free, so the host recurrence is bit-for-bit (FMA-agnostic).
 /// </summary>
 [Module]
 public partial class RngRuntimeLoopParamRecurrence
@@ -97,12 +91,12 @@ public partial class RngUnrolledLoopFeed
 }
 
 /// <summary>
-/// In-loop feed keying via the in-graph derivation chain: a feed under a loop takes the
-/// ModelId <c>[loopSlot, -1, feedSlot]</c>, and its key is a split chain rooted at the
-/// RngSeed parameter with the <b>runtime iteration index</b> entering as the split counter at
-/// the <c>-1</c> position — so iteration <c>i</c> draws from the stream
-/// <c>fold(fold(fold(runMaster, loopSlot), i), feedSlot)</c>, bit-exactly reproducible
-/// host-side, whether the loop survives to runtime or unrolls into constants.
+/// In-loop feed keying via the in-graph derivation chain: a feed under a loop takes the ModelId
+/// <c>[loopSlot, -1, feedSlot]</c>, and its key is a split chain rooted at the RngSeed parameter
+/// with the <b>runtime iteration index</b> entering as the split counter at the <c>-1</c>
+/// position — so iteration <c>i</c> draws from <c>fold(fold(fold(runMaster, loopSlot), i),
+/// feedSlot)</c>, bit-exactly reproducible host-side, whether the loop survives to runtime or
+/// unrolls into constants.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -112,22 +106,22 @@ public class RngLoopTests
 
     private static readonly float[] XVals = [10f, 20f, 30f, 40f, 50f, 60f, 70f, 80f];
 
-    /// <summary>Host replica of one keyed uniform draw at element e (substreamIndex 0).</summary>
     private static float HostUniform(long e, ulong key)
         => RngTestOracle.DrawUniform(key, substreamIndex: 0, e);
 
-    /// <summary>x + sum of per-iteration draws, added in loop order (float order matters).</summary>
-    private static float[] HostExpected(RngConfig cfg, int steps)
+    // The feed's ModelId is [1, -1, 1]: the runtime master folds slot 1, then the iteration
+    // index, then the feed's slot under the loop (1).
+    private static ulong IterationKey(RngConfig cfg, int i)
+        => RngTestOracle.FoldKey(RngTestOracle.FoldKey(RngTestOracle.RunKey(cfg, [1]), (ulong)i), 1);
+
+    /// <summary>x + the per-iteration draws, added in loop order (float order matters).</summary>
+    private static float[] HostExpected(RngConfig cfg, int steps, Func<int, ulong>? keyOf = null)
     {
+        keyOf ??= i => IterationKey(cfg, i);
         var expected = (float[])XVals.Clone();
         for (int i = 0; i < steps; i++)
-        {
-            // Feed ModelId is [1, -1, 1]: the runtime master folds slot 1, then the
-            // iteration index, then the feed's slot under the loop (1).
-            var key = RngTestOracle.FoldKey(RngTestOracle.FoldKey(RngTestOracle.RunKey(cfg, [1]), (ulong)i), 1);
             for (long e = 0; e < N; e++)
-                expected[e] += HostUniform(e, key);
-        }
+                expected[e] += HostUniform(e, keyOf(i));
         return expected;
     }
 
@@ -144,240 +138,156 @@ public class RngLoopTests
         return (output, concrete);
     }
 
+    private static void AssertFailsWithMessage(Action act, string fragment)
+    {
+        var sb = new StringBuilder();
+        for (Exception? e = Assert.ThrowsAny<Exception>(act); e is not null; e = e.InnerException)
+            sb.AppendLine(e.Message);
+        Assert.Contains(fragment, sb.ToString());
+    }
+
     [Fact]
-    public void TestRuntimeLoopFeedDrawsPerIterationStreamsBitExactly()
+    public void TestRuntimeAndUnrolledLoopFeedsDrawTheSamePerIterationStreamsBitExactly()
     {
         var cfg = new RngConfig { MasterSeed = 11 };
         var (output, concrete) = RunRuntimeLoop(cfg, steps: 3);
 
         // The loop really survived to runtime — otherwise this test proves nothing.
         Assert.Contains(concrete.Nodes, n => n.OpCode == OpCodes.LOOP_OPEN);
-
-        // Every iteration drew from its own stream, and each matches the host fold exactly.
         Assert.Equal(HostExpected(cfg, steps: 3), output);
 
         // Deterministic across executions; re-keyed by a different master.
-        var (again, _) = RunRuntimeLoop(cfg, steps: 3);
-        Assert.Equal(output, again);
-        var (other, _) = RunRuntimeLoop(new RngConfig { MasterSeed = 12 }, steps: 3);
-        Assert.NotEqual(output, other);
-    }
+        Assert.Equal(output, RunRuntimeLoop(cfg, steps: 3).output);
+        Assert.NotEqual(output, RunRuntimeLoop(new RngConfig { MasterSeed = 12 }, steps: 3).output);
 
-    [Fact]
-    public void TestUnrolledLoopFoldsToSameKeysAsRuntimeLoop()
-    {
-        var cfg = new RngConfig { MasterSeed = 11 };
-
-        var g = ((ComputationGraph)typeof(RngUnrolledLoopFeed)
-            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
-        var x = TensorData([N], XVals);
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel(cfg);
-
-        // Constant trip count: the loop is gone by concretization…
-        Assert.DoesNotContain(concrete.Nodes, n => n.OpCode == OpCodes.LOOP_OPEN);
-
-        // …yet each unrolled copy folds to the same per-iteration key the runtime loop
-        // splits at execution: graceful degradation in both directions, bit-for-bit.
-        var output = ComputeContext.Default.Execute(concrete, x)[0]
-            .ToTensorData().As<float32>().AccessMemory().ToArray();
-        Assert.Equal(HostExpected(cfg, steps: 2), output);
-
-        var (runtimeOutput, _) = RunRuntimeLoop(cfg, steps: 2);
-        Assert.Equal(runtimeOutput, output);
-    }
-
-    [Fact]
-    public void TestPerIterationOverrideReSeedsExactlyOneStream()
-    {
-        // Override ITERATION 1 of the loop feed site [1, -1, 1] by its realized stream path.
-        // Override routing is structural: the site's chain selects the record's key
-        // (at their fixed offset in the RngSeedData) when the runtime iteration index
-        // matches the record's path, and the folded chain otherwise.
-        var cfg = new RngConfig { MasterSeed = 11 };
-        cfg = cfg.Override(RngCollection.Runtime, [1, 1, 1], 424242UL);
-        var (output, concrete) = RunRuntimeLoop(cfg, steps: 3);
-        Assert.Contains(concrete.Nodes, n => n.OpCode == OpCodes.LOOP_OPEN);
-
-        // Iterations 0 and 2 derive as usual; iteration 1 draws from the override — bit-exact.
-        var expected = (float[])XVals.Clone();
-        for (int i = 0; i < 3; i++)
-        {
-            var key = i == 1
-                ? RngTestOracle.RunKey(cfg, [1, 1, 1])
-                : RngTestOracle.FoldKey(RngTestOracle.FoldKey(RngTestOracle.RunKey(cfg, [1]), (ulong)i), 1);
-            for (long e = 0; e < N; e++)
-                expected[e] += HostUniform(e, key);
-        }
-        Assert.Equal(expected, output);
-    }
-
-    [Fact]
-    public void TestRebindWithChangedOverrideSetRewiresInPlace()
-    {
-        // Override routing is structural (an overridden site's chain roots at the record's
-        // offset in the RngSeedData), so a re-bind that CHANGES the override set re-runs
-        // the wiring pass on the same in-memory model — draws honor the new set exactly, and
-        // removing the override restores the master-derived chain bit-exactly.
-        var cfg = new RngConfig { MasterSeed = 11 };
-        var (baseline, concrete) = RunRuntimeLoop(cfg, steps: 3);
-
-        var x = TensorData([N], XVals);
-        var stepsData = TensorData(Array.Empty<long>(), 3L);
-        float[] Run() => ComputeContext.Default.Execute(concrete, x, stepsData)[0]
-            .ToTensorData().As<float32>().AccessMemory().ToArray();
-
-        var cfgOv = cfg.Override(RngCollection.Runtime, [1, 1, 1], 424242UL);
-        concrete.ApplyRngConfig(cfgOv);
-
-        var expected = (float[])XVals.Clone();
-        for (int i = 0; i < 3; i++)
-        {
-            var key = i == 1
-                ? RngTestOracle.RunKey(cfgOv, [1, 1, 1])
-                : RngTestOracle.FoldKey(RngTestOracle.FoldKey(RngTestOracle.RunKey(cfgOv, [1]), (ulong)i), 1);
-            for (long e = 0; e < N; e++)
-                expected[e] += HostUniform(e, key);
-        }
-        Assert.Equal(expected, Run());
-
-        concrete.ApplyRngConfig(cfg);   // back to no overrides: re-wires again
-        Assert.Equal(baseline, Run());
-    }
-
-    [Fact]
-    public void TestSingleIterationLoopOverrideIsHonored()
-    {
-        // A loop that executes exactly ONE iteration: the override must reach the draw
-        // (regression guard — under the retired key-table representation, a dispatch bug
-        // once dropped the override precisely when the table had a single row).
-        var cfg = new RngConfig { MasterSeed = 11 };
-        cfg = cfg.Override(RngCollection.Runtime, [1, 0, 1], 99999UL);
-        var (output, concrete) = RunRuntimeLoop(cfg, steps: 1);
-        Assert.Contains(concrete.Nodes, n => n.OpCode == OpCodes.LOOP_OPEN);
-
-        var expected = (float[])XVals.Clone();
-        var key = RngTestOracle.RunKey(cfg, [1, 0, 1]);   // the override, not the master derivation
-        for (long e = 0; e < N; e++)
-            expected[e] += HostUniform(e, key);
-        Assert.Equal(expected, output);
-    }
-
-    [Fact]
-    public void TestExecutingFewerIterationsThanEnumeratedStaysExact()
-    {
-        // The concreteness contract: the enumerated iteration space is the stream set, and
-        // running FEWER iterations than enumerated is valid use — the executed subset draws
-        // from exactly the same per-iteration streams. (Running MORE would mint stream ids
-        // that did not exist at concretization — invalid use of the concrete artifact.)
-        var cfg = new RngConfig { MasterSeed = 11 };
+        // Running FEWER iterations than enumerated draws from exactly the same streams.
         var g = ((ComputationGraph)typeof(RngRuntimeLoopFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var x = TensorData([N], XVals);
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x, TensorData(Array.Empty<long>(), 3L)]))
+        var partial = g.ToConcreteArchitecture(g.FromOrderedInputs([x, TensorData(Array.Empty<long>(), 3L)]))
             .ToConcreteModel(cfg);
+        Assert.Equal(HostExpected(cfg, steps: 2),
+            ComputeContext.Default.Execute(partial, x, TensorData(Array.Empty<long>(), 2L))[0]
+                .ToTensorData().As<float32>().AccessMemory().ToArray());
 
-        var output = ComputeContext.Default.Execute(concrete, x, TensorData(Array.Empty<long>(), 2L))[0]
+        // A constant trip count unrolls the loop away by concretization, yet each unrolled copy
+        // folds to the same per-iteration key the runtime loop splits at execution.
+        var ug = ((ComputationGraph)typeof(RngUnrolledLoopFeed)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var unrolled = ug.ToConcreteArchitecture(ug.FromOrderedInputs([x])).ToConcreteModel(cfg);
+        Assert.DoesNotContain(unrolled.Nodes, n => n.OpCode == OpCodes.LOOP_OPEN);
+        var unrolledOutput = ComputeContext.Default.Execute(unrolled, x)[0]
             .ToTensorData().As<float32>().AccessMemory().ToArray();
-        Assert.Equal(HostExpected(cfg, steps: 2), output);
+        Assert.Equal(HostExpected(cfg, steps: 2), unrolledOutput);
+        Assert.Equal(RunRuntimeLoop(cfg, steps: 2).output, unrolledOutput);
     }
 
     [Fact]
-    public void TestZeroEnumeratedIterationsBuildAndRunForParamsAndFeedsAlike()
+    public void TestPerIterationOverridesRouteStructurallyAndRebindingRewiresInPlace()
     {
-        // Concretizing with a trip-count hint of 0 means the loop never runs under the hints.
-        // Params — whose values must be enumerated and materialized — realize the single
-        // all-zero grid cell as padding (validly derived, never consumed at the only valid
-        // executed iteration count, 0). Feeds need no padding at all: their per-iteration
-        // keys derive at runtime from the iteration index, so the site simply never draws.
+        // Override routing is structural: the site's chain selects the record's key (at its
+        // fixed offset in the RngSeedData) when the runtime iteration index matches the
+        // record's path, and the folded chain otherwise.
+        var cfg = new RngConfig { MasterSeed = 11 };
+        var ov = cfg.Override(RngCollection.Runtime, [1, 1, 1], 424242UL);
+        Func<int, ulong> ovKeys = i => i == 1 ? RngTestOracle.RunKey(ov, [1, 1, 1]) : IterationKey(ov, i);
+
+        var (output, concrete) = RunRuntimeLoop(ov, steps: 3);
+        Assert.Contains(concrete.Nodes, n => n.OpCode == OpCodes.LOOP_OPEN);
+        Assert.Equal(HostExpected(ov, steps: 3, ovKeys), output);
+
+        // A re-bind that CHANGES the override set re-runs the wiring pass on the same in-memory
+        // model; removing the override restores the master-derived chain bit-exactly.
+        var (baseline, plain) = RunRuntimeLoop(cfg, steps: 3);
+        var x = TensorData([N], XVals);
+        var stepsData = TensorData(Array.Empty<long>(), 3L);
+        float[] Run() => ComputeContext.Default.Execute(plain, x, stepsData)[0]
+            .ToTensorData().As<float32>().AccessMemory().ToArray();
+        plain.ApplyRngConfig(ov);
+        Assert.Equal(HostExpected(ov, steps: 3, ovKeys), Run());
+        plain.ApplyRngConfig(cfg);
+        Assert.Equal(baseline, Run());
+
+        // A loop that executes exactly ONE iteration: the override must still reach the draw (a
+        // dispatch bug once dropped it precisely when the key table had a single row).
+        var single = cfg.Override(RngCollection.Runtime, [1, 0, 1], 99999UL);
+        var (singleOutput, singleConcrete) = RunRuntimeLoop(single, steps: 1);
+        Assert.Contains(singleConcrete.Nodes, n => n.OpCode == OpCodes.LOOP_OPEN);
+        Assert.Equal(
+            HostExpected(single, steps: 1, _ => RngTestOracle.RunKey(single, [1, 0, 1])),
+            singleOutput);
+    }
+
+    [Fact]
+    public void TestZeroTripLoopsRealizeParamsAndFeedsAndPerIterationParamsAreSelectedBitExactly()
+    {
+        // A trip-count hint of 0 means the loop never runs under the hints. Params — whose
+        // values must be enumerated and materialized — realize the single all-zero grid cell as
+        // padding. Feeds need no padding: their per-iteration keys derive at runtime.
         var g = ((ComputationGraph)typeof(RngRuntimeLoopParamAndFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var x = TensorData([N], XVals);
-        var arch = g.ToConcreteArchitecture(
+        var zeroArch = g.ToConcreteArchitecture(
             g.FromOrderedInputs([x, TensorData(Array.Empty<long>(), 0L)]));
 
-        // Param side: exactly one realized in-loop param, at the padded cell [1, 0, 1]
-        // (the second entry is the injected RngExecutionCounter at the next free top slot).
-        var paramIds = arch.GetConcreteModelParamInfos().ParamInfos
+        // Exactly one realized in-loop param, at the padded cell [1, 0, 1] (the other entry is
+        // the injected RngExecutionCounter at the next free top slot).
+        var paramIds = zeroArch.GetConcreteModelParamInfos().ParamInfos
             .Select(p => p.ModelId.Vals.ToArray()).OrderBy(v => v.Length).ToArray();
         Assert.Equal(2, paramIds.Length);
         Assert.Equal((int[])[2], paramIds[0]);
         Assert.Equal((int[])[1, 0, 1], paramIds[1]);
 
-        // Feed side: the site row [1, -1, 2], iteration slot intact — per-iteration streams
-        // are runtime-derived, so a zero-trip hint enumerates (and pads) nothing.
-        var feedRows = arch.GetRngStreamReport().Streams
+        // Feed side: the site row [1, -1, 2], iteration slot intact.
+        var feedRows = zeroArch.GetRngStreamReport().Streams
             .Where(s => s.Collection == RngCollection.Runtime).ToArray();
         Assert.Single(feedRows);
         Assert.Equal((int[])[1, -1, 2], feedRows[0].ModelIdPath.ToArray());
 
-        // Initialization succeeds (the padded param materializes like any other) and
-        // executing the valid iteration count — 0 — draws nothing.
-        var concrete = arch.ToConcreteModel(new RngConfig { MasterSeed = 11 });
-        var output = ComputeContext.Default.Execute(concrete, x, TensorData(Array.Empty<long>(), 0L))[0]
-            .ToTensorData().As<float32>().AccessMemory().ToArray();
-        Assert.Equal(XVals, output);
-    }
+        // Initialization succeeds and executing the valid iteration count — 0 — draws nothing.
+        var zeroConcrete = zeroArch.ToConcreteModel(new RngConfig { MasterSeed = 11 });
+        Assert.Equal(XVals, ComputeContext.Default
+            .Execute(zeroConcrete, x, TensorData(Array.Empty<long>(), 0L))[0]
+            .ToTensorData().As<float32>().AccessMemory().ToArray());
 
-    [Fact]
-    public void TestRuntimeLoopSelectsPerIterationParamBitExactly()
-    {
-        // The trainable-param analogue of TestRuntimeLoopFeedDrawsPerIterationStreamsBitExactly:
-        // it exercises the in-loop MODEL_PARAM_ID_REF per-iteration selection path with
-        // value-DISCRIMINATING data. Each per-iteration in-loop param is a distinct ModelId
-        // (its own init stream), so a random init draws a distinct value per iteration; the
-        // order-sensitive recurrence acc = acc*2 + w_i weights iteration i by 2^(N-1-i), so a
-        // mis-selected slot (or an empty filler) diverges from the host expectation.
+        // The trainable-param analogue of the feed test: the in-loop MODEL_PARAM_ID_REF
+        // per-iteration selection path with value-DISCRIMINATING data.
         const int steps = 3;
         var cfg = new RngConfig { MasterSeed = 11 };
-
-        var g = ((ComputationGraph)typeof(RngRuntimeLoopParamRecurrence)
+        var rg = ((ComputationGraph)typeof(RngRuntimeLoopParamRecurrence)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
-        var x = TensorData([N], XVals);
         var stepsData = TensorData(Array.Empty<long>(), (long)steps);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x, stepsData]));
+        var arch = rg.ToConcreteArchitecture(rg.FromOrderedInputs([x, stepsData]));
 
-        // The realized in-loop params, keyed by ModelId and ORDERED BY ITERATION SLOT, read
-        // straight from the init draw — INDEPENDENTLY of the in-graph selection under test.
-        // An in-loop param takes a 3-slot ModelId [loopSlot, iterationIndex, paramSlot]; the
-        // middle entry orders the iterations (cf. the zero-trip test's [1, 0, 1]).
-        var drawn = FastInitializeModelParams.Process(
-            arch, ComputeContext.Default, cfg, arch.GetConcreteModelParamInfos());
-        var perIter = drawn
+        // The realized in-loop params, ORDERED BY ITERATION SLOT, read straight from the init
+        // draw — INDEPENDENTLY of the in-graph selection under test. An in-loop param takes a
+        // 3-slot ModelId [loopSlot, iterationIndex, paramSlot].
+        var perIter = FastInitializeModelParams.Process(
+                arch, ComputeContext.Default, cfg, arch.GetConcreteModelParamInfos())
             .Where(kv => kv.Key.Vals.Length == 3)
             .OrderBy(kv => kv.Key.Vals[1])
             .Select(kv => kv.Value.As<float32>().AccessMemory().ToArray()[0])
             .ToArray();
-
-        // One realized param per iteration, and their values genuinely differ — otherwise this
-        // test could not discriminate a mis-selection.
         Assert.Equal(steps, perIter.Length);
         Assert.Equal(perIter.Length, perIter.Distinct().Count());
 
-        // Host recurrence over the per-iteration values in iteration order (float32-exact: the
-        // *2 is rounding-free, so every acc*2 + w_i matches the executed op bit-for-bit).
         var expected = (float[])XVals.Clone();
         foreach (var w in perIter)
             for (long e = 0; e < N; e++)
                 expected[e] = expected[e] * 2f + w;
 
         var concrete = arch.ToConcreteModel(cfg);
-        Assert.Contains(concrete.Nodes, n => n.OpCode == OpCodes.LOOP_OPEN);   // loop survived to runtime
-
-        var output = ComputeContext.Default.Execute(concrete, x, stepsData)[0]
-            .ToTensorData().As<float32>().AccessMemory().ToArray();
-        Assert.Equal(expected, output);
+        Assert.Contains(concrete.Nodes, n => n.OpCode == OpCodes.LOOP_OPEN);
+        Assert.Equal(expected, ComputeContext.Default.Execute(concrete, x, stepsData)[0]
+            .ToTensorData().As<float32>().AccessMemory().ToArray());
     }
 
     [Fact]
-    public void TestMalformedIterationVectorsFailConcretizationLoudly()
+    public void TestMalformedIterationVectorsAndUnmatchedOverridesFailLoudly()
     {
-        // A feed site with more iteration slots than its iteration-indices input supplies is
-        // a corrupted stream identity, not a zero-trip loop: wiring it anyway would derive
-        // keys from indices that never exist at runtime — silently wrong streams. Pin the
-        // fail-loud contract ("a stream set that cannot be derived is a hard build error,
-        // never a dynamic fallback"): concretization itself must throw, naming the site.
-        // Corrupt the site id by adding an iteration slot the loop's counter vector can
-        // never fill.
+        // A feed site with more iteration slots than its iteration-indices input supplies is a
+        // corrupted stream identity, not a zero-trip loop: wiring it anyway would derive keys
+        // from indices that never exist at runtime. Concretization itself must throw.
         var g = ((ComputationGraph)typeof(RngRuntimeLoopFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var feed = g.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
@@ -389,24 +299,12 @@ public class RngLoopTests
 
         var x = TensorData([N], XVals);
         var steps = TensorData(Array.Empty<long>(), 2L);
-        var ex = Assert.ThrowsAny<System.Exception>(
-            () => g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps])));
-        for (System.Exception? e = ex; e is not null; e = e.InnerException)
-            if (e.Message.Contains("iteration slot")) return;
-        Assert.Fail($"expected the malformed-iteration-vector concretization error, got: {ex}");
-    }
+        AssertFailsWithMessage(
+            () => g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps])), "iteration slot");
 
-    [Fact]
-    public void TestUnmatchedRuntimeOverrideFailsTheBind()
-    {
-        // An override that matches no stream of the graph must fail the bind loudly — a
-        // silently inactive override is exactly the re-keying hazard explicit seeding
-        // exists to prevent.
-        var cfg = new RngConfig { MasterSeed = 11 };
-        cfg = cfg.Override(RngCollection.Runtime, [9, 9, 9], 1UL);
-        var ex = Assert.ThrowsAny<System.Exception>(() => RunRuntimeLoop(cfg, steps: 2));
-        for (System.Exception? e = ex; e is not null; e = e.InnerException)
-            if (e.Message.Contains("matches no runtime stream")) return;
-        Assert.Fail($"expected the unmatched-override bind error, got: {ex}");
+        // An override that matches no stream of the graph must fail the bind loudly.
+        var unmatched = new RngConfig { MasterSeed = 11 }.Override(RngCollection.Runtime, [9, 9, 9], 1UL);
+        AssertFailsWithMessage(
+            () => RunRuntimeLoop(unmatched, steps: 2), "matches no runtime stream");
     }
 }

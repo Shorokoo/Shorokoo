@@ -1,6 +1,6 @@
-using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Modules.Initializers;
 using Shorokoo.Modules.Layers;
+using static Shorokoo.Tests.Modules.NNCheckVerdicts;
 
 namespace Shorokoo.Tests.Modules;
 
@@ -116,10 +116,6 @@ public partial class NNPReLUChannelwiseClosedForm
         var scale = Scalar(1f) + yRef.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
         return diff / scale;
     }
-
-    /// <summary>1 if dist ≤ bound, else 0 (the NaN-safe ok-counting idiom from NNLibraryTestModules).</summary>
-    private static Scalar<int64> Within(Scalar<float32> dist, float bound)
-        => (dist <= Scalar(bound)).IfElse(Scalar(1L), Scalar(0L));
 }
 
 /// <summary>GLU over the last dim must equal a manual split's a · sigmoid(b).</summary>

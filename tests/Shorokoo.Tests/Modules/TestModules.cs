@@ -827,17 +827,17 @@ namespace Shorokoo.Tests.Modules
             var divOk = AllWithin((div - Vector(-3L, -3L, 3L)).Cast<float32>(), 0f, 3);
 
             var rev = (Tensor<float32>)OnnxOp.Slice(
-                Tensor(new long[] { 4L }, 1f, 2f, 3f, 4f), Vector(3L), Vector(-5L), Vector(0L), Vector(-1L));
-            var revOk = AllWithin(rev - Tensor(new long[] { 4L }, 4f, 3f, 2f, 1f), 0f, 4);
+                Tensor([4L], 1f, 2f, 3f, 4f), Vector(3L), Vector(-5L), Vector(0L), Vector(-1L));
+            var revOk = AllWithin(rev - Tensor([4L], 4f, 3f, 2f, 1f), 0f, 4);
 
             var last = (Tensor<float32>)OnnxOp.Gather(x, Vector(-1L), axis: 0);
-            var gatherOk = AllWithin(last - Tensor(new long[] { 1L }, 30f), 1e-6f, 1);
+            var gatherOk = AllWithin(last - Tensor([1L], 30f), 1e-6f, 1);
 
             var emptySum = ((Tensor<float32>)VectorFill(0L, 1f)).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
             var emptyOk = ((emptySum - Scalar(0f)).Abs() <= Scalar(0f)).IfElse(Scalar(1L), Scalar(0L));
 
-            var soft = Tensor(new long[] { 3L }, 1000f, 1000f, 1000f).Softmax(axis: -1);
-            var softOk = AllWithin(soft - Tensor(new long[] { 3L }, 1f / 3f, 1f / 3f, 1f / 3f), 1e-6f, 3);
+            var soft = Tensor([3L], 1000f, 1000f, 1000f).Softmax(axis: -1);
+            var softOk = AllWithin(soft - Tensor([3L], 1f / 3f, 1f / 3f, 1f / 3f), 1e-6f, 3);
 
             return divOk + revOk + gatherOk + emptyOk + softOk > Scalar(4L);   // all 5 required
         }

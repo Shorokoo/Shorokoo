@@ -175,8 +175,11 @@ derivation chain, so it works for any iteration the loop actually executes.
 
 Note that changing an override's **value** (or the master seed) on an already-built model
 is a pure parameter write, while changing the override **set** re-wires the derivation
-chains — fine on an in-memory model, refused (loudly) on a loaded one, whose chains are
-baked.
+chains. A saved model keeps its feed ops, so a re-bind on a **loaded** model may change the
+set (and the algorithm) too. What refuses is a graph whose random draws have already been
+**lowered** to baked draw-function calls at ONNX prep: there the routing and the generator
+are fixed, so a re-bind may still change seed *values* but not the override set or the
+algorithm — rebuild from the concrete architecture for that.
 
 ## Reading a model's identity back: `TryGetRngIdentity`
 
@@ -222,10 +225,11 @@ model = model.WithRngOverride(RngCollection.Runtime, [2, 0, 1], 5678);
 The override is applied on top of the model's *bound identity*, so nothing else moves — where
 rebuilding an `RngConfig` from scratch and calling `WithRngConfig` would replace the whole
 identity and silently re-key every other stream. `RngCollection.Params` is rejected (there is
-no recorded init tier to override); an address that matches no runtime stream throws, exactly
-as it does through `RngConfig.Override`; and adding or removing an override on a *loaded*
-model is refused for the usual reason — its derivation chains are baked, so only override
-*values* and the master key can still change.
+no recorded init tier to override); and an address that matches no runtime stream throws,
+exactly as it does through `RngConfig.Override`. It works on a loaded model too — the saved
+feed ops are what let the override set change — with the one exception noted above: a graph
+whose draws are already lowered can re-key a stream it *already* overrides, but cannot gain a
+new override.
 
 The raw encoded form of the identity — the `RngSeed` parameter's `uint64[]` value — is not
 public API. Its layout is an implementation detail that changes with the subsystem, and

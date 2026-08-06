@@ -360,6 +360,10 @@ public class RngSeedTransportTests
         Assert.Equal(1, RngSeedNodeCount(replaced));
         Assert.Equal(Run(model), Run(replaced.WithRngConfig(cfg)));
 
+        var loaded = CompressedFormatUtils.LoadFastGraphFromBinary(
+            CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true));
+        Assert.Equal(Run(added), Run(loaded.WithRngOverride(RngCollection.Runtime, [1, 0, 1], 99UL)));
+
         Assert.Contains("matches no runtime stream", Assert.Throws<InvalidOperationException>(
             () => model.WithRngOverride(RngCollection.Runtime, [9], 1UL)).Message);
         Assert.Contains("records no Params-collection identity", Assert.Throws<ArgumentException>(

@@ -163,9 +163,11 @@ namespace Shorokoo.Graph
         /// so the untouched streams keep their exact keys.
         ///
         /// <para>Overriding a stream that is already overridden replaces its key; that, like a
-        /// master-key change, is a pure parameter write. Adding or removing an override re-wires
-        /// the derivation chains, which a loaded model whose draws are already lowered refuses
-        /// (loudly) — rebuild from the architecture to change which streams are overridden.</para>
+        /// master-key change, is a pure parameter write. Overriding a stream that is not yet
+        /// overridden re-wires the derivation chains — fine on a freshly built model and on a
+        /// loaded one alike, since a saved model keeps its feed ops, but refused (loudly) on a
+        /// graph whose draws are already lowered to baked draw-function calls, whose override
+        /// routing is fixed. Rebuild from the concrete architecture for that.</para>
         /// </summary>
         /// <param name="collection">Must be <see cref="RngCollection.Runtime"/>: a model records
         /// no <see cref="RngCollection.Params"/> identity to override (see <see cref="RngIdentity"/>).</param>

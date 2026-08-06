@@ -306,7 +306,7 @@ public class RngSeedTransportTests
     }
 
     [Fact]
-    public void TestRngIdentityProjectsTheBoundConfigsRuntimeTierAndReproducesIt()
+    public void TestRngIdentityProjectsTheRuntimeTierLosslesslyAndRefusesAnUnrecognizedAlgorithmId()
     {
         var cfg = new RngConfig { MasterSeed = 11, Algorithm = RngAlgorithm.Threefry2x32Rounds13 }
             .Override(RngCollection.Runtime, [1, 1, 1], seed: 424242UL);
@@ -318,16 +318,27 @@ public class RngSeedTransportTests
         Assert.Equal((int[])[1, 1, 1], Assert.Single(identity.Overrides).ModelIdPath);
         Assert.Equal(424242UL, identity.TryGetOverride([1, 1, 1]));
         Assert.Null(identity.TryGetOverride([1, 0, 1]));
+        Assert.Null(LoopFeedArch().TryGetRngIdentity());
 
-        // The projection is lossless over the runtime tier: rebinding it changes no draw.
         Assert.Equal(model.TryGetRngSeed(), model.WithRngConfig(identity.ToRuntimeConfig()).TryGetRngSeed());
         Assert.Equal(Run(model), Run(model.WithRngConfig(identity.ToRuntimeConfig())));
-
-        // The init tier is not recorded, so it cannot surface in the identity either.
         Assert.Equal(model.TryGetRngSeed(),
             LoopFeedArch().WithRngConfig(cfg.Override(RngCollection.Params, [1, 0], 7UL)).TryGetRngSeed());
 
-        Assert.Null(LoopFeedArch().TryGetRngIdentity());   // wired, not yet bound
+        const ulong unknownId = 9999;
+        var arch = LoopFeedArch().WithRngConfig(RngConfig.Default).ToInternal();
+        var seedData = arch.TryGetRngSeed()!;
+        seedData[RngRuntimeIdentity.AlgorithmIdIndex] = unknownId;
+        var seedNode = arch.Nodes.Single(n => n.IdentifierTemplate == Shorokoo.Core.Nodes.Processors.Fast
+            .FastWireRngKeyDerivation.RngSeedIdentifierTemplate);
+        seedNode.Attributes = seedNode.Attributes.SetAttributes(
+            (OnnxOpAttributeNames.ShrkAttrTensorData, (object?)TensorData.Create(
+                new Shape(seedData.Length), DType.UInt64,
+                OnnxUtils.CreateTensorValue(new Shape(seedData.Length), seedData))));
+
+        var tampered = ComputationGraph.FromInternal(arch, GraphKind.ConcreteArchitecture);
+        Assert.Contains(unknownId.ToString(),
+            Assert.Throws<NotSupportedException>(() => tampered.TryGetRngIdentity()).Message);
     }
 
     [Fact]
@@ -347,32 +358,12 @@ public class RngSeedTransportTests
         Assert.Equal(7UL, replaced.TryGetRngIdentity()!.TryGetOverride([1, 1, 1]));
         Assert.Equal(99UL, replaced.TryGetRngIdentity()!.TryGetOverride([1, 0, 1]));
         Assert.Equal(1, RngSeedNodeCount(replaced));
-        Assert.Equal(Run(model), Run(replaced.WithRngConfig(cfg)));   // weights and wiring untouched
+        Assert.Equal(Run(model), Run(replaced.WithRngConfig(cfg)));
 
         Assert.Contains("matches no runtime stream", Assert.Throws<InvalidOperationException>(
             () => model.WithRngOverride(RngCollection.Runtime, [9], 1UL)).Message);
         Assert.Contains("records no Params-collection identity", Assert.Throws<ArgumentException>(
             () => model.WithRngOverride(RngCollection.Params, [1, 1, 1], 1UL)).Message);
-    }
-
-    [Fact]
-    public void TestRngIdentityRefusesAnUnrecognizedAlgorithmIdRatherThanSubstitutingOne()
-    {
-        const ulong unknownId = 9999;
-        var arch = LoopFeedArch().WithRngConfig(RngConfig.Default).ToInternal();
-        var seedData = arch.TryGetRngSeed()!;
-        seedData[RngRuntimeIdentity.AlgorithmIdIndex] = unknownId;
-        var seedNode = arch.Nodes.Single(n =>
-            n.IdentifierTemplate == Shorokoo.Core.Nodes.Processors.Fast
-                .FastWireRngKeyDerivation.RngSeedIdentifierTemplate);
-        seedNode.Attributes = seedNode.Attributes.SetAttributes(
-            (OnnxOpAttributeNames.ShrkAttrTensorData, (object?)TensorData.Create(
-                new Shape(seedData.Length), DType.UInt64,
-                OnnxUtils.CreateTensorValue(new Shape(seedData.Length), seedData))));
-
-        var tampered = ComputationGraph.FromInternal(arch, GraphKind.ConcreteArchitecture);
-        var ex = Assert.Throws<NotSupportedException>(() => tampered.TryGetRngIdentity());
-        Assert.Contains(unknownId.ToString(), ex.Message);
     }
 
     [Fact]

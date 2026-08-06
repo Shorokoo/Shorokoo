@@ -3,8 +3,19 @@ using Shorokoo.Runtime;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Core.Inference;
 using Shorokoo.Core.Inference.Helpers;
+using static Shorokoo.Tests.FoldForcing;
 
 namespace Shorokoo.Tests;
+
+/// <summary>Runtime-valued operands that force an otherwise-constant sub-chain through the host
+/// folder — FastFoldConstants only materializes a constant that a non-constant node consumes.</summary>
+public static class FoldForcing
+{
+    public static Tensor<int32> Runtime32(Tensor<float32> x)
+        => OnnxOp.Range(Scalar(0L), x.ShapeTensor().Reduce(ReduceKind.Prod), Scalar(1L)).int64().Cast<int32>();
+    public static Tensor<uint32> RuntimeU32(Tensor<float32> x)
+        => OnnxOp.Range(Scalar(0L), x.ShapeTensor().Reduce(ReduceKind.Prod), Scalar(1L)).int64().Cast<uint32>();
+}
 
 /// <summary>
 /// QuickExecutionEngine op-handler paths that no <c>Qee*Audit</c> module reaches — everything
@@ -291,6 +302,57 @@ public class QeeIntegerWidthTests
         Qee<QeeU64Pow>(DType.UInt64, 9223372036854775808, 12157665459056928801);
         Qee<QeeU64ToFloatAndBack>(DType.UInt64, 4611686018427387904, 2);
     }
+
+    // FAILING: QEE accumulates a reduction in the 64-bit buffer and narrows only at the op's tail.
+    // That is exact for Sum/Prod/SumSquare — truncation commutes with +, -, * — but not for Mean,
+    // whose divide lands on an accumulator that has already left the declared width, so the folded
+    // constant disagrees with what the backend computes for the same graph.
+    [Fact]
+    public void TestFoldedIntegerReduceMeanMatchesTheBackend()
+    {
+        var vals = TensorData(DType.Int32, [2L], 2147483647, 2147483647);
+        Assert.Equal(Backend<QeeI32ReduceMeanRuntime>(vals), Folded<QeeI32ReduceMeanFolded>(DType.Int32));
+    }
+
+    // The width-boundary cases where folding and the backend must agree: +, -, * and Sum all
+    // commute with truncation to the declared width, so the 64-bit buffer is free to overflow.
+    [Fact]
+    public void TestFoldedIntegerArithmeticMatchesTheBackend()
+    {
+        TensorData I32(int v) => TensorData(DType.Int32, [1L], v);
+        TensorData U32(uint v) => TensorData(DType.UInt32, [1L], v);
+
+        Assert.Equal(Backend<QeeI32AddRuntime>(I32(2147483647), I32(1)), Folded<QeeI32AddFolded>(DType.Int32));
+        Assert.Equal(Backend<QeeI32SubRuntime>(I32(-2147483648), I32(1)), Folded<QeeI32SubFolded>(DType.Int32));
+        Assert.Equal(Backend<QeeU32AddRuntime>(U32(4294967295), U32(1)), Folded<QeeU32AddFolded>(DType.UInt32));
+        Assert.Equal(Backend<QeeU32SubRuntime>(U32(0), U32(1)), Folded<QeeU32SubFolded>(DType.UInt32));
+        Assert.Equal(Backend<QeeU32MulRuntime>(U32(65536), U32(65536)), Folded<QeeU32MulFolded>(DType.UInt32));
+        Assert.Equal(Backend<QeeI32ReduceSumRuntime>(TensorData(DType.Int32, [2L], 2147483647, 2147483647)),
+                     Folded<QeeI32ReduceSumFolded>(DType.Int32));
+    }
+
+    private static long Backend<TModule>(params TensorData[] inputs)
+    {
+        var g = ((ComputationGraph)typeof(TModule)
+            .GetProperty("ComputationGraph", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!).ToInternal();
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([.. inputs])).ToConcreteModel();
+        var outData = ComputeContext.Default.Execute(concrete, inputs)[0].ToTensorData();
+        return outData.DType == DType.UInt32
+            ? outData.As<uint32>().AccessMemory().ToArray()[0]
+            : outData.As<int32>().AccessMemory().ToArray()[0];
+    }
+
+    private static long Folded<TModule>(DType dtype)
+    {
+        var g = ((ComputationGraph)typeof(TModule)
+            .GetProperty("ComputationGraph", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!).ToInternal();
+        var x = TensorData([2L], 0f, 0f);
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel();
+        foreach (var kv in new QuickExecutionEngine().Run(concrete))
+            if (kv.Value.DType == dtype && kv.Value is RuntimeTensor { IntData: { Length: 1 } m })
+                return dtype == DType.UInt32 ? (uint)m[0] : (int)m[0];
+        throw new InvalidOperationException("the constant sub-chain did not fold");
+    }
 }
 
 /// <summary>A uint64 divide whose operands are constants, consumed by a runtime-valued tensor so
@@ -516,3 +578,49 @@ public class QeeUInt64SignedOperatorTests
 
 [Module] public partial class QeeU64ToFloatAndBack { public static Tensor<uint64> Inline()
     => OnnxOp.Div(Vector(9223372036854775808UL, 4UL).Cast<float32>(), Scalar(2f)).float32().Cast<uint64>(); }
+
+// The reduce accumulator pair: the same reduction as a folded constant and as a backend-executed
+// runtime value. Consumed by TestFoldedIntegerReduceMeanMatchesTheBackend.
+
+[Module] public partial class QeeI32ReduceMeanFolded { public static Tensor<int32> Inline(Tensor<float32> x)
+{
+    var runtime = OnnxOp.Range(Scalar(0L), x.ShapeTensor().Reduce(ReduceKind.Prod), Scalar(1L))
+        .int64().Cast<int32>();
+    return runtime * Vector(2147483647, 2147483647).Reduce(ReduceKind.Mean, null, true).int32();
+} }
+
+[Module] public partial class QeeI32ReduceMeanRuntime { public static Tensor<int32> Inline(Tensor<int32> v)
+    => v.Reduce(ReduceKind.Mean, null, true); }
+
+[Module] public partial class QeeI32ReduceSumFolded { public static Tensor<int32> Inline(Tensor<float32> x)
+{
+    var runtime = OnnxOp.Range(Scalar(0L), x.ShapeTensor().Reduce(ReduceKind.Prod), Scalar(1L))
+        .int64().Cast<int32>();
+    return runtime * Vector(2147483647, 2147483647).Reduce(ReduceKind.Sum, null, true).int32();
+} }
+
+[Module] public partial class QeeI32ReduceSumRuntime { public static Tensor<int32> Inline(Tensor<int32> v)
+    => v.Reduce(ReduceKind.Sum, null, true); }
+
+// Width-boundary arithmetic, each as a folded constant and as a backend-executed runtime value.
+// Consumed by TestFoldedIntegerArithmeticMatchesTheBackend.
+
+[Module] public partial class QeeI32AddFolded { public static Tensor<int32> Inline(Tensor<float32> x)
+    => Runtime32(x) * (Vector(2147483647) + Vector(1)); }
+[Module] public partial class QeeI32AddRuntime { public static Tensor<int32> Inline(Tensor<int32> a, Tensor<int32> b) => a + b; }
+
+[Module] public partial class QeeI32SubFolded { public static Tensor<int32> Inline(Tensor<float32> x)
+    => Runtime32(x) * (Vector(-2147483648) - Vector(1)); }
+[Module] public partial class QeeI32SubRuntime { public static Tensor<int32> Inline(Tensor<int32> a, Tensor<int32> b) => a - b; }
+
+[Module] public partial class QeeU32AddFolded { public static Tensor<uint32> Inline(Tensor<float32> x)
+    => RuntimeU32(x) * (Vector(4294967295u) + Vector(1u)); }
+[Module] public partial class QeeU32AddRuntime { public static Tensor<uint32> Inline(Tensor<uint32> a, Tensor<uint32> b) => a + b; }
+
+[Module] public partial class QeeU32SubFolded { public static Tensor<uint32> Inline(Tensor<float32> x)
+    => RuntimeU32(x) * (Vector(0u) - Vector(1u)); }
+[Module] public partial class QeeU32SubRuntime { public static Tensor<uint32> Inline(Tensor<uint32> a, Tensor<uint32> b) => a - b; }
+
+[Module] public partial class QeeU32MulFolded { public static Tensor<uint32> Inline(Tensor<float32> x)
+    => RuntimeU32(x) * (Vector(65536u) * Vector(65536u)); }
+[Module] public partial class QeeU32MulRuntime { public static Tensor<uint32> Inline(Tensor<uint32> a, Tensor<uint32> b) => a * b; }

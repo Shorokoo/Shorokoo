@@ -10,4 +10,5 @@ internal sealed class GreaterOp : CompareOp
     public override string OpCode => OpCodes.GREATER;
     protected override bool CompareFloat(float a, float b) => a > b;
     protected override bool CompareInt(long a, long b) => a > b;
+    protected override bool CompareUInt(ulong a, ulong b) => a > b;
 }

@@ -84,7 +84,8 @@ internal sealed class ScatterNDOp : QuickOp
                 }
                 for (long e = 0; e < sliceLen; e++)
                     buf[(int)(dstBase + e)] = ScatterReduction.ApplyInt(
-                        reduction.Value, buf[(int)(dstBase + e)], ui[(int)(t * sliceLen + e)]);
+                        reduction.Value, buf[(int)(dstBase + e)], ui[(int)(t * sliceLen + e)],
+                        DTypeHelpers.IsUnsignedInt(x.DType));
             }
             return [rt with { IntData = ImmutableArray.Create(buf) }];
         }

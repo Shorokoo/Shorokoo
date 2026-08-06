@@ -30,7 +30,8 @@ internal sealed class MinOp : QuickOp
         {
             if (VariadicElementwise.FoldFloat(inputs, shape, MathF.Min) is { } f)
                 return [rt with { FloatData = System.Collections.Immutable.ImmutableArray.Create(f) }];
-            if (VariadicElementwise.FoldInt(inputs, shape, Math.Min) is { } l)
+            var unsigned = DTypeHelpers.IsUnsignedInt(dtype);
+            if (VariadicElementwise.FoldInt(inputs, shape, (a, b) => IntSemantics.Min(unsigned, a, b)) is { } l)
                 return [rt with { IntData = System.Collections.Immutable.ImmutableArray.Create(l) }];
         }
         return [rt];

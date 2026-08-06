@@ -10,4 +10,6 @@ internal sealed class ReduceL1Op : ReduceOpBase
     public override string OpCode => OpCodes.REDUCE_L1;
     protected override float Reduce(IEnumerable<float> values) => values.Select(MathF.Abs).Sum();
     protected override long ReduceInt(IEnumerable<long> values) { long s = 0; foreach (var v in values) s += Math.Abs(v); return s; }
+    // Unsigned lanes are already their own magnitude.
+    protected override ulong ReduceUInt(IEnumerable<ulong> values) { ulong s = 0; foreach (var v in values) unchecked { s += v; } return s; }
 }

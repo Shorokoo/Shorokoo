@@ -31,4 +31,20 @@ internal sealed class PowOp : BinaryNumericOp
         }
         return result;
     }
+
+    // Unsigned exponents are never negative, so the squaring loop covers the whole domain.
+    protected override ulong ApplyUInt(ulong a, ulong b)
+    {
+        ulong result = 1, baseVal = a, exp = b;
+        unchecked
+        {
+            while (exp > 0)
+            {
+                if ((exp & 1) == 1) result *= baseVal;
+                baseVal *= baseVal;
+                exp >>= 1;
+            }
+        }
+        return result;
+    }
 }

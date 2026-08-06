@@ -12,4 +12,5 @@ internal sealed class ReluOp : UnaryNumericOp
     public override string OpCode => OpCodes.RELU;
     protected override float ApplyFloat(float x) => x < 0 ? 0 : x;
     protected override long ApplyInt(long x) => x < 0 ? 0 : x;
+    protected override ulong ApplyUInt(ulong x) => x;
 }

@@ -269,6 +269,28 @@ public class QeeIntegerWidthTests
             18446744073709551615, 9223372036854775808, 18446744073709551615);
         Qee<QeeU64Cast>(DType.UInt64, 4294967295, 0, 7);
     }
+
+    [Fact]
+    public void TestUnsignedOpsReadTheSignBitAsMagnitude()
+    {
+        Qee<QeeU64Div>(DType.UInt64, 4611686018427387904, 6148914691236517205, 1);
+        Qee<QeeU64Mod>(DType.UInt64, 808, 5);
+        Qee<QeeU64Compare>(DType.UInt64, 0, 0, 1, 1, 0, 0, 1, 1);
+        Qee<QeeU64SignAbs>(DType.UInt64, 1, 0, 1, 9223372036854775808, 0, 18446744073709551615);
+        Qee<QeeU64MinMax>(DType.UInt64, 7, 9223372036854775807, 9223372036854775808, 18446744073709551615);
+        Qee<QeeU64Clip>(DType.UInt64, 10, 9223372036854775808, 18446744073709551614);
+        Qee<QeeU64ReduceMax>(DType.UInt64, 9223372036854775808);
+        Qee<QeeU64ReduceMin>(DType.UInt64, 2);
+        Qee<QeeU64ReduceMean>(DType.UInt64, 3074457345618258604);
+        Qee<QeeU64ReduceL1>(DType.UInt64, 9223372036854775814);
+        Qee<QeeU64ReduceSum>(DType.UInt64, 9223372036854775814);
+        Qee<QeeU64ReduceProd>(DType.UInt64, 9223372036854775808);
+        Qee<QeeU64ArgExtreme>(DType.Int64, 2, 3);
+        Qee<QeeU64TopK>(DType.UInt64, 18446744073709551615, 9223372036854775808);
+        Qee<QeeU64Unique>(DType.UInt64, 4, 9223372036854775808, 18446744073709551615);
+        Qee<QeeU64Pow>(DType.UInt64, 9223372036854775808, 12157665459056928801);
+        Qee<QeeU64ToFloatAndBack>(DType.UInt64, 4611686018427387904, 2);
+    }
 }
 
 /// <summary>A uint64 divide whose operands are constants, consumed by a runtime-valued tensor so
@@ -316,17 +338,15 @@ public partial class QeeUInt64SignedDivideMaxValue
 
 /// <summary>
 /// QEE holds every integer width in one <c>long</c> buffer, so a <c>uint64</c> above
-/// <c>long.MaxValue</c> is a negative bit-pattern long — and Div/Mod/Less/Greater/Sign/Abs read it
-/// with signed C# operators. Host constant folding runs those kernels and bakes the result into the
-/// graph, so the wrong value is persisted, not merely displayed.
+/// <c>long.MaxValue</c> is a negative bit-pattern long. Host constant folding runs the kernels over
+/// that buffer and bakes the result into the graph, so a signed operator there persists a wrong
+/// value rather than merely displaying one.
 /// </summary>
 [Trait("Domain", "Inference")]
 [Trait("Purpose", "Coverage")]
 public class QeeUInt64SignedOperatorTests
 {
-    // Skipped against https://github.com/Shorokoo/Shorokoo/issues/141 — QEE's uint64 kernels use
-    // signed operators. Self-checking: deleting the Skip flips this green the moment #141 is fixed.
-    [Fact(Skip = "QEE uint64 kernels use signed operators — Shorokoo/Shorokoo#141")]
+    [Fact]
     public void TestFoldedUInt64DivideUsesUnsignedSemantics()
     {
         var g = ((ComputationGraph)typeof(QeeUInt64SignedDivide)
@@ -344,7 +364,7 @@ public class QeeUInt64SignedOperatorTests
 
     // Same fault, Mod rather than Div — pinned separately because #133's bits packing is specified
     // as `(word / 2^(W*l)) mod 2^W`, so a literal implementation reaches BOTH operators.
-    [Fact(Skip = "QEE uint64 kernels use signed operators — Shorokoo/Shorokoo#141")]
+    [Fact]
     public void TestFoldedUInt64ModuloUsesUnsignedSemantics()
     {
         var g = ((ComputationGraph)typeof(QeeUInt64SignedModulo)
@@ -364,7 +384,7 @@ public class QeeUInt64SignedOperatorTests
     // The all-ones dividend: signed division reads ulong.MaxValue as -1, so ANY divisor > 1
     // collapses the result to 0 — the most destructive shape of this bug, since it survives every
     // "is it roughly right?" eyeball check.
-    [Fact(Skip = "QEE uint64 kernels use signed operators — Shorokoo/Shorokoo#141")]
+    [Fact]
     public void TestFoldedUInt64DivideOfMaxValueUsesUnsignedSemantics()
     {
         var g = ((ComputationGraph)typeof(QeeUInt64SignedDivideMaxValue)
@@ -422,3 +442,77 @@ public class QeeUInt64SignedOperatorTests
 
 [Module] public partial class QeeU64Cast { public static Tensor<uint64> Inline()
     => Vector(18446744073709551615UL, 9223372036854775808UL, 4294967303UL).Cast<uint32>().Cast<uint64>(); }
+
+// The uint64 sign-bit family: every kernel below reads a lane above long.MaxValue, which the
+// shared long buffer holds as a negative bit pattern. Consumed by
+// TestUnsignedOpsReadTheSignBitAsMagnitude.
+
+[Module] public partial class QeeU64Div { public static Tensor<uint64> Inline()
+    => OnnxOp.Div(Vector(9223372036854775808UL, 18446744073709551615UL, 18446744073709551615UL),
+                  Vector(2UL, 3UL, 18446744073709551615UL)).uint64(); }
+
+[Module] public partial class QeeU64Mod { public static Tensor<uint64> Inline()
+    => OnnxOp.Mod(Vector(9223372036854775808UL, 18446744073709551615UL), Vector(1000UL, 10UL)).uint64(); }
+
+[Module] public partial class QeeU64Compare { public static Tensor<uint64> Inline()
+{
+    var hi = Vector(9223372036854775808UL, 18446744073709551615UL);
+    var one = Vector(1UL, 1UL);
+    return OnnxOp.Cast(OnnxOp.Concat([
+        OnnxOp.Less(hi, one), OnnxOp.Greater(hi, one),
+        OnnxOp.LessOrEqual(hi, one), OnnxOp.GreaterOrEqual(hi, one)], axis: 0), null, DType.UInt64).uint64();
+} }
+
+[Module] public partial class QeeU64SignAbs { public static Tensor<uint64> Inline()
+{
+    var v = Vector(9223372036854775808UL, 0UL, 18446744073709551615UL);
+    return (Tensor<uint64>)OnnxOp.Concat([OnnxOp.Sign(v), OnnxOp.Abs(v)], axis: 0);
+} }
+
+[Module] public partial class QeeU64MinMax { public static Tensor<uint64> Inline()
+{
+    var a = Vector(9223372036854775808UL, 18446744073709551615UL);
+    var b = Vector(7UL, 9223372036854775807UL);
+    return (Tensor<uint64>)OnnxOp.Concat([OnnxOp.Min(a, b), OnnxOp.Max(a, b)], axis: 0);
+} }
+
+[Module] public partial class QeeU64Clip { public static Tensor<uint64> Inline()
+    => OnnxOp.Clip(Vector(1UL, 9223372036854775808UL, 18446744073709551615UL),
+                   Scalar(10UL), Scalar(18446744073709551614UL)).uint64(); }
+
+[Module] public partial class QeeU64ReduceMax { public static Tensor<uint64> Inline()
+    => Vector(9223372036854775808UL, 4UL, 2UL).Reduce(ReduceKind.Max); }
+
+[Module] public partial class QeeU64ReduceMin { public static Tensor<uint64> Inline()
+    => Vector(9223372036854775808UL, 4UL, 2UL).Reduce(ReduceKind.Min); }
+
+[Module] public partial class QeeU64ReduceMean { public static Tensor<uint64> Inline()
+    => Vector(9223372036854775808UL, 4UL, 2UL).Reduce(ReduceKind.Mean); }
+
+[Module] public partial class QeeU64ReduceL1 { public static Tensor<uint64> Inline()
+    => Vector(9223372036854775808UL, 4UL, 2UL).Reduce(ReduceKind.L1); }
+
+[Module] public partial class QeeU64ReduceSum { public static Tensor<uint64> Inline()
+    => Vector(9223372036854775808UL, 4UL, 2UL).Reduce(ReduceKind.Sum); }
+
+[Module] public partial class QeeU64ReduceProd { public static Tensor<uint64> Inline()
+    => Vector(9223372036854775808UL, 3UL).Reduce(ReduceKind.Prod); }
+
+[Module] public partial class QeeU64ArgExtreme { public static Tensor<int64> Inline()
+{
+    var v = Vector(4UL, 9223372036854775808UL, 18446744073709551615UL, 1UL);
+    return (Tensor<int64>)OnnxOp.Concat([
+        OnnxOp.ArgMax(v, 0, true, false), OnnxOp.ArgMin(v, 0, true, false)], axis: 0);
+} }
+
+[Module] public partial class QeeU64TopK { public static Tensor<uint64> Inline()
+    => OnnxOp.TopK(Vector(4UL, 9223372036854775808UL, 18446744073709551615UL, 1UL), Vector(2L)).values.uint64(); }
+
+[Module] public partial class QeeU64Unique { public static Tensor<uint64> Inline()
+    => OnnxOp.Unique(Vector(18446744073709551615UL, 4UL, 9223372036854775808UL, 4UL), sorted: true).y.uint64(); }
+
+[Module] public partial class QeeU64Pow { public static Tensor<uint64> Inline()
+    => OnnxOp.Pow(Vector(2UL, 3UL), Vector(63UL, 40UL)).uint64(); }
+
+[Module] public partial class QeeU64ToFloatAndBack { public static Tensor<uint64> Inline()
+    => OnnxOp.Div(Vector(9223372036854775808UL, 4UL).Cast<float32>(), Scalar(2f)).float32().Cast<uint64>(); }

@@ -65,16 +65,24 @@ internal sealed class CastOp : QuickOp
     internal static RuntimeTensor WithConvertedData(RuntimeTensor rt, RuntimeTensor x, DType toDType)
     {
         var targetCategory = DTypeHelpers.Categorize(toDType);
+        var sourceUnsigned = DTypeHelpers.IsUnsignedInt(x.DType);
         if (targetCategory == DTypeCategory.Float)
         {
             if (x.FloatData is { } fd) return rt with { FloatData = fd };
-            if (x.IntData is { } id) return rt with { FloatData = ImmutableArray.CreateRange(id.Select(v => (float)v)) };
+            if (x.IntData is { } id)
+                return rt with { FloatData = ImmutableArray.CreateRange(
+                    id.Select(v => (float)IntSemantics.ToDouble(sourceUnsigned, v))) };
             if (x.BoolData is { } bd) return rt with { FloatData = ImmutableArray.CreateRange(bd.Select(v => v ? 1f : 0f)) };
         }
         else if (targetCategory == DTypeCategory.Int)
         {
             if (x.IntData is { } id) return rt with { IntData = id };
-            if (x.FloatData is { } fd) return rt with { IntData = ImmutableArray.CreateRange(fd.Select(v => (long)v)) };
+            // UInt64 saturates against the unsigned range: via long it would cap at long.MaxValue,
+            // losing the top half of the target's range. The narrower widths keep the
+            // saturate-through-long-then-wrap behaviour documented above.
+            if (x.FloatData is { } fd)
+                return rt with { IntData = ImmutableArray.CreateRange(
+                    toDType == DType.UInt64 ? fd.Select(v => IntSemantics.S((ulong)v)) : fd.Select(v => (long)v)) };
             if (x.BoolData is { } bd) return rt with { IntData = ImmutableArray.CreateRange(bd.Select(v => v ? 1L : 0L)) };
         }
         else if (targetCategory == DTypeCategory.Bool)

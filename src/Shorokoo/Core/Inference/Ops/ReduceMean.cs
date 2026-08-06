@@ -16,4 +16,11 @@ internal sealed class ReduceMeanOp : ReduceOpBase
         foreach (var v in values) { s += v; n++; }
         return n == 0 ? 0 : s / n;
     }
+
+    protected override ulong ReduceUInt(IEnumerable<ulong> values)
+    {
+        ulong s = 0, n = 0;
+        foreach (var v in values) unchecked { s += v; n++; }
+        return n == 0 ? 0 : s / n;
+    }
 }

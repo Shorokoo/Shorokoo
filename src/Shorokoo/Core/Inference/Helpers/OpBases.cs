@@ -54,6 +54,13 @@ internal abstract class UnaryNumericOp : QuickOp
     protected virtual float ApplyFloat(float x) => x;
     protected virtual long ApplyInt(long x) => x;
 
+    /// <summary>
+    /// The unsigned-dtype path. Defaults to <see cref="ApplyInt"/> on the reinterpreted lane,
+    /// which is exact for every op whose result does not depend on the sign; ops that do
+    /// (Abs, Sign, Relu) override it.
+    /// </summary>
+    protected virtual ulong ApplyUInt(ulong x) => IntSemantics.U(ApplyInt(IntSemantics.S(x)));
+
     protected override RuntimeTensor[] Compute(RuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
     {
         var x = inputs.Length > 0 ? inputs[0] : null;
@@ -70,8 +77,10 @@ internal abstract class UnaryNumericOp : QuickOp
         }
         else if (x?.IntData is { } id && shouldStore)
         {
+            var unsigned = DTypeHelpers.IsUnsignedInt(dtype);
             var buf = new long[id.Length];
-            for (int i = 0; i < buf.Length; i++) buf[i] = ApplyInt(id[i]);
+            for (int i = 0; i < buf.Length; i++)
+                buf[i] = unsigned ? IntSemantics.S(ApplyUInt(IntSemantics.U(id[i]))) : ApplyInt(id[i]);
             iData = ImmutableArray.Create(buf);
         }
 
@@ -96,6 +105,13 @@ internal abstract class BinaryNumericOp : QuickOp
     protected virtual float ApplyFloat(float a, float b) => a;
     protected virtual long ApplyInt(long a, long b) => a;
 
+    /// <summary>
+    /// The unsigned-dtype path. Defaults to <see cref="ApplyInt"/> on the reinterpreted lanes,
+    /// which is exact for the two's-complement ops (Add, Sub, Mul, bitwise); Div and Pow override it.
+    /// </summary>
+    protected virtual ulong ApplyUInt(ulong a, ulong b)
+        => IntSemantics.U(ApplyInt(IntSemantics.S(a), IntSemantics.S(b)));
+
     protected override RuntimeTensor[] Compute(RuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
     {
         var a = inputs.Length > 0 ? inputs[0] : null;
@@ -111,7 +127,12 @@ internal abstract class BinaryNumericOp : QuickOp
             if (a.FloatData is { } af && b.FloatData is { } bf)
                 fData = ImmutableArray.Create(ElementwiseBroadcast.Float(af, a.Shape!, bf, b.Shape!, shape, ApplyFloat));
             else if (a.IntData is { } ai && b.IntData is { } bi)
-                iData = ImmutableArray.Create(ElementwiseBroadcast.Int(ai, a.Shape!, bi, b.Shape!, shape, ApplyInt));
+            {
+                Func<long, long, long> apply = DTypeHelpers.IsUnsignedInt(dtype)
+                    ? (x, y) => IntSemantics.S(ApplyUInt(IntSemantics.U(x), IntSemantics.U(y)))
+                    : ApplyInt;
+                iData = ImmutableArray.Create(ElementwiseBroadcast.Int(ai, a.Shape!, bi, b.Shape!, shape, apply));
+            }
         }
 
         return [RuntimeTensorFactory.Create(dtype, shape) with { FloatData = fData, IntData = iData }];
@@ -126,10 +147,18 @@ internal abstract class CompareOp : QuickOp
     protected virtual bool CompareFloat(float a, float b) => false;
     protected virtual bool CompareInt(long a, long b) => false;
 
+    /// <summary>
+    /// The unsigned-dtype path. Defaults to <see cref="CompareInt"/> on the reinterpreted lanes,
+    /// which is exact for Equal; the ordering comparisons override it.
+    /// </summary>
+    protected virtual bool CompareUInt(ulong a, ulong b)
+        => CompareInt(IntSemantics.S(a), IntSemantics.S(b));
+
     protected override RuntimeTensor[] Compute(RuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
     {
         var a = inputs.Length > 0 ? inputs[0] : null;
         var b = inputs.Length > 1 ? inputs[1] : null;
+        var dtype = a?.DType ?? b?.DType ?? DType.Float32;
         var shape = ShapeHelpers.Broadcast(a?.Shape, b?.Shape);
 
         ImmutableArray<bool>? bData = null;
@@ -139,7 +168,12 @@ internal abstract class CompareOp : QuickOp
             if (a.FloatData is { } af && b.FloatData is { } bf)
                 bData = ImmutableArray.Create(ElementwiseBroadcast.BoolFromFloat(af, a.Shape!, bf, b.Shape!, shape, CompareFloat));
             else if (a.IntData is { } ai && b.IntData is { } bi)
-                bData = ImmutableArray.Create(ElementwiseBroadcast.BoolFromInt(ai, a.Shape!, bi, b.Shape!, shape, CompareInt));
+            {
+                Func<long, long, bool> compare = DTypeHelpers.IsUnsignedInt(dtype)
+                    ? (x, y) => CompareUInt(IntSemantics.U(x), IntSemantics.U(y))
+                    : CompareInt;
+                bData = ImmutableArray.Create(ElementwiseBroadcast.BoolFromInt(ai, a.Shape!, bi, b.Shape!, shape, compare));
+            }
             else if (a.BoolData is { } ab && b.BoolData is { } bb)
                 // Equal supports bool tensors (opset 19+): compare them as 0/1 integers.
                 bData = ImmutableArray.Create(ElementwiseBroadcast.Bool(ab, a.Shape!, bb, b.Shape!, shape,
@@ -157,6 +191,13 @@ internal abstract class ReduceOpBase : QuickOp
 {
     protected abstract float Reduce(IEnumerable<float> values);
     protected virtual long ReduceInt(IEnumerable<long> values) => (long)Reduce(values.Select(v => (float)v));
+
+    /// <summary>
+    /// The unsigned-dtype path. Like <see cref="ReduceInt"/> it defaults to the float
+    /// accumulator, but converts from the lane's true magnitude rather than its signed
+    /// reinterpretation. Subclasses with an exact integer accumulator override both.
+    /// </summary>
+    protected virtual ulong ReduceUInt(IEnumerable<ulong> values) => (ulong)Reduce(values.Select(v => (float)v));
 
     protected override RuntimeTensor[] Compute(RuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
     {
@@ -242,10 +283,14 @@ internal abstract class ReduceOpBase : QuickOp
         }
         if (x.IntData is { } idata)
         {
+            var unsigned = DTypeHelpers.IsUnsignedInt(x.DType);
             var outBuf = new long[keptCount];
             ReduceInto(inDims, inStrides, axisSet, keptCount, (long srcBase, int[] axisShape, long[] axisStrides) =>
             {
-                return ReduceInt(EnumerateGroup(idata, srcBase, axisShape, axisStrides));
+                var group = EnumerateGroup(idata, srcBase, axisShape, axisStrides);
+                return unsigned
+                    ? IntSemantics.S(ReduceUInt(group.Select(IntSemantics.U)))
+                    : ReduceInt(group);
             }, outBuf);
             return [rt with { IntData = ImmutableArray.Create(outBuf) }];
         }

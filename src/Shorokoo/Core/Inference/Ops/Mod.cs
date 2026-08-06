@@ -33,8 +33,13 @@ internal sealed class ModOp : QuickOp
                 fData = ImmutableArray.Create(ElementwiseBroadcast.Float(af, a.Shape!, bf, b.Shape!, shape,
                     fmod ? FmodFloat : ModFloat));
             else if (a.IntData is { } ai && b.IntData is { } bi)
-                iData = ImmutableArray.Create(ElementwiseBroadcast.Int(ai, a.Shape!, bi, b.Shape!, shape,
-                    fmod ? FmodInt : ModInt));
+            {
+                // Unsigned lanes have no sign to disagree about, so fmod and numpy.mod coincide.
+                Func<long, long, long> apply = DTypeHelpers.IsUnsignedInt(dtype)
+                    ? ModUInt
+                    : fmod ? FmodInt : ModInt;
+                iData = ImmutableArray.Create(ElementwiseBroadcast.Int(ai, a.Shape!, bi, b.Shape!, shape, apply));
+            }
         }
 
         return [RuntimeTensorFactory.Create(dtype, shape) with { FloatData = fData, IntData = iData }];
@@ -61,5 +66,11 @@ internal sealed class ModOp : QuickOp
         var r = a % b;
         if (r != 0 && (r < 0) != (b < 0)) r += b;
         return r;
+    }
+
+    private static long ModUInt(long a, long b)
+    {
+        var bu = IntSemantics.U(b);
+        return bu == 0 ? 0 : IntSemantics.S(IntSemantics.U(a) % bu);
     }
 }

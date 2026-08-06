@@ -10,4 +10,5 @@ internal sealed class ReduceMinOp : ReduceOpBase
     public override string OpCode => OpCodes.REDUCE_MIN;
     protected override float Reduce(IEnumerable<float> values) => values.Min();
     protected override long ReduceInt(IEnumerable<long> values) => values.Min();
+    protected override ulong ReduceUInt(IEnumerable<ulong> values) => values.Min();
 }

@@ -11,4 +11,5 @@ internal sealed class ReduceSumOp : ReduceOpBase
     protected override float Reduce(IEnumerable<float> values) => values.Sum();
     // Exact integer accumulation (the float-roundtrip default loses precision past 2^24).
     protected override long ReduceInt(IEnumerable<long> values) { long s = 0; foreach (var v in values) s += v; return s; }
+    protected override ulong ReduceUInt(IEnumerable<ulong> values) { ulong s = 0; foreach (var v in values) unchecked { s += v; } return s; }
 }

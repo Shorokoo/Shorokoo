@@ -199,6 +199,14 @@ namespace Shorokoo.Tests.Modules
                 IntMismatch(((Tensor<uint32>)OnnxOp.BitShift(ua, ub, BitShiftDirection.Left)).Cast<int64>(),
                     Vector(12288L, 320L, 120L)) +
                 IntMismatch(((Tensor<uint32>)OnnxOp.BitShift(ua, ub, BitShiftDirection.Right)).Cast<int64>(),
+                    Vector(0L, 0L, 1L)) +
+                // uint64 arm: 64 bits is the runtime buffer's own width, so it takes a
+                // different masking path from the narrower unsigned widths.
+                IntMismatch(((Tensor<uint64>)OnnxOp.BitShift(
+                        ua.Cast<uint64>(), ub.Cast<uint64>(), BitShiftDirection.Left)).Cast<int64>(),
+                    Vector(12288L, 320L, 120L)) +
+                IntMismatch(((Tensor<uint64>)OnnxOp.BitShift(
+                        ua.Cast<uint64>(), ub.Cast<uint64>(), BitShiftDirection.Right)).Cast<int64>(),
                     Vector(0L, 0L, 1L));
             return mismatch < Scalar(1L);
         }

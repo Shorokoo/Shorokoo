@@ -534,6 +534,14 @@ public class AutoGradNonDifferentiableStubOpsCoverageTests
         RunTensor<AutoGradOptionalHasElementStubCheck>([3L], 1f, 2f, 3f);
         RunTensor<AutoGradNonMaxSuppressionStubCheck>([4L], 0.1f, 0.2f, 0.3f, 0.4f);
         RunTensor<AutoGradSTFTStubCheck>([4L], 1f, 2f, 3f, 4f);
+
+        // AD003 must fire for DeformConv even when only a x0-masked branch reaches it.
+        var masked = Assert.Throws<AutoDiffNotSupportedException>(() =>
+            AutoTest.AdvancedTestGraph<AutoGradDeformConvStubCheck>(
+                [], [TensorData(DType.Float32, [16L], 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f,
+                    9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f)]));
+        Assert.Equal(ErrorCodes.AD003, masked.ErrorCode);
+        Assert.Contains("DeformConv", masked.Message);
         Assert.True(AutoTest.AdvancedTestGraph<AutoGradBernoulliStubCheck>(
             [], [TensorData(DType.Float32, [3L], 0.1f, 0.5f, 0.9f)],
             testOnnxRoundtrip: false, testCsRoundtrip: false));

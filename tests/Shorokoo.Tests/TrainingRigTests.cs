@@ -154,7 +154,9 @@ public partial class ThreeInputMixedModel
 
 internal static class TrainingRigHelpers
 {
-    internal static readonly long[] ScalarInputShape = [4L];
+    // A fresh array per call: a static readonly long[] is still mutable, and this suite
+    // hands it to product code across four parallel workers.
+    internal static long[] ScalarInputShape => [4L];
 
     internal static readonly TensorStructDef ScalarInputDef = new(
         [new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32)], "ModelInput");

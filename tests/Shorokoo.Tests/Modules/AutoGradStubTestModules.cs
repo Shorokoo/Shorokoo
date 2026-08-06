@@ -377,4 +377,27 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>DeformConv reached only through a x0-masked side branch, so the gradient
+    /// routed into it is zero-valued. AD-B3 replaced the silent ZERO-STUB with an AD003
+    /// guard that must fire anyway — a guard that only fires on a live gradient would let
+    /// the silent-zeros regression back in. The bit check below is never reached.</summary>
+    [Module]
+    public partial class AutoGradDeformConvStubCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var input4d = (Tensor<float32>)OnnxOp.Reshape(x, Vector(1L, 1L, 4L, 4L), allowZero: false);
+            var w = (Tensor<float32>)OnnxOp.Expand(Scalar(1f), Vector(1L, 1L, 3L, 3L));
+            var offset = (Tensor<float32>)OnnxOp.Expand(Scalar(0f), Vector(1L, 18L, 2L, 2L));
+            var dc = (Tensor<float32>)OnnxOp.DeformConv(input4d, w, offset, b: null, mask: null,
+                dilations: null, group: null, kernelShape: null, offsetGroup: null,
+                pads: null, strides: null);
+            var maskScaled = dc.Reduce(ReduceKind.Sum, keepDims: false).Scalar() * Scalar(0f);
+            var loss = x.Reduce(ReduceKind.Sum, keepDims: false).Scalar() + maskScaled;
+            var grad = (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, loss);
+            var expected = (Tensor<float32>)OnnxOp.Expand(Scalar(1f), x.DShape);
+            return (grad - expected).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-4f);
+        }
+    }
+
 }

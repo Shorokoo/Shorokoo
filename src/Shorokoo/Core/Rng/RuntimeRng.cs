@@ -123,22 +123,23 @@ internal static class RuntimeRng
     private static Tensor<float32> ToUniform(Tensor<uint32> word)
         => OnnxOp.BitwiseAnd(word, Scalar(0x00FF_FFFFu)).uint32().Cast<float32>() * Scalar(TwoPow24Inv);
 
-    /// <summary>The per-element flat element index <c>[prod(shape)]</c>.</summary>
-    private static Tensor<uint64> ElementIndex(Vector<int64> shape)
-    {
-        Scalar<int64> n = shape.Reduce(ReduceKind.Prod);
-        return OnnxOp.Range(Scalar(0L), n, Scalar(1L)).int64().Cast<uint64>();   // [N]
-    }
+    /// <summary>The number of elements a draw of the given shape produces.</summary>
+    private static Scalar<int64> ElementCount(Vector<int64> shape) => shape.Reduce(ReduceKind.Prod);
+
+    /// <summary>The counter positions <c>[0, count)</c>.</summary>
+    private static Tensor<uint64> Positions(Scalar<int64> count)
+        => OnnxOp.Range(Scalar(0L), count, Scalar(1L)).int64().Cast<uint64>();
 
     /// <summary>
-    /// The generator words for a draw of the given shape under a whole 64-bit key.
+    /// The generator words at the first <paramref name="positionCount"/> counter positions of the
+    /// stream under a whole 64-bit key.
     ///
-    /// <para>The draw position is folded <b>into the key</b> — one bijection over scalars —
+    /// <para>The substream index is folded <b>into the key</b> — one bijection over scalars —
     /// rather than spending a counter word on it. That leaves BOTH counter words for the
-    /// element index, so a draw position and an element index are each a whole 64-bit value
+    /// stream position, so a substream index and a position are each a whole 64-bit value
     /// and neither aliases <em>as counters</em>: the 2³²'th execution draws a fresh stream rather
     /// than repeating the first, and the generator's word pair stays distinct across more than 2³²
-    /// elements. (Distinct generator words, not distinct floats — <see cref="ToUniform"/> keeps 24
+    /// positions. (Distinct generator words, not distinct floats — <see cref="ToUniform"/> keeps 24
     /// bits, so drawn values collide by pigeonhole long before that.)</para>
     ///
     /// <para>The fold reuses the bijection, but it is <b>not</b> the key tree's split: it runs at
@@ -149,13 +150,13 @@ internal static class RuntimeRng
     /// under the folded key <c>B(d, key)</c>.</para>
     /// </summary>
     private static (Tensor<uint32> x0, Tensor<uint32> x1) Draw(
-        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds)
+        Scalar<int64> positionCount, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds)
     {
         var (k0, k1) = Words(key);
         var (d0, d1) = Words(substreamIndex);
         var (dk0, dk1) = Bijection(d0, d1, k0, k1, rounds);
 
-        var (c0, c1) = Words(ElementIndex(shape));
+        var (c0, c1) = Words(Positions(positionCount));
         return Bijection(c0, c1, dk0, dk1, rounds);
     }
 
@@ -163,7 +164,7 @@ internal static class RuntimeRng
     public static Tensor<float32> StandardUniform(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
     {
-        var (x0, _) = Draw(shape, key, substreamIndex, rounds);
+        var (x0, _) = Draw(ElementCount(shape), key, substreamIndex, rounds);
         return ToUniform(x0).Reshape(shape);
     }
 
@@ -171,7 +172,7 @@ internal static class RuntimeRng
     public static Tensor<float32> StandardNormal(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
     {
-        var (x0, x1) = Draw(shape, key, substreamIndex, rounds);
+        var (x0, x1) = Draw(ElementCount(shape), key, substreamIndex, rounds);
         var u1 = ToUniform(x0);
         var u2 = ToUniform(x1);
         var radius = ((-u1 + Scalar(1.0f)).Ln() * Scalar(-2.0f)).Sqrt();   // √(−2·ln(1−u₁))
@@ -192,31 +193,50 @@ internal static class RuntimeRng
         => StandardNormal(shape, key, substreamIndex, rounds) * scale + mean;
 
     // ── Raw random bits ─────────────────────────────────────────────────────────────────
-    // One generator draw per element. The generator's low word x0 is a uniformly-random 32-bit
-    // value; the narrow widths take its low W bits (all bits are equidistributed), U32 takes it
-    // whole, and U64 is both words packed.
+    // The generator's low word x0 is a uniformly-random 32-bit value: U32 takes it whole and
+    // U64 is both words packed, one position per element. The narrow widths would waste 24 or
+    // 16 bits of every word at that ratio, so they PACK instead — E = 32/W elements ride each
+    // word, low lane first, i.e. element i is bits [i*W, (i+1)*W) of the draw's bit stream.
+    // A U8 draw of N elements then costs ceil(N/4) generator evaluations rather than N, and a
+    // U16 draw ceil(N/2). The counter is a linear index into the output stream and not
+    // resumable state, so this is only a change of the elements-per-position ratio from 1:1 to
+    // E:1; every bit the generator produces is equidistributed, so a lane is as uniform as the
+    // whole word.
 
-    /// <summary>Raw uniform bits, U8 (the low 8 bits of the generator word), of the given shape.</summary>
+    /// <summary>
+    /// <c>prod(shape)</c> elements of raw <paramref name="width"/>-bit bits packed
+    /// E = 32/<paramref name="width"/> per generator word, as uint32 lanes carrying their value
+    /// in the low bits (the caller's narrowing cast drops the rest).
+    /// </summary>
+    private static Vector<uint32> PackedBits(
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int width, int rounds)
+    {
+        long lanes = 32 / width;
+        Scalar<int64> n = ElementCount(shape);
+        var (x0, _) = Draw((n + Scalar(lanes - 1)) / Scalar(lanes), key, substreamIndex, rounds);   // [ceil(N/E)]
+
+        // The [M,1] words against the [E] lane offsets broadcast to [M,E], whose row-major
+        // flatten lands lane l of word j at element j*E + l — the low-lane-first convention.
+        var perLane = OnnxOp.BitShift(
+            x0.Reshape(Vector(-1L, 1L)), VectorRange(0u, 32u, (uint)width), BitShiftDirection.Right).uint32();
+        return perLane.Reshape(Vector(-1L)).Vec().Slice(Scalar(0L), n);
+    }
+
+    /// <summary>Raw uniform bits, U8 (4 elements packed per generator word), of the given shape.</summary>
     public static Tensor<uint8> BitsU8(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
-    {
-        var (x0, _) = Draw(shape, key, substreamIndex, rounds);
-        return x0.Cast<uint8>().Reshape(shape);
-    }
+        => PackedBits(shape, key, substreamIndex, 8, rounds).Cast<uint8>().Reshape(shape);
 
-    /// <summary>Raw uniform bits, U16 (the low 16 bits of the generator word), of the given shape.</summary>
+    /// <summary>Raw uniform bits, U16 (2 elements packed per generator word), of the given shape.</summary>
     public static Tensor<uint16> BitsU16(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
-    {
-        var (x0, _) = Draw(shape, key, substreamIndex, rounds);
-        return x0.Cast<uint16>().Reshape(shape);
-    }
+        => PackedBits(shape, key, substreamIndex, 16, rounds).Cast<uint16>().Reshape(shape);
 
     /// <summary>Raw uniform bits, U32 (the whole generator word), of the given shape.</summary>
     public static Tensor<uint32> BitsU32(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
     {
-        var (x0, _) = Draw(shape, key, substreamIndex, rounds);
+        var (x0, _) = Draw(ElementCount(shape), key, substreamIndex, rounds);
         return x0.Reshape(shape);
     }
 
@@ -224,7 +244,7 @@ internal static class RuntimeRng
     public static Tensor<uint64> BitsU64(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
     {
-        var (x0, x1) = Draw(shape, key, substreamIndex, rounds);
+        var (x0, x1) = Draw(ElementCount(shape), key, substreamIndex, rounds);
         return Pack(x0, x1).Reshape(shape);
     }
 }

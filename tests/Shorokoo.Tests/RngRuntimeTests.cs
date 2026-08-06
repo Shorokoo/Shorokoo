@@ -109,6 +109,23 @@ public class RngRuntimeTests
     }
 
     [Fact]
+    public void TestNarrowBitsDrawsPackLanesLowFirstIntoTheGeneratorWordAndSliceTheTail()
+    {
+        var words = RunDrawRaw<RtBitsU32Draw>(4, 4).As<uint32>().AccessMemory().ToArray();
+        var u8 = RunDrawRaw<RtBitsU8Draw>(4, 4).As<uint8>().AccessMemory().ToArray();
+        var u16 = RunDrawRaw<RtBitsU16Draw>(4, 4).As<uint16>().AccessMemory().ToArray();
+
+        for (int j = 0; j < 4; j++)
+            Assert.Equal(words[j], u8[4 * j] | ((uint)u8[4 * j + 1] << 8)
+                                             | ((uint)u8[4 * j + 2] << 16) | ((uint)u8[4 * j + 3] << 24));
+        for (int j = 0; j < 8; j++)
+            Assert.Equal(words[j], u16[2 * j] | ((uint)u16[2 * j + 1] << 16));
+
+        Assert.Equal(u8.Take(5).ToArray(), RunDrawRaw<RtBitsU8Draw>(1, 5).As<uint8>().AccessMemory().ToArray());
+        Assert.Equal(u16.Take(5).ToArray(), RunDrawRaw<RtBitsU16Draw>(1, 5).As<uint16>().AccessMemory().ToArray());
+    }
+
+    [Fact]
     public void TestInGraphUniformIsInRangeAndSpreadAndNormalHasStandardMoments()
     {
         var uniform = RunDraw<RtUniformDraw>(8, 8);

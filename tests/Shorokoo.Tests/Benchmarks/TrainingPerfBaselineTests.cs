@@ -51,6 +51,7 @@ public partial class PerfBaselineLinearModel
 /// </summary>
 [Trait("Domain", "Training")]
 [Trait("Purpose", "Benchmark")]
+[Collection(SerialMeasurement.Name)]
 public class TrainingPerfBaselineTests
 {
     /// <summary>Current must not be slower than this multiple of the baseline.</summary>

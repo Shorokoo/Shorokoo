@@ -51,23 +51,33 @@ jobs:
           --filter "Purpose=Coverage"
           -c Release --logger "console;verbosity=minimal"
 
-      # Purpose=Benchmark measures wall clock and process-wide memory, so it needs the
-      # box to itself: one worker, its own process, and nothing else running. It must
-      # come before the Purpose=Gate step — that one shells out to a full parallel
-      # `dotnet build`, whose MSBuild workers wreck any measurement sharing its process.
-      - name: Benchmark gates (serial, isolated)
+      # Each Purpose=Benchmark check measures the machine — one wall clock, one
+      # process-wide memory growth — so each gets a process of its own. Anything
+      # sharing the process pollutes the measurement, and the memory check's baseline
+      # in particular is meaningless if another test has been training in the same
+      # heap. One invocation per class is the only isolation that is actually
+      # verifiable: `-- xUnit.MaxParallelThreads=1` on this command line is accepted
+      # and silently ignored, and a .runsettings <xUnit> node did not take effect
+      # either. Both must come before the Purpose=Gate step: that one shells out to a
+      # full parallel `dotnet build`, whose MSBuild workers wreck any measurement
+      # sharing its process.
+      - name: Benchmark — training hot path (own process)
         run: >
           dotnet test tests/Shorokoo.Tests/Shorokoo.Tests.csproj
-          --filter "Purpose=Benchmark"
+          --filter "FullyQualifiedName~TrainingPerfBaselineTests"
           -c Release --logger "console;verbosity=minimal" --no-build
-          -- xUnit.MaxParallelThreads=1 xUnit.ParallelizeTestCollections=false
 
-      - name: Build-hygiene gate (serial)
+      - name: Benchmark — memory stability (own process)
+        run: >
+          dotnet test tests/Shorokoo.Tests/Shorokoo.Tests.csproj
+          --filter "FullyQualifiedName~TrainingMemoryStabilityTests"
+          -c Release --logger "console;verbosity=minimal" --no-build
+
+      - name: Build-hygiene gate
         run: >
           dotnet test tests/Shorokoo.Tests/Shorokoo.Tests.csproj
           --filter "Purpose=Gate"
           -c Release --logger "console;verbosity=minimal" --no-build
-          -- xUnit.MaxParallelThreads=1 xUnit.ParallelizeTestCollections=false
 
       - name: Pack
         run: dotnet pack Shorokoo.sln -c Release -o artifacts/nupkgs

@@ -35,6 +35,7 @@ namespace Shorokoo.Tests.Benchmarks;
 /// </summary>
 [Trait("Domain", "Training")]
 [Trait("Purpose", "Benchmark")]
+[Collection(SerialMeasurement.Name)]
 public class TrainingMemoryStabilityTests
 {
     // Pinned scenario geometry — identical to the R-1 throughput gate.

@@ -228,10 +228,6 @@ namespace Shorokoo.Core.Utils
         [JsonPropertyName("algorithm")]
         public string? Algorithm { get; set; }
 
-        /// <summary>Whether all streams share one master-derived key (tied init; test/debug only).</summary>
-        [JsonPropertyName("sharedKey")]
-        public bool SharedKey { get; set; }
-
         /// <summary>Per-stream overrides; omitted when none.</summary>
         [JsonPropertyName("overrides")]
         public List<SkptRngOverride>? Overrides { get; set; }

@@ -39,8 +39,8 @@ namespace Shorokoo.Core.Rng;
 internal static class RngKeyResolver
 {
     /// <summary>
-    /// Resolves one key per spec, in order. A spec with an empty fold path (an override, or
-    /// SharedKey mode) resolves to its root key without emitting a split.
+    /// Resolves one key per spec, in order. A spec with an empty fold path (an override)
+    /// resolves to its root key without emitting a split.
     /// </summary>
     public static IReadOnlyList<ulong> Resolve(
         IReadOnlyList<(ulong root, IReadOnlyList<int> foldPath)> specs,

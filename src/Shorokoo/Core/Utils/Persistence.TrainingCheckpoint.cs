@@ -418,7 +418,6 @@ namespace Shorokoo
                 InitMasterSeed = info.InitMasterSeed,
                 RunMasterSeed = info.RunMasterSeed,
                 Algorithm = algorithm,
-                SharedKey = info.SharedKey,
             };
             foreach (var o in info.Overrides ?? new List<SkptRngOverride>())
             {
@@ -753,7 +752,6 @@ namespace Shorokoo
                 InitMasterSeed = rng.InitMasterSeed,
                 RunMasterSeed = rng.RunMasterSeed,
                 Algorithm = rng.Algorithm.ToString(),
-                SharedKey = rng.SharedKey,
                 Overrides = overrides.Count > 0 ? overrides : null,
             };
         }

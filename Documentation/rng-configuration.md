@@ -175,8 +175,66 @@ derivation chain, so it works for any iteration the loop actually executes.
 
 Note that changing an override's **value** (or the master seed) on an already-built model
 is a pure parameter write, while changing the override **set** re-wires the derivation
-chains — fine on an in-memory model, refused (loudly) on a loaded one, whose chains are
-baked.
+chains. A saved model keeps its feed ops, so a re-bind on a **loaded** model may change the
+set (and the algorithm) too. What refuses is a graph whose random draws have already been
+**lowered** to baked draw-function calls at ONNX prep: there the routing and the generator
+are fixed, so a re-bind may still change seed *values* but not the override set or the
+algorithm — rebuild from the concrete architecture for that.
+
+## Reading a model's identity back: `TryGetRngIdentity`
+
+A model carries its runtime RNG identity with it, so you can ask a built or loaded model
+what it is bound to without holding the config that produced it:
+
+```csharp
+if (model.TryGetRngIdentity() is { } identity)
+{
+    Console.WriteLine(identity.Algorithm);        // e.g. Threefry2x32Rounds13
+    Console.WriteLine(identity.RunMasterKey);     // the derived runtime master key
+    foreach (var o in identity.Overrides)         // path + key, one per overridden stream
+        Console.WriteLine(o);
+}
+```
+
+`null` means the model has no runtime random surface at all (no `RngSeed`, nothing to
+report).
+
+An **identity is not a config**, and deliberately does not pretend to be one:
+
+- **`MasterSeed` is not recoverable.** The identity records the *derived* runtime master key
+  (`Fold(MasterSeed, "runtime")`, a one-way SHA-256 XOR), not the seed it came from. A model
+  can tell you which keys its streams use; it cannot tell you the seed you typed. To
+  reproduce a model's runtime streams under a fresh config, pass the recorded key as
+  `RunMasterSeed` — `new RngConfig { RunMasterSeed = identity.RunMasterKey }` — rather than
+  guessing a master seed.
+- **The `params` collection is not recorded.** Initialization randomness is drawn once and
+  baked into the weights, so nothing in a saved model consumes it. `Overrides` therefore
+  lists `Runtime` overrides only, and re-running initialization under a chosen seed takes an
+  explicit config against the concrete architecture.
+
+## Re-keying one stream: `WithRngOverride`
+
+To change a single runtime stream on a model whose config you no longer have, override it on
+the model directly — the graph-level counterpart of `RngConfig.Override`:
+
+```csharp
+// Same weights, same algorithm, same master key, every other stream untouched.
+model = model.WithRngOverride(RngCollection.Runtime, [2, 0, 1], 5678);
+```
+
+The override is applied on top of the model's *bound identity*, so nothing else moves — where
+rebuilding an `RngConfig` from scratch and calling `WithRngConfig` would replace the whole
+identity and silently re-key every other stream. `RngCollection.Params` is rejected (there is
+no recorded init tier to override); and an address that matches no runtime stream throws,
+exactly as it does through `RngConfig.Override`. It works on a loaded model too — the saved
+feed ops are what let the override set change — with the one exception noted above: a graph
+whose draws are already lowered can re-key a stream it *already* overrides, but cannot gain a
+new override.
+
+The raw encoded form of the identity — the `RngSeed` parameter's `uint64[]` value — is not
+public API. Its layout is an implementation detail that changes with the subsystem, and
+nothing on disk records which layout a file was written with, so `RngIdentity` is the
+supported way to read it.
 
 ## The stream report
 

@@ -79,9 +79,9 @@ namespace Shorokoo
                 if (unitBox is { } cached) return cached.Value;
                 lock (unitGate)
                 {
-                if (unitBox is { } raced) return raced.Value;
-                Scalar<T>? unit = null;
-                {
+                    if (unitBox is { } raced) return raced.Value;
+
+                    Scalar<T>? unit = null;
                     var type = OnnxUtils.GetDType<T>();
                     if (type == DType.BFloat16) unit = (Scalar<T>)(object)Shorokoo.Globals.Scalar(BFloat16.One);
                     else if (type == DType.Float16) unit = (Scalar<T>)(object)Shorokoo.Globals.Scalar(Float16.One);
@@ -102,11 +102,10 @@ namespace Shorokoo
                     else if (type == DType.Complex64) throw new UnsupportedDTypeException(ErrorCodes.CR005, type.ToString(), "Unit Scalar", "Complex64 numbers are not supported for unit scalar creation");
                     else if (type == DType.Complex128) throw new UnsupportedDTypeException(ErrorCodes.CR005, type.ToString(), "Unit Scalar", "Complex128 numbers are not supported for unit scalar creation");
                     else if (type == DType.Invalid) unit = (Scalar<T>)(object)Shorokoo.Globals.Scalar(1);
-                }
 
-                Debug.Assert(unit is not null);
-                unitBox = new System.Runtime.CompilerServices.StrongBox<Scalar<T>>(unit!.Value);
-                return unitBox.Value;
+                    Debug.Assert(unit is not null);
+                    unitBox = new System.Runtime.CompilerServices.StrongBox<Scalar<T>>(unit!.Value);
+                    return unitBox.Value;
                 }
             }
         }

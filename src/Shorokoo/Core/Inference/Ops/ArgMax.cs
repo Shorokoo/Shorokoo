@@ -25,6 +25,9 @@ internal abstract class ArgExtremeOpBase : QuickOp
 
     protected abstract bool BeatsInt(long candidate, long best);
 
+    /// <summary>Unsigned-dtype counterpart of <see cref="BeatsInt"/>.</summary>
+    protected abstract bool BeatsUInt(ulong candidate, ulong best);
+
     protected override RuntimeTensor[] Compute(RuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
     {
         var x = inputs[0];
@@ -53,6 +56,7 @@ internal abstract class ArgExtremeOpBase : QuickOp
         long outerCount = 1;
         for (int d = 0; d < axis; d++) outerCount *= inDims[d];
 
+        var unsigned = DTypeHelpers.IsUnsignedInt(x.DType);
         var buf = new long[outerCount * innerCount];
         long pos = 0;
         for (long outer = 0; outer < outerCount; outer++)
@@ -77,7 +81,10 @@ internal abstract class ArgExtremeOpBase : QuickOp
                     for (long k = 1; k < axisDim; k++)
                     {
                         long v = id[(int)(outerOff + k * innerCount + inner)];
-                        if (BeatsInt(v, best) || (selectLastIndex && v == best)) { best = v; bestIdx = k; }
+                        var beats = unsigned
+                            ? BeatsUInt(IntSemantics.U(v), IntSemantics.U(best))
+                            : BeatsInt(v, best);
+                        if (beats || (selectLastIndex && v == best)) { best = v; bestIdx = k; }
                     }
                 }
                 buf[pos++] = bestIdx;
@@ -92,4 +99,5 @@ internal sealed class ArgMaxOp : ArgExtremeOpBase
     public override string OpCode => OpCodes.ARG_MAX;
     protected override bool Beats(float candidate, float best) => candidate > best;
     protected override bool BeatsInt(long candidate, long best) => candidate > best;
+    protected override bool BeatsUInt(ulong candidate, ulong best) => candidate > best;
 }

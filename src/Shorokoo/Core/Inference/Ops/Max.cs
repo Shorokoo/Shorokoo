@@ -30,7 +30,8 @@ internal sealed class MaxOp : QuickOp
         {
             if (VariadicElementwise.FoldFloat(inputs, shape, MathF.Max) is { } f)
                 return [rt with { FloatData = System.Collections.Immutable.ImmutableArray.Create(f) }];
-            if (VariadicElementwise.FoldInt(inputs, shape, Math.Max) is { } l)
+            var unsigned = DTypeHelpers.IsUnsignedInt(dtype);
+            if (VariadicElementwise.FoldInt(inputs, shape, (a, b) => IntSemantics.Max(unsigned, a, b)) is { } l)
                 return [rt with { IntData = System.Collections.Immutable.ImmutableArray.Create(l) }];
         }
         return [rt];

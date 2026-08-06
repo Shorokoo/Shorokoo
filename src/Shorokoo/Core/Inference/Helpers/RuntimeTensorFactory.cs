@@ -88,25 +88,17 @@ internal static class RuntimeTensorFactory
     ///
     /// <para>Unsigned widths land in <c>[0, 2^w)</c> and signed widths sign-extend, matching
     /// how <see cref="TensorDataConverter.ToRuntimeTensor"/> loads them. <c>Int64</c> and
-    /// <c>UInt64</c> are the buffer's own width and pass through untouched — which also means a
-    /// <c>UInt64</c> value above <c>long.MaxValue</c> stays a negative bit-pattern long, and the
-    /// kernels that use signed C# operators on it (Div, Mod, Less/Greater, Sign, Abs) read it as
-    /// negative. Narrowing gives the sub-64-bit unsigned widths correct signed-operator behaviour
-    /// for free; UInt64 is the one gap, tracked separately.</para>
+    /// <c>UInt64</c> are the buffer's own width and pass through untouched — so a <c>UInt64</c>
+    /// value above <c>long.MaxValue</c> stays a negative bit-pattern long. Narrowing is what
+    /// makes signed C# operators correct for the sub-64-bit unsigned widths; at 64 bits there is
+    /// nothing to narrow to, so the sign-dependent kernels instead reinterpret through
+    /// <see cref="IntSemantics"/> on an unsigned dtype.</para>
     /// </summary>
     public static RuntimeTensor NarrowToDeclaredWidth(RuntimeTensor rt)
     {
         if (rt.IntData is not { } d || d.Length == 0) return rt;
 
-        System.Func<long, long>? narrow = null;
-        var t = rt.DType;
-        if (t == DType.Int32) narrow = v => unchecked((int)v);
-        else if (t == DType.Int16) narrow = v => unchecked((short)v);
-        else if (t == DType.Int8) narrow = v => unchecked((sbyte)v);
-        else if (t == DType.UInt32) narrow = v => unchecked((uint)v);
-        else if (t == DType.UInt16) narrow = v => unchecked((ushort)v);
-        else if (t == DType.UInt8) narrow = v => unchecked((byte)v);
-        if (narrow is null) return rt;
+        if (IntSemantics.Narrower(rt.DType) is not { } narrow) return rt;
 
         long[]? buf = null;
         for (int i = 0; i < d.Length; i++)

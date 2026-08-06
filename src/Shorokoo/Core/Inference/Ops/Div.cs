@@ -10,4 +10,5 @@ internal sealed class DivOp : BinaryNumericOp
     public override string OpCode => OpCodes.DIV;
     protected override float ApplyFloat(float a, float b) => a / b;
     protected override long ApplyInt(long a, long b) => b == 0 ? 0 : a / b;
+    protected override ulong ApplyUInt(ulong a, ulong b) => b == 0 ? 0 : a / b;
 }

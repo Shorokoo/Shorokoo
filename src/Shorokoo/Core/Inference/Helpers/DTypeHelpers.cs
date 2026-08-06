@@ -41,4 +41,12 @@ internal static class DTypeHelpers
     public static bool IsFloat(DType dtype) => Categorize(dtype) == DTypeCategory.Float;
     public static bool IsInt(DType dtype) => Categorize(dtype) == DTypeCategory.Int;
     public static bool IsBool(DType dtype) => dtype == DType.Bool;
+
+    /// <summary>
+    /// True for the unsigned integer dtypes, which share the signed <c>long</c> buffer and so
+    /// need <see cref="IntSemantics"/> in any kernel whose result depends on the sign.
+    /// </summary>
+    public static bool IsUnsignedInt(DType dtype)
+        => dtype == DType.UInt8 || dtype == DType.UInt16
+        || dtype == DType.UInt32 || dtype == DType.UInt64;
 }

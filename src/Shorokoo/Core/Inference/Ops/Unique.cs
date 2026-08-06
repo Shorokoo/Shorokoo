@@ -92,15 +92,28 @@ internal sealed class UniqueOp : QuickOp
 
     private static RuntimeTensor[] ComputeFlattenValues(RuntimeTensor x, DType dtype, bool sorted, int numel)
     {
-        // Work over a unified comparable view; preserve the original storage kind for y.
-        var isFloat = x.FloatData is not null;
-        Func<int, double> get = isFloat
-            ? i => x.FloatData!.Value[i]
-            : i => x.IntData!.Value[i];
+        // Keyed on the storage type itself: a double view neither distinguishes int64 values
+        // above 2^53 nor orders unsigned lanes, which share the signed long buffer.
+        if (x.FloatData is { } fd)
+            return Gather(numel, i => fd[i], Comparer<float>.Default, dtype, sorted,
+                (y, order) => y with { FloatData = ImmutableArray.CreateRange(order) });
 
-        var firstIndex = new Dictionary<double, long>();
-        var order = new List<double>();
-        var counts = new Dictionary<double, long>();
+        var id = x.IntData!.Value;
+        return Gather(numel, i => id[i], IntSemantics.Comparer(DTypeHelpers.IsUnsignedInt(dtype)), dtype, sorted,
+            (y, order) => y with { IntData = ImmutableArray.CreateRange(order) });
+    }
+
+    /// <summary>
+    /// The four Unique outputs over any key type: distinct values (sorted, or in
+    /// first-occurrence order), their first indices, the inverse map, and the occurrence counts.
+    /// </summary>
+    private static RuntimeTensor[] Gather<T>(int numel, Func<int, T> get, IComparer<T> comparer,
+        DType dtype, bool sorted, Func<RuntimeTensor, List<T>, RuntimeTensor> withValues)
+        where T : notnull
+    {
+        var firstIndex = new Dictionary<T, long>();
+        var order = new List<T>();
+        var counts = new Dictionary<T, long>();
         for (int i = 0; i < numel; i++)
         {
             var v = get(i);
@@ -112,9 +125,9 @@ internal sealed class UniqueOp : QuickOp
             }
             counts[v]++;
         }
-        if (sorted) order.Sort();
+        if (sorted) order.Sort(comparer);
 
-        var inverseMap = new Dictionary<double, long>();
+        var inverseMap = new Dictionary<T, long>();
         for (int u = 0; u < order.Count; u++) inverseMap[order[u]] = u;
 
         var idxArr = new long[order.Count];
@@ -128,10 +141,7 @@ internal sealed class UniqueOp : QuickOp
         for (int i = 0; i < numel; i++) invArr[i] = inverseMap[get(i)];
 
         var yShape = new Shape([(long)order.Count]);
-        var y = RuntimeTensorFactory.Create(dtype, yShape);
-        y = isFloat
-            ? y with { FloatData = ImmutableArray.CreateRange(order.Select(v => (float)v)) }
-            : y with { IntData = ImmutableArray.CreateRange(order.Select(v => (long)v)) };
+        var y = withValues(RuntimeTensorFactory.Create(dtype, yShape), order);
 
         return [
             y,

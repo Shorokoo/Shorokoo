@@ -54,14 +54,16 @@ internal sealed class ClipOp : QuickOp
             bool maxKnown = max is null || max.IntData is { Length: > 0 };
             if (!minKnown || !maxKnown) return [rt];
 
-            long lo = min?.IntData is { Length: > 0 } li ? li[0] : long.MinValue;
-            long hi = max?.IntData is { Length: > 0 } hf ? hf[0] : long.MaxValue;
+            var unsigned = DTypeHelpers.IsUnsignedInt(dtype);
+            long lo = min?.IntData is { Length: > 0 } li ? li[0] : unsigned ? 0L : long.MinValue;
+            long hi = max?.IntData is { Length: > 0 } hf ? hf[0]
+                : unsigned ? IntSemantics.S(ulong.MaxValue) : long.MaxValue;
             var d = new long[id.Length];
             for (int i = 0; i < d.Length; i++)
             {
                 var v = id[i];
-                if (v < lo) v = lo;
-                if (v > hi) v = hi;
+                if (IntSemantics.Compare(unsigned, v, lo) < 0) v = lo;
+                if (IntSemantics.Compare(unsigned, v, hi) > 0) v = hi;
                 d[i] = v;
             }
             return [rt with { IntData = ImmutableArray.Create(d) }];

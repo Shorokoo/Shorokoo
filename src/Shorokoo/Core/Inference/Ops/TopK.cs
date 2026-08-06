@@ -61,9 +61,11 @@ internal sealed class TopKOp : QuickOp
 
         var largest = attrs.GetAttributeObj(OnnxOpAttributeNames.AttrLargest) as bool? ?? true;
         var isFloat = x.FloatData is not null;
-        Func<int, double> get = isFloat
-            ? i => x.FloatData!.Value[i]
-            : i => x.IntData!.Value[i];
+        // Integers are ordered in the buffer's own signedness rather than through a double key,
+        // which represents neither an int64 above 2^53 nor an unsigned lane faithfully.
+        var intCompare = IntSemantics.Comparer(DTypeHelpers.IsUnsignedInt(dtype));
+        float Key(float v) => largest ? -v : v;
+        int Sense(int c) => largest ? -c : c;
 
         long axisLen = dims[axis];
         long inner = 1;
@@ -81,11 +83,16 @@ internal sealed class TopKOp : QuickOp
         {
             for (long inIdx = 0; inIdx < inner; inIdx++)
             {
-                var sliceIdx = Enumerable.Range(0, (int)axisLen)
-                    .OrderBy(i => largest ? -get((int)(o * axisLen * inner + i * inner + inIdx)) : get((int)(o * axisLen * inner + i * inner + inIdx)))
-                    .ThenBy(i => i)
-                    .Take(kInt)
-                    .ToArray();
+                var sliceBase = o * axisLen * inner + inIdx;
+                var sliceIdx = Enumerable.Range(0, (int)axisLen).ToArray();
+                Array.Sort(sliceIdx, (i, j) =>
+                {
+                    int fi = (int)(sliceBase + i * inner), fj = (int)(sliceBase + j * inner);
+                    var c = isFloat
+                        ? Key(x.FloatData!.Value[fi]).CompareTo(Key(x.FloatData!.Value[fj]))
+                        : Sense(intCompare.Compare(x.IntData!.Value[fi], x.IntData!.Value[fj]));
+                    return c != 0 ? c : i.CompareTo(j);   // ties resolve to the lower index
+                });
                 for (int r = 0; r < kInt; r++)
                 {
                     var src = (int)(o * axisLen * inner + sliceIdx[r] * inner + inIdx);

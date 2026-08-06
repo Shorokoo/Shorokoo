@@ -8,4 +8,5 @@ internal sealed class ArgMinOp : ArgExtremeOpBase
     public override string OpCode => OpCodes.ARG_MIN;
     protected override bool Beats(float candidate, float best) => candidate < best;
     protected override bool BeatsInt(long candidate, long best) => candidate < best;
+    protected override bool BeatsUInt(ulong candidate, ulong best) => candidate < best;
 }

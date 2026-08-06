@@ -78,7 +78,8 @@ internal sealed class ScatterElementsOp : QuickOp
                 if (ix < 0 || ix >= axisSize) return [rt];
                 long dst = 0;
                 for (int d = 0; d < rank; d++) dst += (d == axis ? ix : idx[d]) * inStrides[d];
-                buf[(int)dst] = ScatterReduction.ApplyInt(reduction.Value, buf[(int)dst], ui[(int)flat]);
+                buf[(int)dst] = ScatterReduction.ApplyInt(reduction.Value, buf[(int)dst], ui[(int)flat],
+                    DTypeHelpers.IsUnsignedInt(x.DType));
                 Advance(idx, idxDims);
             }
             return [rt with { IntData = ImmutableArray.Create(buf) }];
@@ -131,12 +132,13 @@ internal static class ScatterReduction
         _ => update,
     };
 
-    public static long ApplyInt(ScatterNDReduction reduction, long current, long update) => reduction switch
-    {
-        ScatterNDReduction.Add => current + update,
-        ScatterNDReduction.Mul => current * update,
-        ScatterNDReduction.Max => Math.Max(current, update),
-        ScatterNDReduction.Min => Math.Min(current, update),
-        _ => update,
-    };
+    public static long ApplyInt(ScatterNDReduction reduction, long current, long update, bool unsigned)
+        => reduction switch
+        {
+            ScatterNDReduction.Add => current + update,
+            ScatterNDReduction.Mul => current * update,
+            ScatterNDReduction.Max => IntSemantics.Max(unsigned, current, update),
+            ScatterNDReduction.Min => IntSemantics.Min(unsigned, current, update),
+            _ => update,
+        };
 }

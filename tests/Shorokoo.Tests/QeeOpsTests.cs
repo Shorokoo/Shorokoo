@@ -3,8 +3,19 @@ using Shorokoo.Runtime;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Core.Inference;
 using Shorokoo.Core.Inference.Helpers;
+using static Shorokoo.Tests.FoldForcing;
 
 namespace Shorokoo.Tests;
+
+/// <summary>Runtime-valued operands that force an otherwise-constant sub-chain through the host
+/// folder — FastFoldConstants only materializes a constant that a non-constant node consumes.</summary>
+public static class FoldForcing
+{
+    public static Tensor<int32> Runtime32(Tensor<float32> x)
+        => OnnxOp.Range(Scalar(0L), x.ShapeTensor().Reduce(ReduceKind.Prod), Scalar(1L)).int64().Cast<int32>();
+    public static Tensor<uint32> RuntimeU32(Tensor<float32> x)
+        => OnnxOp.Range(Scalar(0L), x.ShapeTensor().Reduce(ReduceKind.Prod), Scalar(1L)).int64().Cast<uint32>();
+}
 
 /// <summary>
 /// QuickExecutionEngine op-handler paths that no <c>Qee*Audit</c> module reaches — everything
@@ -269,6 +280,97 @@ public class QeeIntegerWidthTests
             18446744073709551615, 9223372036854775808, 18446744073709551615);
         Qee<QeeU64Cast>(DType.UInt64, 4294967295, 0, 7);
     }
+
+    [Fact]
+    public void TestUnsignedOpsReadTheSignBitAsMagnitude()
+    {
+        Qee<QeeU64Div>(DType.UInt64, 4611686018427387904, 6148914691236517205, 1);
+        Qee<QeeU64Mod>(DType.UInt64, 808, 5);
+        Qee<QeeU64Compare>(DType.UInt64, 0, 0, 1, 1, 0, 0, 1, 1);
+        Qee<QeeU64SignAbs>(DType.UInt64, 1, 0, 1, 9223372036854775808, 0, 18446744073709551615);
+        Qee<QeeU64MinMax>(DType.UInt64, 7, 9223372036854775807, 9223372036854775808, 18446744073709551615);
+        Qee<QeeU64Clip>(DType.UInt64, 10, 9223372036854775808, 18446744073709551614);
+        Qee<QeeU64ReduceMax>(DType.UInt64, 9223372036854775808);
+        Qee<QeeU64ReduceMin>(DType.UInt64, 2);
+        Qee<QeeU64ReduceMean>(DType.UInt64, 3074457345618258604);
+        Qee<QeeU64ReduceL1>(DType.UInt64, 9223372036854775814);
+        Qee<QeeU64ReduceSum>(DType.UInt64, 9223372036854775814);
+        Qee<QeeU64ReduceProd>(DType.UInt64, 9223372036854775808);
+        Qee<QeeU64ArgExtreme>(DType.Int64, 2, 3);
+        Qee<QeeU64TopK>(DType.UInt64, 18446744073709551615, 9223372036854775808);
+        Qee<QeeU64Unique>(DType.UInt64, 4, 9223372036854775808, 18446744073709551615);
+        Qee<QeeU64Pow>(DType.UInt64, 9223372036854775808, 12157665459056928801);
+        Qee<QeeU64ToFloatAndBack>(DType.UInt64, 4611686018427387904, 2);
+    }
+
+    // Mean is the one reduction whose accumulator must re-enter the declared width before the
+    // final step: truncation commutes with the sum but not with the divide. int64 has no narrower
+    // width to re-enter, so it guards the other direction — that the narrowing is not applied there.
+    [Fact]
+    public void TestFoldedIntegerReduceMeanMatchesTheBackend()
+    {
+        Assert.Equal(Backend<QeeI32ReduceMeanRuntime>(TensorData(DType.Int32, [2L], 2147483647, 2147483647)),
+                     Folded<QeeI32ReduceMeanFolded>(DType.Int32));
+        Assert.Equal(-1L, Backend<QeeI64ReduceMeanRuntime>(TensorData(DType.Int64, [2L], long.MaxValue, long.MaxValue)));
+        Qee<QeeI64ReduceMeanFolded>(DType.Int64, unchecked((ulong)-1L));
+    }
+
+    // The widths ONNX's Mean type constraint rejects, so there is no backend to compare against —
+    // the declared-width rule is what keeps them self-consistent. Sums overflow every width here.
+    [Fact]
+    public void TestFoldedNarrowReduceMeanStaysInTheDeclaredWidth()
+    {
+        Qee<QeeU8ReduceMeanFolded>(DType.UInt8, 127);
+        Qee<QeeI8ReduceMeanFolded>(DType.Int8, unchecked((ulong)-1L));
+        Qee<QeeU16ReduceMeanFolded>(DType.UInt16, 32767);
+    }
+
+    // The width-boundary cases where folding and the backend must agree: +, -, * and Sum all
+    // commute with truncation to the declared width, so the 64-bit buffer is free to overflow.
+    [Fact]
+    public void TestFoldedIntegerArithmeticMatchesTheBackend()
+    {
+        TensorData I32(int v) => TensorData(DType.Int32, [1L], v);
+        TensorData U32(uint v) => TensorData(DType.UInt32, [1L], v);
+
+        Assert.Equal(Backend<QeeI32AddRuntime>(I32(2147483647), I32(1)), Folded<QeeI32AddFolded>(DType.Int32));
+        Assert.Equal(Backend<QeeI32SubRuntime>(I32(-2147483648), I32(1)), Folded<QeeI32SubFolded>(DType.Int32));
+        Assert.Equal(Backend<QeeU32AddRuntime>(U32(4294967295), U32(1)), Folded<QeeU32AddFolded>(DType.UInt32));
+        Assert.Equal(Backend<QeeU32SubRuntime>(U32(0), U32(1)), Folded<QeeU32SubFolded>(DType.UInt32));
+        Assert.Equal(Backend<QeeU32MulRuntime>(U32(65536), U32(65536)), Folded<QeeU32MulFolded>(DType.UInt32));
+        Assert.Equal(Backend<QeeI32ReduceSumRuntime>(TensorData(DType.Int32, [2L], 2147483647, 2147483647)),
+                     Folded<QeeI32ReduceSumFolded>(DType.Int32));
+        Assert.Equal(Backend<QeeI32AddThenDivRuntime>(I32(2147483647), I32(1), I32(5)),
+                     Folded<QeeI32AddThenDivFolded>(DType.Int32));
+        Assert.Equal(Backend<QeeU32AddThenDivRuntime>(U32(4294967295), U32(2), U32(5)),
+                     Folded<QeeU32AddThenDivFolded>(DType.UInt32));
+    }
+
+    private static long Backend<TModule>(params TensorData[] inputs)
+    {
+        var g = ((ComputationGraph)typeof(TModule)
+            .GetProperty("ComputationGraph", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!).ToInternal();
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([.. inputs])).ToConcreteModel();
+        var outData = ComputeContext.Default.Execute(concrete, inputs)[0].ToTensorData();
+        return outData.DType switch
+        {
+            var d when d == DType.UInt32 => outData.As<uint32>().AccessMemory().ToArray()[0],
+            var d when d == DType.Int64 => outData.As<int64>().AccessMemory().ToArray()[0],
+            _ => outData.As<int32>().AccessMemory().ToArray()[0],
+        };
+    }
+
+    private static long Folded<TModule>(DType dtype)
+    {
+        var g = ((ComputationGraph)typeof(TModule)
+            .GetProperty("ComputationGraph", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!).ToInternal();
+        var x = TensorData([2L], 0f, 0f);
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel();
+        foreach (var kv in new QuickExecutionEngine().Run(concrete))
+            if (kv.Value.DType == dtype && kv.Value is RuntimeTensor { IntData: { Length: 1 } m })
+                return dtype == DType.UInt32 ? (uint)m[0] : (int)m[0];
+        throw new InvalidOperationException("the constant sub-chain did not fold");
+    }
 }
 
 /// <summary>A uint64 divide whose operands are constants, consumed by a runtime-valued tensor so
@@ -316,17 +418,15 @@ public partial class QeeUInt64SignedDivideMaxValue
 
 /// <summary>
 /// QEE holds every integer width in one <c>long</c> buffer, so a <c>uint64</c> above
-/// <c>long.MaxValue</c> is a negative bit-pattern long — and Div/Mod/Less/Greater/Sign/Abs read it
-/// with signed C# operators. Host constant folding runs those kernels and bakes the result into the
-/// graph, so the wrong value is persisted, not merely displayed.
+/// <c>long.MaxValue</c> is a negative bit-pattern long. Host constant folding runs the kernels over
+/// that buffer and bakes the result into the graph, so a signed operator there persists a wrong
+/// value rather than merely displaying one.
 /// </summary>
 [Trait("Domain", "Inference")]
 [Trait("Purpose", "Coverage")]
 public class QeeUInt64SignedOperatorTests
 {
-    // Skipped against https://github.com/Shorokoo/Shorokoo/issues/141 — QEE's uint64 kernels use
-    // signed operators. Self-checking: deleting the Skip flips this green the moment #141 is fixed.
-    [Fact(Skip = "QEE uint64 kernels use signed operators — Shorokoo/Shorokoo#141")]
+    [Fact]
     public void TestFoldedUInt64DivideUsesUnsignedSemantics()
     {
         var g = ((ComputationGraph)typeof(QeeUInt64SignedDivide)
@@ -344,7 +444,7 @@ public class QeeUInt64SignedOperatorTests
 
     // Same fault, Mod rather than Div — pinned separately because #133's bits packing is specified
     // as `(word / 2^(W*l)) mod 2^W`, so a literal implementation reaches BOTH operators.
-    [Fact(Skip = "QEE uint64 kernels use signed operators — Shorokoo/Shorokoo#141")]
+    [Fact]
     public void TestFoldedUInt64ModuloUsesUnsignedSemantics()
     {
         var g = ((ComputationGraph)typeof(QeeUInt64SignedModulo)
@@ -364,7 +464,7 @@ public class QeeUInt64SignedOperatorTests
     // The all-ones dividend: signed division reads ulong.MaxValue as -1, so ANY divisor > 1
     // collapses the result to 0 — the most destructive shape of this bug, since it survives every
     // "is it roughly right?" eyeball check.
-    [Fact(Skip = "QEE uint64 kernels use signed operators — Shorokoo/Shorokoo#141")]
+    [Fact]
     public void TestFoldedUInt64DivideOfMaxValueUsesUnsignedSemantics()
     {
         var g = ((ComputationGraph)typeof(QeeUInt64SignedDivideMaxValue)
@@ -422,3 +522,156 @@ public class QeeUInt64SignedOperatorTests
 
 [Module] public partial class QeeU64Cast { public static Tensor<uint64> Inline()
     => Vector(18446744073709551615UL, 9223372036854775808UL, 4294967303UL).Cast<uint32>().Cast<uint64>(); }
+
+// The uint64 sign-bit family: every kernel below reads a lane above long.MaxValue, which the
+// shared long buffer holds as a negative bit pattern. Consumed by
+// TestUnsignedOpsReadTheSignBitAsMagnitude.
+
+[Module] public partial class QeeU64Div { public static Tensor<uint64> Inline()
+    => OnnxOp.Div(Vector(9223372036854775808UL, 18446744073709551615UL, 18446744073709551615UL),
+                  Vector(2UL, 3UL, 18446744073709551615UL)).uint64(); }
+
+[Module] public partial class QeeU64Mod { public static Tensor<uint64> Inline()
+    => OnnxOp.Mod(Vector(9223372036854775808UL, 18446744073709551615UL), Vector(1000UL, 10UL)).uint64(); }
+
+[Module] public partial class QeeU64Compare { public static Tensor<uint64> Inline()
+{
+    var hi = Vector(9223372036854775808UL, 18446744073709551615UL);
+    var one = Vector(1UL, 1UL);
+    return OnnxOp.Cast(OnnxOp.Concat([
+        OnnxOp.Less(hi, one), OnnxOp.Greater(hi, one),
+        OnnxOp.LessOrEqual(hi, one), OnnxOp.GreaterOrEqual(hi, one)], axis: 0), null, DType.UInt64).uint64();
+} }
+
+[Module] public partial class QeeU64SignAbs { public static Tensor<uint64> Inline()
+{
+    var v = Vector(9223372036854775808UL, 0UL, 18446744073709551615UL);
+    return (Tensor<uint64>)OnnxOp.Concat([OnnxOp.Sign(v), OnnxOp.Abs(v)], axis: 0);
+} }
+
+[Module] public partial class QeeU64MinMax { public static Tensor<uint64> Inline()
+{
+    var a = Vector(9223372036854775808UL, 18446744073709551615UL);
+    var b = Vector(7UL, 9223372036854775807UL);
+    return (Tensor<uint64>)OnnxOp.Concat([OnnxOp.Min(a, b), OnnxOp.Max(a, b)], axis: 0);
+} }
+
+[Module] public partial class QeeU64Clip { public static Tensor<uint64> Inline()
+    => OnnxOp.Clip(Vector(1UL, 9223372036854775808UL, 18446744073709551615UL),
+                   Scalar(10UL), Scalar(18446744073709551614UL)).uint64(); }
+
+[Module] public partial class QeeU64ReduceMax { public static Tensor<uint64> Inline()
+    => Vector(9223372036854775808UL, 4UL, 2UL).Reduce(ReduceKind.Max); }
+
+[Module] public partial class QeeU64ReduceMin { public static Tensor<uint64> Inline()
+    => Vector(9223372036854775808UL, 4UL, 2UL).Reduce(ReduceKind.Min); }
+
+[Module] public partial class QeeU64ReduceMean { public static Tensor<uint64> Inline()
+    => Vector(9223372036854775808UL, 4UL, 2UL).Reduce(ReduceKind.Mean); }
+
+[Module] public partial class QeeU64ReduceL1 { public static Tensor<uint64> Inline()
+    => Vector(9223372036854775808UL, 4UL, 2UL).Reduce(ReduceKind.L1); }
+
+[Module] public partial class QeeU64ReduceSum { public static Tensor<uint64> Inline()
+    => Vector(9223372036854775808UL, 4UL, 2UL).Reduce(ReduceKind.Sum); }
+
+[Module] public partial class QeeU64ReduceProd { public static Tensor<uint64> Inline()
+    => Vector(9223372036854775808UL, 3UL).Reduce(ReduceKind.Prod); }
+
+[Module] public partial class QeeU64ArgExtreme { public static Tensor<int64> Inline()
+{
+    var v = Vector(4UL, 9223372036854775808UL, 18446744073709551615UL, 1UL);
+    return (Tensor<int64>)OnnxOp.Concat([
+        OnnxOp.ArgMax(v, 0, true, false), OnnxOp.ArgMin(v, 0, true, false)], axis: 0);
+} }
+
+[Module] public partial class QeeU64TopK { public static Tensor<uint64> Inline()
+    => OnnxOp.TopK(Vector(4UL, 9223372036854775808UL, 18446744073709551615UL, 1UL), Vector(2L)).values.uint64(); }
+
+[Module] public partial class QeeU64Unique { public static Tensor<uint64> Inline()
+    => OnnxOp.Unique(Vector(18446744073709551615UL, 4UL, 9223372036854775808UL, 4UL), sorted: true).y.uint64(); }
+
+[Module] public partial class QeeU64Pow { public static Tensor<uint64> Inline()
+    => OnnxOp.Pow(Vector(2UL, 3UL), Vector(63UL, 40UL)).uint64(); }
+
+[Module] public partial class QeeU64ToFloatAndBack { public static Tensor<uint64> Inline()
+    => OnnxOp.Div(Vector(9223372036854775808UL, 4UL).Cast<float32>(), Scalar(2f)).float32().Cast<uint64>(); }
+
+// The reduce accumulator pair: the same reduction as a folded constant and as a backend-executed
+// runtime value. Consumed by TestFoldedIntegerReduceMeanMatchesTheBackend.
+
+[Module] public partial class QeeI32ReduceMeanFolded { public static Tensor<int32> Inline(Tensor<float32> x)
+{
+    var runtime = OnnxOp.Range(Scalar(0L), x.ShapeTensor().Reduce(ReduceKind.Prod), Scalar(1L))
+        .int64().Cast<int32>();
+    return runtime * Vector(2147483647, 2147483647).Reduce(ReduceKind.Mean, null, true).int32();
+} }
+
+[Module] public partial class QeeI32ReduceMeanRuntime { public static Tensor<int32> Inline(Tensor<int32> v)
+    => v.Reduce(ReduceKind.Mean, null, true); }
+
+[Module] public partial class QeeI32ReduceSumFolded { public static Tensor<int32> Inline(Tensor<float32> x)
+{
+    var runtime = OnnxOp.Range(Scalar(0L), x.ShapeTensor().Reduce(ReduceKind.Prod), Scalar(1L))
+        .int64().Cast<int32>();
+    return runtime * Vector(2147483647, 2147483647).Reduce(ReduceKind.Sum, null, true).int32();
+} }
+
+[Module] public partial class QeeI32ReduceSumRuntime { public static Tensor<int32> Inline(Tensor<int32> v)
+    => v.Reduce(ReduceKind.Sum, null, true); }
+
+// Width-boundary arithmetic, each as a folded constant and as a backend-executed runtime value.
+// Consumed by TestFoldedIntegerArithmeticMatchesTheBackend.
+
+[Module] public partial class QeeI32AddFolded { public static Tensor<int32> Inline(Tensor<float32> x)
+    => Runtime32(x) * (Vector(2147483647) + Vector(1)); }
+[Module] public partial class QeeI32AddRuntime { public static Tensor<int32> Inline(Tensor<int32> a, Tensor<int32> b) => a + b; }
+
+[Module] public partial class QeeI32SubFolded { public static Tensor<int32> Inline(Tensor<float32> x)
+    => Runtime32(x) * (Vector(-2147483648) - Vector(1)); }
+[Module] public partial class QeeI32SubRuntime { public static Tensor<int32> Inline(Tensor<int32> a, Tensor<int32> b) => a - b; }
+
+[Module] public partial class QeeU32AddFolded { public static Tensor<uint32> Inline(Tensor<float32> x)
+    => RuntimeU32(x) * (Vector(4294967295u) + Vector(1u)); }
+[Module] public partial class QeeU32AddRuntime { public static Tensor<uint32> Inline(Tensor<uint32> a, Tensor<uint32> b) => a + b; }
+
+[Module] public partial class QeeU32SubFolded { public static Tensor<uint32> Inline(Tensor<float32> x)
+    => RuntimeU32(x) * (Vector(0u) - Vector(1u)); }
+[Module] public partial class QeeU32SubRuntime { public static Tensor<uint32> Inline(Tensor<uint32> a, Tensor<uint32> b) => a - b; }
+
+[Module] public partial class QeeU32MulFolded { public static Tensor<uint32> Inline(Tensor<float32> x)
+    => RuntimeU32(x) * (Vector(65536u) * Vector(65536u)); }
+[Module] public partial class QeeU32MulRuntime { public static Tensor<uint32> Inline(Tensor<uint32> a, Tensor<uint32> b) => a * b; }
+
+// An add that overflows the declared width feeding a divide. Two ops, so the narrowing tail runs
+// between them and the divide sees the wrapped value.
+// Consumed by TestFoldedIntegerArithmeticMatchesTheBackend.
+
+[Module] public partial class QeeI32AddThenDivFolded { public static Tensor<int32> Inline(Tensor<float32> x)
+    => Runtime32(x) * OnnxOp.Div(Vector(2147483647) + Vector(1), Vector(5)).int32(); }
+[Module] public partial class QeeI32AddThenDivRuntime {
+    public static Tensor<int32> Inline(Tensor<int32> a, Tensor<int32> b, Tensor<int32> c)
+        => OnnxOp.Div(a + b, c).int32(); }
+
+[Module] public partial class QeeU32AddThenDivFolded { public static Tensor<uint32> Inline(Tensor<float32> x)
+    => RuntimeU32(x) * OnnxOp.Div(Vector(4294967295u) + Vector(2u), Vector(5u)).uint32(); }
+[Module] public partial class QeeU32AddThenDivRuntime {
+    public static Tensor<uint32> Inline(Tensor<uint32> a, Tensor<uint32> b, Tensor<uint32> c)
+        => OnnxOp.Div(a + b, c).uint32(); }
+
+// Mean at the widths the declared-width rule has to reach.
+// Consumed by TestFoldedIntegerReduceMeanMatchesTheBackend / …StaysInTheDeclaredWidth.
+
+[Module] public partial class QeeI64ReduceMeanFolded { public static Tensor<int64> Inline()
+    => Vector(9223372036854775807L, 9223372036854775807L).Reduce(ReduceKind.Mean); }
+[Module] public partial class QeeI64ReduceMeanRuntime { public static Tensor<int64> Inline(Tensor<int64> v)
+    => v.Reduce(ReduceKind.Mean, null, true); }
+
+[Module] public partial class QeeU8ReduceMeanFolded { public static Tensor<uint8> Inline()
+    => Vector(255u, 255u).Cast<uint8>().Reduce(ReduceKind.Mean); }
+
+[Module] public partial class QeeI8ReduceMeanFolded { public static Tensor<int8> Inline()
+    => Vector(127, 127).Cast<int8>().Reduce(ReduceKind.Mean); }
+
+[Module] public partial class QeeU16ReduceMeanFolded { public static Tensor<uint16> Inline()
+    => Vector(65535u, 65535u).Cast<uint16>().Reduce(ReduceKind.Mean); }

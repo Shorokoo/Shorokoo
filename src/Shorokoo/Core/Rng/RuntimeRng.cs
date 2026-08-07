@@ -196,24 +196,84 @@ internal static class RuntimeRng
         return perLane.Reshape(Vector(-1L)).Vec().Slice(Scalar(0L), n);
     }
 
-    /// <summary>Standard uniform U(0,1) of the given shape (bit generator: Threefry-2x32-<paramref name="rounds"/>).
-    /// A uniform keeps 24 bits, so two fit in a position's 64 — one per 32-bit lane.</summary>
+    // ── Geometric uniform (Goualard / Walker) ────────────────────────────────────────────
+    // The 24-bit ToUniform grid above is what Box–Muller consumes; the PUBLIC uniform instead
+    // draws the octave geometrically so it reaches the full float32 precision near zero.
+    //
+    // A uniform on [0,1) is, per octave, an even grid: [2^-1,1) carries half the mass, [2^-2,2^-1)
+    // a quarter, and so on, each octave holding 2^23 equally-spaced floats. So draw the octave from
+    // a geometric distribution — the count of leading zeros of a 41-bit field, P(octave e) = 2^e —
+    // and fill the 23-bit mantissa uniformly. The value is a [1,2) fraction times a power-of-two
+    // octave scale: both are exact in float32 (the fraction has a 24-bit significand, the scale only
+    // shifts the exponent), so the whole draw is EXACT — no Cast rounding, no transcendental, hence
+    // EP-independent. Reaches ~2^-41 near zero (vs the 24-bit grid's 2^-24), at one 64-bit
+    // generator value per element (the packing/precision trade — the bits buy resolution).
+
+    private static readonly float[] GeoOctaveScales = BuildGeoOctaveScales();
+    private const int GeoExpBits = 41;                          // leading-zero window; reaches 2^-(GeoExpBits)
+    private static float[] BuildGeoOctaveScales()               // [2^-1, 2^-2, …, 2^-GeoExpBits], all exact
+    {
+        float[] t = new float[GeoExpBits];
+        for (int i = 0; i < GeoExpBits; i++) t[i] = (float)System.Math.Pow(2.0, -1 - i);
+        return t;
+    }
+
+    /// <summary>
+    /// One geometric uniform on [0,1) per 64-bit generator value: geometric octave (leading-zero
+    /// count of the top 41 bits) × uniform 23-bit mantissa. Exact and EP-independent.
+    /// </summary>
+    private static Tensor<float32> GeometricUniform(Vector<uint64> v)
+    {
+        // Mantissa: low 23 bits → frac in [1,2). m < 2^23 casts to float32 without rounding, and
+        // 1 + m·2⁻²³ lands on the exact float grid of [1,2) (ULP there is 2⁻²³).
+        var m = OnnxOp.BitwiseAnd(v, Scalar((1UL << 23) - 1)).uint64();
+        var frac = m.Cast<float32>() * Scalar(1.0f / 8388608.0f) + Scalar(1.0f);
+
+        // Highest-set-bit position p∈[0,40] of the 41-bit exponent field, branchless (a field of 0
+        // leaves p=0 → deepest octave). Selection is arithmetic, not Where — ORT has no Where for
+        // uint64 — so every step is BitShift/Greater/Mul/Add: pure integer, identical on every EP.
+        var ef = OnnxOp.BitwiseAnd(ShiftDown(v, Scalar(23UL)), Scalar((1UL << GeoExpBits) - 1)).uint64();
+        Tensor<uint64> x = ef;
+        Tensor<uint64> p = ShiftDown(ef, Scalar(63UL));               // zeros [N]
+        foreach (int s in (int[])[32, 16, 8, 4, 2, 1])
+        {
+            // add = s where the top half is non-empty, else 0; then shift it away and tally it.
+            var add = OnnxOp.Greater(ShiftDown(x, Scalar((ulong)s)), Scalar(0UL)).Cast<uint64>() * Scalar((ulong)s);
+            p = (p + add).uint64();
+            x = OnnxOp.BitShift(x, add, BitShiftDirection.Right).uint64();
+        }
+        // Octave index = leadingZeros = (GeoExpBits-1) - p; scale = 2^(-1-index); value = frac·scale, exact.
+        var index = Scalar((long)(GeoExpBits - 1)) - p.Cast<int64>();
+        var scale = (Tensor<float32>)OnnxOp.Gather(Vector(GeoOctaveScales), index, axis: 0);
+        return frac * scale;
+    }
+
+    /// <summary>Standard uniform U(0,1) of the given shape (Goualard/Walker geometric draw over
+    /// Threefry-2x32-<paramref name="rounds"/>): full-precision near zero, exact, EP-independent.
+    /// One 64-bit generator value per element.</summary>
     public static Tensor<float32> StandardUniform(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
-        => ToUniform(PackedLanes(shape, key, substreamIndex, 32, rounds)).Reshape(shape);
+        => GeometricUniform(Draw(ElementCount(shape), key, substreamIndex, rounds)).Reshape(shape);
 
     /// <summary>Standard normal N(0,1) of the given shape (Box–Muller over Threefry-2x32-<paramref name="rounds"/>).
-    /// Box–Muller turns a position's two uniforms into a <em>pair</em> of independent normals — the
-    /// cosine and sine arms — so a position yields two elements: element 2j is the cosine arm of
-    /// position j and element 2j+1 the sine arm.</summary>
+    /// Box–Muller turns a (radius, angle) pair into a <em>pair</em> of independent normals — the cosine
+    /// and sine arms — so element 2j is the cosine arm of pair j and element 2j+1 the sine arm.
+    ///
+    /// <para>The radius is <c>√(−2·ln w)</c> where <c>w</c> is the <b>geometric</b> uniform (fine near
+    /// zero, reaching ~2⁻⁴¹) rather than the 24-bit grid's <c>1−u₁</c> (floored at 2⁻²⁴). That deepens
+    /// the reachable tail from ±5.77σ to ~±7.54σ and resolves it finely, and since <c>w > 0</c> always
+    /// there is no <c>ln(0)</c>. The angle stays a 24-bit uniform — an even grid is what a uniform angle
+    /// wants. Each pair spends two generator values: an even position for the radius's geometric draw,
+    /// the odd next one for the angle.</para></summary>
     public static Tensor<float32> StandardNormal(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
     {
         Scalar<int64> n = ElementCount(shape);
-        var v = Draw((n + Scalar(1L)) / Scalar(2L), key, substreamIndex, rounds);   // [ceil(N/2)]
-        var u1 = ToUniform(v);                                  // low 32-bit lane
-        var u2 = ToUniform(ShiftDown(v, Scalar(32UL)));         // high 32-bit lane
-        var radius = ((-u1 + Scalar(1.0f)).Ln() * Scalar(-2.0f)).Sqrt();   // √(−2·ln(1−u₁))
+        Scalar<int64> pairs2 = (n + Scalar(1L)) / Scalar(2L) * Scalar(2L);          // 2·ceil(N/2)
+        var block = Draw(pairs2, key, substreamIndex, rounds);                       // [2M] positions
+        var w  = GeometricUniform(block.Slice(Scalar(0L), pairs2, Scalar(2L)));      // even → radius draw
+        var u2 = ToUniform(block.Slice(Scalar(1L), pairs2, Scalar(2L)));             // odd  → 24-bit angle
+        var radius = (w.Ln() * Scalar(-2.0f)).Sqrt();                               // √(−2·ln w)
         var theta = u2 * Scalar(2.0f * System.MathF.PI);
 
         var arms = (radius * theta.Cos()).Reshape(Vector(-1L, 1L))

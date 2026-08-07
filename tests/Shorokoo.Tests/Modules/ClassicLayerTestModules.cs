@@ -31,7 +31,7 @@ public partial class NNConv3dForwardGolden
         var y = Conv3d.Model(Scalar(3L), Scalar(3L), Scalar(2L), Scalar(1L), Scalar(1L), Scalar(1L), Scalar(true)).Call(x);   // [1,3,3,3,3] = 81
 
         // REFERENCE: golden — Shorokoo's own forward output, collapsed to 19 (self-generated).
-        var reference = Vector(-4.567914f, -8.518518f, 0.9713079f, 8.753852f, -2.9503922f, -2.0596046f, -2.4210513f, 0.7962434f, 1.5437893f, 0.3608622f, -2.7608333f, -6.46304f, -3.5874548f, 0.82138455f, -1.6897788f, -1.8680902f, 2.3683908f, 2.2627265f, 0.27857244f);
+        var reference = Vector(4.8453045f, 1.2641102f, -8.209831f, -5.073344f, 4.558242f, -0.4849854f, 0.40432394f, -1.5361044f, -0.7952203f, 2.4635544f, 1.9459821f, 0.48592547f, -5.5945587f, 4.0588837f, 2.5087523f, 1.5175595f, -3.1372705f, -0.10051507f, 2.9746377f);
 
         var diff = (SelfCheck.Collapse(y, 81) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);

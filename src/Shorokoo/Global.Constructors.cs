@@ -331,9 +331,9 @@ namespace Shorokoo
         /// <summary>Creates a vector of values from start (inclusive) to limit (exclusive), stepping by delta.</summary>
         public static Vector<uint8> VectorRange(byte start, byte limit, byte delta) => OnnxOp.Range(Scalar(start).Cast<int32>(), Scalar(limit).Cast<int32>(), Scalar(delta).Cast<int32>()).Cast<uint8>().Vec();
         /// <summary>Creates a vector of values from start (inclusive) to limit (exclusive), stepping by delta.</summary>
-        public static Vector<uint16> VectorRange(ushort start, ushort limit, ushort delta) => OnnxOp.Range(Scalar(start).Cast<int16>(), Scalar(limit).Cast<int16>(), Scalar(delta).Cast<int16>()).Cast<uint16>().Vec();
+        public static Vector<uint16> VectorRange(ushort start, ushort limit, ushort delta) => OnnxOp.Range(Scalar(start).Cast<int32>(), Scalar(limit).Cast<int32>(), Scalar(delta).Cast<int32>()).Cast<uint16>().Vec();
         /// <summary>Creates a vector of values from start (inclusive) to limit (exclusive), stepping by delta.</summary>
-        public static Vector<uint32> VectorRange(uint start, uint limit, uint delta) => OnnxOp.Range(Scalar(start).Cast<int32>(), Scalar(limit).Cast<int32>(), Scalar(delta).Cast<int32>()).Cast<uint32>().Vec();
+        public static Vector<uint32> VectorRange(uint start, uint limit, uint delta) => OnnxOp.Range(Scalar(start).Cast<int64>(), Scalar(limit).Cast<int64>(), Scalar(delta).Cast<int64>()).Cast<uint32>().Vec();
         /// <summary>Creates a vector of values from start (inclusive) to limit (exclusive), stepping by delta.</summary>
         public static Vector<uint64> VectorRange(ulong start, ulong limit, ulong delta) => OnnxOp.Range(Scalar(start).Cast<int64>(), Scalar(limit).Cast<int64>(), Scalar(delta).Cast<int64>()).Cast<uint64>().Vec();
 

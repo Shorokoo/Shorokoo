@@ -69,6 +69,7 @@ public class RngRuntimeTests
 {
     private const ulong BitsKey = 111UL | (222UL << 32);
     private const ulong UniformKey = 123UL | (456UL << 32);
+    private const ulong NormalKey = 7UL | (9UL << 32);
 
     // Host reference for the runtime scheme: substreamIndex folds into the key, element i
     // indexes the whole counter; uniform = low 24 bits of x0 * 2^-24.
@@ -106,6 +107,13 @@ public class RngRuntimeTests
         var vals = RunDraw<RtUniformDraw>(4, 4);
         Assert.Equal(16, vals.Length);
         for (long i = 0; i < 16; i++) Assert.Equal(HostUniform(i, UniformKey, 0), vals[i]);
+
+        // The normal carries a tolerance: its Ln/Sqrt/Cos/Sin kernels are EP-approximate, unlike
+        // the integer bits path and the exactly-constructed uniform above.
+        var normals = RunDraw<RtNormalDraw>(4, 4);
+        Assert.Equal(16, normals.Length);
+        for (long i = 0; i < 16; i++)
+            Assert.Equal(RngTestOracle.DrawNormal(NormalKey, 0, i), normals[i], 1e-5f);
     }
 
     [Fact]

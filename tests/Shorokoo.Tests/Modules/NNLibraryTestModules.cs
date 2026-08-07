@@ -43,7 +43,7 @@ public partial class NNLinearMatchesPyTorch
         var y = Linear.Model(Scalar(4L), Scalar(true)).Call(x);   // [2,4] = 8
 
         // REFERENCE: PyTorch — F.linear(x, W, b) on the seeded weights (tests/pytorch-reference/linear.py).
-        var reference = Vector(0.20389363f, 1.0442739f, -0.74194896f, 0.7374089f, -0.698354f, -0.076345146f, -1.3606172f, -1.3195376f);
+        var reference = Vector(0.20389363f, 1.04427385f, -0.74194896f, 0.73740888f, -0.69835401f, -0.07634509f, -1.36061716f, -1.31953764f);
 
         var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);

@@ -217,6 +217,13 @@ public partial class ScalarAndFillDispatcherModel
         acc = acc + (VectorRange(0UL, 4UL, 1UL).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(6f)).Abs();
         acc = acc + (VectorRange(Scalar(0f), Scalar(4f), Scalar(1f)).Reduce(ReduceKind.Sum) - Scalar(6f)).Abs();
 
+        // Each unsigned arm past its width's SIGNED limit: a narrowing lowering wraps the limit
+        // negative and yields an empty range, silently, which a [0,4) case cannot see.
+        acc = acc + (VectorRange((byte)0, (byte)200, (byte)50).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(300f)).Abs();
+        acc = acc + (VectorRange((ushort)0, (ushort)40000, (ushort)10000).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(60000f)).Abs();
+        acc = acc + (VectorRange(0u, 3000000000u, 1000000000u).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(3e9f)).Abs() * Scalar(1e-9f);
+        acc = acc + (VectorRange(0UL, 12884901888UL, 4294967296UL).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(12884901888f)).Abs() * Scalar(1e-10f);
+
         return (acc + Nan(input)) < Scalar(1e-3f);
     }
 }

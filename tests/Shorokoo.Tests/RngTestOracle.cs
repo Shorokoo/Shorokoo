@@ -78,7 +78,7 @@ internal static class RngTestOracle
         ulong key, ulong substreamIndex, long i, int width, int rounds = Threefry2x32.Rounds)
         => DrawLane(key, substreamIndex, i, width, rounds);
 
-    /// <summary>Element <paramref name="i"/> of a standard-uniform draw — the Goualard/Walker
+    /// <summary>Element <paramref name="i"/> of a standard-uniform draw — Walker's
     /// geometric transform of the whole 64-bit value at position <paramref name="i"/> (one per
     /// element): a 23-bit mantissa fraction in [1,2) times a geometric octave scale (2^-1-lz, lz =
     /// leading zeros of the 41-bit exponent field). Exact — mirrors <c>RuntimeRng.GeometricUniform</c>.</summary>

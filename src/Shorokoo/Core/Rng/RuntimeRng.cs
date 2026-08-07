@@ -197,7 +197,10 @@ internal static class RuntimeRng
         return perLane.Reshape(Vector(-1L)).Vec().Slice(Scalar(0L), n);
     }
 
-    // ── Geometric uniform (Goualard / Walker) ────────────────────────────────────────────
+    // ── Geometric uniform (Walker 1974; Reynolds' 41+23 form) ────────────────────────────
+    // Walker, "Fast Generation of Uniformly Distributed Pseudorandom Numbers with Floating-Point
+    // Representation" (1974) — independently rederived by Downey (2007). The 41-bit exponent field
+    // plus 23-bit significand split of a single 64-bit draw is Marc Reynolds' practical form.
     // The 24-bit ToUniform grid above is what Box–Muller consumes; the PUBLIC uniform instead
     // draws the octave geometrically so it reaches the full float32 precision near zero.
     //
@@ -257,7 +260,7 @@ internal static class RuntimeRng
         return frac * scale;
     }
 
-    /// <summary>Standard uniform U(0,1) of the given shape (Goualard/Walker geometric draw over
+    /// <summary>Standard uniform U(0,1) of the given shape (Walker's geometric draw over
     /// Threefry-2x32-<paramref name="rounds"/>): full-precision near zero, exact, EP-independent.
     /// One 64-bit generator value per element.</summary>
     public static Tensor<float32> StandardUniform(

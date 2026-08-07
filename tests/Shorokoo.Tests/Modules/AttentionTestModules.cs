@@ -71,7 +71,7 @@ public partial class MhaForwardGolden
         var y = MultiHeadAttention.Model(Scalar(4L), Scalar(2L), Scalar(false), Scalar(false)).Call(x, x, x);   // [1,3,4] = 12
 
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.09002107f, -0.49060184f, 0.10564608f, 0.5673188f, -0.09238208f, -0.44800454f, -0.028342823f, 0.38998196f, -0.1315968f, -0.4668038f, 0.12263871f, 0.51875216f);
+        var reference = Vector(0.16327164f, 0.12630406f, -0.20937659f, 0.08829837f, 0.16231333f, 0.114160605f, -0.19695058f, 0.08645165f, 0.16711465f, 0.13761935f, -0.23597129f, 0.114901f);
 
         var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
@@ -227,7 +227,7 @@ public partial class DecoderLayerNoBiasGolden
         var y = TransformerDecoderLayer.Call(Scalar(4L), Scalar(2L), Scalar(8L), Scalar(false), tgt, memory);
 
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.70630586f, -0.59538174f, -0.36363292f, -0.48109353f, 1.3155701f, -1.0095991f, 0.43730065f, 1.0150449f, -1.4919863f, 0.48694015f, -0.27422255f, 1.3255984f);
+        var reference = Vector(-0.34821165f, 1.347126f, -0.69628626f, 1.2527634f, 0.89528596f, -0.58042526f, -0.42676982f, 2.0227623f, -1.2948227f, 0.6520601f, -0.44096035f, -1.4530492f);
 
         var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
@@ -251,7 +251,7 @@ public partial class DecoderLayerWithBiasGolden
         var y = TransformerDecoderLayer.Call(Scalar(4L), Scalar(2L), Scalar(8L), Scalar(true), tgt, memory);
 
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated; zero biases ⇒ == no-bias).
-        var reference = Vector(0.70630586f, -0.59538174f, -0.36363292f, -0.48109353f, 1.3155701f, -1.0095991f, 0.43730065f, 1.0150449f, -1.4919863f, 0.48694015f, -0.27422255f, 1.3255984f);
+        var reference = Vector(-0.34821165f, 1.347126f, -0.69628626f, 1.2527634f, 0.89528596f, -0.58042526f, -0.42676982f, 2.0227623f, -1.2948227f, 0.6520601f, -0.44096035f, -1.4530492f);
 
         var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);

@@ -208,8 +208,8 @@ public class RngInitFrozenDerivationTests
         // Layer 2: the full materialized values (counter scheme, rounds, uniform transform,
         // substreamIndex ordinal, initializer scaling). REFERENCE: golden. Exact equality is
         // safe cross-backend — Threefry integer ops plus IEEE-exact float multiply/add.
-        float[] expected0 = [-0.89145434f, 1.1247115f, -0.6626692f, 0.36167333f, 0.12048453f, 0.73705673f, -0.96722233f, 0.28805014f, 0.7735388f, 0.72729915f, -0.30286872f, -0.7160487f, 0.2217419f, -0.5162598f, 0.8099788f, 0.49284714f];
-        float[] expected1 = [0.34294987f, -0.8631617f, -1.1718185f, 1.0455909f, -0.8880595f, 0.91218925f, 0.6797034f, 0.36076564f, 0.67893195f, -0.3037445f, -0.9692881f, -0.43132842f, -0.7458223f, 0.9755893f, 1.085321f, 0.67871165f];
+        float[] expected0 = [-0.1666453f, 1.1747282f, 0.28103784f, 0.79320914f, 0.6726147f, 0.9809008f, -0.12876129f, 0.75639755f, 0.9991419f, 0.97602206f, 0.4609381f, -0.2543481f, 0.7232434f, -0.35424256f, -1.0173619f, -0.85879606f];
+        float[] expected1 = [0.7838474f, -0.18079163f, -0.026463203f, 1.135168f, -0.16834271f, -1.0684671f, -0.9522242f, 0.79275525f, 0.95183843f, -0.4605002f, 0.12772842f, 0.39670825f, -0.23946129f, 1.1001672f, -1.155033f, 0.9517283f];
 
         var g = RngInitTwoLinears.ComputationGraph;
         var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());

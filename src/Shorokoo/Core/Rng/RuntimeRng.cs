@@ -281,11 +281,37 @@ internal static class RuntimeRng
         return arms.Reshape(Vector(-1L)).Vec().Slice(Scalar(0L), n).Reshape(shape);
     }
 
-    /// <summary>U(low, high) of the given shape.</summary>
+    // Distinguishing substream for the range transform's side selector, so the magnitude draw g
+    // and the side draw s are independent streams (the golden-ratio fractional constant, arbitrary).
+    private const ulong SideSubstream = 0x9E3779B97F4A7C15UL;
+
+    /// <summary>
+    /// U(low, high) of the given shape, precision-preserving. When the interval straddles zero the
+    /// draw is <b>split at 0</b> — each side a geometric uniform scaled to its half-width — so the
+    /// dense float grid near zero is used, rather than <c>StandardUniform·(hi−lo)+lo</c> whose
+    /// <c>+lo</c> offset would quantise the whole interval to <c>lo</c>'s coarse ULP. When zero is at
+    /// or outside an endpoint the offset form is already float-native near the near-zero endpoint, so
+    /// it is kept. Bounds that are compile-time constants fold the dead branch (and its draw) away, so
+    /// <c>[0,x)</c> stays a single geometric draw; only a zero-straddling interval spends the second.
+    /// </summary>
     public static Tensor<float32> Uniform(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex,
         Scalar<float32> low, Scalar<float32> high, int rounds = Threefry2x32.Rounds)
-        => StandardUniform(shape, key, substreamIndex, rounds) * (high - low) + low;
+    {
+        var g = StandardUniform(shape, key, substreamIndex, rounds);                          // magnitude, fine near 0
+        var offsetVal = g * (high - low) + low;                                               // valid when 0 ∉ (low,high)
+
+        Scalar<bit> interior = (Scalar<bit>)OnnxOp.And(OnnxOp.Less(low, Scalar(0.0f)), OnnxOp.Greater(high, Scalar(0.0f)));
+        var s = StandardUniform(shape, key,
+            OnnxOp.BitwiseXor(substreamIndex, Scalar(SideSubstream)).uint64().Scalar(), rounds);   // side selector, independent
+        var posW = high.Max(Scalar(0.0f));                                                    // ray widths from 0
+        var negW = (Scalar(0.0f) - low).Max(Scalar(0.0f));
+        var pPos = posW / (posW + negW).Max(Scalar(1e-30f));                                  // P(positive side) = hi/(hi−lo)
+        Tensor<bit> onPos = (Tensor<bit>)OnnxOp.Less(s, pPos);
+        var splitVal = onPos.Where(g * posW, Scalar(0.0f) - g * negW);                        // both sides fine near 0
+
+        return ((Tensor<float32>)OnnxOp.Where(interior, splitVal, offsetVal)).Reshape(shape);
+    }
 
     /// <summary>N(mean, scale) of the given shape.</summary>
     public static Tensor<float32> Normal(

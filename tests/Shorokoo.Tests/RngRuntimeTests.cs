@@ -127,6 +127,7 @@ public partial class RngRegionSelectionOpsCheck
 public class RngRuntimeTests
 {
     private const ulong BitsKey = 111UL | (222UL << 32);
+    private const ulong DenseKey = 0xA5A5_1234UL | (0x9E37UL << 32);
     private const ulong UniformKey = 123UL | (456UL << 32);
     private const ulong NormalKey = 7UL | (9UL << 32);
 
@@ -139,6 +140,104 @@ public class RngRuntimeTests
     // low lane first, so element i is lane i%E of the value at position i/E.
     private static ulong HostBits(long i, int width, ulong key, ulong substreamIndex)
         => RngTestOracle.DrawBits(key, substreamIndex, i, width);
+
+    private static readonly (float Low, float High)[] DenseRanges =
+    [
+        (0f, 1f), (-1f, 1f), (4f, 12f), (4f, 8f), (1f, 2f), (-1f, 0f), (0.1f, 0.3f),
+        (-0.0625f, 0.0625f), (1e-30f, 1e-20f), (0f, float.MaxValue), (-float.MaxValue, float.MaxValue),
+        (-1e-40f, 1e-40f), (1e-45f, 1e-44f), (0f, float.Epsilon), (0f, 1.1754944e-38f),
+        (5e-39f, 3e-38f), (-7.888609e-31f, 1.8446744e19f), (1f, 1.0000001f), (1e30f, 1.0000001e30f),
+        (-float.MaxValue, -1.7e38f), (-0.1f, 0.3f), (3f, 3.5f), (100f, 1000f), (0f, float.PositiveInfinity),
+    ];
+
+    private static long DenseSignedOrdinal(float x)
+    {
+        uint b = BitConverter.SingleToUInt32Bits(x);
+        return (b & 0x8000_0000u) != 0 ? -(long)(b & 0x7FFF_FFFFu) : (long)b;
+    }
+
+    [Fact]
+    public void TestDenseUniformOracleNeverLeavesTheRequestedRange()
+    {
+        foreach (var (low, high) in DenseRanges)
+        {
+            var table = RngDenseUniformOracle.Build(low, high);
+            for (long i = 0; i < 400; i++)
+            {
+                float v = RngDenseUniformOracle.Draw(DenseKey, 0, i, low, high);
+                Assert.True(v >= low && v < high);
+                Assert.False(float.IsNaN(v) || float.IsInfinity(v));
+            }
+            Assert.True(table.Slots.Length <= RngDenseUniformOracle.MaxSlots);
+        }
+    }
+
+    [Fact]
+    public void TestDenseUniformOracleTableIsAWellFormedPartition()
+    {
+        foreach (var (low, high) in DenseRanges)
+        {
+            var table = RngDenseUniformOracle.Build(low, high);
+            Assert.Equal(0, table.Slots[0].Threshold);
+            Assert.True(table.Total > 0 && table.Total <= 1L << 62);
+            long weights = 0;
+            for (int i = 0; i < table.Slots.Length; i++)
+            {
+                weights += table.Slots[i].Weight;
+                Assert.True(table.Slots[i].Weight > 0);
+                Assert.InRange(table.Slots[i].IndexBits, 0, RngDenseUniformOracle.P);
+                if (i > 0) Assert.True(table.Slots[i].Threshold >= table.Slots[i - 1].Threshold);
+                Assert.Equal(RngDenseUniformOracle.LongDivide(weights - table.Slots[i].Weight, table.Total),
+                    table.Slots[i].Threshold);
+            }
+            Assert.Equal(table.Total, weights);
+        }
+    }
+
+    [Fact]
+    public void TestDenseUniformOracleReachesEveryFloatWhereNothingIsTruncated()
+    {
+        foreach (var (low, high) in (( float Low, float High)[])[(4f, 12f), (4f, 8f), (1f, 2f), (0.1f, 0.3f), (3f, 3.5f), (100f, 1000f)])
+        {
+            var table = RngDenseUniformOracle.Build(low, high);
+            long elements = 0;
+            foreach (var slot in table.Slots) elements += 1L << slot.IndexBits;
+            Assert.Equal(DenseSignedOrdinal(high) - DenseSignedOrdinal(low), elements);
+        }
+    }
+
+    [Fact]
+    public void TestDenseUniformOracleSplitsSymmetricRangesExactlyInHalf()
+    {
+        for (int e = -60; e <= 60; e++)
+        {
+            float bound = MathF.ScaleB(1f, e);
+            var table = RngDenseUniformOracle.Build(-bound, bound);
+            long negative = 0;
+            for (int i = 0; i < table.Slots.Length; i++)
+            {
+                long end = i + 1 < table.Slots.Length ? table.Slots[i + 1].Threshold : 1L << RngDenseUniformOracle.SelectorBits;
+                if (table.Slots[i].Base < 0) negative += end - table.Slots[i].Threshold;
+            }
+            Assert.Equal(1L << (RngDenseUniformOracle.SelectorBits - 1), negative);
+        }
+    }
+
+    [Fact]
+    public void TestDenseUniformOracleHandlesDegenerateAndNonFiniteBounds()
+    {
+        Assert.Equal(3f, RngDenseUniformOracle.Draw(DenseKey, 0, 0, 3f, 3f));
+        Assert.Equal(7f, RngDenseUniformOracle.Draw(DenseKey, 0, 0, 7f, 3f));
+        Assert.True(float.IsNaN(RngDenseUniformOracle.Draw(DenseKey, 0, 0, float.NaN, 1f)));
+        Assert.True(float.IsNaN(RngDenseUniformOracle.Draw(DenseKey, 0, 0, 1f, float.NaN)));
+        for (long i = 0; i < 200; i++)
+        {
+            float wide = RngDenseUniformOracle.Draw(DenseKey, 0, i, float.NegativeInfinity, float.PositiveInfinity);
+            Assert.False(float.IsNaN(wide) || float.IsInfinity(wide));
+            float single = RngDenseUniformOracle.Draw(DenseKey, 0, i, 1f, 1.0000001f);
+            Assert.Equal(1f, single);
+        }
+    }
 
     [Fact]
     public void TestRegionSelectionOpsAgreeOnBothEngines()

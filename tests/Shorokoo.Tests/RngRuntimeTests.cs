@@ -118,6 +118,36 @@ public partial class RngRegionSelectionOpsCheck
 }
 
 /// <summary>
+/// The dense arbitrary-range uniform draw, checked in-graph against host-computed expectations so
+/// ONNX Runtime and the Quick Execution Engine must both reproduce <c>RngDenseUniformOracle</c>
+/// bit for bit. The bounds arrive as a runtime tensor, so nothing specializes on their values; a
+/// batch of ranges shares one graph because the per-graph overheads dominate a table build.
+/// </summary>
+[Module]
+public partial class RngDenseUniformOracleCheck
+{
+    public const int Ranges = 6, Draws = 32;
+
+    public static Scalar<bit> Inline(Tensor<float32> bounds, Tensor<float32> expected)
+    {
+        var b = bounds.Vec();
+        var want = expected.Vec();
+        Scalar<int64> mismatch = Scalar(0L);
+        for (long r = 0; r < Ranges; r++)
+        {
+            var drawn = RuntimeRng.DenseUniform(Vector((long)Draws),
+                Scalar(0xA5A5_1234UL | (0x9E37UL << 32)), Scalar(0UL), b[2 * r], b[2 * r + 1]);
+            var target = want.Slice(Scalar(r * Draws), Scalar(r * Draws + Draws));
+            var differs = ((Tensor<bit>)OnnxOp.Not(OnnxOp.Equal(drawn, target))).Cast<int64>();
+            var bothNaN = ((Tensor<bit>)OnnxOp.And(OnnxOp.IsNaN(drawn), OnnxOp.IsNaN(target))).Cast<int64>();
+            mismatch = mismatch + (differs * (Scalar(1L) - bothNaN))
+                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        }
+        return mismatch == Scalar(0L);
+    }
+}
+
+/// <summary>
 /// The in-graph counter-based runtime RNG (<see cref="RuntimeRng"/>): the ONNX-op Threefry
 /// subgraph must reproduce the host generator (<see cref="Threefry2x32"/>) bit-for-bit —
 /// execution-provider-independent — and produce well-distributed draws.
@@ -148,6 +178,12 @@ public class RngRuntimeTests
         (-1e-40f, 1e-40f), (1e-45f, 1e-44f), (0f, float.Epsilon), (0f, 1.1754944e-38f),
         (5e-39f, 3e-38f), (-7.888609e-31f, 1.8446744e19f), (1f, 1.0000001f), (1e30f, 1.0000001e30f),
         (-float.MaxValue, -1.7e38f), (-0.1f, 0.3f), (3f, 3.5f), (100f, 1000f), (0f, float.PositiveInfinity),
+        // Straddling the truncation floor: one endpoint inside the collapsed band, the other far
+        // above it — the layouts where the band is partial on exactly one side, with and without
+        // the off-lattice stubs (-5·2^39 is exactly on the lattice these ranges induce).
+        (1e-30f, 1e30f), (-1e-30f, 1e30f), (-2748779069440f, 1e30f), (-1e30f, -2748779069440f),
+        (-1e30f, -1e-30f), (-1e30f, 1e-30f), (-1e30f, 1e15f), (-1e15f, 1e30f),
+        (1e15f, 1e30f), (-1e30f, 0f), (0f, 1e30f), (-1.5e-45f, 3f),
     ];
 
     private static long DenseSignedOrdinal(float x)
@@ -237,6 +273,59 @@ public class RngRuntimeTests
             float single = RngDenseUniformOracle.Draw(DenseKey, 0, i, 1f, 1.0000001f);
             Assert.Equal(1f, single);
         }
+    }
+
+    private static bool DenseMatchesOracle((float Low, float High)[] ranges, bool roundtrip = false)
+    {
+        const int n = RngDenseUniformOracleCheck.Draws;
+        float[] bounds = new float[ranges.Length * 2];
+        float[] expected = new float[ranges.Length * n];
+        for (int r = 0; r < ranges.Length; r++)
+        {
+            bounds[2 * r] = ranges[r].Low;
+            bounds[2 * r + 1] = ranges[r].High;
+            for (long i = 0; i < n; i++)
+                expected[r * n + i] = RngDenseUniformOracle.Draw(DenseKey, 0, i, ranges[r].Low, ranges[r].High);
+        }
+        return AutoTest.AdvancedTestGraph<RngDenseUniformOracleCheck>(
+            hyperparamInputs: [],
+            runtimeInputs: [TensorData([bounds.Length], bounds), TensorData([expected.Length], expected)],
+            testOnnxRoundtrip: roundtrip, testCsRoundtrip: false);
+    }
+
+    private static (float Low, float High)[] DenseBatch(int index)
+        => [.. DenseRanges.Skip(index * RngDenseUniformOracleCheck.Ranges).Take(RngDenseUniformOracleCheck.Ranges)];
+
+    [Fact]
+    public void TestInGraphDenseUniformMatchesTheOracleOnAdversarialRanges()
+    {
+        Assert.True(DenseMatchesOracle(DenseBatch(0), roundtrip: true));
+        Assert.True(DenseMatchesOracle(DenseBatch(1)));
+    }
+
+    [Fact]
+    public void TestInGraphDenseUniformMatchesTheOracleOnSubnormalAndFullDomainRanges()
+    {
+        Assert.True(DenseMatchesOracle(DenseBatch(2)));
+        Assert.True(DenseMatchesOracle(DenseBatch(3)));
+    }
+
+    [Fact]
+    public void TestInGraphDenseUniformMatchesTheOracleAcrossTheTruncationFloor()
+    {
+        Assert.True(DenseMatchesOracle(DenseBatch(4)));
+        Assert.True(DenseMatchesOracle(DenseBatch(5)));
+    }
+
+    [Fact]
+    public void TestInGraphDenseUniformMatchesTheOracleOnDegenerateAndNonFiniteBounds()
+    {
+        Assert.True(DenseMatchesOracle([
+            (3f, 3f), (7f, 3f), (float.NaN, 1f), (1f, float.NaN), (float.NaN, float.NaN), (0f, 0f)]));
+        Assert.True(DenseMatchesOracle([
+            (float.NegativeInfinity, float.PositiveInfinity), (float.NegativeInfinity, 0f),
+            (-1f, float.PositiveInfinity), (float.PositiveInfinity, float.NegativeInfinity),
+            (-0f, 0f), (1f, 1.0000001f)]));
     }
 
     [Fact]

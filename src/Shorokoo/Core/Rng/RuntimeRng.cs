@@ -293,6 +293,407 @@ internal static class RuntimeRng
         return arms.Reshape(Vector(-1L)).Vec().Slice(Scalar(0L), n).Reshape(shape);
     }
 
+    // ── Dense arbitrary-range uniform (region table) ─────────────────────────────────────
+    // Walker/Reynolds generalized off [0,1) onto an arbitrary range: every float in [low, high)
+    // is reachable with probability proportional to its ulp, from ONE 64-bit generator value per
+    // element and with no rejection. The host oracle (tests: RngDenseUniformOracle) is the
+    // contract; this rebuilds the same table in ONNX ops and must agree with it bit for bit.
+    //
+    // Floats are addressed by SIGNED ORDINAL z — the bit pattern for x >= 0, negated for x < 0 —
+    // which is strictly monotone in the real value, so any range (straddling or not) is one
+    // interval [zLow, zHigh) and the sign needs no separate draw. Float z owns [V(z), V(z+1)),
+    // whose width is the ulp of weight class max(1, exponent field). The interval splits into
+    // REGIONS of 2^bits equally-weighted floats: above the truncation floor the float grid itself,
+    // cut into class groups and then into descending power-of-two blocks; below it a coarse even
+    // lattice of spacing 2^(floorClass-150) carrying the remaining mass honestly.
+    //
+    // Weights are counted in units of the SHALLOWEST KEPT class's ulp (not the smallest
+    // subnormal), which is what keeps the cumulative table inside int64 and pins the truncation
+    // depth at DenseClasses = 38: the total never exceeds 2^62. Thresholds are floor(C*2^41/total)
+    // by restoring binary long division, integer-only — 2^41*C overflows int64, and binary64 is
+    // unusable because the Quick Execution Engine evaluates every float dtype at binary32
+    // (Shorokoo#157), which would diverge silently between engines rather than fail.
+    //
+    // The table is built ONCE PER CALL (a [128] tensor), not per element.
+
+    private const int DenseP = 23;                            // significand bits
+    private const long DenseBinade = 1L << DenseP;            // floats per class group
+    private const int DenseBias = 127;
+    private const int DenseClasses = 38;                      // truncation depth K
+    private const int DenseSelectorBits = 64 - DenseP;        // 41: the region-selector field
+    private const int DenseMaxWeightExp = 62;                 // the accumulator's ceiling
+
+    // The static [128]-slot layout. Every slot is a closed form of (zLow, zHigh) and the slot
+    // index, so the table needs no data-dependent iteration; absent slots carry weight 0 and are
+    // unreachable (a zero-weight slot's threshold equals the NEXT non-empty slot's, so the binary
+    // search below — which takes the LAST slot whose threshold is <= the selector — always skips
+    // past it, and the trailing fillers sit at threshold 2^41, above every selector).
+    //
+    // Slots run in ascending ordinal order, which is what makes the cumulative thresholds line up
+    // with the oracle's. 126 of the 128 are used, because complementary families overlay: an
+    // endpoint above the truncation floor spends its 24-slot family on the partial class group at
+    // that endpoint and contributes exactly one full 2^P lattice block to the band; an endpoint
+    // inside the band has no partial class group and spends the family on the partial lattice run
+    // plus its stub instead.
+    private const int DenseSlots = 128;
+    private const int DenseLowAt = 0, DenseEndpointN = 24;    // partial family at zLow
+    private const int DenseNegFullAt = 24, DenseFullN = 38;   // full class groups, negative ray
+    private const int DenseNegBandAt = 62;                    // full lattice block [-2^P, 0)
+    private const int DensePosBandAt = 63;                    // full lattice block [0, 2^P)
+    private const int DensePosFullAt = 64;                    // full class groups, positive ray
+    private const int DenseHighAt = 102;                      // partial family at zHigh
+    private const int DensePadN = 2;
+
+    private static readonly long[] DensePow2 = BuildDensePow2();
+    private static readonly float[] DenseScale = BuildDenseScale();
+    private static readonly float[] DenseSpacing = BuildDenseSpacing();
+    private static readonly float[] DenseBoundary = BuildDenseBoundary();
+
+    private static long[] BuildDensePow2()
+    {
+        long[] t = new long[DenseMaxWeightExp + 1];
+        for (int i = 0; i < t.Length; i++) t[i] = 1L << i;
+        return t;
+    }
+
+    /// <summary>2^(e-127) for a biased exponent field e; index 0 is unused (never gathered).</summary>
+    private static float[] BuildDenseScale()
+    {
+        float[] t = new float[255];
+        for (int e = 1; e < 255; e++) t[e] = System.MathF.ScaleB(1f, e - DenseBias);
+        return t;
+    }
+
+    /// <summary>The lattice spacing 2^(c-150) of weight class c — the ulp of the shallowest kept
+    /// class, i.e. one weight unit.</summary>
+    private static float[] BuildDenseSpacing()
+    {
+        float[] t = new float[255];
+        for (int c = 1; c < 255; c++) t[c] = System.MathF.ScaleB(1f, c - DenseBias - DenseP);
+        return t;
+    }
+
+    /// <summary>Binade lower bounds for the exponent search: 2^(k-127), with the last entry
+    /// +infinity so a finite magnitude never selects field 255.</summary>
+    private static float[] BuildDenseBoundary()
+    {
+        float[] t = new float[256];
+        for (int k = 1; k < 255; k++) t[k] = System.MathF.ScaleB(1f, k - DenseBias);
+        t[255] = float.PositiveInfinity;
+        return t;
+    }
+
+    /// <summary>A predicate as 0/1, so case analysis is arithmetic rather than a <c>Where</c>
+    /// cascade (both of whose arms would evaluate anyway — ONNX has no lazy select outside
+    /// <c>If</c>), and so no case ever depends on a build-time constant.</summary>
+    private static Tensor<int64> Ind(Variable condition) => ((Tensor<bit>)condition).Cast<int64>();
+
+    /// <summary>2^e, clamped to the accumulator's range so an absent slot's nonsense exponent can
+    /// never gather out of bounds.</summary>
+    private static Tensor<int64> DensePow(Tensor<int64> e)
+        => OnnxOp.Gather(Vector(DensePow2), e.Max(Scalar(0L)).Min(Scalar((long)DenseMaxWeightExp)), axis: 0).int64();
+
+    /// <summary>The signed ordinal of a finite float32, decoded arithmetically: ONNX has no
+    /// bit-reinterpretation op at opset 21 (<c>BitCast</c> is opset 26 and throws), so the
+    /// exponent field comes from a binary search over the binade boundaries and the significand
+    /// from an exact power-of-two division. Every cast stays under 2^24, so <c>Cast</c>'s
+    /// unspecified int-to-float rounding is never exercised (C-2/C-8, Shorokoo#156).</summary>
+    private static Tensor<int64> DenseOrdinal(Tensor<float32> x)
+    {
+        var magnitude = x.Abs();
+        Tensor<int64> field = Scalar(0L);
+        foreach (long step in (long[])[128L, 64L, 32L, 16L, 8L, 4L, 2L, 1L])
+        {
+            var bound = OnnxOp.Gather(Vector(DenseBoundary), field + Scalar(step), axis: 0);
+            field = field + Ind(OnnxOp.GreaterOrEqual(magnitude, bound)) * Scalar(step);
+        }
+        var implicitBit = Ind(OnnxOp.GreaterOrEqual(field, Scalar(1L)));
+        var scale = (Tensor<float32>)OnnxOp.Gather(Vector(DenseScale), field.Max(Scalar(1L)), axis: 0);
+        var significand = ((magnitude / scale - implicitBit.Cast<float32>()) * Scalar((float)DenseBinade))
+            .Cast<int64>();
+        var ordinal = field * Scalar(DenseBinade) + significand;
+        return ordinal - Scalar(2L) * Ind(OnnxOp.Less(x, Scalar(0f))) * ordinal;
+    }
+
+    /// <summary>|V(z)| divided by the lattice spacing, truncated, and whether it divided exactly —
+    /// the band's floor/ceil primitive. Pure int64: the significand carries at most 24 bits and
+    /// the spacing only shifts.</summary>
+    private static (Tensor<int64> Quotient, Tensor<int64> Exact) DenseOverSpacing(
+        Tensor<int64> magnitude, Tensor<int64> floorExponent)
+    {
+        var subnormal = Ind(OnnxOp.Less(magnitude, Scalar(DenseBinade)));
+        var binade = magnitude / Scalar(DenseBinade);
+        var exponent = (Scalar(1L) - subnormal) * (binade - Scalar((long)DenseBias))
+                     + subnormal * Scalar(1L - DenseBias);
+        var significand = (Scalar(1L) - subnormal) * (Scalar(DenseBinade) + magnitude - binade * Scalar(DenseBinade))
+                        + subnormal * magnitude;
+        var step = DensePow(floorExponent - exponent);
+        var quotient = significand / step;
+        return (quotient, Ind(OnnxOp.Equal(quotient * step, significand)));
+    }
+
+    /// <summary>One endpoint family: the greedy binary decomposition of the run
+    /// <c>[from, to)</c> into descending power-of-two blocks, laid out so slot <c>j</c> holds the
+    /// block of size 2^(P-offset-j) — ascending in base, which is what keeps the cumulative
+    /// thresholds aligned with the oracle's slot order. <paramref name="offset"/> shifts the run
+    /// down one slot to leave the family's last slot for a trailing stub; that is safe precisely
+    /// because a stub only exists when the run is shorter than a full class group, so its bit-P
+    /// block is absent.</summary>
+    private static (Tensor<int64> Base, Tensor<int64> Bits, Tensor<int64> Weight) DenseRunFamily(
+        Tensor<int64> slot, Tensor<int64> from, Tensor<int64> to, Tensor<int64> lattice,
+        Tensor<int64> weightClass, Tensor<int64> floorClass, Tensor<int64> offset)
+    {
+        var length = (to - from).Max(Scalar(0L));
+        var bits = Scalar((long)DenseP) - offset - slot;
+        var size = DensePow(bits);
+        var half = length / size;
+        var present = (half - half / Scalar(2L) * Scalar(2L)) * Ind(OnnxOp.GreaterOrEqual(bits, Scalar(0L)));
+        var above = DensePow(bits + Scalar(1L));
+        var weight = (Scalar(1L) - lattice) * DensePow(bits + weightClass - floorClass) + lattice * size;
+        return (present * (from + length / above * above), present * bits, present * weight);
+    }
+
+    /// <summary>
+    /// The region table for <c>[low, high)</c>: [128] slots of (threshold, base, index bits,
+    /// lattice flag) plus the call-level lattice spacing, and the fixed result that replaces the
+    /// draw for a NaN bound or an empty range. <paramref name="low"/> and <paramref name="high"/>
+    /// are graph inputs, so every case below is data-driven — <c>RngAlgorithms</c> caches one
+    /// shared uniform <c>Function</c> and cannot specialize on their values.
+    /// </summary>
+    private static (Tensor<int64> Threshold, Tensor<int64> Base, Tensor<int64> Bits,
+                    Tensor<int64> Lattice, Tensor<float32> Spacing,
+                    Tensor<bit> UseFixed, Tensor<float32> Fixed) BuildDenseTable(
+        Tensor<float32> low, Tensor<float32> high)
+    {
+        const long binade = DenseBinade;
+
+        // Non-finite bounds: NaN anywhere yields NaN, infinities clamp to the finite extremes.
+        // +infinity as the upper bound is the one ordinal past the largest finite float, so the
+        // whole finite domain stays reachable.
+        var notANumber = (Tensor<bit>)OnnxOp.Or(OnnxOp.IsNaN(low), OnnxOp.IsNaN(high));
+        var finiteLow = low.Max(Scalar(-float.MaxValue)).Min(Scalar(float.MaxValue));
+        var finiteHigh = high.Max(Scalar(-float.MaxValue)).Min(Scalar(float.MaxValue));
+        var zLow = DenseOrdinal((Tensor<float32>)OnnxOp.Where(notANumber, Scalar(0f), finiteLow));
+        var zHighRaw = DenseOrdinal((Tensor<float32>)OnnxOp.Where(notANumber, Scalar(1f), finiteHigh))
+                     + Ind(OnnxOp.Greater(high, Scalar(float.MaxValue)));
+
+        // An inverted or empty range yields `low` — one rule covering low == high and low > high.
+        // The table is still built over a one-float range so no downstream arithmetic degenerates.
+        var empty = Ind(OnnxOp.LessOrEqual(zHighRaw, zLow));
+        var useFixed = (Tensor<bit>)OnnxOp.Or(notANumber, OnnxOp.Greater(empty, Scalar(0L)));
+        var fixedValue = (Tensor<float32>)OnnxOp.Where(notANumber, Scalar(float.NaN), finiteLow);
+        var zHigh = zHighRaw.Max(zLow + Scalar(1L));
+
+        // ── Truncation floor, band and lattice ──────────────────────────────────────────
+        var magnitudeLow = zLow.Max(Scalar(0L) - zLow - Scalar(1L));
+        var magnitudeTop = (zHigh - Scalar(1L)).Max(Scalar(1L) - zHigh);
+        var topClass = (magnitudeLow / Scalar(binade)).Max(magnitudeTop / Scalar(binade)).Max(Scalar(1L));
+        var floorClass = (topClass - Scalar((long)(DenseClasses - 1))).Max(Scalar(1L));
+        var floorExponent = floorClass - Scalar((long)DenseBias);
+        var latticeShift = floorClass - Scalar(1L);
+        var zFloor = floorClass * Scalar(binade);
+        var bandLow = (Scalar(0L) - zFloor).Max(zLow).Min(zHigh);
+        var bandHigh = zFloor.Max(zLow).Min(zHigh);
+
+        var (quotientLow, exactLow) = DenseOverSpacing(bandLow.Max(Scalar(0L) - bandLow), floorExponent);
+        var (quotientHigh, exactHigh) = DenseOverSpacing(bandHigh.Max(Scalar(0L) - bandHigh), floorExponent);
+        var negativeLow = Ind(OnnxOp.Less(bandLow, Scalar(0L)));
+        var negativeHigh = Ind(OnnxOp.Less(bandHigh, Scalar(0L)));
+        var latticeFrom = (Scalar(1L) - negativeLow) * (quotientLow + Scalar(1L) - exactLow)
+                        - negativeLow * quotientLow;
+        var latticeTo = (Scalar(1L) - negativeHigh) * quotientHigh
+                      - negativeHigh * (quotientHigh + Scalar(1L) - exactHigh);
+
+        var bandNonEmpty = Ind(OnnxOp.Less(bandLow, bandHigh));
+        // A band too narrow to hold a lattice point degenerates to its stub alone.
+        var narrow = bandNonEmpty * Ind(OnnxOp.Greater(latticeFrom, latticeTo));
+        var lattices = bandNonEmpty * (Scalar(1L) - narrow);
+        var leadStub = bandNonEmpty * (Scalar(1L) - exactLow);
+        var trailStub = lattices * (Scalar(1L) - exactHigh);
+        var negativeTo = latticeTo.Min(Scalar(0L));
+        var positiveFrom = latticeFrom.Max(Scalar(0L));
+        var negativeFull = lattices * Ind(OnnxOp.Equal(latticeFrom, Scalar(-binade)))
+                                    * Ind(OnnxOp.Equal(negativeTo, Scalar(0L)));
+        var positiveFull = lattices * Ind(OnnxOp.Equal(positiveFrom, Scalar(0L)))
+                                    * Ind(OnnxOp.Equal(latticeTo, Scalar(binade)));
+
+        var lowAbove = Ind(OnnxOp.Less(zLow, bandLow));
+        var lowInBand = (Scalar(1L) - lowAbove) * bandNonEmpty;
+        var highAbove = Ind(OnnxOp.Less(bandHigh, zHigh));
+        var highInBand = (Scalar(1L) - highAbove) * bandNonEmpty;
+        var lowTakesNegative = lowInBand * lattices * Ind(OnnxOp.Less(latticeFrom, Scalar(0L)))
+                             * (Scalar(1L) - negativeFull);
+        var lowTakesPositive = lowInBand * lattices * Ind(OnnxOp.Greater(latticeFrom, Scalar(0L)))
+                             * Ind(OnnxOp.Equal(latticeTo, Scalar(binade)));
+
+        // ── The family at zLow ──────────────────────────────────────────────────────────
+        var negativeZLow = Ind(OnnxOp.Less(zLow, Scalar(0L)));
+        var groupLow = magnitudeLow / Scalar(binade);
+        var groupEndLow = (Scalar(1L) - Scalar(2L) * negativeZLow) * groupLow * Scalar(binade)
+                        + (Scalar(1L) - negativeZLow) * Scalar(binade);
+        var lowRunEnd = lowAbove * bandLow + (Scalar(1L) - lowAbove) * zHigh;
+        var lowOrdinalTo = groupEndLow.Min(lowRunEnd);
+        var lowFrom = lowInBand * (lowTakesNegative * latticeFrom + lowTakesPositive * positiveFrom)
+                    + (Scalar(1L) - lowInBand) * zLow;
+        var lowTo = lowInBand * (lowTakesNegative * negativeTo + lowTakesPositive * latticeTo)
+                  + (Scalar(1L) - lowInBand) * lowOrdinalTo;
+
+        var slot = OnnxOp.Range(Scalar(0L), Scalar((long)DenseEndpointN), Scalar(1L)).int64();
+        var (lowBase, lowBits, lowWeight) = DenseRunFamily(
+            slot, lowFrom, lowTo, lowInBand, (Scalar(1L) - lowInBand) * groupLow, floorClass, Scalar(0L));
+        var atFirst = Ind(OnnxOp.Equal(slot, Scalar(0L))) * leadStub;
+        var lowLattice = lowInBand * (Scalar(1L) - atFirst) + Scalar(0L) * slot;
+        lowBase = lowBase * (Scalar(1L) - atFirst) + atFirst * bandLow;
+        lowBits = lowBits * (Scalar(1L) - atFirst);
+        lowWeight = lowWeight * (Scalar(1L) - atFirst) + atFirst;
+
+        // ── Full class groups, both rays ────────────────────────────────────────────────
+        var group = OnnxOp.Range(Scalar(0L), Scalar((long)DenseFullN), Scalar(1L)).int64();
+        var negativeBase = Scalar(0L) - (groupLow - group) * Scalar(binade);
+        var negativePresent = lowAbove * Ind(OnnxOp.LessOrEqual(negativeBase + Scalar(binade), bandLow));
+        var negativeWeight = negativePresent
+            * DensePow(Scalar((long)DenseP) + groupLow - Scalar(1L) - group - floorClass);
+
+        var lowOrdinalPositive = (Scalar(1L) - lowInBand) * (Scalar(1L) - lowAbove);
+        var positiveStart = lowOrdinalPositive * groupEndLow + (Scalar(1L) - lowOrdinalPositive) * bandHigh;
+        var positiveBase = positiveStart + group * Scalar(binade);
+        var positivePresent = highAbove * Ind(OnnxOp.LessOrEqual(positiveBase + Scalar(binade), zHigh));
+        var positiveWeight = positivePresent
+            * DensePow(Scalar((long)DenseP) + positiveBase / Scalar(binade) - floorClass);
+
+        // ── The family at zHigh ─────────────────────────────────────────────────────────
+        var magnitudeHigh = magnitudeTop;
+        var negativeZHigh = Ind(OnnxOp.Less(zHigh - Scalar(1L), Scalar(0L)));
+        var groupHigh = magnitudeHigh / Scalar(binade);
+        var groupStartHigh = (Scalar(1L) - Scalar(2L) * negativeZHigh) * groupHigh * Scalar(binade)
+                           - negativeZHigh * Scalar(binade);
+        var highRunFrom = highAbove * bandHigh + (Scalar(1L) - highAbove) * zLow;
+        var highOrdinalFrom = groupStartHigh.Max(highRunFrom);
+        // The trailing class group is a slot of its own only when it is PARTIAL and not already
+        // covered by the family at zLow — a full one is a plain class group above.
+        var covered = (Scalar(1L) - lowInBand) * Ind(OnnxOp.GreaterOrEqual(lowOrdinalTo, zHigh));
+        var trailing = (Scalar(1L) - covered) * Ind(OnnxOp.Less(zHigh - groupStartHigh, Scalar(binade)));
+        var highOrdinalTo = highOrdinalFrom + trailing * (zHigh - highOrdinalFrom);
+        var highTakesNegative = lattices * (Scalar(1L) - negativeFull) * (Scalar(1L) - lowTakesNegative)
+                              * Ind(OnnxOp.Less(latticeFrom, negativeTo));
+        var highTakesPositive = lattices * (Scalar(1L) - positiveFull) * (Scalar(1L) - lowTakesPositive)
+                              * Ind(OnnxOp.Less(positiveFrom, latticeTo));
+        var highFrom = highInBand * (highTakesNegative * latticeFrom + highTakesPositive * positiveFrom)
+                     + (Scalar(1L) - highInBand) * highOrdinalFrom;
+        var highTo = highInBand * (highTakesNegative * negativeTo + highTakesPositive * latticeTo)
+                   + (Scalar(1L) - highInBand) * highOrdinalTo;
+
+        var (highBase, highBits, highWeight) = DenseRunFamily(
+            slot, highFrom, highTo, highInBand, (Scalar(1L) - highInBand) * groupHigh, floorClass, trailStub);
+        var atLast = Ind(OnnxOp.Equal(slot, Scalar((long)(DenseEndpointN - 1)))) * trailStub;
+        var highLattice = highInBand + Scalar(0L) * slot;
+        highBase = highBase * (Scalar(1L) - atLast) + atLast * latticeTo;
+        highBits = highBits * (Scalar(1L) - atLast);
+        highWeight = highWeight * (Scalar(1L) - atLast) + atLast;
+
+        // ── Assemble the [128] table ────────────────────────────────────────────────────
+        var one = Vector(1L);
+        var pad = Vector(0L, 0L);
+        var bandBits = Scalar((long)DenseP).Reshape(one);
+        var bases = lowBase
+            .Concat(0, negativePresent * negativeBase, (negativeFull * Scalar(-binade)).Reshape(one),
+                    Scalar(0L).Reshape(one), positivePresent * positiveBase, highBase, pad);
+        var bits = lowBits
+            .Concat(0, negativePresent * Scalar((long)DenseP), negativeFull.Reshape(one) * bandBits,
+                    positiveFull.Reshape(one) * bandBits, positivePresent * Scalar((long)DenseP), highBits, pad);
+        var lattice = lowLattice
+            .Concat(0, Scalar(0L) * group, negativeFull.Reshape(one), positiveFull.Reshape(one),
+                    Scalar(0L) * group, highLattice, pad);
+        var weights = lowWeight
+            .Concat(0, negativeWeight, (negativeFull * Scalar(1L << DenseP)).Reshape(one),
+                    (positiveFull * Scalar(1L << DenseP)).Reshape(one), positiveWeight, highWeight, pad);
+
+        var total = weights.Reduce(ReduceKind.Sum, Vector(0L), keepDims: false).Max(Scalar(1L));
+        var cumulative = weights.CumSum(Scalar(0L), exclusive: true);
+        // Past the last non-empty slot the cumulative equals the total: divide there would double
+        // a value already at 2^62 and wrap, so those slots take the top threshold directly.
+        var below = Ind(OnnxOp.Less(cumulative, total));
+        var threshold = DenseLongDivide(cumulative * below, total)
+                      + (Scalar(1L) - below) * Scalar(1L << DenseSelectorBits);
+        var spacing = (Tensor<float32>)OnnxOp.Gather(Vector(DenseSpacing), floorClass, axis: 0);
+        return (threshold, bases, bits, lattice, spacing, useFixed, fixedValue);
+    }
+
+    /// <summary>floor(numerator·2^41 / denominator), exactly, in int64, by restoring binary long
+    /// division. Doubling is a MULTIPLY, not a shift: ONNX constrains <c>BitShift</c> to unsigned
+    /// types, and ORT has no <c>uint64</c> <c>Where</c>. Every intermediate stays under 2^63
+    /// because the denominator never exceeds 2^62 — which is what pins the truncation depth.</summary>
+    private static Tensor<int64> DenseLongDivide(Tensor<int64> numerator, Tensor<int64> denominator)
+    {
+        var remainder = numerator;
+        var quotient = numerator * Scalar(0L);
+        for (int i = 0; i < DenseSelectorBits; i++)
+        {
+            remainder = remainder * Scalar(2L);
+            var fits = Ind(OnnxOp.GreaterOrEqual(remainder, denominator));
+            remainder = remainder - fits * denominator;
+            quotient = quotient * Scalar(2L) + fits;
+        }
+        return quotient;
+    }
+
+    /// <summary>
+    /// U(low, high) of the given shape, drawn DENSELY: every float in the range is reachable with
+    /// probability proportional to its ulp, from one 64-bit generator value per element, with no
+    /// rejection and a static node count. The draw splits as region selector (the top 41 bits)
+    /// against the cumulative threshold table, and index within the region (the low 23 bits).
+    ///
+    /// <para>The interval is half-open — <c>high</c> is not attainable, matching PyTorch
+    /// <c>uniform_</c>, Keras <c>RandomUniform</c> and ONNX <c>RandomUniform</c>. An inverted or
+    /// empty range yields <c>low</c>; a NaN bound yields NaN; infinite bounds clamp to the finite
+    /// extremes.</para>
+    ///
+    /// <para>Selection is a 7-round binary search over the [128] table. It needs no bounds clamp —
+    /// starting at 0, the steps 64+32+…+1 total 127 — and no <c>T[0] &lt;= s</c> guard, because
+    /// slot 0's threshold is structurally 0 (its cumulative weight is). Both facts are load-bearing
+    /// if the table's shape is ever changed.</para>
+    /// </summary>
+    public static Tensor<float32> DenseUniform(
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex,
+        Scalar<float32> low, Scalar<float32> high, int rounds = Threefry2x32.Rounds)
+    {
+        var (threshold, bases, bits, lattice, spacing, useFixed, fixedValue) = BuildDenseTable(low, high);
+        var draw = Draw(ElementCount(shape), key, substreamIndex, rounds);
+        var selector = ShiftDown(draw, Scalar((ulong)DenseP)).Cast<int64>();
+        var index = OnnxOp.BitwiseAnd(draw, Scalar((1UL << DenseP) - 1)).uint64().Cast<int64>();
+
+        Tensor<int64> found = selector * Scalar(0L);
+        foreach (long step in (long[])[64L, 32L, 16L, 8L, 4L, 2L, 1L])
+        {
+            var probe = OnnxOp.Gather(threshold, found + Scalar(step), axis: 0);
+            found = found + Ind(OnnxOp.LessOrEqual(probe, selector)) * Scalar(step);
+        }
+        var regionBase = OnnxOp.Gather(bases, found, axis: 0).int64();
+        var regionBits = OnnxOp.Gather(bits, found, axis: 0).int64();
+        var regionLattice = OnnxOp.Gather(lattice, found, axis: 0).int64();
+        var value = regionBase + index / DensePow(Scalar((long)DenseP) - regionBits);
+
+        // The lattice decode is the one float step: a lattice point is n·spacing with |n| <= 2^23,
+        // so the cast is exact and the scaling only moves the exponent. Multiplying by the lattice
+        // flag first keeps the cast in range on an ordinal region too.
+        var latticeValue = (value * regionLattice).Cast<float32>() * spacing;
+
+        // The ordinal decode reassembles (1 + m·2^-23)·2^(e-127) — every step exact in float32,
+        // and the same value the oracle assembles bitwise.
+        var magnitude = value.Max(Scalar(0L) - value);
+        var field = (magnitude / Scalar(DenseBinade)).Min(Scalar(254L));
+        var significand = magnitude - field * Scalar(DenseBinade);
+        var scale = (Tensor<float32>)OnnxOp.Gather(Vector(DenseScale), field.Max(Scalar(1L)), axis: 0);
+        var fraction = significand.Cast<float32>() * Scalar(1.0f / DenseBinade)
+                     + Ind(OnnxOp.GreaterOrEqual(field, Scalar(1L))).Cast<float32>();
+        var sign = Scalar(1.0f) - Scalar(2.0f) * Ind(OnnxOp.Less(value, Scalar(0L))).Cast<float32>();
+        var ordinalValue = sign * fraction * scale;
+
+        var drawn = (Tensor<float32>)OnnxOp.Where(
+            (Tensor<bit>)OnnxOp.Greater(regionLattice, Scalar(0L)), latticeValue, ordinalValue);
+        return ((Tensor<float32>)OnnxOp.Where(useFixed, fixedValue, drawn)).Reshape(shape);
+    }
+
     // Distinguishing substream for the range transform's side selector, so the magnitude draw g
     // and the side draw s are independent streams (the golden-ratio fractional constant, arbitrary).
     private const ulong SideSubstream = 0x9E3779B97F4A7C15UL;

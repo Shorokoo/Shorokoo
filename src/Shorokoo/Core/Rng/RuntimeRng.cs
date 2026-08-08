@@ -23,13 +23,15 @@ namespace Shorokoo.Core.Rng;
 /// means modular wraparound is the type's own semantics rather than an explicit mask after every
 /// operation, and a rotate is a genuine pair of shifts.</para>
 ///
-/// <para>A draw is keyed by <c>(key, substreamIndex)</c> and indexed by the flat element index
-/// <c>i</c>. <c>substreamIndex</c> selects which substream of the consumer's key to draw from — the
+/// <para>A draw is keyed by <c>(key, substreamIndex)</c> and indexed by the stream position
+/// <c>p</c>, and <see cref="Draw"/> yields one whole <c>uint64</c> of generator output per
+/// position. <c>substreamIndex</c> selects which substream of the consumer's key to draw from — the
 /// execution counter for a runtime feed (so each execution draws fresh), the draw's ordinal within
 /// an initializer when one initializer draws more than once. It folds into the key
-/// and <c>i</c> occupies the whole counter, so successive executions draw fresh values while any
-/// fixed <c>(key, substreamIndex, i)</c> replays exactly. Bit→float is the low 24 bits × 2⁻²⁴;
-/// the normal transform is Box–Muller with radius = √(−2·ln(1−u₁)). Mirrors
+/// and <c>p</c> occupies the whole counter, so successive executions draw fresh values while any
+/// fixed <c>(key, substreamIndex, p)</c> replays exactly. Bit→float is the geometric draw (a
+/// geometric octave times a 23-bit mantissa fraction — see <see cref="GeometricUniform"/>);
+/// the normal transform is Box–Muller with radius = √(−2·ln w), w that geometric draw. Mirrors
 /// <see cref="Threefry2x32"/> bit-for-bit (validated against the Random123 known-answer
 /// vectors — see <c>RngRuntimeTests</c>).</para>
 /// </summary>
@@ -119,26 +121,33 @@ internal static class RuntimeRng
         return Pack(x0, x1);
     }
 
-    /// <summary>A [0,1) uniform from a 32-bit word: low 24 bits × 2⁻²⁴.</summary>
-    private static Tensor<float32> ToUniform(Tensor<uint32> word)
-        => OnnxOp.BitwiseAnd(word, Scalar(0x00FF_FFFFu)).uint32().Cast<float32>() * Scalar(TwoPow24Inv);
+    /// <summary>A [0,1) uniform from the low 32-bit lane of a generator value: low 24 bits × 2⁻²⁴.</summary>
+    private static Tensor<float32> ToUniform(Tensor<uint64> v)
+        => OnnxOp.BitwiseAnd(v, Scalar(0x00FF_FFFFUL)).uint64().Cast<float32>() * Scalar(TwoPow24Inv);
 
-    /// <summary>The per-element flat element index <c>[prod(shape)]</c>.</summary>
-    private static Tensor<uint64> ElementIndex(Vector<int64> shape)
-    {
-        Scalar<int64> n = shape.Reduce(ReduceKind.Prod);
-        return OnnxOp.Range(Scalar(0L), n, Scalar(1L)).int64().Cast<uint64>();   // [N]
-    }
+    /// <summary>Shifts <paramref name="shift"/> bits of a generator value away, bringing the lane
+    /// above them into the low bits. Broadcasts, so a vector of lane offsets extracts every lane
+    /// of every value in one node.</summary>
+    private static Tensor<uint64> ShiftDown(Tensor<uint64> v, Variable shift)
+        => OnnxOp.BitShift(v, shift, BitShiftDirection.Right).uint64();
+
+    /// <summary>The number of elements a draw of the given shape produces.</summary>
+    private static Scalar<int64> ElementCount(Vector<int64> shape) => shape.Reduce(ReduceKind.Prod);
+
+    /// <summary>The counter positions <c>[0, count)</c>.</summary>
+    private static Tensor<uint64> Positions(Scalar<int64> count)
+        => OnnxOp.Range(Scalar(0L), count, Scalar(1L)).int64().Cast<uint64>();
 
     /// <summary>
-    /// The generator words for a draw of the given shape under a whole 64-bit key.
+    /// The generator's output at the first <paramref name="positionCount"/> counter positions of
+    /// the stream under a whole 64-bit key — one whole <c>uint64</c> per position.
     ///
-    /// <para>The draw position is folded <b>into the key</b> — one bijection over scalars —
+    /// <para>The substream index is folded <b>into the key</b> — one bijection over scalars —
     /// rather than spending a counter word on it. That leaves BOTH counter words for the
-    /// element index, so a draw position and an element index are each a whole 64-bit value
+    /// stream position, so a substream index and a position are each a whole 64-bit value
     /// and neither aliases <em>as counters</em>: the 2³²'th execution draws a fresh stream rather
     /// than repeating the first, and the generator's word pair stays distinct across more than 2³²
-    /// elements. (Distinct generator words, not distinct floats — <see cref="ToUniform"/> keeps 24
+    /// positions. (Distinct generator words, not distinct floats — <see cref="ToUniform"/> keeps 24
     /// bits, so drawn values collide by pigeonhole long before that.)</para>
     ///
     /// <para>The fold reuses the bijection, but it is <b>not</b> the key tree's split: it runs at
@@ -148,42 +157,194 @@ internal static class RuntimeRng
     /// (<c>B(0, B(d, key))</c>), and <c>B(0, ·)</c> is not the identity. The draw simply runs
     /// under the folded key <c>B(d, key)</c>.</para>
     /// </summary>
-    private static (Tensor<uint32> x0, Tensor<uint32> x1) Draw(
-        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds)
+    private static Vector<uint64> Draw(
+        Scalar<int64> positionCount, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds)
     {
         var (k0, k1) = Words(key);
         var (d0, d1) = Words(substreamIndex);
         var (dk0, dk1) = Bijection(d0, d1, k0, k1, rounds);
 
-        var (c0, c1) = Words(ElementIndex(shape));
-        return Bijection(c0, c1, dk0, dk1, rounds);
+        var (c0, c1) = Words(Positions(positionCount));
+        var (x0, x1) = Bijection(c0, c1, dk0, dk1, rounds);
+        return Pack(x0, x1).Vec();
     }
 
-    /// <summary>Standard uniform U(0,1) of the given shape (bit generator: Threefry-2x32-<paramref name="rounds"/>).</summary>
+    // ── Packing ─────────────────────────────────────────────────────────────────────────
+    // A position costs one bijection and yields 64 bits, and the two words are inseparable —
+    // Threefry's rounds feed x0 and x1 through each other, so x1 is already computed by the
+    // time x0 exists and discarding it saves nothing. Every consumer therefore takes as many
+    // elements from a position as its element width allows: E = 64/W lanes, low lane first,
+    // so element i is bits [i*W, (i+1)*W) of the draw's bit stream. The counter is a linear
+    // index into that stream rather than resumable state, so this is only a choice of the
+    // elements-per-position ratio; every bit the generator produces is equidistributed, so a
+    // lane is as uniform as the whole value.
+
+    /// <summary>
+    /// <c>prod(shape)</c> lanes of <paramref name="width"/> bits, packed E = 64/<paramref
+    /// name="width"/> per generator value, each carrying its value in the low bits (whatever
+    /// rides above is the caller's to mask or narrow away).
+    /// </summary>
+    private static Vector<uint64> PackedLanes(
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int width, int rounds)
+    {
+        long lanes = 64 / width;
+        Scalar<int64> n = ElementCount(shape);
+        var v = Draw((n + Scalar(lanes - 1)) / Scalar(lanes), key, substreamIndex, rounds);   // [ceil(N/E)]
+
+        // The [M,1] values against the [E] lane offsets broadcast to [M,E], whose row-major
+        // flatten lands lane l of value j at element j*E + l — the low-lane-first convention.
+        var perLane = ShiftDown(v.Reshape(Vector(-1L, 1L)), VectorRange(0UL, 64UL, (ulong)width));
+        return perLane.Reshape(Vector(-1L)).Vec().Slice(Scalar(0L), n);
+    }
+
+    // ── Geometric uniform (Walker 1974; Reynolds' 41+23 form) ────────────────────────────
+    // Walker, "Fast Generation of Uniformly Distributed Pseudorandom Numbers with Floating-Point
+    // Representation" (1974) — independently rederived by Downey (2007). The 41-bit exponent field
+    // plus 23-bit significand split of a single 64-bit draw is Marc Reynolds' practical form.
+    // The 24-bit ToUniform grid above is what Box–Muller consumes; the PUBLIC uniform instead
+    // draws the octave geometrically so it reaches the full float32 precision near zero.
+    //
+    // A uniform on [0,1) is, per octave, an even grid: [2^-1,1) carries half the mass, [2^-2,2^-1)
+    // a quarter, and so on, each octave holding 2^23 equally-spaced floats. So draw the octave from
+    // a geometric distribution — the count of leading zeros of a 41-bit field, P(octave e) = 2^e —
+    // and fill the 23-bit mantissa uniformly. The value is a [1,2) fraction times a power-of-two
+    // octave scale: both are exact in float32 (the fraction has a 24-bit significand, the scale only
+    // shifts the exponent), so the whole draw is EXACT — no Cast rounding, no transcendental, hence
+    // EP-independent. Reaches ~2^-41 near zero (vs the 24-bit grid's 2^-24), at one 64-bit
+    // generator value per element (the packing/precision trade — the bits buy resolution).
+
+    private static readonly float[] GeoOctaveScales = BuildGeoOctaveScales();
+    private const int GeoExpBits = 41;                          // leading-zero window; reaches 2^-(GeoExpBits)
+    private static float[] BuildGeoOctaveScales()               // [2^-1, 2^-2, …, 2^-GeoExpBits], all exact
+    {
+        float[] t = new float[GeoExpBits];
+        for (int i = 0; i < GeoExpBits; i++) t[i] = (float)System.Math.Pow(2.0, -1 - i);
+        return t;
+    }
+
+    /// <summary>
+    /// One geometric uniform per 64-bit generator value: geometric octave (leading-zero count of the
+    /// top 41 bits) × uniform 23-bit mantissa. Every produced <em>value</em> is exact — the fraction
+    /// and the octave scale are both exact in float32, so no rounding occurs anywhere — and therefore
+    /// EP-independent.
+    ///
+    /// <para>The <em>distribution</em> is a uniform truncated at 2⁻⁴¹: an all-zero exponent field
+    /// falls into the same bucket as a field of 1, so the deepest octave carries double mass
+    /// (2⁻⁴⁰ instead of 2⁻⁴¹) and nothing below 2⁻⁴¹ is produced. The support is also open at both
+    /// ends — the range is [2⁻⁴¹, 1−2⁻²⁴], so exact 0 is never returned (the old 24-bit grid returned
+    /// it with probability 2⁻²⁴).</para>
+    /// </summary>
+    private static Tensor<float32> GeometricUniform(Vector<uint64> v)
+    {
+        // Mantissa: low 23 bits → frac in [1,2). m < 2^23 casts to float32 without rounding, and
+        // 1 + m·2⁻²³ lands on the exact float grid of [1,2) (ULP there is 2⁻²³).
+        var m = OnnxOp.BitwiseAnd(v, Scalar((1UL << 23) - 1)).uint64();
+        var frac = m.Cast<float32>() * Scalar(1.0f / 8388608.0f) + Scalar(1.0f);
+
+        // Highest-set-bit position p∈[0,40] of the 41-bit exponent field, branchless (a field of 0
+        // leaves p=0 → deepest octave). Selection is arithmetic, not Where — ORT has no Where for
+        // uint64 — so every step is BitShift/Greater/Mul/Add: pure integer, identical on every EP.
+        var ef = OnnxOp.BitwiseAnd(ShiftDown(v, Scalar(23UL)), Scalar((1UL << GeoExpBits) - 1)).uint64();
+        Tensor<uint64> x = ef;
+        Tensor<uint64> p = ShiftDown(ef, Scalar(63UL));               // zeros [N]
+        foreach (int s in (int[])[32, 16, 8, 4, 2, 1])
+        {
+            // add = s where the top half is non-empty, else 0; then shift it away and tally it.
+            var add = OnnxOp.Greater(ShiftDown(x, Scalar((ulong)s)), Scalar(0UL)).Cast<uint64>() * Scalar((ulong)s);
+            p = (p + add).uint64();
+            x = OnnxOp.BitShift(x, add, BitShiftDirection.Right).uint64();
+        }
+        // Octave index = leadingZeros = (GeoExpBits-1) - p; scale = 2^(-1-index); value = frac·scale, exact.
+        var index = Scalar((long)(GeoExpBits - 1)) - p.Cast<int64>();
+        var scale = (Tensor<float32>)OnnxOp.Gather(Vector(GeoOctaveScales), index, axis: 0);
+        return frac * scale;
+    }
+
+    /// <summary>Standard uniform U(0,1) of the given shape (Walker's geometric draw over
+    /// Threefry-2x32-<paramref name="rounds"/>): full-precision near zero, exact, EP-independent.
+    /// One 64-bit generator value per element.</summary>
     public static Tensor<float32> StandardUniform(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
-    {
-        var (x0, _) = Draw(shape, key, substreamIndex, rounds);
-        return ToUniform(x0).Reshape(shape);
-    }
+        => GeometricUniform(Draw(ElementCount(shape), key, substreamIndex, rounds)).Reshape(shape);
 
-    /// <summary>Standard normal N(0,1) of the given shape (per-element Box–Muller over Threefry-2x32-<paramref name="rounds"/>).</summary>
+    /// <summary>Standard normal N(0,1) of the given shape (Box–Muller over Threefry-2x32-<paramref name="rounds"/>).
+    /// Box–Muller turns a (radius, angle) pair into a <em>pair</em> of independent normals — the cosine
+    /// and sine arms — so element 2j is the cosine arm of pair j and element 2j+1 the sine arm.
+    ///
+    /// <para>The radius is <c>√(−2·ln w)</c> where <c>w</c> is the <b>geometric</b> uniform (fine near
+    /// zero, reaching ~2⁻⁴¹) rather than the 24-bit grid's <c>1−u₁</c> (floored at 2⁻²⁴). That deepens
+    /// the reachable tail from ±5.77σ to ~±7.54σ and resolves it finely, and since <c>w > 0</c> always
+    /// there is no <c>ln(0)</c>. The angle stays a 24-bit uniform — an even grid is what a uniform angle
+    /// wants. Each pair spends two generator values: an even position for the radius's geometric draw,
+    /// the odd next one for the angle.</para></summary>
     public static Tensor<float32> StandardNormal(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
     {
-        var (x0, x1) = Draw(shape, key, substreamIndex, rounds);
-        var u1 = ToUniform(x0);
-        var u2 = ToUniform(x1);
-        var radius = ((-u1 + Scalar(1.0f)).Ln() * Scalar(-2.0f)).Sqrt();   // √(−2·ln(1−u₁))
+        Scalar<int64> n = ElementCount(shape);
+        Scalar<int64> pairs2 = (n + Scalar(1L)) / Scalar(2L) * Scalar(2L);          // 2·ceil(N/2)
+        var block = Draw(pairs2, key, substreamIndex, rounds);                       // [2M] positions
+        var w  = GeometricUniform(block.Slice(Scalar(0L), pairs2, Scalar(2L)));      // even → radius draw
+        var u2 = ToUniform(block.Slice(Scalar(1L), pairs2, Scalar(2L)));             // odd  → 24-bit angle
+        var radius = (w.Ln() * Scalar(-2.0f)).Sqrt();                               // √(−2·ln w)
         var theta = u2 * Scalar(2.0f * System.MathF.PI);
-        return (radius * theta.Cos()).Reshape(shape);
+
+        var arms = (radius * theta.Cos()).Reshape(Vector(-1L, 1L))
+            .Concat(1, (radius * theta.Sin()).Reshape(Vector(-1L, 1L)));   // [M,2]
+        return arms.Reshape(Vector(-1L)).Vec().Slice(Scalar(0L), n).Reshape(shape);
     }
 
-    /// <summary>U(low, high) of the given shape.</summary>
+    // Distinguishing substream for the range transform's side selector, so the magnitude draw g
+    // and the side draw s are independent streams (the golden-ratio fractional constant, arbitrary).
+    private const ulong SideSubstream = 0x9E3779B97F4A7C15UL;
+
+    /// <summary>
+    /// U(low, high) of the given shape, precision-preserving.
+    ///
+    /// <para>When the interval straddles zero the draw is <b>split at 0</b> — side chosen with
+    /// P(positive) = high/(high−low), each side a geometric uniform scaled to its own ray width — so
+    /// the dense float grid near zero is used on <em>both</em> sides, rather than
+    /// <c>g·(high−low)+low</c> whose <c>+low</c> offset would quantise the whole interval to
+    /// <c>low</c>'s coarse ULP.</para>
+    ///
+    /// <para>Otherwise the draw is anchored at whichever endpoint is <b>nearest zero</b> and expands
+    /// away from it (<c>low + g·w</c> when |low| ≤ |high|, else <c>high − g·w</c>). Anchoring at the
+    /// far endpoint would be the same cancellation bug mirrored: <c>[low, 0]</c> written as
+    /// <c>low·(1−g)</c> only reaches zero as <c>g→1</c>, where <c>1−g</c> is quantised at 2⁻²⁴.</para>
+    ///
+    /// <para>Cost: the side selector is a second draw, and since <c>Where</c> is an elementwise
+    /// <em>select</em> (both operands are evaluated — ONNX has no lazy select outside <c>If</c>) it is
+    /// paid on every call, not only for straddling bounds.</para>
+    /// </summary>
     public static Tensor<float32> Uniform(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex,
         Scalar<float32> low, Scalar<float32> high, int rounds = Threefry2x32.Rounds)
-        => StandardUniform(shape, key, substreamIndex, rounds) * (high - low) + low;
+    {
+        var g = StandardUniform(shape, key, substreamIndex, rounds);                          // magnitude, fine near 0
+        var width = high - low;
+
+        // Non-straddling: expand away from the endpoint nearest zero, so that endpoint's neighbourhood
+        // keeps float-native resolution instead of being reached through a cancelling subtraction.
+        Scalar<bit> anchorLow = (Scalar<bit>)OnnxOp.LessOrEqual(low.Abs(), high.Abs());
+        var anchored = (Tensor<float32>)OnnxOp.Where(anchorLow, g * width + low, high - g * width);
+
+        Scalar<bit> interior = (Scalar<bit>)OnnxOp.And(OnnxOp.Less(low, Scalar(0.0f)), OnnxOp.Greater(high, Scalar(0.0f)));
+        var s = StandardUniform(shape, key,
+            OnnxOp.BitwiseXor(substreamIndex, Scalar(SideSubstream)).uint64().Scalar(), rounds);   // side selector, independent
+        var posW = high.Max(Scalar(0.0f));                                                    // ray widths from 0
+        var negW = (Scalar(0.0f) - low).Max(Scalar(0.0f));
+
+        // P(positive) = posW/(posW+negW), computed scaled by max(posW,negW) so the sum cannot overflow:
+        // posW+negW is up to 2·float32.MaxValue and would become +inf for a wide straddling interval,
+        // collapsing pPos to 0 and sending every draw negative. After scaling both terms are ≤ 1, so
+        // the denominator is in [1,2] and needs no epsilon guard — m is zero only when low = high = 0,
+        // which is not interior and so lands in the discarded arm.
+        var m = posW.Max(negW).Max(Scalar(float.Epsilon));
+        var pPos = (posW / m) / (posW / m + negW / m);
+        Tensor<bit> onPos = (Tensor<bit>)OnnxOp.Less(s, pPos);
+        var splitVal = onPos.Where(g * posW, Scalar(0.0f) - g * negW);                        // both sides fine near 0
+
+        return ((Tensor<float32>)OnnxOp.Where(interior, splitVal, anchored)).Reshape(shape);
+    }
 
     /// <summary>N(mean, scale) of the given shape.</summary>
     public static Tensor<float32> Normal(
@@ -192,39 +353,27 @@ internal static class RuntimeRng
         => StandardNormal(shape, key, substreamIndex, rounds) * scale + mean;
 
     // ── Raw random bits ─────────────────────────────────────────────────────────────────
-    // One generator draw per element. The generator's low word x0 is a uniformly-random 32-bit
-    // value; the narrow widths take its low W bits (all bits are equidistributed), U32 takes it
-    // whole, and U64 is both words packed.
+    // Raw bits are lanes straight out of the packing above, narrowed to the requested width:
+    // N/8 positions for U8, N/4 for U16, N/2 for U32. U64 is one whole value per element and
+    // has nothing to pack.
 
-    /// <summary>Raw uniform bits, U8 (the low 8 bits of the generator word), of the given shape.</summary>
+    /// <summary>Raw uniform bits, U8 (8 elements packed per generator value), of the given shape.</summary>
     public static Tensor<uint8> BitsU8(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
-    {
-        var (x0, _) = Draw(shape, key, substreamIndex, rounds);
-        return x0.Cast<uint8>().Reshape(shape);
-    }
+        => PackedLanes(shape, key, substreamIndex, 8, rounds).Cast<uint8>().Reshape(shape);
 
-    /// <summary>Raw uniform bits, U16 (the low 16 bits of the generator word), of the given shape.</summary>
+    /// <summary>Raw uniform bits, U16 (4 elements packed per generator value), of the given shape.</summary>
     public static Tensor<uint16> BitsU16(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
-    {
-        var (x0, _) = Draw(shape, key, substreamIndex, rounds);
-        return x0.Cast<uint16>().Reshape(shape);
-    }
+        => PackedLanes(shape, key, substreamIndex, 16, rounds).Cast<uint16>().Reshape(shape);
 
-    /// <summary>Raw uniform bits, U32 (the whole generator word), of the given shape.</summary>
+    /// <summary>Raw uniform bits, U32 (2 elements packed per generator value), of the given shape.</summary>
     public static Tensor<uint32> BitsU32(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
-    {
-        var (x0, _) = Draw(shape, key, substreamIndex, rounds);
-        return x0.Reshape(shape);
-    }
+        => PackedLanes(shape, key, substreamIndex, 32, rounds).Cast<uint32>().Reshape(shape);
 
-    /// <summary>Raw uniform bits, U64 (both generator words), of the given shape.</summary>
+    /// <summary>Raw uniform bits, U64 (one whole generator value per element), of the given shape.</summary>
     public static Tensor<uint64> BitsU64(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
-    {
-        var (x0, x1) = Draw(shape, key, substreamIndex, rounds);
-        return Pack(x0, x1).Reshape(shape);
-    }
+        => Draw(ElementCount(shape), key, substreamIndex, rounds).Reshape(shape);
 }

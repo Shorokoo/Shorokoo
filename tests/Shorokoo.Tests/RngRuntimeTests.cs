@@ -3,6 +3,7 @@ using System.Linq;
 using Shorokoo.Core.Rng;
 using Shorokoo.Runtime;
 using static Shorokoo.Tests.RngDrawRunners;
+using static Shorokoo.Tests.Modules.QeeAuditVerdicts;
 
 namespace Shorokoo.Tests;
 
@@ -59,6 +60,64 @@ public partial class RtFcWithRngFeed
 [Module] public partial class RtLoweredBits64 { public static Tensor<uint64> Inline(Tensor<float32> x) => RandomBits<uint64>(x.ShapeTensor()); }
 
 /// <summary>
+/// The op/dtype pairs the region-table uniform draw depends on, checked in-graph so both ONNX
+/// Runtime and the Quick Execution Engine must agree: a computed (non-constant) int64 table
+/// gathered with computed indices, the restoring long division that builds the threshold table,
+/// and a binary search over that table checked against a linear scan.
+///
+/// <para>The division uses arithmetic selection rather than <c>Where</c>, and multiplication by
+/// two rather than <c>BitShift</c> — ONNX constrains BitShift to unsigned types, and a uint64
+/// <c>Where</c> is unimplemented in ORT.</para>
+/// </summary>
+[Module]
+public partial class RngRegionSelectionOpsCheck
+{
+    private static Tensor<int64> LongDivide(Tensor<int64> cumulative, Tensor<int64> total, int bits)
+    {
+        var remainder = cumulative;
+        var quotient = cumulative * Scalar(0L);
+        for (int i = 0; i < bits; i++)
+        {
+            remainder = remainder * Scalar(2L);
+            var ge = ((Tensor<bit>)OnnxOp.GreaterOrEqual(remainder, total)).Cast<int64>();
+            remainder = remainder - (ge * total);
+            quotient = (quotient * Scalar(2L)) + ge;
+        }
+        return quotient;
+    }
+
+    public static Scalar<bit> Inline(Tensor<int64> c, Tensor<int64> t, Tensor<int64> s, Tensor<float32> x)
+    {
+        var mismatch = IntMismatch(LongDivide(c, t, 41),
+            Vector(0L, 733007751850L, 1466015503701L, 314146179364L, 2199023255551L, 999556025250L, 1099511627775L));
+
+        // A [128] table that cannot be constant-folded: it carries the runtime element count.
+        var n = x.ShapeTensor().Reduce(ReduceKind.Prod);
+        var slots = OnnxOp.Range(Scalar(0L), Scalar(128L), Scalar(1L)).int64();
+        var table = slots * (n + Scalar(9L));                 // T[0] = 0, stride carries the runtime count
+
+        // Gather with computed, descending indices — a real gather, not a slice in disguise.
+        var pick = Scalar(126L) - OnnxOp.Range(Scalar(0L), Scalar(128L), Scalar(18L)).int64();
+        var gathered = ((Tensor<int64>)OnnxOp.Gather(table, pick, axis: 0)) - (pick * (n + Scalar(9L)));
+        mismatch = mismatch + IntMismatch(gathered, Vector(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L));
+
+        // Binary search for the last slot whose threshold is <= s, against a linear scan.
+        var lo = s * Scalar(0L);
+        foreach (long step in (long[])[64L, 32L, 16L, 8L, 4L, 2L, 1L])
+        {
+            var mid = lo + Scalar(step);
+            var take = ((Tensor<bit>)OnnxOp.LessOrEqual((Tensor<int64>)OnnxOp.Gather(table, mid, axis: 0), s)).Cast<int64>();
+            lo = lo + (take * Scalar(step));
+        }
+        var scan = ((Tensor<bit>)OnnxOp.LessOrEqual(table, s.Reshape(Vector(-1L, 1L)))).Cast<int64>()
+            .Reduce(ReduceKind.Sum, Vector(1L), keepDims: false) - Scalar(1L);
+        mismatch = mismatch + IntMismatch(lo - scan, Vector(0L, 0L, 0L, 0L));
+
+        return mismatch == Scalar(0L);
+    }
+}
+
+/// <summary>
 /// The in-graph counter-based runtime RNG (<see cref="RuntimeRng"/>): the ONNX-op Threefry
 /// subgraph must reproduce the host generator (<see cref="Threefry2x32"/>) bit-for-bit —
 /// execution-provider-independent — and produce well-distributed draws.
@@ -69,16 +128,29 @@ public class RngRuntimeTests
 {
     private const ulong BitsKey = 111UL | (222UL << 32);
     private const ulong UniformKey = 123UL | (456UL << 32);
+    private const ulong NormalKey = 7UL | (9UL << 32);
 
     // Host reference for the runtime scheme: substreamIndex folds into the key, element i
     // indexes the whole counter; uniform = low 24 bits of x0 * 2^-24.
     private static float HostUniform(long i, ulong key, ulong substreamIndex)
         => RngTestOracle.DrawUniform(key, substreamIndex, i);
 
-    // Host reference for the raw-bits scheme: the narrow widths take the low bits of x0, U32
-    // the whole word, U64 = x0 | (x1 << 32).
+    // Host reference for the raw-bits scheme: E = 64/W elements pack into each generator value,
+    // low lane first, so element i is lane i%E of the value at position i/E.
     private static ulong HostBits(long i, int width, ulong key, ulong substreamIndex)
         => RngTestOracle.DrawBits(key, substreamIndex, i, width);
+
+    [Fact]
+    public void TestRegionSelectionOpsAgreeOnBothEngines()
+    {
+        Assert.True(AutoTest.AdvancedTestGraph<RngRegionSelectionOpsCheck>(
+            hyperparamInputs: [],
+            runtimeInputs: [
+                TensorData(DType.Int64, [7L], 0L, 1L, 2L, 1L, (1L << 62) - 1, 5L, 1L << 40),
+                TensorData(DType.Int64, [7L], 3L, 3L, 3L, 7L, 1L << 62, 11L, (1L << 41) + 1),
+                TensorData(DType.Int64, [4L], 0L, 17L, 1000L, 1L << 40),
+                TensorData([8L], new float[8])]));
+    }
 
     [Fact]
     public void TestInGraphBitsAndUniformDrawsMatchTheHostGeneratorBitExactly()
@@ -106,6 +178,41 @@ public class RngRuntimeTests
         var vals = RunDraw<RtUniformDraw>(4, 4);
         Assert.Equal(16, vals.Length);
         for (long i = 0; i < 16; i++) Assert.Equal(HostUniform(i, UniformKey, 0), vals[i]);
+
+        // The normal carries a tolerance: its Ln/Sqrt/Cos/Sin kernels are EP-approximate, unlike
+        // the integer bits path and the exactly-constructed uniform above.
+        var normals = RunDraw<RtNormalDraw>(4, 4);
+        Assert.Equal(16, normals.Length);
+        for (long i = 0; i < 16; i++)
+            Assert.Equal(RngTestOracle.DrawNormal(NormalKey, 0, i), normals[i], 1e-5f);
+    }
+
+    [Fact]
+    public void TestBitsDrawsPackLanesLowFirstIntoTheSixtyFourBitDrawValueAndSliceTheTail()
+    {
+        var values = RunDrawRaw<RtBitsU64Draw>(4, 4).As<uint64>().AccessMemory().ToArray();
+        var u8 = RunDrawRaw<RtBitsU8Draw>(4, 4).As<uint8>().AccessMemory().ToArray();
+        var u16 = RunDrawRaw<RtBitsU16Draw>(4, 4).As<uint16>().AccessMemory().ToArray();
+        var u32 = RunDrawRaw<RtBitsU32Draw>(4, 4).As<uint32>().AccessMemory().ToArray();
+
+        void AssertPacksInto(int width, Func<int, ulong> element)
+        {
+            int lanes = 64 / width;
+            for (int j = 0; j < 16 / lanes; j++)
+            {
+                ulong packed = 0;
+                for (int l = 0; l < lanes; l++) packed |= element(j * lanes + l) << (l * width);
+                Assert.Equal(values[j], packed);
+            }
+        }
+
+        AssertPacksInto(8, i => u8[i]);
+        AssertPacksInto(16, i => u16[i]);
+        AssertPacksInto(32, i => u32[i]);
+
+        Assert.Equal(u8.Take(5).ToArray(), RunDrawRaw<RtBitsU8Draw>(1, 5).As<uint8>().AccessMemory().ToArray());
+        Assert.Equal(u16.Take(5).ToArray(), RunDrawRaw<RtBitsU16Draw>(1, 5).As<uint16>().AccessMemory().ToArray());
+        Assert.Equal(u32.Take(5).ToArray(), RunDrawRaw<RtBitsU32Draw>(1, 5).As<uint32>().AccessMemory().ToArray());
     }
 
     [Fact]

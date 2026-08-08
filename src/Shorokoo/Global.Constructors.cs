@@ -321,7 +321,7 @@ namespace Shorokoo
             ((Tensor<T>)OnnxOp.Range(start, limit, delta)).Vec();
 
         /// <summary>Creates a vector of values from start (inclusive) to limit (exclusive), stepping by delta.</summary>
-        public static Vector<int8> VectorRange(sbyte start, sbyte limit, sbyte delta) => OnnxOp.Range(Scalar(start), Scalar(limit), Scalar(delta)).int8().Vec();
+        public static Vector<int8> VectorRange(sbyte start, sbyte limit, sbyte delta) => OnnxOp.Range(Scalar(start).Cast<int32>(), Scalar(limit).Cast<int32>(), Scalar(delta).Cast<int32>()).Cast<int8>().Vec();
         /// <summary>Creates a vector of values from start (inclusive) to limit (exclusive), stepping by delta.</summary>
         public static Vector<int16> VectorRange(short start, short limit, short delta) => OnnxOp.Range(Scalar(start), Scalar(limit), Scalar(delta)).int16().Vec();
         /// <summary>Creates a vector of values from start (inclusive) to limit (exclusive), stepping by delta.</summary>
@@ -329,13 +329,13 @@ namespace Shorokoo
         /// <summary>Creates a vector of values from start (inclusive) to limit (exclusive), stepping by delta.</summary>
         public static Vector<int64> VectorRange(long start, long limit, long delta) => OnnxOp.Range(Scalar(start), Scalar(limit), Scalar(delta)).int64().Vec();
         /// <summary>Creates a vector of values from start (inclusive) to limit (exclusive), stepping by delta.</summary>
-        public static Vector<uint8> VectorRange(byte start, byte limit, byte delta) => OnnxOp.Range(Scalar(start).Cast<int8>(), Scalar(limit).Cast<int8>(), Scalar(delta).Cast<int8>()).Cast<uint8>().Vec();
+        public static Vector<uint8> VectorRange(byte start, byte limit, byte delta) => OnnxOp.Range(Scalar(start).Cast<int32>(), Scalar(limit).Cast<int32>(), Scalar(delta).Cast<int32>()).Cast<uint8>().Vec();
         /// <summary>Creates a vector of values from start (inclusive) to limit (exclusive), stepping by delta.</summary>
-        public static Vector<uint16> VectorRange(ushort start, ushort limit, ushort delta) => OnnxOp.Range(Scalar(start).Cast<int16>(), Scalar(limit).Cast<int16>(), Scalar(delta).Cast<int16>()).Cast<uint16>().Vec();
+        public static Vector<uint16> VectorRange(ushort start, ushort limit, ushort delta) => OnnxOp.Range(Scalar(start).Cast<int32>(), Scalar(limit).Cast<int32>(), Scalar(delta).Cast<int32>()).Cast<uint16>().Vec();
         /// <summary>Creates a vector of values from start (inclusive) to limit (exclusive), stepping by delta.</summary>
-        public static Vector<uint32> VectorRange(uint start, uint limit, uint delta) => OnnxOp.Range(Scalar(start).Cast<int32>(), Scalar(limit).Cast<int32>(), Scalar(delta).Cast<int32>()).Cast<uint32>().Vec();
+        public static Vector<uint32> VectorRange(uint start, uint limit, uint delta) => OnnxOp.Range(Scalar(start).Cast<int64>(), Scalar(limit).Cast<int64>(), Scalar(delta).Cast<int64>()).Cast<uint32>().Vec();
         /// <summary>Creates a vector of values from start (inclusive) to limit (exclusive), stepping by delta.</summary>
-        public static Vector<uint64> VectorRange(ulong start, ulong limit, ulong delta) => OnnxOp.Range(Scalar(start).Cast<int64>(), Scalar(limit).Cast<int64>(), Scalar(delta).Cast<int64>()).uint64().Vec();
+        public static Vector<uint64> VectorRange(ulong start, ulong limit, ulong delta) => OnnxOp.Range(Scalar(start).Cast<int64>(), Scalar(limit).Cast<int64>(), Scalar(delta).Cast<int64>()).Cast<uint64>().Vec();
 
         /// <summary>Creates a constant vector of the given length filled with the default value of T.</summary>
         public static Vector<T> DefaultVector<T>(long length) where T : IVarType => OnnxOp.Constant(TensorDataWithDefaultVals(OnnxUtils.GetDType<T>(), [length]));

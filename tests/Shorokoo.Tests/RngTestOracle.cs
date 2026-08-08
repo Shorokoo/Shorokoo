@@ -45,35 +45,65 @@ internal static class RngTestOracle
         => Fold(identity.RunKeySpec(path));
 
     /// <summary>
-    /// The generator word pair a draw produces for element <paramref name="i"/> — the host
-    /// oracle for <c>RuntimeRng.Draw</c>. The draw position folds into the key, leaving both
-    /// counter words to the whole 64-bit element index.
+    /// The whole 64 bits a draw produces at stream position <paramref name="p"/> — the host oracle
+    /// for <c>RuntimeRng.Draw</c>. The substream index folds into the key, leaving both counter
+    /// words to the whole 64-bit position.
     /// </summary>
-    public static (uint x0, uint x1) DrawWords(
-        ulong key, ulong substreamIndex, long i, int rounds = Threefry2x32.Rounds)
+    public static ulong DrawValue(
+        ulong key, ulong substreamIndex, long p, int rounds = Threefry2x32.Rounds)
     {
         var (dk0, dk1) = Threefry2x32.Bijection(
             (uint)substreamIndex, (uint)(substreamIndex >> 32), (uint)key, (uint)(key >> 32), rounds);
-        return Threefry2x32.Bijection((uint)i, (uint)((ulong)i >> 32), dk0, dk1, rounds);
+        var (x0, x1) = Threefry2x32.Bijection((uint)p, (uint)((ulong)p >> 32), dk0, dk1, rounds);
+        return x0 | ((ulong)x1 << 32);
     }
 
-    /// <summary>Element <paramref name="i"/> of a standard-uniform draw (low 24 bits × 2⁻²⁴).</summary>
-    public static float DrawUniform(
-        ulong key, ulong substreamIndex, long i, int rounds = Threefry2x32.Rounds)
-        => (DrawWords(key, substreamIndex, i, rounds).x0 & 0x00FFFFFFu) * (1.0f / 16777216.0f);
+    /// <summary>
+    /// Lane <paramref name="i"/> of a draw cut into <paramref name="width"/>-bit lanes: E = 64/W
+    /// lanes pack into each generator value, low lane first, so lane <c>i</c> is bits
+    /// <c>[i*W, (i+1)*W)</c> of the stream — the value at position <c>i / E</c>, shifted down by
+    /// <c>(i % E) * W</c>. Degenerates to one whole value per element at W = 64.
+    /// </summary>
+    public static ulong DrawLane(
+        ulong key, ulong substreamIndex, long i, int width, int rounds = Threefry2x32.Rounds)
+    {
+        if (width is not (8 or 16 or 32 or 64)) throw new System.ArgumentOutOfRangeException(nameof(width));
+        long lanes = 64 / width;
+        return (DrawValue(key, substreamIndex, i / lanes, rounds) >> (int)(i % lanes) * width)
+               & (ulong.MaxValue >> (64 - width));
+    }
 
     /// <summary>Element <paramref name="i"/> of a raw-bits draw of the given uint width.</summary>
     public static ulong DrawBits(
         ulong key, ulong substreamIndex, long i, int width, int rounds = Threefry2x32.Rounds)
+        => DrawLane(key, substreamIndex, i, width, rounds);
+
+    /// <summary>Element <paramref name="i"/> of a standard-uniform draw — Walker's
+    /// geometric transform of the whole 64-bit value at position <paramref name="i"/> (one per
+    /// element): a 23-bit mantissa fraction in [1,2) times a geometric octave scale (2^-1-lz, lz =
+    /// leading zeros of the 41-bit exponent field). Exact — mirrors <c>RuntimeRng.GeometricUniform</c>.</summary>
+    public static float DrawUniform(
+        ulong key, ulong substreamIndex, long i, int rounds = Threefry2x32.Rounds)
     {
-        var (x0, x1) = DrawWords(key, substreamIndex, i, rounds);
-        return width switch
-        {
-            8 => (byte)x0,
-            16 => (ushort)x0,
-            32 => x0,
-            64 => x0 | ((ulong)x1 << 32),
-            _ => throw new System.ArgumentOutOfRangeException(nameof(width)),
-        };
+        ulong v = DrawValue(key, substreamIndex, i, rounds);
+        float frac = 1.0f + (uint)(v & 0x7FFFFF) * (1.0f / 8388608.0f);          // [1,2), 23-bit mantissa
+        ulong ef = (v >> 23) & ((1UL << 41) - 1);                                // 41-bit exponent field
+        int p = ef == 0 ? 0 : 63 - System.Numerics.BitOperations.LeadingZeroCount(ef);
+        return frac * (float)System.Math.Pow(2.0, -1 - (40 - p));               // frac · 2^(-1-leadingZeros)
+    }
+
+    /// <summary>Element <paramref name="i"/> of a standard-normal draw. Pair <c>j = i/2</c> takes its
+    /// radius from the geometric uniform at even position <c>2j</c> (√(−2·ln w), deep tail) and its
+    /// angle from a 24-bit uniform at odd position <c>2j+1</c>; even <paramref name="i"/> is the cosine
+    /// arm, odd the sine. Mirrors <c>RuntimeRng.StandardNormal</c>.</summary>
+    public static float DrawNormal(
+        ulong key, ulong substreamIndex, long i, int rounds = Threefry2x32.Rounds)
+    {
+        long j = i / 2;
+        float w = DrawUniform(key, substreamIndex, 2 * j, rounds);                          // geometric radius draw
+        float u2 = (DrawValue(key, substreamIndex, 2 * j + 1, rounds) & 0x00FFFFFFuL) * (1.0f / 16777216.0f);
+        float radius = System.MathF.Sqrt(-2.0f * System.MathF.Log(w));
+        float theta = u2 * (2.0f * System.MathF.PI);
+        return radius * (i % 2 == 0 ? System.MathF.Cos(theta) : System.MathF.Sin(theta));
     }
 }

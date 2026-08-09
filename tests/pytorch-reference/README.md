@@ -1,7 +1,7 @@
 # PyTorch reference generators
 
 Scripts here produce **external-truth reference constants** for the forward-value
-checks in the NN-library coverage modules (e.g. `NNLinearMatchesManualMatMul` in
+checks in the NN-library coverage modules (e.g. `NNLinearMatchesPyTorch` in
 `tests/Shorokoo.Tests/Modules/NNLibraryTestModules.cs`).
 
 Those modules replace the old "recompute the layer's own math by hand and assert

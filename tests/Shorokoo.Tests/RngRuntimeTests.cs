@@ -135,7 +135,7 @@ public partial class RngDenseUniformOracleCheck
         Scalar<int64> mismatch = Scalar(0L);
         for (long r = 0; r < Ranges; r++)
         {
-            var drawn = RuntimeRng.DenseUniform(Vector((long)Draws),
+            var drawn = RuntimeRng.Uniform(Vector((long)Draws),
                 Scalar(0xA5A5_1234UL | (0x9E37UL << 32)), Scalar(0UL), b[2 * r], b[2 * r + 1]);
             var target = want.Slice(Scalar(r * Draws), Scalar(r * Draws + Draws));
             var differs = ((Tensor<bit>)OnnxOp.Not(OnnxOp.Equal(drawn, target))).Cast<int64>();

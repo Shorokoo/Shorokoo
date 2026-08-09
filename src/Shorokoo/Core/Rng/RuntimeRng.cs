@@ -638,7 +638,7 @@ internal static class RuntimeRng
     }
 
     /// <summary>
-    /// U(low, high) of the given shape, drawn DENSELY: every float in the range is reachable with
+    /// U(low, high) of the given shape, drawn densely: every float in the range is reachable with
     /// probability proportional to its ulp, from one 64-bit generator value per element, with no
     /// rejection and a static node count. The draw splits as region selector (the top 41 bits)
     /// against the cumulative threshold table, and index within the region (the low 23 bits).
@@ -653,7 +653,7 @@ internal static class RuntimeRng
     /// slot 0's threshold is structurally 0 (its cumulative weight is). Both facts are load-bearing
     /// if the table's shape is ever changed.</para>
     /// </summary>
-    public static Tensor<float32> DenseUniform(
+    public static Tensor<float32> Uniform(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex,
         Scalar<float32> low, Scalar<float32> high, int rounds = Threefry2x32.Rounds)
     {
@@ -692,59 +692,6 @@ internal static class RuntimeRng
         var drawn = (Tensor<float32>)OnnxOp.Where(
             (Tensor<bit>)OnnxOp.Greater(regionLattice, Scalar(0L)), latticeValue, ordinalValue);
         return ((Tensor<float32>)OnnxOp.Where(useFixed, fixedValue, drawn)).Reshape(shape);
-    }
-
-    // Distinguishing substream for the range transform's side selector, so the magnitude draw g
-    // and the side draw s are independent streams (the golden-ratio fractional constant, arbitrary).
-    private const ulong SideSubstream = 0x9E3779B97F4A7C15UL;
-
-    /// <summary>
-    /// U(low, high) of the given shape, precision-preserving.
-    ///
-    /// <para>When the interval straddles zero the draw is <b>split at 0</b> — side chosen with
-    /// P(positive) = high/(high−low), each side a geometric uniform scaled to its own ray width — so
-    /// the dense float grid near zero is used on <em>both</em> sides, rather than
-    /// <c>g·(high−low)+low</c> whose <c>+low</c> offset would quantise the whole interval to
-    /// <c>low</c>'s coarse ULP.</para>
-    ///
-    /// <para>Otherwise the draw is anchored at whichever endpoint is <b>nearest zero</b> and expands
-    /// away from it (<c>low + g·w</c> when |low| ≤ |high|, else <c>high − g·w</c>). Anchoring at the
-    /// far endpoint would be the same cancellation bug mirrored: <c>[low, 0]</c> written as
-    /// <c>low·(1−g)</c> only reaches zero as <c>g→1</c>, where <c>1−g</c> is quantised at 2⁻²⁴.</para>
-    ///
-    /// <para>Cost: the side selector is a second draw, and since <c>Where</c> is an elementwise
-    /// <em>select</em> (both operands are evaluated — ONNX has no lazy select outside <c>If</c>) it is
-    /// paid on every call, not only for straddling bounds.</para>
-    /// </summary>
-    public static Tensor<float32> Uniform(
-        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex,
-        Scalar<float32> low, Scalar<float32> high, int rounds = Threefry2x32.Rounds)
-    {
-        var g = StandardUniform(shape, key, substreamIndex, rounds);                          // magnitude, fine near 0
-        var width = high - low;
-
-        // Non-straddling: expand away from the endpoint nearest zero, so that endpoint's neighbourhood
-        // keeps float-native resolution instead of being reached through a cancelling subtraction.
-        Scalar<bit> anchorLow = (Scalar<bit>)OnnxOp.LessOrEqual(low.Abs(), high.Abs());
-        var anchored = (Tensor<float32>)OnnxOp.Where(anchorLow, g * width + low, high - g * width);
-
-        Scalar<bit> interior = (Scalar<bit>)OnnxOp.And(OnnxOp.Less(low, Scalar(0.0f)), OnnxOp.Greater(high, Scalar(0.0f)));
-        var s = StandardUniform(shape, key,
-            OnnxOp.BitwiseXor(substreamIndex, Scalar(SideSubstream)).uint64().Scalar(), rounds);   // side selector, independent
-        var posW = high.Max(Scalar(0.0f));                                                    // ray widths from 0
-        var negW = (Scalar(0.0f) - low).Max(Scalar(0.0f));
-
-        // P(positive) = posW/(posW+negW), computed scaled by max(posW,negW) so the sum cannot overflow:
-        // posW+negW is up to 2·float32.MaxValue and would become +inf for a wide straddling interval,
-        // collapsing pPos to 0 and sending every draw negative. After scaling both terms are ≤ 1, so
-        // the denominator is in [1,2] and needs no epsilon guard — m is zero only when low = high = 0,
-        // which is not interior and so lands in the discarded arm.
-        var m = posW.Max(negW).Max(Scalar(float.Epsilon));
-        var pPos = (posW / m) / (posW / m + negW / m);
-        Tensor<bit> onPos = (Tensor<bit>)OnnxOp.Less(s, pPos);
-        var splitVal = onPos.Where(g * posW, Scalar(0.0f) - g * negW);                        // both sides fine near 0
-
-        return ((Tensor<float32>)OnnxOp.Where(interior, splitVal, anchored)).Reshape(shape);
     }
 
     /// <summary>N(mean, scale) of the given shape.</summary>

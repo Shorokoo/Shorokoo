@@ -486,7 +486,7 @@ internal static class RuntimeRng
 
         // ── Truncation floor, band and lattice ──────────────────────────────────────────
         var magnitudeLow = zLow.Max(Scalar(0L) - zLow - Scalar(1L));
-        var magnitudeTop = (zHigh - Scalar(1L)).Max(Scalar(1L) - zHigh);
+        var magnitudeTop = (zHigh - Scalar(1L)).Max(Scalar(0L) - zHigh);
         var topClass = (magnitudeLow / Scalar(binade)).Max(magnitudeTop / Scalar(binade)).Max(Scalar(1L));
         var floorClass = (topClass - Scalar((long)(DenseClasses - 1))).Max(Scalar(1L));
         var floorExponent = floorClass - Scalar((long)DenseBias);

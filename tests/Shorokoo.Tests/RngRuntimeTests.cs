@@ -317,6 +317,16 @@ public class RngRuntimeTests
         Assert.True(DenseMatchesOracle(DenseBatch(5)));
     }
 
+    private static (float Low, float High) StraddlingNegativePowerOfTwo(int exponent)
+    {
+        float p = MathF.ScaleB(-1f, exponent);
+        return (MathF.BitDecrement(p), MathF.BitIncrement(p));
+    }
+
+    [Fact]
+    public void TestInGraphDenseUniformMatchesTheOracleWhenTheTopFloatIsANegativePowerOfTwo()
+        => Assert.True(DenseMatchesOracle([.. (( int[])[0, 1, -1, 10, -20, 60]).Select(StraddlingNegativePowerOfTwo)]));
+
     [Fact]
     public void TestInGraphDenseUniformMatchesTheOracleOnDegenerateAndNonFiniteBounds()
     {

@@ -293,99 +293,89 @@ internal static class RuntimeRng
         return arms.Reshape(Vector(-1L)).Vec().Slice(Scalar(0L), n).Reshape(shape);
     }
 
-    // ── Dense arbitrary-range uniform (region table) ─────────────────────────────────────
+    // ── Dense arbitrary-range uniform (weight blocks) ────────────────────────────────────
     // Walker/Reynolds generalized off [0,1) onto an arbitrary range, from ONE 64-bit generator
-    // value per element, with no rejection and a static node count. Two approximations are
-    // deliberate, and both are too large to leave implied:
-    //
-    //   TRUNCATION. Only the top DenseClasses weight classes are resolved as floats; below that
-    //   floor a coarse even lattice carries the mass, so the floats down there are NOT
-    //   individually reachable. The fraction of a range's floats that IS reachable is 30.7% on
-    //   [0,1) and 15.3% on the whole finite domain. What is exact is the MASS: the collapsed span
-    //   keeps the probability its width earns, so the draw stays uniform in VALUE — it is the
-    //   resolution that is spent, not the distribution.
-    //
-    //   SELECTOR RESOLUTION. A region's probability is a multiple of 2^-41, so a region holding
-    //   less than that of the total is rounded UP to one code rather than dropped (see the
-    //   threshold table below). Above the floor every float is reachable, with probability
-    //   proportional to its ulp to within that rounding. Measured over RngRuntimeTests' adversarial
-    //   ranges: most are exact, the worst region is over-weighted 2^20x (a weight-1 stub), and the
-    //   worst total-variation distance from the ideal is 2^-37. Only endpoint blocks and stubs can
-    //   fall under the floor — a full class group weighs at least 2^23, which is four codes even
-    //   against the largest possible total.
-    //
-    // On [0,1) ABOVE THE FLOOR the draw is bit-for-bit Walker/Reynolds: the 41-bit selector's
-    // leading-zero count is the binade, the low 23 bits are the mantissa. Below it the two part
-    // ways — Walker keeps three more geometric binades down to 2^-41, this switches to the lattice
-    // and reaches 2^-61 and exact zero. The crossover is selector < 8, probability 2^-38; sampling
-    // cannot reach it, so RngRuntimeTests asserts both sides directly.
-    //
-    // That 2^-38 slice is a GAP against the intended contract, which is that a caller asking for
-    // U(0,1) gets Walker/Reynolds. It narrows to 2^-DenseClasses, so K = 39 — the most uint64 now
-    // allows, since a straddling range totals 2^(24+K) and the division needs that under 2^63 —
-    // brings it to 2^-39. It cannot close: at K = 41 the lattice would still own selector 0, where
-    // Walker maps into its bottom binade instead. That is Walker's own defect (it over-weights that
-    // binade 2x and cannot emit anything below 2^-41 or exact zero), so closing the last 2^-41
-    // would mean reproducing a wrong answer. K = 41 is out of reach regardless: it needs a 2^65
-    // accumulator.
-    //
-    // The host oracle (tests: RngDenseUniformOracle) is the contract; this rebuilds the same table
-    // in ONNX ops and must agree with it bit for bit.
+    // value per element, with no rejection and a static node count. The host oracle (tests:
+    // RngDenseUniformOracle) is the contract; this rebuilds it in ONNX ops and must agree with it
+    // bit for bit.
     //
     // Floats are addressed by SIGNED ORDINAL z — the bit pattern for x >= 0, negated for x < 0 —
     // which is strictly monotone in the real value, so any range (straddling or not) is one
     // interval [zLow, zHigh) and the sign needs no separate draw. Float z owns [V(z), V(z+1)),
-    // whose width is the ulp of weight class max(1, exponent field). The interval splits into
-    // REGIONS of 2^bits equally-weighted floats: above the truncation floor the float grid itself,
-    // cut into class groups and then into descending power-of-two blocks; below it a coarse even
-    // lattice of spacing 2^(floorClass-150) carrying the remaining mass honestly.
+    // whose width is the ulp of weight class max(1, |z|'s pattern >> P) — the max(1, ...) is what
+    // puts the subnormals and the smallest normal binade in one class. Note the asymmetry the
+    // convention forces: a negative ordinal's class comes from the magnitude pattern BELOW it, so
+    // class c on the negative side is the magnitudes (c<<P, (c+1)<<P], one ordinal off from the
+    // binade. The classes still tile without gaps, which is all the decode needs.
     //
-    // Weights are counted in units of the SHALLOWEST KEPT class's ulp (not the smallest
-    // subnormal), which is what keeps the cumulative table inside int64 and pins the truncation
-    // depth at DenseClasses = 38: the total never exceeds 2^62. Thresholds are floor(C*2^41/total)
-    // by restoring binary long division, integer-only — 2^41*C overflows int64, and binary64 is
-    // unusable because the Quick Execution Engine evaluates every float dtype at binary32
-    // (Shorokoo#157), which would diverge silently between engines rather than fail.
+    // The interval is partitioned into seven BLOCKS, not a table. The weight axis need not run in
+    // value order, so each kind of material becomes one contiguous block with a closed-form decode
+    // and nothing is looked up: the lattice, the whole classes present on both signs, the whole
+    // classes present on one, a partial class at each end of the range, and a stub at each end of
+    // the lattice. Any block may be empty. Three decode forms cover all seven — lattice point,
+    // geometric (whole classes), ordinal run — because a stub is a one-element run and a one-point
+    // lattice respectively.
     //
-    // The table is built ONCE PER CALL (a [128] tensor), not per element.
+    // TRUNCATION is the one approximation, and it is RANGE-DEPENDENT: 41 weight classes are
+    // resolved as floats, 40 when the range straddles zero, since a straddling range carries both
+    // signs of every class and 41 of them would total 2^65. Below the floor 2^(floorClass-127) a
+    // coarse even lattice of spacing 2^(floorClass-150) carries the remaining mass, as one block
+    // spanning both signs, so the floats down there are NOT individually reachable — 30.7% of the
+    // floats in [0,1) are, 15.3% over the whole finite domain. What is exact is the MASS: every
+    // block keeps the probability its width earns, so the draw stays uniform in VALUE. It is
+    // resolution that is spent, not fairness.
+    //
+    // SELECTION spends the whole 64-bit draw and rounds NOTHING — no block is quantized, unlike a
+    // scheme that maps blocks onto a fixed-width selector field. A block's threshold is its exact
+    // cumulative weight in uint64 (six adds; ORT has no uint64 CumSum kernel), and the draw scales
+    // onto the weight axis by floor(draw*total / 2^64), the high half of the 128-bit product —
+    // Lemire's multiply-shift, so no division either. Both depths above top the total out at
+    // exactly 2^64, which does not fit: it WRAPS to 0, and 0 is therefore the sentinel for it. That
+    // costs one comparison in the scaling (where the wrap makes the scaling the identity) and one
+    // in the block search (where a threshold must not be mistaken for the wrapped total); no
+    // threshold can ever carry the value 2^64 itself, so nothing else needs 65 bits.
+    //
+    // Within a whole-class block the member index is the offset's LOW bits, not offset >> shift.
+    // Both are exactly weight-preserving — a run of n indices each of weight 2^s spans n*2^s units,
+    // so every residue mod n is hit exactly 2^s times — but the low-bits form is what drops the
+    // mantissa out of the draw's low bits, which is what Walker/Reynolds does.
+    //
+    // So on [0,1) this draw IS Walker/Reynolds above the truncation floor, bit for bit: the range
+    // is one-sided so it keeps 41 classes, the total is exactly 2^64 and the scaling is the
+    // identity, the lattice occupies [0, 2^P) so the class block's offset is the draw itself, the
+    // leading-bit search is Walker's leading-zero count over a 41-bit field, and the low P bits are
+    // his mantissa. Below the floor the two part ways BY CONSTRUCTION, and must: the lattice
+    // reaches exact zero, where Walker stops at 2^-41 and doubles his bottom binade's mass. Closing
+    // that last 2^-41 would mean reproducing a wrong answer, so the difference stays. Sampling
+    // cannot reach it either way, so RngRuntimeTests asserts both sides directly.
+    //
+    // The blocks are built ONCE PER CALL (seven-element columns), not per element.
 
     private const int DenseP = 23;                            // significand bits
-    private const long DenseBinade = 1L << DenseP;            // floats per class group
+    private const long DenseBinade = 1L << DenseP;            // floats per weight class, one sign
     private const int DenseBias = 127;
-    private const int DenseClasses = 38;                      // truncation depth K
-    private const int DenseSelectorBits = 64 - DenseP;        // 41: the region-selector field
-    private const int DenseMaxWeightExp = 62;                 // the accumulator's ceiling
-
-    // The static [128]-slot layout. Every slot is a closed form of (zLow, zHigh) and the slot
-    // index, so the table needs no data-dependent iteration; absent slots carry weight 0 and are
-    // unreachable (a zero-weight slot's threshold equals the NEXT non-empty slot's, so the binary
-    // search below — which takes the LAST slot whose threshold is <= the selector — always skips
-    // past it, and the trailing fillers sit at threshold 2^41, above every selector).
-    //
-    // Slots run in ascending ordinal order, which is what makes the cumulative thresholds line up
-    // with the oracle's. 126 of the 128 are used, because complementary families overlay: an
-    // endpoint above the truncation floor spends its 24-slot family on the partial class group at
-    // that endpoint and contributes exactly one full 2^P lattice block to the band; an endpoint
-    // inside the band has no partial class group and spends the family on the partial lattice run
-    // plus its stub instead.
-    private const int DenseSlots = 128;
-    private const int DenseLowAt = 0, DenseEndpointN = 24;    // partial family at zLow
-    private const int DenseNegFullAt = 24, DenseFullN = 38;   // full class groups, negative ray
-    private const int DenseNegBandAt = 62;                    // full lattice block [-2^P, 0)
-    private const int DensePosBandAt = 63;                    // full lattice block [0, 2^P)
-    private const int DensePosFullAt = 64;                    // full class groups, positive ray
-    private const int DenseHighAt = 102;                      // partial family at zHigh
-    private const int DensePadN = 2;
+    private const int DenseMaxClasses = 41;                   // truncation depth off the straddle
+    private const int DenseBlocks = 7;                        // lattice, 2-sided, 1-sided, 2 partials, 2 stubs
+    private const int DenseMaxShift = 62;                     // the int64 power table's top exponent
+    private const int DenseMaxWeight = 63;                    // the uint64 one's
 
     private static readonly long[] DensePow2 = BuildDensePow2();
+    private static readonly ulong[] DensePow2U = BuildDensePow2U();
     private static readonly float[] DenseScale = BuildDenseScale();
     private static readonly float[] DenseSpacing = BuildDenseSpacing();
     private static readonly float[] DenseBoundary = BuildDenseBoundary();
 
     private static long[] BuildDensePow2()
     {
-        long[] t = new long[DenseMaxWeightExp + 1];
+        long[] t = new long[DenseMaxShift + 1];
         for (int i = 0; i < t.Length; i++) t[i] = 1L << i;
+        return t;
+    }
+
+    private static ulong[] BuildDensePow2U()
+    {
+        ulong[] t = new ulong[DenseMaxWeight + 1];
+        for (int i = 0; i < t.Length; i++) t[i] = 1UL << i;
         return t;
     }
 
@@ -424,10 +414,27 @@ internal static class RuntimeRng
     /// <summary><see cref="Ind"/> for the unsigned side of the table arithmetic.</summary>
     private static Tensor<uint64> IndU(Variable condition) => ((Tensor<bit>)condition).Cast<uint64>();
 
-    /// <summary>2^e, clamped to the accumulator's range so an absent slot's nonsense exponent can
-    /// never gather out of bounds.</summary>
+    /// <summary>2^e, clamped to the table's range so an empty block's nonsense exponent can never
+    /// gather out of bounds.</summary>
     private static Tensor<int64> DensePow(Tensor<int64> e)
-        => OnnxOp.Gather(Vector(DensePow2), e.Max(Scalar(0L)).Min(Scalar((long)DenseMaxWeightExp)), axis: 0).int64();
+        => OnnxOp.Gather(Vector(DensePow2), e.Max(Scalar(0L)).Min(Scalar((long)DenseMaxShift)), axis: 0).int64();
+
+    /// <summary><see cref="DensePow"/> in the weight arithmetic's uint64, which needs the one
+    /// exponent int64 cannot hold: a single block may weigh 2^63.</summary>
+    private static Tensor<uint64> DensePowU(Tensor<int64> e)
+        => OnnxOp.Gather(Vector(DensePow2U), e.Max(Scalar(0L)).Min(Scalar((long)DenseMaxWeight)), axis: 0).uint64();
+
+    /// <summary>The weight class of an ordinal: max(1, its magnitude pattern >> P).</summary>
+    private static Tensor<int64> DenseClassOf(Tensor<int64> z)
+        => (z.Max(Scalar(0L) - z - Scalar(1L)) / Scalar(DenseBinade)).Max(Scalar(1L));
+
+    /// <summary>The per-block scalars laid out as one [7] column, in block order.</summary>
+    private static Tensor<T> DenseColumn<T>(params Tensor<T>[] blocks) where T : IVarType
+    {
+        Tensor<T>[] rows = new Tensor<T>[blocks.Length];
+        for (int i = 0; i < blocks.Length; i++) rows[i] = blocks[i].Reshape(Vector(1L));
+        return rows[0].Concat(0, rows[1..]);
+    }
 
     /// <summary>The signed ordinal of a finite float32, decoded arithmetically: ONNX has no
     /// bit-reinterpretation op at opset 21 (<c>BitCast</c> is opset 26 and throws), so the
@@ -468,42 +475,72 @@ internal static class RuntimeRng
         return (quotient, Ind(OnnxOp.Equal(quotient * step, significand)));
     }
 
-    /// <summary>One endpoint family: the greedy binary decomposition of the run
-    /// <c>[from, to)</c> into descending power-of-two blocks, laid out so slot <c>j</c> holds the
-    /// block of size 2^(P-offset-j) — ascending in base, which is what keeps the cumulative
-    /// thresholds aligned with the oracle's slot order. <paramref name="offset"/> shifts the run
-    /// down one slot to leave the family's last slot for a trailing stub; that is safe precisely
-    /// because a stub only exists when the run is shorter than a full class group, so its bit-P
-    /// block is absent.</summary>
-    private static (Tensor<int64> Base, Tensor<int64> Shift, Tensor<int64> Weight) DenseRunFamily(
-        Tensor<int64> slot, Tensor<int64> from, Tensor<int64> to, Tensor<int64> lattice,
-        Tensor<int64> weightClass, Tensor<int64> floorClass, Tensor<int64> offset)
+    /// <summary>
+    /// One sign's ordinal material <c>[from, to)</c> decomposed into a partial class at each end
+    /// and the whole classes C0..C1 between — the oracle's <c>SplitRun</c>. A partial that happens
+    /// to cover its whole class folds into the whole range instead, so the geometric block stays
+    /// maximal; an absent run reports C1 &lt; C0 and both counts 0.
+    ///
+    /// <para><paramref name="negative"/> is a build-time constant at both call sites — the two rays
+    /// differ only in which end of a class run an ordinal starts at, and in which direction the
+    /// classes ascend, so writing the two out costs nothing and no case depends on graph data.</para>
+    /// </summary>
+    private static (Tensor<int64> LowBase, Tensor<int64> LowCount, Tensor<int64> LowClass,
+                    Tensor<int64> HighBase, Tensor<int64> HighCount, Tensor<int64> HighClass,
+                    Tensor<int64> First, Tensor<int64> Last) DenseSplitRun(
+        Tensor<int64> from, Tensor<int64> to, bool negative)
     {
-        var length = (to - from).Max(Scalar(0L));
-        var bits = Scalar((long)DenseP) - offset - slot;
-        var size = DensePow(bits);
-        var half = length / size;
-        var present = (half - half / Scalar(2L) * Scalar(2L)) * Ind(OnnxOp.GreaterOrEqual(bits, Scalar(0L)));
-        var above = DensePow(bits + Scalar(1L));
-        var weight = (Scalar(1L) - lattice) * DensePow(bits + weightClass - floorClass) + lattice * size;
-        var shift = (Scalar(1L) - lattice) * (weightClass - floorClass);
-        return (present * (from + length / above * above), present * shift, present * weight);
+        // Class c holds 2^P consecutive ordinals. Negative classes are the magnitudes
+        // (c<<P, (c+1)<<P], so the run ends one ordinal below -(c<<P).
+        Tensor<int64> RunStart(Tensor<int64> c)
+            => negative ? Scalar(0L) - (c + Scalar(1L)) * Scalar(DenseBinade) : c * Scalar(DenseBinade);
+        Tensor<int64> RunEnd(Tensor<int64> c)
+            => negative ? Scalar(0L) - c * Scalar(DenseBinade) : (c + Scalar(1L)) * Scalar(DenseBinade);
+
+        var present = Ind(OnnxOp.Less(from, to));
+        var classFrom = DenseClassOf(from);
+        var classTo = DenseClassOf(to - Scalar(1L));
+        var lowEnd = RunEnd(classFrom).Min(to);
+        var highStart = RunStart(classTo).Max(from);
+        var lowWhole = Ind(OnnxOp.Equal(from, RunStart(classFrom)))
+                     * Ind(OnnxOp.Equal(lowEnd, RunEnd(classFrom)));
+        var highWhole = Ind(OnnxOp.Equal(to, RunEnd(classTo)))
+                      * Ind(OnnxOp.Equal(highStart, RunStart(classTo)));
+
+        // One class ends the run at both ends, so its partial is the low one alone.
+        var lowCount = present * (Scalar(1L) - lowWhole) * (lowEnd - from);
+        var highCount = present * (Scalar(1L) - highWhole) * (to - highStart)
+                      * (Scalar(1L) - Ind(OnnxOp.Equal(classTo, classFrom)));
+        var first = present * (negative ? classTo + (Scalar(1L) - highWhole)
+                                        : classFrom + (Scalar(1L) - lowWhole));
+        var last = present * (negative ? classFrom - (Scalar(1L) - lowWhole)
+                                       : classTo - (Scalar(1L) - highWhole))
+                 - (Scalar(1L) - present);
+        return (from, lowCount, classFrom, highStart, highCount, classTo, first, last);
     }
 
     /// <summary>
-    /// The region table for <c>[low, high)</c>: [128] slots of (threshold, base, index bits,
-    /// lattice flag) plus the call-level lattice spacing, and the fixed result that replaces the
-    /// draw for a NaN bound or an empty range. <paramref name="low"/> and <paramref name="high"/>
-    /// are graph inputs, so every case below is data-driven — <c>RngAlgorithms</c> caches one
-    /// shared uniform <c>Function</c> and cannot specialize on their values.
+    /// The seven weight blocks of <c>[low, high)</c>: the threshold column plus the columns their
+    /// decodes read, the truncation floor and the lattice spacing, the summed weight, and the fixed
+    /// result that replaces the draw for a NaN bound or an empty range. <paramref name="low"/> and
+    /// <paramref name="high"/> are graph inputs, so every case below is data-driven —
+    /// <c>RngAlgorithms</c> caches one shared uniform <c>Function</c> and cannot specialize on
+    /// their values.
+    ///
+    /// <para>The blocks run in a FIXED order — lattice, both-sign classes, one-sign classes, the
+    /// partial class at each end of the range, the stub at each end of the lattice — and any of
+    /// them may weigh 0. An empty block's threshold is the next block's, which is exactly what
+    /// keeps it unreachable, and the trailing ones carry the total.</para>
     ///
     /// <para>Internal rather than private so a test can hold the threshold column against the
-    /// oracle slot for slot. No amount of sampling covers that column: a held-up threshold can own
-    /// a single selector code out of 2^41, so a draw-based test agrees with a wrong table.</para>
+    /// oracle's blocks. No amount of sampling covers that column: a block can own a single code out
+    /// of 2^64, so a draw-based test agrees with a table that has dropped it.</para>
     /// </summary>
-    internal static (Tensor<uint64> Threshold, Tensor<int64> Base, Tensor<int64> Shift,
-                    Tensor<int64> Lattice, Tensor<float32> Spacing,
-                    Tensor<bit> UseFixed, Tensor<float32> Fixed, Tensor<uint64> Total) BuildDenseTable(
+    internal static (Tensor<uint64> Threshold, Tensor<int64> Base, Tensor<int64> Class,
+                    Tensor<int64> Width, Tensor<int64> Shift, Tensor<int64> Negative,
+                    Tensor<int64> Geometric, Tensor<int64> Lattice, Tensor<int64> FloorClass,
+                    Tensor<float32> Spacing, Tensor<bit> UseFixed, Tensor<float32> Fixed,
+                    Tensor<uint64> Total) BuildDenseTable(
         Tensor<float32> low, Tensor<float32> high)
     {
         const long binade = DenseBinade;
@@ -519,19 +556,21 @@ internal static class RuntimeRng
                      + Ind(OnnxOp.Greater(high, Scalar(float.MaxValue)));
 
         // An inverted or empty range yields `low` — one rule covering low == high and low > high.
-        // The table is still built over a one-float range so no downstream arithmetic degenerates.
+        // The blocks are still built over a one-float range so no downstream arithmetic degenerates.
         var empty = Ind(OnnxOp.LessOrEqual(zHighRaw, zLow));
         var useFixed = (Tensor<bit>)OnnxOp.Or(notANumber, OnnxOp.Greater(empty, Scalar(0L)));
         var fixedValue = (Tensor<float32>)OnnxOp.Where(notANumber, Scalar(float.NaN), finiteLow);
         var zHigh = zHighRaw.Max(zLow + Scalar(1L));
 
         // ── Truncation floor, band and lattice ──────────────────────────────────────────
+        // A straddling range carries both signs of every class, so it keeps one class fewer: either
+        // depth tops the total out at exactly 2^64, and neither may exceed it.
         var magnitudeLow = zLow.Max(Scalar(0L) - zLow - Scalar(1L));
         var magnitudeTop = (zHigh - Scalar(1L)).Max(Scalar(0L) - zHigh);
         var topClass = (magnitudeLow / Scalar(binade)).Max(magnitudeTop / Scalar(binade)).Max(Scalar(1L));
-        var floorClass = (topClass - Scalar((long)(DenseClasses - 1))).Max(Scalar(1L));
+        var straddles = Ind(OnnxOp.Less(zLow, Scalar(0L))) * Ind(OnnxOp.Greater(zHigh, Scalar(0L)));
+        var floorClass = (topClass - Scalar((long)DenseMaxClasses - 1L) + straddles).Max(Scalar(1L));
         var floorExponent = floorClass - Scalar((long)DenseBias);
-        var latticeShift = floorClass - Scalar(1L);
         var zFloor = floorClass * Scalar(binade);
         var bandLow = (Scalar(0L) - zFloor).Max(zLow).Min(zHigh);
         var bandHigh = zFloor.Max(zLow).Min(zHigh);
@@ -545,124 +584,90 @@ internal static class RuntimeRng
         var latticeTo = (Scalar(1L) - negativeHigh) * quotientHigh
                       - negativeHigh * (quotientHigh + Scalar(1L) - exactHigh);
 
+        // A band too narrow to hold a lattice point degenerates to its low stub alone — no lattice
+        // and no high stub, since the one stub already carries the whole band's floats.
         var bandNonEmpty = Ind(OnnxOp.Less(bandLow, bandHigh));
-        // A band too narrow to hold a lattice point degenerates to its stub alone.
-        var narrow = bandNonEmpty * Ind(OnnxOp.Greater(latticeFrom, latticeTo));
-        var lattices = bandNonEmpty * (Scalar(1L) - narrow);
-        var leadStub = bandNonEmpty * (Scalar(1L) - exactLow);
-        var trailStub = lattices * (Scalar(1L) - exactHigh);
-        var negativeTo = latticeTo.Min(Scalar(0L));
-        var positiveFrom = latticeFrom.Max(Scalar(0L));
-        var negativeFull = lattices * Ind(OnnxOp.Equal(latticeFrom, Scalar(-binade)))
-                                    * Ind(OnnxOp.Equal(negativeTo, Scalar(0L)));
-        var positiveFull = lattices * Ind(OnnxOp.Equal(positiveFrom, Scalar(0L)))
-                                    * Ind(OnnxOp.Equal(latticeTo, Scalar(binade)));
+        var lattices = bandNonEmpty * (Scalar(1L) - Ind(OnnxOp.Greater(latticeFrom, latticeTo)));
+        var latticeCount = lattices * (latticeTo - latticeFrom);
+        var lowStub = bandNonEmpty * (Scalar(1L) - exactLow);
+        var highStub = lattices * (Scalar(1L) - exactHigh);
 
-        var lowAbove = Ind(OnnxOp.Less(zLow, bandLow));
-        var lowInBand = (Scalar(1L) - lowAbove) * bandNonEmpty;
-        var highAbove = Ind(OnnxOp.Less(bandHigh, zHigh));
-        var highInBand = (Scalar(1L) - highAbove) * bandNonEmpty;
-        var lowTakesNegative = lowInBand * lattices * Ind(OnnxOp.Less(latticeFrom, Scalar(0L)))
-                             * (Scalar(1L) - negativeFull);
-        var lowTakesPositive = lowInBand * lattices * Ind(OnnxOp.Greater(latticeFrom, Scalar(0L)))
-                             * Ind(OnnxOp.Equal(latticeTo, Scalar(binade)));
+        // ── Whole classes, and the partial class at each end of the range ───────────────
+        var (negLowBase, negLowCount, negLowClass, negHighBase, negHighCount, negHighClass,
+             negFirst, negLast) = DenseSplitRun(zLow, bandLow, negative: true);
+        var (posLowBase, posLowCount, posLowClass, posHighBase, posHighCount, posHighClass,
+             posFirst, posLast) = DenseSplitRun(bandHigh, zHigh, negative: false);
 
-        // ── The family at zLow ──────────────────────────────────────────────────────────
-        var negativeZLow = Ind(OnnxOp.Less(zLow, Scalar(0L)));
-        var groupLow = magnitudeLow / Scalar(binade);
-        var groupEndLow = (Scalar(1L) - Scalar(2L) * negativeZLow) * groupLow * Scalar(binade)
-                        + (Scalar(1L) - negativeZLow) * Scalar(binade);
-        var lowRunEnd = lowAbove * bandLow + (Scalar(1L) - lowAbove) * zHigh;
-        var lowOrdinalTo = groupEndLow.Min(lowRunEnd);
-        var lowFrom = lowInBand * (lowTakesNegative * latticeFrom + lowTakesPositive * positiveFrom)
-                    + (Scalar(1L) - lowInBand) * zLow;
-        var lowTo = lowInBand * (lowTakesNegative * negativeTo + lowTakesPositive * latticeTo)
-                  + (Scalar(1L) - lowInBand) * lowOrdinalTo;
+        // At most one partial class at each end of the whole range: an inner end of either run is a
+        // class boundary by construction, so only the run holding zLow can have a low partial and
+        // only the run holding zHigh a high one.
+        var negPresent = Ind(OnnxOp.Less(zLow, bandLow));
+        var posPresent = Ind(OnnxOp.Less(bandHigh, zHigh));
+        var lowBase = negPresent * negLowBase + (Scalar(1L) - negPresent) * posLowBase;
+        var lowCount = negPresent * negLowCount + (Scalar(1L) - negPresent) * posLowCount;
+        var lowClass = negPresent * negLowClass + (Scalar(1L) - negPresent) * posLowClass;
+        var highBase = posPresent * posHighBase + (Scalar(1L) - posPresent) * negHighBase;
+        var highCount = posPresent * posHighCount + (Scalar(1L) - posPresent) * negHighCount;
+        var highClass = posPresent * posHighClass + (Scalar(1L) - posPresent) * negHighClass;
 
-        var slot = OnnxOp.Range(Scalar(0L), Scalar((long)DenseEndpointN), Scalar(1L)).int64();
-        var (lowBase, lowShift, lowWeight) = DenseRunFamily(
-            slot, lowFrom, lowTo, lowInBand, (Scalar(1L) - lowInBand) * groupLow, floorClass, Scalar(0L));
-        var atFirst = Ind(OnnxOp.Equal(slot, Scalar(0L))) * leadStub;
-        var lowLattice = lowInBand * (Scalar(1L) - atFirst) + Scalar(0L) * slot;
-        lowBase = lowBase * (Scalar(1L) - atFirst) + atFirst * bandLow;
-        lowShift = lowShift * (Scalar(1L) - atFirst);
-        lowWeight = lowWeight * (Scalar(1L) - atFirst) + atFirst;
+        // The classes both rays hold whole become one block; whatever the deeper ray keeps above
+        // them becomes the other, on whichever sign that is.
+        var negWhole = negPresent * Ind(OnnxOp.GreaterOrEqual(negLast, negFirst));
+        var posWhole = posPresent * Ind(OnnxOp.GreaterOrEqual(posLast, posFirst));
+        var both = negWhole * posWhole;
+        var shared = negLast.Min(posLast);
+        var twoFirst = both * negFirst.Max(posFirst);
+        var twoLast = both * shared;
+        var oneFromNeg = negWhole * (Scalar(1L) - both) + both * Ind(OnnxOp.Greater(negLast, shared));
+        var oneFromPos = posWhole * (Scalar(1L) - both)
+                       + both * Ind(OnnxOp.LessOrEqual(negLast, shared)) * Ind(OnnxOp.Greater(posLast, shared));
+        var onePresent = oneFromNeg + oneFromPos;
+        var oneFirst = both * (shared + Scalar(1L))
+                     + (Scalar(1L) - both) * (oneFromNeg * negFirst + oneFromPos * posFirst);
+        var oneLast = oneFromNeg * negLast + oneFromPos * posLast;
 
-        // ── Full class groups, both rays ────────────────────────────────────────────────
-        var group = OnnxOp.Range(Scalar(0L), Scalar((long)DenseFullN), Scalar(1L)).int64();
-        var negativeBase = Scalar(0L) - (groupLow - group) * Scalar(binade);
-        var negativePresent = lowAbove * Ind(OnnxOp.LessOrEqual(negativeBase + Scalar(binade), bandLow));
-        var negativeWeight = negativePresent
-            * DensePow(Scalar((long)DenseP) + groupLow - Scalar(1L) - group - floorClass);
+        // ── Block weights, in units of the shallowest kept class's ulp ─────────────────
+        // A class weighs twice the one below it, so a run of whole classes sums geometrically:
+        // 2^(width + first - floorClass) * (2^(last - first + 1) - 1), width counting both signs at
+        // P+1 and one at P. Every product is provably under 2^64, the total being at most that.
+        var twoWeight = both.Cast<uint64>()
+            * DensePowU(Scalar((long)DenseP + 1L) + twoFirst - floorClass)
+            * (DensePowU(twoLast - twoFirst + Scalar(1L)) - Scalar(1UL));
+        var oneWeight = onePresent.Cast<uint64>()
+            * DensePowU(Scalar((long)DenseP) + oneFirst - floorClass)
+            * (DensePowU(oneLast - oneFirst + Scalar(1L)) - Scalar(1UL));
+        var lowWeight = lowCount.Cast<uint64>() * DensePowU(lowClass - floorClass);
+        var highWeight = highCount.Cast<uint64>() * DensePowU(highClass - floorClass);
 
-        var lowOrdinalPositive = (Scalar(1L) - lowInBand) * (Scalar(1L) - lowAbove);
-        var positiveStart = lowOrdinalPositive * groupEndLow + (Scalar(1L) - lowOrdinalPositive) * bandHigh;
-        var positiveBase = positiveStart + group * Scalar(binade);
-        var positivePresent = highAbove * Ind(OnnxOp.LessOrEqual(positiveBase + Scalar(binade), zHigh));
-        var positiveWeight = positivePresent
-            * DensePow(Scalar((long)DenseP) + positiveBase / Scalar(binade) - floorClass);
+        // ── Thresholds ─────────────────────────────────────────────────────────────────
+        // A block's threshold IS its cumulative weight — no scaling, no division, no rounding — so
+        // six adds do what a CumSum would, which is just as well: ORT has no uint64 kernel for one.
+        // The total may reach exactly 2^64 and WRAP to 0, which is the sentinel for it; no
+        // threshold can carry that value, so only the total ever means something other than itself.
+        Tensor<uint64>[] weight =
+        [
+            latticeCount.Cast<uint64>(), twoWeight, oneWeight, lowWeight, highWeight,
+            lowStub.Cast<uint64>(), highStub.Cast<uint64>(),
+        ];
+        Tensor<uint64>[] cumulative = new Tensor<uint64>[DenseBlocks];
+        cumulative[0] = Scalar(0UL);
+        for (int i = 1; i < DenseBlocks; i++) cumulative[i] = cumulative[i - 1] + weight[i - 1];
+        var total = cumulative[DenseBlocks - 1] + weight[DenseBlocks - 1];
 
-        // ── The family at zHigh ─────────────────────────────────────────────────────────
-        var magnitudeHigh = magnitudeTop;
-        var negativeZHigh = Ind(OnnxOp.Less(zHigh - Scalar(1L), Scalar(0L)));
-        var groupHigh = magnitudeHigh / Scalar(binade);
-        var groupStartHigh = (Scalar(1L) - Scalar(2L) * negativeZHigh) * groupHigh * Scalar(binade)
-                           - negativeZHigh * Scalar(binade);
-        var highRunFrom = highAbove * bandHigh + (Scalar(1L) - highAbove) * zLow;
-        var highOrdinalFrom = groupStartHigh.Max(highRunFrom);
-        // The trailing class group is a slot of its own only when it is PARTIAL and not already
-        // covered by the family at zLow — a full one is a plain class group above.
-        var covered = (Scalar(1L) - lowInBand) * Ind(OnnxOp.GreaterOrEqual(lowOrdinalTo, zHigh));
-        var trailing = (Scalar(1L) - covered) * Ind(OnnxOp.Less(zHigh - groupStartHigh, Scalar(binade)));
-        var highOrdinalTo = highOrdinalFrom + trailing * (zHigh - highOrdinalFrom);
-        var highTakesNegative = lattices * (Scalar(1L) - negativeFull) * (Scalar(1L) - lowTakesNegative)
-                              * Ind(OnnxOp.Less(latticeFrom, negativeTo));
-        var highTakesPositive = lattices * (Scalar(1L) - positiveFull) * (Scalar(1L) - lowTakesPositive)
-                              * Ind(OnnxOp.Less(positiveFrom, latticeTo));
-        var highFrom = highInBand * (highTakesNegative * latticeFrom + highTakesPositive * positiveFrom)
-                     + (Scalar(1L) - highInBand) * highOrdinalFrom;
-        var highTo = highInBand * (highTakesNegative * negativeTo + highTakesPositive * latticeTo)
-                   + (Scalar(1L) - highInBand) * highOrdinalTo;
-
-        var (highBase, highShift, highWeight) = DenseRunFamily(
-            slot, highFrom, highTo, highInBand, (Scalar(1L) - highInBand) * groupHigh, floorClass, trailStub);
-        var atLast = Ind(OnnxOp.Equal(slot, Scalar((long)(DenseEndpointN - 1)))) * trailStub;
-        var highLattice = highInBand + Scalar(0L) * slot;
-        highBase = highBase * (Scalar(1L) - atLast) + atLast * latticeTo;
-        highShift = highShift * (Scalar(1L) - atLast);
-        highWeight = highWeight * (Scalar(1L) - atLast) + atLast;
-
-        // ── Assemble the [128] table ────────────────────────────────────────────────────
-        var one = Vector(1L);
-        var pad = Vector(0L, 0L);
-        var bases = lowBase
-            .Concat(0, negativePresent * negativeBase, (negativeFull * Scalar(-binade)).Reshape(one),
-                    Scalar(0L).Reshape(one), positivePresent * positiveBase, highBase, pad);
-        var shifts = lowShift
-            .Concat(0, negativePresent * (groupLow - Scalar(1L) - group - floorClass),
-                    Scalar(0L).Reshape(one), Scalar(0L).Reshape(one),
-                    positivePresent * (positiveBase / Scalar(binade) - floorClass), highShift, pad);
-        var lattice = lowLattice
-            .Concat(0, Scalar(0L) * group, negativeFull.Reshape(one), positiveFull.Reshape(one),
-                    Scalar(0L) * group, highLattice, pad);
-        var weights = lowWeight
-            .Concat(0, negativeWeight, (negativeFull * Scalar(1L << DenseP)).Reshape(one),
-                    (positiveFull * Scalar(1L << DenseP)).Reshape(one), positiveWeight, highWeight, pad);
-
-        // ── Thresholds ──────────────────────────────────────────────────────────────────
-        // A region's threshold IS its cumulative weight — no scaling, no division, no rounding.
-        // An empty slot contributes 0, so it lands on the NEXT non-empty slot's threshold, which
-        // keeps the table monotone for the binary search and keeps the empty slot unreachable:
-        // the search takes the LAST slot at or below the scaled draw. The slots past the last
-        // non-empty one carry the whole total, which no scaled draw reaches.
-        //
-        // Sum and CumSum have no uint64 kernel in onnxruntime, so both round-trip through int64.
-        // That is exact only while the total stays under 2^63 — which is what pins DenseClasses.
-        var total = weights.Reduce(ReduceKind.Sum, Vector(0L), keepDims: false).Cast<uint64>()
-                           .Max(Scalar(1UL));
-        var threshold = weights.CumSum(Scalar(0L), exclusive: true).Cast<uint64>();
+        // ── The block columns ──────────────────────────────────────────────────────────
+        // Base is a lattice index for the lattice and its stub, an ordinal for the partials and the
+        // low stub, and unread by the geometric blocks; Shift is the partials' weight per ordinal.
+        Tensor<int64> zero = Scalar(0L);
         var spacing = (Tensor<float32>)OnnxOp.Gather(Vector(DenseSpacing), floorClass, axis: 0);
-        return (threshold, bases, shifts, lattice, spacing, useFixed, fixedValue, total);
+        return (DenseColumn(cumulative),
+                DenseColumn(latticeFrom, zero, zero, lowBase, highBase, bandLow, latticeTo),
+                DenseColumn(zero, twoFirst, oneFirst, zero, zero, zero, zero),
+                Vector(0L, DenseP + 1L, DenseP, 0L, 0L, 0L, 0L),
+                DenseColumn(zero, zero, zero, lowClass - floorClass, highClass - floorClass, zero, zero),
+                DenseColumn(zero, zero, oneFromNeg, zero, zero, zero, zero),
+                Vector(0L, 1L, 1L, 0L, 0L, 0L, 0L),
+                Vector(1L, 0L, 0L, 0L, 0L, 0L, 1L),
+                floorClass, spacing, useFixed, fixedValue, total);
     }
 
     /// <summary>The high half of the 128-bit product a·b — Lemire's multiply-shift, which scales a
@@ -683,54 +688,91 @@ internal static class RuntimeRng
 
     /// <summary>
     /// U(low, high) of the given shape, drawn densely: from one 64-bit generator value per element,
-    /// with no rejection and a static node count. The draw splits as region selector (the top 41
-    /// bits) against the cumulative threshold table, and index within the region (the low 23 bits).
+    /// with no rejection and a static node count. The whole draw scales onto the weight axis, the
+    /// blocks' cumulative thresholds pick the block, and the offset above the winning threshold
+    /// decodes in closed form — a lattice point, a run of ordinals, or a member of a run of whole
+    /// weight classes.
     ///
-    /// <para><b>Reachable floats.</b> Every float within the top <c>DenseClasses</c> weight classes
-    /// of the range is reachable, with probability proportional to its ulp up to the selector's
-    /// 2^-41 resolution (a region under that share is rounded up to one code; worst measured
-    /// over-weighting 2^20 on a weight-1 stub, worst total variation 2^-37). Below that truncation
-    /// floor an even lattice carries the mass, and those floats are <b>not</b> individually
-    /// reachable — 30.7% of the floats in [0,1) are reachable, 15.3% over the whole finite domain.
-    /// The draw is still uniform in value there; it is resolution that is spent, not fairness.</para>
+    /// <para><b>Reachable floats.</b> Every float within the top 41 weight classes of the range —
+    /// 40 when it straddles zero — is reachable with probability exactly proportional to its ulp,
+    /// since selection rounds nothing. Below that truncation floor an even lattice carries the
+    /// mass, and those floats are <b>not</b> individually reachable — 30.7% of the floats in [0,1)
+    /// are reachable, 15.3% over the whole finite domain. The draw is still uniform in value there;
+    /// it is resolution that is spent, not fairness.</para>
     ///
     /// <para>The interval is half-open — <c>high</c> is not attainable, matching PyTorch
     /// <c>uniform_</c>, Keras <c>RandomUniform</c> and ONNX <c>RandomUniform</c>. An inverted or
     /// empty range yields <c>low</c>; a NaN bound yields NaN; infinite bounds clamp to the finite
     /// extremes.</para>
     ///
-    /// <para>Selection is a 7-round binary search over the [128] table. It needs no bounds clamp —
-    /// starting at 0, the steps 64+32+…+1 total 127 — and no <c>T[0] &lt;= s</c> guard, because
-    /// slot 0's threshold is structurally 0 (its cumulative weight is). Both facts are load-bearing
-    /// if the table's shape is ever changed.</para>
+    /// <para>Selection needs no search: over seven blocks, counting the thresholds at or below the
+    /// scaled draw is cheaper than walking a tree, and the count IS the block index because an
+    /// empty block carries the following block's threshold and so is never counted alone.</para>
     /// </summary>
     public static Tensor<float32> Uniform(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex,
         Scalar<float32> low, Scalar<float32> high, int rounds = Threefry2x32.Rounds)
     {
-        var (threshold, bases, shifts, lattice, spacing, useFixed, fixedValue, total) =
-            BuildDenseTable(low, high);
+        var (threshold, bases, classes, widths, shifts, negatives, geometrics, lattices,
+             floorClass, spacing, useFixed, fixedValue, total) = BuildDenseTable(low, high);
         var draw = Draw(ElementCount(shape), key, substreamIndex, rounds);
-        // The whole draw, scaled onto the weight axis. The offset above the chosen region's
-        // threshold is then in weight units, and one point of that region spans 2^shift of them.
-        var scaled = DenseMulHigh(draw, total);
+        // The whole draw, scaled onto the weight axis: floor(draw*total / 2^64). A total of 0 is
+        // the 2^64 sentinel, where the scaling is the identity — mulhi by 0 is 0, so adding the
+        // draw back covers that case without a branch.
+        var scaled = DenseMulHigh(draw, total) + IndU(OnnxOp.Equal(total, Scalar(0UL))) * draw;
 
+        // The owning block, as the count of thresholds at or below the scaled draw. The second
+        // factor drops the trailing empty blocks, whose threshold IS the total: that may have
+        // wrapped to 0, which would otherwise sit at or below every draw.
         Tensor<int64> found = scaled.Cast<int64>() * Scalar(0L);
-        foreach (long step in (long[])[64L, 32L, 16L, 8L, 4L, 2L, 1L])
+        for (long block = 1; block < DenseBlocks; block++)
         {
-            var probe = OnnxOp.Gather(threshold, found + Scalar(step), axis: 0).uint64();
-            found = found + (Scalar(1L) - Ind(OnnxOp.Greater(probe, scaled))) * Scalar(step);
+            var probe = OnnxOp.Gather(threshold, Scalar(block), axis: 0).uint64();
+            found = found + (Scalar(1L) - Ind(OnnxOp.Greater(probe, scaled)))
+                          * (Scalar(1L) - Ind(OnnxOp.Equal(probe, total)));
         }
-        var regionBase = OnnxOp.Gather(bases, found, axis: 0).int64();
-        var regionShift = OnnxOp.Gather(shifts, found, axis: 0).int64().Cast<uint64>();
-        var regionLattice = OnnxOp.Gather(lattice, found, axis: 0).int64();
+        var blockBase = OnnxOp.Gather(bases, found, axis: 0).int64();
+        var blockClass = OnnxOp.Gather(classes, found, axis: 0).int64();
+        var blockWidth = OnnxOp.Gather(widths, found, axis: 0).int64();
+        var blockShift = OnnxOp.Gather(shifts, found, axis: 0).int64().Cast<uint64>();
+        var blockNegative = OnnxOp.Gather(negatives, found, axis: 0).int64();
+        var geometric = OnnxOp.Gather(geometrics, found, axis: 0).int64();
+        var lattice = OnnxOp.Gather(lattices, found, axis: 0).int64();
         var offset = scaled - OnnxOp.Gather(threshold, found, axis: 0).uint64();
-        var value = regionBase + ShiftDown(offset, regionShift).Cast<int64>();
+
+        // A run of whole classes decodes in closed form, because each class weighs twice the one
+        // below it: offset + 2^m carries the class in the position of its leading bit — m is the
+        // first class's own weight, in [P, 63], so the sum stays under 2^64 — and the member in its
+        // low `width` bits, which is where the draw's own low bits are.
+        var m = blockWidth + blockClass - floorClass;
+        var shifted = offset + DensePowU(m);
+        Tensor<int64> lead = Scalar(0L);
+        foreach (long step in (long[])[32L, 16L, 8L, 4L, 2L, 1L])
+            lead = lead + Scalar(step) * Ind(OnnxOp.Greater(
+                ShiftDown(shifted, (lead + Scalar(step)).Cast<uint64>()), Scalar(0UL)));
+        var index = OnnxOp.BitwiseAnd(shifted, DensePowU(blockWidth) - Scalar(1UL)).uint64();
+        var mantissa = OnnxOp.BitwiseAnd(index, Scalar((ulong)DenseBinade - 1UL)).uint64().Cast<int64>();
+
+        // A both-signs block spends the index's top bit on the sign; a one-sign block took its own.
+        var twoSided = Ind(OnnxOp.Equal(blockWidth, Scalar((long)DenseP + 1L)));
+        var negative = twoSided * ShiftDown(index, Scalar((ulong)DenseP)).Cast<int64>()
+                     + (Scalar(1L) - twoSided) * blockNegative;
+        // Negative class c is the magnitudes (c<<P, (c+1)<<P], so its mant'th member sits at
+        // ordinal -((c+1)<<P) + mant rather than the positive side's (c<<P) + mant.
+        var classIndex = blockClass + lead - m;
+        var classOrdinal = (Scalar(1L) - Scalar(2L) * negative) * classIndex * Scalar(DenseBinade)
+                         - negative * Scalar(DenseBinade) + mantissa;
+
+        // Everything else is a run: base + offset >> shift, an ordinal for the partial classes and
+        // the low stub, a lattice index for the lattice and its stub. Zeroing it in uint64 keeps a
+        // whole-width geometric offset away from the int64 cast.
+        var run = ((Scalar(1UL) - geometric.Cast<uint64>()) * ShiftDown(offset, blockShift)).Cast<int64>();
+        var value = geometric * classOrdinal + (Scalar(1L) - geometric) * blockBase + run;
 
         // The lattice decode is the one float step: a lattice point is n·spacing with |n| <= 2^23,
         // so the cast is exact and the scaling only moves the exponent. Multiplying by the lattice
-        // flag first keeps the cast in range on an ordinal region too.
-        var latticeValue = (value * regionLattice).Cast<float32>() * spacing;
+        // flag first keeps the cast in range on an ordinal block too.
+        var latticeValue = (value * lattice).Cast<float32>() * spacing;
 
         // The ordinal decode reassembles (1 + m·2^-23)·2^(e-127) — every step exact in float32,
         // and the same value the oracle assembles bitwise.
@@ -744,7 +786,7 @@ internal static class RuntimeRng
         var ordinalValue = sign * fraction * scale;
 
         var drawn = (Tensor<float32>)OnnxOp.Where(
-            (Tensor<bit>)OnnxOp.Greater(regionLattice, Scalar(0L)), latticeValue, ordinalValue);
+            (Tensor<bit>)OnnxOp.Greater(lattice, Scalar(0L)), latticeValue, ordinalValue);
         return ((Tensor<float32>)OnnxOp.Where(useFixed, fixedValue, drawn)).Reshape(shape);
     }
 

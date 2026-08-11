@@ -173,14 +173,14 @@ public partial class RngDenseUniformOracleCheck
 }
 
 /// <summary>
-/// The selector thresholds the graph builds for a batch of ranges, [Ranges * 128], so a test can
-/// hold them against the oracle's. Sampling draws cannot: a held-up threshold may own one selector
-/// code in 2^41, and every draw-based check agrees with a table that has dropped it.
+/// The block thresholds the graph builds for a batch of ranges, [Ranges * 7], so a test can hold
+/// them against the oracle's. Sampling draws cannot: a held-up threshold may own one code in 2^64,
+/// and every draw-based check agrees with a table that has dropped it.
 /// </summary>
 [Module]
 public partial class RngDenseThresholdTable
 {
-    public const int Ranges = 6, Slots = 128;
+    public const int Ranges = 6, Slots = 7;
 
     public static Tensor<uint64> Inline(Tensor<float32> bounds)
     {
@@ -476,9 +476,10 @@ public class RngRuntimeTests
             .As<uint64>().AccessMemory().ToArray()];
     }
 
-    // The graph's [128] table interleaves empty slots among the oracle's live ones, each carrying
-    // the following live slot's threshold; the trailing empties carry the total. So the graph's
-    // distinct thresholds, minus that total, are exactly the oracle's.
+    // The graph's seven thresholds are the oracle's blocks in the same order, except that an empty
+    // block carries the following one's threshold and the trailing empties carry the total. So the
+    // graph's distinct thresholds, minus that total, are exactly the oracle's — and a total of 0
+    // means 2^64, which no threshold can hold, so then nothing is dropped.
     private static void AssertThresholdsMatchOracle((float Low, float High)[] ranges)
     {
         ulong[] graph = GraphThresholds(ranges);
@@ -487,8 +488,9 @@ public class RngRuntimeTests
             var table = RngDenseUniformOracle.Build(ranges[r].Low, ranges[r].High);
             if (table.Fixed is not null) continue;
             ulong[] got = [.. graph.Skip(r * RngDenseThresholdTable.Slots)
-                .Take(RngDenseThresholdTable.Slots).Distinct().Where(t => t != table.Total).Order()];
-            Assert.Equal([.. table.Blocks.Select(s => s.Threshold)], got);
+                .Take(RngDenseThresholdTable.Slots).Distinct()
+                .Where(t => table.Total == 0 || t != table.Total).Order()];
+            Assert.Equal([.. table.Blocks.Select(b => b.Threshold)], got);
         }
     }
 

@@ -107,7 +107,7 @@ public class RngLoopTests
     private static readonly float[] XVals = [10f, 20f, 30f, 40f, 50f, 60f, 70f, 80f];
 
     private static float HostUniform(long e, ulong key)
-        => RngTestOracle.DrawUniform(key, substreamIndex: 0, e);
+        => RngDenseUniformOracle.Draw(key, substreamIndex: 0, e, 0f, 1f);
 
     // The feed's ModelId is [1, -1, 1]: the runtime master folds slot 1, then the iteration
     // index, then the feed's slot under the loop (1).

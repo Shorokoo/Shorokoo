@@ -206,10 +206,15 @@ public class RngInitFrozenDerivationTests
         Assert.Equal(paths.Length, batched.Distinct().Count());
 
         // Layer 2: the full materialized values (counter scheme, rounds, uniform transform,
-        // substreamIndex ordinal, initializer scaling). REFERENCE: golden. Exact equality is
-        // safe cross-backend — Threefry integer ops plus IEEE-exact float multiply/add.
-        float[] expected0 = [-1.1705362f, 1.1747282f, -0.712966f, 0.79320914f, 0.6726147f, 0.2452252f, -0.8070271f, 0.37819877f, 0.9991419f, 0.48801103f, -0.4576206f, -0.8197249f, 0.7232434f, -0.03526976f, 0.12717023f, 0.85879606f];
-        float[] expected1 = [0.7838474f, -1.1139508f, -0.9902949f, 1.135168f, -1.1637465f, 0.53423357f, 0.23805605f, 0.79275525f, 0.95183843f, -0.45805848f, -0.8152901f, -0.2609252f, -0.8792722f, 0.5500836f, 0.5775165f, 0.9517283f];
+        // substreamIndex ordinal, initializer scaling). REFERENCE: the dense uniform oracle, an
+        // independent host rebuild — KaimingUniform is RandomUniform(-1, 1) scaled by
+        // sqrt(6/fanIn), and fanIn is 4 for both [4,4] weights. Exact equality is safe
+        // cross-backend: Threefry integer ops plus IEEE-exact float multiply.
+        float kaiming = MathF.Sqrt(6f / 4f);
+        float[] expected0 = [.. Enumerable.Range(0, 16)
+            .Select(i => RngDenseUniformOracle.Draw(keys[0], 0, i, -1f, 1f) * kaiming)];
+        float[] expected1 = [.. Enumerable.Range(0, 16)
+            .Select(i => RngDenseUniformOracle.Draw(keys[1], 0, i, -1f, 1f) * kaiming)];
 
         var g = RngInitTwoLinears.ComputationGraph;
         var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
@@ -224,8 +229,10 @@ public class RngInitFrozenDerivationTests
         // Layer 3: an initializer that draws TWICE. Both draws share the parameter's ONE stream
         // key and are separated only by their substreamIndex ordinal — this golden pins that
         // ordinal assignment, which the relational assertions above cannot see.
-        float[] multiDraw =
-        [0.31585765f, 0.21880347f, 0.17880033f, 0.23017395f, 0.2856346f, 0.55870205f, 0.14583084f, 0.17104696f, 0.5075757f, 0.074125335f, 0.2884086f, 0.12671219f, 0.017829021f, 0.14411132f, 0.33035496f, 0.088769004f];
+        ulong multiKey = RngTestOracle.InitKey(cfg, (int[])[1]);
+        float[] multiDraw = [.. Enumerable.Range(0, 16).Select(i =>
+            RngDenseUniformOracle.Draw(multiKey, 0, i, 0f, 1f)
+            * ((uint)RngTestOracle.DrawBits(multiKey, 1, i, 32) * (1.0f / 4294967296.0f)))];
 
         var mg = BitsIntermediateTrainableLayer.ComputationGraph;
         var w = mg.ToConcreteArchitecture(mg.FromOrderedInputs([sample]))

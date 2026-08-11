@@ -19,21 +19,28 @@ namespace Shorokoo.Tests;
 /// 2^IndexBits representable floats carrying one weight each. Above the truncation floor
 /// 2^(L) the regions are the float grid itself, cut into class groups and then into descending
 /// power-of-two blocks; below it a coarse even lattice of spacing 2^(L-P) carries the remaining
-/// mass. One 64-bit draw decodes as a 41-bit region selector against a cumulative threshold table
-/// plus the top bits of a 23-bit index.</para>
+/// mass.</para>
 ///
-/// <para>A region whose weight is under total/2^41 would floor to its predecessor's threshold and
-/// so be allotted no selector codes at all; each threshold is therefore held one above the last.
-/// That rounds such a region UP to a 2^-41 share rather than dropping it, and costs nothing
-/// wherever the floors were already strictly increasing — as they are on [0,1), where above the
-/// truncation floor this draw is bit-for-bit Walker/Reynolds. Below the floor it is not: the
-/// lattice reaches 2^-61 and exact zero where Walker stops at 2^-41.</para>
+/// <para>Selection uses the WHOLE 64-bit draw. A region's threshold is its exact cumulative
+/// weight, and the draw is scaled onto the weight axis by <c>floor(draw*total / 2^64)</c> — the
+/// high half of the 128-bit product, Lemire's multiply-shift. The offset of the scaled draw above
+/// the chosen region's threshold is in weight units, so the index within the region is that offset
+/// shifted right by <see cref="Slot.Shift"/>. No region is quantized: the old 41-bit selector
+/// rounded a sub-2^-41 region UP to a 2^-41 share, over-weighting a weight-1 stub by 2^20.</para>
 ///
 /// <para>Every weight is expressed in <b>spacing units</b> (multiples of the shallowest kept
-/// class's ulp), which keeps the cumulative table inside int64 by construction and caps the
-/// truncation depth at K = 38. Thresholds come from restoring binary long division, because
-/// 2^41·C overflows int64 and binary64 is not usable — the Quick Execution Engine evaluates every
-/// float dtype in binary32 (Shorokoo#157).</para>
+/// class's ulp). A range straddling zero totals 2^(24+K), so K = 39 is the ceiling: the trailing
+/// empty slots carry the total as their threshold, and at K = 40 that total is exactly 2^64 —
+/// unrepresentable, so those slots would wrap to 0 and destroy the table's monotonicity, which
+/// the search depends on. Scaling itself survives 2^64 (mulhi by a wrapped 0 total plus the draw
+/// is the identity); the THRESHOLD table is what caps K, and no sentinel above 2^64-1 exists.</para>
+///
+/// <para>On [0,1) above the truncation floor this draw follows Walker/Reynolds' geometric law,
+/// structurally: the total is an exact power of two, so the scaling is an exact shift, the binade
+/// thresholds are 2^60, 2^59, … so the search IS a leading-zero count, and Shift extracts the
+/// mantissa. It is no longer bit-for-bit against a 41/23 split, which read the mantissa from the
+/// draw's LOW bits; the mantissa now comes from the bits under the leading one. Below the floor
+/// the law does not hold at all: the lattice reaches exact zero where Walker stops at 2^-41.</para>
 /// </summary>
 internal static class RngDenseUniformOracle
 {
@@ -41,8 +48,8 @@ internal static class RngDenseUniformOracle
     public const int Bias = 127;
     public const int MinExponent = 1 - Bias;
     public const int MaxClasses = 38;
-    public const int SelectorBits = 64 - P;
-    public const int MaxSlots = 128;
+    public const int SearchRounds = 7;
+    public const int MaxSlots = 1 << SearchRounds;
 
     private const long SignMask = 1L << 31;
     private const long SigMask = (1L << P) - 1;
@@ -51,11 +58,14 @@ internal static class RngDenseUniformOracle
     private const long InfinityOrdinal = 255L << P;
 
     /// <summary>One region: 2^IndexBits floats, Base + idx·1 in ordinal space, or the lattice
-    /// points (Base + idx)·2^LatticeShift·delta when <see cref="Lattice"/>.</summary>
+    /// points (Base + idx)·2^LatticeShift·delta when <see cref="Lattice"/>. Threshold is the
+    /// region's exact cumulative weight; Shift is how many weight units one of its points spans,
+    /// as a power of two, so Weight == 2^(IndexBits + Shift) always.</summary>
     internal readonly record struct Slot(
-        long Threshold, long Base, int IndexBits, bool Lattice, int LatticeShift, long Weight);
+        ulong Threshold, long Base, int IndexBits, int Shift, bool Lattice, int LatticeShift, ulong Weight);
 
-    internal sealed record Table(Slot[] Slots, long Total, long ZLow, long ZHigh, int FloorClass, uint? Fixed);
+    /// <summary>Total is the summed weight, where <b>0 means exactly 2^64</b>.</summary>
+    internal sealed record Table(Slot[] Slots, ulong Total, long ZLow, long ZHigh, int FloorClass, uint? Fixed);
 
     private static long SignedOrdinal(uint bits)
         => (bits & 0x8000_0000u) != 0 ? -(long)(bits & 0x7FFF_FFFFu) : (long)bits;
@@ -124,35 +134,21 @@ internal static class RngDenseUniformOracle
         AddBand(slots, bandLow, bandHigh, floorClass, floorExponent);
         AddOrdinalRun(slots, bandHigh, zHigh, floorClass);
 
-        long total = 0;
-        foreach (Slot s in slots) total += s.Weight;
-
         Slot[] table = [.. slots];
-        long cumulative = 0, previous = -1;
+        ulong cumulative = 0;
         for (int i = 0; i < table.Length; i++)
         {
-            long floor = LongDivide(cumulative, total);
-            long threshold = Math.Min(Math.Max(floor, previous + 1), (1L << SelectorBits) - (table.Length - i));
-            table[i] = table[i] with { Threshold = threshold };
-            previous = threshold;
+            table[i] = table[i] with { Threshold = cumulative };
             cumulative += table[i].Weight;
         }
-        return new Table(table, total, zLow, zHigh, floorClass, null);
+        return new Table(table, cumulative, zLow, zHigh, floorClass, null);
     }
 
-    /// <summary>floor(cumulative·2^41 / total), exactly, in int64. Every intermediate stays under
-    /// 2^63 because total never exceeds 2^62 — which is what pins the depth at K = 38.</summary>
-    public static long LongDivide(long cumulative, long total)
-    {
-        long remainder = cumulative, quotient = 0;
-        for (int i = 0; i < SelectorBits; i++)
-        {
-            remainder <<= 1;
-            quotient <<= 1;
-            if (remainder >= total) { remainder -= total; quotient++; }
-        }
-        return quotient;
-    }
+    /// <summary>The draw scaled onto the weight axis: floor(draw·total / 2^64), the high half of
+    /// the 128-bit product. A total of 0 means exactly 2^64, where the scaling is the identity;
+    /// mulhi by 0 is 0, so adding it back covers that case without a branch.</summary>
+    public static ulong Scale(ulong draw, ulong total)
+        => (ulong)(((UInt128)draw * total) >> 64) + (total == 0 ? draw : 0);
 
     private static void AddOrdinalRun(List<Slot> slots, long from, long to, int floorClass)
     {
@@ -164,7 +160,7 @@ internal static class RngDenseUniformOracle
             while (cur < groupEnd)
             {
                 int bits = 63 - System.Numerics.BitOperations.LeadingZeroCount((ulong)(groupEnd - cur));
-                slots.Add(new Slot(0, cur, bits, false, 0, 1L << (bits + cls - floorClass)));
+                slots.Add(new Slot(0, cur, bits, cls - floorClass, false, 0, 1UL << (bits + cls - floorClass)));
                 cur += 1L << bits;
             }
         }
@@ -177,14 +173,14 @@ internal static class RngDenseUniformOracle
         long end = LatticeFloor(to, floorExponent);
         int shift = floorClass - 1;
 
-        if (start > end) { slots.Add(new Slot(0, from, 0, false, 0, 1)); return; }
+        if (start > end) { slots.Add(new Slot(0, from, 0, 0, false, 0, 1)); return; }
         if (LatticeFloor(from, floorExponent) != start || !IsOnLattice(from, floorExponent))
-            slots.Add(new Slot(0, from, 0, false, 0, 1));
+            slots.Add(new Slot(0, from, 0, 0, false, 0, 1));
 
         AddLatticeRun(slots, start, Math.Min(end, 0), shift);
         AddLatticeRun(slots, Math.Max(start, 0), end, shift);
 
-        if (!IsOnLattice(to, floorExponent)) slots.Add(new Slot(0, end, 0, true, shift, 1));
+        if (!IsOnLattice(to, floorExponent)) slots.Add(new Slot(0, end, 0, 0, true, shift, 1));
     }
 
     private static bool IsOnLattice(long z, int floorExponent)
@@ -196,7 +192,7 @@ internal static class RngDenseUniformOracle
         while (cur < to)
         {
             int bits = 63 - System.Numerics.BitOperations.LeadingZeroCount((ulong)(to - cur));
-            slots.Add(new Slot(0, cur, bits, true, shift, 1L << bits));
+            slots.Add(new Slot(0, cur, bits, 0, true, shift, 1UL << bits));
             cur += 1L << bits;
         }
     }
@@ -217,16 +213,15 @@ internal static class RngDenseUniformOracle
     public static uint SampleBits(Table table, ulong draw)
     {
         if (table.Fixed is uint fixedResult) return fixedResult;
-        long selector = (long)(draw >> P);
-        long index = (long)(draw & (ulong)SigMask);
+        ulong scaled = Scale(draw, table.Total);
         int lo = 0, hi = table.Slots.Length - 1;
         while (lo < hi)
         {
             int mid = (lo + hi + 1) >> 1;
-            if (table.Slots[mid].Threshold <= selector) lo = mid; else hi = mid - 1;
+            if (table.Slots[mid].Threshold <= scaled) lo = mid; else hi = mid - 1;
         }
         Slot s = table.Slots[lo];
-        long idx = index >> (P - s.IndexBits);
+        long idx = (long)((scaled - s.Threshold) >> s.Shift);
         return s.Lattice ? BitsOfLatticePoint(s.Base + idx, s.LatticeShift) : BitsOfOrdinal(s.Base + idx);
     }
 

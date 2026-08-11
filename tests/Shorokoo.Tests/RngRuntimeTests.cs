@@ -61,55 +61,79 @@ public partial class RtFcWithRngFeed
 
 /// <summary>
 /// The op/dtype pairs the region-table uniform draw depends on, checked in-graph so both ONNX
-/// Runtime and the Quick Execution Engine must agree: a computed (non-constant) int64 table
+/// Runtime and the Quick Execution Engine must agree: a computed (non-constant) uint64 table
 /// gathered with computed indices, the restoring long division that builds the threshold table,
-/// and a binary search over that table checked against a linear scan.
+/// the running max that holds each threshold above the last, and a binary search over the table
+/// checked against a linear scan.
 ///
-/// <para>The division uses arithmetic selection rather than <c>Where</c>, and multiplication by
-/// two rather than <c>BitShift</c> — ONNX constrains BitShift to unsigned types, and a uint64
-/// <c>Where</c> is unimplemented in ORT.</para>
+/// <para>The table is <c>uint64</c> because <c>Max</c> on <c>int64</c> mis-orders operands in
+/// [2^31, 2^32) and the running max walks straight through that band. The division uses
+/// arithmetic selection rather than <c>Where</c>, multiplication by two rather than
+/// <c>BitShift</c>, and <c>Greater</c> negated rather than <c>GreaterOrEqual</c> or
+/// <c>LessOrEqual</c> — a uint64 <c>Where</c> is unimplemented in ORT, and these are the forms
+/// it does implement.</para>
 /// </summary>
 [Module]
 public partial class RngRegionSelectionOpsCheck
 {
-    private static Tensor<int64> LongDivide(Tensor<int64> cumulative, Tensor<int64> total, int bits)
+    private static Tensor<uint64> AtLeast(Tensor<uint64> a, Tensor<uint64> b)
+        => Scalar(1UL) - ((Tensor<bit>)OnnxOp.Greater(b, a)).Cast<uint64>();
+
+    private static Tensor<uint64> LongDivide(Tensor<uint64> cumulative, Tensor<uint64> total, int bits)
     {
         var remainder = cumulative;
-        var quotient = cumulative * Scalar(0L);
+        var quotient = cumulative * Scalar(0UL);
         for (int i = 0; i < bits; i++)
         {
-            remainder = remainder * Scalar(2L);
-            var ge = ((Tensor<bit>)OnnxOp.GreaterOrEqual(remainder, total)).Cast<int64>();
+            remainder = remainder * Scalar(2UL);
+            var ge = AtLeast(remainder, total);
             remainder = remainder - (ge * total);
-            quotient = (quotient * Scalar(2L)) + ge;
+            quotient = (quotient * Scalar(2UL)) + ge;
         }
         return quotient;
     }
 
     public static Scalar<bit> Inline(Tensor<int64> c, Tensor<int64> t, Tensor<int64> s, Tensor<float32> x)
     {
-        var mismatch = IntMismatch(LongDivide(c, t, 41),
+        var mismatch = IntMismatch(LongDivide(c.Cast<uint64>(), t.Cast<uint64>(), 41).Cast<int64>(),
             Vector(0L, 733007751850L, 1466015503701L, 314146179364L, 2199023255551L, 999556025250L, 1099511627775L));
 
         // A [128] table that cannot be constant-folded: it carries the runtime element count.
         var n = x.ShapeTensor().Reduce(ReduceKind.Prod);
         var slots = OnnxOp.Range(Scalar(0L), Scalar(128L), Scalar(1L)).int64();
-        var table = slots * (n + Scalar(9L));                 // T[0] = 0, stride carries the runtime count
+        var stride = n + Scalar(9L);
+        var table = (slots * stride).Cast<uint64>();          // T[0] = 0, stride carries the runtime count
 
         // Gather with computed, descending indices — a real gather, not a slice in disguise.
         var pick = Scalar(126L) - OnnxOp.Range(Scalar(0L), Scalar(128L), Scalar(18L)).int64();
-        var gathered = ((Tensor<int64>)OnnxOp.Gather(table, pick, axis: 0)) - (pick * (n + Scalar(9L)));
+        var gathered = ((Tensor<uint64>)OnnxOp.Gather(table, pick, axis: 0)).Cast<int64>() - (pick * stride);
         mismatch = mismatch + IntMismatch(gathered, Vector(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L));
 
+        // The seven-round running max, run twice over the same non-monotone sequence: in uint64
+        // scaled across 2^31, and in int64 left well below it. Scaling commutes with a max, so the
+        // two must agree — and they do not if int64 Max is used above 2^31, which is why the
+        // product's table is unsigned.
+        var wave = Scalar(63L) - (slots * slots) % Scalar(64L);
+        var scale = Scalar(70_000_000UL);
+        var big = (wave * stride).Cast<uint64>() * scale;
+        foreach (long back in (long[])[1L, 2L, 4L, 8L, 16L, 32L, 64L])
+        {
+            var shifted = (slots - Scalar(back)).Max(Scalar(0L));
+            big = big.Max(OnnxOp.Gather(big, shifted, axis: 0).uint64());
+            wave = wave.Max(OnnxOp.Gather(wave, shifted, axis: 0).int64());
+        }
+        mismatch = mismatch + IntMismatch(
+            (big - (wave * stride).Cast<uint64>() * scale).Cast<int64>(), Vector(new long[128]));
+
         // Binary search for the last slot whose threshold is <= s, against a linear scan.
+        var sel = s.Cast<uint64>();
         var lo = s * Scalar(0L);
         foreach (long step in (long[])[64L, 32L, 16L, 8L, 4L, 2L, 1L])
         {
-            var mid = lo + Scalar(step);
-            var take = ((Tensor<bit>)OnnxOp.LessOrEqual((Tensor<int64>)OnnxOp.Gather(table, mid, axis: 0), s)).Cast<int64>();
-            lo = lo + (take * Scalar(step));
+            var probe = OnnxOp.Gather(table, lo + Scalar(step), axis: 0).uint64();
+            lo = lo + (AtLeast(sel, probe).Cast<int64>() * Scalar(step));
         }
-        var scan = ((Tensor<bit>)OnnxOp.LessOrEqual(table, s.Reshape(Vector(-1L, 1L)))).Cast<int64>()
+        var scan = AtLeast(sel.Reshape(Vector(-1L, 1L)), table).Cast<int64>()
             .Reduce(ReduceKind.Sum, Vector(1L), keepDims: false) - Scalar(1L);
         mismatch = mismatch + IntMismatch(lo - scan, Vector(0L, 0L, 0L, 0L));
 
@@ -144,6 +168,26 @@ public partial class RngDenseUniformOracleCheck
                 .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
         }
         return mismatch == Scalar(0L);
+    }
+}
+
+/// <summary>
+/// The selector thresholds the graph builds for a batch of ranges, [Ranges * 128], so a test can
+/// hold them against the oracle's. Sampling draws cannot: a held-up threshold may own one selector
+/// code in 2^41, and every draw-based check agrees with a table that has dropped it.
+/// </summary>
+[Module]
+public partial class RngDenseThresholdTable
+{
+    public const int Ranges = 6, Slots = 128;
+
+    public static Tensor<uint64> Inline(Tensor<float32> bounds)
+    {
+        var b = bounds.Vec();
+        var built = RuntimeRng.BuildDenseTable(b[0], b[1]).Threshold;
+        for (long r = 1; r < Ranges; r++)
+            built = built.Concat(0, RuntimeRng.BuildDenseTable(b[2 * r], b[2 * r + 1]).Threshold);
+        return built;
     }
 }
 
@@ -241,6 +285,20 @@ public class RngRuntimeTests
         }
     }
 
+    // The dense draw generalizes Walker/Reynolds to an arbitrary range, so on [0,1) — the range
+    // Walker/Reynolds covers — it must BE Walker/Reynolds, bit for bit, off the same draw value.
+    // That identity is what fixes the 41/23 split, and nothing else in the suite would notice a
+    // change that abandoned it.
+    [Fact]
+    public void TestDenseUniformOracleIsWalkerReynoldsOnTheUnitInterval()
+    {
+        var table = RngDenseUniformOracle.Build(0f, 1f);
+        for (long i = 0; i < 20000; i++)
+            Assert.Equal(
+                BitConverter.SingleToUInt32Bits(RngTestOracle.DrawUniform(DenseKey, 0, i)),
+                RngDenseUniformOracle.SampleBits(table, RngTestOracle.DrawValue(DenseKey, 0, i)));
+    }
+
     [Fact]
     public void TestDenseUniformOracleGivesEveryWeightedSlotSelectorCodes()
     {
@@ -305,6 +363,43 @@ public class RngRuntimeTests
             hyperparamInputs: [],
             runtimeInputs: [TensorData([bounds.Length], bounds), TensorData([expected.Length], expected)],
             testOnnxRoundtrip: roundtrip, testCsRoundtrip: false);
+    }
+
+    private static ulong[] GraphThresholds((float Low, float High)[] ranges)
+    {
+        float[] bounds = new float[RngDenseThresholdTable.Ranges * 2];
+        for (int r = 0; r < ranges.Length; r++)
+            (bounds[2 * r], bounds[2 * r + 1]) = (ranges[r].Low, ranges[r].High);
+        var g = ((ComputationGraph)typeof(RngDenseThresholdTable)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var input = TensorData([(long)bounds.Length], bounds);
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        return [.. ComputeContext.Default.Execute(concrete, input)[0].ToTensorData()
+            .As<uint64>().AccessMemory().ToArray()];
+    }
+
+    // The graph's [128] table interleaves empty slots among the oracle's live ones, each carrying
+    // the following live slot's threshold; the trailing empties carry 2^41. So the graph's
+    // distinct thresholds, minus that top, are exactly the oracle's.
+    private static void AssertThresholdsMatchOracle((float Low, float High)[] ranges)
+    {
+        ulong top = 1UL << RngDenseUniformOracle.SelectorBits;
+        ulong[] graph = GraphThresholds(ranges);
+        for (int r = 0; r < ranges.Length; r++)
+        {
+            var table = RngDenseUniformOracle.Build(ranges[r].Low, ranges[r].High);
+            if (table.Fixed is not null) continue;
+            ulong[] got = [.. graph.Skip(r * RngDenseThresholdTable.Slots)
+                .Take(RngDenseThresholdTable.Slots).Distinct().Where(t => t != top).Order()];
+            Assert.Equal([.. table.Slots.Select(s => (ulong)s.Threshold)], got);
+        }
+    }
+
+    [Fact]
+    public void TestInGraphDenseTableThresholdsMatchTheOracleSlotForSlot()
+    {
+        for (int b = 0; b * RngDenseThresholdTable.Ranges < DenseRanges.Length; b++)
+            AssertThresholdsMatchOracle(DenseBatch(b));
     }
 
     private static (float Low, float High)[] DenseBatch(int index)

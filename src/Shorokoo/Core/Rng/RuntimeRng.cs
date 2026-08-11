@@ -388,6 +388,9 @@ internal static class RuntimeRng
     /// <c>If</c>), and so no case ever depends on a build-time constant.</summary>
     private static Tensor<int64> Ind(Variable condition) => ((Tensor<bit>)condition).Cast<int64>();
 
+    /// <summary><see cref="Ind"/> for the unsigned side of the table arithmetic.</summary>
+    private static Tensor<uint64> IndU(Variable condition) => ((Tensor<bit>)condition).Cast<uint64>();
+
     /// <summary>2^e, clamped to the accumulator's range so an absent slot's nonsense exponent can
     /// never gather out of bounds.</summary>
     private static Tensor<int64> DensePow(Tensor<int64> e)
@@ -459,8 +462,12 @@ internal static class RuntimeRng
     /// draw for a NaN bound or an empty range. <paramref name="low"/> and <paramref name="high"/>
     /// are graph inputs, so every case below is data-driven — <c>RngAlgorithms</c> caches one
     /// shared uniform <c>Function</c> and cannot specialize on their values.
+    ///
+    /// <para>Internal rather than private so a test can hold the threshold column against the
+    /// oracle slot for slot. No amount of sampling covers that column: a held-up threshold can own
+    /// a single selector code out of 2^41, so a draw-based test agrees with a wrong table.</para>
     /// </summary>
-    private static (Tensor<int64> Threshold, Tensor<int64> Base, Tensor<int64> Bits,
+    internal static (Tensor<uint64> Threshold, Tensor<int64> Base, Tensor<int64> Bits,
                     Tensor<int64> Lattice, Tensor<float32> Spacing,
                     Tensor<bit> UseFixed, Tensor<float32> Fixed) BuildDenseTable(
         Tensor<float32> low, Tensor<float32> high)
@@ -608,31 +615,58 @@ internal static class RuntimeRng
             .Concat(0, negativeWeight, (negativeFull * Scalar(1L << DenseP)).Reshape(one),
                     (positiveFull * Scalar(1L << DenseP)).Reshape(one), positiveWeight, highWeight, pad);
 
-        var total = weights.Reduce(ReduceKind.Sum, Vector(0L), keepDims: false).Max(Scalar(1L));
-        var cumulative = weights.CumSum(Scalar(0L), exclusive: true);
-        // Past the last non-empty slot the cumulative equals the total: divide there would double
-        // a value already at 2^62 and wrap, so those slots take the top threshold directly.
-        var below = Ind(OnnxOp.Less(cumulative, total));
-        var threshold = DenseLongDivide(cumulative * below, total)
-                      + (Scalar(1L) - below) * Scalar(1L << DenseSelectorBits);
+        // ── Selector thresholds ─────────────────────────────────────────────────────────
+        // Unsigned from here down. The running max below walks the whole selector range, so it
+        // crosses [2^31, 2^32) where int64 Max mis-orders its operands, and the division's
+        // doubled remainder reaches 2^63 on the slots past the last non-empty one. Sum and CumSum
+        // have no uint64 kernel in onnxruntime; those two steps, and only those, round-trip
+        // through int64, which is exact because no weight total exceeds 2^62.
+        var total = weights.Reduce(ReduceKind.Sum, Vector(0L), keepDims: false).Cast<uint64>()
+                           .Max(Scalar(1UL));
+        var cumulative = weights.CumSum(Scalar(0L), exclusive: true).Cast<uint64>();
+        // The slots past the last non-empty one carry the whole total, where a 41-bit quotient
+        // saturates one short of 2^41 — a selector code a draw can actually land on. Lift those
+        // onto 2^41, which is not one, so they stay unreachable.
+        var atTotal = Scalar(1UL) - IndU(OnnxOp.Greater(total, cumulative));
+        var floor = DenseLongDivide(cumulative, total) + atTotal;
+
+        // A region holding under 2^-41 of the total floors onto its predecessor and would be
+        // allotted no selector code at all, so each threshold is held one above the last:
+        // T_i = m_i - S + min(max_{j<=i}(F_j + S - m_j), 2^41), for m the count of non-empty slots
+        // before i and S their total, the max by a seven-round scan. An empty slot shares the
+        // next non-empty one's m and F, so it lands on that slot's threshold — which keeps the
+        // table monotone for the binary search and keeps the empty slot unreachable, since the
+        // search takes the LAST slot at or below the selector.
+        var live = Ind(OnnxOp.Greater(weights, Scalar(0L)));
+        var before = live.CumSum(Scalar(0L), exclusive: true).Cast<uint64>();
+        var count = live.Reduce(ReduceKind.Sum, Vector(0L), keepDims: false).Cast<uint64>();
+        var position = OnnxOp.Range(Scalar(0L), Scalar((long)DenseSlots), Scalar(1L)).int64();
+        var running = floor + count - before;
+        foreach (long back in (long[])[1L, 2L, 4L, 8L, 16L, 32L, 64L])
+            running = running.Max(
+                OnnxOp.Gather(running, (position - Scalar(back)).Max(Scalar(0L)), axis: 0).uint64());
+        var threshold = before + running.Min(Scalar(1UL << DenseSelectorBits)) - count;
         var spacing = (Tensor<float32>)OnnxOp.Gather(Vector(DenseSpacing), floorClass, axis: 0);
         return (threshold, bases, bits, lattice, spacing, useFixed, fixedValue);
     }
 
-    /// <summary>floor(numerator·2^41 / denominator), exactly, in int64, by restoring binary long
-    /// division. Doubling is a MULTIPLY, not a shift: ONNX constrains <c>BitShift</c> to unsigned
-    /// types, and ORT has no <c>uint64</c> <c>Where</c>. Every intermediate stays under 2^63
-    /// because the denominator never exceeds 2^62 — which is what pins the truncation depth.</summary>
-    private static Tensor<int64> DenseLongDivide(Tensor<int64> numerator, Tensor<int64> denominator)
+    /// <summary>floor(numerator·2^41 / denominator), exactly, by restoring binary long division.
+    /// The denominator never exceeds 2^62 — which is what pins the truncation depth — so the
+    /// doubled remainder stays under 2^63, and reaches it exactly where the numerator equals the
+    /// denominator; unsigned is what lets that case divide rather than need a guard. The
+    /// comparison is <c>Greater</c> negated rather than <c>GreaterOrEqual</c>, and the doubling a
+    /// multiply rather than a shift, because those are the forms ORT implements for
+    /// <c>uint64</c>.</summary>
+    private static Tensor<uint64> DenseLongDivide(Tensor<uint64> numerator, Tensor<uint64> denominator)
     {
         var remainder = numerator;
-        var quotient = numerator * Scalar(0L);
+        var quotient = numerator * Scalar(0UL);
         for (int i = 0; i < DenseSelectorBits; i++)
         {
-            remainder = remainder * Scalar(2L);
-            var fits = Ind(OnnxOp.GreaterOrEqual(remainder, denominator));
+            remainder = remainder * Scalar(2UL);
+            var fits = Scalar(1UL) - IndU(OnnxOp.Greater(denominator, remainder));
             remainder = remainder - fits * denominator;
-            quotient = quotient * Scalar(2L) + fits;
+            quotient = quotient * Scalar(2UL) + fits;
         }
         return quotient;
     }
@@ -659,14 +693,14 @@ internal static class RuntimeRng
     {
         var (threshold, bases, bits, lattice, spacing, useFixed, fixedValue) = BuildDenseTable(low, high);
         var draw = Draw(ElementCount(shape), key, substreamIndex, rounds);
-        var selector = ShiftDown(draw, Scalar((ulong)DenseP)).Cast<int64>();
+        var selector = ShiftDown(draw, Scalar((ulong)DenseP));
         var index = OnnxOp.BitwiseAnd(draw, Scalar((1UL << DenseP) - 1)).uint64().Cast<int64>();
 
-        Tensor<int64> found = selector * Scalar(0L);
+        Tensor<int64> found = index * Scalar(0L);
         foreach (long step in (long[])[64L, 32L, 16L, 8L, 4L, 2L, 1L])
         {
-            var probe = OnnxOp.Gather(threshold, found + Scalar(step), axis: 0);
-            found = found + Ind(OnnxOp.LessOrEqual(probe, selector)) * Scalar(step);
+            var probe = OnnxOp.Gather(threshold, found + Scalar(step), axis: 0).uint64();
+            found = found + (Scalar(1L) - Ind(OnnxOp.Greater(probe, selector))) * Scalar(step);
         }
         var regionBase = OnnxOp.Gather(bases, found, axis: 0).int64();
         var regionBits = OnnxOp.Gather(bits, found, axis: 0).int64();

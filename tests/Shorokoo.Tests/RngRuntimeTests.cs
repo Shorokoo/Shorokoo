@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using Shorokoo.Core.Rng;
 using Shorokoo.Runtime;
@@ -253,9 +254,24 @@ public class RngRuntimeTests
                 Assert.True(v >= low && v < high);
                 Assert.False(float.IsNaN(v) || float.IsInfinity(v));
             }
-            Assert.True(table.Slots.Length <= RngDenseUniformOracle.MaxSlots);
+            Assert.True(table.Blocks.Length <= DenseMaxBlocks);
         }
     }
+
+    // The six kinds of block, plus the second partial class: lattice, both-signs classes,
+    // one-sign classes, a partial class at each end of the range, and a stub at each end of the
+    // lattice. No range can produce more, and a stub excludes the partial on its side.
+    private const int DenseMaxBlocks = 7;
+
+    private static long DenseElements(RngDenseUniformOracle.Block b)
+        => b.Kind switch
+        {
+            RngDenseUniformOracle.Kind.Lattice => (long)b.Weight,
+            RngDenseUniformOracle.Kind.TwoSided => (long)(b.C1 - b.C0 + 1) << (RngDenseUniformOracle.P + 1),
+            RngDenseUniformOracle.Kind.OneSided => (long)(b.C1 - b.C0 + 1) << RngDenseUniformOracle.P,
+            RngDenseUniformOracle.Kind.Ordinals => (long)(b.Weight >> b.Shift),
+            _ => 1,
+        };
 
     [Fact]
     public void TestDenseUniformOracleTableIsAWellFormedPartition()
@@ -263,19 +279,17 @@ public class RngRuntimeTests
         foreach (var (low, high) in DenseRanges)
         {
             var table = RngDenseUniformOracle.Build(low, high);
-            Assert.Equal(0UL, table.Slots[0].Threshold);
-            Assert.True(table.Slots.Length <= RngDenseUniformOracle.MaxSlots);
-            ulong weights = 0;
-            for (int i = 0; i < table.Slots.Length; i++)
+            Assert.Equal(0UL, table.Blocks[0].Threshold);
+            Assert.InRange(table.Blocks.Length, 1, DenseMaxBlocks);
+            UInt128 weights = 0;
+            for (int i = 0; i < table.Blocks.Length; i++)
             {
-                weights += table.Slots[i].Weight;
-                Assert.True(table.Slots[i].Weight > 0);
-                Assert.InRange(table.Slots[i].IndexBits, 0, RngDenseUniformOracle.P);
-                Assert.InRange(table.Slots[i].Shift, 0, RngDenseUniformOracle.MaxClasses - 1);
-                Assert.Equal(table.Slots[i].Weight, 1UL << (table.Slots[i].IndexBits + table.Slots[i].Shift));
-                if (i > 0) Assert.True(table.Slots[i].Threshold > table.Slots[i - 1].Threshold);
+                weights += table.Blocks[i].Weight;
+                Assert.True(table.Blocks[i].Weight > 0);
+                if (i > 0) Assert.True(table.Blocks[i].Threshold > table.Blocks[i - 1].Threshold);
             }
-            Assert.Equal(table.Total, weights);
+            Assert.True(weights <= (UInt128)1 << 64);
+            Assert.Equal(weights, table.Total == 0 ? (UInt128)1 << 64 : table.Total);
         }
     }
 
@@ -286,51 +300,60 @@ public class RngRuntimeTests
         {
             var table = RngDenseUniformOracle.Build(low, high);
             long elements = 0;
-            foreach (var slot in table.Slots) elements += 1L << slot.IndexBits;
+            foreach (var block in table.Blocks) elements += DenseElements(block);
             Assert.Equal(DenseSignedOrdinal(high) - DenseSignedOrdinal(low), elements);
         }
     }
 
-    // On [0,1) above the truncation floor the dense draw follows Walker/Reynolds' geometric law:
-    // the scaled draw's leading bit picks the binade and the 23 bits under it are the mantissa.
-    // The total on [0,1) is exactly 2^63, so the scaling is an exact shift and the law is checked
-    // against a closed form here rather than against RngTestOracle.WalkerUniform, whose 41/23
-    // split reads the mantissa from the draw's LOW bits. It does NOT hold below the floor, where
-    // Walker keeps more geometric binades and this draw switches to an even lattice reaching
-    // 2^-63 and exact zero — past what sampling reaches, so both sides are asserted directly.
+    // On [0,1) the dense draw IS Walker/Reynolds above the truncation floor, bit for bit. The range
+    // does not straddle zero, so it keeps 41 classes and totals exactly 2^64: the scaling is the
+    // identity, the lattice takes [0, 2^23) so a class block's offset is the draw itself, the
+    // leading-bit search is Walker's leading-zero count over the 41-bit exponent field, and the
+    // index's low bits are Walker's mantissa. It does NOT hold below the floor, where Walker folds
+    // everything under 2^23 into one binade and this draw switches to an even lattice reaching
+    // exact zero — past what sampling reaches, so both sides are asserted directly.
     [Fact]
     public void TestDenseUniformOracleIsWalkerReynoldsAboveTheTruncationFloor()
     {
         var table = RngDenseUniformOracle.Build(0f, 1f);
-        Assert.Equal(1UL << 61, table.Total);
-        Assert.Equal(89, table.FloorClass);
+        Assert.Equal(0UL, table.Total);
+        Assert.Equal(86, table.FloorClass);
 
-        uint Dense(ulong scaled) => RngDenseUniformOracle.SampleBits(table, scaled << 3);
-        uint Geometric(int bit, ulong mantissa)
-            => BitConverter.SingleToUInt32Bits(
-                (1f + mantissa * (1f / 8388608f)) * MathF.ScaleB(1f, bit - 61));
-
+        uint Dense(ulong draw) => RngDenseUniformOracle.SampleBits(table, draw);
         foreach (ulong m in (ulong[])[0UL, 1UL, 4919UL, 8388607UL])
-            for (int bit = 23; bit <= 60; bit++)
-                Assert.Equal(Geometric(bit, m), Dense((1UL << bit) | (m << (bit - 23))));
+            for (int bit = 23; bit <= 63; bit++)
+            {
+                ulong draw = (1UL << bit) | m | (0x5A5A5A5AUL << 24 & ((1UL << bit) - 1));
+                Assert.Equal(BitConverter.SingleToUInt32Bits(RngTestOracle.WalkerUniform(draw)), Dense(draw));
+            }
 
-        for (ulong scaled = 0; scaled < 1UL << 23; scaled += 7919)
-            Assert.Equal(BitConverter.SingleToUInt32Bits(scaled * MathF.ScaleB(1f, -61)), Dense(scaled));
+        for (ulong draw = 0; draw < 1UL << 23; draw += 7919)
+            Assert.Equal(BitConverter.SingleToUInt32Bits(draw * MathF.ScaleB(1f, -64)), Dense(draw));
     }
 
     [Fact]
-    public void TestDenseUniformOracleGivesEveryWeightedSlotItsExactWeightInCodes()
+    public void TestDenseUniformOracleGivesEveryWeightedBlockItsExactWeightInCodes()
     {
         foreach (var (low, high) in DenseRanges)
         {
             var table = RngDenseUniformOracle.Build(low, high);
-            for (int i = 0; i < table.Slots.Length; i++)
+            for (int i = 0; i < table.Blocks.Length; i++)
             {
-                ulong end = i + 1 < table.Slots.Length ? table.Slots[i + 1].Threshold : table.Total;
-                Assert.Equal(table.Slots[i].Weight, end - table.Slots[i].Threshold);
+                UInt128 end = i + 1 < table.Blocks.Length ? table.Blocks[i + 1].Threshold
+                    : table.Total == 0 ? (UInt128)1 << 64 : table.Total;
+                Assert.Equal(table.Blocks[i].Weight, end - table.Blocks[i].Threshold);
             }
         }
     }
+
+    private static ulong DenseNegativeWeight(RngDenseUniformOracle.Block b)
+        => b.Kind switch
+        {
+            RngDenseUniformOracle.Kind.TwoSided => b.Weight >> 1,
+            RngDenseUniformOracle.Kind.OneSided => b.Negative ? b.Weight : 0,
+            RngDenseUniformOracle.Kind.Lattice => (ulong)Math.Clamp(-b.Base, 0, (long)b.Weight),
+            _ => b.Base < 0 ? b.Weight : 0,
+        };
 
     [Fact]
     public void TestDenseUniformOracleSplitsSymmetricRangesExactlyInHalf()
@@ -340,9 +363,70 @@ public class RngRuntimeTests
             float bound = MathF.ScaleB(1f, e);
             var table = RngDenseUniformOracle.Build(-bound, bound);
             ulong negative = 0;
-            foreach (var slot in table.Slots) if (slot.Base < 0) negative += slot.Weight;
+            foreach (var block in table.Blocks) negative += DenseNegativeWeight(block);
             Assert.Equal(table.Total, 2 * negative);
         }
+    }
+
+    private static float DenseFloatOfOrdinal(long z)
+        => BitConverter.UInt32BitsToSingle(z >= 0 ? (uint)z : 0x8000_0000u | (uint)-z);
+
+    // Every weight unit decodes to a float the range contains, and each float takes exactly the
+    // number of units its ulp is worth — the contract itself, by exhaustion rather than sampling.
+    // Only ranges near zero have a small enough total to enumerate: any range deep enough to reach
+    // the truncation floor totals about 2^64 by construction. So this covers the lattice, the
+    // partial classes and the class-boundary crossings; the whole-class blocks are covered exactly
+    // by the Walker and two-sided closed forms above.
+    [Fact]
+    public void TestDenseUniformOracleAssignsEveryWeightUnitExactlyOnce()
+    {
+        foreach (var (lowOrd, highOrd) in ((long Low, long High)[])
+            [(0, 1000), (3, 1000), (-1000, 1000), (-1000, -3), (0, 1),
+             ((1 << 23) - 500, (1 << 23) + 500), ((1 << 24) - 500, (1 << 24) + 500),
+             (-(1 << 24) - 500, -(1 << 24) + 500), (-((1L << 25) + 500), -((1L << 25) - 500))])
+        {
+            (float low, float high) = (DenseFloatOfOrdinal(lowOrd), DenseFloatOfOrdinal(highOrd));
+            var table = RngDenseUniformOracle.Build(low, high);
+            Assert.NotEqual(0UL, table.Total);
+            Dictionary<uint, ulong> seen = [];
+            for (ulong s = 0; s < table.Total; s++)
+            {
+                ulong draw = (ulong)(((((UInt128)s << 64) + table.Total - 1) / table.Total));
+                uint bits = RngDenseUniformOracle.SampleBits(table, draw);
+                seen[bits] = seen.GetValueOrDefault(bits) + 1;
+            }
+            Dictionary<uint, ulong> want = [];
+            for (long z = lowOrd; z < highOrd; z++)
+                want[BitConverter.SingleToUInt32Bits(DenseFloatOfOrdinal(z))] =
+                    1UL << (int)(Math.Max(1, (z >= 0 ? z : -z - 1) >> 23) - table.FloorClass);
+            Assert.Equal([.. want.Keys.Order()], [.. seen.Keys.Order()]);
+            foreach (var (bits, count) in seen) Assert.Equal(want[bits], count);
+        }
+    }
+
+    // The two-sided decode, against a closed form written out independently: on (-1,1) the range
+    // straddles zero so it keeps 40 classes and totals exactly 2^64, and the draw's leading bit
+    // picks the class while its low 24 bits are the sign and mantissa. The negative half runs
+    // downward from the binade above, because a negative ordinal takes its class from the
+    // magnitude pattern below it — hence 2 - mantissa rather than 1 + mantissa.
+    [Fact]
+    public void TestDenseUniformOracleDecodesBothSignsOfEveryWholeClass()
+    {
+        var table = RngDenseUniformOracle.Build(-1f, 1f);
+        Assert.Equal(0UL, table.Total);
+        Assert.Equal(87, table.FloorClass);
+
+        foreach (ulong mantissa in (ulong[])[0UL, 1UL, 4919UL, 8388607UL])
+            foreach (ulong sign in (ulong[])[0UL, 1UL])
+                for (int lead = 24; lead <= 63; lead++)
+                {
+                    ulong draw = (1UL << lead) | (0x5A5A5AUL << 24 & ((1UL << lead) - 1))
+                        | (sign << 23) | mantissa;
+                    float f = 1f + mantissa * (1f / 8388608f);
+                    float want = MathF.ScaleB(sign == 0 ? f : f - 3f, 87 + lead - 24 - 127);
+                    Assert.Equal(BitConverter.SingleToUInt32Bits(want),
+                        RngDenseUniformOracle.SampleBits(table, draw));
+                }
     }
 
     [Fact]
@@ -404,7 +488,7 @@ public class RngRuntimeTests
             if (table.Fixed is not null) continue;
             ulong[] got = [.. graph.Skip(r * RngDenseThresholdTable.Slots)
                 .Take(RngDenseThresholdTable.Slots).Distinct().Where(t => t != table.Total).Order()];
-            Assert.Equal([.. table.Slots.Select(s => s.Threshold)], got);
+            Assert.Equal([.. table.Blocks.Select(s => s.Threshold)], got);
         }
     }
 

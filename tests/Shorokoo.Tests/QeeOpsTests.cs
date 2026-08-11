@@ -478,7 +478,29 @@ public class QeeUInt64SignedOperatorTests
         const ulong third = 6148914691236517205UL;
         Assert.Equal((ulong[])[third, third + 1, third + 2, third + 3], got);
     }
+
+    // FAILING — this pins an open product fault rather than guarding a regression. Max on int64
+    // mis-orders operands in [2^31, 2^32), returning the smaller as though the larger were
+    // negative; Min mirrors it, while Greater on the same pair is correct. The band is exactly
+    // [2^31, 2^32) — 2^32 and above are fine — which rules out a plain int32 truncation and points
+    // at a width narrowing that then compares as signed. The input is a runtime tensor, so this is
+    // not the constant-folding path. No issue is open on Shorokoo/Shorokoo to skip against.
+    [Fact]
+    public void TestInt64MaxOrdersOperandsAcrossTwoToThe31()
+    {
+        var g = ((ComputationGraph)typeof(QeeI64MaxAcrossTwoToThe31)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        long[] v = [(1L << 31) - 1, 1L << 31, (1L << 31) + 7, (1L << 32) - 1, 1L << 32, 1L << 40];
+        var input = TensorData(DType.Int64, [(long)v.Length], [.. v.Select(x => (object)x)]);
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        var got = ComputeContext.Default.Execute(concrete, input)[0]
+            .ToTensorData().As<int64>().AccessMemory().ToArray();
+        Assert.Equal(v, got);
+    }
 }
+
+[Module] public partial class QeeI64MaxAcrossTwoToThe31 {
+    public static Tensor<int64> Inline(Tensor<int64> v) => v.Max(Scalar(1L)); }
 
 [Module] public partial class QeeU32Add { public static Tensor<uint32> Inline()
     => Vector(4294967295u, 0u, 2147483648u, 4294967295u, 4294967295u) + Vector(1u, 1u, 2u, 4294967295u, 2u); }

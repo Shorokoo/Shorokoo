@@ -22,6 +22,11 @@ namespace Shorokoo.Tests;
 /// mass. One 64-bit draw decodes as a 41-bit region selector against a cumulative threshold table
 /// plus the top bits of a 23-bit index.</para>
 ///
+/// <para>A region whose weight is under total/2^41 would floor to its predecessor's threshold and
+/// so be allotted no selector codes at all; each threshold is therefore held one above the last,
+/// which costs nothing wherever the floors were already strictly increasing — as they are on
+/// [0,1), where this draw is bit-for-bit Walker/Reynolds.</para>
+///
 /// <para>Every weight is expressed in <b>spacing units</b> (multiples of the shallowest kept
 /// class's ulp), which keeps the cumulative table inside int64 by construction and caps the
 /// truncation depth at K = 38. Thresholds come from restoring binary long division, because
@@ -121,10 +126,13 @@ internal static class RngDenseUniformOracle
         foreach (Slot s in slots) total += s.Weight;
 
         Slot[] table = [.. slots];
-        long cumulative = 0;
+        long cumulative = 0, previous = -1;
         for (int i = 0; i < table.Length; i++)
         {
-            table[i] = table[i] with { Threshold = LongDivide(cumulative, total) };
+            long floor = LongDivide(cumulative, total);
+            long threshold = Math.Min(Math.Max(floor, previous + 1), (1L << SelectorBits) - (table.Length - i));
+            table[i] = table[i] with { Threshold = threshold };
+            previous = threshold;
             cumulative += table[i].Weight;
         }
         return new Table(table, total, zLow, zHigh, floorClass, null);

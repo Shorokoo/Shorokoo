@@ -222,9 +222,8 @@ public class RngRuntimeTests
                 weights += table.Slots[i].Weight;
                 Assert.True(table.Slots[i].Weight > 0);
                 Assert.InRange(table.Slots[i].IndexBits, 0, RngDenseUniformOracle.P);
-                if (i > 0) Assert.True(table.Slots[i].Threshold >= table.Slots[i - 1].Threshold);
-                Assert.Equal(RngDenseUniformOracle.LongDivide(weights - table.Slots[i].Weight, table.Total),
-                    table.Slots[i].Threshold);
+                if (i > 0) Assert.True(table.Slots[i].Threshold > table.Slots[i - 1].Threshold);
+                Assert.InRange(table.Slots[i].Threshold, 0, (1L << RngDenseUniformOracle.SelectorBits) - 1);
             }
             Assert.Equal(table.Total, weights);
         }
@@ -239,6 +238,21 @@ public class RngRuntimeTests
             long elements = 0;
             foreach (var slot in table.Slots) elements += 1L << slot.IndexBits;
             Assert.Equal(DenseSignedOrdinal(high) - DenseSignedOrdinal(low), elements);
+        }
+    }
+
+    [Fact]
+    public void TestDenseUniformOracleGivesEveryWeightedSlotSelectorCodes()
+    {
+        foreach (var (low, high) in DenseRanges)
+        {
+            var table = RngDenseUniformOracle.Build(low, high);
+            for (int i = 0; i < table.Slots.Length; i++)
+            {
+                long end = i + 1 < table.Slots.Length
+                    ? table.Slots[i + 1].Threshold : 1L << RngDenseUniformOracle.SelectorBits;
+                Assert.True(end > table.Slots[i].Threshold);
+            }
         }
     }
 

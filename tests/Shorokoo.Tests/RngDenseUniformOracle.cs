@@ -194,13 +194,14 @@ internal static class RngDenseUniformOracle
         {
             long start = LatticeCeil(bandLow, floorExponent);
             long end = LatticeFloor(bandHigh, floorExponent);
-            if (start > end) { (hasLowStub, lowStub) = (true, bandLow); }
-            else
-            {
-                if (!IsOnLattice(bandLow, floorExponent)) (hasLowStub, lowStub) = (true, bandLow);
-                (latticeStart, latticeCount) = (start, end - start);
-                if (!IsOnLattice(bandHigh, floorExponent)) (hasHighStub, highStub) = (true, end);
-            }
+            // A span too narrow to hold a lattice point degenerates to its low stub alone. It can
+            // only happen with bandLow off the lattice, so the stub is never lost: one end of the
+            // band is always a floor boundary — the range reaches past it, or there would be no
+            // truncation — and a floor boundary is on the lattice by construction.
+            bool holdsLattice = start <= end;
+            if (!IsOnLattice(bandLow, floorExponent)) (hasLowStub, lowStub) = (true, bandLow);
+            if (holdsLattice) (latticeStart, latticeCount) = (start, end - start);
+            if (holdsLattice && !IsOnLattice(bandHigh, floorExponent)) (hasHighStub, highStub) = (true, end);
         }
 
         List<Block> blocks = [];

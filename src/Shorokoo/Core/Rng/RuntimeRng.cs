@@ -481,9 +481,10 @@ internal static class RuntimeRng
     /// to cover its whole class folds into the whole range instead, so the geometric block stays
     /// maximal; an absent run reports C1 &lt; C0 and both counts 0.
     ///
-    /// <para><paramref name="negative"/> is a build-time constant at both call sites — the two rays
-    /// differ only in which end of a class run an ordinal starts at, and in which direction the
-    /// classes ascend, so writing the two out costs nothing and no case depends on graph data.</para>
+    /// <para><paramref name="negative"/> is a plain C# bool, resolved while the graph is built: the
+    /// two rays differ only in which end of a class run an ordinal starts at and in which direction
+    /// the classes ascend, so each call site emits its own straight-line arithmetic and no case
+    /// depends on graph data.</para>
     /// </summary>
     private static (Tensor<int64> LowBase, Tensor<int64> LowCount, Tensor<int64> LowClass,
                     Tensor<int64> HighBase, Tensor<int64> HighCount, Tensor<int64> HighClass,

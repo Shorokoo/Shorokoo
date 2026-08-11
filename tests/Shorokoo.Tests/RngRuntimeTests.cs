@@ -285,18 +285,33 @@ public class RngRuntimeTests
         }
     }
 
-    // The dense draw generalizes Walker/Reynolds to an arbitrary range, so on [0,1) — the range
-    // Walker/Reynolds covers — it must BE Walker/Reynolds, bit for bit, off the same draw value.
-    // That identity is what fixes the 41/23 split, and nothing else in the suite would notice a
-    // change that abandoned it.
+    // On [0,1) above the truncation floor the dense draw IS Walker/Reynolds, bit for bit off the
+    // same draw value — that identity is what fixes the 41/23 split. It does NOT hold below the
+    // floor, where Walker keeps three more geometric binades down to 2^-41 and this draw switches
+    // to an even lattice reaching 2^-61 and exact zero. The crossover is the first ordinal slot's
+    // threshold, 8, so the disagreeing selectors carry probability 2^-38 — far past what sampling
+    // random draws can reach, which is why both sides are asserted directly.
     [Fact]
-    public void TestDenseUniformOracleIsWalkerReynoldsOnTheUnitInterval()
+    public void TestDenseUniformOracleIsWalkerReynoldsAboveTheTruncationFloor()
     {
         var table = RngDenseUniformOracle.Build(0f, 1f);
-        for (long i = 0; i < 20000; i++)
-            Assert.Equal(
-                BitConverter.SingleToUInt32Bits(RngTestOracle.DrawUniform(DenseKey, 0, i)),
-                RngDenseUniformOracle.SampleBits(table, RngTestOracle.DrawValue(DenseKey, 0, i)));
+        long crossover = table.Slots[1].Threshold;
+        Assert.Equal(8, crossover);
+
+        uint Dense(long selector, ulong mantissa)
+            => RngDenseUniformOracle.SampleBits(table, ((ulong)selector << RngDenseUniformOracle.P) | mantissa);
+        uint Walker(long selector, ulong mantissa)
+            => BitConverter.SingleToUInt32Bits(
+                RngTestOracle.WalkerUniform(((ulong)selector << RngDenseUniformOracle.P) | mantissa));
+
+        foreach (ulong m in (ulong[])[0UL, 1UL, 4919UL, 8388607UL])
+        {
+            for (int b = 3; b <= 40; b++)
+                foreach (long s in (long[])[1L << b, (1L << b) + 1, (1L << (b + 1)) - 1])
+                    Assert.Equal(Walker(s, m), Dense(s, m));
+            for (long s = 0; s < crossover; s++)
+                Assert.NotEqual(Walker(s, m), Dense(s, m));
+        }
     }
 
     [Fact]

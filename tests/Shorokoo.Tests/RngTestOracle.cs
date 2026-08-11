@@ -84,8 +84,13 @@ internal static class RngTestOracle
     /// leading zeros of the 41-bit exponent field). Exact — mirrors <c>RuntimeRng.GeometricUniform</c>.</summary>
     public static float DrawUniform(
         ulong key, ulong substreamIndex, long i, int rounds = Threefry2x32.Rounds)
+        => WalkerUniform(DrawValue(key, substreamIndex, i, rounds));
+
+    /// <summary>Walker's transform of a whole generator value, split out so a test can drive it
+    /// with a chosen value rather than a drawn one — the dense draw agrees with it only above the
+    /// truncation floor, and the disagreeing values carry probability 2^-38.</summary>
+    public static float WalkerUniform(ulong v)
     {
-        ulong v = DrawValue(key, substreamIndex, i, rounds);
         float frac = 1.0f + (uint)(v & 0x7FFFFF) * (1.0f / 8388608.0f);          // [1,2), 23-bit mantissa
         ulong ef = (v >> 23) & ((1UL << 41) - 1);                                // 41-bit exponent field
         int p = ef == 0 ? 0 : 63 - System.Numerics.BitOperations.LeadingZeroCount(ef);

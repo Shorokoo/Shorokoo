@@ -294,10 +294,43 @@ internal static class RuntimeRng
     }
 
     // ── Dense arbitrary-range uniform (region table) ─────────────────────────────────────
-    // Walker/Reynolds generalized off [0,1) onto an arbitrary range: every float in [low, high)
-    // is reachable with probability proportional to its ulp, from ONE 64-bit generator value per
-    // element and with no rejection. The host oracle (tests: RngDenseUniformOracle) is the
-    // contract; this rebuilds the same table in ONNX ops and must agree with it bit for bit.
+    // Walker/Reynolds generalized off [0,1) onto an arbitrary range, from ONE 64-bit generator
+    // value per element, with no rejection and a static node count. Two approximations are
+    // deliberate, and both are too large to leave implied:
+    //
+    //   TRUNCATION. Only the top DenseClasses weight classes are resolved as floats; below that
+    //   floor a coarse even lattice carries the mass, so the floats down there are NOT
+    //   individually reachable. The fraction of a range's floats that IS reachable is 30.7% on
+    //   [0,1) and 15.3% on the whole finite domain. What is exact is the MASS: the collapsed span
+    //   keeps the probability its width earns, so the draw stays uniform in VALUE — it is the
+    //   resolution that is spent, not the distribution.
+    //
+    //   SELECTOR RESOLUTION. A region's probability is a multiple of 2^-41, so a region holding
+    //   less than that of the total is rounded UP to one code rather than dropped (see the
+    //   threshold table below). Above the floor every float is reachable, with probability
+    //   proportional to its ulp to within that rounding. Measured over RngRuntimeTests' adversarial
+    //   ranges: most are exact, the worst region is over-weighted 2^20x (a weight-1 stub), and the
+    //   worst total-variation distance from the ideal is 2^-37. Only endpoint blocks and stubs can
+    //   fall under the floor — a full class group weighs at least 2^23, which is four codes even
+    //   against the largest possible total.
+    //
+    // On [0,1) ABOVE THE FLOOR the draw is bit-for-bit Walker/Reynolds: the 41-bit selector's
+    // leading-zero count is the binade, the low 23 bits are the mantissa. Below it the two part
+    // ways — Walker keeps three more geometric binades down to 2^-41, this switches to the lattice
+    // and reaches 2^-61 and exact zero. The crossover is selector < 8, probability 2^-38; sampling
+    // cannot reach it, so RngRuntimeTests asserts both sides directly.
+    //
+    // That 2^-38 slice is a GAP against the intended contract, which is that a caller asking for
+    // U(0,1) gets Walker/Reynolds. It narrows to 2^-DenseClasses, so K = 39 — the most uint64 now
+    // allows, since a straddling range totals 2^(24+K) and the division needs that under 2^63 —
+    // brings it to 2^-39. It cannot close: at K = 41 the lattice would still own selector 0, where
+    // Walker maps into its bottom binade instead. That is Walker's own defect (it over-weights that
+    // binade 2x and cannot emit anything below 2^-41 or exact zero), so closing the last 2^-41
+    // would mean reproducing a wrong answer. K = 41 is out of reach regardless: it needs a 2^65
+    // accumulator.
+    //
+    // The host oracle (tests: RngDenseUniformOracle) is the contract; this rebuilds the same table
+    // in ONNX ops and must agree with it bit for bit.
     //
     // Floats are addressed by SIGNED ORDINAL z — the bit pattern for x >= 0, negated for x < 0 —
     // which is strictly monotone in the real value, so any range (straddling or not) is one
@@ -672,10 +705,17 @@ internal static class RuntimeRng
     }
 
     /// <summary>
-    /// U(low, high) of the given shape, drawn densely: every float in the range is reachable with
-    /// probability proportional to its ulp, from one 64-bit generator value per element, with no
-    /// rejection and a static node count. The draw splits as region selector (the top 41 bits)
-    /// against the cumulative threshold table, and index within the region (the low 23 bits).
+    /// U(low, high) of the given shape, drawn densely: from one 64-bit generator value per element,
+    /// with no rejection and a static node count. The draw splits as region selector (the top 41
+    /// bits) against the cumulative threshold table, and index within the region (the low 23 bits).
+    ///
+    /// <para><b>Reachable floats.</b> Every float within the top <c>DenseClasses</c> weight classes
+    /// of the range is reachable, with probability proportional to its ulp up to the selector's
+    /// 2^-41 resolution (a region under that share is rounded up to one code; worst measured
+    /// over-weighting 2^20 on a weight-1 stub, worst total variation 2^-37). Below that truncation
+    /// floor an even lattice carries the mass, and those floats are <b>not</b> individually
+    /// reachable — 30.7% of the floats in [0,1) are reachable, 15.3% over the whole finite domain.
+    /// The draw is still uniform in value there; it is resolution that is spent, not fairness.</para>
     ///
     /// <para>The interval is half-open — <c>high</c> is not attainable, matching PyTorch
     /// <c>uniform_</c>, Keras <c>RandomUniform</c> and ONNX <c>RandomUniform</c>. An inverted or

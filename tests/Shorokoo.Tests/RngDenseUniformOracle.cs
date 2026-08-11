@@ -23,9 +23,11 @@ namespace Shorokoo.Tests;
 /// plus the top bits of a 23-bit index.</para>
 ///
 /// <para>A region whose weight is under total/2^41 would floor to its predecessor's threshold and
-/// so be allotted no selector codes at all; each threshold is therefore held one above the last,
-/// which costs nothing wherever the floors were already strictly increasing — as they are on
-/// [0,1), where this draw is bit-for-bit Walker/Reynolds.</para>
+/// so be allotted no selector codes at all; each threshold is therefore held one above the last.
+/// That rounds such a region UP to a 2^-41 share rather than dropping it, and costs nothing
+/// wherever the floors were already strictly increasing — as they are on [0,1), where above the
+/// truncation floor this draw is bit-for-bit Walker/Reynolds. Below the floor it is not: the
+/// lattice reaches 2^-61 and exact zero where Walker stops at 2^-41.</para>
 ///
 /// <para>Every weight is expressed in <b>spacing units</b> (multiples of the shallowest kept
 /// class's ulp), which keeps the cumulative table inside int64 by construction and caps the

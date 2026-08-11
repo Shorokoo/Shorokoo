@@ -320,8 +320,8 @@ internal static class RuntimeRng
     // resolved as floats, 40 when the range straddles zero, since a straddling range carries both
     // signs of every class and 41 of them would total 2^65. Below the floor 2^(floorClass-127) a
     // coarse even lattice of spacing 2^(floorClass-150) carries the remaining mass, as one block
-    // spanning both signs, so the floats down there are NOT individually reachable — 30.7% of the
-    // floats in [0,1) are, 15.3% over the whole finite domain. What is exact is the MASS: every
+    // spanning both signs, so the floats down there are NOT individually reachable — 33.1% of the
+    // floats in [0,1) are, 16.1% over the whole finite domain. What is exact is the MASS: every
     // block keeps the probability its width earns, so the draw stays uniform in VALUE. It is
     // resolution that is spent, not fairness.
     //
@@ -696,8 +696,8 @@ internal static class RuntimeRng
     /// <para><b>Reachable floats.</b> Every float within the top 41 weight classes of the range —
     /// 40 when it straddles zero — is reachable with probability exactly proportional to its ulp,
     /// since selection rounds nothing. Below that truncation floor an even lattice carries the
-    /// mass, and those floats are <b>not</b> individually reachable — 30.7% of the floats in [0,1)
-    /// are reachable, 15.3% over the whole finite domain. The draw is still uniform in value there;
+    /// mass, and those floats are <b>not</b> individually reachable — 33.1% of the floats in [0,1)
+    /// are reachable, 16.1% over the whole finite domain. The draw is still uniform in value there;
     /// it is resolution that is spent, not fairness.</para>
     ///
     /// <para>The interval is half-open — <c>high</c> is not attainable, matching PyTorch

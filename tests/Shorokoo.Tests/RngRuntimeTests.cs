@@ -61,18 +61,19 @@ public partial class RtFcWithRngFeed
 [Module] public partial class RtLoweredBits64 { public static Tensor<uint64> Inline(Tensor<float32> x) => RandomBits<uint64>(x.ShapeTensor()); }
 
 /// <summary>
-/// The op/dtype pairs the region-table uniform draw depends on, checked in-graph so both ONNX
+/// The uint64 op/dtype pairs a threshold-driven draw rests on, checked in-graph so both ONNX
 /// Runtime and the Quick Execution Engine must agree: a computed (non-constant) uint64 table
-/// gathered with computed indices, the restoring long division that builds the threshold table,
-/// the running max that holds each threshold above the last, and a binary search over the table
-/// checked against a linear scan.
+/// gathered with computed indices, a restoring long division, a running max, and a binary search
+/// over the table checked against a linear scan.
 ///
-/// <para>The table is <c>uint64</c> because <c>Max</c> on <c>int64</c> mis-orders operands in
-/// [2^31, 2^32) and the running max walks straight through that band. The division uses
-/// arithmetic selection rather than <c>Where</c>, multiplication by two rather than
-/// <c>BitShift</c>, and <c>Greater</c> negated rather than <c>GreaterOrEqual</c> or
-/// <c>LessOrEqual</c> — a uint64 <c>Where</c> is unimplemented in ORT, and these are the forms
-/// it does implement.</para>
+/// <para>The dense uniform draw no longer builds a 128-slot table, divides, or searches — its
+/// thresholds are exact cumulative weights over seven blocks. These are kept as a pin on the ops
+/// themselves, which stayed load-bearing elsewhere and were expensive to characterize: uint64 is
+/// required because <c>Max</c> on <c>int64</c> mis-orders operands in [2^31, 2^32) and a running
+/// max walks straight through that band, and the division uses arithmetic selection rather than
+/// <c>Where</c>, multiplication by two rather than <c>BitShift</c>, and <c>Greater</c> negated
+/// rather than <c>GreaterOrEqual</c> — a uint64 <c>Where</c> is unimplemented in ORT, and these
+/// are the forms it does implement.</para>
 /// </summary>
 [Module]
 public partial class RngRegionSelectionOpsCheck
@@ -193,6 +194,27 @@ public partial class RngDenseThresholdTable
 }
 
 /// <summary>
+/// The dense draw over [0,1) against <see cref="RuntimeRng.StandardUniform"/>, in-graph and off the
+/// same key, so they consume the same generator values. Above the truncation floor they must agree
+/// exactly: [0,1) does not straddle zero, so it keeps 41 weight classes and totals exactly 2^64,
+/// which makes the scaling the identity and the block decode Walker/Reynolds' own. They part ways
+/// only on draws below 2^23 — probability 2^-41 per element, unreachable by sampling — where the
+/// lattice reaches exact zero and Walker instead folds everything into his bottom binade.
+/// </summary>
+[Module]
+public partial class RngDenseIsWalkerOnTheUnitInterval
+{
+    public static Scalar<bit> Inline(Tensor<float32> x)
+    {
+        var shape = x.ShapeTensor();
+        var key = Scalar(0xA5A5_1234UL | (0x9E37UL << 32));
+        var dense = RuntimeRng.Uniform(shape, key, Scalar(0UL), Scalar(0f), Scalar(1f));
+        var walker = RuntimeRng.StandardUniform(shape, key, Scalar(0UL));
+        return (dense - walker).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() == Scalar(0f);
+    }
+}
+
+/// <summary>
 /// The in-graph counter-based runtime RNG (<see cref="RuntimeRng"/>): the ONNX-op Threefry
 /// subgraph must reproduce the host generator (<see cref="Threefry2x32"/>) bit-for-bit —
 /// execution-provider-independent — and produce well-distributed draws.
@@ -221,6 +243,9 @@ public class RngRuntimeTests
     private static ulong HostBits(long i, int width, ulong key, ulong substreamIndex)
         => RngTestOracle.DrawBits(key, substreamIndex, i, width);
 
+    // One ordinal below 2^-37, the floor boundary a range topping out in weight class 130 induces.
+    private static readonly float FloorBoundaryNeighbour = MathF.BitDecrement(MathF.ScaleB(1f, -37));
+
     private static readonly (float Low, float High)[] DenseRanges =
     [
         (0f, 1f), (-1f, 1f), (4f, 12f), (4f, 8f), (1f, 2f), (-1f, 0f), (0.1f, 0.3f),
@@ -234,6 +259,14 @@ public class RngRuntimeTests
         (1e-30f, 1e30f), (-1e-30f, 1e30f), (-2748779069440f, 1e30f), (-1e30f, -2748779069440f),
         (-1e30f, -1e-30f), (-1e30f, 1e-30f), (-1e30f, 1e15f), (-1e15f, 1e30f),
         (1e15f, 1e30f), (-1e30f, 0f), (0f, 1e30f), (-1.5e-45f, 3f),
+        // A collapsed span narrower than one delta: it holds no lattice point and degenerates to
+        // its stub alone — the low end's when the span sits at the low end of the range, the high
+        // end's when it sits at the high end.
+        (FloorBoundaryNeighbour, 16f), (-16f, -FloorBoundaryNeighbour),
+        // A two-sided block with a one-sided block above it, on each sign in turn.
+        (-1e30f, 1f), (-1f, 1e30f),
+        // One float: the top of a weight class, and the smallest subnormal of the negative ray.
+        (0.99999994f, 1f), (-float.Epsilon, 0f),
     ];
 
     private static long DenseSignedOrdinal(float x)
@@ -366,6 +399,48 @@ public class RngRuntimeTests
             foreach (var block in table.Blocks) negative += DenseNegativeWeight(block);
             Assert.Equal(table.Total, 2 * negative);
         }
+    }
+
+    // The truncation depth is chosen so the total tops out at exactly 2^64 — the largest value the
+    // wrap sentinel can carry. Nothing in the build clamps it, so overflow would be silent: a
+    // random sweep over the whole ordinal domain is what pins it.
+    [Fact]
+    public void TestDenseUniformOracleTotalNeverExceedsTheWeightAxis()
+    {
+        var random = new Random(20260811);
+        for (int i = 0; i < 20000; i++)
+        {
+            long span = 1L << (1 + random.Next(31));
+            long lowOrdinal = random.NextInt64(-(255L << RngDenseUniformOracle.P), 255L << RngDenseUniformOracle.P);
+            long highOrdinal = lowOrdinal + random.NextInt64(1, span);
+            (float low, float high) = (DenseFloatOfOrdinal(lowOrdinal), DenseFloatOfOrdinal(highOrdinal));
+            if (float.IsNaN(low) || float.IsNaN(high) || !(low < high)) continue;
+
+            var table = RngDenseUniformOracle.Build(low, high);
+            UInt128 weights = 0;
+            foreach (var block in table.Blocks) weights += block.Weight;
+            Assert.True(weights <= (UInt128)1 << 64);
+            Assert.Equal(weights, table.Total == 0 ? (UInt128)1 << 64 : table.Total);
+            Assert.InRange(table.Blocks.Length, 1, DenseMaxBlocks);
+            float drawn = RngDenseUniformOracle.Draw(DenseKey, 0, i, low, high);
+            Assert.True(drawn >= low && drawn < high);
+        }
+    }
+
+    // Truncation is the one approximation, and this is its size: the fraction of a range's floats
+    // that stays individually reachable. Both numbers are quoted in RuntimeRng's header.
+    [Fact]
+    public void TestDenseUniformOracleReachesTheDocumentedFractionOfEachDomain()
+    {
+        double Reachable(float low, float high)
+        {
+            long floats = 0;
+            foreach (var block in RngDenseUniformOracle.Build(low, high).Blocks)
+                floats += DenseElements(block);
+            return (double)floats / (DenseSignedOrdinal(high) - DenseSignedOrdinal(low));
+        }
+        Assert.Equal(0.331, Reachable(0f, 1f), 3);
+        Assert.Equal(0.161, Reachable(-float.MaxValue, float.MaxValue), 3);
     }
 
     private static float DenseFloatOfOrdinal(long z)
@@ -524,6 +599,15 @@ public class RngRuntimeTests
         Assert.True(DenseMatchesOracle(DenseBatch(4)));
         Assert.True(DenseMatchesOracle(DenseBatch(5)));
     }
+
+    [Fact]
+    public void TestInGraphDenseUniformMatchesTheOracleOnSubDeltaCollapsedSpans()
+        => Assert.True(DenseMatchesOracle(DenseBatch(6)));
+
+    [Fact]
+    public void TestInGraphDenseUniformOnTheUnitIntervalIsWalkerReynolds()
+        => Assert.True(AutoTest.AdvancedTestGraph<RngDenseIsWalkerOnTheUnitInterval>(
+            hyperparamInputs: [], runtimeInputs: [TensorData([2048L], new float[2048])]));
 
     private static (float Low, float High) StraddlingNegativePowerOfTwo(int exponent)
     {

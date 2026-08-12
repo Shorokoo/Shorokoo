@@ -330,6 +330,12 @@ public class RngRuntimeTests
         return (b & 0x8000_0000u) != 0 ? -(long)(b & 0x7FFF_FFFFu) : (long)b;
     }
 
+    private static int DenseClassOf(float x)
+    {
+        long z = DenseSignedOrdinal(x);
+        return (int)Math.Max(1, (z >= 0 ? z : -z - 1) >> RngDenseUniformOracle.P);
+    }
+
     [Fact]
     public void TestDenseUniformOracleNeverLeavesTheRequestedRange()
     {
@@ -517,21 +523,24 @@ public class RngRuntimeTests
         return units;
     }
 
+    // How the 2^64 draws divide over the weight axis: Remainder of the units take Quotient + 1 of
+    // them and the rest take Quotient.
+    private static (UInt128 Quotient, UInt128 Remainder) DenseSplit(float low, float high)
+    {
+        ulong total = RngDenseUniformOracle.Build(low, high).Total;
+        UInt128 units = total == 0 ? (UInt128)1 << 64 : total;
+        return (((UInt128)1 << 64) / units, ((UInt128)1 << 64) % units);
+    }
+
     // The one rounding the blocks do not remove: a weight unit gets q or q+1 of the 2^64 draws, so
     // a single-unit float can take (q+1)/q of its due. Raising the depth shrank q from 4 to 1.
     [Fact]
     public void TestDenseUniformOracleScalingIsExactOnlyWhenTheTotalIsAPowerOfTwo()
     {
-        (UInt128 Quotient, UInt128 Remainder) Split(float low, float high)
-        {
-            ulong total = RngDenseUniformOracle.Build(low, high).Total;
-            UInt128 units = total == 0 ? (UInt128)1 << 64 : total;
-            return (((UInt128)1 << 64) / units, ((UInt128)1 << 64) % units);
-        }
-        Assert.Equal(((UInt128)1, (UInt128)0), Split(0f, 1f));
-        Assert.Equal(((UInt128)1, (UInt128)0), Split(0f, float.PositiveInfinity));
+        Assert.Equal(((UInt128)1, (UInt128)0), DenseSplit(0f, 1f));
+        Assert.Equal(((UInt128)1, (UInt128)0), DenseSplit(0f, float.PositiveInfinity));
         // Not the finite domain: clamping -infinity to -MaxValue costs it the top class's last float.
-        Assert.Equal(((UInt128)1, (UInt128)1 << 40), Split(-float.MaxValue, float.MaxValue));
+        Assert.Equal(((UInt128)1, (UInt128)1 << 40), DenseSplit(-float.MaxValue, float.MaxValue));
 
         // Every range's own quotient, row per group of DenseRangeGroups.
         UInt128[][] want =
@@ -548,7 +557,264 @@ public class RngRuntimeTests
         for (int g = 0; g < DenseRangeGroups.Length; g++)
             for (int i = 0; i < DenseRangeGroups[g].Length; i++)
                 Assert.Equal(want[g][i],
-                    Split(DenseRangeGroups[g][i].Low, DenseRangeGroups[g][i].High).Quotient);
+                    DenseSplit(DenseRangeGroups[g][i].Low, DenseRangeGroups[g][i].High).Quotient);
+    }
+
+    // The skew a single weight unit takes from that rounding, and the two ranges the header names
+    // as exactly dyadic — hence exactly fair — among them.
+    [Fact]
+    public void TestDenseUniformWeightUnitSkewIsAtMostTwiceAndVanishesOnADyadicTotal()
+    {
+        double Skew(float low, float high)
+        {
+            var (quotient, remainder) = DenseSplit(low, high);
+            return remainder == 0 ? 1.0 : (double)(quotient + 1) / (double)quotient;
+        }
+        foreach (var (low, high) in DenseRanges) Assert.InRange(Skew(low, high), 1.0, 2.0);
+        Assert.Equal(1.0, Skew(0f, 1f));
+        Assert.Equal(1.0, Skew(-1f, 1f));
+        Assert.Equal(1.0, Skew(0f, float.PositiveInfinity));
+        Assert.Equal(1.0, Skew(4f, 12f));
+        Assert.Equal(2.0, Skew(0f, float.MaxValue));
+        Assert.Equal(2.0, Skew(-float.MaxValue, float.MaxValue));
+    }
+
+    // The figure RuntimeRng's header quotes and nothing measured. Every float's run of weight units
+    // maps to within one of the 2^64 draws it is due, so the distance is under the reachable float
+    // count over 2^65 — and is exactly zero where the scaling is the identity.
+    [Fact]
+    public void TestDenseUniformStaysWithinTheDocumentedTotalVariationDistance()
+    {
+        double Distance(float low, float high)
+        {
+            var table = RngDenseUniformOracle.Build(low, high);
+            long floats = 0;
+            foreach (var block in table.Blocks) floats += DenseElements(block);
+            return table.Total == 0 ? 0.0 : floats * Math.ScaleB(1.0, -65);
+        }
+        foreach (var (low, high) in DenseRanges) Assert.True(Distance(low, high) < Math.ScaleB(1.0, -35));
+        Assert.Equal(0.0, Distance(0f, 1f));
+        Assert.Equal(0.0, Distance(-1f, 1f));
+        Assert.Equal(0.0, Distance(0f, float.PositiveInfinity));
+    }
+
+    // The smallest value the blocks can produce. Value order is ordinal order, and every block's
+    // image is a contiguous ordinal run except the lattice, whose first point is its base.
+    private static float DenseMinDrawable(RngDenseUniformOracle.Table table)
+    {
+        float min = float.PositiveInfinity;
+        foreach (var b in table.Blocks)
+            min = MathF.Min(min, b.Kind switch
+            {
+                RngDenseUniformOracle.Kind.Lattice =>
+                    MathF.ScaleB((float)b.Base, table.FloorClass - 150),
+                RngDenseUniformOracle.Kind.TwoSided =>
+                    DenseFloatOfOrdinal(-(((long)b.C1 + 1) << RngDenseUniformOracle.P)),
+                RngDenseUniformOracle.Kind.OneSided => b.Negative
+                    ? DenseFloatOfOrdinal(-(((long)b.C1 + 1) << RngDenseUniformOracle.P))
+                    : DenseFloatOfOrdinal((long)b.C0 << RngDenseUniformOracle.P),
+                _ => DenseFloatOfOrdinal(b.Base),
+            });
+        return min;
+    }
+
+    // In the first two `low` lies inside the collapsed span and off the lattice, so truncation
+    // makes it undrawable; everywhere else it is the base of its ray's partial class and owns
+    // exactly the weight units one float of its class is worth.
+    [Fact]
+    public void TestDenseUniformDrawsLowOnlyWhereTruncationLeavesItOnTheGrid()
+    {
+        float Min(float low, float high) => DenseMinDrawable(RngDenseUniformOracle.Build(low, high));
+        Assert.True(Min(FloorBoundaryNeighbour, 16f) > FloorBoundaryNeighbour);
+        Assert.True(Min(-1f, 1e30f) > -1f);
+        Assert.Equal(-16f, Min(-16f, -FloorBoundaryNeighbour));
+        Assert.Equal(-1e30f, Min(-1e30f, 1f));
+        Assert.Equal(0f, Min(0f, 1f));
+        Assert.Equal(-1f, Min(-1f, 1f));
+        Assert.Equal(4f, Min(4f, 12f));
+
+        void OneUlpShare(float low, float high)
+        {
+            var table = RngDenseUniformOracle.Build(low, high);
+            var block = table.Blocks.Single(b => b.Kind == RngDenseUniformOracle.Kind.Ordinals
+                && b.Base == DenseSignedOrdinal(low));
+            ulong units = 1UL << (DenseClassOf(low) - table.FloorClass);
+            uint bits = BitConverter.SingleToUInt32Bits(low);
+            Assert.Equal(units, 1UL << block.Shift);
+            Assert.Equal(low, Min(low, high));
+            Assert.Equal(bits, RngDenseUniformOracle.SampleBits(table, DenseDrawFor(table, block.Threshold)));
+            Assert.Equal(bits, RngDenseUniformOracle.SampleBits(table, DenseDrawFor(table, block.Threshold + units - 1)));
+            Assert.NotEqual(bits, RngDenseUniformOracle.SampleBits(table, DenseDrawFor(table, block.Threshold + units)));
+        }
+        OneUlpShare(0.1f, 0.3f);
+        OneUlpShare(3f, 3.5f);
+        OneUlpShare(100f, 1000f);
+        OneUlpShare(-0.1f, 0.3f);
+    }
+
+    // A negative ray thinner than one lattice cell is dropped outright, not merely made rare.
+    [Fact]
+    public void TestDenseUniformGivesASubDeltaRayProbabilityExactlyZero()
+    {
+        UInt128 Negative(float low, float high)
+        {
+            UInt128 weight = 0;
+            foreach (var block in RngDenseUniformOracle.Build(low, high).Blocks)
+                weight += DenseNegativeWeight(block);
+            return weight;
+        }
+        Assert.Equal((UInt128)0, Negative(-1f, 1e30f));
+        Assert.Equal((UInt128)0, Negative(-1e-30f, 1e30f));
+        Assert.Equal((UInt128)0, Negative(-1.5e-45f, 3f));
+        Assert.Equal((UInt128)2, Negative(-2.8e-45f, 1.1754944e-38f));
+        Assert.Equal((UInt128)1 << 63, Negative(-1f, 1f));
+    }
+
+    // What the draw actually emits: the real generator's values, off a fixed key so every statistic
+    // below is deterministic, decoded by the table exactly as RngDenseUniformOracle.Draw would.
+    private static float[] DenseStream(ulong key, ulong substreamIndex, float low, float high, int n)
+    {
+        var table = RngDenseUniformOracle.Build(low, high);
+        float[] xs = new float[n];
+        for (long i = 0; i < n; i++)
+            xs[i] = BitConverter.UInt32BitsToSingle(RngDenseUniformOracle.SampleBits(
+                table, RngTestOracle.DrawValue(key, substreamIndex, i)));
+        return xs;
+    }
+
+    // The weight each class above the truncation floor is owed, read off the blocks rather than
+    // sampled. Everything below the floor is the lattice, which is class 0 here because that is all
+    // an observer can tell those floats apart as.
+    private static Dictionary<int, UInt128> DenseClassUnits(RngDenseUniformOracle.Table table)
+    {
+        Dictionary<int, UInt128> units = [];
+        void Add(int cls, UInt128 u) => units[cls] = units.GetValueOrDefault(cls) + u;
+        foreach (var b in table.Blocks)
+            switch (b.Kind)
+            {
+                case RngDenseUniformOracle.Kind.Lattice:
+                    Add(0, b.Weight);
+                    break;
+                case RngDenseUniformOracle.Kind.TwoSided:
+                case RngDenseUniformOracle.Kind.OneSided:
+                {
+                    int width = RngDenseUniformOracle.P
+                        + (b.Kind == RngDenseUniformOracle.Kind.TwoSided ? 1 : 0);
+                    for (int c = b.C0; c <= b.C1; c++)
+                        Add(c, (UInt128)1 << (width + c - table.FloorClass));
+                    break;
+                }
+                default:
+                    Add(b.C0, b.Weight);
+                    break;
+            }
+        return units;
+    }
+
+    private static double DenseClassChiSquare(float low, float high, int draws)
+    {
+        var table = RngDenseUniformOracle.Build(low, high);
+        double total = table.Total == 0 ? Math.ScaleB(1.0, 64) : table.Total;
+        Dictionary<int, long> seen = [];
+        foreach (float x in DenseStream(DenseKey, 0, low, high, draws))
+        {
+            int cls = DenseClassOf(x);
+            int bucket = cls < table.FloorClass ? 0 : cls;
+            seen[bucket] = seen.GetValueOrDefault(bucket) + 1;
+        }
+        double chi = 0, pooledExpected = 0;
+        long pooledSeen = 0;
+        foreach (var (cls, weight) in DenseClassUnits(table))
+        {
+            double expected = draws * (double)weight / total;
+            long observed = seen.GetValueOrDefault(cls);
+            if (expected >= 5) chi += (observed - expected) * (observed - expected) / expected;
+            else { pooledExpected += expected; pooledSeen += observed; }
+        }
+        return chi + (pooledExpected > 0
+            ? (pooledSeen - pooledExpected) * (pooledSeen - pooledExpected) / pooledExpected
+            : 0);
+    }
+
+    // Nothing else reads the drawn stream: the one other empirical check is a mean over 64 samples,
+    // which a sampler returning only the two endpoints would pass.
+    [Fact]
+    public void TestDenseUniformDrawsOccupyEachWeightClassInProportionToItsBlockWeight()
+        => Assert.All((( float Low, float High)[])
+            [(0f, 1f), (-1f, 1f), (4f, 12f), (0.1f, 0.3f), (100f, 1000f),
+             (1e-30f, 1e30f), (-1e30f, 1e15f), (-float.MaxValue, float.MaxValue)],
+            r => Assert.True(DenseClassChiSquare(r.Low, r.High, 40000) < 40));
+
+    [Fact]
+    public void TestDenseUniformDrawsTrackTheContinuousUniformUnderKolmogorovSmirnov()
+    {
+        double Statistic(float low, float high)
+        {
+            float[] xs = DenseStream(DenseKey, 1, low, high, 20000);
+            Array.Sort(xs);
+            double worst = 0;
+            for (int i = 0; i < xs.Length; i++)
+            {
+                double f = ((double)xs[i] - low) / ((double)high - low);
+                worst = Math.Max(worst, Math.Max(Math.Abs(f - (double)i / xs.Length),
+                                                 Math.Abs(f - (i + 1.0) / xs.Length)));
+            }
+            return worst * Math.Sqrt(xs.Length);
+        }
+        Assert.All((( float Low, float High)[])
+            [(0f, 1f), (-1f, 1f), (4f, 12f), (0.1f, 0.3f), (100f, 1000f), (3f, 3.5f), (-0.1f, 0.3f)],
+            r => Assert.True(Statistic(r.Low, r.High) < 2.0));
+    }
+
+    [Fact]
+    public void TestConsecutiveDenseUniformDrawPositionsFillTheUnitSquareIndependently()
+    {
+        const int Draws = 50000, Grid = 8;
+        double Statistic(float low, float high)
+        {
+            float[] xs = DenseStream(DenseKey, 2, low, high, Draws);
+            int Cell(float x) => (int)Math.Min(Grid - 1, ((double)x - low) / ((double)high - low) * Grid);
+            long[] cells = new long[Grid * Grid];
+            for (int i = 0; i + 1 < Draws; i++) cells[Cell(xs[i]) * Grid + Cell(xs[i + 1])]++;
+            double expected = (Draws - 1.0) / cells.Length, chi = 0;
+            foreach (long c in cells) chi += (c - expected) * (c - expected) / expected;
+            return chi;
+        }
+        Assert.All((( float Low, float High)[])
+            [(0f, 1f), (-1f, 1f), (-1f, 0f), (4f, 12f), (0.1f, 0.3f), (3f, 3.5f), (100f, 1000f), (-0.1f, 0.3f)],
+            r => Assert.True(Statistic(r.Low, r.High) < 130));
+    }
+
+    // Distinctness is all the other seed tests ask for, and two streams can be distinct and still
+    // move together.
+    [Fact]
+    public void TestConsecutiveSeedsAndSiblingModelIdPathsGiveUncorrelatedStreams()
+    {
+        double Correlation(float[] a, float[] b)
+        {
+            double ma = 0, mb = 0;
+            for (int i = 0; i < a.Length; i++) { ma += a[i]; mb += b[i]; }
+            ma /= a.Length; mb /= b.Length;
+            double sa = 0, sb = 0, sab = 0;
+            for (int i = 0; i < a.Length; i++)
+            {
+                double da = a[i] - ma, db = b[i] - mb;
+                sa += da * da; sb += db * db; sab += da * db;
+            }
+            return sab / Math.Sqrt(sa * sb);
+        }
+        double Worst(Func<int, ulong> key)
+        {
+            float[][] streams = [.. Enumerable.Range(0, 64).Select(i => DenseStream(key(i), 0, 0f, 1f, 1024))];
+            double worst = 0;
+            for (int i = 0; i < streams.Length; i++)
+                for (int j = i + 1; j < streams.Length; j++)
+                    worst = Math.Max(worst, Math.Abs(Correlation(streams[i], streams[j])));
+            return worst;
+        }
+        Assert.True(Worst(s => RngTestOracle.RunKey(new RngConfig { MasterSeed = (ulong)s }, [1])) < 0.25);
+        Assert.True(Worst(j => RngTestOracle.RunKey(RngConfig.Default, [1, j])) < 0.25);
+        Assert.True(Worst(j => RngTestOracle.InitKey(RngConfig.Default, [3, j])) < 0.25);
     }
 
     // The size of the one approximation, and both numbers are quoted in RuntimeRng's header.

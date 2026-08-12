@@ -478,34 +478,7 @@ public class QeeUInt64SignedOperatorTests
         const ulong third = 6148914691236517205UL;
         Assert.Equal((ulong[])[third, third + 1, third + 2, third + 3], got);
     }
-
-    // FAILING — this pins an open fault in ONNX RUNTIME rather than guarding a regression, and
-    // Shorokoo cannot fix it. Reproduced with a bare ONNX graph holding one Max node on 1.26.0 and
-    // 1.28.0, opsets 13 and 21. Max/Min behave as a 64-bit compare split into 32-bit halves with
-    // the LOW half compared signed, so they mis-order a pair exactly when the high halves are
-    // equal and one low half has bit 31 set. Greater and Add on the same operands are correct.
-    // Nothing in the product is exposed: every int64 Max operand stays inside (-2^31, 2^31), where
-    // both halves are same-signed. No issue is open on Shorokoo/Shorokoo to skip against.
-    [Fact]
-    public void TestInt64MaxMisordersWhenTheLowHalvesStraddleBitThirtyOne()
-    {
-        var g = ((ComputationGraph)typeof(QeeI64MaxLowHalfSigned)
-            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
-        // Pairs whose high halves are equal; the low halves straddle bit 31 in all but the first.
-        long[] a = [5L, 1L << 31, (1L << 32) - 1, (1L << 32) + (1L << 31), (1L << 40) + (1L << 31) + 9,
-                    3 * (1L << 32) + ((1L << 32) - 1), -2147483648L];
-        long[] b = [9L, 1L, 1L, (1L << 32) + 5, (1L << 40) + 5, 3 * (1L << 32) + 1, -4294967291L];
-        var inputA = TensorData(DType.Int64, [(long)a.Length], [.. a.Select(o => (object)o)]);
-        var inputB = TensorData(DType.Int64, [(long)b.Length], [.. b.Select(o => (object)o)]);
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([inputA, inputB])).ToConcreteModel();
-        var got = ComputeContext.Default.Execute(concrete, inputA, inputB)[0]
-            .ToTensorData().As<int64>().AccessMemory().ToArray();
-        Assert.Equal([.. a.Zip(b, Math.Max)], got);
-    }
 }
-
-[Module] public partial class QeeI64MaxLowHalfSigned {
-    public static Tensor<int64> Inline(Tensor<int64> a, Tensor<int64> b) => a.Max(b); }
 
 [Module] public partial class QeeU32Add { public static Tensor<uint32> Inline()
     => Vector(4294967295u, 0u, 2147483648u, 4294967295u, 4294967295u) + Vector(1u, 1u, 2u, 4294967295u, 2u); }

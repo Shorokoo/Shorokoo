@@ -355,7 +355,7 @@ internal static class RuntimeRng
     private const long DenseBinade = 1L << DenseP;            // floats per weight class, one sign
     private const int DenseBias = 127;
     private const int DenseMaxClasses = 41;                   // truncation depth off the straddle
-    private const int DenseBlocks = 7;                        // lattice, 2-sided, 1-sided, 2 partials, 2 stubs
+    private const int DenseBlocks = 9;                        // lattice, 2-sided, 1-sided, 4 partials, 2 stubs
     private const int DenseMaxShift = 62;                     // the int64 power table's top exponent
     private const int DenseMaxWeight = 63;                    // the uint64 one's
 
@@ -599,17 +599,12 @@ internal static class RuntimeRng
         var (posLowBase, posLowCount, posLowClass, posHighBase, posHighCount, posHighClass,
              posFirst, posLast) = DenseSplitRun(bandHigh, zHigh, negative: false);
 
-        // At most one partial class at each end of the whole range: an inner end of either run is a
-        // class boundary by construction, so only the run holding zLow can have a low partial and
-        // only the run holding zHigh a high one.
+        // Each ray's two partials get their own block. Folding them into one pair needs an argument
+        // about which can coexist, and the obvious one is wrong: a range that straddles zero and
+        // stops INSIDE the floor class on the positive side has a real partial at the low end of
+        // BOTH rays, and collapsing them drops floats outright. Four blocks cost two compares.
         var negPresent = Ind(OnnxOp.Less(zLow, bandLow));
         var posPresent = Ind(OnnxOp.Less(bandHigh, zHigh));
-        var lowBase = negPresent * negLowBase + (Scalar(1L) - negPresent) * posLowBase;
-        var lowCount = negPresent * negLowCount + (Scalar(1L) - negPresent) * posLowCount;
-        var lowClass = negPresent * negLowClass + (Scalar(1L) - negPresent) * posLowClass;
-        var highBase = posPresent * posHighBase + (Scalar(1L) - posPresent) * negHighBase;
-        var highCount = posPresent * posHighCount + (Scalar(1L) - posPresent) * negHighCount;
-        var highClass = posPresent * posHighClass + (Scalar(1L) - posPresent) * negHighClass;
 
         // The classes both rays hold whole become one block; whatever the deeper ray keeps above
         // them becomes the other, on whichever sign that is.
@@ -637,8 +632,10 @@ internal static class RuntimeRng
         var oneWeight = onePresent.Cast<uint64>()
             * DensePowU(Scalar((long)DenseP) + oneFirst - floorClass)
             * (DensePowU(oneLast - oneFirst + Scalar(1L)) - Scalar(1UL));
-        var lowWeight = lowCount.Cast<uint64>() * DensePowU(lowClass - floorClass);
-        var highWeight = highCount.Cast<uint64>() * DensePowU(highClass - floorClass);
+        var negLowWeight = negLowCount.Cast<uint64>() * DensePowU(negLowClass - floorClass);
+        var negHighWeight = negHighCount.Cast<uint64>() * DensePowU(negHighClass - floorClass);
+        var posLowWeight = posLowCount.Cast<uint64>() * DensePowU(posLowClass - floorClass);
+        var posHighWeight = posHighCount.Cast<uint64>() * DensePowU(posHighClass - floorClass);
 
         // ── Thresholds ─────────────────────────────────────────────────────────────────
         // A block's threshold IS its cumulative weight — no scaling, no division, no rounding — so
@@ -647,7 +644,8 @@ internal static class RuntimeRng
         // threshold can carry that value, so only the total ever means something other than itself.
         Tensor<uint64>[] weight =
         [
-            latticeCount.Cast<uint64>(), twoWeight, oneWeight, lowWeight, highWeight,
+            latticeCount.Cast<uint64>(), twoWeight, oneWeight,
+            negLowWeight, negHighWeight, posLowWeight, posHighWeight,
             lowStub.Cast<uint64>(), highStub.Cast<uint64>(),
         ];
         Tensor<uint64>[] cumulative = new Tensor<uint64>[DenseBlocks];
@@ -661,13 +659,15 @@ internal static class RuntimeRng
         Tensor<int64> zero = Scalar(0L);
         var spacing = (Tensor<float32>)OnnxOp.Gather(Vector(DenseSpacing), floorClass, axis: 0);
         return (DenseColumn(cumulative),
-                DenseColumn(latticeFrom, zero, zero, lowBase, highBase, bandLow, latticeTo),
-                DenseColumn(zero, twoFirst, oneFirst, zero, zero, zero, zero),
-                Vector(0L, DenseP + 1L, DenseP, 0L, 0L, 0L, 0L),
-                DenseColumn(zero, zero, zero, lowClass - floorClass, highClass - floorClass, zero, zero),
-                DenseColumn(zero, zero, oneFromNeg, zero, zero, zero, zero),
-                Vector(0L, 1L, 1L, 0L, 0L, 0L, 0L),
-                Vector(1L, 0L, 0L, 0L, 0L, 0L, 1L),
+                DenseColumn(latticeFrom, zero, zero,
+                            negLowBase, negHighBase, posLowBase, posHighBase, bandLow, latticeTo),
+                DenseColumn(zero, twoFirst, oneFirst, zero, zero, zero, zero, zero, zero),
+                Vector(0L, DenseP + 1L, DenseP, 0L, 0L, 0L, 0L, 0L, 0L),
+                DenseColumn(zero, zero, zero, negLowClass - floorClass, negHighClass - floorClass,
+                            posLowClass - floorClass, posHighClass - floorClass, zero, zero),
+                DenseColumn(zero, zero, oneFromNeg, zero, zero, zero, zero, zero, zero),
+                Vector(0L, 1L, 1L, 0L, 0L, 0L, 0L, 0L, 0L),
+                Vector(1L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 1L),
                 floorClass, spacing, useFixed, fixedValue, total);
     }
 

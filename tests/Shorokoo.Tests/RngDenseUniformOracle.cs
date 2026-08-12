@@ -168,12 +168,6 @@ internal static class RngDenseUniformOracle
         var (negLow, negHigh, negC0, negC1) = SplitRun(zLow, bandLow, negative: true);
         var (posLow, posHigh, posC0, posC1) = SplitRun(bandHigh, zHigh, negative: false);
 
-        // At most one partial class at each end of the whole range: an inner end of either run is a
-        // class boundary by construction, so only the run holding zLow can have a low partial and
-        // only the run holding zHigh a high partial.
-        var lowPart = zLow < bandLow ? negLow : posLow;
-        var highPart = bandHigh < zHigh ? posHigh : negHigh;
-
         bool negWhole = negC1 >= negC0, posWhole = posC1 >= posC0;
         int twoLow = 0, twoHigh = -1, oneLow = 0, oneHigh = -1;
         bool oneNegative = false;
@@ -213,7 +207,11 @@ internal static class RngDenseUniformOracle
         if (oneHigh >= oneLow)
             blocks.Add(new Block(Kind.OneSided, 0, ClassWeight(oneLow, oneHigh, floorClass, P),
                 0, oneLow, oneHigh, 0, oneNegative));
-        Part[] partials = [lowPart, highPart];
+        // Every partial each ray reports, not a chosen two. Picking two needs an argument about
+        // which can coexist, and the obvious one is wrong: when the range straddles zero and stops
+        // INSIDE the floor class on the positive side, the negative ray's low partial and the
+        // positive ray's low partial are both real, and dropping either loses floats outright.
+        Part[] partials = [negLow, negHigh, posLow, posHigh];
         foreach (var part in partials)
             if (part.Count > 0)
                 blocks.Add(new Block(Kind.Ordinals, 0, (ulong)part.Count << (part.Cls - floorClass),

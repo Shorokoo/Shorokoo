@@ -174,14 +174,14 @@ public partial class RngDenseUniformOracleCheck
 }
 
 /// <summary>
-/// The block thresholds the graph builds for a batch of ranges, [Ranges * 7], so a test can hold
+/// The block thresholds the graph builds for a batch of ranges, [Ranges * 9], so a test can hold
 /// them against the oracle's. Sampling draws cannot: a held-up threshold may own one code in 2^64,
 /// and every draw-based check agrees with a table that has dropped it.
 /// </summary>
 [Module]
 public partial class RngDenseThresholdTable
 {
-    public const int Ranges = 6, Slots = 7;
+    public const int Ranges = 6, Slots = 9;
 
     public static Tensor<uint64> Inline(Tensor<float32> bounds)
     {
@@ -267,6 +267,12 @@ public class RngRuntimeTests
         (-1e30f, 1f), (-1f, 1e30f),
         // One float: the top of a weight class, and the smallest subnormal of the negative ray.
         (0.99999994f, 1f), (-float.Epsilon, 0f),
+        // Straddling, and stopping INSIDE the floor class on the positive side: both rays then
+        // hold a partial at their low end, and a layout that keeps only one of them drops the
+        // positive one — 6.1M floats in the first of these.
+        (-1e30f, 2e18f), (-3.4028235e38f, 6.18969982749202e26f),
+        (-1.2924697071141057e-26f, 2.3509885615147286e-38f), (-1e30f, 1.2379401e27f),
+        (-1e15f, 4.7223665e21f), (-2.8e-45f, 1.1754944e-38f),
     ];
 
     private static long DenseSignedOrdinal(float x)
@@ -291,10 +297,11 @@ public class RngRuntimeTests
         }
     }
 
-    // The six kinds of block, plus the second partial class: lattice, both-signs classes,
-    // one-sign classes, a partial class at each end of the range, and a stub at each end of the
-    // lattice. No range can produce more, and a stub excludes the partial on its side.
-    private const int DenseMaxBlocks = 7;
+    // The kinds of block: the lattice, the both-signs classes, the one-sign classes, a partial
+    // class at each end of each ray, and a stub at each end of the lattice. Far fewer than nine
+    // ever coexist — a stub excludes the partial on its side, and the two rays cannot both be
+    // partial at both ends — but the layout does not depend on which, and nor should the bound.
+    private const int DenseMaxBlocks = 9;
 
     private static long DenseElements(RngDenseUniformOracle.Block b)
         => b.Kind switch
@@ -397,7 +404,7 @@ public class RngRuntimeTests
             var table = RngDenseUniformOracle.Build(-bound, bound);
             ulong negative = 0;
             foreach (var block in table.Blocks) negative += DenseNegativeWeight(block);
-            Assert.Equal(table.Total, 2 * negative);
+            Assert.Equal(1UL << 63, negative);
         }
     }
 
@@ -425,6 +432,54 @@ public class RngRuntimeTests
             float drawn = RngDenseUniformOracle.Draw(DenseKey, 0, i, low, high);
             Assert.True(drawn >= low && drawn < high);
         }
+    }
+
+    // The blocks must account for every float the range holds, not merely agree with themselves.
+    // Total is a sum of the block weights, so a block that is built and then dropped leaves the
+    // partition self-consistent and the floats it covered unreachable; only an independently
+    // computed measure of the range catches that. Ordinal material only — the lattice deliberately
+    // collapses what lies below the floor.
+    [Fact]
+    public void TestDenseUniformOracleBlocksCoverEveryFloatAboveTheFloor()
+    {
+        var random = new Random(20260812);
+        for (int i = 0; i < 20000; i++)
+        {
+            float low = BitConverter.UInt32BitsToSingle((uint)random.NextInt64(1L << 32));
+            float high = BitConverter.UInt32BitsToSingle((uint)random.NextInt64(1L << 32));
+            if (float.IsNaN(low) || float.IsNaN(high) || !(low < high)) continue;
+            var table = RngDenseUniformOracle.Build(low, high);
+            if (table.Fixed is not null) continue;
+
+            long floor = (long)table.FloorClass << RngDenseUniformOracle.P;
+            long bandLow = Math.Clamp(-floor, table.ZLow, table.ZHigh);
+            long bandHigh = Math.Clamp(floor, table.ZLow, table.ZHigh);
+            UInt128 want = DenseOrdinalUnits(table.ZLow, bandLow, table.FloorClass)
+                         + DenseOrdinalUnits(bandHigh, table.ZHigh, table.FloorClass);
+            UInt128 got = 0;
+            foreach (var block in table.Blocks)
+                if (block.Kind is not RngDenseUniformOracle.Kind.Lattice
+                              and not RngDenseUniformOracle.Kind.OrdinalStub
+                              and not RngDenseUniformOracle.Kind.LatticeStub) got += block.Weight;
+            Assert.Equal(want, got);
+        }
+    }
+
+    // The weight of the ordinal run [from, to), summed one weight class at a time.
+    private static UInt128 DenseOrdinalUnits(long from, long to, int floorClass)
+    {
+        UInt128 units = 0;
+        for (long z = from; z < to;)
+        {
+            long magnitude = z >= 0 ? z : -z - 1;
+            int cls = (int)Math.Max(1, magnitude >> RngDenseUniformOracle.P);
+            long end = Math.Min(to, z >= 0
+                ? ((magnitude >> RngDenseUniformOracle.P) + 1) << RngDenseUniformOracle.P
+                : -((long)cls << RngDenseUniformOracle.P));
+            units += (UInt128)(end - z) << (cls - floorClass);
+            z = end;
+        }
+        return units;
     }
 
     // Truncation is the one approximation, and this is its size: the fraction of a range's floats
@@ -576,8 +631,15 @@ public class RngRuntimeTests
             AssertThresholdsMatchOracle(DenseBatch(b));
     }
 
+    // The check module reads a fixed Ranges pairs of bounds, so a short final batch would read
+    // past the end of the tensor rather than fail here.
     private static (float Low, float High)[] DenseBatch(int index)
-        => [.. DenseRanges.Skip(index * RngDenseUniformOracleCheck.Ranges).Take(RngDenseUniformOracleCheck.Ranges)];
+    {
+        (float Low, float High)[] batch =
+            [.. DenseRanges.Skip(index * RngDenseUniformOracleCheck.Ranges).Take(RngDenseUniformOracleCheck.Ranges)];
+        Assert.Equal(RngDenseUniformOracleCheck.Ranges, batch.Length);
+        return batch;
+    }
 
     [Fact]
     public void TestInGraphDenseUniformMatchesTheOracleOnAdversarialRanges()
@@ -603,6 +665,10 @@ public class RngRuntimeTests
     [Fact]
     public void TestInGraphDenseUniformMatchesTheOracleOnSubDeltaCollapsedSpans()
         => Assert.True(DenseMatchesOracle(DenseBatch(6)));
+
+    [Fact]
+    public void TestInGraphDenseUniformMatchesTheOracleWhenBothRaysHoldALowPartial()
+        => Assert.True(DenseMatchesOracle(DenseBatch(7)));
 
     [Fact]
     public void TestInGraphDenseUniformOnTheUnitIntervalIsWalkerReynolds()

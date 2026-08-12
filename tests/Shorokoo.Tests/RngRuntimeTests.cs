@@ -865,6 +865,114 @@ public class RngRuntimeTests
         }
     }
 
+    // A NaN bound comes back bits intact, `low` winning when both are; an infinite bound clamps to
+    // the finite extreme of its sign, except +inf as `high`, which is the ordinal one past the
+    // largest finite; an empty or inverted range comes back as the clamped `low`.
+    private static uint? DenseToyFixed(RngDenseUniformOracle.Format fmt, uint lowBits, uint highBits)
+    {
+        long lowMagnitude = lowBits & (fmt.SignBit - 1), highMagnitude = highBits & (fmt.SignBit - 1);
+        if (lowMagnitude > fmt.InfinityOrdinal) return lowBits;
+        if (highMagnitude > fmt.InfinityOrdinal) return highBits;
+        uint clamped = lowMagnitude == fmt.InfinityOrdinal
+            ? (uint)((lowBits & (uint)fmt.SignBit) | (uint)fmt.MaxFiniteOrdinal) : lowBits;
+        long zLow = DenseToySignedOrdinal(fmt, clamped);
+        long zHigh = highMagnitude != fmt.InfinityOrdinal ? DenseToySignedOrdinal(fmt, highBits)
+            : (highBits & (uint)fmt.SignBit) != 0 ? -fmt.MaxFiniteOrdinal : fmt.InfinityOrdinal;
+        return zHigh <= zLow ? clamped : null;
+    }
+
+    private static long DenseToySignedOrdinal(RngDenseUniformOracle.Format fmt, uint bits)
+        => (bits & (uint)fmt.SignBit) != 0 ? -(long)(bits & (uint)(fmt.SignBit - 1)) : bits;
+
+    // Value of a signed ordinal in units of the format's smallest subnormal — exact integers, and
+    // the only handle on which float a lattice point is that does not go through the construction.
+    private static long DenseToyUnits(RngDenseUniformOracle.Format fmt, long z)
+    {
+        long magnitude = Math.Abs(z), field = magnitude >> fmt.P, significand = magnitude & fmt.SigMask;
+        long units = field == 0 ? significand : (fmt.BinadeSize | significand) << (int)(field - 1);
+        return z < 0 ? -units : units;
+    }
+
+    // F-2: the construction on a format small enough to enumerate. Every pair of representable
+    // bounds, every code on the weight axis, checked against cell widths and lattice occupancy read
+    // off an enumeration of the format rather than off the blocks.
+    private static void DenseToyEnumerate(RngDenseUniformOracle.Format fmt)
+    {
+        int patterns = 1 << (1 + fmt.E + fmt.P);
+        UInt128 axis = (UInt128)1 << fmt.W;
+        uint Bits(long z) => z >= 0 ? (uint)z : (uint)(fmt.SignBit | -z);
+        int Class(long z) => (int)Math.Max(1, (z >= 0 ? z : -z - 1) >> fmt.P);
+
+        Dictionary<long, uint> byUnits = [];
+        for (long z = -fmt.MaxFiniteOrdinal; z <= fmt.MaxFiniteOrdinal; z++)
+            byUnits[DenseToyUnits(fmt, z)] = Bits(z);
+
+        long[] want = new long[patterns], seen = new long[patterns];
+        int kinds = 0;
+        bool truncated = false, wrapped = false;
+        for (uint lowBits = 0; lowBits < patterns; lowBits++)
+            for (uint highBits = 0; highBits < patterns; highBits++)
+            {
+                var table = RngDenseUniformOracle.Build(fmt, lowBits, highBits);
+                Assert.Equal(DenseToyFixed(fmt, lowBits, highBits), table.Fixed);
+                if (table.Fixed is not null) continue;
+
+                int classes = table.ZLow < 0 && table.ZHigh > 0 ? fmt.StraddleClasses : fmt.MaxClasses;
+                int floorClass = Math.Max(1,
+                    Math.Max(Class(table.ZLow), Class(table.ZHigh - 1)) - classes + 1);
+                Assert.Equal(floorClass, table.FloorClass);
+
+                long zFloor = (long)floorClass << fmt.P, delta = 1L << (floorClass - 1);
+                long bandLow = Math.Clamp(-zFloor, table.ZLow, table.ZHigh);
+                long bandHigh = Math.Clamp(zFloor, table.ZLow, table.ZHigh);
+                long spanLow = DenseToyUnits(fmt, bandLow), spanHigh = DenseToyUnits(fmt, bandHigh);
+                Array.Clear(want);
+                for (long z = table.ZLow; z < bandLow; z++) want[Bits(z)] = 1L << (Class(z) - floorClass);
+                for (long z = bandHigh; z < table.ZHigh; z++) want[Bits(z)] = 1L << (Class(z) - floorClass);
+                for (long n = spanLow >> (floorClass - 1); (n + 1) * delta <= spanHigh; n++)
+                    if (n * delta >= spanLow) want[byUnits[n * delta]]++;
+
+                UInt128 total = table.Total == 0 ? axis : table.Total;
+                Assert.Equal(total, (UInt128)want.Sum());
+                Assert.True(total <= axis);
+
+                UInt128 cumulative = 0;
+                foreach (var block in table.Blocks)
+                {
+                    Assert.Equal((UInt128)block.Threshold, cumulative);
+                    Assert.True(block.Weight > 0);
+                    cumulative += block.Weight;
+                    kinds |= 1 << (int)block.Kind;
+                }
+                Assert.Equal(total, cumulative);
+                (truncated, wrapped) = (truncated || floorClass > 1, wrapped || table.Total == 0);
+
+                Array.Clear(seen);
+                for (ulong code = 0; code < total; code++)
+                    seen[RngDenseUniformOracle.SampleBits(table, table.Total == 0 ? code
+                        : ((code << fmt.W) + table.Total - 1) / table.Total)]++;
+                Assert.True(seen.AsSpan().SequenceEqual(want));
+
+                bool escaped = false;
+                for (ulong draw = 0; draw < (ulong)axis; draw++)
+                    escaped |= want[RngDenseUniformOracle.SampleBits(table, draw)] == 0;
+                Assert.False(escaped);
+            }
+        Assert.Equal(0b1111, kinds);
+        Assert.True(truncated && wrapped);
+    }
+
+    // Wide-exponent and wide-significand shapes, each with a draw width leaving the depth W - P
+    // shallower than the classes the format holds, so truncation bites on the deeper ranges.
+    [Fact] public void TestDenseUniformOracleAssignsEveryWeightUnitExactlyOnceOnAThreeByTwoFormat()
+        => DenseToyEnumerate(new(E: 3, P: 2, W: 6));
+    [Fact] public void TestDenseUniformOracleAssignsEveryWeightUnitExactlyOnceOnAFourByThreeFormat()
+        => DenseToyEnumerate(new(E: 4, P: 3, W: 8));
+    [Fact] public void TestDenseUniformOracleAssignsEveryWeightUnitExactlyOnceOnATwoByFourFormat()
+        => DenseToyEnumerate(new(E: 2, P: 4, W: 6));
+    [Fact] public void TestDenseUniformOracleAssignsEveryWeightUnitExactlyOnceOnAFiveByOneFormat()
+        => DenseToyEnumerate(new(E: 5, P: 1, W: 8));
+
     // Against a closed form written out independently. The negative half runs downward from the
     // binade above — a negative ordinal takes its class from the pattern below it — hence 2 - m.
     [Fact]

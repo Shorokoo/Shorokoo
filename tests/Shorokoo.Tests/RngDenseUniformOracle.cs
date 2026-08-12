@@ -112,8 +112,10 @@ internal static class RngDenseUniformOracle
         int exponent;
         if (magnitudeOrdinal < BinadeSize) { significand = magnitudeOrdinal; exponent = MinExponent; }
         else { exponent = (int)(magnitudeOrdinal >> P) - Bias; significand = BinadeSize | (magnitudeOrdinal & SigMask); }
+        // Callers only ask about a magnitude inside the collapsed span, so the value is at most
+        // 2^floorExponent and the shift is never negative. A shift of 0 falls through correctly:
+        // the significand survives and the empty mask makes it exact.
         int shift = floorExponent - exponent;
-        if (shift <= 0) return (shift <= -63 ? 0 : significand << -shift, true);
         if (shift >= 63) return (0, false);
         return (significand >> shift, (significand & ((1L << shift) - 1)) == 0);
     }
@@ -232,7 +234,13 @@ internal static class RngDenseUniformOracle
     /// <summary>Decompose one sign's ordinal material [from, to) into a partial class at each end
     /// and the whole classes between. A partial that happens to cover its whole class is folded
     /// into the whole range instead, so the geometric blocks stay maximal. Classes ascend with the
-    /// ordinal on the positive side and descend on the negative one.</summary>
+    /// ordinal on the positive side and descend on the negative one.
+    ///
+    /// <para>Class 1 is where the run convention and <see cref="ClassIndex"/> disagree: the run is
+    /// 2^23 ordinals, but max(1, ...) also folds the subnormals into class 1, so a negative run
+    /// ending above -2^23 would mis-tile. <see cref="Build"/> never produces one — the band's edge
+    /// is either -(floorClass&lt;&lt;23), which is at most -2^23, or below it — but the invariant
+    /// lives at the caller, not here.</para></summary>
     private static (Part Low, Part High, int C0, int C1) SplitRun(long from, long to, bool negative)
     {
         Part none = new(0, 0, 0, negative);
@@ -276,7 +284,12 @@ internal static class RngDenseUniformOracle
 
     /// <summary>Bit pattern of the mant'th float of weight class cls on the given sign. Positive
     /// classes are the binade; negative ones run down from the binade above, because a negative
-    /// ordinal takes its class from the magnitude pattern below it.</summary>
+    /// ordinal takes its class from the magnitude pattern below it.
+    ///
+    /// <para>The negative form spells -infinity at class 254, mantissa 0. Nothing here prevents it:
+    /// it is unreachable only because a low bound of -infinity clamps to -MaxValue, so the ordinal
+    /// -(255&lt;&lt;23) never falls in range and negative class 254 is never whole. Change that clamp
+    /// and the draw returns -infinity.</para></summary>
     private static uint BitsOfClassMember(int cls, long mant, bool negative)
         => negative
             ? (uint)(SignMask | ((((long)cls + 1) << P) - mant))

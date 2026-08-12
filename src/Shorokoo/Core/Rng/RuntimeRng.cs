@@ -422,8 +422,9 @@ internal static class RuntimeRng
     /// <summary><see cref="Ind"/> for the unsigned side of the table arithmetic.</summary>
     private static Tensor<uint64> IndU(Variable condition) => ((Tensor<bit>)condition).Cast<uint64>();
 
-    /// <summary>2^e, clamped to the table's range so an empty block's nonsense exponent can never
-    /// gather out of bounds.</summary>
+    /// <summary>2^e, clamped to the table's range. The upper clamp is load-bearing — the band's
+    /// divisor reaches 2^214 — while the lower one only guards an empty band, whose quotient is
+    /// discarded; there the oracle instead shifts the other way, which no input reaches.</summary>
     private static Tensor<int64> DensePow(Tensor<int64> e)
         => OnnxOp.Gather(Vector(DensePow2), e.Max(Scalar(0L)).Min(Scalar((long)DenseMaxShift)), axis: 0).int64();
 
@@ -568,7 +569,11 @@ internal static class RuntimeRng
         // The blocks are still built over a one-float range so no downstream arithmetic degenerates.
         var empty = Ind(OnnxOp.LessOrEqual(zHighRaw, zLow));
         var useFixed = (Tensor<bit>)OnnxOp.Or(notANumber, OnnxOp.Greater(empty, Scalar(0L)));
-        var fixedValue = (Tensor<float32>)OnnxOp.Where(notANumber, Scalar(float.NaN), finiteLow);
+        // The canonical quiet NaN, 0x7FC00000, not C#'s float.NaN — which is 0xFFC00000, the sign
+        // bit set, because it inherits x86's result for an invalid operation. NumPy, PyTorch,
+        // Python and Java all spell a default NaN 0x7FC00000, and so does the oracle.
+        var fixedValue = (Tensor<float32>)OnnxOp.Where(
+            notANumber, Scalar(BitConverter.UInt32BitsToSingle(0x7FC0_0000u)), finiteLow);
         var zHigh = zHighRaw.Max(zLow + Scalar(1L));
 
         // ── Truncation floor, band and lattice ──────────────────────────────────────────
@@ -734,8 +739,12 @@ internal static class RuntimeRng
 
         // The owning block, as the count of thresholds at or below the scaled draw. The second
         // factor drops the trailing empty blocks, whose threshold IS the total: that may have
-        // wrapped to 0, which would otherwise sit at or below every draw.
-        Tensor<int64> found = scaled.Cast<int64>() * Scalar(0L);
+        // wrapped to 0, which would otherwise sit at or below every draw. That test rests on the
+        // lattice never being empty when the total wraps — reaching 2^64 needs the full depth on
+        // both extremes, which puts the whole span inside the range — so no LEADING block can
+        // carry a genuine threshold of 0 and be mistaken for the wrapped total. Reordering the
+        // blocks, or making the lattice optional, would break selection silently.
+        Tensor<int64> found = Scalar(0L);
         for (long block = 1; block < DenseBlocks; block++)
         {
             var probe = OnnxOp.Gather(threshold, Scalar(block), axis: 0).uint64();

@@ -61,19 +61,24 @@ public partial class RtFcWithRngFeed
 [Module] public partial class RtLoweredBits64 { public static Tensor<uint64> Inline(Tensor<float32> x) => RandomBits<uint64>(x.ShapeTensor()); }
 
 /// <summary>
-/// The uint64 op/dtype pairs a threshold-driven draw rests on, checked in-graph so both ONNX
-/// Runtime and the Quick Execution Engine must agree: a computed (non-constant) uint64 table
+/// A characterization pin on uint64 ops in ONNX Runtime: a computed (non-constant) uint64 table
 /// gathered with computed indices, a restoring long division, a running max, and a binary search
 /// over the table checked against a linear scan.
 ///
-/// <para>The dense uniform draw no longer builds a 128-slot table, divides, or searches — its
-/// thresholds are exact cumulative weights over seven blocks. These are kept as a pin on the ops
-/// themselves, which stayed load-bearing elsewhere and were expensive to characterize: uint64 is
-/// required because <c>Max</c> on <c>int64</c> mis-orders operands in [2^31, 2^32) and a running
-/// max walks straight through that band, and the division uses arithmetic selection rather than
-/// <c>Where</c>, multiplication by two rather than <c>BitShift</c>, and <c>Greater</c> negated
-/// rather than <c>GreaterOrEqual</c> — a uint64 <c>Where</c> is unimplemented in ORT, and these
-/// are the forms it does implement.</para>
+/// <para><b>The product no longer emits any of this.</b> The dense uniform draw builds no table,
+/// divides not at all, and finds its block by counting seven thresholds. What survives is the
+/// characterization: these behaviours were expensive to establish and nothing else records them.
+/// The running max is why <c>src/docs/wip/int64-max-across-2-31.md</c> can say uint64 is the safe
+/// width — it runs the same non-monotone scan twice, unsigned across 2^31 and signed below it, and
+/// they agree only because the unsigned one is correct. The division uses arithmetic selection
+/// rather than <c>Where</c>, multiplication by two rather than <c>BitShift</c>, and <c>Greater</c>
+/// negated rather than <c>GreaterOrEqual</c>, because a uint64 <c>Where</c> is unimplemented in ORT
+/// and these are the forms it does implement.</para>
+///
+/// <para>ONNX Runtime is the only engine that checks the result. <c>AutoTest</c> evaluates the
+/// self-check bool on the default (ORT-backed) context; its Quick Execution Engine pass only
+/// asserts that every output resolves to a valid dtype, and never reads the bool. A QEE that
+/// disagreed on every op here would still pass — see Shorokoo#159.</para>
 /// </summary>
 [Module]
 public partial class RngRegionSelectionOpsCheck
@@ -145,9 +150,13 @@ public partial class RngRegionSelectionOpsCheck
 
 /// <summary>
 /// The dense arbitrary-range uniform draw, checked in-graph against host-computed expectations so
-/// ONNX Runtime and the Quick Execution Engine must both reproduce <c>RngDenseUniformOracle</c>
-/// bit for bit. The bounds arrive as a runtime tensor, so nothing specializes on their values; a
-/// batch of ranges shares one graph because the per-graph overheads dominate a table build.
+/// ONNX Runtime must reproduce <c>RngDenseUniformOracle</c> bit for bit. The bounds arrive as a
+/// runtime tensor, so nothing specializes on their values; a batch of ranges shares one graph
+/// because the per-graph overheads dominate a table build.
+///
+/// <para>The Quick Execution Engine runs the same graph but its result is not compared:
+/// <c>AutoTest</c> only asserts that every output resolves to a valid dtype there, so this pins
+/// the QEE's op coverage, not its values. Shorokoo#159 tracks closing that.</para>
 /// </summary>
 [Module]
 public partial class RngDenseUniformOracleCheck
@@ -162,7 +171,7 @@ public partial class RngDenseUniformOracleCheck
         for (long r = 0; r < Ranges; r++)
         {
             var drawn = RuntimeRng.Uniform(Vector((long)Draws),
-                Scalar(0xA5A5_1234UL | (0x9E37UL << 32)), Scalar(0UL), b[2 * r], b[2 * r + 1]);
+                Scalar(0xA5A5_1234UL | (0x9E37UL << 32)), Scalar((ulong)r), b[2 * r], b[2 * r + 1]);
             var target = want.Slice(Scalar(r * Draws), Scalar(r * Draws + Draws));
             var differs = ((Tensor<bit>)OnnxOp.Not(OnnxOp.Equal(drawn, target))).Cast<int64>();
             var bothNaN = ((Tensor<bit>)OnnxOp.And(OnnxOp.IsNaN(drawn), OnnxOp.IsNaN(target))).Cast<int64>();
@@ -592,12 +601,16 @@ public class RngRuntimeTests
         Assert.Equal(7f, RngDenseUniformOracle.Draw(DenseKey, 0, 0, 7f, 3f));
         Assert.True(float.IsNaN(RngDenseUniformOracle.Draw(DenseKey, 0, 0, float.NaN, 1f)));
         Assert.True(float.IsNaN(RngDenseUniformOracle.Draw(DenseKey, 0, 0, 1f, float.NaN)));
+        // Which NaN, not merely that it is one: the canonical quiet NaN, as NumPy, PyTorch, Python
+        // and Java spell it — not C#'s float.NaN, which carries x86's sign bit. The in-graph check
+        // cannot see this, since NaN never equals itself and opset 21 has no bit reinterpretation,
+        // so the graph bakes the same constant and this holds it.
+        Assert.Equal(0x7FC0_0000u, RngDenseUniformOracle.Build(float.NaN, 1f).Fixed);
+        Assert.Equal(1f, RngDenseUniformOracle.Draw(DenseKey, 0, 0, 1f, 1.0000001f));
         for (long i = 0; i < 200; i++)
         {
             float wide = RngDenseUniformOracle.Draw(DenseKey, 0, i, float.NegativeInfinity, float.PositiveInfinity);
             Assert.False(float.IsNaN(wide) || float.IsInfinity(wide));
-            float single = RngDenseUniformOracle.Draw(DenseKey, 0, i, 1f, 1.0000001f);
-            Assert.Equal(1f, single);
         }
     }
 
@@ -611,7 +624,7 @@ public class RngRuntimeTests
             bounds[2 * r] = ranges[r].Low;
             bounds[2 * r + 1] = ranges[r].High;
             for (long i = 0; i < n; i++)
-                expected[r * n + i] = RngDenseUniformOracle.Draw(DenseKey, 0, i, ranges[r].Low, ranges[r].High);
+                expected[r * n + i] = RngDenseUniformOracle.Draw(DenseKey, (ulong)r, i, ranges[r].Low, ranges[r].High);
         }
         return AutoTest.AdvancedTestGraph<RngDenseUniformOracleCheck>(
             hyperparamInputs: [],
@@ -723,7 +736,7 @@ public class RngRuntimeTests
     }
 
     [Fact]
-    public void TestRegionSelectionOpsAgreeOnBothEngines()
+    public void TestRegionSelectionOpsBehaveAsCharacterizedInOnnxRuntime()
     {
         Assert.True(AutoTest.AdvancedTestGraph<RngRegionSelectionOpsCheck>(
             hyperparamInputs: [],

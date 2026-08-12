@@ -165,12 +165,18 @@ public class RngInitTests
 }
 
 /// <summary>
-/// The init-value derivation pinned to FROZEN constants — the cross-version seed contract.
-/// Every other init test is relational, so a silent change anywhere in the chain (master →
-/// "init" sub-master fold → per-path key fold → in-graph keyed draw → uniform transform →
-/// Kaiming scaling) would keep them green while breaking every seed anyone has ever shared.
-/// A red here means "MasterSeed 123 no longer produces the weights it used to" and must never
-/// be fixed by regenerating the constants without a deliberate, breaking-change decision.
+/// The init-value derivation pinned end to end — the cross-version seed contract. Every other init
+/// test is relational, so a silent change anywhere in the chain (master → "init" sub-master fold →
+/// per-path key fold → in-graph keyed draw → uniform transform → Kaiming scaling) would keep them
+/// green while breaking every seed anyone has ever shared.
+///
+/// <para>Layer 1, the keys, is frozen to literal constants: a red there means "MasterSeed 123 no
+/// longer produces the keys it used to" and must never be fixed by regenerating them without a
+/// deliberate, breaking-change decision. Layers 2 and 3 are rebuilt from the host oracles instead,
+/// which is stronger — the oracles are independent reimplementations, so they catch a graph that
+/// drifts from the contract, where a frozen constant only catches a graph that drifts from its own
+/// past. A red there is either a real derivation change or a deliberate one, and the oracle says
+/// which.</para>
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -227,8 +233,9 @@ public class RngInitFrozenDerivationTests
         Assert.Equal(expected1, ws[1]);   // weight at ModelId [2, 1]
 
         // Layer 3: an initializer that draws TWICE. Both draws share the parameter's ONE stream
-        // key and are separated only by their substreamIndex ordinal — this golden pins that
-        // ordinal assignment, which the relational assertions above cannot see.
+        // key and are separated only by their substreamIndex ordinal — rebuilding both draws from
+        // the oracles pins that ordinal assignment, which the relational assertions above cannot
+        // see.
         ulong multiKey = RngTestOracle.InitKey(cfg, (int[])[1]);
         float[] multiDraw = [.. Enumerable.Range(0, 16).Select(i =>
             RngDenseUniformOracle.Draw(multiKey, 0, i, 0f, 1f)

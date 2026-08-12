@@ -68,7 +68,7 @@ public partial class RtFcWithRngFeed
 /// <para><b>The product no longer emits any of this.</b> The dense uniform draw builds no table,
 /// divides not at all, and finds its block by counting seven thresholds. What survives is the
 /// characterization: these behaviours were expensive to establish and nothing else records them.
-/// The running max is why <c>src/docs/wip/int64-max-across-2-31.md</c> can say uint64 is the safe
+/// The running max is why the int64-Max finding can say uint64 is the safe
 /// width — it runs the same non-monotone scan twice, unsigned across 2^31 and signed below it, and
 /// they agree only because the unsigned one is correct. The division uses arithmetic selection
 /// rather than <c>Where</c>, multiplication by two rather than <c>BitShift</c>, and <c>Greater</c>
@@ -307,8 +307,10 @@ public class RngRuntimeTests
     }
 
     // The kinds of block: the lattice, the both-signs classes, the one-sign classes, and a partial
-    // class at each end of each ray. Far fewer than seven ever coexist, but the layout does not
-    // depend on which, and nor should the bound.
+    // class at each end of each ray. Measured over 300k random ranges the most that ever coexist is
+    // FIVE, and 3 is the overwhelming case — the bound is deliberately not tightened to that.
+    // Knowing which combinations can coexist is exactly the reasoning that dropped a partial class
+    // and made 6.1M floats unreachable; two slots of slack cost a comparison and a column each.
     private const int DenseMaxBlocks = 7;
 
     private static long DenseElements(RngDenseUniformOracle.Block b)
@@ -601,11 +603,16 @@ public class RngRuntimeTests
         Assert.Equal(7f, RngDenseUniformOracle.Draw(DenseKey, 0, 0, 7f, 3f));
         Assert.True(float.IsNaN(RngDenseUniformOracle.Draw(DenseKey, 0, 0, float.NaN, 1f)));
         Assert.True(float.IsNaN(RngDenseUniformOracle.Draw(DenseKey, 0, 0, 1f, float.NaN)));
-        // Which NaN, not merely that it is one: the canonical quiet NaN, as NumPy, PyTorch, Python
-        // and Java spell it — not C#'s float.NaN, which carries x86's sign bit. The in-graph check
-        // cannot see this, since NaN never equals itself and opset 21 has no bit reinterpretation,
-        // so the graph bakes the same constant and this holds it.
-        Assert.Equal(0x7FC0_0000u, RngDenseUniformOracle.Build(float.NaN, 1f).Fixed);
+        // Which NaN, not merely that it is one: the payload that came in, and low's when both
+        // bounds are NaN. The in-graph check cannot see this — NaN never equals itself and opset
+        // 21 has no bit reinterpretation — so the graph selects the input tensor and this holds it.
+        float NaNOf(uint bits) => BitConverter.UInt32BitsToSingle(bits);
+        Assert.Equal(BitConverter.SingleToUInt32Bits(float.NaN),
+            RngDenseUniformOracle.Build(float.NaN, 1f).Fixed);
+        Assert.Equal(0x7FC0_1234u, RngDenseUniformOracle.Build(NaNOf(0x7FC0_1234u), 1f).Fixed);
+        Assert.Equal(0xFFD0_5678u, RngDenseUniformOracle.Build(1f, NaNOf(0xFFD0_5678u)).Fixed);
+        Assert.Equal(0x7FC0_1234u,
+            RngDenseUniformOracle.Build(NaNOf(0x7FC0_1234u), NaNOf(0xFFD0_5678u)).Fixed);
         Assert.Equal(1f, RngDenseUniformOracle.Draw(DenseKey, 0, 0, 1f, 1.0000001f));
         for (long i = 0; i < 200; i++)
         {

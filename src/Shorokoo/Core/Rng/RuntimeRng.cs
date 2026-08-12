@@ -363,7 +363,12 @@ internal static class RuntimeRng
     private const long DenseBinade = 1L << DenseP;            // floats per weight class, one sign
     private const int DenseBias = 127;
     private const int DenseMaxClasses = 41;                   // truncation depth off the straddle
-    private const int DenseBlocks = 7;                        // lattice, 2-sided, 1-sided, 4 partials
+    // Lattice, both-sign classes, one-sign classes, and a partial class at each end of each ray.
+    // At most five are ever non-empty at once, and the layout could in principle be packed to that
+    // — but only by reasoning about which combinations coexist, which is precisely the reasoning
+    // that once dropped a live partial and made 6.1M floats unreachable. Two spare slots cost one
+    // comparison and one column entry each; the assumption costs correctness.
+    private const int DenseBlocks = 7;
     private const int DenseMaxShift = 62;                     // the int64 power table's top exponent
     private const int DenseMaxWeight = 63;                    // the uint64 one's
 
@@ -569,11 +574,11 @@ internal static class RuntimeRng
         // The blocks are still built over a one-float range so no downstream arithmetic degenerates.
         var empty = Ind(OnnxOp.LessOrEqual(zHighRaw, zLow));
         var useFixed = (Tensor<bit>)OnnxOp.Or(notANumber, OnnxOp.Greater(empty, Scalar(0L)));
-        // The canonical quiet NaN, 0x7FC00000, not C#'s float.NaN — which is 0xFFC00000, the sign
-        // bit set, because it inherits x86's result for an invalid operation. NumPy, PyTorch,
-        // Python and Java all spell a default NaN 0x7FC00000, and so does the oracle.
-        var fixedValue = (Tensor<float32>)OnnxOp.Where(
-            notANumber, Scalar(BitConverter.UInt32BitsToSingle(0x7FC0_0000u)), finiteLow);
+        // The NaN that came in, bits intact, rather than a canonical one — IEEE 754 asks an
+        // operation to propagate an input NaN's payload, and both Where arms are selects, so the
+        // sign bit and payload survive. `low` wins when both bounds are NaN.
+        var fixedValue = (Tensor<float32>)OnnxOp.Where(OnnxOp.IsNaN(low), low,
+            (Tensor<float32>)OnnxOp.Where(OnnxOp.IsNaN(high), high, finiteLow));
         var zHigh = zHighRaw.Max(zLow + Scalar(1L));
 
         // ── Truncation floor, band and lattice ──────────────────────────────────────────

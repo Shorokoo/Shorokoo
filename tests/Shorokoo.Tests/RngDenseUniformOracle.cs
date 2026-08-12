@@ -144,8 +144,10 @@ internal static class RngDenseUniformOracle
     {
         uint lowBits = BitConverter.SingleToUInt32Bits(low);
         uint highBits = BitConverter.SingleToUInt32Bits(high);
-        if (float.IsNaN(low) || float.IsNaN(high))
-            return new Table([], 0, 0, 0, 1, 0, 0x7FC0_0000u);
+        // The NaN that came in, bits intact — IEEE 754 asks an operation to propagate an input
+        // NaN's payload rather than mint a canonical one. `low` wins when both bounds are NaN.
+        if (float.IsNaN(low)) return new Table([], 0, 0, 0, 1, 0, lowBits);
+        if (float.IsNaN(high)) return new Table([], 0, 0, 0, 1, 0, highBits);
 
         uint clampedLow = float.IsInfinity(low)
             ? (uint)((low < 0 ? SignMask : 0) | MaxFiniteOrdinal) : lowBits;

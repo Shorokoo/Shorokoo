@@ -311,10 +311,9 @@ internal static class RuntimeRng
     // The interval is partitioned into seven BLOCKS, not a table. The weight axis need not run in
     // value order, so each kind of material becomes one contiguous block with a closed-form decode
     // and nothing is looked up: the lattice, the whole classes present on both signs, the whole
-    // classes present on one, a partial class at each end of the range, and a stub at each end of
-    // the lattice. Any block may be empty. Three decode forms cover all seven — lattice point,
-    // geometric (whole classes), ordinal run — because a stub is a one-element run and a one-point
-    // lattice respectively.
+    // classes present on one, and a partial class at each end of each ray. Any block may be empty.
+    // Three decode forms cover all seven — lattice point, geometric (whole classes), ordinal run —
+    // since the two whole-class kinds differ only by one bit of index width.
     //
     // TRUNCATION is the one approximation, and it is RANGE-DEPENDENT: 41 weight classes are
     // resolved as floats, 40 when the range straddles zero, since a straddling range carries both
@@ -537,10 +536,10 @@ internal static class RuntimeRng
     /// <c>RngAlgorithms</c> caches one shared uniform <c>Function</c> and cannot specialize on
     /// their values.
     ///
-    /// <para>The blocks run in a FIXED order — lattice, both-sign classes, one-sign classes, the
-    /// partial class at each end of the range, the stub at each end of the lattice — and any of
-    /// them may weigh 0. An empty block's threshold is the next block's, which is exactly what
-    /// keeps it unreachable, and the trailing ones carry the total.</para>
+    /// <para>The blocks run in a FIXED order — lattice, both-sign classes, one-sign classes, then
+    /// the negative ray's two partial classes and the positive ray's two — and any of them may
+    /// weigh 0. An empty block's threshold is the next block's, which is exactly what keeps it
+    /// unreachable, and the trailing ones carry the total.</para>
     ///
     /// <para>Internal rather than private so a test can hold the threshold column against the
     /// oracle's blocks. No amount of sampling covers that column: a block can own a single code out
@@ -663,8 +662,8 @@ internal static class RuntimeRng
         var total = cumulative[DenseBlocks - 1] + weight[DenseBlocks - 1];
 
         // ── The block columns ──────────────────────────────────────────────────────────
-        // Base is a lattice index for the lattice and its stub, an ordinal for the partials and the
-        // low stub, and unread by the geometric blocks; Shift is the partials' weight per ordinal.
+        // Base is a lattice index for the lattice, an ordinal for the partials, and unread by the
+        // geometric blocks; Shift is the partials' weight per ordinal.
         Tensor<int64> zero = Scalar(0L);
         var spacing = (Tensor<float32>)OnnxOp.Gather(Vector(DenseSpacing), floorClass, axis: 0);
         return (DenseColumn(cumulative),
@@ -776,8 +775,8 @@ internal static class RuntimeRng
                          - negative * Scalar(DenseBinade) + mantissa;
 
         // Everything else is a run: base + offset >> shift, an ordinal for the partial classes and
-        // the low stub, a lattice index for the lattice and its stub. Zeroing it in uint64 keeps a
-        // whole-width geometric offset away from the int64 cast.
+        // a lattice index for the lattice. Zeroing it in uint64 keeps a whole-width geometric
+        // offset away from the int64 cast.
         var run = ((Scalar(1UL) - geometric.Cast<uint64>()) * ShiftDown(offset, blockShift)).Cast<int64>();
         var value = geometric * classOrdinal + (Scalar(1L) - geometric) * blockBase + run;
 

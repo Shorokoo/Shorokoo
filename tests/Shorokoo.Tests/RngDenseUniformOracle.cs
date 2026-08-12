@@ -89,7 +89,11 @@ internal static class RngDenseUniformOracle
     internal readonly record struct Block(
         Kind Kind, ulong Threshold, ulong Weight, long Base, int C0, int C1, int Shift, bool Negative);
 
-    /// <summary>Total is the summed weight, where <b>0 means exactly 2^64</b>. LatticeShift turns a
+    /// <summary>Total is the summed weight, and 0 is <b>overloaded</b>: on a drawing table it means
+    /// exactly 2^64, but the three degenerate builds — NaN low, NaN high, and an empty or inverted
+    /// range — also carry 0, there meaning no weight at all, over no blocks. <see cref="Fixed"/> is
+    /// what separates the two and must be read first, as <see cref="SampleBits"/> does; the field
+    /// alone cannot tell <c>Build(3f, 3f)</c> from <c>Build(0f, 1f)</c>. LatticeShift turns a
     /// lattice index into a bit pattern; FloorClass is the shallowest weight class kept whole.</summary>
     internal sealed record Table(
         Block[] Blocks, ulong Total, long ZLow, long ZHigh, int FloorClass, int LatticeShift, uint? Fixed);
@@ -149,6 +153,11 @@ internal static class RngDenseUniformOracle
         if (float.IsNaN(low)) return new Table([], 0, 0, 0, 1, 0, lowBits);
         if (float.IsNaN(high)) return new Table([], 0, 0, 0, 1, 0, highBits);
 
+        // An infinite bound clamps to the finite extreme of its own sign. As `low` that means
+        // -MaxValue, or MaxValue for +infinity — so +infinity as `low` leaves every finite `high`
+        // inverted and the draw is MaxValue, not +infinity, and Build(+inf, +inf) is not empty but
+        // the one-float range [MaxValue, +inf). As `high`, +infinity instead becomes the ordinal
+        // one PAST MaxValue, so the whole finite domain stays reachable.
         uint clampedLow = float.IsInfinity(low)
             ? (uint)((low < 0 ? SignMask : 0) | MaxFiniteOrdinal) : lowBits;
         long zLow = SignedOrdinal(clampedLow);
@@ -183,9 +192,11 @@ internal static class RngDenseUniformOracle
         else if (posWhole) (oneLow, oneHigh, oneNegative) = (posC0, posC1, false);
 
         long latticeStart = 0, latticeCount = 0;
-        // The lattice runs over the points the span wholly contains. The partial cell left over at
-        // whichever end the range cuts — at most one, since the other end is a floor boundary and
-        // so on the lattice — is dropped rather than rounded up to a weight unit. Its true share is
+        // The lattice runs over the points the span wholly contains. At most one end is ever cut:
+        // either the other end is a floor boundary and so on the lattice, or the range lies wholly
+        // inside the span, which forces topClass == floorClass and hence both to 1, where delta is
+        // 2^-149 and the lattice IS the float grid, so neither end is cut at all. The partial cell
+        // left over at a cut end is dropped rather than rounded up to a weight unit. Its true share is
         // under one unit, which is below what the weight axis can express at all, and paying it a
         // whole unit was the scheme's single worst distortion: it over-weighted the sliver's region
         // by up to 2^191, and handed `low` some 2^64 times its due. Dropping it also stops `low`
@@ -211,11 +222,13 @@ internal static class RngDenseUniformOracle
         // which can coexist, and the obvious one is wrong: when the range straddles zero and stops
         // INSIDE the floor class on the positive side, the negative ray's low partial and the
         // positive ray's low partial are both real, and dropping either loses floats outright.
+        // Negative stays false: an Ordinals block takes its sign from the ordinal itself, so the
+        // field is unread here, and the graph writes a literal 0 into those four slots.
         Part[] partials = [negLow, negHigh, posLow, posHigh];
         foreach (var part in partials)
             if (part.Count > 0)
                 blocks.Add(new Block(Kind.Ordinals, 0, (ulong)part.Count << (part.Cls - floorClass),
-                    part.Start, part.Cls, part.Cls, part.Cls - floorClass, part.Negative));
+                    part.Start, part.Cls, part.Cls, part.Cls - floorClass, false));
 
         Block[] table = [.. blocks];
         UInt128 cumulative = 0;
@@ -244,7 +257,7 @@ internal static class RngDenseUniformOracle
     /// lives at the caller, not here.</para></summary>
     private static (Part Low, Part High, int C0, int C1) SplitRun(long from, long to, bool negative)
     {
-        Part none = new(0, 0, 0, negative);
+        Part none = new(0, 0, 0);
         if (from >= to) return (none, none, 0, -1);
 
         int cFrom = ClassIndex(from), cTo = ClassIndex(to - 1);
@@ -253,8 +266,8 @@ internal static class RngDenseUniformOracle
         bool lowWhole = from == ClassRunStart(cFrom, negative) && lowEnd == ClassRunEnd(cFrom, negative);
         bool highWhole = to == ClassRunEnd(cTo, negative) && highStart == ClassRunStart(cTo, negative);
 
-        Part low = lowWhole ? none : new Part(from, lowEnd - from, cFrom, negative);
-        Part high = highWhole || cTo == cFrom ? none : new Part(highStart, to - highStart, cTo, negative);
+        Part low = lowWhole ? none : new Part(from, lowEnd - from, cFrom);
+        Part high = highWhole || cTo == cFrom ? none : new Part(highStart, to - highStart, cTo);
         return (low, high,
             negative ? cTo + (highWhole ? 0 : 1) : cFrom + (lowWhole ? 0 : 1),
             negative ? cFrom - (lowWhole ? 0 : 1) : cTo - (highWhole ? 0 : 1));
@@ -262,7 +275,7 @@ internal static class RngDenseUniformOracle
 
     /// <summary>A partial weight class: <paramref name="Count"/> consecutive ordinals from
     /// <paramref name="Start"/>, all of class <paramref name="Cls"/>.</summary>
-    internal readonly record struct Part(long Start, long Count, int Cls, bool Negative);
+    internal readonly record struct Part(long Start, long Count, int Cls);
 
     /// <summary>The draw scaled onto the weight axis: floor(draw*total / 2^64), the high half of
     /// the 128-bit product. A total of 0 means exactly 2^64, where the scaling is the identity;

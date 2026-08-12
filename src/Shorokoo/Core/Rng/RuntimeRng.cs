@@ -429,7 +429,8 @@ internal static class RuntimeRng
 
     /// <summary>2^e, clamped to the table's range. The upper clamp is load-bearing — the band's
     /// divisor reaches 2^214 — while the lower one only guards an empty band, whose quotient is
-    /// discarded; there the oracle instead shifts the other way, which no input reaches.</summary>
+    /// discarded; the oracle needs no counterpart, because it only ever asks about a magnitude
+    /// inside the collapsed span, where the shift cannot go negative.</summary>
     private static Tensor<int64> DensePow(Tensor<int64> e)
         => OnnxOp.Gather(Vector(DensePow2), e.Max(Scalar(0L)).Min(Scalar((long)DenseMaxShift)), axis: 0).int64();
 
@@ -560,9 +561,10 @@ internal static class RuntimeRng
     {
         const long binade = DenseBinade;
 
-        // Non-finite bounds: NaN anywhere yields NaN, infinities clamp to the finite extremes.
-        // +infinity as the upper bound is the one ordinal past the largest finite float, so the
-        // whole finite domain stays reachable.
+        // Non-finite bounds: NaN anywhere yields NaN, infinities clamp to the finite extreme of
+        // their own sign. +infinity as the upper bound is instead the one ordinal past the largest
+        // finite float, so the whole finite domain stays reachable; +infinity as the LOWER bound
+        // clamps to MaxValue, which leaves any finite upper bound inverted and yields MaxValue.
         var notANumber = (Tensor<bit>)OnnxOp.Or(OnnxOp.IsNaN(low), OnnxOp.IsNaN(high));
         var finiteLow = low.Max(Scalar(-float.MaxValue)).Min(Scalar(float.MaxValue));
         var finiteHigh = high.Max(Scalar(-float.MaxValue)).Min(Scalar(float.MaxValue));
@@ -607,10 +609,12 @@ internal static class RuntimeRng
         // mid-cell leaves a sliver worth less than one weight unit, and it is dropped rather than
         // rounded up: the axis cannot express a part of a unit, and paying it a whole one
         // over-weighted that sliver's region by up to 2^191 — by far the worst distortion the
-        // scheme had. At most one end is ever cut, since the other is a floor boundary.
+        // scheme had. At most one end is ever cut: either the other is a floor boundary, or the
+        // range lies wholly inside the span, which forces floorClass to 1 and makes the lattice the
+        // float grid itself, where nothing is cut.
         var bandNonEmpty = Ind(OnnxOp.Less(bandLow, bandHigh));
-        var lattices = bandNonEmpty * (Scalar(1L) - Ind(OnnxOp.Greater(latticeFrom, latticeTo)));
-        var latticeCount = lattices * (latticeTo - latticeFrom);
+        var latticeNonEmpty = bandNonEmpty * (Scalar(1L) - Ind(OnnxOp.Greater(latticeFrom, latticeTo)));
+        var latticeCount = latticeNonEmpty * (latticeTo - latticeFrom);
 
         // ── Whole classes, and the partial class at each end of the range ───────────────
         var (negLowBase, negLowCount, negLowClass, negHighBase, negHighCount, negHighClass,
@@ -721,9 +725,11 @@ internal static class RuntimeRng
     ///
     /// <para>The interval is half-open — <c>high</c> is not attainable, matching PyTorch
     /// <c>uniform_</c>, Keras <c>RandomUniform</c> and ONNX <c>RandomUniform</c>. An inverted or
-    /// empty range yields <c>low</c>; a NaN bound yields NaN. A <c>low</c> of -infinity clamps to
-    /// -MaxValue, but a <c>high</c> of +infinity maps to the ordinal one PAST MaxValue, so MaxValue
-    /// itself stays drawable and the whole finite domain is covered. <c>low</c> is drawable except
+    /// empty range yields <c>low</c>; a NaN bound yields NaN. An infinite <c>low</c> clamps to the
+    /// finite extreme of its sign — -infinity to -MaxValue, and +infinity to MaxValue, which leaves
+    /// any finite <c>high</c> inverted and so yields MaxValue rather than +infinity — but a
+    /// <c>high</c> of +infinity maps to the ordinal one PAST MaxValue, so MaxValue itself stays
+    /// drawable and the whole finite domain is covered. <c>low</c> is drawable except
     /// where it falls below the truncation floor off the lattice, where nothing is.</para>
     ///
     /// <para>Selection needs no search: over seven blocks, counting the thresholds at or below the
@@ -759,7 +765,12 @@ internal static class RuntimeRng
         var blockBase = OnnxOp.Gather(bases, found, axis: 0).int64();
         var blockClass = OnnxOp.Gather(classes, found, axis: 0).int64();
         var blockWidth = OnnxOp.Gather(widths, found, axis: 0).int64();
-        var blockShift = OnnxOp.Gather(shifts, found, axis: 0).int64().Cast<uint64>();
+        // An absent ray's Shift entry is a class difference taken from an inverted run and goes
+        // hugely negative, which the cast would turn into a BitShift count wider than the operand —
+        // undefined. `found` never lands on an empty block, because an empty block's threshold ties
+        // with its successor's, and a live block's shift is in [0, 40], so the clamp only ever
+        // repeats what the column already holds.
+        var blockShift = OnnxOp.Gather(shifts, found, axis: 0).int64().Max(Scalar(0L)).Cast<uint64>();
         var blockNegative = OnnxOp.Gather(negatives, found, axis: 0).int64();
         var geometric = OnnxOp.Gather(geometrics, found, axis: 0).int64();
         var lattice = OnnxOp.Gather(lattices, found, axis: 0).int64();
@@ -801,6 +812,11 @@ internal static class RuntimeRng
 
         // The ordinal decode reassembles (1 + m·2^-23)·2^(e-127) — every step exact in float32,
         // and the same value the oracle assembles bitwise.
+        // The Min never fires: field 255 needs magnitude 255<<P, whose only ordinal is -infinity's,
+        // and a `low` of -infinity clamps to -MaxValue so that ordinal never falls in range and
+        // negative class 254 is never whole (the oracle's BitsOfClassMember says the same). It is a
+        // guard against nonsense, not a decode step — were it ever to fire it would silently
+        // DISAGREE with the oracle, which decodes field 255 to ±infinity, rather than fail.
         var magnitude = value.Max(Scalar(0L) - value);
         var field = (magnitude / Scalar(DenseBinade)).Min(Scalar(254L));
         var significand = magnitude - field * Scalar(DenseBinade);

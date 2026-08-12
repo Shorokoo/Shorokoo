@@ -181,7 +181,6 @@ internal static class RngDenseUniformOracle
         else if (posWhole) (oneLow, oneHigh, oneNegative) = (posC0, posC1, false);
 
         long latticeStart = 0, latticeCount = 0;
-        long lowStub = 0, highStub = 0;
         // The lattice runs over the points the span wholly contains. The partial cell left over at
         // whichever end the range cuts — at most one, since the other end is a floor boundary and
         // so on the lattice — is dropped rather than rounded up to a weight unit. Its true share is

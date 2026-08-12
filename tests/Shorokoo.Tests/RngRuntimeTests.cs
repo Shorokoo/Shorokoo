@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Shorokoo.Core.Inference;
 using Shorokoo.Core.Rng;
 using Shorokoo.Runtime;
 using static Shorokoo.Tests.RngDrawRunners;
@@ -156,7 +157,8 @@ public partial class RngRegionSelectionOpsCheck
 ///
 /// <para>The Quick Execution Engine runs the same graph but its result is not compared:
 /// <c>AutoTest</c> only asserts that every output resolves to a valid dtype there, so this pins
-/// the QEE's op coverage, not its values. Shorokoo#159 tracks closing that.</para>
+/// the QEE's op coverage, not its values. Shorokoo#159 tracks closing that in general; the dense
+/// draw's QEE values are checked through <see cref="RngDenseUniformOutput"/> instead.</para>
 /// </summary>
 [Module]
 public partial class RngDenseUniformOracleCheck
@@ -205,7 +207,8 @@ public partial class RngDenseThresholdTable
 /// <summary>
 /// The dense draw's raw float32 output for a batch of ranges, so a test can read its bits
 /// host-side. Nothing in-graph can: opset 21 has no bit-reinterpretation op, and <c>Equal</c>
-/// forgives a NaN's payload and the sign of zero alike.
+/// forgives a NaN's payload and the sign of zero alike. Reading the output rather than a
+/// self-check bool is also what lets the Quick Execution Engine be held to the same bits.
 /// </summary>
 [Module]
 public partial class RngDenseUniformOutput
@@ -1128,6 +1131,41 @@ public class RngRuntimeTests
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
         return [.. ComputeContext.Default.Execute(concrete, input)[0].ToTensorData()
             .As<float32>().AccessMemory().ToArray().Select(BitConverter.SingleToUInt32Bits)];
+    }
+
+    // The same raw output off the Quick Execution Engine rather than ONNX Runtime. One concrete
+    // model serves every group: the bounds are a runtime input, and the build dominates the run.
+    private static uint[] QeeDrawBits(InternalComputationGraph model, (float Low, float High)[] ranges)
+    {
+        float[] bounds = new float[RngDenseUniformOutput.Ranges * 2];
+        for (int r = 0; r < ranges.Length; r++)
+            (bounds[2 * r], bounds[2 * r + 1]) = (ranges[r].Low, ranges[r].High);
+        var input = TensorData([(long)bounds.Length], bounds);
+        var rt = (RuntimeTensor)new QuickExecutionEngine().Run(model, [input])[model.Outputs[0]];
+        return [.. rt.FloatData!.Value.Select(BitConverter.SingleToUInt32Bits)];
+    }
+
+    // The second engine's VALUES, which nothing else reads: AutoTest's Quick Execution Engine pass
+    // asserts only that each output resolves to a valid dtype and never looks at a self-check bool,
+    // so a QEE computing every draw wrong stays green (Shorokoo#159). Cross-engine bit-exactness is
+    // the whole reason the draw lives in the graph, so it is asserted on the bits.
+    [Fact]
+    public void TestQuickEngineDenseUniformMatchesTheOracleBitForBitOnEveryAdversarialRange()
+    {
+        var g = ((ComputationGraph)typeof(RngDenseUniformOutput)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var seed = TensorData([(long)RngDenseUniformOutput.Ranges * 2], new float[RngDenseUniformOutput.Ranges * 2]);
+        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([seed])).ToConcreteModel();
+        foreach (var ranges in DenseRangeGroups)
+        {
+            uint[] got = QeeDrawBits(model, ranges);
+            for (int r = 0; r < ranges.Length; r++)
+                for (long i = 0; i < RngDenseUniformOutput.Draws; i++)
+                    Assert.Equal(
+                        BitConverter.SingleToUInt32Bits(RngDenseUniformOracle.Draw(
+                            DenseKey, (ulong)r, i, ranges[r].Low, ranges[r].High)),
+                        got[r * RngDenseUniformOutput.Draws + i]);
+        }
     }
 
     // Which NaN the graph returns, not merely that it returns one — the in-graph check compares

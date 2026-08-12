@@ -188,23 +188,27 @@ public class RngInitTests
 }
 
 /// <summary>
-/// The init-value derivation pinned end to end — the cross-version seed contract. Every other init
-/// test is relational, so a silent change anywhere in the chain (master → "init" sub-master fold →
-/// per-path key fold → in-graph keyed draw → uniform transform → Kaiming scaling) would keep them
-/// green while breaking every seed anyone has ever shared.
+/// The init-value derivation pinned to FROZEN constants — the cross-version seed contract. Every
+/// other init test is relational, so a silent change anywhere in the chain (master → "init"
+/// sub-master fold → per-path key fold → in-graph keyed draw → uniform transform → Kaiming
+/// bounds) would keep them green while breaking every seed anyone has ever shared. A red here
+/// means "MasterSeed 123 no longer produces the weights it used to" and must never be fixed by
+/// regenerating the constants without a deliberate, breaking-change decision.
 ///
-/// <para>Layer 1, the keys, is frozen to literal constants: a red there means "MasterSeed 123 no
-/// longer produces the keys it used to" and must never be fixed by regenerating them without a
-/// deliberate, breaking-change decision. Layers 2 and 3 are rebuilt from the host oracles instead,
-/// which is stronger — the oracles are independent reimplementations, so they catch a graph that
-/// drifts from the contract, where a frozen constant only catches a graph that drifts from its own
-/// past. A red there is either a real derivation change or a deliberate one, and the oracle says
-/// which.</para>
+/// <para>Recomputing any layer's expectation from the oracles would forfeit exactly that: a
+/// coordinated change to graph and oracle would pass silently. The oracles cross-check the same
+/// constants from a separate Fact instead, so both properties hold at once.</para>
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
 public class RngInitFrozenDerivationTests
 {
+    // MasterSeed 123: the two [4,4] KaimingUniform weights at ModelId [1, 1] and [2, 1], and the
+    // two-draw initializer's [4,4] weight.
+    private static readonly float[] FrozenWeight11 = [0.3378866f, 1.2052094f, 0.37335718f, 0.7997707f, 1.0675026f, -0.9041115f, 0.10083773f, -0.7819222f, -1.023829f, -0.70204467f, -0.3367729f, 0.31696287f, -1.0910206f, -0.6310536f, 0.6859728f, 1.1874193f];
+    private static readonly float[] FrozenWeight21 = [1.0079714f, 0.1395562f, -0.016731672f, -1.0395613f, 0.21706164f, -0.5711288f, 0.91078484f, 1.1091135f, 0.9176603f, 0.4229469f, -0.14127223f, 0.5303491f, 0.1532544f, 0.57974875f, 0.9801079f, -1.1877112f];
+    private static readonly float[] FrozenMultiDraw = [0.31585765f, 0.21880347f, 0.17880033f, 0.23017395f, 0.2856346f, 0.55870205f, 0.14583084f, 0.17104696f, 0.5075757f, 0.074125335f, 0.2884086f, 0.12671219f, 0.017829021f, 0.14411132f, 0.33035496f, 0.088769004f];
+
     [Fact]
     public void TestInitKeysValuesAndBatchedResolutionAreFrozenAndMatchTheHostOracle()
     {
@@ -235,16 +239,8 @@ public class RngInitFrozenDerivationTests
         Assert.Equal(paths.Length, batched.Distinct().Count());
 
         // Layer 2: the full materialized values (counter scheme, rounds, uniform transform,
-        // substreamIndex ordinal, initializer bounds). REFERENCE: the dense uniform oracle, an
-        // independent host rebuild — KaimingUniform draws U(-bound, bound) directly with bound =
-        // sqrt(6/fanIn), and fanIn is 4 for both [4,4] weights. Exact equality is safe
-        // cross-backend: the draw is Threefry integer ops plus exact bit assembly.
-        float kaiming = MathF.Sqrt(6f / 4f);
-        float[] expected0 = [.. Enumerable.Range(0, 16)
-            .Select(i => RngDenseUniformOracle.Draw(keys[0], 0, i, -kaiming, kaiming))];
-        float[] expected1 = [.. Enumerable.Range(0, 16)
-            .Select(i => RngDenseUniformOracle.Draw(keys[1], 0, i, -kaiming, kaiming))];
-
+        // substreamIndex ordinal, initializer bounds). REFERENCE: golden. Exact equality is safe
+        // cross-backend — the draw is Threefry integer ops plus exact bit assembly.
         var g = RngInitTwoLinears.ComputationGraph;
         var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
         var ws = g.ToConcreteArchitecture(g.FromOrderedInputs([sample]))
@@ -252,24 +248,43 @@ public class RngInitFrozenDerivationTests
             .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
             .Where(v => v.Length == 16).ToArray();
         Assert.Equal(2, ws.Length);
-        Assert.Equal(expected0, ws[0]);   // weight at ModelId [1, 1]
-        Assert.Equal(expected1, ws[1]);   // weight at ModelId [2, 1]
+        Assert.Equal(FrozenWeight11, ws[0]);
+        Assert.Equal(FrozenWeight21, ws[1]);
 
         // Layer 3: an initializer that draws TWICE. Both draws share the parameter's ONE stream
-        // key and are separated only by their substreamIndex ordinal — rebuilding both draws from
-        // the oracles pins that ordinal assignment, which the relational assertions above cannot
-        // see.
-        ulong multiKey = RngTestOracle.InitKey(cfg, (int[])[1]);
-        float[] multiDraw = [.. Enumerable.Range(0, 16).Select(i =>
-            RngDenseUniformOracle.Draw(multiKey, 0, i, 0f, 1f)
-            * ((uint)RngTestOracle.DrawBits(multiKey, 1, i, 32) * (1.0f / 4294967296.0f)))];
-
+        // key and are separated only by their substreamIndex ordinal — this golden pins that
+        // ordinal assignment, which the relational assertions above cannot see.
         var mg = BitsIntermediateTrainableLayer.ComputationGraph;
         var w = mg.ToConcreteArchitecture(mg.FromOrderedInputs([sample]))
             .InitializeTrainableParams(rngConfig: cfg).ModelParams
             .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
             .Single(v => v.Length == 16);
-        Assert.Equal(multiDraw, w);
+        Assert.Equal(FrozenMultiDraw, w);
+    }
+
+    // The host oracles are independent reimplementations, so holding the same frozen constants up
+    // to them catches a graph that drifts from the CONTRACT, where the freeze above only catches a
+    // graph that drifts from its own past. KaimingUniform draws U(-bound, bound) directly with
+    // bound = sqrt(6/fanIn), and fanIn is 4 for both [4,4] weights.
+    [Fact]
+    public void TestTheFrozenInitValuesAreWhatTheHostOraclesIndependentlyDerive()
+    {
+        var cfg = new RngConfig { MasterSeed = 123 };
+        float kaiming = MathF.Sqrt(6f / 4f);
+        float[] Kaiming(int[] path)
+        {
+            ulong key = RngTestOracle.InitKey(cfg, path);
+            return [.. Enumerable.Range(0, 16)
+                .Select(i => RngDenseUniformOracle.Draw(key, 0, i, -kaiming, kaiming))];
+        }
+        Assert.Equal(FrozenWeight11, Kaiming([1, 1]));
+        Assert.Equal(FrozenWeight21, Kaiming([2, 1]));
+
+        ulong multiKey = RngTestOracle.InitKey(cfg, (int[])[1]);
+        float[] multiDraw = [.. Enumerable.Range(0, 16).Select(i =>
+            RngDenseUniformOracle.Draw(multiKey, 0, i, 0f, 1f)
+            * ((uint)RngTestOracle.DrawBits(multiKey, 1, i, 32) * (1.0f / 4294967296.0f)))];
+        Assert.Equal(FrozenMultiDraw, multiDraw);
     }
 
     private static readonly RngConfig RangeCfg = new() { MasterSeed = 4242 };

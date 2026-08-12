@@ -10,7 +10,8 @@ using static Shorokoo.Globals;
 namespace Shorokoo.Modules.Layers;
 
 /// <summary>
-/// Builds Dropout keep/scale masks from a plain uniform draw (<see cref="Globals.RandomUniform"/>)
+/// Builds Dropout keep/scale masks from a plain uniform draw
+/// (<see cref="Globals.RandomUniform(Vector{int64}, float, float)"/>)
 /// instead of the ONNX <c>Dropout</c> op. The draw site is id-bearing, so the mask rides the
 /// keyed deterministic RNG — its stream key folds from the runtime master along this site's
 /// ModelId path under the model's RNG identity (the bound <see cref="RngConfig"/>, or the

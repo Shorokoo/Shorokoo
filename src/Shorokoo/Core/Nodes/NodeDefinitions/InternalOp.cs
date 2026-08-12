@@ -327,15 +327,21 @@ internal static partial class InternalOp
     /// support). An id-bearing feed lowers to the keyed deterministic draw under the model's
     /// RNG identity; a feed without stream identity lowers to ConstantOfShape +
     /// RandomUniformLike.
+    ///
+    /// <para>The bounds come either as the literal <paramref name="low"/>/<paramref name="high"/>
+    /// attributes or, for a range only known in-graph, as the f32 scalar
+    /// <paramref name="lowInput"/>/<paramref name="highInput"/> inputs, which the keyed draw takes
+    /// directly. Tensor bounds have no attribute-based ONNX fallback, so a feed carrying them must
+    /// be keyed.</para>
     /// </summary>
-    public static Variable RandomUniform(Variable shape, float? high = null, float? low = null, Variable? substreamIndex = null, Variable? iterationIndices = null)
-        => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_UNIFORM, [shape, substreamIndex, iterationIndices], [
+    public static Variable RandomUniform(Variable shape, float? high = null, float? low = null, Variable? substreamIndex = null, Variable? iterationIndices = null, Variable? lowInput = null, Variable? highInput = null)
+        => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_UNIFORM, [shape, substreamIndex, iterationIndices, null, lowInput, highInput], [
             (AttrHigh, high), (AttrLow, low),
             (ShrkAttrLocalModelId, (long[])[])]);
 
     /// <summary>
     /// A normal random feed N(mean, scale) taking its shape as a tensor input; see
-    /// <see cref="RandomUniform(Variable, float?, float?, Variable?, Variable?)"/>.
+    /// <see cref="RandomUniform(Variable, float?, float?, Variable?, Variable?, Variable?, Variable?)"/>.
     /// </summary>
     public static Variable RandomNormal(Variable shape, float? mean = null, float? scale = null, Variable? substreamIndex = null, Variable? iterationIndices = null)
         => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_NORMAL, [shape, substreamIndex, iterationIndices], [

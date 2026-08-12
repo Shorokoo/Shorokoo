@@ -601,6 +601,29 @@ namespace Shorokoo
         }
 
         /// <summary>
+        /// A runtime uniform random feed in [low, high) of dynamic shape whose bounds are graph
+        /// scalars rather than compile-time literals — a range computed in-graph (e.g. an
+        /// initializer's fan-in-derived bound). The draw is keyed by the site's ModelId under the
+        /// model's RNG identity (the bound <see cref="RngConfig"/>, or the default deterministic
+        /// identity when none is bound) — there is no seed to pass: randomness is configuration,
+        /// never part of the model definition.
+        ///
+        /// <para>The bounds reach the dense arbitrary-range draw itself, so the range is exact:
+        /// unlike the affine transform <c>u·(high − low) + low</c> of a standard draw, no
+        /// precision is lost near zero, a range wider than float32 does not overflow, and
+        /// <c>high</c> is never returned. Tensor bounds have no attribute-based ONNX fallback, so
+        /// this feed must be keyed (a concrete, id-bearing model).</para>
+        /// </summary>
+        public static Tensor<float32> RandomUniform(Vector<int64> shape, Scalar<float32> low, Scalar<float32> high)
+        {
+            // Capture the ambient loop context exactly as the literal-bounds overload does.
+            Vector<int64> iterationIndices = [.. LoopAPI.IterationIndices];
+            return InternalOp.RandomUniform(shape, high: null, low: null,
+                substreamIndex: null, iterationIndices: iterationIndices,
+                lowInput: low, highInput: high);
+        }
+
+        /// <summary>
         /// A runtime normal random feed N(mean, scale) of dynamic shape. Keyed by the site's
         /// ModelId under the model's RNG identity — see <see cref="RandomUniform(Vector{int64}, float, float)"/>.
         /// </summary>

@@ -251,11 +251,30 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
+        /// The uniform feed's optional in-graph bound inputs, at slots 4 and 5 (after
+        /// <c>[shape, substreamIndex, iterationIndices, key]</c>). Present when the range was
+        /// computed in-graph rather than given as literals; both arrive together or not at all.
+        /// </summary>
+        internal static (FastTensorKey low, FastTensorKey high)? TensorBounds(FastNode node)
+        {
+            var low = node.Inputs.Count > 4 ? node.Inputs[4] : null;
+            var high = node.Inputs.Count > 5 ? node.Inputs[5] : null;
+            if (low is null && high is null) return null;
+            if (low is null || high is null)
+                throw new InvalidOperationException(
+                    "FastLowerRandomOps: a SHRK_RANDOM_UNIFORM feed carries only one of its two " +
+                    "in-graph bound inputs. A tensor-bounded range needs both; lowering one of them " +
+                    "against the other's attribute default would silently change the range.");
+            return (low.Value, high.Value);
+        }
+
+        /// <summary>
         /// Rewrites an id-bearing SHRK_RANDOM_* feed in place to the SHRK_RNG_UNIFORM/NORMAL
         /// form (inputs <c>[key, substreamIndex, shape, a, b]</c>). The key is the feed's derivation
         /// chain (already wired as its key input); substreamIndex is the site's own counter input
         /// when wired (e.g. the injected per-execution state counter) else 0, and
-        /// the distribution bounds come off the node's attributes as f32 scalar constants.
+        /// the distribution bounds come off the node's in-graph bound inputs when it has them,
+        /// else off its attributes as f32 scalar constants.
         ///
         /// <para>The counter is the framework's own int64 execution ordinal, while a draw
         /// position on the RNG algorithm interface is a whole uint64 — so this boundary is
@@ -276,11 +295,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 ? node.Attributes.GetFloatVal(AttrHigh) ?? 1.0f
                 : node.Attributes.GetFloatVal(AttrScale) ?? 1.0f;
 
+            var bounds = isUniform ? TensorBounds(node) : null;
+
             var substreamIndexKey = node.Inputs.Count > 1 && node.Inputs[1] is { } db
                 ? AppendCastToUInt64(db, newNodes)
                 : AppendScalarUInt64(0UL, newNodes);
-            var aKey = AppendScalarFloat32(a, newNodes);
-            var bKey = AppendScalarFloat32(b, newNodes);
+            var aKey = bounds?.low ?? AppendScalarFloat32(a, newNodes);
+            var bKey = bounds?.high ?? AppendScalarFloat32(b, newNodes);
 
             var newOp = isUniform ? InternalOpCodes.SHRK_RNG_UNIFORM : InternalOpCodes.SHRK_RNG_NORMAL;
             var attrDefs = Definitions.NodeDefinitions[newOp].AttributeDefs;
@@ -384,11 +405,25 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// Lowers an unkeyed SHRK_RANDOM_* node to <c>ConstantOfShape(shape, 0f)</c> +
         /// <c>RandomUniformLike/RandomNormalLike(placeholder)</c>, copying the distribution
         /// attrs and any user seed through (never synthesizing one).
+        ///
+        /// <para><c>RandomUniformLike</c> reads its bounds from ATTRIBUTES, so a feed whose range
+        /// is in-graph cannot take this fallback: there is nowhere to put the bounds. Like an
+        /// id-less bits feed, that combination is a hard build error rather than a silently
+        /// dropped range.</para>
         /// </summary>
         private static void LowerToOnnxRandomLike(FastNode node, bool isUniform, List<FastNode> newNodes)
         {
             var shapeInput = node.Inputs[0]
                 ?? throw new InvalidOperationException("SHRK_RANDOM_* has null shape input.");
+
+            if (isUniform && TensorBounds(node) is not null)
+                throw new InvalidOperationException(
+                    "FastLowerRandomOps: a SHRK_RANDOM_UNIFORM feed with in-graph bound inputs " +
+                    "reached lowering with no stream identity. The ONNX fallback " +
+                    "(ConstantOfShape + RandomUniformLike) carries its bounds as attributes and " +
+                    "cannot express a range computed in-graph, so the range would be silently " +
+                    "dropped. Draw an in-graph range inside a concrete, id-bearing model (or pass " +
+                    "literal bounds).");
 
             var placeholderKey = AppendConstantOfShape(shapeInput, newNodes);
 

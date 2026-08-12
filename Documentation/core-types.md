@@ -41,6 +41,7 @@ Related: [defining-models.md](defining-models.md) · [inference.md](inference.md
 | `TensorFill(shape, TensorData([1], 0f))` | `Tensor<T>` | Constant-filled tensor. |
 | `Tensor<float32>.Fill(shape, TensorData(...))` | `Tensor<float32>` | Static fill on the type. |
 | `RandomUniform(shape, low = 0f, high = 1f)` | `Tensor<float32>` | Random feed; all but `shape` are optional. Keyed by the model's [RNG identity](rng-configuration.md) — no per-site seed. |
+| `RandomUniform(shape, Scalar<float32> low, Scalar<float32> high)` | `Tensor<float32>` | Same feed over a range computed **in-graph** (both bounds required). The bounds reach the draw itself, so the range is exact at any width; a graph-scalar range needs a keyed (concrete, id-bearing) model. |
 | `RandomNormal(shape, mean = 0f, scale = 1f)` | `Tensor<float32>` | Random feed; see `RandomUniform`. |
 
 **Implicit primitive → `Scalar<T>` conversion.** Wherever a `Scalar<T>` is expected, a bare

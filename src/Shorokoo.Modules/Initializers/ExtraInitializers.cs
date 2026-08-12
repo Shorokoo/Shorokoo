@@ -36,18 +36,18 @@ public static partial class TruncatedNormal
 /// Any rank (no fan-in/out, no rank requirement) — works for biases and weights alike.
 /// <c>low</c>/<c>high</c> are extra Inline parameters (the
 /// <see cref="Constant"/>/<see cref="RecurrentUniform"/> extra-param precedent),
-/// generating <c>UniformRange.Init(shape, low, high)</c>.
-/// <see cref="Globals.RandomUniform(Vector{int64}, float, float)"/> takes
-/// LITERAL float bounds, so the range is built in-graph as the affine transform of a
-/// standard U(0,1) draw: u·(high − low) + low — the same fill-times-scalar shape
-/// <see cref="XavierUniform"/> uses, plus a shift. Expects <c>low ≤ high</c>.
+/// generating <c>UniformRange.Init(shape, low, high)</c>. The bounds go to
+/// <see cref="Globals.RandomUniform(Vector{int64}, Scalar{float32}, Scalar{float32})"/>,
+/// which draws the range densely rather than affine-mapping a standard U(0,1) draw:
+/// the transform <c>u·(high − low) + low</c> loses precision near zero, overflows to
+/// infinity for a range wider than float32, and can land exactly on the excluded
+/// <c>high</c>. Expects <c>low ≤ high</c>.
 /// </summary>
 [TrainableParamInitializer]
 public static partial class UniformRange
 {
     public static Tensor<float32> Inline(Vector<int64> shape, Scalar<float32> low, Scalar<float32> high)
-        // standard U(0,1) draw, affine-mapped to [low, high): u·(high − low) + low
-        => Globals.RandomUniform(shape, low: 0.0f, high: 1.0f) * (high - low) + low;
+        => Globals.RandomUniform(shape, low, high);
 }
 
 /// <summary>
@@ -91,8 +91,8 @@ public static partial class XavierUniformGain
     {
         // Xavier bakes gain 1, so the base factor is the same sqrt(6/(fanIn+fanOut)) the
         // default XavierUniform uses; the runtime gain simply scales it.
-        var baseFactor = (6.0f / (InitializerMath.FanIn(shape) + InitializerMath.FanOut(shape))).Sqrt();
-        return Globals.RandomUniform(shape, low: -1.0f, high: 1.0f) * (gain * baseFactor);
+        var bound = gain * (6.0f / (InitializerMath.FanIn(shape) + InitializerMath.FanOut(shape))).Sqrt();
+        return Globals.RandomUniform(shape, -bound, bound);
     }
 }
 
@@ -138,8 +138,8 @@ public static partial class KaimingUniformGain
         // sqrt(3/fanIn) — the BARE base factor, NOT the default's sqrt(6/fanIn): the existing
         // KaimingUniform bakes gain √2 (sqrt(6/fanIn) = √2·sqrt(3/fanIn)); the user-supplied
         // gain replaces that, so the √2 must not be double-baked.
-        var baseFactor = (3.0f / InitializerMath.FanIn(shape)).Sqrt();
-        return Globals.RandomUniform(shape, low: -1.0f, high: 1.0f) * (gain * baseFactor);
+        var bound = gain * (3.0f / InitializerMath.FanIn(shape)).Sqrt();
+        return Globals.RandomUniform(shape, -bound, bound);
     }
 }
 

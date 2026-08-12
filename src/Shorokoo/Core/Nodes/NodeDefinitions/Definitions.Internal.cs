@@ -273,6 +273,15 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             // FastWireRngKeyDerivation) via the "key" input and lowers to the keyed
             // deterministic draw; a feed without stream identity (e.g. inside an initializer
             // function body) lowers to ConstantOfShape + RandomUniformLike.
+            //
+            // The distribution bounds come EITHER as the shrk_low/shrk_high attributes (a
+            // compile-time constant range) OR as the optional f32 scalar "low"/"high" inputs (a
+            // range computed in-graph — e.g. an initializer's fan-in-derived bound). The keyed
+            // draw takes bounds as inputs either way, so the input form is passed straight
+            // through and the attribute form is materialized as constants at lowering. The ONNX
+            // fallback (RandomUniformLike) reads bounds from attributes and so cannot express
+            // the input form: a feed with tensor bounds and no key is a hard build error, like
+            // an id-less bits feed.
             Op(SHRK_RANDOM_UNIFORM)
                 .Tensor<int64>("T1")
                 .Tensor<uint64>("TK")
@@ -285,6 +294,8 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("substreamIndex", "T1", 0)
                 .Input("iterationIndices", "T1", 1)
                 .Input("key", "TK?", 0)
+                .Input("low", "T2?", 0)
+                .Input("high", "T2?", 0)
                 .Output("output", "T2", rank: "R"),
 
             // SHRK_RANDOM_NORMAL: the normal-distribution runtime feed; see SHRK_RANDOM_UNIFORM.

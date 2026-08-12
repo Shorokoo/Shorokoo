@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using Shorokoo.Core.Rng;
+using Shorokoo.Modules.Initializers;
 using Shorokoo.Modules.Layers;
 using Shorokoo.Runtime;
 
@@ -55,6 +56,28 @@ public partial class BitsIntermediateTrainableLayer
         var w = BitsIntermediateTrainableInit.Init(x.ShapeTensor());   // trainable [4,4] weight
         return x * w;
     }
+}
+
+/// <summary>A UniformRange-initialized parameter whose bounds arrive as hyperparameters, so the
+/// range is a runtime value the initializer cannot specialize on.</summary>
+[Module]
+public partial class RngUniformRangeRuntimeBounds
+{
+    public const int N = 256;
+
+    public static Tensor<float32> Inline(
+        Tensor<float32> x, [Hyper] Scalar<float32> low, [Hyper] Scalar<float32> high)
+        => UniformRange.Init([Scalar((long)N)], low, high);
+}
+
+/// <summary>The same runtime range through the public runtime feed — the Scalar-bound overload of
+/// <c>Globals.RandomUniform</c>.</summary>
+[Module]
+public partial class RngRuntimeFeedRuntimeBounds
+{
+    public static Tensor<float32> Inline(
+        Tensor<float32> x, [Hyper] Scalar<float32> low, [Hyper] Scalar<float32> high)
+        => RandomUniform([Scalar((long)RngUniformRangeRuntimeBounds.N)], low, high);
 }
 
 /// <summary>
@@ -212,15 +235,15 @@ public class RngInitFrozenDerivationTests
         Assert.Equal(paths.Length, batched.Distinct().Count());
 
         // Layer 2: the full materialized values (counter scheme, rounds, uniform transform,
-        // substreamIndex ordinal, initializer scaling). REFERENCE: the dense uniform oracle, an
-        // independent host rebuild — KaimingUniform is RandomUniform(-1, 1) scaled by
+        // substreamIndex ordinal, initializer bounds). REFERENCE: the dense uniform oracle, an
+        // independent host rebuild — KaimingUniform draws U(-bound, bound) directly with bound =
         // sqrt(6/fanIn), and fanIn is 4 for both [4,4] weights. Exact equality is safe
-        // cross-backend: Threefry integer ops plus IEEE-exact float multiply.
+        // cross-backend: the draw is Threefry integer ops plus exact bit assembly.
         float kaiming = MathF.Sqrt(6f / 4f);
         float[] expected0 = [.. Enumerable.Range(0, 16)
-            .Select(i => RngDenseUniformOracle.Draw(keys[0], 0, i, -1f, 1f) * kaiming)];
+            .Select(i => RngDenseUniformOracle.Draw(keys[0], 0, i, -kaiming, kaiming))];
         float[] expected1 = [.. Enumerable.Range(0, 16)
-            .Select(i => RngDenseUniformOracle.Draw(keys[1], 0, i, -1f, 1f) * kaiming)];
+            .Select(i => RngDenseUniformOracle.Draw(keys[1], 0, i, -kaiming, kaiming))];
 
         var g = RngInitTwoLinears.ComputationGraph;
         var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
@@ -247,6 +270,73 @@ public class RngInitFrozenDerivationTests
             .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
             .Single(v => v.Length == 16);
         Assert.Equal(multiDraw, w);
+    }
+
+    private static readonly RngConfig RangeCfg = new() { MasterSeed = 4242 };
+
+    private static TensorData[] RangeInputs(float low, float high) =>
+        [TensorData(DType.Float32, [], low), TensorData(DType.Float32, [], high),
+         TensorData(DType.Float32, [1L], 0f)];
+
+    private static (float[] vals, ulong key) UniformRangeParam(float low, float high)
+    {
+        var g = RngUniformRangeRuntimeBounds.ComputationGraph;
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([.. RangeInputs(low, high)]));
+        var vals = arch.InitializeTrainableParams(rngConfig: RangeCfg).ModelParams
+            .Select(p => p.ToTensorData())
+            .Single(t => t.DType == DType.Float32 && t.Shape.Count == RngUniformRangeRuntimeBounds.N)
+            .As<float32>().AccessMemory().ToArray();
+        var path = arch.GetRngStreamReport().Streams
+            .Single(s => s.Shape is { Count: 1 } sh && sh[0] == RngUniformRangeRuntimeBounds.N)
+            .ModelIdPath;
+        return (vals, RngTestOracle.InitKey(RangeCfg, [.. path]));
+    }
+
+    private static bool DrawsTheRange(float low, float high)
+    {
+        var (v, key) = UniformRangeParam(low, high);
+        return v.Length == RngUniformRangeRuntimeBounds.N
+            && v.All(x => float.IsFinite(x) && x >= low && x < high)
+            && Enumerable.Range(0, v.Length).All(i =>
+                BitConverter.SingleToUInt32Bits(v[i]) ==
+                BitConverter.SingleToUInt32Bits(RngDenseUniformOracle.Draw(key, 0, i, low, high)));
+    }
+
+    private static bool FeedStaysInRange(float low, float high)
+    {
+        var g = RngRuntimeFeedRuntimeBounds.ComputationGraph;
+        var inputs = RangeInputs(low, high);
+        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([.. inputs])).ToConcreteModel(RangeCfg);
+        var v = ComputeContext.Default.Execute(model, [.. inputs.Cast<IData>()])[0]
+            .ToTensorData().As<float32>().AccessMemory().ToArray();
+        return v.Length == RngUniformRangeRuntimeBounds.N
+            && v.All(x => float.IsFinite(x) && x >= low && x < high);
+    }
+
+    /// <summary>
+    /// UniformRange over bounds the initializer cannot see at trace time: every draw is finite,
+    /// inside [low, high), and bit-identical to the dense oracle over that same range. The last
+    /// three ranges are the ones the retired affine transform u·(high−low)+low got wrong — the
+    /// widest range overflowed to +Infinity (and 0·∞ to NaN), and a range narrower than one ulp
+    /// of its own endpoint rounded up onto the excluded <c>high</c>.
+    /// </summary>
+    [Fact]
+    public void TestUniformRangeDrawsItsRuntimeBoundsDenselyAndNeverReturnsHigh()
+    {
+        Assert.True(DrawsTheRange(2f, 5f));
+        Assert.True(DrawsTheRange(-1f, 1f));
+        Assert.True(DrawsTheRange(-1.8e38f, 1.8e38f));
+        Assert.True(DrawsTheRange(0f, float.Epsilon));
+        Assert.True(DrawsTheRange(1f, 1.0000001f));
+    }
+
+    /// <summary>The public runtime feed overload carries its graph-scalar bounds to the draw too
+    /// (dropping them would draw [0, 1) and leave every range below).</summary>
+    [Fact]
+    public void TestRuntimeUniformFeedHonoursItsRuntimeBounds()
+    {
+        Assert.True(FeedStaysInRange(2f, 5f));
+        Assert.True(FeedStaysInRange(-1.8e38f, 1.8e38f));
     }
 }
 
@@ -334,6 +424,23 @@ public class RngInitFailLoudTests
                 arch, null, new RngConfig { MasterSeed = 1 }, partial));
         Assert.Contains("missing from the supplied parameter inventory", ex.Message);
         Assert.Contains($"[{string.Join(", ", missing.ModelId.Vals)}]", ex.Message);
+    }
+
+    /// <summary>The ONNX fallback carries its bounds as attributes, so an unkeyed feed whose range
+    /// is in-graph has nowhere to put them — a hard error, never a silently dropped range.</summary>
+    [Fact]
+    public void TestUnkeyedFeedWithRuntimeBoundsIsAHardError()
+    {
+        var g = GraphBuilder.BuildInternalComputationGraphFromDelegate(
+            (Func<Tensor<float32>>)(() => RandomUniform([Scalar(4L)], Scalar(2f), Scalar(5f))));
+        var feed = g.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
+        var attrs = feed.Attributes.GetAttributeVals().ToDictionary();
+        attrs[OnnxOpAttributeNames.ShrkAttrLocalModelId] = (long[])[];
+        feed.Attributes = OnnxCSharpAttributes.FromCSharpVals(attrs, feed.Attributes.AttributeDefs);
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => Shorokoo.Core.Nodes.Processors.Fast.FastLowerRandomOps.Process(g));
+        Assert.Contains("cannot express a range computed in-graph", ex.Message);
     }
 }
 

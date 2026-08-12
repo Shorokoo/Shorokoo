@@ -14,6 +14,7 @@ Which document covers what. For an overview of Shorokoo and an end-to-end exampl
 - [nn-library.md](nn-library.md) — the `Shorokoo.Modules` package: ready-made initializers, layers (`Linear`, `Conv2d`, `BatchNorm2d`, …), losses, and optimizers to build and train with.
 - [rng-configuration.md](rng-configuration.md) — seed and reproduce a model's randomness with `RngConfig`: parameter initialization and runtime draws (Dropout masks, sampling), master-seed re-rolls, per-stream overrides, and how the identity rides save/load.
 - [rng-pinning.md](rng-pinning.md) — keep a module's random streams stable under refactoring with `Rng.Pin` and the stream report's per-scope pin skeleton.
+- [uniform-draws.md](uniform-draws.md) — what a uniform draw returns: the half-open interval, degenerate and non-finite bounds, how finely a range is resolved, and the known imperfections.
 
 ## 3. Run on CPU or GPU
 

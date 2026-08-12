@@ -32,7 +32,7 @@ like `Zeros.Init([outFeatures])` or `KaimingUniform.Init([outC, inC, k, k])`.
 | `Constant` | `value` (every element) | deterministic (no RNG); any rank; the parameterized generalization of `Zeros`/`Ones` (`Constant(0)`/`Constant(1)`); `value` is an `Init` arg (`Constant.Init([shape], Scalar(v))`), à la `RecurrentUniform`; PyTorch `constant_` / Keras `Constant` |
 | `Uniform` | U(0, 1) | seeded; the fixed U(0, 1) default form (use `UniformRange` for a configurable range) |
 | `Normal` | N(0, 1) | seeded; PyTorch's `nn.Embedding` default; the fixed N(0, 1) default form (use `NormalDist` for configurable mean/std) |
-| `UniformRange` | U(low, high) | seeded; any rank; the parameterized generalization of `Uniform` (`Uniform` retained as the U(0, 1) default); `low`/`high` are `Init` args (`UniformRange.Init([shape], Scalar(lo), Scalar(hi))`) and reach the draw itself, so the range is exact at any width — no precision lost near zero, no overflow on a range wider than float32, and `high` is never returned; expects `low ≤ high`; PyTorch `uniform_(a, b)` / Keras `RandomUniform(minval, maxval)` |
+| `UniformRange` | U(low, high) | seeded; any rank; the parameterized generalization of `Uniform` (`Uniform` retained as the U(0, 1) default); `low`/`high` are `Init` args (`UniformRange.Init([shape], Scalar(lo), Scalar(hi))`) and reach the draw itself, so the range is exact at any width — no precision lost near zero, no overflow on a range wider than float32, and `high` is never returned ([uniform-draws.md](uniform-draws.md)); expects `low ≤ high`; PyTorch `uniform_(a, b)` / Keras `RandomUniform(minval, maxval)` |
 | `NormalDist` | N(mean, std) | seeded; any rank; the parameterized generalization of `Normal` (`Normal` retained as the N(0, 1) default); `mean`/`std` are `Init` args (`NormalDist.Init([shape], Scalar(m), Scalar(s))`), built as the affine transform of a standard draw; expects `std ≥ 0`; PyTorch `normal_(mean, std)` / Keras `RandomNormal(mean, stddev)` |
 | `XavierUniform` | U(−a, a), a = √(6 / (fanIn + fanOut)) | gain 1; seeded; rank ≥ 2 |
 | `XavierNormal` | N(0, √(2 / (fanIn + fanOut))) | gain 1; seeded; rank ≥ 2 |
@@ -55,6 +55,12 @@ like `Zeros.Init([outFeatures])` or `KaimingUniform.Init([outC, inC, k, k])`.
   parameters of the same shape initialized by the same class receive **distinct**
   values. Bind a different master seed to re-roll everything coherently; no seed
   ever appears in the model definition.
+- **The uniform initializers all share one draw.** `Uniform`, `UniformRange`,
+  `XavierUniform`, `KaimingUniform`, `RecurrentUniform`, `XavierUniformGain` and
+  `KaimingUniformGain` each hand their own bounds to the same U(low, high) draw — no
+  standard draw is scaled after the fact — so all of them fill a `float32` parameter from
+  the half-open `[low, high)` and inherit the guarantees in
+  [uniform-draws.md](uniform-draws.md).
 - **Fan-in/fan-out** are computed in-graph from the shape vector:
   `fanIn = prod(shape) / shape[0]`, `fanOut = prod(shape) / shape[1]` — the
   PyTorch convention for Linear `[out, in]` and Conv `[outC, inC/g, k...]`

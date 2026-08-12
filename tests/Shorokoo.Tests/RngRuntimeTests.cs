@@ -174,14 +174,14 @@ public partial class RngDenseUniformOracleCheck
 }
 
 /// <summary>
-/// The block thresholds the graph builds for a batch of ranges, [Ranges * 9], so a test can hold
+/// The block thresholds the graph builds for a batch of ranges, [Ranges * 7], so a test can hold
 /// them against the oracle's. Sampling draws cannot: a held-up threshold may own one code in 2^64,
 /// and every draw-based check agrees with a table that has dropped it.
 /// </summary>
 [Module]
 public partial class RngDenseThresholdTable
 {
-    public const int Ranges = 6, Slots = 9;
+    public const int Ranges = 6, Slots = 7;
 
     public static Tensor<uint64> Inline(Tensor<float32> bounds)
     {
@@ -297,11 +297,10 @@ public class RngRuntimeTests
         }
     }
 
-    // The kinds of block: the lattice, the both-signs classes, the one-sign classes, a partial
-    // class at each end of each ray, and a stub at each end of the lattice. Far fewer than nine
-    // ever coexist — a stub excludes the partial on its side, and the two rays cannot both be
-    // partial at both ends — but the layout does not depend on which, and nor should the bound.
-    private const int DenseMaxBlocks = 9;
+    // The kinds of block: the lattice, the both-signs classes, the one-sign classes, and a partial
+    // class at each end of each ray. Far fewer than seven ever coexist, but the layout does not
+    // depend on which, and nor should the bound.
+    private const int DenseMaxBlocks = 7;
 
     private static long DenseElements(RngDenseUniformOracle.Block b)
         => b.Kind switch
@@ -309,8 +308,7 @@ public class RngRuntimeTests
             RngDenseUniformOracle.Kind.Lattice => (long)b.Weight,
             RngDenseUniformOracle.Kind.TwoSided => (long)(b.C1 - b.C0 + 1) << (RngDenseUniformOracle.P + 1),
             RngDenseUniformOracle.Kind.OneSided => (long)(b.C1 - b.C0 + 1) << RngDenseUniformOracle.P,
-            RngDenseUniformOracle.Kind.Ordinals => (long)(b.Weight >> b.Shift),
-            _ => 1,
+            _ => (long)(b.Weight >> b.Shift),
         };
 
     [Fact]
@@ -458,9 +456,7 @@ public class RngRuntimeTests
                          + DenseOrdinalUnits(bandHigh, table.ZHigh, table.FloorClass);
             UInt128 got = 0;
             foreach (var block in table.Blocks)
-                if (block.Kind is not RngDenseUniformOracle.Kind.Lattice
-                              and not RngDenseUniformOracle.Kind.OrdinalStub
-                              and not RngDenseUniformOracle.Kind.LatticeStub) got += block.Weight;
+                if (block.Kind != RngDenseUniformOracle.Kind.Lattice) got += block.Weight;
             Assert.Equal(want, got);
         }
     }

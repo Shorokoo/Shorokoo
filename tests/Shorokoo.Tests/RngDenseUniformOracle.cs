@@ -22,10 +22,14 @@ namespace Shorokoo.Tests;
 /// <para>The interval is partitioned into <b>blocks</b>, not a table: the weight axis need not run
 /// in value order, so each kind of material becomes one contiguous block with a closed-form decode
 /// and nothing is looked up. Above the truncation floor 2^(floorClass-127) the material is whole
-/// weight classes — those present on both signs, then those present on one — plus at most one
-/// partial class at each end of the range. Below the floor a coarse even lattice of spacing delta =
-/// 2^(floorClass-150) carries the remaining mass, as a single region spanning both signs, with a
-/// weight-1 stub at either end that the lattice does not reach.</para>
+/// weight classes — those present on both signs, then those present on one — plus a partial class
+/// at each end of each ray. Below the floor a coarse even lattice of spacing delta =
+/// 2^(floorClass-150) carries the remaining mass, as a single region spanning both signs. Where the
+/// range cuts the span mid-cell the leftover sliver is dropped, not rounded up: its true share is
+/// under one weight unit, so the axis cannot express it, and paying it a whole unit over-weighted
+/// that region by up to 2^191. One consequence is deliberate — a bound lying strictly inside the
+/// span, off the lattice, is not itself drawable, which is what truncation says of every float
+/// down there.</para>
 ///
 /// <para>Selection uses the WHOLE 64-bit draw. A block's threshold is its exact cumulative weight,
 /// and the draw is scaled onto the weight axis by <c>floor(draw*total / 2^64)</c> — the high half of
@@ -78,10 +82,6 @@ internal static class RngDenseUniformOracle
         OneSided,
         /// <summary>A run of consecutive ordinals from Base, each of weight 2^Shift.</summary>
         Ordinals,
-        /// <summary>The single float at ordinal Base, weight 1.</summary>
-        OrdinalStub,
-        /// <summary>The single lattice point Base, weight 1.</summary>
-        LatticeStub,
     }
 
     /// <summary>One block of the weight axis. Threshold is its exact cumulative weight, Weight its
@@ -129,9 +129,6 @@ internal static class RngDenseUniformOracle
         var (q, exact) = MagnitudeOverSpacing(Math.Abs(z), floorExponent);
         return z >= 0 ? (exact ? q : q + 1) : -q;
     }
-
-    private static bool IsOnLattice(long z, int floorExponent)
-        => MagnitudeOverSpacing(Math.Abs(z), floorExponent).Exact;
 
     /// <summary>The weight class c run on one sign: 2^23 consecutive ordinals. Negative classes are
     /// the magnitudes (c&lt;&lt;23, (c+1)&lt;&lt;23], so the run ends one ordinal below -(c&lt;&lt;23).</summary>
@@ -183,19 +180,19 @@ internal static class RngDenseUniformOracle
 
         long latticeStart = 0, latticeCount = 0;
         long lowStub = 0, highStub = 0;
-        bool hasLowStub = false, hasHighStub = false;
+        // The lattice runs over the points the span wholly contains. The partial cell left over at
+        // whichever end the range cuts — at most one, since the other end is a floor boundary and
+        // so on the lattice — is dropped rather than rounded up to a weight unit. Its true share is
+        // under one unit, which is below what the weight axis can express at all, and paying it a
+        // whole unit was the scheme's single worst distortion: it over-weighted the sliver's region
+        // by up to 2^191, and handed `low` some 2^64 times its due. Dropping it also stops `low`
+        // being an exception to truncation — it lies below the floor, where nothing is
+        // individually reachable.
         if (bandLow < bandHigh)
         {
             long start = LatticeCeil(bandLow, floorExponent);
             long end = LatticeFloor(bandHigh, floorExponent);
-            // A span too narrow to hold a lattice point degenerates to its low stub alone. It can
-            // only happen with bandLow off the lattice, so the stub is never lost: one end of the
-            // band is always a floor boundary — the range reaches past it, or there would be no
-            // truncation — and a floor boundary is on the lattice by construction.
-            bool holdsLattice = start <= end;
-            if (!IsOnLattice(bandLow, floorExponent)) (hasLowStub, lowStub) = (true, bandLow);
-            if (holdsLattice) (latticeStart, latticeCount) = (start, end - start);
-            if (holdsLattice && !IsOnLattice(bandHigh, floorExponent)) (hasHighStub, highStub) = (true, end);
+            if (start <= end) (latticeStart, latticeCount) = (start, end - start);
         }
 
         List<Block> blocks = [];
@@ -216,8 +213,6 @@ internal static class RngDenseUniformOracle
             if (part.Count > 0)
                 blocks.Add(new Block(Kind.Ordinals, 0, (ulong)part.Count << (part.Cls - floorClass),
                     part.Start, part.Cls, part.Cls, part.Cls - floorClass, part.Negative));
-        if (hasLowStub) blocks.Add(new Block(Kind.OrdinalStub, 0, 1, lowStub, 0, 0, 0, false));
-        if (hasHighStub) blocks.Add(new Block(Kind.LatticeStub, 0, 1, highStub, 0, 0, 0, false));
 
         Block[] table = [.. blocks];
         UInt128 cumulative = 0;
@@ -312,12 +307,8 @@ internal static class RngDenseUniformOracle
                 bool negative = b.Kind == Kind.TwoSided ? index >= BinadeSize : b.Negative;
                 return BitsOfClassMember(cls, index & SigMask, negative);
             }
-            case Kind.Ordinals:
-                return BitsOfOrdinal(b.Base + (long)(d >> b.Shift));
-            case Kind.LatticeStub:
-                return BitsOfLatticePoint(b.Base, table.LatticeShift);
             default:
-                return BitsOfOrdinal(b.Base);
+                return BitsOfOrdinal(b.Base + (long)(d >> b.Shift));
         }
     }
 

@@ -355,7 +355,7 @@ internal static class RuntimeRng
     private const long DenseBinade = 1L << DenseP;            // floats per weight class, one sign
     private const int DenseBias = 127;
     private const int DenseMaxClasses = 41;                   // truncation depth off the straddle
-    private const int DenseBlocks = 9;                        // lattice, 2-sided, 1-sided, 4 partials, 2 stubs
+    private const int DenseBlocks = 7;                        // lattice, 2-sided, 1-sided, 4 partials
     private const int DenseMaxShift = 62;                     // the int64 power table's top exponent
     private const int DenseMaxWeight = 63;                    // the uint64 one's
 
@@ -585,13 +585,14 @@ internal static class RuntimeRng
         var latticeTo = (Scalar(1L) - negativeHigh) * quotientHigh
                       - negativeHigh * (quotientHigh + Scalar(1L) - exactHigh);
 
-        // A band too narrow to hold a lattice point degenerates to its low stub alone — no lattice
-        // and no high stub, since the one stub already carries the whole band's floats.
+        // The lattice takes the points the span wholly contains. Whichever end the range cuts
+        // mid-cell leaves a sliver worth less than one weight unit, and it is dropped rather than
+        // rounded up: the axis cannot express a part of a unit, and paying it a whole one
+        // over-weighted that sliver's region by up to 2^191 — by far the worst distortion the
+        // scheme had. At most one end is ever cut, since the other is a floor boundary.
         var bandNonEmpty = Ind(OnnxOp.Less(bandLow, bandHigh));
         var lattices = bandNonEmpty * (Scalar(1L) - Ind(OnnxOp.Greater(latticeFrom, latticeTo)));
         var latticeCount = lattices * (latticeTo - latticeFrom);
-        var lowStub = bandNonEmpty * (Scalar(1L) - exactLow);
-        var highStub = lattices * (Scalar(1L) - exactHigh);
 
         // ── Whole classes, and the partial class at each end of the range ───────────────
         var (negLowBase, negLowCount, negLowClass, negHighBase, negHighCount, negHighClass,
@@ -646,7 +647,6 @@ internal static class RuntimeRng
         [
             latticeCount.Cast<uint64>(), twoWeight, oneWeight,
             negLowWeight, negHighWeight, posLowWeight, posHighWeight,
-            lowStub.Cast<uint64>(), highStub.Cast<uint64>(),
         ];
         Tensor<uint64>[] cumulative = new Tensor<uint64>[DenseBlocks];
         cumulative[0] = Scalar(0UL);
@@ -660,14 +660,14 @@ internal static class RuntimeRng
         var spacing = (Tensor<float32>)OnnxOp.Gather(Vector(DenseSpacing), floorClass, axis: 0);
         return (DenseColumn(cumulative),
                 DenseColumn(latticeFrom, zero, zero,
-                            negLowBase, negHighBase, posLowBase, posHighBase, bandLow, latticeTo),
-                DenseColumn(zero, twoFirst, oneFirst, zero, zero, zero, zero, zero, zero),
-                Vector(0L, DenseP + 1L, DenseP, 0L, 0L, 0L, 0L, 0L, 0L),
+                            negLowBase, negHighBase, posLowBase, posHighBase),
+                DenseColumn(zero, twoFirst, oneFirst, zero, zero, zero, zero),
+                Vector(0L, DenseP + 1L, DenseP, 0L, 0L, 0L, 0L),
                 DenseColumn(zero, zero, zero, negLowClass - floorClass, negHighClass - floorClass,
-                            posLowClass - floorClass, posHighClass - floorClass, zero, zero),
-                DenseColumn(zero, zero, oneFromNeg, zero, zero, zero, zero, zero, zero),
-                Vector(0L, 1L, 1L, 0L, 0L, 0L, 0L, 0L, 0L),
-                Vector(1L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 1L),
+                            posLowClass - floorClass, posHighClass - floorClass),
+                DenseColumn(zero, zero, oneFromNeg, zero, zero, zero, zero),
+                Vector(0L, 1L, 1L, 0L, 0L, 0L, 0L),
+                Vector(1L, 0L, 0L, 0L, 0L, 0L, 0L),
                 floorClass, spacing, useFixed, fixedValue, total);
     }
 

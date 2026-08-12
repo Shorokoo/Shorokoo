@@ -48,7 +48,7 @@ namespace Shorokoo.Tests;
 ///
 /// <para>On [0,1) this draw is bit-for-bit Walker/Reynolds above the truncation floor: the range is
 /// one-sided so K = 41, the total is exactly 2^64 and the scaling is the identity, the lattice
-/// occupies [0, 2^23) so the class block's offset IS the draw, the leading-bit search IS a
+/// occupies [0, 2^23) so the class block's offset plus 2^23 IS the draw, the leading-bit search IS a
 /// leading-zero count, and the low 23 bits are the mantissa. Below the floor the two part ways by
 /// construction: the lattice reaches exact zero where Walker stops at 2^-41 and doubles its bottom
 /// binade's mass.</para>

@@ -335,6 +335,15 @@ internal static class RuntimeRng
     // in the block search (where a threshold must not be mistaken for the wrapped total); no
     // threshold can ever carry the value 2^64 itself, so nothing else needs 65 bits.
     //
+    // "Rounds nothing" is about BLOCKS. One rounding survives, below them: a weight unit receives
+    // q or q+1 of the 2^64 draws, q = floor(2^64/total), so a float carrying a single unit can be
+    // over-weighted by (q+1)/q against its neighbour. That is the price the depth was bought with —
+    // at a total near 2^62 it was 1.25x, and pushing the total to just under 2^64 makes it 2x. It
+    // is exactly 1x whenever the total is a power of two, which covers [0,1) and the whole finite
+    // domain. Only the lightest floats feel it: a float of weight w is within 1/(w*q) of its due,
+    // the absolute error is under one draw in 2^64 either way, and the total-variation distance
+    // over floats stays around 2^-35.
+    //
     // Within a whole-class block the member index is the offset's LOW bits, not offset >> shift.
     // Both are exactly weight-preserving — a run of n indices each of weight 2^s spans n*2^s units,
     // so every residue mod n is hit exactly 2^s times — but the low-bits form is what drops the
@@ -342,7 +351,7 @@ internal static class RuntimeRng
     //
     // So on [0,1) this draw IS Walker/Reynolds above the truncation floor, bit for bit: the range
     // is one-sided so it keeps 41 classes, the total is exactly 2^64 and the scaling is the
-    // identity, the lattice occupies [0, 2^P) so the class block's offset is the draw itself, the
+    // identity, the lattice occupies [0, 2^P) so the class block's offset plus 2^P is the draw, the
     // leading-bit search is Walker's leading-zero count over a 41-bit field, and the low P bits are
     // his mantissa. Below the floor the two part ways BY CONSTRUCTION, and must: the lattice
     // reaches exact zero, where Walker stops at 2^-41 and doubles his bottom binade's mass. Closing
@@ -703,8 +712,10 @@ internal static class RuntimeRng
     ///
     /// <para>The interval is half-open — <c>high</c> is not attainable, matching PyTorch
     /// <c>uniform_</c>, Keras <c>RandomUniform</c> and ONNX <c>RandomUniform</c>. An inverted or
-    /// empty range yields <c>low</c>; a NaN bound yields NaN; infinite bounds clamp to the finite
-    /// extremes.</para>
+    /// empty range yields <c>low</c>; a NaN bound yields NaN. A <c>low</c> of -infinity clamps to
+    /// -MaxValue, but a <c>high</c> of +infinity maps to the ordinal one PAST MaxValue, so MaxValue
+    /// itself stays drawable and the whole finite domain is covered. <c>low</c> is drawable except
+    /// where it falls below the truncation floor off the lattice, where nothing is.</para>
     ///
     /// <para>Selection needs no search: over seven blocks, counting the thresholds at or below the
     /// scaled draw is cheaper than walking a tree, and the count IS the block index because an

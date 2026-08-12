@@ -229,7 +229,7 @@ public class RngRuntimeTests
     private const ulong NormalKey = 7UL | (9UL << 32);
 
     // Host reference for the runtime scheme: substreamIndex folds into the key, element i
-    // indexes the whole counter; uniform = low 24 bits of x0 * 2^-24.
+    // indexes the whole counter; uniform is Walker's geometric transform of the whole 64-bit value.
     private static float HostUniform(long i, ulong key, ulong substreamIndex)
         => RngTestOracle.DrawUniform(key, substreamIndex, i);
 
@@ -345,7 +345,7 @@ public class RngRuntimeTests
 
     // On [0,1) the dense draw IS Walker/Reynolds above the truncation floor, bit for bit. The range
     // does not straddle zero, so it keeps 41 classes and totals exactly 2^64: the scaling is the
-    // identity, the lattice takes [0, 2^23) so a class block's offset is the draw itself, the
+    // identity, the lattice takes [0, 2^23) so a class block's offset plus 2^23 is the draw, the
     // leading-bit search is Walker's leading-zero count over the 41-bit exponent field, and the
     // index's low bits are Walker's mantissa. It does NOT hold below the floor, where Walker folds
     // everything under 2^23 into one binade and this draw switches to an even lattice reaching
@@ -476,6 +476,36 @@ public class RngRuntimeTests
             z = end;
         }
         return units;
+    }
+
+    // The one rounding the block scheme does not remove: a weight unit gets q or q+1 of the 2^64
+    // draws, so a float carrying a single unit can be over-weighted by (q+1)/q. Raising the depth
+    // shrank q, which is the price paid for reachability — the ratio was 1.25x when the total
+    // topped out at 2^62 and is 2x now, and exactly 1x when the total is a power of two.
+    [Fact]
+    public void TestDenseUniformOracleScalingIsExactOnlyWhenTheTotalIsAPowerOfTwo()
+    {
+        (UInt128 Quotient, UInt128 Remainder) Split(float low, float high)
+        {
+            ulong total = RngDenseUniformOracle.Build(low, high).Total;
+            UInt128 units = total == 0 ? (UInt128)1 << 64 : total;
+            return (((UInt128)1 << 64) / units, ((UInt128)1 << 64) % units);
+        }
+        Assert.Equal(((UInt128)1, (UInt128)0), Split(0f, 1f));
+        Assert.Equal(((UInt128)1, (UInt128)0), Split(0f, float.PositiveInfinity));
+        // Not the whole finite domain, though: clamping -infinity to -MaxValue costs the total the
+        // top class's last float, so it lands just under 2^64 and the lightest floats take the 2x.
+        Assert.Equal(((UInt128)1, (UInt128)1 << 40), Split(-float.MaxValue, float.MaxValue));
+
+        UInt128 sharpest = UInt128.MaxValue;
+        foreach (var (low, high) in DenseRanges)
+        {
+            if (RngDenseUniformOracle.Build(low, high).Fixed is not null) continue;
+            var (quotient, remainder) = Split(low, high);
+            Assert.True(quotient >= 1);
+            if (remainder > 0) sharpest = UInt128.Min(sharpest, quotient);
+        }
+        Assert.Equal((UInt128)1, sharpest);
     }
 
     // Truncation is the one approximation, and this is its size: the fraction of a range's floats

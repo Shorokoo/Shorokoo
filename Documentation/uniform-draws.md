@@ -12,9 +12,11 @@ produces (seeds, streams, reproducibility) see
 
 ## Facts
 
-- The interval is **half-open**: a draw over `[low, high)` returns values `>= low` and
-  `< high`. `high` is never returned — matching PyTorch's `uniform_`, Keras's
-  `RandomUniform`, and ONNX's `RandomUniform`.
+- The interval is **half-open**: a draw over a non-empty `[low, high)` returns values
+  `>= low` and `< high`, and never `high` — matching PyTorch's `uniform_`, Keras's
+  `RandomUniform`, and ONNX's `RandomUniform`. A degenerate range is the exception: when
+  `low == high` there is no interval to draw from and every element is that bound, which
+  is `high`'s value as much as it is `low`'s (see [the table below](#degenerate-and-non-finite-bounds)).
 - The result dtype is always **`float32`**, whatever the bounds are.
 - The draw is **uniform in value**: the chance of landing in a sub-interval is proportional
   to that sub-interval's width, for any range you ask for — exactly so, but for the bounded
@@ -24,8 +26,12 @@ produces (seeds, streams, reproducibility) see
   and every initializer that takes a bound as an `Init` argument. Both forms use the same
   draw and carry the same guarantees (graph-scalar bounds additionally need a keyed —
   concrete, id-bearing — model, since they cannot be expressed as ONNX attributes).
-- Nothing here depends on the execution provider: the draw is integer and exact, so a CPU
-  run, a GPU run, and an exported ONNX model produce identical values.
+- Nothing here rests on floating-point rounding: the draw is integer and exact, so the same
+  seed yields identical values under ONNX Runtime's CPU provider, under the Quick Execution
+  Engine, and in an exported ONNX model — the three paths the suite compares bit for bit.
+  Other execution providers are expected to agree for the same reason, with one risk still
+  open: a provider that flushes subnormals to zero would disturb the sub-floor lattice
+  described below ([issue #160](https://github.com/Shorokoo/Shorokoo/issues/160)).
 
 ## The range is addressed, not scaled
 
@@ -41,9 +47,10 @@ stands for. Three guarantees follow.
 - **A range wider than `float32` does not overflow.**
   `UniformRange.Init([shape], Scalar(-1.8e38f), Scalar(1.8e38f))` draws normally, where
   `high − low` alone would be `+infinity`.
-- **`high` is never returned.** The exclusion is structural — `high`'s own float is not one
-  of the values the draw can address — rather than a property that a rounding step could
-  undo.
+- **`high` is never returned from a non-empty range.** The exclusion is structural —
+  `high`'s own float is not one of the values the draw can address — rather than a property
+  that a rounding step could undo. Only the degenerate `low == high`, which addresses no
+  float at all and fills with the bound, gives that value back.
 
 ## Degenerate and non-finite bounds
 
@@ -70,25 +77,30 @@ their expectation; an inverted range is not an error, it is a constant fill with
 
 ## How finely the range is resolved
 
-The draw resolves **41 successive binades** — powers of two of magnitude — counting down
-from the largest magnitude in the range, or **40** when the range straddles zero. Call the
-bottom of that span the *floor*:
+The draw resolves **41 successive weight classes** — a class is `max(1, exponent field)`,
+which is a binade of magnitude everywhere except at the very bottom, where the subnormals
+and the smallest normal binade fold into one class — counting down from the largest
+magnitude in the range, or **40** when the range straddles zero. Call the bottom of that
+span the *floor*:
 
 - **Above the floor**, every single `float32` value in the range is drawable, with
-  probability exactly proportional to its ulp.
+  probability proportional to its ulp: exactly so when the range's total weight is a power
+  of two, and otherwise to within one weight unit, the smallest share the draw can express.
 - **Below the floor**, values come from an evenly spaced lattice whose step is 2⁻²³ of the
   floor, so those floats are *represented* but not individually addressable: the draw can
-  land in that region and will land there exactly as often as its width says it should, but
-  it cannot single out an arbitrary float down there.
+  land in that region and will land there as often as its width says it should, to within
+  the same one weight unit where the range's end cuts a lattice cell short, but it cannot
+  single out an arbitrary float down there.
 
 On `[0, 1)` the floor is 2⁻⁴¹: every float from 2⁻⁴¹ up is individually drawable, and
 smaller results are multiples of 2⁻⁶⁴ (exact `0f` among them). On `[-1, 1)` the floor is
-2⁻⁴⁰ — straddling zero costs one binade, since both signs of every magnitude are in play.
+2⁻⁴⁰ — straddling zero costs one class, since both signs of every magnitude are in play.
 
 Counting values rather than mass: about **33.1%** of the floats in `[0, 1)` can come out of
 a draw over `[0, 1)`, and about **16.1%** of the floats in the whole finite `float32`
-domain can come out of a draw over that domain. What is *not* approximated is the
-probability mass — each region keeps exactly the share its width earns, so the draw stays
+domain can come out of a draw over that domain. What truncation does *not* spend is the
+probability mass — each region keeps the share its width earns, exactly when the range's
+total weight is a power of two and otherwise to within one weight unit, so the draw stays
 uniform in value either way. Resolution is what truncation spends, not fairness.
 
 For practical ranges this is invisible: an initializer bound, a `[0, 1)` mask, a
@@ -103,9 +115,9 @@ Three, none of them large, all of them real:
   depends on the range: when its total weight is a power of two the split is *exact*, and
   that covers the common cases — `[0, 1)`, `[-1, 1)`, `[4, 12)`, `[0, +infinity)`. Otherwise
   the lightest floats round up or down by one draw in 2⁶⁴, which for a float carrying the
-  smallest possible weight is a factor of at most 2 against its neighbour. Measured over the
-  whole distribution the departure from an exact uniform stays below 2⁻³⁵ in total-variation
-  distance.
+  smallest possible weight is a factor of at most 2 against its neighbour. The error does
+  not accumulate: over any run of adjacent floats the count stays within one draw of due,
+  so the skew is visible only per-float and only at the very lightest of them.
 - **`low` itself is not always drawable.** Where `low` sits above the floor it is drawable
   and carries exactly one float's share. Where it falls below the floor and off the lattice
   it cannot be returned at all — e.g. a draw over `[-1, 1e30)` never returns exactly `-1`.
@@ -124,5 +136,7 @@ normalised to `+0f` before anything else looks at it. So `RandomUniform(shape, -
 `RandomUniform(shape, -0f, -0f)` and an inverted range starting at `-0f` all yield `+0f`
 rather than the `-0f` the "returns `low`" rule above would otherwise give. The two values
 are numerically equal, so only a bit comparison can see the difference — but the guarantee
-is a bit-level one, and it holds identically on every execution provider and on an exported
+is a bit-level one, and it is enforced on the bounds before any drawing happens, so it does
+not depend on how an execution provider treats a negative zero. It is checked bit for bit
+under ONNX Runtime's CPU provider, under the Quick Execution Engine, and on an exported
 ONNX model.

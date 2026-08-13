@@ -52,9 +52,10 @@ flow through QEE as shape/dtype-only. Use the ONNX Runtime backend
 
 ### Uniform draws resolve a bounded span of magnitudes
 
-A uniform draw addresses `float32` values directly, but only over the top 41 binades of
-the requested range (40 when the range straddles zero) — one 64-bit generator value per
-element cannot separate more than that. Below that floor the draw still carries the
+A uniform draw addresses `float32` values directly, but only over the top 41 weight classes
+of the requested range (40 when the range straddles zero) — one 64-bit generator value per
+element cannot separate more than that. A class is `max(1, exponent field)`, so it is a
+binade except at the bottom, where the subnormals and the smallest normal binade share one. Below that floor the draw still carries the
 probability mass its width earns, but on an even lattice rather than on the float grid, so
 those floats are not individually drawable; about 33% of the floats in `[0, 1)` and 16% of
 the whole finite `float32` domain can come out of a draw. Two further consequences show up

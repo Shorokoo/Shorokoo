@@ -561,6 +561,13 @@ internal static class RuntimeRng
     {
         const long binade = DenseBinade;
 
+        // A negative zero is normalised away as it ENTERS, which is the whole of the "never returns
+        // -0f" contract. A drawn value can never be -0f — SignedOrdinal(-0f) == SignedOrdinal(+0f)
+        // == 0, and ordinal 0 decodes to +0f — and `high` is exclusive, so `low` is the only bearer:
+        // the fixed path below returns it verbatim. IEEE makes -0f == 0f, so both zeros match, and
+        // no NaN compares equal, so a NaN bound keeps its payload and its sign.
+        low = (Tensor<float32>)OnnxOp.Where(OnnxOp.Equal(low, Scalar(0f)), Scalar(0f), low);
+
         // Non-finite bounds: NaN anywhere yields NaN, infinities clamp to the finite extreme of
         // their own sign. +infinity as the upper bound is instead the one ordinal past the largest
         // finite float, so the whole finite domain stays reachable; +infinity as the LOWER bound
@@ -572,7 +579,8 @@ internal static class RuntimeRng
         var zHighRaw = DenseOrdinal((Tensor<float32>)OnnxOp.Where(notANumber, Scalar(1f), finiteHigh))
                      + Ind(OnnxOp.Greater(high, Scalar(float.MaxValue)));
 
-        // An inverted or empty range yields `low` — one rule covering low == high and low > high.
+        // An inverted or empty range yields `low` (normalised, so never -0f) — one rule covering
+        // low == high and low > high.
         // The blocks are still built over a one-float range so no downstream arithmetic degenerates.
         var empty = Ind(OnnxOp.LessOrEqual(zHighRaw, zLow));
         var useFixed = (Tensor<bit>)OnnxOp.Or(notANumber, OnnxOp.Greater(empty, Scalar(0L)));
@@ -731,6 +739,10 @@ internal static class RuntimeRng
     /// <c>high</c> of +infinity maps to the ordinal one PAST MaxValue, so MaxValue itself stays
     /// drawable and the whole finite domain is covered. <c>low</c> is drawable except
     /// where it falls below the truncation floor off the lattice, where nothing is.</para>
+    ///
+    /// <para><b>Never -0f.</b> A <c>low</c> of -0f normalises to +0f on the way in, so no draw and
+    /// no degenerate case returns the bit pattern 0x80000000 — see <see cref="BuildDenseTable"/>.
+    /// </para>
     ///
     /// <para>Selection needs no search: over seven blocks, counting the thresholds at or below the
     /// scaled draw is cheaper than walking a tree, and the count IS the block index because an

@@ -161,6 +161,12 @@ internal static class RngDenseUniformOracle
     public static Table Build(Format fmt, uint lowBits, uint highBits)
     {
         long lowMagnitude = lowBits & (fmt.SignBit - 1), highMagnitude = highBits & (fmt.SignBit - 1);
+        // A negative zero is normalised away as it ENTERS, which is the whole of the "never returns
+        // -0" contract. A drawn value can never be -0 — SignedOrdinal(-0) == SignedOrdinal(+0) == 0,
+        // and ordinal 0 decodes to +0 — and `high` is exclusive, so `low` is the only bearer: the
+        // degenerate paths below return it verbatim.
+        if (lowMagnitude == 0) lowBits = 0;
+
         // The NaN that came in, bits intact — IEEE 754 asks an operation to propagate an input
         // NaN's payload rather than mint a canonical one. `low` wins when both bounds are NaN.
         if (lowMagnitude > fmt.InfinityOrdinal) return new Table(fmt, [], 0, 0, 0, 1, 0, lowBits);

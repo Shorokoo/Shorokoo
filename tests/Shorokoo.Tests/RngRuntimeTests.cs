@@ -870,10 +870,12 @@ public class RngRuntimeTests
 
     // A NaN bound comes back bits intact, `low` winning when both are; an infinite bound clamps to
     // the finite extreme of its sign, except +inf as `high`, which is the ordinal one past the
-    // largest finite; an empty or inverted range comes back as the clamped `low`.
+    // largest finite; an empty or inverted range comes back as the clamped `low`, whose negative
+    // zero was normalised to +0 on the way in.
     private static uint? DenseToyFixed(RngDenseUniformOracle.Format fmt, uint lowBits, uint highBits)
     {
         long lowMagnitude = lowBits & (fmt.SignBit - 1), highMagnitude = highBits & (fmt.SignBit - 1);
+        if (lowMagnitude == 0) lowBits = 0;
         if (lowMagnitude > fmt.InfinityOrdinal) return lowBits;
         if (highMagnitude > fmt.InfinityOrdinal) return highBits;
         uint clamped = lowMagnitude == fmt.InfinityOrdinal
@@ -1169,8 +1171,7 @@ public class RngRuntimeTests
     }
 
     // Which NaN the graph returns, not merely that it returns one — the in-graph check compares
-    // with Equal, which no NaN satisfies. (-0f, 0f) is absent: ONNX Runtime's Where drops the sign
-    // of a zero it selects from its X operand, so the graph answers +0 where the oracle says -0.
+    // with Equal, which no NaN satisfies.
     [Fact]
     public void TestInGraphDenseUniformReproducesTheOraclesNaNPayloadBitForBit()
     {
@@ -1186,6 +1187,34 @@ public class RngRuntimeTests
                     BitConverter.SingleToUInt32Bits(RngDenseUniformOracle.Draw(
                         DenseKey, (ulong)r, i, ranges[r].Low, ranges[r].High)),
                     got[r * RngDenseUniformOutput.Draws + i]);
+    }
+
+    // -0f reaches the draw only through `low`, where it is normalised to +0f, so no draw and no
+    // degenerate case returns the bit pattern 0x80000000 on any engine.
+    [Fact]
+    public void TestDenseUniformNeverReturnsNegativeZeroOnAnyEngine()
+    {
+        const uint negativeZero = 0x8000_0000u;
+        (float Low, float High)[] ranges =
+            [(-0f, 0f), (-0f, -0f), (0f, -0f), (-0f, -1f), (-0f, 1f), (-0f, float.Epsilon)];
+        var g = ((ComputationGraph)typeof(RngDenseUniformOutput)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var seed = TensorData([(long)RngDenseUniformOutput.Ranges * 2],
+            new float[RngDenseUniformOutput.Ranges * 2]);
+        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([seed])).ToConcreteModel();
+        uint[] ort = GraphDrawBits(ranges), qee = QeeDrawBits(model, ranges);
+        for (int r = 0; r < ranges.Length; r++)
+            for (int i = 0; i < RngDenseUniformOutput.Draws; i++)
+            {
+                int k = r * RngDenseUniformOutput.Draws + i;
+                uint oracle = BitConverter.SingleToUInt32Bits(RngDenseUniformOracle.Draw(
+                    DenseKey, (ulong)r, i, ranges[r].Low, ranges[r].High));
+                Assert.NotEqual(negativeZero, oracle);
+                Assert.NotEqual(negativeZero, ort[k]);
+                Assert.NotEqual(negativeZero, qee[k]);
+                Assert.Equal(oracle, ort[k]);
+                Assert.Equal(oracle, qee[k]);
+            }
     }
 
     // An empty block carries the following one's threshold and the trailing empties carry the

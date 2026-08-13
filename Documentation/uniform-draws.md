@@ -51,8 +51,8 @@ A uniform draw never throws on its bounds. It resolves them like this:
 
 | Bounds | Result |
 |---|---|
-| `low == high` | that value, for every element |
-| `low > high` | `low`, for every element |
+| `low == high` | that value, for every element (`-0f` normalises to `+0f`) |
+| `low > high` | `low`, for every element (`-0f` normalises to `+0f`) |
 | `low` is NaN | that NaN, sign and payload intact |
 | `high` is NaN | that NaN, sign and payload intact |
 | both bounds NaN | `low`'s NaN |
@@ -116,5 +116,13 @@ Three, none of them large, all of them real:
   over-weight that sliver by far more than dropping it costs. If you need both signs
   represented, do not pair bounds whose magnitudes differ by 30-odd orders of magnitude.
 
-One bit-level curiosity: `RandomUniform(shape, -0f, 0f)` yields `+0f` rather than `-0f`
-(numerically equal; only a bit comparison can see the difference).
+## Negative zero is never returned
+
+A draw never returns `-0f`, whatever you pass. `-0f` can only enter through `low` — a drawn
+value is never a negative zero, and `high` is an exclusive bound — and a `low` of `-0f` is
+normalised to `+0f` before anything else looks at it. So `RandomUniform(shape, -0f, 0f)`,
+`RandomUniform(shape, -0f, -0f)` and an inverted range starting at `-0f` all yield `+0f`
+rather than the `-0f` the "returns `low`" rule above would otherwise give. The two values
+are numerically equal, so only a bit comparison can see the difference — but the guarantee
+is a bit-level one, and it holds identically on every execution provider and on an exported
+ONNX model.

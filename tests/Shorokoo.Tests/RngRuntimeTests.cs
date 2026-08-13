@@ -604,7 +604,6 @@ public class RngRuntimeTests
         Assert.Equal(2.0, Skew(-float.MaxValue, float.MaxValue));
     }
 
-
     // The smallest value the blocks can produce. Value order is ordinal order, and every block's
     // image is a contiguous ordinal run except the lattice, whose first point is its base.
     private static float DenseMinDrawable(RngDenseUniformOracle.Table table)
@@ -969,18 +968,21 @@ public class RngRuntimeTests
                     drawn[RngDenseUniformOracle.SampleBits(table, draw)]++;
 
                 long quotient = (long)(axis / total), remainder = (long)(axis % total);
+                bool shared = true;
                 for (uint bits = 0; bits < patterns; bits++)
                 {
                     (long weight, long got) = (want[bits], drawn[bits]);
-                    Assert.Equal(weight == 0, got == 0);
-                    Assert.InRange(got, weight * quotient,
-                        remainder == 0 ? weight * quotient : weight * (quotient + 1));
-                    skewedPastOneDraw |=
-                        Int128.Abs(got * (Int128)total - weight * (Int128)axis) > (Int128)total;
+                    shared &= got >= weight * quotient && got <= weight * quotient
+                        + (remainder == 0 ? 0 : weight);
+                    skewedPastOneDraw = skewedPastOneDraw
+                        || Int128.Abs(got * (Int128)total - weight * (Int128)axis) > (Int128)total;
                 }
+                Assert.True(shared);
             }
         Assert.Equal(0b1111, kinds);
-        Assert.True(truncated && wrapped && skewedPastOneDraw);
+        Assert.True(truncated);
+        Assert.True(wrapped);
+        Assert.True(skewedPastOneDraw);
     }
 
     // Wide-exponent and wide-significand shapes, each with a draw width leaving the depth W - P

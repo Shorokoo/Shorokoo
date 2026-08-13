@@ -174,11 +174,13 @@ budget.
 - **A single float can take up to twice its due share.** Whether the draw divides evenly
   depends on the range: a power-of-two width divides exactly, so `[0, 1)`, `[-1, 1)`,
   `[4, 12)` and `[0, +infinity)` are clean, while a bound like `√(6 / fanIn)` is not.
-  Otherwise the lightest floats round up or down by one draw in 2⁶⁴, which for a float
-  carrying the
-  smallest possible weight is a factor of at most 2 against its neighbour. The error does
-  not accumulate: a run of adjacent floats is no further off than a single one, so the skew
-  is visible only per-float and only at the very lightest of them.
+  Otherwise every weight unit rounds up or down by one draw in 2⁶⁴, which leaves any float
+  within a factor of `(q+1)/q` of its due share — at most 2, and reached only by the
+  lightest floats, which have the least weight to absorb the rounding into. What that
+  factor does *not* bound is the error in draws: a heavy float's weight units are spread
+  across the axis rather than sitting adjacent, so their roundings add up instead of
+  cancelling, and both a heavy float and a run of neighbours drift further in absolute
+  terms than a light one does. The share stays within the factor throughout.
 - **`low` itself is not always drawable.** Where `low` sits above the floor it is drawable
   and carries exactly one float's share. Where it falls below the floor and off the lattice
   it cannot be returned at all — e.g. a draw over `[-1, 1e30)` never returns exactly `-1`.

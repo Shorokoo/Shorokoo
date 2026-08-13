@@ -102,7 +102,8 @@ public class NullableParamTests
         // through the generated sub-module Call.
         Assert.True(AutoTest.AdvancedTestGraph<NullableBiasLayer>(hyperparamInputs: [],
             runtimeInputs: [TensorData([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f),
-                            TensorData([2L, 3L], 10f, 20f, 30f, 40f, 50f, 60f)]));
+                            TensorData([2L, 3L], 10f, 20f, 30f, 40f, 50f, 60f)],
+                            expected: [11.0, 22.0, 33.0, 44.0, 55.0, 66.0]));
         Assert.True(AutoTest.AdvancedTestGraph<NullableBiasPresentCheck>(hyperparamInputs: [],
             runtimeInputs: [TensorData([3L], 1f, 2f, 3f), TensorData([3L], 10f, 20f, 30f)]));
     }
@@ -158,7 +159,8 @@ public class NullableParamTests
         var x = TensorData([2L, 2L], 1f, 2f, 3f, 4f);
         var bias = TensorData([2L, 2L], 5f, 6f, 7f, 8f);
         Assert.True(AutoTest.AdvancedTestGraph<NullableTrainableBiasLayer>(
-            hyperparamInputs: [], runtimeInputs: [x, bias]));
+            hyperparamInputs: [], runtimeInputs: [x, bias],
+            expected: [6.0, 8.0, 10.0, 12.0]));
         Assert.Equal(Bytes(1f, 2f, 3f, 4f),
             RunWithOptionals(NullableTrainableBiasLayer.ComputationGraph, [x, x], x, OptionalTensorData.None(DType.Float32)));
     }

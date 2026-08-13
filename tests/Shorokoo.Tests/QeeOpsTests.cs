@@ -50,21 +50,26 @@ public class QeeOpsCoverageTests
             hyperparamInputs: [], runtimeInputs: [
                 TensorData(DType.Int64, [3L], -2L, 0L, 5L),
                 TensorData(DType.Int64, [3L], 2L, 3L, 4L),
-                TensorData(DType.Int64, [3L], 1L, 2L, 3L)]));
+                TensorData(DType.Int64, [3L], 1L, 2L, 3L)],
+                expected: [2.0, 0.0, -5.0, -1.0, 0.0, 1.0, 2.0, 9.0, 64.0]));
         Assert.True(AutoTest.AdvancedTestGraph<QeeBitwiseNotInt64Check>(
-            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Int64, [3L], 0b1100L, 0b1010L, 0b1111L)]));
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Int64, [3L], 0b1100L, 0b1010L, 0b1111L)],
+            expected: [-13.0, -11.0, -16.0]));
     }
 
     [Fact]
     public void TestQeeConstantEyeLikeAndCastToBoolCoverage()
     {
-        Assert.True(AutoTest.AdvancedTestGraph<QeeConstantOpsCheck>(hyperparamInputs: [], runtimeInputs: []));
+        Assert.True(AutoTest.AdvancedTestGraph<QeeConstantOpsCheck>(hyperparamInputs: [], runtimeInputs: [],
+        expected: [42.0, 1.0, 2.0, 3.0, 2.5, 1.5, 2.5, 3.5]));
         Assert.True(AutoTest.AdvancedTestGraph<QeeEyeLikeOpsCheck>(
-            hyperparamInputs: [], runtimeInputs: [TensorDataWithDefaultVals(DType.Float32, [3L, 3L])]));
+            hyperparamInputs: [], runtimeInputs: [TensorDataWithDefaultVals(DType.Float32, [3L, 3L])],
+            expected: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]));
         Assert.True(AutoTest.AdvancedTestGraph<QeeCastToBoolOpsCheck>(
             hyperparamInputs: [], runtimeInputs: [
                 TensorData(DType.Int64, [3L], 0L, 1L, 2L),
-                TensorData(DType.Bool, [3L], true, false, true)]));
+                TensorData(DType.Bool, [3L], true, false, true)],
+                expected: [0.0, 1.0, 1.0, 1.0, 0.0, 1.0]));
     }
 
     [Fact]
@@ -72,9 +77,11 @@ public class QeeOpsCoverageTests
     {
         Assert.True(AutoTest.AdvancedTestGraph<QeeEinsumTraceCheck>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [4L, 4L],
-                1f, 0f, 0f, 0f, 0f, 2f, 0f, 0f, 0f, 0f, 3f, 0f, 0f, 0f, 0f, 4f)]));
+                1f, 0f, 0f, 0f, 0f, 2f, 0f, 0f, 0f, 0f, 3f, 0f, 0f, 0f, 0f, 4f)],
+                expected: [30.0]));
         Assert.True(AutoTest.AdvancedTestGraph<QeeSizeCheck>(
-            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [4L], -1.5f, 0.4f, 1.6f, 2.5f)]));
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [4L], -1.5f, 0.4f, 1.6f, 2.5f)],
+            expected: [4.0]));
         Assert.True(AutoTest.AdvancedTestGraph<QeeMultinomialCheck>(
             hyperparamInputs: [], runtimeInputs: [
                 TensorData(DType.Float32, [2L, 3L], 0.1f, 0.4f, 0.5f, 0.3f, 0.3f, 0.4f)],
@@ -89,14 +96,16 @@ public class QeeOpsCoverageTests
                 TensorData(DType.Float64, [3L], 1.0, 2.0, 3.0),
                 TensorData(DType.Int32, [3L], 1, 2, 3),
                 TensorData(DType.Int16, [3L], (short)1, (short)2, (short)3),
-                TensorData(DType.Int8, [3L], (sbyte)1, (sbyte)2, (sbyte)3)]));
+                TensorData(DType.Int8, [3L], (sbyte)1, (sbyte)2, (sbyte)3)],
+                expected: [1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0]));
         Assert.True(AutoTest.AdvancedTestGraph<QeeDtypeIdentityUnsignedOpsCheck>(
             hyperparamInputs: [], runtimeInputs: [
                 TensorData(DType.UInt8, [3L], (byte)1, (byte)2, (byte)3),
                 TensorData(DType.UInt16, [3L], (ushort)1, (ushort)2, (ushort)3),
                 TensorData(DType.UInt32, [3L], (uint)1, (uint)2, (uint)3),
                 TensorData(DType.UInt64, [3L], (ulong)1, (ulong)2, (ulong)3),
-                TensorData(DType.Bool, [3L], true, false, true)]));
+                TensorData(DType.Bool, [3L], true, false, true)],
+                expected: [1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 0.0, 1.0]));
     }
 
     [Fact]

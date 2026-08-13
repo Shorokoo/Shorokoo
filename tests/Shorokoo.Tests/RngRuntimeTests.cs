@@ -604,24 +604,6 @@ public class RngRuntimeTests
         Assert.Equal(2.0, Skew(-float.MaxValue, float.MaxValue));
     }
 
-    // The figure RuntimeRng's header quotes and nothing measured. Every float's run of weight units
-    // maps to within one of the 2^64 draws it is due, so the distance is under the reachable float
-    // count over 2^65 — and is exactly zero where the scaling is the identity.
-    [Fact]
-    public void TestDenseUniformStaysWithinTheDocumentedTotalVariationDistance()
-    {
-        double Distance(float low, float high)
-        {
-            var table = RngDenseUniformOracle.Build(low, high);
-            long floats = 0;
-            foreach (var block in table.Blocks) floats += DenseElements(block);
-            return table.Total == 0 ? 0.0 : floats * Math.ScaleB(1.0, -65);
-        }
-        foreach (var (low, high) in DenseRanges) Assert.True(Distance(low, high) < Math.ScaleB(1.0, -35));
-        Assert.Equal(0.0, Distance(0f, 1f));
-        Assert.Equal(0.0, Distance(-1f, 1f));
-        Assert.Equal(0.0, Distance(0f, float.PositiveInfinity));
-    }
 
     // The smallest value the blocks can produce. Value order is ordinal order, and every block's
     // image is a contiguous ordinal run except the lattice, whose first point is its base.
@@ -921,8 +903,11 @@ public class RngRuntimeTests
             ? -(long)(bits & (uint)(fmt.SignBit - 1)) : bits);
 
     // F-2: the construction on a format small enough to enumerate. Every pair of representable
-    // bounds, every code on the weight axis, checked against cell widths and lattice occupancy read
-    // off an enumeration of the format rather than off the blocks.
+    // bounds, every code on the weight axis, and every draw, checked against cell widths and
+    // lattice occupancy read off an enumeration of the format rather than off the blocks. The draw
+    // tally is where the per-float share is held to w*q .. w*(q+1) and where the absolute error is
+    // shown to pass one draw — a float's weight units are strided by the member index, so their
+    // roundings accumulate instead of telescoping the way a contiguous run's would.
     private static void DenseToyEnumerate(RngDenseUniformOracle.Format fmt)
     {
         int patterns = 1 << (1 + fmt.E + fmt.P);
@@ -934,9 +919,9 @@ public class RngRuntimeTests
         for (long z = -fmt.MaxFiniteOrdinal; z <= fmt.MaxFiniteOrdinal; z++)
             byUnits[DenseToyUnits(fmt, z)] = Bits(z);
 
-        long[] want = new long[patterns], seen = new long[patterns];
+        long[] want = new long[patterns], seen = new long[patterns], drawn = new long[patterns];
         int kinds = 0;
-        bool truncated = false, wrapped = false;
+        bool truncated = false, wrapped = false, skewedPastOneDraw = false;
         for (uint lowBits = 0; lowBits < patterns; lowBits++)
             for (uint highBits = 0; highBits < patterns; highBits++)
             {
@@ -979,13 +964,23 @@ public class RngRuntimeTests
                         : ((code << fmt.W) + table.Total - 1) / table.Total)]++;
                 Assert.True(seen.AsSpan().SequenceEqual(want));
 
-                bool escaped = false;
+                Array.Clear(drawn);
                 for (ulong draw = 0; draw < (ulong)axis; draw++)
-                    escaped |= want[RngDenseUniformOracle.SampleBits(table, draw)] == 0;
-                Assert.False(escaped);
+                    drawn[RngDenseUniformOracle.SampleBits(table, draw)]++;
+
+                long quotient = (long)(axis / total), remainder = (long)(axis % total);
+                for (uint bits = 0; bits < patterns; bits++)
+                {
+                    (long weight, long got) = (want[bits], drawn[bits]);
+                    Assert.Equal(weight == 0, got == 0);
+                    Assert.InRange(got, weight * quotient,
+                        remainder == 0 ? weight * quotient : weight * (quotient + 1));
+                    skewedPastOneDraw |=
+                        Int128.Abs(got * (Int128)total - weight * (Int128)axis) > (Int128)total;
+                }
             }
         Assert.Equal(0b1111, kinds);
-        Assert.True(truncated && wrapped);
+        Assert.True(truncated && wrapped && skewedPastOneDraw);
     }
 
     // Wide-exponent and wide-significand shapes, each with a draw width leaving the depth W - P

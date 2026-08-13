@@ -339,9 +339,11 @@ internal static class RuntimeRng
     // over-weighted by (q+1)/q against its neighbour. That is the price the depth was bought with —
     // at a total near 2^62 it was 1.25x, and pushing the total to just under 2^64 makes it 2x. It
     // is exactly 1x whenever the total is a power of two, which covers [0,1) and the whole finite
-    // domain. Only the lightest floats feel it: a float of weight w is within 1/(w*q) of its due,
-    // the absolute error is under one draw in 2^64 either way, and the total-variation distance
-    // over floats stays around 2^-35.
+    // domain. A float of weight w takes between w*q and w*(q+1) draws, so (q+1)/q bounds EVERY
+    // float's relative error, not just the lightest — the lightest simply have the least room to
+    // absorb it. The ABSOLUTE error is not bounded by one draw: w's weight units are strided by the
+    // member index below, so their q/q+1 roundings accumulate rather than telescoping the way a
+    // contiguous run would, and exhaustive enumeration of the toy formats reaches 7 draws at w=16.
     //
     // Within a whole-class block the member index is the offset's LOW bits, not offset >> shift.
     // Both are exactly weight-preserving — a run of n indices each of weight 2^s spans n*2^s units,

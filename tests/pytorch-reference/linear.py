@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PyTorch reference for the Linear forward-value check (NNLinearMatchesManualMatMul).
+"""PyTorch reference for the Linear forward-value check (NNLinearMatchesPyTorch).
 
 Given a .safetensors file holding a Linear layer's seeded weight + bias and an
 "input" tensor, runs nn.functional.linear (Shorokoo Linear semantics:

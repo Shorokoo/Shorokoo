@@ -205,6 +205,25 @@ public partial class ScalarAndFillDispatcherModel
         acc = acc + NanAny(VectorFill(slen, 9f));
         acc = acc + NanAny(VectorFill(slen, 10.0));
 
+        // VectorRange(start, limit, delta) — 8 typed arms plus the generic Scalar<T> form.
+        // Value-checked: [0, 4) stepping 1 is [0,1,2,3], which sums to 6.
+        acc = acc + (VectorRange((sbyte)0, (sbyte)4, (sbyte)1).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(6f)).Abs();
+        acc = acc + (VectorRange((short)0, (short)4, (short)1).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(6f)).Abs();
+        acc = acc + (VectorRange(0, 4, 1).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(6f)).Abs();
+        acc = acc + (VectorRange(0L, 4L, 1L).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(6f)).Abs();
+        acc = acc + (VectorRange((byte)0, (byte)4, (byte)1).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(6f)).Abs();
+        acc = acc + (VectorRange((ushort)0, (ushort)4, (ushort)1).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(6f)).Abs();
+        acc = acc + (VectorRange(0u, 4u, 1u).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(6f)).Abs();
+        acc = acc + (VectorRange(0UL, 4UL, 1UL).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(6f)).Abs();
+        acc = acc + (VectorRange(Scalar(0f), Scalar(4f), Scalar(1f)).Reduce(ReduceKind.Sum) - Scalar(6f)).Abs();
+
+        // Each unsigned arm past its width's SIGNED limit: a narrowing lowering wraps the limit
+        // negative and yields an empty range, silently, which a [0,4) case cannot see.
+        acc = acc + (VectorRange((byte)0, (byte)200, (byte)50).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(300f)).Abs();
+        acc = acc + (VectorRange((ushort)0, (ushort)40000, (ushort)10000).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(60000f)).Abs();
+        acc = acc + (VectorRange(0u, 3000000000u, 1000000000u).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(3e9f)).Abs() * Scalar(1e-9f);
+        acc = acc + (VectorRange(0UL, 12884901888UL, 4294967296UL).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(12884901888f)).Abs() * Scalar(1e-10f);
+
         return (acc + Nan(input)) < Scalar(1e-3f);
     }
 }

@@ -93,9 +93,11 @@ public partial class SwitchInitLinear
 [Trait("Purpose", "Coverage")]
 public class RngAlgorithmTests
 {
-    // Host reference: substreamIndex folds into the key, element i indexes the whole counter;
-    // uniform = low 24 bits of x0 * 2^-24.
-    private static float HostUniform(long i, ulong key) => RngTestOracle.DrawUniform(key, 0, i);
+    // Host reference: substreamIndex folds into the key, element i indexes the whole counter.
+    // A plain uniform draw is the dense arbitrary-range draw over [0,1), so the dense oracle is
+    // the reference — an independent host rebuild, not a call back into the graph.
+    private static float HostUniform(long i, ulong key)
+        => RngDenseUniformOracle.Draw(key, 0, i, 0f, 1f);
 
     [Fact]
     public void TestKeyedUniformBitsAndSplitThenDrawMatchTheHostGeneratorBitExactly()
@@ -251,8 +253,8 @@ public class RngAlgorithmSwitchTests
         // — the injected counter is baked at 0 in one-shot inference).
         for (long i = 0; i < 16; i++)
         {
-            Assert.Equal(RngTestOracle.DrawUniform(key20, 0, i, Threefry2x32.Rounds), draws20[i]);
-            Assert.Equal(RngTestOracle.DrawUniform(key13, 0, i, Threefry2x32.Rounds13), draws13[i]);
+            Assert.Equal(RngDenseUniformOracle.Draw(key20, 0, i, 0f, 1f, Threefry2x32.Rounds), draws20[i]);
+            Assert.Equal(RngDenseUniformOracle.Draw(key13, 0, i, 0f, 1f, Threefry2x32.Rounds13), draws13[i]);
         }
     }
 

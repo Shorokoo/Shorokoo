@@ -50,6 +50,22 @@ small tensors (up to `MaxDataElements`, default 256 elements). Larger tensors
 flow through QEE as shape/dtype-only. Use the ONNX Runtime backend
 (`OnnxEngine.Eval` / `ComputeContext`) for real numeric execution.
 
+### Uniform draws resolve a bounded span of magnitudes
+
+A uniform draw addresses `float32` values directly, but only over the top 41 weight classes
+of the requested range (40 when the range straddles zero) — one 64-bit generator value per
+element cannot separate more than that. A class is `max(1, exponent field)`, so it is a
+binade except at the bottom, where the subnormals and the smallest normal binade share one. Below that floor the draw still carries the
+probability mass its width earns, but on an even lattice rather than on the float grid, so
+those floats are not individually drawable; about 33% of the floats in `[0, 1)` and 16% of
+the whole finite `float32` domain can come out of a draw. Two further consequences show up
+only at extreme ranges: a single float can take up to twice its due share when the range's
+total weight is not a power of two (it is exact when it is, `[0, 1)` and `[-1, 1)`
+included), and a side of the range worth less than one weight unit — the negative side of
+`[-1, 1e30)`, say — gets probability exactly zero. Resolution here is bounded by the
+generator bits spent per element, so a deeper draw is possible but costs more of them. See
+[uniform-draws.md](uniform-draws.md) for the full contract.
+
 ### ONNX `Scan` import: stacked-output attributes
 
 Imported `Scan` nodes are lowered to an equivalent `Loop` (trip count from the

@@ -119,7 +119,7 @@ public static partial class XavierUniform
     public static Tensor<float32> Inline(Vector<int64> shape)
     {
         var bound = (6.0f / (InitializerMath.FanIn(shape) + InitializerMath.FanOut(shape))).Sqrt();
-        return Globals.RandomUniform(shape, low: -1.0f, high: 1.0f) * bound;
+        return Globals.RandomUniform(shape, -bound, bound);
     }
 }
 
@@ -147,7 +147,7 @@ public static partial class KaimingUniform
     public static Tensor<float32> Inline(Vector<int64> shape)
     {
         var bound = (6.0f / InitializerMath.FanIn(shape)).Sqrt();
-        return Globals.RandomUniform(shape, low: -1.0f, high: 1.0f) * bound;
+        return Globals.RandomUniform(shape, -bound, bound);
     }
 }
 
@@ -184,6 +184,6 @@ public static partial class RecurrentUniform
     public static Tensor<float32> Inline(Vector<int64> shape, Scalar<int64> hiddenSize)
     {
         var bound = Scalar(1.0f) / hiddenSize.Cast<float32>().Sqrt();
-        return Globals.RandomUniform(shape, low: -1.0f, high: 1.0f) * bound;
+        return Globals.RandomUniform(shape, -bound, bound);
     }
 }

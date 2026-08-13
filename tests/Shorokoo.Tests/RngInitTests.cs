@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using Shorokoo.Core.Rng;
+using Shorokoo.Modules.Initializers;
 using Shorokoo.Modules.Layers;
 using Shorokoo.Runtime;
 
@@ -55,6 +56,45 @@ public partial class BitsIntermediateTrainableLayer
         var w = BitsIntermediateTrainableInit.Init(x.ShapeTensor());   // trainable [4,4] weight
         return x * w;
     }
+}
+
+/// <summary>A UniformRange-initialized parameter whose bounds arrive as hyperparameters, so the
+/// range is a runtime value the initializer cannot specialize on.</summary>
+[Module]
+public partial class RngUniformRangeRuntimeBounds
+{
+    public const int N = 256;
+
+    public static Tensor<float32> Inline(
+        Tensor<float32> x, [Hyper] Scalar<float32> low, [Hyper] Scalar<float32> high)
+        => UniformRange.Init([Scalar((long)N)], low, high);
+}
+
+/// <summary>The same runtime range through the public runtime feed — the Scalar-bound overload of
+/// <c>Globals.RandomUniform</c>.</summary>
+[Module]
+public partial class RngRuntimeFeedRuntimeBounds
+{
+    public static Tensor<float32> Inline(
+        Tensor<float32> x, [Hyper] Scalar<float32> low, [Hyper] Scalar<float32> high)
+        => RandomUniform([Scalar((long)RngUniformRangeRuntimeBounds.N)], low, high);
+}
+
+/// <summary>A XavierUniformGain-initialized parameter whose gain arrives as a hyperparameter, so
+/// the same site and stream key serve every gain the test materializes.</summary>
+[Module]
+public partial class RngXavierGainRuntimeGain
+{
+    public static Tensor<float32> Inline(Tensor<float32> x, [Hyper] Scalar<float32> gain)
+        => XavierUniformGain.Init([Scalar(4L), Scalar(4L)], gain);
+}
+
+/// <summary>The KaimingUniformGain counterpart of <see cref="RngXavierGainRuntimeGain"/>.</summary>
+[Module]
+public partial class RngKaimingGainRuntimeGain
+{
+    public static Tensor<float32> Inline(Tensor<float32> x, [Hyper] Scalar<float32> gain)
+        => KaimingUniformGain.Init([Scalar(4L), Scalar(4L)], gain);
 }
 
 /// <summary>
@@ -165,17 +205,27 @@ public class RngInitTests
 }
 
 /// <summary>
-/// The init-value derivation pinned to FROZEN constants — the cross-version seed contract.
-/// Every other init test is relational, so a silent change anywhere in the chain (master →
-/// "init" sub-master fold → per-path key fold → in-graph keyed draw → uniform transform →
-/// Kaiming scaling) would keep them green while breaking every seed anyone has ever shared.
-/// A red here means "MasterSeed 123 no longer produces the weights it used to" and must never
-/// be fixed by regenerating the constants without a deliberate, breaking-change decision.
+/// The init-value derivation pinned to FROZEN constants — the cross-version seed contract. Every
+/// other init test is relational, so a silent change anywhere in the chain (master → "init"
+/// sub-master fold → per-path key fold → in-graph keyed draw → uniform transform → Kaiming
+/// bounds) would keep them green while breaking every seed anyone has ever shared. A red here
+/// means "MasterSeed 123 no longer produces the weights it used to" and must never be fixed by
+/// regenerating the constants without a deliberate, breaking-change decision.
+///
+/// <para>Recomputing any layer's expectation from the oracles would forfeit exactly that: a
+/// coordinated change to graph and oracle would pass silently. The oracles cross-check the same
+/// constants from a separate Fact instead, so both properties hold at once.</para>
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
 public class RngInitFrozenDerivationTests
 {
+    // MasterSeed 123: the two [4,4] KaimingUniform weights at ModelId [1, 1] and [2, 1], and the
+    // two-draw initializer's [4,4] weight.
+    private static readonly float[] FrozenWeight11 = [0.3378866f, 1.2052094f, 0.37335718f, 0.7997707f, 1.0675026f, -0.9041115f, 0.10083773f, -0.7819222f, -1.023829f, -0.70204467f, -0.3367729f, 0.31696287f, -1.0910206f, -0.6310536f, 0.6859728f, 1.1874193f];
+    private static readonly float[] FrozenWeight21 = [1.0079714f, 0.1395562f, -0.016731672f, -1.0395613f, 0.21706164f, -0.5711288f, 0.91078484f, 1.1091135f, 0.9176603f, 0.4229469f, -0.14127223f, 0.5303491f, 0.1532544f, 0.57974875f, 0.9801079f, -1.1877112f];
+    private static readonly float[] FrozenMultiDraw = [0.31585765f, 0.21880347f, 0.17880033f, 0.23017395f, 0.2856346f, 0.55870205f, 0.14583084f, 0.17104696f, 0.5075757f, 0.074125335f, 0.2884086f, 0.12671219f, 0.017829021f, 0.14411132f, 0.33035496f, 0.088769004f];
+
     [Fact]
     public void TestInitKeysValuesAndBatchedResolutionAreFrozenAndMatchTheHostOracle()
     {
@@ -206,11 +256,8 @@ public class RngInitFrozenDerivationTests
         Assert.Equal(paths.Length, batched.Distinct().Count());
 
         // Layer 2: the full materialized values (counter scheme, rounds, uniform transform,
-        // substreamIndex ordinal, initializer scaling). REFERENCE: golden. Exact equality is
-        // safe cross-backend — Threefry integer ops plus IEEE-exact float multiply/add.
-        float[] expected0 = [-1.1163274f, 1.1247115f, -0.20118715f, -0.8630716f, 0.12048453f, 0.73705673f, -0.38930926f, -0.9366948f, 0.7735388f, -0.49744576f, -0.60573745f, -0.41470495f, -1.003003f, 0.19222532f, 0.8099788f, 0.49284714f];
-        float[] expected1 = [-0.88179505f, 0.22158815f, 0.46890008f, 1.0455909f, -1.1027482f, 0.91218925f, -0.5450415f, 0.36076564f, -0.54581296f, 0.6172559f, -0.40583524f, 0.3620881f, -0.5337995f, -0.24915563f, 1.085321f, 0.67871165f];
-
+        // substreamIndex ordinal, initializer bounds). REFERENCE: golden. Exact equality is safe
+        // cross-backend — the draw is Threefry integer ops plus exact bit assembly.
         var g = RngInitTwoLinears.ComputationGraph;
         var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
         var ws = g.ToConcreteArchitecture(g.FromOrderedInputs([sample]))
@@ -218,21 +265,147 @@ public class RngInitFrozenDerivationTests
             .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
             .Where(v => v.Length == 16).ToArray();
         Assert.Equal(2, ws.Length);
-        Assert.Equal(expected0, ws[0]);   // weight at ModelId [1, 1]
-        Assert.Equal(expected1, ws[1]);   // weight at ModelId [2, 1]
+        Assert.Equal(FrozenWeight11, ws[0]);
+        Assert.Equal(FrozenWeight21, ws[1]);
 
         // Layer 3: an initializer that draws TWICE. Both draws share the parameter's ONE stream
         // key and are separated only by their substreamIndex ordinal — this golden pins that
         // ordinal assignment, which the relational assertions above cannot see.
-        float[] multiDraw =
-        [0.12127531f, 0.045944285f, 0.71740365f, 0.025424859f, 0.1510541f, 0.14533761f, 0.0006900568f, 0.3375456f, 0.34560895f, 0.17979373f, 0.14335075f, 0.010312658f, 0.112886935f, 0.4531033f, 0.27203277f, 0.15625617f];
-
         var mg = BitsIntermediateTrainableLayer.ComputationGraph;
         var w = mg.ToConcreteArchitecture(mg.FromOrderedInputs([sample]))
             .InitializeTrainableParams(rngConfig: cfg).ModelParams
             .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
             .Single(v => v.Length == 16);
-        Assert.Equal(multiDraw, w);
+        Assert.Equal(FrozenMultiDraw, w);
+    }
+
+    // The host oracles are independent reimplementations, so holding the same frozen constants up
+    // to them catches a graph that drifts from the CONTRACT, where the freeze above only catches a
+    // graph that drifts from its own past. KaimingUniform draws U(-bound, bound) directly with
+    // bound = sqrt(6/fanIn), and fanIn is 4 for both [4,4] weights.
+    [Fact]
+    public void TestTheFrozenInitValuesAreWhatTheHostOraclesIndependentlyDerive()
+    {
+        var cfg = new RngConfig { MasterSeed = 123 };
+        float kaiming = MathF.Sqrt(6f / 4f);
+        float[] Kaiming(int[] path)
+        {
+            ulong key = RngTestOracle.InitKey(cfg, path);
+            return [.. Enumerable.Range(0, 16)
+                .Select(i => RngDenseUniformOracle.Draw(key, 0, i, -kaiming, kaiming))];
+        }
+        Assert.Equal(FrozenWeight11, Kaiming([1, 1]));
+        Assert.Equal(FrozenWeight21, Kaiming([2, 1]));
+
+        ulong multiKey = RngTestOracle.InitKey(cfg, (int[])[1]);
+        float[] multiDraw = [.. Enumerable.Range(0, 16).Select(i =>
+            RngDenseUniformOracle.Draw(multiKey, 0, i, 0f, 1f)
+            * ((uint)RngTestOracle.DrawBits(multiKey, 1, i, 32) * (1.0f / 4294967296.0f)))];
+        Assert.Equal(FrozenMultiDraw, multiDraw);
+    }
+
+    private static readonly RngConfig RangeCfg = new() { MasterSeed = 4242 };
+
+    private static TensorData[] RangeInputs(float low, float high) =>
+        [TensorData(DType.Float32, [], low), TensorData(DType.Float32, [], high),
+         TensorData(DType.Float32, [1L], 0f)];
+
+    private static (float[] vals, ulong key) UniformRangeParam(float low, float high)
+    {
+        var g = RngUniformRangeRuntimeBounds.ComputationGraph;
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([.. RangeInputs(low, high)]));
+        var vals = arch.InitializeTrainableParams(rngConfig: RangeCfg).ModelParams
+            .Select(p => p.ToTensorData())
+            .Single(t => t.DType == DType.Float32 && t.Shape.Count == RngUniformRangeRuntimeBounds.N)
+            .As<float32>().AccessMemory().ToArray();
+        var path = arch.GetRngStreamReport().Streams
+            .Single(s => s.Shape is { Count: 1 } sh && sh[0] == RngUniformRangeRuntimeBounds.N)
+            .ModelIdPath;
+        return (vals, RngTestOracle.InitKey(RangeCfg, [.. path]));
+    }
+
+    private static bool DrawsTheRange(float low, float high)
+    {
+        var (v, key) = UniformRangeParam(low, high);
+        return v.Length == RngUniformRangeRuntimeBounds.N
+            && v.All(x => float.IsFinite(x) && x >= low && x < high)
+            && Enumerable.Range(0, v.Length).All(i =>
+                BitConverter.SingleToUInt32Bits(v[i]) ==
+                BitConverter.SingleToUInt32Bits(RngDenseUniformOracle.Draw(key, 0, i, low, high)));
+    }
+
+    private static bool FeedDrawsTheRange(float low, float high)
+    {
+        var g = RngRuntimeFeedRuntimeBounds.ComputationGraph;
+        var inputs = RangeInputs(low, high);
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([.. inputs]));
+        var v = ComputeContext.Default.Execute(arch.ToConcreteModel(RangeCfg), [.. inputs.Cast<IData>()])[0]
+            .ToTensorData().As<float32>().AccessMemory().ToArray();
+        var path = arch.GetRngStreamReport().Streams
+            .Single(s => s.Kind == RngStreamKind.UniformFeed).ModelIdPath;
+        ulong key = RngTestOracle.RunKey(RangeCfg, [.. path]);
+        return v.Length == RngUniformRangeRuntimeBounds.N
+            && v.All(x => float.IsFinite(x) && x >= low && x < high)
+            && Enumerable.Range(0, v.Length).All(i =>
+                BitConverter.SingleToUInt32Bits(v[i]) ==
+                BitConverter.SingleToUInt32Bits(RngDenseUniformOracle.Draw(key, 0, i, low, high)));
+    }
+
+    /// <summary>
+    /// UniformRange over bounds the initializer cannot see at trace time: every draw is finite,
+    /// inside [low, high), and bit-identical to the dense oracle over that same range. The last
+    /// three ranges are the ones the retired affine transform u·(high−low)+low got wrong — the
+    /// widest range overflowed to +Infinity (and 0·∞ to NaN), and a range narrower than one ulp
+    /// of its own endpoint rounded up onto the excluded <c>high</c>.
+    /// </summary>
+    [Fact]
+    public void TestUniformRangeDrawsItsRuntimeBoundsDenselyAndNeverReturnsHigh()
+    {
+        Assert.True(DrawsTheRange(2f, 5f));
+        Assert.True(DrawsTheRange(-1f, 1f));
+        Assert.True(DrawsTheRange(-1.8e38f, 1.8e38f));
+        Assert.True(DrawsTheRange(0f, float.Epsilon));
+        Assert.True(DrawsTheRange(1f, 1.0000001f));
+    }
+
+    /// <summary>The public runtime feed overload carries its graph-scalar bounds to the draw too,
+    /// and draws bit-for-bit what the dense oracle does over them — a range check alone stays green
+    /// under drift that changes every drawn bit, and under dropped bounds wherever the range happens
+    /// to contain [0, 1).</summary>
+    [Fact]
+    public void TestRuntimeUniformFeedDrawsItsRuntimeBoundsBitForBit()
+    {
+        Assert.True(FeedDrawsTheRange(2f, 5f));
+        Assert.True(FeedDrawsTheRange(-1f, 1f));
+        Assert.True(FeedDrawsTheRange(-1.8e38f, 1.8e38f));
+        Assert.True(FeedDrawsTheRange(1f, 1.0000001f));
+    }
+
+    private static float[] GainDraw(ComputationGraph g, float gain)
+    {
+        TensorData[] inputs =
+            [TensorData(DType.Float32, [], gain), TensorData(DType.Float32, [1L], 0f)];
+        return g.ToConcreteArchitecture(g.FromOrderedInputs([.. inputs]))
+            .InitializeTrainableParams(rngConfig: RangeCfg).ModelParams
+            .Select(p => p.ToTensorData())
+            .Single(t => t.DType == DType.Float32 && t.Shape.Count == 16)
+            .As<float32>().AccessMemory().ToArray();
+    }
+
+    private static bool GainIsSignAgnostic(ComputationGraph g, float gain)
+    {
+        var pos = GainDraw(g, gain);
+        return pos.Length == 16 && pos.Distinct().Count() > 1 && pos.SequenceEqual(GainDraw(g, -gain));
+    }
+
+    /// <summary>U(-b, b) is symmetric, so a negative <c>gain</c> must draw the distribution its
+    /// magnitude does. Passing the signed bound straight through instead inverts the range, and an
+    /// inverted range yields <c>low</c> for every element — a silent constant fill.</summary>
+    [Fact]
+    public void TestGainInitializersTakeTheBoundsMagnitudeAndNeverFillConstant()
+    {
+        Assert.True(GainIsSignAgnostic(RngXavierGainRuntimeGain.ComputationGraph, 2.5f));
+        Assert.True(GainIsSignAgnostic(RngKaimingGainRuntimeGain.ComputationGraph, 1.4142135f));
     }
 }
 
@@ -321,6 +494,23 @@ public class RngInitFailLoudTests
         Assert.Contains("missing from the supplied parameter inventory", ex.Message);
         Assert.Contains($"[{string.Join(", ", missing.ModelId.Vals)}]", ex.Message);
     }
+
+    /// <summary>The ONNX fallback carries its bounds as attributes, so an unkeyed feed whose range
+    /// is in-graph has nowhere to put them — a hard error, never a silently dropped range.</summary>
+    [Fact]
+    public void TestUnkeyedFeedWithRuntimeBoundsIsAHardError()
+    {
+        var g = GraphBuilder.BuildInternalComputationGraphFromDelegate(
+            (Func<Tensor<float32>>)(() => RandomUniform([Scalar(4L)], Scalar(2f), Scalar(5f))));
+        var feed = g.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
+        var attrs = feed.Attributes.GetAttributeVals().ToDictionary();
+        attrs[OnnxOpAttributeNames.ShrkAttrLocalModelId] = (long[])[];
+        feed.Attributes = OnnxCSharpAttributes.FromCSharpVals(attrs, feed.Attributes.AttributeDefs);
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => Shorokoo.Core.Nodes.Processors.Fast.FastLowerRandomOps.Process(g));
+        Assert.Contains("cannot express a range computed in-graph", ex.Message);
+    }
 }
 
 /// <summary>
@@ -371,10 +561,10 @@ public class RngNormalFrozenDerivationTests
     public void TestNormalInitAndDrawValuesAreFrozen()
     {
         // REFERENCE: golden — generated once from the implementation that defines the convention.
-        float[] init20 = [0.12544397f, 0.2957119f, 1.614189f, -0.22173794f, -0.23703626f, -0.64295983f, -0.1786294f, -1.4764216f, 0.15099204f, -0.019193964f, -0.21473941f, 1.033891f, 1.3871936f, 0.59315336f, -0.41766375f, 0.006978817f];
-        float[] feed20 = [-0.2854576f, -1.0614587f, 0.69347787f, 1.1629281f, -0.63950145f, 1.7594889f, 1.6418929f, -2.4083176f, 0.79176825f, -0.48223278f, 0.48083737f, 0.38064465f, -0.3447332f, 0.0259849f, 0.062860526f, -0.43736157f];
-        float[] init13 = [0.10458848f, -1.9170773f, 0.12625404f, 0.056145065f, -1.4316688f, -0.37182125f, 0.019850086f, 0.9272645f, -1.0287207f, 1.1623243f, -0.9364095f, 0.21012756f, 0.55460495f, -0.6630122f, 0.30105424f, -0.8519283f];
-        float[] feed13 = [-0.2670085f, -0.9534051f, 0.28634885f, 0.93654203f, 0.9747834f, -0.14879523f, -1.5747236f, 0.99790245f, -1.1938162f, 0.9022896f, -0.8663206f, 0.3107173f, 1.0289081f, 1.3187166f, 0.5506851f, -0.7555348f];
+        float[] init20 = [0.32684076f, 0.31919587f, 0.71540254f, 0.47326648f, -0.53483117f, 0.82311344f, 0.76074445f, -0.22252876f, 0.1262496f, 0.32773456f, -0.33518276f, -0.5254864f, -0.36883605f, 0.08743811f, -0.22421674f, 0.13269918f];
+        float[] feed20 = [-0.7269528f, 0.33580682f, -0.19701481f, -0.23019204f, 0.48736975f, -1.9013742f, 0.62898695f, -0.20801696f, -0.3274576f, 0.6395818f, -0.28467518f, 1.5134908f, 1.9615656f, 0.07030752f, -0.015374133f, -0.89534664f];
+        float[] init13 = [0.80691016f, -0.120621406f, 0.7277567f, 0.6014911f, 1.019367f, 1.08257f, -0.8566765f, -0.7944496f, 0.49256578f, -0.9301721f, 0.6375022f, 0.32377562f, -0.7371908f, 0.4374376f, -0.39587018f, -0.21394667f];
+        float[] feed13 = [-1.6076908f, 0.710971f, -2.258631f, 1.7556456f, 0.36330792f, 0.80508655f, -1.818318f, -0.3107102f, -1.5659105f, 0.5310641f, -1.1968004f, -0.0999485f, -0.109400675f, -0.8416264f, -0.293053f, -0.12692356f];
 
         var (i20, f20) = Run(new RngConfig { MasterSeed = 123 });
         var (i13, f13) = Run(new RngConfig { MasterSeed = 123, Algorithm = RngAlgorithm.Threefry2x32Rounds13 });

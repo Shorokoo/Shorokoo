@@ -3,7 +3,9 @@
 `RngConfig` is the single object that decides what every random draw in a model produces —
 parameter initialization and runtime feeds (Dropout masks, sampling, in-model noise) alike.
 It is **configuration, not architecture**: a model definition never contains a seed, and the
-same graph can be bound to different configs at different times.
+same graph can be bound to different configs at different times. (This page is about *which*
+values a draw produces; what a uniform draw returns — the interval, the edge cases, its
+resolution — is [uniform-draws.md](uniform-draws.md).)
 
 ```csharp
 var config = new RngConfig { MasterSeed = 42 };
@@ -133,8 +135,8 @@ already decorrelated by their stream keys; it costs the checkpoint a single scal
 Framework-managed counters like this one are 64-bit state end-to-end — the counter increments
 exactly, and the whole 64-bit value reaches the draw — so there is no float32-style
 saturation point, and no wrap point, past which a mask would repeat a mask it drew before.
-(Individual mask *values* still collide as often as chance dictates — a uniform keeps 24 bits.
-What does not repeat is the stream.)
+(Individual mask *values* still collide as often as chance dictates — `float32` holds
+finitely many values. What does not repeat is the stream.)
 
 ## Feeds inside loops
 

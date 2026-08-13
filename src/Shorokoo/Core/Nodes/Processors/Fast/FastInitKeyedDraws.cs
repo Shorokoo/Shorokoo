@@ -158,10 +158,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 float b = isUniform
                     ? node.Attributes.GetFloatVal(AttrHigh) ?? 1.0f
                     : node.Attributes.GetFloatVal(AttrScale) ?? 1.0f;
-                var aKey = AppendConstant(new OnnxTensorData<float32>(
+
+                // A uniform draw whose range is computed in the initializer body (e.g. a
+                // fan-in-derived bound, or UniformRange's own low/high parameters) carries its
+                // bounds as inputs; they go straight to the keyed draw, which takes bounds as
+                // inputs anyway. Only a literal range is materialized as constants here.
+                var bounds = isUniform ? FastLowerRandomOps.TensorBounds(node) : null;
+                var aKey = bounds?.low ?? AppendConstant(new OnnxTensorData<float32>(
                     new Shape(Array.Empty<long>()),
                     OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (float[])[a])), newNodes);
-                var bKey = AppendConstant(new OnnxTensorData<float32>(
+                var bKey = bounds?.high ?? AppendConstant(new OnnxTensorData<float32>(
                     new Shape(Array.Empty<long>()),
                     OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (float[])[b])), newNodes);
 

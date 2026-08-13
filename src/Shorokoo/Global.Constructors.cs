@@ -613,6 +613,10 @@ namespace Shorokoo
         /// precision is lost near zero, a range wider than float32 does not overflow, and
         /// <c>high</c> is never returned. Tensor bounds have no attribute-based ONNX fallback, so
         /// this feed must be keyed (a concrete, id-bearing model).</para>
+        ///
+        /// <para>Expects <c>low ≤ high</c>. An inverted range is not an error: every element comes
+        /// back as <c>low</c>, a constant fill — so a caller deriving its bounds in-graph must take
+        /// the magnitude itself when a sign it does not control could flip them.</para>
         /// </summary>
         public static Tensor<float32> RandomUniform(Vector<int64> shape, Scalar<float32> low, Scalar<float32> high)
         {

@@ -82,7 +82,9 @@ public static partial class NormalDist
 /// linear/sigmoid, 5/3 for tanh, √2 for ReLU; the caller computes it). <c>gain</c>
 /// is an extra Inline <see cref="Scalar{float32}"/> parameter (the
 /// <see cref="UniformRange"/>/<see cref="NormalDist"/> precedent), generating
-/// <c>XavierUniformGain.Init(shape, gain)</c>. Requires a rank &gt;= 2 shape.
+/// <c>XavierUniformGain.Init(shape, gain)</c>. Requires a rank &gt;= 2 shape. The bound is
+/// taken as a magnitude, so a negative <c>gain</c> draws exactly the distribution its absolute
+/// value does — mirroring a symmetric interval leaves it unchanged.
 /// </summary>
 [TrainableParamInitializer]
 public static partial class XavierUniformGain
@@ -90,8 +92,11 @@ public static partial class XavierUniformGain
     public static Tensor<float32> Inline(Vector<int64> shape, Scalar<float32> gain)
     {
         // Xavier bakes gain 1, so the base factor is the same sqrt(6/(fanIn+fanOut)) the
-        // default XavierUniform uses; the runtime gain simply scales it.
-        var bound = gain * (6.0f / (InitializerMath.FanIn(shape) + InitializerMath.FanOut(shape))).Sqrt();
+        // default XavierUniform uses; the runtime gain simply scales it. The MAGNITUDE is what
+        // U(-b, b) needs: a negative gain would otherwise hand the draw an inverted range,
+        // which yields a constant fill of `low` rather than the mirrored (== identical)
+        // distribution a symmetric interval has.
+        var bound = (gain * (6.0f / (InitializerMath.FanIn(shape) + InitializerMath.FanOut(shape))).Sqrt()).Abs();
         return Globals.RandomUniform(shape, -bound, bound);
     }
 }
@@ -129,6 +134,8 @@ public static partial class XavierNormalGain
 /// <c>calculate_gain</c> (the caller passes the raw value — e.g. <c>Scalar(MathF.Sqrt(2f))</c>
 /// for ReLU). <c>gain</c> is an extra Inline <see cref="Scalar{float32}"/>
 /// parameter, generating <c>KaimingUniformGain.Init(shape, gain)</c>. Requires a rank &gt;= 2 shape.
+/// The bound is taken as a magnitude, so a negative <c>gain</c> draws exactly the distribution its
+/// absolute value does — mirroring a symmetric interval leaves it unchanged.
 /// </summary>
 [TrainableParamInitializer]
 public static partial class KaimingUniformGain
@@ -137,8 +144,9 @@ public static partial class KaimingUniformGain
     {
         // sqrt(3/fanIn) — the BARE base factor, NOT the default's sqrt(6/fanIn): the existing
         // KaimingUniform bakes gain √2 (sqrt(6/fanIn) = √2·sqrt(3/fanIn)); the user-supplied
-        // gain replaces that, so the √2 must not be double-baked.
-        var bound = gain * (3.0f / InitializerMath.FanIn(shape)).Sqrt();
+        // gain replaces that, so the √2 must not be double-baked. Magnitude as in
+        // XavierUniformGain: a negative gain must mirror the interval, not invert it.
+        var bound = (gain * (3.0f / InitializerMath.FanIn(shape)).Sqrt()).Abs();
         return Globals.RandomUniform(shape, -bound, bound);
     }
 }

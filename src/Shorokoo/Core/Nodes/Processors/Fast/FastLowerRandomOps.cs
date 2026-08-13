@@ -101,7 +101,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
 
                 var idVals = node.Attributes.GetIntsVal(ShrkAttrLocalModelId);
-                // The key input is the last input slot: [shape, substreamIndex, iterationIndices, key].
+                // The key is input slot 3: [shape, substreamIndex, iterationIndices, key] for the
+                // normal and bits feeds, and [shape, substreamIndex, iterationIndices, key, low,
+                // high] for the uniform one, whose optional graph-scalar bounds follow the key.
                 var keySource = node.Inputs.Count > 3 ? node.Inputs[3] : null;
                 if (idVals is { Length: > 0 } && keySource is { } ks)
                 {

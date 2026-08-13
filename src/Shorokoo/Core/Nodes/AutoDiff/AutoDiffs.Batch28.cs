@@ -215,10 +215,15 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             where TOut : IVarType
             => null;
 
-        // RANDOM_NORMAL/RANDOM_UNIFORM have no inputs; SHRK_RANDOM_NORMAL/UNIFORM/BITS take
-        // hyperparam-derived inputs that the autograd engine never differentiates
-        // through (and bits output is integer, non-differentiable). They don't need
-        // [AutoDiff] entries because no reachable autograd path passes through them.
+        // RANDOM_NORMAL/RANDOM_UNIFORM have no inputs. SHRK_RANDOM_NORMAL/UNIFORM/BITS take a
+        // shape, a substream index, iteration indices and a stream key — all integer, so
+        // non-differentiable — and SHRK_RANDOM_UNIFORM additionally takes optional float32
+        // low/high bound inputs, which are ordinary graph values and CAN therefore sit on a
+        // reachable autograd path (a model computing its bounds from a trainable parameter and
+        // training through the draw). None of these ops has an [AutoDiff] entry, so such a
+        // model fails loud — AutoDiffNotSupportedException [AD003] — rather than silently
+        // getting a wrong gradient. Reparameterizing a draw w.r.t. its bounds is not
+        // implemented; add an entry here if it ever is.
 
         // ===== Multinomial =====
         // Discrete-sample output: non-differentiable w.r.t. logits in the standard path.

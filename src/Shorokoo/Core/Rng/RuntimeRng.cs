@@ -725,8 +725,11 @@ internal static class RuntimeRng
     /// weight classes.
     ///
     /// <para><b>Reachable floats.</b> Every float within the top 41 weight classes of the range —
-    /// 40 when it straddles zero — is reachable with probability exactly proportional to its ulp,
-    /// since selection rounds nothing. Below that truncation floor an even lattice carries the
+    /// 40 when it straddles zero — is reachable with probability proportional to its ulp: exactly
+    /// so when the total weight is a power of two (which covers [0,1) and the whole finite domain),
+    /// and otherwise within one draw in 2^64 of its due, since block selection rounds nothing but
+    /// a weight unit takes floor(2^64/total) or one more of the draws and the range's end sliver is
+    /// dropped rather than rounded up. Below that truncation floor an even lattice carries the
     /// mass, and those floats are <b>not</b> individually reachable — 33.1% of the floats in [0,1)
     /// are reachable, 16.1% over the whole finite domain. The draw is still uniform in value there;
     /// it is resolution that is spent, not fairness.</para>

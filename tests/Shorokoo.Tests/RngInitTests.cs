@@ -80,6 +80,23 @@ public partial class RngRuntimeFeedRuntimeBounds
         => RandomUniform([Scalar((long)RngUniformRangeRuntimeBounds.N)], low, high);
 }
 
+/// <summary>A XavierUniformGain-initialized parameter whose gain arrives as a hyperparameter, so
+/// the same site and stream key serve every gain the test materializes.</summary>
+[Module]
+public partial class RngXavierGainRuntimeGain
+{
+    public static Tensor<float32> Inline(Tensor<float32> x, [Hyper] Scalar<float32> gain)
+        => XavierUniformGain.Init([Scalar(4L), Scalar(4L)], gain);
+}
+
+/// <summary>The KaimingUniformGain counterpart of <see cref="RngXavierGainRuntimeGain"/>.</summary>
+[Module]
+public partial class RngKaimingGainRuntimeGain
+{
+    public static Tensor<float32> Inline(Tensor<float32> x, [Hyper] Scalar<float32> gain)
+        => KaimingUniformGain.Init([Scalar(4L), Scalar(4L)], gain);
+}
+
 /// <summary>
 /// End-to-end coverage for per-parameter initialization RNG: same-shape parameters differ,
 /// initialization is reproducible for a config, the master seed re-randomizes everything, and
@@ -352,6 +369,33 @@ public class RngInitFrozenDerivationTests
     {
         Assert.True(FeedStaysInRange(2f, 5f));
         Assert.True(FeedStaysInRange(-1.8e38f, 1.8e38f));
+    }
+
+    private static float[] GainDraw(ComputationGraph g, float gain)
+    {
+        TensorData[] inputs =
+            [TensorData(DType.Float32, [], gain), TensorData(DType.Float32, [1L], 0f)];
+        return g.ToConcreteArchitecture(g.FromOrderedInputs([.. inputs]))
+            .InitializeTrainableParams(rngConfig: RangeCfg).ModelParams
+            .Select(p => p.ToTensorData())
+            .Single(t => t.DType == DType.Float32 && t.Shape.Count == 16)
+            .As<float32>().AccessMemory().ToArray();
+    }
+
+    private static bool GainIsSignAgnostic(ComputationGraph g, float gain)
+    {
+        var pos = GainDraw(g, gain);
+        return pos.Length == 16 && pos.Distinct().Count() > 1 && pos.SequenceEqual(GainDraw(g, -gain));
+    }
+
+    /// <summary>U(-b, b) is symmetric, so a negative <c>gain</c> must draw the distribution its
+    /// magnitude does. Passing the signed bound straight through instead inverts the range, and an
+    /// inverted range yields <c>low</c> for every element — a silent constant fill.</summary>
+    [Fact]
+    public void TestGainInitializersTakeTheBoundsMagnitudeAndNeverFillConstant()
+    {
+        Assert.True(GainIsSignAgnostic(RngXavierGainRuntimeGain.ComputationGraph, 2.5f));
+        Assert.True(GainIsSignAgnostic(RngKaimingGainRuntimeGain.ComputationGraph, 1.4142135f));
     }
 }
 

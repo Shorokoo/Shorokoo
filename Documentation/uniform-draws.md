@@ -10,6 +10,12 @@ resolves a range, and the places where it is not perfect. For *which* values a g
 produces (seeds, streams, reproducibility) see
 [Configuring randomness](rng-configuration.md).
 
+```csharp
+var mask   = RandomUniform(Vector(4L, 8L));                  // float32 in [0, 1)
+var weight = RandomUniform(Vector(4L, 8L), -0.05f, 0.05f);   // float32 in [-0.05, 0.05)
+var init   = UniformRange.Init([4L, 8L], Scalar(-1f), Scalar(1f));   // same draw, in-graph bounds
+```
+
 ## Facts
 
 - The interval is **half-open**: a draw over a non-empty `[low, high)` returns values
@@ -25,15 +31,16 @@ produces (seeds, streams, reproducibility) see
 - Bounds may be compile-time literals or graph scalars computed in-graph — the two
   `RandomUniform` overloads in [core-types.md](core-types.md#factory-helpers-using-static-shorokooglobals),
   and every [initializer](nn-library.md#initializers-shorokoomodulesinitializers) that takes a
-  bound as an `Init` argument. Both forms use the same draw and carry the same guarantees
-  (graph-scalar bounds additionally need a keyed — concrete, id-bearing — model, since they
-  cannot be expressed as ONNX attributes).
+  bound as an `Init` argument. Both forms use the same draw and carry the same guarantees;
+  graph-scalar bounds cannot be expressed as ONNX attributes, so they additionally need a
+  concrete model — one built through
+  [`ToConcreteModel`](rng-configuration.md), not a bare architecture.
 - Nothing here rests on floating-point rounding: the draw is integer and exact, so the same
   seed yields identical values bit for bit under ONNX Runtime's CPU provider, under the
   [Quick Execution Engine](limitations.md#quick-execution-engine-value-computation-is-bounded),
-  and in an exported ONNX model. Other execution providers agree for the same reason, with
-  one exception yet to be tested on hardware: a provider that flushes very small magnitudes
-  to zero would disturb the values a draw produces closest to zero
+  and in an exported ONNX model. Other execution providers are expected to agree for the
+  same reason, with one risk untested for want of the hardware: a provider that flushes very
+  small magnitudes to zero would disturb the values a draw produces closest to zero
   ([issue #160](https://github.com/Shorokoo/Shorokoo/issues/160)).
 
 ## The range is addressed, not scaled
@@ -45,7 +52,8 @@ floats are dense each individual one is correspondingly rarer, and every sub-int
 the share its width earns. Two bounded qualifications apply, both set out under
 [how finely the range is resolved](#how-finely-the-range-is-resolved): the rounding lands on
 a `float32` only down to a floor, beneath which it lands on a coarser grid; and the shares
-are exact for some ranges and right to within one part in 2⁶⁴ for the rest.
+are exact for a range whose width is a power of two, and for any other range are off by at
+most a factor of two, and that only on the very lightest floats.
 
 That is not the usual construction. A uniform over an arbitrary range is commonly built — as
 most standard libraries build it — by drawing `u` on `[0, 1)` and returning
@@ -77,7 +85,7 @@ A uniform draw never throws on its bounds. It resolves them like this:
 | `high` is NaN | that NaN, sign and payload intact |
 | both bounds NaN | `low`'s NaN |
 | `low = float.NegativeInfinity` | behaves as `-float.MaxValue` |
-| `high = float.PositiveInfinity` | every finite float above `low` stays drawable, `float.MaxValue` included |
+| `high = float.PositiveInfinity` | the range runs to every finite float above `low`, `float.MaxValue` included |
 | `low = float.PositiveInfinity` | behaves as `float.MaxValue`, which leaves any finite `high` inverted — so you get `float.MaxValue` |
 | `high = float.NegativeInfinity` | behaves as `-float.MaxValue`, inverted for any larger `low` — so you get `low` |
 
@@ -94,19 +102,24 @@ The draw resolves **41 successive weight classes**, counting down from the large
 in the range — **40** when the range straddles zero, since both signs of every magnitude are
 then in play. Call the bottom of that span the *floor*.
 
-A **weight class** is one power of two of magnitude: the floats of a class all share an
-exponent, so they all have the same ulp, and a class spans `[2ᵏ, 2ᵏ⁺¹)`. The very bottom of
-the format is the one exception — the *subnormals*, the tiny values below the smallest
-normal magnitude, share a class with the smallest normal span rather than forming classes of
-their own.
+A **weight class** is one power of two of magnitude: 2²³ `float32` values that all share one
+ulp. The very bottom of the format is the one exception — the *subnormals*, the tiny values
+below the smallest normal magnitude, share a class with the smallest normal span rather than
+forming classes of their own.
 
 **Weight** is how the draw counts shares. A float's weight is its ulp measured in units of
 the smallest ulp resolved — the ulp at the floor — so a float one class above the floor
-weighs 2, two classes above weighs 4, and so on up. A range's **total weight** is that sum
-over everything it can produce, and it never exceeds 2⁶⁴, the number of values one generator
-draw can take. Handing those 2⁶⁴ draws out over the total is exact when the total is a power
-of two, and otherwise leaves each weight unit one draw above or below its due. That is the
-sense in which shares hold "to within one weight unit".
+weighs 2, two classes above weighs 4, and so on up. That doubling is what fixes the depth at
+41: a class of 2²³ floats weighing 2ᵏ each, summed over 41 classes, comes to 2²³·(2⁴¹ − 1) —
+just under 2⁶⁴, the number of values one 64-bit generator draw can take. A 42nd class would
+overrun it.
+
+A range's **total weight** is simply its width in those same units:
+`(high − low) / (the ulp at the floor)`. Since the ulp at the floor is itself a power of two,
+the total is a power of two exactly when **the range's width is** — which is what `[0, 1)`,
+`[-1, 1)`, `[4, 12)` and `[0, +infinity)` have in common, and what an arbitrary `[-a, a)`
+initializer bound does not. Handing the 2⁶⁴ draws out over that total is exact in the first
+case, and in the second leaves each weight unit one draw above or below its due.
 
 The floor divides two regimes:
 
@@ -115,8 +128,8 @@ The floor divides two regimes:
 - **Below the floor**, values come from an evenly spaced lattice whose step is 2⁻²³ of the
   floor, so those floats are *represented* but not individually addressable: the draw can
   land in that region and will land there as often as its width says it should, to within
-  the same one weight unit where the range's end cuts a lattice cell short, but it cannot
-  single out an arbitrary float down there.
+  one weight unit where the range's end cuts a lattice cell short, but it cannot single out
+  an arbitrary float down there.
 
 On `[0, 1)` the floor is 2⁻⁴¹: every float from 2⁻⁴¹ up is individually drawable, and
 smaller results are multiples of 2⁻⁶⁴, exact `0f` among them. Above that floor this is bit
@@ -128,15 +141,17 @@ arbitrary-range machinery costs nothing against a generator built for that range
 Counting values rather than mass: about **33.1%** of the floats in `[0, 1)` can come out of
 a draw over `[0, 1)`, and about **16.1%** of the floats in the whole finite `float32`
 domain can come out of a draw over that domain. What truncation does *not* spend is the
-probability mass: every region keeps the share its width earns, so the draw stays uniform in
-value either way. Resolution is what truncation spends, not fairness.
+probability mass: every region keeps the share its width earns, up to that same rounding, so
+the draw stays uniform in value either way. Resolution is what truncation spends, not
+fairness.
 
 The floats truncation collapses are also the ones carrying almost no mass. Wherever the
-lattice costs resolution at all, a draw reaches it about **once in a trillion** times: 2⁻⁴¹,
-or 4.5e-13, over `[0, 1)`, `[0, float.MaxValue)` and `[0, +infinity)`, rising to 2.4e-12 —
-about one draw in 4e11 — for a range pairing magnitudes at opposite ends of the `float32`
-exponent span, such as `[-1e30, 2e18)`. A large fraction of the *floats*, a negligible
-fraction of the *draws*.
+lattice costs resolution at all, a draw reaches it on the order of **once in a trillion**
+times: 2⁻⁴¹, or 4.5e-13, over `[0, 1)`, `[0, float.MaxValue)` and `[0, +infinity)`, rising to
+2.4e-12 — about one draw in 4e11 — for a range that straddles zero, which puts both signs of
+the collapsed span on the lattice and so doubles its weight. `[-0.1, 0.3)` sits near that
+ceiling as squarely as `[-1e30, 2e18)` does; it is the straddle that costs, not the spread.
+A large fraction of the *floats*, a negligible fraction of the *draws*.
 
 A range small enough that its 41 classes — 40 if it straddles zero — reach the bottom of the
 format is the exception, and a harmless one. There the lattice step *is* the spacing of the
@@ -149,17 +164,18 @@ spans dozens of orders of magnitude at once.
 
 ## Known imperfections
 
-Three, none of them large, all of them real. All three follow from spending exactly one
-64-bit generator value per element: the smallest share the draw can express is one part in
-2⁶⁴, and the truncation depth is set by the same budget.
+All three follow from spending exactly one 64-bit generator value per element: the smallest
+share the draw can express is one part in 2⁶⁴, and the truncation depth is set by the same
+budget.
 
 - **A single float can take up to twice its due share.** Whether the draw divides evenly
-  depends on the range: when its total weight is a power of two the split is *exact*, and
-  that covers the common cases — `[0, 1)`, `[-1, 1)`, `[4, 12)`, `[0, +infinity)`. Otherwise
-  the lightest floats round up or down by one draw in 2⁶⁴, which for a float carrying the
+  depends on the range: a power-of-two width divides exactly, so `[0, 1)`, `[-1, 1)`,
+  `[4, 12)` and `[0, +infinity)` are clean, while a bound like `√(6 / fanIn)` is not.
+  Otherwise the lightest floats round up or down by one draw in 2⁶⁴, which for a float
+  carrying the
   smallest possible weight is a factor of at most 2 against its neighbour. The error does
-  not accumulate: over any run of adjacent floats the count stays within one draw of due,
-  so the skew is visible only per-float and only at the very lightest of them.
+  not accumulate: a run of adjacent floats is no further off than a single one, so the skew
+  is visible only per-float and only at the very lightest of them.
 - **`low` itself is not always drawable.** Where `low` sits above the floor it is drawable
   and carries exactly one float's share. Where it falls below the floor and off the lattice
   it cannot be returned at all — e.g. a draw over `[-1, 1e30)` never returns exactly `-1`.

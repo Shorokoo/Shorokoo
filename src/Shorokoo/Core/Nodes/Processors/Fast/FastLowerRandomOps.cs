@@ -421,11 +421,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (isUniform && TensorBounds(node) is not null)
                 throw new InvalidOperationException(
                     "FastLowerRandomOps: a SHRK_RANDOM_UNIFORM feed with in-graph bound inputs " +
-                    "reached lowering with no stream identity. The ONNX fallback " +
-                    "(ConstantOfShape + RandomUniformLike) carries its bounds as attributes and " +
-                    "cannot express a range computed in-graph, so the range would be silently " +
-                    "dropped. Draw an in-graph range inside a concrete, id-bearing model (or pass " +
-                    "literal bounds).");
+                    "reached the ONNX fallback, which carries its bounds as attributes and cannot " +
+                    "express a range computed in-graph — the range would be silently dropped. The " +
+                    "feed reaches this fallback when it has no key derivation chain, which for an " +
+                    "initializer body means the graph is a ConcreteArchitecture: its initializers " +
+                    "have not been run. Call ToConcreteModel first; executing or exporting a " +
+                    "non-concrete model is not supported.");
 
             var placeholderKey = AppendConstantOfShape(shapeInput, newNodes);
 

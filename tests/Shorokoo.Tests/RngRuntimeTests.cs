@@ -564,7 +564,9 @@ public class RngRuntimeTests
     }
 
     // The skew a single weight unit takes from that rounding, and the two ranges the header names
-    // as exactly dyadic — hence exactly fair — among them.
+    // as exactly dyadic — hence exactly fair — among them. The skew vanishes exactly when the
+    // remainder does, so the remainder is what the table below pins; with the quotient pinned above
+    // it fixes every range's total, which no bound on the skew itself ever could.
     [Fact]
     public void TestDenseUniformWeightUnitSkewIsAtMostTwiceAndVanishesOnADyadicTotal()
     {
@@ -573,7 +575,27 @@ public class RngRuntimeTests
             var (quotient, remainder) = DenseSplit(low, high);
             return remainder == 0 ? 1.0 : (double)(quotient + 1) / (double)quotient;
         }
-        foreach (var (low, high) in DenseRanges) Assert.InRange(Skew(low, high), 1.0, 2.0);
+
+        // Row per group of DenseRangeGroups.
+        UInt128[][] want =
+        [
+            [0UL, 0UL, 0UL, 0UL, 0UL, 0UL],
+            [3689348045083770880UL, 0UL, 4835449830180466688UL, 1099511627776UL, 1099511627776UL, 77020UL],
+            [4UL, 0UL, 0UL, 14779033UL, 0UL, 0UL],
+            [0UL, 9215719435925454848UL, 3689348319961677824UL, 0UL, 2233785415175766016UL, 0UL],
+            [3894828626373246977UL, 3894828626373246976UL, 3894828626373246936UL,
+             3894828626373247016UL, 3894828626373246977UL, 3894828626373246976UL],
+            [3894828626373232426UL, 3894828626373232426UL, 3894828626373261528UL,
+             3894828626373246976UL, 3894828626373246976UL, 4611686018427387904UL],
+            [8388608UL, 8388608UL, 3894828626373246976UL, 3894828626373246976UL, 0UL, 0UL],
+            [3894828626344143146UL, 1099478073346UL, 9223372036837998593UL,
+             3876814227863764992UL, 9223370083729801216UL, 1048576UL],
+        ];
+        for (int g = 0; g < DenseRangeGroups.Length; g++)
+            for (int i = 0; i < DenseRangeGroups[g].Length; i++)
+                Assert.Equal(want[g][i],
+                    DenseSplit(DenseRangeGroups[g][i].Low, DenseRangeGroups[g][i].High).Remainder);
+
         Assert.Equal(1.0, Skew(0f, 1f));
         Assert.Equal(1.0, Skew(-1f, 1f));
         Assert.Equal(1.0, Skew(0f, float.PositiveInfinity));
@@ -838,65 +860,65 @@ public class RngRuntimeTests
     private static float DenseFloatOfOrdinal(long z)
         => BitConverter.UInt32BitsToSingle(z >= 0 ? (uint)z : 0x8000_0000u | (uint)-z);
 
-    // The contract by exhaustion rather than sampling. Only ranges near zero have a small enough
-    // total to enumerate — anything reaching the truncation floor totals about 2^64 — so the
-    // whole-class blocks are left to the Walker and two-sided closed forms above.
+    // The contract by exhaustion rather than sampling, over every kind of block the weight axis is
+    // small enough to walk. A whole class costs 2^23 codes, so a one-sided block is affordable and
+    // the last two ranges buy one on each sign; a two-sided block needs a whole class on both sides
+    // of a lattice spanning both, which is 2^25, so it stays with the toy formats and the closed
+    // forms above — the kinds guard is what keeps that admission honest.
     [Fact]
-    public void TestDenseUniformOracleAssignsEveryWeightUnitExactlyOnce()
+    public void TestDenseUniformOracleAssignsEveryEnumerableWeightUnitExactlyOnce()
     {
+        int kinds = 0;
         foreach (var (lowOrd, highOrd) in ((long Low, long High)[])
             [(0, 1000), (3, 1000), (-1000, 1000), (-1000, -3), (0, 1),
              ((1 << 23) - 500, (1 << 23) + 500), ((1 << 24) - 500, (1 << 24) + 500),
-             (-(1 << 24) - 500, -(1 << 24) + 500), (-((1L << 25) + 500), -((1L << 25) - 500))])
+             (-(1 << 24) - 500, -(1 << 24) + 500), (-((1L << 25) + 500), -((1L << 25) - 500)),
+             (1L << 23, 1L << 24), (-(1L << 24), -(1L << 23))])
         {
             (float low, float high) = (DenseFloatOfOrdinal(lowOrd), DenseFloatOfOrdinal(highOrd));
             var table = RngDenseUniformOracle.Build(low, high);
             Assert.NotEqual(0UL, table.Total);
-            Dictionary<uint, ulong> seen = [];
-            for (ulong s = 0; s < table.Total; s++)
-            {
-                ulong draw = (ulong)(((((UInt128)s << 64) + table.Total - 1) / table.Total));
-                uint bits = RngDenseUniformOracle.SampleBits(table, draw);
-                seen[bits] = seen.GetValueOrDefault(bits) + 1;
-            }
-            Dictionary<uint, ulong> want = [];
+            int[] want = new int[highOrd - lowOrd], seen = new int[highOrd - lowOrd];
             for (long z = lowOrd; z < highOrd; z++)
-                want[BitConverter.SingleToUInt32Bits(DenseFloatOfOrdinal(z))] =
-                    1UL << (int)(Math.Max(1, (z >= 0 ? z : -z - 1) >> 23) - table.FloorClass);
-            Assert.Equal([.. want.Keys.Order()], [.. seen.Keys.Order()]);
-            foreach (var (bits, count) in seen) Assert.Equal(want[bits], count);
+                want[z - lowOrd] = 1 << (int)(Math.Max(1, (z >= 0 ? z : -z - 1) >> 23) - table.FloorClass);
+            for (ulong s = 0; s < table.Total; s++)
+                seen[DenseSignedOrdinal(BitConverter.UInt32BitsToSingle(
+                    RngDenseUniformOracle.SampleBits(table, DenseDrawFor(table, s)))) - lowOrd]++;
+            Assert.True(seen.AsSpan().SequenceEqual(want));
+            foreach (var block in table.Blocks) kinds |= 1 << (int)block.Kind;
         }
+        Assert.Equal(0b1101, kinds);
     }
 
-    // A NaN bound comes back bits intact, `low` winning when both are; an infinite bound clamps to
-    // the finite extreme of its sign, except +inf as `high`, which is the ordinal one past the
-    // largest finite; an empty or inverted range comes back as the clamped `low`, whose negative
-    // zero was normalised to +0 on the way in.
-    private static uint? DenseToyFixed(RngDenseUniformOracle.Format fmt, uint lowBits, uint highBits)
+    // A NaN bound comes back bits intact, `low` winning when both are. Otherwise the range is
+    // degenerate exactly when its bounds do not ascend as VALUES — a `low` of either infinity
+    // pulled onto the finite extreme of its sign, a `high` of -infinity likewise, and a `high` of
+    // +infinity left above every finite float — and the answer is the float at that pulled-in low,
+    // which for either zero is +0 because that is the only zero any value carries.
+    private static uint? DenseToyFixed(RngDenseUniformOracle.Format fmt,
+        Dictionary<long, uint> byUnits, uint lowBits, uint highBits)
     {
-        long lowMagnitude = lowBits & (fmt.SignBit - 1), highMagnitude = highBits & (fmt.SignBit - 1);
-        if (lowMagnitude == 0) lowBits = 0;
-        if (lowMagnitude > fmt.InfinityOrdinal) return lowBits;
-        if (highMagnitude > fmt.InfinityOrdinal) return highBits;
-        uint clamped = lowMagnitude == fmt.InfinityOrdinal
-            ? (uint)((lowBits & (uint)fmt.SignBit) | (uint)fmt.MaxFiniteOrdinal) : lowBits;
-        long zLow = DenseToySignedOrdinal(fmt, clamped);
-        long zHigh = highMagnitude != fmt.InfinityOrdinal ? DenseToySignedOrdinal(fmt, highBits)
-            : (highBits & (uint)fmt.SignBit) != 0 ? -fmt.MaxFiniteOrdinal : fmt.InfinityOrdinal;
-        return zHigh <= zLow ? clamped : null;
+        if ((lowBits & (fmt.SignBit - 1)) > fmt.InfinityOrdinal) return lowBits;
+        if ((highBits & (fmt.SignBit - 1)) > fmt.InfinityOrdinal) return highBits;
+        long max = DenseToyUnitsOfBits(fmt, (uint)fmt.MaxFiniteOrdinal);
+        long low = Math.Clamp(DenseToyUnitsOfBits(fmt, lowBits), -max, max);
+        long high = Math.Max(DenseToyUnitsOfBits(fmt, highBits), -max);
+        return high <= low ? byUnits[low] : null;
     }
-
-    private static long DenseToySignedOrdinal(RngDenseUniformOracle.Format fmt, uint bits)
-        => (bits & (uint)fmt.SignBit) != 0 ? -(long)(bits & (uint)(fmt.SignBit - 1)) : bits;
 
     // Value of a signed ordinal in units of the format's smallest subnormal — exact integers, and
     // the only handle on which float a lattice point is that does not go through the construction.
+    // An infinity lands above every finite value, which is where a `high` of +infinity belongs.
     private static long DenseToyUnits(RngDenseUniformOracle.Format fmt, long z)
     {
         long magnitude = Math.Abs(z), field = magnitude >> fmt.P, significand = magnitude & fmt.SigMask;
         long units = field == 0 ? significand : (fmt.BinadeSize | significand) << (int)(field - 1);
         return z < 0 ? -units : units;
     }
+
+    private static long DenseToyUnitsOfBits(RngDenseUniformOracle.Format fmt, uint bits)
+        => DenseToyUnits(fmt, (bits & (uint)fmt.SignBit) != 0
+            ? -(long)(bits & (uint)(fmt.SignBit - 1)) : bits);
 
     // F-2: the construction on a format small enough to enumerate. Every pair of representable
     // bounds, every code on the weight axis, checked against cell widths and lattice occupancy read
@@ -919,7 +941,7 @@ public class RngRuntimeTests
             for (uint highBits = 0; highBits < patterns; highBits++)
             {
                 var table = RngDenseUniformOracle.Build(fmt, lowBits, highBits);
-                Assert.Equal(DenseToyFixed(fmt, lowBits, highBits), table.Fixed);
+                Assert.Equal(DenseToyFixed(fmt, byUnits, lowBits, highBits), table.Fixed);
                 if (table.Fixed is not null) continue;
 
                 int classes = table.ZLow < 0 && table.ZHigh > 0 ? fmt.StraddleClasses : fmt.MaxClasses;
@@ -939,7 +961,6 @@ public class RngRuntimeTests
 
                 UInt128 total = table.Total == 0 ? axis : table.Total;
                 Assert.Equal(total, (UInt128)want.Sum());
-                Assert.True(total <= axis);
 
                 UInt128 cumulative = 0;
                 foreach (var block in table.Blocks)
@@ -1022,6 +1043,17 @@ public class RngRuntimeTests
             Assert.False(float.IsNaN(wide) || float.IsInfinity(wide));
             Assert.Equal(1f, RngDenseUniformOracle.Draw(DenseKey, 0, i, 1f, 1.0000001f));
         }
+
+        // +infinity as `low` clamps to MaxValue, which inverts every finite `high`; against a
+        // `high` of +infinity it instead leaves the one-float range [MaxValue, +infinity), the only
+        // +infinity `low` that draws rather than returns a fixed value.
+        Assert.Equal(float.MaxValue, RngDenseUniformOracle.Draw(DenseKey, 0, 0, float.PositiveInfinity, 1f));
+        Assert.Equal(BitConverter.SingleToUInt32Bits(float.MaxValue),
+            RngDenseUniformOracle.Build(float.PositiveInfinity, -1e30f).Fixed);
+        Assert.Null(RngDenseUniformOracle.Build(float.PositiveInfinity, float.PositiveInfinity).Fixed);
+        for (long i = 0; i < 200; i++)
+            Assert.Equal(float.MaxValue, RngDenseUniformOracle.Draw(
+                DenseKey, 0, i, float.PositiveInfinity, float.PositiveInfinity));
     }
 
     // The smallest draw scaling to `scaled`, so a block's own first code can be hand-picked.
@@ -1170,23 +1202,32 @@ public class RngRuntimeTests
         }
     }
 
-    // Which NaN the graph returns, not merely that it returns one — the in-graph check compares
-    // with Equal, which no NaN satisfies.
+    // Which NaN each engine returns, not merely that it returns one — the in-graph check compares
+    // with Equal, which no NaN satisfies, and the adversarial-range sweep above carries no NaN at
+    // all, so the Quick Execution Engine never sees one there.
     [Fact]
-    public void TestInGraphDenseUniformReproducesTheOraclesNaNPayloadBitForBit()
+    public void TestDenseUniformReproducesTheOraclesNaNPayloadBitForBitOnAnyEngine()
     {
         float NaNOf(uint bits) => BitConverter.UInt32BitsToSingle(bits);
         (float Low, float High)[] ranges =
             [(NaNOf(0x7FC0_1234u), 1f), (1f, NaNOf(0x7FC0_1234u)),
              (NaNOf(0x7FC0_1234u), NaNOf(0xFFD0_5678u)), (NaNOf(0xFFD0_5678u), 1f),
              (0f, 0f), (0f, 1f)];
-        uint[] got = GraphDrawBits(ranges);
+        var g = ((ComputationGraph)typeof(RngDenseUniformOutput)
+            .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
+        var seed = TensorData([(long)RngDenseUniformOutput.Ranges * 2],
+            new float[RngDenseUniformOutput.Ranges * 2]);
+        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([seed])).ToConcreteModel();
+        uint[] ort = GraphDrawBits(ranges), qee = QeeDrawBits(model, ranges);
         for (int r = 0; r < ranges.Length; r++)
-            for (long i = 0; i < RngDenseUniformOutput.Draws; i++)
-                Assert.Equal(
-                    BitConverter.SingleToUInt32Bits(RngDenseUniformOracle.Draw(
-                        DenseKey, (ulong)r, i, ranges[r].Low, ranges[r].High)),
-                    got[r * RngDenseUniformOutput.Draws + i]);
+            for (int i = 0; i < RngDenseUniformOutput.Draws; i++)
+            {
+                int k = r * RngDenseUniformOutput.Draws + i;
+                uint oracle = BitConverter.SingleToUInt32Bits(RngDenseUniformOracle.Draw(
+                    DenseKey, (ulong)r, i, ranges[r].Low, ranges[r].High));
+                Assert.Equal(oracle, ort[k]);
+                Assert.Equal(oracle, qee[k]);
+            }
     }
 
     // -0f reaches the draw only through `low`, where it is normalised to +0f, so no draw and no
@@ -1293,7 +1334,7 @@ public class RngRuntimeTests
         => Assert.True(DenseMatchesOracle([
             (float.NegativeInfinity, float.PositiveInfinity), (float.NegativeInfinity, 0f),
             (-1f, float.PositiveInfinity), (float.PositiveInfinity, float.NegativeInfinity),
-            (-0f, 0f), (1f, 1.0000001f)]));
+            (float.PositiveInfinity, 1f), (float.PositiveInfinity, float.PositiveInfinity)]));
 
     [Fact]
     public void TestRegionSelectionOpsBehaveAsCharacterizedInOnnxRuntime()

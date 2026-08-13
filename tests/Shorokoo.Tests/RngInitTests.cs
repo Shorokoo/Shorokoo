@@ -334,15 +334,21 @@ public class RngInitFrozenDerivationTests
                 BitConverter.SingleToUInt32Bits(RngDenseUniformOracle.Draw(key, 0, i, low, high)));
     }
 
-    private static bool FeedStaysInRange(float low, float high)
+    private static bool FeedDrawsTheRange(float low, float high)
     {
         var g = RngRuntimeFeedRuntimeBounds.ComputationGraph;
         var inputs = RangeInputs(low, high);
-        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([.. inputs])).ToConcreteModel(RangeCfg);
-        var v = ComputeContext.Default.Execute(model, [.. inputs.Cast<IData>()])[0]
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([.. inputs]));
+        var v = ComputeContext.Default.Execute(arch.ToConcreteModel(RangeCfg), [.. inputs.Cast<IData>()])[0]
             .ToTensorData().As<float32>().AccessMemory().ToArray();
+        var path = arch.GetRngStreamReport().Streams
+            .Single(s => s.Kind == RngStreamKind.UniformFeed).ModelIdPath;
+        ulong key = RngTestOracle.RunKey(RangeCfg, [.. path]);
         return v.Length == RngUniformRangeRuntimeBounds.N
-            && v.All(x => float.IsFinite(x) && x >= low && x < high);
+            && v.All(x => float.IsFinite(x) && x >= low && x < high)
+            && Enumerable.Range(0, v.Length).All(i =>
+                BitConverter.SingleToUInt32Bits(v[i]) ==
+                BitConverter.SingleToUInt32Bits(RngDenseUniformOracle.Draw(key, 0, i, low, high)));
     }
 
     /// <summary>
@@ -362,13 +368,17 @@ public class RngInitFrozenDerivationTests
         Assert.True(DrawsTheRange(1f, 1.0000001f));
     }
 
-    /// <summary>The public runtime feed overload carries its graph-scalar bounds to the draw too
-    /// (dropping them would draw [0, 1) and leave every range below).</summary>
+    /// <summary>The public runtime feed overload carries its graph-scalar bounds to the draw too,
+    /// and draws bit-for-bit what the dense oracle does over them — a range check alone stays green
+    /// under drift that changes every drawn bit, and under dropped bounds wherever the range happens
+    /// to contain [0, 1).</summary>
     [Fact]
-    public void TestRuntimeUniformFeedHonoursItsRuntimeBounds()
+    public void TestRuntimeUniformFeedDrawsItsRuntimeBoundsBitForBit()
     {
-        Assert.True(FeedStaysInRange(2f, 5f));
-        Assert.True(FeedStaysInRange(-1.8e38f, 1.8e38f));
+        Assert.True(FeedDrawsTheRange(2f, 5f));
+        Assert.True(FeedDrawsTheRange(-1f, 1f));
+        Assert.True(FeedDrawsTheRange(-1.8e38f, 1.8e38f));
+        Assert.True(FeedDrawsTheRange(1f, 1.0000001f));
     }
 
     private static float[] GainDraw(ComputationGraph g, float gain)

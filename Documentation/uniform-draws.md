@@ -20,7 +20,10 @@ produces (seeds, streams, reproducibility) see
 - The result dtype is always **`float32`**, whatever the bounds are.
 - The draw is **uniform in value**: the chance of landing in a sub-interval is proportional
   to that sub-interval's width, for any range you ask for — exactly so, but for the bounded
-  imperfections at the bottom of this page.
+  imperfections at the bottom of this page. Per float, that means **pick a real in
+  `[low, high)` and round down**, which is *not* what `low + (high − low)·u` gives; see
+  [the next section](#the-range-is-addressed-not-scaled), the one thing on this page worth
+  reading if you read nothing else.
 - Bounds may be compile-time literals or graph scalars computed in-graph — the two
   `RandomUniform` overloads in [core-types.md](core-types.md#factory-helpers-using-static-shorokooglobals),
   and every initializer that takes a bound as an `Init` argument. Both forms use the same
@@ -35,10 +38,18 @@ produces (seeds, streams, reproducibility) see
 
 ## The range is addressed, not scaled
 
-A uniform over an arbitrary range is commonly built by drawing `u` on `[0, 1)` and
-returning `u·(high − low) + low`. Shorokoo does not do that: it addresses the `float32`
-values of the range directly, weighting each one by the width of the real interval it
-stands for. Three guarantees follow.
+One sentence covers the distribution: **pick a real number uniformly from `[low, high)` and
+round it down to a `float32`.** Equivalently, each float comes out with probability
+proportional to its **ulp** — the width of the real interval it stands for — so wherever
+floats are dense each individual one is correspondingly rarer, and every sub-interval still
+takes exactly the share its width earns.
+
+That is not the usual construction, and it is the part most likely to be got wrong by
+assumption. A uniform over an arbitrary range is commonly built — as most standard libraries
+build it — by drawing `u` on `[0, 1)` and returning `u·(high − low) + low`, which inherits
+`u`'s own granularity and so lands on a coarse grid wherever the range's floats are finer
+than that. Shorokoo addresses the `float32` values of the range directly instead, and three
+guarantees follow.
 
 - **No precision is lost near zero.** Over `[-1, 1)` the draw resolves magnitudes down to
   2⁻⁴⁰; scaling a standard draw would round every result near zero to a multiple of about
@@ -93,8 +104,14 @@ span the *floor*:
   single out an arbitrary float down there.
 
 On `[0, 1)` the floor is 2⁻⁴¹: every float from 2⁻⁴¹ up is individually drawable, and
-smaller results are multiples of 2⁻⁶⁴ (exact `0f` among them). On `[-1, 1)` the floor is
-2⁻⁴⁰ — straddling zero costs one class, since both signs of every magnitude are in play.
+smaller results are multiples of 2⁻⁶⁴ (exact `0f` among them). Above that floor the draw is
+**bit for bit the classical dense unit-interval construction** — Walker's 1974 method in
+Marc Reynolds' 41+23 form — so asking for `[0, 1)` through the arbitrary-range machinery
+gives up nothing against the algorithm specialised to it. The two part company only below
+the floor, and in this draw's favour: the lattice reaches exact `0f`, where Walker's bottom
+binade stops at 2⁻⁴¹ and absorbs the mass beneath it, taking twice its due share. On
+`[-1, 1)` the floor is 2⁻⁴⁰ — straddling zero costs one class, since both signs of every
+magnitude are in play.
 
 Counting values rather than mass: about **33.1%** of the floats in `[0, 1)` can come out of
 a draw over `[0, 1)`, and about **16.1%** of the floats in the whole finite `float32`
@@ -103,13 +120,28 @@ probability mass — each region keeps the share its width earns, exactly when t
 total weight is a power of two and otherwise to within one weight unit, so the draw stays
 uniform in value either way. Resolution is what truncation spends, not fairness.
 
+Those percentages also read worse than they are, because the floats truncation collapses are
+precisely the ones carrying almost no mass. Wherever the lattice actually costs resolution, a
+draw reaches it about **once in a trillion** times: exactly 2⁻⁴¹ ≈ 4.5e-13 of draws over
+`[0, 1)` — the same over `[0, float.MaxValue)` and `[0, +infinity)` — and at most 2.3e-12,
+one draw in 4.3e11, across the adversarial ranges the suite measures. A large fraction of the
+*floats*, a negligible fraction of the *draws*.
+
+(A range small enough that 41 classes reach the bottom of the format is the exception, and a
+harmless one: there the lattice step *is* the spacing of the float grid, so draws land on the
+lattice routinely and every one of them is an exactly addressed float. Nothing is collapsed,
+so there is nothing to lose.)
+
 For practical ranges this is invisible: an initializer bound, a `[0, 1)` mask, a
 `[-a, a)` weight draw all live far above their floor. It becomes observable when a range
 spans dozens of orders of magnitude at once.
 
 ## Known imperfections
 
-Three, none of them large, all of them real:
+Three, none of them large, all of them real. All three follow from spending exactly one
+64-bit generator value per element — the smallest share the draw can express is one part in
+2⁶⁴, and the truncation depth is set by the same budget — so they are settled properties of
+the draw rather than defects awaiting a fix:
 
 - **A single float can take up to twice its due share.** Whether the draw divides evenly
   depends on the range: when its total weight is a power of two the split is *exact*, and

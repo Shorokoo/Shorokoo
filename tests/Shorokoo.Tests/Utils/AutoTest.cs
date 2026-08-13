@@ -105,6 +105,13 @@ namespace Shorokoo.Tests.Utils
         /// asserts every declared output has been resolved to a non-Invalid <see cref="DType"/>.
         /// Used as an extra validation layer alongside the ONNX/CS roundtrips so coverage tests
         /// exercise the QEE op path on the same module graphs the ONNX path runs.
+        ///
+        /// On top of the dtype pass, the self-checking-<c>Scalar</c> convention is enforced here
+        /// too: a sole bool output the QEE actually computed must be all-true, exactly as the ORT
+        /// path requires. The value check is conditional on the QEE having a value at all — it
+        /// keeps only shape and dtype for tensors above
+        /// <see cref="QuickExecutionEngine.MaxDataElements"/> and for ops it can only type — so a
+        /// module whose bit it cannot reach still gets the dtype pass rather than a false failure.
         /// </summary>
         private static bool RunQuickEngineExecution(InternalComputationGraph graph, TensorData[]? sampleInputs)
         {
@@ -113,11 +120,21 @@ namespace Shorokoo.Tests.Utils
                 ? qee.Run(graph)
                 : qee.Run(graph, sampleInputs);
 
+            IRuntimeTensor? soleOutput = null;
             foreach (var outKey in graph.Outputs)
             {
                 if (!store.TryGetValue(outKey, out var rt) || rt.DType == DType.Invalid)
                     return false;
+                soleOutput = rt;
             }
+
+            if (graph.Outputs.Count == 1
+                && soleOutput is RuntimeTensor { BoolData: { } bits } bitOut
+                && bitOut.DType == DType.Bool
+                && bits.Length > 0
+                && bits.IndexOf(false) >= 0)
+                return false;
+
             return true;
         }
 

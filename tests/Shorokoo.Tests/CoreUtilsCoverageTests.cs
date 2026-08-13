@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Shorokoo.Core.Factory.OpsFactories;
+using Shorokoo.Core.Inference;
 using Shorokoo.Core.Inference.Abstractions;
 
 namespace Shorokoo.Tests;
@@ -28,6 +29,31 @@ public class CoreUtilsCoverageTests
         Assert.True(AutoTest.TestGraph(BoolGraph(Vector(true))));
         Assert.False(AutoTest.TestGraph(BoolGraph(Vector(false))));
         Assert.False(AutoTest.TestGraph(BoolGraph(Vector(true, false))));
+    }
+
+    /// <summary>QEE stub that hands back its first input untouched, degrading the op it replaces
+    /// to an identity so the two engines disagree on purpose.</summary>
+    private sealed class QeeIdentityStub : QuickOp
+    {
+        private readonly string _opCode;
+        public QeeIdentityStub(string opCode) { _opCode = opCode; }
+        public override string OpCode => _opCode;
+        protected override RuntimeTensor[] Compute(RuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
+            => [inputs[0]!];
+    }
+
+    private static InternalComputationGraph NotFalseGraph() => new([], [OnnxOp.Not(Scalar(false).ToVariable())]);
+
+    [Fact]
+    public void TestSelfCheckingGraphConventionIsEnforcedOnTheQuickEngineToo()
+    {
+        Assert.True(AutoTest.TestGraph(NotFalseGraph(), testQuickEngineExecution: true));
+
+        using (OpRegistry.Override(new QeeIdentityStub(OpCodes.NOT)))
+        {
+            Assert.False(AutoTest.TestGraph(NotFalseGraph(), testQuickEngineExecution: true));
+            Assert.True(AutoTest.TestGraph(NotFalseGraph(), testQuickEngineExecution: false));
+        }
     }
 
     [Fact]

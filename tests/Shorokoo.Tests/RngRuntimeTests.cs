@@ -76,10 +76,12 @@ public partial class RtFcWithRngFeed
 /// negated rather than <c>GreaterOrEqual</c>, because a uint64 <c>Where</c> is unimplemented in ORT
 /// and these are the forms it does implement.</para>
 ///
-/// <para>ONNX Runtime is the only engine that checks the result. <c>AutoTest</c> evaluates the
-/// self-check bool on the default (ORT-backed) context; its Quick Execution Engine pass only
-/// asserts that every output resolves to a valid dtype, and never reads the bool. A QEE that
-/// disagreed on every op here would still pass — see Shorokoo#159.</para>
+/// <para>ONNX Runtime is still the only engine that checks the result <b>here</b>. <c>AutoTest</c>'s
+/// Quick Execution Engine pass does now assert the self-check bool, but only when the QEE actually
+/// computes it, and on this graph it does not: the uint64 arithmetic and the 41-round
+/// <c>LongDivide</c> leave the bit unvalued, so the pass falls back to checking that every output
+/// resolves to a valid dtype. A QEE that disagreed on every op here would still pass. Giving the
+/// QEE enough of this op set to value the bit is what Shorokoo#159 has left open.</para>
 /// </summary>
 [Module]
 public partial class RngRegionSelectionOpsCheck
@@ -155,10 +157,10 @@ public partial class RngRegionSelectionOpsCheck
 /// runtime tensor, so nothing specializes on their values; a batch of ranges shares one graph
 /// because the per-graph overheads dominate a table build.
 ///
-/// <para>The Quick Execution Engine runs the same graph but its result is not compared:
-/// <c>AutoTest</c> only asserts that every output resolves to a valid dtype there, so this pins
-/// the QEE's op coverage, not its values. Shorokoo#159 tracks closing that in general; the dense
-/// draw's QEE values are checked through <see cref="RngDenseUniformOutput"/> instead.</para>
+/// <para>The Quick Execution Engine runs the same graph and <b>is</b> held to the same answer:
+/// <c>AutoTest</c> computes the self-check bool there too and requires it true, so both engines
+/// must reproduce the oracle bit for bit. The dense draw's QEE values are additionally checked
+/// through <see cref="RngDenseUniformOutput"/>.</para>
 /// </summary>
 [Module]
 public partial class RngDenseUniformOracleCheck

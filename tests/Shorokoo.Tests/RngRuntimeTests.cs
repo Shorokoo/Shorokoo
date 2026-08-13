@@ -76,12 +76,12 @@ public partial class RtFcWithRngFeed
 /// negated rather than <c>GreaterOrEqual</c>, because a uint64 <c>Where</c> is unimplemented in ORT
 /// and these are the forms it does implement.</para>
 ///
-/// <para>ONNX Runtime is still the only engine that checks the result <b>here</b>. <c>AutoTest</c>'s
-/// Quick Execution Engine pass does now assert the self-check bool, but only when the QEE actually
-/// computes it, and on this graph it does not: the uint64 arithmetic and the 41-round
-/// <c>LongDivide</c> leave the bit unvalued, so the pass falls back to checking that every output
-/// resolves to a valid dtype. A QEE that disagreed on every op here would still pass. Giving the
-/// QEE enough of this op set to value the bit is what Shorokoo#159 has left open.</para>
+/// <para>Both engines check the result. <c>AutoTest</c> evaluates the self-check bool on the
+/// default (ORT-backed) context and asserts it again on the Quick Execution Engine, so the uint64
+/// forms above have to behave identically on both. Reaching this bit needs the QEE's value cap
+/// raised past its 256 default — one broadcast part-way through widens to 512 elements, and a
+/// tensor over the cap keeps shape and dtype only, a loss every op downstream inherits all the way
+/// to the verdict. <c>AutoTest</c> raises it for every module it runs.</para>
 /// </summary>
 [Module]
 public partial class RngRegionSelectionOpsCheck
@@ -1181,11 +1181,12 @@ public class RngRuntimeTests
         return [.. rt.FloatData!.Value.Select(BitConverter.SingleToUInt32Bits)];
     }
 
-    // The second engine's VALUES, which nothing else reads: AutoTest's Quick Execution Engine pass
-    // does assert a self-check bool when the QEE computes one, but this module returns raw draws
-    // rather than a bit, and value outputs are still only dtype-checked (Shorokoo#159 item 2), so a
-    // QEE computing every draw wrong stays green there. Cross-engine bit-exactness is the whole
-    // reason the draw lives in the graph, so it is asserted on the bits here.
+    // The second engine's VALUES, which nothing else reads: AutoTest asserts a self-check bool on
+    // the QEE when it computes one, and its `expected` argument checks values — but that compares
+    // the ORT result, not the QEE's. This module returns raw draws rather than a bit, so nothing
+    // holds the QEE to a number and one computing every draw wrong stays green (Shorokoo#159 item
+    // 2). Cross-engine bit-exactness is the whole reason the draw lives in the graph, so it is
+    // asserted on the bits here.
     [Fact]
     public void TestQuickEngineDenseUniformMatchesTheOracleBitForBitOnEveryAdversarialRange()
     {
@@ -1340,7 +1341,7 @@ public class RngRuntimeTests
             (float.PositiveInfinity, 1f), (float.PositiveInfinity, float.PositiveInfinity)]));
 
     [Fact]
-    public void TestRegionSelectionOpsBehaveAsCharacterizedInOnnxRuntime()
+    public void TestRegionSelectionOpsAgreeOnBothEngines()
     {
         Assert.True(AutoTest.AdvancedTestGraph<RngRegionSelectionOpsCheck>(
             hyperparamInputs: [],

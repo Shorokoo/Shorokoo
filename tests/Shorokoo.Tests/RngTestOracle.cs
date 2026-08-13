@@ -87,8 +87,10 @@ internal static class RngTestOracle
         => WalkerUniform(DrawValue(key, substreamIndex, i, rounds));
 
     /// <summary>Walker's transform of a whole generator value, split out so a test can drive it
-    /// with a chosen value rather than a drawn one — the dense draw agrees with it only above the
-    /// truncation floor, and the disagreeing values carry probability 2^-38.</summary>
+    /// with a chosen value rather than a drawn one. The dense draw agrees with it only above the
+    /// truncation floor: the disagreeing values are those below 2^23, probability 2^-41. There the
+    /// 41-bit exponent field is exhausted, so ef 0 and ef 1 share an octave — Walker's bottom binade
+    /// takes twice its due and nothing below 2^-41, exact zero included, is reachable.</summary>
     public static float WalkerUniform(ulong v)
     {
         float frac = 1.0f + (uint)(v & 0x7FFFFF) * (1.0f / 8388608.0f);          // [1,2), 23-bit mantissa

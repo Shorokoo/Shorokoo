@@ -13,7 +13,7 @@ produces (seeds, streams, reproducibility) see
 ```csharp
 var mask   = RandomUniform(Vector(4L, 8L));                  // float32 in [0, 1)
 var weight = RandomUniform(Vector(4L, 8L), -0.05f, 0.05f);   // float32 in [-0.05, 0.05)
-var init   = UniformRange.Init([4L, 8L], Scalar(-1f), Scalar(1f));   // same draw, in-graph bounds
+var init   = UniformRange.Init([Scalar(4L), Scalar(8L)], Scalar(-1f), Scalar(1f));  // in-graph bounds
 ```
 
 ## Facts
@@ -110,16 +110,19 @@ forming classes of their own.
 **Weight** is how the draw counts shares. A float's weight is its ulp measured in units of
 the smallest ulp resolved — the ulp at the floor — so a float one class above the floor
 weighs 2, two classes above weighs 4, and so on up. That doubling is what fixes the depth at
-41: a class of 2²³ floats weighing 2ᵏ each, summed over 41 classes, comes to 2²³·(2⁴¹ − 1) —
-just under 2⁶⁴, the number of values one 64-bit generator draw can take. A 42nd class would
-overrun it.
+41: a class of 2²³ floats weighing 2ᵏ each, summed over 41 classes, comes to 2²³·(2⁴¹ − 1),
+and the sub-floor lattice's own 2²³ points bring it to exactly 2⁶⁴ — the number of values
+one 64-bit generator draw can take. The budget is spent to the last unit, which is why the
+lattice is not optional and why a 42nd class will not fit.
 
-A range's **total weight** is simply its width in those same units:
-`(high − low) / (the ulp at the floor)`. Since the ulp at the floor is itself a power of two,
-the total is a power of two exactly when **the range's width is** — which is what `[0, 1)`,
-`[-1, 1)`, `[4, 12)` and `[0, +infinity)` have in common, and what an arbitrary `[-a, a)`
-initializer bound does not. Handing the 2⁶⁴ draws out over that total is exact in the first
-case, and in the second leaves each weight unit one draw above or below its due.
+A range's **total weight** is its width in those same units, rounded down:
+`floor((high − low) / (the ulp at the floor))`. What the rounding drops is under one unit —
+the same sliver the lattice loses where the range's end cuts a cell short. Since the ulp at
+the floor is a power of two, **a power-of-two width always divides it cleanly**, and the
+total comes out a power of two too: that is what `[0, 1)`, `[-1, 1)`, `[4, 12)` and
+`[0, +infinity)` have in common, and what an arbitrary `[-a, a)` initializer bound does not.
+Handing the 2⁶⁴ draws out over that total is exact in the first case, and in the second
+leaves each weight unit one draw above or below its due.
 
 The floor divides two regimes:
 

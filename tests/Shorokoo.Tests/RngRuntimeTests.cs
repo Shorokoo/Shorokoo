@@ -1182,9 +1182,10 @@ public class RngRuntimeTests
     }
 
     // The second engine's VALUES, which nothing else reads: AutoTest's Quick Execution Engine pass
-    // asserts only that each output resolves to a valid dtype and never looks at a self-check bool,
-    // so a QEE computing every draw wrong stays green (Shorokoo#159). Cross-engine bit-exactness is
-    // the whole reason the draw lives in the graph, so it is asserted on the bits.
+    // does assert a self-check bool when the QEE computes one, but this module returns raw draws
+    // rather than a bit, and value outputs are still only dtype-checked (Shorokoo#159 item 2), so a
+    // QEE computing every draw wrong stays green there. Cross-engine bit-exactness is the whole
+    // reason the draw lives in the graph, so it is asserted on the bits here.
     [Fact]
     public void TestQuickEngineDenseUniformMatchesTheOracleBitForBitOnEveryAdversarialRange()
     {

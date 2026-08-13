@@ -1,6 +1,6 @@
 # What a uniform draw returns
 
-Related: [rng-configuration.md](rng-configuration.md) · [nn-library.md](nn-library.md) · [core-types.md](core-types.md)
+Related: [rng-configuration.md](rng-configuration.md) · [nn-library.md](nn-library.md) · [core-types.md](core-types.md) · [limitations.md](limitations.md)
 
 Every uniform random value in Shorokoo comes out of one draw: `Globals.RandomUniform`, the
 `Uniform` / `UniformRange` / `XavierUniform` / `KaimingUniform` / `RecurrentUniform` /
@@ -19,37 +19,39 @@ produces (seeds, streams, reproducibility) see
   is `high`'s value as much as it is `low`'s (see [the table below](#degenerate-and-non-finite-bounds)).
 - The result dtype is always **`float32`**, whatever the bounds are.
 - The draw is **uniform in value**: the chance of landing in a sub-interval is proportional
-  to that sub-interval's width, for any range you ask for — exactly so, but for the bounded
-  imperfections at the bottom of this page. Per float, that means **pick a real in
-  `[low, high)` and round down**, which is *not* what `low + (high − low)·u` gives; see
-  [the next section](#the-range-is-addressed-not-scaled), the one thing on this page worth
-  reading if you read nothing else.
+  to that sub-interval's width, but for the bounded imperfections at the bottom of this page.
+  Per float, that means **pick a real in `[low, high)` and round down**, which is *not* what
+  `low + (high − low)·u` gives — see [the next section](#the-range-is-addressed-not-scaled).
 - Bounds may be compile-time literals or graph scalars computed in-graph — the two
   `RandomUniform` overloads in [core-types.md](core-types.md#factory-helpers-using-static-shorokooglobals),
-  and every initializer that takes a bound as an `Init` argument. Both forms use the same
-  draw and carry the same guarantees (graph-scalar bounds additionally need a keyed —
-  concrete, id-bearing — model, since they cannot be expressed as ONNX attributes).
+  and every [initializer](nn-library.md#initializers-shorokoomodulesinitializers) that takes a
+  bound as an `Init` argument. Both forms use the same draw and carry the same guarantees
+  (graph-scalar bounds additionally need a keyed — concrete, id-bearing — model, since they
+  cannot be expressed as ONNX attributes).
 - Nothing here rests on floating-point rounding: the draw is integer and exact, so the same
-  seed yields identical values under ONNX Runtime's CPU provider, under the Quick Execution
-  Engine, and in an exported ONNX model — the three paths the suite compares bit for bit.
-  Other execution providers are expected to agree for the same reason, with one risk still
-  open: a provider that flushes subnormals to zero would disturb the sub-floor lattice
-  described below ([issue #160](https://github.com/Shorokoo/Shorokoo/issues/160)).
+  seed yields identical values bit for bit under ONNX Runtime's CPU provider, under the
+  [Quick Execution Engine](limitations.md#quick-execution-engine-value-computation-is-bounded),
+  and in an exported ONNX model. Other execution providers agree for the same reason, with
+  one exception yet to be tested on hardware: a provider that flushes very small magnitudes
+  to zero would disturb the values a draw produces closest to zero
+  ([issue #160](https://github.com/Shorokoo/Shorokoo/issues/160)).
 
 ## The range is addressed, not scaled
 
 One sentence covers the distribution: **pick a real number uniformly from `[low, high)` and
 round it down to a `float32`.** Equivalently, each float comes out with probability
 proportional to its **ulp** — the width of the real interval it stands for — so wherever
-floats are dense each individual one is correspondingly rarer, and every sub-interval still
-takes exactly the share its width earns.
+floats are dense each individual one is correspondingly rarer, and every sub-interval takes
+the share its width earns. Two bounded qualifications apply, both set out under
+[how finely the range is resolved](#how-finely-the-range-is-resolved): the rounding lands on
+a `float32` only down to a floor, beneath which it lands on a coarser grid; and the shares
+are exact for some ranges and right to within one part in 2⁶⁴ for the rest.
 
-That is not the usual construction, and it is the part most likely to be got wrong by
-assumption. A uniform over an arbitrary range is commonly built — as most standard libraries
-build it — by drawing `u` on `[0, 1)` and returning `u·(high − low) + low`, which inherits
-`u`'s own granularity and so lands on a coarse grid wherever the range's floats are finer
-than that. Shorokoo addresses the `float32` values of the range directly instead, and three
-guarantees follow.
+That is not the usual construction. A uniform over an arbitrary range is commonly built — as
+most standard libraries build it — by drawing `u` on `[0, 1)` and returning
+`u·(high − low) + low`, which inherits `u`'s own granularity and so lands on a coarse grid
+wherever the range's floats are finer than that. Shorokoo addresses the `float32` values of
+the range directly instead, and three guarantees follow.
 
 - **No precision is lost near zero.** Over `[-1, 1)` the draw resolves magnitudes down to
   2⁻⁴⁰; scaling a standard draw would round every result near zero to a multiple of about
@@ -83,20 +85,33 @@ So `RandomUniform(shape, float.NegativeInfinity, float.PositiveInfinity)` draws 
 whole finite `float32` domain and never returns an infinity or a NaN — `+infinity` as the
 upper bound is the one non-finite bound that widens the range instead of clamping it.
 
-The initializers that take bounds (`UniformRange` and friends) document `low <= high` as
-their expectation; an inverted range is not an error, it is a constant fill with `low`.
+The initializers that take bounds (`UniformRange` and friends) expect `low <= high`; an
+inverted range is not an error, it is a constant fill with `low`.
 
 ## How finely the range is resolved
 
-The draw resolves **41 successive weight classes** — a class is `max(1, exponent field)`,
-which is a binade of magnitude everywhere except at the very bottom, where the subnormals
-and the smallest normal binade fold into one class — counting down from the largest
-magnitude in the range, or **40** when the range straddles zero. Call the bottom of that
-span the *floor*:
+The draw resolves **41 successive weight classes**, counting down from the largest magnitude
+in the range — **40** when the range straddles zero, since both signs of every magnitude are
+then in play. Call the bottom of that span the *floor*.
+
+A **weight class** is one power of two of magnitude: the floats of a class all share an
+exponent, so they all have the same ulp, and a class spans `[2ᵏ, 2ᵏ⁺¹)`. The very bottom of
+the format is the one exception — the *subnormals*, the tiny values below the smallest
+normal magnitude, share a class with the smallest normal span rather than forming classes of
+their own.
+
+**Weight** is how the draw counts shares. A float's weight is its ulp measured in units of
+the smallest ulp resolved — the ulp at the floor — so a float one class above the floor
+weighs 2, two classes above weighs 4, and so on up. A range's **total weight** is that sum
+over everything it can produce, and it never exceeds 2⁶⁴, the number of values one generator
+draw can take. Handing those 2⁶⁴ draws out over the total is exact when the total is a power
+of two, and otherwise leaves each weight unit one draw above or below its due. That is the
+sense in which shares hold "to within one weight unit".
+
+The floor divides two regimes:
 
 - **Above the floor**, every single `float32` value in the range is drawable, with
-  probability proportional to its ulp: exactly so when the range's total weight is a power
-  of two, and otherwise to within one weight unit, the smallest share the draw can express.
+  probability proportional to its ulp.
 - **Below the floor**, values come from an evenly spaced lattice whose step is 2⁻²³ of the
   floor, so those floats are *represented* but not individually addressable: the draw can
   land in that region and will land there as often as its width says it should, to within
@@ -104,33 +119,29 @@ span the *floor*:
   single out an arbitrary float down there.
 
 On `[0, 1)` the floor is 2⁻⁴¹: every float from 2⁻⁴¹ up is individually drawable, and
-smaller results are multiples of 2⁻⁶⁴ (exact `0f` among them). Above that floor the draw is
-**bit for bit the classical dense unit-interval construction** — Walker's 1974 method in
-Marc Reynolds' 41+23 form — so asking for `[0, 1)` through the arbitrary-range machinery
-gives up nothing against the algorithm specialised to it. The two part company only below
-the floor, and in this draw's favour: the lattice reaches exact `0f`, where Walker's bottom
-binade stops at 2⁻⁴¹ and absorbs the mass beneath it, taking twice its due share. On
-`[-1, 1)` the floor is 2⁻⁴⁰ — straddling zero costs one class, since both signs of every
-magnitude are in play.
+smaller results are multiples of 2⁻⁶⁴, exact `0f` among them. Above that floor this is bit
+for bit the classical dense construction for the unit interval — Walker's 1974 method, in
+the 41-plus-23-bit form Marc Reynolds gives it — so asking for `[0, 1)` through the
+arbitrary-range machinery costs nothing against a generator built for that range alone. On
+`[-1, 1)` the floor is 2⁻⁴⁰.
 
 Counting values rather than mass: about **33.1%** of the floats in `[0, 1)` can come out of
 a draw over `[0, 1)`, and about **16.1%** of the floats in the whole finite `float32`
 domain can come out of a draw over that domain. What truncation does *not* spend is the
-probability mass — each region keeps the share its width earns, exactly when the range's
-total weight is a power of two and otherwise to within one weight unit, so the draw stays
-uniform in value either way. Resolution is what truncation spends, not fairness.
+probability mass: every region keeps the share its width earns, so the draw stays uniform in
+value either way. Resolution is what truncation spends, not fairness.
 
-Those percentages also read worse than they are, because the floats truncation collapses are
-precisely the ones carrying almost no mass. Wherever the lattice actually costs resolution, a
-draw reaches it about **once in a trillion** times: exactly 2⁻⁴¹ ≈ 4.5e-13 of draws over
-`[0, 1)` — the same over `[0, float.MaxValue)` and `[0, +infinity)` — and at most 2.3e-12,
-one draw in 4.3e11, across the adversarial ranges the suite measures. A large fraction of the
-*floats*, a negligible fraction of the *draws*.
+The floats truncation collapses are also the ones carrying almost no mass. Wherever the
+lattice costs resolution at all, a draw reaches it about **once in a trillion** times: 2⁻⁴¹,
+or 4.5e-13, over `[0, 1)`, `[0, float.MaxValue)` and `[0, +infinity)`, rising to 2.4e-12 —
+about one draw in 4e11 — for a range pairing magnitudes at opposite ends of the `float32`
+exponent span, such as `[-1e30, 2e18)`. A large fraction of the *floats*, a negligible
+fraction of the *draws*.
 
-(A range small enough that 41 classes reach the bottom of the format is the exception, and a
-harmless one: there the lattice step *is* the spacing of the float grid, so draws land on the
-lattice routinely and every one of them is an exactly addressed float. Nothing is collapsed,
-so there is nothing to lose.)
+A range small enough that its 41 classes — 40 if it straddles zero — reach the bottom of the
+format is the exception, and a harmless one. There the lattice step *is* the spacing of the
+float grid, so every point of the lattice is an exactly addressed float: nothing is
+collapsed, and a draw that lands below the floor loses nothing by it.
 
 For practical ranges this is invisible: an initializer bound, a `[0, 1)` mask, a
 `[-a, a)` weight draw all live far above their floor. It becomes observable when a range
@@ -139,9 +150,8 @@ spans dozens of orders of magnitude at once.
 ## Known imperfections
 
 Three, none of them large, all of them real. All three follow from spending exactly one
-64-bit generator value per element — the smallest share the draw can express is one part in
-2⁶⁴, and the truncation depth is set by the same budget — so they are settled properties of
-the draw rather than defects awaiting a fix:
+64-bit generator value per element: the smallest share the draw can express is one part in
+2⁶⁴, and the truncation depth is set by the same budget.
 
 - **A single float can take up to twice its due share.** Whether the draw divides evenly
   depends on the range: when its total weight is a power of two the split is *exact*, and
@@ -156,9 +166,8 @@ the draw rather than defects awaiting a fix:
 - **A vanishingly small side of a hugely lopsided range can get probability exactly zero.**
   A draw over `[-1, 1e30)` returns no negative value at all: the negative side is worth
   about 10⁻³⁰ of the range, which is less than the smallest share the draw can express, and
-  it is dropped rather than rounded up to the smallest expressible one — which would
-  over-weight that sliver by far more than dropping it costs. If you need both signs
-  represented, do not pair bounds whose magnitudes differ by 30-odd orders of magnitude.
+  it is dropped rather than rounded up to that share. If you need both signs represented, do
+  not pair bounds whose magnitudes differ by 30-odd orders of magnitude.
 
 ## Negative zero is never returned
 
@@ -169,6 +178,4 @@ normalised to `+0f` before anything else looks at it. So `RandomUniform(shape, -
 rather than the `-0f` the "returns `low`" rule above would otherwise give. The two values
 are numerically equal, so only a bit comparison can see the difference — but the guarantee
 is a bit-level one, and it is enforced on the bounds before any drawing happens, so it does
-not depend on how an execution provider treats a negative zero. It is checked bit for bit
-under ONNX Runtime's CPU provider, under the Quick Execution Engine, and on an exported
-ONNX model.
+not depend on how an execution provider treats a negative zero.

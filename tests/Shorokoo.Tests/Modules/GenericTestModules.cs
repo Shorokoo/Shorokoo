@@ -706,6 +706,33 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
+    /// <see cref="MixedTensorStructLoop"/>'s slot mix under a runtime trip count, so
+    /// <c>FastFoldConstantIterationLoops</c> cannot unroll the loop away. The expanded
+    /// LOOP_OPEN / LOOP_CLOSE slots — whose per-field output keys are minted past the
+    /// node's original indices, leaving that key space sparse — therefore survive into
+    /// ONNX export, the .srk round-trip, C# codegen and QEE, none of which the
+    /// constant-trip struct-loop modules reach.
+    /// </summary>
+    [Module]
+    public partial class MixedTensorStructLoopRuntimeTripCount
+    {
+        public static Scalar<float32> Inline(Tensor<float32> x, Scalar<float32> a, Scalar<float32> b)
+        {
+            var trips = x.Reduce(ReduceKind.Min, keepDims: false).Scalar().Cast<int64>();
+            var plainAcc = Scalar(0.0f);
+            var pair = TensorStruct<GenericPairStruct>(a, b);
+
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                plainAcc = plainAcc + pair.First;
+                pair = TensorStruct<GenericPairStruct>(pair.First + pair.Second, pair.Second + Scalar(1.0f));
+            }
+
+            return plainAcc + pair.First;
+        }
+    }
+
+    /// <summary>
     /// Threads a TensorStruct through all six SEQUENCE_* ops in a single body:
     /// <c>SEQUENCE_EMPTY</c> + <c>SEQUENCE_INSERT</c> build a one-element struct
     /// sequence; <c>SEQUENCE_CONSTRUCT</c> builds a two-element one; <c>SEQUENCE_AT</c>
@@ -808,7 +835,10 @@ namespace Shorokoo.Tests.Modules
     /// (passes through). Drives the plain-tensor passthrough <c>else</c>
     /// branch of <c>FastUnpackTensorStructs.ExpandIfCloseStructBranches</c> that
     /// the single-output struct-IfElse modules don't reach because they have
-    /// no non-struct slot in the same IF_CLOSE.
+    /// no non-struct slot in the same IF_CLOSE. Reads <c>Second</c> as well as
+    /// <c>First</c>, at a distinct weight: the expansion mints the trailing
+    /// field onto the slot index the pass-through slot vacates, so a reader of
+    /// <c>First</c> alone cannot tell the two apart.
     /// </summary>
     [Module]
     public partial class IfElseMixedStructAndPlainSlots
@@ -829,7 +859,9 @@ namespace Shorokoo.Tests.Modules
 
             var pickedFirst = (Scalar<float32>)InternalOp.TensorStructGetField(
                 pickedStruct, "First", DType.Float32, 0, DataStructure.Tensor);
-            return pickedFirst + pickedPlain;
+            var pickedSecond = (Scalar<float32>)InternalOp.TensorStructGetField(
+                pickedStruct, "Second", DType.Float32, 0, DataStructure.Tensor);
+            return pickedFirst + pickedSecond * Scalar(10.0f) + pickedPlain;
         }
     }
 

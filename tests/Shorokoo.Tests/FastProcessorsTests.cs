@@ -17,16 +17,6 @@ public class FastProcessorsCoverageTests
     private static double[] Rep(double v, int n) => [.. Enumerable.Repeat(v, n)];
     private static TensorData Flag(bool v) => TensorData(DType.Bool, [], v);
 
-    // Split out so the rest of the struct/control-flow coverage keeps asserting. A loop mixing a
-    // plain carry with a TensorStruct carry loses the struct: the module computes 3a+3b+1, the
-    // framework returns 4a for every b, and b is dead in the concretized graph (Shorokoo#163).
-    // Drop the Skip when #163 is fixed — the expected value below is the module's own arithmetic.
-    [Fact(Skip = "Shorokoo#163: a loop mixing plain and TensorStruct carries drops the struct")]
-    public void TestLoopMixingPlainAndStructCarriesKeepsBoth()
-        => Assert.True(AutoTest.AdvancedTestGraph<MixedTensorStructLoop>(
-            hyperparamInputs: [], runtimeInputs: [Scalar32(1f), Scalar32(2f)],
-            expected: [10.0]));
-
     [Fact]
     public void TestTensorStructInControlFlow()
     {
@@ -46,7 +36,17 @@ public class FastProcessorsCoverageTests
             expected: [1.0]));
         Assert.True(AutoTest.AdvancedTestGraph<IfElseMixedStructAndPlainSlots>(
             hyperparamInputs: [], runtimeInputs: [Flag(true), Scalar32(3f), Scalar32(5f)],
-            expected: [11.0]));
+            expected: [61.0]));
+
+        // A plain carry interleaved with a struct carry, both slot orders of the
+        // expansion, unrolled (constant trip count) and not (runtime trip count).
+        Assert.True(AutoTest.AdvancedTestGraph<MixedTensorStructLoop>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(1f), Scalar32(2f)],
+            expected: [10.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<MixedTensorStructLoopRuntimeTripCount>(
+            hyperparamInputs: [],
+            runtimeInputs: [TensorData(DType.Float32, [2L], 2f, 5f), Scalar32(1f), Scalar32(2f)],
+            expected: [10.0]));
         Assert.True(AutoTest.AdvancedTestGraph<TensorStructLoopCarryWithScanOutput>(
             hyperparamInputs: [], runtimeInputs: [Scalar32(1f), Scalar32(2f)],
             expected: [3.0, 6.0, 9.0]));

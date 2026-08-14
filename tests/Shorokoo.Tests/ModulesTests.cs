@@ -529,6 +529,26 @@ public class ModulesCoverageTests
         Assert.Equal(1, direct[0]);
     }
 
+    private static string[] NodesNotOwningTheirOutputs(InternalComputationGraph g)
+        => [.. g.Nodes
+            .Where(n => n.FullOutputs.Values.SelectMany(slots => slots)
+                .Any(k => k is FastTensorKey t && !t.IsEmpty && !t.FastNodeKey.Equals(n.Key)))
+            .Select(n => n.OpCode.ToString())];
+
+    [Fact]
+    public void TestEveryNodeOwnsTheTensorKeysItProduces()
+    {
+        Assert.Empty(NodesNotOwningTheirOutputs(ConstLoopWithScanOutput.ComputationGraph.ToInternal()));
+        Assert.Empty(NodesNotOwningTheirOutputs(TensorStructLoopCarry.ComputationGraph.ToInternal()));
+
+        var g = MixedTensorStructLoopRuntimeTripCount.ComputationGraph.ToInternal();
+        var inputs = g.FromOrderedInputs([
+            TensorData(DType.Float32, [2L], 2f, 5f),
+            TensorData(DType.Float32, [], 1f),
+            TensorData(DType.Float32, [], 2f)]);
+        Assert.Empty(NodesNotOwningTheirOutputs(g.ToConcreteArchitecture(inputs)));
+    }
+
     private static Tensor<float32> MachineryFreeBody(Tensor<float32> x) => x + x;
 
     [Fact]

@@ -132,33 +132,38 @@ namespace Shorokoo.Graph
                     fastNode.FullInputs[kvp.Key] = slot;
                 }
 
-                foreach (var kvp in node.FullOutputs)
+                // A node owns every tensor key it produces: the key's FastNodeKey is this node's,
+                // and its OutputIndex is the slot's position in the node's flattened output list.
+                // The Variable objects reaching here do not all carry that — LoopAPI hands a loop
+                // node output Variables minted against its tracing-pass placeholders, whose nodes
+                // never enter the graph, so their keys name nothing and can repeat an index across
+                // two slots. Consumers wire through `variableToKey` by Variable identity, so
+                // renaming here rewires them; groups are walked in the same ordinal order as
+                // FastNode.Outputs so positions and indices agree.
+                int outputIndex = 0;
+                foreach (var kvp in node.FullOutputs.OrderBy(g => g.Key, StringComparer.Ordinal))
                 {
                     var slot = new List<FastTensorKey?>(kvp.Value.Length);
                     foreach (var output in kvp.Value)
                     {
+                        int slotIndex = outputIndex++;
                         if (output is null) { slot.Add(null); continue; }
 
                         FastTensorKey outputKey;
                         if (useSequentialIds)
                         {
-                            // Under sequential ids the producing node's FastNodeKey already
-                            // reflects the desired integer id; outputs always belong to that node.
+                            // Sequential ids drive the exported N{i}_T{j} tensor names, so the
+                            // declared OutputIndex is load-bearing and kept as-is.
                             outputKey = new FastTensorKey(assignedKey, output.Key.OutputIndex);
                         }
-                        else if (isDuplicate && output.Key.NodeKey == node.Key)
+                        else if (output.Key.OutputIndex < 0)
                         {
+                            // Connecting tensors are identified by OutputIndex -1; keep it.
                             outputKey = new FastTensorKey(assignedKey, output.Key.OutputIndex);
-                        }
-                        else if (isDuplicate)
-                        {
-                            // Cross-node reference (e.g. LOOP_OPEN carry variable).
-                            // If the referenced node was also duplicated, remap.
-                            outputKey = FastTensorKey.FromCgKey(output.Key);
                         }
                         else
                         {
-                            outputKey = FastTensorKey.FromCgKey(output.Key);
+                            outputKey = new FastTensorKey(assignedKey, slotIndex);
                         }
 
                         variableToKey[output] = outputKey;

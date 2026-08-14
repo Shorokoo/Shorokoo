@@ -872,6 +872,29 @@ namespace Shorokoo.Core.Factory.IR
         }
 
         /// <summary>
+        /// Import-time rejection for an operator Shorokoo has no definition for. Named ops
+        /// that a user is likely to hit carry the workaround with them; everything else
+        /// points at the support matrix.
+        /// </summary>
+        private static string UnsupportedOperatorMessage(string opType, string? nodeName)
+        {
+            var opening = $"ONNX import: the '{opType}' operator (node '{nodeName}') is not "
+                + "supported by Shorokoo.";
+            return opType switch
+            {
+                // Literal: Shorokoo deliberately has no Scan op code to match against.
+                "Scan" => opening
+                    + " Shorokoo executes Loop, not Scan, and does not rewrite one into the "
+                    + "other. Workaround: express the iteration as an explicit Loop — slice "
+                    + "each per-iteration input inside the body with Gather on the iteration "
+                    + "index, and let the Loop stack its scan outputs — or re-export the model "
+                    + "with the Scan already expressed that way (in Shorokoo, build it with "
+                    + "LoopAPI and ctx.Scan). See Documentation/limitations.md.",
+                _ => opening + " See Documentation/operator-support.md for the supported set.",
+            };
+        }
+
+        /// <summary>
         /// Walks <paramref name="tempNodes"/> in the canonical proto order produced by
         /// <see cref="EnumerateNodesInProtoOrder"/> and materializes one
         /// <see cref="FastNode"/> per visited node. Three-way branch:
@@ -903,7 +926,12 @@ namespace Shorokoo.Core.Factory.IR
 
                 var nodeProto = tempNode.Node;
 
-                Debug.Assert(functionsMap.ContainsKey(opCode) || definitions.ContainsKey(opCode) || Definitions.ModuleOps.Contains(opCode), opCode);
+                if (!functionsMap.ContainsKey(opCode) && !definitions.ContainsKey(opCode)
+                    && !Definitions.ModuleOps.Contains(opCode))
+                {
+                    throw new NotSupportedException(
+                        UnsupportedOperatorMessage(nodeProto.OpType, nodeProto.Name));
+                }
 
                 if (isEtherealIdentityNode(nodeProto))
                 {
@@ -931,8 +959,8 @@ namespace Shorokoo.Core.Factory.IR
                 }
                 else
                 {
-                    throw new UnsupportedDTypeException(ErrorCodes.FW030, nodeProto.OpType, "attribute type conversion",
-                        $"Attribute type conversion not implemented for node type '{nodeProto.OpType}'");
+                    throw new NotSupportedException(
+                        UnsupportedOperatorMessage(nodeProto.OpType, nodeProto.Name));
                 }
 
                 fastGraph.Nodes.Add(fastNode);

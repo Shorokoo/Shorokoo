@@ -107,6 +107,29 @@ public class OnnxControlFlowImportTests
     }
 
     [Fact]
+    public void TestScanImportFailsWithActionableError()
+    {
+        var body = new GraphProto { Name = "scan_body" };
+        body.Inputs.Add(TensorInfo("s_in", FloatElem, 4));
+        body.Inputs.Add(TensorInfo("x_t", FloatElem, 4));
+        body.Nodes.Add(Node("Add", "body_add", ["s_in", "x_t"], ["s_out"]));
+        body.Outputs.Add(TensorInfo("s_out", FloatElem, 4));
+
+        var graph = new GraphProto { Name = "scan_graph" };
+        graph.Inputs.Add(TensorInfo("init", FloatElem, 4));
+        graph.Inputs.Add(TensorInfo("x", FloatElem, 3, 4));
+        graph.Nodes.Add(Node("Scan", "the_scan", ["init", "x"], ["s_final"],
+            new AttributeProto { Name = "body", Type = AttributeProto.AttributeType.Graph, G = body },
+            new AttributeProto { Name = "num_scan_inputs", Type = AttributeProto.AttributeType.Int, I = 1 }));
+        graph.Outputs.Add(TensorInfo("s_final", FloatElem, 4));
+
+        var ex = Assert.Throws<NotSupportedException>(() => Import(WrapModel(graph)));
+        Assert.Contains("Scan", ex.Message);
+        Assert.Contains("the_scan", ex.Message);
+        Assert.Contains("LoopAPI", ex.Message);
+    }
+
+    [Fact]
     public void TestSequenceMapImportFailsWithActionableError()
     {
         var body = new GraphProto { Name = "seqmap_body" };

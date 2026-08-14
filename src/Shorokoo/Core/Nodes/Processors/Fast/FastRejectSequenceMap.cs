@@ -1,8 +1,6 @@
-using Shorokoo.Core.Graph;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Graph;
 using System;
-using System.Collections.Generic;
 
 namespace Shorokoo.Core.Nodes.Processors.Fast
 {
@@ -12,21 +10,23 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// body-less — a corrupted model rather than a failure. An op Shorokoo cannot execute
     /// has to say so at the import that introduced it.
     /// </summary>
+    /// <remarks>
+    /// Scans one graph only, and does not descend into function bodies: a body is not
+    /// reachable as node data (<see cref="Shorokoo.Core.Function.OriginalFastGraph"/>
+    /// thaws a fresh copy on every access), so a recursive walk would thaw every
+    /// reachable function on every import just to read one op code. The ONNX reader
+    /// instead applies this to each function body as it builds it — while that body is
+    /// still the mutable graph in hand — and to the top-level graph, which together cover
+    /// every node the import produces.
+    /// </remarks>
     internal static class FastRejectSequenceMap
     {
         public static void Process(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
-            ProcessGraph(graph, new HashSet<Function>());
-        }
 
-        private static void ProcessGraph(InternalComputationGraph graph, HashSet<Function> seenFunctions)
-        {
             foreach (var node in graph.Nodes)
             {
-                if (node.TargetFunction is { } fn && seenFunctions.Add(fn))
-                    ProcessGraph(fn.OriginalFastGraph, seenFunctions);
-
                 if (node.OpCode != OpCodes.SEQUENCE_MAP_OPEN) continue;
                 throw new NotSupportedException(
                     $"ONNX import: the 'SequenceMap' operator (node '{node.FriendlyName}') is not supported. " +

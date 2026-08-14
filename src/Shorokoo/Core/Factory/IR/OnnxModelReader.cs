@@ -70,7 +70,8 @@ namespace Shorokoo.Core.Factory.IR
             var (functions, onnxNameToFunction) = internalBuildFunctions(this.model.Functions, this.OpSetVersion, tensorStructDefs);
             var fastGraph = internalBuildInternalComputationGraph(this.model.Graph, functions, onnxNameToFunction, this.OpSetVersion, tensorStructDefs);
             // Reject the imported control-flow ops Shorokoo cannot execute, before any other
-            // pass sees the graph.
+            // pass sees the graph. Function bodies were checked as they were built, so this
+            // scans the top-level graph only.
             Shorokoo.Core.Nodes.Processors.Fast.FastRejectSequenceMap.Process(fastGraph);
             Shorokoo.Core.Nodes.Processors.Fast.FastUnPrepFromOnnx.Process(fastGraph);
             return fastGraph;
@@ -221,6 +222,11 @@ namespace Shorokoo.Core.Factory.IR
                 }
 
                 CreateFastNodes(fastGraph, EnumerateNodesInProtoOrder(functionProto.Nodes), tensorKeys, functionsMap, opset);
+
+                // Reject the unexecutable control-flow ops here, while the body is still the
+                // mutable graph in hand: once it is frozen into the Function below, reading its
+                // nodes back costs a full thaw.
+                Shorokoo.Core.Nodes.Processors.Fast.FastRejectSequenceMap.Process(fastGraph);
 
                 foreach (var outputName in functionProto.Outputs)
                 {

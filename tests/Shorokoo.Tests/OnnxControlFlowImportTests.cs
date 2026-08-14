@@ -148,4 +148,36 @@ public class OnnxControlFlowImportTests
         Assert.Contains("the_seqmap", ex.Message);
         Assert.Contains("LoopAPI", ex.Message);
     }
+
+    [Fact]
+    public void TestSequenceMapInsideAFunctionBodyFailsWithActionableError()
+    {
+        var body = new GraphProto { Name = "seqmap_body" };
+        body.Inputs.Add(TensorInfo("elem_in", FloatElem));
+        body.Nodes.Add(Node("Identity", "body_id", ["elem_in"], ["elem_out"]));
+        body.Outputs.Add(TensorInfo("elem_out", FloatElem));
+
+        var fn = new FunctionProto { Name = "SeqMapFn", Domain = "Functions" };
+        fn.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+        fn.OpsetImports.Add(new OperatorSetIdProto { Domain = "Functions", Version = 1 });
+        fn.Inputs.Add("fn_seq");
+        fn.Outputs.Add("fn_out_seq");
+        fn.ValueInfoes.Add(SequenceInfo("fn_seq", FloatElem));
+        fn.ValueInfoes.Add(SequenceInfo("fn_out_seq", FloatElem));
+        fn.Nodes.Add(Node("SequenceMap", "nested_seqmap", ["fn_seq"], ["fn_out_seq"],
+            new AttributeProto { Name = "body", Type = AttributeProto.AttributeType.Graph, G = body }));
+
+        var graph = new GraphProto { Name = "seqmap_fn_graph" };
+        graph.Inputs.Add(SequenceInfo("seq", FloatElem));
+        graph.Nodes.Add(Node("SeqMapFn", "call_fn", ["seq"], ["out_seq"]));
+        graph.Outputs.Add(SequenceInfo("out_seq", FloatElem));
+
+        var model = WrapModel(graph);
+        model.Functions.Add(fn);
+
+        var ex = Assert.Throws<NotSupportedException>(() => Import(model));
+        Assert.Contains("SequenceMap", ex.Message);
+        Assert.Contains("nested_seqmap", ex.Message);
+        Assert.Contains("LoopAPI", ex.Message);
+    }
 }

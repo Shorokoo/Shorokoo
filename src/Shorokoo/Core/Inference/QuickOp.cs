@@ -15,7 +15,10 @@ namespace Shorokoo.Core.Inference;
 
 /// <summary>
 /// Base class for every operator implementation in the QuickExecutionEngine. A single
-/// instance is registered per op code and invoked for every node bearing that op code.
+/// instance is registered per op code and invoked for every node bearing that op code — by
+/// every engine, on every thread — so an op holds no mutable state of its own. What has to
+/// survive between invocations lives in the per-run <see cref="QuickRunState"/> that
+/// <see cref="Execute"/> receives.
 ///
 /// Four layers, from specific to general:
 ///   - <see cref="Compute(RuntimeTensor?[], OnnxCSharpAttributes, int)"/> (required): pure
@@ -50,7 +53,8 @@ internal abstract class QuickOp
         InternalComputationGraph graph,
         Dictionary<FastNodeKey, FastNode> nodeByKey,
         Dictionary<FastTensorKey, IRuntimeTensor> store,
-        int maxDataElements)
+        int maxDataElements,
+        QuickRunState state)
     {
         var inputs = GatherInputs(node.Inputs, store);
         return RunCompute(inputs, node, maxDataElements);

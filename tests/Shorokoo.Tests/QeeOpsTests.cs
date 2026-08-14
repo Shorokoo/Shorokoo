@@ -114,6 +114,33 @@ public class QeeOpsCoverageTests
             TensorData(DType.Float32, [], 1f),
             TensorData(DType.Float32, [], 2f),
             TensorData(DType.Float32, [], 3f)]));
+
+    [Fact]
+    public void TestNoQuickOpKeepsInstanceState() =>
+        Assert.Empty(typeof(QuickOp).Assembly.GetTypes()
+            .Where(typeof(QuickOp).IsAssignableFrom)
+            .SelectMany(t => t.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)));
+
+    /// <summary>One graph, so one set of node keys: concurrent runs collide on any trip
+    /// count the close op does not keep to itself.</summary>
+    [Fact]
+    public void TestConcurrentRunsOfOneLoopGraphKeepTheirOwnTripCounts()
+    {
+        var zero = TensorData(DType.Float32, [3L], 0f, 5f, 7f);
+        var three = TensorData(DType.Float32, [3L], 3f, 4f, 5f);
+        var g = ZeroTripLoopWithScanOutput.ComputationGraph;
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([zero])).ToConcreteModel().ToInternal();
+
+        long ScanRows(TensorData x) => ((RuntimeTensor)new QuickExecutionEngine()
+            .Run(concrete, x)[concrete.Outputs[0]]).Shape!.Dims[0];
+
+        Assert.Equal(0L, ScanRows(zero));
+        Assert.Equal(3L, ScanRows(three));
+
+        var rows = new long[256];
+        Parallel.For(0, rows.Length, i => rows[i] = ScanRows(i % 2 == 0 ? zero : three));
+        Assert.Equal([.. Enumerable.Range(0, rows.Length).Select(i => i % 2 == 0 ? 0L : 3L)], rows);
+    }
 }
 
 /// <summary>A <c>uint32</c> constant that has to survive host-side constant folding as a

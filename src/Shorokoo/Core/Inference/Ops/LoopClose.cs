@@ -74,8 +74,6 @@ internal sealed class LoopCloseOp : QuickOp
 
     public override string OpCode => OpCodes.LOOP_CLOSE;
 
-    private readonly Dictionary<FastNodeKey, int> _iterationCountByOpenNode = new();
-
     // Thread-local carrier for per-invocation metadata that the flat Compute signature can't
     // hold. Execute sets this before calling ComputeWithLoopBack and clears it afterwards.
     [ThreadStatic] private static LoopInfo? _currentLoopInfo;
@@ -90,11 +88,18 @@ internal sealed class LoopCloseOp : QuickOp
         /// loop's maxIterations and initial condition.
         /// </summary>
         public bool HasOpenInputs;
+        /// <summary>
+        /// The running engine's own trip counts, which belong to the run rather than to this
+        /// op: <see cref="OpRegistry"/> shares one instance of the op across every engine on
+        /// every thread, and the count gates the zero-trip decision, so a lost or torn entry
+        /// would not skew a trip count but pick the wrong outputs entirely.
+        /// </summary>
+        public required Dictionary<FastNodeKey, int> Iterations;
     }
 
     public override (IRuntimeTensor[] results, bool loopBack) Execute(
         FastNode node, InternalComputationGraph graph, Dictionary<FastNodeKey, FastNode> nodeByKey,
-        Dictionary<FastTensorKey, IRuntimeTensor> store, int maxDataElements)
+        Dictionary<FastTensorKey, IRuntimeTensor> store, int maxDataElements, QuickRunState state)
     {
         FastNode? openNode = null;
         if (node.GraphOpenNodeKey is FastNodeKey openKey && !openKey.IsEmpty)
@@ -114,6 +119,7 @@ internal sealed class LoopCloseOp : QuickOp
             NLoop = Math.Max(0, openInputs.Length - 2),
             OpenNodeKey = openNode?.Key ?? default,
             HasOpenInputs = openInputs.Length >= 2,
+            Iterations = state.LoopIterations,
         };
         _currentLoopInfo = info;
         try
@@ -158,7 +164,7 @@ internal sealed class LoopCloseOp : QuickOp
         bool? initialCondValue = null;
         if (initialCondInput?.BoolData is { Length: > 0 } ic) initialCondValue = ic[0];
 
-        _iterationCountByOpenNode.TryGetValue(info.OpenNodeKey, out int iter);
+        info.Iterations.TryGetValue(info.OpenNodeKey, out int iter);
 
         // ONNX Loop is a while, not a do-while: a trip count of 0 — or an initial condition
         // that is already false — means the body contributes nothing. The engine only
@@ -180,14 +186,14 @@ internal sealed class LoopCloseOp : QuickOp
 
         if (!knownDone && !capReached)
         {
-            _iterationCountByOpenNode[info.OpenNodeKey] = iter + 1;
+            info.Iterations[info.OpenNodeKey] = iter + 1;
             return (BuildLoopBackResults(inputs, nLoop, iter + 1), true);
         }
 
         // Giving up at the cap is not the loop finishing: the values in hand belong to a
         // truncated prefix, so the outputs keep their shapes and lose their data.
         bool cappedOut = capReached && !knownDone;
-        _iterationCountByOpenNode.Remove(info.OpenNodeKey);
+        info.Iterations.Remove(info.OpenNodeKey);
         return (BuildTerminateResults(inputs, nLoop, nScan, zeroTrip ? 0 : iter + 1, zeroTrip, cappedOut), false);
     }
 

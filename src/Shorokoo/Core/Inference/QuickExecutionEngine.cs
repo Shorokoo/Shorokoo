@@ -165,12 +165,13 @@ public sealed class QuickExecutionEngine
                 store[kvp.Key] = kvp.Value;
 
         var nodeByKey = FastProcessorHelper.BuildNodeByKey(graph);
+        var state = new QuickRunState();
         var nodes = graph.Nodes;
         int i = 0;
         while (i < nodes.Count)
         {
             var node = nodes[i];
-            var nextIndex = ProcessNode(node, i, graph, nodeByKey, store);
+            var nextIndex = ProcessNode(node, i, graph, nodeByKey, store, state);
             i = nextIndex ?? i + 1;
         }
 
@@ -185,7 +186,8 @@ public sealed class QuickExecutionEngine
     internal int? ProcessNode(
         FastNode node, int nodeIndex, InternalComputationGraph graph,
         Dictionary<FastNodeKey, FastNode> nodeByKey,
-        Dictionary<FastTensorKey, IRuntimeTensor> store)
+        Dictionary<FastTensorKey, IRuntimeTensor> store,
+        QuickRunState state)
     {
         var outputKeys = node.Outputs;
 
@@ -225,7 +227,7 @@ public sealed class QuickExecutionEngine
         bool loopBack;
         try
         {
-            (results, loopBack) = op.Execute(node, graph, nodeByKey, store, MaxDataElements);
+            (results, loopBack) = op.Execute(node, graph, nodeByKey, store, MaxDataElements, state);
         }
         catch
         {

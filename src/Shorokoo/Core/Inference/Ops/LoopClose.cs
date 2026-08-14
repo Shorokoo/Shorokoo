@@ -36,7 +36,14 @@ namespace Shorokoo.Core.Inference.Ops;
 ///   - If the continueWhen value is known false → stop.
 ///   - If bounds are unknown and we've already done <see cref="MaxIterationsForUnknownBounds"/>
 ///     iterations → stop (shape-inference heuristic).
+///   - If the graph supplies no maxIterations at all, the loop is unbounded and only its
+///     condition can stop it, so stop after <see cref="MaxIterationsForUnboundedLoops"/>
+///     iterations whatever that condition says — otherwise a constant-true condition walks
+///     the engine forever.
 ///   - Otherwise → loop back.
+///
+/// Stopping at either cap is giving up rather than finishing, so those outputs keep their
+/// shapes and drop their data: the truncated prefix's values are not the loop's result.
 ///
 /// On loop-back, emits <c>2 + N_loop</c> tensors matching the open node's outputs; the engine
 /// maps them onto those outputs and jumps to the first body node. On terminate, emits
@@ -77,6 +84,12 @@ internal sealed class LoopCloseOp : QuickOp
     {
         public int NLoop;
         public FastNodeKey OpenNodeKey;
+        /// <summary>
+        /// Whether the paired open node was found. Without it the merged array carries no
+        /// open-side prefix, so inputs[0] and inputs[1] are body slots rather than the
+        /// loop's maxIterations and initial condition.
+        /// </summary>
+        public bool HasOpenInputs;
     }
 
     public override (IRuntimeTensor[] results, bool loopBack) Execute(
@@ -100,6 +113,7 @@ internal sealed class LoopCloseOp : QuickOp
         {
             NLoop = Math.Max(0, openInputs.Length - 2),
             OpenNodeKey = openNode?.Key ?? default,
+            HasOpenInputs = openInputs.Length >= 2,
         };
         _currentLoopInfo = info;
         try
@@ -121,7 +135,10 @@ internal sealed class LoopCloseOp : QuickOp
         // (maxIter at inputs[0], continueWhen at inputs[2 + nLoop]). Loop/scan variables at
         // the end of the array can be of any IRuntimeTensor variant and flow through
         // untouched via Build{LoopBack,Terminate}Results.
-        var maxIterInput = inputs.Length > 0 ? inputs[0] as RuntimeTensor : null;
+        // Only the open node's own prefix carries the bookkeeping inputs; with no paired
+        // open node those slots hold body carries, and reading them would misjudge both the
+        // trip count and the zero-trip test. Treat the bounds as unknown instead.
+        var maxIterInput = info.HasOpenInputs ? inputs[0] as RuntimeTensor : null;
         var continueWhenInput = inputs.Length > 2 + nLoop
             ? inputs[2 + nLoop] as RuntimeTensor
             : null;
@@ -131,13 +148,13 @@ internal sealed class LoopCloseOp : QuickOp
 
         long? maxIter = null;
         if (maxIterInput?.IntData is { Length: > 0 } mi) maxIter = mi[0];
-        bool maxIterKnown = maxIterInput is null || maxIter.HasValue;
+        bool maxIterKnown = info.HasOpenInputs && (maxIterInput is null || maxIter.HasValue);
 
         bool? continueWhenValue = null;
         if (continueWhenInput?.BoolData is { Length: > 0 } cw) continueWhenValue = cw[0];
         bool continueWhenKnown = continueWhenInput is null || continueWhenValue.HasValue;
 
-        var initialCondInput = inputs.Length > 1 ? inputs[1] as RuntimeTensor : null;
+        var initialCondInput = info.HasOpenInputs ? inputs[1] as RuntimeTensor : null;
         bool? initialCondValue = null;
         if (initialCondInput?.BoolData is { Length: > 0 } ic) initialCondValue = ic[0];
 
@@ -157,7 +174,7 @@ internal sealed class LoopCloseOp : QuickOp
         // to be bounded here instead — otherwise a condition resolving to a constant true
         // (a real one, or one a body forwards from the open node's placeholder) loops the
         // engine forever, accumulating per-iteration history until the process dies.
-        bool unbounded = maxIterInput is null;
+        bool unbounded = info.HasOpenInputs && maxIterInput is null;
         int iterationCap = unbounded ? MaxIterationsForUnboundedLoops : MaxIterationsForUnknownBounds;
         bool capReached = (unbounded || anyUnknown) && iter + 1 >= iterationCap;
 

@@ -926,6 +926,28 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
+    /// Runtime-derived zero trip count with a <c>ctx.Scan</c> output, so the LOOP survives
+    /// constant folding to the engine and takes <c>LoopCloseOp.BuildScanOutput</c>'s
+    /// zero-iteration path.
+    /// </summary>
+    [Module]
+    public partial class ZeroTripLoopWithScanOutput
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)   // x = [0,5,7] → trips = 0
+        {
+            var acc = x;
+            var trips = x.Reduce(ReduceKind.Min, keepDims: false).Scalar().Cast<int64>();
+            Variable? scanned = null;
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                acc = acc * Scalar(2f);
+                scanned = (Variable)ctx.Scan(acc);
+            }
+            return (Tensor<float32>)scanned!;
+        }
+    }
+
+    /// <summary>
     /// Constant-iter loop with a <c>ctx.Scan</c> output. Drives the scan-output
     /// branch of <c>FastFoldConstantIterationLoops.UnrollOne</c> — the per-iter
     /// <c>UNSQUEEZE</c> + final <c>CONCAT</c> stack that materialises the

@@ -1,4 +1,5 @@
 using Shorokoo.Core.Nodes.Processors.Helpers;
+using Shorokoo.Core.Inference;
 using Shorokoo.Core.Graph;
 using Shorokoo.Runtime;
 
@@ -497,6 +498,17 @@ public class ModulesCoverageTests
     public void TestZeroTripLoopLeavesTheAccumulatorUntouchedOnBothEngines()
         => Assert.True(AutoTest.AdvancedTestGraph<AnalyticLoopZeroTripCheck>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [3L], 0f, 5f, 7f)]));
+
+    [Fact]
+    public void TestZeroTripLoopStacksNoRowsIntoItsScanOutput()
+    {
+        var g = ZeroTripLoopWithScanOutput.ComputationGraph;
+        var x = TensorData(DType.Float32, [3L], 0f, 5f, 7f);
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel().ToInternal();
+        var scanned = Assert.IsType<RuntimeTensor>(
+            new QuickExecutionEngine().Run(concrete, x)[concrete.Outputs[0]]);
+        Assert.Equal(0L, scanned.Shape!.Dims[0]);
+    }
 
     [Fact]
     public void TestOpSemanticsAndControlFlowAnalyticChecksAndLoopGraphOnnxRoundtrip()

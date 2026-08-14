@@ -344,7 +344,7 @@ entry, never the tensor data. The recorded per-entry sha256s are reported as wri
 but not verified (a full `Persistence.Load` verifies them), and cheap sanity
 observations flag manifest/archive mismatches, compressed entries where STORED
 is expected, and unknown manifest keys. See the inspection section in
-[onnx-and-weights.md](onnx-and-weights.md#identify-and-summarize-a-file-checkpointinspect).
+[onnx-and-weights.md](onnx-and-weights.md#identify-and-summarize-a-file-persistenceinspect).
 
 
 A foreign `.safetensors` file (e.g. PyTorch/timm weights) lands as a native

@@ -320,7 +320,7 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
 - To see what a checkpoint file holds (the run counters — step, epoch, batch index —
   and the per-section tensor listing) without loading it — or to identify an unknown
   file — use `Persistence.Inspect(path)`;
-  see [onnx-and-weights.md](onnx-and-weights.md#identify-and-summarize-a-file-checkpointinspect).
+  see [onnx-and-weights.md](onnx-and-weights.md#identify-and-summarize-a-file-persistenceinspect).
 
 ### Bind trained weights into an inference model
 

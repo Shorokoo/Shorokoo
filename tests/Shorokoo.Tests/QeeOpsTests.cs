@@ -162,7 +162,7 @@ public class QeeOpsCoverageTests
         var engine = new QuickExecutionEngine();
 
         using (OpRegistry.Override(new ThrowingLoopCloseStub()))
-            engine.Run(concrete, x);
+            Assert.Equal(DType.Invalid, engine.Run(concrete, x)[concrete.Outputs[0]].DType);
 
         var rt = (RuntimeTensor)engine.Run(concrete, x)[concrete.Outputs[0]];
         Assert.Null(rt.IterationIndices);

@@ -17,15 +17,20 @@ public class FastProcessorsCoverageTests
     private static double[] Rep(double v, int n) => [.. Enumerable.Repeat(v, n)];
     private static TensorData Flag(bool v) => TensorData(DType.Bool, [], v);
 
-    // Split out so the rest of the struct/control-flow coverage keeps asserting. A loop mixing a
-    // plain carry with a TensorStruct carry loses the struct: the module computes 3a+3b+1, the
-    // framework returns 4a for every b, and b is dead in the concretized graph (Shorokoo#163).
-    // Drop the Skip when #163 is fixed — the expected value below is the module's own arithmetic.
-    [Fact(Skip = "Shorokoo#163: a loop mixing plain and TensorStruct carries drops the struct")]
+    [Fact]
     public void TestLoopMixingPlainAndStructCarriesKeepsBoth()
-        => Assert.True(AutoTest.AdvancedTestGraph<MixedTensorStructLoop>(
+    {
+        // 3a + 3b + 1 — both carries must survive the loop-var expansion.
+        Assert.True(AutoTest.AdvancedTestGraph<MixedTensorStructLoop>(
             hyperparamInputs: [], runtimeInputs: [Scalar32(1f), Scalar32(2f)],
             expected: [10.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<MixedTensorStructLoop>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(3f), Scalar32(7f)],
+            expected: [31.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<MixedTensorStructLoop>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(1f), Scalar32(100f)],
+            expected: [304.0]));
+    }
 
     [Fact]
     public void TestTensorStructInControlFlow()

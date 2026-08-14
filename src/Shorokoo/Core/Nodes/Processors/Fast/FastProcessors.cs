@@ -2095,7 +2095,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         // expand when at least one loopVar is a registered TensorStruct
                         // or TensorStruct sequence.
                         if (!HasRegisteredStructLoopVar(node, 2, structFields, unpackedStructSequences, ResolveKey)) break;
-                        ExpandLoopOpenStructLoopVars(node, structFields, unpackedStructSequences, structDtypeByKey, remap, loopOpenOriginalVariadicCounts, ResolveKey);
+                        ExpandLoopOpenStructLoopVars(node, structFields, unpackedStructSequences, structDtypeByKey, loopOpenOriginalVariadicCounts, ResolveKey);
                         break;
                     }
                     case OpCodes.LOOP_CLOSE:
@@ -2104,13 +2104,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         // LoopVar inputs may be TensorStruct — scan vars are always
                         // plain tensors per the op definition.
                         if (!HasRegisteredStructLoopCloseVar(node, structFields, unpackedStructSequences, loopOpenOriginalVariadicCounts, ResolveKey)) break;
-                        ExpandLoopCloseStructLoopVars(node, structFields, unpackedStructSequences, structDtypeByKey, remap, loopOpenOriginalVariadicCounts, ResolveKey);
+                        ExpandLoopCloseStructLoopVars(node, structFields, unpackedStructSequences, structDtypeByKey, loopOpenOriginalVariadicCounts, ResolveKey);
                         break;
                     }
                     case OpCodes.IF_CLOSE:
                     {
                         if (!HasRegisteredStructIfBranch(node, structFields, unpackedStructSequences, ResolveKey)) break;
-                        ExpandIfCloseStructBranches(node, structFields, unpackedStructSequences, structDtypeByKey, remap, ResolveKey);
+                        ExpandIfCloseStructBranches(node, structFields, unpackedStructSequences, structDtypeByKey, ResolveKey);
                         break;
                     }
                     case InternalOpCodes.TENSOR_STRUCT_GETFIELD:
@@ -2290,22 +2290,37 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
+        /// First output index safe to mint on <paramref name="nodeKey"/>: one past
+        /// every index <paramref name="origOutputs"/> already carries for that node.
+        /// An expanded slot's per-field key must not land on an original key that a
+        /// pass-through slot still carries — two live tensors sharing one key alias,
+        /// and the field silently resolves to the pass-through's value.
+        /// </summary>
+        private static int FirstFreeOutputIndex(FastNodeKey nodeKey, List<FastTensorKey?> origOutputs)
+        {
+            int next = 0;
+            foreach (var o in origOutputs)
+                if (o is FastTensorKey k && !k.IsEmpty && k.FastNodeKey.Equals(nodeKey) && k.OutputIndex >= next)
+                    next = k.OutputIndex + 1;
+            return next;
+        }
+
+        /// <summary>
         /// LOOP_OPEN variadic expansion. Each TensorStruct loop-var slot becomes
         /// N parallel slots (one per field); each TensorStruct-sequence loop-var
-        /// slot likewise becomes N parallel sequence slots. Plain-tensor slots
-        /// pass through with a fresh output key (their slot index shifts as
-        /// struct slots before them expand). Records the new per-field output
-        /// list in `structFields` / `unpackedStructSequences` so downstream
-        /// body consumers resolve the expanded slot directly. Stores the
-        /// pre-expansion variadic count in `loopOpenOriginalVariadicCounts`
-        /// for the matching LOOP_CLOSE handler.
+        /// slot likewise becomes N parallel sequence slots, keyed by freshly
+        /// minted output indices. Plain-tensor slots keep their original output
+        /// key and only shift position, so no consumer needs rewiring. Records
+        /// the new per-field output list in `structFields` /
+        /// `unpackedStructSequences` so downstream body consumers resolve the
+        /// expanded slot directly. Stores the pre-expansion variadic count in
+        /// `loopOpenOriginalVariadicCounts` for the matching LOOP_CLOSE handler.
         /// </summary>
         private static void ExpandLoopOpenStructLoopVars(
             FastNode openNode,
             Dictionary<FastTensorKey, List<FastTensorKey?>> structFields,
             Dictionary<FastTensorKey, List<FastTensorKey>> unpackedStructSequences,
             Dictionary<FastTensorKey, DType> structDtypeByKey,
-            Dictionary<FastTensorKey, FastTensorKey> remap,
             Dictionary<FastNodeKey, int> loopOpenOriginalVariadicCounts,
             Func<FastTensorKey, FastTensorKey> resolveKey)
         {
@@ -2323,7 +2338,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var newBodyOutputs = new List<FastTensorKey?>(origBodyOutputs.Count)
             { origBodyOutputs[0], origBodyOutputs[1] };
 
-            int slot = 2;
+            int slot = FirstFreeOutputIndex(openNode.Key, origBodyOutputs);
             for (int i = 0; i < origLoopVarInputCount; i++)
             {
                 var origIn = origDirectInputs[2 + i];
@@ -2365,9 +2380,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 else
                 {
                     newDirectInputs.Add(origIn);
-                    var newOut = new FastTensorKey(openNode.Key, slot++);
-                    newBodyOutputs.Add(newOut);
-                    if (!newOut.Equals(origOut.Value)) remap[origOut.Value] = newOut;
+                    newBodyOutputs.Add(origOut);
                 }
             }
 
@@ -2380,17 +2393,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// LOOP_CLOSE variadic expansion. Mirror of <see cref="ExpandLoopOpenStructLoopVars"/>:
         /// each TensorStruct loop-var body-input slot expands into its per-field
         /// parallel slots and the corresponding output slot expands the same way.
-        /// Scan-var inputs pass through verbatim (scan-vars are always plain
-        /// tensors per the op definition); their output slot indices shift by
-        /// the same delta as loopVars' expansion and are remapped so downstream
-        /// consumers still resolve correctly.
+        /// Scan-var inputs and outputs pass through verbatim (scan-vars are always
+        /// plain tensors per the op definition); only their position shifts, so
+        /// downstream consumers keep resolving through the unchanged key.
         /// </summary>
         private static void ExpandLoopCloseStructLoopVars(
             FastNode closeNode,
             Dictionary<FastTensorKey, List<FastTensorKey?>> structFields,
             Dictionary<FastTensorKey, List<FastTensorKey>> unpackedStructSequences,
             Dictionary<FastTensorKey, DType> structDtypeByKey,
-            Dictionary<FastTensorKey, FastTensorKey> remap,
             Dictionary<FastNodeKey, int> loopOpenOriginalVariadicCounts,
             Func<FastTensorKey, FastTensorKey> resolveKey)
         {
@@ -2407,7 +2418,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var newBodyInputs = new List<FastTensorKey?>(origBodyInputs.Count);
             newBodyInputs.Add(origBodyInputs[0]); // break
             var newFlatOutputs = new List<FastTensorKey?>();
-            int slot = 0;
+            int slot = FirstFreeOutputIndex(closeNode.Key, origFlatOutputs);
 
             // LoopVar slots (variadic).
             for (int i = 0; i < nLoopVars; i++)
@@ -2451,13 +2462,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 else
                 {
                     newBodyInputs.Add(origIn);
-                    var newOut = new FastTensorKey(closeNode.Key, slot++);
-                    newFlatOutputs.Add(newOut);
-                    if (!newOut.Equals(origOut.Value)) remap[origOut.Value] = newOut;
+                    newFlatOutputs.Add(origOut);
                 }
             }
 
-            // ScanVar slots pass through: inputs verbatim, outputs with shifted slots.
+            // ScanVar slots pass through verbatim on both sides; only their position shifts.
             for (int j = 1 + nLoopVars; j < origBodyInputs.Count; j++)
                 newBodyInputs.Add(origBodyInputs[j]);
             for (int j = nLoopVars; j < origFlatOutputs.Count; j++)
@@ -2467,9 +2476,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     "ExpandLoopCloseStructLoopVars: LOOP_CLOSE scan output slot is null. "
                     + "LoopAPI binds every scan output to a body value by construction, "
                     + "so null pass-through is unreachable.");
-                var newOut = new FastTensorKey(closeNode.Key, slot++);
-                newFlatOutputs.Add(newOut);
-                if (!newOut.Equals(origOut.Value)) remap[origOut.Value] = newOut;
+                newFlatOutputs.Add(origOut);
             }
 
             closeNode.FullInputs[OnnxOpAttributeNames.AttrBody] = newBodyInputs;
@@ -2480,15 +2487,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// IF_CLOSE branch expansion. For each branch slot, both the then- and
         /// else-side inputs must be unpacked the same way (struct vs sequence
         /// vs plain tensor) — asserted and required. Struct / sequence slots
-        /// expand into N parallel slots, one per field. Plain slots pass
-        /// through with a fresh output key.
+        /// expand into N parallel slots, one per field, keyed by freshly minted
+        /// output indices. Plain slots keep their original output key.
         /// </summary>
         private static void ExpandIfCloseStructBranches(
             FastNode ifCloseNode,
             Dictionary<FastTensorKey, List<FastTensorKey?>> structFields,
             Dictionary<FastTensorKey, List<FastTensorKey>> unpackedStructSequences,
             Dictionary<FastTensorKey, DType> structDtypeByKey,
-            Dictionary<FastTensorKey, FastTensorKey> remap,
             Func<FastTensorKey, FastTensorKey> resolveKey)
         {
             var origElse = ifCloseNode.FullInputs[OnnxOpAttributeNames.AttrElseBranch];
@@ -2498,7 +2504,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var newElse = new List<FastTensorKey?>();
             var newThen = new List<FastTensorKey?>();
             var newOuts = new List<FastTensorKey?>();
-            int slot = 0;
+            int slot = FirstFreeOutputIndex(ifCloseNode.Key, origOuts);
 
             for (int i = 0; i < origElse.Count; i++)
             {
@@ -2561,9 +2567,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 {
                     newElse.Add(origEl);
                     newThen.Add(origTh);
-                    var newOut = new FastTensorKey(ifCloseNode.Key, slot++);
-                    newOuts.Add(newOut);
-                    if (!newOut.Equals(origOut.Value)) remap[origOut.Value] = newOut;
+                    newOuts.Add(origOut);
                 }
             }
 

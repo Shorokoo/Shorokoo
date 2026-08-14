@@ -33,7 +33,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // already been rebuilt — letting us point its TargetFunction edges at
             // the new instances before constructing the new Function.
             var functionsPostOrder = CollectFunctionsPostOrder(graph);
-            var oldToNew = new Dictionary<Function, Function>(ReferenceEqualityComparer.Instance);
+            var oldToNew = new Dictionary<Function, Function>();
 
             foreach (var fn in functionsPostOrder)
             {
@@ -129,7 +129,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// </summary>
         private static List<Function> CollectFunctionsPostOrder(InternalComputationGraph graph)
         {
-            var seen = new HashSet<Function>(ReferenceEqualityComparer.Instance);
+            var seen = new HashSet<Function>();
             var result = new List<Function>();
 
             void Visit(InternalComputationGraph g)

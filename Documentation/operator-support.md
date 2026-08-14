@@ -480,7 +480,7 @@ String operators are non-differentiable, hence N/A gradients.
 |---|---|---|---|
 | If | ✅ | ✅ | ✅ [1] |
 | Loop | ✅ | 🟡 [2] | 🟡 [3] |
-| Scan | 🟡 [4] | 🟡 [2] | 🟡 [3] |
+| Scan | ❌ [4] | ❌ [4] | ❌ [4] |
 
 1. Gradients are routed through both branches; the condition is
    non-differentiable.
@@ -489,11 +489,10 @@ String operators are non-differentiable, hence N/A gradients.
 3. Loops with a statically known trip count are unrolled and differentiate
    normally; dynamic trip counts throw `AutoDiffNotSupportedException` — see
    [limitations.md](limitations.md).
-4. Imported Scan nodes are lowered to an equivalent Loop. Any
-   `scan_input_axes`/`scan_input_directions` are supported; non-zero
-   `scan_output_axes`, reverse `scan_output_directions`, and the opset-8 form
-   are rejected at import — see [limitations.md](limitations.md). QEE and
-   gradients then behave exactly as for Loop.
+4. `Scan` is not supported: Shorokoo executes `Loop`, not `Scan`, and does not
+   rewrite one into the other, so a model containing a `Scan` node is rejected
+   at import — see [limitations.md](limitations.md). Express the iteration as
+   an explicit `Loop` instead (in Shorokoo, `LoopAPI` with `ctx.Scan`).
 
 ## Shorokoo-specific operators
 

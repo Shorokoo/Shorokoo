@@ -98,6 +98,7 @@ internal static partial class FastListAllSpecificModelIdsUsed
             TransformArr = transformArr,
             TensorMasks = new Dictionary<FastTensorKey, FastTensorKey>(),
             NewNodes = new List<FastNode>(),
+            PostNodes = new List<FastNode>(),
             NodeByKey = new Dictionary<FastNodeKey, FastNode>(workGraph.Nodes.Count),
         };
 
@@ -132,28 +133,13 @@ internal static partial class FastListAllSpecificModelIdsUsed
             if (isLoopBoundary)
             {
                 // Mask-computing ops feeding into the loop boundary's new carry/scan input
-                // slots come first; the loop node itself must follow them.
-                // (Post-loop REDUCE_MAX nodes for scan masks are only ever emitted by
-                // HandleLoopClose and land AFTER the close node — we split them out below.)
-                if (node.OpCode == OpCodes.LOOP_CLOSE)
-                {
-                    // HandleLoopClose may emit both pre-close mask ops (for the new input
-                    // slots) and post-close ReduceMax ops (for scan-output masks). Split at
-                    // the first ReduceMax and place the rest after the close node. Inputs to
-                    // ReduceMax post-close are the LOOP_CLOSE's own outputs, which only exist
-                    // after it runs.
-                    int splitIdx = context.NewNodes.FindIndex(n => n.OpCode == OpCodes.REDUCE_MAX);
-                    if (splitIdx < 0) splitIdx = context.NewNodes.Count;
-                    for (int k = 0; k < splitIdx; k++) finalNodes.Add(context.NewNodes[k]);
-                    finalNodes.Add(node);
-                    for (int k = splitIdx; k < context.NewNodes.Count; k++) finalNodes.Add(context.NewNodes[k]);
-                }
-                else
-                {
-                    finalNodes.AddRange(context.NewNodes);
-                    finalNodes.Add(node);
-                }
+                // slots come first; the loop node itself must follow them. HandleLoopClose
+                // also emits ops reading the close node's own outputs — those go in PostNodes.
+                finalNodes.AddRange(context.NewNodes);
+                finalNodes.Add(node);
+                finalNodes.AddRange(context.PostNodes);
                 context.NewNodes.Clear();
+                context.PostNodes.Clear();
             }
             else
             {
@@ -255,6 +241,12 @@ internal static partial class FastListAllSpecificModelIdsUsed
         public FastTensorKey ZeroUnsqueezedKey;   // [0L] (vector of one) for left-pad amount
         public Dictionary<FastTensorKey, FastTensorKey> TensorMasks = null!;
         public List<FastNode> NewNodes = null!;
+        /// <summary>
+        /// Mask ops that read a node's own outputs and so must be placed AFTER it. Only
+        /// <see cref="HandleLoopClose"/> emits into this list; every other handler uses
+        /// <see cref="NewNodes"/>.
+        /// </summary>
+        public List<FastNode> PostNodes = null!;
         public Dictionary<FastNodeKey, FastNode> NodeByKey = null!;
     }
 }
@@ -605,11 +597,12 @@ internal static partial class FastListAllSpecificModelIdsUsed
         newOutputs.AddRange(scanOutputMaskKeys);
         node.FullOutputs[""] = newOutputs;
 
-        // Record tensor masks for the final-carry outputs (direct assignment).
+        // Record tensor masks for the final-carry outputs, OR'd with the body-side update
+        // mask (see UnionWithBodyMask).
         for (int i = 0; i < numOrigLoopVars; i++)
         {
             if (origFinalCarries[i] is FastTensorKey fc && !fc.IsEmpty && finalCarryMaskKeys[i] is FastTensorKey fcm)
-                ctx.TensorMasks[fc] = fcm;
+                ctx.TensorMasks[fc] = UnionWithBodyMask(fcm, carryUpdateMasks[i], ctx);
         }
 
         // Scan-output masks come out as [numIterations, numModelIds] tensors. Reduce-max
@@ -618,11 +611,31 @@ internal static partial class FastListAllSpecificModelIdsUsed
         {
             if (origScanOutputs[i] is FastTensorKey so && !so.IsEmpty && scanOutputMaskKeys[i] is FastTensorKey som)
             {
-                var reduced = CreateReduceMaxAxis0(som, ctx.NewNodes);
-                ctx.TensorMasks[so] = reduced;
+                var reduced = CreateReduceMaxAxis0(som, ctx.PostNodes);
+                ctx.TensorMasks[so] = UnionWithBodyMask(reduced, scanVarMasks[i], ctx);
             }
         }
     }
+
+    /// <summary>
+    /// OR a loop output's mask — as the loop itself produced it — with the mask the body
+    /// computed for the matching carry/scan update.
+    ///
+    /// <para>Liveness is a <i>may</i> analysis: a model ID referenced anywhere in a loop body
+    /// is used by that loop, whatever trip count the hints happen to imply. The loop's own
+    /// mask carries do not say that on their own, because they inherit the loop's value
+    /// semantics — a statically zero-trip loop yields its initializers (an empty mask), which
+    /// would prune every param the body references even though a zero-trip loop still
+    /// realizes its in-loop param grid's padded cell. ORing the body's update mask back in
+    /// makes the answer independent of the trip count; for a loop that does iterate it is a
+    /// no-op, since the loop's final carry mask <i>is</i> the last iteration's update mask.
+    /// </para>
+    /// </summary>
+    private static FastTensorKey UnionWithBodyMask(
+        FastTensorKey loopOutputMask, FastTensorKey? bodyMask, MaskBuildContext ctx)
+        => bodyMask is FastTensorKey bm && !bm.IsEmpty
+            ? CreateBinaryOp(OpCodes.OR, loopOutputMask, bm, ctx.PostNodes)
+            : loopOutputMask;
 }
 
 // PART 4: helpers — constant builders, op builders, one-hot construction, input preparation.

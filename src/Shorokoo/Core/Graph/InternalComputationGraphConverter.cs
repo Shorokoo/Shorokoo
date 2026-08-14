@@ -59,9 +59,9 @@ namespace Shorokoo.Graph
             // follows the right producer even when keys would otherwise collide.
             var usedNodeKeys = new HashSet<NodeKey>();
             var usedFastIds = useSequentialIds ? new HashSet<UInt128>() : null;
-            var variableToKey = new Dictionary<Variable, FastTensorKey>(ReferenceEqualityComparer.Instance);
+            var variableToKey = new Dictionary<Variable, FastTensorKey>();
             // For GraphOpenNodeKey: map from Node object to the assigned FastNodeKey.
-            var nodeToAssignedKey = new Dictionary<Node, FastNodeKey>(ReferenceEqualityComparer.Instance);
+            var nodeToAssignedKey = new Dictionary<Node, FastNodeKey>();
 
             // Pre-seed variableToKey with externally-supplied mappings for stand-in
             // input IValues. Their owning Nodes are skipped below so the host-graph

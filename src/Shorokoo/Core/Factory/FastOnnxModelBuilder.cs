@@ -566,7 +566,7 @@ namespace Shorokoo.Core.Factory
             // inside the outer module and only passed to the inner function as a
             // parameter). Without these the loader's ReconstructTensorStructDType
             // fails the metadata lookup when it walks the FunctionProto's inputs.
-            var seenFunctions = new HashSet<Function>(ReferenceEqualityComparer.Instance);
+            var seenFunctions = new HashSet<Function>();
             void VisitFunction(Function fn)
             {
                 if (!seenFunctions.Add(fn)) return;
@@ -1092,7 +1092,7 @@ namespace Shorokoo.Core.Factory
         /// </summary>
         private static List<Function> CollectFunctionsPostOrder(InternalComputationGraph graph)
         {
-            var seen = new HashSet<Function>(ReferenceEqualityComparer.Instance);
+            var seen = new HashSet<Function>();
             var result = new List<Function>();
 
             void Visit(InternalComputationGraph g)

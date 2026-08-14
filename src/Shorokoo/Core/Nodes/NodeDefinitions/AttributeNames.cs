@@ -212,11 +212,6 @@ public static class OnnxOpAttributeNames
     public const string AttrIgnoreIndex = "ignore_index";
 
     // From Scan
-    public const string AttrNumScanInputs = "num_scan_inputs";
-    public const string AttrScanInputAxes = "scan_input_axes";
-    public const string AttrScanInputDirections = "scan_input_directions";
-    public const string AttrScanOutputAxes = "scan_output_axes";
-    public const string AttrScanOutputDirections = "scan_output_directions";
 
     // From Attention (opset 23/24)
     public const string AttrIsCausal = "is_causal";

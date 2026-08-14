@@ -136,7 +136,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
 
             // 2. Walk in reverse topo order, calling per-node gradient methods.
             var gradByKey = new Dictionary<FastTensorKey, Variable>();
-            var freshInputBacking = new Dictionary<Variable, FastTensorKey>(ReferenceEqualityComparer.Instance);
+            var freshInputBacking = new Dictionary<Variable, FastTensorKey>();
 
             // Initialize loss gradient: a Scalar<float32> = 1.0. We hardcode float32 here;
             // see class doc for the rationale.

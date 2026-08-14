@@ -66,25 +66,22 @@ included), and a side of the range worth less than one weight unit — the negat
 generator bits spent per element, so a deeper draw is possible but costs more of them. See
 [uniform-draws.md](uniform-draws.md) for the full contract.
 
-### ONNX `Scan` import: stacked-output attributes
+### ONNX `Scan` import
 
-Imported `Scan` nodes are lowered to an equivalent `Loop` (trip count from the
-scan input's shape, per-iteration slicing via `Gather`, scan outputs stacked by
-the Loop). Any `scan_input_axes` and `scan_input_directions` are supported.
-Because a `Loop` always stacks its scan outputs along axis 0 in iteration
-order, non-zero `scan_output_axes` and reverse `scan_output_directions` are
-rejected at import time with a `NotSupportedException` naming the attribute.
-Workaround: export the model with default output axes/directions and apply the
-`Transpose`/reversal downstream of the Scan instead. The opset-8 form of Scan
-(implicit batch dimension + `sequence_lens` input) is likewise rejected;
-re-export at opset 9 or later.
+`Scan` cannot be imported. Shorokoo executes `Loop`, not `Scan`, and does not
+rewrite one into the other, so a model containing a `Scan` node is rejected at
+import. Workaround: express the iteration as an explicit `Loop` — slice each
+per-iteration input inside the body with `Gather` on the iteration index, and
+let the `Loop` stack its scan outputs — or re-export the model from the source
+framework with the `Scan` already expressed that way. In Shorokoo, build the
+equivalent with `LoopAPI` and `ctx.Scan`, which is fully supported.
 
 ### ONNX `SequenceMap` import
 
 `SequenceMap` cannot be imported. Lowering it to a `Loop` requires whole-graph
 type inference: its variadic additional inputs are mapped per-element when
-sequence-typed but broadcast when tensor-typed — indistinguishable at the
-proto level — and the per-output accumulator sequences need a typed
+sequence-typed but broadcast when tensor-typed — indistinguishable without
+inferring the element types — and the per-output accumulator sequences need a typed
 `SequenceEmpty` seed. The ONNX Runtime execution backend has no `SequenceMap`
 kernel to fall back on either. The importer rejects the model with an
 error. Workaround: express the mapping as an explicit `Loop` over

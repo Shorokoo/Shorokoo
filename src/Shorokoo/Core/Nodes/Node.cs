@@ -223,8 +223,6 @@ namespace Shorokoo.Core.Nodes
                                         this.OpCode == OpCodes.IF_CLOSE ? OpCodes.IF :
                                         this.OpCode == OpCodes.LOOP_OPEN ? OpCodes.LOOP :
                                         this.OpCode == OpCodes.LOOP_CLOSE ? OpCodes.LOOP :
-                                        this.OpCode == OpCodes.SCAN_OPEN ? OpCodes.SCAN :
-                                        this.OpCode == OpCodes.SCAN_CLOSE ? OpCodes.SCAN :
                                         this.OpCode == OpCodes.SEQUENCE_MAP_OPEN ? OpCodes.SEQUENCE_MAP :
                                         this.OpCode == OpCodes.SEQUENCE_MAP_CLOSE ? OpCodes.SEQUENCE_MAP :
                                         this.OpCode;

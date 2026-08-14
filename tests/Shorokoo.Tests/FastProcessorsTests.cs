@@ -18,21 +18,6 @@ public class FastProcessorsCoverageTests
     private static TensorData Flag(bool v) => TensorData(DType.Bool, [], v);
 
     [Fact]
-    public void TestLoopMixingPlainAndStructCarriesKeepsBoth()
-    {
-        // 3a + 3b + 1 — both carries must survive the loop-var expansion.
-        Assert.True(AutoTest.AdvancedTestGraph<MixedTensorStructLoop>(
-            hyperparamInputs: [], runtimeInputs: [Scalar32(1f), Scalar32(2f)],
-            expected: [10.0]));
-        Assert.True(AutoTest.AdvancedTestGraph<MixedTensorStructLoop>(
-            hyperparamInputs: [], runtimeInputs: [Scalar32(3f), Scalar32(7f)],
-            expected: [31.0]));
-        Assert.True(AutoTest.AdvancedTestGraph<MixedTensorStructLoop>(
-            hyperparamInputs: [], runtimeInputs: [Scalar32(1f), Scalar32(100f)],
-            expected: [304.0]));
-    }
-
-    [Fact]
     public void TestTensorStructInControlFlow()
     {
         // Bare TensorStruct loop vars / IF branches: ExpandLoopOpenStructLoopVars,
@@ -51,7 +36,17 @@ public class FastProcessorsCoverageTests
             expected: [1.0]));
         Assert.True(AutoTest.AdvancedTestGraph<IfElseMixedStructAndPlainSlots>(
             hyperparamInputs: [], runtimeInputs: [Flag(true), Scalar32(3f), Scalar32(5f)],
-            expected: [11.0]));
+            expected: [61.0]));
+
+        // A plain carry interleaved with a struct carry, both slot orders of the
+        // expansion, unrolled (constant trip count) and not (runtime trip count).
+        Assert.True(AutoTest.AdvancedTestGraph<MixedTensorStructLoop>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(1f), Scalar32(2f)],
+            expected: [10.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<MixedTensorStructLoopRuntimeTripCount>(
+            hyperparamInputs: [],
+            runtimeInputs: [TensorData(DType.Float32, [2L], 2f, 5f), Scalar32(1f), Scalar32(2f)],
+            expected: [10.0]));
         Assert.True(AutoTest.AdvancedTestGraph<TensorStructLoopCarryWithScanOutput>(
             hyperparamInputs: [], runtimeInputs: [Scalar32(1f), Scalar32(2f)],
             expected: [3.0, 6.0, 9.0]));

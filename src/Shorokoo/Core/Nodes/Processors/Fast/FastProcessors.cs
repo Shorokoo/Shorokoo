@@ -2295,6 +2295,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// An expanded slot's per-field key must not land on an original key that a
         /// pass-through slot still carries — two live tensors sharing one key alias,
         /// and the field silently resolves to the pass-through's value.
+        /// <para>
+        /// Precondition: <paramref name="origOutputs"/> is the node's <em>only</em>
+        /// output group, so no live key carrying <paramref name="nodeKey"/> sits
+        /// outside the scanned list. That holds for the three callers — LoopAPI
+        /// collapses LOOP_OPEN's declared groups into one, and LOOP_CLOSE / IF_CLOSE
+        /// have only the default group — but a multi-group node (IF_OPEN) would need
+        /// every group scanned.
+        /// </para>
         /// </summary>
         private static int FirstFreeOutputIndex(FastNodeKey nodeKey, List<FastTensorKey?> origOutputs)
         {

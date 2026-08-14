@@ -121,8 +121,6 @@ public class QeeOpsCoverageTests
             .Where(typeof(QuickOp).IsAssignableFrom)
             .SelectMany(t => t.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)));
 
-    /// <summary>One graph, so one set of node keys: concurrent runs collide on any trip
-    /// count the close op does not keep to itself.</summary>
     [Fact]
     public void TestConcurrentRunsOfOneLoopGraphKeepTheirOwnTripCounts()
     {
@@ -151,8 +149,6 @@ public class QeeOpsCoverageTests
             => throw new InvalidOperationException();
     }
 
-    /// <summary>A close node that throws never pops its loop frame, so the frame belongs to
-    /// the run rather than to the engine the caller may reuse.</summary>
     [Fact]
     public void TestEngineReuseAfterAFailedLoopRunLeavesOutputsUntaggedByIteration()
     {

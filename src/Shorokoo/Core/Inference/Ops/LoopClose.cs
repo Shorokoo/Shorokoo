@@ -75,8 +75,8 @@ internal sealed class LoopCloseOp : QuickOp
     public override string OpCode => OpCodes.LOOP_CLOSE;
 
     /// <summary>
-    /// Per-invocation metadata the flat <c>Compute</c> signature cannot hold.
-    /// <see cref="Execute"/> builds one and hands it to <see cref="ComputeLoop"/> directly.
+    /// What <see cref="Execute"/> derives from the paired open node and hands to
+    /// <see cref="ComputeLoop"/>, which cannot recover any of it from the flat input array.
     /// </summary>
     private sealed class LoopInfo
     {

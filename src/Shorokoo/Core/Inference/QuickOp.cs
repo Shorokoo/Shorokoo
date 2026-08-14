@@ -16,7 +16,7 @@ namespace Shorokoo.Core.Inference;
 /// <summary>
 /// Base class for every operator implementation in the QuickExecutionEngine. A single
 /// instance is registered per op code and invoked for every node bearing that op code — by
-/// every engine, on every thread — so an op holds no fields at all. What has to survive
+/// every engine, on every thread — so an op holds no mutable state. What has to survive
 /// between invocations lives in the per-run <see cref="QuickRunState"/> that
 /// <see cref="Execute"/> receives; anything an <see cref="Execute"/> override needs to hand
 /// its own helpers travels as an argument.
@@ -62,7 +62,10 @@ internal abstract class QuickOp
     }
 
     /// <summary>
-    /// Shared tail used by every <see cref="Execute"/> override: delegates to
+    /// Shared tail for the default <see cref="Execute"/> and for overrides whose results come
+    /// straight from <c>Compute</c> (<c>IfCloseOp</c>) — an override that builds its results some
+    /// other way calls <see cref="FinalizeOutputs"/> itself, as <c>SplitOp</c> and
+    /// <c>LoopCloseOp</c> do. Delegates to
     /// <see cref="Compute(IRuntimeTensor?[], OnnxCSharpAttributes, int)"/>, narrows each integer
     /// output to its declared width, and enforces the per-output data-size limit. Each op is
     /// expected to emit <see cref="IRuntimeTensor"/> results with their dtype already populated

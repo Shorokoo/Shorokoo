@@ -22,8 +22,9 @@ internal sealed class QuickRunState
     public Dictionary<FastNodeKey, int> LoopIterations { get; } = new();
 
     /// <summary>
-    /// One entry per loop the walk is currently inside, outermost first. Lets the engine tag
-    /// newly-produced tensors with their loop iteration indices and lets <c>LOOP_CLOSE</c>
+    /// One entry per loop the walk is currently inside, outermost first. Its depth is what
+    /// tags newly-produced tensors as having come from inside a loop (see
+    /// <see cref="IRuntimeTensor.IterationIndices"/>), and its frames let <c>LOOP_CLOSE</c>
     /// resolve the index of the node immediately after its paired <c>LOOP_OPEN</c>.
     ///
     /// A frame is only popped when its close node terminates, which a throwing or malformed

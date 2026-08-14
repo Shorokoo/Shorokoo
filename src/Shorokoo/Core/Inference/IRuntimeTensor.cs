@@ -32,8 +32,10 @@ public interface IRuntimeTensor
     Variable? ReferenceTensor { get; init; }
 
     /// <summary>
-    /// Iteration indices of the enclosing loops at the time this tensor was produced (outermost
-    /// first). Null for tensors created outside every loop.
+    /// One slot per loop enclosing this tensor when it was produced, outermost first. Null for
+    /// tensors created outside every loop. Only the length is meaningful — the nesting depth;
+    /// the engine fills the slots with zeros rather than the iteration each loop was on, and
+    /// nothing reads them.
     /// </summary>
     ImmutableArray<long>? IterationIndices { get; init; }
 

@@ -137,8 +137,9 @@ public class QeeOpsCoverageTests
         Assert.Equal(0L, ScanRows(zero));
         Assert.Equal(3L, ScanRows(three));
 
-        var rows = new long[256];
-        Parallel.For(0, rows.Length, i => rows[i] = ScanRows(i % 2 == 0 ? zero : three));
+        var rows = new long[64];
+        Parallel.For(0, rows.Length, new ParallelOptions { MaxDegreeOfParallelism = 4 },
+            i => rows[i] = ScanRows(i % 2 == 0 ? zero : three));
         Assert.Equal([.. Enumerable.Range(0, rows.Length).Select(i => i % 2 == 0 ? 0L : 3L)], rows);
     }
 

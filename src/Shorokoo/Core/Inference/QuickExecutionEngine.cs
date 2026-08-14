@@ -36,6 +36,10 @@ namespace Shorokoo.Core.Inference;
 ///     op decides whether to loop again. On a loop-back, the close op's results are mapped onto
 ///     the open node's outputs (the in-body loop vars) and the engine jumps back to the node
 ///     after the open node. Tensors produced inside a loop accumulate per-iteration history.
+///   - An instance carries no mutable state: everything a walk accumulates lives in the
+///     <see cref="QuickRunState"/> that each <c>Run</c> creates for itself. One engine is
+///     therefore reusable across runs — including after a run that gave up part-way — and
+///     safe to share between threads.
 /// </summary>
 public sealed class QuickExecutionEngine
 {
@@ -49,24 +53,6 @@ public sealed class QuickExecutionEngine
     /// Instance-visible accessor for the element threshold.
     /// </summary>
     public int MaxDataElements { get; init; } = DefaultMaxDataElements;
-
-    private readonly struct FastLoopFrame
-    {
-        public readonly FastNode OpenNode;
-        public readonly int OpenNodeIndex;
-        public FastLoopFrame(FastNode openNode, int openNodeIndex)
-        {
-            OpenNode = openNode;
-            OpenNodeIndex = openNodeIndex;
-        }
-    }
-
-    /// <summary>
-    /// One entry per currently-active loop, outermost first. Lets the engine tag newly-produced
-    /// tensors with their loop iteration indices and lets <c>LOOP_CLOSE</c> resolve the index
-    /// of the node immediately after its paired <c>LOOP_OPEN</c>.
-    /// </summary>
-    private readonly List<FastLoopFrame> _fastLoopStack = new();
 
     /// <summary>
     /// Readonly-graph overload of <see cref="Run(InternalComputationGraph, TensorData[])"/>.
@@ -214,7 +200,7 @@ public sealed class QuickExecutionEngine
         }
 
         if (node.OpCode == OpCodes.LOOP_OPEN)
-            _fastLoopStack.Add(new FastLoopFrame(node, nodeIndex));
+            state.LoopStack.Add(new FastLoopFrame(node, nodeIndex));
 
         var op = OpRegistry.Get(node.OpCode);
         if (op is null)
@@ -247,34 +233,35 @@ public sealed class QuickExecutionEngine
                 return null;
             }
 
-            StoreResults(openNode.Outputs, results, store);
+            StoreResults(openNode.Outputs, results, store, state);
 
-            var frameIdx = _fastLoopStack.FindLastIndex(f => f.OpenNode.Key == openNode.Key);
+            var frameIdx = state.LoopStack.FindLastIndex(f => f.OpenNode.Key == openNode.Key);
             if (frameIdx < 0)
             {
-                StoreResults(outputKeys, results, store);
+                StoreResults(outputKeys, results, store, state);
                 return null;
             }
-            return _fastLoopStack[frameIdx].OpenNodeIndex + 1;
+            return state.LoopStack[frameIdx].OpenNodeIndex + 1;
         }
 
         if (node.OpCode == OpCodes.LOOP_CLOSE && node.GraphOpenNodeKey is FastNodeKey ck && !ck.IsEmpty)
         {
-            var frameIdx = _fastLoopStack.FindLastIndex(f => f.OpenNode.Key == ck);
-            if (frameIdx >= 0) _fastLoopStack.RemoveAt(frameIdx);
+            var frameIdx = state.LoopStack.FindLastIndex(f => f.OpenNode.Key == ck);
+            if (frameIdx >= 0) state.LoopStack.RemoveAt(frameIdx);
         }
 
-        StoreResults(outputKeys, results, store);
+        StoreResults(outputKeys, results, store, state);
         return null;
     }
 
-    private void StoreResults(
+    private static void StoreResults(
         System.Collections.Generic.List<FastTensorKey?> outputKeys,
         IRuntimeTensor[] results,
-        Dictionary<FastTensorKey, IRuntimeTensor> store)
+        Dictionary<FastTensorKey, IRuntimeTensor> store,
+        QuickRunState state)
     {
-        ImmutableArray<long>? iterTemplate = _fastLoopStack.Count > 0
-            ? ImmutableArray.Create(new long[_fastLoopStack.Count])
+        ImmutableArray<long>? iterTemplate = state.LoopStack.Count > 0
+            ? ImmutableArray.Create(new long[state.LoopStack.Count])
             : null;
 
         for (int i = 0; i < outputKeys.Count; i++)
@@ -289,7 +276,7 @@ public sealed class QuickExecutionEngine
             var newIter = iterTemplate;
             ImmutableArray<IRuntimeTensor>? newHistory = null;
             bool setHistory = false;
-            if (_fastLoopStack.Count > 0 && store.TryGetValue(k.Value, out var prior))
+            if (state.LoopStack.Count > 0 && store.TryGetValue(k.Value, out var prior))
             {
                 newHistory = prior.History is { } h ? h.Add(prior) : ImmutableArray.Create(prior);
                 setHistory = true;

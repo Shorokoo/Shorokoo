@@ -141,6 +141,32 @@ public class QeeOpsCoverageTests
         Parallel.For(0, rows.Length, i => rows[i] = ScanRows(i % 2 == 0 ? zero : three));
         Assert.Equal([.. Enumerable.Range(0, rows.Length).Select(i => i % 2 == 0 ? 0L : 3L)], rows);
     }
+
+    private sealed class ThrowingLoopCloseStub : QuickOp
+    {
+        public override string OpCode => OpCodes.LOOP_CLOSE;
+        protected override RuntimeTensor[] Compute(
+            RuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
+            => throw new InvalidOperationException();
+    }
+
+    /// <summary>A close node that throws never pops its loop frame, so the frame belongs to
+    /// the run rather than to the engine the caller may reuse.</summary>
+    [Fact]
+    public void TestEngineReuseAfterAFailedLoopRunLeavesOutputsUntaggedByIteration()
+    {
+        var x = TensorData(DType.Float32, [3L], 3f, 4f, 5f);
+        var g = ZeroTripLoopWithScanOutput.ComputationGraph;
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel().ToInternal();
+        var engine = new QuickExecutionEngine();
+
+        using (OpRegistry.Override(new ThrowingLoopCloseStub()))
+            engine.Run(concrete, x);
+
+        var rt = (RuntimeTensor)engine.Run(concrete, x)[concrete.Outputs[0]];
+        Assert.Null(rt.IterationIndices);
+        Assert.Equal(3L, rt.Shape!.Dims[0]);
+    }
 }
 
 /// <summary>A <c>uint32</c> constant that has to survive host-side constant folding as a

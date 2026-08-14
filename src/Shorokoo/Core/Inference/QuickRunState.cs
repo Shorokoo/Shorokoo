@@ -20,4 +20,29 @@ internal sealed class QuickRunState
     /// when the loop terminates.
     /// </summary>
     public Dictionary<FastNodeKey, int> LoopIterations { get; } = new();
+
+    /// <summary>
+    /// One entry per loop the walk is currently inside, outermost first. Lets the engine tag
+    /// newly-produced tensors with their loop iteration indices and lets <c>LOOP_CLOSE</c>
+    /// resolve the index of the node immediately after its paired <c>LOOP_OPEN</c>.
+    ///
+    /// A frame is only popped when its close node terminates, which a throwing or malformed
+    /// close node never reaches — so this rides on the run rather than on the engine, and a
+    /// run that gives up part-way cannot leave a later one believing it is inside a loop.
+    /// </summary>
+    public List<FastLoopFrame> LoopStack { get; } = new();
+}
+
+/// <summary>A <c>LOOP_OPEN</c> the walk is currently inside, and where it sits in the node
+/// list — the loop-back jump target is the node after it.</summary>
+internal readonly struct FastLoopFrame
+{
+    public readonly FastNode OpenNode;
+    public readonly int OpenNodeIndex;
+
+    public FastLoopFrame(FastNode openNode, int openNodeIndex)
+    {
+        OpenNode = openNode;
+        OpenNodeIndex = openNodeIndex;
+    }
 }

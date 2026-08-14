@@ -7,7 +7,7 @@ namespace Shorokoo.Tests;
 
 /// <summary>
 /// Import-side coverage for <c>Scan</c> (lowered to <c>Loop</c> by
-/// <c>OnnxControlFlowLowering</c>), for the <c>Loop</c> it lowers to, and for
+/// <c>FastLowerScanToLoop</c>), for the <c>Loop</c> it lowers to, and for
 /// <c>SequenceMap</c> (a documented import limitation). Models are built from Shorokoo's
 /// own proto classes, imported through <see cref="OnnxModelImporter"/>, then executed via
 /// ComputeContext and the QuickExecutionEngine.
@@ -145,6 +145,17 @@ public class ScanSequenceMapTests
         var y = store[graph.Outputs[1]];
         Assert.Equal(DType.Float32, y.DType);
         Assert.Equal([3L, 4L], Assert.IsType<RuntimeTensor>(y).Shape!.Dims);
+    }
+
+    /// <summary>LOOP_OPEN's condition passthrough is a placeholder the engine fabricates (the
+    /// definition leaves the output unnamed, typed VestigalTrue); no graph may consume it.</summary>
+    [Fact]
+    public void TestScanLoweringLeavesTheLoopConditionPassthroughUnconsumed()
+    {
+        var graph = Import(BuildCumulativeSumScanModel(stateLen: 4, outYShape: [3L, 4L]));
+        var passthrough = graph.Nodes.Single(n => n.OpCode == OpCodes.LOOP_OPEN).Outputs[1]!.Value;
+        Assert.DoesNotContain(graph.Nodes,
+            n => n.Inputs.Any(i => i is not null && i.Value.Equals(passthrough)));
     }
 
     /// <summary>A zero-row Scan lowers to a zero-trip Loop. Only the scan output's row count

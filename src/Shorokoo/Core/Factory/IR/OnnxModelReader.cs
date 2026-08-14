@@ -65,15 +65,13 @@ namespace Shorokoo.Core.Factory.IR
 
         public InternalComputationGraph BuildInternalComputationGraph()
         {
-            // Lower control-flow ops Shorokoo doesn't execute natively (Scan → Loop)
-            // and reject unsupported ones (SequenceMap) with an actionable error,
-            // before any FastNode is materialized.
-            OnnxControlFlowLowering.Process(this.model);
-
             var tensorStructDefs = ParseTensorStructMetadata(this.model);
 
             var (functions, onnxNameToFunction) = internalBuildFunctions(this.model.Functions, this.OpSetVersion, tensorStructDefs);
             var fastGraph = internalBuildInternalComputationGraph(this.model.Graph, functions, onnxNameToFunction, this.OpSetVersion, tensorStructDefs);
+            // Lower the control-flow ops Shorokoo doesn't execute natively (Scan → Loop) and
+            // reject the unsupported ones (SequenceMap), before any other pass sees the graph.
+            Shorokoo.Core.Nodes.Processors.Fast.FastLowerScanToLoop.Process(fastGraph, (long)this.OpSetVersion);
             Shorokoo.Core.Nodes.Processors.Fast.FastUnPrepFromOnnx.Process(fastGraph);
             return fastGraph;
         }

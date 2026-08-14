@@ -16,7 +16,7 @@ namespace Shorokoo.Core.Inference.Ops;
 
 /// <summary>
 /// Close side of a <c>Loop</c> node pair. <see cref="Execute"/> pulls the paired open node's
-/// inputs out of the store and prepends them so the pure <see cref="ComputeWithLoopBack"/>
+/// inputs out of the store and prepends them so the pure <see cref="ComputeLoop"/>
 /// sees a flat layout:
 ///   inputs[0]                           — maxIterations (may be null / no data)
 ///   inputs[1]                           — initial continue condition (may be null)
@@ -25,11 +25,11 @@ namespace Shorokoo.Core.Inference.Ops;
 ///   inputs[3 + N_loop .. 2 + 2*N_loop]  — body loop variables (next-iteration values)
 ///   inputs[3 + 2*N_loop ..]             — body scan variables
 ///
-/// <c>N_loop</c> is passed to <see cref="ComputeWithLoopBack"/> through a thread-local because
-/// it cannot be derived from the flat array alone (the body-loopvar vs scan-var split is only
-/// knowable by looking at the open node's input count).
+/// <c>N_loop</c> rides alongside in a <c>LoopInfo</c> because it cannot be derived from the
+/// flat array alone (the body-loopvar vs scan-var split is only knowable by looking at the
+/// open node's input count).
 ///
-/// Termination rules (inside <see cref="ComputeWithLoopBack"/>):
+/// Termination rules (inside <see cref="ComputeLoop"/>):
 ///   - If the loop is a zero-trip one — maxIterations known and non-positive, or the initial
 ///     condition known false, on what would be the first iteration → stop.
 ///   - If maxIterations is known and its last iteration has been completed → stop.
@@ -74,10 +74,10 @@ internal sealed class LoopCloseOp : QuickOp
 
     public override string OpCode => OpCodes.LOOP_CLOSE;
 
-    // Thread-local carrier for per-invocation metadata that the flat Compute signature can't
-    // hold. Execute sets this before calling ComputeWithLoopBack and clears it afterwards.
-    [ThreadStatic] private static LoopInfo? _currentLoopInfo;
-
+    /// <summary>
+    /// Per-invocation metadata the flat <c>Compute</c> signature cannot hold.
+    /// <see cref="Execute"/> builds one and hands it to <see cref="ComputeLoop"/> directly.
+    /// </summary>
     private sealed class LoopInfo
     {
         public int NLoop;
@@ -121,20 +121,14 @@ internal sealed class LoopCloseOp : QuickOp
             HasOpenInputs = openInputs.Length >= 2,
             Iterations = state.LoopIterations,
         };
-        _currentLoopInfo = info;
-        try
-        {
-            return RunCompute(merged, node, maxDataElements);
-        }
-        finally { _currentLoopInfo = null; }
+        var (results, loopBack) = ComputeLoop(merged, info);
+        FinalizeOutputs(results, maxDataElements);
+        return (results, loopBack);
     }
 
-    protected override (IRuntimeTensor[] results, bool loopBack) ComputeWithLoopBack(
-        IRuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
+    private static (IRuntimeTensor[] results, bool loopBack) ComputeLoop(
+        IRuntimeTensor?[] inputs, LoopInfo info)
     {
-        var info = _currentLoopInfo
-            ?? throw new InvalidOperationException(
-                "LoopCloseOp.ComputeWithLoopBack requires Execute-supplied loop context.");
         var nLoop = info.NLoop;
 
         // The termination decision only needs to inspect the plain-tensor bookkeeping inputs

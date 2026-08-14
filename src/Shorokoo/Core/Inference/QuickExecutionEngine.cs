@@ -36,6 +36,10 @@ namespace Shorokoo.Core.Inference;
 ///     op decides whether to loop again. On a loop-back, the close op's results are mapped onto
 ///     the open node's outputs (the in-body loop vars) and the engine jumps back to the node
 ///     after the open node. Tensors produced inside a loop accumulate per-iteration history.
+///   - An instance carries no mutable state: everything a walk accumulates lives in the
+///     <see cref="QuickRunState"/> that each <c>Run</c> creates for itself. One engine is
+///     therefore reusable across runs — including after a run that gave up part-way — and
+///     safe to share between threads.
 /// </summary>
 public sealed class QuickExecutionEngine
 {
@@ -49,24 +53,6 @@ public sealed class QuickExecutionEngine
     /// Instance-visible accessor for the element threshold.
     /// </summary>
     public int MaxDataElements { get; init; } = DefaultMaxDataElements;
-
-    private readonly struct FastLoopFrame
-    {
-        public readonly FastNode OpenNode;
-        public readonly int OpenNodeIndex;
-        public FastLoopFrame(FastNode openNode, int openNodeIndex)
-        {
-            OpenNode = openNode;
-            OpenNodeIndex = openNodeIndex;
-        }
-    }
-
-    /// <summary>
-    /// One entry per currently-active loop, outermost first. Lets the engine tag newly-produced
-    /// tensors with their loop iteration indices and lets <c>LOOP_CLOSE</c> resolve the index
-    /// of the node immediately after its paired <c>LOOP_OPEN</c>.
-    /// </summary>
-    private readonly List<FastLoopFrame> _fastLoopStack = new();
 
     /// <summary>
     /// Readonly-graph overload of <see cref="Run(InternalComputationGraph, TensorData[])"/>.
@@ -165,12 +151,13 @@ public sealed class QuickExecutionEngine
                 store[kvp.Key] = kvp.Value;
 
         var nodeByKey = FastProcessorHelper.BuildNodeByKey(graph);
+        var state = new QuickRunState();
         var nodes = graph.Nodes;
         int i = 0;
         while (i < nodes.Count)
         {
             var node = nodes[i];
-            var nextIndex = ProcessNode(node, i, graph, nodeByKey, store);
+            var nextIndex = ProcessNode(node, i, graph, nodeByKey, store, state);
             i = nextIndex ?? i + 1;
         }
 
@@ -185,7 +172,8 @@ public sealed class QuickExecutionEngine
     internal int? ProcessNode(
         FastNode node, int nodeIndex, InternalComputationGraph graph,
         Dictionary<FastNodeKey, FastNode> nodeByKey,
-        Dictionary<FastTensorKey, IRuntimeTensor> store)
+        Dictionary<FastTensorKey, IRuntimeTensor> store,
+        QuickRunState state)
     {
         var outputKeys = node.Outputs;
 
@@ -212,12 +200,13 @@ public sealed class QuickExecutionEngine
         }
 
         if (node.OpCode == OpCodes.LOOP_OPEN)
-            _fastLoopStack.Add(new FastLoopFrame(node, nodeIndex));
+            state.LoopStack.Add(new FastLoopFrame(node, nodeIndex));
 
         var op = OpRegistry.Get(node.OpCode);
         if (op is null)
         {
             WriteDeclaredOutputs(node, store);
+            PopLoopFrame(node, state);
             return null;
         }
 
@@ -225,11 +214,12 @@ public sealed class QuickExecutionEngine
         bool loopBack;
         try
         {
-            (results, loopBack) = op.Execute(node, graph, nodeByKey, store, MaxDataElements);
+            (results, loopBack) = op.Execute(node, graph, nodeByKey, store, MaxDataElements, state);
         }
         catch
         {
             WriteDeclaredOutputs(node, store);
+            PopLoopFrame(node, state);
             return null;
         }
 
@@ -242,37 +232,53 @@ public sealed class QuickExecutionEngine
             if (openNode is null)
             {
                 WriteDeclaredOutputs(node, store);
+                PopLoopFrame(node, state);
                 return null;
             }
 
-            StoreResults(openNode.Outputs, results, store);
+            StoreResults(openNode.Outputs, results, store, state);
 
-            var frameIdx = _fastLoopStack.FindLastIndex(f => f.OpenNode.Key == openNode.Key);
+            var frameIdx = state.LoopStack.FindLastIndex(f => f.OpenNode.Key == openNode.Key);
             if (frameIdx < 0)
             {
-                StoreResults(outputKeys, results, store);
+                StoreResults(outputKeys, results, store, state);
                 return null;
             }
-            return _fastLoopStack[frameIdx].OpenNodeIndex + 1;
+            return state.LoopStack[frameIdx].OpenNodeIndex + 1;
         }
 
-        if (node.OpCode == OpCodes.LOOP_CLOSE && node.GraphOpenNodeKey is FastNodeKey ck && !ck.IsEmpty)
-        {
-            var frameIdx = _fastLoopStack.FindLastIndex(f => f.OpenNode.Key == ck);
-            if (frameIdx >= 0) _fastLoopStack.RemoveAt(frameIdx);
-        }
-
-        StoreResults(outputKeys, results, store);
+        PopLoopFrame(node, state);
+        StoreResults(outputKeys, results, store, state);
         return null;
     }
 
-    private void StoreResults(
+    /// <summary>
+    /// Drops the frame the paired <c>LOOP_OPEN</c> pushed, for a walk leaving a
+    /// <c>LOOP_CLOSE</c> for good. Every exit from a close node except a loop-back has to do
+    /// this, the ones that gave up included: a frame left behind tells
+    /// <see cref="StoreResults"/> that every later node in the run was produced inside a loop,
+    /// so their tensors pick up an iteration tag and a history they never had. A close node
+    /// naming no open node is a malformed pair, and the innermost frame is then the only one
+    /// it can have been closing.
+    /// </summary>
+    private static void PopLoopFrame(FastNode node, QuickRunState state)
+    {
+        if (node.OpCode != OpCodes.LOOP_CLOSE || state.LoopStack.Count == 0) return;
+
+        var frameIdx = node.GraphOpenNodeKey is FastNodeKey ck && !ck.IsEmpty
+            ? state.LoopStack.FindLastIndex(f => f.OpenNode.Key == ck)
+            : state.LoopStack.Count - 1;
+        if (frameIdx >= 0) state.LoopStack.RemoveAt(frameIdx);
+    }
+
+    private static void StoreResults(
         System.Collections.Generic.List<FastTensorKey?> outputKeys,
         IRuntimeTensor[] results,
-        Dictionary<FastTensorKey, IRuntimeTensor> store)
+        Dictionary<FastTensorKey, IRuntimeTensor> store,
+        QuickRunState state)
     {
-        ImmutableArray<long>? iterTemplate = _fastLoopStack.Count > 0
-            ? ImmutableArray.Create(new long[_fastLoopStack.Count])
+        ImmutableArray<long>? iterTemplate = state.LoopStack.Count > 0
+            ? ImmutableArray.Create(new long[state.LoopStack.Count])
             : null;
 
         for (int i = 0; i < outputKeys.Count; i++)
@@ -287,7 +293,7 @@ public sealed class QuickExecutionEngine
             var newIter = iterTemplate;
             ImmutableArray<IRuntimeTensor>? newHistory = null;
             bool setHistory = false;
-            if (_fastLoopStack.Count > 0 && store.TryGetValue(k.Value, out var prior))
+            if (state.LoopStack.Count > 0 && store.TryGetValue(k.Value, out var prior))
             {
                 newHistory = prior.History is { } h ? h.Add(prior) : ImmutableArray.Create(prior);
                 setHistory = true;

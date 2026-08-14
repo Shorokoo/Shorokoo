@@ -29,7 +29,8 @@ internal sealed class SplitOp : QuickOp
         InternalComputationGraph graph,
         Dictionary<FastNodeKey, FastNode> nodeByKey,
         Dictionary<FastTensorKey, IRuntimeTensor> store,
-        int maxDataElements)
+        int maxDataElements,
+        QuickRunState state)
     {
         var inputs = GatherInputs(node.Inputs, store);
         var rtInputs = new RuntimeTensor?[inputs.Length];

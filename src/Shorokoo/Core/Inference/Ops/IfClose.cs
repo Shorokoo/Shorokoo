@@ -34,7 +34,7 @@ internal sealed class IfCloseOp : QuickOp
 
     public override (IRuntimeTensor[] results, bool loopBack) Execute(
         FastNode node, InternalComputationGraph graph, Dictionary<FastNodeKey, FastNode> nodeByKey,
-        Dictionary<FastTensorKey, IRuntimeTensor> store, int maxDataElements)
+        Dictionary<FastTensorKey, IRuntimeTensor> store, int maxDataElements, QuickRunState state)
     {
         var ownInputs = GatherInputs(node.Inputs, store);
         FastNode? openNode = null;
@@ -53,7 +53,7 @@ internal sealed class IfCloseOp : QuickOp
         merged[0] = cond;
         Array.Copy(ownInputs, 0, merged, 1, ownInputs.Length);
 
-        return RunCompute(merged, node, maxDataElements);
+        return (RunCompute(merged, node, maxDataElements), false);
     }
 
     protected override IRuntimeTensor[] Compute(

@@ -15,9 +15,13 @@ namespace Shorokoo.Core.Inference;
 
 /// <summary>
 /// Base class for every operator implementation in the QuickExecutionEngine. A single
-/// instance is registered per op code and invoked for every node bearing that op code.
+/// instance is registered per op code and invoked for every node bearing that op code — by
+/// every engine, on every thread — so an op holds no mutable state. What has to survive
+/// between invocations lives in the per-run <see cref="QuickRunState"/> that
+/// <see cref="Execute"/> receives; anything an <see cref="Execute"/> override needs to hand
+/// its own helpers travels as an argument.
 ///
-/// Four layers, from specific to general:
+/// Three layers, from specific to general:
 ///   - <see cref="Compute(RuntimeTensor?[], OnnxCSharpAttributes, int)"/> (required): pure
 ///     shape/dtype inference from tensor inputs + attributes. Almost every op implements just
 ///     this.
@@ -27,13 +31,12 @@ namespace Shorokoo.Core.Inference;
 ///     that isn't a plain tensor) and delegates to the tensor-only overload. Ops that natively
 ///     work with optionals / sequences (SequenceConstruct, OptionalGetElement, etc.) override
 ///     this instead.
-///   - <see cref="ComputeWithLoopBack"/> (optional): adds a loop-back signal; default delegates
-///     to the IRuntimeTensor overload of <see cref="Compute(IRuntimeTensor?[], OnnxCSharpAttributes, int)"/>.
 ///   - <see cref="Execute"/> (optional): the orchestration layer. Has access to the graph node
 ///     and tensor store, so it can resolve inputs from places that aren't the node's own input
-///     array — e.g. a close node reading its paired open node's inputs. Default gathers
-///     <c>node.Inputs</c> and calls <see cref="ComputeWithLoopBack"/>. Only control-flow close
-///     ops need to override this.
+///     array — e.g. a close node reading its paired open node's inputs — and it alone can ask
+///     the engine to rewind a loop body. Default gathers <c>node.Inputs</c>, calls
+///     <see cref="RunCompute"/> and never loops back. Only control-flow close ops and
+///     <c>SplitOp</c> override this.
 /// </summary>
 internal abstract class QuickOp
 {
@@ -42,37 +45,42 @@ internal abstract class QuickOp
 
     /// <summary>
     /// Runs the op for the given node. Default gathers inputs by <see cref="FastTensorKey"/>
-    /// and delegates to <see cref="ComputeWithLoopBack"/>. Control-flow close ops (LoopClose,
-    /// IfClose) override this to pull in their paired open node's data.
+    /// and delegates to <see cref="RunCompute"/>. Control-flow close ops (LoopClose, IfClose)
+    /// override this to pull in their paired open node's data; only LoopClose ever asks for a
+    /// loop-back.
     /// </summary>
     public virtual (IRuntimeTensor[] results, bool loopBack) Execute(
         FastNode node,
         InternalComputationGraph graph,
         Dictionary<FastNodeKey, FastNode> nodeByKey,
         Dictionary<FastTensorKey, IRuntimeTensor> store,
-        int maxDataElements)
+        int maxDataElements,
+        QuickRunState state)
     {
         var inputs = GatherInputs(node.Inputs, store);
-        return RunCompute(inputs, node, maxDataElements);
+        return (RunCompute(inputs, node, maxDataElements), false);
     }
 
     /// <summary>
-    /// Shared tail used by every <see cref="Execute"/> override: delegates to
-    /// <see cref="ComputeWithLoopBack"/>, narrows each integer output to its declared width,
-    /// and enforces the per-output data-size limit. Each op is expected to emit
-    /// <see cref="IRuntimeTensor"/> results with their dtype already populated (no
-    /// ReferenceTensor wiring — FastNode has no Variable objects), but not to remember that
+    /// Shared tail for the default <see cref="Execute"/> and for overrides whose results come
+    /// straight from <c>Compute</c> (<c>IfCloseOp</c>) — an override that builds its results some
+    /// other way calls <see cref="FinalizeOutputs"/> itself, as <c>SplitOp</c> and
+    /// <c>LoopCloseOp</c> do. Delegates to
+    /// <see cref="Compute(IRuntimeTensor?[], OnnxCSharpAttributes, int)"/>, narrows each integer
+    /// output to its declared width, and enforces the per-output data-size limit. Each op is
+    /// expected to emit <see cref="IRuntimeTensor"/> results with their dtype already populated
+    /// (no ReferenceTensor wiring — FastNode has no Variable objects), but not to remember that
     /// QEE's shared 64-bit integer buffer is wider than most of the dtypes it carries — see
     /// <see cref="RuntimeTensorFactory.NarrowToDeclaredWidth(IRuntimeTensor)"/>.
     /// </summary>
-    protected (IRuntimeTensor[] results, bool loopBack) RunCompute(
+    protected IRuntimeTensor[] RunCompute(
         IRuntimeTensor?[] inputs,
         FastNode node,
         int maxDataElements)
     {
-        var (results, loopBack) = ComputeWithLoopBack(inputs, node.Attributes, maxDataElements);
+        var results = Compute(inputs, node.Attributes, maxDataElements);
         FinalizeOutputs(results, maxDataElements);
-        return (results, loopBack);
+        return results;
     }
 
     /// <summary>
@@ -109,20 +117,6 @@ internal abstract class QuickOp
             rs[i] = rt;
         }
         return rs;
-    }
-
-    /// <summary>
-    /// Loop-aware computation entry. Default delegates to the <see cref="IRuntimeTensor"/>
-    /// overload of <see cref="Compute(IRuntimeTensor?[], OnnxCSharpAttributes, int)"/> and
-    /// never requests a loop-back. <c>LoopCloseOp</c> overrides this to signal when the engine
-    /// should rewind the loop body.
-    /// </summary>
-    protected virtual (IRuntimeTensor[] results, bool loopBack) ComputeWithLoopBack(
-        IRuntimeTensor?[] inputs,
-        OnnxCSharpAttributes attrs,
-        int maxDataElements)
-    {
-        return (Compute(inputs, attrs, maxDataElements), false);
     }
 
     /// <summary>

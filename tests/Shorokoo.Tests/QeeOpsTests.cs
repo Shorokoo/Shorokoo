@@ -114,6 +114,73 @@ public class QeeOpsCoverageTests
             TensorData(DType.Float32, [], 1f),
             TensorData(DType.Float32, [], 2f),
             TensorData(DType.Float32, [], 3f)]));
+
+    [Fact]
+    public void TestNoQuickOpKeepsInstanceState() =>
+        Assert.Empty(typeof(QuickOp).Assembly.GetTypes()
+            .Where(typeof(QuickOp).IsAssignableFrom)
+            .SelectMany(t => t.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)));
+
+    [Fact]
+    public void TestConcurrentRunsOfOneLoopGraphKeepTheirOwnTripCounts()
+    {
+        var zero = TensorData(DType.Float32, [3L], 0f, 5f, 7f);
+        var three = TensorData(DType.Float32, [3L], 3f, 4f, 5f);
+        var g = ZeroTripLoopWithScanOutput.ComputationGraph;
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([zero])).ToConcreteModel().ToInternal();
+
+        long ScanRows(TensorData x) => ((RuntimeTensor)new QuickExecutionEngine()
+            .Run(concrete, x)[concrete.Outputs[0]]).Shape!.Dims[0];
+
+        Assert.Equal(0L, ScanRows(zero));
+        Assert.Equal(3L, ScanRows(three));
+
+        var rows = new long[64];
+        Parallel.For(0, rows.Length, new ParallelOptions { MaxDegreeOfParallelism = 4 },
+            i => rows[i] = ScanRows(i % 2 == 0 ? zero : three));
+        Assert.Equal([.. Enumerable.Range(0, rows.Length).Select(i => i % 2 == 0 ? 0L : 3L)], rows);
+    }
+
+    private sealed class ThrowingLoopCloseStub : QuickOp
+    {
+        public override string OpCode => OpCodes.LOOP_CLOSE;
+        protected override RuntimeTensor[] Compute(
+            RuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
+            => throw new InvalidOperationException();
+    }
+
+    [Fact]
+    public void TestEngineReuseAfterAFailedLoopRunLeavesOutputsUntaggedByIteration()
+    {
+        var x = TensorData(DType.Float32, [3L], 3f, 4f, 5f);
+        var g = ZeroTripLoopWithScanOutput.ComputationGraph;
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel().ToInternal();
+        var engine = new QuickExecutionEngine();
+
+        using (OpRegistry.Override(new ThrowingLoopCloseStub()))
+            Assert.Equal(DType.Invalid, engine.Run(concrete, x)[concrete.Outputs[0]].DType);
+
+        var rt = (RuntimeTensor)engine.Run(concrete, x)[concrete.Outputs[0]];
+        Assert.Null(rt.IterationIndices);
+        Assert.Equal(3L, rt.Shape!.Dims[0]);
+    }
+
+    [Fact]
+    public void TestAThrowingLoopCloseLeavesLaterNodesInTheSameRunUntagged()
+    {
+        var x = TensorData(DType.Float32, [3L], 3f, 4f, 5f);
+        var a = TensorData(DType.Float32, [], 1f);
+        var b = TensorData(DType.Float32, [], 2f);
+        var g = MixedTensorStructLoopRuntimeTripCount.ComputationGraph;
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x, a, b])).ToConcreteModel().ToInternal();
+
+        using (OpRegistry.Override(new ThrowingLoopCloseStub()))
+        {
+            var rt = (RuntimeTensor)new QuickExecutionEngine().Run(concrete, x, a, b)[concrete.Outputs[0]];
+            Assert.Equal(DType.Invalid, rt.DType);
+            Assert.Null(rt.IterationIndices);
+        }
+    }
 }
 
 /// <summary>A <c>uint32</c> constant that has to survive host-side constant folding as a

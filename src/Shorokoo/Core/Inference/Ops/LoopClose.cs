@@ -16,7 +16,7 @@ namespace Shorokoo.Core.Inference.Ops;
 
 /// <summary>
 /// Close side of a <c>Loop</c> node pair. <see cref="Execute"/> pulls the paired open node's
-/// inputs out of the store and prepends them so the pure <see cref="ComputeWithLoopBack"/>
+/// inputs out of the store and prepends them so the pure <see cref="ComputeLoop"/>
 /// sees a flat layout:
 ///   inputs[0]                           — maxIterations (may be null / no data)
 ///   inputs[1]                           — initial continue condition (may be null)
@@ -25,11 +25,11 @@ namespace Shorokoo.Core.Inference.Ops;
 ///   inputs[3 + N_loop .. 2 + 2*N_loop]  — body loop variables (next-iteration values)
 ///   inputs[3 + 2*N_loop ..]             — body scan variables
 ///
-/// <c>N_loop</c> is passed to <see cref="ComputeWithLoopBack"/> through a thread-local because
-/// it cannot be derived from the flat array alone (the body-loopvar vs scan-var split is only
-/// knowable by looking at the open node's input count).
+/// <c>N_loop</c> rides alongside in a <c>LoopInfo</c> because it cannot be derived from the
+/// flat array alone (the body-loopvar vs scan-var split is only knowable by looking at the
+/// open node's input count).
 ///
-/// Termination rules (inside <see cref="ComputeWithLoopBack"/>):
+/// Termination rules (inside <see cref="ComputeLoop"/>):
 ///   - If the loop is a zero-trip one — maxIterations known and non-positive, or the initial
 ///     condition known false, on what would be the first iteration → stop.
 ///   - If maxIterations is known and its last iteration has been completed → stop.
@@ -74,12 +74,10 @@ internal sealed class LoopCloseOp : QuickOp
 
     public override string OpCode => OpCodes.LOOP_CLOSE;
 
-    private readonly Dictionary<FastNodeKey, int> _iterationCountByOpenNode = new();
-
-    // Thread-local carrier for per-invocation metadata that the flat Compute signature can't
-    // hold. Execute sets this before calling ComputeWithLoopBack and clears it afterwards.
-    [ThreadStatic] private static LoopInfo? _currentLoopInfo;
-
+    /// <summary>
+    /// What <see cref="Execute"/> derives from the paired open node and hands to
+    /// <see cref="ComputeLoop"/>, which cannot recover any of it from the flat input array.
+    /// </summary>
     private sealed class LoopInfo
     {
         public int NLoop;
@@ -90,11 +88,18 @@ internal sealed class LoopCloseOp : QuickOp
         /// loop's maxIterations and initial condition.
         /// </summary>
         public bool HasOpenInputs;
+        /// <summary>
+        /// The running engine's own trip counts, which belong to the run rather than to this
+        /// op: <see cref="OpRegistry"/> shares one instance of the op across every engine on
+        /// every thread, and the count gates the zero-trip decision, so a lost or torn entry
+        /// would not merely skew a trip count but pick the wrong outputs entirely.
+        /// </summary>
+        public required Dictionary<FastNodeKey, int> Iterations;
     }
 
     public override (IRuntimeTensor[] results, bool loopBack) Execute(
         FastNode node, InternalComputationGraph graph, Dictionary<FastNodeKey, FastNode> nodeByKey,
-        Dictionary<FastTensorKey, IRuntimeTensor> store, int maxDataElements)
+        Dictionary<FastTensorKey, IRuntimeTensor> store, int maxDataElements, QuickRunState state)
     {
         FastNode? openNode = null;
         if (node.GraphOpenNodeKey is FastNodeKey openKey && !openKey.IsEmpty)
@@ -114,21 +119,16 @@ internal sealed class LoopCloseOp : QuickOp
             NLoop = Math.Max(0, openInputs.Length - 2),
             OpenNodeKey = openNode?.Key ?? default,
             HasOpenInputs = openInputs.Length >= 2,
+            Iterations = state.LoopIterations,
         };
-        _currentLoopInfo = info;
-        try
-        {
-            return RunCompute(merged, node, maxDataElements);
-        }
-        finally { _currentLoopInfo = null; }
+        var (results, loopBack) = ComputeLoop(merged, info);
+        FinalizeOutputs(results, maxDataElements);
+        return (results, loopBack);
     }
 
-    protected override (IRuntimeTensor[] results, bool loopBack) ComputeWithLoopBack(
-        IRuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
+    private static (IRuntimeTensor[] results, bool loopBack) ComputeLoop(
+        IRuntimeTensor?[] inputs, LoopInfo info)
     {
-        var info = _currentLoopInfo
-            ?? throw new InvalidOperationException(
-                "LoopCloseOp.ComputeWithLoopBack requires Execute-supplied loop context.");
         var nLoop = info.NLoop;
 
         // The termination decision only needs to inspect the plain-tensor bookkeeping inputs
@@ -158,7 +158,7 @@ internal sealed class LoopCloseOp : QuickOp
         bool? initialCondValue = null;
         if (initialCondInput?.BoolData is { Length: > 0 } ic) initialCondValue = ic[0];
 
-        _iterationCountByOpenNode.TryGetValue(info.OpenNodeKey, out int iter);
+        info.Iterations.TryGetValue(info.OpenNodeKey, out int iter);
 
         // ONNX Loop is a while, not a do-while: a trip count of 0 — or an initial condition
         // that is already false — means the body contributes nothing. The engine only
@@ -180,14 +180,14 @@ internal sealed class LoopCloseOp : QuickOp
 
         if (!knownDone && !capReached)
         {
-            _iterationCountByOpenNode[info.OpenNodeKey] = iter + 1;
+            info.Iterations[info.OpenNodeKey] = iter + 1;
             return (BuildLoopBackResults(inputs, nLoop, iter + 1), true);
         }
 
         // Giving up at the cap is not the loop finishing: the values in hand belong to a
         // truncated prefix, so the outputs keep their shapes and lose their data.
         bool cappedOut = capReached && !knownDone;
-        _iterationCountByOpenNode.Remove(info.OpenNodeKey);
+        info.Iterations.Remove(info.OpenNodeKey);
         return (BuildTerminateResults(inputs, nLoop, nScan, zeroTrip ? 0 : iter + 1, zeroTrip, cappedOut), false);
     }
 

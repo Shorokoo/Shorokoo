@@ -67,6 +67,24 @@ public class OnnxControlFlowImportTests
         Assert.Equal([1f, 2f, 3f, 4f], sFinal.FloatData!.Value.ToArray());
     }
 
+    /// <summary>A graph that supplies no iteration count leaves the loop unbounded, so the
+    /// engine bounds the walk itself and reports shape without data.</summary>
+    [Fact]
+    public void TestLoopWithNoTripCountTerminatesWithShapeOnlyOutputs()
+    {
+        var graph = Import(BuildDoublingWhileLoopModel());
+
+        var hinted = Assert.IsType<RuntimeTensor>(new QuickExecutionEngine().Run(graph,
+            TensorData(DType.Bool, [], true),
+            TensorData(DType.Float32, [4L], 1f, 2f, 3f, 4f))[graph.Outputs[0]]);
+        Assert.Equal([4L], hinted.Shape!.Dims);
+        Assert.Null(hinted.FloatData);
+
+        var unhinted = Assert.IsType<RuntimeTensor>(
+            new QuickExecutionEngine().Run(graph)[graph.Outputs[0]]);
+        Assert.Null(unhinted.FloatData);
+    }
+
     /// <summary>while (cond) { s = s + s; } over a [4] state, with no trip-count limit.</summary>
     private static ModelProto BuildDoublingWhileLoopModel()
     {

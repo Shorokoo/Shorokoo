@@ -55,6 +55,16 @@ internal sealed class LoopCloseOp : QuickOp
     /// <summary>When neither maxIter nor continueWhen is statically known, we iterate this many times.</summary>
     public const int MaxIterationsForUnknownBounds = 4;
 
+    /// <summary>
+    /// When the graph supplies no iteration count at all the loop is unbounded — only the
+    /// condition can stop it, and a condition that resolves to a constant <c>true</c> never
+    /// will. The engine has to come back with shapes either way, so it walks this many
+    /// iterations and then gives up. Larger than
+    /// <see cref="MaxIterationsForUnknownBounds"/> because nothing here is unknown: the
+    /// prefix is all the engine will ever see of the loop, so it is worth more of it.
+    /// </summary>
+    public const int MaxIterationsForUnboundedLoops = 100;
+
     public override string OpCode => OpCodes.LOOP_CLOSE;
 
     private readonly Dictionary<FastNodeKey, int> _iterationCountByOpenNode = new();
@@ -143,7 +153,13 @@ internal sealed class LoopCloseOp : QuickOp
 
         bool knownDone = zeroTrip || (maxIter is long m && iter + 1 >= m) || continueWhenValue == false;
         bool anyUnknown = !maxIterKnown || !continueWhenKnown;
-        bool capReached = anyUnknown && iter + 1 >= MaxIterationsForUnknownBounds;
+        // No iteration-count input means the graph never bounded this loop, so the walk has
+        // to be bounded here instead — otherwise a condition resolving to a constant true
+        // (a real one, or one a body forwards from the open node's placeholder) loops the
+        // engine forever, accumulating per-iteration history until the process dies.
+        bool unbounded = maxIterInput is null;
+        int iterationCap = unbounded ? MaxIterationsForUnboundedLoops : MaxIterationsForUnknownBounds;
+        bool capReached = (unbounded || anyUnknown) && iter + 1 >= iterationCap;
 
         if (!knownDone && !capReached)
         {
@@ -151,8 +167,11 @@ internal sealed class LoopCloseOp : QuickOp
             return (BuildLoopBackResults(inputs, nLoop, iter + 1), true);
         }
 
+        // Giving up at the cap is not the loop finishing: the values in hand belong to a
+        // truncated prefix, so the outputs keep their shapes and lose their data.
+        bool cappedOut = capReached && !knownDone;
         _iterationCountByOpenNode.Remove(info.OpenNodeKey);
-        return (BuildTerminateResults(inputs, nLoop, nScan, zeroTrip ? 0 : iter + 1, zeroTrip), false);
+        return (BuildTerminateResults(inputs, nLoop, nScan, zeroTrip ? 0 : iter + 1, zeroTrip, cappedOut), false);
     }
 
 
@@ -184,7 +203,7 @@ internal sealed class LoopCloseOp : QuickOp
     }
 
     private static IRuntimeTensor[] BuildTerminateResults(
-        IRuntimeTensor?[] inputs, int nLoop, int nScan, int totalIterations, bool zeroTrip)
+        IRuntimeTensor?[] inputs, int nLoop, int nScan, int totalIterations, bool zeroTrip, bool cappedOut)
     {
         var results = new IRuntimeTensor[nLoop + nScan];
         // Zero trips: the loop variables come back as their initializers (inputs[2 .. 1 + nLoop])
@@ -192,7 +211,7 @@ internal sealed class LoopCloseOp : QuickOp
         for (int i = 0; i < nLoop; i++)
             results[i] = zeroTrip
                 ? PropagateLoopVar(inputs[2 + i])
-                : MergeLoopVarAcrossIterations(inputs[3 + nLoop + i]);
+                : MergeLoopVarAcrossIterations(inputs[3 + nLoop + i], cappedOut);
         for (int i = 0; i < nScan; i++)
             results[nLoop + i] = BuildScanOutput(inputs[3 + 2 * nLoop + i] as RuntimeTensor, totalIterations);
         return results;
@@ -221,7 +240,7 @@ internal sealed class LoopCloseOp : QuickOp
         _ => RuntimeTensorFactory.Create(DType.Invalid, null),
     };
 
-    private static IRuntimeTensor MergeLoopVarAcrossIterations(IRuntimeTensor? current)
+    private static IRuntimeTensor MergeLoopVarAcrossIterations(IRuntimeTensor? current, bool cappedOut)
     {
         switch (current)
         {
@@ -234,13 +253,13 @@ internal sealed class LoopCloseOp : QuickOp
             case RuntimeOptionalTensor opt:
                 return opt;
             case RuntimeTensor tensor:
-                return MergeAcrossIterations(tensor);
+                return MergeAcrossIterations(tensor, cappedOut);
             default:
                 return RuntimeTensorFactory.Create(DType.Invalid, null);
         }
     }
 
-    private static RuntimeTensor MergeAcrossIterations(RuntimeTensor current)
+    private static RuntimeTensor MergeAcrossIterations(RuntimeTensor current, bool cappedOut)
     {
         // Shape across every recorded iteration (prior iterations in History + the current one).
         // Even if shapes diverge across iterations, the loop's output is the final iteration's
@@ -252,6 +271,12 @@ internal sealed class LoopCloseOp : QuickOp
         shapes.Add(current.Shape);
 
         var merged = MergeShapes(current.DType, shapes);
+        // MergeShapes builds a data-free tensor, so a capped-out loop simply keeps it that
+        // way: the last iteration walked is not the loop's result, and publishing its values
+        // would hand downstream folding a confidently wrong constant.
+        if (cappedOut)
+            return merged with { History = current.History, IterationIndices = current.IterationIndices };
+
         return merged with
         {
             FloatData = current.FloatData,

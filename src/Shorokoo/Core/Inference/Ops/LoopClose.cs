@@ -30,6 +30,8 @@ namespace Shorokoo.Core.Inference.Ops;
 /// knowable by looking at the open node's input count).
 ///
 /// Termination rules (inside <see cref="ComputeWithLoopBack"/>):
+///   - If the loop is a zero-trip one — maxIterations known and non-positive, or the initial
+///     condition known false, on what would be the first iteration → stop.
 ///   - If maxIterations is known and its last iteration has been completed → stop.
 ///   - If the continueWhen value is known false → stop.
 ///   - If bounds are unknown and we've already done <see cref="MaxIterationsForUnknownBounds"/>
@@ -42,6 +44,11 @@ namespace Shorokoo.Core.Inference.Ops;
 /// keep the final iteration's concrete data (and the per-iteration <c>History</c>) while also
 /// carrying a shape merged across every recorded iteration, and scan outputs get rank+1 with
 /// leading dim = iteration count.
+///
+/// A zero-trip loop terminates on its outputs alone: the body has already been walked (the
+/// engine only discovers the pair here, at the close node), so its tensors stay in the store
+/// for the static-discovery passes that read them, but the loop reports its initializers and
+/// empty scan outputs — a <c>Loop</c> is a while, not a do-while.
 /// </summary>
 internal sealed class LoopCloseOp : QuickOp
 {
@@ -120,9 +127,21 @@ internal sealed class LoopCloseOp : QuickOp
         if (continueWhenInput?.BoolData is { Length: > 0 } cw) continueWhenValue = cw[0];
         bool continueWhenKnown = continueWhenInput is null || continueWhenValue.HasValue;
 
+        var initialCondInput = inputs.Length > 1 ? inputs[1] as RuntimeTensor : null;
+        bool? initialCondValue = null;
+        if (initialCondInput?.BoolData is { Length: > 0 } ic) initialCondValue = ic[0];
+
         _iterationCountByOpenNode.TryGetValue(info.OpenNodeKey, out int iter);
 
-        bool knownDone = (maxIter is long m && iter + 1 >= m) || continueWhenValue == false;
+        // ONNX Loop is a while, not a do-while: a trip count of 0 — or an initial condition
+        // that is already false — means the body contributes nothing. The engine only
+        // discovers the pair when it reaches this close node, so the body has already run;
+        // its per-node tensors stay in the store (the trainable-param grid is realized from
+        // them) but must not reach the loop's own outputs.
+        bool zeroTrip = iter == 0
+            && ((maxIter is long z && z <= 0) || initialCondValue == false);
+
+        bool knownDone = zeroTrip || (maxIter is long m && iter + 1 >= m) || continueWhenValue == false;
         bool anyUnknown = !maxIterKnown || !continueWhenKnown;
         bool capReached = anyUnknown && iter + 1 >= MaxIterationsForUnknownBounds;
 
@@ -133,7 +152,7 @@ internal sealed class LoopCloseOp : QuickOp
         }
 
         _iterationCountByOpenNode.Remove(info.OpenNodeKey);
-        return (BuildTerminateResults(inputs, nLoop, nScan, iter + 1), false);
+        return (BuildTerminateResults(inputs, nLoop, nScan, zeroTrip ? 0 : iter + 1, zeroTrip), false);
     }
 
 
@@ -164,11 +183,16 @@ internal sealed class LoopCloseOp : QuickOp
         return results;
     }
 
-    private static IRuntimeTensor[] BuildTerminateResults(IRuntimeTensor?[] inputs, int nLoop, int nScan, int totalIterations)
+    private static IRuntimeTensor[] BuildTerminateResults(
+        IRuntimeTensor?[] inputs, int nLoop, int nScan, int totalIterations, bool zeroTrip)
     {
         var results = new IRuntimeTensor[nLoop + nScan];
+        // Zero trips: the loop variables come back as their initializers (inputs[2 .. 1 + nLoop])
+        // untouched by the body's discovery pass, and every scan output has a leading dim of 0.
         for (int i = 0; i < nLoop; i++)
-            results[i] = MergeLoopVarAcrossIterations(inputs[3 + nLoop + i]);
+            results[i] = zeroTrip
+                ? PropagateLoopVar(inputs[2 + i])
+                : MergeLoopVarAcrossIterations(inputs[3 + nLoop + i]);
         for (int i = 0; i < nScan; i++)
             results[nLoop + i] = BuildScanOutput(inputs[3 + 2 * nLoop + i] as RuntimeTensor, totalIterations);
         return results;

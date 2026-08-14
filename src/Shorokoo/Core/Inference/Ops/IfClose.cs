@@ -53,7 +53,7 @@ internal sealed class IfCloseOp : QuickOp
         merged[0] = cond;
         Array.Copy(ownInputs, 0, merged, 1, ownInputs.Length);
 
-        return RunCompute(merged, node, maxDataElements);
+        return (RunCompute(merged, node, maxDataElements), false);
     }
 
     protected override IRuntimeTensor[] Compute(

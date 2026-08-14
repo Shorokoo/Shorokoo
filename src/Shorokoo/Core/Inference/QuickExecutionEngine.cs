@@ -206,6 +206,7 @@ public sealed class QuickExecutionEngine
         if (op is null)
         {
             WriteDeclaredOutputs(node, store);
+            PopLoopFrame(node, state);
             return null;
         }
 
@@ -218,6 +219,7 @@ public sealed class QuickExecutionEngine
         catch
         {
             WriteDeclaredOutputs(node, store);
+            PopLoopFrame(node, state);
             return null;
         }
 
@@ -230,6 +232,7 @@ public sealed class QuickExecutionEngine
             if (openNode is null)
             {
                 WriteDeclaredOutputs(node, store);
+                PopLoopFrame(node, state);
                 return null;
             }
 
@@ -244,14 +247,28 @@ public sealed class QuickExecutionEngine
             return state.LoopStack[frameIdx].OpenNodeIndex + 1;
         }
 
-        if (node.OpCode == OpCodes.LOOP_CLOSE && node.GraphOpenNodeKey is FastNodeKey ck && !ck.IsEmpty)
-        {
-            var frameIdx = state.LoopStack.FindLastIndex(f => f.OpenNode.Key == ck);
-            if (frameIdx >= 0) state.LoopStack.RemoveAt(frameIdx);
-        }
-
+        PopLoopFrame(node, state);
         StoreResults(outputKeys, results, store, state);
         return null;
+    }
+
+    /// <summary>
+    /// Drops the frame the paired <c>LOOP_OPEN</c> pushed, for a walk leaving a
+    /// <c>LOOP_CLOSE</c> for good. Every exit from a close node except a loop-back has to do
+    /// this, the ones that gave up included: a frame left behind tells
+    /// <see cref="StoreResults"/> that every later node in the run was produced inside a loop,
+    /// so their tensors pick up an iteration tag and a history they never had. A close node
+    /// naming no open node is a malformed pair, and the innermost frame is then the only one
+    /// it can have been closing.
+    /// </summary>
+    private static void PopLoopFrame(FastNode node, QuickRunState state)
+    {
+        if (node.OpCode != OpCodes.LOOP_CLOSE || state.LoopStack.Count == 0) return;
+
+        var frameIdx = node.GraphOpenNodeKey is FastNodeKey ck && !ck.IsEmpty
+            ? state.LoopStack.FindLastIndex(f => f.OpenNode.Key == ck)
+            : state.LoopStack.Count - 1;
+        if (frameIdx >= 0) state.LoopStack.RemoveAt(frameIdx);
     }
 
     private static void StoreResults(

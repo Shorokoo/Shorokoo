@@ -168,6 +168,23 @@ public class QeeOpsCoverageTests
         Assert.Null(rt.IterationIndices);
         Assert.Equal(3L, rt.Shape!.Dims[0]);
     }
+
+    [Fact]
+    public void TestAThrowingLoopCloseLeavesLaterNodesInTheSameRunUntagged()
+    {
+        var x = TensorData(DType.Float32, [3L], 3f, 4f, 5f);
+        var a = TensorData(DType.Float32, [], 1f);
+        var b = TensorData(DType.Float32, [], 2f);
+        var g = MixedTensorStructLoopRuntimeTripCount.ComputationGraph;
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x, a, b])).ToConcreteModel().ToInternal();
+
+        using (OpRegistry.Override(new ThrowingLoopCloseStub()))
+        {
+            var rt = (RuntimeTensor)new QuickExecutionEngine().Run(concrete, x, a, b)[concrete.Outputs[0]];
+            Assert.Equal(DType.Invalid, rt.DType);
+            Assert.Null(rt.IterationIndices);
+        }
+    }
 }
 
 /// <summary>A <c>uint32</c> constant that has to survive host-side constant folding as a

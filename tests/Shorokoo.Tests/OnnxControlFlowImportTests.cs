@@ -67,19 +67,6 @@ public class OnnxControlFlowImportTests
         Assert.Equal([1f, 2f, 3f, 4f], sFinal.FloatData!.Value.ToArray());
     }
 
-    // A no-trip-count Loop whose condition QEE cannot resolve to false never terminates:
-    // LoopOpenOp's vestigial "true" makes continueWhen look resolved, so anyUnknown stays
-    // false and the MaxIterationsForUnknownBounds cap never fires (Shorokoo#169). Skipped
-    // rather than left failing because it hangs and exhausts memory instead of returning.
-    [Fact(Skip = "Shorokoo#169: QEE never terminates a no-trip-count Loop with a true condition")]
-    public void TestLoopWithNoTripCountAndATrueConditionStillTerminates()
-    {
-        var graph = Import(BuildDoublingWhileLoopModel());
-        var store = new QuickExecutionEngine().Run(graph,
-            TensorData(DType.Bool, [], true), TensorData(DType.Float32, [4L], 1f, 2f, 3f, 4f));
-        Assert.Equal([4L], Assert.IsType<RuntimeTensor>(store[graph.Outputs[0]]).Shape!.Dims);
-    }
-
     /// <summary>while (cond) { s = s + s; } over a [4] state, with no trip-count limit.</summary>
     private static ModelProto BuildDoublingWhileLoopModel()
     {

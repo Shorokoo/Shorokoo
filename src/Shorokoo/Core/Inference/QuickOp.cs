@@ -16,9 +16,10 @@ namespace Shorokoo.Core.Inference;
 /// <summary>
 /// Base class for every operator implementation in the QuickExecutionEngine. A single
 /// instance is registered per op code and invoked for every node bearing that op code — by
-/// every engine, on every thread — so an op holds no mutable state of its own. What has to
-/// survive between invocations lives in the per-run <see cref="QuickRunState"/> that
-/// <see cref="Execute"/> receives.
+/// every engine, on every thread — so an op keeps no state that outlives a single
+/// <see cref="Execute"/> call; what has to survive between invocations lives in the per-run
+/// <see cref="QuickRunState"/> that <see cref="Execute"/> receives. (<c>LoopCloseOp</c>'s one
+/// field is a thread-scoped carrier it clears in a <c>finally</c> before returning.)
 ///
 /// Four layers, from specific to general:
 ///   - <see cref="Compute(RuntimeTensor?[], OnnxCSharpAttributes, int)"/> (required): pure

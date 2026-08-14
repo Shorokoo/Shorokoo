@@ -92,7 +92,7 @@ internal sealed class LoopCloseOp : QuickOp
         /// The running engine's own trip counts, which belong to the run rather than to this
         /// op: <see cref="OpRegistry"/> shares one instance of the op across every engine on
         /// every thread, and the count gates the zero-trip decision, so a lost or torn entry
-        /// would not skew a trip count but pick the wrong outputs entirely.
+        /// would not merely skew a trip count but pick the wrong outputs entirely.
         /// </summary>
         public required Dictionary<FastNodeKey, int> Iterations;
     }

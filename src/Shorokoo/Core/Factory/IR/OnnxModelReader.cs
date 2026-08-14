@@ -69,9 +69,9 @@ namespace Shorokoo.Core.Factory.IR
 
             var (functions, onnxNameToFunction) = internalBuildFunctions(this.model.Functions, this.OpSetVersion, tensorStructDefs);
             var fastGraph = internalBuildInternalComputationGraph(this.model.Graph, functions, onnxNameToFunction, this.OpSetVersion, tensorStructDefs);
-            // Lower the control-flow ops Shorokoo doesn't execute natively (Scan → Loop) and
-            // reject the unsupported ones (SequenceMap), before any other pass sees the graph.
-            Shorokoo.Core.Nodes.Processors.Fast.FastLowerScanToLoop.Process(fastGraph, (long)this.OpSetVersion);
+            // Reject the imported control-flow ops Shorokoo cannot execute, before any other
+            // pass sees the graph.
+            Shorokoo.Core.Nodes.Processors.Fast.FastRejectSequenceMap.Process(fastGraph);
             Shorokoo.Core.Nodes.Processors.Fast.FastUnPrepFromOnnx.Process(fastGraph);
             return fastGraph;
         }

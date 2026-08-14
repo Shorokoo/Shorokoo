@@ -357,9 +357,6 @@ internal static class OpCodes
     public const string ROTARY_EMBEDDING = "RotaryEmbedding";
     public const string ROUND = "Round";
     public const string STFT = "STFT";
-    public const string SCAN = "Scan";
-    public const string SCAN_OPEN = "Scan#OPEN";
-    public const string SCAN_CLOSE = "Scan#CLOSE";
     public const string SCATTER_ELEMENTS = "ScatterElements";
     public const string SCATTER_ND = "ScatterND";
     public const string SELU = "Selu";

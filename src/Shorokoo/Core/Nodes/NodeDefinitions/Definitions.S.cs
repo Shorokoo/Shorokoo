@@ -347,28 +347,6 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Output("Y", "T1", rankPlusOne: "R")
                 .Output("num_splits", "T2", "R"),
 
-            Op(SCAN_OPEN)
-                .Any<AnyLike>("StateAndScanInputs", tracksModuleFn: true, minVariadicCount: 0)
-                .AttributeLong(AttrNumScanInputs)
-                .AttributeLongs(AttrScanInputAxes)
-                .AttributeLongs(AttrScanInputDirections)
-                .AttributeLongs(AttrScanOutputAxes)
-                .AttributeLongs(AttrScanOutputDirections)
-                .SingleGraphOpen(AttrBody)
-                .Input("initial_state_and_scan_inputs", "StateAndScanInputs?", "RIn")
-                .Output("state_and_iter_slices", "StateAndScanInputs?", rank: "RIn"),
-
-            Op(SCAN_CLOSE)
-                .Any<AnyLike>("StateAndScanOutputs", tracksModuleFn: true, minVariadicCount: 0)
-                .AttributeLong(AttrNumScanInputs)
-                .AttributeLongs(AttrScanInputAxes)
-                .AttributeLongs(AttrScanInputDirections)
-                .AttributeLongs(AttrScanOutputAxes)
-                .AttributeLongs(AttrScanOutputDirections)
-                .SingleGraphClose(AttrBody)
-                .Input("body_state_and_scan_output_slices", "StateAndScanOutputs?", "RBody")
-                .Output("final_state_and_scan_outputs", "StateAndScanOutputs?", rankPlusOne: "RBody"),
-
             Op(SEQUENCE_MAP_OPEN)
                 .Any<AnyLike>("InputSeqAndExtras", tracksModuleFn: true, minVariadicCount: 1)
                 .SingleGraphOpen(AttrBody)

@@ -246,13 +246,11 @@ namespace Shorokoo.Core.Factory
         public static bool IsOpenOpCode(string opCode)
             => opCode == OpCodes.IF_OPEN
             || opCode == OpCodes.LOOP_OPEN
-            || opCode == OpCodes.SCAN_OPEN
             || opCode == OpCodes.SEQUENCE_MAP_OPEN;
 
         public static bool IsCloseOpCode(string opCode)
             => opCode == OpCodes.IF_CLOSE
             || opCode == OpCodes.LOOP_CLOSE
-            || opCode == OpCodes.SCAN_CLOSE
             || opCode == OpCodes.SEQUENCE_MAP_CLOSE;
 
         public static bool IsModelInputOpCode(string opCode)

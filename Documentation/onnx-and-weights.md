@@ -206,7 +206,7 @@ so. Header fields (add-only across minor revisions; unknown fields are ignored):
 - `SrkFileFormat.TryReadHeaderFromFile(path)` reads the header (`SrkHeader`) without
   loading the graph — useful to identify a file cheaply; it returns `null` for data
   that is not a `.srk` container. For a format-agnostic version of the same idea, see
-  [`Persistence.Inspect`](#identify-and-summarize-a-file-checkpointinspect).
+  [`Persistence.Inspect`](#identify-and-summarize-a-file-persistenceinspect).
 - `producer` is informational; the payload dialect remains versioned by the embedded
   ONNX `ir_version`/opsets themselves.
 

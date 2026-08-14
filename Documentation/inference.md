@@ -83,7 +83,7 @@ When the graph comes from a saved `.srk`/`.zsrk` file, you can catch this mismat
 at load time instead: v2 files record their lowering stage in the header, and
 `LoadFastGraphFromFile(path, requiredStage: GraphKind.ConcreteModel)` refuses a
 module-stage file with a clear stage-mismatch error — see
-[onnx-and-weights.md](onnx-and-weights.md#the-srk-v2-container).
+[onnx-and-weights.md](onnx-and-weights.md#the-srk-container).
 
 ### The lowering pipeline
 

@@ -15,12 +15,12 @@ QuickExecutionEngine debugging engine in [inference.md](inference.md).
 using Shorokoo.Graph;
 
 // Create debug requests specifying which graphs to save and where
-var debugRequests = new DebugRequests(new[]
-{
+var debugRequests = new DebugRequests(
+[
     (GraphCreationPoint.AfterInlineAllModulesAndFunctions, "/tmp/debug/after_inline.cs"),
     (GraphCreationPoint.AfterProcessTrainableParameters, "/tmp/debug/after_trainable.cs"),
     (GraphCreationPoint.FinalGraph, "/tmp/debug/final.cs")
-});
+]);
 
 // Call ToConcreteArchitecture with debug requests
 var concreteArchitecture = graph.ToConcreteArchitecture(inputHints, computeContext, debugRequests);
@@ -35,8 +35,8 @@ The `GraphCreationPoint` enum provides the following options:
 - `AfterProcessAllModelHyperparamRefs` - After processing model hyperparameter references
 - `AfterProcessModelSequences` - After processing model sequences
 - `AfterProcessAccessibleModuleSetHyperparams` - After processing accessible module hyperparameters
-- `AfterUnrollModuleLoop` - After unrolling each module loop (called multiple times)
-- `AfterSimplify` - After simplification (called multiple times)
+- `AfterUnrollModuleLoop` - After unrolling each module loop
+- `AfterSimplify` - After simplification
 - `AfterSimplifyTrainableParamInitializers` - After simplifying trainable parameter initializers
 - `AfterLowerStateUpdateNodes` - After lowering `StateUpdate` nodes
 - `AfterFirstSimplify` - After the first simplification pass
@@ -63,4 +63,3 @@ var debugRequests = new DebugRequests(debugDict);
 - Debug files are saved as C# code using the existing `SaveToCSharp()` functionality
 - Directories are automatically created if they don't exist
 - Passing `null` for `debugRequests` parameter works normally (no debug output)
-- Points like `AfterUnrollModuleLoop` and `AfterSimplify` may be triggered multiple times during processing

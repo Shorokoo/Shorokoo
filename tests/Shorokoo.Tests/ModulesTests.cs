@@ -535,9 +535,6 @@ public class ModulesCoverageTests
                 .Any(k => k is FastTensorKey t && !t.IsEmpty && !t.FastNodeKey.Equals(n.Key)))
             .Select(n => n.OpCode.ToString())];
 
-    // Fails: LoopAPI gives LOOP_OPEN's iteration-index output and both LOOP_CLOSE outputs a node
-    // key matching no node in the graph, and a loop that escapes unrolling carries them into the
-    // concrete architecture. No issue tracks it yet, so the test stays failing rather than skipped.
     [Fact]
     public void TestEveryNodeOwnsTheTensorKeysItProduces()
     {

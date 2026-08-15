@@ -242,6 +242,18 @@ namespace Shorokoo
             throw new ArgumentException($"Unknown ProtoTypeNum: {protoTypeNum}");
         }
 
+        /// <summary>
+        /// The standard DType whose <see cref="ToString"/> is <paramref name="name"/> (e.g.
+        /// <c>"Float32"</c>), or <c>null</c> when no standard DType carries that name — the inverse of
+        /// <see cref="ToString"/> for persisted dtype names.
+        /// </summary>
+        public static DType? FromName(string name)
+        {
+            foreach (var dtype in Mapping.Values)
+                if (string.Equals(dtype.sType, name, StringComparison.Ordinal)) return dtype;
+            return null;
+        }
+
         private static Dictionary<int, DType>? _dctMapping = null;
         private static Dictionary<int, DType> Mapping
         {

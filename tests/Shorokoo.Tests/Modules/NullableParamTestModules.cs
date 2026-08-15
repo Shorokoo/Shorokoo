@@ -51,6 +51,15 @@ namespace Shorokoo.Tests.Modules
             => x * factor;
     }
 
+    /// <summary>A [Hyper(default)] scalar at a non-float32 dtype: the default is authored, recorded
+    /// and re-emitted at the declared <c>int32</c>, not through a float (#125).</summary>
+    [Module]
+    public partial class DefaultedIntHyperLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x, [Hyper(3)] Scalar<int32> factor)
+            => x * factor.Cast<float32>();
+    }
+
     /// <summary>Two [Hyper(default)] scalars — scale (2.0) and bias (1.0) — each omittable
     /// independently, so a caller can supply some and omit others.</summary>
     [Module]
@@ -76,6 +85,18 @@ namespace Shorokoo.Tests.Modules
         public static Scalar<bit> Inline(Tensor<float32> x)
         {
             var actual = DefaultedHyperLayer.Model().Call(x);              // factor omitted → x * 3
+            var expected = x * Scalar(3f);
+            return (actual - expected).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-6f);
+        }
+    }
+
+    /// <summary>Omits the int32 default → DefaultedIntHyperLayer.Model().Call(x) must equal x * 3.</summary>
+    [Module]
+    public partial class DefaultedIntHyperOmitCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var actual = DefaultedIntHyperLayer.Model().Call(x);
             var expected = x * Scalar(3f);
             return (actual - expected).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-6f);
         }

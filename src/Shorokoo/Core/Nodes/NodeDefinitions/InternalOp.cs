@@ -20,7 +20,7 @@ internal static partial class InternalOp
     public static Variable RuntimeInput(DType dtype, int? rank, string? defaultName = null, Function? moduleFn = null)
         => NodeBuilder.BuildNodeSingleOut(MODEL_TENSOR_INPUT, [], [(AttrDtype, dtype), (ShrkAttrRank, (long?)rank)], outputNames: defaultName is null ? null : [defaultName], targetFunction: moduleFn);
 
-    public static Variable ModuleTensorInput(DType dtype, int? rank, InputType? inputType, Function? targetFunction, string? defaultName = null, float? defaultValue = null)
+    public static Variable ModuleTensorInput(DType dtype, int? rank, InputType? inputType, Function? targetFunction, string? defaultName = null, string? defaultValue = null)
     {
         Debug.Assert(targetFunction is null || dtype == DType.Model || dtype == DType.Module || dtype == DType.Int64);
 
@@ -32,8 +32,9 @@ internal static partial class InternalOp
         };
 
         // A [Hyper(defaultValue)] default is recorded as declarative metadata so it survives
-        // serialization; only present when the parameter actually declared a default.
-        if (defaultValue is float dv)
+        // serialization; only present when the parameter actually declared a default. It is the
+        // default's invariant-culture literal — the input's own dtype says how to read it.
+        if (defaultValue is string dv)
             attributes.Add((ShrkAttrDefaultValue, dv));
 
         return NodeBuilder.BuildNodeSingleOut(MODEL_TENSOR_INPUT, [], [.. attributes], outputNames: defaultName is null ? null : [defaultName], targetFunction: targetFunction);

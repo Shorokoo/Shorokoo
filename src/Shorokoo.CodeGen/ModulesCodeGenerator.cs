@@ -707,24 +707,52 @@ public class ModuleSourceGenerator : IIncrementalGenerator
         var hyperAttr = attributes.FirstOrDefault(x => x.AttributeClass?.Name == "HyperAttribute");
         var attributeKind = hyperAttr is not null ? ParamKind.Hyperparam : ParamKind.InputParam;
 
+        var elementType = ScalarElementTypeName(p.Type);
         string? defaultLiteral = null;
         if (hyperAttr is not null && hyperAttr.ConstructorArguments.Length > 0)
-            defaultLiteral = FormatFloatLiteral(hyperAttr.ConstructorArguments[0].Value);
+            defaultLiteral = FormatHyperDefaultLiteral(hyperAttr.ConstructorArguments[0].Value, elementType);
 
-        return new ParamData(p.Name, p.Type.ToDisplayString(), attributeKind, defaultLiteral);
+        return new ParamData(p.Name, p.Type.ToDisplayString(), attributeKind, defaultLiteral, elementType);
     }
 
     /// <summary>
-    /// Formats a boxed numeric constant (from a <c>[Hyper(default)]</c> argument) as a C# float
-    /// literal, e.g. <c>0.9f</c> or <c>1E-08f</c>. Returns <c>null</c> if the value isn't numeric.
+    /// The Shorokoo element type name of a <c>Scalar&lt;T&gt;</c> parameter (e.g. <c>"float32"</c>,
+    /// <c>"int32"</c>, <c>"bit"</c>); <c>null</c> for anything that is not a scalar.
     /// </summary>
-    private static string? FormatFloatLiteral(object? value)
+    private static string? ScalarElementTypeName(ITypeSymbol type)
+        => type is INamedTypeSymbol { Name: "Scalar", TypeArguments.Length: 1 } named
+            ? named.TypeArguments[0].Name
+            : null;
+
+    /// <summary>
+    /// Formats a <c>[Hyper(default)]</c> argument as a C# literal <b>of the parameter's declared
+    /// element type</b> — the declaration is the source of truth for the dtype, and the attribute
+    /// argument only carries the magnitude (attribute arguments are compile-time constants, so a
+    /// <c>double</c> literal is the only way to write an exact <c>float64</c> default). Returns
+    /// <c>null</c> when the value isn't numeric or the element type has no C# literal form, which
+    /// leaves the hyperparameter simply undefaulted.
+    /// </summary>
+    private static string? FormatHyperDefaultLiteral(object? value, string? elementTypeName)
     {
-        if (value is null) return null;
+        if (value is null || elementTypeName is null) return null;
+        var invariant = System.Globalization.CultureInfo.InvariantCulture;
         try
         {
-            float f = Convert.ToSingle(value, System.Globalization.CultureInfo.InvariantCulture);
-            return f.ToString("R", System.Globalization.CultureInfo.InvariantCulture) + "f";
+            return elementTypeName switch
+            {
+                "float32" => Convert.ToSingle(value, invariant).ToString("R", invariant) + "f",
+                "float64" => Convert.ToDouble(value, invariant).ToString("R", invariant) + "d",
+                "int8" => "(sbyte)" + Convert.ToSByte(value, invariant).ToString(invariant),
+                "int16" => "(short)" + Convert.ToInt16(value, invariant).ToString(invariant),
+                "int32" => Convert.ToInt32(value, invariant).ToString(invariant),
+                "int64" => Convert.ToInt64(value, invariant).ToString(invariant) + "L",
+                "uint8" => "(byte)" + Convert.ToByte(value, invariant).ToString(invariant),
+                "uint16" => "(ushort)" + Convert.ToUInt16(value, invariant).ToString(invariant),
+                "uint32" => Convert.ToUInt32(value, invariant).ToString(invariant) + "U",
+                "uint64" => Convert.ToUInt64(value, invariant).ToString(invariant) + "UL",
+                "bit" => Convert.ToBoolean(value, invariant) ? "true" : "false",
+                _ => null,
+            };
         }
         catch
         {
@@ -739,21 +767,20 @@ public class ModuleSourceGenerator : IIncrementalGenerator
     // ─────────────────── nullable / omittable caller-facing parameters ───────────────────
     // The Inline method declares non-nullable parameters; the generated Model/Call surface
     // exposes "omittable" ones as nullable with a `= null` default so callers can leave them out:
-    //   * a [Hyper(default)] Scalar<float32> becomes `Scalar<float32>? = null`; when null the
-    //     attribute's default constant is substituted.
+    //   * a [Hyper(default)] Scalar<T> becomes `Scalar<T>? = null`; when null the attribute's
+    //     default constant, formatted at T, is substituted.
     //   * an OptionalTensor<T> becomes `Tensor<T>? = null`; null is wrapped as an absent optional,
     //     a tensor as a present one.
 
     /// <summary>True for an <c>OptionalTensor&lt;T&gt;</c> parameter.</summary>
     private static bool ParamIsOptionalTensor(ParamData p) => p.TypeDeclaration.Contains("OptionalTensor<");
 
-    /// <summary>True for a <c>[Hyper(default)] Scalar&lt;float32&gt;</c> parameter.</summary>
-    private static bool ParamIsDefaultedFloatHyper(ParamData p)
-        => p.Kind == ParamKind.Hyperparam && p.DefaultLiteral is not null
-           && p.TypeDeclaration.Replace(" ", "").Contains("Scalar<") && p.TypeDeclaration.Contains("float32");
+    /// <summary>True for a <c>[Hyper(default)] Scalar&lt;T&gt;</c> parameter, at any dtype.</summary>
+    private static bool ParamIsDefaultedScalarHyper(ParamData p)
+        => p.Kind == ParamKind.Hyperparam && p.DefaultLiteral is not null && p.ScalarElementType is not null;
 
     /// <summary>True when the parameter is exposed as a nullable, omittable caller-facing parameter.</summary>
-    private static bool ParamIsOmittable(ParamData p) => ParamIsOptionalTensor(p) || ParamIsDefaultedFloatHyper(p);
+    private static bool ParamIsOmittable(ParamData p) => ParamIsOptionalTensor(p) || ParamIsDefaultedScalarHyper(p);
 
     /// <summary>The caller-facing parameter type (nullable for omittable parameters).</summary>
     private static string CallerFacingType(ParamData p)
@@ -765,7 +792,7 @@ public class ModuleSourceGenerator : IIncrementalGenerator
             inner = inner.Substring(0, inner.LastIndexOf('>'));
             return $"global::Shorokoo.Tensor<{inner}>?";
         }
-        if (ParamIsDefaultedFloatHyper(p))
+        if (ParamIsDefaultedScalarHyper(p))
             return $"{p.TypeDeclaration}?";
         return p.TypeDeclaration;
     }
@@ -775,7 +802,7 @@ public class ModuleSourceGenerator : IIncrementalGenerator
     {
         if (ParamIsOptionalTensor(p))
             return $"global::Shorokoo.Globals.OptionalTensor({p.Name})";
-        if (ParamIsDefaultedFloatHyper(p))
+        if (ParamIsDefaultedScalarHyper(p))
             return $"({p.Name} ?? global::Shorokoo.Globals.Scalar({p.DefaultLiteral}))";
         return p.Name;
     }
@@ -802,14 +829,13 @@ public class ModuleSourceGenerator : IIncrementalGenerator
     }
 
     /// <summary>
-    /// True when every hyperparameter is a scalar <c>float32</c> — the schedulable optimizer shape
-    /// for which we emit a strongly-typed <see cref="ParamData"/>-named hyperparameter set.
+    /// True when every hyperparameter is a scalar — of any supported dtype, since the declared
+    /// <c>Scalar&lt;T&gt;</c> is what the rig threads through as the hyperparameter's dtype. This is the
+    /// schedulable optimizer shape for which we emit a strongly-typed hyperparameter set.
     /// </summary>
-    private static bool AllHyperparamsAreFloatScalars(FullModuleInfo module)
+    private static bool AllHyperparamsAreScalars(FullModuleInfo module)
         => module.Hyperparams.Count > 0
-           && module.Hyperparams.All(h =>
-               h.TypeDeclaration.Replace(" ", "").Contains("Scalar<")
-               && h.TypeDeclaration.Contains("float32"));
+           && module.Hyperparams.All(h => h.ScalarElementType is not null);
 
     private static List<ParamData?> ProcessReturnType(ITypeSymbol returnType)
     {
@@ -1087,10 +1113,11 @@ public class ModuleSourceGenerator : IIncrementalGenerator
 
         sb.AppendLine("    }");
 
-        // Strongly-typed, named hyperparameter set for optimizer-shaped modules (all hyperparameters
-        // are scalar float32). Gives named, defaulted, init-only Hyperparameter properties so a rig can
-        // be built as `new XxxHyperparameters { LearningRate = Schedules.Cosine(...), WeightDecay = 1e-4f }`.
-        if (AllHyperparamsAreFloatScalars(fullModule))
+        // Strongly-typed, named hyperparameter set for optimizer-shaped modules (every hyperparameter
+        // is a scalar, at whatever dtype it declares). Gives named, defaulted, init-only Hyperparameter
+        // properties so a rig can be built as
+        // `new XxxHyperparameters { LearningRate = Schedules.Cosine(...), WeightDecay = 1e-4f }`.
+        if (AllHyperparamsAreScalars(fullModule))
         {
             EmitHyperparameterSet(sb, className, fullModule);
         }
@@ -1114,7 +1141,7 @@ public class ModuleSourceGenerator : IIncrementalGenerator
 
         sb.AppendLine()
           .AppendLine($"    /// <summary>Strongly-typed, named hyperparameters for <see cref=\"{className}\"/>.")
-          .AppendLine("    /// A bare <c>float</c> is baked as a constant; a <c>Schedule</c> is applied per step.</summary>")
+          .AppendLine("    /// A bare value is baked as a constant at the declared dtype; a <c>Schedule</c> is applied per step.</summary>")
           .AppendLine($"    public sealed class {recordName} : global::Shorokoo.IOptimizerHyperparameters")
           .AppendLine("    {");
 
@@ -1122,7 +1149,7 @@ public class ModuleSourceGenerator : IIncrementalGenerator
         {
             var prop = Pascalize(h.Name);
             if (h.DefaultLiteral is not null)
-                sb.AppendLine($"        public global::Shorokoo.Hyperparameter {prop} {{ get; init; }} = {h.DefaultLiteral};");
+                sb.AppendLine($"        public global::Shorokoo.Hyperparameter {prop} {{ get; init; }} = global::Shorokoo.Hyperparameter.Baked({h.DefaultLiteral});");
             else
                 sb.AppendLine($"        public required global::Shorokoo.Hyperparameter {prop} {{ get; init; }}");
         }
@@ -1285,17 +1312,25 @@ public class ParamData
     public ParamKind Kind { get; }
 
     /// <summary>
-    /// For a hyperparameter declared with <c>[Hyper(default)]</c>, the C# float literal of that
-    /// default (e.g. <c>"0.9f"</c>); <c>null</c> when no default was supplied.
+    /// For a hyperparameter declared with <c>[Hyper(default)]</c>, the C# literal of that default at
+    /// the parameter's declared element type (e.g. <c>"0.9f"</c>, <c>"5L"</c>, <c>"true"</c>);
+    /// <c>null</c> when no default was supplied.
     /// </summary>
     public string? DefaultLiteral { get; }
 
-    public ParamData(string name, string typeDeclaration, ParamKind kind, string? defaultLiteral = null)
+    /// <summary>
+    /// The Shorokoo element type of a <c>Scalar&lt;T&gt;</c> parameter (e.g. <c>"float32"</c>);
+    /// <c>null</c> for any parameter that is not a scalar.
+    /// </summary>
+    public string? ScalarElementType { get; }
+
+    public ParamData(string name, string typeDeclaration, ParamKind kind, string? defaultLiteral = null, string? scalarElementType = null)
     {
         Name = name;
         TypeDeclaration = typeDeclaration;
         Kind = kind;
         DefaultLiteral = defaultLiteral;
+        ScalarElementType = scalarElementType;
     }
 }
 

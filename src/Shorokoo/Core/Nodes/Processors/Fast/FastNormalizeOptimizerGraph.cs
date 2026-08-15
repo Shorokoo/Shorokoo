@@ -24,6 +24,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <summary>Number of leading hyperparameter inputs (everything before currentParam and grad).</summary>
         public int HyperparamCount { get; }
 
+        /// <summary>
+        /// The dtype each hyperparameter is <b>declared</b> at (its <c>[Hyper] Scalar&lt;T&gt;</c> input's
+        /// element type), in declared order — the source of truth the rig threads through packing, graph
+        /// binding, and state init. Every entry is a rank-0 scalar; a non-scalar declaration is rejected.
+        /// </summary>
+        public DType[] HyperparamDTypes { get; }
+
         /// <summary>Number of optimizer state tensors (per trainable parameter).</summary>
         public int StateCount { get; }
 
@@ -45,12 +52,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         internal NormalizedOptimizerGraphInfo(
             int hyperparamCount,
+            DType[] hyperparamDTypes,
             int stateCount,
             InternalComputationGraph? stateInitGraph,
             DType[] stateDTypes,
             int?[] stateRanks)
         {
             HyperparamCount = hyperparamCount;
+            HyperparamDTypes = hyperparamDTypes;
             StateCount = stateCount;
             StateInitGraph = stateInitGraph;
             StateDTypes = stateDTypes;
@@ -98,6 +107,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             const int mandatoryParamAndGradInputs = 2;
             int hyperparamCount = graph.Inputs.Count - mandatoryParamAndGradInputs;
+            var hyperparamDTypes = ReadHyperparamDTypes(graph, hyperparamCount);
 
             // Pass 1: discover the state-parameter nodes ([StateInitializer] Init results) in
             // linear (declaration) order, and collect the StateUpdate machinery nodes.
@@ -161,7 +171,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // Stateless optimizer (e.g. plain SGD): nothing to normalize.
             if (stateNodes.Count == 0 && stateUpdateLinkNodes.Count == 0 && !hasWithStateDeps)
                 return new NormalizedOptimizerGraphInfo(
-                    hyperparamCount, 0, null, Array.Empty<DType>(), Array.Empty<int?>());
+                    hyperparamCount, hyperparamDTypes, 0, null, Array.Empty<DType>(), Array.Empty<int?>());
 
             // Pass 2: split off the state-init graph before mutating the main graph. Each state
             // node is rewritten into a FUNCTION_INVOKE of its initializer (dropping the leading
@@ -372,7 +382,39 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             FastProcessorHelper.RemoveUnreachableNodes(graph);
 
             return new NormalizedOptimizerGraphInfo(
-                hyperparamCount, stateNodes.Count, stateInitGraph, stateDTypes, stateRanks);
+                hyperparamCount, hyperparamDTypes, stateNodes.Count, stateInitGraph, stateDTypes, stateRanks);
+        }
+
+        /// <summary>
+        /// Reads the declared element type of each of the optimizer graph's leading hyperparameter
+        /// inputs — the authored <c>[Hyper] Scalar&lt;T&gt;</c> signature, which is the single source of
+        /// truth for a hyperparameter's dtype. A non-scalar (rank != 0) declaration is rejected here,
+        /// where the authored signature is still in view.
+        /// </summary>
+        private static DType[] ReadHyperparamDTypes(InternalComputationGraph graph, int hyperparamCount)
+        {
+            var producerByOutput = new Dictionary<FastTensorKey, FastNode>();
+            foreach (var node in graph.Nodes)
+                foreach (var (_, outs) in node.FullOutputs)
+                    foreach (var ok in outs)
+                        if (ok is FastTensorKey k && !k.IsEmpty) producerByOutput[k] = node;
+
+            var dtypes = new DType[hyperparamCount];
+            for (int h = 0; h < hyperparamCount; h++)
+            {
+                if (!producerByOutput.TryGetValue(graph.Inputs[h], out var producer))
+                    throw new InvalidOperationException(
+                        $"Optimizer graph hyperparameter input {h} has no producer node.");
+                dtypes[h] = producer.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype)
+                    ?? throw new InvalidOperationException(
+                        $"Optimizer graph hyperparameter input {h} declares no dtype.");
+                var rank = producer.Attributes.GetLongVal(OnnxOpAttributeNames.ShrkAttrRank);
+                if (rank is long r && r != 0)
+                    throw new InvalidOperationException(
+                        $"Optimizer hyperparameter input {h} is declared with rank {r}; hyperparameters " +
+                        "must be scalars (declare them as Scalar<T>).");
+            }
+            return dtypes;
         }
 
         /// <summary>

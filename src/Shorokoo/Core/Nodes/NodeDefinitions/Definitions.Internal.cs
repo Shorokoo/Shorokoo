@@ -32,8 +32,10 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeDType(AttrDtype, "T")
                 .AttributeLong(ShrkAttrRank, "R")
                 .AttributeEnum<InputType>(ShrkAttrInputType, ["Hyperparam", "ReadyInput", "ModelInput", "GenericType"], defaultValue: "ReadyInput")
-                // Optional: the [Hyper(defaultValue)] default for a defaulted hyperparameter input.
-                .AttributeFloat(ShrkAttrDefaultValue)
+                // Optional: the [Hyper(defaultValue)] default for a defaulted hyperparameter input,
+                // as an invariant-culture literal. A string rather than a float because a hyperparameter
+                // is any supported scalar dtype (#125) and a float cannot hold every int64/float64 default.
+                .AttributeString(ShrkAttrDefaultValue)
                 // Optional, mutually exclusive: a small (≤ MaxSmallTensorElements) input
                 // records a zero-filled representative tensor here; a larger one records only its dims in
                 // ShrkAttrRepresentativeInputShape. Together they make a concrete architecture

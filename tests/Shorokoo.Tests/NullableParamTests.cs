@@ -129,6 +129,7 @@ public class NullableParamTests
     public void TestDefaultedHypers()
     {
         Assert.True(AutoTest.AdvancedTestGraph<DefaultedHyperOmitCheck>(hyperparamInputs: [], runtimeInputs: [SampleX]));
+        Assert.True(AutoTest.AdvancedTestGraph<DefaultedIntHyperOmitCheck>(hyperparamInputs: [], runtimeInputs: [SampleX]));
         Assert.True(AutoTest.AdvancedTestGraph<DefaultedHyperSupplyCheck>(hyperparamInputs: [], runtimeInputs: [SampleX]));
         Assert.True(AutoTest.AdvancedTestGraph<TwoDefaultedHyperOmitAllCheck>(hyperparamInputs: [], runtimeInputs: [SampleX]));
         Assert.True(AutoTest.AdvancedTestGraph<TwoDefaultedHyperOmitBiasCheck>(hyperparamInputs: [], runtimeInputs: [SampleX]));
@@ -140,17 +141,25 @@ public class NullableParamTests
     {
         // The [Hyper(3f)] default is declarative metadata on the hyperparameter input node only.
         var inputs = InputsOf(DefaultedHyperLayer.ComputationGraph);
-        Assert.Equal(3f, inputs.Single(v => v.InputType == InputType.Hyperparam).HyperDefaultValue);
+        Assert.Equal("3", inputs.Single(v => v.InputType == InputType.Hyperparam).HyperDefaultValue);
         Assert.Null(inputs.Single(v => v.InputType != InputType.Hyperparam).HyperDefaultValue);
 
         var bytes = CompressedFormatUtils.SaveFastGraphToBinary(DefaultedHyperLayer.ComputationGraph, compressed: true);
         var roundtripped = CompressedFormatUtils.LoadFastGraphFromBinary(bytes);
-        Assert.Equal(3f, InputsOf(roundtripped).Single(v => v.InputType == InputType.Hyperparam).HyperDefaultValue);
+        Assert.Equal("3", InputsOf(roundtripped).Single(v => v.InputType == InputType.Hyperparam).HyperDefaultValue);
 
         // Re-emitted as [Hyper(3f)] rather than a bare [Hyper] when written as a sub-module function.
         var code = new CSharpModelBuilder().BuildFullGraph(
             DefaultedHyperSupplyCheck.ComputationGraph.ToInternal(), "DefaultedHyperRoundtrip");
         Assert.Contains("[Hyper(3f)]", code);
+
+        // A non-float32 default is recorded and re-emitted at its declared dtype, not through a float.
+        var intInputs = InputsOf(DefaultedIntHyperLayer.ComputationGraph);
+        var intHyper = intInputs.Single(v => v.InputType == InputType.Hyperparam);
+        Assert.Equal("3", intHyper.HyperDefaultValue);
+        Assert.Equal(DType.Int32, intHyper.Type);
+        Assert.Contains("[Hyper(3)]", new CSharpModelBuilder().BuildFullGraph(
+            DefaultedIntHyperOmitCheck.ComputationGraph.ToInternal(), "DefaultedIntHyperRoundtrip"));
     }
 
     [Fact]

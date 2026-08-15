@@ -69,8 +69,8 @@ namespace Shorokoo.Core.Factory
             string? inputTypeName = ReadInputTypeName(inputNode);
             // The default-value attribute is optional; nodes rebuilt without it (any non-defaulted
             // input) simply carry no default, so read it tolerantly rather than indexing.
-            float? defaultValue = inputNode.Attributes.GetAttributeVals().TryGetValue(OnnxOpAttributeNames.ShrkAttrDefaultValue, out var dvObj)
-                ? (float?)dvObj
+            string? defaultValue = inputNode.Attributes.GetAttributeVals().TryGetValue(OnnxOpAttributeNames.ShrkAttrDefaultValue, out var dvObj)
+                ? (string?)dvObj
                 : null;
 
             var dims = rank is int r ? OnnxIRFactory.CreateDims(MakeUnnamedDims(r), key.ToString()) : null;

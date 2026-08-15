@@ -103,9 +103,17 @@ namespace Shorokoo.Core
             return InputType.ReadyInput;
         }
 
-        /// <summary>The <c>[Hyper(defaultValue)]</c> default declared on this parameter, or null when it declared none.</summary>
-        private static float? GetHyperDefaultValue(this ParameterInfo paramInfo)
-            => paramInfo.GetCustomAttribute<HyperAttribute>() is { HasDefault: true } hyper ? hyper.DefaultValue : null;
+        /// <summary>
+        /// The <c>[Hyper(defaultValue)]</c> default declared on this parameter as an invariant-culture
+        /// literal, or null when it declared none. A literal rather than a number because a
+        /// hyperparameter is any supported scalar dtype (#125): the parameter's own
+        /// <c>Scalar&lt;T&gt;</c> declaration says how to read it, and every <c>int64</c> /
+        /// <c>float64</c> / <c>bool</c> default survives exactly.
+        /// </summary>
+        private static string? GetHyperDefaultValue(this ParameterInfo paramInfo)
+            => paramInfo.GetCustomAttribute<HyperAttribute>() is { HasDefault: true, DefaultValue: { } boxed }
+                ? Convert.ToString(boxed, System.Globalization.CultureInfo.InvariantCulture)
+                : null;
 
         // The signature string is computed from the internal graph node; callers cross the module
         // boundary explicitly with IModuleParam.ToVariable() before reaching here.
@@ -345,7 +353,7 @@ namespace Shorokoo.Core
         /// <param name="paramName">The parameter's name, used as the input node's default name (may be <see langword="null"/>).</param>
         /// <param name="hyperDefaultValue">The <c>[Hyper(defaultValue)]</c> default, when the parameter declared one;
         /// recorded as declarative metadata on a scalar hyperparameter input so it survives serialization.</param>
-        public static IModuleParam ModuleParamInputBasedOn(Type type, InputType inputType, string? paramName, float? hyperDefaultValue = null)
+        public static IModuleParam ModuleParamInputBasedOn(Type type, InputType inputType, string? paramName, string? hyperDefaultValue = null)
         {
             RejectVariableParam(type);
 

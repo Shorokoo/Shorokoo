@@ -726,12 +726,9 @@ namespace Shorokoo.Core.Factory.IR
                     }
                     else
                     {
-                        var defaultValueStr = inputProto.MetadataProps
+                        var defaultValue = inputProto.MetadataProps
                             .Where(x => x.Key == Function.IRDefaultValue)
                             .SingleOrDefault()?.Value;
-                        float? defaultValue = defaultValueStr is null
-                            ? null
-                            : float.Parse(defaultValueStr, System.Globalization.CultureInfo.InvariantCulture);
 
                         var attrDefs = Definitions.NodeDefinitions[InternalOpCodes.MODEL_TENSOR_INPUT].AttributeDefs;
                         var attrVals = new Dictionary<string, object?>
@@ -740,7 +737,7 @@ namespace Shorokoo.Core.Factory.IR
                             [ShrkAttrInputType] = inputType,
                             [ShrkAttrRank] = rank,
                         };
-                        if (defaultValue is float dv)
+                        if (defaultValue is string dv)
                             attrVals[ShrkAttrDefaultValue] = dv;
                         var attrs = OnnxCSharpAttributes.FromCSharpVals(attrVals, attrDefs);
 

@@ -92,10 +92,10 @@ namespace Shorokoo
         /// C# emitter writes <c>[Hyper(defaultValue)]</c>). The attribute is optional, so a node that
         /// never carried it (any non-defaulted input) reads back as null rather than throwing.
         /// </summary>
-        float? HyperDefaultValue
+        string? HyperDefaultValue
             => this.OwningNode.IsModelInput
                 && this.OwningNode.Attributes.GetAttributeVals().TryGetValue(OnnxOpAttributeNames.ShrkAttrDefaultValue, out var dv)
-                ? (float?)dv
+                ? (string?)dv
                 : null;
 
         TensorDim[]? TensorDims 

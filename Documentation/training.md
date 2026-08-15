@@ -22,7 +22,7 @@ Related: [defining-models.md](defining-models.md) · [nn-library.md](nn-library.
 Ready-made losses and optimizers ship in the `Shorokoo.Modules` package
 (namespaces `Shorokoo.Modules.Losses` / `Shorokoo.Modules.Optimizers`) — see
 [nn-library.md](nn-library.md) for the full catalog (eight losses; layers and
-initializers too). Each optimizer with scalar `float32` hyperparameters gets a
+initializers too). Each optimizer whose hyperparameters are all scalars gets a
 source-generated, named, defaulted hyperparameter set
 (`<Optimizer>Hyperparameters`) implementing `IOptimizerHyperparameters`. The
 twelve optimizers (the positional `params Hyperparameter[]` count for `FromScratch`
@@ -60,9 +60,9 @@ Its *kind* — not a separate flag — decides the wiring:
 
 | Assign | Kind | Wiring |
 |---|---|---|
-| a `float` (e.g. `1e-4f`), or `Hyperparameter.Baked(v)` | `Baked` | graph `Constant`; change ⇒ rebuild |
+| a bare value (e.g. `1e-4f`, `5`, `true`), or `Hyperparameter.Baked(v)` | `Baked` | graph `Constant`; change ⇒ rebuild |
 | a `Schedule` (e.g. `Schedules.Cosine(3e-4f, total)`), or `Hyperparameter.Scheduled(schedule)` | `Scheduled` | lowered to graph math and computed **in-graph** from the counter input(s) each `TrainStep` — no host evaluation |
-| `Hyperparameter.Scheduled(module)` | `Scheduled` (module) | a scheduler module (int64 counter(s) → `float32` value) inlined into the graph, for schedules the built-ins don't cover |
+| `Hyperparameter.Scheduled(module)` | `Scheduled` (module) | a scheduler module (int64 counter(s) → the declared-dtype value) inlined into the graph, for schedules the built-ins don't cover |
 | `Hyperparameter.Runtime()` | `Runtime` | runtime input with no schedule; supply each step via `MakeHyperparameters` |
 
 `Schedule` factories live on `Schedules` (`Constant`, `Linear`, `Cosine`, `CosineWithWarmup`,
@@ -72,7 +72,8 @@ Its *kind* — not a separate flag — decides the wiring:
 **Two scheduler construction paths, one runtime representation.** Every schedule the rig accepts is a
 graph, from exactly two sources: a built-in `Schedule`, or a scheduler **module** — a Shorokoo module
 graph whose inputs are a named subset of the reserved int64 scalar counters `{step, epoch, batchIndex}`
-and whose single output is the `float32` scalar value, passed via `Hyperparameter.Scheduled(module)`.
+and whose single output is the scheduled scalar at the hyperparameter's declared dtype, passed via
+`Hyperparameter.Scheduled(module)`.
 Built-in DSL schedules are step-only (`PerEpoch` derives its epoch in-graph from the step); a module
 declares which counters it consumes by naming its inputs. Both lower to the **same** artifact — a pure
 `counters → value` graph — and rig build enforces that purity (a scheduler graph carrying trainable
@@ -90,6 +91,52 @@ by a single interpreter that mirrors the graph lowering.
 > value carries the schedule-lowering tolerance: on engines whose `Cos`/`Pow` differ from .NET `MathF`
 > (e.g. ONNX Runtime) a schedule using those ops may differ from the host `Schedule.At` value by a few
 > ulps (arithmetic/piecewise schedules stay exact). This is the documented `ScheduleLowering` contract.
+
+### Hyperparameter dtypes
+
+A hyperparameter's dtype is whatever the optimizer **declares** it at — the `Scalar<T>` in its
+`[Hyper(...)] Scalar<T>` parameter — and that declaration is the single source of truth end to end.
+Most are `float32` (learning rate, weight decay, betas), but any supported scalar dtype works: an
+`int32` count, a `bit` (bool) flag, a `float64` coefficient.
+
+```csharp
+[Module]
+public partial class MyOptimizer
+{
+    public static Tensor<float32> Inline(
+        Tensor<float32> currentParam,
+        Tensor<float32> grad,
+        [Hyper(0.01f)] Scalar<float32> learningRate,
+        [Hyper(2)]     Scalar<int32>   accumSteps,
+        [Hyper(true)]  Scalar<bit>     nesterov,
+        [Hyper(0.25)]  Scalar<float64> decay) => …;
+}
+```
+
+`[Hyper(default)]` takes the host literal matching the declared dtype (`0.01f`, `2`, `true`, `0.25`);
+the generated `MyOptimizerHyperparameters` set carries each default at that dtype. A dtype with no
+natural C# literal (e.g. `float16`) simply takes no default — declare it as a bare `[Hyper]` and bind
+it explicitly with `Hyperparameter.Baked(Globals.TensorData([], someFloat16))`.
+
+Host-supplied values — a baked constant, or a per-step `MakeHyperparameters` value — are **converted
+to the declared dtype**, and the conversion must be value-preserving: `("accumSteps", 3L)` becomes an
+`int32` 3, while `("accumSteps", 2.5)` and `("accumSteps", long.MaxValue)` fail loud rather than
+silently truncating, as does crossing the bool boundary in either direction. `rig.HyperparameterDTypes`
+reports the declared dtypes, in the same order as `rig.HyperparameterNames`.
+
+Built-in `Schedule` math (cosine / linear / decay) is inherently continuous, so a built-in schedule
+drives `float32` hyperparameters only; schedule a non-`float32` hyperparameter with a scheduler
+**module** producing that dtype. Baked and runtime hyperparameters have no such restriction.
+
+> **Migration (breaking).** `Hyperparameter.BakedValue` is now the rank-0 `TensorData` the constant was
+> built from (with `BakedDType` alongside), not a `float`; `MakeHyperparameters`'s named overload takes
+> `(string name, object value)` pairs rather than `(string, float)` — existing call sites such as
+> `MakeHyperparameters(("learningRate", 0.1f))` are unaffected. `HyperAttribute.DefaultValue` is
+> `object?` (the host literal the constructor took) rather than `float`, and a graph input's
+> `HyperDefaultValue` is the default's invariant literal (`string?`) rather than a `float?`, so an
+> `int64` / `float64` / `bool` default survives the graph round-trip exactly. In a training `.skpt`, the
+> rig block's `bakedHypers` map is gone: each baked binding now records its own `dtype` and base64
+> `value`, so `rigVersion` stays `1` and older-shaped files (none exist in the wild) are not read.
 
 > **Migration (breaking).** `HyperValue` is renamed **`Hyperparameter`** and is now an explicit
 > `Baked`/`Scheduled`/`Runtime` union. `HyperValue.Constant(v)` → `Hyperparameter.Baked(v)` (a bare
@@ -160,7 +207,8 @@ public TrainingCheckpoint TrainStep(
     long batchNumber);
 
 public TensorDataStruct MakeHyperparameters(float value);                       // exactly one dynamic
-public TensorDataStruct MakeHyperparameters(params (string name, float value)[] values); // named
+//   also: (double), (int), (long), (bool), (TensorData) for the other declared dtypes
+public TensorDataStruct MakeHyperparameters(params (string name, object value)[] values); // named
 
 public TrainingResult Fit(  // alias: Train(...)
     TrainingCheckpoint initialCheckpoint,
@@ -454,8 +502,9 @@ Constraints:
   graphs, and optimizer-owned ones are rejected inside model graphs.
 - **Each state is updated exactly once per step** — combine conditional updates into one
   value (e.g. with `IfElse`) and register it with a single `StateUpdate` call.
-- **Hyperparameters must be scalar `float32`** — the rig bakes/feeds them as float32 scalars and
-  schedules are `step → float`. A non-float or *mixed* hyperparameter list yields no generated set.
+- **Hyperparameters must be scalars** — of any supported dtype (`float32`, `int32`, `bit`, …); the rig
+  bakes/feeds them at their declared dtype, and a set is generated even when the dtypes are mixed.
+  A non-scalar (`Tensor`/`Vector`) hyperparameter yields no generated set.
 - **Order + `[Hyper]` matter** — hyperparameters must be the leading inputs, and `[Hyper]` is what
   makes the named set generate. Without it the optimizer still works via the positional
   `params Hyperparameter[]` overload, but you lose the named, compile-checked set.

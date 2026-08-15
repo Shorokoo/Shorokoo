@@ -204,7 +204,7 @@ namespace Shorokoo
         /// <summary>
         /// Struct definition for the <b>schedule-less runtime</b> optimizer hyperparameters — the ones
         /// built with <see cref="Hyperparameter.Runtime"/> that the caller supplies explicitly each step
-        /// (one scalar <c>float32</c> field each). Empty when every hyperparameter is either baked as a
+        /// (one scalar field each, at the hyperparameter's declared dtype). Empty when every hyperparameter is either baked as a
         /// constant or scheduled in-graph. Scheduled hyperparameters (a built-in <see cref="Schedule"/>
         /// or a scheduler module) are <b>not</b> here — they are computed in-graph from the step counter
         /// and need no per-step value. When non-empty, supply values via
@@ -245,8 +245,17 @@ namespace Shorokoo
         public IReadOnlyList<string> HyperparameterNames { get; private set; } = Array.Empty<string>();
 
         /// <summary>
+        /// The dtype each hyperparameter is <b>declared</b> at by the optimizer's
+        /// <c>[Hyper(...)] Scalar&lt;T&gt;</c> signature, in the same order as
+        /// <see cref="HyperparameterNames"/>. This is the single source of truth for the pipeline: a
+        /// baked value is converted to it, a runtime field is typed by it, and a scheduler module must
+        /// produce it. A hyperparameter is any supported scalar dtype, not just <c>float32</c>.
+        /// </summary>
+        public IReadOnlyList<DType> HyperparameterDTypes { get; private set; } = Array.Empty<DType>();
+
+        /// <summary>
         /// The names of the dynamic (runtime-input) hyperparameters, in <see cref="HyperparameterStructDef"/>
-        /// field order — the names accepted by <see cref="MakeHyperparameters(ValueTuple{string, float}[])"/>.
+        /// field order — the names accepted by <see cref="MakeHyperparameters(ValueTuple{string, object}[])"/>.
         /// </summary>
         public IReadOnlyList<string> DynamicHyperparameterNames { get; private set; } = Array.Empty<string>();
 
@@ -293,9 +302,10 @@ namespace Shorokoo
         /// a baked hyper's constant, a scheduled hyper's canonical graph evaluated via QEE at build
         /// (built-in schedule <i>and</i> user module alike), and <c>null</c> for a runtime hyper
         /// (its value is host-supplied — see D5). Indexed in optimizer order. Replaces the old
-        /// hardcoded-<c>0f</c> state-init seed that silently fed <c>0</c> for scheduler modules.
+        /// hardcoded-<c>0f</c> state-init seed that silently fed <c>0</c> for scheduler modules. Each
+        /// value is a rank-0 tensor at the hyperparameter's declared dtype.
         /// </summary>
-        private float?[] _hyperparamInitialCounterValues = Array.Empty<float?>();
+        private TensorData?[] _hyperparamInitialCounterValues = Array.Empty<TensorData?>();
 
         /// <summary>
         /// Optimizer-order indices of the hyperparameters the optimizer's state-init graph actually
@@ -975,7 +985,7 @@ namespace Shorokoo
             // Value route (§2.5): the value each hyper contributes to optimizer state init, at the
             // initial counters. Baked → its constant; scheduled → its graph evaluated via QEE below;
             // runtime → null (host-supplied, D5). Filled per kind as the hypers are wired.
-            _hyperparamInitialCounterValues = new float?[hyperparameters.Length];
+            _hyperparamInitialCounterValues = new TensorData?[hyperparameters.Length];
 
             // Step 1: Compose model + loss + autograd via TrainingGraphBuilder. The model
             // graph is already through ToConcreteArchitecture (done once at FromScratch),
@@ -1090,12 +1100,17 @@ namespace Shorokoo
             //                                     int64 step-counter input, with no per-step host
             //                                     evaluation (#99).
             //  • schedule-less runtime         → a "hyperparams" TensorStruct runtime input (one scalar
-            //    (Hyperparameter.Runtime)             float32 field each), supplied explicitly every step.
+            //    (Hyperparameter.Runtime)             field each, at the declared dtype), supplied every step.
+            // The optimizer's declared Scalar<T> signature is the dtype source of truth throughout.
             string NameOf(int h) => hyperparamNames is not null && h < hyperparamNames.Count
                 ? hyperparamNames[h] : $"hyperparam_{h}";
-            float SeedOf(int h) => SeedValue(hyperparameters[h]);
 
             HyperparameterNames = Enumerable.Range(0, numHyperparams).Select(NameOf).ToArray();
+            HyperparameterDTypes = optimizerInfo.HyperparamDTypes;
+            for (int h = 0; h < numHyperparams; h++)
+                HyperparameterScalar.AssertSupported(optimizerInfo.HyperparamDTypes[h], NameOf(h));
+
+            TensorData SeedOf(int h) => SeedValue(hyperparameters[h], optimizerInfo.HyperparamDTypes[h], NameOf(h));
 
             // Classify the dynamic hyperparameters into in-graph scheduled vs schedule-less runtime.
             var scheduledIndices = new List<int>();
@@ -1116,7 +1131,8 @@ namespace Shorokoo
             // in-graph and never appear here.
             DynamicHyperparameterIndices = runtimeIndices;
             var hyperFields = runtimeIndices
-                .Select(h => new TensorStructFieldDef(NameOf(h), DataStructure.Tensor, 0, DType.Float32))
+                .Select(h => new TensorStructFieldDef(
+                    NameOf(h), DataStructure.Tensor, 0, optimizerInfo.HyperparamDTypes[h]))
                 .ToArray();
             HyperparameterStructDef = new TensorStructDef(hyperFields, "Hyperparameters");
             DynamicHyperparameterNames = hyperFields.Select(f => f.Name).ToArray();
@@ -1150,8 +1166,7 @@ namespace Shorokoo
                     fastTraining.Nodes.Add(node);
                     headNodesInOrder.Add(node);
                     hyperparamKeys[runtimeIndices[i]] = new FastTensorKey(node.Key, 0);
-                    _initialHyperparamFields[f.Name] =
-                        Shorokoo.Globals.TensorData(Array.Empty<long>(), SeedOf(runtimeIndices[i]));
+                    _initialHyperparamFields[f.Name] = SeedOf(runtimeIndices[i]);
                 }
             }
 
@@ -1169,7 +1184,8 @@ namespace Shorokoo
                 var needed = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var h in scheduledIndices)
                 {
-                    var built = BuildSchedulerModule(hyperparameters[h], NameOf(h), MergeContext);
+                    var built = BuildSchedulerModule(
+                        hyperparameters[h], NameOf(h), optimizerInfo.HyperparamDTypes[h], MergeContext);
                     builtByIndex[h] = built;
                     foreach (var c in built.CounterNames) needed.Add(c);
                 }
@@ -1208,13 +1224,23 @@ namespace Shorokoo
             for (int h = 0; h < numHyperparams; h++)
             {
                 if (hyperparameters[h].Kind != HyperparameterKind.Baked) continue;
-                _hyperparamInitialCounterValues[h] = hyperparameters[h].BakedValue;
+                _hyperparamInitialCounterValues[h] = SeedOf(h);
                 var node = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.Constant(
-                    Shorokoo.Globals.TensorData(Array.Empty<long>(), SeedOf(h)));
+                    _hyperparamInitialCounterValues[h]!);
                 fastTraining.Nodes.Add(node);
                 headNodesInOrder.Add(node);
                 hyperparamKeys[h] = new FastTensorKey(node.Key, 0);
             }
+
+            // Record the bindings the rig actually built with: a baked value is normalized to its
+            // declared dtype here, so rig.Hyperparameters[h].BakedDType is always
+            // HyperparameterDTypes[h] and persistence writes the constant the graph carries rather
+            // than whichever host literal the caller happened to type.
+            var normalizedHypers = (Hyperparameter[])hyperparameters.Clone();
+            for (int h = 0; h < numHyperparams; h++)
+                if (hyperparameters[h].Kind == HyperparameterKind.Baked)
+                    normalizedHypers[h] = Hyperparameter.Baked(_hyperparamInitialCounterValues[h]!);
+            _constituents = _constituents with { Hyperparameters = normalizedHypers };
 
             // Build optimizer state struct definition. Element type comes from each state's
             // initializer; the rank falls back to the parameter's rank when the initializer's
@@ -1365,40 +1391,44 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// The scalar value used to seed shape inference (and, for a baked hyper, its graph constant):
-        /// a baked hyper's constant, a built-in schedule's step-0 value, else 0 (a scheduler module —
-        /// whose value comes from evaluating its graph, see <see cref="EvaluateSchedulerAtInitialCounters"/>
-        /// — or a seedless runtime hyper).
+        /// The scalar used to seed shape inference (and, for a baked hyper, its graph constant), at the
+        /// hyperparameter's <paramref name="declared"/> dtype: a baked hyper's constant converted to that
+        /// dtype, a built-in schedule's step-0 value, else the dtype's zero (a scheduler module — whose
+        /// value comes from evaluating its graph, see <see cref="EvaluateSchedulerAtInitialCounters"/> —
+        /// or a seedless runtime hyper).
         /// </summary>
-        private static float SeedValue(Hyperparameter h) => h.Kind switch
+        private static TensorData SeedValue(Hyperparameter h, DType declared, string name) => h.Kind switch
         {
-            HyperparameterKind.Baked => h.BakedValue,
-            HyperparameterKind.Scheduled => h.AsSchedule is Schedule s && s.CanLower() ? s.At(0) : 0f,
-            _ => 0f,
+            HyperparameterKind.Baked => HyperparameterScalar.ConvertTo(h.BakedValue, declared, name),
+            HyperparameterKind.Scheduled when h.AsSchedule is Schedule s && s.CanLower()
+                => HyperparameterScalar.ConvertTo(HyperparameterScalar.Of(s.At(0)), declared, name),
+            _ => HyperparameterScalar.Zero(declared),
         };
 
         /// <summary>
         /// Evaluates a scheduler graph (built-in lowering or user module) at the <b>initial counters</b>
         /// — every counter input bound to 0 — via the pure managed <see cref="Shorokoo.Core.Inference.QuickExecutionEngine"/>,
-        /// returning the float32 value. This is the single value route (§2.5) for optimizer state init:
+        /// returning the scalar value at the scheduler's own (declared) dtype. This is the single value route (§2.5) for optimizer state init:
         /// the scheduler graph is normative, so its build-time value comes from evaluating it, not from
         /// a host closure or a hardcoded placeholder. The graph is pure (enforced, D4), so all-zero
         /// counters fully determine the value.
         /// </summary>
-        private static float EvaluateSchedulerAtInitialCounters(InternalComputationGraph schedulerGraph)
+        private static TensorData EvaluateSchedulerAtInitialCounters(InternalComputationGraph schedulerGraph)
         {
             var inputs = new IData[schedulerGraph.Inputs.Count];
             for (int i = 0; i < inputs.Length; i++)
                 inputs[i] = Shorokoo.Globals.TensorData(Array.Empty<long>(), 0L);
             var result = new Shorokoo.Core.Inference.QuickExecutionEngine().Execute(schedulerGraph, inputs);
-            return ((TensorData)result[0]).As<float32>().AccessMemory<float>()[0];
+            return (TensorData)result[0];
         }
 
         /// <summary>
         /// Builds the graph a scheduled hyperparameter is emitted from: a module taking the int64
-        /// scalar counter input(s) and producing the float32 scalar scheduled value. A built-in
-        /// <see cref="Schedule"/> is lowered via <see cref="ScheduleLowering"/>; a user scheduler
-        /// module is validated, purity-checked, and inlined. The returned graph is spliced into the
+        /// scalar counter input(s) and producing the scheduled scalar at the hyperparameter's declared
+        /// dtype. A built-in <see cref="Schedule"/> is lowered via <see cref="ScheduleLowering"/> — its
+        /// math is continuous, so it drives <c>float32</c> hyperparameters only; a user scheduler
+        /// module is validated, purity-checked, and inlined, and may produce any declared dtype. The
+        /// returned graph is spliced into the
         /// training-step graph by <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastReplay.ReplayInto"/>
         /// against the shared step-counter input.
         /// </summary>
@@ -1408,7 +1438,8 @@ namespace Shorokoo
         /// <summary>A built scheduler graph and the counter inputs it consumes, in the graph's input order.</summary>
         private readonly record struct SchedulerGraph(InternalComputationGraph Graph, string[] CounterNames);
 
-        private static SchedulerGraph BuildSchedulerModule(Hyperparameter hv, string name, ComputeContext mergeContext)
+        private static SchedulerGraph BuildSchedulerModule(
+            Hyperparameter hv, string name, DType declared, ComputeContext mergeContext)
         {
             if (hv.AsSchedule is Schedule schedule)
             {
@@ -1417,6 +1448,13 @@ namespace Shorokoo
                         $"Scheduled hyperparameter '{name}' wraps an opaque host function and cannot be " +
                         "lowered to graph math. Build the schedule from the Schedules factories and " +
                         "Schedule combinators, or supply a scheduler module.", nameof(hv));
+                // Built-in Schedule math (cosine / linear / decay) is inherently continuous float32, so a
+                // hyperparameter of any other dtype needs a scheduler module rather than a built-in.
+                if (declared != DType.Float32)
+                    throw new ArgumentException(
+                        $"Hyperparameter '{name}' is declared '{declared}', but a built-in Schedule " +
+                        "produces float32. Drive a non-float32 hyperparameter with a scheduler module " +
+                        "(Hyperparameter.Scheduled(module)) that produces its declared dtype.", nameof(hv));
                 // Built-in DSL schedules are step-only (PerEpoch derives epoch in-graph from step, #39).
                 var step = Shorokoo.Globals.InputScalar<int64>("step");
                 var value = schedule.LowerToGraph(step);
@@ -1426,17 +1464,19 @@ namespace Shorokoo
             var module = hv.AsSchedulerModule
                 ?? throw new InvalidOperationException(
                     $"Scheduled hyperparameter '{name}' has neither a built-in schedule nor a scheduler module.");
-            return ValidateAndInlineSchedulerModule(module, name, mergeContext);
+            return ValidateAndInlineSchedulerModule(module, name, declared, mergeContext);
         }
 
         /// <summary>
         /// Validates a user scheduler module's signature — its inputs a subset of the reserved int64
         /// scalar counters <c>{step, epoch, batchIndex}</c> (D1; each named, rank-0, no duplicates) and
-        /// a single float32 scalar output — enforces purity (D4), and returns its inlined graph together
+        /// a single scalar output at the hyperparameter's declared dtype — enforces purity (D4), and
+        /// returns its inlined graph together
         /// with the counter names it consumes (in input order, for wiring). Fails loud at rig build with
         /// a clear message on any signature/purity mismatch.
         /// </summary>
-        private static SchedulerGraph ValidateAndInlineSchedulerModule(ComputationGraph module, string name, ComputeContext mergeContext)
+        private static SchedulerGraph ValidateAndInlineSchedulerModule(
+            ComputationGraph module, string name, DType declared, ComputeContext mergeContext)
         {
             if (module.Kind is not (GraphKind.Module or GraphKind.ConcreteArchitecture or GraphKind.ConcreteModel))
                 throw new ArgumentException(
@@ -1503,10 +1543,10 @@ namespace Shorokoo
                 ?? throw new ArgumentException(
                     $"Scheduler module for hyperparameter '{name}': could not infer its output shape.",
                     nameof(module));
-            if (outInfo.DType != DType.Float32)
+            if (outInfo.DType != declared)
                 throw new ArgumentException(
-                    $"Scheduler module for hyperparameter '{name}' must produce a float32 value; " +
-                    $"got {outInfo.DType}.", nameof(module));
+                    $"Scheduler module for hyperparameter '{name}' must produce a '{declared}' value " +
+                    $"(the dtype the optimizer declares it at); got {outInfo.DType}.", nameof(module));
             if (outInfo.Shape.Dims.Length != 0)
                 throw new ArgumentException(
                     $"Scheduler module for hyperparameter '{name}' must produce a scalar (rank-0) value; " +
@@ -1666,7 +1706,7 @@ namespace Shorokoo
         /// <summary>
         /// Executes a single training step with explicit hyperparameter values, overriding any
         /// schedules for this step (build the values with <see cref="MakeHyperparameters(float)"/> or
-        /// <see cref="MakeHyperparameters(ValueTuple{string, float}[])"/>). Use this for manual control, or
+        /// <see cref="MakeHyperparameters(ValueTuple{string, object}[])"/>). Use this for manual control, or
         /// for rigs whose dynamic hyperparameters are schedule-less (<see cref="Hyperparameter.Runtime"/>).
         /// In-graph scheduled hyperparameters (built-in schedules / scheduler modules) are unaffected
         /// by this overload — they are always computed from the step counter — so <paramref name="hyperparams"/>
@@ -2083,7 +2123,7 @@ namespace Shorokoo
         /// <summary>
         /// Like <see cref="CreateInitialCheckpoint()"/>, but with explicit initial values for the
         /// <see cref="HyperparameterKind.Runtime"/> hyperparameters (build the struct with
-        /// <see cref="MakeHyperparameters(float)"/> / <see cref="MakeHyperparameters(ValueTuple{string, float}[])"/>
+        /// <see cref="MakeHyperparameters(float)"/> / <see cref="MakeHyperparameters(ValueTuple{string, object}[])"/>
         /// — the same struct the per-step override <c>TrainStep</c> takes). Required (D5) when the
         /// optimizer's state initializer reads a runtime hyperparameter; harmless otherwise. Baked and
         /// scheduled hyperparameters still contribute their build-time value at the initial counters.
@@ -2108,23 +2148,24 @@ namespace Shorokoo
         /// (<see cref="_hyperparamInitialCounterValues"/>); a runtime hyper takes its value from
         /// <paramref name="runtimeHypers"/> when supplied. A runtime hyper the state-init graph
         /// actually <b>consumes</b> must be present (D5): its absence fails loud rather than defaulting
-        /// to a placeholder. An unconsumed runtime hyper is irrelevant to state init, so it defaults to 0.
+        /// to a placeholder. An unconsumed runtime hyper is irrelevant to state init, so it defaults to
+        /// its declared dtype's zero.
         /// </summary>
-        private float[] ResolveStateInitHyperValues(TensorDataStruct? runtimeHypers, bool throwOnMissingConsumed)
+        private TensorData[] ResolveStateInitHyperValues(TensorDataStruct? runtimeHypers, bool throwOnMissingConsumed)
         {
-            var values = new float[_hyperparamInitialCounterValues.Length];
+            var values = new TensorData[_hyperparamInitialCounterValues.Length];
             for (int i = 0; i < values.Length; i++)
             {
-                if (_hyperparamInitialCounterValues[i] is float known) { values[i] = known; continue; }
+                if (_hyperparamInitialCounterValues[i] is TensorData known) { values[i] = known; continue; }
 
                 // Runtime hyper: use the supplied value; a value the state-init graph actually consumes
                 // must be present when the caller means it (throwOnMissingConsumed) — else it is an
-                // internal 0 placeholder used only to seed shape inference at build.
+                // internal zero placeholder used only to seed shape inference at build.
                 var name = _runtimeHyperNameByOptIndex[i];
                 if (runtimeHypers is not null
                     && runtimeHypers.Fields.TryGetValue(name, out var d) && d is TensorData td)
                 {
-                    values[i] = td.As<float32>().AccessMemory<float>()[0];
+                    values[i] = HyperparameterScalar.ConvertTo(td, HyperparameterDTypes[i], name);
                 }
                 else if (throwOnMissingConsumed && _stateInitConsumedHyperIndices.Contains(i))
                 {
@@ -2135,7 +2176,8 @@ namespace Shorokoo
                 }
                 else
                 {
-                    values[i] = 0f;   // unconsumed runtime hyper, or a build-time shape-inference placeholder
+                    // Unconsumed runtime hyper, or a build-time shape-inference placeholder.
+                    values[i] = HyperparameterScalar.Zero(HyperparameterDTypes[i]);
                 }
             }
             return values;
@@ -2143,18 +2185,15 @@ namespace Shorokoo
 
         /// <summary>
         /// Runs the optimizer's split-off state-init graph once per trainable parameter, binding its
-        /// hyperparameter inputs to <paramref name="hyperValuesInOptOrder"/>, the parameter's initial
+        /// hyperparameter inputs to <paramref name="hyperSeeds"/> (in optimizer order), the parameter's initial
         /// value, and a zero gradient; returns the initial optimizer-state field values.
         /// </summary>
-        private Dictionary<string, IData> ComputeInitialOptStateFields(float[] hyperValuesInOptOrder, ComputeContext ctx)
+        private Dictionary<string, IData> ComputeInitialOptStateFields(TensorData[] hyperSeeds, ComputeContext ctx)
         {
             var fields = new Dictionary<string, IData>();
             var stateInitGraph = _optimizerStateInitGraph
                 ?? throw new InvalidOperationException("Optimizer state fields exist but no state-init graph was produced.");
             var statesPerParam = OptimizerStateDef.Fields.Length / TrainableParamStructDef.Fields.Length;
-            var hyperSeeds = hyperValuesInOptOrder
-                .Select(v => (TensorData)Shorokoo.Globals.TensorData(Array.Empty<long>(), v))
-                .ToArray();
 
             for (var paramIdx = 0; paramIdx < TrainableParamStructDef.Fields.Length; paramIdx++)
             {
@@ -2247,7 +2286,8 @@ namespace Shorokoo
             var needed = new HashSet<string>(StringComparer.Ordinal);
             foreach (var h in scheduledIndices)
             {
-                var built = BuildSchedulerModule(hyperparameters[h], NameOf(h), MergeContext);
+                var built = BuildSchedulerModule(
+                    hyperparameters[h], NameOf(h), HyperparameterDTypes[h], MergeContext);
                 builtByIndex[h] = built;
                 foreach (var c in built.CounterNames) needed.Add(c);
             }
@@ -2402,12 +2442,33 @@ namespace Shorokoo
         /// explicit <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, TensorDataStruct)"/>
         /// overload. Convenience for the common case of exactly one dynamic hyperparameter (e.g. the
         /// learning rate); throws if the rig has a different number. For multiple, use the named overload.
+        /// The value is converted to the hyperparameter's declared dtype, failing loud if it would not
+        /// survive the conversion.
         /// </summary>
-        public TensorDataStruct MakeHyperparameters(float value)
+        public TensorDataStruct MakeHyperparameters(float value) => MakeSingleHyperparameter(value);
+
+        /// <summary>Double-precision form of <see cref="MakeHyperparameters(float)"/>.</summary>
+        public TensorDataStruct MakeHyperparameters(double value) => MakeSingleHyperparameter(value);
+
+        /// <summary>Integer form of <see cref="MakeHyperparameters(float)"/>.</summary>
+        public TensorDataStruct MakeHyperparameters(int value) => MakeSingleHyperparameter(value);
+
+        /// <summary>64-bit integer form of <see cref="MakeHyperparameters(float)"/>.</summary>
+        public TensorDataStruct MakeHyperparameters(long value) => MakeSingleHyperparameter(value);
+
+        /// <summary>Boolean form of <see cref="MakeHyperparameters(float)"/>.</summary>
+        public TensorDataStruct MakeHyperparameters(bool value) => MakeSingleHyperparameter(value);
+
+        /// <summary>Explicitly typed form of <see cref="MakeHyperparameters(float)"/>, for a dtype with
+        /// no natural C# literal (e.g. <c>float16</c>); the scalar must be rank-0.</summary>
+        public TensorDataStruct MakeHyperparameters(TensorData value)
+            => MakeSingleHyperparameter(value ?? throw new ArgumentNullException(nameof(value)));
+
+        private TensorDataStruct MakeSingleHyperparameter(object value)
         {
             if (HyperparameterStructDef.Fields.Length != 1)
                 throw new InvalidOperationException(
-                    $"MakeHyperparameters(float) requires exactly one dynamic hyperparameter; this rig has " +
+                    $"MakeHyperparameters(value) requires exactly one dynamic hyperparameter; this rig has " +
                     $"{HyperparameterStructDef.Fields.Length} ([{string.Join(", ", DynamicHyperparameterNames)}]). " +
                     "Use MakeHyperparameters((name, value), …).");
             return PackHyperparams([value]);
@@ -2418,13 +2479,16 @@ namespace Shorokoo
         /// explicit <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, TensorDataStruct)"/>
         /// overload. Every dynamic hyperparameter must be named exactly once (case-insensitive); names
         /// are those in <see cref="DynamicHyperparameterNames"/>, e.g.
-        /// <c>MakeHyperparameters(("learningRate", lr), ("weightDecay", wd))</c>.
+        /// <c>MakeHyperparameters(("learningRate", lr), ("weightDecay", wd))</c>. Each value is a host
+        /// scalar (a numeric or <c>bool</c> value, or a rank-0 <see cref="TensorData"/>) converted to
+        /// that hyperparameter's declared dtype, so a rig may mix dtypes:
+        /// <c>MakeHyperparameters(("learningRate", 0.1f), ("useNesterov", true))</c>.
         /// </summary>
-        public TensorDataStruct MakeHyperparameters(params (string name, float value)[] values)
+        public TensorDataStruct MakeHyperparameters(params (string name, object value)[] values)
         {
             if (values is null) throw new ArgumentNullException(nameof(values));
 
-            var byName = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+            var byName = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
             foreach (var (name, value) in values)
             {
                 if (name is null) throw new ArgumentException("Hyperparameter name cannot be null.", nameof(values));
@@ -2432,7 +2496,7 @@ namespace Shorokoo
                     throw new ArgumentException($"Hyperparameter '{name}' was supplied more than once.", nameof(values));
             }
 
-            var ordered = new float[HyperparameterStructDef.Fields.Length];
+            var ordered = new object[HyperparameterStructDef.Fields.Length];
             for (int i = 0; i < HyperparameterStructDef.Fields.Length; i++)
             {
                 var fieldName = HyperparameterStructDef.Fields[i].Name;
@@ -2450,14 +2514,21 @@ namespace Shorokoo
             return PackHyperparams(ordered);
         }
 
-        /// <summary>Packs values (in <see cref="HyperparameterStructDef"/> field order) into a scalar-field struct.</summary>
-        private TensorDataStruct PackHyperparams(float[] orderedValues)
+        /// <summary>
+        /// Packs host values (in <see cref="HyperparameterStructDef"/> field order) into a scalar-field
+        /// struct, converting each to its field's declared dtype.
+        /// </summary>
+        private TensorDataStruct PackHyperparams(object[] orderedValues)
         {
             var fields = new KeyValuePair<string, IData>[orderedValues.Length];
             for (int i = 0; i < orderedValues.Length; i++)
+            {
+                var field = HyperparameterStructDef.Fields[i];
                 fields[i] = new KeyValuePair<string, IData>(
-                    HyperparameterStructDef.Fields[i].Name,
-                    Shorokoo.Globals.TensorData(Array.Empty<long>(), orderedValues[i]));
+                    field.Name,
+                    HyperparameterScalar.ConvertTo(
+                        HyperparameterScalar.Of(orderedValues[i]), field.ElementType, field.Name));
+            }
             return new TensorDataStruct(HyperparameterStructDef, fields);
         }
 

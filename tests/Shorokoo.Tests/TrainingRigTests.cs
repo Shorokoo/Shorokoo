@@ -2428,3 +2428,170 @@ public class TrainingRigSkptCheckpointCoverageTests
         finally { if (File.Exists(stepEpochPath)) File.Delete(stepEpochPath); }
     }
 }
+
+[Trait("Domain", "Training")]
+[Trait("Purpose", "Coverage")]
+public class TrainingRigHyperparameterDTypeCoverageTests
+{
+    private static ComputationGraph SchedulerModuleRaw(Variable[] inputs, Variable[] outputs)
+        => new(new InternalComputationGraph([.. inputs], [.. outputs]), GraphKind.Module);
+
+    private static TrainingRig MixedRig(MixedDTypeHyperOptimizerHyperparameters hypers)
+        => TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            MixedDTypeHyperOptimizer.ComputationGraph, ScalarMultiplyBatches().sample, hypers);
+
+    [Fact]
+    public void TestDeclaredDTypesDriveBakedRuntimeAndScheduledHyperparametersCoverage()
+    {
+        var (_, inputBatch, targetBatch) = ScalarMultiplyBatches();
+
+        var bakedRig = MixedRig(new MixedDTypeHyperOptimizerHyperparameters());
+        Assert.Equal((string[])["learningRate", "gradScale", "descend", "decay"],
+            bakedRig.HyperparameterNames.ToArray());
+        Assert.Equal((DType[])[DType.Float32, DType.Int32, DType.Bool, DType.Float64],
+            bakedRig.HyperparameterDTypes.ToArray());
+        Assert.Equal((DType[])[DType.Float32, DType.Int32, DType.Bool, DType.Float64],
+            bakedRig.Hyperparameters.Select(h => h.BakedDType).ToArray());
+        Assert.Equal(2, ((TensorData<int32>)bakedRig.Hyperparameters[1].BakedValue).AccessMemory()[0]);
+        Assert.True(((TensorData<bit>)bakedRig.Hyperparameters[2].BakedValue).AccessMemory()[0]);
+        Assert.Equal(0.25, ((TensorData<float64>)bakedRig.Hyperparameters[3].BakedValue).AccessMemory()[0]);
+        Assert.Empty(bakedRig.HyperparameterStructDef.Fields);
+
+        float Step(TrainingRig rig, TensorDataStruct? hypers = null)
+        {
+            var ckpt = rig.CreateInitialCheckpoint();
+            return Weight(rig, hypers is null
+                ? rig.TrainStep(ckpt, inputBatch, targetBatch)
+                : rig.TrainStep(ckpt, hypers, inputBatch, targetBatch));
+        }
+
+        var runtimeRig = MixedRig(new MixedDTypeHyperOptimizerHyperparameters
+        {
+            LearningRate = Hyperparameter.Runtime(),
+            GradScale = Hyperparameter.Runtime(),
+            Descend = Hyperparameter.Runtime(),
+            Decay = Hyperparameter.Runtime(),
+        });
+        Assert.Equal((DType[])[DType.Float32, DType.Int32, DType.Bool, DType.Float64],
+            runtimeRig.HyperparameterStructDef.Fields.Select(f => f.ElementType).ToArray());
+
+        var matching = runtimeRig.MakeHyperparameters(
+            ("learningRate", 0.1f), ("gradScale", 2), ("descend", true), ("decay", 0.25));
+        Assert.Equal(DType.Int32, ((TensorData)matching.Fields["gradScale"]).DType);
+        Assert.Equal(DType.Bool, ((TensorData)matching.Fields["descend"]).DType);
+        Assert.True(MathF.Abs(Step(bakedRig) - Step(runtimeRig, matching)) < 1e-5f);
+
+        var ascend = runtimeRig.MakeHyperparameters(
+            ("learningRate", 0.1f), ("gradScale", 2), ("descend", false), ("decay", 0.25));
+        Assert.True(MathF.Abs(Step(runtimeRig, ascend) - Step(runtimeRig, matching)) > 1e-4f);
+
+        var scheduledRig = MixedRig(new MixedDTypeHyperOptimizerHyperparameters
+        {
+            LearningRate = Schedules.Constant(0.1f),
+            GradScale = Hyperparameter.Scheduled(IntStepScheduler.ComputationGraph),
+            Descend = true,
+            Decay = 0.25,
+        });
+        Assert.Empty(scheduledRig.HyperparameterStructDef.Fields);
+        var scheduledStep = Step(scheduledRig);
+        var scaleTwoAtStepZero = runtimeRig.MakeHyperparameters(
+            ("learningRate", 0.1f), ("gradScale", 2), ("descend", true), ("decay", 0.25));
+        Assert.True(MathF.Abs(scheduledStep - Step(runtimeRig, scaleTwoAtStepZero)) < 1e-5f);
+
+        var intStateRig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            InitFromIntHyperOptimizer.ComputationGraph, ScalarMultiplyBatches().sample,
+            new InitFromIntHyperOptimizerHyperparameters { StateSeed = 7 });
+        Assert.All(FlattenStruct(intStateRig.CreateInitialCheckpoint().OptimizerState),
+            v => Assert.Equal(7f, v));
+    }
+
+    [Fact]
+    public void TestHyperparameterDTypeConversionsAndRejectionsCoverage()
+    {
+        var runtimeRig = MixedRig(new MixedDTypeHyperOptimizerHyperparameters
+        {
+            LearningRate = Hyperparameter.Runtime(),
+            GradScale = Hyperparameter.Runtime(),
+            Descend = Hyperparameter.Runtime(),
+            Decay = Hyperparameter.Runtime(),
+        });
+
+        TensorDataStruct Make(object lr, object scale, object descend, object decay)
+            => runtimeRig.MakeHyperparameters(
+                ("learningRate", lr), ("gradScale", scale), ("descend", descend), ("decay", decay));
+
+        // Value-preserving widening/narrowing is converted to the declared dtype.
+        Assert.Equal(3, ((TensorData<int32>)Make(0.1f, 3L, true, 0.25).Fields["gradScale"]).AccessMemory()[0]);
+        Assert.Equal(0.5f, ((TensorData<float32>)Make(0.5, 3, true, 0.25).Fields["learningRate"]).AccessMemory()[0]);
+        Assert.Equal(2.0, ((TensorData<float64>)Make(0.1f, 3, true, 2).Fields["decay"]).AccessMemory()[0]);
+
+        // A value that would not survive the conversion, or crosses the bool boundary, fails loud.
+        Assert.Throws<ArgumentException>(() => Make(0.1f, 2.5, true, 0.25));
+        Assert.Throws<ArgumentException>(() => Make(0.1f, long.MaxValue, true, 0.25));
+        Assert.Throws<ArgumentException>(() => Make(0.1f, true, true, 0.25));
+        Assert.Throws<ArgumentException>(() => Make(0.1f, 2, 1, 0.25));
+        Assert.Throws<ArgumentException>(() => Make(0.1f, 2, true, "0.25"));
+
+        // A baked value is converted at rig build under the same rule.
+        Assert.Equal(5, ((TensorData<int32>)MixedRig(new MixedDTypeHyperOptimizerHyperparameters
+            { GradScale = 5L }).Hyperparameters[1].BakedValue).AccessMemory()[0]);
+        Assert.Throws<ArgumentException>(() => MixedRig(new MixedDTypeHyperOptimizerHyperparameters
+            { GradScale = 2.5 }));
+        Assert.Throws<ArgumentException>(() => MixedRig(new MixedDTypeHyperOptimizerHyperparameters
+            { Descend = 1 }));
+
+        // Built-in Schedule math is float32; a non-float32 hyperparameter needs a scheduler module.
+        var schedEx = Assert.Throws<ArgumentException>(() => MixedRig(
+            new MixedDTypeHyperOptimizerHyperparameters { GradScale = Schedules.Constant(2f) }));
+        Assert.Contains("scheduler module", schedEx.Message);
+
+        // A scheduler module must produce the declared dtype, not merely float32.
+        var step = InputScalar<int64>("step");
+        var moduleEx = Assert.Throws<ArgumentException>(() => MixedRig(
+            new MixedDTypeHyperOptimizerHyperparameters
+                { GradScale = Hyperparameter.Scheduled(SchedulerModuleRaw([step], [step.Cast<float32>()])) }));
+        Assert.Contains("Int32", moduleEx.Message);
+
+        Assert.Throws<ArgumentException>(() => Hyperparameter.Baked(TensorData([2L], [1f, 2f])));
+    }
+
+    [Fact]
+    public void TestNonFloatHyperparametersRoundTripThroughSkptCoverage()
+    {
+        var (_, inputBatch, targetBatch) = ScalarMultiplyBatches();
+        var rig = MixedRig(new MixedDTypeHyperOptimizerHyperparameters
+        {
+            LearningRate = Schedules.Constant(0.1f),
+            GradScale = 3,
+            Descend = false,
+            Decay = 0.125,
+        });
+        var ckpt = rig.TrainStep(rig.CreateInitialCheckpoint(), inputBatch, targetBatch);
+        var reference = rig.TrainStep(ckpt, inputBatch, targetBatch);
+
+        var path = TempPath("hyperdtype") + ".skpt";
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+
+            var manifest = System.Text.Encoding.UTF8.GetString(ReadEntryBytesViaBcl(path, "config.json"));
+            Assert.Contains("\"dtype\": \"Int32\"", manifest);
+            Assert.Contains("\"dtype\": \"Bool\"", manifest);
+            Assert.Contains("\"dtype\": \"Float64\"", manifest);
+            Assert.DoesNotContain("bakedHypers", manifest);
+
+            var (rig2, loaded) = TrainingRig.Load(path);
+            Assert.Equal((DType[])[DType.Float32, DType.Int32, DType.Bool, DType.Float64],
+                rig2.HyperparameterDTypes.ToArray());
+            Assert.Equal(3, ((TensorData<int32>)rig2.Hyperparameters[1].BakedValue).AccessMemory()[0]);
+            Assert.False(((TensorData<bit>)rig2.Hyperparameters[2].BakedValue).AccessMemory()[0]);
+            Assert.Equal(0.125, ((TensorData<float64>)rig2.Hyperparameters[3].BakedValue).AccessMemory()[0]);
+
+            var resumed = rig2.TrainStep(loaded, inputBatch, targetBatch);
+            Assert.Equal(FlattenStruct(reference.TrainableParams), FlattenStruct(resumed.TrainableParams));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+}

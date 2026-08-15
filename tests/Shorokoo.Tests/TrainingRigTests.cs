@@ -2527,6 +2527,14 @@ public class TrainingRigHyperparameterDTypeCoverageTests
         Assert.Equal(0.5f, ((TensorData<float32>)Make(0.5, 3, true, 0.25).Fields["learningRate"]).AccessMemory()[0]);
         Assert.Equal(2.0, ((TensorData<float64>)Make(0.1f, 3, true, 2).Fields["decay"]).AccessMemory()[0]);
 
+        // Rounding between float dtypes is ordinary precision, not a lost value: a plain `0.1` double
+        // literal is the familiar 0.1f for a float32 hyperparameter, and only overflow is rejected.
+        Assert.Equal(0.1f, ((TensorData<float32>)Make(0.1, 3, true, 0.25).Fields["learningRate"]).AccessMemory()[0]);
+        Assert.Equal(1e-8f, ((TensorData<float32>)Make(1e-8, 3, true, 0.25).Fields["learningRate"]).AccessMemory()[0]);
+        Assert.Throws<ArgumentException>(() => Make(1e300, 3, true, 0.25));
+        Assert.Equal(0.1f, ((TensorData<float32>)MixedRig(new MixedDTypeHyperOptimizerHyperparameters
+            { LearningRate = 0.1 }).Hyperparameters[0].BakedValue).AccessMemory()[0]);
+
         // A value that would not survive the conversion, or crosses the bool boundary, fails loud.
         Assert.Throws<ArgumentException>(() => Make(0.1f, 2.5, true, 0.25));
         Assert.Throws<ArgumentException>(() => Make(0.1f, long.MaxValue, true, 0.25));

@@ -123,12 +123,14 @@ a dtype with no natural C# literal, e.g. `float16` — takes no default: declare
 `Hyperparameter.Baked(Globals.TensorData(…))`.
 
 **Dtypes.** Host-supplied values — a baked constant, or a per-step `MakeHyperparameters` value — are
-fitted to the declared dtype, and a scalar's conversion must be value-preserving: `("accumSteps", 3L)`
-becomes an `int32` 3, while `("accumSteps", 2.5)` and `("accumSteps", long.MaxValue)` fail loud rather
-than silently truncating, as does crossing the bool boundary in either direction. A **non-scalar** value
-is not converted element-wise — build it at the declared dtype (`Globals.TensorData(dtype, shape, …)`)
-and a mismatch fails loud. `rig.HyperparameterDTypes` reports the declared dtypes, in the same order as
-`rig.HyperparameterNames`.
+fitted to the declared dtype. Between floating-point dtypes that is always allowed: `LearningRate = 0.1`
+on a `float32` hyperparameter is the familiar `0.1f`, since rounding a `double` to a `float` is what
+float precision means (only an overflow to infinity is rejected). Every other conversion must be
+value-preserving: `("accumSteps", 3L)` becomes an `int32` 3, while `("accumSteps", 2.5)` and
+`("accumSteps", long.MaxValue)` fail loud rather than silently truncating, as does crossing the bool
+boundary in either direction. A **non-scalar** value is not converted element-wise — build it at the
+declared dtype (`Globals.TensorData(dtype, shape, …)`) and a mismatch fails loud.
+`rig.HyperparameterDTypes` reports the declared dtypes, in the same order as `rig.HyperparameterNames`.
 
 **Shapes.** The declaration pins the *rank* (`Scalar<T>` ⇒ 0, `Vector<T>` ⇒ 1, `Tensor<T>` ⇒ any); the
 concrete *shape* comes from the binding, and the rig reports it as `rig.HyperparameterShapes`:
@@ -162,8 +164,8 @@ rig.TrainStep(ckpt,
     inputs, targets);
 ```
 
-> **Migration (breaking).** `Hyperparameter.BakedValue` is now the rank-0 `TensorData` the constant was
-> built from (with `BakedDType` alongside), not a `float`; `MakeHyperparameters`'s named overload takes
+> **Migration (breaking).** `Hyperparameter.BakedValue` is now the `TensorData` the constant was built
+> from — carrying its shape as well as its dtype (with `BakedDType` alongside) — not a `float`; `MakeHyperparameters`'s named overload takes
 > `(string name, object value)` pairs rather than `(string, float)` — existing call sites such as
 > `MakeHyperparameters(("learningRate", 0.1f))` are unaffected. `HyperAttribute.DefaultValue` is
 > `object?` (the host literal the constructor took) rather than `float`, and a graph input's

@@ -290,11 +290,24 @@ namespace Shorokoo
         /// <summary>
         /// Fits a host-supplied value to <paramref name="declared"/>, the optimizer's declared dtype. An
         /// exact-dtype value passes through unchanged, whatever its shape. A <b>scalar</b> at another
-        /// dtype is converted, but only when the conversion round-trips exactly, so a truncating or
-        /// out-of-range value (0.5 into an int32, 300 into an int8, a bool into a float) fails loud
-        /// instead of silently changing the value. A <b>non-scalar</b> at another dtype is rejected
-        /// rather than converted element-wise: it was built explicitly, so it can be built at the
-        /// declared dtype.
+        /// dtype is converted, under a rule that separates ordinary precision from a changed value:
+        ///
+        /// <list type="bullet">
+        /// <item><description>
+        /// <b>Between floating-point dtypes</b> the conversion is always allowed. Rounding a
+        /// <c>float64</c> to a <c>float32</c> is what float precision <i>means</i> — <c>0.1</c> for a
+        /// <c>float32</c> learning rate is exactly the familiar <c>0.1f</c>, not a lost value — so only
+        /// an overflow to infinity is rejected.
+        /// </description></item>
+        /// <item><description>
+        /// <b>Every other conversion</b> must round-trip exactly, so a truncating or out-of-range value
+        /// (0.5 into an <c>int32</c>, 300 into an <c>int8</c>, 2^24+1 into a <c>float32</c>) fails loud
+        /// instead of silently changing the value. A bool never converts either way.
+        /// </description></item>
+        /// </list>
+        ///
+        /// A <b>non-scalar</b> at another dtype is rejected rather than converted element-wise: it was
+        /// built explicitly, so it can be built at the declared dtype.
         /// </summary>
         internal static TensorData ConvertTo(TensorData value, DType declared, string name)
         {
@@ -314,13 +327,36 @@ namespace Shorokoo
 
             var host = Read(value);
             var converted = ConvertNumeric(host, declared, name, value.DType);
-            if (!ConvertNumeric(converted, value.DType, name, declared).Equals(host))
+
+            if (IsFloating(value.DType) && IsFloating(declared))
+            {
+                if (double.IsInfinity(AsDouble(converted)) && !double.IsInfinity(AsDouble(host)))
+                    throw new ArgumentException(
+                        $"Hyperparameter '{name}' is declared '{declared}', and the supplied " +
+                        $"'{value.DType}' value {host} overflows it.", nameof(value));
+            }
+            else if (!ConvertNumeric(converted, value.DType, name, declared).Equals(host))
+            {
                 throw new ArgumentException(
                     $"Hyperparameter '{name}' is declared '{declared}', and the supplied '{value.DType}' " +
                     $"value {host} does not survive the conversion. Supply it at the declared dtype " +
                     "(e.g. Hyperparameter.Baked(Globals.TensorData([], …))).", nameof(value));
+            }
             return Of(converted);
         }
+
+        /// <summary>True for the IEEE floating-point dtypes, between which narrowing is ordinary precision.</summary>
+        private static bool IsFloating(DType dtype)
+            => dtype == DType.Float16 || dtype == DType.BFloat16
+               || dtype == DType.Float32 || dtype == DType.Float64;
+
+        /// <summary>A boxed numeric as a double, including the half types (neither is IConvertible).</summary>
+        private static double AsDouble(object value) => value switch
+        {
+            Float16 v => (float)v,
+            BFloat16 v => (float)v,
+            _ => Convert.ToDouble(value, System.Globalization.CultureInfo.InvariantCulture),
+        };
 
         /// <summary>
         /// Fails loud when <paramref name="value"/>'s shape is not <paramref name="expected"/> — the shape
@@ -341,10 +377,12 @@ namespace Shorokoo
         {
             try
             {
-                if (target == DType.Float16) return (Float16)Convert.ToSingle(host, System.Globalization.CultureInfo.InvariantCulture);
-                if (target == DType.BFloat16) return (BFloat16)Convert.ToSingle(host, System.Globalization.CultureInfo.InvariantCulture);
+                // Unwrap the half types first: neither implements IConvertible, so Convert.ToSingle /
+                // Convert.ChangeType would throw on them — including for a half-to-half conversion.
                 if (host is Float16 h16) host = (float)h16;
                 if (host is BFloat16 hb16) host = (float)hb16;
+                if (target == DType.Float16) return (Float16)Convert.ToSingle(host, System.Globalization.CultureInfo.InvariantCulture);
+                if (target == DType.BFloat16) return (BFloat16)Convert.ToSingle(host, System.Globalization.CultureInfo.InvariantCulture);
                 return Convert.ChangeType(host, target.ToPrimitiveType(), System.Globalization.CultureInfo.InvariantCulture);
             }
             catch (Exception e) when (e is OverflowException or InvalidCastException or FormatException)

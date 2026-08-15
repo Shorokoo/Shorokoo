@@ -12,12 +12,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     /// <remarks>
     /// Scans one graph only, and does not descend into function bodies: a body is not
-    /// reachable as node data (<see cref="Shorokoo.Core.Function.OriginalFastGraph"/>
-    /// thaws a fresh copy on every access), so a recursive walk would thaw every
-    /// reachable function on every import just to read one op code. The ONNX reader
-    /// instead applies this to each function body as it builds it — while that body is
-    /// still the mutable graph in hand — and to the top-level graph, which together cover
-    /// every node the import produces.
+    /// directly readable off node data — reaching it costs a full thaw, since
+    /// <see cref="Shorokoo.Core.Function.OriginalFastGraph"/> copies the frozen body on
+    /// every access — so a recursive walk would thaw every reachable function on every
+    /// import just to read one op code. The ONNX reader instead runs this from
+    /// <c>CreateFastNodes</c>, the one point every graph it materializes from protos
+    /// passes through, while that graph is still the mutable one in hand.
     /// </remarks>
     internal static class FastRejectSequenceMap
     {

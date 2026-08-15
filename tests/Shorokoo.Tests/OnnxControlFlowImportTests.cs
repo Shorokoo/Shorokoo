@@ -130,33 +130,35 @@ public class OnnxControlFlowImportTests
     }
 
     [Fact]
-    public void TestSequenceMapImportFailsWithActionableError()
+    public void TestSequenceMapImportFailsWithActionableErrorWhereverItSits()
     {
-        var body = new GraphProto { Name = "seqmap_body" };
-        body.Inputs.Add(TensorInfo("elem_in", FloatElem));
-        body.Nodes.Add(Node("Identity", "body_id", ["elem_in"], ["elem_out"]));
-        body.Outputs.Add(TensorInfo("elem_out", FloatElem));
+        AssertSequenceMapRejected(SeqMapAtTopLevel(), "top_seqmap");
+        AssertSequenceMapRejected(SeqMapInCalledFunction(), "called_seqmap");
+        AssertSequenceMapRejected(SeqMapInUnreferencedFunction(), "unreferenced_seqmap");
+    }
 
-        var graph = new GraphProto { Name = "seqmap_graph" };
-        graph.Inputs.Add(SequenceInfo("seq", FloatElem));
-        graph.Nodes.Add(Node("SequenceMap", "the_seqmap", ["seq"], ["out_seq"],
-            new AttributeProto { Name = "body", Type = AttributeProto.AttributeType.Graph, G = body }));
-        graph.Outputs.Add(SequenceInfo("out_seq", FloatElem));
-
-        var ex = Assert.Throws<NotSupportedException>(() => Import(WrapModel(graph)));
+    private static void AssertSequenceMapRejected(ModelProto model, string nodeName)
+    {
+        var ex = Assert.Throws<NotSupportedException>(() => Import(model));
         Assert.Contains("SequenceMap", ex.Message);
-        Assert.Contains("the_seqmap", ex.Message);
+        Assert.Contains(nodeName, ex.Message);
         Assert.Contains("LoopAPI", ex.Message);
     }
 
-    [Fact]
-    public void TestSequenceMapInsideAFunctionBodyFailsWithActionableError()
+    private static NodeProto SeqMapNode(string name, string input, string output)
     {
         var body = new GraphProto { Name = "seqmap_body" };
         body.Inputs.Add(TensorInfo("elem_in", FloatElem));
         body.Nodes.Add(Node("Identity", "body_id", ["elem_in"], ["elem_out"]));
         body.Outputs.Add(TensorInfo("elem_out", FloatElem));
 
+        return Node("SequenceMap", name, [input], [output],
+            new AttributeProto { Name = "body", Type = AttributeProto.AttributeType.Graph, G = body });
+    }
+
+    /// <summary>Shaped like <c>FastOnnxModelBuilder.BuildFunctionProto</c> emits them.</summary>
+    private static FunctionProto SeqMapFunction(string nodeName)
+    {
         var fn = new FunctionProto { Name = "SeqMapFn", Domain = "Functions" };
         fn.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
         fn.OpsetImports.Add(new OperatorSetIdProto { Domain = "Functions", Version = 1 });
@@ -164,20 +166,43 @@ public class OnnxControlFlowImportTests
         fn.Outputs.Add("fn_out_seq");
         fn.ValueInfoes.Add(SequenceInfo("fn_seq", FloatElem));
         fn.ValueInfoes.Add(SequenceInfo("fn_out_seq", FloatElem));
-        fn.Nodes.Add(Node("SequenceMap", "nested_seqmap", ["fn_seq"], ["fn_out_seq"],
-            new AttributeProto { Name = "body", Type = AttributeProto.AttributeType.Graph, G = body }));
+        fn.Nodes.Add(SeqMapNode(nodeName, "fn_seq", "fn_out_seq"));
+        return fn;
+    }
 
+    private static ModelProto SeqMapAtTopLevel()
+    {
+        var graph = new GraphProto { Name = "seqmap_graph" };
+        graph.Inputs.Add(SequenceInfo("seq", FloatElem));
+        graph.Nodes.Add(SeqMapNode("top_seqmap", "seq", "out_seq"));
+        graph.Outputs.Add(SequenceInfo("out_seq", FloatElem));
+        return WrapModel(graph);
+    }
+
+    private static ModelProto SeqMapInCalledFunction()
+    {
         var graph = new GraphProto { Name = "seqmap_fn_graph" };
         graph.Inputs.Add(SequenceInfo("seq", FloatElem));
-        graph.Nodes.Add(Node("SeqMapFn", "call_fn", ["seq"], ["out_seq"]));
+        var call = Node("SeqMapFn", "call_fn", ["seq"], ["out_seq"]);
+        call.Domain = "Functions";
+        graph.Nodes.Add(call);
         graph.Outputs.Add(SequenceInfo("out_seq", FloatElem));
 
         var model = WrapModel(graph);
-        model.Functions.Add(fn);
+        model.Functions.Add(SeqMapFunction("called_seqmap"));
+        return model;
+    }
 
-        var ex = Assert.Throws<NotSupportedException>(() => Import(model));
-        Assert.Contains("SequenceMap", ex.Message);
-        Assert.Contains("nested_seqmap", ex.Message);
-        Assert.Contains("LoopAPI", ex.Message);
+    /// <summary>A dead FunctionProto — nothing in the executable graph reaches it.</summary>
+    private static ModelProto SeqMapInUnreferencedFunction()
+    {
+        var graph = new GraphProto { Name = "dead_fn_graph" };
+        graph.Inputs.Add(TensorInfo("x", FloatElem, 4));
+        graph.Nodes.Add(Node("Identity", "passthrough", ["x"], ["y"]));
+        graph.Outputs.Add(TensorInfo("y", FloatElem, 4));
+
+        var model = WrapModel(graph);
+        model.Functions.Add(SeqMapFunction("unreferenced_seqmap"));
+        return model;
     }
 }

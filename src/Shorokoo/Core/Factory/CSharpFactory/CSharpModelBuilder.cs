@@ -83,6 +83,26 @@ namespace Shorokoo.Core.Factory.CSharpFactory
             }
         }
 
+        /// <summary>
+        /// Formats a recorded <c>[Hyper(defaultValue)]</c> literal as a C# literal of the declared dtype,
+        /// so the emitted attribute picks the matching <c>HyperAttribute</c> overload and the default
+        /// round-trips at its own dtype rather than through a float.
+        /// </summary>
+        private static string HyperDefaultLiteral(string value, DType dtype)
+        {
+            var invariant = System.Globalization.CultureInfo.InvariantCulture;
+            if (dtype == DType.Bool)
+                return bool.TryParse(value, out var b) && b ? "true" : "false";
+            if (dtype == DType.Int8 || dtype == DType.Int16 || dtype == DType.Int32
+                || dtype == DType.UInt8 || dtype == DType.UInt16 || dtype == DType.UInt32)
+                return Convert.ToInt32(value, invariant).ToString(invariant);
+            if (dtype == DType.Int64 || dtype == DType.UInt64)
+                return Convert.ToInt64(value, invariant).ToString(invariant) + "L";
+            if (dtype == DType.Float64)
+                return Convert.ToDouble(value, invariant).ToString("R", invariant) + "d";
+            return Convert.ToSingle(value, invariant).ToString("R", invariant) + "f";
+        }
+
         public static string GetTypeDefString(Variable Variable)
             => GetTypeDefString(Variable, Variable.Rank);
 
@@ -335,9 +355,11 @@ public static class " + modelName + @"
                 if (includeHyperparamAttribute && input.InputType == InputType.Hyperparam)
                 {
                     // Re-emit the [Hyper(defaultValue)] default when one was recorded, so a defaulted
-                    // hyperparameter round-trips through C# emission as a defaulted hyperparameter.
-                    attribute = input.HyperDefaultValue is float dv
-                        ? $"[Hyper({dv.ToString(System.Globalization.CultureInfo.InvariantCulture)}f)] "
+                    // hyperparameter round-trips through C# emission as a defaulted hyperparameter. The
+                    // literal is written at the input's own dtype, so an int/bool hyperparameter re-emits
+                    // as an int/bool default rather than as a float.
+                    attribute = input.HyperDefaultValue is string dv
+                        ? $"[Hyper({HyperDefaultLiteral(dv, input.Type)})] "
                         : "[Hyper] ";
                 }
                 inputParams.Add($"{attribute}{GetModuleAwareTypeDefString(input)} {GetSanitizedVariableName(input)}");

@@ -23,7 +23,7 @@ namespace Shorokoo.Core.Factory.IR
 {
     internal class OnnxIRFactory
     {
-        public static ValueInfoProto CreateTensorInfo(TensorShapeProto? dims, string name, DType type, DataStructure structure, string? targetFunctionName, string? inputTypeName, float? defaultValue = null)
+        public static ValueInfoProto CreateTensorInfo(TensorShapeProto? dims, string name, DType type, DataStructure structure, string? targetFunctionName, string? inputTypeName, string? defaultValue = null)
         {
             var valueInfo = new ValueInfoProto();
             valueInfo.Name = name;
@@ -103,11 +103,11 @@ namespace Shorokoo.Core.Factory.IR
                 valueInfo.MetadataProps.Add(inputTypeEntry);
             }
 
-            if (defaultValue is float dv)
+            if (defaultValue is string dv)
             {
                 var defaultValueEntry = new StringStringEntryProto();
                 defaultValueEntry.Key = Function.IRDefaultValue;
-                defaultValueEntry.Value = dv.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                defaultValueEntry.Value = dv;
                 valueInfo.MetadataProps.Add(defaultValueEntry);
             }
 

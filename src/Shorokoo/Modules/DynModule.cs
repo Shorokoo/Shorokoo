@@ -62,21 +62,42 @@ namespace Shorokoo.Modules
     /// For optimizer modules, an optional <see cref="DefaultValue"/> supplies the default used by the
     /// source-generated strongly-typed hyperparameter set (e.g. <c>AdamWOptimizerHyperparameters</c>),
     /// keeping the default next to the declaration as the single source of truth.
+    ///
+    /// <para>The parameter's own <c>Scalar&lt;T&gt;</c> declaration is the source of truth for the
+    /// hyperparameter's dtype; the default is formatted at that dtype by the source generator. Attribute
+    /// arguments are compile-time constants and a single <see cref="float"/> parameter cannot carry an
+    /// <see cref="int"/>, <see cref="double"/> or <see cref="bool"/>, hence one constructor per host
+    /// literal type. A dtype with no natural C# literal (e.g. <c>float16</c>) takes no default — declare
+    /// it as a bare <c>[Hyper]</c> and bind it explicitly.</para>
     /// </summary>
     public class HyperAttribute : Attribute
     {
         /// <summary>Declares a hyperparameter with no default value.</summary>
         public HyperAttribute() { }
 
-        /// <summary>Declares a hyperparameter with the given default value.</summary>
-        public HyperAttribute(float defaultValue)
+        /// <summary>Declares a hyperparameter defaulting to the given floating-point value.</summary>
+        public HyperAttribute(float defaultValue) : this((object)defaultValue) { }
+
+        /// <summary>Declares a hyperparameter defaulting to the given double-precision value.</summary>
+        public HyperAttribute(double defaultValue) : this((object)defaultValue) { }
+
+        /// <summary>Declares a hyperparameter defaulting to the given integer value.</summary>
+        public HyperAttribute(int defaultValue) : this((object)defaultValue) { }
+
+        /// <summary>Declares a hyperparameter defaulting to the given 64-bit integer value.</summary>
+        public HyperAttribute(long defaultValue) : this((object)defaultValue) { }
+
+        /// <summary>Declares a hyperparameter defaulting to the given boolean value.</summary>
+        public HyperAttribute(bool defaultValue) : this((object)defaultValue) { }
+
+        private HyperAttribute(object defaultValue)
         {
             DefaultValue = defaultValue;
             HasDefault = true;
         }
 
-        /// <summary>The default value, when one was supplied via <see cref="HyperAttribute(float)"/>.</summary>
-        public float DefaultValue { get; }
+        /// <summary>The default value, boxed at the host literal type the constructor took.</summary>
+        public object? DefaultValue { get; }
 
         /// <summary>Whether a default value was supplied.</summary>
         public bool HasDefault { get; }

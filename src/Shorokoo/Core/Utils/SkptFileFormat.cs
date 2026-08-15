@@ -168,10 +168,13 @@ namespace Shorokoo.Core.Utils
 
     /// <summary>
     /// One optimizer hyperparameter's persisted binding (issue #115 / #106), in the optimizer's
-    /// declared order. <see cref="Kind"/> decides reconstruction: <c>"baked"</c> reads its value from
-    /// <see cref="SkptRigInfo.BakedHypers"/> (keyed by <see cref="Name"/>); <c>"runtime"</c> is
-    /// rebuilt as a host-supplied runtime hyperparameter; <c>"scheduled"</c> takes the scheduler
-    /// model's output named <see cref="Name"/> as its <c>counters → value</c> graph.
+    /// declared order. <see cref="Kind"/> decides reconstruction: <c>"baked"</c> reads its constant off
+    /// this entry's own <see cref="DType"/> / <see cref="Shape"/> / <see cref="Value"/>; <c>"runtime"</c>
+    /// is rebuilt as a host-supplied runtime hyperparameter at the recorded <see cref="Shape"/>;
+    /// <c>"scheduled"</c> takes the scheduler model's output named <see cref="Name"/> as its
+    /// <c>counters → value</c> graph. A hyperparameter's dtype always comes from the optimizer
+    /// constituent's own declaration, which is the source of truth on load as at build; only a baked
+    /// binding records a dtype, as the key to reading its bytes back.
     /// </summary>
     public sealed class SkptRigHyperparameter
     {
@@ -182,6 +185,32 @@ namespace Shorokoo.Core.Utils
         /// <summary>The source kind: <c>"baked"</c>, <c>"scheduled"</c>, or <c>"runtime"</c>.</summary>
         [JsonPropertyName("kind")]
         public string? Kind { get; set; }
+
+        /// <summary>
+        /// The baked constant's dtype (a <see cref="Shorokoo.DType"/> name, e.g. <c>"Float32"</c>,
+        /// <c>"Int32"</c>, <c>"Bool"</c>). Required on a <c>"baked"</c> entry — a hyperparameter is any
+        /// supported dtype, so the value cannot be read without it — and absent otherwise.
+        /// </summary>
+        [JsonPropertyName("dtype")]
+        public string? DType { get; set; }
+
+        /// <summary>
+        /// The hyperparameter's dims (empty for a scalar). Required on a <c>"baked"</c> entry, to read its
+        /// bytes back, and on a <c>"runtime"</c> one, whose shape is declared by the host rather than
+        /// derivable from the file. Absent on a <c>"scheduled"</c> entry, whose shape its scheduler graph
+        /// carries.
+        /// </summary>
+        [JsonPropertyName("shape")]
+        public long[]? Shape { get; set; }
+
+        /// <summary>
+        /// The baked constant, as base64 of its raw little-endian bytes at <see cref="DType"/> and
+        /// <see cref="Shape"/>. Base64 rather than a decimal literal so every dtype (including
+        /// <c>float16</c> / <c>bfloat16</c>) round-trips bit-exactly. Required on a <c>"baked"</c> entry,
+        /// absent otherwise.
+        /// </summary>
+        [JsonPropertyName("value")]
+        public string? Value { get; set; }
 
         /// <summary>Round-trips fields added by newer minor revisions of the format.</summary>
         [JsonExtensionData]
@@ -270,14 +299,10 @@ namespace Shorokoo.Core.Utils
         [JsonPropertyName("schedulerModel")]
         public string? SchedulerModel { get; set; }
 
-        /// <summary>The hyperparameter bindings, in the optimizer's declared order.</summary>
+        /// <summary>The hyperparameter bindings, in the optimizer's declared order. A baked binding
+        /// carries its own dtype and value; see <see cref="SkptRigHyperparameter"/>.</summary>
         [JsonPropertyName("hyperparameters")]
         public List<SkptRigHyperparameter>? Hyperparameters { get; set; }
-
-        /// <summary>The values of the baked hyperparameters, keyed by name. A scheduled or runtime
-        /// hyperparameter is absent (its value is a graph / host-supplied).</summary>
-        [JsonPropertyName("bakedHypers")]
-        public Dictionary<string, float>? BakedHypers { get; set; }
 
         /// <summary>The RNG config the rig was built with.</summary>
         [JsonPropertyName("rng")]

@@ -277,10 +277,10 @@ namespace Shorokoo.Core
             }
         }
 
-        public float? HyperDefaultValue
+        public string? HyperDefaultValue
             => this.OwningNode.IsModelInput
                 && this.OwningNode.Attributes.GetAttributeVals().TryGetValue(OnnxOpAttributeNames.ShrkAttrDefaultValue, out var dv)
-                ? (float?)dv
+                ? (string?)dv
                 : null;
 
         public TensorDim[]? TensorDims

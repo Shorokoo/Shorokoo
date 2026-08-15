@@ -344,7 +344,6 @@ namespace Shorokoo
             var bindings = rig.Hyperparameters
                 ?? throw new InvalidDataException(
                     $"'{filePath}': the rig block records no hyperparameter bindings.");
-            var baked = rig.BakedHypers ?? new Dictionary<string, float>();
             var hypers = new Hyperparameter[bindings.Count];
             var names = new string[bindings.Count];
             for (int h = 0; h < bindings.Count; h++)
@@ -353,11 +352,10 @@ namespace Shorokoo
                 names[h] = b.Name ?? $"hyperparam_{h}";
                 hypers[h] = b.Kind switch
                 {
-                    SkptFileFormat.HyperKindBaked => Hyperparameter.Baked(
-                        baked.TryGetValue(names[h], out var v) ? v
-                        : throw new InvalidDataException(
-                            $"'{filePath}': baked hyperparameter '{names[h]}' has no value in the rig block.")),
-                    SkptFileFormat.HyperKindRuntime => Hyperparameter.Runtime(),
+                    SkptFileFormat.HyperKindBaked => Hyperparameter.Baked(ReadBakedHyper(b, names[h], filePath)),
+                    SkptFileFormat.HyperKindRuntime => Hyperparameter.Runtime(
+                        b.Shape ?? throw new InvalidDataException(
+                            $"'{filePath}': runtime hyperparameter '{names[h]}' records no shape in the rig block.")),
                     SkptFileFormat.HyperKindScheduled => Hyperparameter.Scheduled(
                         TrainingRig.SplitSchedulerOutput(
                             schedulerGraph ?? throw new InvalidDataException(
@@ -375,6 +373,37 @@ namespace Shorokoo
             return TrainingRig.ReconstructFromConstituents(
                 archGraph, lossGraph, optimizerGraph, hypers, names, rngConfig,
                 mergeContext, runtimeContext);
+        }
+
+        /// <summary>
+        /// Reads a baked hyperparameter's constant off its binding: the recorded dtype and shape name how
+        /// to decode the recorded base64 bytes. All three are required — a hyperparameter is any supported
+        /// dtype at any shape, so an untyped or unshaped value is unreadable, not an older float32 scalar.
+        /// </summary>
+        private static TensorData ReadBakedHyper(SkptRigHyperparameter binding, string name, string filePath)
+        {
+            if (string.IsNullOrEmpty(binding.DType))
+                throw new InvalidDataException(
+                    $"'{filePath}': baked hyperparameter '{name}' records no dtype in the rig block.");
+            if (binding.Value is null)
+                throw new InvalidDataException(
+                    $"'{filePath}': baked hyperparameter '{name}' records no value in the rig block.");
+            if (binding.Shape is null)
+                throw new InvalidDataException(
+                    $"'{filePath}': baked hyperparameter '{name}' records no shape in the rig block.");
+            var dtype = DType.FromName(binding.DType)
+                ?? throw new InvalidDataException(
+                    $"'{filePath}': baked hyperparameter '{name}' records the unknown dtype '{binding.DType}'.");
+            try
+            {
+                return Globals.TensorData(dtype, binding.Shape, binding.Value);
+            }
+            catch (Exception e) when (e is FormatException or ArgumentException)
+            {
+                throw new InvalidDataException(
+                    $"'{filePath}': baked hyperparameter '{name}' has a value that is not a valid " +
+                    $"'{dtype}' tensor of shape [{string.Join(", ", binding.Shape)}].", e);
+            }
         }
 
         /// <summary>Loads one constituent model graph from its <c>models/</c> entry, verifying SHA-256
@@ -702,11 +731,11 @@ namespace Shorokoo
             // attribute, so the reconstructed arch is self-describing (a from-file load reads the
             // shapes straight off it via ReadRepresentativeInputs).
 
-            // Hyperparameter bindings, in optimizer order. Baked values ride in bakedHypers; a scheduled
-            // one maps to the scheduler model's output of the same name; a runtime one is host-supplied.
+            // Hyperparameter bindings, in optimizer order. A baked one records its constant inline, at
+            // the dtype the optimizer declares it at; a scheduled one maps to the scheduler model's
+            // output of the same name; a runtime one is host-supplied.
             var names = rig.HyperparameterNames;
             var hyperBindings = new List<SkptRigHyperparameter>(rig.Hyperparameters.Count);
-            var bakedHypers = new Dictionary<string, float>(StringComparer.Ordinal);
             for (int h = 0; h < rig.Hyperparameters.Count; h++)
             {
                 var hv = rig.Hyperparameters[h];
@@ -718,8 +747,22 @@ namespace Shorokoo
                     HyperparameterKind.Runtime => SkptFileFormat.HyperKindRuntime,
                     _ => throw new InvalidOperationException($"Unknown hyperparameter kind {hv.Kind}."),
                 };
-                hyperBindings.Add(new SkptRigHyperparameter { Name = name, Kind = kind });
-                if (hv.Kind == HyperparameterKind.Baked) bakedHypers[name] = hv.BakedValue;
+                var binding = new SkptRigHyperparameter { Name = name, Kind = kind };
+                if (hv.Kind == HyperparameterKind.Baked)
+                {
+                    // Normalized to the declared dtype at rig build, so this is the very constant the
+                    // training-step graph carries.
+                    binding.DType = hv.BakedDType.ToString();
+                    binding.Shape = hv.BakedValue.Shape.Dims;
+                    binding.Value = Convert.ToBase64String(hv.BakedValue.AccessRawMemory());
+                }
+                else if (hv.Kind == HyperparameterKind.Runtime)
+                {
+                    // A runtime hyperparameter's shape is declared by the host, so nothing else in the
+                    // file records it; its dtype still comes from the optimizer constituent.
+                    binding.Shape = [.. hv.RuntimeShape];
+                }
+                hyperBindings.Add(binding);
             }
 
             return new SkptRigInfo
@@ -730,7 +773,6 @@ namespace Shorokoo
                 OptimizerModel = SkptFileFormat.OptimizerModelKey,
                 SchedulerModel = schedulerKey,
                 Hyperparameters = hyperBindings,
-                BakedHypers = bakedHypers.Count > 0 ? bakedHypers : null,
                 Rng = SerializeRngConfig(rig.RngConfig),
             };
         }

@@ -135,6 +135,126 @@ public partial class StepEpochScheduler
         => Scalar(0.5f) - step.Cast<float32>() * Scalar(0.01f) - epoch.Cast<float32>() * Scalar(0.1f);
 }
 
+/// <summary>
+/// SGD whose hyperparameters span four dtypes — <c>float32</c>, <c>int32</c>, <c>bit</c> and
+/// <c>float64</c> — so the whole hyperparameter pipeline (authoring default, generated
+/// hyperparameter set, packing, graph binding, persistence) is exercised off <c>float32</c> (#125).
+/// The update is <c>param·(1 − decay·lr) − sign·lr·scale·grad</c>, with <c>sign</c> <c>+1</c> when
+/// <c>descend</c> is true and <c>−1</c> otherwise, so every hyperparameter observably moves the weight.
+/// </summary>
+[Module]
+public partial class MixedDTypeHyperOptimizer
+{
+    public static Tensor<float32> Inline(
+        Tensor<float32> currentParam,
+        Tensor<float32> grad,
+        [Hyper(0.1f)] Scalar<float32> learningRate,
+        [Hyper(2)] Scalar<int32> gradScale,
+        [Hyper(true)] Scalar<bit> descend,
+        [Hyper(0.25)] Scalar<float64> decay)
+    {
+        var sign = descend.Cast<float32>() * Scalar(2f) - Scalar(1f);
+        return currentParam * (Scalar(1f) - decay.Cast<float32>() * learningRate)
+             - sign * learningRate * gradScale.Cast<float32>() * grad;
+    }
+}
+
+/// <summary>
+/// Optimizer-owned state initializer filling the parameter's shape from an <c>int32</c> scalar, so a
+/// non-<c>float32</c> hyperparameter reaches the split-off state-init graph (#125).
+/// </summary>
+[StateInitializer(Ownership = StateOwnership.OptimizerOwned)]
+public static partial class InitToIntScalarFill
+{
+    public static Tensor<float32> Inline(Vector<int64> shape, Scalar<int32> value)
+        => Globals.TensorFill(shape, 1.0f) * value.Cast<float32>();
+}
+
+/// <summary>
+/// SGD whose optimizer state is initialized from an <c>int32</c> hyperparameter — the non-float
+/// counterpart of <see cref="InitFromHyperOptimizer"/>, proving the §2.5 value route carries a
+/// declared dtype other than <c>float32</c> into state init.
+/// </summary>
+[Module]
+public partial class InitFromIntHyperOptimizer
+{
+    public static Tensor<float32> Inline(
+        Tensor<float32> currentParam,
+        Tensor<float32> grad,
+        [Hyper(0.1f)] Scalar<float32> learningRate,
+        [Hyper(3)] Scalar<int32> stateSeed)
+    {
+        var s = InitToIntScalarFill.Init(currentParam.ShapeTensor(), stateSeed);
+        Globals.StateUpdate(s, s);
+        return currentParam - learningRate * grad;
+    }
+}
+
+/// <summary>Scheduler module producing an <c>int32</c> value, for a non-float32 scheduled hyperparameter.</summary>
+[Module]
+public partial class IntStepScheduler
+{
+    public static Scalar<int32> Inline(Scalar<int64> step)
+        => (step + Scalar(2L)).Cast<int32>();
+}
+
+/// <summary>
+/// SGD whose learning rate is a <b>vector</b> hyperparameter, broadcast over the parameter — a
+/// non-scalar hyperparameter carried end to end (#125). The update is
+/// <c>param − (perElementRate · gain) · grad</c>, with <c>gain</c> a plain scalar alongside it so a
+/// rig mixes shapes as well as dtypes.
+/// </summary>
+[Module]
+public partial class VectorRateOptimizer
+{
+    public static Tensor<float32> Inline(
+        Tensor<float32> currentParam,
+        Tensor<float32> grad,
+        [Hyper] Vector<float32> perElementRate,
+        [Hyper(1f)] Scalar<float32> gain)
+        => currentParam - perElementRate * gain * grad;
+}
+
+/// <summary>
+/// Scheduler module producing a rank-1 <c>float32</c> value — a decaying per-element learning rate —
+/// so a non-scalar hyperparameter can be driven in-graph from the step counter.
+/// </summary>
+[Module]
+public partial class VectorRateScheduler
+{
+    public static Vector<float32> Inline(Scalar<int64> step)
+        => Globals.Vector(0.1f, 0.2f, 0.4f, 0.8f) - step.Cast<float32>() * Scalar(0.01f);
+}
+
+/// <summary>
+/// Optimizer-owned state initializer seeded from a rank-1 hyperparameter, so a non-scalar
+/// hyperparameter reaches the split-off state-init graph.
+/// </summary>
+[StateInitializer(Ownership = StateOwnership.OptimizerOwned)]
+public static partial class InitToVectorSum
+{
+    public static Tensor<float32> Inline(Vector<int64> shape, Vector<float32> value)
+        => Globals.TensorFill(shape, 1.0f) * value.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+}
+
+/// <summary>
+/// SGD whose optimizer state is initialized from the sum of a <b>vector</b> hyperparameter, proving
+/// the §2.5 value route carries a non-scalar hyperparameter into state init.
+/// </summary>
+[Module]
+public partial class InitFromVectorHyperOptimizer
+{
+    public static Tensor<float32> Inline(
+        Tensor<float32> currentParam,
+        Tensor<float32> grad,
+        [Hyper] Vector<float32> perElementRate)
+    {
+        var s = InitToVectorSum.Init(currentParam.ShapeTensor(), perElementRate);
+        Globals.StateUpdate(s, s);
+        return currentParam - perElementRate * grad;
+    }
+}
+
 /// <summary>Impure scheduler module — draws RNG; rig build must reject it (D4).</summary>
 [Module]
 public partial class RngScheduler

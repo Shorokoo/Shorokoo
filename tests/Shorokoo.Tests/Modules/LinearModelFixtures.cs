@@ -198,6 +198,63 @@ public partial class IntStepScheduler
         => (step + Scalar(2L)).Cast<int32>();
 }
 
+/// <summary>
+/// SGD whose learning rate is a <b>vector</b> hyperparameter, broadcast over the parameter — a
+/// non-scalar hyperparameter carried end to end (#125). The update is
+/// <c>param − (perElementRate · gain) · grad</c>, with <c>gain</c> a plain scalar alongside it so a
+/// rig mixes shapes as well as dtypes.
+/// </summary>
+[Module]
+public partial class VectorRateOptimizer
+{
+    public static Tensor<float32> Inline(
+        Tensor<float32> currentParam,
+        Tensor<float32> grad,
+        [Hyper] Vector<float32> perElementRate,
+        [Hyper(1f)] Scalar<float32> gain)
+        => currentParam - perElementRate * gain * grad;
+}
+
+/// <summary>
+/// Scheduler module producing a rank-1 <c>float32</c> value — a decaying per-element learning rate —
+/// so a non-scalar hyperparameter can be driven in-graph from the step counter.
+/// </summary>
+[Module]
+public partial class VectorRateScheduler
+{
+    public static Vector<float32> Inline(Scalar<int64> step)
+        => Globals.Vector(0.1f, 0.2f, 0.4f, 0.8f) - step.Cast<float32>() * Scalar(0.01f);
+}
+
+/// <summary>
+/// Optimizer-owned state initializer seeded from a rank-1 hyperparameter, so a non-scalar
+/// hyperparameter reaches the split-off state-init graph.
+/// </summary>
+[StateInitializer(Ownership = StateOwnership.OptimizerOwned)]
+public static partial class InitToVectorSum
+{
+    public static Tensor<float32> Inline(Vector<int64> shape, Vector<float32> value)
+        => Globals.TensorFill(shape, 1.0f) * value.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+}
+
+/// <summary>
+/// SGD whose optimizer state is initialized from the sum of a <b>vector</b> hyperparameter, proving
+/// the §2.5 value route carries a non-scalar hyperparameter into state init.
+/// </summary>
+[Module]
+public partial class InitFromVectorHyperOptimizer
+{
+    public static Tensor<float32> Inline(
+        Tensor<float32> currentParam,
+        Tensor<float32> grad,
+        [Hyper] Vector<float32> perElementRate)
+    {
+        var s = InitToVectorSum.Init(currentParam.ShapeTensor(), perElementRate);
+        Globals.StateUpdate(s, s);
+        return currentParam - perElementRate * grad;
+    }
+}
+
 /// <summary>Impure scheduler module — draws RNG; rig build must reject it (D4).</summary>
 [Module]
 public partial class RngScheduler

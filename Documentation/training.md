@@ -22,7 +22,7 @@ Related: [defining-models.md](defining-models.md) · [nn-library.md](nn-library.
 Ready-made losses and optimizers ship in the `Shorokoo.Modules` package
 (namespaces `Shorokoo.Modules.Losses` / `Shorokoo.Modules.Optimizers`) — see
 [nn-library.md](nn-library.md) for the full catalog (eight losses; layers and
-initializers too). Each optimizer whose hyperparameters are all scalars gets a
+initializers too). Each optimizer whose hyperparameters are all tensor-shaped gets a
 source-generated, named, defaulted hyperparameter set
 (`<Optimizer>Hyperparameters`) implementing `IOptimizerHyperparameters`. The
 twelve optimizers (the positional `params Hyperparameter[]` count for `FromScratch`
@@ -63,7 +63,7 @@ Its *kind* — not a separate flag — decides the wiring:
 | a bare value (e.g. `1e-4f`, `5`, `true`), or `Hyperparameter.Baked(v)` | `Baked` | graph `Constant`; change ⇒ rebuild |
 | a `Schedule` (e.g. `Schedules.Cosine(3e-4f, total)`), or `Hyperparameter.Scheduled(schedule)` | `Scheduled` | lowered to graph math and computed **in-graph** from the counter input(s) each `TrainStep` — no host evaluation |
 | `Hyperparameter.Scheduled(module)` | `Scheduled` (module) | a scheduler module (int64 counter(s) → the declared-dtype value) inlined into the graph, for schedules the built-ins don't cover |
-| `Hyperparameter.Runtime()` | `Runtime` | runtime input with no schedule; supply each step via `MakeHyperparameters` |
+| `Hyperparameter.Runtime()` / `Hyperparameter.Runtime(shape)` | `Runtime` | runtime input with no schedule; supply each step via `MakeHyperparameters` |
 
 `Schedule` factories live on `Schedules` (`Constant`, `Linear`, `Cosine`, `CosineWithWarmup`,
 `StepDecay`, `Exponential`, `OneCycle`) with fluent combinators on the result (`WithWarmup`, `Then`,
@@ -92,12 +92,13 @@ by a single interpreter that mirrors the graph lowering.
 > (e.g. ONNX Runtime) a schedule using those ops may differ from the host `Schedule.At` value by a few
 > ulps (arithmetic/piecewise schedules stay exact). This is the documented `ScheduleLowering` contract.
 
-### Hyperparameter dtypes
+### Hyperparameter dtypes and shapes
 
-A hyperparameter's dtype is whatever the optimizer **declares** it at — the `Scalar<T>` in its
-`[Hyper(...)] Scalar<T>` parameter — and that declaration is the single source of truth end to end.
-Most are `float32` (learning rate, weight decay, betas), but any supported scalar dtype works: an
-`int32` count, a `bit` (bool) flag, a `float64` coefficient.
+A hyperparameter's dtype and rank are whatever the optimizer **declares** them at — the `Scalar<T>`,
+`Vector<T>` or `Tensor<T>` in its `[Hyper(...)]` parameter — and that declaration is the single source
+of truth end to end. Most hyperparameters are `float32` scalars (learning rate, weight decay, betas),
+but any supported dtype works — an `int32` count, a `bit` (bool) flag, a `float64` coefficient — and so
+does any shape, e.g. a per-element learning-rate vector.
 
 ```csharp
 [Module]
@@ -109,24 +110,57 @@ public partial class MyOptimizer
         [Hyper(0.01f)] Scalar<float32> learningRate,
         [Hyper(2)]     Scalar<int32>   accumSteps,
         [Hyper(true)]  Scalar<bit>     nesterov,
-        [Hyper(0.25)]  Scalar<float64> decay) => …;
+        [Hyper(0.25)]  Scalar<float64> decay,
+        [Hyper]        Vector<float32> perGroupScale) => …;
 }
 ```
 
-`[Hyper(default)]` takes the host literal matching the declared dtype (`0.01f`, `2`, `true`, `0.25`);
-the generated `MyOptimizerHyperparameters` set carries each default at that dtype. A dtype with no
-natural C# literal (e.g. `float16`) simply takes no default — declare it as a bare `[Hyper]` and bind
-it explicitly with `Hyperparameter.Baked(Globals.TensorData([], someFloat16))`.
+**Defaults are scalar-only.** `[Hyper(default)]` takes the host literal matching the declared dtype
+(`0.01f`, `2`, `true`, `0.25`) and the generated `MyOptimizerHyperparameters` set carries each default
+at that dtype. An attribute argument is a compile-time constant, so a non-scalar hyperparameter — and
+a dtype with no natural C# literal, e.g. `float16` — takes no default: declare it as a bare `[Hyper]`
+(the generated property is then `required`) and bind it explicitly with
+`Hyperparameter.Baked(Globals.TensorData(…))`.
 
-Host-supplied values — a baked constant, or a per-step `MakeHyperparameters` value — are **converted
-to the declared dtype**, and the conversion must be value-preserving: `("accumSteps", 3L)` becomes an
-`int32` 3, while `("accumSteps", 2.5)` and `("accumSteps", long.MaxValue)` fail loud rather than
-silently truncating, as does crossing the bool boundary in either direction. `rig.HyperparameterDTypes`
-reports the declared dtypes, in the same order as `rig.HyperparameterNames`.
+**Dtypes.** Host-supplied values — a baked constant, or a per-step `MakeHyperparameters` value — are
+fitted to the declared dtype, and a scalar's conversion must be value-preserving: `("accumSteps", 3L)`
+becomes an `int32` 3, while `("accumSteps", 2.5)` and `("accumSteps", long.MaxValue)` fail loud rather
+than silently truncating, as does crossing the bool boundary in either direction. A **non-scalar** value
+is not converted element-wise — build it at the declared dtype (`Globals.TensorData(dtype, shape, …)`)
+and a mismatch fails loud. `rig.HyperparameterDTypes` reports the declared dtypes, in the same order as
+`rig.HyperparameterNames`.
 
-Built-in `Schedule` math (cosine / linear / decay) is inherently continuous, so a built-in schedule
-drives `float32` hyperparameters only; schedule a non-`float32` hyperparameter with a scheduler
-**module** producing that dtype. Baked and runtime hyperparameters have no such restriction.
+**Shapes.** The declaration pins the *rank* (`Scalar<T>` ⇒ 0, `Vector<T>` ⇒ 1, `Tensor<T>` ⇒ any); the
+concrete *shape* comes from the binding, and the rig reports it as `rig.HyperparameterShapes`:
+
+| Kind | Where its shape comes from |
+|---|---|
+| `Baked` | the constant's own shape — `Hyperparameter.Baked(TensorData([4L], …))` |
+| `Scheduled` (module) | the scheduler module's output shape, inferred at rig build |
+| `Runtime` | declared by you: `Hyperparameter.Runtime(4L)`; `Runtime()` means a scalar |
+
+A runtime hyperparameter states its shape because the training step is compiled once, so the shape has
+to be known at build even though the values are not. That also makes the shape fixed for the rig's
+life: a per-step value whose shape differs fails loud rather than silently reshaping.
+
+Built-in `Schedule` math (cosine / linear / decay) is inherently continuous and scalar, so a built-in
+schedule drives `float32` **scalar** hyperparameters only; drive any other dtype or shape with a
+scheduler **module** producing it. Baked and runtime hyperparameters have no such restriction.
+
+```csharp
+var rig = TrainingRig.FromScratch(model, loss, MyOptimizer.ComputationGraph, sample,
+    new MyOptimizerHyperparameters
+    {
+        LearningRate  = Schedules.Cosine(1e-3f, totalSteps),        // float32 scalar, built-in schedule
+        AccumSteps    = 4,                                          // int32, baked
+        Nesterov      = true,                                       // bool, baked
+        PerGroupScale = Hyperparameter.Runtime(3L),                 // float32 vector, host-supplied
+    });
+
+rig.TrainStep(ckpt,
+    rig.MakeHyperparameters(("perGroupScale", TensorData([3L], 1f, 2f, 3f))),
+    inputs, targets);
+```
 
 > **Migration (breaking).** `Hyperparameter.BakedValue` is now the rank-0 `TensorData` the constant was
 > built from (with `BakedDType` alongside), not a `float`; `MakeHyperparameters`'s named overload takes
@@ -135,8 +169,9 @@ drives `float32` hyperparameters only; schedule a non-`float32` hyperparameter w
 > `object?` (the host literal the constructor took) rather than `float`, and a graph input's
 > `HyperDefaultValue` is the default's invariant literal (`string?`) rather than a `float?`, so an
 > `int64` / `float64` / `bool` default survives the graph round-trip exactly. In a training `.skpt`, the
-> rig block's `bakedHypers` map is gone: each baked binding now records its own `dtype` and base64
-> `value`, so `rigVersion` stays `1` and older-shaped files (none exist in the wild) are not read.
+> rig block's `bakedHypers` map is gone: each baked binding now records its own `dtype`, `shape` and
+> base64 `value`, and a runtime binding records its `shape`, so `rigVersion` stays `1` and older-shaped
+> files (none exist in the wild) are not read.
 
 > **Migration (breaking).** `HyperValue` is renamed **`Hyperparameter`** and is now an explicit
 > `Baked`/`Scheduled`/`Runtime` union. `HyperValue.Constant(v)` → `Hyperparameter.Baked(v)` (a bare
@@ -207,7 +242,7 @@ public TrainingCheckpoint TrainStep(
     long batchNumber);
 
 public TensorDataStruct MakeHyperparameters(float value);                       // exactly one dynamic
-//   also: (double), (int), (long), (bool), (TensorData) for the other declared dtypes
+//   also: (double), (int), (long), (bool), and (TensorData) for other dtypes / non-scalar shapes
 public TensorDataStruct MakeHyperparameters(params (string name, object value)[] values); // named
 
 public TrainingResult Fit(  // alias: Train(...)
@@ -502,9 +537,10 @@ Constraints:
   graphs, and optimizer-owned ones are rejected inside model graphs.
 - **Each state is updated exactly once per step** — combine conditional updates into one
   value (e.g. with `IfElse`) and register it with a single `StateUpdate` call.
-- **Hyperparameters must be scalars** — of any supported dtype (`float32`, `int32`, `bit`, …); the rig
-  bakes/feeds them at their declared dtype, and a set is generated even when the dtypes are mixed.
-  A non-scalar (`Tensor`/`Vector`) hyperparameter yields no generated set.
+- **Hyperparameters must be tensor-shaped** — `Scalar<T>`, `Vector<T>` or `Tensor<T>`, at any supported
+  dtype (`float32`, `int32`, `bit`, …); the rig bakes/feeds them at their declared dtype and shape, and a
+  set is generated even when the dtypes and shapes are mixed. An `OptionalTensor`, sequence or struct
+  hyperparameter yields no generated set. Only a scalar can carry a `[Hyper(default)]` default.
 - **Order + `[Hyper]` matter** — hyperparameters must be the leading inputs, and `[Hyper]` is what
   makes the named set generate. Without it the optimizer still works via the positional
   `params Hyperparameter[]` overload, but you lose the named, compile-checked set.

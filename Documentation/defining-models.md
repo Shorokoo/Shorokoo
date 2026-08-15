@@ -48,7 +48,7 @@ For `[Module] class Foo` with `Inline(I x, [Hyper] H h) -> O`:
 | `Foo.Model(h).Call(x)` | Build the subgraph for input `x`. |
 | `Foo.Call(h, x)` | Shortcut for `Foo.Model(h).Call(x)`. The combined shortcut keeps hyperparameters first (then inputs); only the `Inline` source signature is inputs-first. |
 | `Foo.ComputationGraph` | The readonly `ComputationGraph` (kind `Module`; used for export and training). |
-| `FooHyperparameters` | Generated **only when every `[Hyper]` is a scalar** (the optimizer-shaped case), at any supported dtype: a named, init-only set implementing `IOptimizerHyperparameters`, with defaults from `[Hyper(default)]`, each formatted at its declared dtype. See [training.md](training.md). |
+| `FooHyperparameters` | Generated **only when every `[Hyper]` is tensor-shaped** — `Scalar<T>`, `Vector<T>` or `Tensor<T>`, at any supported dtype (the optimizer-shaped case): a named, init-only set implementing `IOptimizerHyperparameters`, with defaults from `[Hyper(default)]`, each formatted at its declared dtype. Only a scalar can carry a default; a non-scalar hyperparameter's property is `required`. See [training.md](training.md). |
 
 For `[TrainableParamInitializer] class ConstInit` with `Inline(Vector<int64> shape)`:
 `ConstInit.Init(shape)` returns the initialized trainable `Tensor<T>`. (The class
@@ -151,6 +151,7 @@ generated `Model` / `Call` surface, so callers can leave them out:
 |---|---|---|
 | `[Hyper(0.9f)] Scalar<float32> momentum` | `Scalar<float32>? momentum = null` | the attribute's default (`0.9f`) is used |
 | `[Hyper(2)] Scalar<int32> accumSteps` | `Scalar<int32>? accumSteps = null` | the default is formatted at the declared dtype (`2`) |
+| `[Hyper] Vector<float32> scales` | `Vector<float32> scales` | not omittable — only a scalar hyperparameter can carry a default |
 | `OptionalTensor<float32> bias` | `Tensor<float32>? bias = null` | an **absent** optional is passed |
 
 (C#'s "optional parameters last" rule still applies: only the trailing run of

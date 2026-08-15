@@ -10,7 +10,7 @@
 | `AccessMemory()` | Reads a `TensorData<T>`'s values as a `ReadOnlySpan<primitive>`. | `core-types.md` |
 | `IData` | Interface implemented by `TensorData`; the input type `ComputeContext.Execute` accepts. | `inference.md` |
 | `[Module]` | Attribute marking a `partial class` whose `Inline` becomes a computation graph. | `defining-models.md` |
-| `[Hyper]` | Attribute marking a scalar hyperparameter (bound on `Model(...)`, before the tensor inputs). An optional default — `[Hyper(0.9f)]` — makes the parameter omittable (the default is used when omitted) and seeds the generated optimizer hyperparameter set. | `defining-models.md` |
+| `[Hyper]` | Attribute marking a hyperparameter (bound on `Model(...)`, before the tensor inputs); `Scalar<T>`, `Vector<T>` or `Tensor<T>`, at any supported dtype. An optional **scalar-only** default — `[Hyper(0.9f)]` — makes the parameter omittable (the default is used when omitted) and seeds the generated optimizer hyperparameter set. | `defining-models.md` |
 | `[TrainableParamInitializer]` / `[StateInitializer]` | Attributes for classes that produce trainable weights / non-trainable state. | `defining-models.md` |
 | `Inline` | The `static` method the generator reads to build the graph. | `defining-models.md` |
 | `Model` / `Call` / `ComputationGraph` | Generated members: bind hypers, run on inputs, get the full graph. | `defining-models.md` |
@@ -26,7 +26,7 @@
 | `Globals.StateUpdate` | Register a state mutation (optimizer/BatchNorm state) inside a module. | `training.md` |
 | `TrainingRig` | Entry point that composes model+loss+optimizer and runs autodiff. | `training.md` |
 | `TrainingCheckpoint` | Holds trainable params, model state, optimizer state, and the global `Step` (advances each `TrainStep`; schedules resume from it). | `training.md` |
-| `Hyperparameter` | An optimizer hyperparameter's source: `Hyperparameter.Baked(v)` (a bare value), a `Schedule`, or `Hyperparameter.Runtime()`; its `Kind` decides baked-vs-scheduled-vs-runtime wiring, and its dtype is whatever the optimizer's `Scalar<T>` declares. | `training.md` |
+| `Hyperparameter` | An optimizer hyperparameter's source: `Hyperparameter.Baked(v)` (a bare value or a `TensorData`), a `Schedule`, or `Hyperparameter.Runtime(shape)`; its `Kind` decides baked-vs-scheduled-vs-runtime wiring, and its dtype and rank are whatever the optimizer's `Scalar<T>` / `Vector<T>` / `Tensor<T>` declares. | `training.md` |
 | `Schedule` / `Schedules` | A `step → value` schedule (`Schedules.Cosine`, `OneCycle`, …) with fluent combinators (`WithWarmup`, `Then`, `Scale`, `Clamp`, `Shift`, `PerEpoch`). | `training.md` |
 | `IOptimizerHyperparameters` / `<Optimizer>Hyperparameters` | The named, defaulted hyperparameter set; source-generated per optimizer (e.g. `AdamWOptimizerHyperparameters`). | `training.md` |
 | autodiff / `[AutoDiff]` | Automatic gradient generation; per-op derivative rules. | `training.md` |

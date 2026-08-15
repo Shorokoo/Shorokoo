@@ -2554,7 +2554,11 @@ public class TrainingRigHyperparameterDTypeCoverageTests
                 { GradScale = Hyperparameter.Scheduled(SchedulerModuleRaw([step], [step.Cast<float32>()])) }));
         Assert.Contains("Int32", moduleEx.Message);
 
-        Assert.Throws<ArgumentException>(() => Hyperparameter.Baked(TensorData([2L], [1f, 2f])));
+        // A non-scalar constant bound to a Scalar<T>-declared hyperparameter is rejected at rig build.
+        var rankEx = Assert.Throws<ArgumentException>(() => MixedRig(
+            new MixedDTypeHyperOptimizerHyperparameters
+                { GradScale = Hyperparameter.Baked((TensorData)TensorData([2L], [1, 2])) }));
+        Assert.Contains("declared with rank 0", rankEx.Message);
     }
 
     [Fact]
@@ -2590,6 +2594,152 @@ public class TrainingRigHyperparameterDTypeCoverageTests
             Assert.Equal(0.125, ((TensorData<float64>)rig2.Hyperparameters[3].BakedValue).AccessMemory()[0]);
 
             var resumed = rig2.TrainStep(loaded, inputBatch, targetBatch);
+            Assert.Equal(FlattenStruct(reference.TrainableParams), FlattenStruct(resumed.TrainableParams));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+}
+
+[Trait("Domain", "Training")]
+[Trait("Purpose", "Coverage")]
+public class TrainingRigHyperparameterShapeCoverageTests
+{
+    private static TrainingRig VectorRig(VectorRateOptimizerHyperparameters hypers)
+        => TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            VectorRateOptimizer.ComputationGraph, ScalarMultiplyBatches().sample, hypers);
+
+    private static TensorData Rate(params float[] v) => (TensorData)TensorData([(long)v.Length], v);
+
+    [Fact]
+    public void TestNonScalarHyperparametersDriveTrainingThroughEveryKindCoverage()
+    {
+        var (_, inputBatch, targetBatch) = ScalarMultiplyBatches();
+
+        var bakedRig = VectorRig(new VectorRateOptimizerHyperparameters
+            { PerElementRate = Hyperparameter.Baked(Rate(0.1f, 0.2f, 0.4f, 0.8f)) });
+        Assert.Equal((long[])[4L], bakedRig.HyperparameterShapes[0].Dims);
+        Assert.Equal((long[])[], bakedRig.HyperparameterShapes[1].Dims);
+        Assert.Equal(DType.Float32, bakedRig.HyperparameterDTypes[0]);
+        Assert.Empty(bakedRig.HyperparameterStructDef.Fields);
+
+        float Step(TrainingRig rig, TensorDataStruct? hypers = null)
+        {
+            var ckpt = rig.CreateInitialCheckpoint();
+            return Weight(rig, hypers is null
+                ? rig.TrainStep(ckpt, inputBatch, targetBatch)
+                : rig.TrainStep(ckpt, hypers, inputBatch, targetBatch));
+        }
+
+        var runtimeRig = VectorRig(new VectorRateOptimizerHyperparameters
+        {
+            PerElementRate = Hyperparameter.Runtime(4L),
+            Gain = Hyperparameter.Runtime(),
+        });
+        Assert.Equal((string[])["perElementRate", "gain"], runtimeRig.DynamicHyperparameterNames.ToArray());
+        Assert.Equal((int?[])[1, 0], runtimeRig.HyperparameterStructDef.Fields.Select(f => f.Rank).ToArray());
+        Assert.Equal((long[])[4L], runtimeRig.HyperparameterShapes[0].Dims);
+
+        var matching = runtimeRig.MakeHyperparameters(
+            ("perElementRate", Rate(0.1f, 0.2f, 0.4f, 0.8f)), ("gain", 1f));
+        Assert.Equal((long[])[4L], ((TensorData)matching.Fields["perElementRate"]).Shape.Dims);
+        Assert.True(MathF.Abs(Step(bakedRig) - Step(runtimeRig, matching)) < 1e-5f);
+
+        var doubled = runtimeRig.MakeHyperparameters(
+            ("perElementRate", Rate(0.1f, 0.2f, 0.4f, 0.8f)), ("gain", 2f));
+        Assert.True(MathF.Abs(Step(runtimeRig, doubled) - Step(runtimeRig, matching)) > 1e-4f);
+
+        var scheduledRig = VectorRig(new VectorRateOptimizerHyperparameters
+            { PerElementRate = Hyperparameter.Scheduled(VectorRateScheduler.ComputationGraph) });
+        Assert.Equal((long[])[4L], scheduledRig.HyperparameterShapes[0].Dims);
+        Assert.Empty(scheduledRig.HyperparameterStructDef.Fields);
+        Assert.True(MathF.Abs(Step(scheduledRig) - Step(bakedRig)) < 1e-5f);
+
+        var scheduledCkpt = scheduledRig.CreateInitialCheckpoint();
+        var hostCkpt = runtimeRig.CreateInitialCheckpoint();
+        for (int s = 0; s < 3; s++)
+        {
+            scheduledCkpt = scheduledRig.TrainStep(scheduledCkpt, inputBatch, targetBatch);
+            hostCkpt = runtimeRig.TrainStep(hostCkpt, runtimeRig.MakeHyperparameters(
+                ("perElementRate", Rate(0.1f - 0.01f * s, 0.2f - 0.01f * s, 0.4f - 0.01f * s, 0.8f - 0.01f * s)),
+                ("gain", 1f)), inputBatch, targetBatch);
+            Assert.True(MathF.Abs(Weight(scheduledRig, scheduledCkpt) - Weight(runtimeRig, hostCkpt)) < 1e-5f);
+        }
+
+        var stateRig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            InitFromVectorHyperOptimizer.ComputationGraph, ScalarMultiplyBatches().sample,
+            new InitFromVectorHyperOptimizerHyperparameters
+                { PerElementRate = Hyperparameter.Baked(Rate(0.5f, 1.5f, 2f, 3f)) });
+        Assert.All(FlattenStruct(stateRig.CreateInitialCheckpoint().OptimizerState),
+            v => Assert.True(MathF.Abs(v - 7f) < 1e-4f));
+    }
+
+    [Fact]
+    public void TestHyperparameterShapeMismatchesAndScalarOnlySourcesAreRejectedCoverage()
+    {
+        // A binding whose rank contradicts the declared Vector<T> / Scalar<T> fails at rig build.
+        Assert.Throws<ArgumentException>(() => VectorRig(new VectorRateOptimizerHyperparameters
+            { PerElementRate = 0.1f }));
+        Assert.Throws<ArgumentException>(() => VectorRig(new VectorRateOptimizerHyperparameters
+            { PerElementRate = Hyperparameter.Runtime(2L, 2L) }));
+        Assert.Throws<ArgumentException>(() => VectorRig(new VectorRateOptimizerHyperparameters
+            { PerElementRate = Hyperparameter.Baked(Rate(0.1f)), Gain = Hyperparameter.Runtime(3L) }));
+
+        // Built-in Schedule math is a float32 scalar, so it cannot drive a vector hyperparameter.
+        var schedEx = Assert.Throws<ArgumentException>(() => VectorRig(new VectorRateOptimizerHyperparameters
+            { PerElementRate = Schedules.Constant(0.1f) }));
+        Assert.Contains("scheduler module", schedEx.Message);
+
+        // A scheduler module must produce the declared rank.
+        var moduleEx = Assert.Throws<ArgumentException>(() => VectorRig(new VectorRateOptimizerHyperparameters
+            { PerElementRate = Hyperparameter.Scheduled(SchedulerModuleRaw()) }));
+        Assert.Contains("rank-1", moduleEx.Message);
+
+        // A per-step value must match the shape the rig was built at, and keeps its declared dtype.
+        var runtimeRig = VectorRig(new VectorRateOptimizerHyperparameters
+            { PerElementRate = Hyperparameter.Runtime(4L) });
+        var shapeEx = Assert.Throws<ArgumentException>(
+            () => runtimeRig.MakeHyperparameters(Rate(0.1f, 0.2f)));
+        Assert.Contains("shape is fixed", shapeEx.Message);
+        Assert.Throws<ArgumentException>(() => runtimeRig.MakeHyperparameters(0.1f));
+        Assert.Throws<ArgumentException>(() => runtimeRig.MakeHyperparameters(
+            (TensorData)TensorData([4L], [1, 2, 3, 4])));
+    }
+
+    private static ComputationGraph SchedulerModuleRaw()
+    {
+        var step = InputScalar<int64>("step");
+        return new ComputationGraph(
+            new InternalComputationGraph([step], [step.Cast<float32>()]), GraphKind.Module);
+    }
+
+    [Fact]
+    public void TestNonScalarHyperparametersRoundTripThroughSkptCoverage()
+    {
+        var (_, inputBatch, targetBatch) = ScalarMultiplyBatches();
+        var rig = VectorRig(new VectorRateOptimizerHyperparameters
+        {
+            PerElementRate = Hyperparameter.Baked(Rate(0.1f, 0.2f, 0.4f, 0.8f)),
+            Gain = Hyperparameter.Runtime(),
+        });
+        var ckpt = rig.TrainStep(rig.CreateInitialCheckpoint(), rig.MakeHyperparameters(1f),
+            inputBatch, targetBatch);
+        var reference = rig.TrainStep(ckpt, rig.MakeHyperparameters(1f), inputBatch, targetBatch);
+
+        var path = TempPath("hypershape") + ".skpt";
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+
+            var (rig2, loaded) = TrainingRig.Load(path);
+            Assert.Equal((long[])[4L], rig2.HyperparameterShapes[0].Dims);
+            Assert.Equal((long[])[], rig2.HyperparameterShapes[1].Dims);
+            Assert.Equal((float[])[0.1f, 0.2f, 0.4f, 0.8f],
+                ((TensorData<float32>)rig2.Hyperparameters[0].BakedValue).AccessMemory().ToArray());
+            Assert.Equal((long[])[], rig2.Hyperparameters[1].RuntimeShape.ToArray());
+
+            var resumed = rig2.TrainStep(loaded, rig2.MakeHyperparameters(1f), inputBatch, targetBatch);
             Assert.Equal(FlattenStruct(reference.TrainableParams), FlattenStruct(resumed.TrainableParams));
         }
         finally { if (File.Exists(path)) File.Delete(path); }

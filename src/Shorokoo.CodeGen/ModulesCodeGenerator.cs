@@ -712,17 +712,27 @@ public class ModuleSourceGenerator : IIncrementalGenerator
         if (hyperAttr is not null && hyperAttr.ConstructorArguments.Length > 0)
             defaultLiteral = FormatHyperDefaultLiteral(hyperAttr.ConstructorArguments[0].Value, elementType);
 
-        return new ParamData(p.Name, p.Type.ToDisplayString(), attributeKind, defaultLiteral, elementType);
+        return new ParamData(
+            p.Name, p.Type.ToDisplayString(), attributeKind, defaultLiteral, elementType, IsTensorShaped(p.Type));
     }
 
     /// <summary>
     /// The Shorokoo element type name of a <c>Scalar&lt;T&gt;</c> parameter (e.g. <c>"float32"</c>,
-    /// <c>"int32"</c>, <c>"bit"</c>); <c>null</c> for anything that is not a scalar.
+    /// <c>"int32"</c>, <c>"bit"</c>); <c>null</c> for anything that is not a scalar. Only a scalar's
+    /// element type is needed, because only a scalar can carry a <c>[Hyper(default)]</c> literal.
     /// </summary>
     private static string? ScalarElementTypeName(ITypeSymbol type)
         => type is INamedTypeSymbol { Name: "Scalar", TypeArguments.Length: 1 } named
             ? named.TypeArguments[0].Name
             : null;
+
+    /// <summary>
+    /// True for a tensor-shaped parameter — <c>Scalar&lt;T&gt;</c>, <c>Vector&lt;T&gt;</c> or
+    /// <c>Tensor&lt;T&gt;</c> — the shapes a hyperparameter may take. An <c>OptionalTensor</c>,
+    /// sequence or struct parameter is not one.
+    /// </summary>
+    private static bool IsTensorShaped(ITypeSymbol type)
+        => type is INamedTypeSymbol { Name: "Scalar" or "Vector" or "Tensor", TypeArguments.Length: 1 };
 
     /// <summary>
     /// Formats a <c>[Hyper(default)]</c> argument as a C# literal <b>of the parameter's declared
@@ -829,13 +839,16 @@ public class ModuleSourceGenerator : IIncrementalGenerator
     }
 
     /// <summary>
-    /// True when every hyperparameter is a scalar — of any supported dtype, since the declared
-    /// <c>Scalar&lt;T&gt;</c> is what the rig threads through as the hyperparameter's dtype. This is the
-    /// schedulable optimizer shape for which we emit a strongly-typed hyperparameter set.
+    /// True when every hyperparameter is tensor-shaped — a <c>Scalar&lt;T&gt;</c>, <c>Vector&lt;T&gt;</c>
+    /// or <c>Tensor&lt;T&gt;</c> at any supported dtype, which is what the rig threads through as a
+    /// hyperparameter's dtype and rank. This is the schedulable optimizer shape for which we emit a
+    /// strongly-typed hyperparameter set. (Only a scalar can carry a <c>[Hyper(default)]</c> default —
+    /// an attribute argument is a compile-time constant and cannot be a tensor — so a non-scalar
+    /// hyperparameter is simply <c>required</c> in the emitted set.)
     /// </summary>
-    private static bool AllHyperparamsAreScalars(FullModuleInfo module)
+    private static bool AllHyperparamsAreTensors(FullModuleInfo module)
         => module.Hyperparams.Count > 0
-           && module.Hyperparams.All(h => h.ScalarElementType is not null);
+           && module.Hyperparams.All(h => h.IsTensorShaped);
 
     private static List<ParamData?> ProcessReturnType(ITypeSymbol returnType)
     {
@@ -1114,10 +1127,10 @@ public class ModuleSourceGenerator : IIncrementalGenerator
         sb.AppendLine("    }");
 
         // Strongly-typed, named hyperparameter set for optimizer-shaped modules (every hyperparameter
-        // is a scalar, at whatever dtype it declares). Gives named, defaulted, init-only Hyperparameter
-        // properties so a rig can be built as
+        // is tensor-shaped, at whatever dtype and rank it declares). Gives named, defaulted, init-only
+        // Hyperparameter properties so a rig can be built as
         // `new XxxHyperparameters { LearningRate = Schedules.Cosine(...), WeightDecay = 1e-4f }`.
-        if (AllHyperparamsAreScalars(fullModule))
+        if (AllHyperparamsAreTensors(fullModule))
         {
             EmitHyperparameterSet(sb, className, fullModule);
         }
@@ -1324,13 +1337,20 @@ public class ParamData
     /// </summary>
     public string? ScalarElementType { get; }
 
-    public ParamData(string name, string typeDeclaration, ParamKind kind, string? defaultLiteral = null, string? scalarElementType = null)
+    /// <summary>
+    /// True when the parameter is tensor-shaped (<c>Scalar&lt;T&gt;</c> / <c>Vector&lt;T&gt;</c> /
+    /// <c>Tensor&lt;T&gt;</c>) — the shapes a hyperparameter may take.
+    /// </summary>
+    public bool IsTensorShaped { get; }
+
+    public ParamData(string name, string typeDeclaration, ParamKind kind, string? defaultLiteral = null, string? scalarElementType = null, bool isTensorShaped = false)
     {
         Name = name;
         TypeDeclaration = typeDeclaration;
         Kind = kind;
         DefaultLiteral = defaultLiteral;
         ScalarElementType = scalarElementType;
+        IsTensorShaped = isTensorShaped;
     }
 }
 

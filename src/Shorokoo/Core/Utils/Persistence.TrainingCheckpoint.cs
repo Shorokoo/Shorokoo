@@ -353,7 +353,9 @@ namespace Shorokoo
                 hypers[h] = b.Kind switch
                 {
                     SkptFileFormat.HyperKindBaked => Hyperparameter.Baked(ReadBakedHyper(b, names[h], filePath)),
-                    SkptFileFormat.HyperKindRuntime => Hyperparameter.Runtime(),
+                    SkptFileFormat.HyperKindRuntime => Hyperparameter.Runtime(
+                        b.Shape ?? throw new InvalidDataException(
+                            $"'{filePath}': runtime hyperparameter '{names[h]}' records no shape in the rig block.")),
                     SkptFileFormat.HyperKindScheduled => Hyperparameter.Scheduled(
                         TrainingRig.SplitSchedulerOutput(
                             schedulerGraph ?? throw new InvalidDataException(
@@ -374,9 +376,9 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Reads a baked hyperparameter's constant off its binding: the recorded dtype names how to
-        /// decode the recorded base64 scalar bytes. Both are required — a hyperparameter is any supported
-        /// scalar dtype, so an untyped value is unreadable, not an older float32 one.
+        /// Reads a baked hyperparameter's constant off its binding: the recorded dtype and shape name how
+        /// to decode the recorded base64 bytes. All three are required — a hyperparameter is any supported
+        /// dtype at any shape, so an untyped or unshaped value is unreadable, not an older float32 scalar.
         /// </summary>
         private static TensorData ReadBakedHyper(SkptRigHyperparameter binding, string name, string filePath)
         {
@@ -386,18 +388,21 @@ namespace Shorokoo
             if (binding.Value is null)
                 throw new InvalidDataException(
                     $"'{filePath}': baked hyperparameter '{name}' records no value in the rig block.");
+            if (binding.Shape is null)
+                throw new InvalidDataException(
+                    $"'{filePath}': baked hyperparameter '{name}' records no shape in the rig block.");
             var dtype = DType.FromName(binding.DType)
                 ?? throw new InvalidDataException(
                     $"'{filePath}': baked hyperparameter '{name}' records the unknown dtype '{binding.DType}'.");
             try
             {
-                return Globals.TensorData(dtype, [], binding.Value);
+                return Globals.TensorData(dtype, binding.Shape, binding.Value);
             }
             catch (Exception e) when (e is FormatException or ArgumentException)
             {
                 throw new InvalidDataException(
                     $"'{filePath}': baked hyperparameter '{name}' has a value that is not a valid " +
-                    $"'{dtype}' scalar.", e);
+                    $"'{dtype}' tensor of shape [{string.Join(", ", binding.Shape)}].", e);
             }
         }
 
@@ -748,7 +753,14 @@ namespace Shorokoo
                     // Normalized to the declared dtype at rig build, so this is the very constant the
                     // training-step graph carries.
                     binding.DType = hv.BakedDType.ToString();
+                    binding.Shape = hv.BakedValue.Shape.Dims;
                     binding.Value = Convert.ToBase64String(hv.BakedValue.AccessRawMemory());
+                }
+                else if (hv.Kind == HyperparameterKind.Runtime)
+                {
+                    // A runtime hyperparameter's shape is declared by the host, so nothing else in the
+                    // file records it; its dtype still comes from the optimizer constituent.
+                    binding.Shape = [.. hv.RuntimeShape];
                 }
                 hyperBindings.Add(binding);
             }

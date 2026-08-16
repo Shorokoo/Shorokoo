@@ -1392,8 +1392,9 @@ public partial class NNEmbeddingForwardGolden
     {
         var y = Embedding.Model(Scalar(5L), Scalar(4L), Scalar(-1L), Scalar(0f), Scalar(2f)).Call(indices);   // [3,4] = 12
 
-        // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(2.107942f, -0.46960738f, 1.3003153f, -2.1802306f, 0.9251567f, 0.18110505f, 0.9125693f, -0.20915838f, 2.107942f, -0.46960738f, 1.3003153f, -2.1802306f);
+        // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated), regenerated when the
+        // default RNG algorithm moved to Threefry2x32-Dense.v1 — Embedding initializes from Normal.
+        var reference = Vector(0.30302453f, 1.2604059f, 0.10996187f, 1.464033f, -0.49045822f, -1.098122f, -1.8281288f, 0.48056358f, 0.30302453f, 1.2604059f, 0.10996187f, 1.464033f);
 
         var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
@@ -1558,7 +1559,9 @@ public partial class NNEmbeddingInitChoice
         var normal = EmbeddingHelpers.Embed(indices, 5L, 4L);   // default init selector (Normal)
         var flat = xavier.Reshape([Scalar(-1L)]).Concat(0L, normal.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.7035597f, -0.07680409f, 0.5851435f, 0.7814938f, 0.6993564f, 0.4083065f, -0.6039033f, -0.4603252f, -0.49853125f, -0.71051013f, -0.6064174f, -0.14723669f, -0.43131658f, -0.88758403f, -0.22227336f, 0.47584838f, -0.9521141f, 0.7214563f, -1.1342117f, -1.4568925f, -0.75773567f, -0.056353197f, -0.1816379f, 1.5030893f);
+        // The first twelve (XavierUniform) are unchanged; only the last twelve (Normal) moved
+        // when the default algorithm became Threefry2x32-Dense.v1.
+        var reference = Vector(-0.7035597f, -0.07680409f, 0.5851435f, 0.7814938f, 0.6993564f, 0.4083065f, -0.6039033f, -0.4603252f, -0.49853125f, -0.71051013f, -0.6064174f, -0.14723669f, -0.55789876f, 0.5785821f, -1.0057484f, -0.030812155f, 1.287779f, 0.7086024f, 0.578124f, -0.29904434f, -0.7150537f, -0.57194465f, 1.2532319f, 1.4992924f);
         var diff = (SelfCheck.Collapse(flat, 24) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -1607,8 +1610,9 @@ public partial class NNEmbeddingBagSumGolden
     {
         var y = EmbeddingBag.Bag(indices, 5L, 4L, BagMode.Sum);   // [2,4] = 8
 
-        // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-1.559707f, 1.4833276f, -0.22284068f, 0.88921434f, -1.171633f, 2.0576725f, -0.3308642f, -0.999979f);
+        // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated), regenerated when
+        // the default RNG algorithm moved to Threefry2x32-Dense.v1 — EmbeddingBag initializes from Normal.
+        var reference = Vector(-1.7076514f, 2.6132617f, -3.2003596f, -2.2661538f, -1.5246716f, 2.98888f, -1.2375349f, -2.638269f);
 
         var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
@@ -1626,8 +1630,9 @@ public partial class NNEmbeddingBagMeanGolden
     {
         var y = EmbeddingBag.Bag(indices, 5L, 4L, BagMode.Mean);   // [2,4] = 8
 
-        // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.51990235f, 0.49444255f, -0.074280225f, 0.29640478f, -0.39054433f, 0.68589085f, -0.11028806f, -0.33332634f);
+        // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated), regenerated when
+        // the default RNG algorithm moved to Threefry2x32-Dense.v1 — EmbeddingBag initializes from Normal.
+        var reference = Vector(-0.56921715f, 0.87108725f, -1.0667865f, -0.7553846f, -0.50822383f, 0.9962933f, -0.41251162f, -0.87942296f);
 
         var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
@@ -1645,8 +1650,9 @@ public partial class NNEmbeddingBagMaxGolden
     {
         var y = EmbeddingBag.Bag(indices, 5L, 4L, BagMode.Max);   // [2,4] = 8
 
-        // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(0.20019631f, 1.7030451f, 0.15930815f, 0.36900115f, 0.20019631f, 1.7030451f, 0.15930815f, 0.36900115f);
+        // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated), regenerated when
+        // the default RNG algorithm moved to Threefry2x32-Dense.v1 — EmbeddingBag initializes from Normal.
+        var reference = Vector(0.22733732f, 1.4041787f, -0.65125394f, 1.0392427f, 0.22733732f, 1.7797971f, 1.3115706f, 0.6671276f);
 
         var diff = (y.Reshape([Scalar(-1L)]) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
@@ -1685,8 +1691,9 @@ public partial class NNEmbeddingBagPaddingIdxSumExact
         var padded = EmbeddingBag.Bag(indices, 5L, 4L, BagMode.Sum, paddingIdx: 2L);   // [B, D]
         var unmasked = EmbeddingBag.Bag(indices, 5L, 4L, BagMode.Sum);   // no paddingIdx — pad rows count
         var flat = padded.Reshape([Scalar(-1L)]).Concat(0L, unmasked.Reshape([Scalar(-1L)]));
-        // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-1.2437776f, 1.5263888f, -0.06280626f, 0.55498135f, 0.2723409f, 0.3546273f, -0.49017233f, -1.1859592f, -1.4423302f, -1.0825385f, -3.8134923f, 0.96941394f, -1.5187021f, -0.327846f, -0.4987827f, 0.36552233f);
+        // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated), regenerated when
+        // the default RNG algorithm moved to Threefry2x32-Dense.v1 — both segments are Normal-derived.
+        var reference = Vector(-0.2446494f, 1.2090828f, -2.5491056f, -3.3053966f, -1.7520089f, 2.1254256f, 0.23874319f, -1.3578515f, 0.60281307f, 1.4489868f, -0.41783231f, -1.5269053f, -0.12527007f, -0.016176403f, 1.3035787f, -0.21727772f);
         var diff = (SelfCheck.Collapse(flat, 16) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }
@@ -1704,7 +1711,9 @@ public partial class NNEmbeddingBagInitChoice
         var normal = EmbeddingBag.Bag(indices, 5L, 4L, BagMode.Sum);   // default init selector (Normal)
         var flat = xavier.Reshape([Scalar(-1L)]).Concat(0L, normal.Reshape([Scalar(-1L)]));
         // REFERENCE: golden — Shorokoo's own forward output, frozen (self-generated).
-        var reference = Vector(-0.10449439f, 0.52028596f, 0.683534f, 0.9740405f, -0.15109223f, -0.24939685f, 0.8929709f, 1.5857272f, -1.4423302f, -1.0825385f, -3.8134923f, 0.969414f, -0.62548757f, -1.965713f, -1.8215785f, 3.772873f);
+        // The first eight (XavierUniform) are unchanged; only the last eight (Normal) moved
+        // when the default algorithm became Threefry2x32-Dense.v1.
+        var reference = Vector(-0.10449439f, 0.52028596f, 0.683534f, 0.9740405f, -0.15109223f, -0.24939685f, 0.8929709f, 1.5857272f, 0.60281307f, 1.4489869f, -0.41783231f, -1.5269053f, -1.5401162f, -0.56297654f, 0.7352468f, -1.1152822f);
         var diff = (SelfCheck.Collapse(flat, 16) - reference).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
         return diff < Scalar(1e-3f);
     }

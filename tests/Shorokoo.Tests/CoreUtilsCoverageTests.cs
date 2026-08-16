@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using Shorokoo.Core.Factory.OpsFactories;
 using Shorokoo.Core.Inference;
 using Shorokoo.Core.Inference.Abstractions;
@@ -279,6 +280,67 @@ public class CoreUtilsCoverageTests
         Assert.Equal(gpu, InferenceBackend.SelectBackend([gpu], cudaAvailable: false)!.Value);
         Assert.Equal(gpu, InferenceBackend.SelectBackend([cpu, gpu], cudaAvailable: true)!.Value);
         Assert.Equal(cpu, InferenceBackend.SelectBackend([cpu, gpu], cudaAvailable: false)!.Value);
+    }
+
+    private static string OrtBackendSourceRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "src", "Backend", "OnnxRuntime")))
+            dir = dir.Parent;
+        Assert.NotNull(dir);
+        return Path.Combine(dir!.FullName, "src", "Backend", "OnnxRuntime");
+    }
+
+    private static readonly Regex OrtSafeHandleCtor =
+        new(@"new\s+(SessionOptions|RunOptions)\s*\(", RegexOptions.Compiled);
+
+    private static string StripCommentsAndStrings(string source)
+    {
+        source = Regex.Replace(source, @"/\*.*?\*/", " ", RegexOptions.Singleline);
+        source = Regex.Replace(source, @"//[^\n]*", " ");
+        source = Regex.Replace(source, @"@""(?:[^""]|"""")*""", " ");
+        source = Regex.Replace(source, @"""(?:\\.|[^""\\])*""", " ");
+        return source;
+    }
+
+    private static string[] UnscopedOrtSafeHandles(string source)
+    {
+        char[] statementEnds = [';', '{', '}'];
+        var code = StripCommentsAndStrings(source);
+        return OrtSafeHandleCtor.Matches(code)
+            .Where(m => !code[(code.LastIndexOfAny(statementEnds, m.Index) + 1)..m.Index].Contains("using"))
+            .Select(m => m.Value.Trim())
+            .ToArray();
+    }
+
+    [Fact]
+    public void TestOrtSafeHandlesAreUsingScopedAndTheGuardStillDetectsEveryEvasion()
+    {
+        var files = Directory
+            .EnumerateFiles(OrtBackendSourceRoot(), "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}") &&
+                        !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
+            .ToArray();
+        Assert.NotEmpty(files);
+
+        var sources = files.Select(File.ReadAllText).ToArray();
+        Assert.Contains(sources, s => OrtSafeHandleCtor.IsMatch(StripCommentsAndStrings(s)));
+        Assert.Empty(sources.SelectMany(UnscopedOrtSafeHandles));
+
+        string[] mustFlag =
+        [
+            "var o = new SessionOptions();",
+            "SessionOptions o = new SessionOptions();",
+            "_ = new RunOptions();",
+            "return Wrap(new SessionOptions());",
+        ];
+        string[] mustNotFlag =
+        [
+            "using var o = new SessionOptions();",
+            "using (var o = new RunOptions()) { }",
+        ];
+        Assert.All(mustFlag, s => Assert.NotEmpty(UnscopedOrtSafeHandles(s)));
+        Assert.All(mustNotFlag, s => Assert.Empty(UnscopedOrtSafeHandles(s)));
     }
 
     [Fact]

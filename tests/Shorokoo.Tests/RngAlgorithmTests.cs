@@ -281,8 +281,8 @@ public class RngAlgorithmSwitchTests
         var key20 = ResolvedKey(concrete20);
         var key13 = ResolvedKey(concrete13);
         Assert.Equal(key20, key13);
-        Assert.Equal(RngAlgorithms.Threefry2x32BoxMullerV1, BoundAlgorithm(concrete20));
-        Assert.Equal(RngAlgorithms.Threefry2x32x13BoxMullerV1, BoundAlgorithm(concrete13));
+        Assert.Equal(RngAlgorithms.Threefry2x32DenseV1, BoundAlgorithm(concrete20));
+        Assert.Equal(RngAlgorithms.Threefry2x32x13DenseV1, BoundAlgorithm(concrete13));
 
         // Bit-exact against the host generator at each algorithm's round count (substreamIndex 0
         // — the injected counter is baked at 0 in one-shot inference).
@@ -348,8 +348,8 @@ public class RngAlgorithmSwitchTests
         var (name20, algo20) = UniformFn(Rounds20);
         var (name13, algo13) = UniformFn(Rounds13);
 
-        Assert.Equal(RngAlgorithms.Threefry2x32BoxMullerV1, algo20);
-        Assert.Equal(RngAlgorithms.Threefry2x32x13BoxMullerV1, algo13);
+        Assert.Equal(RngAlgorithms.Threefry2x32DenseV1, algo20);
+        Assert.Equal(RngAlgorithms.Threefry2x32x13DenseV1, algo13);
         Assert.Contains("Threefry2x32_13", name13);
         Assert.DoesNotContain("Threefry2x32_13", name20);
         Assert.NotEqual(name20, name13);

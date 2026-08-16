@@ -58,19 +58,19 @@ internal sealed class RngRuntimeIdentity
         Overrides = overrides;
     }
 
-    /// <summary>The configured algorithm, or null when the id is unknown (a file written by a
+    /// <summary>The configured algorithm, or null when the id is unknown (a file written under an
     /// id this build does not define). Consumers must fail loudly on null, never substitute.</summary>
     public RngAlgorithm? Algorithm => TryAlgorithmFromId(AlgorithmId);
 
-    /// <summary>The stable identity-vector id of a configured algorithm. Ids are append-only:
-    /// an existing one must never be reassigned, or every model saved under it decodes to a
-    /// different draw.</summary>
+    /// <summary>The stable identity-vector id of a configured algorithm — the encoding of the
+    /// <see cref="RngAlgorithm"/> member, and nothing more. An id must not be pointed at a
+    /// <i>different</i> member, since a stored vector would then decode to the wrong algorithm
+    /// entirely; but it carries no promise about what that algorithm draws. Id 0 has already
+    /// outlived one normal transform.</summary>
     public static long AlgorithmIdOf(RngAlgorithm algorithm) => algorithm switch
     {
         RngAlgorithm.Threefry2x32 => 0,
         RngAlgorithm.Threefry2x32Rounds13 => 1,
-        RngAlgorithm.Threefry2x32Dense => 2,
-        RngAlgorithm.Threefry2x32Rounds13Dense => 3,
         _ => throw new NotSupportedException($"Unknown RNG algorithm '{algorithm}'."),
     };
 
@@ -79,8 +79,6 @@ internal sealed class RngRuntimeIdentity
     {
         0 => RngAlgorithm.Threefry2x32,
         1 => RngAlgorithm.Threefry2x32Rounds13,
-        2 => RngAlgorithm.Threefry2x32Dense,
-        3 => RngAlgorithm.Threefry2x32Rounds13Dense,
         _ => null,
     };
 

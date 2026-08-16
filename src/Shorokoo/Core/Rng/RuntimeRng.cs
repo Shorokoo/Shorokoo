@@ -7,10 +7,10 @@ namespace Shorokoo.Core.Rng;
 /// <summary>
 /// In-graph counter-based RNG: builds an ONNX-op subgraph computing Threefry-2x32 over a
 /// per-element counter, entirely from ordinary integer/float graph math. The bit generator, both
-/// uniforms and the <b>dense</b> normal are integer and exact; only the <b>Box–Muller</b> normal
-/// runs float32 Ln/Sqrt/Cos/Sin kernels, whose accuracy ONNX leaves unspecified and two conformant
-/// providers may therefore disagree on — which is why its goldens carry a tolerance and no other
-/// draw's do. Because it uses no ONNX
+/// uniforms and the normal are <b>all</b> integer and exact: no draw here runs a float32
+/// Ln/Sqrt/Cos/Sin kernel, whose accuracy ONNX leaves unspecified and two conformant providers may
+/// therefore legitimately disagree on. Every draw is consequently bit-reproducible, so every golden
+/// is an exact value rather than a toleranced one. Because it uses no ONNX
 /// random op, the result is deterministic and identical across execution providers and the
 /// Quick Execution Engine, and an exported model's randomness is self-contained — unlike ONNX's
 /// <c>RandomUniformLike</c>, whose value depends on the runtime, EP, platform, and session
@@ -32,10 +32,9 @@ namespace Shorokoo.Core.Rng;
 /// and <c>p</c> occupies the whole counter, so successive executions draw fresh values while any
 /// fixed <c>(key, substreamIndex, p)</c> replays exactly. Bit→float is the geometric draw (a
 /// geometric octave times a 23-bit mantissa fraction — see <see cref="GeometricUniform"/>).
-/// There are two normal transforms, and the algorithm NAME picks one: Box–Muller with radius
-/// √(−2·ln w) over a pair of positions (<see cref="StandardNormalBoxMuller"/>), and the dense
-/// decode, which reads one whole value as a position on the magnitude axis
-/// (<see cref="StandardNormalDense"/>). Mirrors
+/// There is ONE normal transform (<see cref="StandardNormal"/>): it too spends one whole value per
+/// element, reading its top bit as the sign and its low 63 as a position on the magnitude axis,
+/// which it decodes by integer ops alone — no rejection, no retry, no transcendental. Mirrors
 /// <see cref="Threefry2x32"/> bit-for-bit (validated against the Random123 known-answer
 /// vectors — see <c>RngRuntimeTests</c>).</para>
 /// </summary>
@@ -43,7 +42,6 @@ internal static class RuntimeRng
 {
     private static readonly int[] Rot = [13, 15, 26, 6, 17, 29, 16, 24];
     private const uint SkeinParity = 0x1BD11BDAu;
-    private const float TwoPow24Inv = 1.0f / 16777216.0f;
 
     // ── uint64 <-> the two uint32 lanes Threefry works in ───────────────────────────────
     // The ONLY place the word split exists. Everything above this boundary speaks uint64.
@@ -125,10 +123,6 @@ internal static class RuntimeRng
         return Pack(x0, x1);
     }
 
-    /// <summary>A [0,1) uniform from the low 32-bit lane of a generator value: low 24 bits × 2⁻²⁴.</summary>
-    private static Tensor<float32> ToUniform(Tensor<uint64> v)
-        => OnnxOp.BitwiseAnd(v, Scalar(0x00FF_FFFFUL)).uint64().Cast<float32>() * Scalar(TwoPow24Inv);
-
     /// <summary>Shifts <paramref name="shift"/> bits of a generator value away, bringing the lane
     /// above them into the low bits. Broadcasts, so a vector of lane offsets extracts every lane
     /// of every value in one node.</summary>
@@ -151,8 +145,9 @@ internal static class RuntimeRng
     /// stream position, so a substream index and a position are each a whole 64-bit value
     /// and neither aliases <em>as counters</em>: the 2³²'th execution draws a fresh stream rather
     /// than repeating the first, and the generator's word pair stays distinct across more than 2³²
-    /// positions. (Distinct generator words, not distinct floats — <see cref="ToUniform"/> keeps 24
-    /// bits, so drawn values collide by pigeonhole long before that.)</para>
+    /// positions. (Distinct generator words, not distinct floats — every transform above lands on a
+    /// float32, whose 24-bit significand makes drawn values collide by pigeonhole long before
+    /// that.)</para>
     ///
     /// <para>The fold reuses the bijection, but it is <b>not</b> the key tree's split: it runs at
     /// this algorithm's <paramref name="rounds"/>, whereas a key split is pinned to the default
@@ -205,8 +200,9 @@ internal static class RuntimeRng
     // Walker, "Fast Generation of Uniformly Distributed Pseudorandom Numbers with Floating-Point
     // Representation" (1974) — independently rederived by Downey (2007). The 41-bit exponent field
     // plus 23-bit significand split of a single 64-bit draw is Marc Reynolds' practical form.
-    // The 24-bit ToUniform grid above is what Box–Muller consumes; the PUBLIC uniform instead
-    // draws the octave geometrically so it reaches the full float32 precision near zero.
+    // The obvious construction — 24 bits of the draw times 2^-24 — is an even grid that floors at
+    // 2^-24 and wastes the float's exponent; this draws the octave geometrically instead, so it
+    // reaches the full float32 precision near zero for the same one generator value.
     //
     // A uniform on [0,1) is, per octave, an even grid: [2^-1,1) carries half the mass, [2^-2,2^-1)
     // a quarter, and so on, each octave holding 2^23 equally-spaced floats. So draw the octave from
@@ -235,8 +231,8 @@ internal static class RuntimeRng
     /// <para>The <em>distribution</em> is a uniform truncated at 2⁻⁴¹: an all-zero exponent field
     /// falls into the same bucket as a field of 1, so the deepest octave carries double mass
     /// (2⁻⁴⁰ instead of 2⁻⁴¹) and nothing below 2⁻⁴¹ is produced. The support is also open at both
-    /// ends — the range is [2⁻⁴¹, 1−2⁻²⁴], so exact 0 is never returned (the old 24-bit grid returned
-    /// it with probability 2⁻²⁴).</para>
+    /// ends — the range is [2⁻⁴¹, 1−2⁻²⁴], so exact 0 is never returned (an even 24-bit grid would
+    /// return it with probability 2⁻²⁴).</para>
     /// </summary>
     private static Tensor<float32> GeometricUniform(Vector<uint64> v)
     {
@@ -270,40 +266,6 @@ internal static class RuntimeRng
     public static Tensor<float32> StandardUniform(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
         => GeometricUniform(Draw(ElementCount(shape), key, substreamIndex, rounds)).Reshape(shape);
-
-    /// <summary>Standard normal N(0,1) of the given shape (Box–Muller over Threefry-2x32-<paramref name="rounds"/>).
-    /// Box–Muller turns a (radius, angle) pair into a <em>pair</em> of independent normals — the cosine
-    /// and sine arms — so element 2j is the cosine arm of pair j and element 2j+1 the sine arm.
-    ///
-    /// <para>The radius is <c>√(−2·ln w)</c> where <c>w</c> is the <b>geometric</b> uniform (fine near
-    /// zero, reaching ~2⁻⁴¹) rather than the 24-bit grid's <c>1−u₁</c> (floored at 2⁻²⁴). That deepens
-    /// the reachable tail from ±5.77σ to ~±7.54σ and resolves it finely, and since <c>w > 0</c> always
-    /// there is no <c>ln(0)</c>. The angle stays a 24-bit uniform — an even grid is what a uniform angle
-    /// wants. Each pair spends two generator values: an even position for the radius's geometric draw,
-    /// the odd next one for the angle.</para>
-    ///
-    /// <para><b>This transform is frozen.</b> Its <c>Ln</c>/<c>Sqrt</c>/<c>Cos</c>/<c>Sin</c> are
-    /// float32 kernels ONNX specifies no accuracy for, so two conformant providers may return
-    /// different draws from the same bits — which is why <see cref="StandardNormalDense"/> exists and
-    /// is what a new algorithm name should draw. But it is NOT a replacement: the algorithm names
-    /// <c>Threefry2x32-BoxMuller.v1</c> and <c>Threefry2x32-13-BoxMuller.v1</c> mean THIS, and a model
-    /// saved under one of them must keep drawing it (see <c>RngAlgorithms</c>). Do not change a line
-    /// of it; a better transform is a new name.</para></summary>
-    public static Tensor<float32> StandardNormalBoxMuller(
-        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
-    {
-        Scalar<int64> n = ElementCount(shape);
-        Scalar<int64> pairs2 = (n + Scalar(1L)) / Scalar(2L) * Scalar(2L);          // 2·ceil(N/2)
-        var block = Draw(pairs2, key, substreamIndex, rounds);                       // [2M] positions
-        var w  = GeometricUniform(block.Slice(Scalar(0L), pairs2, Scalar(2L)));      // even → radius draw
-        var u2 = ToUniform(block.Slice(Scalar(1L), pairs2, Scalar(2L)));             // odd  → 24-bit angle
-        var radius = (w.Ln() * Scalar(-2.0f)).Sqrt();                               // √(−2·ln w)
-        var theta = u2 * Scalar(2.0f * System.MathF.PI);
-
-        var arms = (radius * theta.Cos()).Reshape(Vector(-1L, 1L))
-            .Concat(1, (radius * theta.Sin()).Reshape(Vector(-1L, 1L)));   // [M,2]
-        return arms.Reshape(Vector(-1L)).Vec().Slice(Scalar(0L), n).Reshape(shape);
-    }
 
     // ── Dense arbitrary-range uniform (weight blocks) ────────────────────────────────────
     // Walker/Reynolds generalized off [0,1) onto an arbitrary range, from ONE 64-bit generator
@@ -860,14 +822,16 @@ internal static class RuntimeRng
         return ((Tensor<float32>)OnnxOp.Where(useFixed, fixedValue, drawn)).Reshape(shape);
     }
 
-    // ── Dense standard normal (piece table) ─────────────────────────────────────────────
-    // One 64-bit generator value per element, decoded to a float32 by INTEGER ops alone. ONNX
-    // specifies no accuracy for Log/Sqrt/Cos/Sin, so two conformant execution providers may
-    // legitimately disagree on the very same float32 formula — 66% of Box–Muller's draws differ
-    // between float32 and binary64 evaluation of the expression it is written as — and a draw
-    // nobody can reproduce is not a draw. So nothing below is transcendental: it is multiply-high,
-    // shift, gather and compare, and the only float32 op is the final reassembly of a bit pattern
-    // into a number, which is exact for the same reason the dense uniform's ordinal decode is.
+    // ── The standard normal (piece table) ───────────────────────────────────────────────
+    // One 64-bit generator value per element, decoded to a float32 by INTEGER ops alone. That is
+    // why the classical route — a radius √(−2·ln u) and an angle, or any other closed form built on
+    // Log/Sqrt/Cos/Sin — is not taken here: ONNX specifies no accuracy for those kernels, so two
+    // conformant execution providers may legitimately disagree on the very same float32 formula
+    // (two thirds of such a transform's draws already differ between float32 and binary64
+    // evaluation of the expression as written), and a draw nobody can reproduce is not a draw. So
+    // nothing below is transcendental: it is multiply-high, shift, gather and compare, and the only
+    // float32 op is the final reassembly of a bit pattern into a number, which is exact for the
+    // same reason the dense uniform's ordinal decode is.
     //
     // The top bit is the SIGN and the low 63 a position on the MAGNITUDE axis. Drawing the
     // magnitude and applying the sign afterwards is what makes the draw exactly symmetric — +a and
@@ -1031,12 +995,10 @@ internal static class RuntimeRng
     /// <summary>
     /// Standard normal N(0,1) of the given shape, drawn densely: one 64-bit generator value per
     /// element, no rejection, a static node count, and — because the whole decode is integer —
-    /// bit-identical on every execution provider and on the Quick Execution Engine. That is what
-    /// <see cref="StandardNormalBoxMuller"/> cannot offer: ONNX specifies no accuracy for
-    /// Log/Sqrt/Cos, so two conformant providers evaluating the same formula may return different
-    /// floats. The two are separate entry points because the algorithm name pins the transform —
-    /// this one is <b>not</b> a new version of Box–Muller but a different draw entirely, reading
-    /// one generator value per element where Box–Muller reads one per pair.
+    /// bit-identical on every execution provider and on the Quick Execution Engine. This is the
+    /// only normal transform: a formula built on Log/Sqrt/Cos would be none of those things, since
+    /// ONNX specifies no accuracy for those kernels and two conformant providers evaluating the
+    /// same expression may return different floats.
     ///
     /// <para>The draw's top bit is the sign; its low 63 are a position on the magnitude axis, which
     /// carries an even lattice below the truncation floor 2⁻³⁹, then 218 pieces each decoding a run
@@ -1058,7 +1020,7 @@ internal static class RuntimeRng
     /// <para>See the section comment above for the construction, and <c>RngDenseNormalOracle</c>
     /// for the host contract this must reproduce bit for bit.</para>
     /// </summary>
-    public static Tensor<float32> StandardNormalDense(
+    public static Tensor<float32> StandardNormal(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
         => NormalOfDraw(Draw(ElementCount(shape), key, substreamIndex, rounds)).Reshape(shape);
 
@@ -1089,35 +1051,14 @@ internal static class RuntimeRng
         return sign * fraction * scale;
     }
 
-    /// <summary>N(mean, scale) of the given shape, Box–Muller — see
-    /// <see cref="StandardNormalBoxMuller"/>.</summary>
-    public static Tensor<float32> NormalBoxMuller(
-        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex,
-        Scalar<float32> mean, Scalar<float32> scale, int rounds = Threefry2x32.Rounds)
-        => StandardNormalBoxMuller(shape, key, substreamIndex, rounds) * scale + mean;
-
-    /// <summary>N(mean, scale) of the given shape, dense — see
-    /// <see cref="StandardNormalDense"/>.</summary>
-    public static Tensor<float32> NormalDense(
-        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex,
-        Scalar<float32> mean, Scalar<float32> scale, int rounds = Threefry2x32.Rounds)
-        => StandardNormalDense(shape, key, substreamIndex, rounds) * scale + mean;
-
-    /// <summary>Box–Muller, under the unqualified names the transform had when it was the only one.
-    /// Kept so callers written before the split keep compiling and keep their values; anything that
-    /// pins an algorithm NAME must say which transform it means, because these do not — a caller
-    /// reading <c>Normal</c> as "the normal draw" is exactly how a name comes to mean something
-    /// else. New code calls <see cref="NormalBoxMuller"/> or <see cref="NormalDense"/>.</summary>
+    /// <summary>N(mean, scale) of the given shape: <see cref="StandardNormal"/> affinely rescaled,
+    /// which costs the draw nothing — the standard draw is exact and the two float32 ops here are
+    /// the caller's own arithmetic, so the result is still identical on every execution
+    /// provider.</summary>
     public static Tensor<float32> Normal(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex,
         Scalar<float32> mean, Scalar<float32> scale, int rounds = Threefry2x32.Rounds)
-        => NormalBoxMuller(shape, key, substreamIndex, mean, scale, rounds);
-
-    /// <summary><see cref="Normal"/>'s standard counterpart: Box–Muller, under the unqualified
-    /// name.</summary>
-    public static Tensor<float32> StandardNormal(
-        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
-        => StandardNormalBoxMuller(shape, key, substreamIndex, rounds);
+        => StandardNormal(shape, key, substreamIndex, rounds) * scale + mean;
 
     // ── Raw random bits ─────────────────────────────────────────────────────────────────
     // Raw bits are lanes straight out of the packing above, narrowed to the requested width:

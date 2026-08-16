@@ -1376,12 +1376,10 @@ public class RngRuntimeTests
         Assert.Equal(16, vals.Length);
         for (long i = 0; i < 16; i++) Assert.Equal(HostUniform(i, UniformKey, 0), vals[i]);
 
-        // The normal carries a tolerance: its Ln/Sqrt/Cos/Sin kernels are EP-approximate, unlike
-        // the integer bits path and the exactly-constructed uniform above.
         var normals = RunDraw<RtNormalDraw>(4, 4);
         Assert.Equal(16, normals.Length);
         for (long i = 0; i < 16; i++)
-            Assert.Equal(RngTestOracle.DrawNormal(NormalKey, 0, i), normals[i], 1e-5f);
+            Assert.Equal(RngDenseNormalOracle.Draw(NormalKey, 0, i), normals[i]);
     }
 
     [Fact]
@@ -1635,7 +1633,7 @@ public partial class RngDenseNormalOracleCheck
         Scalar<int64> mismatch = Scalar(0L);
         for (long s = 0; s < Substreams; s++)
         {
-            var drawn = RuntimeRng.StandardNormalDense(Vector((long)Draws),
+            var drawn = RuntimeRng.StandardNormal(Vector((long)Draws),
                 Scalar(0xA5A5_1234UL | (0x9E37UL << 32)), Scalar((ulong)s));
             var target = want.Slice(Scalar(s * Draws), Scalar(s * Draws + Draws));
             mismatch = mismatch + ((Tensor<bit>)OnnxOp.Not(OnnxOp.Equal(drawn, target))).Cast<int64>()

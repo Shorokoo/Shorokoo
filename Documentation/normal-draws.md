@@ -10,12 +10,10 @@ how finely it resolves the magnitude axis, where it stops, and the places where 
 perfect. For *which* values a given draw produces (seeds, streams, reproducibility) see
 [Configuring randomness](rng-configuration.md).
 
-Everything below describes the **dense** normal transform, which
-`RngAlgorithm.Threefry2x32Dense` (the default) and `RngAlgorithm.Threefry2x32Rounds13Dense`
-select. The two Box–Muller algorithms are a different draw with a weaker contract; the
-[last section](#the-same-bits-everywhere) says how it differs, and
-[Choosing the generator](rng-configuration.md#choosing-the-generator) says which name selects
-which.
+Everything below holds under both `RngAlgorithm` values: they differ in the bit generator's
+round count and nothing else, so the decode described here — and every guarantee it carries —
+is the same under either (see
+[Choosing the generator](rng-configuration.md#choosing-the-generator)).
 
 ```csharp
 var noise  = RandomNormal(Vector(4L, 8L));                // float32, standard normal
@@ -29,7 +27,7 @@ var init   = NormalDist.Init([Scalar(4L), Scalar(8L)], Scalar(0f), Scalar(0.02f)
 - **One 64-bit generator value per element.** The top bit is the sign, the low 63 a position
   on the *magnitude axis*. There is no rejection and no pairing, so no two elements share a
   generator value and each element's value depends on nothing but its own position in the
-  stream. (The older Box–Muller draw produced normals in pairs; this one does not.)
+  stream.
 - The draw is **exactly symmetric**. The magnitude is sampled and the sign applied
   afterwards, so `+a` and `-a` are equally likely and own mirror-image intervals of the axis.
   The set of values a draw can return is closed under negation, and there is no sign bias to
@@ -146,14 +144,10 @@ The same seed yields identical values under ONNX Runtime's CPU provider, under t
 [Quick Execution Engine](limitations.md#quick-execution-engine-value-computation-is-bounded),
 and in an exported model; both engines are held to the same host reference in the suite.
 
-That is not a free property, and the older Box–Muller transform does not have it. It builds a
-normal from `√(−2·ln w)·cos(2πu)` — four float32 transcendentals deep — and ONNX specifies no
-accuracy for `Log`, `Sqrt`, `Cos` or `Sin`, so two perfectly conformant providers can return
-different normals from the same key. Evaluating that same formula in float32 and in binary64
-makes **66%** of its draws differ, the worst by **4.19e-2** relative.
-
-`RngAlgorithm.Threefry2x32` and `RngAlgorithm.Threefry2x32Rounds13` still select the
-Box–Muller transform, and a model keeps the algorithm it was saved under, so a model written
-under either of those names keeps drawing Box–Muller normals — none of this page's contract
-applies to it. Moving such a model onto a dense algorithm is a deliberate re-bind; see
-[Choosing the generator](rng-configuration.md#choosing-the-generator).
+That is not a free property, and it is what the integer decode was adopted for. The
+transcendental construction it replaced — a normal built from `√(−2·ln w)·cos(2πu)`, four
+float32 transcendentals deep — cannot have it: ONNX specifies no accuracy for `Log`, `Sqrt`,
+`Cos` or `Sin`, so two perfectly conformant providers can return different normals from the
+same key. Evaluating that same formula in float32 and in binary64 makes **66%** of its draws
+differ, the worst by **4.19e-2** relative. Nothing on this page depends on a provider's
+transcendental accuracy, because nothing in the decode calls one.

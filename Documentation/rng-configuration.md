@@ -96,50 +96,37 @@ local `FunctionProto`s. `RngSeed` becomes an ordinary initializer, and the runti
 session-build constant folding collapses the constant chain segments to literal keys — so
 the per-draw cost is what it always was. The exported model's randomness is therefore
 identifiable — you can point at the function in the ONNX file that produced any draw, and at
-the initializer that carries the identity it derived from — and, under the default algorithm,
-deterministic and portable across execution providers: every step from the key to the value is
-integer arithmetic, so any provider that implements the integer ops correctly returns the same
-bits. Portability is a property of the *algorithm*, not of the lowering; the Box–Muller
-algorithms below are the exception, and the next section says why.
+the initializer that carries the identity it derived from — and deterministic and portable
+across execution providers: every step from the key to the value is integer arithmetic, so any
+provider that implements the integer ops correctly returns the same bits.
 
 ## Choosing the generator
 
-`RngConfig.Algorithm` selects the bit generator **and the transforms that turn its bits into
+`RngConfig.Algorithm` selects the bit generator **and the decodes that turn its bits into
 values** — both, because both decide what a draw returns:
 
-- `RngAlgorithm.Threefry2x32Dense` (default) — Threefry-2x32, 20 rounds (the Random123
-  safety-margin default), with the dense normal transform.
-- `RngAlgorithm.Threefry2x32Rounds13Dense` — the same transforms over the reduced 13-round
-  bit generator (Random123 `threefry2x32x13`): still BigCrush-resistant, ~35% fewer rounds —
-  the lower-margin choice.
-- `RngAlgorithm.Threefry2x32` — 20 rounds with the older **Box–Muller** normal transform.
-- `RngAlgorithm.Threefry2x32Rounds13` — 13 rounds with the Box–Muller normal transform.
+- `RngAlgorithm.Threefry2x32` (default) — Threefry-2x32, 20 rounds (the Random123
+  safety-margin default).
+- `RngAlgorithm.Threefry2x32Rounds13` — the reduced 13-round bit generator (Random123
+  `threefry2x32x13`): still BigCrush-resistant, 7 rounds fewer — the lower-margin choice.
 
-They differ along exactly two axes: the bit generator's round count, and the **normal**
-transform. The uniform draw is the same in all four (its contract is
-[uniform-draws.md](uniform-draws.md)), and so is the key tree.
+The two differ along exactly one axis: the bit generator's round count. The decodes above it
+are identical — the uniform's ([uniform-draws.md](uniform-draws.md)) and the normal's
+([normal-draws.md](normal-draws.md)) — and so is the key tree. The recorded identity names
+which algorithm a model is bound to, and a model whose identity names an algorithm this build
+does not know fails loudly rather than falling back to another one.
 
-**Why the normal transform has two forms.** Box–Muller builds a normal from
-`√(−2·ln w)·cos(2πu)` — four float32 transcendentals deep. ONNX specifies no accuracy for
-`Log`, `Sqrt`, `Cos` or `Sin`, so two execution providers can both be perfectly conformant and
-still return different normals from the same key; evaluating that same formula in float32 and
-in binary64 makes 66% of draws differ, the worst by 4.19e-2 relative. The dense transform
-spends one 64-bit generator value per element and decodes it into a normal by **integer
+**Why the decodes are integer-only.** A normal is commonly built by transforming uniform
+values through `√(−2·ln w)·cos(2πu)` — four float32 transcendentals deep. ONNX specifies no
+accuracy for `Log`, `Sqrt`, `Cos` or `Sin`, so two execution providers can both be perfectly
+conformant and still return different normals from the same key; evaluating that same formula
+in float32 and in binary64 makes 66% of draws differ, the worst by 4.19e-2 relative. Shorokoo's
+normal instead spends one 64-bit generator value per element and decodes it by **integer
 arithmetic alone** — a table of pieces, each inverting the Gaussian CDF over its run of
 magnitudes with a degree-12 series; no transcendental anywhere — so the value is fixed by the
-bits and nothing else. That is what makes the default algorithm's normals portable, and it is
-the whole reason the default moved.
+bits and nothing else, on every execution provider and in an exported model.
 
-**A model keeps the algorithm it was saved under.** An algorithm name pins the entire draw,
-transforms included, and improving a transform adds a name rather than redefining one. A model
-or checkpoint written under `Threefry2x32` or `Threefry2x32Rounds13` therefore keeps drawing
-Box–Muller normals when you load it, exactly as it did before — the recorded identity says
-which algorithm, and a model whose identity names an algorithm this build does not know fails
-loudly rather than falling back to another one. Moving an existing model onto a dense
-algorithm is a deliberate re-bind: at the same round count it changes the normals a stream
-draws and leaves its uniforms untouched, while changing the round count as well changes both.
-
-All algorithms **share one key tree**: a stream's key is derived the same way regardless of
+Both algorithms **share one key tree**: a stream's key is derived the same way regardless of
 algorithm, so switching `Algorithm` never reshuffles which stream is which — the same stream
 simply draws different numbers. Both parameter initialization and runtime feeds honor the
 choice. Because binding is a parameter write, you can switch generators on an
@@ -222,7 +209,7 @@ what it is bound to without holding the config that produced it:
 ```csharp
 if (model.TryGetRngIdentity() is { } identity)
 {
-    Console.WriteLine(identity.Algorithm);        // e.g. Threefry2x32Dense
+    Console.WriteLine(identity.Algorithm);        // e.g. Threefry2x32
     Console.WriteLine(identity.RunMasterKey);     // the derived runtime master key
     foreach (var o in identity.Overrides)         // path + key, one per overridden stream
         Console.WriteLine(o);

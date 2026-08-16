@@ -12,8 +12,8 @@ namespace Shorokoo.Core.Rng;
 /// functions</b> — <c>split</c> (index-based key split), <c>uniform</c> and <c>normal</c>
 /// (keyed draws) — because both the bit generator <em>and</em> the distribution transforms
 /// determine the produced values (two frameworks produce different normals from identical
-/// bit streams when their transforms differ). The version is part of the name: improving a
-/// transform later is a <em>new algorithm name</em>, never a silent change.
+/// bit streams when their transforms differ). So the name pins the whole set — bit generator
+/// and transforms alike — and carries its version.
 ///
 /// <para>Each function is an ordinary Shorokoo <see cref="Function"/> built from in-graph
 /// integer/float math (see <see cref="RuntimeRng"/>), tagged with
@@ -24,25 +24,15 @@ namespace Shorokoo.Core.Rng;
 /// </summary>
 internal static class RngAlgorithms
 {
-    /// <summary>Threefry-2x32 (Random123, 20 rounds) + the dense uniform + Box–Muller normal.</summary>
-    public const string Threefry2x32BoxMullerV1 = "Threefry2x32-BoxMuller.v1";
-
-    /// <summary>Threefry-2x32 with the reduced 13-round bit generator (Random123 <c>threefry2x32x13</c>,
-    /// still BigCrush-resistant) + the same uniform + Box–Muller normal. Only the
-    /// draw's round count differs from <see cref="Threefry2x32BoxMullerV1"/>; the key tree is shared.</summary>
-    public const string Threefry2x32x13BoxMullerV1 = "Threefry2x32-13-BoxMuller.v1";
-
-    /// <summary>Threefry-2x32 (Random123, 20 rounds) + the same uniform + the <b>dense</b> normal:
-    /// one 64-bit generator value per element decoded by integer arithmetic alone (a piece table
-    /// plus a polynomial series, no transcendental). Only the normal transform differs from
-    /// <see cref="Threefry2x32BoxMullerV1"/> — a new name rather than a redefinition, so a model
-    /// saved under the Box–Muller name keeps drawing Box–Muller (see <see cref="NormalBody"/>
-    /// for the caveat currently outstanding on that).</summary>
+    /// <summary>Threefry-2x32 (Random123, 20 rounds) + the dense uniform + the dense normal: one
+    /// 64-bit generator value per element decoded by integer arithmetic alone (a piece table plus a
+    /// polynomial series, no transcendental).</summary>
     public const string Threefry2x32DenseV1 = "Threefry2x32-Dense.v1";
 
-    /// <summary>The reduced 13-round bit generator + the dense normal: <see cref="Threefry2x32DenseV1"/>
-    /// at <see cref="Threefry2x32.Rounds13"/>, exactly as
-    /// <see cref="Threefry2x32x13BoxMullerV1"/> stands to <see cref="Threefry2x32BoxMullerV1"/>.</summary>
+    /// <summary>The reduced 13-round bit generator (Random123 <c>threefry2x32x13</c>, still
+    /// BigCrush-resistant) + the same uniform and normal: <see cref="Threefry2x32DenseV1"/> at
+    /// <see cref="Threefry2x32.Rounds13"/>. Only the draw's round count differs; the key tree is
+    /// shared.</summary>
     public const string Threefry2x32x13DenseV1 = "Threefry2x32-13-Dense.v1";
 
     /// <summary>The default algorithm for keyed draws.</summary>
@@ -64,10 +54,8 @@ internal static class RngAlgorithms
     /// <summary>The registry name of a configured <see cref="RngAlgorithm"/>.</summary>
     public static string NameOf(RngAlgorithm algorithm) => algorithm switch
     {
-        RngAlgorithm.Threefry2x32 => Threefry2x32BoxMullerV1,
-        RngAlgorithm.Threefry2x32Rounds13 => Threefry2x32x13BoxMullerV1,
-        RngAlgorithm.Threefry2x32Dense => Threefry2x32DenseV1,
-        RngAlgorithm.Threefry2x32Rounds13Dense => Threefry2x32x13DenseV1,
+        RngAlgorithm.Threefry2x32 => Threefry2x32DenseV1,
+        RngAlgorithm.Threefry2x32Rounds13 => Threefry2x32x13DenseV1,
         _ => throw new NotSupportedException($"Unknown RNG algorithm '{algorithm}'."),
     };
 
@@ -75,27 +63,14 @@ internal static class RngAlgorithms
     // is deliberately NOT algorithm-dependent — see DrawRounds usage below.
     private static int DrawRounds(string algorithm) => algorithm switch
     {
-        Threefry2x32BoxMullerV1 => Threefry2x32.Rounds,          // 20
-        Threefry2x32x13BoxMullerV1 => Threefry2x32.Rounds13,     // 13
         Threefry2x32DenseV1 => Threefry2x32.Rounds,              // 20
         Threefry2x32x13DenseV1 => Threefry2x32.Rounds13,         // 13
-        _ => throw new NotSupportedException($"Unknown RNG algorithm '{algorithm}'."),
-    };
-
-    // The normal transform per algorithm — the other axis the name pins, alongside the round
-    // count. Dense: one generator value per element, decoded by integer arithmetic alone.
-    private static bool DenseNormal(string algorithm) => algorithm switch
-    {
-        Threefry2x32BoxMullerV1 or Threefry2x32x13BoxMullerV1 => false,
-        Threefry2x32DenseV1 or Threefry2x32x13DenseV1 => true,
         _ => throw new NotSupportedException($"Unknown RNG algorithm '{algorithm}'."),
     };
 
     // Sanitized, stable ONNX-safe function-name fragment; the pretty name rides the metadata.
     private static string Tag(string algorithm) => algorithm switch
     {
-        Threefry2x32BoxMullerV1 => "Threefry2x32_BoxMuller_v1",
-        Threefry2x32x13BoxMullerV1 => "Threefry2x32_13_BoxMuller_v1",
         Threefry2x32DenseV1 => "Threefry2x32_Dense_v1",
         Threefry2x32x13DenseV1 => "Threefry2x32_13_Dense_v1",
         _ => throw new NotSupportedException($"Unknown RNG algorithm '{algorithm}'."),
@@ -136,7 +111,6 @@ internal static class RngAlgorithms
             if (Cache.TryGetValue((algorithm, kind, bitsDtype), out var fn)) return fn;
 
             bool r13 = rounds == Threefry2x32.Rounds13;
-            bool dense = DenseNormal(algorithm);
             Delegate body = kind switch
             {
                 KindSplit => (Func<Scalar<uint64>, Scalar<uint64>, Scalar<uint64>>)SplitImpl,
@@ -144,7 +118,9 @@ internal static class RngAlgorithms
                 KindUniform => r13
                     ? (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)Uniform13Impl
                     : (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)UniformImpl,
-                KindNormal => NormalBody(r13, dense),
+                KindNormal => r13
+                    ? (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)Normal13Impl
+                    : (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)NormalImpl,
                 KindBits => BitsBody(r13, bitsDtype!),
                 _ => throw new NotSupportedException($"Unknown RNG function kind '{kind}'."),
             };
@@ -160,24 +136,6 @@ internal static class RngAlgorithms
             Cache[(algorithm, kind, bitsDtype)] = fn;
             return fn;
         }
-    }
-
-    /// <summary>The normal draw delegate for a round count and normal transform (a non-capturing
-    /// static method, as <see cref="GraphBuilder.BuildInternalComputationGraphFromDelegate"/> requires).
-    ///
-    /// <para>The two transforms are separate entry points because the algorithm NAME pins the
-    /// transform: the Box–Muller arm must keep producing Box–Muller normals for as long as its
-    /// names are registered, whatever the dense arm does.</para>
-    /// </summary>
-    private static Delegate NormalBody(bool r13, bool dense)
-    {
-        if (dense)
-            return r13
-                ? (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)NormalDense13Impl
-                : NormalDenseImpl;
-        return r13
-            ? (Func<Scalar<uint64>, Scalar<uint64>, Vector<int64>, Scalar<float32>, Scalar<float32>, Tensor<float32>>)NormalBoxMuller13Impl
-            : NormalBoxMullerImpl;
     }
 
     /// <summary>The bits draw delegate for a width and round count (a non-capturing static method,
@@ -207,25 +165,15 @@ internal static class RngAlgorithms
         Scalar<float32> low, Scalar<float32> high)
         => RuntimeRng.Uniform(shape, key, substreamIndex, low, high, Threefry2x32.Rounds13);
 
-    private static Tensor<float32> NormalBoxMullerImpl(
+    private static Tensor<float32> NormalImpl(
         Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape,
         Scalar<float32> mean, Scalar<float32> scale)
-        => RuntimeRng.NormalBoxMuller(shape, key, substreamIndex, mean, scale, Threefry2x32.Rounds);
+        => RuntimeRng.Normal(shape, key, substreamIndex, mean, scale, Threefry2x32.Rounds);
 
-    private static Tensor<float32> NormalBoxMuller13Impl(
+    private static Tensor<float32> Normal13Impl(
         Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape,
         Scalar<float32> mean, Scalar<float32> scale)
-        => RuntimeRng.NormalBoxMuller(shape, key, substreamIndex, mean, scale, Threefry2x32.Rounds13);
-
-    private static Tensor<float32> NormalDenseImpl(
-        Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape,
-        Scalar<float32> mean, Scalar<float32> scale)
-        => RuntimeRng.NormalDense(shape, key, substreamIndex, mean, scale, Threefry2x32.Rounds);
-
-    private static Tensor<float32> NormalDense13Impl(
-        Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape,
-        Scalar<float32> mean, Scalar<float32> scale)
-        => RuntimeRng.NormalDense(shape, key, substreamIndex, mean, scale, Threefry2x32.Rounds13);
+        => RuntimeRng.Normal(shape, key, substreamIndex, mean, scale, Threefry2x32.Rounds13);
 
     private static Tensor<uint8>  BitsU8Impl  (Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape) => RuntimeRng.BitsU8(shape, key, substreamIndex, Threefry2x32.Rounds);
     private static Tensor<uint16> BitsU16Impl (Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape) => RuntimeRng.BitsU16(shape, key, substreamIndex, Threefry2x32.Rounds);

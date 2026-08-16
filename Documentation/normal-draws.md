@@ -142,6 +142,9 @@ The whole decode, from generator bits to the `float32` returned, is integer arit
 execution provider that implements the integer operations correctly therefore returns the
 same values from the same key, bit for bit, and an exported ONNX model draws exactly what
 Shorokoo drew — portability by construction rather than by testing providers one at a time.
+The same seed yields identical values under ONNX Runtime's CPU provider, under the
+[Quick Execution Engine](limitations.md#quick-execution-engine-value-computation-is-bounded),
+and in an exported model; both engines are held to the same host reference in the suite.
 
 That is not a free property, and the older Box–Muller transform does not have it. It builds a
 normal from `√(−2·ln w)·cos(2πu)` — four float32 transcendentals deep — and ONNX specifies no

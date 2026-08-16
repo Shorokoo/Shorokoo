@@ -100,6 +100,34 @@ public class RngAlgorithmTests
         => RngDenseUniformOracle.Draw(key, 0, i, 0f, 1f);
 
     [Fact]
+    public void TestDenseNormalOracleDecodesEveryGoldenDrawExactly()
+    {
+        foreach ((ulong draw, uint bits) in RngDenseNormalGolden.Pairs)
+            Assert.Equal(bits, (uint)RngDenseNormalOracle.SampleBits(draw));
+    }
+
+    [Fact]
+    public void TestDenseNormalOracleIsMonotoneMirroredAndFinite()
+    {
+        ulong mask = (1UL << 63) - 1;
+        uint previous = 0;
+        foreach ((ulong draw, uint _) in RngDenseNormalGolden.Pairs)
+        {
+            ulong code = draw & mask;
+            uint magnitude = (uint)RngDenseNormalOracle.MagnitudeBits(code);
+            Assert.True((magnitude >> 23) < 0xFF);
+            Assert.Equal(magnitude | 0x8000_0000U, (uint)RngDenseNormalOracle.SampleBits(draw | (1UL << 63)));
+            Assert.Equal(magnitude, (uint)RngDenseNormalOracle.SampleBits(code));
+        }
+        foreach (ulong code in new ulong[] { 0, 1, 1UL << 20, 1UL << 40, 1UL << 62, mask })
+        {
+            uint magnitude = (uint)RngDenseNormalOracle.MagnitudeBits(code);
+            Assert.True(magnitude >= previous);
+            previous = magnitude;
+        }
+    }
+
+    [Fact]
     public void TestKeyedUniformBitsAndSplitThenDrawMatchTheHostGeneratorBitExactly()
     {
         const ulong key = 123UL | (456UL << 32);

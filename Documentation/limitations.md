@@ -66,6 +66,22 @@ included), and a side of the range worth less than one weight unit — the negat
 generator bits spent per element, so a deeper draw is possible but costs more of them. See
 [uniform-draws.md](uniform-draws.md) for the full contract.
 
+### Normal draws stop at 8 sigma and resolve a bounded span of magnitudes
+
+A normal draw spends one 64-bit generator value per element — one bit of sign, 63 for the
+magnitude — which buys 42 weight classes of resolved magnitudes, from 2⁻³⁹ (1.818989e-12) up
+to 8. Neither end is reachable by accident, but both are hard. **Above**: every position at or
+past 8 sigma decodes to exactly `8.0f`, so the tail is clipped there and that one float
+carries all 1.244e-15 of the mass beyond it (about one draw in 800 trillion); a scaled draw
+never leaves `mean ± 8·scale`. **Below**: magnitudes under 2⁻³⁹ ride an even lattice instead
+of the float grid, so they are not individually drawable — the region still carries exactly
+the mass it is due (1.4513e-12, about one draw in 690 billion), and the normal density is
+constant to within 2⁻⁷⁸ across it, so what is lost is resolution among numerically
+interchangeable values, not fairness. In all, 702,968,878 of the 4,278,190,080 finite
+`float32` values — 16.4% — can come out of a draw. Both limits are set by the generator bits
+spent per element, so a wider window is possible but costs more of them. See
+[normal-draws.md](normal-draws.md) for the full contract.
+
 ### ONNX `Scan` import
 
 `Scan` cannot be imported. Shorokoo executes `Loop`, not `Scan`, and does not

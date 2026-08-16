@@ -107,6 +107,13 @@ public class RngAlgorithmTests
     }
 
     [Fact]
+    public void TestDenseNormalOracleReachesBothSignedZeros()
+    {
+        Assert.Equal(0x0000_0000U, (uint)RngDenseNormalOracle.SampleBits(0UL));
+        Assert.Equal(0x8000_0000U, (uint)RngDenseNormalOracle.SampleBits(1UL << 63));
+    }
+
+    [Fact]
     public void TestDenseNormalOracleIsMonotoneMirroredAndFinite()
     {
         ulong mask = (1UL << 63) - 1;
@@ -201,7 +208,7 @@ public class RngAlgorithmTests
         {
             var algo = fn.MetadataProps.FirstOrDefault(p => p.Key == Function.IRRngAlgorithmParamName)?.Value;
             var kind = fn.MetadataProps.FirstOrDefault(p => p.Key == Function.IRRngFunctionKindParamName)?.Value;
-            Assert.Equal(RngAlgorithms.Threefry2x32BoxMullerV1, algo);
+            Assert.Equal(RngAlgorithms.Default, algo);
             Assert.Contains(kind, (string[])[RngAlgorithms.KindSplit, RngAlgorithms.KindUniform, RngAlgorithms.KindNormal]);
         }
 

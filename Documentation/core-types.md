@@ -42,7 +42,8 @@ Related: [defining-models.md](defining-models.md) · [inference.md](inference.md
 | `Tensor<float32>.Fill(shape, TensorData(...))` | `Tensor<float32>` | Static fill on the type. |
 | `RandomUniform(shape, low = 0f, high = 1f)` | `Tensor<float32>` | Random feed over the half-open `[low, high)`; all but `shape` are optional. Keyed by the model's [RNG identity](rng-configuration.md) — no per-site seed. What the draw returns: [uniform-draws.md](uniform-draws.md). |
 | `RandomUniform(shape, Scalar<float32> low, Scalar<float32> high)` | `Tensor<float32>` | Same feed over a range computed **in-graph** (both bounds required). The bounds reach the draw itself, so the range is exact at any width; a graph-scalar range needs a keyed (concrete, id-bearing) model. |
-| `RandomNormal(shape, mean = 0f, scale = 1f)` | `Tensor<float32>` | Random feed; see `RandomUniform`. |
+| `RandomNormal(shape, mean = 0f, scale = 1f)` | `Tensor<float32>` | Random feed over N(`mean`, `scale`); all but `shape` are optional. Keyed by the model's [RNG identity](rng-configuration.md) — no per-site seed. What the draw returns: [normal-draws.md](normal-draws.md). |
+| `RandomNormal(shape, Scalar<float32> mean, Scalar<float32> scale)` | `Tensor<float32>` | Same feed over a distribution computed **in-graph** (both required). The parameters reach the draw itself, so one built model can be re-parameterized per run; a graph-scalar distribution needs a keyed (concrete, id-bearing) model. |
 
 **Implicit primitive → `Scalar<T>` conversion.** Wherever a `Scalar<T>` is expected, a bare
 primitive value converts to one automatically, so the `Scalar(...)` wrapper is usually

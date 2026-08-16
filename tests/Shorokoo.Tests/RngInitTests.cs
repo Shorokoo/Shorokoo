@@ -80,6 +80,34 @@ public partial class RngRuntimeFeedRuntimeBounds
         => RandomUniform([Scalar((long)RngUniformRangeRuntimeBounds.N)], low, high);
 }
 
+/// <summary>The normal counterpart — the Scalar-parameter overload of <c>Globals.RandomNormal</c>,
+/// whose mean and scale arrive as hyperparameters.</summary>
+[Module]
+public partial class RngRuntimeFeedRuntimeNormal
+{
+    public static Tensor<float32> Inline(
+        Tensor<float32> x, [Hyper] Scalar<float32> mean, [Hyper] Scalar<float32> scale)
+        => RandomNormal([Scalar((long)RngUniformRangeRuntimeBounds.N)], mean, scale);
+}
+
+/// <summary>An initializer drawing N(mean, scale) straight through the Scalar-parameter feed, so
+/// the distribution reaches the keyed init draw as inputs rather than attributes.</summary>
+[TrainableParamInitializer]
+public static partial class RngNormalParamsInit
+{
+    public static Tensor<float32> Inline(Vector<int64> shape, Scalar<float32> mean, Scalar<float32> scale)
+        => RandomNormal(shape, mean, scale);
+}
+
+/// <summary>The initializer-side counterpart of <see cref="RngRuntimeFeedRuntimeNormal"/>.</summary>
+[Module]
+public partial class RngNormalParamsInitLayer
+{
+    public static Tensor<float32> Inline(
+        Tensor<float32> x, [Hyper] Scalar<float32> mean, [Hyper] Scalar<float32> scale)
+        => RngNormalParamsInit.Init([Scalar((long)RngUniformRangeRuntimeBounds.N)], mean, scale);
+}
+
 /// <summary>A XavierUniformGain-initialized parameter whose gain arrives as a hyperparameter, so
 /// the same site and stream key serve every gain the test materializes.</summary>
 [Module]
@@ -381,6 +409,97 @@ public class RngInitFrozenDerivationTests
         Assert.True(FeedDrawsTheRange(1f, 1.0000001f));
     }
 
+    private static float[] NormalFeed(float mean, float scale)
+    {
+        var g = RngRuntimeFeedRuntimeNormal.ComputationGraph;
+        var inputs = RangeInputs(mean, scale);
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([.. inputs]));
+        return ComputeContext.Default.Execute(arch.ToConcreteModel(RangeCfg), [.. inputs.Cast<IData>()])[0]
+            .ToTensorData().As<float32>().AccessMemory().ToArray();
+    }
+
+    private static float[] NormalInit(float mean, float scale)
+    {
+        var g = RngNormalParamsInitLayer.ComputationGraph;
+        return g.ToConcreteArchitecture(g.FromOrderedInputs([.. RangeInputs(mean, scale)]))
+            .InitializeTrainableParams(rngConfig: RangeCfg).ModelParams
+            .Select(p => p.ToTensorData())
+            .Single(t => t.DType == DType.Float32 && t.Shape.Count == RngUniformRangeRuntimeBounds.N)
+            .As<float32>().AccessMemory().ToArray();
+    }
+
+    private static bool AffineMapsTheStandardDraw(Func<float, float, float[]> draw, float mean, float scale)
+    {
+        var z = draw(0f, 1f);
+        var v = draw(mean, scale);
+        return z.Length == RngUniformRangeRuntimeBounds.N && z.Distinct().Count() > 1
+            && Enumerable.Range(0, z.Length).All(i =>
+                MathF.Abs(v[i] - (z[i] * scale + mean)) <= 1e-5f * (1f + MathF.Abs(v[i])));
+    }
+
+    /// <summary>The public runtime feed's graph-scalar overload carries mean and scale to the draw
+    /// itself: the same stream, mapped by exactly the values the model was handed at run time. A
+    /// dropped scale, a dropped mean, and dropping both each leave a distinguishable output.</summary>
+    [Fact]
+    public void TestRuntimeNormalFeedDrawsItsRuntimeMeanAndScale()
+    {
+        Assert.True(AffineMapsTheStandardDraw(NormalFeed, 3f, 2f));
+        Assert.True(AffineMapsTheStandardDraw(NormalFeed, -1.5f, 0.25f));
+        Assert.True(AffineMapsTheStandardDraw(NormalFeed, 0f, 7f));
+        Assert.True(AffineMapsTheStandardDraw(NormalFeed, 9f, 1f));
+        Assert.True(NormalFeed(100f, 0f).All(x => x == 100f));
+    }
+
+    /// <summary>The same graph-scalar parameters through a parameter initializer, keyed on the
+    /// parameter's own init stream.</summary>
+    [Fact]
+    public void TestNormalInitializerDrawsItsRuntimeMeanAndScale()
+    {
+        Assert.True(AffineMapsTheStandardDraw(NormalInit, 3f, 2f));
+        Assert.True(AffineMapsTheStandardDraw(NormalInit, -1.5f, 0.25f));
+        Assert.True(NormalInit(100f, 0f).All(x => x == 100f));
+    }
+
+    /// <summary>One built model, re-parameterized per execution without a rebuild.</summary>
+    [Fact]
+    public void TestRuntimeNormalFeedReparameterizesWithoutRebuild()
+    {
+        var g = RngRuntimeFeedRuntimeNormal.ComputationGraph;
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([.. RangeInputs(0f, 1f)]));
+        var model = arch.ToConcreteModel(RangeCfg);
+        float[] Run(float mean, float scale) => ComputeContext.Default
+            .Execute(model, [.. RangeInputs(mean, scale).Cast<IData>()])[0]
+            .ToTensorData().As<float32>().AccessMemory().ToArray();
+
+        var z = Run(0f, 1f);
+        Assert.True(z.Distinct().Count() > 1);
+        foreach (var (mean, scale) in ((float, float)[])[(7f, 4f), (-2f, 0.5f), (0f, 1f)])
+            Assert.All(Enumerable.Range(0, z.Length).Zip(Run(mean, scale)),
+                p => Assert.Equal(z[p.First] * scale + mean, p.Second, 1e-4f));
+    }
+
+    /// <summary>The operator's two forms are the same two draw inputs: the graph-scalar overload
+    /// wires <c>mean</c>/<c>scale</c> as node inputs and sets no attributes, the literal overload
+    /// sets the attributes and wires no inputs.</summary>
+    [Fact]
+    public void TestNormalFeedCarriesItsParametersAsInputsOrAttributesNeverBoth()
+    {
+        static Shorokoo.Core.Graph.FastNode Feed(Func<Tensor<float32>> f) => GraphBuilder
+            .BuildInternalComputationGraphFromDelegate(f).Nodes
+            .Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL);
+
+        var tensorForm = Feed(() => RandomNormal([Scalar(4L)], Scalar(3f), Scalar(2f)));
+        Assert.NotNull(tensorForm.Inputs[4]);
+        Assert.NotNull(tensorForm.Inputs[5]);
+        Assert.Null(tensorForm.Attributes.GetFloatVal(OnnxOpAttributeNames.AttrMean));
+        Assert.Null(tensorForm.Attributes.GetFloatVal(OnnxOpAttributeNames.AttrScale));
+
+        var literalForm = Feed(() => RandomNormal([Scalar(4L)], 3f, 2f));
+        Assert.True(literalForm.Inputs.Count < 5 || literalForm.Inputs[4] is null);
+        Assert.Equal(3f, literalForm.Attributes.GetFloatVal(OnnxOpAttributeNames.AttrMean));
+        Assert.Equal(2f, literalForm.Attributes.GetFloatVal(OnnxOpAttributeNames.AttrScale));
+    }
+
     private static float[] GainDraw(ComputationGraph g, float gain)
     {
         TensorData[] inputs =
@@ -495,21 +614,31 @@ public class RngInitFailLoudTests
         Assert.Contains($"[{string.Join(", ", missing.ModelId.Vals)}]", ex.Message);
     }
 
-    /// <summary>The ONNX fallback carries its bounds as attributes, so an unkeyed feed whose range
-    /// is in-graph has nowhere to put them — a hard error, never a silently dropped range.</summary>
-    [Fact]
-    public void TestUnkeyedFeedWithRuntimeBoundsIsAHardError()
+    private static string UnkeyedTensorParamFeedError(Func<Tensor<float32>> draw, string opCode)
     {
-        var g = GraphBuilder.BuildInternalComputationGraphFromDelegate(
-            (Func<Tensor<float32>>)(() => RandomUniform([Scalar(4L)], Scalar(2f), Scalar(5f))));
-        var feed = g.Nodes.Single(n => n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM);
+        var g = GraphBuilder.BuildInternalComputationGraphFromDelegate(draw);
+        var feed = g.Nodes.Single(n => n.OpCode == opCode);
         var attrs = feed.Attributes.GetAttributeVals().ToDictionary();
         attrs[OnnxOpAttributeNames.ShrkAttrLocalModelId] = (long[])[];
         feed.Attributes = OnnxCSharpAttributes.FromCSharpVals(attrs, feed.Attributes.AttributeDefs);
+        return Assert.Throws<InvalidOperationException>(
+            () => Shorokoo.Core.Nodes.Processors.Fast.FastLowerRandomOps.Process(g)).Message;
+    }
 
-        var ex = Assert.Throws<InvalidOperationException>(
-            () => Shorokoo.Core.Nodes.Processors.Fast.FastLowerRandomOps.Process(g));
-        Assert.Contains("cannot express a range computed in-graph", ex.Message);
+    /// <summary>The ONNX fallback carries its distribution as attributes, so an unkeyed feed whose
+    /// parameters are in-graph has nowhere to put them — a hard error, never silently dropped.</summary>
+    [Fact]
+    public void TestUnkeyedFeedWithRuntimeDistributionIsAHardError()
+    {
+        var uniform = UnkeyedTensorParamFeedError(
+            () => RandomUniform([Scalar(4L)], Scalar(2f), Scalar(5f)), InternalOpCodes.SHRK_RANDOM_UNIFORM);
+        Assert.Contains("cannot express one computed in-graph", uniform);
+        Assert.Contains(InternalOpCodes.SHRK_RANDOM_UNIFORM, uniform);
+
+        var normal = UnkeyedTensorParamFeedError(
+            () => RandomNormal([Scalar(4L)], Scalar(2f), Scalar(5f)), InternalOpCodes.SHRK_RANDOM_NORMAL);
+        Assert.Contains("cannot express one computed in-graph", normal);
+        Assert.Contains(InternalOpCodes.SHRK_RANDOM_NORMAL, normal);
     }
 }
 

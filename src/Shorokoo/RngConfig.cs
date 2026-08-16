@@ -8,17 +8,37 @@ using System.Text;
 
 namespace Shorokoo;
 
-/// <summary>The bit generator a <see cref="RngConfig"/> uses for keyed draws. Configuration, never
-/// part of a model definition. Every algorithm shares one key tree (so switching preserves stream
-/// identity — the same stream just draws different numbers); only the draw's bit generator differs.</summary>
+/// <summary>The bit generator and distribution transforms a <see cref="RngConfig"/> uses for keyed
+/// draws. Configuration, never part of a model definition. Every algorithm shares one key tree (so
+/// switching preserves stream identity — the same stream just draws different numbers); only the
+/// draw itself differs.
+///
+/// <para>A member names a whole draw, transforms included, and never changes meaning: the normal
+/// transform moved from Box–Muller to the dense decode by adding members, not by redefining the
+/// existing ones, so a model or checkpoint written under either Box–Muller member keeps drawing
+/// Box–Muller normals.</para></summary>
 public enum RngAlgorithm
 {
-    /// <summary>Threefry-2x32 (Random123), 20 rounds. The default: expressible as portable ONNX integer ops.</summary>
+    /// <summary>Threefry-2x32 (Random123), 20 rounds, with the Box–Muller normal transform. The
+    /// former default; retained so models saved under it keep drawing what they drew. Its normal
+    /// transform evaluates float32 Log/Sqrt/Cos, whose accuracy ONNX does not specify, so two
+    /// conformant execution providers may produce different normals from the same key.</summary>
     Threefry2x32,
 
-    /// <summary>Threefry-2x32 with the reduced 13-round bit generator (Random123 <c>threefry2x32x13</c>):
-    /// still BigCrush-resistant, ~35% cheaper than the 20-round default — the faster, lower-margin choice.</summary>
+    /// <summary>Threefry-2x32 with the reduced 13-round bit generator (Random123 <c>threefry2x32x13</c>)
+    /// and the Box–Muller normal transform: still BigCrush-resistant, fewer rounds than the 20-round
+    /// form — the lower-margin choice. Carries the same normal-transform caveat as
+    /// <see cref="Threefry2x32"/>.</summary>
     Threefry2x32Rounds13,
+
+    /// <summary>Threefry-2x32 (Random123), 20 rounds, with the <b>dense</b> normal transform: one
+    /// 64-bit generator value per element decoded by integer arithmetic alone. The default — every
+    /// draw, uniform and normal alike, is then exact and identical on any execution provider.</summary>
+    Threefry2x32Dense,
+
+    /// <summary>The reduced 13-round bit generator with the dense normal transform: the
+    /// lower-margin counterpart of <see cref="Threefry2x32Dense"/>.</summary>
+    Threefry2x32Rounds13Dense,
 }
 
 /// <summary>
@@ -78,8 +98,8 @@ public sealed class RngConfig
     /// </summary>
     public ulong? RunMasterSeed { get; init; }
 
-    /// <summary>The bit generator. Default <see cref="RngAlgorithm.Threefry2x32"/>.</summary>
-    public RngAlgorithm Algorithm { get; init; } = RngAlgorithm.Threefry2x32;
+    /// <summary>The bit generator and its transforms. Default <see cref="RngAlgorithm.Threefry2x32Dense"/>.</summary>
+    public RngAlgorithm Algorithm { get; init; } = RngAlgorithm.Threefry2x32Dense;
 
     // (collection, ModelId path) -> seed. Immutable, like the config itself: Override
     // returns a copy carrying an extended dictionary.

@@ -639,6 +639,27 @@ namespace Shorokoo
         }
 
         /// <summary>
+        /// A runtime normal random feed N(mean, scale) of dynamic shape whose mean and scale are
+        /// graph scalars rather than compile-time literals — a distribution computed in-graph (e.g.
+        /// a fan-in-derived standard deviation, or a scale annealed from a step counter). The draw
+        /// is keyed by the site's ModelId under the model's RNG identity (the bound
+        /// <see cref="RngConfig"/>, or the default deterministic identity when none is bound) —
+        /// there is no seed to pass: randomness is configuration, never part of the model definition.
+        ///
+        /// <para>The parameters reach the keyed draw itself as its <c>mean</c>/<c>scale</c> inputs.
+        /// Tensor parameters have no attribute-based ONNX fallback, so this feed must be keyed (a
+        /// concrete, id-bearing model).</para>
+        /// </summary>
+        public static Tensor<float32> RandomNormal(Vector<int64> shape, Scalar<float32> mean, Scalar<float32> scale)
+        {
+            // Capture the ambient loop context exactly as the literal-parameter overload does.
+            Vector<int64> iterationIndices = [.. LoopAPI.IterationIndices];
+            return InternalOp.RandomNormal(shape, mean: null, scale: null,
+                substreamIndex: null, iterationIndices: iterationIndices,
+                meanInput: mean, scaleInput: scale);
+        }
+
+        /// <summary>
         /// A runtime raw-bits random feed of dynamic shape: uniformly-random unsigned integers of
         /// the width <typeparamref name="T"/> (<c>uint8</c>/<c>uint16</c>/<c>uint32</c>/<c>uint64</c>).
         /// Keyed by the site's ModelId under the model's RNG identity — see

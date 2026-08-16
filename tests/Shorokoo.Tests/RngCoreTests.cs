@@ -79,7 +79,7 @@ public class RngCoreTests
     public void TestDefaultConfigAndPathDerivedKeysAreStableSiblingDistinctAndMasterSeeded()
     {
         Assert.Equal(0ul, RngConfig.Default.MasterSeed);
-        Assert.Equal(RngAlgorithm.Threefry2x32, RngConfig.Default.Algorithm);
+        Assert.Equal(RngAlgorithm.Threefry2x32Dense, RngConfig.Default.Algorithm);
 
         var cfg = new RngConfig { MasterSeed = 20260702 };
         Assert.Equal(RngTestOracle.InitKey(cfg, [3, 1, 1]), RngTestOracle.InitKey(cfg, [3, 1, 1]));
@@ -151,13 +151,25 @@ public class RngRuntimeIdentityTests
         var cfg = new RngConfig { MasterSeed = 42 };
         var vec = RngRuntimeIdentity.Build(cfg);
         Assert.Equal(RngRuntimeIdentity.HeaderLength, vec.Length);
-        Assert.Equal(0UL, vec[RngRuntimeIdentity.AlgorithmIdIndex]);
+        Assert.Equal(2UL, vec[RngRuntimeIdentity.AlgorithmIdIndex]);
         Assert.Equal(cfg.RunMasterKey, vec[RngRuntimeIdentity.RunKeyIndex]);
         AssertRoundTrips(cfg);
 
-        var cfg13 = new RngConfig { MasterSeed = 42, Algorithm = RngAlgorithm.Threefry2x32Rounds13 };
-        Assert.Equal(1UL, RngRuntimeIdentity.Build(cfg13)[RngRuntimeIdentity.AlgorithmIdIndex]);
-        AssertRoundTrips(cfg13);
+        // Stored ids are append-only: a shift silently re-decodes every saved model.
+        Assert.Equal(0L, RngRuntimeIdentity.AlgorithmIdOf(RngAlgorithm.Threefry2x32));
+        Assert.Equal(1L, RngRuntimeIdentity.AlgorithmIdOf(RngAlgorithm.Threefry2x32Rounds13));
+        Assert.Equal(2L, RngRuntimeIdentity.AlgorithmIdOf(RngAlgorithm.Threefry2x32Dense));
+        Assert.Equal(3L, RngRuntimeIdentity.AlgorithmIdOf(RngAlgorithm.Threefry2x32Rounds13Dense));
+
+        foreach (var alg in (RngAlgorithm[])[
+            RngAlgorithm.Threefry2x32, RngAlgorithm.Threefry2x32Rounds13,
+            RngAlgorithm.Threefry2x32Dense, RngAlgorithm.Threefry2x32Rounds13Dense])
+        {
+            var c = new RngConfig { MasterSeed = 42, Algorithm = alg };
+            Assert.Equal((ulong)RngRuntimeIdentity.AlgorithmIdOf(alg),
+                RngRuntimeIdentity.Build(c)[RngRuntimeIdentity.AlgorithmIdIndex]);
+            AssertRoundTrips(c);
+        }
 
         var subMaster = new RngConfig { MasterSeed = 42, RunMasterSeed = 777 };
         Assert.NotEqual(RngTestOracle.RunKey(cfg, Paths[0]), RngTestOracle.RunKey(subMaster, Paths[0]));
@@ -247,7 +259,7 @@ public class RngSeedTransportTests
 
         // The decoded identity reproduces the config's runtime derivation, override included.
         var decoded = RngRuntimeIdentity.Decode(carried!);
-        Assert.Equal(RngRuntimeIdentity.AlgorithmIdOf(RngAlgorithm.Threefry2x32), decoded.AlgorithmId);
+        Assert.Equal(RngRuntimeIdentity.AlgorithmIdOf(RngAlgorithm.Threefry2x32Dense), decoded.AlgorithmId);
         Assert.Equal(RngTestOracle.RunKey(cfg, [1, 1, 1]), RngTestOracle.RunKey(decoded, [1, 1, 1]));
         Assert.Equal(RngTestOracle.RunKey(cfg, [1, 0, 1]), RngTestOracle.RunKey(decoded, [1, 0, 1]));
 

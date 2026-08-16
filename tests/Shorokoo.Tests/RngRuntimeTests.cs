@@ -1560,4 +1560,108 @@ public class RngRuntimeTests
             Assert.Equal(RngTestOracle.DrawUniform(drawKey, 0xFFFF_FFFF_FFFF_FFFFUL, i), atTop[i]);
         }
     }
+
+    // Codes at every piece boundary and inside every piece, both ends of the lattice, the boundary
+    // the lattice hands over at and the cap's — the whole magnitude axis in one graph, each code
+    // once per sign.
+    private static ulong[] DenseNormalProbeDraws()
+    {
+        List<ulong> codes = [0UL, 1UL, 2UL, 3UL, DenseNormalTable.LatticeCodes / 2,
+            DenseNormalTable.LatticeCodes - 1, DenseNormalTable.LatticeCodes,
+            DenseNormalTable.LatticeCodes + 1, DenseNormalTable.CapCode - 1,
+            DenseNormalTable.CapCode, DenseNormalTable.CapCode + 1, (1UL << 63) - 1];
+        for (int p = 0; p < DenseNormalTable.PieceCount; p++)
+        {
+            ulong entry = DenseNormalTable.Entry[p];
+            ulong next = p + 1 < DenseNormalTable.PieceCount
+                ? DenseNormalTable.Entry[p + 1] : DenseNormalTable.CapCode;
+            codes.AddRange([entry, entry + 1, entry + (next - entry) / 2, next - 1]);
+        }
+        var random = new Random(20260816);
+        for (int i = 0; i < 64; i++) codes.Add((ulong)random.NextInt64());
+
+        ulong[] draws = new ulong[2 * codes.Count];
+        for (int i = 0; i < codes.Count; i++)
+        {
+            draws[2 * i] = codes[i] & ((1UL << 63) - 1);
+            draws[2 * i + 1] = draws[2 * i] | (1UL << 63);
+        }
+        return draws;
+    }
+
+    [Fact]
+    public void TestInGraphDenseNormalMatchesTheOracleBitForBit()
+    {
+        const int n = RngDenseNormalOracleCheck.Draws;
+        float[] expected = new float[RngDenseNormalOracleCheck.Substreams * n];
+        for (int s = 0; s < RngDenseNormalOracleCheck.Substreams; s++)
+            for (long i = 0; i < n; i++)
+                expected[s * n + i] = RngDenseNormalOracle.Draw(DenseKey, (ulong)s, i);
+        Assert.True(AutoTest.AdvancedTestGraph<RngDenseNormalOracleCheck>(
+            hyperparamInputs: [], runtimeInputs: [TensorData([(long)expected.Length], expected)]));
+    }
+
+    [Fact]
+    public void TestInGraphDenseNormalDecodesEveryPieceTheLatticeAndTheCapAsTheOracleDoes()
+    {
+        ulong[] draws = DenseNormalProbeDraws();
+        float[] expected = [.. draws.Select(
+            d => BitConverter.UInt32BitsToSingle((uint)RngDenseNormalOracle.SampleBits(d)))];
+        Assert.True(AutoTest.AdvancedTestGraph<RngDenseNormalDecodeCheck>(
+            hyperparamInputs: [],
+            runtimeInputs: [TensorData([(long)draws.Length], draws),
+                            TensorData([(long)expected.Length], expected)]));
+    }
+}
+
+/// <summary>
+/// The dense standard-normal draw, checked in-graph against host-computed expectations so ONNX
+/// Runtime must reproduce <see cref="RngDenseNormalOracle"/> bit for bit. The expectations arrive
+/// as a runtime tensor, so nothing specializes on them; a batch of substreams shares one graph
+/// because the per-graph overheads dominate the decode.
+///
+/// <para><c>AutoTest</c> computes the self-check on the Quick Execution Engine too and requires it
+/// true there, so both engines are held to the same bits — which is the whole reason the decode is
+/// integer.</para>
+/// </summary>
+[Module]
+public partial class RngDenseNormalOracleCheck
+{
+    public const int Substreams = 6, Draws = 64;
+
+    public static Scalar<bit> Inline(Tensor<float32> expected)
+    {
+        var want = expected.Vec();
+        Scalar<int64> mismatch = Scalar(0L);
+        for (long s = 0; s < Substreams; s++)
+        {
+            var drawn = RuntimeRng.StandardNormalDense(Vector((long)Draws),
+                Scalar(0xA5A5_1234UL | (0x9E37UL << 32)), Scalar((ulong)s));
+            var target = want.Slice(Scalar(s * Draws), Scalar(s * Draws + Draws));
+            mismatch = mismatch + ((Tensor<bit>)OnnxOp.Not(OnnxOp.Equal(drawn, target))).Cast<int64>()
+                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        }
+        return mismatch == Scalar(0L);
+    }
+}
+
+/// <summary>
+/// The same decode over CHOSEN generator values rather than drawn ones, so the regions sampling
+/// cannot reach are checked too: the lattice and the cap together carry under 2^-39 of the mass,
+/// and every piece past the mode's neighbours is out of reach of any feasible number of draws.
+///
+/// <para>The reciprocals are compared alongside the values because <c>Equal</c> holds <c>-0f</c>
+/// equal to <c>0f</c>, and the draw returns both. Every drawn magnitude lies in [2^-62, 8], so
+/// <c>1/v</c> is finite and non-zero and separates the two zeros as ±infinity.</para>
+/// </summary>
+[Module]
+public partial class RngDenseNormalDecodeCheck
+{
+    public static Scalar<bit> Inline(Tensor<uint64> draws, Tensor<float32> expected)
+    {
+        var got = RuntimeRng.NormalOfDraw(draws);
+        var differs = ((Tensor<bit>)OnnxOp.Not(OnnxOp.Equal(got, expected))).Cast<int64>()
+            + ((Tensor<bit>)OnnxOp.Not(OnnxOp.Equal(Scalar(1f) / got, Scalar(1f) / expected))).Cast<int64>();
+        return differs.Reduce(ReduceKind.Sum, keepDims: false).Scalar() == Scalar(0L);
+    }
 }

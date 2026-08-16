@@ -102,8 +102,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 var idVals = node.Attributes.GetIntsVal(ShrkAttrLocalModelId);
                 // The key is input slot 3: [shape, substreamIndex, iterationIndices, key] for the
-                // normal and bits feeds, and [shape, substreamIndex, iterationIndices, key, low,
-                // high] for the uniform one, whose optional graph-scalar bounds follow the key.
+                // bits feed, and [shape, substreamIndex, iterationIndices, key, a, b] for the float
+                // ones, whose optional graph-scalar distribution parameters follow the key.
                 var keySource = node.Inputs.Count > 3 ? node.Inputs[3] : null;
                 if (idVals is { Length: > 0 } && keySource is { } ks)
                 {
@@ -253,8 +253,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// The uniform feed's optional in-graph bound inputs, at slots 4 and 5 (after
-        /// <c>[shape, substreamIndex, iterationIndices, key]</c>). Present when the range was
+        /// A float feed's optional in-graph distribution inputs — the uniform's <c>low</c>/<c>high</c>
+        /// and the normal's <c>mean</c>/<c>scale</c> — at slots 4 and 5 (after
+        /// <c>[shape, substreamIndex, iterationIndices, key]</c>). Present when the distribution was
         /// computed in-graph rather than given as literals; both arrive together or not at all.
         /// </summary>
         internal static (FastTensorKey low, FastTensorKey high)? TensorBounds(FastNode node)
@@ -264,9 +265,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (low is null && high is null) return null;
             if (low is null || high is null)
                 throw new InvalidOperationException(
-                    "FastLowerRandomOps: a SHRK_RANDOM_UNIFORM feed carries only one of its two " +
-                    "in-graph bound inputs. A tensor-bounded range needs both; lowering one of them " +
-                    "against the other's attribute default would silently change the range.");
+                    $"FastLowerRandomOps: a {node.OpCode} feed carries only one of its two " +
+                    "in-graph distribution inputs. A tensor-parameterized draw needs both; lowering " +
+                    "one of them against the other's attribute default would silently change the " +
+                    "distribution.");
             return (low.Value, high.Value);
         }
 
@@ -297,7 +299,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 ? node.Attributes.GetFloatVal(AttrHigh) ?? 1.0f
                 : node.Attributes.GetFloatVal(AttrScale) ?? 1.0f;
 
-            var bounds = isUniform ? TensorBounds(node) : null;
+            var bounds = TensorBounds(node);
 
             var substreamIndexKey = node.Inputs.Count > 1 && node.Inputs[1] is { } db
                 ? AppendCastToUInt64(db, newNodes)
@@ -408,25 +410,25 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <c>RandomUniformLike/RandomNormalLike(placeholder)</c>, copying the distribution
         /// attrs and any user seed through (never synthesizing one).
         ///
-        /// <para><c>RandomUniformLike</c> reads its bounds from ATTRIBUTES, so a feed whose range
-        /// is in-graph cannot take this fallback: there is nowhere to put the bounds. Like an
-        /// id-less bits feed, that combination is a hard build error rather than a silently
-        /// dropped range.</para>
+        /// <para><c>RandomUniformLike</c>/<c>RandomNormalLike</c> read their distribution from
+        /// ATTRIBUTES, so a feed whose distribution is in-graph cannot take this fallback: there is
+        /// nowhere to put the parameters. Like an id-less bits feed, that combination is a hard
+        /// build error rather than a silently dropped distribution.</para>
         /// </summary>
         private static void LowerToOnnxRandomLike(FastNode node, bool isUniform, List<FastNode> newNodes)
         {
             var shapeInput = node.Inputs[0]
                 ?? throw new InvalidOperationException("SHRK_RANDOM_* has null shape input.");
 
-            if (isUniform && TensorBounds(node) is not null)
+            if (TensorBounds(node) is not null)
                 throw new InvalidOperationException(
-                    "FastLowerRandomOps: a SHRK_RANDOM_UNIFORM feed with in-graph bound inputs " +
-                    "reached the ONNX fallback, which carries its bounds as attributes and cannot " +
-                    "express a range computed in-graph — the range would be silently dropped. The " +
-                    "feed reaches this fallback when it has no key derivation chain, which for an " +
-                    "initializer body means the graph is a ConcreteArchitecture: its initializers " +
-                    "have not been run. Call ToConcreteModel first; executing or exporting a " +
-                    "non-concrete model is not supported.");
+                    $"FastLowerRandomOps: a {node.OpCode} feed with in-graph distribution inputs " +
+                    "reached the ONNX fallback, which carries its distribution as attributes and " +
+                    "cannot express one computed in-graph — the parameters would be silently " +
+                    "dropped. The feed reaches this fallback when it has no key derivation chain, " +
+                    "which for an initializer body means the graph is a ConcreteArchitecture: its " +
+                    "initializers have not been run. Call ToConcreteModel first; executing or " +
+                    "exporting a non-concrete model is not supported.");
 
             var placeholderKey = AppendConstantOfShape(shapeInput, newNodes);
 

@@ -6,10 +6,11 @@ namespace Shorokoo.Core.Rng;
 
 /// <summary>
 /// In-graph counter-based RNG: builds an ONNX-op subgraph computing Threefry-2x32 over a
-/// per-element counter, entirely from ordinary integer/float graph math — the bit generator and
-/// the uniform transform are integer and exact, while the normal transform's Box-Muller step runs
-/// float32 Ln/Sqrt/Cos kernels (which is why the normal goldens carry a tolerance and the uniform
-/// ones do not). Because it uses no ONNX
+/// per-element counter, entirely from ordinary integer/float graph math. The bit generator, both
+/// uniforms and the <b>dense</b> normal are integer and exact; only the <b>Box–Muller</b> normal
+/// runs float32 Ln/Sqrt/Cos/Sin kernels, whose accuracy ONNX leaves unspecified and two conformant
+/// providers may therefore disagree on — which is why its goldens carry a tolerance and no other
+/// draw's do. Because it uses no ONNX
 /// random op, the result is deterministic and identical across execution providers and the
 /// Quick Execution Engine, and an exported model's randomness is self-contained — unlike ONNX's
 /// <c>RandomUniformLike</c>, whose value depends on the runtime, EP, platform, and session
@@ -30,8 +31,11 @@ namespace Shorokoo.Core.Rng;
 /// an initializer when one initializer draws more than once. It folds into the key
 /// and <c>p</c> occupies the whole counter, so successive executions draw fresh values while any
 /// fixed <c>(key, substreamIndex, p)</c> replays exactly. Bit→float is the geometric draw (a
-/// geometric octave times a 23-bit mantissa fraction — see <see cref="GeometricUniform"/>);
-/// the normal transform is Box–Muller with radius = √(−2·ln w), w that geometric draw. Mirrors
+/// geometric octave times a 23-bit mantissa fraction — see <see cref="GeometricUniform"/>).
+/// There are two normal transforms, and the algorithm NAME picks one: Box–Muller with radius
+/// √(−2·ln w) over a pair of positions (<see cref="StandardNormalBoxMuller"/>), and the dense
+/// decode, which reads one whole value as a position on the magnitude axis
+/// (<see cref="StandardNormalDense"/>). Mirrors
 /// <see cref="Threefry2x32"/> bit-for-bit (validated against the Random123 known-answer
 /// vectors — see <c>RngRuntimeTests</c>).</para>
 /// </summary>
@@ -276,8 +280,16 @@ internal static class RuntimeRng
     /// the reachable tail from ±5.77σ to ~±7.54σ and resolves it finely, and since <c>w > 0</c> always
     /// there is no <c>ln(0)</c>. The angle stays a 24-bit uniform — an even grid is what a uniform angle
     /// wants. Each pair spends two generator values: an even position for the radius's geometric draw,
-    /// the odd next one for the angle.</para></summary>
-    public static Tensor<float32> StandardNormal(
+    /// the odd next one for the angle.</para>
+    ///
+    /// <para><b>This transform is frozen.</b> Its <c>Ln</c>/<c>Sqrt</c>/<c>Cos</c>/<c>Sin</c> are
+    /// float32 kernels ONNX specifies no accuracy for, so two conformant providers may return
+    /// different draws from the same bits — which is why <see cref="StandardNormalDense"/> exists and
+    /// is what a new algorithm name should draw. But it is NOT a replacement: the algorithm names
+    /// <c>Threefry2x32-BoxMuller.v1</c> and <c>Threefry2x32-13-BoxMuller.v1</c> mean THIS, and a model
+    /// saved under one of them must keep drawing it (see <c>RngAlgorithms</c>). Do not change a line
+    /// of it; a better transform is a new name.</para></summary>
+    public static Tensor<float32> StandardNormalBoxMuller(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
     {
         Scalar<int64> n = ElementCount(shape);
@@ -848,11 +860,264 @@ internal static class RuntimeRng
         return ((Tensor<float32>)OnnxOp.Where(useFixed, fixedValue, drawn)).Reshape(shape);
     }
 
-    /// <summary>N(mean, scale) of the given shape.</summary>
+    // ── Dense standard normal (piece table) ─────────────────────────────────────────────
+    // One 64-bit generator value per element, decoded to a float32 by INTEGER ops alone. ONNX
+    // specifies no accuracy for Log/Sqrt/Cos/Sin, so two conformant execution providers may
+    // legitimately disagree on the very same float32 formula — 66% of Box–Muller's draws differ
+    // between float32 and binary64 evaluation of the expression it is written as — and a draw
+    // nobody can reproduce is not a draw. So nothing below is transcendental: it is multiply-high,
+    // shift, gather and compare, and the only float32 op is the final reassembly of a bit pattern
+    // into a number, which is exact for the same reason the dense uniform's ordinal decode is.
+    //
+    // The top bit is the SIGN and the low 63 a position on the MAGNITUDE axis. Drawing the
+    // magnitude and applying the sign afterwards is what makes the draw exactly symmetric — +a and
+    // -a own mirror-image cells — which a signed ordinal axis cannot give, since there -2^k would
+    // own half the cell +2^k does.
+    //
+    // The axis is cut into three kinds of region, lowest first. LATTICE: below the truncation floor
+    // 2^-39 the density is constant to 2^-78, so an even lattice of the floor class's ulp (2^-62)
+    // carries the mass there and one division by a constant places the point — those floats are not
+    // individually reachable, exactly as under the dense uniform's own floor. PIECES: a run of
+    // 2^IndexBits consecutive magnitudes inside one weight class, decoded by a degree-12 series
+    // that inverts the Gaussian CDF over the piece. The 218 pieces tile [2^-39, 8) with no gap, so
+    // all 352321536 float32 magnitudes there are addressed one at a time rather than in blocks.
+    // CAP: past the last resolved magnitude everything collapses onto 8f, 1.2e-15 of the mass.
+    //
+    // Cells run AWAY FROM ZERO and boundaries are MIDPOINTS: magnitude a owns
+    // [midpoint(a-1,a), midpoint(a,a+1)), so a draw lands on the float NEAREST the value its code
+    // names rather than the one below it — a quarter of a relative ulp of error on average instead
+    // of a half, and no systematic downward bias. What that convention costs the decode is the
+    // first magnitude of a weight class, which owns 0.75 of its own ulp because the lower
+    // neighbour's is half as wide; NormalClassStart is the correction.
+    //
+    // DenseNormalTable is generated offline against a 320-bit erf and is re-derived neither here
+    // nor by the oracle, so the two share it: RngDenseNormalOracle pins this DECODE bit for bit
+    // (tests: RngDenseNormalOracleCheck), while the table's own correctness — every entry code the
+    // exact ideal breakpoint, no float that earns a code starved — is established by the census in
+    // the ShorokooDev harness. A fault in the table would be invisible to both.
+
+    private const int NormalSearchRounds = 8;                 // 2^8 >= DenseNormalTable.PieceCount
+
+    /// <summary>The piece entry codes padded to 2^<see cref="NormalSearchRounds"/> with a sentinel
+    /// above every code, so the branchless search may probe past the last piece without a clamp and
+    /// can never settle on a padded slot — the axis stops at 2^63, well under the sentinel.</summary>
+    private static readonly ulong[] NormalEntry = BuildNormalEntry();
+
+    /// <summary>A quarter ulp in the piece's Q0.64 offset for a piece that BEGINS a weight class,
+    /// and 0 for one that does not. Rounding to nearest is otherwise carried by the series ORIGIN,
+    /// which sits at the piece's first cell boundary; this only corrects the 0.75-ulp first cell.
+    /// Which pieces begin a class is a property of the table, so the whole column folds host-side
+    /// rather than costing a mask and a compare per element.</summary>
+    private static readonly ulong[] NormalClassStart = BuildNormalClassStart();
+
+    /// <summary>ceil(2^(64+P) / LatticeCodes) — the lattice's division by a constant, turned into a
+    /// multiply-high. See <see cref="NormalMagnitudeBits"/> for why it is exact.</summary>
+    private static readonly ulong NormalLatticeRecip =
+        (ulong)(((System.UInt128)1 << (64 + DenseP)) / DenseNormalTable.LatticeCodes) + 1UL;
+
+    /// <summary>The biased exponent field of lattice point 1, i.e. of the floor class's ulp: the
+    /// oracle's <c>e - P + 1</c> at <c>e = (FloorClass - 1) + 0</c>.</summary>
+    private const long NormalLatticeField = DenseNormalTable.FloorClass - DenseP;
+
+    private static ulong[] BuildNormalEntry()
+    {
+        ulong[] t = new ulong[1 << NormalSearchRounds];
+        for (int i = 0; i < t.Length; i++)
+            t[i] = i < DenseNormalTable.PieceCount ? DenseNormalTable.Entry[i] : ulong.MaxValue;
+        return t;
+    }
+
+    private static ulong[] BuildNormalClassStart()
+    {
+        ulong[] t = new ulong[DenseNormalTable.PieceCount];
+        for (int p = 0; p < t.Length; p++)
+            t[p] = (DenseNormalTable.FirstOrdinal[p] & (DenseBinade - 1L)) == 0L
+                ? 1UL << (int)(62L - DenseNormalTable.IndexBits[p])
+                : 0UL;
+        return t;
+    }
+
+    /// <summary>
+    /// The float32 magnitude bit pattern of a position on the magnitude axis — the oracle's
+    /// <c>MagnitudeBits</c>, elementwise and branchless.
+    ///
+    /// <para>All three regions are evaluated for every element and two of the three are multiplied
+    /// away, so the one thing that has to hold is that a dead region cannot FAULT. Zeroing the code
+    /// off the lattice is what buys that, and is not cosmetic: a code from the piece region would
+    /// otherwise put the lattice point's leading bit as high as 62 and make the significand's shift
+    /// count negative, which as a <c>uint64</c> is a shift wider than the operand — undefined. The
+    /// piece region needs no counterpart: its arithmetic wraps rather than faults, and every index
+    /// it gathers with is in range whatever the code.</para>
+    /// </summary>
+    private static Tensor<int64> NormalMagnitudeBits(Tensor<uint64> code)
+    {
+        // ── Lattice: point = floor(code·2^P / LatticeCodes) ────────────────────────────
+        // A multiply-high by ceil(2^(64+P)/L) rather than a division, and EXACT over the whole
+        // region rather than merely close. Writing that reciprocal as (2^(64+P) + d)/L with
+        // 1 <= d < L, the quotient it computes overshoots code·2^P/L by code·d/(L·2^64) < L/2^64,
+        // under 2^-40; the shortfall a wrong floor would have to close is a residue of at least
+        // 1/L, over 2^-24. Exactness is therefore L^2 < 2^64, with 24 bits of room to spare.
+        var onLattice = IndU(OnnxOp.Greater(Scalar(DenseNormalTable.LatticeCodes), code));
+        var point = DenseMulHigh(code * onLattice, Scalar(NormalLatticeRecip));
+
+        // A lattice point is n·2^(FloorClass-1-P) with n < 2^P, so its bit pattern is assembled
+        // rather than computed: the exponent field follows n's leading bit and the significand is
+        // whatever hangs below it, left-justified. Nothing rounds — n carries at most P significant
+        // bits and scaling by a power of two only moves the exponent — and the floor sits far above
+        // the subnormals, so the oracle's small-exponent arm is unreachable here. n = 0 is the one
+        // point with no leading bit; it is pushed to 1 for the search and multiplied back out.
+        var live = IndU(OnnxOp.Greater(point, Scalar(0UL)));
+        var n = point + Scalar(1UL) - live;
+        Tensor<int64> lead = Scalar(0L);
+        foreach (long step in (long[])[16L, 8L, 4L, 2L, 1L])
+            lead = lead + Scalar(step) * Ind(OnnxOp.Greater(
+                ShiftDown(n, (lead + Scalar(step)).Cast<uint64>()), Scalar(0UL)));
+        var latticeBits = live * (
+            OnnxOp.BitShift((Scalar(NormalLatticeField) + lead).Cast<uint64>(),
+                Scalar((ulong)DenseP), BitShiftDirection.Left).uint64()
+            + OnnxOp.BitShift(n - DensePowU(lead),
+                (Scalar((long)DenseP) - lead).Cast<uint64>(), BitShiftDirection.Left).uint64());
+
+        // ── Pieces: the largest piece whose entry code is at or below this one ─────────
+        // The classic branchless lower bound — NormalSearchRounds rounds of one gather, one compare
+        // and one arithmetic select, so the piece is data and never a graph branch. It needs a live
+        // first probe, which the entry column has: piece 0 starts exactly where the lattice ends.
+        var entries = Vector(NormalEntry);
+        Tensor<int64> piece = Scalar(0L);
+        foreach (long step in (long[])[128L, 64L, 32L, 16L, 8L, 4L, 2L, 1L])
+            piece = piece + Scalar(step) * (Scalar(1L) - Ind(OnnxOp.Greater(
+                OnnxOp.Gather(entries, piece + Scalar(step), axis: 0).uint64(), code)));
+
+        // The code's position within the piece, as a Q0.64 fraction of its span: a 128-bit product
+        // with the piece's reciprocal, shifted by the piece's own shift. BOTH halves are needed,
+        // the shift running 10..59 rather than 64 — so the top comes from the multiply-high and the
+        // bottom from the wrapping product, reassembled the way a 128-bit shift would leave them.
+        var into = code - OnnxOp.Gather(entries, piece, axis: 0).uint64();
+        var reciprocal = OnnxOp.Gather(Vector(DenseNormalTable.Recip), piece, axis: 0).uint64();
+        var recipShift = OnnxOp.Gather(Vector(DenseNormalTable.RecipShift), piece, axis: 0).int64();
+        var x = OnnxOp.BitShift(DenseMulHigh(into, reciprocal),
+                    (Scalar(64L) - recipShift).Cast<uint64>(), BitShiftDirection.Left).uint64()
+              + ShiftDown(into * reciprocal, recipShift.Cast<uint64>());
+
+        // Horner, not a chain of explicit powers: one multiply-high per degree rather than two, and
+        // one truncation rather than two. The accumulator cannot overflow — every coefficient is
+        // non-negative and they sum to under 2^64, and MulHigh(a, x) <= a.
+        var series = OnnxOp.Gather(
+            Vector(DenseNormalTable.C[DenseNormalTable.Degree - 1]), piece, axis: 0).uint64();
+        for (int k = DenseNormalTable.Degree - 2; k >= 0; k--)
+            series = DenseMulHigh(series, x)
+                   + OnnxOp.Gather(Vector(DenseNormalTable.C[k]), piece, axis: 0).uint64();
+        series = DenseMulHigh(series, x);
+
+        // The magnitude's index within its piece: the series' top IndexBits, once the class-start
+        // quarter ulp is in. The Min cannot fire — the sum is a uint64 and the shift leaves
+        // IndexBits of it — and is kept only because the oracle keeps it.
+        var indexBits = OnnxOp.Gather(Vector(DenseNormalTable.IndexBits), piece, axis: 0).int64();
+        var index = ShiftDown(series + OnnxOp.Gather(Vector(NormalClassStart), piece, axis: 0).uint64(),
+                        (Scalar(64L) - indexBits).Cast<uint64>())
+                    .Min(DensePowU(indexBits) - Scalar(1UL));
+        var pieceBits = OnnxOp.Gather(Vector(DenseNormalTable.FirstOrdinal), piece, axis: 0).int64()
+                      + index.Cast<int64>();
+
+        // ── The three regions ──────────────────────────────────────────────────────────
+        // The lattice term needs no flag of its own: a code off the lattice was zeroed, so its
+        // point is 0 and `live` has already cleared the term.
+        var capped = Scalar(1L) - Ind(OnnxOp.Greater(Scalar(DenseNormalTable.CapCode), code));
+        return latticeBits.Cast<int64>()
+             + capped * Scalar(DenseNormalTable.CapOrdinal)
+             + (Scalar(1L) - onLattice.Cast<int64>()) * (Scalar(1L) - capped) * pieceBits;
+    }
+
+    /// <summary>
+    /// Standard normal N(0,1) of the given shape, drawn densely: one 64-bit generator value per
+    /// element, no rejection, a static node count, and — because the whole decode is integer —
+    /// bit-identical on every execution provider and on the Quick Execution Engine. That is what
+    /// <see cref="StandardNormalBoxMuller"/> cannot offer: ONNX specifies no accuracy for
+    /// Log/Sqrt/Cos, so two conformant providers evaluating the same formula may return different
+    /// floats. The two are separate entry points because the algorithm name pins the transform —
+    /// this one is <b>not</b> a new version of Box–Muller but a different draw entirely, reading
+    /// one generator value per element where Box–Muller reads one per pair.
+    ///
+    /// <para>The draw's top bit is the sign; its low 63 are a position on the magnitude axis, which
+    /// carries an even lattice below the truncation floor 2⁻³⁹, then 218 pieces each decoding a run
+    /// of consecutive float32 magnitudes through a degree-12 series that inverts the Gaussian CDF
+    /// over it, then a cap. Sampling the magnitude and applying the sign afterwards is what makes
+    /// the draw exactly symmetric.</para>
+    ///
+    /// <para><b>Reachable values.</b> The pieces tile [2⁻³⁹, 8) with no gap, so all
+    /// 352&#160;321&#160;536 float32 magnitudes there are decoded one at a time, on both signs, and
+    /// each owns the codes of the interval between its midpoint neighbours — a draw lands on the
+    /// float NEAREST the value its code names, not the one below it. (That every one of them
+    /// actually earns a code is a property of the table, established by its generator's census
+    /// rather than by this decode.) Below 2⁻³⁹ an even lattice of spacing 2⁻⁶² carries the mass
+    /// instead, so those floats are not individually reachable — the same trade the dense uniform
+    /// makes below its own floor, over 1.5e-12 of the mass. Past the largest resolved magnitude the
+    /// draw returns exactly 8f, which is 1.2e-15 of it. Zero is drawable with either sign;
+    /// <c>-0f</c> comes up with probability 2⁻⁶³.</para>
+    ///
+    /// <para>See the section comment above for the construction, and <c>RngDenseNormalOracle</c>
+    /// for the host contract this must reproduce bit for bit.</para>
+    /// </summary>
+    public static Tensor<float32> StandardNormalDense(
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
+        => NormalOfDraw(Draw(ElementCount(shape), key, substreamIndex, rounds)).Reshape(shape);
+
+    /// <summary>
+    /// The decode alone, over given generator values rather than drawn ones. Internal rather than
+    /// private so a test can drive it across regions no amount of sampling reaches: the lattice and
+    /// the cap together carry under 2^-39 of the mass, and every piece past the mode's neighbours
+    /// is out of reach of any feasible number of draws — a draw-based check agrees with a decode
+    /// that has them all wrong.
+    /// </summary>
+    internal static Tensor<float32> NormalOfDraw(Tensor<uint64> draw)
+    {
+        var magnitude = NormalMagnitudeBits(
+            OnnxOp.BitwiseAnd(draw, Scalar((1UL << DenseNormalTable.MagnitudeBits) - 1UL)).uint64());
+
+        // Bit pattern to number, arithmetically: opset 21 has no bit-reinterpretation op (BitCast
+        // is opset 26 and throws), so the field and significand are split out and (1 + m·2^-P)·2^(e-127)
+        // reassembled. Every step is exact — m < 2^24 casts without rounding and the scale only
+        // moves the exponent — so this is the same float the bit pattern names, not a nearby one.
+        // Field 0 arises only at magnitude 0, where the fraction is 0 and the scale is irrelevant;
+        // multiplying by the sign there yields -0f for a set sign bit, as the oracle's OR does.
+        var field = ShiftDown(magnitude.Cast<uint64>(), Scalar((ulong)DenseP)).Cast<int64>();
+        var significand = magnitude - field * Scalar(DenseBinade);
+        var scale = (Tensor<float32>)OnnxOp.Gather(Vector(DenseScale), field.Max(Scalar(1L)), axis: 0);
+        var fraction = significand.Cast<float32>() * Scalar(1.0f / DenseBinade)
+                     + Ind(OnnxOp.GreaterOrEqual(field, Scalar(1L))).Cast<float32>();
+        var sign = Scalar(1.0f) - Scalar(2.0f) * ShiftDown(draw, Scalar(63UL)).Cast<int64>().Cast<float32>();
+        return sign * fraction * scale;
+    }
+
+    /// <summary>N(mean, scale) of the given shape, Box–Muller — see
+    /// <see cref="StandardNormalBoxMuller"/>.</summary>
+    public static Tensor<float32> NormalBoxMuller(
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex,
+        Scalar<float32> mean, Scalar<float32> scale, int rounds = Threefry2x32.Rounds)
+        => StandardNormalBoxMuller(shape, key, substreamIndex, rounds) * scale + mean;
+
+    /// <summary>N(mean, scale) of the given shape, dense — see
+    /// <see cref="StandardNormalDense"/>.</summary>
+    public static Tensor<float32> NormalDense(
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex,
+        Scalar<float32> mean, Scalar<float32> scale, int rounds = Threefry2x32.Rounds)
+        => StandardNormalDense(shape, key, substreamIndex, rounds) * scale + mean;
+
+    /// <summary>Box–Muller, under the unqualified names the transform had when it was the only one.
+    /// Kept so callers written before the split keep compiling and keep their values; anything that
+    /// pins an algorithm NAME must say which transform it means, because these do not — a caller
+    /// reading <c>Normal</c> as "the normal draw" is exactly how a name comes to mean something
+    /// else. New code calls <see cref="NormalBoxMuller"/> or <see cref="NormalDense"/>.</summary>
     public static Tensor<float32> Normal(
         Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex,
         Scalar<float32> mean, Scalar<float32> scale, int rounds = Threefry2x32.Rounds)
-        => StandardNormal(shape, key, substreamIndex, rounds) * scale + mean;
+        => NormalBoxMuller(shape, key, substreamIndex, mean, scale, rounds);
+
+    /// <summary><see cref="Normal"/>'s standard counterpart: Box–Muller, under the unqualified
+    /// name.</summary>
+    public static Tensor<float32> StandardNormal(
+        Vector<int64> shape, Scalar<uint64> key, Scalar<uint64> substreamIndex, int rounds = Threefry2x32.Rounds)
+        => StandardNormalBoxMuller(shape, key, substreamIndex, rounds);
 
     // ── Raw random bits ─────────────────────────────────────────────────────────────────
     // Raw bits are lanes straight out of the packing above, narrowed to the requested width:

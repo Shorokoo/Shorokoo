@@ -686,23 +686,45 @@ public class RngNormalFrozenDerivationTests
         return (init, feed);
     }
 
-    [Fact]
-    public void TestNormalInitAndDrawValuesAreFrozen()
-    {
-        // REFERENCE: golden — generated once from the implementation that defines the convention.
-        float[] init20 = [0.32684076f, 0.31919587f, 0.71540254f, 0.47326648f, -0.53483117f, 0.82311344f, 0.76074445f, -0.22252876f, 0.1262496f, 0.32773456f, -0.33518276f, -0.5254864f, -0.36883605f, 0.08743811f, -0.22421674f, 0.13269918f];
-        float[] feed20 = [-0.7269528f, 0.33580682f, -0.19701481f, -0.23019204f, 0.48736975f, -1.9013742f, 0.62898695f, -0.20801696f, -0.3274576f, 0.6395818f, -0.28467518f, 1.5134908f, 1.9615656f, 0.07030752f, -0.015374133f, -0.89534664f];
-        float[] init13 = [0.80691016f, -0.120621406f, 0.7277567f, 0.6014911f, 1.019367f, 1.08257f, -0.8566765f, -0.7944496f, 0.49256578f, -0.9301721f, 0.6375022f, 0.32377562f, -0.7371908f, 0.4374376f, -0.39587018f, -0.21394667f];
-        float[] feed13 = [-1.6076908f, 0.710971f, -2.258631f, 1.7556456f, 0.36330792f, 0.80508655f, -1.818318f, -0.3107102f, -1.5659105f, 0.5310641f, -1.1968004f, -0.0999485f, -0.109400675f, -0.8416264f, -0.293053f, -0.12692356f];
+    // REFERENCE: goldens — generated once from the implementation that defines each convention.
+    // The two BoxMuller rows are the ORIGINAL frozen values, unchanged by the dense draw landing.
+    // That they still hold is the evidence for the guarantee the versioned names exist to give:
+    // a model saved under an algorithm keeps drawing what that algorithm drew.
+    private static readonly (RngAlgorithm Algorithm, float[] Init, float[] Feed)[] Frozen =
+    [
+        (RngAlgorithm.Threefry2x32,
+            [0.32684076f, 0.31919587f, 0.71540254f, 0.47326648f, -0.53483117f, 0.82311344f, 0.76074445f, -0.22252876f, 0.1262496f, 0.32773456f, -0.33518276f, -0.5254864f, -0.36883605f, 0.08743811f, -0.22421674f, 0.13269918f],
+            [-0.7269528f, 0.33580682f, -0.19701481f, -0.23019204f, 0.48736975f, -1.9013742f, 0.62898695f, -0.20801696f, -0.3274576f, 0.6395818f, -0.28467518f, 1.5134908f, 1.9615656f, 0.07030752f, -0.015374133f, -0.89534664f]),
+        (RngAlgorithm.Threefry2x32Rounds13,
+            [0.80691016f, -0.120621406f, 0.7277567f, 0.6014911f, 1.019367f, 1.08257f, -0.8566765f, -0.7944496f, 0.49256578f, -0.9301721f, 0.6375022f, 0.32377562f, -0.7371908f, 0.4374376f, -0.39587018f, -0.21394667f],
+            [-1.6076908f, 0.710971f, -2.258631f, 1.7556456f, 0.36330792f, 0.80508655f, -1.818318f, -0.3107102f, -1.5659105f, 0.5310641f, -1.1968004f, -0.0999485f, -0.109400675f, -0.8416264f, -0.293053f, -0.12692356f]),
+        (RngAlgorithm.Threefry2x32Dense,
+            [-0.46155134f, 1.1823097f, 1.7006428f, -1.0548751f, 0.5553944f, -0.037981175f, -0.32655385f, 0.43091658f, -0.5052699f, 0.1411822f, -0.09921032f, -0.61696446f, -0.23968527f, 0.22614606f, -0.3482982f, -2.1913755f],
+            [-1.4262838f, 0.78313416f, -0.22856675f, 0.07745038f, 0.3881657f, -0.40209898f, -0.44436496f, -0.5162606f, -0.7766776f, 1.1438937f, 1.1135756f, -1.682844f, 0.5379951f, 0.4911052f, -0.78660655f, 1.0551703f]),
+        (RngAlgorithm.Threefry2x32Rounds13Dense,
+            [-0.648924f, -0.62196916f, 0.61931646f, 0.067791395f, 0.11458076f, 0.49879357f, 0.59926426f, -0.3936729f, 1.1705743f, 0.8123495f, -0.38091052f, 0.3156036f, 0.8826961f, -0.22946525f, -0.3551115f, -0.5530873f],
+            [0.61773705f, -0.8109559f, 0.041261587f, -0.8039563f, -1.0408375f, -1.5433217f, 0.52736086f, -0.2665317f, 0.89446217f, -1.389097f, 0.74119544f, -0.67193127f, -0.91855776f, 0.46575305f, -0.7654304f, -2.0355716f]),
+    ];
 
-        var (i20, f20) = Run(new RngConfig { MasterSeed = 123 });
-        var (i13, f13) = Run(new RngConfig { MasterSeed = 123, Algorithm = RngAlgorithm.Threefry2x32Rounds13 });
-        for (int i = 0; i < 16; i++)
+    [Fact]
+    public void TestNormalInitAndDrawValuesAreFrozenPerAlgorithm()
+    {
+        foreach ((RngAlgorithm algorithm, float[] init, float[] feed) in Frozen)
         {
-            Assert.Equal(init20[i], i20[i], 1e-6f);
-            Assert.Equal(feed20[i], f20[i], 1e-6f);
-            Assert.Equal(init13[i], i13[i], 1e-6f);
-            Assert.Equal(feed13[i], f13[i], 1e-6f);
+            var (i, f) = Run(new RngConfig { MasterSeed = 123, Algorithm = algorithm });
+            for (int k = 0; k < 16; k++)
+            {
+                Assert.Equal(init[k], i[k], 1e-6f);
+                Assert.Equal(feed[k], f[k], 1e-6f);
+            }
         }
+    }
+
+    [Fact]
+    public void TestTheTwoNormalTransformsDisagree()
+    {
+        var (boxMuller, _) = Run(new RngConfig { MasterSeed = 123, Algorithm = RngAlgorithm.Threefry2x32 });
+        var (dense, _) = Run(new RngConfig { MasterSeed = 123, Algorithm = RngAlgorithm.Threefry2x32Dense });
+        Assert.NotEqual(boxMuller, dense);
     }
 }

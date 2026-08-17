@@ -867,13 +867,6 @@ internal static class RuntimeRng
     /// can never settle on a padded slot — the axis stops at 2^63, well under the sentinel.</summary>
     private static readonly ulong[] NormalEntry = BuildNormalEntry();
 
-    /// <summary>A quarter ulp in the piece's Q0.64 offset for a piece that BEGINS a weight class,
-    /// and 0 for one that does not. Rounding to nearest is otherwise carried by the series ORIGIN,
-    /// which sits at the piece's first cell boundary; this only corrects the 0.75-ulp first cell.
-    /// Which pieces begin a class is a property of the table, so the whole column folds host-side
-    /// rather than costing a mask and a compare per element.</summary>
-    private static readonly ulong[] NormalClassStart = BuildNormalClassStart();
-
     /// <summary>ceil(2^(64+P) / LatticeCodes) — the lattice's division by a constant, turned into a
     /// multiply-high. See <see cref="NormalMagnitudeBits"/> for why it is exact.</summary>
     private static readonly ulong NormalLatticeRecip =
@@ -891,16 +884,6 @@ internal static class RuntimeRng
         return t;
     }
 
-    private static ulong[] BuildNormalClassStart()
-    {
-        ulong[] t = new ulong[DenseNormalTable.PieceCount];
-        for (int p = 0; p < t.Length; p++)
-            t[p] = (DenseNormalTable.FirstOrdinal[p] & (DenseBinade - 1L)) == 0L
-                ? 1UL << (int)(62L - DenseNormalTable.IndexBits[p])
-                : 0UL;
-        return t;
-    }
-
     /// <summary>
     /// The float32 magnitude bit pattern of a position on the magnitude axis — the oracle's
     /// <c>MagnitudeBits</c>, elementwise and branchless.
@@ -913,6 +896,25 @@ internal static class RuntimeRng
     /// piece region needs no counterpart: its arithmetic wraps rather than faults, and every index
     /// it gathers with is in range whatever the code.</para>
     /// </summary>
+    /// <summary>A bit field of the packed row's small-field word.</summary>
+    private static Tensor<uint64> NormalField(Tensor<uint64> word, int offset, ulong mask)
+        => OnnxOp.BitwiseAnd(ShiftDown(word, Scalar((ulong)offset)), Scalar(mask)).uint64();
+
+    /// <summary>Series coefficient k (1-based) unpacked from the gathered row. C1 occupies a whole
+    /// word; the rest are stored as mantissa | shift, two to a word, and restored exactly — the
+    /// generator leaves each one at most <c>CoefMantissaBits</c> significant bits, so the trailing
+    /// zeros the shift replaces were never information.</summary>
+    private static Tensor<uint64> NormalCoef(Tensor<uint64>[] row, int k)
+    {
+        if (k == 1) return row[1];
+        var field = NormalField(row[2 + (k - 2) / 2],
+            DenseNormalTable.CoefBits * ((k - 2) % 2), (1UL << DenseNormalTable.CoefBits) - 1UL);
+        return OnnxOp.BitShift(
+            OnnxOp.BitwiseAnd(field, Scalar((1UL << DenseNormalTable.CoefMantissaBits) - 1UL)).uint64(),
+            ShiftDown(field, Scalar((ulong)DenseNormalTable.CoefMantissaBits)),
+            BitShiftDirection.Left).uint64();
+    }
+
     private static Tensor<int64> NormalMagnitudeBits(Tensor<uint64> code)
     {
         // ── Lattice: point = floor(code·2^P / LatticeCodes) ────────────────────────────
@@ -956,9 +958,18 @@ internal static class RuntimeRng
         // with the piece's reciprocal, shifted by the piece's own shift. BOTH halves are needed,
         // the shift running 10..59 rather than 64 — so the top comes from the multiply-high and the
         // bottom from the wrapping product, reassembled the way a 128-bit shift would leave them.
+        // One gather per PACKED word, not per field. The row is 9 words where a column per field
+        // would be 17, and the difference is initializer bytes on every model that draws normals.
+        // The unpack below costs fewer units than the 8 gathers it removes, so this is not a
+        // space-for-time trade — see DenseNormalTable for the layout.
+        var row = new Tensor<uint64>[DenseNormalTable.RowWords];
+        for (int i = 0; i < row.Length; i++)
+            row[i] = OnnxOp.Gather(Vector(DenseNormalTable.W[i]), piece, axis: 0).uint64();
+        var fields = row[^1];
+
         var into = code - OnnxOp.Gather(entries, piece, axis: 0).uint64();
-        var reciprocal = OnnxOp.Gather(Vector(DenseNormalTable.Recip), piece, axis: 0).uint64();
-        var recipShift = OnnxOp.Gather(Vector(DenseNormalTable.RecipShift), piece, axis: 0).int64();
+        var reciprocal = row[0];
+        var recipShift = NormalField(fields, 0, 0x3FUL).Cast<int64>();
         var x = OnnxOp.BitShift(DenseMulHigh(into, reciprocal),
                     (Scalar(64L) - recipShift).Cast<uint64>(), BitShiftDirection.Left).uint64()
               + ShiftDown(into * reciprocal, recipShift.Cast<uint64>());
@@ -966,22 +977,20 @@ internal static class RuntimeRng
         // Horner, not a chain of explicit powers: one multiply-high per degree rather than two, and
         // one truncation rather than two. The accumulator cannot overflow — every coefficient is
         // non-negative and they sum to under 2^64, and MulHigh(a, x) <= a.
-        var series = OnnxOp.Gather(
-            Vector(DenseNormalTable.C[DenseNormalTable.Degree - 1]), piece, axis: 0).uint64();
-        for (int k = DenseNormalTable.Degree - 2; k >= 0; k--)
-            series = DenseMulHigh(series, x)
-                   + OnnxOp.Gather(Vector(DenseNormalTable.C[k]), piece, axis: 0).uint64();
+        var series = NormalCoef(row, DenseNormalTable.Degree);
+        for (int k = DenseNormalTable.Degree - 1; k >= 1; k--)
+            series = DenseMulHigh(series, x) + NormalCoef(row, k);
         series = DenseMulHigh(series, x);
 
         // The magnitude's index within its piece: the series' top IndexBits, once the class-start
         // quarter ulp is in. The Min cannot fire — the sum is a uint64 and the shift leaves
         // IndexBits of it — and is kept only because the oracle keeps it.
-        var indexBits = OnnxOp.Gather(Vector(DenseNormalTable.IndexBits), piece, axis: 0).int64();
-        var index = ShiftDown(series + OnnxOp.Gather(Vector(NormalClassStart), piece, axis: 0).uint64(),
-                        (Scalar(64L) - indexBits).Cast<uint64>())
+        var indexBits = NormalField(fields, 6, 0x1FUL).Cast<int64>();
+        var classStart = OnnxOp.BitShift(NormalField(fields, 11, 1UL),
+                             (Scalar(62L) - indexBits).Cast<uint64>(), BitShiftDirection.Left).uint64();
+        var index = ShiftDown(series + classStart, (Scalar(64L) - indexBits).Cast<uint64>())
                     .Min(DensePowU(indexBits) - Scalar(1UL));
-        var pieceBits = OnnxOp.Gather(Vector(DenseNormalTable.FirstOrdinal), piece, axis: 0).int64()
-                      + index.Cast<int64>();
+        var pieceBits = NormalField(fields, 12, 0x7FFFFFFFUL).Cast<int64>() + index.Cast<int64>();
 
         // ── The three regions ──────────────────────────────────────────────────────────
         // The lattice term needs no flag of its own: a code off the lattice was zeroed, so its

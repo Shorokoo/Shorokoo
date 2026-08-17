@@ -63,25 +63,23 @@ internal static class RngDenseNormalOracle
     /// </summary>
     public static ulong Poly(int p, ulong code)
     {
-        ulong x = (ulong)((UInt128)(code - DenseNormalTable.Entry[p]) * DenseNormalTable.Recip[p]
-            >> (int)DenseNormalTable.RecipShift[p]);
-        ulong acc = DenseNormalTable.C[DenseNormalTable.Degree - 1][p];
-        for (int k = DenseNormalTable.Degree - 2; k >= 0; k--) acc = MulHigh(acc, x) + DenseNormalTable.C[k][p];
+        ulong x = (ulong)((UInt128)(code - DenseNormalTable.Entry[p]) * DenseNormalTable.Recip(p)
+            >> DenseNormalTable.RecipShift(p));
+        ulong acc = DenseNormalTable.C(DenseNormalTable.Degree, p);
+        for (int k = DenseNormalTable.Degree - 1; k >= 1; k--) acc = MulHigh(acc, x) + DenseNormalTable.C(k, p);
         return MulHigh(acc, x);
     }
 
     /// <summary>A quarter ulp in the piece's Q0.64 offset, and zero for a piece that does not begin a
     /// weight class. Rounding to nearest is otherwise carried by the series <b>origin</b>, which sits
     /// at the piece's first cell boundary; this only corrects the 0.75-ulp first cell.</summary>
-    private static ulong ClassStartOffset(int p) => 1UL << (int)(62 - DenseNormalTable.IndexBits[p]);
-
-    private static bool StartsClass(int p) => (DenseNormalTable.FirstOrdinal[p] & ((1L << P) - 1)) == 0;
+    private static ulong ClassStartOffset(int p) => 1UL << (62 - DenseNormalTable.IndexBits(p));
 
     /// <summary>Index of the magnitude within its piece.</summary>
     public static ulong DecodeIndex(int p, ulong code)
     {
-        int bits = (int)DenseNormalTable.IndexBits[p];
-        ulong offset = StartsClass(p) ? ClassStartOffset(p) : 0UL;
+        int bits = DenseNormalTable.IndexBits(p);
+        ulong offset = DenseNormalTable.StartsClass(p) ? ClassStartOffset(p) : 0UL;
         ulong index = (Poly(p, code) + offset) >> (64 - bits);
         return Math.Min(index, (1UL << bits) - 1);
     }
@@ -108,7 +106,7 @@ internal static class RngDenseNormalOracle
         }
         if (code >= DenseNormalTable.CapCode) return (ulong)DenseNormalTable.CapOrdinal;
         int p = SelectPiece(code);
-        return (ulong)DenseNormalTable.FirstOrdinal[p] + DecodeIndex(p, code);
+        return (ulong)DenseNormalTable.FirstOrdinal(p) + DecodeIndex(p, code);
     }
 
     /// <summary>The whole draw: one 64-bit generator value to one float32 bit pattern.</summary>

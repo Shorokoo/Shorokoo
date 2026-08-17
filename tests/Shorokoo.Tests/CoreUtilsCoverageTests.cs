@@ -282,33 +282,46 @@ public class CoreUtilsCoverageTests
         Assert.Equal(cpu, InferenceBackend.SelectBackend([cpu, gpu], cudaAvailable: false)!.Value);
     }
 
-    private static string OrtBackendSourceRoot()
+    private static string ProductSourceRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "src", "Backend", "OnnxRuntime")))
+        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "src", "Shorokoo")))
             dir = dir.Parent;
         Assert.NotNull(dir);
-        return Path.Combine(dir!.FullName, "src", "Backend", "OnnxRuntime");
+        return Path.Combine(dir!.FullName, "src");
     }
 
-    private static readonly Regex OrtSafeHandleCtor =
-        new(@"new\s+(SessionOptions|RunOptions)\s*\(", RegexOptions.Compiled);
+    // Every way to come by one of ORT's SafeHandle types: the constructors, and the SessionOptions
+    // factories (MakeSessionOptionWithCudaProvider and friends) that return one with no `new` in it.
+    private static readonly Regex OrtSafeHandleSource = new(
+        @"new\s+(SessionOptions|RunOptions)\s*\(|SessionOptions\s*\.\s*Make\w*\s*\(", RegexOptions.Compiled);
 
+    // The two shapes that actually root the handle across a native call: the resource of a `using`,
+    // and a field, which lives as long as its owner. The handle must be the WHOLE initializer --
+    // `using var s = new InferenceSession(b, new SessionOptions())` roots the session and leaves the
+    // options collectible, which is the exact bug this guard exists for.
+    private static readonly Regex RootedInitializer = new(
+        @"^\s*(using\s*\(?\s*(var|SessionOptions|RunOptions)\s+\w+\s*=\s*"
+        + @"|(public|private|protected|internal)[\w\s]*?(SessionOptions|RunOptions)\s+\w+\s*=\s*)$",
+        RegexOptions.Compiled);
+
+    // Strings go before line comments: a literal containing "//" would otherwise blank the rest of
+    // its line and hide a construction sitting after it.
     private static string StripCommentsAndStrings(string source)
     {
         source = Regex.Replace(source, @"/\*.*?\*/", " ", RegexOptions.Singleline);
-        source = Regex.Replace(source, @"//[^\n]*", " ");
         source = Regex.Replace(source, @"@""(?:[^""]|"""")*""", " ");
         source = Regex.Replace(source, @"""(?:\\.|[^""\\])*""", " ");
+        source = Regex.Replace(source, @"//[^\n]*", " ");
         return source;
     }
 
-    private static string[] UnscopedOrtSafeHandles(string source)
+    private static string[] UnrootedOrtSafeHandles(string source)
     {
-        char[] statementEnds = [';', '{', '}'];
+        char[] statementEnds = [';', '{', '}', ')'];
         var code = StripCommentsAndStrings(source);
-        return OrtSafeHandleCtor.Matches(code)
-            .Where(m => !code[(code.LastIndexOfAny(statementEnds, m.Index) + 1)..m.Index].Contains("using"))
+        return OrtSafeHandleSource.Matches(code)
+            .Where(m => !RootedInitializer.IsMatch(code[(code.LastIndexOfAny(statementEnds, m.Index) + 1)..m.Index]))
             .Select(m => m.Value.Trim())
             .ToArray();
     }
@@ -317,15 +330,15 @@ public class CoreUtilsCoverageTests
     public void TestOrtSafeHandlesAreUsingScopedAndTheGuardStillDetectsEveryEvasion()
     {
         var files = Directory
-            .EnumerateFiles(OrtBackendSourceRoot(), "*.cs", SearchOption.AllDirectories)
+            .EnumerateFiles(ProductSourceRoot(), "*.cs", SearchOption.AllDirectories)
             .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}") &&
                         !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
             .ToArray();
-        Assert.NotEmpty(files);
+        Assert.True(files.Length > 100);
 
         var sources = files.Select(File.ReadAllText).ToArray();
-        Assert.Contains(sources, s => OrtSafeHandleCtor.IsMatch(StripCommentsAndStrings(s)));
-        Assert.Empty(sources.SelectMany(UnscopedOrtSafeHandles));
+        Assert.Contains(sources, s => OrtSafeHandleSource.IsMatch(StripCommentsAndStrings(s)));
+        Assert.Empty(sources.SelectMany(UnrootedOrtSafeHandles));
 
         string[] mustFlag =
         [
@@ -333,14 +346,20 @@ public class CoreUtilsCoverageTests
             "SessionOptions o = new SessionOptions();",
             "_ = new RunOptions();",
             "return Wrap(new SessionOptions());",
+            "using var s = new InferenceSession(b, new SessionOptions());",
+            "var o = SessionOptions.MakeSessionOptionWithCudaProvider(0);",
+            "_prefix = \"https://x\"; var o = new SessionOptions();",
         ];
         string[] mustNotFlag =
         [
             "using var o = new SessionOptions();",
             "using (var o = new RunOptions()) { }",
+            "using SessionOptions o = new SessionOptions();",
+            "private readonly SessionOptions _o = new SessionOptions();",
+            "using var o = SessionOptions.MakeSessionOptionWithCudaProvider(0);",
         ];
-        Assert.All(mustFlag, s => Assert.NotEmpty(UnscopedOrtSafeHandles(s)));
-        Assert.All(mustNotFlag, s => Assert.Empty(UnscopedOrtSafeHandles(s)));
+        Assert.All(mustFlag, s => Assert.NotEmpty(UnrootedOrtSafeHandles(s)));
+        Assert.All(mustNotFlag, s => Assert.Empty(UnrootedOrtSafeHandles(s)));
     }
 
     [Fact]

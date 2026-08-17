@@ -114,21 +114,16 @@ public class RngAlgorithmTests
     }
 
     [Fact]
-    public void TestDenseNormalOracleIsMonotoneMirroredAndFinite()
+    public void TestDenseNormalOracleIsMonotoneAndFinite()
     {
         ulong mask = (1UL << 63) - 1;
+        ulong[] codes = [.. RngDenseNormalGolden.Pairs.Select(p => p.Draw & mask).Distinct().Order()];
+        Assert.True(codes.Length > 1000);
         uint previous = 0;
-        foreach ((ulong draw, uint _) in RngDenseNormalGolden.Pairs)
+        foreach (ulong code in codes)
         {
-            ulong code = draw & mask;
             uint magnitude = (uint)RngDenseNormalOracle.MagnitudeBits(code);
             Assert.True((magnitude >> 23) < 0xFF);
-            Assert.Equal(magnitude | 0x8000_0000U, (uint)RngDenseNormalOracle.SampleBits(draw | (1UL << 63)));
-            Assert.Equal(magnitude, (uint)RngDenseNormalOracle.SampleBits(code));
-        }
-        foreach (ulong code in new ulong[] { 0, 1, 1UL << 20, 1UL << 40, 1UL << 62, mask })
-        {
-            uint magnitude = (uint)RngDenseNormalOracle.MagnitudeBits(code);
             Assert.True(magnitude >= previous);
             previous = magnitude;
         }

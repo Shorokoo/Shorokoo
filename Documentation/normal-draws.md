@@ -46,12 +46,13 @@ var init   = NormalDist.Init([Scalar(4L), Scalar(8L)], Scalar(0f), Scalar(0.02f)
   exported ONNX model — see [the same bits everywhere](#the-same-bits-everywhere).
 - `mean` and `scale` may be compile-time literals or graph scalars computed in-graph — the
   two `RandomNormal` overloads in
-  [core-types.md](core-types.md#factory-helpers-using-static-shorokooglobals), and the
-  [initializers](nn-library.md#initializers-shorokoomodulesinitializers) that take them as
-  `Init` arguments. Both forms use the same draw and carry the same guarantees; graph-scalar
-  parameters cannot be expressed as ONNX attributes, so they additionally need a concrete
-  model — one built through [`ToConcreteModel`](rng-configuration.md), not a bare
-  architecture.
+  [core-types.md](core-types.md#factory-helpers-using-static-shorokooglobals). Both forms use
+  the same draw and carry the same guarantees; graph-scalar parameters cannot be expressed as
+  ONNX attributes, so they additionally need a concrete model — one built through
+  [`ToConcreteModel`](rng-configuration.md), not a bare architecture. The
+  [initializers](nn-library.md#initializers-shorokoomodulesinitializers) that take `mean` and
+  `scale` as `Init` arguments do not go through that overload: they draw standard-normal and
+  apply the shift and scale as ordinary graph arithmetic, so they need no concrete model.
 
 ## The magnitude is addressed, the sign applied after
 
@@ -100,12 +101,13 @@ span the *floor* and the top the *cap*.
 | Region | Magnitudes | What a draw returns there | Mass |
 |---|---|---|---|
 | lattice | below the floor, 2⁻³⁹ (1.818989e-12) | points of an even lattice whose step is the floor class's spacing — represented, but not individually addressable | 1.4513e-12, about 1 draw in 690 billion |
-| resolved | 2⁻³⁹ up to 8, the 42 weight classes between | individual `float32` values, each with the mass of the interval it stands for | all the rest |
+| resolved | 2⁻³⁹ up to 8, the 42 weight classes between | individual `float32` values, each with the mass of the interval it stands for — except above 7.601182, where a float's cell can be worth under one position and 577,209 of them get none | all the rest |
 | cap | 8 and beyond | exactly `8.0f` | 1.244e-15, about 1 draw in 800 trillion |
 
-Counting values rather than mass: **702,968,878** of the 4,278,190,080 finite `float32`
-values — **16.4%** — are individually reachable, and by the symmetry above that set is exactly
-closed under negation.
+Counting values rather than mass: **720,265,872** of the 4,278,190,080 finite `float32`
+values — **16.8%** — are individually reachable, and by the symmetry above that set is exactly
+closed under negation. That is 351,744,327 resolved magnitudes and 8,388,607 lattice points on
+each sign, plus ±`8.0f` and both zeros.
 
 **Below the floor**, what truncation spends is resolution, not fairness. The lattice is not an
 approximation there: across that whole region the normal density is constant to within 2⁻⁷⁸,
@@ -142,11 +144,11 @@ same values from the same key, bit for bit, and an exported ONNX model draws exa
 Shorokoo drew — portability by construction rather than by testing providers one at a time.
 The same seed yields identical values under ONNX Runtime's CPU provider, under the
 [Quick Execution Engine](limitations.md#quick-execution-engine-value-computation-is-bounded),
-and in an exported model; both engines are held to the same host reference in the suite.
+and in an exported model.
 
-That is not a free property, and it is what the integer decode was adopted for. The
-transcendental construction it replaced — a normal built from `√(−2·ln w)·cos(2πu)`, four
-float32 transcendentals deep — cannot have it: ONNX specifies no accuracy for `Log`, `Sqrt`,
+That is not a free property, and it is what the integer decode was adopted for. The usual
+transcendental construction — a normal built from `√(−2·ln w)·cos(2πu)`, four float32
+transcendentals deep — cannot have it: ONNX specifies no accuracy for `Log`, `Sqrt`,
 `Cos` or `Sin`, so two perfectly conformant providers can return different normals from the
 same key. Evaluating that same formula in float32 and in binary64 makes **66%** of its draws
 differ, the worst by **4.19e-2** relative. Nothing on this page depends on a provider's

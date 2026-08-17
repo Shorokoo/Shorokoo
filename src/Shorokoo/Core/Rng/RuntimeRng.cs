@@ -844,7 +844,8 @@ internal static class RuntimeRng
     // individually reachable, exactly as under the dense uniform's own floor. PIECES: a run of
     // 2^IndexBits consecutive magnitudes inside one weight class, decoded by a degree-12 series
     // that inverts the Gaussian CDF over the piece. The 218 pieces tile [2^-39, 8) with no gap, so
-    // all 352321536 float32 magnitudes there are addressed one at a time rather than in blocks.
+    // all 352321536 float32 magnitudes there are addressed one at a time rather than in blocks --
+    // though past 4 a cell can be worth under one code, so 577210 of them earn none.
     // CAP: past the last resolved magnitude everything collapses onto 8f, 1.2e-15 of the mass.
     //
     // Cells run AWAY FROM ZERO and boundaries are MIDPOINTS: magnitude a owns
@@ -852,7 +853,7 @@ internal static class RuntimeRng
     // names rather than the one below it — a quarter of a relative ulp of error on average instead
     // of a half, and no systematic downward bias. What that convention costs the decode is the
     // first magnitude of a weight class, which owns 0.75 of its own ulp because the lower
-    // neighbour's is half as wide; NormalClassStart is the correction.
+    // neighbour's is half as wide; the classStart term is the correction.
     //
     // DenseNormalTable is generated offline against a 320-bit erf and is re-derived neither here
     // nor by the oracle, so the two share it: RngDenseNormalOracle pins this DECODE bit for bit
@@ -884,18 +885,6 @@ internal static class RuntimeRng
         return t;
     }
 
-    /// <summary>
-    /// The float32 magnitude bit pattern of a position on the magnitude axis — the oracle's
-    /// <c>MagnitudeBits</c>, elementwise and branchless.
-    ///
-    /// <para>All three regions are evaluated for every element and two of the three are multiplied
-    /// away, so the one thing that has to hold is that a dead region cannot FAULT. Zeroing the code
-    /// off the lattice is what buys that, and is not cosmetic: a code from the piece region would
-    /// otherwise put the lattice point's leading bit as high as 62 and make the significand's shift
-    /// count negative, which as a <c>uint64</c> is a shift wider than the operand — undefined. The
-    /// piece region needs no counterpart: its arithmetic wraps rather than faults, and every index
-    /// it gathers with is in range whatever the code.</para>
-    /// </summary>
     /// <summary>A bit field of the packed row's small-field word.</summary>
     private static Tensor<uint64> NormalField(Tensor<uint64> word, int offset, ulong mask)
         => OnnxOp.BitwiseAnd(ShiftDown(word, Scalar((ulong)offset)), Scalar(mask)).uint64();
@@ -915,6 +904,18 @@ internal static class RuntimeRng
             BitShiftDirection.Left).uint64();
     }
 
+    /// <summary>
+    /// The float32 magnitude bit pattern of a position on the magnitude axis — the oracle's
+    /// <c>MagnitudeBits</c>, elementwise and branchless.
+    ///
+    /// <para>All three regions are evaluated for every element and two of the three are multiplied
+    /// away, so the one thing that has to hold is that a dead region cannot FAULT. Zeroing the code
+    /// off the lattice is what buys that, and is not cosmetic: a code from the piece region would
+    /// otherwise put the lattice point's leading bit as high as 62 and make the significand's shift
+    /// count negative, which as a <c>uint64</c> is a shift wider than the operand — undefined. The
+    /// piece region needs no counterpart: its arithmetic wraps rather than faults, and every index
+    /// it gathers with is in range whatever the code.</para>
+    /// </summary>
     private static Tensor<int64> NormalMagnitudeBits(Tensor<uint64> code)
     {
         // ── Lattice: point = floor(code·2^P / LatticeCodes) ────────────────────────────
@@ -990,7 +991,7 @@ internal static class RuntimeRng
                              (Scalar(62L) - indexBits).Cast<uint64>(), BitShiftDirection.Left).uint64();
         var index = ShiftDown(series + classStart, (Scalar(64L) - indexBits).Cast<uint64>())
                     .Min(DensePowU(indexBits) - Scalar(1UL));
-        var pieceBits = NormalField(fields, 12, 0x7FFFFFFFUL).Cast<int64>() + index.Cast<int64>();
+        var pieceBits = NormalField(fields, 12, ulong.MaxValue >> 12).Cast<int64>() + index.Cast<int64>();
 
         // ── The three regions ──────────────────────────────────────────────────────────
         // The lattice term needs no flag of its own: a code off the lattice was zeroed, so its
@@ -1015,14 +1016,17 @@ internal static class RuntimeRng
     /// over it, then a cap. Sampling the magnitude and applying the sign afterwards is what makes
     /// the draw exactly symmetric.</para>
     ///
-    /// <para><b>Reachable values.</b> The pieces tile [2⁻³⁹, 8) with no gap, so all
-    /// 352&#160;321&#160;536 float32 magnitudes there are decoded one at a time, on both signs, and
-    /// each owns the codes of the interval between its midpoint neighbours — a draw lands on the
-    /// float NEAREST the value its code names, not the one below it. (That every one of them
-    /// actually earns a code is a property of the table, established by its generator's census
-    /// rather than by this decode.) Below 2⁻³⁹ an even lattice of spacing 2⁻⁶² carries the mass
-    /// instead, so those floats are not individually reachable — the same trade the dense uniform
-    /// makes below its own floor, over 1.5e-12 of the mass. Past the largest resolved magnitude the
+    /// <para><b>Reachable values.</b> The pieces tile [2⁻³⁹, 8) with no gap, so the
+    /// 352&#160;321&#160;536 float32 magnitudes there are addressed one at a time rather than in
+    /// blocks, on both signs, and each owns the codes of the interval between its midpoint
+    /// neighbours — a draw lands on the float NEAREST the value its code names, not the one below
+    /// it. Being addressed is not the same as being reachable: below 4 every one of them earns at
+    /// least one code, but past 4 a float's cell can carry less mass than a single code is worth,
+    /// and 577&#160;210 magnitudes in [4,&#160;8) get none. Which floats those are is a property of
+    /// the table, established by its generator's census rather than by this decode. Below 2⁻³⁹ an
+    /// even lattice of spacing 2⁻⁶² carries the mass instead, so those floats are not individually
+    /// reachable — the same trade the dense uniform
+    /// makes below its own floor, 1.45e-12 of the mass. Past the largest resolved magnitude the
     /// draw returns exactly 8f, which is 1.2e-15 of it. Zero is drawable with either sign;
     /// <c>-0f</c> comes up with probability 2⁻⁶³.</para>
     ///

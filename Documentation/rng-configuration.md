@@ -97,7 +97,8 @@ session-build constant folding collapses the constant chain segments to literal 
 the per-draw cost is what it always was. The exported model's randomness is therefore
 identifiable — you can point at the function in the ONNX file that produced any draw, and at
 the initializer that carries the identity it derived from — and deterministic and portable
-across execution providers: every step from the key to the value is integer arithmetic, so any
+across execution providers: every step from the key to the drawn bit pattern is integer
+arithmetic, so any
 provider that implements the integer ops correctly returns the same bits.
 
 ## Choosing the generator

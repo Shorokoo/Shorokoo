@@ -23,6 +23,13 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
         using var runOptions = new RunOptions();
         var results = _session.Run(runOptions, ortInputs, outputNames);
 
+        // ORT snapshots each input's handle into an IntPtr[] and keeps no reference to the OrtValue
+        // wrappers, so from that point on `ortInputs` is their only root -- and the JIT retires it
+        // at the call. OrtValue has an ordinary finalizer that calls OrtReleaseValue, so a GC inside
+        // the native Run would free the feeds while it is still reading them. `_session` is rooted
+        // by this instance and `runOptions` by the using; the inputs need this.
+        GC.KeepAlive(ortInputs);
+
         var wrapped = new List<IShorokooTensorValue>(results.Count);
         foreach (var r in results) wrapped.Add(new OrtTensorValue(r));
         return wrapped;

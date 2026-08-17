@@ -203,9 +203,16 @@ public class RngRuntimeIdentityTests
             [0UL, 42UL, 0UL, 99UL],
             [0UL, 42UL, 1UL, int.MaxValue],
             [0UL, 42UL, 1UL, ulong.MaxValue],
+            [0UL, 42UL, 1UL, 1UL, 1UL << 40, 7UL],
         ];
         foreach (var v in malformed)
             Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode(v));
+
+        // An id this build does not define is not malformed data: it decodes, and Algorithm is null
+        // so the consumer fails loud naming the id rather than the decoder throwing an arithmetic
+        // exception on the way.
+        Assert.Null(RngRuntimeIdentity.Decode([ulong.MaxValue, 42UL, 0UL]).Algorithm);
+        Assert.Null(RngRuntimeIdentity.Decode([9UL, 42UL, 0UL]).Algorithm);
     }
 }
 

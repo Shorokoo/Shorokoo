@@ -496,6 +496,7 @@ public class RngInitFrozenDerivationTests
 
         var literalForm = Feed(() => RandomNormal([Scalar(4L)], 3f, 2f));
         Assert.True(literalForm.Inputs.Count < 5 || literalForm.Inputs[4] is null);
+        Assert.True(literalForm.Inputs.Count < 6 || literalForm.Inputs[5] is null);
         Assert.Equal(3f, literalForm.Attributes.GetFloatVal(OnnxOpAttributeNames.AttrMean));
         Assert.Equal(2f, literalForm.Attributes.GetFloatVal(OnnxOpAttributeNames.AttrScale));
     }

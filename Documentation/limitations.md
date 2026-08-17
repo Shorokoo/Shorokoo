@@ -77,8 +77,9 @@ never leaves `mean ± 8·scale`. **Below**: magnitudes under 2⁻³⁹ ride an e
 of the float grid, so they are not individually drawable — the region still carries exactly
 the mass it is due (1.4513e-12, about one draw in 690 billion), and the normal density is
 constant to within 2⁻⁷⁸ across it, so what is lost is resolution among numerically
-interchangeable values, not fairness. In all, 702,968,878 of the 4,278,190,080 finite
-`float32` values — 16.4% — can come out of a draw. Both limits are set by the generator bits
+interchangeable values, not fairness. **Near the top**: above 7.601182 a float's cell can carry less mass than one
+position is worth, so 577,209 magnitudes below 8 get no position and never come out. In all,
+720,265,872 of the 4,278,190,080 finite `float32` values — 16.8% — can come out of a draw. Both limits are set by the generator bits
 spent per element, so a wider window is possible but costs more of them. See
 [normal-draws.md](normal-draws.md) for the full contract.
 

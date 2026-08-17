@@ -8,16 +8,21 @@ using System.Text;
 
 namespace Shorokoo;
 
-/// <summary>The bit generator a <see cref="RngConfig"/> uses for keyed draws. Configuration, never
-/// part of a model definition. Every algorithm shares one key tree (so switching preserves stream
-/// identity — the same stream just draws different numbers); only the draw's bit generator differs.</summary>
+/// <summary>The bit generator and distribution transforms a <see cref="RngConfig"/> uses for keyed
+/// draws. Configuration, never part of a model definition. Every algorithm shares one key tree (so
+/// switching preserves stream identity — the same stream just draws different numbers); only the
+/// draw itself differs. The members differ in the bit generator's round count alone; both use the
+/// same uniform and normal transforms.</summary>
 public enum RngAlgorithm
 {
-    /// <summary>Threefry-2x32 (Random123), 20 rounds. The default: expressible as portable ONNX integer ops.</summary>
+    /// <summary>Threefry-2x32 (Random123), 20 rounds. The default — every draw, uniform and normal
+    /// alike, is decoded by integer arithmetic alone, so it is exact and identical on any execution
+    /// provider.</summary>
     Threefry2x32,
 
-    /// <summary>Threefry-2x32 with the reduced 13-round bit generator (Random123 <c>threefry2x32x13</c>):
-    /// still BigCrush-resistant, ~35% cheaper than the 20-round default — the faster, lower-margin choice.</summary>
+    /// <summary>Threefry-2x32 with the reduced 13-round bit generator (Random123
+    /// <c>threefry2x32x13</c>): still BigCrush-resistant, fewer rounds than the 20-round form — the
+    /// lower-margin counterpart of <see cref="Threefry2x32"/>.</summary>
     Threefry2x32Rounds13,
 }
 
@@ -78,7 +83,7 @@ public sealed class RngConfig
     /// </summary>
     public ulong? RunMasterSeed { get; init; }
 
-    /// <summary>The bit generator. Default <see cref="RngAlgorithm.Threefry2x32"/>.</summary>
+    /// <summary>The bit generator and its transforms. Default <see cref="RngAlgorithm.Threefry2x32"/>.</summary>
     public RngAlgorithm Algorithm { get; init; } = RngAlgorithm.Threefry2x32;
 
     // (collection, ModelId path) -> seed. Immutable, like the config itself: Override

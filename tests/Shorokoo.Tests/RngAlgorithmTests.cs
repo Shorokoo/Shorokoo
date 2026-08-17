@@ -100,6 +100,36 @@ public class RngAlgorithmTests
         => RngDenseUniformOracle.Draw(key, 0, i, 0f, 1f);
 
     [Fact]
+    public void TestDenseNormalOracleDecodesEveryGoldenDrawExactly()
+    {
+        foreach ((ulong draw, uint bits) in RngDenseNormalGolden.Pairs)
+            Assert.Equal(bits, (uint)RngDenseNormalOracle.SampleBits(draw));
+    }
+
+    [Fact]
+    public void TestDenseNormalOracleReachesBothSignedZeros()
+    {
+        Assert.Equal(0x0000_0000U, (uint)RngDenseNormalOracle.SampleBits(0UL));
+        Assert.Equal(0x8000_0000U, (uint)RngDenseNormalOracle.SampleBits(1UL << 63));
+    }
+
+    [Fact]
+    public void TestDenseNormalOracleIsMonotoneAndFinite()
+    {
+        ulong mask = (1UL << 63) - 1;
+        ulong[] codes = [.. RngDenseNormalGolden.Pairs.Select(p => p.Draw & mask).Distinct().Order()];
+        Assert.True(codes.Length > 1000);
+        uint previous = 0;
+        foreach (ulong code in codes)
+        {
+            uint magnitude = (uint)RngDenseNormalOracle.MagnitudeBits(code);
+            Assert.True((magnitude >> 23) < 0xFF);
+            Assert.True(magnitude >= previous);
+            previous = magnitude;
+        }
+    }
+
+    [Fact]
     public void TestKeyedUniformBitsAndSplitThenDrawMatchTheHostGeneratorBitExactly()
     {
         const ulong key = 123UL | (456UL << 32);
@@ -173,7 +203,7 @@ public class RngAlgorithmTests
         {
             var algo = fn.MetadataProps.FirstOrDefault(p => p.Key == Function.IRRngAlgorithmParamName)?.Value;
             var kind = fn.MetadataProps.FirstOrDefault(p => p.Key == Function.IRRngFunctionKindParamName)?.Value;
-            Assert.Equal(RngAlgorithms.Threefry2x32BoxMullerV1, algo);
+            Assert.Equal(RngAlgorithms.Default, algo);
             Assert.Contains(kind, (string[])[RngAlgorithms.KindSplit, RngAlgorithms.KindUniform, RngAlgorithms.KindNormal]);
         }
 
@@ -246,8 +276,8 @@ public class RngAlgorithmSwitchTests
         var key20 = ResolvedKey(concrete20);
         var key13 = ResolvedKey(concrete13);
         Assert.Equal(key20, key13);
-        Assert.Equal(RngAlgorithms.Threefry2x32BoxMullerV1, BoundAlgorithm(concrete20));
-        Assert.Equal(RngAlgorithms.Threefry2x32x13BoxMullerV1, BoundAlgorithm(concrete13));
+        Assert.Equal(RngAlgorithms.Threefry2x32DenseV1, BoundAlgorithm(concrete20));
+        Assert.Equal(RngAlgorithms.Threefry2x32x13DenseV1, BoundAlgorithm(concrete13));
 
         // Bit-exact against the host generator at each algorithm's round count (substreamIndex 0
         // — the injected counter is baked at 0 in one-shot inference).
@@ -313,8 +343,8 @@ public class RngAlgorithmSwitchTests
         var (name20, algo20) = UniformFn(Rounds20);
         var (name13, algo13) = UniformFn(Rounds13);
 
-        Assert.Equal(RngAlgorithms.Threefry2x32BoxMullerV1, algo20);
-        Assert.Equal(RngAlgorithms.Threefry2x32x13BoxMullerV1, algo13);
+        Assert.Equal(RngAlgorithms.Threefry2x32DenseV1, algo20);
+        Assert.Equal(RngAlgorithms.Threefry2x32x13DenseV1, algo13);
         Assert.Contains("Threefry2x32_13", name13);
         Assert.DoesNotContain("Threefry2x32_13", name20);
         Assert.NotEqual(name20, name13);

@@ -25,7 +25,15 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
         ShorokooGraphOptimization graphOptimization,
         ShorokooLogSeverity logSeverity)
     {
-        var options = new SessionOptions();
+        // The `using` is load-bearing, not tidiness. SessionOptions is a SafeHandle, so it
+        // carries a critical finalizer that calls OrtReleaseSessionOptions, and ORT takes its
+        // handle as a bare IntPtr -- the P/Invoke does no SafeHandle ref-counting, and the
+        // session does not retain the options the caller passes. Left as a plain local, the
+        // options are unreachable the instant that IntPtr is read, so a GC landing inside
+        // session creation frees them while ORT is still walking sess_options->provider_factories
+        // (core/session/utils.cc, InitializeSession) -- a use-after-free that segfaults the
+        // process. Disposing in a finally keeps them rooted across the constructor.
+        using var options = new SessionOptions();
         options.LogSeverityLevel = (OrtLoggingLevel)(int)logSeverity;
         options.GraphOptimizationLevel = (GraphOptimizationLevel)(int)graphOptimization;
         _configureExecutionProvider(options);

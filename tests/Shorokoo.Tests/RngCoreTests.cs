@@ -155,9 +155,17 @@ public class RngRuntimeIdentityTests
         Assert.Equal(cfg.RunMasterKey, vec[RngRuntimeIdentity.RunKeyIndex]);
         AssertRoundTrips(cfg);
 
-        var cfg13 = new RngConfig { MasterSeed = 42, Algorithm = RngAlgorithm.Threefry2x32Rounds13 };
-        Assert.Equal(1UL, RngRuntimeIdentity.Build(cfg13)[RngRuntimeIdentity.AlgorithmIdIndex]);
-        AssertRoundTrips(cfg13);
+        Assert.Equal(0L, RngRuntimeIdentity.AlgorithmIdOf(RngAlgorithm.Threefry2x32));
+        Assert.Equal(1L, RngRuntimeIdentity.AlgorithmIdOf(RngAlgorithm.Threefry2x32Rounds13));
+
+        foreach (var alg in (RngAlgorithm[])[
+            RngAlgorithm.Threefry2x32, RngAlgorithm.Threefry2x32Rounds13])
+        {
+            var c = new RngConfig { MasterSeed = 42, Algorithm = alg };
+            Assert.Equal((ulong)RngRuntimeIdentity.AlgorithmIdOf(alg),
+                RngRuntimeIdentity.Build(c)[RngRuntimeIdentity.AlgorithmIdIndex]);
+            AssertRoundTrips(c);
+        }
 
         var subMaster = new RngConfig { MasterSeed = 42, RunMasterSeed = 777 };
         Assert.NotEqual(RngTestOracle.RunKey(cfg, Paths[0]), RngTestOracle.RunKey(subMaster, Paths[0]));
@@ -195,9 +203,16 @@ public class RngRuntimeIdentityTests
             [0UL, 42UL, 0UL, 99UL],
             [0UL, 42UL, 1UL, int.MaxValue],
             [0UL, 42UL, 1UL, ulong.MaxValue],
+            [0UL, 42UL, 1UL, 1UL, 1UL << 40, 7UL],
         ];
         foreach (var v in malformed)
             Assert.ThrowsAny<ArgumentException>(() => RngRuntimeIdentity.Decode(v));
+
+        // An id this build does not define is not malformed data: it decodes, and Algorithm is null
+        // so the consumer fails loud naming the id rather than the decoder throwing an arithmetic
+        // exception on the way.
+        Assert.Null(RngRuntimeIdentity.Decode([ulong.MaxValue, 42UL, 0UL]).Algorithm);
+        Assert.Null(RngRuntimeIdentity.Decode([9UL, 42UL, 0UL]).Algorithm);
     }
 }
 

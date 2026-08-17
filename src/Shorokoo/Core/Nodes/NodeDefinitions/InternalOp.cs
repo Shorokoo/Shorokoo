@@ -343,9 +343,15 @@ internal static partial class InternalOp
     /// <summary>
     /// A normal random feed N(mean, scale) taking its shape as a tensor input; see
     /// <see cref="RandomUniform(Variable, float?, float?, Variable?, Variable?, Variable?, Variable?)"/>.
+    ///
+    /// <para>The distribution parameters come either as the literal <paramref name="mean"/>/<paramref name="scale"/>
+    /// attributes or, for values only known in-graph, as the f32 scalar
+    /// <paramref name="meanInput"/>/<paramref name="scaleInput"/> inputs, which the keyed draw takes
+    /// directly. Tensor parameters have no attribute-based ONNX fallback, so a feed carrying them
+    /// must be keyed.</para>
     /// </summary>
-    public static Variable RandomNormal(Variable shape, float? mean = null, float? scale = null, Variable? substreamIndex = null, Variable? iterationIndices = null)
-        => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_NORMAL, [shape, substreamIndex, iterationIndices], [
+    public static Variable RandomNormal(Variable shape, float? mean = null, float? scale = null, Variable? substreamIndex = null, Variable? iterationIndices = null, Variable? meanInput = null, Variable? scaleInput = null)
+        => NodeBuilder.BuildNodeSingleOut(SHRK_RANDOM_NORMAL, [shape, substreamIndex, iterationIndices, null, meanInput, scaleInput], [
             (AttrMean, mean), (AttrScale, scale),
             (ShrkAttrLocalModelId, (long[])[])]);
 

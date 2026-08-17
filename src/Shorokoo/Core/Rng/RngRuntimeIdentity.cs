@@ -58,11 +58,15 @@ internal sealed class RngRuntimeIdentity
         Overrides = overrides;
     }
 
-    /// <summary>The configured algorithm, or null when the id is unknown (a file written by a
+    /// <summary>The configured algorithm, or null when the id is unknown (a file written under an
     /// id this build does not define). Consumers must fail loudly on null, never substitute.</summary>
     public RngAlgorithm? Algorithm => TryAlgorithmFromId(AlgorithmId);
 
-    /// <summary>The stable identity-vector id of a configured algorithm.</summary>
+    /// <summary>The stable identity-vector id of a configured algorithm — the encoding of the
+    /// <see cref="RngAlgorithm"/> member, and nothing more. An id must not be pointed at a
+    /// <i>different</i> member, since a stored vector would then decode to the wrong algorithm
+    /// entirely; but it carries no promise about what that algorithm draws. Id 0 has already
+    /// outlived one normal transform.</summary>
     public static long AlgorithmIdOf(RngAlgorithm algorithm) => algorithm switch
     {
         RngAlgorithm.Threefry2x32 => 0,
@@ -133,7 +137,14 @@ internal sealed class RngRuntimeIdentity
                 throw new ArgumentException("Malformed RngSeedData: truncated override record.", nameof(rngSeedData));
             int pathLen = (int)claimedPathLen;
             int[] path = new int[pathLen];
-            for (int j = 0; j < pathLen; j++) path[j] = checked((int)unchecked((long)rngSeedData[i++]));
+            for (int j = 0; j < pathLen; j++)
+            {
+                long element = unchecked((long)rngSeedData[i++]);
+                if (element is < int.MinValue or > int.MaxValue)
+                    throw new ArgumentException(
+                        "Malformed RngSeedData: path element outside the ModelId range.", nameof(rngSeedData));
+                path[j] = (int)element;
+            }
             int keyOffset = i;
             var key = rngSeedData[i];
             i += 1;
@@ -141,7 +152,10 @@ internal sealed class RngRuntimeIdentity
         }
         if (i != rngSeedData.Length)
             throw new ArgumentException("Malformed RngSeedData: trailing data after override records.", nameof(rngSeedData));
-        return new RngRuntimeIdentity(checked((long)rngSeedData[AlgorithmIdIndex]), runKey, records);
+        // Unchecked, deliberately: an id this build does not define must reach the `Algorithm => null`
+        // path so consumers can fail loud naming it, and a stored id with the top bit set is exactly
+        // that case. A checked cast would throw OverflowException here instead and skip them.
+        return new RngRuntimeIdentity(unchecked((long)rngSeedData[AlgorithmIdIndex]), runKey, records);
     }
 
     /// <summary>

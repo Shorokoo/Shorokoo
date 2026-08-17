@@ -301,6 +301,12 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Output("output", "T2", rank: "R"),
 
             // SHRK_RANDOM_NORMAL: the normal-distribution runtime feed; see SHRK_RANDOM_UNIFORM.
+            // Its distribution parameters follow the same two forms: EITHER the
+            // shrk_mean/shrk_scale attributes (compile-time literals) OR the optional f32 scalar
+            // "mean"/"scale" inputs (computed in-graph), which the keyed draw takes directly.
+            // As for the uniform, the ONNX fallback (RandomNormalLike) reads them from
+            // attributes and so cannot express the input form: a feed with tensor parameters and
+            // no key is a hard build error.
             Op(SHRK_RANDOM_NORMAL)
                 .Tensor<int64>("T1")
                 .Tensor<uint64>("TK")
@@ -313,6 +319,8 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("substreamIndex", "T1", 0)
                 .Input("iterationIndices", "T1", 1)
                 .Input("key", "TK?", 0)
+                .Input("mean", "T2?", 0)
+                .Input("scale", "T2?", 0)
                 .Output("output", "T2", rank: "R"),
 
             // SHRK_RANDOM_BITS: a raw-bits runtime feed with dynamic shape input; the output is
@@ -359,7 +367,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Output("output", "T2", rank: "R"),
 
             // SHRK_RNG_NORMAL: keyed deterministic N(mean, scale) draw of dynamic shape under
-            // the named algorithm (per-element-pair Box-Muller). See SHRK_RNG_UNIFORM.
+            // the named algorithm, whose name pins the normal transform. See SHRK_RNG_UNIFORM.
             Op(SHRK_RNG_NORMAL)
                 .Tensor<uint64>("TK")
                 .Tensor<int64>("TS")

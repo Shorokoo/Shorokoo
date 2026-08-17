@@ -12,8 +12,8 @@ namespace Shorokoo.Core.Rng;
 /// functions</b> — <c>split</c> (index-based key split), <c>uniform</c> and <c>normal</c>
 /// (keyed draws) — because both the bit generator <em>and</em> the distribution transforms
 /// determine the produced values (two frameworks produce different normals from identical
-/// bit streams when their transforms differ). The version is part of the name: improving a
-/// transform later is a <em>new algorithm name</em>, never a silent change.
+/// bit streams when their transforms differ). So the name pins the whole set — bit generator
+/// and transforms alike — and carries its version.
 ///
 /// <para>Each function is an ordinary Shorokoo <see cref="Function"/> built from in-graph
 /// integer/float math (see <see cref="RuntimeRng"/>), tagged with
@@ -24,16 +24,19 @@ namespace Shorokoo.Core.Rng;
 /// </summary>
 internal static class RngAlgorithms
 {
-    /// <summary>Threefry-2x32 (Random123, 20 rounds) + torch-convention 24-bit uniform + Box–Muller normal.</summary>
-    public const string Threefry2x32BoxMullerV1 = "Threefry2x32-BoxMuller.v1";
+    /// <summary>Threefry-2x32 (Random123, 20 rounds) + the dense uniform + the dense normal: one
+    /// 64-bit generator value per element decoded by integer arithmetic alone (a piece table plus a
+    /// polynomial series, no transcendental).</summary>
+    public const string Threefry2x32DenseV1 = "Threefry2x32-Dense.v1";
 
-    /// <summary>Threefry-2x32 with the reduced 13-round bit generator (Random123 <c>threefry2x32x13</c>,
-    /// still BigCrush-resistant, ~35% faster) + the same 24-bit uniform + Box–Muller normal. Only the
-    /// draw's round count differs from <see cref="Threefry2x32BoxMullerV1"/>; the key tree is shared.</summary>
-    public const string Threefry2x32x13BoxMullerV1 = "Threefry2x32-13-BoxMuller.v1";
+    /// <summary>The reduced 13-round bit generator (Random123 <c>threefry2x32x13</c>, still
+    /// BigCrush-resistant) + the same uniform and normal: <see cref="Threefry2x32DenseV1"/> at
+    /// <see cref="Threefry2x32.Rounds13"/>. Only the draw's round count differs; the key tree is
+    /// shared.</summary>
+    public const string Threefry2x32x13DenseV1 = "Threefry2x32-13-Dense.v1";
 
     /// <summary>The default algorithm for keyed draws.</summary>
-    public const string Default = Threefry2x32BoxMullerV1;
+    public const string Default = Threefry2x32DenseV1;
 
     public const string KindSplit = "split";
     /// <summary>The batched key-tree fold: one pass folds a whole level (M parent keys x M
@@ -51,8 +54,8 @@ internal static class RngAlgorithms
     /// <summary>The registry name of a configured <see cref="RngAlgorithm"/>.</summary>
     public static string NameOf(RngAlgorithm algorithm) => algorithm switch
     {
-        RngAlgorithm.Threefry2x32 => Threefry2x32BoxMullerV1,
-        RngAlgorithm.Threefry2x32Rounds13 => Threefry2x32x13BoxMullerV1,
+        RngAlgorithm.Threefry2x32 => Threefry2x32DenseV1,
+        RngAlgorithm.Threefry2x32Rounds13 => Threefry2x32x13DenseV1,
         _ => throw new NotSupportedException($"Unknown RNG algorithm '{algorithm}'."),
     };
 
@@ -60,8 +63,16 @@ internal static class RngAlgorithms
     // is deliberately NOT algorithm-dependent — see DrawRounds usage below.
     private static int DrawRounds(string algorithm) => algorithm switch
     {
-        Threefry2x32BoxMullerV1 => Threefry2x32.Rounds,          // 20
-        Threefry2x32x13BoxMullerV1 => Threefry2x32.Rounds13,     // 13
+        Threefry2x32DenseV1 => Threefry2x32.Rounds,              // 20
+        Threefry2x32x13DenseV1 => Threefry2x32.Rounds13,         // 13
+        _ => throw new NotSupportedException($"Unknown RNG algorithm '{algorithm}'."),
+    };
+
+    // Sanitized, stable ONNX-safe function-name fragment; the pretty name rides the metadata.
+    private static string Tag(string algorithm) => algorithm switch
+    {
+        Threefry2x32DenseV1 => "Threefry2x32_Dense_v1",
+        Threefry2x32x13DenseV1 => "Threefry2x32_13_Dense_v1",
         _ => throw new NotSupportedException($"Unknown RNG algorithm '{algorithm}'."),
     };
 
@@ -114,10 +125,8 @@ internal static class RngAlgorithms
                 _ => throw new NotSupportedException($"Unknown RNG function kind '{kind}'."),
             };
 
-            // Sanitized, stable ONNX-safe name; the pretty algorithm name rides the metadata.
-            var tag = algorithm == Threefry2x32x13BoxMullerV1 ? "Threefry2x32_13_BoxMuller_v1" : "Threefry2x32_BoxMuller_v1";
             var suffix = kind == KindBits ? "_" + bitsDtype!.ToString() : "";
-            var name = "ShrkRng_" + tag + "_" + kind + suffix;
+            var name = "ShrkRng_" + Tag(algorithm) + "_" + kind + suffix;
             var graph = GraphBuilder.BuildInternalComputationGraphFromDelegate(body);
             fn = new Function(graph, FunctionType.Function, name, name)
             {
@@ -151,15 +160,15 @@ internal static class RngAlgorithms
         Scalar<float32> low, Scalar<float32> high)
         => RuntimeRng.Uniform(shape, key, substreamIndex, low, high, Threefry2x32.Rounds);
 
-    private static Tensor<float32> NormalImpl(
-        Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape,
-        Scalar<float32> mean, Scalar<float32> scale)
-        => RuntimeRng.Normal(shape, key, substreamIndex, mean, scale, Threefry2x32.Rounds);
-
     private static Tensor<float32> Uniform13Impl(
         Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape,
         Scalar<float32> low, Scalar<float32> high)
         => RuntimeRng.Uniform(shape, key, substreamIndex, low, high, Threefry2x32.Rounds13);
+
+    private static Tensor<float32> NormalImpl(
+        Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape,
+        Scalar<float32> mean, Scalar<float32> scale)
+        => RuntimeRng.Normal(shape, key, substreamIndex, mean, scale, Threefry2x32.Rounds);
 
     private static Tensor<float32> Normal13Impl(
         Scalar<uint64> key, Scalar<uint64> substreamIndex, Vector<int64> shape,

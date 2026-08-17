@@ -61,6 +61,15 @@ like `Zeros.Init([outFeatures])` or `KaimingUniform.Init([outC, inC, k, k])`.
   standard draw is scaled after the fact — so all of them fill a `float32` parameter from
   the half-open `[low, high)` and inherit the guarantees in
   [uniform-draws.md](uniform-draws.md).
+- **The normal initializers all share one draw.** `Normal`, `NormalDist`, `XavierNormal`,
+  `KaimingNormal`, `XavierNormalGain`, `KaimingNormalGain` and `LeCunNormal` each hand their
+  own standard deviation to the same N(mean, scale) draw, so all of them inherit its bound that
+  no drawn magnitude exceeds `8·scale`, which bounds the largest weight they can produce. The
+  bit-exactness guarantee in [normal-draws.md](normal-draws.md) covers the draw itself; the
+  fan-scaled initializers build their standard deviation in-graph with `Sqrt`, whose accuracy
+  ONNX does not specify, so their final values can differ in the last ulp between providers. Two draw from it but
+  do not inherit that bound: `TruncatedNormal` clamps to `[−2, 2]`, which is tighter, and
+  `Orthogonal` transforms its Gaussian through Newton–Schulz iterations.
 - **Fan-in/fan-out** are computed in-graph from the shape vector:
   `fanIn = prod(shape) / shape[0]`, `fanOut = prod(shape) / shape[1]` — the
   PyTorch convention for Linear `[out, in]` and Conv `[outC, inC/g, k...]`

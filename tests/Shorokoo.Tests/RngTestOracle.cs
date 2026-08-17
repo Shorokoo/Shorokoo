@@ -98,19 +98,4 @@ internal static class RngTestOracle
         int p = ef == 0 ? 0 : 63 - System.Numerics.BitOperations.LeadingZeroCount(ef);
         return frac * (float)System.Math.Pow(2.0, -1 - (40 - p));               // frac · 2^(-1-leadingZeros)
     }
-
-    /// <summary>Element <paramref name="i"/> of a standard-normal draw. Pair <c>j = i/2</c> takes its
-    /// radius from the geometric uniform at even position <c>2j</c> (√(−2·ln w), deep tail) and its
-    /// angle from a 24-bit uniform at odd position <c>2j+1</c>; even <paramref name="i"/> is the cosine
-    /// arm, odd the sine. Mirrors <c>RuntimeRng.StandardNormal</c>.</summary>
-    public static float DrawNormal(
-        ulong key, ulong substreamIndex, long i, int rounds = Threefry2x32.Rounds)
-    {
-        long j = i / 2;
-        float w = DrawUniform(key, substreamIndex, 2 * j, rounds);                          // geometric radius draw
-        float u2 = (DrawValue(key, substreamIndex, 2 * j + 1, rounds) & 0x00FFFFFFuL) * (1.0f / 16777216.0f);
-        float radius = System.MathF.Sqrt(-2.0f * System.MathF.Log(w));
-        float theta = u2 * (2.0f * System.MathF.PI);
-        return radius * (i % 2 == 0 ? System.MathF.Cos(theta) : System.MathF.Sin(theta));
-    }
 }

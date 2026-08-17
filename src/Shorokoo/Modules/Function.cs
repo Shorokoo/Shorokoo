@@ -77,7 +77,7 @@ namespace Shorokoo.Core
 
         /// <summary>
         /// Metadata property on FunctionProto: the named RNG algorithm this function belongs to
-        /// (e.g. "Threefry2x32-BoxMuller.v1"). Present only on RNG algorithm functions.
+        /// (e.g. "Threefry2x32-Dense.v1"). Present only on RNG algorithm functions.
         /// </summary>
         public const string IRRngAlgorithmParamName = "RngAlgorithm";
 

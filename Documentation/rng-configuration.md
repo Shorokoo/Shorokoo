@@ -95,21 +95,40 @@ functions (kinds *split* / *uniform* / *normal*) that export as tagged, non-inli
 local `FunctionProto`s. `RngSeed` becomes an ordinary initializer, and the runtime's
 session-build constant folding collapses the constant chain segments to literal keys — so
 the per-draw cost is what it always was. The exported model's randomness is therefore
-deterministic, portable across execution providers, and identifiable: you can point at the
-function in the ONNX file that produced any draw — and at the initializer that carries the
-identity it derived from.
+identifiable — you can point at the function in the ONNX file that produced any draw, and at
+the initializer that carries the identity it derived from — and deterministic and portable
+across execution providers: every step from the key to the drawn bit pattern is integer
+arithmetic, so any
+provider that implements the integer ops correctly returns the same bits.
 
 ## Choosing the generator
 
-`RngConfig.Algorithm` selects the bit generator:
+`RngConfig.Algorithm` selects the bit generator **and the decodes that turn its bits into
+values** — both, because both decide what a draw returns:
 
-- `RngAlgorithm.Threefry2x32` (default) — Threefry-2x32, 20 rounds; the Random123
-  safety-margin default.
-- `RngAlgorithm.Threefry2x32Rounds13` — the reduced 13-round variant (Random123
-  `threefry2x32x13`): still BigCrush-resistant, ~35% cheaper — the faster, lower-margin choice.
+- `RngAlgorithm.Threefry2x32` (default) — Threefry-2x32, 20 rounds (the Random123
+  safety-margin default).
+- `RngAlgorithm.Threefry2x32Rounds13` — the reduced 13-round bit generator (Random123
+  `threefry2x32x13`): still BigCrush-resistant, 7 rounds fewer — the lower-margin choice.
 
-All algorithms **share one key tree**: a stream's key is derived the same way regardless of
-generator, so switching `Algorithm` never reshuffles which stream is which — the same stream
+The two differ along exactly one axis: the bit generator's round count. The decodes above it
+are identical — the uniform's ([uniform-draws.md](uniform-draws.md)) and the normal's
+([normal-draws.md](normal-draws.md)) — and so is the key tree. The recorded identity names
+which algorithm a model is bound to, and a model whose identity names an algorithm this build
+does not know fails loudly rather than falling back to another one.
+
+**Why the decodes are integer-only.** A normal is commonly built by transforming uniform
+values through `√(−2·ln w)·cos(2πu)` — four float32 transcendentals deep. ONNX specifies no
+accuracy for `Log`, `Sqrt`, `Cos` or `Sin`, so two execution providers can both be perfectly
+conformant and still return different normals from the same key; evaluating that same formula
+in float32 and in binary64 makes 66% of draws differ, the worst by 4.19e-2 relative. Shorokoo's
+normal instead spends one 64-bit generator value per element and decodes it by **integer
+arithmetic alone** — a table of pieces, each inverting the Gaussian CDF over its run of
+magnitudes with a degree-12 series; no transcendental anywhere — so the value is fixed by the
+bits and nothing else, on every execution provider and in an exported model.
+
+Both algorithms **share one key tree**: a stream's key is derived the same way regardless of
+algorithm, so switching `Algorithm` never reshuffles which stream is which — the same stream
 simply draws different numbers. Both parameter initialization and runtime feeds honor the
 choice. Because binding is a parameter write, you can switch generators on an
 already-built (in-memory) model the same way you re-seed it (`concrete = concrete.WithRngConfig(...)`),
@@ -191,7 +210,7 @@ what it is bound to without holding the config that produced it:
 ```csharp
 if (model.TryGetRngIdentity() is { } identity)
 {
-    Console.WriteLine(identity.Algorithm);        // e.g. Threefry2x32Rounds13
+    Console.WriteLine(identity.Algorithm);        // e.g. Threefry2x32
     Console.WriteLine(identity.RunMasterKey);     // the derived runtime master key
     foreach (var o in identity.Overrides)         // path + key, one per overridden stream
         Console.WriteLine(o);

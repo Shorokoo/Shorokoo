@@ -75,7 +75,9 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Loads a .skpt checkpoint saved by <see cref="CheckpointBuilder.Save"/>, binding the
+        /// Loads a .skpt checkpoint saved by <see cref="CheckpointBuilder.Save"/> or
+        /// <see cref="CheckpointBuilder.SaveAsDirectory"/> — the path may name either shape,
+        /// the single file or the checkpoint directory (issue #183) — binding the
         /// <c>default</c> tensor mapping set. See <see cref="Load(string, string)"/> to select
         /// another set (e.g. <c>ema</c>).
         /// </summary>
@@ -104,20 +106,13 @@ namespace Shorokoo
             if (string.IsNullOrWhiteSpace(set))
                 throw new ArgumentException("Mapping set name cannot be null or empty.", nameof(set));
 
-            var fileBytes = File.ReadAllBytes(filePath);
-            using var fileStream = new MemoryStream(fileBytes, writable: false);
-            using var archive = OpenArchive(fileStream, filePath);
-
-            var configEntry = archive.GetEntry(SkptFileFormat.ConfigEntryName)
-                ?? throw new InvalidDataException(
-                    $"'{filePath}' is not a .skpt checkpoint — the archive contains no " +
-                    $"'{SkptFileFormat.ConfigEntryName}' manifest.");
-            var manifest = SkptFileFormat.ParseManifest(ReadEntryBytes(configEntry, filePath), filePath);
+            using var container = SkptContainer.Open(filePath);
+            var manifest = SkptFileFormat.ParseManifest(container.ReadManifestBytes(), filePath);
             ValidateManifestIdentity(manifest, filePath);
 
             var (modelKey, modelEntry) = SingleModel(manifest, filePath);
-            var graph = LoadModelDefinition(archive, modelKey, modelEntry, filePath);
-            BindWeights(archive, manifest, modelKey, set, graph, filePath);
+            var graph = LoadModelDefinition(container, modelKey, modelEntry, filePath);
+            BindWeights(container, manifest, modelKey, set, graph, filePath);
 
             return new ComputationGraph(graph, GraphKind.ConcreteModel);
         }
@@ -197,6 +192,7 @@ namespace Shorokoo
         /// </summary>
         internal static void VerifySkptContainer(string filePath, string flatEntryPointHint)
         {
+            if (Directory.Exists(filePath)) return;   // the .skpt directory form (issue #183)
             var prefix = ReadFilePrefix(filePath);
             if (LooksLikeZipArchive(prefix)) return;
             throw new InvalidDataException(LooksLikeSafeTensorsFile(prefix)
@@ -212,10 +208,15 @@ namespace Shorokoo
         /// checkpoint (an 8-byte header-length prefix, then the JSON header's <c>{</c>).
         /// <paramref name="skptEntryPointHint"/> completes the error when the file is a zip
         /// archive — the <c>.skpt</c> container — pointing at the entry point that reads that
-        /// shape.
+        /// shape. A directory can only be the .skpt directory form (issue #183), so it fails
+        /// the same way, with the same pointer.
         /// </summary>
         internal static void VerifyFlatTrainingCheckpoint(string filePath, string skptEntryPointHint)
         {
+            if (Directory.Exists(filePath))
+                throw new InvalidDataException(
+                    $"'{filePath}' is not a flat safetensors training checkpoint — it is a " +
+                    $"directory, the .skpt container's directory form. {skptEntryPointHint}");
             var prefix = ReadFilePrefix(filePath);
             if (LooksLikeZipArchive(prefix))
                 throw new InvalidDataException(
@@ -247,19 +248,6 @@ namespace Shorokoo
             using var probe = File.OpenRead(filePath);
             int read = probe.ReadAtLeast(prefix, prefix.Length, throwOnEndOfStream: false);
             return read == prefix.Length ? prefix : prefix.AsSpan(0, read).ToArray();
-        }
-
-        private static ZipArchive OpenArchive(Stream stream, string filePath)
-        {
-            try
-            {
-                return new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true);
-            }
-            catch (InvalidDataException e)
-            {
-                throw new InvalidDataException(
-                    $"'{filePath}' is not a .skpt checkpoint — it does not open as a zip archive. ({e.Message})", e);
-            }
         }
 
         private static void ValidateManifestIdentity(SkptManifest manifest, string filePath)
@@ -305,7 +293,7 @@ namespace Shorokoo
         }
 
         private static InternalComputationGraph LoadModelDefinition(
-            ZipArchive archive, string modelKey, SkptModelEntry modelEntry, string filePath)
+            SkptContainer container, string modelKey, SkptModelEntry modelEntry, string filePath)
         {
             if (string.IsNullOrEmpty(modelEntry.Entry))
                 throw new InvalidDataException(
@@ -319,7 +307,7 @@ namespace Shorokoo
                     $"'{filePath}': model '{modelKey}' records stage '{modelEntry.Stage}', but this " +
                     "Shorokoo build loads 'concrete-model' checkpoints only.");
 
-            var modelBytes = ReadEntry(archive, modelEntry.Entry, $"model '{modelKey}'", filePath);
+            var modelBytes = container.ReadRequiredEntry(modelEntry.Entry, $"model '{modelKey}'");
             VerifySha256(modelBytes, modelEntry.Sha256, modelEntry.Entry, filePath);
 
             var (graph, _) = CompressedFormatUtils.LoadFastGraphCore(
@@ -336,7 +324,7 @@ namespace Shorokoo
         /// <paramref name="setName"/> fails loudly, listing the sets the manifest declares.
         /// </summary>
         private static void BindWeights(
-            ZipArchive archive, SkptManifest manifest, string modelKey, string setName,
+            SkptContainer container, SkptManifest manifest, string modelKey, string setName,
             InternalComputationGraph graph, string filePath)
         {
             if (manifest.TensorMappings is null
@@ -377,7 +365,7 @@ namespace Shorokoo
                         "belong to this model?");
                 unboundRefs.Remove(paramId);
 
-                var tensors = ResolveDataEntry(archive, manifest, tensorRef, paramId, tensorsByDataKey, filePath);
+                var tensors = ResolveDataEntry(container, manifest, tensorRef, paramId, tensorsByDataKey, filePath);
                 if (string.IsNullOrEmpty(tensorRef.Tensor) || !tensors.TryGetValue(tensorRef.Tensor, out var loaded))
                     throw new InvalidDataException(
                         $"'{filePath}': parameter '{paramId}' maps to tensor '{tensorRef.Tensor}' in data " +
@@ -410,7 +398,7 @@ namespace Shorokoo
         /// and SHA-256-verifying each data entry at most once per load.
         /// </summary>
         private static Dictionary<string, TensorData> ResolveDataEntry(
-            ZipArchive archive, SkptManifest manifest, SkptTensorRef tensorRef, string paramId,
+            SkptContainer container, SkptManifest manifest, SkptTensorRef tensorRef, string paramId,
             Dictionary<string, Dictionary<string, TensorData>> tensorsByDataKey, string filePath)
         {
             var dataKey = tensorRef.Data;
@@ -431,7 +419,7 @@ namespace Shorokoo
                 throw new InvalidDataException(
                     $"'{filePath}': data entry '{dataKey}' uses unsupported storage format " +
                     $"'{dataEntry.Format}' (supported: '{SkptFileFormat.DataFormatSafeTensors}').");
-            var storedBytes = ReadEntry(archive, dataEntry.Entry, $"data entry '{dataKey}'", filePath);
+            var storedBytes = container.ReadRequiredEntry(dataEntry.Entry, $"data entry '{dataKey}'");
             // The manifest sha256 covers the entry's bytes as stored in the archive — for a
             // compressed entry, the compressed bytes — so integrity is checked here, before
             // and without decompression (mirroring .srk's payloadSha256 semantics).
@@ -493,31 +481,6 @@ namespace Shorokoo
                         $"'{dataEntry.Compression}' (supported: '{SkptFileFormat.CompressionNone}', " +
                         $"'{SkptFileFormat.CompressionZstd}').");
             }
-        }
-
-        private static byte[] ReadEntry(ZipArchive archive, string entryPath, string role, string filePath)
-        {
-            var entry = archive.GetEntry(entryPath)
-                ?? throw new InvalidDataException(
-                    $"'{filePath}': the manifest references entry '{entryPath}' (for {role}), " +
-                    "but the archive contains no such entry.");
-            return ReadEntryBytes(entry, filePath);
-        }
-
-        private static byte[] ReadEntryBytes(ZipArchiveEntry entry, string filePath)
-        {
-            // entry.Length is the uncompressed size declared in the archive's directory; a
-            // corrupt or hostile file can declare up to ~4 GiB. Reject oversize entries with
-            // the loader's usual named error rather than letting the (int) cast below throw a
-            // context-free OverflowException. This .skpt version reads in-memory entries only.
-            if (entry.Length > int.MaxValue)
-                throw new InvalidDataException(
-                    $"'{filePath}': entry '{entry.FullName}' declares an uncompressed size of {entry.Length} " +
-                    "bytes, which exceeds the maximum this .skpt version reads.");
-            using var entryStream = entry.Open();
-            using var buffer = new MemoryStream((int)entry.Length);
-            entryStream.CopyTo(buffer);
-            return buffer.ToArray();
         }
 
         private static void VerifySha256(byte[] bytes, string? expected, string entryPath, string filePath)
@@ -813,6 +776,47 @@ namespace Shorokoo
         {
             if (string.IsNullOrWhiteSpace(filePath))
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
+            var entries = BuildCheckpointEntries();
+            AtomicFileWriter.WriteFile(filePath,
+                stream => SkptFileFormat.WriteStoredZip(stream, entries, DateTime.UtcNow));
+        }
+
+        /// <summary>
+        /// Saves the checkpoint as a <b>directory</b> (issue #183): the same content as
+        /// <see cref="Save"/> — the same config.json manifest at the root, the models/ and data/
+        /// entries byte-identical — laid out as real files and folders instead of a single zip.
+        /// The directory form is diffable and rsync-friendly (an unchanged entry stays an
+        /// untouched file) and makes reading or replacing one entry a plain file operation; the
+        /// zip stays the single-file form for handing someone a checkpoint, and
+        /// <see cref="Persistence.PackSkpt"/> / <see cref="Persistence.ExtractSkpt"/> convert
+        /// between the two. <see cref="Persistence.Load(string)"/> and
+        /// <see cref="Persistence.Inspect"/> accept either shape. Which form a save writes is
+        /// always this explicit choice of method, never inferred from the path (a directory
+        /// checkpoint may itself be named <c>run17.skpt</c>).
+        ///
+        /// <para>The write is atomic: content is staged to a temp directory beside
+        /// <paramref name="directoryPath"/> and committed by a directory rename, so the target
+        /// path never names a half-written checkpoint; the target's parent directory must
+        /// already exist. An existing checkpoint (file or directory) at the target is replaced
+        /// only by a completed save.</para>
+        /// </summary>
+        public void SaveAsDirectory(string directoryPath)
+        {
+            if (string.IsNullOrWhiteSpace(directoryPath))
+                throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(directoryPath));
+            var entries = BuildCheckpointEntries();
+            AtomicFileWriter.WriteDirectory(directoryPath,
+                stagingRoot => SkptFileFormat.WriteDirectoryEntries(stagingRoot, entries));
+        }
+
+        /// <summary>
+        /// Builds the checkpoint's complete entry list — config.json first, then the model and
+        /// data entries — shared verbatim by the zip (<see cref="Save"/>) and directory
+        /// (<see cref="SaveAsDirectory"/>) forms, which differ only in how the entries land on
+        /// disk.
+        /// </summary>
+        private List<SkptFileFormat.ZipEntrySpec> BuildCheckpointEntries()
+        {
             if (!_withModel || !_withWeights)
                 throw new InvalidOperationException(
                     "Persistence.Save: this Shorokoo version writes exactly one checkpoint shape — " +
@@ -1008,8 +1012,7 @@ namespace Shorokoo
                 new(SkptFileFormat.ConfigEntryName, SkptFileFormat.SerializeManifest(manifest), Align: false),
             };
             entries.AddRange(bodyEntries);
-            AtomicFileWriter.WriteFile(filePath,
-                stream => SkptFileFormat.WriteStoredZip(stream, entries, DateTime.UtcNow));
+            return entries;
         }
 
         /// <summary>

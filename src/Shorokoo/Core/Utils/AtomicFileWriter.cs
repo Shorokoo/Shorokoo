@@ -84,6 +84,98 @@ namespace Shorokoo.Core.Utils
         }
 
         /// <summary>
+        /// Atomically writes a directory tree: <paramref name="writeContent"/> populates a staged
+        /// <c>.tmp-</c>-prefixed sibling directory next to <paramref name="targetPath"/>, which is
+        /// then committed by a directory rename — so the target path never names a half-written
+        /// tree. Replacing an existing target is supported: a directory rename cannot overwrite,
+        /// so the previous target is first renamed aside (to another staged name) and removed
+        /// best-effort after the commit; until the commit rename, the previous target is intact
+        /// either in place or under its aside name. On any failure the staged copy is deleted and
+        /// the previous target is left untouched. The target's parent directory must already
+        /// exist. Content durability is the callback's concern: flush files it writes to disk
+        /// (the directory-format writers do).
+        /// </summary>
+        internal static void WriteDirectory(
+            string targetPath,
+            Action<string> writeContent,
+            Action<string>? onWarning = null)
+        {
+            if (writeContent is null) throw new ArgumentNullException(nameof(writeContent));
+            // A directory target is commonly written with a trailing separator ("run.skpt/");
+            // normalize so the name/parent split below sees the directory's own name.
+            var (directory, name, fullTarget) = ValidateTarget(
+                string.IsNullOrWhiteSpace(targetPath) ? targetPath : Path.TrimEndingDirectorySeparator(targetPath));
+            if (File.Exists(fullTarget))
+                throw new IOException(
+                    $"Cannot save directory '{targetPath}': the target already exists as a file. " +
+                    "Delete it first, or save to another path.");
+
+            string tempPath = Path.Combine(directory, StageName(name));
+            try
+            {
+                Directory.CreateDirectory(tempPath);
+                writeContent(tempPath);
+                CommitFaultInjection?.Invoke(tempPath);
+                if (Directory.Exists(fullTarget))
+                {
+                    // A staged-shaped aside name, so a crash between the two renames leaves it
+                    // recognizable as uncommitted debris for the post-commit sweep.
+                    string asidePath = Path.Combine(directory, StageName(name));
+                    Directory.Move(fullTarget, asidePath);
+                    Directory.Move(tempPath, fullTarget);
+                    try { Directory.Delete(asidePath, recursive: true); }
+                    catch (Exception e)
+                    {
+                        (onWarning ?? (static _ => { }))(
+                            $"Shorokoo: failed to remove the replaced checkpoint copy '{asidePath}': {e.Message}");
+                    }
+                }
+                else
+                {
+                    Directory.Move(tempPath, fullTarget);
+                }
+            }
+            catch
+            {
+                try { if (Directory.Exists(tempPath)) Directory.Delete(tempPath, recursive: true); }
+                catch { /* the stale temp is swept on the next successful save */ }
+                throw;
+            }
+
+            AfterCommitDirectory(directory, name, onWarning);
+        }
+
+        /// <summary>
+        /// Post-commit housekeeping for <see cref="WriteDirectory"/>: sweep stale staged sibling
+        /// directories from earlier failed saves of this target (the directory analogue of
+        /// <see cref="AfterCommit"/>). Best-effort — the commit has already succeeded. Unlike the
+        /// file sweep there is no share-mode guard against a concurrent saver's live staging
+        /// directory, so only directories older than a grace period are swept.
+        /// </summary>
+        private static void AfterCommitDirectory(string directory, string targetName, Action<string>? onWarning)
+        {
+            onWarning ??= static _ => { };
+            foreach (var stale in EnumerateSafely(directory, $"{TempPrefix}{targetName}-*", onWarning))
+            {
+                if (!IsStagedTempFor(Path.GetFileName(stale), targetName)) continue;
+                if (!Directory.Exists(stale)) continue;   // file temps belong to the file sweep
+                try
+                {
+                    // A concurrent save of the same target may be mid-staging right now; skip
+                    // anything recently created rather than deleting the data out from under it.
+                    if (DateTime.UtcNow - Directory.GetCreationTimeUtc(stale) < StaleDirectoryGracePeriod)
+                        continue;
+                    Directory.Delete(stale, recursive: true);
+                }
+                catch (Exception e) { onWarning($"Shorokoo: failed to remove stale temp '{stale}': {e.Message}"); }
+            }
+        }
+
+        /// <summary>How old a staged sibling directory must be before the post-commit sweep
+        /// treats it as abandoned rather than a concurrent saver's live staging area.</summary>
+        private static readonly TimeSpan StaleDirectoryGracePeriod = TimeSpan.FromHours(1);
+
+        /// <summary>
         /// Writes a file exactly as <see cref="WriteFile(string, Action{Stream}, Action{string})"/>
         /// and then, <b>after the commit has succeeded</b>, prunes older members of the same
         /// checkpoint series so only the <see cref="RetainPolicy.Keep"/> most recent survive.

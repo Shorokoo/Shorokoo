@@ -655,6 +655,31 @@ namespace Shorokoo.Core.Utils
         internal static bool LooksLikeZstdFrame(ReadOnlySpan<byte> data)
             => data.Length >= 4 && data[0] == 0x28 && data[1] == 0xB5 && data[2] == 0x2F && data[3] == 0xFD;
 
+        /// <summary>
+        /// Writes checkpoint entries as real files under <paramref name="stagingRoot"/> — the
+        /// directory form of a .skpt (issue #183). Each entry's archive-relative path becomes a
+        /// file path (creating subdirectories as needed) with byte-identical content to the zip
+        /// form; the zip's payload alignment is moot here (a real file is already page-aligned
+        /// and range-readable), so <see cref="ZipEntrySpec.Align"/> is ignored. Every file is
+        /// flushed to disk, since the atomic directory commit is a rename of
+        /// <paramref name="stagingRoot"/> itself. Entry paths resolve through the same
+        /// inside-the-root rule the directory reader enforces, so nothing is ever written
+        /// outside the staging root.
+        /// </summary>
+        internal static void WriteDirectoryEntries(string stagingRoot, IReadOnlyList<ZipEntrySpec> entries)
+        {
+            if (entries is null) throw new ArgumentNullException(nameof(entries));
+            var rootFull = Path.GetFullPath(stagingRoot);
+            foreach (var entry in entries)
+            {
+                var resolved = SkptDirectoryContainer.ResolveEntryPath(rootFull, entry.Name, stagingRoot);
+                Directory.CreateDirectory(Path.GetDirectoryName(resolved)!);
+                using var fs = new FileStream(resolved, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                fs.Write(entry.Data);
+                fs.Flush(flushToDisk: true);
+            }
+        }
+
         #region STORED zip writer
 
         /// <summary>One entry to be written into a .skpt archive.</summary>

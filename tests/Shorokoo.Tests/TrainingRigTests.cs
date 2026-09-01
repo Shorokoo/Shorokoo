@@ -2435,6 +2435,41 @@ public class TrainingRigSkptCheckpointCoverageTests
         }
         finally { if (File.Exists(stepEpochPath)) File.Delete(stepEpochPath); }
     }
+
+    [Fact]
+    public void TestSkptDirectoryFormTrainingCheckpointRoundTripCoverage()
+    {
+        var (rig, ckpt, inBatch, outBatch) = BuildTrainedAdamRig(steps: 2);
+        var reference = rig.TrainStep(ckpt, inBatch, outBatch);
+        var dirPath = TempPath("skpt_ckpt_dir") + ".skpt";
+        var packedPath = TempPath("skpt_ckpt_packed") + ".skpt";
+        try
+        {
+            Persistence.ForTrainingCheckpoint(ckpt).SaveAsDirectory(dirPath);
+            Assert.True(File.Exists(Path.Combine(dirPath, SkptFileFormat.ConfigEntryName)));
+            Assert.True(File.Exists(Path.Combine(dirPath, SkptFileFormat.TrainableEntryPath)));
+
+            var (rig2, loaded) = TrainingRig.Load(dirPath);
+            Assert.Equal(2, loaded.Step);
+            Assert.Equal(FlattenStruct(ckpt.TrainableParams), FlattenStruct(loaded.TrainableParams));
+            Assert.Equal(FlattenStruct(ckpt.OptimizerState), FlattenStruct(loaded.OptimizerState));
+            var resumed = rig2.TrainStep(loaded, inBatch, outBatch);
+            Assert.Equal(FlattenStruct(reference.TrainableParams), FlattenStruct(resumed.TrainableParams));
+
+            Assert.Equal(2, rig.LoadCheckpointFromSkpt(dirPath).Step);
+            Assert.Equal(GraphKind.ConcreteModel, Persistence.Load(dirPath).Kind);
+
+            Persistence.PackSkpt(dirPath, packedPath);
+            var (_, packedLoaded) = TrainingRig.Load(packedPath);
+            Assert.Equal(FlattenStruct(loaded.TrainableParams), FlattenStruct(packedLoaded.TrainableParams));
+            Assert.Equal(2, packedLoaded.Step);
+        }
+        finally
+        {
+            if (Directory.Exists(dirPath)) Directory.Delete(dirPath, recursive: true);
+            if (File.Exists(packedPath)) File.Delete(packedPath);
+        }
+    }
 }
 
 [Trait("Domain", "Training")]

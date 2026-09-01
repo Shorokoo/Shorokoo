@@ -94,7 +94,7 @@ Persistence.SaveTrainingCheckpointToSkpt(checkpoint, "run.skpt");
 
 // Resume in a fresh process: rebuild the rig from the same graphs, then load.
 var rig     = TrainingRig.FromScratch(modelGraph, lossGraph, optimizerGraph, sample, hypers);
-var resumed = rig.LoadCheckpoint("run.skpt");   // reads .skpt or flat, auto-detected
+var resumed = rig.LoadCheckpointFromSkpt("run.skpt");
 var next    = rig.TrainStep(resumed, inputBatch, targetBatch);   // trainstep compiled once internally
 ```
 
@@ -136,15 +136,18 @@ missing kind, a rank mismatch, or a tampered entry (sha256) fails loudly.
 Reconstruct without a rig by supplying the struct defs directly:
 
 ```csharp
-TrainingCheckpoint ckpt = Persistence.LoadTrainingCheckpoint(
+TrainingCheckpoint ckpt = Persistence.LoadTrainingCheckpointFromSkpt(
     "run.skpt", trainableParamDef, modelStateDef, optimizerStateDef);
 ```
 
-`Persistence.SaveTrainingCheckpoint(checkpoint, path)` writes the **flat**
-[safetensors format](training.md); the `.skpt` path is opt-in via
-`SaveTrainingCheckpointToSkpt` / `ForTrainingCheckpoint`. Both `LoadTrainingCheckpoint`
-and `TrainingRig.LoadCheckpoint` read either shape — the on-disk form is detected from the
-file — so both load through one entry point.
+Each on-disk shape has its own save/load pair. `Persistence.SaveTrainingCheckpoint` /
+`Persistence.LoadTrainingCheckpoint` (and `rig.LoadCheckpoint`) handle the **flat**
+[safetensors format](training.md); `SaveTrainingCheckpointToSkpt` /
+`ForTrainingCheckpoint` and `LoadTrainingCheckpointFromSkpt` (and
+`rig.LoadCheckpointFromSkpt`) handle the `.skpt` container. No load entry point sniffs
+the file's bytes to pick a shape: handing one the other format fails immediately with an
+error naming both formats and the entry point that reads the file's actual shape. To
+identify a genuinely unknown file first, use `Persistence.Inspect`.
 
 ## Provenance metadata
 
@@ -509,4 +512,5 @@ Rules:
 - A [training checkpoint](#training-checkpoints) stores the trainable weights, model
   state, optimizer state and global step of a run. The full training **rig** — the
   constituent model/loss/optimizer/scheduler graphs and their schedules — is not yet
-  carried; resume rebuilds the rig from the same graphs, then `LoadCheckpoint`s the file.
+  carried; resume rebuilds the rig from the same graphs, then loads the file with
+  `rig.LoadCheckpointFromSkpt`.

@@ -1033,7 +1033,7 @@ namespace Shorokoo
                 else if (t.CheckpointVersion != SkptFileFormat.TrainingCheckpointVersion)
                     observations.Add($"training-checkpoint block version {t.CheckpointVersion} is not the " +
                         $"version this build reads ({SkptFileFormat.TrainingCheckpointVersion}); " +
-                        "Persistence.LoadTrainingCheckpoint would refuse the file.");
+                        "Persistence.LoadTrainingCheckpointFromSkpt would refuse the file.");
 
                 var kinds = new List<KeyValuePair<string, string>>();
                 foreach (var (kindName, dataKey) in t.Kinds ?? new())

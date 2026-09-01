@@ -45,8 +45,12 @@ namespace Shorokoo
     /// The safetensors boundary lives here too: <c>ExportSafeTensors</c> writes a model's
     /// weights to a standard .safetensors file and <c>ImportSafeTensors</c> binds a foreign
     /// .safetensors file onto an architecture (see <c>Persistence.SafeTensors.cs</c>).
-    /// Training-run state routes through <see cref="SaveTrainingCheckpoint(TrainingCheckpoint, string)"/> /
-    /// <see cref="LoadTrainingCheckpoint"/>.
+    /// Training-run state routes through a format-explicit save/load pair per on-disk shape:
+    /// <see cref="SaveTrainingCheckpoint(TrainingCheckpoint, string)"/> /
+    /// <see cref="LoadTrainingCheckpoint"/> for the flat safetensors file, and
+    /// <see cref="SaveTrainingCheckpointToSkpt"/> /
+    /// <see cref="LoadTrainingCheckpointFromSkpt(string, TensorStructDef, TensorStructDef, TensorStructDef)"/>
+    /// for the native .skpt container.
     /// </summary>
     // Partial: Persistence.Inspect (read-only artifact identification) lives in
     // ArtifactInspection.cs and the safetensors weight-exchange boundary in
@@ -125,9 +129,13 @@ namespace Shorokoo
         // shape is a .skpt (issue #95) that carries the concrete inference model plus
         // the training state split into per-kind data entries, so a training checkpoint gains the
         // container's benefits (inspectable manifest, per-entry Zstd, atomic write, provenance
-        // metadata) and shares one format with inference checkpoints. New saves opt into the .skpt
-        // shape via SaveTrainingCheckpointToSkpt / ForTrainingCheckpoint (in
-        // Persistence.TrainingCheckpoint.cs); LoadTrainingCheckpoint reads either shape.
+        // metadata) and shares one format with inference checkpoints. Each shape has its own
+        // save/load pair (issue #185): SaveTrainingCheckpoint / LoadTrainingCheckpoint for the
+        // flat file, SaveTrainingCheckpointToSkpt (or ForTrainingCheckpoint) /
+        // LoadTrainingCheckpointFromSkpt (in Persistence.TrainingCheckpoint.cs) for the
+        // container. No load path sniffs the file's bytes to pick a shape — a wrong-format
+        // file fails immediately naming both formats; a caller with a genuinely unknown file
+        // identifies it with Inspect first and dispatches.
 
         /// <summary>
         /// Saves a <see cref="TrainingCheckpoint"/> — trainable parameters, model state, optimizer
@@ -145,13 +153,17 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Loads a <see cref="TrainingCheckpoint"/> saved by either <see cref="SaveTrainingCheckpoint(TrainingCheckpoint, string)"/>
-        /// (the flat safetensors file) or <see cref="SaveTrainingCheckpointToSkpt"/> (the
-        /// native .skpt container) — the shape is detected from the file's bytes. Either way the
-        /// checkpoint is reconstructed against the given struct defs (which pin the expected shapes,
-        /// so a checkpoint from a different model or optimizer fails loudly). The result carries no
-        /// <see cref="TrainingCheckpoint.Rig"/>; to resume a whole rig (and attach it), prefer
-        /// <see cref="TrainingRig.LoadCheckpoint"/>, which supplies these defs from the rig.
+        /// Loads a <see cref="TrainingCheckpoint"/> from the flat sectioned-safetensors file written
+        /// by <see cref="SaveTrainingCheckpoint(TrainingCheckpoint, string)"/> /
+        /// <see cref="TrainingCheckpoint.Save(string, CheckpointComponents?)"/>. This entry point
+        /// reads that format only: handed a <c>.skpt</c> container it fails immediately, naming
+        /// <see cref="LoadTrainingCheckpointFromSkpt(string, TensorStructDef, TensorStructDef, TensorStructDef)"/>
+        /// as the entry point for that shape (a caller with a genuinely unknown file identifies it
+        /// with <see cref="Inspect"/> first). The checkpoint is reconstructed against the given
+        /// struct defs (which pin the expected shapes, so a checkpoint from a different model or
+        /// optimizer fails loudly). The result carries no <see cref="TrainingCheckpoint.Rig"/>; to
+        /// resume a whole rig (and attach it), prefer <see cref="TrainingRig.LoadCheckpoint"/>,
+        /// which supplies these defs from the rig.
         /// </summary>
         public static TrainingCheckpoint LoadTrainingCheckpoint(
             string filePath,
@@ -162,26 +174,68 @@ namespace Shorokoo
             if (string.IsNullOrWhiteSpace(filePath))
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
 
-            return IsSkptFile(filePath)
-                ? LoadTrainingCheckpointFromSkpt(
-                    filePath, trainableParamDef, modelStateDef, optimizerStateDef,
-                    components: null, rigForDefaults: null)
-                : TrainingCheckpoint.LoadFlat(
-                    filePath, trainableParamDef, modelStateDef, optimizerStateDef,
-                    components: null, rigForDefaults: null);
+            VerifyFlatTrainingCheckpoint(filePath,
+                "Load a .skpt training checkpoint with Persistence.LoadTrainingCheckpointFromSkpt " +
+                "(or rebuild the whole rig from it with TrainingRig.Load).");
+            return TrainingCheckpoint.LoadFlat(
+                filePath, trainableParamDef, modelStateDef, optimizerStateDef,
+                components: null, rigForDefaults: null);
+        }
+
+        // ---- Load-path format verification (issue #185) ----
+        // Each training-checkpoint load entry point assumes the on-disk shape its name declares
+        // and verifies it before parsing, so a wrong-format file fails immediately with an error
+        // naming both formats and the entry point that reads the other one — instead of a deep
+        // parse error from the wrong reader. Neither guard ever picks a code path from the bytes;
+        // identifying a genuinely unknown file is Persistence.Inspect's job.
+
+        /// <summary>
+        /// Fails loud unless <paramref name="filePath"/> begins like a <c>.skpt</c> container (a
+        /// zip archive). <paramref name="flatEntryPointHint"/> completes the error when the file
+        /// looks like the flat safetensors checkpoint instead, pointing at the entry point that
+        /// reads that shape.
+        /// </summary>
+        internal static void VerifySkptContainer(string filePath, string flatEntryPointHint)
+        {
+            var prefix = ReadFilePrefix(filePath);
+            if (LooksLikeZipArchive(prefix)) return;
+            throw new InvalidDataException(LooksLikeSafeTensorsFile(prefix)
+                ? $"'{filePath}' is not a .skpt container — it looks like a flat safetensors " +
+                  $"training checkpoint, not a zip archive. {flatEntryPointHint}"
+                : $"'{filePath}' is not a .skpt container — a .skpt is a zip archive, but the " +
+                  (prefix.Length == 0
+                      ? "file is empty, "
+                      : $"file starts with bytes {Convert.ToHexString(prefix.AsSpan(0, Math.Min(prefix.Length, 4)))}, ") +
+                  "matching neither a .skpt container nor a flat safetensors checkpoint.");
         }
 
         /// <summary>
-        /// True if the file is a <c>.skpt</c> container (a zip archive) rather than a flat
-        /// safetensors checkpoint — sniffed from the leading four bytes (a zip starts <c>PK\x03\x04</c>;
-        /// the flat checkpoint is a safetensors file with an 8-byte header-length prefix).
+        /// Fails loud when <paramref name="filePath"/> begins like a zip archive — the <c>.skpt</c>
+        /// container, not the flat safetensors checkpoint the caller reads.
+        /// <paramref name="skptEntryPointHint"/> completes the error, pointing at the entry point
+        /// that reads the container shape.
         /// </summary>
-        internal static bool IsSkptFile(string filePath)
+        internal static void VerifyFlatTrainingCheckpoint(string filePath, string skptEntryPointHint)
         {
-            byte[] prefix = new byte[4];
+            if (!LooksLikeZipArchive(ReadFilePrefix(filePath))) return;
+            throw new InvalidDataException(
+                $"'{filePath}' is not a flat safetensors training checkpoint — it is a zip " +
+                $"archive, the .skpt container format. {skptEntryPointHint}");
+        }
+
+        /// <summary>A flat training checkpoint is a safetensors file: an 8-byte little-endian
+        /// JSON-header length followed by the header's opening <c>{</c>.</summary>
+        private static bool LooksLikeSafeTensorsFile(ReadOnlySpan<byte> prefix)
+            => prefix.Length >= 9 && prefix[8] == (byte)'{';
+
+        /// <summary>The leading bytes of the file (fewer when the file is shorter) — enough for
+        /// the zip and safetensors shape checks above.</summary>
+        private static byte[] ReadFilePrefix(string filePath)
+        {
+            byte[] prefix = new byte[9];
             using var probe = File.OpenRead(filePath);
-            probe.ReadAtLeast(prefix, prefix.Length, throwOnEndOfStream: false);
-            return LooksLikeZipArchive(prefix);
+            int read = probe.ReadAtLeast(prefix, prefix.Length, throwOnEndOfStream: false);
+            return read == prefix.Length ? prefix : prefix.AsSpan(0, read).ToArray();
         }
 
         private static ZipArchive OpenArchive(Stream stream, string filePath)

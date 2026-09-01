@@ -47,7 +47,10 @@ namespace Shorokoo.Core.Factory
     /// <c>NotImplementedException</c> there — so those floors are presently unreachable and
     /// kept only as the documented restore point for when a runtime registers the ops at a
     /// usable opset. The attribute floors in <see cref="MinimumOpsetByAttribute"/> remain
-    /// live (a user can still author e.g. a Cast <c>round_mode</c>).
+    /// live, primarily for imported models: no <c>Ops</c>/<c>OnnxOp</c> entry point accepts
+    /// any of those attributes, so a graph built through the public op surface always
+    /// exports at 21, and only a foreign <c>.onnx</c> carrying one of them (or a node
+    /// stamped through the raw <c>NodeBuilder</c> surface) re-exports higher.
     /// </para>
     /// </summary>
     internal static class FastOpsetResolver

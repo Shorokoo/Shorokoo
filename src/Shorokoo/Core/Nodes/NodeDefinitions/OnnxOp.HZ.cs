@@ -516,10 +516,10 @@ public static partial class OnnxOp
     public static Variable QuantizeLinear(
         Variable x, Variable yScale, Variable? yZeroPoint = null,
         long? axis = null, long? blockSize = null, DType? outputDatatype = null,
-        bool? saturate = null, long? precision = null)
+        bool? saturate = null)
         => NodeBuilder.BuildNodeSingleOut(QUANTIZE_LINEAR, [x, yScale, yZeroPoint],
             [(AttrAxis, axis), (AttrBlockSize, blockSize), (AttrOutputDtype, outputDatatype),
-             (AttrSaturate, saturate), (AttrPrecision, precision)]);
+             (AttrSaturate, saturate)]);
 
     public static Variable QLinearMatMul(
         Variable a, Variable aScale, Variable aZeroPoint,

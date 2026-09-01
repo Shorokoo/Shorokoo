@@ -20,17 +20,6 @@ namespace Shorokoo.Core
 {
     public class Function
     {
-        public class FunctionNotFoundException : ShorokooException
-        {
-            public string FunctionName { get; }
-
-            public FunctionNotFoundException(string errorCode, string functionName, string additionalContext = "") 
-                : base(errorCode, $"Function '{functionName}' was not found. {additionalContext}".Trim())
-            {
-                FunctionName = functionName;
-            }
-        }
-
         /// <summary>
         /// Metadata property on FunctionProto.
         /// The value is a FunctionType specifying the purpose of the function.

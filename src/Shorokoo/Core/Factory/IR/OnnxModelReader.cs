@@ -70,8 +70,8 @@ namespace Shorokoo.Core.Factory.IR
         {
             var tensorStructDefs = ParseTensorStructMetadata(this.model);
 
-            var (functions, onnxNameToFunction) = internalBuildFunctions(this.model.Functions, this.OpSetVersion, tensorStructDefs);
-            var fastGraph = internalBuildInternalComputationGraph(this.model.Graph, functions, onnxNameToFunction, this.OpSetVersion, tensorStructDefs);
+            var onnxNameToFunction = internalBuildFunctions(this.model.Functions, this.OpSetVersion, tensorStructDefs);
+            var fastGraph = internalBuildInternalComputationGraph(this.model.Graph, onnxNameToFunction, this.OpSetVersion, tensorStructDefs);
             Shorokoo.Core.Nodes.Processors.Fast.FastUnPrepFromOnnx.Process(fastGraph);
             return fastGraph;
         }
@@ -159,106 +159,93 @@ namespace Shorokoo.Core.Factory.IR
                     "Circular reference detected in function dependencies");
         }
 
-        private static (Function[] functions, Dictionary<string, Function> onnxNameToFunction) internalBuildFunctions(
+        private static Dictionary<string, Function> internalBuildFunctions(
             List<FunctionProto> functionProtos,
             OpSetVersion opset,
             ImmutableDictionary<int, TensorStructDef>? tensorStructDefs = null)
         {
             var orderedFunctionProtos = SortByReferenceHierarchy(functionProtos).ToList();
             Dictionary<string, Function> functions = new();
-            List<Function>? retvals = new();
 
             foreach (var functionProto in orderedFunctionProtos)
             {
-                var result = internalInitFunction(functionProto, functions.ToImmutableDictionary(), opset, tensorStructDefs);
-
-                Debug.Assert(result is not null);
-                functions[functionProto.Name] = result;
-
-                retvals.Add(result);
+                functions[functionProto.Name] = internalInitFunction(functionProto, functions.ToImmutableDictionary(), opset, tensorStructDefs);
             }
 
-            return (retvals.ToArray(), functions);
+            return functions;
         }
 
-        private static Function? internalInitFunction(
+        private static Function internalInitFunction(
             FunctionProto functionProto,
             ImmutableDictionary<string, Function> functionsMap,
             OpSetVersion opset,
             ImmutableDictionary<int, TensorStructDef>? tensorStructDefs = null)
         {
-            try
+            var functionTypeName = functionProto.MetadataProps.FirstOrDefault(x => x.Key == Function.IRFunctionTypeParamName)?.Value;
+            var functionType = Function.FromComponentTypeName(functionTypeName);
+
+            // Restore the original module name from metadata if available
+            // This preserves names like "ResNet18Debug" even when the ONNX file uses "fn_0"
+            var friendlyName = functionProto.MetadataProps.FirstOrDefault(x => x.Key == Function.IRFunctionFriendlyName)?.Value;
+            // Strip any built-in-op collision-avoidance prefix (OnnxFunctionName) so the
+            // reconstructed DefaultName equals the original name; functionsMap stays keyed
+            // by the on-disk (encoded) name so op_type / shrk_function_name lookups still match.
+            var defaultName = OnnxFunctionName.Decode(functionProto.Name);
+
+            // Walk the FunctionProto's nodes in proto order (descending into each
+            // sub-graph between an emitted OPEN/CLOSE pair). Proto order is the
+            // canonical execution order — a topological-sort-based reconstruction
+            // would hoist scope-invariant body nodes (e.g. a shape Concat whose only
+            // inputs are function-input hyperparams) above their enclosing LOOP_OPEN,
+            // breaking downstream OPEN/CLOSE-band passes like
+            // FastFoldConstantIterationLoops.
+            var fastGraph = new InternalComputationGraph();
+            var tensorKeys = new Dictionary<string, FastTensorKey>();
+
+            var infosByName = functionProto.ValueInfoes.ToDictionary(x => x.Name, x => x);
+            var inputInfos = functionProto.Inputs.Select(name => infosByName[name]).ToList();
+            foreach (var (info, key, fastNode) in CreateFastInputTensors(inputInfos, functionsMap, tensorStructDefs))
             {
-                var functionTypeName = functionProto.MetadataProps.FirstOrDefault(x => x.Key == Function.IRFunctionTypeParamName)?.Value;
-                var functionType = Function.FromComponentTypeName(functionTypeName);
-
-                // Restore the original module name from metadata if available
-                // This preserves names like "ResNet18Debug" even when the ONNX file uses "fn_0"
-                var friendlyName = functionProto.MetadataProps.FirstOrDefault(x => x.Key == Function.IRFunctionFriendlyName)?.Value;
-                // Strip any built-in-op collision-avoidance prefix (OnnxFunctionName) so the
-                // reconstructed DefaultName equals the original name; functionsMap stays keyed
-                // by the on-disk (encoded) name so op_type / shrk_function_name lookups still match.
-                var defaultName = OnnxFunctionName.Decode(functionProto.Name);
-
-                // Walk the FunctionProto's nodes in proto order (descending into each
-                // sub-graph between an emitted OPEN/CLOSE pair). Proto order is the
-                // canonical execution order — a topological-sort-based reconstruction
-                // would hoist scope-invariant body nodes (e.g. a shape Concat whose only
-                // inputs are function-input hyperparams) above their enclosing LOOP_OPEN,
-                // breaking downstream OPEN/CLOSE-band passes like
-                // FastFoldConstantIterationLoops.
-                var fastGraph = new InternalComputationGraph();
-                var tensorKeys = new Dictionary<string, FastTensorKey>();
-
-                var infosByName = functionProto.ValueInfoes.ToDictionary(x => x.Name, x => x);
-                var inputInfos = functionProto.Inputs.Select(name => infosByName[name]).ToList();
-                foreach (var (info, key, fastNode) in CreateFastInputTensors(inputInfos, functionsMap, tensorStructDefs))
-                {
-                    fastGraph.Nodes.Add(fastNode);
-                    tensorKeys[info.Name] = key;
-                    fastGraph.Inputs.Add(key);
-                    fastGraph.InputUniqueNames.Add(info.Name);
-                }
-
-                CreateFastNodes(fastGraph, EnumerateNodesInProtoOrder(functionProto.Nodes), tensorKeys, functionsMap, opset);
-
-                foreach (var outputName in functionProto.Outputs)
-                {
-                    fastGraph.Outputs.Add(tensorKeys[outputName]);
-                    fastGraph.OutputUniqueNames.Add(outputName);
-                }
-
-                // State-initializer ownership rides FunctionProto metadata; absent falls back to
-                // the constructor default,
-                // ModuleOwned. An explicitly present but unknown value fails loudly rather than
-                // silently re-tagging optimizer state as module state.
-                var ownershipName = functionProto.MetadataProps
-                    .FirstOrDefault(x => x.Key == Function.IRStateOwnershipParamName)?.Value;
-                StateOwnership? stateOwnership = null;
-                if (ownershipName is not null)
-                {
-                    if (!Enum.TryParse<StateOwnership>(ownershipName, out var parsedOwnership))
-                        throw new System.IO.InvalidDataException(
-                            $"Function '{defaultName}': metadata '{Function.IRStateOwnershipParamName}' has " +
-                            $"unknown value '{ownershipName}' (expected " +
-                            $"'{StateOwnership.ModuleOwned}' or '{StateOwnership.OptimizerOwned}').");
-                    stateOwnership = parsedOwnership;
-                }
-
-                Function onnxFunction = new Function(fastGraph, functionType, defaultName: defaultName, friendlyName: friendlyName,
-                    stateOwnership)
-                {
-                    RngAlgorithm = functionProto.MetadataProps
-                        .FirstOrDefault(x => x.Key == Function.IRRngAlgorithmParamName)?.Value,
-                    RngFunctionKind = functionProto.MetadataProps
-                        .FirstOrDefault(x => x.Key == Function.IRRngFunctionKindParamName)?.Value,
-                };
-                return onnxFunction;
+                fastGraph.Nodes.Add(fastNode);
+                tensorKeys[info.Name] = key;
+                fastGraph.Inputs.Add(key);
+                fastGraph.InputUniqueNames.Add(info.Name);
             }
-            catch (Function.FunctionNotFoundException)
+
+            CreateFastNodes(fastGraph, EnumerateNodesInProtoOrder(functionProto.Nodes), tensorKeys, functionsMap, opset);
+
+            foreach (var outputName in functionProto.Outputs)
             {
-                return null;
+                fastGraph.Outputs.Add(tensorKeys[outputName]);
+                fastGraph.OutputUniqueNames.Add(outputName);
             }
+
+            // State-initializer ownership rides FunctionProto metadata; absent falls back to
+            // the constructor default,
+            // ModuleOwned. An explicitly present but unknown value fails loudly rather than
+            // silently re-tagging optimizer state as module state.
+            var ownershipName = functionProto.MetadataProps
+                .FirstOrDefault(x => x.Key == Function.IRStateOwnershipParamName)?.Value;
+            StateOwnership? stateOwnership = null;
+            if (ownershipName is not null)
+            {
+                if (!Enum.TryParse<StateOwnership>(ownershipName, out var parsedOwnership))
+                    throw new System.IO.InvalidDataException(
+                        $"Function '{defaultName}': metadata '{Function.IRStateOwnershipParamName}' has " +
+                        $"unknown value '{ownershipName}' (expected " +
+                        $"'{StateOwnership.ModuleOwned}' or '{StateOwnership.OptimizerOwned}').");
+                stateOwnership = parsedOwnership;
+            }
+
+            Function onnxFunction = new Function(fastGraph, functionType, defaultName: defaultName, friendlyName: friendlyName,
+                stateOwnership)
+            {
+                RngAlgorithm = functionProto.MetadataProps
+                    .FirstOrDefault(x => x.Key == Function.IRRngAlgorithmParamName)?.Value,
+                RngFunctionKind = functionProto.MetadataProps
+                    .FirstOrDefault(x => x.Key == Function.IRRngFunctionKindParamName)?.Value,
+            };
+            return onnxFunction;
         }
 
         /// <summary>
@@ -493,7 +480,6 @@ namespace Shorokoo.Core.Factory.IR
         /// </summary>
         private static InternalComputationGraph internalBuildInternalComputationGraph(
             GraphProto graphProto,
-            Function[] functions,
             Dictionary<string, Function> onnxNameToFunction,
             OpSetVersion opset,
             ImmutableDictionary<int, TensorStructDef>? tensorStructDefs = null)

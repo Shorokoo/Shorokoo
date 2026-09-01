@@ -4,13 +4,19 @@ Related: [onnx-and-weights.md](onnx-and-weights.md) · [training.md](training.md
 
 ## Facts
 
-- A `.skpt` file is Shorokoo's native checkpoint container: **one file** holding a
-  model definition and its weights, reloadable as a runnable model with
-  `Persistence.Load`. There is no loose-directory form.
-- The file is a **standard zip archive** — any unzip tool can list and extract its
-  entries — whose entries are all **STORED** (uncompressed), so tensor data remains
-  range-readable through the zip central directory. Data payloads are 64-byte aligned
-  inside the file.
+- A `.skpt` is Shorokoo's native checkpoint container: a model definition and its
+  weights, reloadable as a runnable model with `Persistence.Load`. It has **two on-disk
+  forms with identical content**: a **single file** (the distribution form) and a
+  **directory** of real files (the working form for training runs — diffable,
+  rsync-friendly, entries readable and replaceable as plain files). Saving picks the
+  form explicitly (`Save` vs `SaveAsDirectory`); loading and inspection accept either,
+  and `ExtractSkpt` / `PackSkpt` convert both ways. See
+  [The directory form](#the-directory-form).
+- The single-file form is a **standard zip archive** — any unzip tool can list and
+  extract its entries — whose entries are all **STORED** (uncompressed), so tensor data
+  remains range-readable through the zip central directory. Data payloads are 64-byte
+  aligned inside the file. (In the directory form alignment is moot — a real file is
+  already page-aligned and range-readable.)
 - Data entries can **opt into Zstd compression** (`.WithZstdCompressedData()`): the zip
   framing stays STORED, and a single Zstd layer lives inside the entry's bytes, declared
   per entry in the manifest (`compression: "zstd"`). The default remains uncompressed —
@@ -19,8 +25,10 @@ Related: [onnx-and-weights.md](onnx-and-weights.md) · [training.md](training.md
 - A single `config.json` manifest is the **only source of wiring**: entries never
   reference each other; every mapping (model → serialization format, parameter →
   stored tensor, data entry → storage format) lives in the manifest.
-- Saves are **atomic** (staged to a temp file, committed by rename): a crash mid-save
-  never corrupts an existing checkpoint. The target directory must already exist.
+- Saves are **atomic** in both forms (staged beside the target — a temp file or a temp
+  directory — and committed by rename): a crash mid-save never corrupts an existing
+  checkpoint, and an interrupted directory save is never visible at the target path.
+  The target's parent directory must already exist.
 - This version writes an **inference checkpoint of a concrete model** (definition +
   weights). It can also carry **additional named weight sets** over the same parameters
   (e.g. an `ema` set alongside `default`), selected at load time — see
@@ -76,6 +84,80 @@ var loaded = Persistence.Load("model.skpt");   // decompression is transparent
 
 Loading honors each entry's manifest-declared compression; nothing changes on the
 read side of the API.
+
+## The directory form
+
+The same checkpoint can be saved as a **directory** instead of a single file:
+`config.json` at the root, the models/ and data/ entries as real files and folders,
+with byte-identical content and the same manifest describing both shapes.
+
+```csharp
+Persistence.From(concreteModel)
+    .WithModel()
+    .WithWeights()
+    .SaveAsDirectory("run17.skpt");        // a directory named run17.skpt
+
+var loaded = Persistence.Load("run17.skpt");   // loads either form transparently
+```
+
+```
+run17.skpt/
+├── config.json
+├── models/model.srk
+└── data/weights.safetensors
+```
+
+Training checkpoints save the same way (`Persistence.ForTrainingCheckpoint(ckpt)
+.SaveAsDirectory(path)`), and every `.skpt` load entry point — `Persistence.Load`,
+`TrainingRig.Load`, `rig.LoadCheckpointFromSkpt`,
+`Persistence.LoadTrainingCheckpointFromSkpt` — accepts either shape; a directory path
+is unambiguously the directory form (no content sniffing).
+
+When to use which:
+
+- **Directory** — the working form: a run writing a checkpoint every N steps leaves
+  unchanged entries as untouched files (diff/rsync-friendly), a partial download can
+  fetch one tensor file, and reading or replacing one weight set is a plain file
+  operation. This is where the rest of the field landed (safetensors repos, Orbax,
+  `.mlpackage`).
+- **Single file** — the distribution form: one artifact to hand someone.
+
+Which form a save writes is always the explicit choice of method — never inferred from
+the path, since a directory checkpoint may itself be named `run17.skpt`.
+
+Convert between the forms at will; entry content is byte-identical in both directions,
+and every entry's recorded sha256 is verified in transit:
+
+```csharp
+Persistence.ExtractSkpt("model.skpt", "model-dir.skpt");   // file → directory
+Persistence.PackSkpt("model-dir.skpt", "model2.skpt");     // directory → file
+```
+
+Guarantees specific to the directory form:
+
+- **Atomic commit by directory rename.** A save stages the whole tree in a `.tmp-`
+  sibling directory and commits by renaming it onto the target, so the target path
+  never names a half-written checkpoint: an interrupted save leaves the previous
+  checkpoint in place (or, for a first save, no target at all) plus staged debris that
+  no load path reads. Replacing an existing checkpoint takes two renames (a directory
+  rename cannot overwrite): a failure between them rolls the previous checkpoint back
+  into place, and only a hard crash inside that tiny window can leave the target
+  absent — the previous tree then still exists, complete, under a `.tmp-` sibling
+  name. A concurrent reader can therefore observe the checkpoint briefly *missing*
+  during a replace (never silently half-written); a polling reader should treat
+  not-found — or a failed SHA-256 check from catching the swap mid-read — as
+  retryable. The single-file form's replace is one atomic rename with no such window.
+- **Path safety on read.** Entry paths come from `config.json`, so a hostile manifest
+  could name `../…` or an absolute path; every read resolves the entry against the
+  checkpoint root and **fails loudly** on any path that escapes it (the same rule the
+  ONNX external-data reader applies to its `location` field). Extraction of a hostile
+  zip is bounded the same way — nothing is ever written outside the target directory.
+  The check is lexical, like the ONNX rule: it stops `..` and absolute paths, while a
+  symlink planted inside an untrusted checkpoint directory is followed by the
+  filesystem — treat a checkpoint directory from an untrusted source accordingly.
+- **The manifest still rules.** Only the manifest and the entries it references are a
+  checkpoint; stray files in the directory are ignored by load (and flagged by
+  `Inspect`), and conversion carries only manifest-referenced entries.
 
 ## Training checkpoints
 
@@ -344,7 +426,9 @@ scope; `.WithWeights(setName, values)` only carries and selects the parallel ver
 
 ## Inspecting a .skpt
 
-`Persistence.Inspect("model.skpt")` identifies the container and summarizes its
+`Persistence.Inspect("model.skpt")` identifies the container — either form: a
+directory path is inspected as [the directory form](#the-directory-form), its file
+listing playing the central directory's role — and summarizes its
 manifest — whole-archive metadata (producer, creation time, any
 [user provenance metadata](#provenance-metadata), and a one-line count of the
 [host user-data bag](#host-user-data-bag) with the full object on `Skpt.UserData`),
@@ -368,6 +452,9 @@ ComputationGraph model = Persistence.ImportSafeTensorsToCheckpoint(
 ```
 
 ## Container layout
+
+The layout is the same in both forms — zip entry paths in the single file, real file
+paths in [the directory form](#the-directory-form):
 
 ```
 model.skpt

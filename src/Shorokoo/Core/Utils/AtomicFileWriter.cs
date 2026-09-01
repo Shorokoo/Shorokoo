@@ -62,6 +62,10 @@ namespace Shorokoo.Core.Utils
         {
             if (writeContent is null) throw new ArgumentNullException(nameof(writeContent));
             var (directory, name, fullTarget) = ValidateTarget(targetPath);
+            if (Directory.Exists(fullTarget))
+                throw new IOException(
+                    $"Cannot save '{targetPath}': the target already exists as a directory. " +
+                    "Delete it first, or save to another path.");
 
             string tempPath = Path.Combine(directory, StageName(name));
             try
@@ -82,6 +86,148 @@ namespace Shorokoo.Core.Utils
 
             AfterCommit(directory, name, onWarning);
         }
+
+        /// <summary>
+        /// Test hook for the directory replace window: invoked after an existing target has been
+        /// renamed aside but before the staged tree is renamed onto the target. Throwing here
+        /// simulates a failure mid-replace, verifying the rollback that puts the previous
+        /// checkpoint back in place. Thread-scoped like the other hooks; reset in a <c>finally</c>.
+        /// </summary>
+        [ThreadStatic]
+        internal static Action<string>? ReplaceFaultInjection;
+
+        /// <summary>
+        /// Atomically writes a directory tree: <paramref name="writeContent"/> populates a staged
+        /// <c>.tmp-</c>-prefixed sibling directory next to <paramref name="targetPath"/>, which is
+        /// then committed by a directory rename — so the target path never names a half-written
+        /// tree. Replacing an existing target is supported: a directory rename cannot overwrite,
+        /// so the previous target is first renamed aside (to another staged name), and removed
+        /// best-effort after the commit; a failure between the two renames moves it straight
+        /// back, so on any in-process failure the staged copy is deleted and the previous target
+        /// is left in place untouched. Only a hard crash inside that two-rename window can leave
+        /// the target absent — the previous tree then still exists, complete, under its aside
+        /// name until the sweep after the next successful save. The target's parent directory
+        /// must already exist. Content durability is the callback's concern: flush files it
+        /// writes to disk (the directory-format writers do).
+        /// </summary>
+        internal static void WriteDirectory(
+            string targetPath,
+            Action<string> writeContent,
+            Action<string>? onWarning = null)
+        {
+            if (writeContent is null) throw new ArgumentNullException(nameof(writeContent));
+            // A directory target is commonly written with trailing separators ("run.skpt/");
+            // normalize so the name/parent split below sees the directory's own name. Trimming
+            // everything down to nothing (an all-separator path) falls through to ValidateTarget's
+            // own does-not-name-a-directory rejection.
+            string trimmedTarget = string.IsNullOrWhiteSpace(targetPath)
+                ? targetPath
+                : targetPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var (directory, name, fullTarget) = ValidateTarget(
+                trimmedTarget.Length == 0 ? targetPath : trimmedTarget);
+            if (File.Exists(fullTarget))
+                throw new IOException(
+                    $"Cannot save directory '{targetPath}': the target already exists as a file. " +
+                    "Delete it first, or save to another path.");
+
+            string tempPath = Path.Combine(directory, StageName(name));
+            try
+            {
+                Directory.CreateDirectory(tempPath);
+                writeContent(tempPath);
+                CommitFaultInjection?.Invoke(tempPath);
+                if (Directory.Exists(fullTarget))
+                {
+                    // A staged-shaped aside name, so a crash between the two renames leaves it
+                    // recognizable as uncommitted debris for the post-commit sweep.
+                    string asidePath = Path.Combine(directory, StageName(name));
+                    Directory.Move(fullTarget, asidePath);
+                    // The rename preserves the old tree's timestamps, which would make the aside
+                    // look abandoned to a concurrent same-target saver's post-commit sweep the
+                    // instant it exists. Touch it so the activity grace period protects the
+                    // rollback copy through the replace window (after a hard crash it goes quiet
+                    // and becomes sweepable, as intended). Best-effort: an unset timestamp merely
+                    // narrows the protection back to the status quo.
+                    try { Directory.SetLastWriteTimeUtc(asidePath, DateTime.UtcNow); }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                    try
+                    {
+                        ReplaceFaultInjection?.Invoke(tempPath);
+                        Directory.Move(tempPath, fullTarget);
+                    }
+                    catch
+                    {
+                        // Roll the previous checkpoint back into place, so a failed replace
+                        // leaves the target exactly as it was. If even the rollback fails, the
+                        // previous tree was last seen under the aside name — say where to look.
+                        try { Directory.Move(asidePath, fullTarget); }
+                        catch (Exception rollbackFailure)
+                        {
+                            (onWarning ?? (static _ => { }))(
+                                "Shorokoo: a failed replace could not restore the previous checkpoint " +
+                                $"to '{fullTarget}'; look for it at '{asidePath}' " +
+                                $"({rollbackFailure.Message}).");
+                        }
+                        throw;
+                    }
+                    try { Directory.Delete(asidePath, recursive: true); }
+                    catch (Exception e)
+                    {
+                        (onWarning ?? (static _ => { }))(
+                            $"Shorokoo: failed to remove the replaced checkpoint copy '{asidePath}': {e.Message}");
+                    }
+                }
+                else
+                {
+                    Directory.Move(tempPath, fullTarget);
+                }
+            }
+            catch
+            {
+                try { if (Directory.Exists(tempPath)) Directory.Delete(tempPath, recursive: true); }
+                catch { /* the stale temp is swept on the next successful save */ }
+                throw;
+            }
+
+            AfterCommit(directory, name, onWarning);
+        }
+
+        /// <summary>Suffix a sweep renames a doomed staged directory to before deleting it, so a
+        /// half-finished sweep leaves a recognizable non-staged name (readers already ignore the
+        /// <see cref="TempPrefix"/>) that the next sweep finishes off.</summary>
+        private const string SweepSuffix = "-sweep";
+
+        /// <summary>
+        /// The newest creation/write timestamp anywhere in a staged tree — the liveness signal
+        /// the sweep checks, since a concurrent saver flushing content into the tree keeps some
+        /// timestamp fresh. When the tree cannot be examined, now is returned, so the sweep never
+        /// deletes what it cannot rule out as live.
+        /// </summary>
+        private static DateTime LastActivityUtc(string root)
+        {
+            try
+            {
+                DateTime newest = Directory.GetCreationTimeUtc(root);
+                DateTime rootWrite = Directory.GetLastWriteTimeUtc(root);
+                if (rootWrite > newest) newest = rootWrite;
+                foreach (var entry in Directory.EnumerateFileSystemEntries(root, "*", SearchOption.AllDirectories))
+                {
+                    var t = File.GetLastWriteTimeUtc(entry);
+                    if (t > newest) newest = t;
+                }
+                return newest;
+            }
+            catch
+            {
+                return DateTime.UtcNow;
+            }
+        }
+
+        /// <summary>How long a staged sibling directory must show no write activity before the
+        /// post-commit sweep treats it as abandoned rather than a concurrent saver's live
+        /// staging area.</summary>
+        private static readonly TimeSpan StaleDirectoryGracePeriod = TimeSpan.FromHours(1);
 
         /// <summary>
         /// Writes a file exactly as <see cref="WriteFile(string, Action{Stream}, Action{string})"/>
@@ -223,21 +369,54 @@ namespace Shorokoo.Core.Utils
             $"{TempPrefix}{targetName}-{Guid.NewGuid():N}";
 
         /// <summary>
-        /// Post-commit housekeeping: sweep stale temps from earlier failed saves of this target.
-        /// Best-effort — the commit has already succeeded.
+        /// Post-commit housekeeping shared by <see cref="WriteFile(string, Action{Stream}, Action{string})"/>
+        /// and <see cref="WriteDirectory"/>: sweep stale temps — file- and directory-shaped alike,
+        /// so a crashed save of either form is cleaned up by the next successful save of the same
+        /// target in either form. Best-effort — the commit has already succeeded.
+        ///
+        /// <para>Our own temp was renamed away, so every remaining sibling shaped exactly like
+        /// <c>.tmp-&lt;targetName&gt;-&lt;32-hex-guid&gt;</c> is a leftover from a failed save of
+        /// <i>this</i> target (the strict GUID-suffix match keeps a target from sweeping a
+        /// differently named one that merely shares its name as a prefix). A file temp is guarded
+        /// against a live concurrent writer by <see cref="DeleteAbandonedTemp"/>'s share-mode
+        /// open. A directory temp has no share-mode guard, so two defenses stand in: only a tree
+        /// with no write activity anywhere in it for the whole grace period is treated as
+        /// abandoned, and a doomed tree is renamed aside before deletion — the rename is atomic
+        /// and the staging writers never recreate directories mid-write, so a saver that was
+        /// somehow still using the tree fails loudly on its next write or its commit rename
+        /// rather than ever committing a partially swept checkpoint.</para>
         /// </summary>
         private static void AfterCommit(string directory, string targetName, Action<string>? onWarning)
         {
             onWarning ??= static _ => { }; // best-effort housekeeping; observe it by passing a callback
 
-            // Our own temp was renamed away, so every remaining sibling shaped exactly like
-            // ".tmp-<targetName>-<32-hex-guid>" is a leftover from a failed save of *this* target.
-            // The strict GUID-suffix match avoids touching a different target whose name shares
-            // this one as a prefix (saving "run" must not sweep "run-2"'s ".tmp-run-2-<guid>").
             foreach (var stale in EnumerateSafely(directory, $"{TempPrefix}{targetName}-*", onWarning))
             {
-                if (!IsStagedTempFor(Path.GetFileName(stale), targetName)) continue;
-                try { DeleteAbandonedTemp(stale); }
+                string staleName = Path.GetFileName(stale);
+                if (Directory.Exists(stale) && staleName.EndsWith(SweepSuffix, StringComparison.Ordinal)
+                    && IsStagedTempFor(staleName[..^SweepSuffix.Length], targetName))
+                {
+                    // A doomed tree an earlier sweep renamed but failed to finish deleting.
+                    try { Directory.Delete(stale, recursive: true); }
+                    catch (Exception e) { onWarning($"Shorokoo: failed to remove stale temp '{stale}': {e.Message}"); }
+                    continue;
+                }
+                if (!IsStagedTempFor(staleName, targetName)) continue;
+                try
+                {
+                    if (Directory.Exists(stale))
+                    {
+                        if (DateTime.UtcNow - LastActivityUtc(stale) < StaleDirectoryGracePeriod)
+                            continue;
+                        string doomed = stale + SweepSuffix;
+                        Directory.Move(stale, doomed);
+                        Directory.Delete(doomed, recursive: true);
+                    }
+                    else
+                    {
+                        DeleteAbandonedTemp(stale);
+                    }
+                }
                 catch (Exception e) { onWarning($"Shorokoo: failed to remove stale temp '{stale}': {e.Message}"); }
             }
         }

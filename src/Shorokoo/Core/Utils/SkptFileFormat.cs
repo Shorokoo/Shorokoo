@@ -655,6 +655,49 @@ namespace Shorokoo.Core.Utils
         internal static bool LooksLikeZstdFrame(ReadOnlySpan<byte> data)
             => data.Length >= 4 && data[0] == 0x28 && data[1] == 0xB5 && data[2] == 0x2F && data[3] == 0xFD;
 
+        /// <summary>
+        /// Writes checkpoint entries as real files under <paramref name="stagingRoot"/> — the
+        /// directory form of a .skpt (issue #183). Each entry's archive-relative path becomes a
+        /// file path (creating subdirectories as needed) with byte-identical content to the zip
+        /// form; the zip's payload alignment is moot here (a real file is already page-aligned
+        /// and range-readable), so <see cref="ZipEntrySpec.Align"/> is ignored. Every file is
+        /// flushed to disk, since the atomic directory commit is a rename of
+        /// <paramref name="stagingRoot"/> itself. Entry paths resolve through the same
+        /// inside-the-root rule the directory reader enforces, so nothing is ever written
+        /// outside the staging root; <paramref name="origin"/> names the checkpoint being
+        /// written (or converted) in that failure, not the transient staging path.
+        /// </summary>
+        internal static void WriteDirectoryEntries(
+            string stagingRoot, IReadOnlyList<ZipEntrySpec> entries, string origin)
+        {
+            if (entries is null) throw new ArgumentNullException(nameof(entries));
+            var rootFull = Path.GetFullPath(stagingRoot);
+
+            // Resolve every entry and create the needed subdirectories once, up front — never
+            // per entry. This is load-bearing for the stale-staging sweep's guarantee: after
+            // this point nothing here recreates a directory, so if a concurrent sweep judges
+            // this staging tree abandoned and renames it away mid-write, the next CreateNew
+            // fails loudly (DirectoryNotFoundException) instead of silently rebuilding a
+            // partial tree that could then be committed.
+            var resolvedPaths = new string[entries.Count];
+            var directories = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < entries.Count; i++)
+            {
+                resolvedPaths[i] = SkptDirectoryContainer.ResolveEntryPath(rootFull, entries[i].Name, origin);
+                directories.Add(Path.GetDirectoryName(resolvedPaths[i])!);
+            }
+            foreach (var dir in directories)
+                Directory.CreateDirectory(dir);
+
+            for (int i = 0; i < entries.Count; i++)
+            {
+                using var fs = new FileStream(
+                    resolvedPaths[i], FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                fs.Write(entries[i].Data);
+                fs.Flush(flushToDisk: true);
+            }
+        }
+
         #region STORED zip writer
 
         /// <summary>One entry to be written into a .skpt archive.</summary>

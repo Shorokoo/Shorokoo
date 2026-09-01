@@ -367,7 +367,8 @@ namespace Shorokoo
         /// <summary>The inspected file's path, as passed to <see cref="Persistence.Inspect"/>.</summary>
         public string FilePath { get; }
 
-        /// <summary>Total size of the file in bytes.</summary>
+        /// <summary>Total size of the file in bytes; for an inspected .skpt checkpoint
+        /// directory (issue #183), the total size of the directory's files.</summary>
         public long FileSizeBytes { get; }
 
         /// <summary>What the file was identified as.</summary>
@@ -613,16 +614,22 @@ namespace Shorokoo
         /// and .skpt checkpoint containers written by <see cref="CheckpointBuilder.Save"/>
         /// (a zip archive with a root config.json manifest — only the zip central directory
         /// and the manifest entry are read; recorded sha256s are reported, never verified).
+        /// A <b>directory</b> path is inspected as the .skpt directory form (issue #183): its
+        /// root config.json is read the same way, its file listing plays the central
+        /// directory's role, and <see cref="ArtifactInspection.FileSizeBytes"/> reports the
+        /// total bytes of the directory's files.
         /// Anything else — including corrupt or truncated headers — yields a structured
         /// <see cref="ArtifactKind.NotRecognized"/> (or partially-detailed) result with
-        /// observations rather than an exception: content problems never throw. A missing
-        /// file (<see cref="FileNotFoundException"/>) and I/O errors (permissions, disk)
-        /// do.
+        /// observations rather than an exception: content problems never throw. A path naming
+        /// neither a file nor a directory (<see cref="FileNotFoundException"/>) and I/O errors
+        /// (permissions, disk) do.
         /// </summary>
         public static ArtifactInspection Inspect(string filePath)
         {
             if (string.IsNullOrWhiteSpace(filePath))
                 throw new ArgumentException("Path cannot be null or empty.", nameof(filePath));
+            if (Directory.Exists(filePath))
+                return InspectSkptDirectory(filePath);
             if (!File.Exists(filePath))
                 throw new FileNotFoundException($"File not found: {filePath}", filePath);
 
@@ -834,6 +841,89 @@ namespace Shorokoo
                 observations);
         }
 
+        // ---- .skpt checkpoint directory (issue #183) ----
+
+        /// <summary>
+        /// Inspects a directory path as the .skpt directory form: the root config.json is read
+        /// (bounded, exactly like the zip path's manifest read) and the recursive file listing
+        /// stands in for the zip central directory, so the same summary and the same
+        /// manifest/content cross-checks apply. Additionally, a manifest entry path that does
+        /// not resolve (lexically) inside the checkpoint root is flagged — Inspect never
+        /// resolves an entry path outside the directory (and never throws on content), while a
+        /// full load refuses such an entry.
+        /// <see cref="ArtifactInspection.FileSizeBytes"/> is the total size of the directory's
+        /// files.
+        /// </summary>
+        private static ArtifactInspection InspectSkptDirectory(string directoryPath)
+        {
+            var observations = new List<string>();
+            var rootFull = Path.GetFullPath(directoryPath);
+
+            var dirEntries = new List<(string Name, long Length, long CompressedLength)>();
+            long totalBytes = 0;
+            foreach (var file in Directory.EnumerateFiles(rootFull, "*", SearchOption.AllDirectories))
+            {
+                long length = new FileInfo(file).Length;
+                var name = Path.GetRelativePath(rootFull, file).Replace(Path.DirectorySeparatorChar, '/');
+                // Equal stored/declared lengths by construction: a real file has no zip framing,
+                // so the shared summary's STORED-expectation check can never misfire here.
+                dirEntries.Add((name, length, length));
+                totalBytes += length;
+            }
+
+            var configPath = Path.Combine(rootFull, SkptFileFormat.ConfigEntryName);
+            if (!File.Exists(configPath))
+                return NotRecognized(directoryPath, totalBytes, observations,
+                    $"a directory with no root '{SkptFileFormat.ConfigEntryName}' manifest — " +
+                    "not a .skpt checkpoint directory.");
+            if (new FileInfo(configPath).Length > MaxSkptManifestBytes)
+                return NotRecognized(directoryPath, totalBytes, observations,
+                    $"a directory whose '{SkptFileFormat.ConfigEntryName}' is " +
+                    $"{new FileInfo(configPath).Length} bytes — not a readable .skpt manifest.");
+
+            SkptManifest manifest;
+            try
+            {
+                manifest = SkptFileFormat.ParseManifest(File.ReadAllBytes(configPath), directoryPath);
+            }
+            catch (InvalidDataException e)
+            {
+                return NotRecognized(directoryPath, totalBytes, observations,
+                    $"a directory whose '{SkptFileFormat.ConfigEntryName}' is not a readable " +
+                    $"manifest ({e.Message}).");
+            }
+
+            if (manifest.Format != SkptFileFormat.FormatName)
+                return NotRecognized(directoryPath, totalBytes, observations,
+                    $"a directory with a '{SkptFileFormat.ConfigEntryName}' entry, but it declares " +
+                    $"format '{manifest.Format ?? "<none>"}' rather than '{SkptFileFormat.FormatName}' — " +
+                    "not a .skpt checkpoint directory.");
+
+            // Path-escape scan (the directory form's own hazard): such an entry is also absent
+            // from the in-root listing, so the shared summary flags it missing as well.
+            void FlagEscape(string what, string? entryPath)
+            {
+                if (!string.IsNullOrEmpty(entryPath)
+                    && !SkptDirectoryContainer.EntryPathStaysInside(rootFull, entryPath))
+                    observations.Add($"the manifest's {what} references entry '{entryPath}', which " +
+                        "escapes the checkpoint directory; a load refuses it.");
+            }
+            foreach (var (key, m) in manifest.Models ?? new())
+                FlagEscape($"model '{key}'", m?.Entry);
+            foreach (var (key, d) in manifest.Data ?? new())
+                FlagEscape($"data entry '{key}'", d?.Entry);
+
+            byte[]? userDataBytes = null;
+            var userDataPath = Path.Combine(rootFull, SkptFileFormat.UserDataEntryPath);
+            if (File.Exists(userDataPath) && new FileInfo(userDataPath).Length <= MaxSkptManifestBytes)
+                userDataBytes = File.ReadAllBytes(userDataPath);
+
+            return new ArtifactInspection(directoryPath, totalBytes, ArtifactKind.SkptCheckpoint,
+                SummarizeSkptManifest(manifest, dirEntries, configCount: 1, userDataBytes,
+                    directoryPath, observations),
+                observations);
+        }
+
         /// <summary>
         /// Builds the .skpt summary from the parsed manifest plus the zip central-directory
         /// listing, adding the cheap sanity observations along the way: manifest/archive
@@ -885,7 +975,7 @@ namespace Shorokoo
                     observations.Add($"the manifest's model '{key}' names no archive entry.");
                 else if (!declaredSizes.ContainsKey(m.Entry))
                     observations.Add($"the manifest's model '{key}' references entry '{m.Entry}', " +
-                        "but the archive has no such entry.");
+                        "but the checkpoint has no such entry.");
                 else
                     referenced.Add(m.Entry);
                 if (m is not null && m.Format != SkptFileFormat.ModelFormatSrk1)
@@ -910,7 +1000,7 @@ namespace Shorokoo
                     observations.Add($"the manifest's data entry '{key}' names no archive entry.");
                 else if (!declaredSizes.ContainsKey(d.Entry))
                     observations.Add($"the manifest's data entry '{key}' references entry " +
-                        $"'{d.Entry}', but the archive has no such entry.");
+                        $"'{d.Entry}', but the checkpoint has no such entry.");
                 else
                     referenced.Add(d.Entry);
                 // "json" is a known storage format for the host user-data entry (issue #101);
@@ -982,7 +1072,7 @@ namespace Shorokoo
                         "STORED (uncompressed).");
                 if (!referenced.Contains(name) && !name.EndsWith("/", StringComparison.Ordinal)
                     && ++unreferenced <= MaxZipEntryObservations)
-                    observations.Add($"archive entry '{name}' is not referenced by the manifest.");
+                    observations.Add($"entry '{name}' is not referenced by the manifest.");
             }
             if (storedViolations > MaxZipEntryObservations)
                 observations.Add($"… and {storedViolations - MaxZipEntryObservations} more " +

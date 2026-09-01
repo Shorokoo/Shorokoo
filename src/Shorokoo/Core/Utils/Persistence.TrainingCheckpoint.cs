@@ -161,15 +161,8 @@ namespace Shorokoo
             if (modelStateDef is null) throw new ArgumentNullException(nameof(modelStateDef));
             if (optimizerStateDef is null) throw new ArgumentNullException(nameof(optimizerStateDef));
 
-            var fileBytes = File.ReadAllBytes(filePath);
-            using var fileStream = new MemoryStream(fileBytes, writable: false);
-            using var archive = OpenArchive(fileStream, filePath);
-
-            var configEntry = archive.GetEntry(SkptFileFormat.ConfigEntryName)
-                ?? throw new InvalidDataException(
-                    $"'{filePath}' is not a .skpt checkpoint — the archive contains no " +
-                    $"'{SkptFileFormat.ConfigEntryName}' manifest.");
-            var manifest = SkptFileFormat.ParseManifest(ReadEntryBytes(configEntry, filePath), filePath);
+            using var container = SkptContainer.Open(filePath);
+            var manifest = SkptFileFormat.ParseManifest(container.ReadManifestBytes(), filePath);
             ValidateManifestIdentity(manifest, filePath);
 
             var training = manifest.Training
@@ -219,7 +212,7 @@ namespace Shorokoo
                 && (modelMapping is not null || trainableParamDef.Fields.Length == 0))
             {
                 (trainable, modelState) = ReconstructArchOwnedState(
-                    archive, manifest, modelMapping, trainableParamDef, modelStateDef, tensorsByDataKey, filePath);
+                    container, manifest, modelMapping, trainableParamDef, modelStateDef, tensorsByDataKey, filePath);
             }
             else if (rigForDefaults is not null)
             {
@@ -229,14 +222,14 @@ namespace Shorokoo
             else
             {
                 (trainable, modelState) = ReconstructArchOwnedState(
-                    archive, manifest, modelMapping, trainableParamDef, modelStateDef, tensorsByDataKey, filePath);
+                    container, manifest, modelMapping, trainableParamDef, modelStateDef, tensorsByDataKey, filePath);
             }
 
             if (Want(CheckpointComponents.OptimizerState)
                 && (optimizerMapping is not null || optimizerStateDef.Fields.Length == 0))
             {
                 optState = ReconstructOptimizerState(
-                    archive, manifest, optimizerMapping, optimizerStateDef, tensorsByDataKey, filePath);
+                    container, manifest, optimizerMapping, optimizerStateDef, tensorsByDataKey, filePath);
             }
             else if (rigForDefaults is not null)
             {
@@ -245,7 +238,7 @@ namespace Shorokoo
             else
             {
                 optState = ReconstructOptimizerState(
-                    archive, manifest, optimizerMapping, optimizerStateDef, tensorsByDataKey, filePath);
+                    container, manifest, optimizerMapping, optimizerStateDef, tensorsByDataKey, filePath);
             }
 
             return new TrainingCheckpoint(trainable, modelState, optState, step, epoch, batchIndex, rig: null, loss: loss);
@@ -274,7 +267,7 @@ namespace Shorokoo
         /// model.
         /// </summary>
         private static (TensorDataStruct Trainable, TensorDataStruct ModelState) ReconstructArchOwnedState(
-            ZipArchive archive, SkptManifest manifest, IReadOnlyDictionary<string, SkptTensorRef>? mapping,
+            SkptContainer container, SkptManifest manifest, IReadOnlyDictionary<string, SkptTensorRef>? mapping,
             TensorStructDef trainableParamDef, TensorStructDef modelStateDef,
             Dictionary<string, Dictionary<string, TensorData>> tensorsByDataKey, string filePath)
         {
@@ -308,9 +301,9 @@ namespace Shorokoo
                         "training state cannot be resolved unambiguously.");
             }
 
-            var trainable = BuildStateStruct(archive, manifest, byField, trainableParamDef,
+            var trainable = BuildStateStruct(container, manifest, byField, trainableParamDef,
                 "trainable parameter", "Does the checkpoint match this model?", tensorsByDataKey, filePath);
-            var modelState = BuildStateStruct(archive, manifest, byField, modelStateDef,
+            var modelState = BuildStateStruct(container, manifest, byField, modelStateDef,
                 "model-state field", "Does the checkpoint match this model?", tensorsByDataKey, filePath);
 
             if (byField.Count > 0)
@@ -335,7 +328,7 @@ namespace Shorokoo
         /// match the rig's optimizer fails loudly naming the mismatched instance.
         /// </summary>
         private static TensorDataStruct ReconstructOptimizerState(
-            ZipArchive archive, SkptManifest manifest, IReadOnlyDictionary<string, SkptTensorRef>? mapping,
+            SkptContainer container, SkptManifest manifest, IReadOnlyDictionary<string, SkptTensorRef>? mapping,
             TensorStructDef def,
             Dictionary<string, Dictionary<string, TensorData>> tensorsByDataKey, string filePath)
         {
@@ -370,7 +363,7 @@ namespace Shorokoo
                         $"resolve to the same state instance '{fieldName}'.");
             }
 
-            var optState = BuildStateStruct(archive, manifest, byField, def,
+            var optState = BuildStateStruct(container, manifest, byField, def,
                 "optimizer-state instance", "Does the checkpoint match this optimizer?",
                 tensorsByDataKey, filePath);
 
@@ -394,7 +387,7 @@ namespace Shorokoo
         /// <paramref name="tensorsByDataKey"/>).
         /// </summary>
         private static TensorDataStruct BuildStateStruct(
-            ZipArchive archive, SkptManifest manifest,
+            SkptContainer container, SkptManifest manifest,
             Dictionary<string, (string Id, SkptTensorRef Ref)> byField,
             TensorStructDef def, string role, string mismatchHint,
             Dictionary<string, Dictionary<string, TensorData>> tensorsByDataKey, string filePath)
@@ -407,7 +400,7 @@ namespace Shorokoo
                         $"'{filePath}': the checkpoint maps no tensor for {role} '{fieldDef.Name}'. " +
                         mismatchHint);
                 var tensors = ResolveDataEntry(
-                    archive, manifest, mapped.Ref, mapped.Id, tensorsByDataKey, filePath);
+                    container, manifest, mapped.Ref, mapped.Id, tensorsByDataKey, filePath);
                 if (string.IsNullOrEmpty(mapped.Ref.Tensor)
                     || !tensors.TryGetValue(mapped.Ref.Tensor, out var td))
                     throw new InvalidDataException(
@@ -439,15 +432,8 @@ namespace Shorokoo
             VerifySkptContainer(filePath,
                 "A flat checkpoint stores training state only — no rig constituents to rebuild " +
                 "from; rebuild the rig from its source graphs and resume with rig.LoadCheckpoint(path).");
-            var fileBytes = File.ReadAllBytes(filePath);
-            using var fileStream = new MemoryStream(fileBytes, writable: false);
-            using var archive = OpenArchive(fileStream, filePath);
-
-            var configEntry = archive.GetEntry(SkptFileFormat.ConfigEntryName)
-                ?? throw new InvalidDataException(
-                    $"'{filePath}' is not a .skpt checkpoint — the archive contains no " +
-                    $"'{SkptFileFormat.ConfigEntryName}' manifest.");
-            var manifest = SkptFileFormat.ParseManifest(ReadEntryBytes(configEntry, filePath), filePath);
+            using var container = SkptContainer.Open(filePath);
+            var manifest = SkptFileFormat.ParseManifest(container.ReadManifestBytes(), filePath);
             ValidateManifestIdentity(manifest, filePath);
 
             var training = manifest.Training
@@ -466,11 +452,11 @@ namespace Shorokoo
                     $"'{filePath}': rig block version {rig.RigVersion} is not readable by this Shorokoo " +
                     $"build, which reads version {SkptFileFormat.TrainingRigVersion} only.");
 
-            var archGraph = LoadConstituentGraph(archive, manifest, rig.ArchModel ?? SkptFileFormat.ArchModelKey, filePath);
-            var lossGraph = LoadConstituentGraph(archive, manifest, rig.LossModel ?? SkptFileFormat.LossModelKey, filePath);
-            var optimizerGraph = LoadConstituentGraph(archive, manifest, rig.OptimizerModel ?? SkptFileFormat.OptimizerModelKey, filePath);
+            var archGraph = LoadConstituentGraph(container, manifest, rig.ArchModel ?? SkptFileFormat.ArchModelKey, filePath);
+            var lossGraph = LoadConstituentGraph(container, manifest, rig.LossModel ?? SkptFileFormat.LossModelKey, filePath);
+            var optimizerGraph = LoadConstituentGraph(container, manifest, rig.OptimizerModel ?? SkptFileFormat.OptimizerModelKey, filePath);
             var schedulerGraph = rig.SchedulerModel is string schedKey
-                ? LoadConstituentGraph(archive, manifest, schedKey, filePath)
+                ? LoadConstituentGraph(container, manifest, schedKey, filePath)
                 : null;
 
             // Model-input shapes are not read from the manifest: the deserialized arch's
@@ -545,7 +531,7 @@ namespace Shorokoo
         /// <summary>Loads one constituent model graph from its <c>models/</c> entry, verifying SHA-256
         /// and stamping it with its recorded stage (#115).</summary>
         private static ComputationGraph LoadConstituentGraph(
-            ZipArchive archive, SkptManifest manifest, string modelKey, string filePath)
+            SkptContainer container, SkptManifest manifest, string modelKey, string filePath)
         {
             if (manifest.Models is null || !manifest.Models.TryGetValue(modelKey, out var entry) || entry is null)
                 throw new InvalidDataException(
@@ -559,7 +545,7 @@ namespace Shorokoo
                     $"'{filePath}': rig model '{modelKey}' uses unsupported serialization format " +
                     $"'{entry.Format}' (supported: '{SkptFileFormat.ModelFormatSrk1}').");
 
-            var bytes = ReadEntry(archive, entry.Entry, $"rig model '{modelKey}'", filePath);
+            var bytes = container.ReadRequiredEntry(entry.Entry, $"rig model '{modelKey}'");
             VerifySha256(bytes, entry.Sha256, entry.Entry, filePath);
             var (graph, kind) = CompressedFormatUtils.LoadFastGraphCore(
                 bytes, origin: $"{filePath}!{entry.Entry}", requiredStage: null);
@@ -676,7 +662,35 @@ namespace Shorokoo
         {
             if (string.IsNullOrWhiteSpace(filePath))
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
+            var entries = BuildCheckpointEntries();
+            AtomicFileWriter.WriteFile(filePath,
+                stream => SkptFileFormat.WriteStoredZip(stream, entries, DateTime.UtcNow));
+        }
 
+        /// <summary>
+        /// Commits the training checkpoint as a <b>directory</b> (issue #183): the same content
+        /// as <see cref="Save"/> — the same manifest, model and data entries byte-identical —
+        /// laid out as real files, which is the natural shape for a run writing a checkpoint
+        /// every N steps (unchanged entries stay untouched files for diff/rsync). Loading
+        /// (<see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?)"/>,
+        /// <see cref="TrainingRig.LoadCheckpointFromSkpt"/>, <see cref="Persistence.Load(string)"/>)
+        /// accepts either shape; <see cref="Persistence.PackSkpt"/> converts the directory to
+        /// the single-file form. The write is atomic (staged to a temp directory and committed
+        /// by rename); see <see cref="CheckpointBuilder.SaveAsDirectory"/> for the protocol.
+        /// </summary>
+        public void SaveAsDirectory(string directoryPath)
+        {
+            if (string.IsNullOrWhiteSpace(directoryPath))
+                throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(directoryPath));
+            var entries = BuildCheckpointEntries();
+            AtomicFileWriter.WriteDirectory(directoryPath,
+                stagingRoot => SkptFileFormat.WriteDirectoryEntries(stagingRoot, entries, directoryPath));
+        }
+
+        /// <summary>Builds the training checkpoint's complete entry list — config.json first,
+        /// then the model and data entries — shared verbatim by the zip and directory forms.</summary>
+        private List<SkptFileFormat.ZipEntrySpec> BuildCheckpointEntries()
+        {
             // Build the concrete inference model — the self-describing "models/" half of the
             // container. This is the SAME weight-bind the extraction path uses: bind the checkpoint's
             // trainable params (the default weight set) and its model state (running stats etc., so a
@@ -876,8 +890,7 @@ namespace Shorokoo
                 new(SkptFileFormat.ConfigEntryName, SkptFileFormat.SerializeManifest(manifest), Align: false),
             };
             entries.AddRange(bodyEntries);
-            AtomicFileWriter.WriteFile(filePath,
-                stream => SkptFileFormat.WriteStoredZip(stream, entries, DateTime.UtcNow));
+            return entries;
         }
 
         /// <summary>

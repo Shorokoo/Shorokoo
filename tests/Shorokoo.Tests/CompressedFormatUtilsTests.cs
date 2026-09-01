@@ -1291,6 +1291,239 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         RefusedLoad(SkptFileFormat.WeightsEntryPath, "Zstd-decompress");
     }
 
+    /// <summary>Every file of a .skpt checkpoint directory keyed by its manifest-style relative
+    /// path (forward slashes) — the directory analogue of <see cref="ReadZipEntries"/>.</summary>
+    private static Dictionary<string, byte[]> ReadDirectoryEntries(string dirPath)
+        => Directory.EnumerateFiles(dirPath, "*", SearchOption.AllDirectories)
+            .ToDictionary(
+                f => Path.GetRelativePath(dirPath, f).Replace(Path.DirectorySeparatorChar, '/'),
+                File.ReadAllBytes,
+                StringComparer.Ordinal);
+
+    [Fact]
+    public void TestSkptDirectoryFormRoundTripAndConversions()
+    {
+        var (model, numOut, input) = BuildSkptModel();
+        var direct = ExecuteToBytes(model, numOut, input);
+        var originalWeights = WeightBytesByParam(model);
+        var zipPath = P("dirform.skpt");
+        var dirPath = P("dirform-dir.skpt");
+        Persistence.From(model).WithModel().WithWeights().Save(zipPath);
+        Persistence.From(model).WithModel().WithWeights().SaveAsDirectory(dirPath);
+
+        var zipEntries = ReadZipEntries(zipPath);
+        var dirEntries = ReadDirectoryEntries(dirPath);
+        Assert.Equal(zipEntries.Keys.OrderBy(n => n, StringComparer.Ordinal),
+            dirEntries.Keys.OrderBy(n => n, StringComparer.Ordinal));
+
+        var fromDir = Persistence.Load(dirPath);
+        Assert.Equal(GraphKind.ConcreteModel, fromDir.Kind);
+        var dirWeights = WeightBytesByParam(fromDir);
+        Assert.Equal(originalWeights.Count, dirWeights.Count);
+        foreach (var (paramId, bytes) in originalWeights)
+            Assert.Equal(bytes, dirWeights[paramId]);
+        Assert.Equal(direct, ExecuteToBytes(fromDir, numOut, input));
+        Assert.Equal(direct, ExecuteToBytes(Persistence.Load(zipPath), numOut, input));
+
+        var dirManifest = SkptFileFormat.ParseManifest(dirEntries[SkptFileFormat.ConfigEntryName], dirPath);
+        Assert.Equal(SkptFileFormat.Sha256Hex(dirEntries[SkptFileFormat.WeightsEntryPath]),
+            Assert.Single(dirManifest.Data!).Value.Sha256);
+        Assert.Contains("default",
+            Assert.Throws<InvalidDataException>(() => Persistence.Load(dirPath, "nope")).Message);
+
+        var extractedPath = P("extracted.skpt");
+        Persistence.ExtractSkpt(zipPath, extractedPath);
+        var extractedEntries = ReadDirectoryEntries(extractedPath);
+        Assert.Equal(zipEntries.Keys.OrderBy(n => n, StringComparer.Ordinal),
+            extractedEntries.Keys.OrderBy(n => n, StringComparer.Ordinal));
+        foreach (var (name, bytes) in zipEntries)
+            Assert.Equal(bytes, extractedEntries[name]);
+        Assert.Equal(direct, ExecuteToBytes(Persistence.Load(extractedPath), numOut, input));
+
+        var packedPath = P("packed.skpt");
+        Persistence.PackSkpt(extractedPath, packedPath);
+        var packedEntries = ReadZipEntries(packedPath);
+        Assert.Equal(zipEntries.Keys.OrderBy(n => n, StringComparer.Ordinal),
+            packedEntries.Keys.OrderBy(n => n, StringComparer.Ordinal));
+        foreach (var (name, bytes) in zipEntries)
+            Assert.Equal(bytes, packedEntries[name]);
+        var packedHeaders = ParseLocalZipHeaders(File.ReadAllBytes(packedPath));
+        Assert.All(packedHeaders, h => Assert.Equal(0, h.Method));
+        Assert.Equal(0L, packedHeaders.Single(h => h.Name == SkptFileFormat.WeightsEntryPath)
+            .DataOffset % SkptFileFormat.DataAlignment);
+        Assert.Equal(direct, ExecuteToBytes(Persistence.Load(packedPath), numOut, input));
+
+        Assert.Contains("PackSkpt",
+            Assert.Throws<ArgumentException>(() => Persistence.ExtractSkpt(dirPath, P("x.skpt"))).Message);
+        Assert.Contains("ExtractSkpt",
+            Assert.Throws<ArgumentException>(() => Persistence.PackSkpt(zipPath, P("y.skpt"))).Message);
+
+        var (zModel, zNumOut, zInput) = BuildCompressibleSkptModel();
+        var zstdZip = P("zstd-dirform.skpt");
+        var zstdDir = P("zstd-dirform-dir.skpt");
+        Persistence.From(zModel).WithModel().WithWeights().WithZstdCompressedData().Save(zstdZip);
+        Persistence.ExtractSkpt(zstdZip, zstdDir);
+        Assert.True(SkptFileFormat.LooksLikeZstdFrame(
+            File.ReadAllBytes(Path.Combine(zstdDir, SkptFileFormat.WeightsEntryPath))));
+        Assert.Equal(ExecuteToBytes(zModel, zNumOut, zInput),
+            ExecuteToBytes(Persistence.Load(zstdDir), zNumOut, zInput));
+    }
+
+    [Fact]
+    public void TestInspectSkptDirectoryForm()
+    {
+        var (model, _, _) = BuildSkptModel();
+        var dirPath = P("inspect-dir.skpt");
+        Persistence.From(model).WithModel().WithWeights().SaveAsDirectory(dirPath);
+        var dirEntries = ReadDirectoryEntries(dirPath);
+
+        var result = Persistence.Inspect(dirPath);
+        Assert.Equal(ArtifactKind.SkptCheckpoint, result.Kind);
+        Assert.Equal(dirPath, result.FilePath);
+        Assert.Equal(dirEntries.Values.Sum(b => b.LongLength), result.FileSizeBytes);
+        Assert.Empty(result.Observations);
+        var skpt = result.Skpt!;
+        Assert.Equal(SkptFileFormat.CurrentVersion, skpt.SkptVersion);
+        Assert.Equal(SkptFileFormat.ModelEntryPath, Assert.Single(skpt.Models).EntryPath);
+        var dataSummary = Assert.Single(skpt.DataEntries);
+        Assert.Equal(SkptFileFormat.WeightsEntryPath, dataSummary.EntryPath);
+        Assert.Equal(dirEntries[SkptFileFormat.WeightsEntryPath].LongLength, dataSummary.DeclaredSizeBytes);
+        string[] expectedSets = ["default"];
+        Assert.Equal(expectedSets, skpt.MappingSetNames);
+
+        File.WriteAllBytes(Path.Combine(dirPath, "data", "stray.bin"), new byte[16]);
+        File.Delete(Path.Combine(dirPath, SkptFileFormat.ModelEntryPath));
+        AssertInspection(Persistence.Inspect(dirPath), ArtifactKind.SkptCheckpoint,
+            [SkptFileFormat.ModelEntryPath, "no such entry"], ["data/stray.bin", "not referenced"]);
+
+        var plainDir = P("plain-dir");
+        Directory.CreateDirectory(plainDir);
+        File.WriteAllText(Path.Combine(plainDir, "readme.txt"), "just a directory");
+        AssertInspection(Persistence.Inspect(plainDir), ArtifactKind.NotRecognized,
+            [SkptFileFormat.ConfigEntryName]);
+        File.WriteAllText(Path.Combine(plainDir, SkptFileFormat.ConfigEntryName),
+            "{\"name\":\"other-tool\"}");
+        AssertInspection(Persistence.Inspect(plainDir), ArtifactKind.NotRecognized, ["format"]);
+        File.WriteAllText(Path.Combine(plainDir, SkptFileFormat.ConfigEntryName), "not json");
+        AssertInspection(Persistence.Inspect(plainDir), ArtifactKind.NotRecognized, ["not a readable"]);
+    }
+
+    [Fact]
+    public void TestSkptDirectorySaveAtomicityInterruptionAndPathEscapes()
+    {
+        var (model, numOut, input) = BuildSkptModel();
+        var direct = ExecuteToBytes(model, numOut, input);
+        var target = P("atomic-dir.skpt");
+
+        Assert.Throws<DirectoryNotFoundException>(() => Persistence.From(model).WithModel().WithWeights()
+            .SaveAsDirectory(P(Path.Combine("no-such-dir", "model.skpt"))));
+        var filePath = P("already-a-file.skpt");
+        File.WriteAllBytes(filePath, [1]);
+        Assert.Throws<IOException>(() => Persistence.From(model).WithModel().WithWeights()
+            .SaveAsDirectory(filePath));
+
+        // A simulated crash in the commit window leaves the existing checkpoint fully intact —
+        // an interrupted save is never visible at the target path.
+        Persistence.From(model).WithModel().WithWeights().SaveAsDirectory(target);
+        var committed = ReadDirectoryEntries(target);
+        AtomicFileWriter.CommitFaultInjection = tempPath =>
+        {
+            if (tempPath.Contains("atomic-dir.skpt")) throw new IOException("simulated commit crash");
+        };
+        try
+        {
+            Assert.Throws<IOException>(
+                () => Persistence.From(model).WithModel().WithWeights().SaveAsDirectory(target));
+        }
+        finally { AtomicFileWriter.CommitFaultInjection = null; }
+        var afterCrash = ReadDirectoryEntries(target);
+        Assert.Equal(committed.Keys.OrderBy(n => n, StringComparer.Ordinal),
+            afterCrash.Keys.OrderBy(n => n, StringComparer.Ordinal));
+        foreach (var (name, bytes) in committed)
+            Assert.Equal(bytes, afterCrash[name]);
+        Assert.Equal(direct, ExecuteToBytes(Persistence.Load(target), numOut, input));
+
+        var (zModel, zNumOut, zInput) = BuildCompressibleSkptModel();
+        Persistence.From(zModel).WithModel().WithWeights().SaveAsDirectory(target);
+        var zDirect = ExecuteToBytes(zModel, zNumOut, zInput);
+        Assert.Equal(zDirect, ExecuteToBytes(Persistence.Load(target), zNumOut, zInput));
+
+        // A failure after the previous checkpoint was renamed aside (mid-replace) rolls it back.
+        AtomicFileWriter.ReplaceFaultInjection = tempPath =>
+        {
+            if (tempPath.Contains("atomic-dir.skpt")) throw new IOException("simulated replace crash");
+        };
+        try
+        {
+            Assert.Throws<IOException>(
+                () => Persistence.From(model).WithModel().WithWeights().SaveAsDirectory(target));
+        }
+        finally { AtomicFileWriter.ReplaceFaultInjection = null; }
+        Assert.Equal(zDirect, ExecuteToBytes(Persistence.Load(target), zNumOut, zInput));
+
+        // A '-sweep' leftover from an interrupted earlier sweep is finished off by the next save.
+        var doomed = P($".tmp-atomic-dir.skpt-{Guid.NewGuid():N}-sweep");
+        Directory.CreateDirectory(doomed);
+        File.WriteAllBytes(Path.Combine(doomed, "junk.bin"), [1]);
+        Persistence.From(model).WithModel().WithWeights().SaveAsDirectory(target);
+        Assert.False(Directory.Exists(doomed));
+        Assert.Equal(direct, ExecuteToBytes(Persistence.Load(target), numOut, input));
+
+        var partial = P("partial.skpt");
+        Directory.CreateDirectory(Path.Combine(partial, "data"));
+        File.WriteAllBytes(Path.Combine(partial, SkptFileFormat.WeightsEntryPath),
+            committed[SkptFileFormat.WeightsEntryPath]);
+        Assert.Contains(SkptFileFormat.ConfigEntryName,
+            Assert.Throws<InvalidDataException>(() => Persistence.Load(partial)).Message);
+        Assert.Throws<FileNotFoundException>(() => Persistence.Load(P("nope.skpt")));
+
+        // ── A hostile manifest's entry path may never resolve outside the checkpoint.
+        var hostile = P("hostile.skpt");
+        Persistence.From(model).WithModel().WithWeights().SaveAsDirectory(hostile);
+        var configPath = Path.Combine(hostile, SkptFileFormat.ConfigEntryName);
+        var goodConfig = File.ReadAllBytes(configPath);
+        File.WriteAllBytes(P("outside-secret.bin"), [0xAA, 0xBB]);
+
+        void Refused(string registry, string entryValue, params string[] fragments)
+        {
+            var config = JsonNode.Parse(goodConfig)!;
+            (registry == "data" ? config["data"]!["weights"]! : config["models"]!["model"]!)
+                ["entry"] = entryValue;
+            File.WriteAllBytes(configPath, System.Text.Encoding.UTF8.GetBytes(config.ToJsonString()));
+            var ex = Assert.Throws<InvalidDataException>(() => Persistence.Load(hostile));
+            foreach (var fragment in fragments)
+                Assert.Contains(fragment, ex.Message);
+        }
+        Refused("data", "../outside-secret.bin", "escapes");
+        Refused("data", "data/../../outside-secret.bin", "escapes");
+        Refused("data", P("outside-secret.bin"), "absolute");
+        Refused("models", "../outside-secret.bin", "escapes");
+
+        var inspection = Persistence.Inspect(hostile);
+        Assert.Equal(ArtifactKind.SkptCheckpoint, inspection.Kind);
+        Assert.Contains(inspection.Observations, o => o.Contains("escapes"));
+        Assert.Contains("escapes", Assert.Throws<InvalidDataException>(
+            () => Persistence.PackSkpt(hostile, P("packed-hostile.skpt"))).Message);
+        File.WriteAllBytes(configPath, goodConfig);
+        Assert.Equal(direct, ExecuteToBytes(Persistence.Load(hostile), numOut, input));
+
+        // Extraction of a hostile zip cannot write outside the target either.
+        var zipPath = P("hostile-zip.skpt");
+        Persistence.From(model).WithModel().WithWeights().Save(zipPath);
+        var entries = ReadZipEntries(zipPath);
+        var config2 = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
+        config2["data"]!["weights"]!["entry"] = "../evil.bin";
+        RewriteSkpt(zipPath, entries.Select(e => (
+            e.Key == SkptFileFormat.WeightsEntryPath ? "../evil.bin" : e.Key,
+            e.Key == SkptFileFormat.ConfigEntryName
+                ? System.Text.Encoding.UTF8.GetBytes(config2.ToJsonString()) : e.Value)).ToList());
+        var extractTarget = P("hostile-extract.skpt");
+        Assert.Contains("escapes", Assert.Throws<InvalidDataException>(
+            () => Persistence.ExtractSkpt(zipPath, extractTarget)).Message);
+        Assert.False(Directory.Exists(extractTarget));
+        Assert.False(File.Exists(P("evil.bin")));
+    }
+
     /// <summary>The model's weight tensors (TensorData) keyed by parameter identifier, excluding
     /// the RNG identity parameter — the values an additional mapping set is built over.</summary>
     private static Dictionary<string, TensorData> WeightDataByParam(ComputationGraph model)

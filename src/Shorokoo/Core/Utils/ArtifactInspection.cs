@@ -243,8 +243,10 @@ namespace Shorokoo
 
     /// <summary>The training-checkpoint block of an inspected .skpt manifest (issue #95) — present
     /// only when the file persists a <see cref="TrainingCheckpoint"/>. Read from the config.json
-    /// <c>training</c> block alone; no tensor payload is touched (the step and per-kind wiring live
-    /// in the manifest, so Inspect reports them without loading data).</summary>
+    /// <c>training</c> block alone; no tensor payload is touched (the run counters live in the
+    /// manifest, so Inspect reports them without loading data; the training state's per-tensor
+    /// wiring lives in the manifest's tensor mappings, summarized by
+    /// <see cref="SkptArtifactInfo.MappingSetNames"/> and the data registry).</summary>
     public sealed class SkptTrainingSummary
     {
         /// <summary>Training-checkpoint block version (<see cref="SkptFileFormat.TrainingCheckpointVersion"/>
@@ -263,19 +265,13 @@ namespace Shorokoo
         /// host-owned run counter (issue #100) — or <c>null</c> when the manifest omits it (issue #111).</summary>
         public long? BatchIndex { get; }
 
-        /// <summary>Training-state kind name → the manifest data-registry key that stores it, in
-        /// manifest order (the kinds present; an empty struct is omitted).</summary>
-        public IReadOnlyList<KeyValuePair<string, string>> Kinds { get; }
-
         internal SkptTrainingSummary(
-            int checkpointVersion, long step, long? epoch, long? batchIndex,
-            IReadOnlyList<KeyValuePair<string, string>> kinds)
+            int checkpointVersion, long step, long? epoch, long? batchIndex)
         {
             CheckpointVersion = checkpointVersion;
             Step = step;
             Epoch = epoch;
             BatchIndex = batchIndex;
-            Kinds = kinds;
         }
     }
 
@@ -513,13 +509,6 @@ namespace Shorokoo
                       .Append(", global step ").Append(tr.Step)
                       .Append(", epoch ").Append(tr.Epoch?.ToString() ?? "unset")
                       .Append(", batch index ").Append(tr.BatchIndex?.ToString() ?? "unset").AppendLine();
-                    sb.Append("  training kinds (").Append(tr.Kinds.Count).AppendLine("):");
-                    foreach (var kind in tr.Kinds.Take(MaxListedTensors))
-                        sb.Append("    ").Append(kind.Key).Append(" → data entry '")
-                          .Append(kind.Value).AppendLine("'");
-                    if (tr.Kinds.Count > MaxListedTensors)
-                        sb.Append("    … and ").Append(tr.Kinds.Count - MaxListedTensors)
-                          .AppendLine(" more");
                 }
             }
 
@@ -949,6 +938,18 @@ namespace Shorokoo
                     if (!mappingSetNames.Contains(setName))
                         mappingSetNames.Add(setName);
                     CollectUnknown($"mapping set '{modelKey}/{setName}'", set?.AdditionalFields);
+                    // Every tensor reference must land in the data registry — the same
+                    // manifest-only wiring check Load enforces. One observation per set keeps
+                    // the summary bounded against a hostile many-tensor mapping.
+                    foreach (var (refId, tensorRef) in set?.Tensors ?? new())
+                    {
+                        var dataKey = tensorRef?.Data;
+                        if (dataKey is null || (manifest.Data?.ContainsKey(dataKey) ?? false)) continue;
+                        observations.Add($"mapping set '{modelKey}/{setName}' references data entry " +
+                            $"'{dataKey}' (for '{refId}'), which the manifest's data registry does " +
+                            "not declare.");
+                        break;
+                    }
                 }
             }
 
@@ -1021,9 +1022,10 @@ namespace Shorokoo
             }
 
             // Training-checkpoint block (issue #95): read straight from the manifest — the host-owned
-            // run counters (step, epoch, batch index; the latter two added by issue #100) and per-kind
-            // wiring are metadata, so this needs no tensor reads. Cross-check that each named kind's
-            // data key exists in the data registry, and flag a malformed block.
+            // run counters (step, epoch, batch index; the latter two added by issue #100) are
+            // metadata, so this needs no tensor reads. The training state's per-tensor wiring lives
+            // in tensorMappings (issue #184), cross-checked against the data registry above like any
+            // other mapping. Flag a malformed block.
             SkptTrainingSummary? training = null;
             if (manifest.Training is { } t)
             {
@@ -1035,16 +1037,7 @@ namespace Shorokoo
                         $"version this build reads ({SkptFileFormat.TrainingCheckpointVersion}); " +
                         "Persistence.LoadTrainingCheckpointFromSkpt would refuse the file.");
 
-                var kinds = new List<KeyValuePair<string, string>>();
-                foreach (var (kindName, dataKey) in t.Kinds ?? new())
-                {
-                    kinds.Add(new KeyValuePair<string, string>(kindName, dataKey));
-                    if (manifest.Data is null || !manifest.Data.ContainsKey(dataKey))
-                        observations.Add($"the training kind '{kindName}' references data entry " +
-                            $"'{dataKey}', which the manifest's data registry does not declare.");
-                }
-                training = new SkptTrainingSummary(
-                    t.CheckpointVersion, t.Step, t.Epoch, t.BatchIndex, kinds);
+                training = new SkptTrainingSummary(t.CheckpointVersion, t.Step, t.Epoch, t.BatchIndex);
             }
 
             return new SkptArtifactInfo(

@@ -15,13 +15,15 @@ namespace Shorokoo
     // Native .skpt persistence for training checkpoints (issue #95). A training-checkpoint .skpt
     // is a strict superset of an inference .skpt: it carries the concrete inference model
     // (models/model.srk) and a "default" weight set — which doubles as the run's trainable weights,
-    // so Persistence.Load reads it straight back as an inference model — plus per-kind data entries
-    // for the remaining training state (model state, optimizer state) and a manifest training block
-    // recording the global step and which data entry holds each kind. The trainable weights live
-    // once: the model's default weight mapping references the trainable data entry rather than
-    // duplicating the bytes. This half of the Persistence facade owns that save/load; the container
-    // primitives (writer, manifest schema, sha256/decompression helpers) are shared with the
-    // inference path in Persistence.cs.
+    // so Persistence.Load reads it straight back as an inference model — plus data entries for the
+    // remaining training state (model state, optimizer state) and a manifest training block
+    // recording the global step. Every state tensor is addressed individually through the
+    // manifest's tensorMappings (issue #184): the trainable weights and model state ride in the
+    // inference model's default mapping — which thereby doubles as the training-state mapping, so
+    // the bytes live once — and the optimizer state gets its own mapping under the optimizer
+    // constituent's model key, keyed per (parameter × slot) instance. This half of the Persistence
+    // facade owns that save/load; the container primitives (writer, manifest schema,
+    // sha256/decompression helpers) are shared with the inference path in Persistence.cs.
     public static partial class Persistence
     {
         /// <summary>
@@ -123,11 +125,14 @@ namespace Shorokoo
 
         /// <summary>
         /// Reconstructs a <see cref="TrainingCheckpoint"/> from a native <c>.skpt</c> container
-        /// written by <see cref="SaveTrainingCheckpointToSkpt"/>. Validated against the expected
-        /// struct defs with the same fail-loud contract as <see cref="TrainingCheckpoint.Load"/>:
-        /// every referenced entry's SHA-256 is verified, each kind's tensors must match the given
-        /// def field-for-field (missing field, rank mismatch, or a stray tensor fails loudly), and a
-        /// kind the def expects but the file omits fails loudly. Backs the public
+        /// written by <see cref="SaveTrainingCheckpointToSkpt"/>, resolving every state tensor
+        /// individually through the manifest's tensor mappings (issue #184): trainable params and
+        /// model state through the inference model's <c>default</c> mapping, optimizer state through
+        /// the optimizer constituent's per-instance mapping. Validated against the expected struct
+        /// defs with the same fail-loud contract as <see cref="TrainingCheckpoint.Load"/>: every
+        /// referenced entry's SHA-256 is verified, and the mapped tensors must cover each def
+        /// field-for-field (a missing field, a rank mismatch, or a mapped tensor no def declares
+        /// fails loudly, naming the mismatch). Backs the public
         /// <see cref="LoadTrainingCheckpointFromSkpt(string, TensorStructDef, TensorStructDef, TensorStructDef)"/>
         /// and the rig-supplied <see cref="TrainingCheckpoint.LoadFromSkpt"/>; callers verify the
         /// container shape first.
@@ -182,11 +187,20 @@ namespace Shorokoo
             // as int64 so the in-memory int64 counters survive the round trip with no truncation on
             // read. Epoch and batchIndex are nullable: a .skpt whose position is genuinely unknown
             // omits them, and they deserialize to null rather than a sentinel 0.
-            var kinds = training.Kinds ?? new Dictionary<string, string>();
+            //
+            // Every state tensor is addressed individually through the manifest's tensorMappings
+            // (issue #184): the trainable params and model state through the inference model's
+            // 'default' mapping — the very mapping Persistence.Load binds, so the bytes live once —
+            // and the optimizer state through the optimizer constituent's mapping, keyed per
+            // (parameter × slot) instance. Which def each tensor belongs to is re-derived from the
+            // identifiers, with the same fail-loud coverage contract as before: a def field with no
+            // mapped tensor, a mapped tensor no def declares, or a rank mismatch names the culprit.
+            var modelMapping = GetDefaultMappingTensors(manifest, SkptFileFormat.DefaultModelKey);
+            var optimizerMapping = GetDefaultMappingTensors(
+                manifest, training.Rig?.OptimizerModel ?? SkptFileFormat.OptimizerModelKey);
+            var tensorsByDataKey = new Dictionary<string, Dictionary<string, TensorData>>(StringComparer.Ordinal);
 
             bool Want(CheckpointComponents c) => components is null || (components.Value & c) != 0;
-            bool KindPresent(string kindName) =>
-                kinds.TryGetValue(kindName, out var key) && !string.IsNullOrEmpty(key);
 
             // Counters (step/epoch/batch) ride with the Counters component; the loss is its own
             // independent Loss component. Each filtered out ⇒ 0 (step) / null (epoch, batch, loss),
@@ -199,12 +213,11 @@ namespace Shorokoo
             TensorDataStruct trainable, modelState, optState;
 
             if (Want(CheckpointComponents.InferenceState)
-                && (KindPresent(SkptFileFormat.TrainingKindTrainableParams) || trainableParamDef.Fields.Length == 0))
+                && (modelMapping is not null
+                    || (trainableParamDef.Fields.Length == 0 && modelStateDef.Fields.Length == 0)))
             {
-                trainable = ReconstructTrainingKind(
-                    archive, manifest, kinds, SkptFileFormat.TrainingKindTrainableParams, trainableParamDef, filePath);
-                modelState = ReconstructTrainingKind(
-                    archive, manifest, kinds, SkptFileFormat.TrainingKindModelState, modelStateDef, filePath);
+                (trainable, modelState) = ReconstructArchOwnedState(
+                    archive, manifest, modelMapping, trainableParamDef, modelStateDef, tensorsByDataKey, filePath);
             }
             else if (rigForDefaults is not null)
             {
@@ -213,17 +226,15 @@ namespace Shorokoo
             }
             else
             {
-                trainable = ReconstructTrainingKind(
-                    archive, manifest, kinds, SkptFileFormat.TrainingKindTrainableParams, trainableParamDef, filePath);
-                modelState = ReconstructTrainingKind(
-                    archive, manifest, kinds, SkptFileFormat.TrainingKindModelState, modelStateDef, filePath);
+                (trainable, modelState) = ReconstructArchOwnedState(
+                    archive, manifest, modelMapping, trainableParamDef, modelStateDef, tensorsByDataKey, filePath);
             }
 
             if (Want(CheckpointComponents.OptimizerState)
-                && (KindPresent(SkptFileFormat.TrainingKindOptimizerState) || optimizerStateDef.Fields.Length == 0))
+                && (optimizerMapping is not null || optimizerStateDef.Fields.Length == 0))
             {
-                optState = ReconstructTrainingKind(
-                    archive, manifest, kinds, SkptFileFormat.TrainingKindOptimizerState, optimizerStateDef, filePath);
+                optState = ReconstructOptimizerState(
+                    archive, manifest, optimizerMapping, optimizerStateDef, tensorsByDataKey, filePath);
             }
             else if (rigForDefaults is not null)
             {
@@ -231,92 +242,172 @@ namespace Shorokoo
             }
             else
             {
-                optState = ReconstructTrainingKind(
-                    archive, manifest, kinds, SkptFileFormat.TrainingKindOptimizerState, optimizerStateDef, filePath);
+                optState = ReconstructOptimizerState(
+                    archive, manifest, optimizerMapping, optimizerStateDef, tensorsByDataKey, filePath);
             }
 
             return new TrainingCheckpoint(trainable, modelState, optState, step, epoch, batchIndex, rig: null, loss: loss);
         }
 
+        /// <summary>The tensors of a model's <c>default</c> mapping set, or null when the manifest
+        /// carries no such set (distinct from an existing-but-empty set, which returns its empty
+        /// dictionary — a model that genuinely has no parameters).</summary>
+        private static Dictionary<string, SkptTensorRef>? GetDefaultMappingTensors(
+            SkptManifest manifest, string modelKey)
+            => manifest.TensorMappings is not null
+               && manifest.TensorMappings.TryGetValue(modelKey, out var sets)
+               && sets is not null
+               && sets.TryGetValue(SkptFileFormat.DefaultMappingSetName, out var set)
+               && set?.Tensors is not null
+                ? set.Tensors
+                : null;
+
         /// <summary>
-        /// Rebuilds one training-state kind against <paramref name="def"/>. A kind the manifest omits
-        /// is valid only when the def carries no fields (then an empty struct); a def with fields but
-        /// no matching entry fails loudly (the checkpoint is missing state this model/optimizer needs).
+        /// Rebuilds the arch-owned training state — the trainable parameters and the model state —
+        /// from the inference model's <c>default</c> tensor mapping (issue #184). The mapping's keys
+        /// are full parameter identifiers; which def each tensor belongs to is re-derived by
+        /// matching the identifier's canonical dotted portion against the def field names. Coverage
+        /// is exact both ways: a def field with no mapped tensor, or a mapped tensor neither def
+        /// declares, fails loudly naming it — that is what catches a checkpoint from a different
+        /// model.
         /// </summary>
-        private static TensorDataStruct ReconstructTrainingKind(
-            ZipArchive archive, SkptManifest manifest, IReadOnlyDictionary<string, string> kinds,
-            string kindName, TensorStructDef def, string filePath)
+        private static (TensorDataStruct Trainable, TensorDataStruct ModelState) ReconstructArchOwnedState(
+            ZipArchive archive, SkptManifest manifest, IReadOnlyDictionary<string, SkptTensorRef>? mapping,
+            TensorStructDef trainableParamDef, TensorStructDef modelStateDef,
+            Dictionary<string, Dictionary<string, TensorData>> tensorsByDataKey, string filePath)
         {
-            if (!kinds.TryGetValue(kindName, out var dataKey) || string.IsNullOrEmpty(dataKey))
+            if (mapping is null)
+            {
+                if (trainableParamDef.Fields.Length > 0 || modelStateDef.Fields.Length > 0)
+                    throw new InvalidDataException(
+                        $"'{filePath}': the .skpt manifest has no '{SkptFileFormat.DefaultMappingSetName}' " +
+                        $"tensor mapping for model '{SkptFileFormat.DefaultModelKey}', but this model expects " +
+                        $"{trainableParamDef.Fields.Length} trainable and {modelStateDef.Fields.Length} " +
+                        "model-state field(s). Does the checkpoint match this model?");
+                return (new TensorDataStruct(trainableParamDef, Array.Empty<KeyValuePair<string, IData>>()),
+                        new TensorDataStruct(modelStateDef, Array.Empty<KeyValuePair<string, IData>>()));
+            }
+
+            var byField = new Dictionary<string, (string Id, SkptTensorRef Ref)>(StringComparer.Ordinal);
+            foreach (var (id, tensorRef) in mapping)
+            {
+                var fieldName = Core.Nodes.Processors.Training.FastDiscoverParamsHelpers
+                    .ExtractTemplateString(id);
+                if (!byField.TryAdd(fieldName, (id, tensorRef)))
+                    throw new InvalidDataException(
+                        $"'{filePath}': parameters '{byField[fieldName].Id}' and '{id}' in the " +
+                        $"'{SkptFileFormat.DefaultMappingSetName}' mapping of model " +
+                        $"'{SkptFileFormat.DefaultModelKey}' share the canonical name '{fieldName}'; the " +
+                        "training state cannot be resolved unambiguously.");
+            }
+
+            var trainable = BuildStateStruct(archive, manifest, byField, trainableParamDef,
+                "trainable parameter", "Does the checkpoint match this model?", tensorsByDataKey, filePath);
+            var modelState = BuildStateStruct(archive, manifest, byField, modelStateDef,
+                "model-state field", "Does the checkpoint match this model?", tensorsByDataKey, filePath);
+
+            if (byField.Count > 0)
+            {
+                var stray = byField.Values.First().Id;
+                throw new InvalidDataException(
+                    $"'{filePath}': the checkpoint maps parameter '{stray}'" +
+                    (byField.Count > 1 ? $" (and {byField.Count - 1} more)" : string.Empty) +
+                    ", which this model's trainable/model-state definitions do not declare. Does the " +
+                    "checkpoint match this model?");
+            }
+            return (trainable, modelState);
+        }
+
+        /// <summary>
+        /// Rebuilds the optimizer state from the optimizer constituent's <c>default</c> tensor
+        /// mapping (issue #184), whose keys are composite
+        /// <c>{parameterIdentifier}#opt{slot}</c> per-instance identifiers — the arch-owned
+        /// parameter identity plus the optimizer-owned slot index. Each key is resolved to its
+        /// struct field name by construction (never by parsing field names), and coverage against
+        /// <paramref name="def"/> is exact both ways, so a checkpoint whose optimizer state does not
+        /// match the rig's optimizer fails loudly naming the mismatched instance.
+        /// </summary>
+        private static TensorDataStruct ReconstructOptimizerState(
+            ZipArchive archive, SkptManifest manifest, IReadOnlyDictionary<string, SkptTensorRef>? mapping,
+            TensorStructDef def,
+            Dictionary<string, Dictionary<string, TensorData>> tensorsByDataKey, string filePath)
+        {
+            if (mapping is null)
             {
                 if (def.Fields.Length > 0)
                     throw new InvalidDataException(
-                        $"'{filePath}': the training checkpoint carries no '{kindName}' kind, but this " +
-                        $"model/optimizer expects it ({def.Fields.Length} field(s)). Does the checkpoint " +
-                        "match this model/optimizer?");
+                        $"'{filePath}': the training checkpoint carries no optimizer-state tensor mapping, " +
+                        $"but this optimizer expects {def.Fields.Length} state field(s). Does the " +
+                        "checkpoint match this optimizer?");
                 return new TensorDataStruct(def, Array.Empty<KeyValuePair<string, IData>>());
             }
 
-            var tensors = ReadTrainingKindTensors(archive, manifest, dataKey, kindName, filePath);
-            return ReadTrainingKindSection(tensors, def, kindName, filePath);
+            var byField = new Dictionary<string, (string Id, SkptTensorRef Ref)>(StringComparer.Ordinal);
+            foreach (var (id, tensorRef) in mapping)
+            {
+                if (!SkptFileFormat.TryParseOptimizerStateId(id, out var paramId, out var slot))
+                    throw new InvalidDataException(
+                        $"'{filePath}': optimizer-state mapping key '{id}' is not a " +
+                        $"'<parameter>{SkptFileFormat.OptimizerStateIdSeparator}<slot>' composite " +
+                        "identifier.");
+                var fieldName = TrainingRig.OptimizerStateFieldName(
+                    Core.Nodes.Processors.Training.FastDiscoverParamsHelpers.ExtractTemplateString(paramId),
+                    slot);
+                if (!byField.TryAdd(fieldName, (id, tensorRef)))
+                    throw new InvalidDataException(
+                        $"'{filePath}': optimizer-state mapping keys '{byField[fieldName].Id}' and '{id}' " +
+                        $"resolve to the same state instance '{fieldName}'.");
+            }
+
+            var optState = BuildStateStruct(archive, manifest, byField, def,
+                "optimizer-state instance", "Does the checkpoint match this optimizer?",
+                tensorsByDataKey, filePath);
+
+            if (byField.Count > 0)
+            {
+                var stray = byField.Values.First().Id;
+                throw new InvalidDataException(
+                    $"'{filePath}': the checkpoint maps optimizer-state tensor '{stray}'" +
+                    (byField.Count > 1 ? $" (and {byField.Count - 1} more)" : string.Empty) +
+                    ", which this optimizer's state definition does not declare. Does the checkpoint " +
+                    "match this optimizer?");
+            }
+            return optState;
         }
 
         /// <summary>
-        /// Reads, SHA-256-verifies and decodes the safetensors data entry a training kind points at,
-        /// returning its tensors by name. Mirrors the inference path's data-entry handling (integrity
-        /// checked over the stored bytes, then any Zstd layer removed) via the shared helpers.
+        /// Materializes one state struct against <paramref name="def"/> from the per-field mapping
+        /// index, consuming each claimed entry (so the caller can fail loudly on leftovers): every
+        /// def field must have a mapped tensor of the expected rank, resolved through the shared
+        /// data-entry reader (SHA-256-verified and decoded at most once per entry via
+        /// <paramref name="tensorsByDataKey"/>).
         /// </summary>
-        private static Dictionary<string, TensorData> ReadTrainingKindTensors(
-            ZipArchive archive, SkptManifest manifest, string dataKey, string kindName, string filePath)
-        {
-            if (manifest.Data is null || !manifest.Data.TryGetValue(dataKey, out var dataEntry) || dataEntry is null)
-                throw new InvalidDataException(
-                    $"'{filePath}': training kind '{kindName}' references data entry '{dataKey}', which the " +
-                    "manifest's data registry does not declare.");
-            if (string.IsNullOrEmpty(dataEntry.Entry))
-                throw new InvalidDataException(
-                    $"'{filePath}': the manifest's data entry '{dataKey}' (training kind '{kindName}') names " +
-                    "no archive entry.");
-            if (dataEntry.Format != SkptFileFormat.DataFormatSafeTensors)
-                throw new InvalidDataException(
-                    $"'{filePath}': data entry '{dataKey}' uses unsupported storage format " +
-                    $"'{dataEntry.Format}' (supported: '{SkptFileFormat.DataFormatSafeTensors}').");
-
-            var storedBytes = ReadEntry(archive, dataEntry.Entry, $"data entry '{dataKey}'", filePath);
-            VerifySha256(storedBytes, dataEntry.Sha256, dataEntry.Entry, filePath);
-            var dataBytes = DecodeDataEntryPayload(storedBytes, dataEntry, dataKey, filePath);
-            return SafeTensorLoader.ParseSafeTensorBytes(dataBytes)
-                .ToDictionary(t => t.Name, t => t.Data, StringComparer.Ordinal);
-        }
-
-        /// <summary>
-        /// Reconstructs a <see cref="TensorDataStruct"/> for one kind against <paramref name="def"/>:
-        /// every def field must be present with a matching rank, and no stray tensor may remain — the
-        /// field-name-keyed analogue of <see cref="TrainingCheckpoint"/>'s section reader.
-        /// </summary>
-        private static TensorDataStruct ReadTrainingKindSection(
-            IReadOnlyDictionary<string, TensorData> tensors, TensorStructDef def, string kindName, string filePath)
+        private static TensorDataStruct BuildStateStruct(
+            ZipArchive archive, SkptManifest manifest,
+            Dictionary<string, (string Id, SkptTensorRef Ref)> byField,
+            TensorStructDef def, string role, string mismatchHint,
+            Dictionary<string, Dictionary<string, TensorData>> tensorsByDataKey, string filePath)
         {
             var fields = new List<KeyValuePair<string, IData>>(def.Fields.Length);
             foreach (var fieldDef in def.Fields)
             {
-                if (!tensors.TryGetValue(fieldDef.Name, out var td))
+                if (!byField.Remove(fieldDef.Name, out var mapped))
                     throw new InvalidDataException(
-                        $"'{filePath}': training kind '{kindName}' is missing field '{fieldDef.Name}'. " +
-                        "Does the checkpoint match this model/optimizer?");
+                        $"'{filePath}': the checkpoint maps no tensor for {role} '{fieldDef.Name}'. " +
+                        mismatchHint);
+                var tensors = ResolveDataEntry(
+                    archive, manifest, mapped.Ref, mapped.Id, tensorsByDataKey, filePath);
+                if (string.IsNullOrEmpty(mapped.Ref.Tensor)
+                    || !tensors.TryGetValue(mapped.Ref.Tensor, out var td))
+                    throw new InvalidDataException(
+                        $"'{filePath}': '{mapped.Id}' maps to tensor '{mapped.Ref.Tensor}' in data entry " +
+                        $"'{mapped.Ref.Data}', but that entry contains no such tensor.");
                 if (fieldDef.Rank is int rank && td.Shape.Dims.Length != rank)
                     throw new InvalidDataException(
-                        $"'{filePath}': training-kind '{kindName}' field '{fieldDef.Name}' has rank " +
-                        $"{td.Shape.Dims.Length}, expected {rank}.");
+                        $"'{filePath}': {role} '{fieldDef.Name}' has rank {td.Shape.Dims.Length}, " +
+                        $"expected {rank}.");
                 fields.Add(new KeyValuePair<string, IData>(fieldDef.Name, td));
             }
-
-            foreach (var name in tensors.Keys)
-                if (def.GetField(name) is null)
-                    throw new InvalidDataException(
-                        $"'{filePath}': training kind '{kindName}' has unexpected tensor '{name}' not in " +
-                        "this model/optimizer's definition.");
-
             return new TensorDataStruct(def, fields);
         }
 
@@ -590,12 +681,16 @@ namespace Shorokoo
             // Default weight mapping: each model parameter (keyed by its full identifier) points at
             // its tensor in the trainable or model-state data entry, named by the checkpoint's struct
             // field name (the identifier's canonical dotted portion). Every parameter must have a
-            // matching trainable or model-state field, or the model and checkpoint disagree.
+            // matching trainable or model-state field, or the model and checkpoint disagree. This
+            // one mapping is also how the training state is addressed on reload (issue #184): each
+            // arch-owned state tensor rides in it per tensor, so it must cover the checkpoint's
+            // trainable and model-state fields exactly — both directions are validated here.
             var trainableFieldNames = new HashSet<string>(
                 _checkpoint.TrainableParams.Definition.Fields.Select(f => f.Name), StringComparer.Ordinal);
             var modelStateFieldNames = new HashSet<string>(
                 _checkpoint.ModelState.Definition.Fields.Select(f => f.Name), StringComparer.Ordinal);
             var tensorRefs = new Dictionary<string, SkptTensorRef>(StringComparer.Ordinal);
+            var identifierByField = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var node in weightNodes)
             {
                 var fieldName = Core.Nodes.Processors.Training.FastDiscoverParamsHelpers
@@ -608,7 +703,14 @@ namespace Shorokoo
                         $"trainable or model-state field '{fieldName}' in the checkpoint. The model graph " +
                         "and the checkpoint do not correspond.");
                 tensorRefs[node.IdentifierTemplate!] = new SkptTensorRef { Data = dataKey, Tensor = fieldName };
+                identifierByField[fieldName] = node.IdentifierTemplate!;
             }
+            foreach (var fieldName in trainableFieldNames.Concat(modelStateFieldNames))
+                if (!identifierByField.ContainsKey(fieldName))
+                    throw new InvalidOperationException(
+                        $"{operation}: the checkpoint's state field '{fieldName}' has no matching " +
+                        "parameter in the model, so its tensor cannot be addressed in the manifest's " +
+                        "tensor mapping. The model graph and the checkpoint do not correspond.");
 
             // Serialize each training-state kind to safetensors (keyed by field name). The trainable
             // entry carries every trainable field (the authoritative source for reconstruction); the
@@ -627,9 +729,8 @@ namespace Shorokoo
             {
                 new(SkptFileFormat.ModelEntryPath, modelBytes, Align: false),
             };
-            var kinds = new Dictionary<string, string>(StringComparer.Ordinal);
 
-            void AddKind(string kindName, string dataKey, string entryPath, byte[] rawBytes)
+            void AddDataEntry(string dataKey, string entryPath, byte[] rawBytes)
             {
                 var (stored, compression, align) = EncodeDataEntry(rawBytes);
                 dataEntries[dataKey] = new SkptDataEntry
@@ -640,19 +741,51 @@ namespace Shorokoo
                     Sha256 = SkptFileFormat.Sha256Hex(stored),
                 };
                 bodyEntries.Add(new(entryPath, stored, Align: align));
-                kinds[kindName] = dataKey;
             }
 
-            AddKind(SkptFileFormat.TrainingKindTrainableParams, SkptFileFormat.TrainableDataKey,
-                SkptFileFormat.TrainableEntryPath, trainableBytes);
+            AddDataEntry(SkptFileFormat.TrainableDataKey, SkptFileFormat.TrainableEntryPath, trainableBytes);
             if (_checkpoint.ModelState.Definition.Fields.Length > 0)
-                AddKind(SkptFileFormat.TrainingKindModelState, SkptFileFormat.ModelStateDataKey,
-                    SkptFileFormat.ModelStateEntryPath,
+                AddDataEntry(SkptFileFormat.ModelStateDataKey, SkptFileFormat.ModelStateEntryPath,
                     Persistence.SerializeTrainingKind(_checkpoint.ModelState, "model state"));
             if (_checkpoint.OptimizerState.Definition.Fields.Length > 0)
-                AddKind(SkptFileFormat.TrainingKindOptimizerState, SkptFileFormat.OptimizerStateDataKey,
-                    SkptFileFormat.OptimizerStateEntryPath,
+                AddDataEntry(SkptFileFormat.OptimizerStateDataKey, SkptFileFormat.OptimizerStateEntryPath,
                     Persistence.SerializeTrainingKind(_checkpoint.OptimizerState, "optimizer state"));
+
+            // Optimizer-state tensor mapping (issue #184): one entry per (trainable parameter ×
+            // state slot) instance, keyed by the composite identifier — the parameter's full
+            // identifier (its identity in the arch) plus the optimizer-owned slot index — under the
+            // optimizer constituent's model key. The rig generates the optimizer-state def
+            // param-major with TrainingRig.OptimizerStateFieldName, which is re-checked per field
+            // here so the mapping can never silently drift from the stored tensor names.
+            Dictionary<string, SkptTensorRef>? optimizerStateRefs = null;
+            var optFields = _checkpoint.OptimizerState.Definition.Fields;
+            if (optFields.Length > 0)
+            {
+                var trainableFields = _checkpoint.TrainableParams.Definition.Fields;
+                if (trainableFields.Length == 0 || optFields.Length % trainableFields.Length != 0)
+                    throw new InvalidOperationException(
+                        $"{operation}: the checkpoint's optimizer state has {optFields.Length} field(s) " +
+                        $"over {trainableFields.Length} trainable parameter(s) — not a whole number of " +
+                        "state slots per parameter, so the per-instance tensor mapping cannot be built.");
+                int slots = optFields.Length / trainableFields.Length;
+                optimizerStateRefs = new Dictionary<string, SkptTensorRef>(StringComparer.Ordinal);
+                for (int i = 0; i < optFields.Length; i++)
+                {
+                    var paramName = trainableFields[i / slots].Name;
+                    int slot = i % slots;
+                    if (optFields[i].Name != TrainingRig.OptimizerStateFieldName(paramName, slot))
+                        throw new InvalidOperationException(
+                            $"{operation}: optimizer-state field '{optFields[i].Name}' is not the expected " +
+                            $"'{TrainingRig.OptimizerStateFieldName(paramName, slot)}' — the checkpoint's " +
+                            "optimizer state does not follow the rig's param-major slot layout.");
+                    optimizerStateRefs[SkptFileFormat.MakeOptimizerStateId(identifierByField[paramName], slot)] =
+                        new SkptTensorRef
+                        {
+                            Data = SkptFileFormat.OptimizerStateDataKey,
+                            Tensor = optFields[i].Name,
+                        };
+                }
+            }
 
             // The model registry: the inference model (the one Persistence.Load binds) plus the rig's
             // constituent graphs as ordinary models/ entries (#115). Constituents carry no tensor
@@ -675,6 +808,23 @@ namespace Shorokoo
             // (input shapes, hyperparameter bindings, RNG config) in the rig block.
             var rigInfo = AppendRigConstituents(_checkpoint.Rig!, models, bodyEntries);
 
+            // Tensor mappings: the inference model's default set (which doubles as the
+            // trainable/model-state training mapping — one entry per tensor, bytes stored once) plus,
+            // when the optimizer is stateful, the optimizer constituent's per-instance set.
+            var tensorMappings = new Dictionary<string, Dictionary<string, SkptMappingSet>>
+            {
+                [SkptFileFormat.DefaultModelKey] = new Dictionary<string, SkptMappingSet>(StringComparer.Ordinal)
+                {
+                    [SkptFileFormat.DefaultMappingSetName] = new SkptMappingSet { Tensors = tensorRefs },
+                },
+            };
+            if (optimizerStateRefs is not null)
+                tensorMappings[SkptFileFormat.OptimizerModelKey] =
+                    new Dictionary<string, SkptMappingSet>(StringComparer.Ordinal)
+                    {
+                        [SkptFileFormat.DefaultMappingSetName] = new SkptMappingSet { Tensors = optimizerStateRefs },
+                    };
+
             var manifest = new SkptManifest
             {
                 Format = SkptFileFormat.FormatName,
@@ -683,13 +833,7 @@ namespace Shorokoo
                 Producer = new SkptProducerInfo { Shorokoo = ShorokooVersion.VersionString },
                 UserMetadata = _userMetadata,
                 Models = models,
-                TensorMappings = new Dictionary<string, Dictionary<string, SkptMappingSet>>
-                {
-                    [SkptFileFormat.DefaultModelKey] = new Dictionary<string, SkptMappingSet>(StringComparer.Ordinal)
-                    {
-                        [SkptFileFormat.DefaultMappingSetName] = new SkptMappingSet { Tensors = tensorRefs },
-                    },
-                },
+                TensorMappings = tensorMappings,
                 Data = dataEntries,
                 Training = new SkptTrainingInfo
                 {
@@ -709,7 +853,6 @@ namespace Shorokoo
                     // so it reads back as null — never a sentinel 0.0. A dropped Loss component on LOAD
                     // (or a null value) reads back null.
                     Loss = _checkpoint.Loss,
-                    Kinds = kinds,
                 },
             };
 

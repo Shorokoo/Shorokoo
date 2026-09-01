@@ -27,8 +27,8 @@ Related: [onnx-and-weights.md](onnx-and-weights.md) · [training.md](training.md
   [Named weight sets](#named-weight-sets-default--ema).
 - A `.skpt` can also persist a **training checkpoint** — the trainable weights, model
   state, optimizer state and the run counters (global step, epoch, batch index) of a
-  training run — with the state split into
-  separate per-kind `data/` entries alongside the concrete inference model, so a run
+  training run — with every state tensor addressed individually through the manifest's
+  tensor mappings, alongside the concrete inference model, so a run
   resumes across process restarts and the same file also loads as an inference model. See
   [Training checkpoints](#training-checkpoints). Precompiled artifacts and the full
   training-rig (constituent models, schedules) are future extensions of the same container.
@@ -115,13 +115,19 @@ What the file carries:
   self-describing model can never disagree with extraction. The trainable weights double as the model's
   `default` weight set, so the same file loads as a runnable inference model with
   `Persistence.Load("run.skpt")` — no separate export step.
-- **The training state, split by kind into separate `data/` entries**: the trainable
-  weights (`data/trainable.safetensors`), the model state (`data/model_state.safetensors`,
-  omitted for a stateless model) and the optimizer state
-  (`data/optimizer_state.safetensors`, omitted for a stateless optimizer like plain SGD).
-  Each entry stores its kind's tensors keyed by struct field name.
-- **The run counters** — the global step, plus the epoch and batch index — and which data
-  entry holds each kind, recorded in the manifest's `training` block (so `Persistence.Inspect`
+- **The training state, every tensor addressed individually** through the manifest's
+  `tensorMappings`. The trainable weights and model state are parameters the architecture
+  owns, so they ride in the model's `default` mapping — the very mapping inference loading
+  binds, keyed by parameter identifier, so the bytes live once. The optimizer state gets
+  its own `default` mapping under the optimizer constituent's model key, keyed
+  `{parameterIdentifier}#opt{slot}` — one entry per (trainable parameter × optimizer state
+  slot) instance, composing the arch-owned parameter identity with the optimizer-owned
+  slot index. The bytes live in separate `data/` entries (`data/trainable.safetensors`;
+  `data/model_state.safetensors`, omitted for a stateless model; and
+  `data/optimizer_state.safetensors`, omitted for a stateless optimizer like plain SGD),
+  each storing its tensors keyed by struct field name.
+- **The run counters** — the global step, plus the epoch and batch index — recorded in
+  the manifest's `training` block (so `Persistence.Inspect`
   reports them without reading tensor data). Step, epoch and batch index are host-owned: the
   training loop advances them (`TrainStep` advances the step and carries epoch/batch through
   unchanged), and they are persisted so a resumed run restores its position. A checkpoint whose
@@ -130,8 +136,9 @@ What the file carries:
 Round-trip is exact: reloaded trainable params, model state and optimizer state are
 bit-identical, the counters are preserved, and a resumed `TrainStep` reproduces the pre-save
 trajectory. Loading validates against the rig's struct definitions with the same fail-loud
-contract as the flat format — a checkpoint from a different model or optimizer, a
-missing kind, a rank mismatch, or a tampered entry (sha256) fails loudly.
+contract as the flat format — a checkpoint from a different model or optimizer (a state
+tensor mapped that the rig does not declare, or a declared one the checkpoint does not
+map — the mismatch is named), a rank mismatch, or a tampered entry (sha256) fails loudly.
 
 Reconstruct without a rig by supplying the struct defs directly:
 
@@ -386,10 +393,11 @@ model.skpt
 - `data/user-data.json` holds the optional [host user-data bag](#host-user-data-bag) —
   a JSON object you attach and read back verbatim; present only when you supply one, and
   ignored by load.
-- A [training checkpoint](#training-checkpoints) adds more `data/` entries — one per
-  training-state kind (`data/trainable.safetensors`, and, when non-empty,
-  `data/model_state.safetensors` and `data/optimizer_state.safetensors`) — and a
-  `training` block in the manifest (the run counters: step, epoch, batch index).
+- A [training checkpoint](#training-checkpoints) adds more `data/` entries
+  (`data/trainable.safetensors`, and, when non-empty,
+  `data/model_state.safetensors` and `data/optimizer_state.safetensors`) plus a
+  `training` block in the manifest (the run counters: step, epoch, batch index); every
+  state tensor is wired individually through `tensorMappings`, never routed by entry.
 - The trees are optional and the layout is extensible: future versions add more
   `models/` entries, more `data/` kinds, `precompiledmodels/`, and `sample_inputs/`
   without a container change.
@@ -425,6 +433,13 @@ model.skpt
   // Tensor mappings: per model, named mapping sets resolving each parameter to a
   // tensor inside a data entry. "default" is always present; additional sets (e.g.
   // "ema") map the same parameters, sharing data entries where the bytes are identical.
+  // In a training checkpoint, this is also how every training-state tensor is addressed:
+  // the trainable weights and model state through the model's "default" mapping (whose
+  // entries then point at the "trainable" / "model_state" data entries), and the
+  // optimizer state through a "default" mapping under the optimizer constituent's model
+  // key ("optimizer"), keyed "{parameterIdentifier}#opt{slot}" — one entry per
+  // (parameter × state slot) instance, e.g.
+  //   "[1]:TrainableParam#0…#opt0": { "data": "optimizer_state", "tensor": "TrainableParam#0…_opt_0" }.
   "tensorMappings": {
     "model": {
       "default": {
@@ -471,20 +486,15 @@ model.skpt
   },
 
   // Training block: present only in a training checkpoint (omitted for an inference
-  // checkpoint). Records the host-owned run counters (step, epoch, batch index) and which
-  // data entry holds each state kind — an empty kind (e.g. model state for a stateless
-  // model) is absent and has no entry. epoch/batchIndex are nullable: a checkpoint whose
-  // position is genuinely unknown omits them and reads them back as null.
+  // checkpoint). Records the host-owned run counters (step, epoch, batch index); the
+  // training state itself is addressed per tensor through "tensorMappings" above, so the
+  // block routes nothing. epoch/batchIndex are nullable: a checkpoint whose position is
+  // genuinely unknown omits them and reads them back as null.
   "training": {
     "checkpointVersion": 1,
     "step": 42,
     "epoch": 3,
-    "batchIndex": 17,
-    "kinds": {
-      "trainableParams": "trainable",         // → data/trainable.safetensors (also the default set)
-      "modelState": "model_state",            // → data/model_state.safetensors
-      "optimizerState": "optimizer_state"     // → data/optimizer_state.safetensors
-    }
+    "batchIndex": 17
   }
 }
 ```

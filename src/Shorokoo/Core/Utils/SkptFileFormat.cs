@@ -106,11 +106,13 @@ namespace Shorokoo.Core.Utils
     /// <summary>
     /// The training-checkpoint block of a .skpt manifest (issue #95). Present only when the file
     /// persists a <see cref="Shorokoo.TrainingCheckpoint"/>; absent for an ordinary inference
-    /// checkpoint. It records the checkpoint's host-owned run counters (step, epoch, batch index) and which
-    /// manifest data-registry entry holds each
-    /// training-state kind — the trainable weights (which also serve as the model's default weight
-    /// set), the model state, and the optimizer state. A kind whose struct is empty is omitted
-    /// from <see cref="Kinds"/> and carries no data entry. Like the rest of the manifest, its keys
+    /// checkpoint. It records the checkpoint's host-owned run counters (step, epoch, batch index)
+    /// and the rig constituents; the training state itself is addressed per tensor through the
+    /// manifest's <c>tensorMappings</c> (issue #184) — the trainable weights and model state by the
+    /// inference model's <c>default</c> mapping (which thereby doubles as the training-state
+    /// mapping, so no bytes are duplicated), the optimizer state by the optimizer constituent's
+    /// <c>default</c> mapping under composite per-instance identifiers (see
+    /// <see cref="SkptFileFormat.MakeOptimizerStateId"/>). Like the rest of the manifest, its keys
     /// are add-only across minor revisions.
     /// </summary>
     public sealed class SkptTrainingInfo
@@ -145,11 +147,6 @@ namespace Shorokoo.Core.Utils
         /// filtered out on load. The serializer omits it when null (never a sentinel 0.0).</summary>
         [JsonPropertyName("loss")]
         public float? Loss { get; set; }
-
-        /// <summary>Training-state kind name → the manifest data-registry key that stores it
-        /// (e.g. <c>"trainableParams" → "trainable"</c>). A kind with an empty struct is absent.</summary>
-        [JsonPropertyName("kinds")]
-        public Dictionary<string, string>? Kinds { get; set; }
 
         /// <summary>The serialized <see cref="Shorokoo.TrainingRig"/> constituents (issue #115, folding
         /// in #106): enough to rebuild the whole rig — <c>trainstep</c> and all — from the checkpoint
@@ -445,29 +442,21 @@ namespace Shorokoo.Core.Utils
         // ---- Training-checkpoint container (issue #95) ----
         // A training-checkpoint .skpt is a superset of an inference .skpt: it carries the concrete
         // inference model (models/) plus its default weight set — which doubles as the run's
-        // trainable weights — and adds per-kind data entries for the remaining training state
-        // (model state, optimizer state). The global step is small metadata and rides in the
+        // trainable weights — and adds data entries for the remaining training state (model state,
+        // optimizer state). Every state tensor is addressed individually through tensorMappings
+        // (issue #184): the trainable weights and model state ride in the inference model's
+        // "default" mapping, keyed by parameter identifier; the optimizer state gets its own
+        // "default" mapping under the optimizer constituent's model key, keyed by the composite
+        // per-instance identifier below. The global step is small metadata and rides in the
         // manifest's dedicated training block rather than a data entry. A file carrying that block
         // reconstructs a TrainingCheckpoint; one without it is an ordinary inference checkpoint.
 
         /// <summary>Current training-checkpoint manifest-block version (see <see cref="SkptTrainingInfo"/>).</summary>
         public const int TrainingCheckpointVersion = 1;
 
-        /// <summary>Training-state kind name: the trainable parameters (also the model's default
-        /// weight set, so the checkpoint is self-describing for inference).</summary>
-        public const string TrainingKindTrainableParams = "trainableParams";
-
-        /// <summary>Training-state kind name: the model state (running stats, etc.; empty for
-        /// stateless models).</summary>
-        public const string TrainingKindModelState = "modelState";
-
-        /// <summary>Training-state kind name: the optimizer state (moment buffers, step, etc.;
-        /// empty for basic SGD).</summary>
-        public const string TrainingKindOptimizerState = "optimizerState";
-
         /// <summary>Manifest data-registry key of the trainable-weights entry. Doubles as the
         /// model's default weight set (referenced by the "default" tensor mapping) and as the
-        /// trainable-params training kind.</summary>
+        /// training checkpoint's trainable-parameter storage.</summary>
         internal const string TrainableDataKey = "trainable";
 
         /// <summary>Manifest data-registry key of the model-state entry.</summary>
@@ -484,6 +473,43 @@ namespace Shorokoo.Core.Utils
 
         /// <summary>Archive path of the optimizer-state data entry.</summary>
         internal const string OptimizerStateEntryPath = "data/optimizer_state.safetensors";
+
+        /// <summary>
+        /// Separator of the composite optimizer-state tensor identifier (issue #184). A single
+        /// optimizer-state tensor's identity is a model parameter (arch-owned, named by its full
+        /// parameter identifier) times a state slot (optimizer-owned, a 0-based index), so the
+        /// optimizer constituent's tensor mapping keys each tensor as
+        /// <c>{parameterIdentifier}#opt{slot}</c>. The optimizer's own ModelIds do not enumerate
+        /// per-parameter state instances, hence the composite rather than a plain identifier.
+        /// </summary>
+        internal const string OptimizerStateIdSeparator = "#opt";
+
+        /// <summary>Composes the optimizer-state mapping key for one (parameter, slot) instance
+        /// (see <see cref="OptimizerStateIdSeparator"/>).</summary>
+        internal static string MakeOptimizerStateId(string parameterIdentifier, int slot)
+            => parameterIdentifier + OptimizerStateIdSeparator
+               + slot.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        /// <summary>
+        /// Splits a composite optimizer-state mapping key back into its parameter identifier and
+        /// slot index. The separator is matched at its last occurrence (so a pathological
+        /// identifier containing the separator still round-trips); false for a key that does not
+        /// end in <c>#opt&lt;digits&gt;</c>.
+        /// </summary>
+        internal static bool TryParseOptimizerStateId(string id, out string parameterIdentifier, out int slot)
+        {
+            parameterIdentifier = string.Empty;
+            slot = 0;
+            int at = id.LastIndexOf(OptimizerStateIdSeparator, StringComparison.Ordinal);
+            if (at <= 0) return false;
+            var slotPart = id.AsSpan(at + OptimizerStateIdSeparator.Length);
+            if (slotPart.IsEmpty || !int.TryParse(
+                    slotPart, System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture, out slot))
+                return false;
+            parameterIdentifier = id.Substring(0, at);
+            return true;
+        }
 
         // ---- Training-rig constituents (issue #115, folding in #106) ----
         // A training .skpt also carries the rig's constituent graphs as ordinary models/ entries — the

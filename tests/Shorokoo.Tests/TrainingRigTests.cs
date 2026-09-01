@@ -2035,9 +2035,18 @@ public class TrainingRigSkptCheckpointCoverageTests
             Assert.NotNull(manifest.Training);
             Assert.Equal(SkptFileFormat.TrainingCheckpointVersion, manifest.Training!.CheckpointVersion);
             Assert.Equal(2, manifest.Training.Step);
-            Assert.Contains(SkptFileFormat.TrainingKindTrainableParams, manifest.Training.Kinds!.Keys);
-            Assert.Contains(SkptFileFormat.TrainingKindOptimizerState, manifest.Training.Kinds.Keys);
-            Assert.DoesNotContain(SkptFileFormat.TrainingKindModelState, manifest.Training.Kinds.Keys);
+            Assert.True(manifest.Training.AdditionalFields is null
+                || !manifest.Training.AdditionalFields.ContainsKey("kinds"));
+            var modelTensors = manifest.TensorMappings!["model"]["default"].Tensors!;
+            var optTensors = manifest.TensorMappings["optimizer"]["default"].Tensors!;
+            Assert.All(modelTensors.Values, r => Assert.Equal("trainable", r.Data));
+            Assert.Equal(2 * modelTensors.Count, optTensors.Count);
+            Assert.All(optTensors, kv =>
+            {
+                Assert.True(SkptFileFormat.TryParseOptimizerStateId(kv.Key, out var paramId, out _));
+                Assert.Contains(paramId, modelTensors.Keys);
+                Assert.Equal("optimizer_state", kv.Value.Data);
+            });
 
             var rigB = BuildTrainedAdamRig(steps: 0).Rig;
             var loaded = rigB.LoadCheckpointFromSkpt(path);
@@ -2067,13 +2076,9 @@ public class TrainingRigSkptCheckpointCoverageTests
             Assert.NotNull(training);
             Assert.Equal(SkptFileFormat.TrainingCheckpointVersion, training!.CheckpointVersion);
             Assert.Equal(2, training.Step);
-            var kindNames = training.Kinds.Select(k => k.Key).ToArray();
-            Assert.Contains(SkptFileFormat.TrainingKindTrainableParams, kindNames);
-            Assert.Contains(SkptFileFormat.TrainingKindOptimizerState, kindNames);
             var text = inspect.ToString();
             Assert.Contains("training checkpoint: version 1", text);
             Assert.Contains("global step 2", text);
-            Assert.Contains(SkptFileFormat.TrainingKindTrainableParams, text);
         }
         finally { if (File.Exists(path)) File.Delete(path); }
 
@@ -2143,6 +2148,24 @@ public class TrainingRigSkptCheckpointCoverageTests
                 [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([8L], new float[8]))],
                 0.5f, 0.9f);
             Assert.ThrowsAny<Exception>(() => bnRig.LoadCheckpointFromSkpt(path));
+
+            TrainingRig SgdmRig() => TrainingRig.FromScratch(
+                ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+                SGDMomentumOptimizer.ComputationGraph,
+                [new TensorDataModelParam("input", ModelParamType.InputParam,
+                    TensorData(ScalarInputShape, [1f, 2f, 3f, 4f]))],
+                0.5f, 0.9f);
+            var strayOpt = Assert.Throws<System.IO.InvalidDataException>(() => SgdmRig().LoadCheckpoint(path));
+            Assert.Contains("optimizer", strayOpt.Message);
+
+            var sgdmPath = TempPath("skpt_sgdm") + ".skpt";
+            try
+            {
+                Persistence.SaveTrainingCheckpointToSkpt(SgdmRig().CreateInitialCheckpoint(), sgdmPath);
+                var missingOpt = Assert.Throws<System.IO.InvalidDataException>(() => rig.LoadCheckpoint(sgdmPath));
+                Assert.Contains("optimizer-state", missingOpt.Message);
+            }
+            finally { if (File.Exists(sgdmPath)) File.Delete(sgdmPath); }
 
             var bytes = File.ReadAllBytes(path);
             var entryBytes = ReadEntryBytesViaBcl(path, SkptFileFormat.TrainableEntryPath);

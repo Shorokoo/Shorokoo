@@ -2155,14 +2155,14 @@ public class TrainingRigSkptCheckpointCoverageTests
                 [new TensorDataModelParam("input", ModelParamType.InputParam,
                     TensorData(ScalarInputShape, [1f, 2f, 3f, 4f]))],
                 0.5f, 0.9f);
-            var strayOpt = Assert.Throws<System.IO.InvalidDataException>(() => SgdmRig().LoadCheckpoint(path));
+            var strayOpt = Assert.Throws<System.IO.InvalidDataException>(() => SgdmRig().LoadCheckpointFromSkpt(path));
             Assert.Contains("optimizer", strayOpt.Message);
 
             var sgdmPath = TempPath("skpt_sgdm") + ".skpt";
             try
             {
                 Persistence.SaveTrainingCheckpointToSkpt(SgdmRig().CreateInitialCheckpoint(), sgdmPath);
-                var missingOpt = Assert.Throws<System.IO.InvalidDataException>(() => rig.LoadCheckpoint(sgdmPath));
+                var missingOpt = Assert.Throws<System.IO.InvalidDataException>(() => rig.LoadCheckpointFromSkpt(sgdmPath));
                 Assert.Contains("optimizer-state", missingOpt.Message);
             }
             finally { if (File.Exists(sgdmPath)) File.Delete(sgdmPath); }

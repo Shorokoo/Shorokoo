@@ -1971,7 +1971,7 @@ public class TrainingRigSkptCheckpointCoverageTests
         return -1;
     }
 
-    private static void StripSkptTrainingCounterKeys(string path)
+    private static void RewriteSkptManifest(string path, Action<System.Text.Json.Nodes.JsonNode> edit)
     {
         var entries = new List<SkptFileFormat.ZipEntrySpec>();
         using (var zip = System.IO.Compression.ZipFile.OpenRead(path))
@@ -1984,9 +1984,7 @@ public class TrainingRigSkptCheckpointCoverageTests
                 if (e.FullName == SkptFileFormat.ConfigEntryName)
                 {
                     var node = System.Text.Json.Nodes.JsonNode.Parse(data)!;
-                    var training = node["training"]!.AsObject();
-                    training.Remove("epoch");
-                    training.Remove("batchIndex");
+                    edit(node);
                     data = System.Text.Encoding.UTF8.GetBytes(node.ToJsonString());
                 }
                 entries.Add(new SkptFileFormat.ZipEntrySpec(e.FullName, data, Align: false));
@@ -2167,6 +2165,20 @@ public class TrainingRigSkptCheckpointCoverageTests
             }
             finally { if (File.Exists(sgdmPath)) File.Delete(sgdmPath); }
 
+            var nullRefPath = TempPath("skpt_nullref") + ".skpt";
+            try
+            {
+                Persistence.SaveTrainingCheckpointToSkpt(one, nullRefPath);
+                RewriteSkptManifest(nullRefPath, n =>
+                {
+                    var tensors = n["tensorMappings"]!["model"]!["default"]!["tensors"]!.AsObject();
+                    tensors[tensors.First().Key] = null;
+                });
+                var nullEx = Assert.Throws<System.IO.InvalidDataException>(() => rig.LoadCheckpointFromSkpt(nullRefPath));
+                Assert.Contains("null reference", nullEx.Message);
+            }
+            finally { if (File.Exists(nullRefPath)) File.Delete(nullRefPath); }
+
             var bytes = File.ReadAllBytes(path);
             var entryBytes = ReadEntryBytesViaBcl(path, SkptFileFormat.TrainableEntryPath);
             int window = Math.Min(24, entryBytes.Length);
@@ -2200,7 +2212,12 @@ public class TrainingRigSkptCheckpointCoverageTests
             var two = new TrainingCheckpoint(
                 trained.TrainableParams, trained.ModelState, trained.OptimizerState, step: 2, rig: trained.Rig);
             Persistence.SaveTrainingCheckpointToSkpt(two, strippedPath);
-            StripSkptTrainingCounterKeys(strippedPath);
+            RewriteSkptManifest(strippedPath, n =>
+            {
+                var training = n["training"]!.AsObject();
+                training.Remove("epoch");
+                training.Remove("batchIndex");
+            });
 
             var manifest = SkptFileFormat.ParseManifest(
                 ReadEntryBytesViaBcl(strippedPath, SkptFileFormat.ConfigEntryName), strippedPath);

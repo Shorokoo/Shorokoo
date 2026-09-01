@@ -29,12 +29,15 @@ namespace Shorokoo
         /// <summary>
         /// Saves a <see cref="TrainingCheckpoint"/> as a native <c>.skpt</c> container: the concrete
         /// inference model (built from the checkpoint's trained weights via
-        /// <see cref="TrainingCheckpoint.ToInferenceModel"/>) plus the training state split into
-        /// per-kind data entries (trainable weights, model state, optimizer state), with the global
-        /// step recorded in the manifest. The trainable-weights entry doubles as the model's default
-        /// weight set, so the file also loads as an inference checkpoint via
-        /// <see cref="Load(string)"/>. Reload the training state with
-        /// <see cref="LoadTrainingCheckpoint"/> / <see cref="TrainingRig.LoadCheckpoint"/>.
+        /// <see cref="TrainingCheckpoint.ToInferenceModel"/>) plus the training state (trainable
+        /// weights, model state, optimizer state), every state tensor addressed individually
+        /// through the manifest's tensor mappings, with the global step recorded in the manifest.
+        /// The trainable weights double as the model's default weight set, so the file also loads
+        /// as an inference checkpoint via <see cref="Load(string)"/>. Reload the training state
+        /// with <see cref="TrainingRig.LoadCheckpointFromSkpt"/> /
+        /// <see cref="LoadTrainingCheckpointFromSkpt(string, TensorStructDef, TensorStructDef, TensorStructDef)"/>,
+        /// or rebuild the whole rig from the file alone with
+        /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?)"/>.
         ///
         /// <para>The write is atomic (staged to a temp file and committed by rename). For per-entry
         /// Zstd compression or provenance metadata, use the builder form
@@ -291,6 +294,11 @@ namespace Shorokoo
             var byField = new Dictionary<string, (string Id, SkptTensorRef Ref)>(StringComparer.Ordinal);
             foreach (var (id, tensorRef) in mapping)
             {
+                if (tensorRef is null)
+                    throw new InvalidDataException(
+                        $"'{filePath}': the '{SkptFileFormat.DefaultMappingSetName}' mapping of model " +
+                        $"'{SkptFileFormat.DefaultModelKey}' has a null reference for parameter '{id}' — " +
+                        "the manifest is malformed.");
                 var fieldName = Core.Nodes.Processors.Training.FastDiscoverParamsHelpers
                     .ExtractTemplateString(id);
                 if (!byField.TryAdd(fieldName, (id, tensorRef)))
@@ -345,6 +353,10 @@ namespace Shorokoo
             var byField = new Dictionary<string, (string Id, SkptTensorRef Ref)>(StringComparer.Ordinal);
             foreach (var (id, tensorRef) in mapping)
             {
+                if (tensorRef is null)
+                    throw new InvalidDataException(
+                        $"'{filePath}': the optimizer-state tensor mapping has a null reference for " +
+                        $"'{id}' — the manifest is malformed.");
                 if (!SkptFileFormat.TryParseOptimizerStateId(id, out var paramId, out var slot))
                     throw new InvalidDataException(
                         $"'{filePath}': optimizer-state mapping key '{id}' is not a " +
@@ -703,7 +715,11 @@ namespace Shorokoo
                         $"trainable or model-state field '{fieldName}' in the checkpoint. The model graph " +
                         "and the checkpoint do not correspond.");
                 tensorRefs[node.IdentifierTemplate!] = new SkptTensorRef { Data = dataKey, Tensor = fieldName };
-                identifierByField[fieldName] = node.IdentifierTemplate!;
+                if (!identifierByField.TryAdd(fieldName, node.IdentifierTemplate!))
+                    throw new InvalidOperationException(
+                        $"{operation}: parameters '{identifierByField[fieldName]}' and " +
+                        $"'{node.IdentifierTemplate}' share the canonical name '{fieldName}', so the " +
+                        "checkpoint's state tensors could not be resolved unambiguously on reload.");
             }
             foreach (var fieldName in trainableFieldNames.Concat(modelStateFieldNames))
                 if (!identifierByField.ContainsKey(fieldName))

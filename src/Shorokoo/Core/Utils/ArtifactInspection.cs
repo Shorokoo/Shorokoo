@@ -938,16 +938,19 @@ namespace Shorokoo
                     if (!mappingSetNames.Contains(setName))
                         mappingSetNames.Add(setName);
                     CollectUnknown($"mapping set '{modelKey}/{setName}'", set?.AdditionalFields);
-                    // Every tensor reference must land in the data registry — the same
-                    // manifest-only wiring check Load enforces. One observation per set keeps
-                    // the summary bounded against a hostile many-tensor mapping.
+                    // Every tensor reference must name a data-registry entry — the same
+                    // manifest-only wiring Load enforces (a null reference, a missing data key,
+                    // and an undeclared data key all fail Load loudly). One observation per set
+                    // keeps the summary bounded against a hostile many-tensor mapping.
                     foreach (var (refId, tensorRef) in set?.Tensors ?? new())
                     {
                         var dataKey = tensorRef?.Data;
-                        if (dataKey is null || (manifest.Data?.ContainsKey(dataKey) ?? false)) continue;
-                        observations.Add($"mapping set '{modelKey}/{setName}' references data entry " +
-                            $"'{dataKey}' (for '{refId}'), which the manifest's data registry does " +
-                            "not declare.");
+                        if (dataKey is not null && (manifest.Data?.ContainsKey(dataKey) ?? false))
+                            continue;
+                        observations.Add(dataKey is null
+                            ? $"mapping set '{modelKey}/{setName}' names no data entry for '{refId}'."
+                            : $"mapping set '{modelKey}/{setName}' references data entry '{dataKey}' " +
+                              $"(for '{refId}'), which the manifest's data registry does not declare.");
                         break;
                     }
                 }

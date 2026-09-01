@@ -202,26 +202,37 @@ namespace Shorokoo
             throw new InvalidDataException(LooksLikeSafeTensorsFile(prefix)
                 ? $"'{filePath}' is not a .skpt container — it looks like a flat safetensors " +
                   $"training checkpoint, not a zip archive. {flatEntryPointHint}"
-                : $"'{filePath}' is not a .skpt container — a .skpt is a zip archive, but the " +
-                  (prefix.Length == 0
-                      ? "file is empty, "
-                      : $"file starts with bytes {Convert.ToHexString(prefix.AsSpan(0, Math.Min(prefix.Length, 4)))}, ") +
-                  "matching neither a .skpt container nor a flat safetensors checkpoint.");
+                : $"'{filePath}' is not a .skpt container — a .skpt is a zip archive, but " +
+                  $"{DescribeUnrecognizedPrefix(prefix)}, matching neither a .skpt container " +
+                  "nor a flat safetensors checkpoint.");
         }
 
         /// <summary>
-        /// Fails loud when <paramref name="filePath"/> begins like a zip archive — the <c>.skpt</c>
-        /// container, not the flat safetensors checkpoint the caller reads.
-        /// <paramref name="skptEntryPointHint"/> completes the error, pointing at the entry point
-        /// that reads the container shape.
+        /// Fails loud unless <paramref name="filePath"/> begins like the flat safetensors
+        /// checkpoint (an 8-byte header-length prefix, then the JSON header's <c>{</c>).
+        /// <paramref name="skptEntryPointHint"/> completes the error when the file is a zip
+        /// archive — the <c>.skpt</c> container — pointing at the entry point that reads that
+        /// shape.
         /// </summary>
         internal static void VerifyFlatTrainingCheckpoint(string filePath, string skptEntryPointHint)
         {
-            if (!LooksLikeZipArchive(ReadFilePrefix(filePath))) return;
-            throw new InvalidDataException(
-                $"'{filePath}' is not a flat safetensors training checkpoint — it is a zip " +
-                $"archive, the .skpt container format. {skptEntryPointHint}");
+            var prefix = ReadFilePrefix(filePath);
+            if (LooksLikeZipArchive(prefix))
+                throw new InvalidDataException(
+                    $"'{filePath}' is not a flat safetensors training checkpoint — it is a zip " +
+                    $"archive, the .skpt container format. {skptEntryPointHint}");
+            if (!LooksLikeSafeTensorsFile(prefix))
+                throw new InvalidDataException(
+                    $"'{filePath}' is not a flat safetensors training checkpoint — " +
+                    $"{DescribeUnrecognizedPrefix(prefix)}, matching neither a flat safetensors " +
+                    "checkpoint nor a .skpt container.");
         }
+
+        /// <summary>Names an unrecognized file's leading bytes for the guards' errors.</summary>
+        private static string DescribeUnrecognizedPrefix(ReadOnlySpan<byte> prefix)
+            => prefix.Length == 0
+                ? "the file is empty"
+                : $"the file starts with bytes {Convert.ToHexString(prefix[..Math.Min(prefix.Length, 4)])}";
 
         /// <summary>A flat training checkpoint is a safetensors file: an 8-byte little-endian
         /// JSON-header length followed by the header's opening <c>{</c>.</summary>

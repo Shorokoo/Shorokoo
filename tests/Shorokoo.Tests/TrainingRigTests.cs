@@ -2342,6 +2342,8 @@ public class TrainingRigSkptCheckpointCoverageTests
                 () => TrainingRig.Load(flatPath)).Message);
             Assert.Contains("neither", Assert.Throws<System.IO.InvalidDataException>(
                 () => reader.LoadCheckpointFromSkpt(junkPath)).Message);
+            Assert.Contains("neither", Assert.Throws<System.IO.InvalidDataException>(
+                () => reader.LoadCheckpoint(junkPath)).Message);
         }
         finally
         {

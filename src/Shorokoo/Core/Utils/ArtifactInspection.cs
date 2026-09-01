@@ -848,8 +848,9 @@ namespace Shorokoo
         /// (bounded, exactly like the zip path's manifest read) and the recursive file listing
         /// stands in for the zip central directory, so the same summary and the same
         /// manifest/content cross-checks apply. Additionally, a manifest entry path that does
-        /// not resolve inside the checkpoint root is flagged — Inspect never reads outside the
-        /// directory (and never throws on content), while a full load refuses such an entry.
+        /// not resolve (lexically) inside the checkpoint root is flagged — Inspect never
+        /// resolves an entry path outside the directory (and never throws on content), while a
+        /// full load refuses such an entry.
         /// <see cref="ArtifactInspection.FileSizeBytes"/> is the total size of the directory's
         /// files.
         /// </summary>

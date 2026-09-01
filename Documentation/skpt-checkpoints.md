@@ -138,13 +138,22 @@ Guarantees specific to the directory form:
 - **Atomic commit by directory rename.** A save stages the whole tree in a `.tmp-`
   sibling directory and commits by renaming it onto the target, so the target path
   never names a half-written checkpoint: an interrupted save leaves the previous
-  checkpoint intact (or, for a first save, no target at all) plus staged debris that no
-  load path reads.
+  checkpoint in place (or, for a first save, no target at all) plus staged debris that
+  no load path reads. Replacing an existing checkpoint takes two renames (a directory
+  rename cannot overwrite): a failure between them rolls the previous checkpoint back
+  into place, and only a hard crash inside that tiny window can leave the target
+  absent — the previous tree then still exists, complete, under a `.tmp-` sibling
+  name. A concurrent reader can therefore observe the checkpoint briefly *missing*
+  during a replace (never half-written); a polling reader should treat not-found as
+  retryable. The single-file form's replace is one atomic rename with no such window.
 - **Path safety on read.** Entry paths come from `config.json`, so a hostile manifest
   could name `../…` or an absolute path; every read resolves the entry against the
   checkpoint root and **fails loudly** on any path that escapes it (the same rule the
   ONNX external-data reader applies to its `location` field). Extraction of a hostile
   zip is bounded the same way — nothing is ever written outside the target directory.
+  The check is lexical, like the ONNX rule: it stops `..` and absolute paths, while a
+  symlink planted inside an untrusted checkpoint directory is followed by the
+  filesystem — treat a checkpoint directory from an untrusted source accordingly.
 - **The manifest still rules.** Only the manifest and the entries it references are a
   checkpoint; stray files in the directory are ignored by load (and flagged by
   `Inspect`), and conversion carries only manifest-referenced entries.

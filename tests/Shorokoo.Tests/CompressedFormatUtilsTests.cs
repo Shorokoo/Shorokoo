@@ -1445,8 +1445,21 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
 
         var (zModel, zNumOut, zInput) = BuildCompressibleSkptModel();
         Persistence.From(zModel).WithModel().WithWeights().SaveAsDirectory(target);
-        Assert.Equal(ExecuteToBytes(zModel, zNumOut, zInput),
-            ExecuteToBytes(Persistence.Load(target), zNumOut, zInput));
+        var zDirect = ExecuteToBytes(zModel, zNumOut, zInput);
+        Assert.Equal(zDirect, ExecuteToBytes(Persistence.Load(target), zNumOut, zInput));
+
+        // A failure after the previous checkpoint was renamed aside (mid-replace) rolls it back.
+        AtomicFileWriter.ReplaceFaultInjection = tempPath =>
+        {
+            if (tempPath.Contains("atomic-dir.skpt")) throw new IOException("simulated replace crash");
+        };
+        try
+        {
+            Assert.Throws<IOException>(
+                () => Persistence.From(model).WithModel().WithWeights().SaveAsDirectory(target));
+        }
+        finally { AtomicFileWriter.ReplaceFaultInjection = null; }
+        Assert.Equal(zDirect, ExecuteToBytes(Persistence.Load(target), zNumOut, zInput));
 
         var partial = P("partial.skpt");
         Directory.CreateDirectory(Path.Combine(partial, "data"));

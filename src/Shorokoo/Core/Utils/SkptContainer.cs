@@ -162,7 +162,17 @@ namespace Shorokoo.Core.Utils
                 throw new InvalidDataException(
                     $"'{checkpointPath}': the manifest references entry '{entryPath}', which is an " +
                     "absolute path; checkpoint entries must live inside the checkpoint directory.");
-            var resolved = Path.GetFullPath(Path.Combine(rootFullPath, entryPath));
+            string resolved;
+            try
+            {
+                resolved = Path.GetFullPath(Path.Combine(rootFullPath, entryPath));
+            }
+            catch (ArgumentException e)   // e.g. an embedded NUL — the loader's named error, not a bare throw
+            {
+                throw new InvalidDataException(
+                    $"'{checkpointPath}': the manifest references entry '{entryPath}', which is not " +
+                    $"a valid path. ({e.Message})", e);
+            }
             var rootPrefix = Path.EndsInDirectorySeparator(rootFullPath)
                 ? rootFullPath
                 : rootFullPath + Path.DirectorySeparatorChar;

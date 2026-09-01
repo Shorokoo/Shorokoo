@@ -664,15 +664,17 @@ namespace Shorokoo.Core.Utils
         /// flushed to disk, since the atomic directory commit is a rename of
         /// <paramref name="stagingRoot"/> itself. Entry paths resolve through the same
         /// inside-the-root rule the directory reader enforces, so nothing is ever written
-        /// outside the staging root.
+        /// outside the staging root; <paramref name="origin"/> names the checkpoint being
+        /// written (or converted) in that failure, not the transient staging path.
         /// </summary>
-        internal static void WriteDirectoryEntries(string stagingRoot, IReadOnlyList<ZipEntrySpec> entries)
+        internal static void WriteDirectoryEntries(
+            string stagingRoot, IReadOnlyList<ZipEntrySpec> entries, string origin)
         {
             if (entries is null) throw new ArgumentNullException(nameof(entries));
             var rootFull = Path.GetFullPath(stagingRoot);
             foreach (var entry in entries)
             {
-                var resolved = SkptDirectoryContainer.ResolveEntryPath(rootFull, entry.Name, stagingRoot);
+                var resolved = SkptDirectoryContainer.ResolveEntryPath(rootFull, entry.Name, origin);
                 Directory.CreateDirectory(Path.GetDirectoryName(resolved)!);
                 using var fs = new FileStream(resolved, FileMode.CreateNew, FileAccess.Write, FileShare.None);
                 fs.Write(entry.Data);

@@ -797,8 +797,9 @@ namespace Shorokoo
         /// <para>The write is atomic: content is staged to a temp directory beside
         /// <paramref name="directoryPath"/> and committed by a directory rename, so the target
         /// path never names a half-written checkpoint; the target's parent directory must
-        /// already exist. An existing checkpoint (file or directory) at the target is replaced
-        /// only by a completed save.</para>
+        /// already exist. An existing checkpoint directory at the target is replaced only by a
+        /// completed save (a failed replace rolls the previous checkpoint back into place); a
+        /// file at the target is never replaced by a directory — that fails loudly.</para>
         /// </summary>
         public void SaveAsDirectory(string directoryPath)
         {
@@ -806,7 +807,7 @@ namespace Shorokoo
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(directoryPath));
             var entries = BuildCheckpointEntries();
             AtomicFileWriter.WriteDirectory(directoryPath,
-                stagingRoot => SkptFileFormat.WriteDirectoryEntries(stagingRoot, entries));
+                stagingRoot => SkptFileFormat.WriteDirectoryEntries(stagingRoot, entries, directoryPath));
         }
 
         /// <summary>

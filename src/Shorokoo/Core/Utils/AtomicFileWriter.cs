@@ -84,16 +84,27 @@ namespace Shorokoo.Core.Utils
         }
 
         /// <summary>
+        /// Test hook for the directory replace window: invoked after an existing target has been
+        /// renamed aside but before the staged tree is renamed onto the target. Throwing here
+        /// simulates a failure mid-replace, verifying the rollback that puts the previous
+        /// checkpoint back in place. Thread-scoped like the other hooks; reset in a <c>finally</c>.
+        /// </summary>
+        [ThreadStatic]
+        internal static Action<string>? ReplaceFaultInjection;
+
+        /// <summary>
         /// Atomically writes a directory tree: <paramref name="writeContent"/> populates a staged
         /// <c>.tmp-</c>-prefixed sibling directory next to <paramref name="targetPath"/>, which is
         /// then committed by a directory rename — so the target path never names a half-written
         /// tree. Replacing an existing target is supported: a directory rename cannot overwrite,
-        /// so the previous target is first renamed aside (to another staged name) and removed
-        /// best-effort after the commit; until the commit rename, the previous target is intact
-        /// either in place or under its aside name. On any failure the staged copy is deleted and
-        /// the previous target is left untouched. The target's parent directory must already
-        /// exist. Content durability is the callback's concern: flush files it writes to disk
-        /// (the directory-format writers do).
+        /// so the previous target is first renamed aside (to another staged name), and removed
+        /// best-effort after the commit; a failure between the two renames moves it straight
+        /// back, so on any in-process failure the staged copy is deleted and the previous target
+        /// is left in place untouched. Only a hard crash inside that two-rename window can leave
+        /// the target absent — the previous tree then still exists, complete, under its aside
+        /// name until the sweep after the next successful save. The target's parent directory
+        /// must already exist. Content durability is the callback's concern: flush files it
+        /// writes to disk (the directory-format writers do).
         /// </summary>
         internal static void WriteDirectory(
             string targetPath,
@@ -122,7 +133,20 @@ namespace Shorokoo.Core.Utils
                     // recognizable as uncommitted debris for the post-commit sweep.
                     string asidePath = Path.Combine(directory, StageName(name));
                     Directory.Move(fullTarget, asidePath);
-                    Directory.Move(tempPath, fullTarget);
+                    try
+                    {
+                        ReplaceFaultInjection?.Invoke(tempPath);
+                        Directory.Move(tempPath, fullTarget);
+                    }
+                    catch
+                    {
+                        // Roll the previous checkpoint back into place, so a failed replace
+                        // leaves the target exactly as it was. If even the rollback fails, the
+                        // previous tree stays recoverable under the aside name.
+                        try { Directory.Move(asidePath, fullTarget); }
+                        catch { /* recoverable under asidePath */ }
+                        throw;
+                    }
                     try { Directory.Delete(asidePath, recursive: true); }
                     catch (Exception e)
                     {
@@ -150,29 +174,74 @@ namespace Shorokoo.Core.Utils
         /// directories from earlier failed saves of this target (the directory analogue of
         /// <see cref="AfterCommit"/>). Best-effort — the commit has already succeeded. Unlike the
         /// file sweep there is no share-mode guard against a concurrent saver's live staging
-        /// directory, so only directories older than a grace period are swept.
+        /// directory, so two defenses stand in: only a tree with no write activity anywhere in
+        /// it for the whole grace period is treated as abandoned, and a doomed tree is renamed
+        /// aside before deletion — the rename is atomic, so a saver that was somehow still using
+        /// it fails loudly on its next write or its commit rename rather than ever committing a
+        /// partially swept checkpoint.
         /// </summary>
         private static void AfterCommitDirectory(string directory, string targetName, Action<string>? onWarning)
         {
             onWarning ??= static _ => { };
             foreach (var stale in EnumerateSafely(directory, $"{TempPrefix}{targetName}-*", onWarning))
             {
-                if (!IsStagedTempFor(Path.GetFileName(stale), targetName)) continue;
+                string staleName = Path.GetFileName(stale);
+                if (Directory.Exists(stale) && staleName.EndsWith(SweepSuffix, StringComparison.Ordinal)
+                    && IsStagedTempFor(staleName[..^SweepSuffix.Length], targetName))
+                {
+                    // A doomed tree an earlier sweep renamed but failed to finish deleting.
+                    try { Directory.Delete(stale, recursive: true); }
+                    catch (Exception e) { onWarning($"Shorokoo: failed to remove stale temp '{stale}': {e.Message}"); }
+                    continue;
+                }
+                if (!IsStagedTempFor(staleName, targetName)) continue;
                 if (!Directory.Exists(stale)) continue;   // file temps belong to the file sweep
                 try
                 {
-                    // A concurrent save of the same target may be mid-staging right now; skip
-                    // anything recently created rather than deleting the data out from under it.
-                    if (DateTime.UtcNow - Directory.GetCreationTimeUtc(stale) < StaleDirectoryGracePeriod)
+                    if (DateTime.UtcNow - LastActivityUtc(stale) < StaleDirectoryGracePeriod)
                         continue;
-                    Directory.Delete(stale, recursive: true);
+                    string doomed = stale + SweepSuffix;
+                    Directory.Move(stale, doomed);
+                    Directory.Delete(doomed, recursive: true);
                 }
                 catch (Exception e) { onWarning($"Shorokoo: failed to remove stale temp '{stale}': {e.Message}"); }
             }
         }
 
-        /// <summary>How old a staged sibling directory must be before the post-commit sweep
-        /// treats it as abandoned rather than a concurrent saver's live staging area.</summary>
+        /// <summary>Suffix a sweep renames a doomed staged directory to before deleting it, so a
+        /// half-finished sweep leaves a recognizable non-staged name (readers already ignore the
+        /// <see cref="TempPrefix"/>) that the next sweep finishes off.</summary>
+        private const string SweepSuffix = "-sweep";
+
+        /// <summary>
+        /// The newest creation/write timestamp anywhere in a staged tree — the liveness signal
+        /// the sweep checks, since a concurrent saver flushing content into the tree keeps some
+        /// timestamp fresh. When the tree cannot be examined, now is returned, so the sweep never
+        /// deletes what it cannot rule out as live.
+        /// </summary>
+        private static DateTime LastActivityUtc(string root)
+        {
+            try
+            {
+                DateTime newest = Directory.GetCreationTimeUtc(root);
+                DateTime rootWrite = Directory.GetLastWriteTimeUtc(root);
+                if (rootWrite > newest) newest = rootWrite;
+                foreach (var entry in Directory.EnumerateFileSystemEntries(root, "*", SearchOption.AllDirectories))
+                {
+                    var t = File.GetLastWriteTimeUtc(entry);
+                    if (t > newest) newest = t;
+                }
+                return newest;
+            }
+            catch
+            {
+                return DateTime.UtcNow;
+            }
+        }
+
+        /// <summary>How long a staged sibling directory must show no write activity before the
+        /// post-commit sweep treats it as abandoned rather than a concurrent saver's live
+        /// staging area.</summary>
         private static readonly TimeSpan StaleDirectoryGracePeriod = TimeSpan.FromHours(1);
 
         /// <summary>

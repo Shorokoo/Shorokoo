@@ -25,7 +25,8 @@ namespace Shorokoo
         /// transit, entry paths must resolve inside the target (a hostile manifest cannot write
         /// elsewhere), and only the manifest and the entries it references are carried. The
         /// write is atomic (staged to a temp directory beside the target and committed by
-        /// rename); the target's parent directory must already exist.
+        /// rename); the target's parent directory must already exist, and an existing directory
+        /// at the target — whatever it holds — is replaced by a completed conversion.
         /// <see cref="PackSkpt"/> converts back.
         /// </summary>
         /// <param name="skptFilePath">The single-file <c>.skpt</c> to convert.</param>
@@ -45,7 +46,7 @@ namespace Shorokoo
             using var container = SkptContainer.Open(skptFilePath);
             var entries = CollectManifestEntries(container);
             AtomicFileWriter.WriteDirectory(directoryPath,
-                stagingRoot => SkptFileFormat.WriteDirectoryEntries(stagingRoot, entries));
+                stagingRoot => SkptFileFormat.WriteDirectoryEntries(stagingRoot, entries, skptFilePath));
         }
 
         /// <summary>
@@ -84,8 +85,9 @@ namespace Shorokoo
         /// then the model entries and the data entries in manifest order. Each model/data
         /// entry's recorded SHA-256 is verified (over the stored bytes, so a compressed entry
         /// needs no decompression), and an uncompressed safetensors data entry is flagged for
-        /// the zip form's payload alignment — reproducing exactly the writers' rule, so a
-        /// round-tripped zip has the same layout properties as a directly saved one.
+        /// the zip form's payload alignment — reproducing the writers' rule, so a round-tripped
+        /// zip keeps the writers' STORED-and-aligned payload layout (entry order may differ
+        /// from a direct save; content and per-entry properties do not).
         /// </summary>
         private static List<SkptFileFormat.ZipEntrySpec> CollectManifestEntries(SkptContainer container)
         {
@@ -98,13 +100,23 @@ namespace Shorokoo
             {
                 new(SkptFileFormat.ConfigEntryName, configBytes, Align: false),
             };
-            var seen = new HashSet<string>(StringComparer.Ordinal) { SkptFileFormat.ConfigEntryName };
+            var carried = new Dictionary<string, byte[]>(StringComparer.Ordinal)
+            {
+                [SkptFileFormat.ConfigEntryName] = configBytes,
+            };
 
             void Carry(string entryPath, string role, string? sha256, bool align)
             {
-                if (!seen.Add(entryPath)) return;   // two registry keys may share one stored entry
+                // Two registry keys may share one stored entry; it is carried once, but every
+                // key's recorded hash must match it, or the source is internally inconsistent.
+                if (carried.TryGetValue(entryPath, out var already))
+                {
+                    VerifySha256(already, sha256, entryPath, path);
+                    return;
+                }
                 var bytes = container.ReadRequiredEntry(entryPath, role);
                 VerifySha256(bytes, sha256, entryPath, path);
+                carried[entryPath] = bytes;
                 entries.Add(new(entryPath, bytes, align));
             }
 

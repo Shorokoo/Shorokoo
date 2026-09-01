@@ -201,6 +201,16 @@ namespace Shorokoo
         internal TensorStructDef OptimizerStateDef { get; private set; } = null!;
 
         /// <summary>
+        /// The <see cref="OptimizerStateDef"/> field name of one (trainable parameter × state slot)
+        /// instance. The single naming rule shared by the rig build (which generates the def,
+        /// param-major: every slot of parameter 0, then of parameter 1, …) and .skpt persistence
+        /// (which addresses each instance per tensor, issue #184) — change it in one place or not
+        /// at all.
+        /// </summary>
+        internal static string OptimizerStateFieldName(string paramName, int slot)
+            => $"{paramName}_opt_{slot}";
+
+        /// <summary>
         /// Struct definition for the <b>schedule-less runtime</b> optimizer hyperparameters — the ones
         /// built with <see cref="Hyperparameter.Runtime()"/> that the caller supplies explicitly each step
         /// (one field each, at the hyperparameter's declared dtype and built shape). Empty when every hyperparameter is either baked as a
@@ -1249,7 +1259,7 @@ namespace Shorokoo
                     for (int s = 0; s < numOptimizerStateFieldsPerParam; s++)
                     {
                         optStateFields.Add(new TensorStructFieldDef(
-                            $"{pf.Name}_opt_{s}", pf.Structure,
+                            OptimizerStateFieldName(pf.Name, s), pf.Structure,
                             optimizerInfo.StateRanks[s] ?? pf.Rank,
                             optimizerInfo.StateDTypes[s]));
                     }

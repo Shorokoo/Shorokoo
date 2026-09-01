@@ -1971,7 +1971,7 @@ public class TrainingRigSkptCheckpointCoverageTests
         return -1;
     }
 
-    private static void StripSkptTrainingCounterKeys(string path)
+    private static void RewriteSkptManifest(string path, Action<System.Text.Json.Nodes.JsonNode> edit)
     {
         var entries = new List<SkptFileFormat.ZipEntrySpec>();
         using (var zip = System.IO.Compression.ZipFile.OpenRead(path))
@@ -1984,9 +1984,7 @@ public class TrainingRigSkptCheckpointCoverageTests
                 if (e.FullName == SkptFileFormat.ConfigEntryName)
                 {
                     var node = System.Text.Json.Nodes.JsonNode.Parse(data)!;
-                    var training = node["training"]!.AsObject();
-                    training.Remove("epoch");
-                    training.Remove("batchIndex");
+                    edit(node);
                     data = System.Text.Encoding.UTF8.GetBytes(node.ToJsonString());
                 }
                 entries.Add(new SkptFileFormat.ZipEntrySpec(e.FullName, data, Align: false));
@@ -2035,9 +2033,18 @@ public class TrainingRigSkptCheckpointCoverageTests
             Assert.NotNull(manifest.Training);
             Assert.Equal(SkptFileFormat.TrainingCheckpointVersion, manifest.Training!.CheckpointVersion);
             Assert.Equal(2, manifest.Training.Step);
-            Assert.Contains(SkptFileFormat.TrainingKindTrainableParams, manifest.Training.Kinds!.Keys);
-            Assert.Contains(SkptFileFormat.TrainingKindOptimizerState, manifest.Training.Kinds.Keys);
-            Assert.DoesNotContain(SkptFileFormat.TrainingKindModelState, manifest.Training.Kinds.Keys);
+            Assert.True(manifest.Training.AdditionalFields is null
+                || !manifest.Training.AdditionalFields.ContainsKey("kinds"));
+            var modelTensors = manifest.TensorMappings!["model"]["default"].Tensors!;
+            var optTensors = manifest.TensorMappings["optimizer"]["default"].Tensors!;
+            Assert.All(modelTensors.Values, r => Assert.Equal("trainable", r.Data));
+            Assert.Equal(2 * modelTensors.Count, optTensors.Count);
+            Assert.All(optTensors, kv =>
+            {
+                Assert.True(SkptFileFormat.TryParseOptimizerStateId(kv.Key, out var paramId, out _));
+                Assert.Contains(paramId, modelTensors.Keys);
+                Assert.Equal("optimizer_state", kv.Value.Data);
+            });
 
             var rigB = BuildTrainedAdamRig(steps: 0).Rig;
             var loaded = rigB.LoadCheckpointFromSkpt(path);
@@ -2067,13 +2074,9 @@ public class TrainingRigSkptCheckpointCoverageTests
             Assert.NotNull(training);
             Assert.Equal(SkptFileFormat.TrainingCheckpointVersion, training!.CheckpointVersion);
             Assert.Equal(2, training.Step);
-            var kindNames = training.Kinds.Select(k => k.Key).ToArray();
-            Assert.Contains(SkptFileFormat.TrainingKindTrainableParams, kindNames);
-            Assert.Contains(SkptFileFormat.TrainingKindOptimizerState, kindNames);
             var text = inspect.ToString();
             Assert.Contains("training checkpoint: version 1", text);
             Assert.Contains("global step 2", text);
-            Assert.Contains(SkptFileFormat.TrainingKindTrainableParams, text);
         }
         finally { if (File.Exists(path)) File.Delete(path); }
 
@@ -2144,6 +2147,38 @@ public class TrainingRigSkptCheckpointCoverageTests
                 0.5f, 0.9f);
             Assert.ThrowsAny<Exception>(() => bnRig.LoadCheckpointFromSkpt(path));
 
+            TrainingRig SgdmRig() => TrainingRig.FromScratch(
+                ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+                SGDMomentumOptimizer.ComputationGraph,
+                [new TensorDataModelParam("input", ModelParamType.InputParam,
+                    TensorData(ScalarInputShape, [1f, 2f, 3f, 4f]))],
+                0.5f, 0.9f);
+            var strayOpt = Assert.Throws<System.IO.InvalidDataException>(() => SgdmRig().LoadCheckpointFromSkpt(path));
+            Assert.Contains("optimizer", strayOpt.Message);
+
+            var sgdmPath = TempPath("skpt_sgdm") + ".skpt";
+            try
+            {
+                Persistence.SaveTrainingCheckpointToSkpt(SgdmRig().CreateInitialCheckpoint(), sgdmPath);
+                var missingOpt = Assert.Throws<System.IO.InvalidDataException>(() => rig.LoadCheckpointFromSkpt(sgdmPath));
+                Assert.Contains("optimizer-state", missingOpt.Message);
+            }
+            finally { if (File.Exists(sgdmPath)) File.Delete(sgdmPath); }
+
+            var nullRefPath = TempPath("skpt_nullref") + ".skpt";
+            try
+            {
+                Persistence.SaveTrainingCheckpointToSkpt(one, nullRefPath);
+                RewriteSkptManifest(nullRefPath, n =>
+                {
+                    var tensors = n["tensorMappings"]!["model"]!["default"]!["tensors"]!.AsObject();
+                    tensors[tensors.First().Key] = null;
+                });
+                var nullEx = Assert.Throws<System.IO.InvalidDataException>(() => rig.LoadCheckpointFromSkpt(nullRefPath));
+                Assert.Contains("null reference", nullEx.Message);
+            }
+            finally { if (File.Exists(nullRefPath)) File.Delete(nullRefPath); }
+
             var bytes = File.ReadAllBytes(path);
             var entryBytes = ReadEntryBytesViaBcl(path, SkptFileFormat.TrainableEntryPath);
             int window = Math.Min(24, entryBytes.Length);
@@ -2177,7 +2212,12 @@ public class TrainingRigSkptCheckpointCoverageTests
             var two = new TrainingCheckpoint(
                 trained.TrainableParams, trained.ModelState, trained.OptimizerState, step: 2, rig: trained.Rig);
             Persistence.SaveTrainingCheckpointToSkpt(two, strippedPath);
-            StripSkptTrainingCounterKeys(strippedPath);
+            RewriteSkptManifest(strippedPath, n =>
+            {
+                var training = n["training"]!.AsObject();
+                training.Remove("epoch");
+                training.Remove("batchIndex");
+            });
 
             var manifest = SkptFileFormat.ParseManifest(
                 ReadEntryBytesViaBcl(strippedPath, SkptFileFormat.ConfigEntryName), strippedPath);

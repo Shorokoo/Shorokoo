@@ -25,16 +25,14 @@ namespace Shorokoo.Core.Factory
     /// </summary>
     public enum RepresentativeInputForm
     {
-        /// <summary>Leave representative-input attributes exactly as the in-memory build set them (tensor
-        /// attr ≤ 1024 elements, shape attr above). Native <c>.srk</c> (attributes ride on the emitted
-        /// input NodeProtos) and the execution/compile path (inputs are graph inputs, so the attributes
-        /// are simply not serialized) both use this — no downgrade, no ONNX metadata.</summary>
+        /// <summary>Leave the representative-input shape attribute exactly as the in-memory build set
+        /// it. Native <c>.srk</c> (the attribute rides on the emitted input NodeProtos) and the
+        /// execution/compile path (inputs are graph inputs, so the attribute is simply not serialized)
+        /// both use this — no ONNX metadata.</summary>
         Passthrough,
 
-        /// <summary>Vanilla ONNX export: run the
-        /// <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastDowngradeRepresentativeInputs"/> pre-pass
-        /// (inline tensors over the vanilla limit become shape-only), then emit each input's normalized
-        /// representative attribute into its own graph-input <see cref="ValueInfoProto"/> metadata.</summary>
+        /// <summary>Vanilla ONNX export: emit each input's representative-shape attribute into its own
+        /// graph-input <see cref="ValueInfoProto"/> metadata.</summary>
         VanillaMetadata,
     }
 
@@ -158,10 +156,10 @@ namespace Shorokoo.Core.Factory
         /// <see cref="ValueInfoProto"/>s; the loader rebuilds the input list from those nodes. Off
         /// (default) for the execution/compile path, which must keep proper ONNX graph inputs for ONNX
         /// Runtime.</param>
-        /// <param name="representativeForm">How representative-input attributes are treated (see
+        /// <param name="representativeForm">How the representative-input shape attribute is treated (see
         /// <see cref="RepresentativeInputForm"/>). The internal dialect is always
-        /// <see cref="RepresentativeInputForm.Passthrough"/>: native <c>.srk</c> serializes the attributes
-        /// on the emitted input nodes, and the execution path leaves them unserialized on graph inputs.</param>
+        /// <see cref="RepresentativeInputForm.Passthrough"/>: native <c>.srk</c> serializes the attribute
+        /// on the emitted input nodes, and the execution path leaves it unserialized on graph inputs.</param>
         internal static ModelProto BuildInternalOnnxModel(
             InternalComputationGraph fastGraph,
             OpSetVersion opset = OpSetVersion.OPS_21,
@@ -188,13 +186,6 @@ namespace Shorokoo.Core.Factory
 
             // ----- 1. Clone so we never mutate the caller's graph.
             var prepFast = fastGraph.Clone();
-
-            // Vanilla ONNX keeps its per-input representative metadata compact: downgrade any inline
-            // representative tensor over the vanilla limit to shape-only, as a graph transform on the same
-            // graph we are about to emit (passthrough targets skip this — equivalently N = ∞).
-            if (representativeForm == RepresentativeInputForm.VanillaMetadata)
-                FastDowngradeRepresentativeInputs.Process(
-                    prepFast, FastDowngradeRepresentativeInputs.VanillaMaxInlineElements);
 
             // ----- 2. Run the Fast pre-passes in place. Capture the rename map
             // so we can also remap the tensor-info lookup we'll build below.

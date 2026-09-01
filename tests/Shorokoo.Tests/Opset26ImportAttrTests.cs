@@ -10,7 +10,9 @@ namespace Shorokoo.Tests;
 /// <summary>
 /// Import tolerance for the optional attributes opsets 22-26 added to existing ops:
 /// DequantizeLinear-23 <c>output_dtype</c>, QuantizeLinear-23 <c>precision</c>,
-/// Cast-24 <c>round_mode</c>.
+/// Cast-24 <c>round_mode</c> — and the export opset stamps they govern: the authoring
+/// surface cannot produce any of them, so an authored graph exports at 21, while an
+/// imported model carrying one re-exports at the opset that introduced it.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -87,5 +89,49 @@ public class Opset26ImportAttrTests
         Assert.Equal(cExpected,
             ((TensorData<float32>)ComputeContext.Default.Execute(Import(WrapModel(c, 24)), cInputs)[0].ToTensorData())
                 .AccessMemory().ToArray());
+    }
+
+    private static long ExportedDefaultOpset(string path)
+    {
+        using var fs = File.OpenRead(path);
+        return ProtoBuf.Serializer.Deserialize<ModelProto>(fs)
+            .OpsetImports.Single(o => o.Domain == "").Version;
+    }
+
+    [Fact]
+    public void TestAuthoredGraphExportsAtOpset21AndImportedPrecisionReexportsAt23()
+    {
+        var dir = Directory.CreateDirectory(
+            Path.Combine(Path.GetTempPath(), $"ShorokooOpsetStamp_{System.Guid.NewGuid():N}")).FullName;
+        try
+        {
+            var g = QeeQuantizationValueAuditCheck.ComputationGraph;
+            var authored = g.ToConcreteArchitecture(g.FromOrderedInputs(
+                [TensorData(DType.Float32, [2L, 2L], 1.25f, -0.5f, 0.6f, 3.1f)])).ToConcreteModel();
+            var authoredPath = Path.Combine(dir, "authored.onnx");
+            Persistence.ExportOnnx(authored, authoredPath);
+            Assert.Equal(21L, ExportedDefaultOpset(authoredPath));
+
+            var q = new GraphProto { Name = "q" };
+            q.Inputs.Add(TensorInfo("x", FloatElem, 4));
+            q.Initializers.Add(Init("scale", FloatElem, [], System.BitConverter.GetBytes(0.5f)));
+            var qNode = new NodeProto { OpType = "QuantizeLinear", Name = "q0" };
+            qNode.Inputs.AddRange(["x", "scale"]);
+            qNode.Outputs.Add("y");
+            qNode.Attributes.Add(IntAttr("precision", 8));
+            q.Nodes.Add(qNode);
+            q.Outputs.Add(TensorInfo("y", UInt8Elem, 4));
+
+            var foreignPath = Path.Combine(dir, "foreign.onnx");
+            using (var fs = File.Create(foreignPath))
+                ProtoBuf.Serializer.Serialize(fs, WrapModel(q, 23));
+            var reexportPath = Path.Combine(dir, "reexport.onnx");
+            Persistence.ExportOnnx(Persistence.ImportOnnx(foreignPath), reexportPath);
+            Assert.Equal(23L, ExportedDefaultOpset(reexportPath));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
     }
 }

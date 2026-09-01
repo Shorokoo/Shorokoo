@@ -420,10 +420,10 @@ namespace Shorokoo
         public static Tensor<TOut> QuantizeLinear<TIn, TOut>(
             Tensor<TIn> x, Tensor<TIn> yScale, Tensor<TOut>? yZeroPoint = null,
             long? axis = null, long? blockSize = null,
-            bool? saturate = null, long? precision = null)
+            bool? saturate = null)
             where TIn : FloatLike where TOut : AnyIntLike
             => OnnxOp.QuantizeLinear(x, yScale, yZeroPoint, axis, blockSize,
-                OnnxUtils.GetDType<TOut>(), saturate, precision);
+                OnnxUtils.GetDType<TOut>(), saturate);
 
         /// <summary>Quantized matrix product of int8-like operands with per-operand scale/zero point (ONNX QLinearMatMul).</summary>
         public static Tensor<TOut> QLinearMatMul<TA, TB, TOut, TScale>(

@@ -62,6 +62,10 @@ namespace Shorokoo.Core.Utils
         {
             if (writeContent is null) throw new ArgumentNullException(nameof(writeContent));
             var (directory, name, fullTarget) = ValidateTarget(targetPath);
+            if (Directory.Exists(fullTarget))
+                throw new IOException(
+                    $"Cannot save '{targetPath}': the target already exists as a directory. " +
+                    "Delete it first, or save to another path.");
 
             string tempPath = Path.Combine(directory, StageName(name));
             try
@@ -138,6 +142,15 @@ namespace Shorokoo.Core.Utils
                     // recognizable as uncommitted debris for the post-commit sweep.
                     string asidePath = Path.Combine(directory, StageName(name));
                     Directory.Move(fullTarget, asidePath);
+                    // The rename preserves the old tree's timestamps, which would make the aside
+                    // look abandoned to a concurrent same-target saver's post-commit sweep the
+                    // instant it exists. Touch it so the activity grace period protects the
+                    // rollback copy through the replace window (after a hard crash it goes quiet
+                    // and becomes sweepable, as intended). Best-effort: an unset timestamp merely
+                    // narrows the protection back to the status quo.
+                    try { Directory.SetLastWriteTimeUtc(asidePath, DateTime.UtcNow); }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
                     try
                     {
                         ReplaceFaultInjection?.Invoke(tempPath);
@@ -147,13 +160,13 @@ namespace Shorokoo.Core.Utils
                     {
                         // Roll the previous checkpoint back into place, so a failed replace
                         // leaves the target exactly as it was. If even the rollback fails, the
-                        // previous tree stays recoverable under the aside name — say where.
+                        // previous tree was last seen under the aside name — say where to look.
                         try { Directory.Move(asidePath, fullTarget); }
                         catch (Exception rollbackFailure)
                         {
                             (onWarning ?? (static _ => { }))(
                                 "Shorokoo: a failed replace could not restore the previous checkpoint " +
-                                $"to '{fullTarget}'; it is preserved, complete, at '{asidePath}' " +
+                                $"to '{fullTarget}'; look for it at '{asidePath}' " +
                                 $"({rollbackFailure.Message}).");
                         }
                         throw;

@@ -144,7 +144,8 @@ Guarantees specific to the directory form:
   into place, and only a hard crash inside that tiny window can leave the target
   absent — the previous tree then still exists, complete, under a `.tmp-` sibling
   name. A concurrent reader can therefore observe the checkpoint briefly *missing*
-  during a replace (never half-written); a polling reader should treat not-found as
+  during a replace (never silently half-written); a polling reader should treat
+  not-found — or a failed SHA-256 check from catching the swap mid-read — as
   retryable. The single-file form's replace is one atomic rename with no such window.
 - **Path safety on read.** Entry paths come from `config.json`, so a hostile manifest
   could name `../…` or an absolute path; every read resolves the entry against the

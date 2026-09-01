@@ -464,7 +464,7 @@ namespace Shorokoo
                     try
                     {
                         // ZstdSharp allocates from the frame's declared content size, capped at
-                        // 2 GiB — the same bound ReadEntryBytes enforces on stored entries — so a
+                        // 2 GiB — the same bound SkptContainer.TryReadEntry enforces on stored entries — so a
                         // hostile frame cannot demand an unbounded allocation.
                         return CompressedFormatUtils.Decompress(storedBytes);
                     }

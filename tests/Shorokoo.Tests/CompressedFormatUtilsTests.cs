@@ -1461,6 +1461,14 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         finally { AtomicFileWriter.ReplaceFaultInjection = null; }
         Assert.Equal(zDirect, ExecuteToBytes(Persistence.Load(target), zNumOut, zInput));
 
+        // A '-sweep' leftover from an interrupted earlier sweep is finished off by the next save.
+        var doomed = P($".tmp-atomic-dir.skpt-{Guid.NewGuid():N}-sweep");
+        Directory.CreateDirectory(doomed);
+        File.WriteAllBytes(Path.Combine(doomed, "junk.bin"), [1]);
+        Persistence.From(model).WithModel().WithWeights().SaveAsDirectory(target);
+        Assert.False(Directory.Exists(doomed));
+        Assert.Equal(direct, ExecuteToBytes(Persistence.Load(target), numOut, input));
+
         var partial = P("partial.skpt");
         Directory.CreateDirectory(Path.Combine(partial, "data"));
         File.WriteAllBytes(Path.Combine(partial, SkptFileFormat.WeightsEntryPath),

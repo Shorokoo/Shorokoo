@@ -333,7 +333,9 @@ namespace Shorokoo
 
         /// <summary>Training-checkpoint block (issue #95): non-null iff the file persists a
         /// <see cref="TrainingCheckpoint"/> (its manifest carries a <c>training</c> block). Null for
-        /// an inference checkpoint. Reports the global step and per-kind data entries.</summary>
+        /// an inference checkpoint. Reports the run counters; the training state's per-tensor
+        /// wiring is summarized by <see cref="MappingSetNames"/> and <see cref="DataEntries"/>
+        /// (issue #184).</summary>
         public SkptTrainingSummary? Training { get; }
 
         internal SkptArtifactInfo(

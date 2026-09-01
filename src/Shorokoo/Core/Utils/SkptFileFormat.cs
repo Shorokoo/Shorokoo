@@ -360,8 +360,10 @@ namespace Shorokoo.Core.Utils
         public Dictionary<string, SkptDataEntry>? Data { get; set; }
 
         /// <summary>Training-checkpoint block (issue #95): present only when the file persists a
-        /// <see cref="Shorokoo.TrainingCheckpoint"/>, recording its global step and per-kind data
-        /// entries. Absent (null, omitted from the JSON) for an inference checkpoint.</summary>
+        /// <see cref="Shorokoo.TrainingCheckpoint"/>, recording its run counters and rig
+        /// constituents; the training state is addressed per tensor through
+        /// <see cref="TensorMappings"/> (issue #184). Absent (null, omitted from the JSON) for an
+        /// inference checkpoint.</summary>
         [JsonPropertyName("training")]
         public SkptTrainingInfo? Training { get; set; }
 

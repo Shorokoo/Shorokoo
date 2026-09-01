@@ -216,8 +216,7 @@ namespace Shorokoo
             TensorDataStruct trainable, modelState, optState;
 
             if (Want(CheckpointComponents.InferenceState)
-                && (modelMapping is not null
-                    || (trainableParamDef.Fields.Length == 0 && modelStateDef.Fields.Length == 0)))
+                && (modelMapping is not null || trainableParamDef.Fields.Length == 0))
             {
                 (trainable, modelState) = ReconstructArchOwnedState(
                     archive, manifest, modelMapping, trainableParamDef, modelStateDef, tensorsByDataKey, filePath);

@@ -167,7 +167,9 @@ namespace Shorokoo.Core.Utils
             {
                 resolved = Path.GetFullPath(Path.Combine(rootFullPath, entryPath));
             }
-            catch (ArgumentException e)   // e.g. an embedded NUL — the loader's named error, not a bare throw
+            // An embedded NUL (ArgumentException) or, on Windows, an over-long resolved path
+            // (PathTooLongException) — either way the loader's named error, not a bare throw.
+            catch (Exception e) when (e is ArgumentException or PathTooLongException)
             {
                 throw new InvalidDataException(
                     $"'{checkpointPath}': the manifest references entry '{entryPath}', which is not " +
@@ -194,7 +196,9 @@ namespace Shorokoo.Core.Utils
             {
                 resolved = Path.GetFullPath(Path.Combine(rootFullPath, entryPath));
             }
-            catch (ArgumentException)   // an invalid path (e.g. an embedded NUL) stays "outside"
+            // An invalid path (embedded NUL) or an over-long one (Windows) stays "outside";
+            // Inspect must never throw on content.
+            catch (Exception e) when (e is ArgumentException or PathTooLongException)
             {
                 return false;
             }

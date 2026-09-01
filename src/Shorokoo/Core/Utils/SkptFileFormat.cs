@@ -672,12 +672,28 @@ namespace Shorokoo.Core.Utils
         {
             if (entries is null) throw new ArgumentNullException(nameof(entries));
             var rootFull = Path.GetFullPath(stagingRoot);
-            foreach (var entry in entries)
+
+            // Resolve every entry and create the needed subdirectories once, up front — never
+            // per entry. This is load-bearing for the stale-staging sweep's guarantee: after
+            // this point nothing here recreates a directory, so if a concurrent sweep judges
+            // this staging tree abandoned and renames it away mid-write, the next CreateNew
+            // fails loudly (DirectoryNotFoundException) instead of silently rebuilding a
+            // partial tree that could then be committed.
+            var resolvedPaths = new string[entries.Count];
+            var directories = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < entries.Count; i++)
             {
-                var resolved = SkptDirectoryContainer.ResolveEntryPath(rootFull, entry.Name, origin);
-                Directory.CreateDirectory(Path.GetDirectoryName(resolved)!);
-                using var fs = new FileStream(resolved, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-                fs.Write(entry.Data);
+                resolvedPaths[i] = SkptDirectoryContainer.ResolveEntryPath(rootFull, entries[i].Name, origin);
+                directories.Add(Path.GetDirectoryName(resolvedPaths[i])!);
+            }
+            foreach (var dir in directories)
+                Directory.CreateDirectory(dir);
+
+            for (int i = 0; i < entries.Count; i++)
+            {
+                using var fs = new FileStream(
+                    resolvedPaths[i], FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                fs.Write(entries[i].Data);
                 fs.Flush(flushToDisk: true);
             }
         }

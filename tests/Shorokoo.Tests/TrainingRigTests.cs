@@ -434,9 +434,11 @@ public class TrainingRigRepresentativeInputCoverageTests
         }
         finally { if (File.Exists(path)) File.Delete(path); }
 
+        AssertArchSrkRoundTrip([]);
         AssertArchSrkRoundTrip([4L]);
         AssertArchSrkRoundTrip([2048L]);
 
+        AssertOnnxRepRoundTrip([]);
         AssertOnnxRepRoundTrip([4L]);
         AssertOnnxRepRoundTrip([2048L]);
     }

@@ -709,8 +709,11 @@ namespace Shorokoo
 
                 var dims = node.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape)
                     ?? throw new InvalidOperationException(
-                        "Concrete arch input node carries no representative-input shape attribute; the rig " +
-                        "was not built through BuildInitialRig (which records one on every model input).");
+                        "Concrete arch input node carries no representative-input shape attribute: the rig " +
+                        "was not built through BuildInitialRig (which records one on every model input), or " +
+                        "the arch was saved by an older Shorokoo that recorded small inputs as an inline " +
+                        "representative tensor instead of dims (there is no legacy read path; rebuild the " +
+                        "rig from its source graphs and re-save).");
                 var dtype = node.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype)
                     ?? throw new InvalidOperationException(
                         "Concrete arch input node records a representative-input shape but no dtype; " +

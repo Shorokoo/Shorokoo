@@ -36,14 +36,11 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 // as an invariant-culture literal. A string rather than a float because a hyperparameter
                 // is any supported scalar dtype (#125) and a float cannot hold every int64/float64 default.
                 .AttributeString(ShrkAttrDefaultValue)
-                // Optional, mutually exclusive: a small (≤ MaxSmallTensorElements) input
-                // records a zero-filled representative tensor here; a larger one records only its dims in
-                // ShrkAttrRepresentativeInputShape. Together they make a concrete architecture
-                // self-describing for training shape inference. In the native .srk dialect a
-                // MODEL_TENSOR_INPUT is emitted as a NodeProto, so whichever attribute is set round-trips
-                // on disk; the vanilla ONNX/compile path keeps the input as a graph input and carries the
-                // info in metadata_props instead.
-                .AttributeTensor(ShrkAttrRepresentativeInput, "T", "R")
+                // Optional: the dims the model was concretized at (with AttrDtype above, this makes a
+                // concrete architecture self-describing for training shape inference). In the native
+                // .srk dialect a MODEL_TENSOR_INPUT is emitted as a NodeProto, so the attribute
+                // round-trips on disk; the vanilla ONNX/compile path keeps the input as a graph input
+                // and carries the info in metadata_props instead.
                 .AttributeLongs(ShrkAttrRepresentativeInputShape)
                 .Output("modelInput", "T", rank: "R"),
 

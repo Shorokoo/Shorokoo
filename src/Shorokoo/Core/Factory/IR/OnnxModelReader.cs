@@ -296,10 +296,16 @@ namespace Shorokoo.Core.Factory.IR
 
                     return intVal;
                 case AttributeProto.AttributeType.Ints:
+                    // protobuf-net deserializes an empty repeated field as null, but an
+                    // AttributeProto typed Ints that is present with no entries IS the attribute,
+                    // set to an empty list (e.g. a scalar input's representative shape) — not
+                    // "attribute unset", which is what a null here would read back as.
+                    var intsVal = attribute.Ints ?? [];
+
                     // Check if this is a DType array attribute
                     if (attributeDef?.Type == AttributeType.DTypes)
                     {
-                        var dtypes = attribute.Ints.Select(i => (DType)(int)i).ToArray();
+                        var dtypes = intsVal.Select(i => (DType)(int)i).ToArray();
 
                         // Check for generic parameter names in RefAttrName
                         if (!string.IsNullOrEmpty(attribute.RefAttrName) &&
@@ -321,7 +327,7 @@ namespace Shorokoo.Core.Factory.IR
                         return dtypes;
                     }
 
-                    return attribute.Ints;
+                    return intsVal;
                 case AttributeProto.AttributeType.Float:
                     return attribute.F;
                 case AttributeProto.AttributeType.Floats:

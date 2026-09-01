@@ -13,14 +13,10 @@ namespace Shorokoo.Core.Factory
     /// ValueInfoProto in hand; the reader (<c>OnnxModelReader.CreateFastInputTensors</c>) has the
     /// ValueInfoProto and the FastNode it is building in hand — so there is no cross-graph index pairing.
     ///
-    /// <para>Encoding is passthrough: whichever of the two mutually-exclusive attributes is set on the
-    /// node is serialized verbatim. The vanilla &gt;N-element downgrade is a separate graph pre-pass
-    /// (<see cref="Shorokoo.Core.Nodes.Processors.Fast.FastDowngradeRepresentativeInputs"/>) applied
-    /// before emission, so this codec never re-thresholds.</para>
-    /// <list type="bullet">
-    ///   <item><c>"tensor|{protoDtype}|{d0,d1,…}|{base64 raw bytes}"</c> — an inline (zero-filled) tensor.</item>
-    ///   <item><c>"shape|{protoDtype}|{d0,d1,…}"</c> — dims only.</item>
-    /// </list>
+    /// <para>The representative shape is always dims-only, so the codec has a single form:
+    /// <c>"shape|{protoDtype}|{d0,d1,…}"</c>. The metadata is not redundant with the ValueInfoProto's
+    /// own dims: those are unnamed (rank-only) placeholders, and stamping the concrete representative
+    /// shape into them would falsely freeze the batch dimension for every external consumer.</para>
     /// </summary>
     internal static class RepresentativeInputMetadata
     {
@@ -28,20 +24,12 @@ namespace Shorokoo.Core.Factory
         public const string Key = "shrk_repr_input";
 
         /// <summary>
-        /// Encodes the representative-input attribute currently set on <paramref name="node"/> (a
-        /// <c>MODEL_TENSOR_INPUT</c>), or <c>null</c> when neither attribute is set. Passthrough — no
-        /// downgrade.
+        /// Encodes the representative-input shape attribute currently set on <paramref name="node"/> (a
+        /// <c>MODEL_TENSOR_INPUT</c>), or <c>null</c> when the attribute is not set.
         /// </summary>
         public static string? Encode(FastNode node)
         {
             var attrs = node.Attributes;
-
-            if (attrs.IsAttributeDefined(OnnxOpAttributeNames.ShrkAttrRepresentativeInput)
-                && attrs.GetTensorVal(OnnxOpAttributeNames.ShrkAttrRepresentativeInput) is { } inline)
-            {
-                var b64 = Convert.ToBase64String(inline.AccessRawMemory().ToArray());
-                return $"tensor|{inline.DType.ProtoTypeNum}|{DimsToString(inline.Shape.Dims)}|{b64}";
-            }
 
             if (attrs.IsAttributeDefined(OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape)
                 && attrs.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape) is { } dims
@@ -54,48 +42,21 @@ namespace Shorokoo.Core.Factory
         }
 
         /// <summary>
-        /// Decodes <paramref name="encoded"/> and sets the matching representative attribute on
-        /// <paramref name="node"/> (clearing the other). Fail-safe: a malformed value — wrong field count,
-        /// unparseable dtype/dims, non-base64 payload, or a byte count that does not match the shape/dtype
-        /// — is skipped, leaving the node untouched. The dtype is parsed only in the tensor branch, where
-        /// it is needed.
+        /// Decodes <paramref name="encoded"/> and sets the representative-shape attribute on
+        /// <paramref name="node"/>. Fail-safe: a malformed value — wrong field count, an unknown form
+        /// tag, or unparseable dims — is skipped, leaving the node untouched.
         /// </summary>
         public static void Apply(FastNode node, string encoded)
         {
             var parts = encoded.Split('|');
-            if (parts.Length < 3) return;
+            if (parts.Length < 3 || parts[0] != "shape") return;
 
             long[] dims;
             try { dims = ParseDims(parts[2]); }
             catch (FormatException) { return; }
 
-            if (parts[0] == "tensor" && parts.Length >= 4)
-            {
-                if (!int.TryParse(parts[1], out var protoDtype)) return;
-                byte[] bytes;
-                try { bytes = Convert.FromBase64String(parts[3]); }
-                catch (FormatException) { return; }
-
-                var dtype = (DType)protoDtype;
-                var shape = new Shape(dims);
-                // Guard against a byte-count/shape mismatch: CreateFromRawBytes throws (not a
-                // FormatException) on a bad length, and this codec's contract is to skip malformed values.
-                var bytesPerElement = dtype.EncodingBitCount / 8;
-                if (shape.Count < 0 || bytesPerElement <= 0
-                    || bytes.LongLength != shape.Count * bytesPerElement)
-                    return;
-
-                var tensor = TensorData.CreateFromRawBytes(shape, dtype, bytes);
-                node.Attributes = node.Attributes.SetAttributes(
-                    (OnnxOpAttributeNames.ShrkAttrRepresentativeInput, (object?)tensor),
-                    (OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape, (object?)null));
-            }
-            else if (parts[0] == "shape")
-            {
-                node.Attributes = node.Attributes.SetAttributes(
-                    (OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape, (object?)dims),
-                    (OnnxOpAttributeNames.ShrkAttrRepresentativeInput, (object?)null));
-            }
+            node.Attributes = node.Attributes.SetAttributes(
+                (OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape, (object?)dims));
         }
 
         private static string DimsToString(long[] dims) => string.Join(",", dims);

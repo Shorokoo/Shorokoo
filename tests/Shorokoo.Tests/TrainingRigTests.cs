@@ -364,9 +364,6 @@ public class TrainingRigFromScratchCoverageTests
 [Trait("Purpose", "Coverage")]
 public class TrainingRigRepresentativeInputCoverageTests
 {
-    private const string ReprInputAttr =
-        Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInput;
-
     private const string ReprShapeAttr =
         Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape;
 
@@ -391,48 +388,16 @@ public class TrainingRigRepresentativeInputCoverageTests
         => g.Nodes.First(n => n.Outputs.Any(o => o.HasValue && o.Value.Equals(key)));
 
     [Fact]
-    public void TestRepresentativeInputThresholdsAndAttributeSplitCoverage()
+    public void TestRepresentativeInputShapeIsAlwaysDimsOnlyCoverage()
     {
         foreach (long n in (long[])[256L, 512L, 1024L, 2048L])
             CoverFromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
                 SGDOptimizer.ComputationGraph, [n], 0.01f);
 
-        var small = TensorInputNode(RigWithInputShape([4L]).ConcreteArchConstituent);
-        var smallTensor = small.Attributes.GetTensorVal(ReprInputAttr);
-        Assert.NotNull(smallTensor);
-        Assert.Equal((long[])[4L], smallTensor!.Shape.Dims);
-        Assert.Null(small.Attributes.GetLongsVal(ReprShapeAttr));
-
-        var large = TensorInputNode(RigWithInputShape([2048L]).ConcreteArchConstituent);
-        Assert.Null(large.Attributes.GetTensorVal(ReprInputAttr));
-        Assert.Equal((long[])[2048L], large.Attributes.GetLongsVal(ReprShapeAttr));
-
-        AssertReprDowngrade([4L], expectTensorAfter: true);
-        AssertReprDowngrade([16L], expectTensorAfter: true);
-        AssertReprDowngrade([17L], expectTensorAfter: false);
-        AssertReprDowngrade([500L], expectTensorAfter: false);
-    }
-
-    private static void AssertReprDowngrade(long[] shape, bool expectTensorAfter)
-    {
-        var arch = RigWithInputShape(shape).ConcreteArchConstituent.ToInternal();
-        var node = arch.Nodes.First(
-            n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_TENSOR_INPUT);
-        Assert.NotNull(node.Attributes.GetTensorVal(ReprInputAttr));
-
-        Shorokoo.Core.Nodes.Processors.Fast.FastDowngradeRepresentativeInputs.Process(
-            arch, Shorokoo.Core.Nodes.Processors.Fast.FastDowngradeRepresentativeInputs.VanillaMaxInlineElements);
-
-        if (expectTensorAfter)
-        {
-            Assert.NotNull(node.Attributes.GetTensorVal(ReprInputAttr));
-            Assert.Null(node.Attributes.GetLongsVal(ReprShapeAttr));
-        }
-        else
-        {
-            Assert.Null(node.Attributes.GetTensorVal(ReprInputAttr));
-            Assert.Equal(shape, node.Attributes.GetLongsVal(ReprShapeAttr));
-        }
+        Assert.Equal((long[])[4L], TensorInputNode(
+            RigWithInputShape([4L]).ConcreteArchConstituent).Attributes.GetLongsVal(ReprShapeAttr));
+        Assert.Equal((long[])[2048L], TensorInputNode(
+            RigWithInputShape([2048L]).ConcreteArchConstituent).Attributes.GetLongsVal(ReprShapeAttr));
     }
 
     [Fact]
@@ -469,15 +434,16 @@ public class TrainingRigRepresentativeInputCoverageTests
         }
         finally { if (File.Exists(path)) File.Delete(path); }
 
-        AssertArchSrkRoundTrip([4L], expectInline: true);
-        AssertArchSrkRoundTrip([2048L], expectInline: false);
+        AssertArchSrkRoundTrip([]);
+        AssertArchSrkRoundTrip([4L]);
+        AssertArchSrkRoundTrip([2048L]);
 
-        AssertOnnxRepRoundTrip(setShape: [4L], asShapeAttr: false, expectInlineAfter: true);
-        AssertOnnxRepRoundTrip(setShape: [32L], asShapeAttr: false, expectInlineAfter: false);
-        AssertOnnxRepRoundTrip(setShape: [2048L], asShapeAttr: true, expectInlineAfter: false);
+        AssertOnnxRepRoundTrip([]);
+        AssertOnnxRepRoundTrip([4L]);
+        AssertOnnxRepRoundTrip([2048L]);
     }
 
-    private static void AssertArchSrkRoundTrip(long[] shape, bool expectInline)
+    private static void AssertArchSrkRoundTrip(long[] shape)
     {
         var arch = RigWithInputShape(shape).ConcreteArchConstituent;
         var bytes = Shorokoo.Core.Utils.CompressedFormatUtils.SaveFastGraphToBinary(arch);
@@ -488,33 +454,17 @@ public class TrainingRigRepresentativeInputCoverageTests
 
         var node = internalReloaded.Nodes.First(
             n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_TENSOR_INPUT);
-        var tensor = node.Attributes.GetTensorVal(ReprInputAttr);
-        var dims = node.Attributes.GetLongsVal(ReprShapeAttr);
-        if (expectInline)
-        {
-            Assert.NotNull(tensor);
-            Assert.Equal(shape, tensor!.Shape.Dims);
-            Assert.Null(dims);
-        }
-        else
-        {
-            Assert.Null(tensor);
-            Assert.Equal(shape, dims);
-        }
+        Assert.Equal(shape, node.Attributes.GetLongsVal(ReprShapeAttr));
     }
 
-    private static void AssertOnnxRepRoundTrip(long[] setShape, bool asShapeAttr, bool expectInlineAfter)
+    private static void AssertOnnxRepRoundTrip(long[] setShape)
     {
         var baseModel = RigWithInputShape([4L]).CreateInitialCheckpoint().ToInferenceModel();
         var internalModel = baseModel.ToInternal();
         var inputNode = internalModel.Nodes.First(
             n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_TENSOR_INPUT);
-        inputNode.Attributes = asShapeAttr
-            ? inputNode.Attributes.SetAttributes(
-                (ReprShapeAttr, (object?)setShape), (ReprInputAttr, (object?)null))
-            : inputNode.Attributes.SetAttributes(
-                (ReprInputAttr, (object?)TensorData(setShape, new float[ProductOf(setShape)])),
-                (ReprShapeAttr, (object?)null));
+        inputNode.Attributes = inputNode.Attributes.SetAttributes(
+            (ReprShapeAttr, (object?)setShape));
         var modelWithRep = new ComputationGraph(internalModel, GraphKind.ConcreteModel);
 
         var onnxPath = TempPath("rep_onnx") + ".onnx";
@@ -526,8 +476,9 @@ public class TrainingRigRepresentativeInputCoverageTests
             {
                 var proto = ProtoBuf.Serializer.Deserialize<Shorokoo.Core.Factory.IR.ModelProto>(ms);
                 Assert.Single(proto.Graph.Inputs);
-                Assert.Contains(proto.Graph.Inputs[0].MetadataProps,
+                var repr = proto.Graph.Inputs[0].MetadataProps.Single(
                     p => p.Key == Shorokoo.Core.Factory.RepresentativeInputMetadata.Key);
+                Assert.StartsWith("shape|", repr.Value);
                 Assert.DoesNotContain(proto.MetadataProps,
                     p => p.Key == Shorokoo.Core.Factory.RepresentativeInputMetadata.Key
                       || p.Key.StartsWith("shrk_repr_input", StringComparison.Ordinal));
@@ -536,19 +487,7 @@ public class TrainingRigRepresentativeInputCoverageTests
             var imported = Persistence.ImportOnnx(onnxPath);
             var node = imported.ToInternal().Nodes.First(
                 n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_TENSOR_INPUT);
-            var tensor = node.Attributes.GetTensorVal(ReprInputAttr);
-            var dims = node.Attributes.GetLongsVal(ReprShapeAttr);
-            if (expectInlineAfter)
-            {
-                Assert.NotNull(tensor);
-                Assert.Equal(setShape, tensor!.Shape.Dims);
-                Assert.Null(dims);
-            }
-            else
-            {
-                Assert.Null(tensor);
-                Assert.Equal(setShape, dims);
-            }
+            Assert.Equal(setShape, node.Attributes.GetLongsVal(ReprShapeAttr));
         }
         finally { if (File.Exists(onnxPath)) File.Delete(onnxPath); }
     }
@@ -576,15 +515,8 @@ public class TrainingRigRepresentativeInputCoverageTests
         Assert.Equal(original.InputUniqueNames, reloaded.InputUniqueNames);
         Assert.Equal(3, reloaded.InputUniqueNames.Distinct().Count());
 
-        bool[] expectInline = [true, false, true];
         long[][] expectDims = [[4L], [2048L], [2L, 3L]];
         DType[] expectDtype = [DType.Float32, DType.Int64, DType.Float32];
-        long[] expectRank = [1L, 1L, 2L];
-
-        static long RankOf(Shorokoo.Core.Graph.FastNode n)
-            => n.Attributes.GetTensorVal(ReprInputAttr) is { } t
-                ? t.Shape.Dims.Length
-                : n.Attributes.GetLongsVal(ReprShapeAttr)!.Length;
 
         for (int i = 0; i < 3; i++)
         {
@@ -594,22 +526,8 @@ public class TrainingRigRepresentativeInputCoverageTests
 
             Assert.Equal(expectDtype[i], before.Attributes.GetDTypeVal(DtypeAttr));
             Assert.Equal(expectDtype[i], after.Attributes.GetDTypeVal(DtypeAttr));
-            Assert.Equal(expectRank[i], RankOf(before));
-            Assert.Equal(expectRank[i], RankOf(after));
-
-            var inlineTensor = after.Attributes.GetTensorVal(ReprInputAttr);
-            var shapeOnly = after.Attributes.GetLongsVal(ReprShapeAttr);
-            if (expectInline[i])
-            {
-                Assert.NotNull(inlineTensor);
-                Assert.Equal(expectDims[i], inlineTensor!.Shape.Dims);
-                Assert.Null(shapeOnly);
-            }
-            else
-            {
-                Assert.Null(inlineTensor);
-                Assert.Equal(expectDims[i], shapeOnly);
-            }
+            Assert.Equal(expectDims[i], before.Attributes.GetLongsVal(ReprShapeAttr));
+            Assert.Equal(expectDims[i], after.Attributes.GetLongsVal(ReprShapeAttr));
         }
     }
 }

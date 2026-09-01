@@ -371,40 +371,91 @@ namespace Shorokoo
         /// <summary>
         /// Loads a checkpoint against <paramref name="rig"/>, whose struct definitions the sections are
         /// reconstructed against and whose model/loss/optimizer this checkpoint is attached to
-        /// (<see cref="Rig"/> is set on the result). Reads either on-disk shape — the flat
-        /// sectioned-safetensors file (<see cref="Save(string, CheckpointComponents?)"/>) or the native
-        /// <c>.skpt</c> container — detected automatically. <paramref name="components"/> selects which
+        /// (<see cref="Rig"/> is set on the result). Reads the flat sectioned-safetensors shape
+        /// (<see cref="Save(string, CheckpointComponents?)"/>) only: handed a native <c>.skpt</c>
+        /// container it fails immediately, naming <see cref="LoadFromSkpt"/> as the entry point
+        /// for that shape. <paramref name="components"/> selects which
         /// parts to load; <c>null</c> loads everything present. A component not present in the file is
         /// filled from the rig's initial values (counters default to 0). Explicitly requesting the
         /// <see cref="CheckpointComponents.TrainingRig"/> component (including via
         /// <see cref="CheckpointComponents.All"/>) throws a <see cref="NotSupportedException"/> naming
-        /// #115 — no file stores the rig's constituent graphs yet, so the request cannot be satisfied;
+        /// #115 — no flat file stores the rig's constituent graphs, so the request cannot be satisfied;
         /// pass the rig and omit the flag. Throws if the file is not a
         /// Shorokoo checkpoint, was written by a newer format, or its fields don't match the rig (e.g.
         /// a checkpoint from a different model or optimizer). Prefer
         /// <see cref="TrainingRig.LoadCheckpoint(string, CheckpointComponents?)"/>.
         ///
         /// <para>A <paramref name="rig"/> is required: the struct definitions come from it. Rebuilding
-        /// the rig from the checkpoint file alone is not yet implemented (Shorokoo/Shorokoo#115), so a
-        /// <c>null</c> rig throws.</para>
+        /// the rig from the checkpoint file alone needs a <c>.skpt</c> written with the rig
+        /// constituents — the static <see cref="TrainingRig.Load(string, Runtime.ComputeContext?, Runtime.ComputeContext?)"/>
+        /// — so a <c>null</c> rig throws.</para>
         /// </summary>
         public static TrainingCheckpoint Load(
             string filePath,
             TrainingRig? rig = null,
             CheckpointComponents? components = null)
         {
+            var r = ValidateRigLoadArguments(filePath, rig, components);
+            Persistence.VerifyFlatTrainingCheckpoint(filePath,
+                "Load a .skpt training checkpoint with rig.LoadCheckpointFromSkpt(path) " +
+                "(or rebuild the whole rig from it with the static TrainingRig.Load(path)).");
+            var raw = LoadFlat(
+                filePath, r.TrainableParamStructDef, r.ModelStateDef, r.OptimizerStateDef,
+                components, r);
+            // Attach the rig (sets Rig, preserves counters); the raw checkpoint was read against the
+            // rig's own defs, so the compatibility check inside AdoptCheckpoint always passes.
+            return r.AdoptCheckpoint(raw);
+        }
+
+        /// <summary>
+        /// Loads a checkpoint from a native <c>.skpt</c> container
+        /// (<see cref="Persistence.SaveTrainingCheckpointToSkpt"/>) against <paramref name="rig"/> —
+        /// the <c>.skpt</c> counterpart of <see cref="Load"/>, with the same contract: the sections
+        /// are reconstructed against the rig's struct definitions, <see cref="Rig"/> is set on the
+        /// result, <paramref name="components"/> selects which parts to load (<c>null</c> ⇒
+        /// everything present; absent parts fill from the rig's initial values), and requesting the
+        /// <see cref="CheckpointComponents.TrainingRig"/> component throws — this rig-supplied path
+        /// never rebuilds the rig (that is the static
+        /// <see cref="TrainingRig.Load(string, Runtime.ComputeContext?, Runtime.ComputeContext?)"/>).
+        /// Reads the container shape only: handed a flat safetensors checkpoint it fails
+        /// immediately, naming <see cref="Load"/> as the entry point for that shape. Prefer
+        /// <see cref="TrainingRig.LoadCheckpointFromSkpt(string, CheckpointComponents?)"/>.
+        /// </summary>
+        public static TrainingCheckpoint LoadFromSkpt(
+            string filePath,
+            TrainingRig? rig = null,
+            CheckpointComponents? components = null)
+        {
+            var r = ValidateRigLoadArguments(filePath, rig, components);
+            Persistence.VerifySkptContainer(filePath,
+                "Load a flat safetensors training checkpoint with rig.LoadCheckpoint(path).");
+            var raw = Persistence.LoadTrainingCheckpointFromSkpt(
+                filePath, r.TrainableParamStructDef, r.ModelStateDef, r.OptimizerStateDef,
+                components, r);
+            return r.AdoptCheckpoint(raw);
+        }
+
+        /// <summary>The argument contract <see cref="Load"/> and <see cref="LoadFromSkpt"/> share:
+        /// a non-empty path, a rig to resolve the struct definitions, and no request for the
+        /// <see cref="CheckpointComponents.TrainingRig"/> component (a rig-supplied load never
+        /// rebuilds the rig). Returns the validated non-null rig.</summary>
+        private static TrainingRig ValidateRigLoadArguments(
+            string filePath, TrainingRig? rig, CheckpointComponents? components)
+        {
             if (string.IsNullOrWhiteSpace(filePath))
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
             if (rig is null)
                 throw new InvalidOperationException(
-                    "TrainingCheckpoint.Load requires a rig to resolve the checkpoint's struct definitions. " +
-                    "Pass the rig you are resuming (or use rig.LoadCheckpoint(path)). Reconstructing the rig " +
-                    "from the checkpoint file itself is not yet implemented (Shorokoo/Shorokoo#115).");
+                    "TrainingCheckpoint.Load/LoadFromSkpt requires a rig to resolve the checkpoint's struct " +
+                    "definitions. Pass the rig you are resuming (or use rig.LoadCheckpoint(path) / " +
+                    "rig.LoadCheckpointFromSkpt(path)). To reconstruct the rig from the checkpoint file " +
+                    "itself, use the static TrainingRig.Load(path) — it requires a native .skpt written " +
+                    "with the rig constituents (Shorokoo/Shorokoo#115).");
 
             // Explicitly requesting the TrainingRig component (including via CheckpointComponents.All)
-            // throws, symmetric with Save (ResolveSaveComponents): the file never stores the rig's
-            // constituent graphs — that serialization is unimplemented (#115) — so the request cannot
-            // be satisfied. null ⇒ "everything present" is the way to load without naming the flag.
+            // throws, symmetric with Save (ResolveSaveComponents): a rig-supplied load never rebuilds
+            // the rig — you already passed one. null ⇒ "everything present" is the way to load without
+            // naming the flag.
             if (components is CheckpointComponents cReq && (cReq & CheckpointComponents.TrainingRig) != 0)
                 throw new NotSupportedException(
                     "Loading the TrainingRig component means rebuilding the rig from the checkpoint file " +
@@ -413,17 +464,7 @@ namespace Shorokoo
                     "the static TrainingRig.Load(path) (Shorokoo/Shorokoo#115). To load state into the rig " +
                     "you passed, omit the TrainingRig flag; null components loads every state component the " +
                     "file contains.");
-
-            var raw = Persistence.IsSkptFile(filePath)
-                ? Persistence.LoadTrainingCheckpointFromSkpt(
-                    filePath, rig.TrainableParamStructDef, rig.ModelStateDef, rig.OptimizerStateDef,
-                    components, rig)
-                : LoadFlat(
-                    filePath, rig.TrainableParamStructDef, rig.ModelStateDef, rig.OptimizerStateDef,
-                    components, rig);
-            // Attach the rig (sets Rig, preserves counters); the raw checkpoint was read against the
-            // rig's own defs, so the compatibility check inside AdoptCheckpoint always passes.
-            return rig.AdoptCheckpoint(raw);
+            return rig;
         }
 
         /// <summary>

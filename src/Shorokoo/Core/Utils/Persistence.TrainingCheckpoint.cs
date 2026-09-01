@@ -93,13 +93,44 @@ namespace Shorokoo
         // ---- Load ----
 
         /// <summary>
+        /// Loads a <see cref="TrainingCheckpoint"/> from a native <c>.skpt</c> container written by
+        /// <see cref="SaveTrainingCheckpointToSkpt"/> / <see cref="ForTrainingCheckpoint"/>. This
+        /// entry point reads that format only: handed a flat safetensors checkpoint it fails
+        /// immediately, naming <see cref="LoadTrainingCheckpoint"/> as the entry point for that
+        /// shape (a caller with a genuinely unknown file identifies it with <see cref="Inspect"/>
+        /// first). The checkpoint is reconstructed against the given struct defs (which pin the
+        /// expected shapes, so a checkpoint from a different model or optimizer fails loudly). The
+        /// result carries no <see cref="TrainingCheckpoint.Rig"/>; to resume a whole rig, prefer
+        /// <see cref="TrainingRig.LoadCheckpointFromSkpt"/> (which supplies these defs from the
+        /// rig) or the from-file-alone
+        /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?)"/>.
+        /// </summary>
+        public static TrainingCheckpoint LoadTrainingCheckpointFromSkpt(
+            string filePath,
+            TensorStructDef trainableParamDef,
+            TensorStructDef modelStateDef,
+            TensorStructDef optimizerStateDef)
+        {
+            if (string.IsNullOrWhiteSpace(filePath))
+                throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
+
+            VerifySkptContainer(filePath,
+                "Load a flat safetensors training checkpoint with Persistence.LoadTrainingCheckpoint.");
+            return LoadTrainingCheckpointFromSkpt(
+                filePath, trainableParamDef, modelStateDef, optimizerStateDef,
+                components: null, rigForDefaults: null);
+        }
+
+        /// <summary>
         /// Reconstructs a <see cref="TrainingCheckpoint"/> from a native <c>.skpt</c> container
         /// written by <see cref="SaveTrainingCheckpointToSkpt"/>. Validated against the expected
         /// struct defs with the same fail-loud contract as <see cref="TrainingCheckpoint.Load"/>:
         /// every referenced entry's SHA-256 is verified, each kind's tensors must match the given
         /// def field-for-field (missing field, rank mismatch, or a stray tensor fails loudly), and a
-        /// kind the def expects but the file omits fails loudly. Routed to by
-        /// <see cref="LoadTrainingCheckpoint"/> when the file is a .skpt.
+        /// kind the def expects but the file omits fails loudly. Backs the public
+        /// <see cref="LoadTrainingCheckpointFromSkpt(string, TensorStructDef, TensorStructDef, TensorStructDef)"/>
+        /// and the rig-supplied <see cref="TrainingCheckpoint.LoadFromSkpt"/>; callers verify the
+        /// container shape first.
         ///
         /// <para><paramref name="components"/> selects which parts to load (<c>null</c> ⇒ everything
         /// present), exactly as the flat path (<see cref="TrainingCheckpoint.LoadFlat"/>) does: a
@@ -303,6 +334,9 @@ namespace Shorokoo
         internal static TrainingRig ReconstructRigFromSkpt(
             string filePath, ComputeContext mergeContext, ComputeContext runtimeContext)
         {
+            VerifySkptContainer(filePath,
+                "A flat checkpoint stores training state only — no rig constituents to rebuild " +
+                "from; rebuild the rig from its source graphs and resume with rig.LoadCheckpoint(path).");
             var fileBytes = File.ReadAllBytes(filePath);
             using var fileStream = new MemoryStream(fileBytes, writable: false);
             using var archive = OpenArchive(fileStream, filePath);

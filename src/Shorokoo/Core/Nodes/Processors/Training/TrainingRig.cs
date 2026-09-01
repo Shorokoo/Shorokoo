@@ -2239,17 +2239,30 @@ namespace Shorokoo
 
         /// <summary>
         /// Loads a checkpoint previously written by <see cref="TrainingCheckpoint.Save(string, CheckpointComponents?)"/>
-        /// (flat safetensors) or <see cref="Persistence.SaveTrainingCheckpointToSkpt"/> (the
-        /// native .skpt container) — the on-disk shape is detected automatically — reconstructing it
+        /// (the flat safetensors file), reconstructing it
         /// against this rig's parameter/state struct definitions so training resumes exactly where it
         /// left off: trainable params, optimizer moments, model state, and the host-owned run counters
         /// (global step, epoch, batch index) are all restored (schedules resume from that step; older
         /// checkpoints lacking epoch/batch restore them as 0). Throws if the file's fields don't match this
         /// rig — e.g. a checkpoint produced by a different model or optimizer. The rig must be built
-        /// from the same model/loss/optimizer graphs as the one that saved the checkpoint.
+        /// from the same model/loss/optimizer graphs as the one that saved the checkpoint. This entry
+        /// point reads the flat shape only: handed a native <c>.skpt</c> container it fails
+        /// immediately, naming <see cref="LoadCheckpointFromSkpt"/> as the entry point for that shape.
         /// </summary>
         public TrainingCheckpoint LoadCheckpoint(string filePath, CheckpointComponents? components = null)
             => TrainingCheckpoint.Load(filePath, this, components);
+
+        /// <summary>
+        /// Loads a checkpoint previously written by <see cref="Persistence.SaveTrainingCheckpointToSkpt"/>
+        /// (the native <c>.skpt</c> container) — the <c>.skpt</c> counterpart of
+        /// <see cref="LoadCheckpoint"/>, with the same resume semantics and fail-loud contract.
+        /// This entry point reads the container shape only: handed a flat safetensors checkpoint it
+        /// fails immediately, naming <see cref="LoadCheckpoint"/> as the entry point for that shape.
+        /// To rebuild the whole rig from a <c>.skpt</c> alone (no pre-existing rig), use the static
+        /// <see cref="Load(string, ComputeContext?, ComputeContext?)"/> instead.
+        /// </summary>
+        public TrainingCheckpoint LoadCheckpointFromSkpt(string filePath, CheckpointComponents? components = null)
+            => TrainingCheckpoint.LoadFromSkpt(filePath, this, components);
 
         // ───────── Constituent persistence & from-file reconstruction (§5.8.2, #115/#106) ─────────
         // A training .skpt stores the rig's constituents as ordinary models/ entries so a fresh process
@@ -2435,7 +2448,7 @@ namespace Shorokoo
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
             var rig = Persistence.ReconstructRigFromSkpt(
                 filePath, mergeContext ?? ComputeContext.Default, runtimeContext ?? ComputeContext.Default);
-            var checkpoint = rig.LoadCheckpoint(filePath);
+            var checkpoint = rig.LoadCheckpointFromSkpt(filePath);
             return (rig, checkpoint);
         }
 

@@ -1652,7 +1652,7 @@ public class TrainingRigCheckpointCoverageTests
             Assert.Equal(1, Persistence.Inspect(bigFlat).TrainingCheckpoint!.FormatVersion);
 
             Persistence.SaveTrainingCheckpointToSkpt(big, bigSkpt);
-            var skpt = loaderRig.LoadCheckpoint(bigSkpt);
+            var skpt = loaderRig.LoadCheckpointFromSkpt(bigSkpt);
             Assert.Equal(bigStep, skpt.Step);
             Assert.Equal(bigEpoch, skpt.Epoch);
             Assert.Equal(bigBatch, skpt.BatchIndex);
@@ -1680,7 +1680,7 @@ public class TrainingRigCheckpointCoverageTests
             Assert.Equal(7, manifest.Training!.Epoch);
             Assert.Equal(340, manifest.Training.BatchIndex);
 
-            var skptLoaded = loaderRig.LoadCheckpoint(skptPath);
+            var skptLoaded = loaderRig.LoadCheckpointFromSkpt(skptPath);
             Assert.Equal(4, skptLoaded.Step);
             Assert.Equal(7, skptLoaded.Epoch);
             Assert.Equal(340, skptLoaded.BatchIndex);
@@ -1745,7 +1745,7 @@ public class TrainingRigCheckpointCoverageTests
             Assert.Null(manifest.Training!.Epoch);
             Assert.Null(manifest.Training.BatchIndex);
 
-            var skptLoaded = loaderRig.LoadCheckpoint(nullSkpt);
+            var skptLoaded = loaderRig.LoadCheckpointFromSkpt(nullSkpt);
             Assert.Equal(trained.Step, skptLoaded.Step);
             Assert.Null(skptLoaded.Epoch);
             Assert.Null(skptLoaded.BatchIndex);
@@ -1936,14 +1936,14 @@ public class TrainingRigCheckpointCoverageTests
             Assert.Null(reader.LoadCheckpoint(flatNullLossReqPath).Loss);
 
             Persistence.SaveTrainingCheckpointToSkpt(trained, skptPath);
-            Assert.Equal(loss, reader.LoadCheckpoint(skptPath).Loss!.Value);
-            var skptNoLoss = reader.LoadCheckpoint(
+            Assert.Equal(loss, reader.LoadCheckpointFromSkpt(skptPath).Loss!.Value);
+            var skptNoLoss = reader.LoadCheckpointFromSkpt(
                 skptPath, CheckpointComponents.InferenceState | CheckpointComponents.OptimizerState | CheckpointComponents.Counters);
             Assert.Equal(trained.Step, skptNoLoss.Step);
             Assert.Null(skptNoLoss.Loss);
 
             Persistence.SaveTrainingCheckpointToSkpt(initial, skptInitPath);
-            Assert.Null(reader.LoadCheckpoint(skptInitPath).Loss);
+            Assert.Null(reader.LoadCheckpointFromSkpt(skptInitPath).Loss);
         }
         finally
         {
@@ -2040,7 +2040,7 @@ public class TrainingRigSkptCheckpointCoverageTests
             Assert.DoesNotContain(SkptFileFormat.TrainingKindModelState, manifest.Training.Kinds.Keys);
 
             var rigB = BuildTrainedAdamRig(steps: 0).Rig;
-            var loaded = rigB.LoadCheckpoint(path);
+            var loaded = rigB.LoadCheckpointFromSkpt(path);
             Assert.Equal(2, loaded.Step);
             Assert.Equal(FlattenStruct(ckpt.TrainableParams), FlattenStruct(loaded.TrainableParams));
             Assert.Equal(FlattenStruct(ckpt.OptimizerState), FlattenStruct(loaded.OptimizerState));
@@ -2099,7 +2099,7 @@ public class TrainingRigSkptCheckpointCoverageTests
             using (var zip = System.IO.Compression.ZipFile.OpenRead(bnPath))
                 Assert.Contains(SkptFileFormat.ModelStateEntryPath, zip.Entries.Select(e => e.FullName));
 
-            var bnLoaded = BnRig().LoadCheckpoint(bnPath);
+            var bnLoaded = BnRig().LoadCheckpointFromSkpt(bnPath);
             Assert.Equal(11, bnLoaded.Step);
             Assert.Equal(FlattenStruct(bnCkpt.ModelState), FlattenStruct(bnLoaded.ModelState));
             Assert.Equal(FlattenStruct(bnCkpt.TrainableParams), FlattenStruct(bnLoaded.TrainableParams));
@@ -2133,7 +2133,7 @@ public class TrainingRigSkptCheckpointCoverageTests
             Assert.NotNull(inspect.Skpt.Training);
             Assert.Equal(1, inspect.Skpt.Training!.Step);
 
-            var loaded = rig.LoadCheckpoint(path);
+            var loaded = rig.LoadCheckpointFromSkpt(path);
             Assert.Equal(1, loaded.Step);
             Assert.Equal(FlattenStruct(one.TrainableParams), FlattenStruct(loaded.TrainableParams));
 
@@ -2142,7 +2142,7 @@ public class TrainingRigSkptCheckpointCoverageTests
                 SGDMomentumOptimizer.ComputationGraph,
                 [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([8L], new float[8]))],
                 0.5f, 0.9f);
-            Assert.ThrowsAny<Exception>(() => bnRig.LoadCheckpoint(path));
+            Assert.ThrowsAny<Exception>(() => bnRig.LoadCheckpointFromSkpt(path));
 
             var bytes = File.ReadAllBytes(path);
             var entryBytes = ReadEntryBytesViaBcl(path, SkptFileFormat.TrainableEntryPath);
@@ -2152,14 +2152,14 @@ public class TrainingRigSkptCheckpointCoverageTests
             Assert.True(at >= 0);
             bytes[at] ^= 0xFF;
             File.WriteAllBytes(tampered, bytes);
-            Assert.ThrowsAny<Exception>(() => rig.LoadCheckpoint(tampered));
+            Assert.ThrowsAny<Exception>(() => rig.LoadCheckpointFromSkpt(tampered));
 
             var infPath = TempPath("skpt_inf") + ".skpt";
             try
             {
                 Persistence.From(one.ToInferenceModel()).WithModel().WithWeights().Save(infPath);
                 var ex = Assert.Throws<System.IO.InvalidDataException>(() =>
-                    Persistence.LoadTrainingCheckpoint(infPath,
+                    Persistence.LoadTrainingCheckpointFromSkpt(infPath,
                         rig.TrainableParamStructDef, rig.ModelStateDef, rig.OptimizerStateDef));
                 Assert.Contains("training", ex.Message);
             }
@@ -2184,7 +2184,7 @@ public class TrainingRigSkptCheckpointCoverageTests
             Assert.Null(manifest.Training!.Epoch);
             Assert.Null(manifest.Training.BatchIndex);
 
-            var strippedLoaded = rig.LoadCheckpoint(strippedPath);
+            var strippedLoaded = rig.LoadCheckpointFromSkpt(strippedPath);
             Assert.Equal(2, strippedLoaded.Step);
             Assert.Null(strippedLoaded.Epoch);
             Assert.Null(strippedLoaded.BatchIndex);
@@ -2206,7 +2206,7 @@ public class TrainingRigSkptCheckpointCoverageTests
         {
             Persistence.SaveTrainingCheckpointToSkpt(trained, subsetPath);
 
-            var loaded = rig.LoadCheckpoint(subsetPath, CheckpointComponents.InferenceState);
+            var loaded = rig.LoadCheckpointFromSkpt(subsetPath, CheckpointComponents.InferenceState);
             Assert.Same(rig, loaded.Rig);
             Assert.Equal(FlattenStruct(trained.TrainableParams), FlattenStruct(loaded.TrainableParams));
             Assert.Equal(0, loaded.Step);
@@ -2214,11 +2214,61 @@ public class TrainingRigSkptCheckpointCoverageTests
             Assert.Equal(initialOpt, FlattenStruct(loaded.OptimizerState));
 
             var ex = Assert.Throws<NotSupportedException>(
-                () => rig.LoadCheckpoint(subsetPath, CheckpointComponents.TrainingRig));
+                () => rig.LoadCheckpointFromSkpt(subsetPath, CheckpointComponents.TrainingRig));
             Assert.Contains("#115", ex.Message);
-            Assert.Throws<NotSupportedException>(() => rig.LoadCheckpoint(subsetPath, CheckpointComponents.All));
+            Assert.Throws<NotSupportedException>(() => rig.LoadCheckpointFromSkpt(subsetPath, CheckpointComponents.All));
         }
         finally { if (File.Exists(subsetPath)) File.Delete(subsetPath); }
+    }
+
+    [Fact]
+    public void TestCheckpointLoadEntryPointsAreFormatExplicitCoverage()
+    {
+        var (_, trained, _, _) = BuildTrainedAdamRig(steps: 1);
+        var reader = BuildTrainedAdamRig(steps: 0).Rig;
+        var flatPath = TempPath("fmt_flat") + ".safetensors";
+        var skptPath = TempPath("fmt_skpt") + ".skpt";
+        var junkPath = TempPath("fmt_junk") + ".bin";
+        try
+        {
+            trained.Save(flatPath);
+            Persistence.SaveTrainingCheckpointToSkpt(trained, skptPath);
+            File.WriteAllBytes(junkPath, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+
+            Assert.Equal(1, reader.LoadCheckpoint(flatPath).Step);
+            Assert.Equal(1, reader.LoadCheckpointFromSkpt(skptPath).Step);
+            Assert.Equal(1, Persistence.LoadTrainingCheckpoint(
+                flatPath, reader.TrainableParamStructDef, reader.ModelStateDef, reader.OptimizerStateDef).Step);
+            Assert.Equal(1, Persistence.LoadTrainingCheckpointFromSkpt(
+                skptPath, reader.TrainableParamStructDef, reader.ModelStateDef, reader.OptimizerStateDef).Step);
+
+            var flatGotSkpt = Assert.Throws<System.IO.InvalidDataException>(
+                () => reader.LoadCheckpoint(skptPath));
+            Assert.Contains(".skpt", flatGotSkpt.Message);
+            Assert.Contains("LoadCheckpointFromSkpt", flatGotSkpt.Message);
+            var skptGotFlat = Assert.Throws<System.IO.InvalidDataException>(
+                () => reader.LoadCheckpointFromSkpt(flatPath));
+            Assert.Contains("safetensors", skptGotFlat.Message);
+            Assert.Contains("LoadCheckpoint(path)", skptGotFlat.Message);
+            Assert.Contains("LoadTrainingCheckpointFromSkpt", Assert.Throws<System.IO.InvalidDataException>(
+                () => Persistence.LoadTrainingCheckpoint(
+                    skptPath, reader.TrainableParamStructDef, reader.ModelStateDef, reader.OptimizerStateDef)).Message);
+            Assert.Contains("Persistence.LoadTrainingCheckpoint", Assert.Throws<System.IO.InvalidDataException>(
+                () => Persistence.LoadTrainingCheckpointFromSkpt(
+                    flatPath, reader.TrainableParamStructDef, reader.ModelStateDef, reader.OptimizerStateDef)).Message);
+            Assert.Contains("rig.LoadCheckpoint", Assert.Throws<System.IO.InvalidDataException>(
+                () => TrainingRig.Load(flatPath)).Message);
+            Assert.Contains("neither", Assert.Throws<System.IO.InvalidDataException>(
+                () => reader.LoadCheckpointFromSkpt(junkPath)).Message);
+            Assert.Contains("neither", Assert.Throws<System.IO.InvalidDataException>(
+                () => reader.LoadCheckpoint(junkPath)).Message);
+        }
+        finally
+        {
+            string[] paths = [flatPath, skptPath, junkPath];
+            foreach (var p in paths)
+                if (File.Exists(p)) File.Delete(p);
+        }
     }
 
     [Fact]

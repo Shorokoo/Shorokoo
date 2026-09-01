@@ -376,19 +376,25 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
   inspectable manifest, per-entry Zstd, and provenance metadata — save with
   `Persistence.SaveTrainingCheckpointToSkpt(checkpoint, "run.skpt")` — the checkpoint's
   `.Rig` supplies the self-describing inference model, so no model graph or example input
-  is needed (or use the `Persistence.ForTrainingCheckpoint(...)` builder). `rig.LoadCheckpoint`
-  reads either shape — the on-disk form is auto-detected — so this line resumes a
-  `.skpt` run unchanged. See [skpt-checkpoints.md](skpt-checkpoints.md#training-checkpoints).
-- `LoadCheckpoint` reconstructs the checkpoint against the rig's own parameter
-  and state definitions, so the rig must be built from the **same**
+  is needed (or use the `Persistence.ForTrainingCheckpoint(...)` builder) — and resume with
+  `rig.LoadCheckpointFromSkpt("run.skpt")`. Each on-disk shape has its own load entry
+  point: `rig.LoadCheckpoint` reads the flat safetensors file only, `rig.LoadCheckpointFromSkpt`
+  the `.skpt` container only, and handing either the other shape fails immediately with an
+  error naming the right entry point (nothing sniffs the file's bytes to pick a path; to
+  identify an unknown file, use `Persistence.Inspect`).
+  See [skpt-checkpoints.md](skpt-checkpoints.md#training-checkpoints).
+- `LoadCheckpoint` / `LoadCheckpointFromSkpt` reconstruct the checkpoint against the rig's own
+  parameter and state definitions, so the rig must be built from the **same**
   model/loss/optimizer graphs. Loading a checkpoint from a different model or
   optimizer throws.
 - Because `.Step` is restored, learning-rate **schedules resume from the right
   step** — not from step 0.
-- `rig.LoadCheckpoint(path)` delegates to `TrainingCheckpoint.Load(path, rig)`, which
+- `rig.LoadCheckpoint(path)` delegates to `TrainingCheckpoint.Load(path, rig)` (and
+  `rig.LoadCheckpointFromSkpt(path)` to `TrainingCheckpoint.LoadFromSkpt(path, rig)`), which
   resolves the struct defs from the rig and sets `.Rig` on the result. The lower-level
   `Persistence.LoadTrainingCheckpoint(path, trainableDef, modelStateDef, optimizerStateDef)`
-  is the def-based form if you hold the struct defs without a rig (its result carries no rig).
+  (flat) / `Persistence.LoadTrainingCheckpointFromSkpt(...)` (`.skpt`) are the def-based forms
+  if you hold the struct defs without a rig (their results carry no rig).
 - Both save and load take an optional `CheckpointComponents` flags value —
   `InferenceState` (trainable params + model state), `OptimizerState`, `Counters`, `Loss`, and
   `TrainingRig` — combined with `|`. On save, `null` writes every available component; on

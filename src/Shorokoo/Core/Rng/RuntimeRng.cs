@@ -845,7 +845,10 @@ internal static class RuntimeRng
     // 2^IndexBits consecutive magnitudes inside one weight class, decoded by a degree-12 series
     // that inverts the Gaussian CDF over the piece. The 218 pieces tile [2^-39, 8) with no gap, so
     // all 352321536 float32 magnitudes there are addressed one at a time rather than in blocks --
-    // though past 4 a cell can be worth under one code, so 577210 of them earn none.
+    // though past 7.6008 a cell is worth under one code, so 577210 of them hold no whole code in
+    // their EXACT share -- the ideal census. One fewer, 577209, is what this DECODE actually
+    // starves (its series lands a code on one of the 577210), and that is the count the user-facing
+    // Documentation/normal-draws.md gives, together with the first starved magnitude, 7.601182.
     // CAP: past the last resolved magnitude everything collapses onto 8f, 1.2e-15 of the mass.
     //
     // Cells run AWAY FROM ZERO and boundaries are MIDPOINTS: magnitude a owns

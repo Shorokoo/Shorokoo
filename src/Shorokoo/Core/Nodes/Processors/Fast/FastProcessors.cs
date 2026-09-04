@@ -3870,16 +3870,19 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// round-trip to handle.
         ///
         /// <para>
-        /// Precondition: no loop body may contain a <c>MODEL_PARAM_REF</c>,
-        /// <c>MODEL_PARAM_ID_REF</c>, <c>MODEL_PARAM_MODEL_REF</c>, or
-        /// <c>MODULE_SET_HYPERPARAMS</c> node. The full
+        /// A loop whose body still holds module-stage machinery
+        /// (<see cref="InternalOpCodes.IsModuleStageOp"/> — <c>MODEL_PARAM_REF</c> and its
+        /// two id-ref siblings, <c>MODULE_SET_HYPERPARAMS</c>, <c>MODEL_INVOKE</c>, …) is
+        /// disqualified rather than unrolled: cloning such a node copies its
+        /// IdentifierTemplate and model-id attributes verbatim, so every iteration would
+        /// name the same parameter. The per-iteration rewrite that used to fix those up
+        /// here is gone, because the full
         /// <see cref="InternalComputationGraphExtensions.ToConcreteArchitecture"/> pipeline
-        /// resolves all four into plain <c>MODEL_PARAM</c> (or, for
-        /// <c>MODULE_SET_HYPERPARAMS</c>, removes the node via
-        /// <see cref="FastUnpackModelStruct"/>) before <see cref="FastSimplify"/> calls
-        /// in here, so the per-iteration identifier-template / model-id rewrite that
-        /// used to run on those op-codes is dead in production and has been removed.
-        /// <see cref="UnrollOne"/> asserts this invariant on every cloned body node.
+        /// resolves them all — into plain <c>MODEL_PARAM</c>, or removed outright — before
+        /// <see cref="FastSimplify"/> calls in here. A module-stage graph reaching this pass
+        /// (<c>Specialize</c> constant-folds one) therefore keeps its loops rolled for
+        /// <c>ToConcreteArchitecture</c> to unroll after the rewrite.
+        /// <see cref="UnrollOne"/> asserts the resulting invariant on every cloned body node.
         /// </para>
         /// </summary>
         public static bool Process(InternalComputationGraph graph)
@@ -4044,6 +4047,21 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     && !bodyNodeSet.Contains(gok))
                     return false;
             }
+
+            // (3b) Module-stage machinery in the body disqualifies the unroll. Cloning a
+            // body node per iteration duplicates its IdentifierTemplate and model-id
+            // attributes verbatim, which is only sound once those are resolved: within
+            // ToConcreteArchitecture the Stage-F rewrite has already turned every
+            // MODEL_PARAM_REF / MODEL_PARAM_ID_REF / MODEL_PARAM_MODEL_REF into a
+            // MODEL_PARAM carrying its own concrete id (and dropped the module
+            // machinery around it), so a clone is just a clone. On a still-module-stage
+            // graph — FastSimplify reached through Specialize — it is not: every
+            // iteration's clone would name the same parameter. Leaving the loop rolled
+            // is correct for downstream passes; ToConcreteArchitecture unrolls it after
+            // the rewrite, so the baked route lands on the same concrete model as the
+            // hinted one.
+            for (int j = openIdx + 1; j < closeIdx; j++)
+                if (InternalOpCodes.IsModuleStageOp(graph.Nodes[j].OpCode)) return false;
 
             // (4) Body outputs must be consumed only by other body nodes, the CLOSE, or
             // nowhere. A body output that leaks to a non-body consumer would break after
@@ -4536,11 +4554,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     clonedThisIter.Add((b, cloned));
                 }
 
-                // Precondition assert: by the time FastSimplify invokes Process,
+                // Precondition assert: the eligibility gate rejects any loop whose body
+                // still holds module-stage machinery, and inside ToConcreteArchitecture
                 // FastConvertToIdRefModelParams + FastUnpackModelStruct +
-                // FastConvertModelParamIdRefToModelParam have all run, so the
-                // four op-codes that used to drive a per-iteration identifier-template
-                // rewrite here are gone. See the Process docstring for the full chain.
+                // FastConvertModelParamIdRefToModelParam have run before FastSimplify
+                // anyway, so the four op-codes that used to drive a per-iteration
+                // identifier-template rewrite here cannot reach a clone.
                 foreach (var (_, cloned) in clonedThisIter)
                 {
                     Debug.Assert(

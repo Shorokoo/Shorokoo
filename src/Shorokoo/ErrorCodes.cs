@@ -649,6 +649,9 @@ namespace Shorokoo
         /// <summary>ONNX export rejected: the graph carries Shorokoo-internal ops and cannot be expressed in the vanilla ONNX dialect</summary>
         public const string FW045 = "FW045";
 
+        /// <summary>Execution rejected: the graph still carries module machinery, which no ONNX Runtime kernel implements</summary>
+        public const string FW046 = "FW046";
+
         #endregion
 
         #region Utility Error Codes (UT001-UT010)

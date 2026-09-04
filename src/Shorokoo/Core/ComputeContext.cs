@@ -196,6 +196,7 @@ namespace Shorokoo.Runtime
 
         internal CompiledGraph Compile(InternalComputationGraph graph)
         {
+            RequireExecutableDialect(graph, "graph compilation");
             var originalInputNames = ResolveOriginalInputNames(graph);
             return CompileFromModel(
                 () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true),
@@ -323,11 +324,48 @@ namespace Shorokoo.Runtime
         /// </summary>
         internal NamedModelParam[] Run(InternalComputationGraph graph, params NamedModelParam[] inputs)
         {
+            RequireExecutableDialect(graph, "graph execution");
             var originalInputNames = ResolveOriginalInputNames(graph);
             return RunFromModel(
                 () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true),
                 originalInputNames,
                 inputs);
+        }
+
+        /// <summary>
+        /// Fail-fast gate on the two ONNX Runtime session paths (<see cref="Compile(InternalComputationGraph)"/>
+        /// and <see cref="Run(InternalComputationGraph, NamedModelParam[])"/>): module machinery
+        /// (<see cref="InternalOpCodes.ModuleStageOps"/>) has no ORT kernel behind it, so a graph still
+        /// carrying it can only fail — deep inside session creation, naming an internal op that appears
+        /// nowhere in the public API (<c>No Op registered for ShrkCreateModule</c>), or earlier still with
+        /// a lowering pass's own complaint. Catching it here names the residual ops and the lowering call
+        /// instead. The kind-stamped entry points gate earlier via
+        /// <see cref="ComputationGraph.RequireConcretized"/>; this covers the unstamped graphs the
+        /// <c>Eval</c> helpers build straight from output variables, which is how a
+        /// <c>[Module]</c>'s output reaches ORT unlowered.
+        ///
+        /// <para>FUNCTION_INVOKE is excluded, unlike in the stage classification
+        /// (<see cref="SrkFileFormat.DescribeKindViolation"/>): every invoke serializes to a call on an
+        /// emitted FunctionProto and runs, whatever the target's <see cref="FunctionType"/> — which is
+        /// exactly how <c>ToConcreteModel</c> materializes parameters, by executing their
+        /// initializer functions here.</para>
+        /// </summary>
+        private static void RequireExecutableDialect(InternalComputationGraph graph, string operation)
+        {
+            var residual = new SortedSet<string>(StringComparer.Ordinal);
+            foreach (var node in graph.Nodes)
+                if (node.OpCode != InternalOpCodes.FUNCTION_INVOKE &&
+                    InternalOpCodes.IsModuleStageOp(node.OpCode))
+                    residual.Add(node.OpCode);
+
+            if (residual.Count == 0) return;
+            throw new ModelException(ErrorCodes.FW046, operation,
+                "this graph is still a module graph — it carries module machinery that no ONNX Runtime " +
+                $"kernel implements ({string.Join(", ", residual)}). Passing a [Module]'s output " +
+                "(MyModule.Call(x)) straight to Eval is the usual cause: Eval runs the graph exactly as " +
+                "handed to it. Lower the module's ComputationGraph first — " +
+                "graph.ToConcreteArchitecture(graph.FromOrderedInputs(inputs)).ToConcreteModel() — " +
+                "and execute that.");
         }
 
         private NamedModelParam[] RunFromModel(Func<ModelProto> buildModel, string[] originalInputNames, NamedModelParam[] inputs)

@@ -358,6 +358,43 @@ public class ModulesCoverageTests
         Assert.Contains(reloaded.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.CREATE_MODULE);
     }
 
+    /// <summary>
+    /// Executing a module graph is refused before ONNX Runtime ever sees it: the residual module
+    /// machinery is named, so is the lowering call, and the lowered graph still runs. Covers both
+    /// documented shapes — a module whose initializers are constant (which used to reach ORT and
+    /// come back with <c>No Op registered for ShrkCreateModule</c>) and a library layer whose
+    /// distribution is computed in-graph (which used to die inside the random-op lowering).
+    /// </summary>
+    [Fact]
+    public void TestExecutingAModuleGraphIsRefusedWithTheLoweringHint()
+    {
+        var input = TensorDataWithSmallVals(DType.Float32, [4L, 4L]);
+
+        void AssertRefused(string residualOp, System.Action run)
+        {
+            var ex = Assert.Throws<ModelException>(run);
+            Assert.Equal(ErrorCodes.FW046, ex.ErrorCode);
+            Assert.Contains(residualOp, ex.Message);
+            Assert.Contains("ToConcreteArchitecture", ex.Message);
+            Assert.Contains("ToConcreteModel", ex.Message);
+        }
+
+        var g = SimplestLayer.ComputationGraph;
+
+        AssertRefused(InternalOpCodes.CREATE_MODULE, () => OnnxEngine.Eval(SimplestLayer.Call(Tensor(input))));
+        AssertRefused(InternalOpCodes.CREATE_MODULE, () => OnnxEngine.Eval(
+            Shorokoo.Modules.Layers.Linear.Call(Scalar(4L), Scalar(false), Tensor(input))));
+        AssertRefused(InternalOpCodes.MODEL_PARAM_REF, () => ComputeContext.Default.Execute(g.ToInternal(), input));
+        AssertRefused(InternalOpCodes.MODEL_PARAM_REF, () => ComputeContext.Default.Compile(g.ToInternal()));
+
+        Assert.IsType<System.InvalidOperationException>(
+            Record.Exception(() => ComputeContext.Default.Execute(g, input)));
+
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
+        Assert.Null(Record.Exception(() => ComputeContext.Default.Execute(concrete, input)));
+        Assert.Null(Record.Exception(() => ComputeContext.Default.Execute(concrete.ToConcreteModel(), input)));
+    }
+
     private static Tensor<float32> DoubleScalar(Tensor<float32> input) => input + input;
 
     [Fact]

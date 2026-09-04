@@ -108,9 +108,11 @@ parameter additionally gets a `= null` C# default — becoming genuinely omittab
 — only inside the **trailing** run of the signature it appears in. In `Call` it
 never is, because the tensor inputs come last; so a layer's defaulted hypers are
 **nullable yet positionally required**, and you write `null` where you want the
-default: `LocalResponseNorm.Call(null, null, null, x)`. In `Model(hypers…)` there
-are no tensors to trail, so a defaulted hyper there can be omitted outright
-(`LocalResponseNorm.Model()`). Each entry below names only which of its own
+default: `LocalResponseNorm.Call(null, null, null, x)`. `Model(hypers…)` takes no
+tensors, so there a defaulted hyper *can* fall in the trailing run and be omitted
+outright — `LocalResponseNorm.Model()` works, while `BatchNorm.Model`'s
+`momentum`/`epsilon` still precede three plain bits and stay required. Each entry
+below names only which of its own
 parameters carry a declared default and what that default is; everything it does
 not name is a plain, required `[Hyper]`.
 

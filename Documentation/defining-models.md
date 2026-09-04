@@ -263,7 +263,7 @@ public partial class DenseBasic
         [Hyper] Scalar<int64> outFeatures,    // hyper params last
         [Hyper] Scalar<bit> useBias)
     {
-        var inFeatures = x.TShape[1..^0].T.Reduce(ReduceKind.Prod).Scalar();
+        var inFeatures = x.TShape[1..^0].Reduce(ReduceKind.Prod).Scalar();
         var xFlat = x.Reshape([x.DimTensor(0), inFeatures]);
         var w = ConstInit.Init([outFeatures, inFeatures]);
         var y = xFlat.MatMul(w.Transpose([1L, 0L]));
@@ -290,13 +290,14 @@ emitted.
 | `Foo.Model(h...)` | `ModuleFactory.FromFuncWithHypers(...).SetHyperparams((h...))` |
 | `Foo.Model().Call(x)` | `ModuleFactory.FromFunc(...).SetHyperparams().Call(x)` |
 | `Foo.ComputationGraph` | `ModuleFactory.ComputationGraph(body)` |
-| `Init.Init(shape)` | `Globals.CallTrainableParamInitializer(body, name, isTrainable, shape)` |
+| `ConstInit.Init(shape)` | `Globals.CallTrainableParamInitializer(body, defaultName, isTrainable, shape)` |
 
 ### End-to-end example (define, call, train, export)
 
 ```csharp
 using Shorokoo;
 using Shorokoo.Modules;
+using Shorokoo.Core.Factory;          // FastOnnxModelBuilder
 using static Shorokoo.Globals;
 
 // 1. Define — a plain static method, same shape as an Inline method.
@@ -318,13 +319,15 @@ var model  = module.SetHyperparams();          // generated: ScalarMultiply.Mode
 var y      = model.Call(x);                    // generated: ScalarMultiply.Call(x)
 
 // 3. The computation graph — equivalent to the generated ComputationGraph property
-//    (cached build, fresh clone per call).
+//    (cached build; the readonly instance is handed out directly, no per-access clone).
 var graph = ModuleFactory.ComputationGraph(
     (Func<Tensor<float32>, Tensor<float32>>)ScalarMultiply);
 
 // 4. Train — TrainingRig consumes graphs, so nothing changes (see training.md).
-var rig = TrainingRig.FromScratch(graph, L2Loss.ComputationGraph,
-    SGDOptimizer.ComputationGraph, sampleInputs, 0.01f);
+//    Losses.* / Optimizers.* (namespace Shorokoo) are the same graphs as
+//    L2Loss.ComputationGraph / SGDOptimizer.ComputationGraph, without the extra usings.
+var rig = TrainingRig.FromScratch(graph, Losses.L2Loss,
+    Optimizers.SGD, sampleInputs, 0.01f);
 
 // 5. Export — concretize and save/export as usual (see onnx-and-weights.md).
 var concrete = graph.ToConcreteArchitecture(graph.FromOrderedInputs([sample]))
@@ -366,6 +369,8 @@ For hyperparameters combined with *multiple* runtime inputs, construct the
 exactly what the generator emits):
 
 ```csharp
+using Shorokoo.Core;   // Module<...> / CallbackModule<...> / GraphBuilder live here
+
 // Body is inputs-first: Body(Tensor<float32> a, Tensor<float32> b, [Hyper] Scalar<float32> h)
 new Module<Scalar<float32>, (Tensor<float32>, Tensor<float32>), Tensor<float32>>(
     (h, ins) => Body(ins.Item1, ins.Item2, h), Body);

@@ -114,6 +114,8 @@ dimensions. That is the shape a scalar graph input wants, e.g. the value handed 
 - Shape ops: `.Reshape(shape, keepAxes)` (see below), `.Transpose(dims...)`, `.Squeeze(axes)`,
   `.Unsqueeze(axis)`, `.Expand(shape)`, `.Flatten(axis)`, `.Concat(axis, others...)`,
   `.Slice(start, end, axes, steps)`, `.Pad(mode, pads, val)`, `.Tile(repeats)`.
+- Indexing: `.Gather(indices, axis)` and `.GatherND(indices, batchDims)` — both default to
+  ONNX's 0, so `table.Gather(tokens)` gathers rows.
 - Math/activations: `.Relu()`, `.Sigmoid()`, `.Tanh()`, `.Softmax(axis)`, `.Gelu()`,
   `.Sqrt()`, `.Exp()`, `.Ln()`, `.Abs()`, trig (`.Sin()`, `.Cos()`, …).
 - Linear algebra: `.MatMul(other)`.

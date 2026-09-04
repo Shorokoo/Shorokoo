@@ -190,11 +190,13 @@ internal abstract class CompareOp : QuickOp
 internal abstract class ReduceOpBase : QuickOp
 {
     /// <summary>
-    /// Whether this reduction has an identity element, i.e. a value it takes over an EMPTY group,
-    /// which a reduced axis of extent 0 produces. Sum-like folds do (0, or 1 for Prod); Max, Min
-    /// and Mean do not. Defaults to <c>false</c> so an accumulator only folds an empty group once
-    /// it has said it can — QEE declining to fold costs a constant, inventing a value costs
-    /// correctness.
+    /// Whether this accumulator may fold an EMPTY group, which a reduced axis of extent 0 produces.
+    /// Sum, SumSquare, L1, L2 and Prod may: their identity is 0 (1 for Prod), exact in every dtype.
+    /// The rest decline, for three different reasons — ONNX gives Max and Min the dtype's minimum
+    /// and maximum, which <c>values.Max()</c>/<c>Min()</c> do not implement; LogSum and LogSumExp
+    /// have the identity -inf, which the shared integer accumulator cannot represent; and Mean is
+    /// genuinely undefined, being 0/0. Defaults to <c>false</c> so an accumulator folds an empty
+    /// group only once it has said it can — declining costs a constant, guessing costs correctness.
     /// </summary>
     protected virtual bool FoldsEmptyGroup => false;
 
@@ -284,11 +286,14 @@ internal abstract class ReduceOpBase : QuickOp
             : axes.Select(a => a < 0 ? a + inDims.Length : a).ToArray();
         var axisSet = new HashSet<long>(normalizedAxesAll);
 
-        if (!FoldsEmptyGroup && normalizedAxesAll.Any(a => a >= 0 && a < inDims.Length && inDims[a] == 0))
-            return [rt];
-
         long keptCount = 1;
         for (int d = 0; d < inDims.Length; d++) if (!axisSet.Contains(d)) keptCount *= inDims[d];
+
+        // With no groups to evaluate the accumulator is never called, so the empty result stands
+        // whether or not this reduction has an identity.
+        if (!FoldsEmptyGroup && keptCount > 0
+            && normalizedAxesAll.Any(a => a >= 0 && a < inDims.Length && inDims[a] == 0))
+            return [rt];
 
         long[] inStrides = new long[inDims.Length];
         long s = 1;

@@ -28,8 +28,8 @@ public class QeeReductionShapeAuditTests
     }
 
     [Fact]
-    public void TestQeeFoldsAReductionOverAnEmptyTensorToTheIdentity()
-        => Assert.True(QeeAudit.Check<QeeEmptyReduceIdentityCheck>(
+    public void TestQeeReductionsWithoutAnIdentityDeclineAnEmptyAxisWithoutInvalidatingTheOutput()
+        => Assert.True(QeeAudit.OrtOnly<QeeEmptyReduceNoIdentityCheck>(
             F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)));
 
     [Fact]

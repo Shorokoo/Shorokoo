@@ -178,11 +178,11 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 | ArgMin | ✅ | ✅ | N/A [1] |
 | ReduceL1 | ✅ | ✅ | ✅ |
 | ReduceL2 | ✅ | ✅ | ✅ |
-| ReduceLogSum | ✅ | ✅ | ✅ |
-| ReduceLogSumExp | ✅ | ✅ | ✅ |
-| ReduceMax | ✅ | ✅ | ✅ [2] |
-| ReduceMean | ✅ | ✅ | ✅ |
-| ReduceMin | ✅ | ✅ | ✅ [2] |
+| ReduceLogSum | ✅ | 🟡 [4] | ✅ |
+| ReduceLogSumExp | ✅ | 🟡 [4] | ✅ |
+| ReduceMax | ✅ | 🟡 [4] | ✅ [2] |
+| ReduceMean | ✅ | 🟡 [4] | ✅ |
+| ReduceMin | ✅ | 🟡 [4] | ✅ [2] |
 | ReduceProd | ✅ | ✅ | ✅ [3] |
 | ReduceSum | ✅ | ✅ | ✅ |
 | ReduceSumSquare | ✅ | ✅ | ✅ |
@@ -190,6 +190,11 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 1. Integer index output — non-differentiable.
 2. Ties share the gradient equally.
 3. The gradient uses prod/x and is NaN when an element is exactly 0.
+4. Values only, and only when a **reduced axis has extent 0**, which leaves every group
+   empty. `ReduceSum`, `ReduceSumSquare`, `ReduceL1`, `ReduceL2` and `ReduceProd` fold such
+   a group to their identity (0, or 1 for Prod); these five have no identity QEE can supply,
+   so it propagates dtype and shape and leaves the value uncomputed. Every other input folds
+   normally, and the ONNX Runtime backend computes all ten in every case.
 
 ## Shape & data movement
 

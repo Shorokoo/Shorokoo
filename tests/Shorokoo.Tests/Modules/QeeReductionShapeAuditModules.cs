@@ -37,13 +37,16 @@ namespace Shorokoo.Tests.Modules
 
     /// <summary>All 10 Reduce* ops: axes as INPUT (positive + negative), keepdims 0/1,
     /// axes absent (reduce ALL dims), noop_with_empty_axes with absent AND empty axes
-    /// (identity), float + exact-int paths (incl. integer-truncating ReduceMean).
+    /// (identity), float + exact-int paths (incl. integer-truncating ReduceMean), the
+    /// fluent wrapper's keepDims default, and reductions over an extent-0 axis.
     /// Inputs: xf = [[1,2,3],[4,5,6]] (float32), xi = [[1,-2,3],[4,5,-6]] (int64).</summary>
     [Module]
     public partial class QeeReduceValueAuditCheck
     {
         public static Scalar<bit> Inline(Tensor<float32> xf, Tensor<int64> xi)
         {
+            var empty = xf.Reshape(Vector(-1L)).Slice(Vector(0L), Vector(0L));
+            var emptyI = xi.Reshape(Vector(-1L)).Slice(Vector(0L), Vector(0L));
             var mismatch =
                 FloatMismatch(NN.Reduce(ReduceKind.Sum, xf, Vector(1L), keepDims: false, noOp: null), Vector(6f, 15f)) +
                 FloatMismatch(NN.Reduce(ReduceKind.Sum, xf, Vector(-2L), keepDims: false, noOp: null), Vector(5f, 7f, 9f)) +
@@ -68,15 +71,34 @@ namespace Shorokoo.Tests.Modules
                 FloatMismatch(NN.Reduce(ReduceKind.SumSquare, xf, Vector(1L), keepDims: false, noOp: null), Vector(14f, 77f)) +
                 // The fluent Reduce drops the reduced dims by default (PyTorch/NumPy), not ONNX's keepdims=1.
                 ShapeMismatch(xf.Reduce(ReduceKind.Sum, Vector(1L)), Vector(2L)) +
-                // reduce-all yields rank 0: its shape vector is empty, so the shape OF that shape is [0].
-                IntMismatch1(xf.Reduce(ReduceKind.Sum).TShape.TShape.Reduce(ReduceKind.Sum), 0L) +
-                FloatMismatch(xf.Reduce(ReduceKind.Sum, Vector(1L)), Vector(6f, 15f)) +
-                FloatMismatch(Flat(xf.Reduce(ReduceKind.Sum)), Vector(21f)) +
-                ShapeMismatch(xf.Reduce(ReduceKind.Sum, Vector(1L), keepDims: true), Vector(2L, 1L));
+                IntMismatch1(xf.Reduce(ReduceKind.Sum).TRank, 0L) +
+                // the same defaults on the hand-maintained Vector mirrors, which have no generator.
+                IntMismatch1(xi.TShape.Reduce(ReduceKind.Sum, Vector(0L)).TRank, 0L) +
+                IntMismatch(FlatI(xi.TShape.Gather(Vector(0L))), Vector(2L)) +
+                ShapeMismatch(xf.Reduce(ReduceKind.Sum, Vector(1L), keepDims: true), Vector(2L, 1L)) +
+                // A reduced axis of extent 0 leaves the group empty: the reductions with an identity
+                // fold to it, on the float and the integer accumulator alike.
+                FloatMismatch(Flat(empty.Reduce(ReduceKind.Sum)), Vector(0f)) +
+                FloatMismatch(Flat(empty.Reduce(ReduceKind.Prod)), Vector(1f)) +
+                FloatMismatch(Flat(empty.Reduce(ReduceKind.SumSquare)), Vector(0f)) +
+                FloatMismatch(Flat(empty.Reduce(ReduceKind.L1)), Vector(0f)) +
+                FloatMismatch(Flat(empty.Reduce(ReduceKind.L2)), Vector(0f)) +
+                IntMismatch(FlatI(emptyI.Reduce(ReduceKind.Sum)), Vector(0L)) +
+                IntMismatch(FlatI(emptyI.Reduce(ReduceKind.Prod)), Vector(1L)) +
+                IntMismatch(FlatI(emptyI.Reduce(ReduceKind.L1)), Vector(0L)) +
+                // one identity per group, not one for the whole tensor.
+                FloatMismatch(empty.Reshape(Vector(2L, 0L)).Reduce(ReduceKind.Sum, Vector(1L)), Vector(0f, 0f)) +
+                // an empty KEPT axis reduces to an empty result, identity or not. Concatenating that
+                // result keeps its VALUE on the audited path, so a result that is merely shaped and
+                // not folded leaves the bit uncomputed.
+                ShapeMismatch(empty.Reshape(Vector(0L, 3L)).Reduce(ReduceKind.Sum, Vector(1L)), Vector(0L)) +
+                FloatMismatch(Flat(empty.Reshape(Vector(0L, 0L)).Reduce(ReduceKind.Max, Vector(1L)))
+                    .Concat(0L, Vector(7f)), Vector(7f));
             return mismatch < Scalar(1L);
         }
 
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
+        private static Tensor<int64> FlatI(Tensor<int64> t) => t.Reshape(Vector(-1L));
     }
 
     /// <summary>ArgMax / ArgMin (axis incl. negative, keepdims, select_last_index ties,
@@ -112,22 +134,21 @@ namespace Shorokoo.Tests.Modules
     }
 
 
-    /// <summary>A reduction over an EMPTY tensor is the reduction's identity element - sum 0.</summary>
+    /// <summary>Max, Min, Mean, LogSum and LogSumExp over an extent-0 axis: QEE has no identity to
+    /// fold, so it must propagate dtype and shape and leave the value alone - never degrade the
+    /// output to DType.Invalid, which is what throwing inside the engine looks like from outside.
+    /// Driven by QeeAudit.OrtOnly, since the bit itself cannot be folded. Input xf = [[1,2,3],[4,5,6]].</summary>
     [Module]
-    public partial class QeeEmptyReduceIdentityCheck
+    public partial class QeeEmptyReduceNoIdentityCheck
     {
-        public static Scalar<bit> Inline(Tensor<float32> r)
+        public static Vector<float32> Inline(Tensor<float32> xf)
         {
-            var empty = r.Reshape(Vector(-1L)).Slice(Vector(0L), Vector(0L));
-            var mismatch =
-                FloatMismatch(Flat(empty.Reduce(ReduceKind.Sum)), Vector(0f)) +
-                FloatMismatch(Flat(empty.Reduce(ReduceKind.Prod)), Vector(1f)) +
-                FloatMismatch(Flat(empty.Reduce(ReduceKind.SumSquare)), Vector(0f)) +
-                FloatMismatch(Flat(empty.Reduce(ReduceKind.L1)), Vector(0f)) +
-                FloatMismatch(Flat(empty.Reduce(ReduceKind.L2)), Vector(0f)) +
-                // an empty KEPT axis reduces to an empty result, not to the identity.
-                ShapeMismatch(empty.Reshape(Vector(0L, 3L)).Reduce(ReduceKind.Sum, Vector(1L)), Vector(0L));
-            return mismatch < Scalar(1L);
+            var empty = xf.Reshape(Vector(-1L)).Slice(Vector(0L), Vector(0L)).Reshape(Vector(1L, 0L));
+            return Flat(empty.Reduce(ReduceKind.Max, Vector(1L)))
+                .Concat(0L, Flat(empty.Reduce(ReduceKind.Min, Vector(1L))),
+                        Flat(empty.Reduce(ReduceKind.Mean, Vector(1L))),
+                        Flat(empty.Reduce(ReduceKind.LogSum, Vector(1L))),
+                        Flat(empty.Reduce(ReduceKind.LogSumExp, Vector(1L)))).Vec();
         }
 
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));

@@ -23,6 +23,16 @@ public class CoreUtilsCoverageTests
     private static InternalComputationGraph BoolGraph(IValue only) => new([], [only.ToVariable()]);
 
     [Fact]
+    public void TestReshapeRejectsNegativeAndRepeatedKeepAxes()
+    {
+        var x = Vector(1f, 2f, 3f, 4f).Reshape(Vector(2L, 2L));
+        Assert.Equal("keepAxes", Assert.Throws<ArgumentOutOfRangeException>(
+            () => x.Reshape(Vector(-1L), keepAxes: [-1])).ParamName);
+        Assert.Equal("keepAxes", Assert.Throws<ArgumentException>(
+            () => x.Reshape(Vector(-1L), keepAxes: [0, 0])).ParamName);
+    }
+
+    [Fact]
     public void TestSelfCheckingGraphConventionRejectsAFalseBitAtAnyRank()
     {
         Assert.True(AutoTest.TestGraph(BoolGraph(Scalar(true))));

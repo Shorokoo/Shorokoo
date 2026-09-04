@@ -82,7 +82,7 @@ public static class Attention
     /// Rotary Positional Embedding (RoPE; Su et al. 2021). Rotates each query/key
     /// vector by an angle proportional to its sequence position, encoding RELATIVE
     /// position inside the attention dot-product. Param-free: a deterministic
-    /// rotation from position + a fixed frequency base. Apply to Q and K (each
+    /// rotation from position + a fixed frequency <paramref name="theta"/>. Apply to Q and K (each
     /// <c>[N, H, L, d]</c>, d EVEN) BEFORE <see cref="ScaledDotProductAttention"/>;
     /// do NOT apply to V.
     ///

@@ -35,7 +35,7 @@ public partial class GroupNormStaticReshapeRepro
 // ORT's ReshapeFusion also declines such targets and the uncomposed pattern loads and runs.
 // A future ORT that extends the fusion to 0-targets would surface here.
 [Module]
-public partial class GroupNormKeepDimsReshapeRepro
+public partial class GroupNormKeepAxesReshapeRepro
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // [2, 4, 3, 3]
     {
@@ -56,7 +56,7 @@ public class GroupNormStaticReshapeRegressionTests
     }
 
     [Fact]
-    public void GroupNormStaticStatefulAndKeepDimsReshapesLoadAndRun()
+    public void GroupNormStaticStatefulAndKeepAxesReshapesLoadAndRun()
     {
         var x = Range([2L, 4L, 3L, 3L], 0.7f, -10f);
         Assert.True(AutoTest.AdvancedTestGraph<GroupNormStaticReshapeRepro>(hyperparamInputs: [], runtimeInputs: [x]));
@@ -64,7 +64,7 @@ public class GroupNormStaticReshapeRegressionTests
         // between the dynamic restore reshape and the static one, which ORT's EliminateIdentity
         // re-fuses unless FastComposeContiguousReshapes walks through same-scope identities.
         Assert.True(AutoTest.AdvancedTestGraph<StatefulGroupNormStaticReshapeRepro>(hyperparamInputs: [], runtimeInputs: [x]));
-        Assert.True(AutoTest.AdvancedTestGraph<GroupNormKeepDimsReshapeRepro>(hyperparamInputs: [], runtimeInputs: [x]));
+        Assert.True(AutoTest.AdvancedTestGraph<GroupNormKeepAxesReshapeRepro>(hyperparamInputs: [], runtimeInputs: [x]));
     }
 }
 

@@ -199,7 +199,7 @@ internal static partial class InternalOp
         return NodeBuilder.BuildNodeSingleOut(MODEL_PARAM_REF, [iterationIndices, .. initializerParams], [.. attributes], targetFunction: initializerFn, identifierTemplateString: identifierTemplateString);
     }
 
-    public static Variable TrainableParamModelRef(Variable model, Variable[] initializerParams, Variable? iterationIndices, int[] relativeModelId, DType dtype, int? rank, Function initializerFn, bool isTrainable, DType[]? genericTypeArgs = null, string? identifierTemplateString = null)
+    public static Variable TrainableParamModelRef(Variable model, Variable[] initializerParams, Variable? iterationIndices, int[] relativeModelId, DType dtype, int? rank, Function initializerFn, bool isTrainable, DType[]? genericTypeArgs = null, string? identifierTemplateString = null, bool isParamReference = false)
     {
         var attributes = new List<(string, object?)>
         {
@@ -207,6 +207,7 @@ internal static partial class InternalOp
             (ShrkAttrDtype, dtype),
             (ShrkAttrRank, rank),
             (ShrkAttrIsTrainable, isTrainable),
+            (ShrkAttrIsParamReference, isParamReference),
             (ShrkAttrFunctionName, initializerFn.DefaultName),
             (ShrkAttrDomainName, "Functions")
         };

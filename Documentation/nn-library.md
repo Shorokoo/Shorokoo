@@ -22,8 +22,11 @@ dotnet add package Shorokoo.Modules
 
 ## Initializers (`Shorokoo.Modules.Initializers`)
 
-All are shape-only `[TrainableParamInitializer]`s — call sites are one-liners
-like `Zeros.Init([outFeatures])` or `KaimingUniform.Init([outC, inC, k, k])`.
+All are `[TrainableParamInitializer]`s taking the parameter's shape first — call sites
+are one-liners like `Zeros.Init([outFeatures])` or
+`KaimingUniform.Init([outC, inC, k, k])`. The three `Scalar*` entries are the
+exception: they take **no shape** and create a rank-0 parameter (see
+[Trainable scalars](#trainable-scalars) below).
 
 | Initializer | Fills with | Notes |
 |---|---|---|
@@ -45,6 +48,9 @@ like `Zeros.Init([outFeatures])` or `KaimingUniform.Init([outC, inC, k, k])`.
 | `TruncatedNormal` | N(0, 1) clamped to [−2, 2] | seeded; clamp approximation (in-graph rejection sampling isn't possible); Keras/JAX-style default |
 | `LeCunNormal` | N(0, √(1 / fanIn)) | seeded; rank ≥ 2; JAX/Flax `lecun_normal` (SELU / self-normalizing nets) |
 | `Orthogonal` | (semi-)orthogonal matrix (`QᵀQ ≈ I` / `QQᵀ ≈ I`) | seeded; rank ≥ 2; **Björck/Newton–Schulz approximation** (15 cubic iterations `Y ← 1.5·Y − 0.5·Y·(YᵀY)` from a seeded Gaussian — exact QR/SVD-orthogonal isn't expressible in Shorokoo's op set, cf. `TruncatedNormal`); gain 1; Saxe-2013 dynamical isometry (RNN recurrent matrices, deep stacks); PyTorch `orthogonal_` |
+| `ScalarZeros` | 0.0, rank 0 | no shape argument (`ScalarZeros.Init()`); a trainable **scalar**, not a `[1]`-shaped tensor; the trainable counterpart of `OptimizerScalarZeros` |
+| `ScalarOnes` | 1.0, rank 0 | no shape argument (`ScalarOnes.Init()`); the multiplicative identity, so a learned gain starts as a no-op; the trainable counterpart of `OptimizerScalarOnes` |
+| `ScalarConstant` | `value`, rank 0 | no shape argument; `value` is the only `Init` arg (`ScalarConstant.Init(Scalar(v))`); the rank-0 analogue of `Constant`, and the parameterized generalization of `ScalarZeros`/`ScalarOnes` |
 | `RecurrentUniform` | U(−1/√H, 1/√H) | seeded; PyTorch's `nn.RNN`/`nn.LSTM`/`nn.GRU` default (`k = 1/hidden_size`); `H` is an `Init` arg (`RecurrentUniform.Init([shape], Scalar(hiddenSize))`), not read from the shape — a gated cell stacks its gates along axis 1, so that axis is `4H` for LSTM and `3H` for GRU while the bound stays `1/√H`; inits W, R and bias alike; used by the `Recurrent` layers |
 
 - **Seeded determinism**: the random initializers are stream-keyed — each
@@ -79,6 +85,32 @@ like `Zeros.Init([outFeatures])` or `KaimingUniform.Init([outC, inC, k, k])`.
   PyTorch convention for Linear `[out, in]` and Conv `[outC, inC/g, k...]`
   layouts. Hence the rank ≥ 2 requirement: use `Zeros`/`Ones`/`Uniform`/`Normal`
   for biases.
+
+<a id="trainable-scalars"></a>
+### Trainable scalars (rank 0)
+
+A learned scalar — a per-layer temperature, a residual scale, a gated architecture's
+`gamma` — is a rank-0 parameter. `ScalarZeros` / `ScalarOnes` / `ScalarConstant` create
+one directly, taking no shape:
+
+```csharp
+var gamma = ScalarOnes.Init();                        // seeded at 1: starts as a no-op
+var beta  = ScalarZeros.Init();                       // seeded at 0
+var temp  = ScalarConstant.Init(Scalar(0.125f));      // seeded at 1/√d
+return x * gamma + beta;                              // broadcasts against any shape
+```
+
+They are deterministic (no RNG, no fan-in/out — neither is meaningful for a lone value)
+and mirror the `Zeros`/`Ones`/`Constant` trio of the shaped set:
+`ScalarZeros == ScalarConstant(0)`, `ScalarOnes == ScalarConstant(1)`.
+
+Do **not** reach for `Ones.Init([Scalar(1L)])` instead. It broadcasts the same way, but it
+is a length-1 rank-1 tensor, and it persists in the checkpoint as a `[1]`-shaped parameter
+where a scalar was meant. The `Scalar*` initializers persist as rank 0.
+
+State has the same pair on the optimizer side — `OptimizerScalarZeros` /
+`OptimizerScalarOnes`, both rank 0 and both shape-argument-free (see
+[Optimizers](#optimizers-shorokoomodulesoptimizers)).
 
 ## Layers (`Shorokoo.Modules.Layers`)
 

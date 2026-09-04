@@ -68,3 +68,49 @@ public partial class InitializerProps
         return truncOk + lecunOk > Scalar(1L); // both must hold
     }
 }
+
+/// <summary>
+/// Seeded values of the rank-0 trainable-parameter initializers: <c>ScalarZeros</c> = 0,
+/// <c>ScalarOnes</c> = 1, <c>ScalarConstant(v)</c> = v. The runtime input is unused.
+/// </summary>
+[Module]
+public partial class ScalarInitializerValues
+{
+    public static Scalar<bit> Inline(Tensor<float32> dummy)
+    {
+        var pen = ScalarZeros.Init().Abs()
+                + (ScalarOnes.Init() - Scalar(1f)).Abs()
+                + (ScalarConstant.Init(Scalar(0.125f)) - Scalar(0.125f)).Abs();
+        return pen < Scalar(1e-6f);
+    }
+}
+
+/// <summary>Scales its input by one trainable rank-0 scalar gain seeded at 1.</summary>
+[Module]
+public partial class ScalarGainModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => input * ScalarOnes.Init();
+}
+
+/// <summary>Rank-0 module-owned state: a call counter, one float rather than a param-shaped buffer.</summary>
+[StateInitializer(Ownership = StateOwnership.ModuleOwned)]
+public static partial class ScalarCallCount
+{
+    public static Scalar<float32> Inline() => Scalar(0.0f);
+}
+
+/// <summary>
+/// A trainable rank-0 gain alongside rank-0 module-owned state — both shapeless, neither
+/// carrying a shape input.
+/// </summary>
+[Module]
+public partial class ScalarGainWithScalarStateModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var calls = ScalarCallCount.Init();
+        Globals.StateUpdate(calls, calls + Scalar(1f));
+        return input * ScalarOnes.Init() + calls * Scalar(0f);
+    }
+}

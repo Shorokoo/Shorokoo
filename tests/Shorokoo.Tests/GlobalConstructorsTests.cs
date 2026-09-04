@@ -29,6 +29,18 @@ public class GlobalConstructorsCoverageTests
         Run<TensorStructFactoryModel>();
         Run<VariableAndInputConstructorsModel>();
     }
+
+    [Fact]
+    public void TestAShapeTooLargeForOneArrayIsNamedRatherThanWrappedToAWrongLength()
+    {
+        var tooLong = Assert.Throws<InvalidTensorOperationException>(
+            () => TensorDataWithDefaultVals(DType.Float32, [65536L, 65536L]));
+        Assert.Contains("4294967296 elements", tooLong.Message);
+
+        var overflowing = Assert.Throws<InvalidTensorOperationException>(
+            () => TensorDataWithSmallVals(DType.Float32, [1L << 32, 1L << 32]));
+        Assert.Contains("overflows Int64", overflowing.Message);
+    }
 }
 
 /// <summary>

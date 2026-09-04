@@ -478,6 +478,9 @@ namespace Shorokoo
         
         /// <summary>InputTensorSequence not implemented</summary>
         public const string GC010 = "GC010";
+
+        /// <summary>Tensor shape holds more elements than one array can</summary>
+        public const string GC011 = "GC011";
         
         #endregion
 
@@ -503,6 +506,9 @@ namespace Shorokoo
         
         /// <summary>ComputeContext execution failed with inner exception</summary>
         public const string CR007 = "CR007";
+
+        /// <summary>Trainable-parameter initialization failed; the parameter inventory is reported</summary>
+        public const string CR008 = "CR008";
 
         /// <summary>Variable→handle conversion: structural kind (tensor/optional/sequence/struct) mismatch</summary>
         public const string CR011 = "CR011";

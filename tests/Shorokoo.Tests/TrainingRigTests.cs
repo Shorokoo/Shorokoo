@@ -1,4 +1,5 @@
 using Shorokoo.Core.Nodes.Processors.Helpers;
+using Shorokoo.Modules.Initializers;
 using Shorokoo.Runtime;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
@@ -126,6 +127,20 @@ public partial class BatchedMatmulModel
         var pooled = ctx.Reduce(ReduceKind.Mean, Vector(1L), keepDims: false);
         return (Tensor<float32>)OnnxOp.Softmax(pooled.MatMul(InitXavier.Init([embed, classes])), axis: 1);
     }
+}
+
+[Module]
+public partial class ParamTooLargeToAllocateModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => Zeros.Init([Scalar(1L << 25), Scalar(1L << 25)]);
+}
+
+[Module]
+public partial class ParamSizeOverflowingModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => Zeros.Init([Scalar(1L << 32), Scalar(1L << 32)]);
 }
 
 [Module]
@@ -632,6 +647,26 @@ public class TrainingRigCompositionCoverageTests
             moduleGraph.FromOrderedInputs([TensorData([4L], [1f, 2f, 3f, 4f])]));
         Assert.NotEmpty(arch.GetConcreteModelParamInfos().ParamInfos);
         Assert.NotEmpty(arch.InitializeTrainableParams().ModelParams);
+    }
+
+    [Fact]
+    public void TestOnlyAnAllocationFailureIsReportedAndItNamesTheParametersShapesAndSizes()
+    {
+        var graph = ParamTooLargeToAllocateModel.ComputationGraph.ToInternal();
+        var arch = graph.ToConcreteArchitecture(
+            graph.FromOrderedInputs([TensorData([1L, 4L], [1f, 2f, 3f, 4f])]));
+
+        var ex = Assert.Throws<ComputeContextException>(() => arch.InitializeTrainableParams());
+        Assert.Contains("Zeros", ex.Message);
+        Assert.Contains("[33554432, 33554432]", ex.Message);
+        Assert.Contains("4.00 PiB", ex.Message);
+        Assert.NotNull(ex.InnerException);
+
+        var other = ParamSizeOverflowingModel.ComputationGraph.ToInternal();
+        var otherArch = other.ToConcreteArchitecture(
+            other.FromOrderedInputs([TensorData([1L, 4L], [1f, 2f, 3f, 4f])]));
+        Assert.IsNotType<ComputeContextException>(
+            Record.Exception(() => otherArch.InitializeTrainableParams()));
     }
 
     [Fact]

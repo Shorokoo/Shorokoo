@@ -12,6 +12,7 @@ using Shorokoo.Core.Utils;
 using Shorokoo.Onnx;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Globalization;
 using System.Linq;
 using Shorokoo.Core.Nodes.Processors.AutoGrad;
 
@@ -88,7 +89,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var collectedOutputKeys = new List<FastTensorKey>();
             // What this call is initializing, kept for the failure message below: a native
             // allocation failure aborts the whole session and names nothing on its own.
-            var collectedInventory = new List<(string? Template, ModelId Id, DType DType, long[]? Shape)>();
+            var collectedInventory =
+                new List<(string? Template, ConcreteModelParamInfo? Info, ModelId Id, DType DType, long[]? Shape)>();
 
             foreach (var node in workGraph.Nodes)
             {
@@ -107,6 +109,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var shape = node.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrShape);
                 // Both are cleared by the rewrite below; read them while they are still there.
                 var identifierTemplate = node.IdentifierTemplate;
+                ConcreteModelParamInfo? paramInfo = null;
 
                 // Replace the (shared) initializer with a per-parameter keyed-draw clone
                 // before the node is rewritten to FUNCTION_INVOKE (which preserves TargetFunction).
@@ -124,6 +127,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                             "initialize un-keyed (backend randomness not derived from the RngConfig) " +
                             "while the other parameters stay keyed. The inventory must be " +
                             "GetConcreteModelParamInfos() of this same graph.");
+
+                    paramInfo = info;
 
                     if (node.TargetFunction is { } initFn)
                     {
@@ -166,7 +171,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var outputKey = node.FullOutputs[""][0]!.Value;
                 collectedModelIds.Add(modelId);
                 collectedOutputKeys.Add(outputKey);
-                collectedInventory.Add((identifierTemplate, modelId, dtype, shape));
+                collectedInventory.Add((identifierTemplate, paramInfo, modelId, dtype, shape));
             }
 
             // Fail-loud override validation, mirroring the Runtime-side check at bind
@@ -210,13 +215,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 results = computeContext.Run(workGraph);
             }
-            catch (System.Exception ex)
+            catch (System.Exception ex) when (IsAllocationFailure(ex))
             {
                 // Every parameter's initializer runs in ONE session, so the native failure
                 // (ORT reports an out-of-memory abort as a bare "bad allocation") carries no
                 // parameter, shape or size — nothing separates "this parameter is too large"
                 // from "this graph is malformed" (#208). Report what the session was asked to
-                // allocate; the inner exception keeps the original diagnosis.
+                // allocate; the inner exception keeps the original diagnosis. Only allocation
+                // failures are relabelled: everything else this call can raise (a missing
+                // backend package, an unsupported op, a malformed graph) already says what it
+                // is, and keeping its type keeps the catch clauses around this API working.
                 throw new ComputeContextException(ErrorCodes.CR008, "FastInitializeModelParams",
                     DescribeInventory(collectedInventory) + " Underlying failure: " + ex.Message, ex);
             }
@@ -226,19 +234,43 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
+        /// True for the failures #208 is about: a managed out-of-memory, or a native allocation
+        /// abort the backend reports only as text ("bad allocation", "std::bad_alloc", ...).
+        /// </summary>
+        private static bool IsAllocationFailure(System.Exception ex)
+        {
+            string[] markers = ["bad alloc", "bad_alloc", "out of memory", "failed to allocate",
+                "insufficient memory"];
+            for (var e = ex; e is not null; e = e.InnerException)
+            {
+                if (e is System.OutOfMemoryException) return true;
+                if (markers.Any(m => e.Message.Contains(m, System.StringComparison.OrdinalIgnoreCase)))
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>
         /// Renders what one initialization session was asked to produce: the parameter count,
-        /// the total element count and byte size, and the largest parameters by size.
+        /// the total element count and byte size, and the largest parameters by size. Sizes
+        /// saturate rather than wrap — the parameter that blew the session up is exactly the one
+        /// whose element count can overflow Int64, and it has to stay at the top of the list.
         /// </summary>
         private static string DescribeInventory(
-            List<(string? Template, ModelId Id, DType DType, long[]? Shape)> inventory)
+            List<(string? Template, ConcreteModelParamInfo? Info, ModelId Id, DType DType, long[]? Shape)> inventory)
         {
+            const long Unknown = -1;
+
+            static long AddSat(long a, long b) => a > long.MaxValue - b ? long.MaxValue : a + b;
+
             static long ElementCount(long[]? shape)
             {
-                if (shape is null) return -1;
+                if (shape is null) return Unknown;
                 long n = 1;
                 foreach (var d in shape)
                 {
-                    if (d < 0) return -1;
+                    if (d < 0) return Unknown;
+                    if (d != 0 && n > long.MaxValue / d) return long.MaxValue;
                     n *= d;
                 }
                 return n;
@@ -246,43 +278,56 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             static long ByteCount(DType dtype, long elements)
             {
-                if (elements < 0) return -1;
-                try { return elements * dtype.EncodingBitCount / 8; }
-                catch (UnsupportedDTypeException) { return -1; }
+                if (elements < 0) return Unknown;
+                int bits;
+                try { bits = dtype.EncodingBitCount; }
+                catch (UnsupportedDTypeException) { return Unknown; }
+                if (bits <= 0) return Unknown;
+                return elements > long.MaxValue / bits ? long.MaxValue : elements * bits / 8;
             }
 
             static string Bytes(long bytes) => bytes < 0
                 ? "unknown size"
-                : bytes >= 1L << 50 ? $"{bytes / (double)(1L << 50):F2} PiB"
-                : bytes >= 1L << 40 ? $"{bytes / (double)(1L << 40):F2} TiB"
-                : bytes >= 1L << 30 ? $"{bytes / (double)(1L << 30):F2} GiB"
-                : bytes >= 1L << 20 ? $"{bytes / (double)(1L << 20):F2} MiB"
-                : $"{bytes} bytes";
+                : bytes == long.MaxValue ? "more than 8 EiB"
+                : bytes >= 1L << 60 ? Fmt(bytes / (double)(1L << 60), "EiB")
+                : bytes >= 1L << 50 ? Fmt(bytes / (double)(1L << 50), "PiB")
+                : bytes >= 1L << 40 ? Fmt(bytes / (double)(1L << 40), "TiB")
+                : bytes >= 1L << 30 ? Fmt(bytes / (double)(1L << 30), "GiB")
+                : bytes >= 1L << 20 ? Fmt(bytes / (double)(1L << 20), "MiB")
+                : bytes.ToString("N0", CultureInfo.InvariantCulture) + " bytes";
+
+            static string Fmt(double v, string unit) => v.ToString("F2", CultureInfo.InvariantCulture) + " " + unit;
 
             var sized = inventory
                 .Select(x =>
                 {
                     var elements = ElementCount(x.Shape);
-                    return (x.Template, x.Id, x.DType, x.Shape, Elements: elements,
+                    return (x.Template, x.Info, x.Id, x.Shape, DType: x.DType, Elements: elements,
                         Bytes: ByteCount(x.DType, elements));
                 })
                 .ToArray();
 
             static string Describe(
-                (string? Template, ModelId Id, DType DType, long[]? Shape, long Elements, long Bytes) p)
-                => $"'{p.Template ?? "<unnamed>"}' at ModelId [{string.Join(", ", p.Id.Vals)}] " +
+                (string? Template, ConcreteModelParamInfo? Info, ModelId Id, long[]? Shape,
+                 DType DType, long Elements, long Bytes) p)
+                => $"'{p.Info?.ToShorokooIdString() ?? p.Template ?? "<unnamed>"}' " +
+                   $"at ModelId [{string.Join(", ", p.Id.Vals)}] " +
                    $"{p.DType} [{(p.Shape is null ? "unknown shape" : string.Join(", ", p.Shape))}] " +
                    $"= {Bytes(p.Bytes)}";
 
-            var totalBytes = sized.Any(x => x.Bytes < 0) ? -1 : sized.Sum(x => x.Bytes);
-            var totalElements = sized.Any(x => x.Elements < 0) ? -1 : sized.Sum(x => x.Elements);
+            var totalBytes = sized.Any(x => x.Bytes < 0)
+                ? Unknown : sized.Aggregate(0L, (t, x) => AddSat(t, x.Bytes));
+            var totalElements = sized.Any(x => x.Elements < 0)
+                ? Unknown : sized.Aggregate(0L, (t, x) => AddSat(t, x.Elements));
             var largest = sized.OrderByDescending(x => x.Bytes).Take(5).Select(Describe);
 
             return $"initializing {sized.Length} model parameter{(sized.Length == 1 ? "" : "s")} " +
-                   $"({(totalElements < 0 ? "unknown" : totalElements.ToString("N0"))} elements, " +
-                   $"{Bytes(totalBytes)}) failed. All initializers run in one session, so the " +
-                   "underlying failure names no parameter of its own; the largest of them, in " +
-                   "order: " + string.Join("; ", largest) + ".";
+                   $"({(totalElements < 0 ? "unknown"
+                        : totalElements == long.MaxValue ? "more than 9.2e18"
+                        : totalElements.ToString("N0", CultureInfo.InvariantCulture))} " +
+                   $"elements, {Bytes(totalBytes)}) failed. All initializers run in one session, " +
+                   "so the underlying failure names no parameter of its own; the largest of them, " +
+                   "in order: " + string.Join("; ", largest) + ".";
         }
 
         /// <summary>

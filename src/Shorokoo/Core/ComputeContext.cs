@@ -339,29 +339,33 @@ namespace Shorokoo.Runtime
             var modelData = memoryStream.ToArray();
 
             var session = CreateSession(modelData, HasOptionalOps(model.Graph));
-
-            var onnxInputNameByOriginal = new Dictionary<string, string>();
-            for (int i = 0; i < originalInputNames.Length && i < session.InputNames.Count; i++)
-                onnxInputNameByOriginal[originalInputNames[i]] = session.InputNames[i];
-
-            var sessionInputs = new Dictionary<string, IShorokooTensorValue>();
-            foreach (var input in inputs)
+            try
             {
-                var onnxName = onnxInputNameByOriginal.TryGetValue(input.ParamName, out var mapped)
-                    ? mapped : input.ParamName;
-                sessionInputs[onnxName] = input.ToTensorValue();
+                var onnxInputNameByOriginal = new Dictionary<string, string>();
+                for (int i = 0; i < originalInputNames.Length && i < session.InputNames.Count; i++)
+                    onnxInputNameByOriginal[originalInputNames[i]] = session.InputNames[i];
+
+                var sessionInputs = new Dictionary<string, IShorokooTensorValue>();
+                foreach (var input in inputs)
+                {
+                    var onnxName = onnxInputNameByOriginal.TryGetValue(input.ParamName, out var mapped)
+                        ? mapped : input.ParamName;
+                    sessionInputs[onnxName] = input.ToTensorValue();
+                }
+                var results = session.Run(sessionInputs, session.OutputNames);
+
+                return results.Zip(session.OutputNames).Select(x =>
+                            OnnxUtils.CreateNamedModelParam(x.First, ModelParamType.OutputParam, x.Second))
+                            .ToArray();
             }
-            var results = session.Run(sessionInputs, session.OutputNames);
-
-            var retVal = results.Zip(session.OutputNames).Select(x =>
-                        OnnxUtils.CreateNamedModelParam(x.First, ModelParamType.OutputParam, x.Second))
-                        .ToArray();
-
-            // Dispose the session to free native memory. The returned tensor values
-            // own their memory independently of the session.
-            session.Dispose();
-
-            return retVal;
+            finally
+            {
+                // Dispose the session to free native memory — on the throwing path too, where
+                // the memory it holds is the memory the caller has just been told it lacks. The
+                // returned tensor values own their memory independently of the session, and the
+                // finally also keeps the session rooted across the native calls above.
+                session.Dispose();
+            }
         }
 
         private IShorokooInferenceSession CreateSession(byte[] modelData, bool disableOptimizations = false)

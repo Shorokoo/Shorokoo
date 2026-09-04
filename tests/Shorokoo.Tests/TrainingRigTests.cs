@@ -542,6 +542,15 @@ public partial class OversizedParamModel
         => Shorokoo.Modules.Initializers.Zeros.Init([Scalar(1L << 25), Scalar(1L << 25)]);
 }
 
+/// <summary>A parameter whose element count overflows the backend's own size arithmetic, so
+/// initialization fails for a reason that is not an allocation.</summary>
+[Module]
+public partial class OverflowingParamModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => Shorokoo.Modules.Initializers.Zeros.Init([Scalar(1L << 32), Scalar(1L << 32)]);
+}
+
 [Trait("Domain", "Training")]
 [Trait("Purpose", "Coverage")]
 public class TrainingRigCompositionCoverageTests
@@ -658,6 +667,12 @@ public class TrainingRigCompositionCoverageTests
         Assert.Contains("[33554432, 33554432]", ex.Message);
         Assert.Contains("4.00 PiB", ex.Message);
         Assert.NotNull(ex.InnerException);
+
+        var other = OverflowingParamModel.ComputationGraph.ToInternal();
+        var otherArch = other.ToConcreteArchitecture(
+            other.FromOrderedInputs([TensorData([1L, 4L], [1f, 2f, 3f, 4f])]));
+        Assert.IsNotType<ComputeContextException>(
+            Record.Exception(() => otherArch.InitializeTrainableParams()));
     }
 
     [Fact]

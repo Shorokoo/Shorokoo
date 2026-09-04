@@ -1,3 +1,4 @@
+using Shorokoo.Modules.Layers;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
 using Shorokoo.Runtime;
@@ -18,6 +19,14 @@ public class AttentionModuleTests
 {
     private static TensorData Sdpa3x2() => TensorData(DType.Float32, [1L, 1L, 3L, 2L],
         0.1f, 0.9f, 0.5f, -0.3f, -0.7f, 0.4f);
+
+    private static TensorData Sdpa8x4()
+    {
+        var vals = new float[64];
+        for (var i = 0; i < vals.Length; i++)
+            vals[i] = MathF.Sin(i * 0.7f) * 0.6f;
+        return TensorData([1L, 2L, 8L, 4L], vals);
+    }
 
     private static TensorData Mha3x4() => TensorData(DType.Float32, [1L, 3L, 4L],
         0.1f, 0.2f, -0.3f, 0.4f,
@@ -55,6 +64,19 @@ public class AttentionModuleTests
             hyperparamInputs: [], runtimeInputs: [RoPE3x4()]));
         Assert.True(AutoTest.AdvancedTestGraph<RoPEClosedFormPositionOne>(
             hyperparamInputs: [], runtimeInputs: [RoPE2x4()]));
+    }
+
+    [Fact]
+    public void TestChunkedSdpaCoverage()
+    {
+        Assert.True(AutoTest.AdvancedTestGraph<AttnChunkedMatchesDense>(
+            hyperparamInputs: [], runtimeInputs: [Sdpa8x4()]));
+        Assert.True(AutoTest.AdvancedTestGraph<AttnChunkedMatchesDenseWithMask>(
+            hyperparamInputs: [], runtimeInputs: [Sdpa8x4()]));
+        Assert.True(AutoTest.AdvancedTestGraph<AttnCausalMaskQueryOffset>(
+            hyperparamInputs: [], runtimeInputs: [Sdpa8x4()]));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            Attention.ScaledDotProductAttention(default, default, default, queryChunks: 0));
     }
 
     [Fact]
@@ -142,6 +164,52 @@ public class TransformerEncoderTrainingCoverageTests
         Assert.True(float.IsFinite(encoderStep.Loss!.Value));
         Assert.NotEmpty(encoderStep.TrainableParams.Fields);
         Assert.True(AnyFieldChanged(encoderInitial.TrainableParams, encoderStep.TrainableParams));
+    }
+}
+
+/// <summary>
+/// Training-rig smoke coverage for chunked attention: gradients must flow through the
+/// per-chunk Slice / Concat of <c>ScaledDotProductAttention(queryChunks: …)</c>.
+/// </summary>
+[Trait("Domain", "Training")]
+[Trait("Purpose", "Coverage")]
+public class ChunkedSdpaTrainingCoverageTests
+{
+    [Fact]
+    public void TestChunkedSdpaTrainStepCoverage()
+    {
+        long[] inputShape = [2L, 2L, 6L, 4L];
+        long[] outShape = [2L, 2L, 4L];
+
+        NamedModelParam[] sample =
+        [
+            new TensorDataModelParam("input", ModelParamType.InputParam,
+                TensorData(inputShape, Floats(96, seed: 0.3f))),
+        ];
+
+        var rig = TrainingRig.FromScratch(
+            ChunkedSdpaMeanPoolModel.ComputationGraph,
+            L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph,
+            sample, 0.5f);
+
+        var initial = rig.CreateInitialCheckpoint();
+        Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
+
+        TensorStructFieldDef[] inputFields =
+            [new TensorStructFieldDef("input", DataStructure.Tensor, 4, DType.Float32)];
+        TensorStructFieldDef[] targetFields =
+            [new TensorStructFieldDef("targets", DataStructure.Tensor, 3, DType.Float32)];
+
+        var step = rig.TrainStep(
+            initial,
+            new TensorDataStruct(new TensorStructDef(inputFields, "ModelInput"),
+                new Dictionary<string, IData> { { "input", TensorData(inputShape, Floats(96, seed: 0.3f)) } }),
+            new TensorDataStruct(new TensorStructDef(targetFields, "Target"),
+                new Dictionary<string, IData> { { "targets", TensorData(outShape, new float[16]) } }));
+
+        Assert.True(float.IsFinite(step.Loss!.Value));
+        Assert.True(AnyFieldChanged(initial.TrainableParams, step.TrainableParams));
     }
 }
 

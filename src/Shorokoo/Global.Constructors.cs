@@ -703,11 +703,35 @@ namespace Shorokoo
                 $"DType '{type}' is not supported for tensor data creation with values");
         }
 
+        /// <summary>
+        /// Element count of <paramref name="dims"/> as an array length. Accumulating this in an
+        /// int wraps silently for a shape of 2^31 elements or more, and the tensor then built is
+        /// the wrong length for its own shape — a failure reported far from the shape that caused
+        /// it, if at all.
+        /// </summary>
+        private static int ElementCount(long[] dims, string operation)
+        {
+            long size = 1;
+            foreach (var dim in dims)
+            {
+                if (dim < 0 || (dim != 0 && size > long.MaxValue / dim))
+                    throw new InvalidTensorOperationException(ErrorCodes.GC011, operation,
+                        $"shape [{string.Join(", ", dims)}]", "the shape's element count overflows Int64");
+                size *= dim;
+            }
+
+            if (size > int.MaxValue)
+                throw new InvalidTensorOperationException(ErrorCodes.GC011, operation,
+                    $"shape [{string.Join(", ", dims)}]",
+                    $"the shape holds {size} elements, more than the {int.MaxValue} a single array can");
+
+            return (int)size;
+        }
+
         /// <summary>Creates TensorData with the given dims filled with the dtype's default value (zero / false).</summary>
         public static TensorData TensorDataWithDefaultVals(DType type, long[] dims)
         {
-            var size = 1;
-            foreach (var dim in dims) size *= (int)dim;
+            var size = ElementCount(dims, nameof(TensorDataWithDefaultVals));
 
             if (type.ToIVarType() == typeof(bit)) return TensorData(dims, Enumerable.Repeat(false, size).ToArray());
             if (type.ToIVarType() == typeof(int8)) return TensorData(dims, Enumerable.Repeat((sbyte)0, size).ToArray());
@@ -729,8 +753,7 @@ namespace Shorokoo
         /// <summary>Creates TensorData filled with small non-zero values: 1 for integer types, 0.1 for float types, false for bit.</summary>
         public static TensorData TensorDataWithSmallVals(DType type, long[] dims)
         {
-            var size = 1;
-            foreach (var dim in dims) size *= (int)dim;
+            var size = ElementCount(dims, nameof(TensorDataWithSmallVals));
 
             if (type.ToIVarType() == typeof(bit)) return TensorData(dims, Enumerable.Repeat(false, size).ToArray());
             if (type.ToIVarType() == typeof(int8)) return TensorData(dims, Enumerable.Repeat((sbyte)1, size).ToArray());

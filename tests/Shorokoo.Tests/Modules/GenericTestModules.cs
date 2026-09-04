@@ -1,3 +1,5 @@
+using Shorokoo.Modules.Layers;
+
 namespace Shorokoo.Tests.Modules
 {
     /// <summary>
@@ -1134,7 +1136,7 @@ namespace Shorokoo.Tests.Modules
     public partial class PrunedBiasSmallLinear
     {
         public static Tensor<float32> Inline(Tensor<float32> x)
-            => Shorokoo.Modules.Layers.Linear.Call(Scalar(1L << 5), Scalar(false), x);
+            => Linear.Call(Scalar(1L << 5), Scalar(false), x);
     }
 
     /// <summary>The same pruned bias, with the parameter large enough that materializing it
@@ -1143,7 +1145,7 @@ namespace Shorokoo.Tests.Modules
     public partial class PrunedBiasLargeLinear
     {
         public static Tensor<float32> Inline(Tensor<float32> x)
-            => Shorokoo.Modules.Layers.Linear.Call(Scalar(1L << 25), Scalar(false), x);
+            => Linear.Call(Scalar(1L << 25), Scalar(false), x);
     }
 
     #endregion

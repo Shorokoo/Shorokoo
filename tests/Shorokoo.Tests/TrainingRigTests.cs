@@ -1,5 +1,5 @@
 using Shorokoo.Core.Nodes.Processors.Helpers;
-using Shorokoo.Modules.Layers;
+using Shorokoo.Modules.Initializers;
 using Shorokoo.Runtime;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
@@ -127,6 +127,20 @@ public partial class BatchedMatmulModel
         var pooled = ctx.Reduce(ReduceKind.Mean, Vector(1L), keepDims: false);
         return (Tensor<float32>)OnnxOp.Softmax(pooled.MatMul(InitXavier.Init([embed, classes])), axis: 1);
     }
+}
+
+[Module]
+public partial class ParamTooLargeToAllocateModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => Zeros.Init([Scalar(1L << 25), Scalar(1L << 25)]);
+}
+
+[Module]
+public partial class ParamSizeOverflowingModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => Zeros.Init([Scalar(1L << 32), Scalar(1L << 32)]);
 }
 
 [Module]
@@ -533,24 +547,6 @@ public class TrainingRigRepresentativeInputCoverageTests
     }
 }
 
-/// <summary>A single trainable parameter far larger than any machine's memory, so its
-/// initializer aborts inside the backend with a bare native allocation failure.</summary>
-[Module]
-public partial class OversizedParamModel
-{
-    public static Tensor<float32> Inline(Tensor<float32> x)
-        => Shorokoo.Modules.Initializers.Zeros.Init([Scalar(1L << 25), Scalar(1L << 25)]);
-}
-
-/// <summary>A parameter whose element count overflows the backend's own size arithmetic, so
-/// initialization fails for a reason that is not an allocation.</summary>
-[Module]
-public partial class OverflowingParamModel
-{
-    public static Tensor<float32> Inline(Tensor<float32> x)
-        => Shorokoo.Modules.Initializers.Zeros.Init([Scalar(1L << 32), Scalar(1L << 32)]);
-}
-
 [Trait("Domain", "Training")]
 [Trait("Purpose", "Coverage")]
 public class TrainingRigCompositionCoverageTests
@@ -653,12 +649,10 @@ public class TrainingRigCompositionCoverageTests
         Assert.NotEmpty(arch.InitializeTrainableParams().ModelParams);
     }
 
-    /// <summary>Every initializer runs in one session, so a native allocation abort names no
-    /// parameter of its own (#208): the parameters, their shapes and their sizes are reported.</summary>
     [Fact]
-    public void TestInitializationFailureNamesTheParametersShapesAndSizes()
+    public void TestOnlyAnAllocationFailureIsReportedAndItNamesTheParametersShapesAndSizes()
     {
-        var graph = OversizedParamModel.ComputationGraph.ToInternal();
+        var graph = ParamTooLargeToAllocateModel.ComputationGraph.ToInternal();
         var arch = graph.ToConcreteArchitecture(
             graph.FromOrderedInputs([TensorData([1L, 4L], [1f, 2f, 3f, 4f])]));
 
@@ -668,7 +662,7 @@ public class TrainingRigCompositionCoverageTests
         Assert.Contains("4.00 PiB", ex.Message);
         Assert.NotNull(ex.InnerException);
 
-        var other = OverflowingParamModel.ComputationGraph.ToInternal();
+        var other = ParamSizeOverflowingModel.ComputationGraph.ToInternal();
         var otherArch = other.ToConcreteArchitecture(
             other.FromOrderedInputs([TensorData([1L, 4L], [1f, 2f, 3f, 4f])]));
         Assert.IsNotType<ComputeContextException>(

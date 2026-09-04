@@ -478,6 +478,9 @@ namespace Shorokoo
         
         /// <summary>InputTensorSequence not implemented</summary>
         public const string GC010 = "GC010";
+
+        /// <summary>Tensor shape holds more elements than one array can</summary>
+        public const string GC011 = "GC011";
         
         #endregion
 

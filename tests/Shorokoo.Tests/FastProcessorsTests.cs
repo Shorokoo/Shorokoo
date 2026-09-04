@@ -21,7 +21,7 @@ public class FastProcessorsCoverageTests
     /// although the comment emitting them says only their shape is ever observed — pruning a
     /// parameter still costs its whole tensor in host memory and in the persisted graph.
     /// Open bug: https://github.com/Shorokoo/Shorokoo/issues/229 — drop the Skip when it is fixed.</summary>
-    [Fact(Skip = "Pruned parameter candidates are still materialized in full: issue #229.")]
+    [Fact(Skip = "Shorokoo/Shorokoo#229: a pruned parameter candidate is still materialized in full.")]
     public void TestPrunedParamCandidateIsNotMaterializedInFull()
     {
         static long ConcretizationBytes(InternalComputationGraph g)

@@ -258,7 +258,10 @@ graph to the next call. `Eval` is the exception: it returns `TensorData` (or
 - Only one backend is live per process. The first factory resolved is cached and reused
   for every later call; assigning `Factory` afterwards swaps the cached factory but does
   not unload a native ONNX Runtime already bound, so to compare CPU vs GPU use separate
-  processes.
+  processes. Every `ComputeContext` in the process shares that one backend — including a
+  training rig's two, which for that reason cannot select different devices (see
+  [Compute contexts](training.md#compute-contexts-mergecontext-and-runtimecontext) in the
+  training guide).
 
 ### The factory types
 

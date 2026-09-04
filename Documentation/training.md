@@ -21,11 +21,11 @@ Related: [defining-models.md](defining-models.md) · [nn-library.md](nn-library.
 
 Ready-made losses and optimizers ship in the `Shorokoo.Modules` package
 (namespaces `Shorokoo.Modules.Losses` / `Shorokoo.Modules.Optimizers`) — see
-[nn-library.md](nn-library.md) for the full catalog (eight losses; layers and
+[nn-library.md](nn-library.md) for the full catalog (sixteen losses; layers and
 initializers too). Each optimizer whose hyperparameters are all tensor-shaped gets a
 source-generated, named, defaulted hyperparameter set
 (`<Optimizer>Hyperparameters`) implementing `IOptimizerHyperparameters`. The
-twelve optimizers (the positional `params Hyperparameter[]` count for `FromScratch`
+thirteen optimizers (the positional `params Hyperparameter[]` count for `FromScratch`
 equals each set's property count):
 
 | Optimizer | Hyperparameter set (named, init-only `Hyperparameter` properties; defaults from `[Hyper]`) |
@@ -42,6 +42,7 @@ equals each set's property count):
 | `AdadeltaOptimizer` | `AdadeltaOptimizerHyperparameters { LearningRate = 1.0, Rho = 0.9, Epsilon = 1e-6 }` |
 | `LionOptimizer` | `LionOptimizerHyperparameters { LearningRate = 1e-4, Beta1 = 0.9, Beta2 = 0.99, WeightDecay = 0 }` (4 positional) |
 | `AdafactorOptimizer` | `AdafactorOptimizerHyperparameters { LearningRate = 0.01, Beta2Decay = -0.8, Epsilon1 = 1e-30, Epsilon2 = 1e-3, ClipThreshold = 1.0, WeightDecay = 0 }` (6 positional; **non-factored** — full param-shaped 2nd moment, no row/col factoring) |
+| `LambOptimizer` | `LambOptimizerHyperparameters { LearningRate = 0.001, Beta1 = 0.9, Beta2 = 0.999, Epsilon = 1e-6, WeightDecay = 0.01 }` (5 positional; `Epsilon` is LAMB's `1e-6`, not Adam's `1e-8`) |
 
 A loss module has signature `(predictions, targets) -> Scalar<float32>` with exactly two tensor inputs; targets are typically `Tensor<float32>`, but class-index losses (`CrossEntropyLoss`, `NLLLoss`) take `Tensor<int64>` targets.
 The library losses' configurable knobs (`reduction`, `ignore_index`, `label_smoothing`, class `weight`/`pos_weight`, SmoothL1 `beta`) live on extra `Reduced`/`PerElement` methods, *not* on the rig-bound `Inline`. Knobs that stay scalar and add no input (`reduction = Mean`/`Sum`, `ignoreIndex`, `labelSmoothing`) are rig-usable by writing a tiny 2-input wrapper `[Module]` whose `Inline` calls `Reduced(...)` with the knobs baked; a class `weight`/`pos_weight` (an extra tensor input) is rig-usable only when **baked as a graph constant** inside such a wrapper. See the [Losses → Configurable knobs](nn-library.md#loss-configurable-knobs) section for the recipes.
@@ -375,10 +376,20 @@ A rig carries two `ComputeContext` members, both supplied at construction (defau
 a reloaded run gets fresh contexts by passing them to `FromScratch`. `MergeContext` runs the
 build/merge phase (concretization, shape inference, graph lowering and memory optimization, optimizer
 state init); `RuntimeContext` compiles the training-step graph into its executable session and runs it,
-so it determines the execution backend. It is the sole compile/run context for `TrainStep`, `Train` and
-`Fit` — none of them takes a per-call context override, so a rig has exactly one compiled training-step
-graph that the `Fit`/`Train` loop and a manual `TrainStep` loop all share. Every `With…` derivation
-keeps the same two contexts.
+so it is the context whose session actually executes training. It is the sole compile/run context for
+`TrainStep`, `Train` and `Fit` — none of them takes a per-call context override, so a rig has exactly
+one compiled training-step graph that the `Fit`/`Train` loop and a manual `TrainStep` loop all share.
+Every `With…` derivation keeps the same two contexts.
+
+**What the two can usefully differ in: nothing, today.** `ComputeContext` has a single parameterless
+constructor and carries no per-instance settings — no device, no execution provider, no thread count,
+no session options — and every session either context creates is built by the one process-wide backend
+factory. Passing two distinct instances therefore selects nothing. In particular you **cannot** merge
+on one device and train on another: [only one backend is live per process](inference.md#backend-selection)
+and both contexts go through it, so the naming does not offer a CPU-build / GPU-train split. Read the
+two members as a division of *phases* — which work is build/merge and which is compile/run — not of
+hardware; they would only become a lever if `ComputeContext` gained per-instance configuration.
+Leaving both `null`, so each defaults to `ComputeContext.Default`, is the normal choice.
 
 Result types:
 - `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long?`; the training loop advances them — the counter-agnostic `TrainStep` carries them through unchanged). They are `null` when the position is genuinely **unknown** — an initial checkpoint, or one trained without a data loader / explicit counters — rather than a misleading `0`; the loader-driven and explicit-counter paths set concrete values. A scheduled hyperparameter reading the epoch / batch counter sees `0` for a `null` value. `.Step` is always a concrete `long`; all counters are `int64` end to end. It also carries `.Rig` (the `TrainingRig?` that produced it — set on every rig-produced checkpoint, so `checkpoint.ToInferenceModel()` needs no re-supplied graph) and `.Loss` (`float?`; the loss of the `TrainStep` that produced it, `null` on an initial or bare checkpoint). Both are preserved through the counter derivations (`WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex`). `TrainStep` returns this checkpoint directly — read the step's loss off `.Loss`. `.Loss` persists as its own `Loss` component, independent of `Counters` (dropping `Loss`, or an initial checkpoint, reloads with `.Loss == null` — never a sentinel `0`).
@@ -479,9 +490,14 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
   epoch/batch (a checkpoint trained without a loader / explicit counters) is absent on disk and
   reloads as `null`, never a sentinel `0`. A concrete
   `0` (e.g. a run resting at the start of an epoch) is written and reloads as `0`.
-- For the **native `.skpt` container** instead — the training state split into
-  per-kind data entries alongside the concrete inference model, with the container's
-  inspectable manifest, per-entry Zstd, and provenance metadata — save with
+- For the **native `.skpt` container** instead — the training state with every tensor
+  addressed individually through the manifest's `tensorMappings` (the trainable weights and
+  model state ride in the concrete inference model's `default` mapping, keyed by parameter
+  identifier, so their bytes live once; the optimizer state gets its own `default` mapping
+  under the optimizer constituent's model key, keyed `{parameterIdentifier}#opt{slot}` — one
+  per trainable parameter × optimizer state slot), the bytes themselves in per-kind `data/`
+  entries beside the model, with the container's inspectable manifest, per-entry Zstd, and
+  provenance metadata — save with
   `Persistence.SaveTrainingCheckpointToSkpt(checkpoint, "run.skpt")` — the checkpoint's
   `.Rig` supplies the self-describing inference model, so no model graph or example input
   is needed (or use the `Persistence.ForTrainingCheckpoint(...)` builder) — and resume with
@@ -693,13 +709,16 @@ Constraints:
 - Prefer the optimizer's generated named set (`<Optimizer>Hyperparameters`); it has the right
   names/defaults and is checked at compile time. The positional `params Hyperparameter[]` overload must
   still match the optimizer's hyperparameter count exactly: SGD=1, SGDMomentum=2, Adam=4,
-  RMSprop=4, AdamW=5, Adagrad=2, Adamax=4, NAdam=5, RAdam=4, Adadelta=3, Lion=4, Adafactor=6.
+  RMSprop=4, AdamW=5, Adagrad=2, Adamax=4, NAdam=5, RAdam=4, Adadelta=3, Lion=4, Adafactor=6,
+  Lamb=5.
 - Optimizer state has one or more fields per trainable parameter (momentum: velocity;
   AdamW: `m`/`v`; Adam: `m`/`v` plus a scalar `step`; RMSprop: `squareAvg`/`momentumBuffer`;
   Adagrad: `accumulator`; Adamax: `m`/`u` plus a scalar `step`; NAdam: `m`/`v` plus two
   scalars — `step` and `muProduct`; RAdam: `m`/`v` plus a scalar `step`; Adadelta:
-  `squareAvg`/`accDelta`; Lion: `m` only — half of Adam/AdamW; Adafactor: a **full
-  param-shaped** `v` plus a scalar `step` — same footprint as Adam, because the
+  `squareAvg`/`accDelta`; Lion: `m` only — half of Adam/AdamW; Lamb: `m`/`v` plus a
+  scalar `step` — Adam's footprint, the per-tensor trust ratio being recomputed each
+  step and stored nowhere; Adafactor: a **full param-shaped** `v` plus a scalar
+  `step` — same footprint as Adam, because the
   sublinear-memory row/column factoring is **not** implemented, see below) — see the table in
   [nn-library.md](nn-library.md). Each field is
   initialized by running its state initializer: `OptimizerStateZeros` zero-fills at the

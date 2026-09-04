@@ -8,7 +8,8 @@ namespace Shorokoo.Tests;
 /// <c>AutoDiffs.Batch31.cs</c>): Swish @24 and RMSNormalization @23 lower inline to
 /// opset-21 primitives, so their gradients flow through those primitives and are exercised
 /// by the finite-difference self-checking modules in <c>Modules/AutoGradOpset26Modules.cs</c>.
-/// The Swish check is QEE-only because ORT 1.26 registers no Swish kernel. The batch's
+/// The Swish check is QEE-only only to match the audit-module style — its lowered graph
+/// carries no Swish node and loads anywhere. The batch's
 /// non-decomposable ops (Attention, RotaryEmbedding, TensorScatter, BitCast, CumProd) throw
 /// from their <c>OnnxOp</c> entry point before any graph — gradient path included — exists,
 /// so no autodiff code runs for them; that authoring throw is pinned in

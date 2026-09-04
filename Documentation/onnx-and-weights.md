@@ -74,12 +74,24 @@ RepresentativeInputForm representativeForm = Passthrough)` requires a
 actual and required kinds (only a concrete model can satisfy the vanilla-ONNX
 guarantee). It clones the graph (no mutation), lowers it for ONNX, and emits
 nodes, subgraphs, and functions.
-The default `OPS_21` is the export **baseline**: if the graph (including
-function bodies) contains operators introduced after opset 21 (e.g.
-`Attention`, opset 23), the model's `opset_import` is raised automatically
-just far enough to cover them. Models up to opset 26 execute on the bundled
-ONNX Runtime 1.26 — see [limitations.md](limitations.md) for the stamping
-policy.
+The default `OPS_21` is the export **baseline**: the exporter scans the graph
+(function bodies included) and raises the model's `opset_import` only as far as
+it actually requires. In practice that raise is driven by post-21 **attributes**
+carried by an imported model — `DequantizeLinear.output_dtype` and
+`QuantizeLinear.precision` raise the stamp to 23, `Cast`/`CastLike.round_mode`
+to 24. No post-21 **operator** raises it, because none can reach the exporter:
+`Attention`, `AttentionWithKVCache`, `RotaryEmbedding`, `TensorScatter`,
+`BitCast` and `CumProd` throw `NotImplementedException` at their `OnnxOp` entry
+points, and `Swish` and `RMSNormalization` lower inline to opset-21 primitives,
+so no post-21 operator node is ever emitted from an authored graph (the
+exporter's per-operator floors are kept as the restore point for when a runtime
+registers those operators at a usable opset). A graph built through
+`Ops`/`OnnxOp` therefore always exports at opset 21 — the low-level
+`NodeBuilder` surface is the exception, since it can stamp one of those
+attributes directly, and a node built that way raises the stamp exactly as an
+imported one does. Models up to opset 26 execute on the bundled ONNX Runtime
+1.26 — see [limitations.md](limitations.md) for the stamping policy and
+[operator-support.md](operator-support.md) for the per-operator picture.
 
 `representativeForm` (`RepresentativeInputForm`, namespace
 `Shorokoo.Core.Factory`) decides what becomes of the model's **representative
@@ -224,6 +236,23 @@ so. Header fields (add-only across minor revisions; unknown fields are ignored):
 
 This is the only `.srk` layout: there is no legacy read path, and a file that does not
 open with the container magic is not a `.srk` file (loading it fails with a clear error).
+
+**Pre-release caveat: a payload break can land inside version 1.** Add-only governs
+the container's header *fields*. While Shorokoo is pre-release, what the **payload**
+records can still change in a read-breaking way without a container version bump —
+and once has: a concrete architecture saved before model-input shapes became
+dims-only recorded a small input as an inline representative tensor, so the current
+reader finds no shape on that input. The blast radius is narrow: it bites only where
+a rig is rebuilt from a persisted architecture with no host-supplied sample inputs —
+i.e. `TrainingRig.Load` on an older training [`.skpt`](skpt-checkpoints.md), which
+fails loudly, naming the older-build cause. There is deliberately no legacy read
+path — rebuild the rig from its source graphs and re-save. Everything else still
+reads: `LoadFastGraphFromFile` loads such a graph as it always did,
+`Persistence.Load` loads a `.skpt` holding one as an inference model,
+`rig.LoadCheckpointFromSkpt` reads the manifest and the state tensors without
+touching the stored architecture, the flat safetensors format is unaffected, and so
+is feeding a standalone `.srk` architecture to `TrainingRig.FromScratch`, whose
+sample inputs record the representative shapes afresh.
 
 Unlike `BuildOnnxModel`, this format is Shorokoo's **internal dialect**: it
 accepts any graph — module-stage graphs with their internal ops included —

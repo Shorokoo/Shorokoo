@@ -8,7 +8,8 @@ namespace Shorokoo.Tests;
 /// Coverage for the opset 22-26 op batch under Shorokoo's single-opset-21 export. The
 /// decomposable ops (Swish @24, RMSNormalization @23) are lowered inline to opset-21
 /// primitives by their <see cref="OnnxOp"/> entry points, so their value audits run
-/// normally (Swish QEE-only because ORT 1.26 registers no Swish kernel). The ops with no
+/// normally (the Swish audit is QEE-only only to match the audit-module style — its lowered
+/// graph carries no Swish node and loads anywhere). The ops with no
 /// opset-21 equivalent — Attention / AttentionWithKVCache / RotaryEmbedding (opset 23),
 /// TensorScatter (opset 24), BitCast / CumProd (opset 26) — cannot be emitted into an
 /// opset-21 model, so their entry points throw at authoring time; their op definitions and

@@ -1,4 +1,4 @@
-using Shorokoo.Core.Nodes.Processors.Helpers;
+﻿using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Core.Graph;
 using System.Collections.Immutable;
 
@@ -171,5 +171,34 @@ public class ParamNameDslCoverageTests
             format:  "wild.{p}");
         Assert.True(wildcard.Matches(shorokooIds[1]));
         Assert.Equal("wild.1", wildcard.ToName(shorokooIds[1]));
+    }
+
+    // Open bug Shorokoo/Shorokoo#82: SimplePatternNamingScheme.buildReverseCache keys its table on
+    // ToName(candidate), which is null for any candidate no pattern covers, so ToModelId dies with
+    // ArgumentNullException("key"), naming neither the uncovered parameter nor the scheme.
+    [Fact(Skip = "Shorokoo/Shorokoo#82 - an unnamed candidate lands as a null reverse-cache key")]
+    public void TestSimplePatternSchemeToModelIdOverPartiallyCoveredCandidatesNamesTheUncoveredParam()
+    {
+        var (infos, shorokooIdScheme) = LoopLayerParams.Value;
+        var candidates = infos.ParamInfos.Select(p => p.ModelId).ToImmutableArray();
+        var scheme = new SimplePatternNamingScheme(
+            [new SimplePatternScheme("TrainableParam#0.LoopLayer#0.InitSimple#{p}", "outer.weight")],
+            shorokooIdScheme, ModuleParamSetNamingScheme.PyTorchFrameworkId);
+        var uncovered = infos.ParamInfos[1];
+
+        Assert.True(ResolvesOrNamesTheGap(scheme, "outer.weight", candidates, infos.ParamInfos[0].ModelId, uncovered));
+        Assert.True(ResolvesOrNamesTheGap(scheme, "not.in.the.scheme", candidates, null, uncovered));
+    }
+
+    private static bool ResolvesOrNamesTheGap(
+        SimplePatternNamingScheme scheme, string paramName, ImmutableArray<ModelId> candidates,
+        ModelId? expected, ConcreteModelParamInfo uncovered)
+    {
+        try { return scheme.ToModelId(paramName, candidates).Equals(expected); }
+        catch (InvalidOperationException ex)
+        {
+            return ex.Message.Contains(uncovered.ToShorokooIdString())
+                || ex.Message.Contains(string.Join(",", uncovered.ModelId.Vals));
+        }
     }
 }

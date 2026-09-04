@@ -314,17 +314,29 @@ public TensorDataStruct MakeHyperparameters(float value);                       
 //   also: (double), (int), (long), (bool), and (TensorData) for other dtypes / non-scalar shapes
 public TensorDataStruct MakeHyperparameters(params (string name, object value)[] values); // named
 
-public TrainingResult Fit(  // alias: Train(...)
-    TrainingCheckpoint initialCheckpoint,
+// Array-driven: one array element per training step (typically a pre-batched batch). The checkpoint
+// comes LAST and is optional, so the minimal call is `rig.Fit(inputs, targets, numEpochs: 10)`.
+public TrainingResult Fit(
     TensorDataStruct[] trainingInputs,
     TensorDataStruct[] trainingOutputs,
-    int numEpochs);                                // compiles/runs via rig.RuntimeContext (one graph per rig)
+    int numEpochs,
+    TrainingCheckpoint? initialCheckpoint = null); // defaults to CreateInitialCheckpoint()
+                                                   // compiles/runs via rig.RuntimeContext (one graph per rig)
 
 // Data-loader-driven: the loader owns the batch stream; Fit advances step / epoch / batch for you.
 public TrainingResult Fit(
     IDataLoader loader,
     int numEpochs,
     TrainingCheckpoint? initialCheckpoint = null); // defaults to CreateInitialCheckpoint()
+
+// The same array loop, with the checkpoint FIRST and required. `Train` is not an alias for `Fit`:
+// the argument orders differ, so the two calls are not interchangeable. The array `Fit` above is
+// exactly this call with the checkpoint defaulted.
+public TrainingResult Train(
+    TrainingCheckpoint initialCheckpoint,
+    TensorDataStruct[] trainingInputs,
+    TensorDataStruct[] trainingOutputs,
+    int numEpochs);
 ```
 
 ### Compute contexts: `MergeContext` and `RuntimeContext`

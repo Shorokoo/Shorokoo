@@ -302,13 +302,24 @@ rig.TrainStep(ckpt,
 ```
 
 > **Migration (breaking).** The positional-hyperparameter `FromScratch` overloads no longer take a
-> `params` array behind the optional `rngConfig` / `mergeContext` / `runtimeContext`. Pass the values
-> as an explicit array in the hyperparameter slot and let the optional arguments follow:
-> `FromScratch(model, loss, opt, sample, rng, null, null, 0.05f)` →
-> `FromScratch(model, loss, opt, sample, [0.05f], rng)`, and a hyperparameter-less
-> `FromScratch(model, loss, opt, sample, rng)` (the old empty `params` expansion) →
-> `FromScratch(model, loss, opt, sample, [], rng)`. The bare
-> `FromScratch(model, loss, opt, sample, 0.05f)` params form is unchanged.
+> `params` array behind the optional `rngConfig` / `mergeContext` / `runtimeContext`. Pass the values as
+> an explicit array in the hyperparameter slot and let the optional arguments follow — every old call
+> that named or passed an `rngConfig` or a context moves the same way, and every one of them is now a
+> compile error rather than a changed meaning:
+>
+> | old | new |
+> |---|---|
+> | `(sample, rng, null, null, 0.05f)` | `(sample, [0.05f], rng)` |
+> | `(sample, rng, mergeContext: null, runtimeContext: null, 0.05f)` | `(sample, [0.05f], rng)` |
+> | `(sample, rng, merge, runtime, 0.05f)` | `(sample, [0.05f], rng, merge, runtime)` |
+> | `(sample, rng)` / `(sample, rng, merge)` — the old empty `params` expansion | `(sample, [], rng)` / `(sample, [], rng, merge)` |
+>
+> The bare `FromScratch(model, loss, opt, sample, 0.05f)` params form is unchanged, and so is an array
+> passed alone. Two edges: reaching a context past `rngConfig` needs the context named
+> (`(sample, [0.05f], mergeContext: ctx)`, else the collection expression is matched against the named-set
+> overload and the error names `IOptimizerHyperparameters`), and a literal `null` in the hyperparameter
+> slot alongside any optional is now ambiguous between the named-set and array overloads — pass the set,
+> or cast.
 
 > **Migration (breaking).** `Hyperparameter.BakedValue` is now the `TensorData` the constant was built
 > from — carrying its shape as well as its dtype (with `BakedDType` alongside) — not a `float`; `MakeHyperparameters`'s named overload takes

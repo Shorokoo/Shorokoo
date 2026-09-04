@@ -433,7 +433,9 @@ namespace Shorokoo
         /// trailing <c>params</c> array; each defaults to its neutral value
         /// (<see cref="RngConfig.Default"/> / <see cref="ComputeContext.Default"/>). Supplying any of them
         /// selects this overload — an array alone still binds the <c>params</c> overload above, to the
-        /// same effect — and an empty array configures an optimizer that takes no hyperparameters.
+        /// same effect. Name a context you reach past <paramref name="rngConfig"/>
+        /// (<c>FromScratch(model, loss, opt, sample, [0.01f], mergeContext: ctx)</c>), and pass an empty
+        /// array for an optimizer that takes no hyperparameters at all.
         /// </summary>
         public static TrainingRig FromScratch(
             ComputationGraph modelGraph,
@@ -470,7 +472,9 @@ namespace Shorokoo
 
         /// <summary>
         /// Convenience overload that accepts a <see cref="ModelParamList"/> for sample inputs
-        /// with positional hyperparameter values.
+        /// with positional hyperparameter values. As on the <see cref="NamedModelParam"/> pair, an
+        /// <see cref="RngConfig"/> or a compute context means handing the values to the overload below
+        /// as an array instead.
         /// </summary>
         public static TrainingRig FromScratch(
             ComputationGraph modelGraph,
@@ -488,7 +492,9 @@ namespace Shorokoo
         /// <see cref="ModelParamList"/> convenience overload with an RNG configuration and the optional
         /// build/merge and compile/run compute contexts (see <see cref="MergeContext"/> /
         /// <see cref="RuntimeContext"/>), which follow the hyperparameter array as they do on the
-        /// named-set overload.
+        /// named-set overload. Selected by supplying any of them — the same resolution as the
+        /// <see cref="NamedModelParam"/> array overload above, and the same need to name a context
+        /// reached past <paramref name="rngConfig"/>.
         /// </summary>
         public static TrainingRig FromScratch(
             ComputationGraph modelGraph,

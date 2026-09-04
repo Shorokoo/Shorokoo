@@ -409,6 +409,28 @@ public TrainingResult Train(
     int numEpochs);
 ```
 
+### What construction costs
+
+`FromScratch` does real work before any training happens, and it is worth knowing which
+work, because a checkpoint/resume workflow re-pays it on every process start (nothing
+about it is written to a `.skpt`; `TrainingRig.Load` rebuilds the same way).
+
+Two distinct phases, in this order:
+
+1. **Parameter initialization**, inside `FromScratch`. Every trainable parameter's
+   initializer runs on the compute backend — a keyed random draw for
+   `NormalDist`/`Kaiming…`/`Xavier…`, a fill for `Zeros`/`Ones`. Each parameter is
+   initialized in its own backend session, so this grows **linearly** with the number of
+   trainable parameters, and its peak host memory is set by the **largest single**
+   parameter rather than by the model total.
+2. **Training-step compilation**, on the first `TrainStep` — the rig compiles its
+   training-step graph once, lazily, and caches it (see `TrainStep` above). This is a
+   single fixed cost per rig, independent of how many steps follow.
+
+Neither is proportional to your dataset, and neither recurs during the loop: steady-state
+`TrainStep` pays neither. If you are timing a run, expect the first step to be markedly
+slower than the rest — that is phase 2, not a slow optimizer.
+
 ### Compute contexts: `MergeContext` and `RuntimeContext`
 
 A rig carries two `ComputeContext` members, both supplied at construction (defaulting to

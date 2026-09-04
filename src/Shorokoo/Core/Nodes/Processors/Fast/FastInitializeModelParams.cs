@@ -24,8 +24,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// to a <c>FUNCTION_INVOKE</c> of its initializer <see cref="Function"/> (preserving
     /// the original initializer-param inputs, the output <see cref="FastTensorKey"/>, and
     /// the target function), then runs the resulting graph through
-    /// <see cref="ComputeContext.Run(InternalComputationGraph, NamedModelParam[])"/> with each
-    /// initializer's output as a graph output. The decoded results are returned as a
+    /// <see cref="ComputeContext.Run(InternalComputationGraph, NamedModelParam[])"/> — once per
+    /// parameter, over the slice of the graph feeding that one initializer's output (see
+    /// <see cref="ChunkFor"/>), each result copied off its session (see <see cref="Rehost"/>).
+    /// The decoded results are returned as a
     /// <see cref="ModelId"/> → <see cref="TensorData"/> dictionary.
     /// </summary>
     internal static class FastInitializeModelParams
@@ -198,39 +200,90 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (collectedOutputKeys.Count == 0)
                 return ImmutableDictionary<ModelId, TensorData>.Empty;
 
-            // Replace graph inputs / outputs to mirror the legacy
-            // `RebuildGraph(newInputs: [], newOutputs: [...])` call. Then sweep the
-            // nodes that no longer feed any output (e.g. the original output-producing
-            // chains and any inputs they pulled in).
+            // Mirror the legacy `RebuildGraph(newInputs: [], newOutputs: [...])` call: the
+            // initialization graph takes no input at all, and each parameter's initializer
+            // output becomes a graph output.
             workGraph.Inputs = new List<FastTensorKey>();
             workGraph.InputUniqueNames = new List<string?>();
-            workGraph.Outputs = new List<FastTensorKey>(collectedOutputKeys);
-            workGraph.OutputUniqueNames = collectedOutputKeys.Select(_ => (string?)null).ToList();
             workGraph.OutputRankOverrides = null;
 
-            FastProcessorHelper.RemoveUnreachableNodes(workGraph);
-
-            NamedModelParam[] results;
-            try
+            var builder = ImmutableDictionary.CreateBuilder<ModelId, TensorData>();
+            for (int i = 0; i < collectedOutputKeys.Count; i++)
             {
-                results = computeContext.Run(workGraph);
+                var chunk = ChunkFor(workGraph, collectedOutputKeys[i]);
+                try
+                {
+                    builder[collectedModelIds[i]] = Rehost(computeContext.Run(chunk)[0].ToTensorData());
+                }
+                catch (System.Exception ex) when (IsAllocationFailure(ex))
+                {
+                    // The backend reports an out-of-memory abort as a bare "bad allocation", with
+                    // no parameter, shape or size — nothing to separate "this parameter is too
+                    // large" from "this graph is malformed" (#208). Because each parameter now
+                    // gets its own session, the one being initialized IS the one that failed, so
+                    // name it, with the rest of the model as context; the inner exception keeps
+                    // the original diagnosis. Only allocation failures are relabelled: everything
+                    // else this call can raise (a missing backend package, an unsupported op, a
+                    // malformed graph) already says what it is, and keeping its type keeps the
+                    // catch clauses around this API working.
+                    throw new ComputeContextException(ErrorCodes.CR008, "FastInitializeModelParams",
+                        DescribeInventory(collectedInventory, failing: i) +
+                        " Underlying failure: " + ex.Message, ex);
+                }
             }
-            catch (System.Exception ex) when (IsAllocationFailure(ex))
-            {
-                // Every parameter's initializer runs in ONE session, so the native failure
-                // (ORT reports an out-of-memory abort as a bare "bad allocation") carries no
-                // parameter, shape or size — nothing separates "this parameter is too large"
-                // from "this graph is malformed" (#208). Report what the session was asked to
-                // allocate; the inner exception keeps the original diagnosis. Only allocation
-                // failures are relabelled: everything else this call can raise (a missing
-                // backend package, an unsupported op, a malformed graph) already says what it
-                // is, and keeping its type keeps the catch clauses around this API working.
-                throw new ComputeContextException(ErrorCodes.CR008, "FastInitializeModelParams",
-                    DescribeInventory(collectedInventory) + " Underlying failure: " + ex.Message, ex);
-            }
+            return builder.ToImmutable();
+        }
 
-            return collectedModelIds.Zip(results)
-                .ToImmutableDictionary(x => x.First, x => x.Second.ToTensorData());
+        /// <summary>
+        /// Copies a freshly computed parameter value onto storage of its own and releases the
+        /// backend tensor it came out of.
+        ///
+        /// <para>Necessary because a backend result tensor is allocated by ITS OWN session's
+        /// allocator and keeps that allocator — and so the session's whole arena, sized to the
+        /// draw's peak, not to the parameter — alive for as long as the value is referenced. The
+        /// values ARE referenced: they are the rig's initial weights. Held that way, running one
+        /// session per parameter would retain every session's arena at once and cost more memory
+        /// than the single-session graph it replaced (measured: 949 MiB against 429 MiB on the
+        /// 12 x [384, 384] stack). Re-hosting keeps the arena's lifetime inside the loop
+        /// iteration, so peak host memory is one parameter's draw rather than the whole model's
+        /// (Shorokoo/Shorokoo#194).</para>
+        /// </summary>
+        private static TensorData Rehost(TensorData data)
+        {
+            if (data.DType == DType.String) return data;
+            var copy = TensorData.CreateFromRawBytes(data.Shape, data.DType, data.AccessRawMemory().ToArray());
+            data.Dispose();
+            return copy;
+        }
+
+        /// <summary>
+        /// The single-parameter slice of the rewritten initialization graph: a copy whose only
+        /// output is <paramref name="outputKey"/>, swept down to the nodes that actually feed it.
+        ///
+        /// <para>Initialization runs ONE SESSION PER PARAMETER rather than one session for the
+        /// whole model, and that is a cost decision, not a stylistic one. The parameters are
+        /// mutually independent — each keyed draw hangs off its own stream key and reads nothing
+        /// another initializer produces — so slicing changes no value; what it changes is the size
+        /// of the graph any one session has to build. That matters because the backend's session
+        /// build is SUPERLINEAR in graph size: measured on an N-layer stack of [384, 384] normal
+        /// draws, building the whole-model init graph cost 0.23 s at N=1, 0.88 s at N=2, 3.4 s at
+        /// N=4, 13.4 s at N=8 and 32 s at N=12 — a clean 4x per doubling. Sliced, the same N=12
+        /// model pays 12 x 0.23 s. Left whole, a GPT-sized model spends minutes of pure build
+        /// before the first gradient (Shorokoo/Shorokoo#195), and its peak host memory is the whole
+        /// model's draws at once instead of the largest single parameter's (#194).</para>
+        ///
+        /// <para>Sharing one function BODY across the parameters does not substitute for this:
+        /// the backend inlines every call site, so the graph it builds is the same size either
+        /// way (measured — it made no difference). Slicing is what bounds that size.</para>
+        /// </summary>
+        private static InternalComputationGraph ChunkFor(
+            InternalComputationGraph workGraph, FastTensorKey outputKey)
+        {
+            var chunk = workGraph.Clone();
+            chunk.Outputs = new List<FastTensorKey> { outputKey };
+            chunk.OutputUniqueNames = new List<string?> { null };
+            FastProcessorHelper.RemoveUnreachableNodes(chunk);
+            return chunk;
         }
 
         /// <summary>
@@ -251,13 +304,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// Renders what one initialization session was asked to produce: the parameter count,
-        /// the total element count and byte size, and the largest parameters by size. Sizes
-        /// saturate rather than wrap — the parameter that blew the session up is exactly the one
-        /// whose element count can overflow Int64, and it has to stay at the top of the list.
+        /// Renders the parameter at <paramref name="failing"/> — the one whose own initialization
+        /// session just aborted — and then the model it belongs to as context: the parameter
+        /// count, the total element count and byte size, and the largest parameters by size.
+        /// Sizes saturate rather than wrap — the parameter that blew its session up is exactly
+        /// the one whose element count can overflow Int64, and it has to stay at the top of the
+        /// list.
         /// </summary>
         private static string DescribeInventory(
-            List<(string? Template, ConcreteModelParamInfo? Info, ModelId Id, DType DType, long[]? Shape)> inventory)
+            List<(string? Template, ConcreteModelParamInfo? Info, ModelId Id, DType DType, long[]? Shape)> inventory,
+            int failing)
         {
             const long Unknown = -1;
 
@@ -321,13 +377,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 ? Unknown : sized.Aggregate(0L, (t, x) => AddSat(t, x.Elements));
             var largest = sized.OrderByDescending(x => x.Bytes).Take(5).Select(Describe);
 
-            return $"initializing {sized.Length} model parameter{(sized.Length == 1 ? "" : "s")} " +
+            return $"initializing the model parameter {Describe(sized[failing])} failed. " +
+                   $"It is 1 of {sized.Length} " +
                    $"({(totalElements < 0 ? "unknown"
                         : totalElements == long.MaxValue ? "more than 9.2e18"
                         : totalElements.ToString("N0", CultureInfo.InvariantCulture))} " +
-                   $"elements, {Bytes(totalBytes)}) failed. All initializers run in one session, " +
-                   "so the underlying failure names no parameter of its own; the largest of them, " +
-                   "in order: " + string.Join("; ", largest) + ".";
+                   $"elements, {Bytes(totalBytes)} in total); the largest of them, in order: " +
+                   string.Join("; ", largest) + ".";
         }
 
         /// <summary>

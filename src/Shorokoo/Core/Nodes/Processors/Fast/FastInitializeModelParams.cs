@@ -235,24 +235,34 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// Copies a freshly computed parameter value onto storage of its own and releases the
+        /// Copies a freshly computed parameter value onto storage of its own, then releases the
         /// backend tensor it came out of.
         ///
-        /// <para>Necessary because a backend result tensor is allocated by ITS OWN session's
-        /// allocator and keeps that allocator — and so the session's whole arena, sized to the
-        /// draw's peak, not to the parameter — alive for as long as the value is referenced. The
-        /// values ARE referenced: they are the rig's initial weights. Held that way, running one
-        /// session per parameter would retain every session's arena at once and cost more memory
-        /// than the single-session graph it replaced (measured: 949 MiB against 429 MiB on the
-        /// 12 x [384, 384] stack). Re-hosting keeps the arena's lifetime inside the loop
-        /// iteration, so peak host memory is one parameter's draw rather than the whole model's
-        /// (Shorokoo/Shorokoo#194).</para>
+        /// <para>The copy is the half that matters. A backend result tensor is allocated by ITS
+        /// OWN session's allocator and keeps that allocator — and so the session's whole arena,
+        /// sized to the draw's peak rather than to the parameter — alive for as long as the value
+        /// is referenced. These values ARE referenced: they are the rig's initial weights, so no
+        /// collection can reclaim them. Returned as-is, one session per parameter holds every
+        /// session's arena at once: measured on the 12 x [384, 384] stack, 379-481 MiB still live
+        /// after a forced collection, against 10-32 MiB re-hosted, for 6.75 MiB of actual
+        /// parameter.</para>
+        ///
+        /// <para>Disposing is the smaller half: dropping the last reference already lets the
+        /// finalizer free the value, and disposing only makes that deterministic rather than
+        /// leaving it to a thread nobody controls. It has to be the BACKING VALUE — TensorData's
+        /// own Dispose is the standard pattern with an empty body, since the runtime value owns
+        /// the buffer, so disposing the wrapper frees nothing.</para>
+        ///
+        /// <para>This is what lets <see cref="ChunkFor"/> buy its speed for nothing: with the
+        /// copy, slicing costs no measurable memory over one whole-model session; without it,
+        /// several hundred MiB.</para>
         /// </summary>
         private static TensorData Rehost(TensorData data)
         {
             if (data.DType == DType.String) return data;
+            // Read the bytes before disposing: that invalidates the buffer they came from.
             var copy = TensorData.CreateFromRawBytes(data.Shape, data.DType, data.AccessRawMemory().ToArray());
-            data.Dispose();
+            if (data is IOnnxData backed) backed.Value.Dispose();
             return copy;
         }
 
@@ -261,20 +271,30 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// output is <paramref name="outputKey"/>, swept down to the nodes that actually feed it.
         ///
         /// <para>Initialization runs ONE SESSION PER PARAMETER rather than one session for the
-        /// whole model, and that is a cost decision, not a stylistic one. The parameters are
-        /// mutually independent — each keyed draw hangs off its own stream key and reads nothing
-        /// another initializer produces — so slicing changes no value; what it changes is the size
-        /// of the graph any one session has to build. That matters because the backend's session
-        /// build is SUPERLINEAR in graph size: measured on an N-layer stack of [384, 384] normal
-        /// draws, building the whole-model init graph cost 0.23 s at N=1, 0.88 s at N=2, 3.4 s at
-        /// N=4, 13.4 s at N=8 and 32 s at N=12 — a clean 4x per doubling. Sliced, the same N=12
-        /// model pays 12 x 0.23 s. Left whole, a GPT-sized model spends minutes of pure build
-        /// before the first gradient (Shorokoo/Shorokoo#195), and its peak host memory is the whole
-        /// model's draws at once instead of the largest single parameter's (#194).</para>
+        /// whole model. The parameters are mutually independent — each keyed draw hangs off its
+        /// own stream key and reads nothing another initializer produces — so slicing changes no
+        /// value; what it changes is the size of the graph any one session has to build. That
+        /// matters because the backend's session build is SUPERLINEAR in graph size. Measured on
+        /// an N-layer stack of [384, 384] normal draws, with constant folding already off (see
+        /// <c>ComputeContext.IsFullyConstant</c>, the other half of this fix), building the
+        /// whole-model init graph cost 0.23 s at N=1, 0.88 s at N=2, 3.4 s at N=4, 13.4 s at N=8
+        /// and 32 s at N=12 — a clean 4x per doubling. Left whole, a GPT-sized model spends
+        /// minutes of pure build before the first gradient (Shorokoo/Shorokoo#195).</para>
         ///
-        /// <para>Sharing one function BODY across the parameters does not substitute for this:
+        /// <para>Slicing does not pay for that speed in memory — but only because of
+        /// <see cref="Rehost"/>. N sessions would otherwise hold N arenas at once, each sized to a
+        /// draw rather than to a parameter, for several hundred MiB more than the one-session
+        /// graph. With each result copied off its session as it is produced, the N=12 model above
+        /// peaks within noise of the one-session build (497 MiB against 492) while costing a
+        /// quarter of its wall clock (8.6 s against 37.0). The order-of-magnitude memory win over
+        /// the behaviour #194 reported is <c>IsFullyConstant</c>'s, not this.</para>
+        ///
+        /// <para>Sharing one function BODY across the parameters does not substitute for slicing:
         /// the backend inlines every call site, so the graph it builds is the same size either
-        /// way (measured — it made no difference). Slicing is what bounds that size.</para>
+        /// way (measured — it made no difference). What IS linear here is the backend session
+        /// builds, which is where the cost lives; cloning and sweeping the graph once per
+        /// parameter is itself quadratic in the parameter count, but it is host-side pointer work
+        /// against a session build measured in tenths of a second.</para>
         /// </summary>
         private static InternalComputationGraph ChunkFor(
             InternalComputationGraph workGraph, FastTensorKey outputKey)

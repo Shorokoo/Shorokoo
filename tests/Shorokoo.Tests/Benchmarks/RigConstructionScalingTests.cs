@@ -70,43 +70,54 @@ internal static class RigScalingStack
 }
 
 /// <summary>
-/// Code-pinned scaling gate for <see cref="TrainingRig.FromScratch"/> — the phase that runs every
-/// trainable parameter's initializer before any training happens. Two laws are pinned, one per
-/// axis, because rig construction once broke on both
-/// (<see href="https://github.com/Shorokoo/Shorokoo/issues/194">#194</see> host memory,
-/// <see href="https://github.com/Shorokoo/Shorokoo/issues/195">#195</see> build time) and the two
-/// failures had different causes.
+/// Code-pinned scaling gate for the phase that runs every trainable parameter's initializer
+/// before any training happens. Three laws, because rig construction broke on three separate
+/// things (<see href="https://github.com/Shorokoo/Shorokoo/issues/194">#194</see> host memory,
+/// <see href="https://github.com/Shorokoo/Shorokoo/issues/195">#195</see> build time, and the
+/// per-session retention that fixing #195 introduced) and each has a different cause, so one
+/// measurement cannot stand in for another.
 ///
-/// <para><b>Memory — bytes per trainable element.</b> Construction used to cost ~4.4 KiB of host
-/// working set per parameter ELEMENT, about 1100x the 4 bytes the fp32 parameter occupies, so a
-/// few-million-parameter model needed tens of GB to build and a GPT-sized embedding died with
-/// ORT's bare "bad allocation". The cause was the backend folding the whole input-less
-/// initialization graph at session build, materializing every intermediate of every keyed
-/// Threefry draw at once. The gate divides the ADDITIONAL peak working set the large table needs
-/// over the small one by their element difference, so the fixed process floor cancels and the
-/// figure is the per-element law itself — a machine-independent quantity, unlike a wall clock.</para>
+/// <para><b>Bytes per trainable element.</b> Construction used to cost ~4.4 KiB of host working
+/// set per parameter ELEMENT, ~1100x the 4 bytes the fp32 parameter occupies, because the backend
+/// folded the whole input-less initialization graph at session build. Measured as the ADDITIONAL
+/// peak the large table needs over the small one, so the fixed process floor cancels and what
+/// remains is the per-element law — machine-independent in a way a wall clock is not.</para>
 ///
-/// <para><b>Time — cost per additional trainable parameter.</b> The backend's session build is
-/// superlinear in graph size, so initializing every parameter in one session made construction
-/// grow quadratically in the parameter count (4x per doubling): minutes of pure build for a
-/// GPT-sized model, re-paid on every process restart. Initialization now runs one session per
-/// parameter, which is linear. The gate is a pure RATIO of two per-parameter increments measured
-/// at opposite ends of the range, so it needs no absolute time budget and holds on any machine:
-/// linear construction keeps the ratio near 1, and the quadratic law it replaced puts it above 3.</para>
+/// <para><b>Cost per trainable parameter.</b> Initializing every parameter in one session made
+/// construction quadratic in the parameter count, since the backend's session build is
+/// superlinear in graph size. It runs one session per parameter now, which is linear. Measured as
+/// a RATIO of per-parameter cost at the two ends of the range, so no absolute time budget is
+/// needed and it holds on any machine: linear keeps it near 1, the quadratic law it replaced puts
+/// it near 6.</para>
 ///
-/// <para>Both budgets are deliberately loose — comfortably above the measured behaviour and
-/// comfortably below the broken law — so ordinary run-to-run jitter never trips them.</para>
+/// <para><b>Bytes retained per parameter.</b> One session per parameter is only affordable
+/// because each result is copied off its session; a retained result keeps its session's whole
+/// arena alive, and a forced collection cannot reclaim it, since the values are genuinely
+/// referenced as the rig's initial weights. Measured as live working set across one
+/// initialization, collected on both ends so only real retention survives.</para>
+///
+/// <para>Each budget is set well above the measured behaviour and well below the broken law, so
+/// jitter never trips one. The two timing points are taken best-of-<see cref="TimingRuns"/>: they
+/// are differences of small quantities otherwise, and the noise on a single sample is comparable
+/// to the effect.</para>
 /// </summary>
 [Trait("Domain", "Training")]
 [Trait("Purpose", "Benchmark")]
 [Collection(SerialMeasurement.Name)]
 public class RigConstructionScalingTests
 {
-    /// <summary>Measured ~0.4 KiB/element; the law this gate exists to catch is ~4.4 KiB.</summary>
+    /// <summary>Measured ~0.4 KiB/element; the law this catches is ~4.4 KiB.</summary>
     private const double MemoryBudgetBytesPerElement = 1536.0;
 
-    /// <summary>Measured ~0.85 under linear construction; the quadratic law it replaced gives ~3.1.</summary>
+    /// <summary>Measured ~1.0 (linear); the quadratic law it replaced gives ~6.</summary>
     private const double MaxPerParameterCostGrowth = 2.0;
+
+    /// <summary>Measured 10-32 MiB for 12 x 0.56 MiB of parameter; uncopied, 379-481 MiB.</summary>
+    private const long RetainedBudgetBytes = 96L * 1024 * 1024;
+
+    private const int TimingRuns = 3;
+    private const int StackParams = 12;
+    private const int SmallStackParams = 2;
 
     private const long SmallTableElements = RigScalingTableSmall.Rows * 384L;
     private const long LargeTableElements = RigScalingTableLarge.Rows * 384L;
@@ -114,27 +125,45 @@ public class RigConstructionScalingTests
     [Fact]
     public void RigConstructionScalesWithTheModelRatherThanExplodingOnIt()
     {
-        // Warm-up on the small table: it pays the process's one-time JIT / first-touch cost AND
-        // sets the peak the large table is then measured against, so both measurements below see
-        // an already-warm process.
+        // Concretize up front: only initialization is under measurement, and concretizing inside
+        // a timed region would put a second, unrelated cost into the ratio.
+        var small = Concretize(RigScalingStack2.ComputationGraph);
+        var large = Concretize(RigScalingStack12.ComputationGraph);
+        small.InitializeTrainableParams();   // pays the process's one-time JIT / first-touch cost
+
+        // Peak working set is monotonic, so the two table builds must be the first big
+        // allocations in the process and must run in this order for the delta to mean anything.
         BuildRig(RigScalingTableSmall.ComputationGraph);
-        long peakAfterSmall = PeakWorkingSetBytes();
-
+        long peakAfterSmallTable = PeakWorkingSetBytes();
         BuildRig(RigScalingTableLarge.ComputationGraph);
-        double bytesPerElement =
-            (PeakWorkingSetBytes() - peakAfterSmall) / (double)(LargeTableElements - SmallTableElements);
+        long peakGrowth = PeakWorkingSetBytes() - peakAfterSmallTable;
 
-        double t2 = BuildSeconds(RigScalingStack2.ComputationGraph);
-        double t4 = BuildSeconds(RigScalingStack4.ComputationGraph);
-        double t8 = BuildSeconds(RigScalingStack8.ComputationGraph);
-        double t12 = BuildSeconds(RigScalingStack12.ComputationGraph);
+        long before = LiveWorkingSetBytes();
+        var values = large.InitializeTrainableParams();
+        long retained = LiveWorkingSetBytes() - before;
 
-        // Per-added-parameter cost at the top of the range against the same at the bottom. Both
-        // are differences, so the fixed per-build cost cancels out of each.
-        double perParameterCostGrowth = ((t12 - t8) / 4.0) / ((t4 - t2) / 2.0);
+        double smallSeconds = BestInitSeconds(small);
+        double largeSeconds = BestInitSeconds(large);
+        double perParameterCostGrowth =
+            (largeSeconds / StackParams) / (smallSeconds / SmallStackParams);
 
-        Assert.True(bytesPerElement <= MemoryBudgetBytesPerElement);
+        // Keep the values past the retention measurement: collecting them early is exactly the
+        // thing that would make a retention regression invisible.
+        Assert.Equal(StackParams, values.ModelParams.Length);
+
+        // A large model that raised the peak by nothing measured nothing — fail loudly rather
+        // than divide by it and pass.
+        Assert.True(peakGrowth > 0);
+        Assert.True(peakGrowth / (double)(LargeTableElements - SmallTableElements)
+                    <= MemoryBudgetBytesPerElement);
+        Assert.True(retained <= RetainedBudgetBytes);
         Assert.True(perParameterCostGrowth <= MaxPerParameterCostGrowth);
+    }
+
+    private static InternalComputationGraph Concretize(ComputationGraph model)
+    {
+        var g = model.ToInternal();
+        return g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([1L], (float[])[1f])]));
     }
 
     private static void BuildRig(ComputationGraph model) =>
@@ -143,11 +172,16 @@ public class RigConstructionScalingTests
             [new TensorDataModelParam("x", ModelParamType.InputParam, TensorData([1L], (float[])[1f]))],
             new AdamOptimizerHyperparameters { LearningRate = 0.1f });
 
-    private static double BuildSeconds(ComputationGraph model)
+    private static double BestInitSeconds(InternalComputationGraph arch)
     {
-        var sw = Stopwatch.StartNew();
-        BuildRig(model);
-        return sw.Elapsed.TotalSeconds;
+        double best = double.MaxValue;
+        for (int i = 0; i < TimingRuns; i++)
+        {
+            var sw = Stopwatch.StartNew();
+            arch.InitializeTrainableParams();
+            best = Math.Min(best, sw.Elapsed.TotalSeconds);
+        }
+        return best;
     }
 
     private static long PeakWorkingSetBytes()
@@ -155,5 +189,16 @@ public class RigConstructionScalingTests
         using var proc = Process.GetCurrentProcess();
         proc.Refresh();
         return proc.PeakWorkingSet64;
+    }
+
+    /// <summary>Working set after a blocking full collection, so only real retention is counted.</summary>
+    private static long LiveWorkingSetBytes()
+    {
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        using var proc = Process.GetCurrentProcess();
+        proc.Refresh();
+        return proc.WorkingSet64;
     }
 }

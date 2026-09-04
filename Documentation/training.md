@@ -411,25 +411,26 @@ public TrainingResult Train(
 
 ### What construction costs
 
-`FromScratch` does real work before any training happens, and it is worth knowing which
-work, because a checkpoint/resume workflow re-pays it on every process start (nothing
-about it is written to a `.skpt`; `TrainingRig.Load` rebuilds the same way).
+`FromScratch` does real work before any training happens, and a checkpoint/resume workflow
+re-pays all of it on every process start: what a `.skpt` stores is the trained state, not the
+rig, so `TrainingRig.Load` rebuilds the rig the same way `FromScratch` does (and then overwrites
+the freshly initialized weights with the checkpoint's).
 
-Two distinct phases, in this order:
+The build phase, all of it on `MergeContext`, is concretization, composition with the loss,
+autograd, optimizer lowering, shape inference and graph optimization, plus two costs that scale
+with your parameter count: each trainable parameter's initializer is run, and each optimizer-state
+initializer is run per trainable parameter. Parameters are initialized one backend session apiece,
+so that part grows linearly with the number of trainable parameters rather than superlinearly, and
+holds on to only the parameters themselves rather than every session's working memory. Host
+memory during initialization is dominated by the largest single parameter's draw; it still grows
+with the model, but far more slowly than the parameter count.
 
-1. **Parameter initialization**, inside `FromScratch`. Every trainable parameter's
-   initializer runs on the compute backend — a keyed random draw for
-   `NormalDist`/`Kaiming…`/`Xavier…`, a fill for `Zeros`/`Ones`. Each parameter is
-   initialized in its own backend session, so this grows **linearly** with the number of
-   trainable parameters, and its peak host memory is set by the **largest single**
-   parameter rather than by the model total.
-2. **Training-step compilation**, on the first `TrainStep` — the rig compiles its
-   training-step graph once, lazily, and caches it (see `TrainStep` above). This is a
-   single fixed cost per rig, independent of how many steps follow.
+Then, on the first `TrainStep`, the rig compiles its training-step graph once and caches it (see
+`TrainStep` above) — one fixed cost per rig, independent of how many steps follow.
 
-Neither is proportional to your dataset, and neither recurs during the loop: steady-state
-`TrainStep` pays neither. If you are timing a run, expect the first step to be markedly
-slower than the rest — that is phase 2, not a slow optimizer.
+Neither phase is proportional to your dataset, and neither recurs during the loop: steady-state
+`TrainStep` pays neither. If you are timing a run, expect the first step to be markedly slower
+than the rest — that is the compile, not a slow optimizer.
 
 ### Compute contexts: `MergeContext` and `RuntimeContext`
 

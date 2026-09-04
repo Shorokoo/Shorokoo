@@ -374,7 +374,7 @@ namespace Shorokoo.Runtime
 
         private IShorokooInferenceSession CreateSession(byte[] modelData, bool disableOptimizations = false)
         {
-            // Both callers that pass true are avoiding ORT's constant-folding pass:
+            // Both conditions that pass true here are avoiding ORT's constant-folding pass:
             // it calls GetDeleteFunc on Optional values, which OptionalTypeBase doesn't
             // implement -- session init throws "GetDeleteFunc is not implemented" -- and on
             // an input-less graph it folds the whole graph at build time, at a cost that
@@ -410,13 +410,30 @@ namespace Shorokoo.Runtime
         /// disposed (see <see cref="RunFromModel"/>), so the work happens exactly once either
         /// way — the only question is whether it happens in the fold pass or in the execution
         /// plan, and only the latter reuses buffers. Running the graph unoptimized is therefore
-        /// both faster and dramatically smaller, and it is value-identical: constant folding is
-        /// semantics-preserving, so the parameters come out bit for bit the same (pinned by the
-        /// RNG init goldens).</para>
+        /// both faster and dramatically smaller.</para>
         ///
-        /// <para>This is deliberately scoped to <see cref="RunFromModel"/>. A
+        /// <para>It is also value-identical, which is worth spelling out because "disable the
+        /// optimizer" usually is not. ORT folds at level 1 and fuses at level 2, and the fold
+        /// evaluates each node with the same CPU kernel the execution plan would — so on a graph
+        /// this predicate accepts, level 1 collapses everything to literals and level 2 finds
+        /// nothing left to fuse. The bit-inexact part of optimization never engaged here. That is
+        /// the argument; the pin is <c>RngInitFrozenDerivationTests</c>, which asserts exact
+        /// initial weights through this path for a uniform, a raw-bits and a dense-normal
+        /// initializer.</para>
+        ///
+        /// <para>The predicate is a property of the GRAPH, not of the caller, so it also catches
+        /// the other input-less one-shots: the RNG key resolver, optimizer-state seeding (which
+        /// bakes its inputs to constants and then clears them, so it is always input-less), and
+        /// an <c>Eval</c> of a constant expression. That breadth is intended — every one of them
+        /// is a constant computed once and discarded, and the paragraph above applies to each
+        /// unchanged. The order-of-magnitude figures are measured on parameter initialization,
+        /// which is the shape that made it matter.</para>
+        ///
+        /// <para>It is deliberately scoped to <see cref="RunFromModel"/>. A
         /// <see cref="CompileFromModel"/> session is kept and re-run, so there optimization is
-        /// amortized and stays on.</para>
+        /// amortized and stays on — which is why a keyed feed inside a training-step or exported
+        /// model still gets its constant key chain folded, as
+        /// <c>Documentation/rng-configuration.md</c> says it does.</para>
         /// </summary>
         private static bool IsFullyConstant(GraphProto graph) => graph.Inputs.Count == 0;
 

@@ -46,11 +46,11 @@ public class QeeElementwiseAuditTests
 }
 
 /// <summary>
-/// Regression pins for wrapper-API value bugs in Scalar.cs / Vector.cs: Scalar's
-/// left-shift-by-primitive operator delegating to the right shift, and Scalar/Vector
-/// Min/Max ignoring their <c>params others</c> argument. Each runs a self-checking module
-/// through <see cref="QuickExecutionEngine"/> and asserts the value the public wrapper
-/// must produce.
+/// Regression pins for wrapper-API value bugs once present in Scalar.cs / Vector.cs:
+/// Scalar's left-shift-by-primitive operator delegating to the right shift, and
+/// Scalar/Vector Min/Max ignoring their <c>params others</c> argument. Both are fixed;
+/// each pin runs a self-checking module through <see cref="QuickExecutionEngine"/> and
+/// asserts the value the public wrapper must produce.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]

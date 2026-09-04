@@ -79,6 +79,42 @@ public class ModulesCoverageTests
         Assert.True(TwoGates(bake: true, viaSpecialize: true, paramCount: 1, ifNodes: 0, then, biased));
     }
 
+    private static long BiggestConstant(ComputationGraph arch)
+    {
+        long biggest = 0;
+        foreach (var n in arch.ToInternal().Nodes)
+        {
+            if (n.OpCode != OpCodes.CONSTANT) continue;
+            if (n.Attributes?.GetAttributeVals().GetValueOrDefault(OnnxOpAttributeNames.AttrValue) is not TensorData td) continue;
+            long count = 1;
+            foreach (var d in td.Shape.Dims) count *= d;
+            biggest = Math.Max(biggest, count);
+        }
+        return biggest;
+    }
+
+    private static long GatedBigParamBiggestConstant(bool viaSpecialize)
+    {
+        var g = Modules.BigGatedParamLayer.ComputationGraph;
+        var off = TensorData([], false);
+        var x = TensorData([2L], 1f, 2f);
+        if (viaSpecialize) g = g.Specialize(g.FromOrderedInputs([off]));
+        return BiggestConstant(g.ToConcreteArchitecture(
+            viaSpecialize ? g.FromOrderedInputs([x]) : g.FromOrderedInputs([off, x])));
+    }
+
+    /// <summary>Switching a gated parameter block off is documented as costing no bytes in a saved
+    /// model, and does on the <c>Specialize</c> route. On the hint route the pruned
+    /// <c>[256, 256]</c> parameter comes back as a dense 65536-element zero <c>CONSTANT</c> in the
+    /// graph, so the bytes move from the param list into the serialized graph rather than going
+    /// away. Tracked as Shorokoo/Shorokoo#235.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#235: a hint-pruned gated param is replaced by an equally large dense zero constant")]
+    public void TestPruningAGatedParamDoesNotLeaveItsBytesBehindAsAZeroConstant()
+    {
+        Assert.True(GatedBigParamBiggestConstant(viaSpecialize: true) < 65536);
+        Assert.True(GatedBigParamBiggestConstant(viaSpecialize: false) < 65536);
+    }
+
     [Fact]
     public void TestSimpleHyperparamLoopSequenceOptionalAndConditionalModulesCoverage()
     {

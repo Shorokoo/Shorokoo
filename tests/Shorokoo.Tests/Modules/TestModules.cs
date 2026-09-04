@@ -132,6 +132,16 @@ namespace Shorokoo.Tests.Modules
     }
 
     [Module]
+    public partial class BigGatedParamLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<bit> useBig)
+        {
+            var big = InitSimple.Init(Vector(256L, 256L));
+            return useBig.IfElse(input + big.Reduce(ReduceKind.Sum, Vector(0L, 1L), keepDims: false), input);
+        }
+    }
+
+    [Module]
     public partial class SimpleWithHyperparam
     {
         public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> hyperparam)

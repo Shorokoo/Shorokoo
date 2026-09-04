@@ -472,10 +472,13 @@ so it is the context whose session actually executes training. It is the sole co
 one compiled training-step graph that the `Fit`/`Train` loop and a manual `TrainStep` loop all share.
 Every `With…` derivation keeps the same two contexts.
 
-**What the two can usefully differ in: nothing, today.** `ComputeContext` has a single parameterless
-constructor and carries no per-instance settings — no device, no execution provider, no thread count,
-no session options — and every session either context creates is built by the one process-wide backend
-factory. Passing two distinct instances therefore selects nothing. In particular you **cannot** merge
+**What the two can usefully differ in: the build progress sink, and nothing else today.**
+`ComputeContext` carries no per-instance *compute* settings — no device, no execution provider, no
+thread count, no session options — and every session either context creates is built by the one
+process-wide backend factory. Its single per-instance setting observes rather than configures:
+`Progress`, the sink the build reports its stages to ([below](#watching-a-long-build)). That one is
+genuinely phase-scoped — the build runs on `MergeContext`, so a sink set on `RuntimeContext` never
+reports. Beyond it, passing two distinct instances selects nothing. In particular you **cannot** merge
 on one device and train on another: [only one backend is live per process](inference.md#backend-selection)
 and both contexts go through it, so the naming does not offer a CPU-build / GPU-train split. Read the
 two members as a division of *phases* — which work is build/merge and which is compile/run — not of
@@ -488,6 +491,64 @@ Result types:
 
 `TrainingRig`, `TrainingCheckpoint`, and `TrainingResult` are in
 namespace `Shorokoo` (covered by `using Shorokoo;`).
+
+### Watching a long build
+
+`FromScratch` can run for **minutes** on a large model — it concretizes the graph, composes the loss
+and autodiff, unrolls loops, and runs shape inference plus the memory-aware graph optimization before
+it returns. By default it says nothing while doing so, which is indistinguishable from a hang. Attach
+a sink to the build context to see the stage it is in:
+
+```csharp
+using Shorokoo.Graph;
+
+var buildContext = new ComputeContext { Progress = new BuildProgressHandler(Console.WriteLine) };
+
+var rig = TrainingRig.FromScratch(
+    MyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+    sampleInputs, new AdamWOptimizerHyperparameters { LearningRate = 0.001f },
+    mergeContext: buildContext);
+```
+
+```
+[   0.0s] Concretize: Clone
+[   0.1s] Concretize: InlineModulesAndFunctions
+…
+[  38.4s] Concretize: ExpandAutoGrad
+[  51.9s] TrainingStep: ComposeModelLossAndAutoGrad
+…
+[ 96.2s] Initialize: OptimizeTrainingStepGraph
+[ 121.7s] Initialize: Done
+```
+
+Each `BuildProgress` is reported as the build **enters** the named stage, so a build that has been
+quiet for minutes is inside the stage its last report named. It carries three fields:
+
+- `Phase` — `BuildPhase.Concretize` (lowering the model to a concrete architecture),
+  `BuildPhase.TrainingStep` (composing and lowering the training-step graph), or
+  `BuildPhase.Initialize` (running the initializers, shape inference and graph optimization). The
+  phases run in that order and do not interleave; the last report of a completed build is
+  `Initialize: Done`.
+- `Stage` — the pass being entered, named after the pass itself (`InlineModulesAndFunctions`,
+  `ExpandAutoGrad`, `OptimizeTrainingStepGraph`, …). Stage names are diagnostics, not API: they track
+  the pipeline and change with it.
+- `Elapsed` — time since the start of *this* build. One clock spans all three phases.
+
+`ToString()` renders the line shown above. Reports are raised **synchronously on the building
+thread**, so use `BuildProgressHandler` (which calls its handler inline) rather than
+`System.Progress<T>`, whose posted callbacks can arrive out of order or after the build returns —
+exactly what a liveness signal must not do. Keep the handler short; it runs inside the build. A
+context shared by concurrent builds delivers their reports interleaved, on their own threads.
+
+The same sink works on the lowering step alone, which is the slow part of the build and is also
+reachable directly:
+
+```csharp
+var concrete = MyModel.ComputationGraph.ToConcreteArchitecture(inputHints, buildContext);
+```
+
+To capture the *graphs* rather than the stage names — after the fact, as compilable C# — see
+[debugging.md](debugging.md).
 
 ### Seeding the run
 

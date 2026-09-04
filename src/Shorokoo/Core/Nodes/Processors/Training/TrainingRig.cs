@@ -385,6 +385,10 @@ namespace Shorokoo
         /// <param name="mergeContext">
         /// Optional build/merge-phase compute context (see <see cref="MergeContext"/>); <c>null</c> ⇒
         /// <see cref="ComputeContext.Default"/>. Never persisted — a reloaded rig gets a fresh one here.
+        /// This build can run for minutes on a large graph; set the context's
+        /// <see cref="ComputeContext.Progress"/> to have it report each stage as it enters it (see
+        /// <see cref="BuildProgress"/>), so a long build is visibly alive rather than indistinguishable
+        /// from a hang.
         /// </param>
         /// <param name="runtimeContext">
         /// Optional compile/run compute context (see <see cref="RuntimeContext"/>); <c>null</c> ⇒
@@ -603,8 +607,11 @@ namespace Shorokoo
             // model is refused up front.
             var model = RequireModelGraphKind(c.Model, "TrainingRig (model constituent)");
 
-            // Concretization is a build/merge-phase step, so it runs on the merge context.
+            // Concretization is a build/merge-phase step, so it runs on the merge context. That
+            // context also carries the optional progress sink, and the reporter built from it here is
+            // threaded through the whole build so every phase reports against one clock.
             var ctx = mergeContext;
+            var progress = BuildProgressReporter.For(mergeContext);
 
             // Single ToConcreteArchitecture pass — the ONE concretization for this rig and all its
             // future derivations. The resulting concrete arch is the shared substrate: the trainstep
@@ -613,7 +620,8 @@ namespace Shorokoo
             // it. The pass also runs the QEE-backed liveness filter that prunes trainable params whose
             // reachability is killed by the sample input shape. Sample input VALUES matter only here
             // (concretization's QEE/ORT resolution fallbacks); the derivation path needs only shapes.
-            var concreteArch = model.ToConcreteArchitecture(new ModelParamList(sampleInputs), ctx);
+            var concreteArch = model.ToConcreteArchitecture(
+                new ModelParamList(sampleInputs), ctx, debugRequests: null, progress);
 
             // Bind the RNG config at the shared concretization point: binding writes the
             // config's runtime identity into the RngSeed parameter, which — with the feeds'
@@ -627,7 +635,7 @@ namespace Shorokoo
             // is stored. Done once here; the attribute rides along on Clone() and survives re-seeding.
             WriteRepresentativeInputs(concreteArch, sampleInputs);
 
-            return DeriveFromConcreteArch(c, concreteArch, mergeContext, runtimeContext);
+            return DeriveFromConcreteArch(c, concreteArch, mergeContext, runtimeContext, progress);
         }
 
         /// <summary>
@@ -644,10 +652,15 @@ namespace Shorokoo
             RigConstituents constituents,
             InternalComputationGraph concreteArch,
             ComputeContext mergeContext,
-            ComputeContext runtimeContext)
+            ComputeContext runtimeContext,
+            BuildProgressReporter? progress = null)
         {
             var c = constituents;
             ValidateConstituents(c);
+
+            // A derivation is a build of its own; only the initial build hands one in (so its
+            // concretization and the composition below share a clock).
+            progress ??= BuildProgressReporter.For(mergeContext);
 
             // Loss and optimizer are composed as module bodies and must be module graphs; re-validated
             // on every derivation so a swapped constituent is checked. The model is not re-checked — it
@@ -668,8 +681,9 @@ namespace Shorokoo
                 RuntimeContext = runtimeContext,
             };
             rig.BuildTrainingStepPureGraph(
-                concreteArch, c.Loss.ToInternal(), c.Optimizer.ToInternal(), c.Hyperparameters, c.Names);
-            rig.InitializeAndOptimize(concreteArch, mergeContext, c.RngConfig);
+                concreteArch, c.Loss.ToInternal(), c.Optimizer.ToInternal(), c.Hyperparameters, c.Names,
+                progress);
+            rig.InitializeAndOptimize(concreteArch, mergeContext, c.RngConfig, progress);
             return rig;
         }
 
@@ -969,8 +983,11 @@ namespace Shorokoo
             InternalComputationGraph lossGraph,
             InternalComputationGraph optimizerGraph,
             Hyperparameter[] hyperparameters,
-            IReadOnlyList<string>? hyperparamNames)
+            IReadOnlyList<string>? hyperparamNames,
+            BuildProgressReporter? progress = null)
         {
+            void Stage(string stage) => progress?.Report(BuildPhase.TrainingStep, stage);
+
             // Normalize the optimizer graph in place. State variables created by the optimizer's
             // [StateInitializer] Init calls are rewritten into explicit graph inputs appended
             // after grad, and the StateUpdate-pattern nodes (STATE_UPDATE_LINK + WITH_STATE_DEPS)
@@ -979,6 +996,7 @@ namespace Shorokoo
             // state values (per trainable parameter) in InitializeAndOptimize.
             // FromScratchInternal hands in an owned thawed copy — normalize it in place.
             var optimizerFastGraph = optimizerGraph;
+            Stage("NormalizeOptimizerGraph");
             var optimizerInfo = Shorokoo.Core.Nodes.Processors.Fast.FastNormalizeOptimizerGraph.Process(optimizerFastGraph);
             _optimizerStateInitGraph = optimizerInfo.StateInitGraph;
 
@@ -992,6 +1010,7 @@ namespace Shorokoo
             // so the input-aware liveness filter has already pruned dead-branch trainable
             // params — FastReplaceTrainableParamsWithInputProcessor inside PrepareForTraining
             // builds the trainable param struct from only the live MODEL_PARAM nodes.
+            Stage("ComposeModelLossAndAutoGrad");
             var fastTraining = TrainingGraphBuilder.PrepareForTrainingAsFast(concreteArch, lossGraph);
 
             // PrepareForTraining's output layout:
@@ -1406,7 +1425,7 @@ namespace Shorokoo
             // Step 10: lower to an executable form. LowerGraph runs its Fast pipeline
             // in place on fastTraining and returns the same graph for the public-facing
             // TrainingStepPureGraph property.
-            _trainingStepWorkGraph = LowerGraph(fastTraining, MergeContext);
+            _trainingStepWorkGraph = LowerGraph(fastTraining, MergeContext, progress);
 
             UpdatedParamFieldCount = TrainableParamStructDef.Fields.Length;
             UpdatedStateFieldCount = ModelStateDef.Fields.Length;
@@ -1676,36 +1695,47 @@ namespace Shorokoo
         /// loop over trainable parameters (e.g. ResNet residual stacks) must be flattened before
         /// the autograd pass runs.
         /// </summary>
-        private static InternalComputationGraph LowerGraph(InternalComputationGraph fast, ComputeContext mergeContext)
+        private static InternalComputationGraph LowerGraph(
+            InternalComputationGraph fast, ComputeContext mergeContext, BuildProgressReporter? progress = null)
         {
+            void Stage(string stage) => progress?.Report(BuildPhase.TrainingStep, stage);
+
             // Expand TensorStruct outputs into individual field outputs.
+            Stage("ExpandStructOutputs");
             Shorokoo.Core.Nodes.Processors.Fast.FastExpandStructOutputs.Process(fast);
 
             // Unpack TensorStruct inputs (struct → individual fields).
+            Stage("UnpackTensorStructs");
             Shorokoo.Core.Nodes.Processors.Fast.FastUnpackTensorStructs.Process(fast);
 
             // Simplify before loop unrolling. Any loop whose iteration count is already a direct
             // Constant node will be unrolled here via FastFoldConstantIterationLoops inside
             // FastSimplify.
+            Stage("Simplify");
             Shorokoo.Core.Nodes.Processors.Fast.FastSimplify.Process(fast);
 
             // Resolve any remaining LOOP_OPEN iteration counts that are computed from constants
             // (e.g. Sub(Constant(2), Constant(1))) into literal Constant nodes. Autograd has no
             // gradient implementation for Loop, so every loop reaching autograd must be flattened.
+            Stage("FoldLoopIterationCounts");
             FastFoldLoopIterationCountsToConstantsProcessor.Process(fast, mergeContext);
 
             // Simplify after iteration-count resolution; the FastFoldConstantIterationLoops pass
             // inside FastSimplify performs the actual unroll, then folds remaining constants.
+            Stage("UnrollLoops");
             Shorokoo.Core.Nodes.Processors.Fast.FastSimplify.Process(fast);
 
             // Lower attribute-tensorized variant ops (e.g. SHRK_CONV) to standard ONNX ops before
             // autograd — they have no gradient rule. Loops are unrolled by this point, so their
             // geometry inputs are constant-foldable.
+            Stage("LowerAttributeTensorOps");
             Shorokoo.Core.Nodes.Processors.Fast.FastLowerAttributeTensorOps.Process(fast, compute: mergeContext);
 
             // Lower AUTO_GRAD nodes natively on the Fast graph — no CG round-trip needed.
+            Stage("ExpandAutoGrad");
             Shorokoo.Core.Nodes.Processors.AutoGrad.FastProcessAutoGradProcessor.Process(fast);
 
+            Stage("SimplifyAfterAutoGrad");
             Shorokoo.Core.Nodes.Processors.Fast.FastSimplify.Process(fast);
             return fast;
         }
@@ -2592,8 +2622,11 @@ namespace Shorokoo
         private void InitializeAndOptimize(
             InternalComputationGraph concreteArch,
             ComputeContext ctx,
-            RngConfig? rngConfig = null)
+            RngConfig? rngConfig = null,
+            BuildProgressReporter? progress = null)
         {
+            void Stage(string stage) => progress?.Report(BuildPhase.Initialize, stage);
+
             // The model inputs for shape inference are read off the concrete arch's own
             // representative-input attributes (recorded once at BuildInitialRig) — no separate
             // sample-input field. Zero-filled shapes for small inputs; shape+dtype-only placeholders
@@ -2622,6 +2655,7 @@ namespace Shorokoo
             // are non-null. Without the infos the rig would silently fall back to unkeyed
             // seeded init, ignoring the config's master seed / algorithm for the weights.
             var paramInfos = rngConfig is null ? null : concreteArch.GetConcreteModelParamInfos();
+            Stage("InitializeModelParams");
             var paramValuesById = Shorokoo.Core.Nodes.Processors.Fast.FastInitializeModelParams.Process(
                 concreteArch, ctx, rngConfig, paramInfos);
 
@@ -2668,6 +2702,7 @@ namespace Shorokoo
                 // internal 0 placeholder here (shape only — the state init is shape-driven); the real
                 // value is required (and recomputed) in CreateInitialCheckpoint(hyperparameters), and
                 // the no-arg CreateInitialCheckpoint fails loud on the _stateInitNeedsRuntimeHypers flag.
+                Stage("InitializeOptimizerState");
                 _initialOptStateFields = ComputeInitialOptStateFields(
                     ResolveStateInitHyperValues(null, throwOnMissingConsumed: false), ctx);
             }
@@ -2676,6 +2711,7 @@ namespace Shorokoo
             // the already-computed paramValuesById via FastApplyModelParamValues — this
             // rewrites MODEL_PARAM → MODEL_PARAM_DATA in place without a
             // second initializer-execution pass.
+            Stage("InferModelShapes");
             var shapeInferencer = new ShapeInferenceInterpreter(ctx);
             var concreteModel = Shorokoo.Core.Nodes.Processors.Fast.FastApplyModelParamValues.Process(concreteArch, paramValuesById);
             var modelShapeInfo = shapeInferencer.Infer(concreteModel, modelInputExemplars);
@@ -2743,8 +2779,10 @@ namespace Shorokoo
             // Step 4: Shape inference + memory-aware graph optimization. The optimizer
             // alternates Rematerializer and MemoryAwareScheduler under a combined
             // compute+memory metric, only committing transforms that strictly improve it.
+            Stage("InferTrainingStepShapes");
             var shapeInfo = shapeInferencer.Infer(graph, allInputs);
             var baselineEval = new Shorokoo.Core.AutoDiffCheckpointing.GraphEvaluator().Evaluate(graph, shapeInfo);
+            Stage("OptimizeTrainingStepGraph");
             var optimizer = new MemoryAwareGraphOptimizer(shapeInference: shapeInferencer);
             var optResult = optimizer.OptimizeWithShapeInfo(graph, shapeInfo);
             PreOptimizationEval = baselineEval;
@@ -2756,6 +2794,7 @@ namespace Shorokoo
             PreOptimizationGraph = new ComputationGraph(graph, GraphKind.ConcreteModel);
             TrainingStepPureGraph = new ComputationGraph(optResult.OptimizedGraph, GraphKind.ConcreteModel);
             _trainingStepWorkGraph = null;
+            Stage("Done");
         }
     }
 

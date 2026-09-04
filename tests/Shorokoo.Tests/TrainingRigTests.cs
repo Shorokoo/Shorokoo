@@ -2894,3 +2894,90 @@ public class TrainingRigHyperparameterShapeCoverageTests
         finally { if (File.Exists(path)) File.Delete(path); }
     }
 }
+
+[Trait("Domain", "Training")]
+[Trait("Purpose", "Coverage")]
+public class BuildProgressCoverageTests
+{
+    private static (List<BuildProgress> Reports, ComputeContext Context) Watched()
+    {
+        var reports = new List<BuildProgress>();
+        return (reports, new ComputeContext { Progress = new BuildProgressHandler(reports.Add) });
+    }
+
+    private static List<BuildPhase> PhaseRuns(List<BuildProgress> reports)
+    {
+        var runs = new List<BuildPhase>();
+        foreach (var r in reports)
+            if (runs.Count == 0 || runs[^1] != r.Phase) runs.Add(r.Phase);
+        return runs;
+    }
+
+    private static bool Reported(List<BuildProgress> reports, BuildPhase phase, string stage)
+        => reports.Any(r => r.Phase == phase && r.Stage == stage);
+
+    [Fact]
+    public void TestFromScratchReportsEveryBuildPhaseInOrderCoverage()
+    {
+        var reports = new List<BuildProgress>();
+        var reportThreads = new List<int>();
+        var ctx = new ComputeContext
+        {
+            Progress = new BuildProgressHandler(r =>
+            {
+                reports.Add(r);
+                reportThreads.Add(Environment.CurrentManagedThreadId);
+            }),
+        };
+        var (sample, _, _) = ScalarMultiplyBatches();
+        var buildThread = Environment.CurrentManagedThreadId;
+
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            AdamWOptimizer.ComputationGraph, sample,
+            new AdamWOptimizerHyperparameters { LearningRate = 0.1f }, mergeContext: ctx);
+
+        Assert.NotNull(rig.TrainingStepPureGraph);
+        Assert.Equal((BuildPhase[])[BuildPhase.Concretize, BuildPhase.TrainingStep, BuildPhase.Initialize],
+            PhaseRuns(reports).ToArray());
+        Assert.True(Reported(reports, BuildPhase.Concretize, "InlineModulesAndFunctions"));
+        Assert.True(Reported(reports, BuildPhase.Concretize, "ExpandAutoGrad"));
+        Assert.True(Reported(reports, BuildPhase.TrainingStep, "NormalizeOptimizerGraph"));
+        Assert.True(Reported(reports, BuildPhase.TrainingStep, "ComposeModelLossAndAutoGrad"));
+        Assert.True(Reported(reports, BuildPhase.TrainingStep, "ExpandAutoGrad"));
+        Assert.True(Reported(reports, BuildPhase.Initialize, "InitializeModelParams"));
+        Assert.True(Reported(reports, BuildPhase.Initialize, "InitializeOptimizerState"));
+        Assert.True(Reported(reports, BuildPhase.Initialize, "OptimizeTrainingStepGraph"));
+        Assert.Equal(BuildPhase.Initialize, reports[^1].Phase);
+        Assert.Equal("Done", reports[^1].Stage);
+        Assert.Equal(reports.Select(r => r.Elapsed).OrderBy(e => e), reports.Select(r => r.Elapsed));
+        Assert.Equal(reports.Count, reportThreads.Count);
+        Assert.All(reportThreads, t => Assert.Equal(buildThread, t));
+    }
+
+    [Fact]
+    public void TestToConcreteArchitectureReportsLoweringStagesAndIsSilentWithoutASinkCoverage()
+    {
+        var (reports, ctx) = Watched();
+        var model = ScalarMultiplyModel.ComputationGraph;
+        var hints = new ModelParamList(
+            [new KeyValuePair<string, TensorData>(model.ToInternal().Inputs[0].ToString(), TensorData([4L], new float[4]))],
+            ModelParamType.InputParam);
+
+        Assert.NotNull(model.ToConcreteArchitecture(hints, ctx));
+        Assert.All(reports, r => Assert.Equal(BuildPhase.Concretize, r.Phase));
+        Assert.Equal("Clone", reports[0].Stage);
+        Assert.Equal("SimplifyAfterAutoGrad", reports[^1].Stage);
+        Assert.Equal("[   1.5s] Concretize: Clone",
+            new BuildProgress(BuildPhase.Concretize, "Clone", TimeSpan.FromSeconds(1.5)).ToString());
+
+        var silent = new ComputeContext();
+        Assert.Null(silent.Progress);
+        Assert.NotNull(model.ToConcreteArchitecture(hints, silent));
+
+        var second = new List<BuildProgress>();
+        ctx.Progress = new BuildProgressHandler(second.Add);
+        Assert.NotNull(model.ToConcreteArchitecture(hints, ctx));
+        Assert.Equal(reports.Select(r => r.Stage), second.Select(r => r.Stage));
+    }
+}

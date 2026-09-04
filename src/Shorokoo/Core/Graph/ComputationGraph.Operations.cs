@@ -39,7 +39,9 @@ namespace Shorokoo.Graph
         /// </summary>
         /// <param name="inputHints">Sample inputs (names + shapes/values) used as shape hints and as
         /// QEE/ORT resolution fallbacks during lowering; build one with <see cref="FromOrderedInputs"/>.</param>
-        /// <param name="computeContext">Optional context used to resolve values while lowering.</param>
+        /// <param name="computeContext">Optional context used to resolve values while lowering. Set its
+        /// <see cref="ComputeContext.Progress"/> to watch a long lowering pass by pass — see
+        /// <see cref="BuildProgress"/>.</param>
         /// <param name="debugRequests">Optional hook to dump the graph at each lowering stage.</param>
         /// <returns>A fully inlined, concrete architecture graph.</returns>
         public ComputationGraph ToConcreteArchitecture(

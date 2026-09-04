@@ -412,7 +412,9 @@ namespace Shorokoo
         /// declared order) rather than as a named set. Each <see cref="Hyperparameter"/>'s kind still
         /// decides baked-vs-runtime; a bare <c>float</c> implicitly converts to a baked constant, so
         /// <c>FromScratch(model, loss, opt, sample, 0.01f)</c> bakes a single learning rate. Generated
-        /// graph fields fall back to <c>hyperparam_{i}</c> names since no names are supplied.
+        /// graph fields fall back to <c>hyperparam_{i}</c> names since no names are supplied. To pass an
+        /// <see cref="RngConfig"/> or the compute contexts as well, hand the values to the overload below
+        /// as an array: <c>FromScratch(model, loss, opt, sample, [0.01f], rngConfig)</c>.
         /// </summary>
         public static TrainingRig FromScratch(
             ComputationGraph modelGraph,
@@ -429,7 +431,9 @@ namespace Shorokoo
         /// The values are an explicit array in the slot the named set occupies, so the optional arguments
         /// follow in the same order as on the named-set overload rather than being pushed in front of a
         /// trailing <c>params</c> array; each defaults to its neutral value
-        /// (<see cref="RngConfig.Default"/> / <see cref="ComputeContext.Default"/>).
+        /// (<see cref="RngConfig.Default"/> / <see cref="ComputeContext.Default"/>). Supplying any of them
+        /// selects this overload — an array alone still binds the <c>params</c> overload above, to the
+        /// same effect — and an empty array configures an optimizer that takes no hyperparameters.
         /// </summary>
         public static TrainingRig FromScratch(
             ComputationGraph modelGraph,

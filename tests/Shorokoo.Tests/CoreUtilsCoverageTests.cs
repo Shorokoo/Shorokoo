@@ -6,6 +6,7 @@ using Shorokoo.Core.Factory.OpsFactories;
 using Shorokoo.Core.Inference;
 using Shorokoo.Core.Inference.Abstractions;
 using Shorokoo.Modules.Optimizers;
+using Shorokoo.OnnxRuntime;
 
 namespace Shorokoo.Tests;
 
@@ -342,26 +343,34 @@ public class CoreUtilsCoverageTests
 
     // A params array behind an optional parameter binds positional arguments to the optionals,
     // so the values silently land in the wrong parameters (or fail resolution somewhere unhelpful).
+    private const BindingFlags DeclaredMembers = BindingFlags.Public | BindingFlags.NonPublic |
+        BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;
+
     private static IEnumerable<string> ParamsBehindOptional(Type type) =>
-        from member in type
-            .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly)
-            .Cast<MethodBase>().Concat(type.GetConstructors())
+        from member in type.GetMethods(DeclaredMembers).Cast<MethodBase>()
+            .Concat(type.GetConstructors(DeclaredMembers))
+        where member.IsPublic || member.IsFamily || member.IsFamilyOrAssembly
         let ps = member.GetParameters()
-        where ps.Length > 1 && ps[^1].IsDefined(typeof(ParamArrayAttribute), false)
-              && ps[..^1].Any(p => p.IsOptional)
+        where ps.Length > 1 && ps[..^1].Any(p => p.IsOptional)
+              && ps[^1].GetCustomAttributesData().Any(a =>
+                     a.AttributeType.Name is "ParamArrayAttribute" or "ParamCollectionAttribute")
         select $"{type.FullName}.{member.Name}";
 
-    private sealed class ParamsBehindOptionalBait
+    private class ParamsBehindOptionalBait
     {
-        public static void Trap(int a, int b = 0, params int[] rest) { _ = (a, b, rest); }
+        public static void ArrayTrap(int a, int b = 0, params int[] rest) { }
+        protected static void CollectionTrap(int a, int b = 0, params List<int> rest) { }
     }
 
     [Fact]
     public void TestNoPublicApiPlacesAParamsArrayBehindAnOptionalParameter()
     {
-        Assembly[] assemblies = [typeof(RngConfig).Assembly, typeof(SGDOptimizer).Assembly];
-        Assert.NotEmpty(ParamsBehindOptional(typeof(ParamsBehindOptionalBait)));
-        Assert.Empty(assemblies.SelectMany(a => a.GetExportedTypes()).SelectMany(ParamsBehindOptional));
+        Assembly[] assemblies =
+            [typeof(RngConfig).Assembly, typeof(SGDOptimizer).Assembly, typeof(OrtSessionFactory).Assembly];
+        var exported = assemblies.SelectMany(a => a.GetExportedTypes()).ToArray();
+        Assert.Equal(2, ParamsBehindOptional(typeof(ParamsBehindOptionalBait)).Count());
+        Assert.True(exported.Length > 100);
+        Assert.Empty(exported.SelectMany(ParamsBehindOptional));
     }
 
     [Fact]

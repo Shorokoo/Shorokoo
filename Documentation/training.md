@@ -305,7 +305,9 @@ rig.TrainStep(ckpt,
 > `params` array behind the optional `rngConfig` / `mergeContext` / `runtimeContext`. Pass the values
 > as an explicit array in the hyperparameter slot and let the optional arguments follow:
 > `FromScratch(model, loss, opt, sample, rng, null, null, 0.05f)` →
-> `FromScratch(model, loss, opt, sample, [0.05f], rng)`. The bare
+> `FromScratch(model, loss, opt, sample, [0.05f], rng)`, and a hyperparameter-less
+> `FromScratch(model, loss, opt, sample, rng)` (the old empty `params` expansion) →
+> `FromScratch(model, loss, opt, sample, [], rng)`. The bare
 > `FromScratch(model, loss, opt, sample, 0.05f)` params form is unchanged.
 
 > **Migration (breaking).** `Hyperparameter.BakedValue` is now the `TensorData` the constant was built
@@ -342,14 +344,15 @@ public static TrainingRig FromScratch(
     ComputeContext? mergeContext = null,      // build/merge-phase context (rig.MergeContext); null ⇒ Default
     ComputeContext? runtimeContext = null);   // compile/run context (rig.RuntimeContext); null ⇒ Default
 
-// Lower-level: positional values (a float bakes a constant, a Schedule schedules it). The params
-// form takes the values and nothing else; passing them as an explicit array instead opens the same
-// optional rngConfig / contexts the named-set overload has, in the same order and the same slots:
+// Lower-level: positional values (a float bakes a constant, a Schedule schedules it). The params form
+// takes the values and nothing else; supplying an rngConfig or either context selects the array form,
+// which takes them in the same order and the same slots as the named-set overload above:
 //   FromScratch(model, loss, opt, sampleInputs, params Hyperparameter[] hyperparameters)
 //   FromScratch(model, loss, opt, sampleInputs, Hyperparameter[] hyperparameters,
 //               RngConfig? rngConfig = null,
 //               ComputeContext? mergeContext = null, ComputeContext? runtimeContext = null)
-// Every one of these has a twin taking a ModelParamList (model.FromOrderedInputs([…])) for sampleInputs.
+// Each of the three forms above also has a twin taking a ModelParamList (model.FromOrderedInputs([…]))
+// for sampleInputs.
 
 // Fresh initial checkpoint. Optimizer state is initialized at each hyperparameter's value at the
 // initial counters. Fails loud if the optimizer's state initializer reads a Runtime hyper (its value

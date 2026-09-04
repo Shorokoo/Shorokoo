@@ -373,13 +373,17 @@ public class TrainingRigFromScratchCoverageTests
         Assert.Throws<ArgumentNullException>(() => TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             (ModelParamList)null!, [0.05f], cfg));
+        Assert.Throws<ArgumentNullException>(() => TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            (ModelParamList)null!, 0.05f));
 
-        var defaulted = TrainingRig.FromScratch(
+        // Six arguments reach only the array overload, so the omitted contexts are its own defaults.
+        var seededOnly = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
-            SGDOptimizer.ComputationGraph, sample, [0.05f]);
-        Assert.Equal(RngConfig.Default.MasterSeed, defaulted.RngConfig.MasterSeed);
-        Assert.Same(ComputeContext.Default, defaulted.MergeContext);
-        Assert.Same(ComputeContext.Default, defaulted.RuntimeContext);
+            SGDOptimizer.ComputationGraph, sample, [0.05f], cfg);
+        Assert.Equal(7UL, seededOnly.RngConfig.MasterSeed);
+        Assert.Same(ComputeContext.Default, seededOnly.MergeContext);
+        Assert.Same(ComputeContext.Default, seededOnly.RuntimeContext);
     }
 
     [Fact]

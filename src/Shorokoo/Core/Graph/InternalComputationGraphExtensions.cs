@@ -110,6 +110,10 @@ namespace Shorokoo.Graph
             FastConvertModelParamIdRefToModelParam.Process(
                 fastGraph, identifierTemplatesInfo, inputHints, computeContext);
             DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterProcessTrainableParameters);
+            // A param whose shape needs an input's value cannot be built without a hint for that
+            // input. That is user error, so name the input before the op check below reports the
+            // leftover id-ref node in terms of the pipeline.
+            FastConvertModelParamIdRefToModelParam.ThrowIfAParamShapeNeedsAnUnhintedInput(fastGraph, inputHints);
             AssertFastGraphDoesNotContainOps(fastGraph,
                 new[] { InternalOpCodes.MODEL_PARAM_ID_REF },
                 "After FastConvertModelParamIdRefToModelParam");
@@ -668,9 +672,9 @@ namespace Shorokoo.Graph
             if (found.Count > 10)
                 errorMsg.AppendLine($"  ... and {found.Count - 10} more");
 
-            // No Debug.Fail here: this check is reachable from public API (e.g. a
-            // ToConcreteArchitecture call missing an input hint a trainable-param shape needs),
-            // and an assertion aborts a Debug build before this exception is ever constructed.
+            // No Debug.Fail here: every stage check that calls this is reachable from public API,
+            // and an assertion aborts a Debug build before this exception is ever constructed —
+            // leaving Debug and Release to disagree on the same mistake.
             throw new System.InvalidOperationException(errorMsg.ToString());
         }
     }

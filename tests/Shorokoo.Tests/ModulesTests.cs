@@ -572,15 +572,15 @@ public class ModulesCoverageTests
             [TensorData(DType.Int64, [], 3L), TensorData(DType.Int64, [], 4L)], input);
     }
 
-    /// <summary>Omitting the hint for an input a trainable-param shape derives from is a user mistake,
-    /// and it must surface as a catchable exception naming that input in every configuration — never
-    /// as an assertion, which outside a test host kills the process.</summary>
+    private static string ConcretizeWithNoHints(ComputationGraph graph)
+        => Assert.IsType<InvalidOperationException>(Record.Exception(
+            () => graph.ToConcreteArchitecture(new ModelParamList([])))).Message;
+
     [Fact]
     public void TestConcretizingWithoutTheHintAParamShapeNeedsFailsWithACatchableExceptionNotAnAssertion()
     {
-        var ex = Assert.IsType<InvalidOperationException>(Record.Exception(
-            () => SimplestLayer.ComputationGraph.ToConcreteArchitecture(new ModelParamList([]))));
-        Assert.Contains("input 'input'", ex.Message);
+        Assert.Contains("input 'input'", ConcretizeWithNoHints(SimplestLayer.ComputationGraph));
+        Assert.Contains("input 'input'", ConcretizeWithNoHints(ConditionalTrainableParamInLoopLayer.ComputationGraph));
     }
 
     [Fact]

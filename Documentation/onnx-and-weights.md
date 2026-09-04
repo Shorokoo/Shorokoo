@@ -68,7 +68,8 @@ parameters is refused up front (`XD008`) with the actual vs required kind named.
 - The passed `ModelProto` is left unmodified.
 
 `BuildOnnxModel(ComputationGraph graph, OpSetVersion opset = OPS_21,
-bool prepForOnnx = false)` requires a
+bool prepForOnnx = false,
+RepresentativeInputForm representativeForm = Passthrough)` requires a
 `GraphKind.ConcreteModel` graph — anything else fails fast with `FW045` naming the
 actual and required kinds (only a concrete model can satisfy the vanilla-ONNX
 guarantee). It clones the graph (no mutation), lowers it for ONNX, and emits
@@ -79,6 +80,17 @@ function bodies) contains operators introduced after opset 21 (e.g.
 just far enough to cover them. Models up to opset 26 execute on the bundled
 ONNX Runtime 1.26 — see [limitations.md](limitations.md) for the stamping
 policy.
+
+`representativeForm` (`RepresentativeInputForm`, namespace
+`Shorokoo.Core.Factory`) decides what becomes of the model's **representative
+input shapes** — the dims each input was concretized at, recorded on the graph's
+input nodes and always dims-only (no values). `Passthrough` (the default) leaves
+them out of the exported file; `VanillaMetadata` writes each input's
+representative shape into that input's own graph-input `ValueInfoProto` metadata
+(key `shrk_repr_input`), which `OnnxModelImporter` re-attaches on import. It is
+plain metadata: the `ValueInfoProto`'s own dims stay symbolic either way, so no
+external consumer sees a frozen batch dimension. `Persistence.ExportOnnx` below
+passes `VanillaMetadata`.
 
 ### The vanilla dialect is a guarantee
 
@@ -393,7 +405,9 @@ imported ONNX graph does not carry, so it leaves the ONNX names unchanged.
 `Persistence.Inspect(path)` (namespace `Shorokoo`) answers "what is this file?"
 **without loading it**: it identifies any Shorokoo-produced artifact and
 summarizes its contents from headers/prefixes only, so inspecting a multi-GB
-file is fast and cheap.
+file is fast and cheap. A **directory** path is inspected too — as the `.skpt`
+[directory form](skpt-checkpoints.md#the-directory-form), with
+`result.FileSizeBytes` reporting the total bytes of the directory's files.
 
 ```csharp
 ArtifactInspection result = Persistence.Inspect("run.safetensors");
@@ -418,13 +432,17 @@ Recognized formats and what is reported:
 | `TrainingCheckpoint` | the `__shorokoo_checkpoint__` marker tensor in a SafeTensors header | checkpoint format version, the run counters (global step, epoch, batch index), and the per-section (`trainable` / `model_state` / `opt_state`) tensor listing (`result.TrainingCheckpoint`); `result.SafeTensors` is populated too |
 | `CompressedSafeTensors` | Zstd frame magic whose decompressed content starts with a valid SafeTensors length prefix + JSON header (`.zsafetensor`, written by `CompressedFormatUtils.SaveCompressedSafeTensors`) | the same details as `SafeTensors` (`result.SafeTensors`), read by stream-decompressing only the prefix and header — the tensor payload is never decompressed; sizes describe the decompressed content |
 | `SkptCheckpoint` | a zip archive — or a **directory** (the `.skpt` directory form) — with a root `config.json` manifest declaring format `"skpt"` (see [skpt-checkpoints.md](skpt-checkpoints.md)) | whole-archive metadata (`.skpt` version, created time, producer), the model registry (per model: entry path, format, stage, graph hash), the data registry (per entry: storage format, compression, declared size, recorded sha256 — reported **unverified**), and the mapping-set names (`result.Skpt`) |
-| `NotRecognized` | anything else — including a zip without a readable `skpt` manifest | a structured result — **content problems never throw**; a missing file and I/O errors (permissions, disk) do |
+| `NotRecognized` | anything else — including a zip without a readable `skpt` manifest, and a directory with no root `config.json`, one whose `config.json` is too large to be a manifest, or one whose manifest declares another format | a structured result — **content problems never throw**; a missing file and I/O errors (permissions, disk) do |
 
 - Reads are bounded to headers and prefixes; tensor payload bytes are never
-  materialized. The one exception is a checkpoint's 32-byte marker (the format
-  version and run counters live there). For a `.skpt`, only the zip central directory
-  and the `config.json` entry are read — the recorded per-entry sha256s are
-  reported as written, never checked (a full `Persistence.Load` verifies them).
+  materialized. The one exception is a checkpoint's 16-byte marker (an `int64[2]`
+  holding the format version and the global step) plus the presence-gated epoch /
+  batch / loss scalars beside it, 8 bytes each. For a `.skpt`, only the zip central
+  directory and the `config.json` entry are read — and for the **directory form**,
+  the directory's files are enumerated, its file listing playing the central
+  directory's role, and the root `config.json` read the same way. The recorded
+  per-entry sha256s are reported as written, never checked (a full
+  `Persistence.Load` verifies them).
   Because the payload is untouched, `Inspect` also succeeds on a file whose
   payload is corrupt — it reports the header while a full load would fail the
   SHA-256 check.
@@ -432,8 +450,10 @@ Recognized formats and what is reported:
   alone, e.g. declared tensor extents pointing past the end of the file
   (truncation), trailing bytes beyond the declared data, an unreadable /
   future-version container header, or — for a `.skpt` — a manifest entry with
-  no matching archive entry (and vice versa), a compressed entry where STORED
-  is expected, unknown manifest keys, and empty registries. Through the
+  no matching archive entry (and vice versa), a manifest entry path that escapes
+  the checkpoint root (reported, never thrown — `Inspect` never resolves it, and a
+  load refuses it), a compressed entry where STORED is expected, unknown manifest
+  keys, and empty registries. Through the
   compression layer of a `.zsafetensor` only header-internal checks apply — a
   compressed file's size has no fixed relation to the decompressed extents, so
   truncation of the tensor payload is not detectable from the header.

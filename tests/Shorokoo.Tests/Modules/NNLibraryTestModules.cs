@@ -491,7 +491,7 @@ public partial class NNLayerNormNormalizes
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
-        var y = LayerNorm.Call(Scalar(1L), Scalar(1e-5f), x);
+        var y = LayerNorm.Call(Scalar(1L), Scalar(true), Scalar(1e-5f), x);
         Vector<int64> lastAxis = [Scalar(1L)];
         var mean = y.Reduce(ReduceKind.Mean, lastAxis, keepDims: false);
         var variance = (y * y).Reduce(ReduceKind.Mean, lastAxis, keepDims: false) - mean * mean;
@@ -721,7 +721,7 @@ public partial class NNGroupNormG1MatchesLayerNorm
     {
         var eps = Scalar(1e-5f);
         var g1 = GroupNorm.Call(Scalar(1L), Scalar(false), eps, x);
-        var ln = LayerNorm.Call(Scalar(3L), eps, x);   // last C·H·W = rank-1 dims
+        var ln = LayerNorm.Call(Scalar(3L), Scalar(false), eps, x);   // last C·H·W = rank-1 dims
 
         var pen = (g1 - ln).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
         var scale = Scalar(1f) + ln.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
@@ -876,6 +876,37 @@ public partial class NNGroupNormAffineTrueParamModel
         var y = GroupNorm.Model(Scalar(2L), Scalar(true), Scalar(1e-5f)).Call(input * w);
         Vector<int64> axes = [Scalar(2L), Scalar(3L)];
         return y.Reduce(ReduceKind.Mean, axes, keepDims: false);
+    }
+}
+
+/// <summary>§7-2(b) LayerNorm(normalizedDims=2, affine:false) rig model over [N, D1, D2]: scalar
+/// pre-weight → LayerNorm → per-sample mean. γ/β are pruned (dead branch), so the only trainable param
+/// is the scalar weight.</summary>
+[Module]
+public partial class NNLayerNormAffineFalseParamModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var w = InitScalarWeight.Init(Vector(1L));
+        var y = LayerNorm.Model(Scalar(2L), Scalar(false), Scalar(1e-5f)).Call(input * w);
+        Vector<int64> tailAxes = [Scalar(1L), Scalar(2L)];
+        return y.Reduce(ReduceKind.Mean, tailAxes, keepDims: false);
+    }
+}
+
+/// <summary>§7-2(b) LayerNorm(normalizedDims=2, affine:true) rig model over [N, D1, D2]: scalar
+/// pre-weight → LayerNorm → per-sample mean. γ/β survive, so the model exposes 3 trainable params
+/// (scalar weight + γ + β), each materializing to D1·D2 — the discriminator against a paramShape that
+/// collapsed to the last dim alone — and both must take gradient through the live IfElse branch.</summary>
+[Module]
+public partial class NNLayerNormAffineTrueParamModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var w = InitScalarWeight.Init(Vector(1L));
+        var y = LayerNorm.Model(Scalar(2L), Scalar(true), Scalar(1e-5f)).Call(input * w);
+        Vector<int64> tailAxes = [Scalar(1L), Scalar(2L)];
+        return y.Reduce(ReduceKind.Mean, tailAxes, keepDims: false);
     }
 }
 

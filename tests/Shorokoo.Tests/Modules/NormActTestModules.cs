@@ -19,7 +19,7 @@ public partial class RMSNormNormalizes
 {
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
-        var y = RMSNorm.Call(Scalar(1L), Scalar(1e-5f), x);
+        var y = RMSNorm.Call(Scalar(1L), Scalar(true), Scalar(1e-5f), x);
         Vector<int64> lastAxis = [Scalar(1L)];
         var ms = (y * y).Reduce(ReduceKind.Mean, lastAxis, keepDims: false);
         var pen = (ms - Scalar(1f)).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
@@ -34,7 +34,7 @@ public partial class RMSNormMatchesManual
     public static Scalar<bit> Inline(Tensor<float32> x)
     {
         var eps = Scalar(1e-5f);
-        var y = RMSNorm.Call(Scalar(1L), eps, x);
+        var y = RMSNorm.Call(Scalar(1L), Scalar(true), eps, x);
 
         Vector<int64> lastAxis = [Scalar(1L)];
         var ms = (x * x).Reduce(ReduceKind.Mean, lastAxis, keepDims: true);
@@ -42,6 +42,39 @@ public partial class RMSNormMatchesManual
 
         var diff = (y - yRef).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
         return diff < Scalar(1e-3f) * (Scalar(1f) + yRef.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar());
+    }
+}
+
+/// <summary>RMSNorm(affine:false) ALONE in a graph — the issue's own repro, and the only module here
+/// whose every trainable param is pruned — must still concretize and normalize: unit-RMS rows
+/// (mean(y²) ≈ 1). Pins the all-pruned concretization path for a multiplicative gate.</summary>
+[Module]
+public partial class RMSNormGainFreeNormalizes
+{
+    public static Scalar<bit> Inline(Tensor<float32> x)
+    {
+        var y = RMSNorm.Call(Scalar(1L), Scalar(false), Scalar(1e-5f), x);
+        Vector<int64> lastAxis = [Scalar(1L)];
+        var ms = (y * y).Reduce(ReduceKind.Mean, lastAxis, keepDims: false);
+        var pen = (ms - Scalar(1f)).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+        return pen < Scalar(1e-2f);
+    }
+}
+
+/// <summary>RMSNorm's affine:false branch is the bare normalizer, not something else: at init (gain=1)
+/// it equals affine:true bit-for-bit. Over the last TWO dims, so the multi-axis Range path runs.
+/// Composed with RMSNormMatchesManual (which pins the true branch against the closed form) this pins
+/// the false branch without re-deriving the formula.</summary>
+[Module]
+public partial class RMSNormGainFreeEqualsGainAtInit
+{
+    public static Scalar<bit> Inline(Tensor<float32> x)
+    {
+        var eps = Scalar(1e-5f);
+        var gainFree = RMSNorm.Call(Scalar(2L), Scalar(false), eps, x);
+        var gained = RMSNorm.Call(Scalar(2L), Scalar(true), eps, x);
+        var pen = (gainFree - gained).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        return pen < Scalar(1e-6f);
     }
 }
 
@@ -365,9 +398,40 @@ public partial class NormActRMSNormModel
 {
     public static Tensor<float32> Inline(Tensor<float32> input)
     {
-        var y = RMSNorm.Model(Scalar(1L), Scalar(1e-5f)).Call(input);
+        var y = RMSNorm.Model(Scalar(1L), Scalar(true), Scalar(1e-5f)).Call(input);
         Vector<int64> lastAxis = [Scalar(1L)];
         return y.Reduce(ReduceKind.Mean, lastAxis, keepDims: false);
+    }
+}
+
+/// <summary>RMSNorm(normalizedDims=2, affine:false) rig model over [N, D1, D2]: scalar pre-weight →
+/// RMSNorm → per-sample mean. The gain sits on the dead branch and is pruned, so the only trainable
+/// param is the scalar weight.</summary>
+[Module]
+public partial class NormActRMSNormAffineFalseParamModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var w = InitScalarWeight.Init(Vector(1L));
+        var y = RMSNorm.Model(Scalar(2L), Scalar(false), Scalar(1e-5f)).Call(input * w);
+        Vector<int64> tailAxes = [Scalar(1L), Scalar(2L)];
+        return y.Reduce(ReduceKind.Mean, tailAxes, keepDims: false);
+    }
+}
+
+/// <summary>RMSNorm(normalizedDims=2, affine:true) rig model over [N, D1, D2]: scalar pre-weight →
+/// RMSNorm → per-sample mean. The gain survives, so the model exposes 2 trainable params (scalar
+/// weight + gain), and the gain materializes to D1·D2 — the discriminator against a paramShape that
+/// collapsed to the last dim alone.</summary>
+[Module]
+public partial class NormActRMSNormAffineTrueParamModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var w = InitScalarWeight.Init(Vector(1L));
+        var y = RMSNorm.Model(Scalar(2L), Scalar(true), Scalar(1e-5f)).Call(input * w);
+        Vector<int64> tailAxes = [Scalar(1L), Scalar(2L)];
+        return y.Reduce(ReduceKind.Mean, tailAxes, keepDims: false);
     }
 }
 

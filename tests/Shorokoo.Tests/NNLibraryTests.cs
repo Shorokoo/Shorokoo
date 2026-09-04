@@ -1228,6 +1228,37 @@ public class NNLibraryBatchNormEvalTrainingCoverageTests
         Assert.Equal(1, TrainableFieldCount(NNGroupNormAffineFalseParamModel.ComputationGraph, normInput));
         Assert.Equal(3, TrainableFieldCount(NNGroupNormAffineTrueParamModel.ComputationGraph, normInput));
     }
+
+    /// <summary>LayerNorm's affine gate over [2, 3, 4] with normalizedDims=2: affine:false prunes γ/β to
+    /// leave only the upstream scalar weight; affine:true keeps three params, γ and β each materialize to
+    /// D1·D2 = 12 (not the last dim alone), and both move after one step — the live IfElse branch carries
+    /// gradient. Only the length-12 params are checked for movement: LayerNorm is scale-invariant, so the
+    /// upstream scalar weight takes no gradient through it. Targets are nonzero because LayerNorm's output
+    /// is zero-mean over the normalized dims, so against a zero target the loss — and every gradient with
+    /// it — would vanish at init.</summary>
+    [Fact]
+    public void TestLayerNormAffineOnOff()
+    {
+        var lnInput = TensorData([2L, 3L, 4L], Ramp(24));
+        Assert.Equal(1, TrainableFieldCount(NNLayerNormAffineFalseParamModel.ComputationGraph, lnInput));
+
+        var rig = TrainingRig.FromScratch(
+            NNLayerNormAffineTrueParamModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, lnInput)], 0.5f);
+        var initial = rig.CreateInitialCheckpoint();
+        var step = rig.TrainStep(initial,
+            MakeBatch("input", "ModelInput", lnInput),
+            MakeBatch("targets", "Target", TensorData([2L], [1f, 2f])));
+
+        Assert.Equal(3, rig.TrainableParamStructDef.Fields.Length);
+        Assert.Equal([1, 12, 12], rig.TrainableParamStructDef.Fields
+            .Select(f => Floats(initial.TrainableParams.Fields[f.Name]).Length).Order());
+        foreach (var field in rig.TrainableParamStructDef.Fields
+                     .Where(f => Floats(initial.TrainableParams.Fields[f.Name]).Length == 12))
+            Assert.True(Floats(initial.TrainableParams.Fields[field.Name])
+                .Zip(Floats(step.TrainableParams.Fields[field.Name]))
+                .Any(p => MathF.Abs(p.First - p.Second) > 1e-7f));
+    }
 }
 
 /// <summary>BatchNorm train-path normalization, EMA running stats and track/selection, plus the

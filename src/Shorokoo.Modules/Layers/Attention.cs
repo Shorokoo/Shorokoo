@@ -212,10 +212,10 @@ public partial class TransformerEncoderLayer
         [Hyper] Scalar<int64> ffnDim,
         [Hyper] Scalar<bit> useBias)
     {
-        var attnIn = LayerNorm.Call(1L, Scalar(1e-5f), x);
+        var attnIn = LayerNorm.Call(1L, true, Scalar(1e-5f), x);
         var h = x + MultiHeadAttention.Call(embedDim, numHeads, useBias, false, attnIn, attnIn, attnIn);
 
-        var ffIn = LayerNorm.Call(1L, Scalar(1e-5f), h);
+        var ffIn = LayerNorm.Call(1L, true, Scalar(1e-5f), h);
 
         var w1 = XavierUniform.Init([embedDim, ffnDim]);
         var w2 = XavierUniform.Init([ffnDim, embedDim]);
@@ -265,15 +265,15 @@ public partial class TransformerDecoderLayer
         [Hyper] Scalar<bit> useBias)
     {
         // Sublayer 1: masked (causal) self-attention over tgt, pre-LN.
-        var saIn = LayerNorm.Call(1L, Scalar(1e-5f), tgt);
+        var saIn = LayerNorm.Call(1L, true, Scalar(1e-5f), tgt);
         var h = tgt + MultiHeadAttention.Call(embedDim, numHeads, useBias, true, saIn, saIn, saIn);
 
         // Sublayer 2: cross-attention — query = LN(h), key = value = memory (raw), non-causal.
-        var caIn = LayerNorm.Call(1L, Scalar(1e-5f), h);
+        var caIn = LayerNorm.Call(1L, true, Scalar(1e-5f), h);
         var h2 = h + MultiHeadAttention.Call(embedDim, numHeads, useBias, false, caIn, memory, memory);
 
         // Sublayer 3: position-wise GELU FFN, pre-LN (mirrors TransformerEncoderLayer).
-        var ffIn = LayerNorm.Call(1L, Scalar(1e-5f), h2);
+        var ffIn = LayerNorm.Call(1L, true, Scalar(1e-5f), h2);
 
         var w1 = XavierUniform.Init([embedDim, ffnDim]);
         var w2 = XavierUniform.Init([ffnDim, embedDim]);

@@ -93,6 +93,18 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>A gated trainable parameter, as in <c>Linear</c>'s <c>useBias</c>: the bias exists
+    /// only on the <c>true</c> branch, so a <c>false</c> concretization hint prunes it.</summary>
+    [Module]
+    public partial class GatedBiasHyperLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<bit> useBias)
+        {
+            var bias = InitSimple.Init(input.ShapeTensor());
+            return useBias.IfElse(input + bias, input);
+        }
+    }
+
     [Module]
     public partial class SimpleWithHyperparam
     {

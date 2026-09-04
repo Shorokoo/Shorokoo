@@ -38,9 +38,12 @@ public sealed class RngStreamOverride
 /// that this type therefore does not offer:</para>
 ///
 /// <list type="bullet">
-/// <item><description><see cref="RngConfig.MasterSeed"/> is not recoverable. The identity stores
-/// the <em>derived</em> runtime master key, not the seed it was folded from — so a model can tell
-/// you which keys its streams use, never the seed a caller typed.</description></item>
+/// <item><description>It records a <em>derived</em> key, not <see cref="RngConfig.MasterSeed"/>.
+/// <see cref="RunMasterKey"/> is the runtime sub-master the feeds fold from: the
+/// <see cref="RngConfig.RunMasterSeed"/> that was set, or else <c>Fold(MasterSeed, "runtime")</c> —
+/// an XOR against a fixed constant, which a master seed reads straight back out of. Nothing
+/// records which of the two a given model is, so the key is not in general the seed a caller
+/// typed.</description></item>
 /// <item><description>The <see cref="RngCollection.Params"/> tier is not recorded at all.
 /// Initialization randomness is drawn once and baked into the weights, so nothing in a saved model
 /// consumes it; re-running initialization under a chosen seed takes an explicit
@@ -64,10 +67,11 @@ public sealed class RngIdentity
     /// <summary>The bit generator the model's draws are bound to.</summary>
     public RngAlgorithm Algorithm { get; }
 
-    /// <summary>The runtime-collection master key every non-overridden feed folds from. This is
-    /// the derived key, not <see cref="RngConfig.MasterSeed"/>; supply it as
+    /// <summary>The runtime-collection master key every non-overridden feed folds from — the
+    /// <see cref="RngConfig.RunMasterSeed"/> that was set, or else
+    /// <c>Fold(MasterSeed, "runtime")</c>, with nothing recorded to say which. Supply it as
     /// <see cref="RngConfig.RunMasterSeed"/> to reproduce this model's runtime streams under a
-    /// fresh config.</summary>
+    /// fresh config, rather than working back to a <see cref="RngConfig.MasterSeed"/>.</summary>
     public ulong RunMasterKey { get; }
 
     /// <summary>Every runtime stream the model overrides, in the canonical (path-sorted) order the

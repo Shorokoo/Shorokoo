@@ -2,21 +2,36 @@
 
 Shorokoo supports the standard `ai.onnx` domain up to **opset 26** — the
 maximum implemented by the bundled ONNX Runtime 1.26. Exported models are
-stamped at the **opset-21 baseline**; the exporter then auto-raises
-each model's opset stamp only as far as the post-21 operators actually
-present in the graph require (e.g. a graph containing `RMSNormalization` is
-stamped opset 23; `Attention` is stamped opset 24 because ONNX Runtime's CPU
-kernel registers at 24+). See [limitations.md](limitations.md) for why the baseline stays
-at 21. Every supported operator is listed below — the full opset-21 set plus
-the post-21 additions (`Attention`, `RMSNormalization`, `RotaryEmbedding`
-at opset 23; `Swish`, `TensorScatter` at opset 24; `BitCast`, `CumProd` at
-opset 26) — grouped by family and alphabetical within each family. The three
-columns mean:
+stamped at the **opset-21 baseline**; the exporter then auto-raises each
+model's opset stamp only as far as the graph actually requires. In practice
+that raise is driven by post-21 **attributes** carried by an imported model:
+`DequantizeLinear.output_dtype` and `QuantizeLinear.precision` raise the stamp
+to 23, `Cast`/`CastLike.round_mode` to 24. No post-21 **operator** raises it,
+because none can reach the exporter — `RMSNormalization` and `Swish` lower
+inline to opset-21 primitives, so no such node is ever emitted, and the
+remaining post-21 operators throw at authoring time (see the family notes
+below). A graph you build through `Ops`/`OnnxOp`/`NN` therefore always exports
+at opset 21 — the low-level `NodeBuilder` surface is the exception, since it
+can stamp any attribute a node definition declares, and a node built that way
+raises the stamp exactly as an imported one does. See
+[limitations.md](limitations.md) for why the baseline stays at 21. Every
+operator Shorokoo has a definition for is listed below — the full opset-21 set
+plus the post-21 additions, each at the opset the ONNX spec introduces it
+(`Attention`, `RMSNormalization`, `RotaryEmbedding` at opset 23; `Swish`,
+`TensorScatter` at opset 24; `BitCast`, `CumProd` at opset 26) — grouped by
+family and alphabetical within each family. Each of those spec versions is
+also the exporter's opset floor for the operator, as listed in
+[limitations.md](limitations.md), with one exception: `Attention` is floored at
+24, because ORT 1.26's CPU provider only registers its kernel at opset 24+.
+The three columns mean:
 
 - **Build & run** — the operator can be constructed in a Shorokoo graph
   (definition covers the spec's inputs/outputs/attributes) and executes on the
   ONNX Runtime backend. Footnotes flag spec-legal corners that are restricted
-  in-framework or by ONNX Runtime's CPU kernels.
+  in-framework or by ONNX Runtime's CPU kernels; a ❌ here means the operator
+  cannot be built at all — either Shorokoo has no definition for it, or the
+  definition exists but the authoring entry point throws. The family's note
+  says which.
 - **QEE** — the Quick Execution Engine propagates output **dtype and shape**
   for every supported operator, and concrete **values** for small tensors (see
   [limitations.md](limitations.md) for the size bound). 🟡 here means values
@@ -40,44 +55,44 @@ operator, or operator not available).
 | Asinh | ✅ | ✅ | ✅ |
 | Atan | ✅ | ✅ | ✅ |
 | Atanh | ✅ | ✅ | ✅ |
-| BitCast | ✅ | ✅ | N/A (bit reinterpretation) |
-| Cast | ✅ | 🟡 [1] | ✅ [2] |
-| CastLike | ✅ | 🟡 [1] | ✅ [2] |
-| Ceil | ✅ | ✅ | N/A [3] |
+| BitCast | ❌ [1] | ✅ | N/A (bit reinterpretation) |
+| Cast | ✅ | 🟡 [2] | ✅ [3] |
+| CastLike | ✅ | 🟡 [2] | ✅ [3] |
+| Ceil | ✅ | ✅ | N/A [4] |
 | Celu | ✅ | ✅ | ✅ |
-| Clip | ✅ | ✅ | 🟡 [4] |
+| Clip | ✅ | ✅ | 🟡 [5] |
 | Cos | ✅ | ✅ | ✅ |
 | Cosh | ✅ | ✅ | ✅ |
-| CumProd | ✅ | ✅ | ✅ |
+| CumProd | ❌ [1] | ✅ | ✅ |
 | CumSum | ✅ | ✅ | ✅ |
 | Div | ✅ | ✅ | ✅ |
 | Elu | ✅ | ✅ | ✅ |
-| Erf | ✅ | 🟡 [5] | ✅ |
+| Erf | ✅ | 🟡 [6] | ✅ |
 | Exp | ✅ | ✅ | ✅ |
-| Floor | ✅ | ✅ | N/A [3] |
-| Gelu | ✅ | ✅ | ✅ [6] |
+| Floor | ✅ | ✅ | N/A [4] |
+| Gelu | ✅ | ✅ | ✅ [7] |
 | HardSigmoid | ✅ | ✅ | ✅ |
 | HardSwish | ✅ | ✅ | ✅ |
-| Hardmax | ✅ | ✅ | N/A [7] |
+| Hardmax | ✅ | ✅ | N/A [8] |
 | LeakyRelu | ✅ | ✅ | ✅ |
 | Log | ✅ | ✅ | ✅ |
 | LogSoftmax | ✅ | ✅ | ✅ |
-| Max | ✅ | ✅ | ✅ [8] |
+| Max | ✅ | ✅ | ✅ [9] |
 | Mean | ✅ | ✅ | ✅ |
-| Min | ✅ | ✅ | ✅ [8] |
+| Min | ✅ | ✅ | ✅ [9] |
 | Mish | ✅ | ✅ | ✅ |
-| Mod | ✅ | ✅ | ✅ [9] |
+| Mod | ✅ | ✅ | ✅ [10] |
 | Mul | ✅ | ✅ | ✅ |
 | Neg | ✅ | ✅ | ✅ |
-| PRelu | 🟡 [10] | ✅ | ✅ |
-| Pow | 🟡 [11] | ✅ | ✅ [12] |
+| PRelu | 🟡 [11] | ✅ | ✅ |
+| Pow | 🟡 [12] | ✅ | ✅ [13] |
 | Reciprocal | ✅ | ✅ | ✅ |
-| Relu | 🟡 [13] | ✅ | ✅ |
-| Round | ✅ | ✅ | N/A [3] |
+| Relu | 🟡 [14] | ✅ | ✅ |
+| Round | ✅ | ✅ | N/A [4] |
 | Selu | ✅ | ✅ | ✅ |
 | Shrink | ✅ | ✅ | ✅ |
 | Sigmoid | ✅ | ✅ | ✅ |
-| Sign | ✅ | ✅ | N/A [3] |
+| Sign | ✅ | ✅ | N/A [4] |
 | Sin | ✅ | ✅ | ✅ |
 | Sinh | ✅ | ✅ | ✅ |
 | Softmax | ✅ | ✅ | ✅ |
@@ -86,34 +101,44 @@ operator, or operator not available).
 | Sqrt | ✅ | ✅ | ✅ |
 | Sub | ✅ | ✅ | ✅ |
 | Sum | ✅ | ✅ | ✅ |
-| Swish | 🟡 [14] | ✅ | ✅ |
+| Swish | ✅ [15] | ✅ | ✅ |
 | Tan | ✅ | ✅ | ✅ |
 | Tanh | ✅ | ✅ | ✅ |
 | ThresholdedRelu | ✅ | ✅ | ✅ |
 
-1. QEE stores values in float32/int64 storage, so narrowing-integer wrap and
+1. Cannot be constructed today: `OnnxOp.BitCast` and `OnnxOp.CumProd` throw
+   `NotImplementedException`, and neither has an `NN.*` wrapper. Neither has
+   an opset-21 equivalent — no opset-21 operator reinterprets bit patterns,
+   and a general cumulative product needs a `Scan` multiply body — and
+   Shorokoo emits a single opset-21 model, so there is nothing to lower them
+   to. The op definitions and QEE kernels are retained — that is what the
+   other two columns describe — and the entry points are re-enabled once a
+   runtime registers the operators at a usable opset.
+2. QEE stores values in float32/int64 storage, so narrowing-integer wrap and
    float16/bfloat16 rounding are not modeled in QEE values (real rounding
    happens at execution); string/complex/int4 casts propagate dtype only.
-2. Gradient is cast back to the source dtype; integer-target rounding is
+3. Gradient is cast back to the source dtype; integer-target rounding is
    ignored (straight-through-estimator convention).
-3. Piecewise-constant output — zero gradient everywhere it is defined.
-4. Gradient flows to the data input only; the optional `min`/`max` inputs are
+4. Piecewise-constant output — zero gradient everywhere it is defined.
+5. Gradient flows to the data input only; the optional `min`/`max` inputs are
    treated as constants.
-5. QEE values for float inputs only; integer inputs propagate shape/dtype.
-6. Both `approximate="none"` (exact erf) and `approximate="tanh"` forms are
+6. QEE values for float inputs only; integer inputs propagate shape/dtype.
+7. Both `approximate="none"` (exact erf) and `approximate="tanh"` forms are
    matched by the corresponding derivative.
-7. One-hot output; zero gradient by convention.
-8. Ties share the gradient equally.
-9. Float inputs get the almost-everywhere derivative (d/da = 1, d/db = −q with
-   the fmod-consistent quotient); integer Mod is piecewise constant.
-10. Float tensors only; the spec also allows (u)int32/64 inputs.
-11. Float base only; the spec also allows int32/int64 bases.
-12. The exponent's gradient term uses ln(base) and is NaN for base ≤ 0
+8. One-hot output; zero gradient by convention.
+9. Ties share the gradient equally.
+10. Float inputs get the almost-everywhere derivative (d/da = 1, d/db = −q with
+    the fmod-consistent quotient); integer Mod is piecewise constant.
+11. Float tensors only; the spec also allows (u)int32/64 inputs.
+12. Float base only; the spec also allows int32/int64 bases.
+13. The exponent's gradient term uses ln(base) and is NaN for base ≤ 0
     (standard caveat; harmless when the exponent is a constant).
-13. Float tensors only; the spec also allows signed integers since opset 14.
-14. ONNX Runtime 1.26 ships no `Swish` kernel on any execution provider, so
-    Swish graphs execute through the Quick Execution Engine only. Equivalent
-    ORT-executable form: `x * Sigmoid(alpha * x)` built from primitives.
+14. Float tensors only; the spec also allows signed integers since opset 14.
+15. `Swish` lowers inline to `Mul`/`Sigmoid` (`y = x * sigmoid(alpha * x)`),
+    so the exported ONNX carries no `Swish` node and the model loads and runs
+    on any execution provider — ONNX Runtime 1.26 registers no `Swish` kernel,
+    and none is needed. The fused `Swish` op definition is retained for the
+    day a runtime does.
 
 ## Comparisons & logic
 
@@ -197,12 +222,12 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 | SpaceToDepth | ✅ | ✅ | ✅ |
 | Split | ✅ | ✅ | ✅ |
 | Squeeze | ✅ | ✅ | ✅ |
-| TensorScatter | ✅ | 🟡 [16] | ❌ [17] |
+| TensorScatter | ❌ [14] | 🟡 [15] | ❌ [16] |
 | Tile | ✅ | ✅ | ✅ |
-| TopK | ✅ | ✅ [14] | ✅ |
+| TopK | ✅ | ✅ [17] | ✅ |
 | Transpose | ✅ | ✅ | ✅ |
 | Trilu | ✅ | ✅ | ✅ |
-| Unique | ✅ | 🟡 [15] | ✅ |
+| Unique | ✅ | 🟡 [18] | ✅ |
 | Unsqueeze | ✅ | ✅ | ✅ |
 
 1. The `sparse_value` attribute is unsupported (no in-framework sparse-tensor
@@ -224,15 +249,22 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 13. Exact whenever a `steps` input is wired (any stride, including negative);
     the faster path used when `steps` is absent retains an approximate
     clamping of negative starts/ends.
-14. Values computed for small tensors honoring `largest` (ties resolved to the
+14. Cannot be constructed today: `OnnxOp.TensorScatter` throws
+    `NotImplementedException` and has no `NN.*` wrapper. The operator has no
+    opset-21 equivalent and Shorokoo emits a single opset-21 model, so it
+    cannot be lowered — a faithful lowering of the per-batch write indices and
+    the windowed/circular modes is deferred. The op definition and QEE kernel
+    are retained; the entry point is re-enabled once a runtime registers the
+    operator at a usable opset.
+15. Shape/dtype inference only; values are not computed.
+16. Gradient is not implemented; differentiation raises
+    `AutoDiffNotSupportedException` (error code `AD003`).
+17. Values computed for small tensors honoring `largest` (ties resolved to the
     lower index); when `k` is wired but unknown the shape degrades to a bounded
     rank-only claim.
-15. Flatten form computes all four outputs for small tensors (both `sorted`
+18. Flatten form computes all four outputs for small tensors (both `sorted`
     modes); the `axis` form is shape-only and its unique-count extent stays
     data-dependent (rank-only with bounds).
-16. Shape/dtype inference only; values are not computed.
-17. Gradient is not implemented; differentiation raises
-    `AutoDiffNotSupportedException` (error code `AD003`).
 
 ## Convolution & pooling
 
@@ -282,7 +314,7 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 | LpNormalization | ✅ | 🟡 [5] | ✅ |
 | MeanVarianceNormalization | ✅ | 🟡 [5] | ✅ |
 | NegativeLogLikelihoodLoss | ✅ | 🟡 [5] | ✅ |
-| RMSNormalization | ✅ | ✅ | ✅ |
+| RMSNormalization | ✅ [7] | ✅ | ✅ |
 | SoftmaxCrossEntropyLoss | ✅ | 🟡 [5] | ✅ |
 
 1. With `training_mode=1` the node is decomposed into primitive ops at export
@@ -300,25 +332,43 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
    mask is unavailable.
 5. Shape/dtype inference only; values are not computed.
 6. Gradients into the optional Mean/InvStdDev outputs are treated as zero.
+7. `RMSNormalization` lowers inline to opset-21 primitives
+   (`y = x / sqrt(mean(x², suffix axes) + epsilon) * scale`, built from
+   `ReduceMean`/`Sqrt`/`Div`/`Mul`), so the exported ONNX carries no
+   `RMSNormalization` node and the model loads and runs on any execution
+   provider. The fused `RMSNormalization` op definition and its QEE kernel are
+   retained for the day a runtime registers the operator at a usable opset.
 
 ## MatMul & linear algebra
 
 | Op | Build & run | QEE | Gradient |
 |---|---|---|---|
-| Attention | ✅ | 🟡 [1] | ❌ [2] |
-| Det | ✅ | 🟡 [3] | ✅ |
-| Einsum | ✅ | 🟡 [4] | 🟡 [5] |
+| Attention | ❌ [1] | 🟡 [2] | ❌ [3] |
+| Det | ✅ | 🟡 [4] | ✅ |
+| Einsum | ✅ | 🟡 [5] | 🟡 [6] |
 | Gemm | ✅ | ✅ | ✅ |
 | MatMul | ✅ | ✅ | ✅ |
-| RotaryEmbedding | ✅ | 🟡 [1] | ❌ [2] |
+| RotaryEmbedding | ❌ [1] | 🟡 [2] | ❌ [3] |
 
-1. Shape/dtype inference only; values are not computed.
-2. Gradient is not implemented; differentiation raises
+1. Cannot be constructed today: `OnnxOp.Attention`, its KV-cache variant
+   `OnnxOp.AttentionWithKVCache`, and `OnnxOp.RotaryEmbedding` — and the
+   matching `NN.*` wrappers — throw `NotImplementedException`. None of them
+   has an opset-21 equivalent and Shorokoo emits a single opset-21
+   model, so a faithful lowering (the causal/GQA/softcap variants and the
+   KV-cache update for `Attention`; the position-id gather, interleaved vs
+   half-split layouts and partial rotary dim for `RotaryEmbedding`) is
+   deferred. The op definitions and QEE kernels are retained; the entry points
+   are re-enabled once a runtime registers the operators at a usable opset.
+   Meanwhile, build attention from primitives or use the NN library's
+   `Attention.ScaledDotProductAttention` / `MultiHeadAttention` and its rotary
+   helper `Attention.ApplyRoPE` — see [nn-library.md](nn-library.md).
+2. Shape/dtype inference only; values are not computed.
+3. Gradient is not implemented; differentiation raises
    `AutoDiffNotSupportedException` (error code `AD003`).
-3. Shape/dtype only; determinant values are not computed.
-4. Shape is inferred from the equation (matmul/transpose/reduce/diagonal
+4. Shape/dtype only; determinant values are not computed.
+5. Shape is inferred from the equation (matmul/transpose/reduce/diagonal
    forms; exotic equations degrade to unknown shape); values are not computed.
-5. Repeated subscripts within a single operand (e.g. `"ii->i"`) are
+6. Repeated subscripts within a single operand (e.g. `"ii->i"`) are
    unsupported; ellipsis is supported.
 
 ## Quantization
@@ -331,13 +381,18 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 | MatMulInteger | 🟡 [1] | ✅ | N/A [3] |
 | QLinearConv | ✅ | 🟡 [2] | N/A [3] |
 | QLinearMatMul | ✅ | 🟡 [2] | N/A [3] |
-| QuantizeLinear | ✅ | ✅ | N/A [3] |
+| QuantizeLinear | ✅ [4] | ✅ | N/A [3] |
 
 1. The weight zero point is scalar only; a per-channel 1-D `w_zero_point` is
    not representable in-framework.
 2. Shape/dtype only; values are not computed.
 3. Quantized operators are non-differentiable — no straight-through estimator
    is provided, so there is no quantization-aware training path.
+4. The opset-23 `precision` attribute is not exposed by `Ops.QuantizeLinear`
+   or `OnnxOp.QuantizeLinear`: it only selects float8/float4 quantization
+   targets, which Shorokoo does not support. The node definition still
+   declares it, so an imported model that carries it round-trips unchanged
+   and re-exports stamped at opset 23.
 
 ## Recurrent (RNN family)
 

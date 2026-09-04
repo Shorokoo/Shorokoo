@@ -23,11 +23,15 @@ A Shorokoo ID is parsed into **semantic elements**—the fundamental units of ma
 | **Number** | Contiguous digits (as a unit) | `77`, `22`, `0`, `123` |
 | **Dot** | The `.` character | `.` |
 | **Hash** | The `#` character | `#` |
+| **Colon** | The `:` character | `:` |
 
 **Parsing rules:**
 - Letters and digits form separate elements at boundaries
-- `.` and `#` are always individual elements
+- `.`, `#` and `:` are always individual elements
 - Numbers are treated as single elements regardless of digit count
+- Any other character is silently skipped: it yields no element, but it still
+  ends the run of letters or digits before it — `Conv-x` parses as `Conv`, `x`,
+  not as one word
 
 **Example:**
 
@@ -47,6 +51,19 @@ Semantic elements:
   [9]  "BatchNorm" (word)
   [10] "#"         (hash)
   [11] "1"         (number)
+```
+
+A loop index parses the same way, the `:` being an element of its own:
+
+```
+Input: "Loop#0:12"
+
+Semantic elements:
+  [0] "Loop"      (word)
+  [1] "#"         (hash)
+  [2] "0"         (number)
+  [3] ":"         (colon)
+  [4] "12"        (number)
 ```
 
 ## 2. Escape Sequences
@@ -73,12 +90,16 @@ Matches: "BatchNorm#0"
 
 | Syntax | Description |
 |--------|-------------|
-| `{*}` | Match any sequence of elements (greedy) |
+| `{*}` | Match any run of elements, including an empty one |
 
 ```
 Pattern: "Layer#{*}.weight"
 Matches: "Layer#0.weight", "Layer#123.weight", "Layer#0.Sub#1.weight"
 ```
+
+The matcher backtracks and takes the **shortest** run that lets the rest of the
+pattern match — so where a pattern holds two `{*}`, the first one takes as few
+elements as it can.
 
 ### 3.3 Captures
 
@@ -152,11 +173,17 @@ format: "{p|bnParam}"  // p=0 → "running_mean"
 
 ### 5.1 Scheme Definition
 
+The patterns go into a `SimplePatternNamingScheme`, which also takes the
+model's own canonical-id scheme (`arch.GetShorokooIdNamingScheme()`, from the
+concrete architecture) and a framework id. Every pattern whose format reaches
+for a map is handed the maps of [§5.2](#52-shared-maps) — a `SimplePatternScheme`
+looks only in its own maps, so one that omits them throws on `{p|bnParam}`.
+
 ```csharp
-public static NamingScheme CreateResNet50Scheme()
+public static SimplePatternNamingScheme CreateResNet50Scheme(ModelIdNamingScheme shorokooIdScheme)
 {
-    return new NamingScheme(new[]
-    {
+    SimplePatternScheme[] patterns =
+    [
         // ════════════════════════════════════════════════════════════════
         // STEM
         // ════════════════════════════════════════════════════════════════
@@ -166,7 +193,8 @@ public static NamingScheme CreateResNet50Scheme()
         ),
         new SimplePatternScheme(
             pattern: "ResNetStem#0.BatchNorm#0.InitSimple#{p}",
-            format:  "bn1.{p|bnParam}"
+            format:  "bn1.{p|bnParam}",
+            maps:    SharedMaps
         ),
 
         // ════════════════════════════════════════════════════════════════
@@ -174,7 +202,8 @@ public static NamingScheme CreateResNet50Scheme()
         // ════════════════════════════════════════════════════════════════
         new SimplePatternScheme(
             pattern: "BottleneckStackS11#0.Loop#0:0.BottleneckS11#0.Conv2Dk11s11#{c}.InitSimple#0",
-            format:  "layer1.0.{c|layer1Conv}.weight"
+            format:  "layer1.0.{c|layer1Conv}.weight",
+            maps:    SharedMaps
         ),
         new SimplePatternScheme(
             pattern: "BottleneckStackS11#0.Loop#0:0.BottleneckS11#0.Conv2Dk33s11#0.InitSimple#0",
@@ -182,7 +211,8 @@ public static NamingScheme CreateResNet50Scheme()
         ),
         new SimplePatternScheme(
             pattern: "BottleneckStackS11#0.Loop#0:0.BottleneckS11#0.BatchNorm#{b}.InitSimple#{p}",
-            format:  "layer1.0.{b|layer1Bn}.{p|bnParam}"
+            format:  "layer1.0.{b|layer1Bn}.{p|bnParam}",
+            maps:    SharedMaps
         ),
 
         // ════════════════════════════════════════════════════════════════
@@ -202,7 +232,8 @@ public static NamingScheme CreateResNet50Scheme()
         ),
         new SimplePatternScheme(
             pattern: "BottleneckStackS11#0.Loop#0:{idx|1:}.BottleneckS11#0.BatchNorm#{b}.InitSimple#{p}",
-            format:  "layer1.{idx}.bn{b + 1}.{p|bnParam}"
+            format:  "layer1.{idx}.bn{b + 1}.{p|bnParam}",
+            maps:    SharedMaps
         ),
 
         // ════════════════════════════════════════════════════════════════
@@ -225,7 +256,8 @@ public static NamingScheme CreateResNet50Scheme()
         ),
         new SimplePatternScheme(
             pattern: "BottleneckStackS22#{layer}.Loop#0:0.BottleneckS22#0.BatchNorm#{b}.InitSimple#{p}",
-            format:  "layer{layer + 2}.0.{b|bnDs}.{p|bnParam}"
+            format:  "layer{layer + 2}.0.{b|bnDs}.{p|bnParam}",
+            maps:    SharedMaps
         ),
         new SimplePatternScheme(
             pattern: "BottleneckStackS22#{layer}.Loop#0:0.BottleneckS22#0.Conv2Dk11s22#0.InitSimple#0",
@@ -247,7 +279,8 @@ public static NamingScheme CreateResNet50Scheme()
         ),
         new SimplePatternScheme(
             pattern: "BottleneckStackS22#{layer}.Loop#0:{idx|1:}.BottleneckS11#0.BatchNorm#{b}.InitSimple#{p}",
-            format:  "layer{layer + 2}.{idx}.bn{b + 1}.{p|bnParam}"
+            format:  "layer{layer + 2}.{idx}.bn{b + 1}.{p|bnParam}",
+            maps:    SharedMaps
         ),
 
         // ════════════════════════════════════════════════════════════════
@@ -255,16 +288,20 @@ public static NamingScheme CreateResNet50Scheme()
         // ════════════════════════════════════════════════════════════════
         new SimplePatternScheme(
             pattern: "ClassificationHead#0.DenseBasic#0.InitSimple#{p}",
-            format:  "fc.{p|fcParam}"
+            format:  "fc.{p|fcParam}",
+            maps:    SharedMaps
         )
-    });
+    ];
+
+    return new SimplePatternNamingScheme(
+        patterns, shorokooIdScheme, ModuleParamSetNamingScheme.PyTorchFrameworkId);
 }
 ```
 
 ### 5.2 Shared Maps
 
 ```csharp
-static readonly Maps SharedMaps = new()
+static readonly Dictionary<string, Dictionary<string, string>> SharedMaps = new()
 {
     ["bnParam"]    = new() { ["0"] = "running_mean", ["1"] = "running_var", ["2"] = "weight", ["3"] = "bias" },
     ["layer1Conv"] = new() { ["0"] = "conv1", ["1"] = "conv3", ["2"] = "downsample.0" },
@@ -275,6 +312,9 @@ static readonly Maps SharedMaps = new()
 ```
 
 ### 5.3 Example Conversions
+
+What `CreateResNet50Scheme(...).ToName(shorokooId)` returns for a sample of the
+parameters:
 
 | Shorokoo ID | PyTorch Name |
 |-------------|--------------|
@@ -290,31 +330,126 @@ static readonly Maps SharedMaps = new()
 
 ## 6. API Reference
 
-### Constructor
+### `SimplePatternScheme` — one pattern
 
 ```csharp
-public SimplePatternScheme(
-    string pattern,
-    string format,
-    Dictionary<string, Dictionary<string, string>>? maps = null
-)
+public class SimplePatternScheme
+{
+    public SimplePatternScheme(
+        string pattern,
+        string format,
+        Dictionary<string, Dictionary<string, string>>? maps = null
+    );
+
+    public string Pattern { get; }
+    public string Format { get; }
+    public ImmutableDictionary<string, ImmutableDictionary<string, string>> Maps { get; }
+
+    public bool Matches(string shorokooId);
+    public bool TryMatch(string shorokooId, out Dictionary<string, string> captures);
+    public string ToName(string shorokooId);
+
+    public static List<SemanticElement> ParseSemanticElements(string input);
+}
 ```
 
-### Methods
+`TryMatch` is `Matches` plus the bindings: on a match it hands back the capture table the
+format string would be evaluated against (`["idx"] = "3"`, `["mod"] = "Conv2"`, as in
+[§3.3](#33-captures)), which is how to see what a pattern actually bound without writing a
+format for it. `ParseSemanticElements` is the [§1](#1-semantic-elements) parser itself — call
+it on an id to see the element list a pattern is matched against:
 
 ```csharp
-public string ToName(string shorokooId);
-public bool Matches(string shorokooId);
+foreach (var e in SimplePatternScheme.ParseSemanticElements("Loop#0:12"))
+    Console.WriteLine($"{e.Type} {e.Value}");   // Word Loop / Hash # / Number 0 / Colon : / Number 12
 ```
+
+### `SimplePatternNamingScheme` — the whole scheme
+
+```csharp
+public class SimplePatternNamingScheme : ModuleParamSetNamingScheme
+{
+    // modelIdToShorokooIdScheme is the model's own canonical-id scheme
+    // (arch.GetShorokooIdNamingScheme(), §5.1); frameworkId records which framework's
+    // names this scheme speaks, e.g. ModuleParamSetNamingScheme.PyTorchFrameworkId.
+    public SimplePatternNamingScheme(
+        IEnumerable<SimplePatternScheme> patterns,
+        ModelIdNamingScheme modelIdToShorokooIdScheme,
+        string frameworkId
+    );
+
+    public ImmutableArray<SimplePatternScheme> Patterns { get; }
+    public ModelIdNamingScheme ModelIdToShorokooIdScheme { get; }
+    public string FrameworkId { get; }                  // from ModuleParamSetNamingScheme
+
+    public override string? ToName(string shorokooId);
+    public override string? ToName(ModelId modelId);
+    public override string? ToName(ConcreteModelParamInfo shorokooParam);
+    public override ModelId? ToModelId(string paramName, ImmutableArray<ModelId> candidates);
+}
+```
+
+Every `ToName` overload does the same thing — try the patterns in order, return the first
+match's name, return `null` when none matches — and they differ only in where the canonical
+id string comes from. `ToName(string)` is handed one directly, which is the natural direction
+here and the one weight **export** needs. `ToName(ModelId)` gets there through
+`ModelIdToShorokooIdScheme` first; `ToName(ConcreteModelParamInfo)` reads the parameter's own
+id string off the concrete model.
+
+`ToModelId` is the reverse direction, and the one
+`ToConcreteModel(weights, namingScheme)` uses to **import**: it names every candidate ModelId
+once into a name → ModelId table, then looks the third-party name up in it. See
+[§7](#7-error-handling) — the lookup returns `null` for an unknown name, but building the
+table over an incompletely covered set of candidates throws.
 
 ## 7. Error Handling
 
-```csharp
-// Pattern mismatch
-try { var name = scheme.ToName(unknownId); }
-catch (PatternMismatchException ex) { /* No pattern matches */ }
+There is no DSL-specific exception type; failures surface as the ordinary BCL
+ones — and the most common failure does not throw at all.
 
-// Map key not found
-try { var name = scheme.ToName(id); }
-catch (MapKeyNotFoundException ex) { /* Key not in map */ }
+| Failure | Behaviour |
+|---------|-----------|
+| No pattern in a `SimplePatternNamingScheme` matches the id | `ToName` returns **`null`** |
+| A single `SimplePatternScheme.ToName` is given an id its pattern does not match | `InvalidOperationException` |
+| The format looks up a key the map does not hold | `KeyNotFoundException` |
+| The format names a map the scheme was not given | `KeyNotFoundException` |
+| The format references a capture the pattern does not bind | `KeyNotFoundException` |
+| A pattern or format has an unmatched `{`, or an unparsable range constraint | `FormatException` |
+| `ToModelId` is given candidates the patterns do not name in full | `ArgumentNullException` — "Value cannot be null. (Parameter 'key')" |
+| `ToModelId` is given two candidates the patterns give the same name | `ArgumentException` — "An item with the same key has already been added" |
+
+```csharp
+// No pattern matches: null, not an exception.
+string? name = scheme.ToName(unknownId);   // null — nothing named this id
+
+// A lone pattern, on the other hand, insists on matching.
+try { var n = new SimplePatternScheme("A#0", "x").ToName("B#1"); }
+catch (InvalidOperationException) { /* "Shorokoo ID 'B#1' does not match pattern 'A#0'" */ }
+
+// Map miss — including a scheme constructed without its maps at all.
+try { var n = pattern.ToName(id); }
+catch (KeyNotFoundException) { /* "Key '9' not found in map 'bnParam'" */ }
+
+// The reverse direction is not forgiving in the same way: ToModelId names every
+// candidate before it looks anything up, and an unnamed one lands as a null key.
+try { var id2 = partialScheme.ToModelId("layer1.0.conv1.weight", candidates); }
+catch (ArgumentNullException) { /* "Value cannot be null. (Parameter 'key')" */ }
 ```
+
+The two `ToModelId` rows are worth reading twice, because the entry point this page
+recommends — `ToConcreteModel(weights, namingScheme)` — goes through them. The lookup
+itself is as forgiving as `ToName`: an unknown third-party name gives `null` back. The
+table it looks in is not. That table is built over *every* candidate first, so a single
+parameter the patterns leave unnamed puts a `null` key into it, and the failure arrives
+as a bare `ArgumentNullException` naming neither the parameter nor the scheme. Do not
+read it as a complaint about the name you passed; it means the pattern set has a hole
+somewhere else in the model. Prefer an entry point that checks coverage before it gets
+there: `Persistence.ImportSafeTensors` names every parameter first and refuses with an
+`InvalidDataException` — "required model parameter '…' maps to no source tensor name
+under the naming scheme — add a rule covering it" — which says *which* parameter is
+uncovered.
+
+A `null` is not ignored downstream either: export refuses a scheme that leaves any
+weight unnamed, and import treats the parameter as one the scheme does not
+cover — which then fails as a required parameter with no source tensor (see
+[onnx-and-weights.md](onnx-and-weights.md#naming)).

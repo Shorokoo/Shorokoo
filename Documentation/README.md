@@ -24,7 +24,7 @@ Which document covers what. For an overview of Shorokoo and an end-to-end exampl
 ## 4. Interoperate with the ML ecosystem
 
 - [onnx-and-weights.md](onnx-and-weights.md) — export/import `.onnx`, save/load Shorokoo's own `.srk`/`.zsrk` graphs, and load `.safetensors` weights and bind them into a model.
-- [skpt-checkpoints.md](skpt-checkpoints.md) — Shorokoo's native `.skpt` checkpoint (a single file, or the same content as a directory): save a concrete model (definition + weights) with `Persistence.From(...).Save(...)` / `.SaveAsDirectory(...)`, load it back with `Persistence.Load`, and the container/manifest format itself.
+- [skpt-checkpoints.md](skpt-checkpoints.md) — Shorokoo's native `.skpt` checkpoint (a single file, or the same content as a directory): save a concrete model (definition + weights) with `Persistence.From(...).Save(...)` / `.SaveAsDirectory(...)` and load it back with `Persistence.Load`; save a full training checkpoint — weights, optimizer state, run counters and the rig's own constituents — and rebuild the whole rig plus its resumed checkpoint from the file alone with `TrainingRig.Load`; and the container/manifest format itself.
 
 ## Reference
 

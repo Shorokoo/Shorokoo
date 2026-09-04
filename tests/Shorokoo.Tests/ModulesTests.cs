@@ -20,6 +20,52 @@ public class ModulesCoverageTests
 
     private static double[] Rep(double v, int n) => [.. Enumerable.Repeat(v, n)];
 
+    /// <summary>Concretizes <see cref="Modules.GatedBiasHyperLayer"/> under <paramref name="hint"/>
+    /// and runs it with <paramref name="atExecute"/>. Null means the contradiction did not survive
+    /// to a result: either the concrete model no longer declares the gating bit (so the two values
+    /// cannot differ) or the run was rejected. Written by hand rather than through
+    /// <c>AutoTest.AdvancedTestGraph</c>, which feeds one value array as both the concretization
+    /// hints and the execution inputs and so cannot express a contradiction at all.</summary>
+    private static float[]? GatedBiasOutcome(bool hint, bool atExecute)
+    {
+        var g = Modules.GatedBiasHyperLayer.ComputationGraph;
+        var x = TensorData([2L], 1f, 2f);
+        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([], hint), x]))
+            .ToConcreteModel(RngConfig.Default);
+        var gated = model.InputNames.Contains(GatingInput);
+        if (!gated && atExecute != hint) return null;
+        IData[] inputs = gated ? [TensorData([], atExecute), x] : [x];
+        NamedModelParam[] outputs;
+        try
+        {
+            outputs = new ComputeContext().Execute(model, inputs);
+        }
+        catch (ShorokooException)
+        {
+            return null;
+        }
+        return outputs[0].ToTensorData().As<float32>().AccessMemory<float>().ToArray();
+    }
+
+    private const string GatingInput = "useBias";
+
+    /// <summary>
+    /// Concretizing the gated hyperparameter as <c>false</c> prunes the bias but leaves the gating
+    /// bit a live graph input, so <c>Execute</c> accepts the contradicting value <c>true</c> and
+    /// silently returns the surviving unbiased branch's result instead of rejecting the run. The
+    /// fault is one-directional: a <c>true</c> hint keeps both branches, so executing it with
+    /// <c>false</c> correctly returns the unbiased result. Tracked as Shorokoo/Shorokoo#217.
+    /// </summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#217: a false gating hint executed with true silently returns the unbiased result")]
+    public void TestAFalseGatedHyperparamHintExecutedWithTrueIsSilentlyIgnored()
+    {
+        float[] plain = [1f, 2f];
+        float[] biased = [2f, 3f];
+        Assert.Equal(plain, GatedBiasOutcome(false, false));
+        Assert.Equal(biased, GatedBiasOutcome(true, true));
+        Assert.Null(GatedBiasOutcome(false, true));
+    }
+
     [Fact]
     public void TestSimpleHyperparamLoopSequenceOptionalAndConditionalModulesCoverage()
     {
@@ -493,6 +539,48 @@ public class ModulesCoverageTests
         var fcExpected = ComputeContext.Default.Execute(fcRef, numOut, fcInput)[0].ToTensorData().AccessRawMemory().ToArray();
         Assert.Equal(fcExpected, fcActual);
     }
+
+    private static float[] RunFloats(ComputationGraph model, params TensorData[] inputs)
+        => ComputeContext.Default.Execute(model, inputs)[0].ToTensorData().As<float32>().AccessMemory<float>().ToArray();
+
+    private static void AssertBakedHypersMatchHintedHypers(
+        ComputationGraph module, TensorData[] hypers, TensorData input)
+    {
+        var hinted    = module.ToConcreteArchitecture(module.FromOrderedInputs([.. hypers, input]));
+        var baked     = module.Specialize(module.FromOrderedInputs([.. hypers]));
+        var bakedArch = baked.ToConcreteArchitecture(baked.FromOrderedInputs([input]));
+
+        ModelId[] hintedIds = [.. hinted.GetConcreteModelParamInfos().ModelIds];
+        ModelId[] bakedIds  = [.. bakedArch.GetConcreteModelParamInfos().ModelIds];
+        Assert.Equal(hintedIds, bakedIds);
+        Assert.Equal(RunFloats(hinted.ToConcreteModel(), [.. hypers, input]),
+                     RunFloats(bakedArch.ToConcreteModel(), input));
+    }
+
+    /// <summary>The documented lowering pipeline is <c>Specialize</c> -> <c>ToConcreteArchitecture</c>
+    /// -> <c>ToConcreteModel</c>, so baking a hyper must reach the same concrete model as passing it
+    /// as a concretization hint. Both modules allocate trainable params inside a
+    /// <c>LoopAPI.Iterate</c> body, which is what the baked route mishandles today.
+    /// Tracked as Shorokoo/Shorokoo#221.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#221: Specialize mishandles trainable params allocated inside a loop body")]
+    public void TestBakingHypersMatchesHintingThemWhenParamsLiveInsideALoopBody()
+    {
+        var input = TensorDataWithSmallVals(DType.Float32, [2L, 5L]);
+        AssertBakedHypersMatchHintedHypers(LoopLayer.ComputationGraph,
+            [TensorData(DType.Int64, [], 4L), TensorData(DType.Int64, [], 3L)], input);
+        AssertBakedHypersMatchHintedHypers(ConditionalTrainableParamInLoopLayer.ComputationGraph,
+            [TensorData(DType.Int64, [], 3L), TensorData(DType.Int64, [], 4L)], input);
+    }
+
+    /// <summary>Omitting the hint for an input a trainable-param shape derives from is a user mistake,
+    /// and the product has an exception for it — but a Debug build hits <c>Debug.Fail</c> first, which
+    /// outside a test host kills the process. Same defect class as Shorokoo/Shorokoo#220, a different
+    /// site: this one is <c>ToConcreteArchitecture</c>'s post-stage op check.
+    /// Tracked as Shorokoo/Shorokoo#222.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#222: Debug.Fail aborts before the exception, and the message names internals not the missing hint")]
+    public void TestConcretizingWithoutTheHintAParamShapeNeedsFailsWithACatchableExceptionNotAnAssertion()
+        => Assert.IsType<InvalidOperationException>(Record.Exception(
+            () => SimplestLayer.ComputationGraph.ToConcreteArchitecture(new ModelParamList([]))));
 
     [Fact]
     public void TestZeroTripLoopLeavesTheAccumulatorUntouchedOnBothEngines()

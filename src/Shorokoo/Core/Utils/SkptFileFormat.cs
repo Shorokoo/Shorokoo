@@ -395,10 +395,12 @@ namespace Shorokoo.Core.Utils
         /// <summary>Archive path of the manifest.</summary>
         public const string ConfigEntryName = "config.json";
 
-        /// <summary>Archive path of the (single, for now) model definition entry.</summary>
+        /// <summary>Archive path of the inference model definition entry. A training checkpoint adds
+        /// the rig's constituent graphs beside it under <c>models/</c>.</summary>
         public const string ModelEntryPath = "models/model.srk";
 
-        /// <summary>Archive path of the (single, for now) weights data entry.</summary>
+        /// <summary>Archive path of the weights data entry an inference save writes. A training
+        /// checkpoint writes its own per-kind training-state entries under <c>data/</c> instead.</summary>
         public const string WeightsEntryPath = "data/weights.safetensors";
 
         /// <summary>Archive path of the host user-data bag (issue #101).</summary>
@@ -519,7 +521,9 @@ namespace Shorokoo.Core.Utils
         // scheduler model — plus the non-graph recipe (input shapes, hyperparameter bindings, RNG
         // config) in the manifest training block's rig section, so a fresh process rebuilds the whole
         // rig from the file alone. These sit alongside the "model" inference-model entry, which stays
-        // the one Persistence.Load binds; the constituents carry no tensor mapping (the rig re-derives).
+        // the one Persistence.Load binds. No constituent binds weights (the rig re-derives), so the
+        // arch, loss and scheduler entries carry no tensor mapping at all; the optimizer entry carries
+        // the optimizer-state mapping, and only when the optimizer is stateful.
 
         /// <summary>Current rig-block version (see <see cref="SkptRigInfo"/>). The block carries no
         /// per-input <c>inputShapes</c> field: the arch's <c>MODEL_TENSOR_INPUT</c> nodes serialize as

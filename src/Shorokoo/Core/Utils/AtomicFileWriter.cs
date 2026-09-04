@@ -5,8 +5,11 @@ namespace Shorokoo.Core.Utils
     /// <c>.tmp-</c>-prefixed sibling name in the target's directory (same filesystem, so the
     /// commit rename is atomic), flushed to disk, then renamed onto the target. On any failure
     /// the staged copy is deleted and the previous target is left untouched — a crash mid-save
-    /// never corrupts the existing file. This is the designated write path for every
-    /// save/export API (see <see cref="TrainingCheckpoint.Save(string, CheckpointComponents?)"/>); it carries no assumptions
+    /// never corrupts the existing file. This is the designated write path for the
+    /// <c>Persistence.*</c> save/export surface and
+    /// <see cref="TrainingCheckpoint.Save(string, CheckpointComponents?)"/> — not for the raw layers
+    /// below them (<c>OnnxModelExporter</c>, <c>SafeTensorLoader.SaveSafeTensors</c>,
+    /// <c>CompressedFormatUtils</c>), which write in place; it carries no assumptions
     /// about what is being written.
     /// </summary>
     /// <remarks>

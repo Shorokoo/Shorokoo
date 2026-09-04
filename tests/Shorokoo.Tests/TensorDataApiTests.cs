@@ -3,7 +3,7 @@ namespace Shorokoo.Tests;
 /// <summary>
 /// Coverage for the user-facing data-holder surface: <see cref="TensorData"/>,
 /// <see cref="TensorDataSequence"/>, <see cref="NamedModelParam"/>, <see cref="Shape"/>
-/// and the <see cref="OnnxEngine.Eval(IValue)"/> entry points.
+/// and the <see cref="OnnxEngine.Eval(Variable)"/> entry points.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]

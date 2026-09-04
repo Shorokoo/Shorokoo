@@ -541,7 +541,7 @@ namespace Shorokoo
             => OnnxOp.RotaryEmbedding(x, cosCache, sinCache, positionIds,
                 interleaved, numHeads, rotaryEmbeddingDim);
 
-        /// <summary>Swish activation y = x * sigmoid(alpha * x) (ONNX Swish, opset 24+; no ORT 1.26 kernel — QEE-only execution).</summary>
+        /// <summary>Swish activation y = x * sigmoid(alpha * x) (ONNX Swish, opset 24+; lowered inline to Mul/Sigmoid, so the exported ONNX carries no Swish node and runs on any execution provider).</summary>
         public static Tensor<T> Swish<T>(Tensor<T> x, float? alpha = null)
             where T : FloatLike
             => OnnxOp.Swish(x, alpha);

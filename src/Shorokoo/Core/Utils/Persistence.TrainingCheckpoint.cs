@@ -817,9 +817,10 @@ namespace Shorokoo
             }
 
             // The model registry: the inference model (the one Persistence.Load binds) plus the rig's
-            // constituent graphs as ordinary models/ entries (#115). Constituents carry no tensor
-            // mapping — a from-file reconstruction re-derives the trainstep rather than binding weights
-            // into them.
+            // constituent graphs as ordinary models/ entries (#115). No constituent binds weights — a
+            // from-file reconstruction re-derives the trainstep instead — so the arch, loss and
+            // scheduler entries carry no tensor mapping at all; the optimizer entry carries the
+            // optimizer-state mapping built above, and only when the optimizer is stateful.
             var models = new Dictionary<string, SkptModelEntry>(StringComparer.Ordinal)
             {
                 [SkptFileFormat.DefaultModelKey] = new SkptModelEntry

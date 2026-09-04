@@ -641,6 +641,27 @@ public class RngInitFailLoudTests
         Assert.Contains("cannot express one computed in-graph", normal);
         Assert.Contains(InternalOpCodes.SHRK_RANDOM_NORMAL, normal);
     }
+
+    /// <summary>An id-bearing feed with no key chain is reachable from public API — a module
+    /// output handed to <c>OnnxEngine.Eval</c>, and a ConcreteArchitecture handed to
+    /// <c>ComputeContext.Execute</c>, which <c>RequireConcretized</c> admits. Both must fail with
+    /// the product's own catchable exception; today a Debug build hits FastLowerRandomOps'
+    /// <c>Debug.Assert</c> instead, which outside a test host kills the process.
+    /// Tracked as Shorokoo/Shorokoo#220.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#220: a Debug.Assert on a user-reachable path fires instead of the product's own exception")]
+    public void TestIdBearingFeedWithoutKeyChainFailsWithACatchableExceptionNotAnAssertion()
+    {
+        var sample = TensorData([1L, 4L], 1f, 2f, 3f, 4f);
+        var moduleGraph = RngInitTwoLinears.ComputationGraph;
+        var arch = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([sample]));
+
+        Assert.IsType<InvalidOperationException>(Record.Exception(
+            () => OnnxEngine.Eval(RngInitTwoLinears.Call(Tensor([1L, 4L], 1f, 2f, 3f, 4f)))));
+        Assert.IsType<InvalidOperationException>(Record.Exception(
+            () => ComputeContext.Default.Execute(arch, sample)));
+        Assert.Null(Record.Exception(
+            () => ComputeContext.Default.Execute(arch.ToConcreteModel(), sample)));
+    }
 }
 
 /// <summary>

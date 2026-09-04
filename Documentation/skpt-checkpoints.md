@@ -25,21 +25,34 @@ Related: [onnx-and-weights.md](onnx-and-weights.md) · [training.md](training.md
 - A single `config.json` manifest is the **only source of wiring**: entries never
   reference each other; every mapping (model → serialization format, parameter →
   stored tensor, data entry → storage format) lives in the manifest.
-- Saves are **atomic** in both forms (staged beside the target — a temp file or a temp
-  directory — and committed by rename): a crash mid-save never corrupts an existing
+- Saves are **atomic** in both `.skpt` forms (staged beside the target — a temp file or a
+  temp directory — and committed by rename): a crash mid-save never corrupts an existing
   checkpoint, and an interrupted directory save is never visible at the target path.
-  The target's parent directory must already exist.
+  (The directory form's *replace* takes two renames, so a hard crash in that one window can
+  leave the target briefly **absent** — never half-written; see
+  [The directory form](#the-directory-form).)
+  The target's parent directory must already exist. The flat safetensors training
+  checkpoint (`checkpoint.Save`) is written through the same atomic file path, as is
+  every save/export API on the `Persistence.*` facade — `ExtractSkpt` / `PackSkpt`,
+  `Persistence.ExportSafeTensors`, `Persistence.ExportOnnx`. The raw layers below that
+  facade write **in place** — see
+  [onnx-and-weights.md](onnx-and-weights.md#facts). See also
+  [training.md](training.md#save-and-resume-a-checkpoint-across-process-restarts).
 - This version writes an **inference checkpoint of a concrete model** (definition +
   weights). It can also carry **additional named weight sets** over the same parameters
   (e.g. an `ema` set alongside `default`), selected at load time — see
   [Named weight sets](#named-weight-sets-default--ema).
 - A `.skpt` can also persist a **training checkpoint** — the trainable weights, model
-  state, optimizer state and the run counters (global step, epoch, batch index) of a
-  training run — with every state tensor addressed individually through the manifest's
+  state, optimizer state, the run counters (global step, epoch, batch index) and the step's
+  loss of a training run — with every state tensor addressed individually through the manifest's
   tensor mappings, alongside the concrete inference model, so a run
-  resumes across process restarts and the same file also loads as an inference model. See
-  [Training checkpoints](#training-checkpoints). Precompiled artifacts and the full
-  training-rig (constituent models, schedules) are future extensions of the same container.
+  resumes across process restarts and the same file also loads as an inference model. Every
+  training `.skpt` also carries the **rig's constituents** — the concrete architecture, the loss
+  and optimizer graphs, the composed scheduler when any hyperparameter is scheduled, the
+  hyperparameter bindings and the RNG config — so `TrainingRig.Load(path)` rebuilds the whole
+  rig, and its resumed checkpoint, from the file alone. See
+  [Training checkpoints](#training-checkpoints). Precompiled artifacts are a future extension
+  of the same container.
 - A checkpoint can carry a **host user-data bag** — an arbitrary JSON object you attach
   at save and read back verbatim on load (e.g. your data-pipeline state), stored as
   `data/user-data.json` and never interpreted by Shorokoo. See
@@ -89,7 +102,7 @@ read side of the API.
 
 The same checkpoint can be saved as a **directory** instead of a single file:
 `config.json` at the root, the models/ and data/ entries as real files and folders,
-with byte-identical content and the same manifest describing both shapes.
+with byte-identical content and the same manifest describing both forms.
 
 ```csharp
 Persistence.From(concreteModel)
@@ -110,7 +123,7 @@ run17.skpt/
 Training checkpoints save the same way (`Persistence.ForTrainingCheckpoint(ckpt)
 .SaveAsDirectory(path)`), and every `.skpt` load entry point — `Persistence.Load`,
 `TrainingRig.Load`, `rig.LoadCheckpointFromSkpt`,
-`Persistence.LoadTrainingCheckpointFromSkpt` — accepts either shape; a directory path
+`Persistence.LoadTrainingCheckpointFromSkpt` — accepts either form; a directory path
 is unambiguously the directory form (no content sniffing).
 
 When to use which:
@@ -161,8 +174,9 @@ Guarantees specific to the directory form:
 
 ## Training checkpoints
 
-A training run's state — the trainable weights, model state, optimizer state and the
-global step — persists into a `.skpt` too, so training resumes across process restarts
+A training run's state — the trainable weights, model state, optimizer state, the run
+counters (global step, epoch, batch index) and the step's loss — persists into a `.skpt`
+too, so training resumes across process restarts
 in the native container (inspectable manifest, per-entry Zstd, atomic write, provenance
 metadata), sharing one on-disk format with inference checkpoints.
 
@@ -179,6 +193,22 @@ var rig     = TrainingRig.FromScratch(modelGraph, lossGraph, optimizerGraph, sam
 var resumed = rig.LoadCheckpointFromSkpt("run.skpt");
 var next    = rig.TrainStep(resumed, inputBatch, targetBatch);   // trainstep compiled once internally
 ```
+
+Or resume from the file **alone**, with no model/loss/optimizer graphs in hand — the static
+`TrainingRig.Load` rebuilds the rig from the constituents the checkpoint carries and returns it
+together with the checkpoint loaded against it:
+
+```csharp
+var (rig, resumed) = TrainingRig.Load("run.skpt");   // resumed.Rig is that rig
+var next = rig.TrainStep(resumed, inputBatch, targetBatch);
+```
+
+The rebuilt rig re-derives its trainstep exactly as a fresh build does, so a resumed step
+continues the saved trajectory. Its two optional arguments are the compute contexts that seed the
+rebuilt rig (`TrainingRig.Load(path, mergeContext, runtimeContext)`, each defaulting to
+`ComputeContext.Default`) — contexts are never persisted, so a reloaded run gets fresh ones.
+Handed a flat safetensors checkpoint — which stores training state only, with no constituents to
+rebuild from — it fails loudly, pointing at `rig.LoadCheckpoint`.
 
 To compose the container's features, use the builder form:
 
@@ -208,12 +238,25 @@ What the file carries:
   `data/model_state.safetensors`, omitted for a stateless model; and
   `data/optimizer_state.safetensors`, omitted for a stateless optimizer like plain SGD),
   each storing its tensors keyed by struct field name.
-- **The run counters** — the global step, plus the epoch and batch index — recorded in
-  the manifest's `training` block (so `Persistence.Inspect`
-  reports them without reading tensor data). Step, epoch and batch index are host-owned: the
+- **The run counters and the step's loss** — the global step, plus the epoch and batch index
+  and the loss of the step that produced the checkpoint — recorded in the manifest's
+  `training` block (so `Persistence.Inspect` reports the counters without reading tensor
+  data). Step, epoch and batch index are host-owned: the
   training loop advances them (`TrainStep` advances the step and carries epoch/batch through
   unchanged), and they are persisted so a resumed run restores its position. A checkpoint whose
-  epoch/batch position is genuinely unknown omits them and reloads them as `null`.
+  epoch/batch position is genuinely unknown omits them and reloads them as `null`, and so does
+  one no training step produced a loss for (an initial or bare checkpoint) — never a
+  sentinel `0`.
+- **The rig's constituents** — the concrete architecture, the loss graph, the optimizer graph
+  and, when any hyperparameter is scheduled, one composed scheduler model — as ordinary `models/`
+  entries (`models/model-arch.srk`, `models/loss.srk`, `models/optimizer.srk`,
+  `models/scheduler.srk`), with the non-graph part of the recipe recorded in the manifest's
+  `training.rig` block: the model-registry keys naming which `models/` entries those
+  constituents are (`archModel`, `lossModel`, `optimizerModel`, and `schedulerModel` when a
+  scheduler was composed), the hyperparameter bindings, in the optimizer's declared order, and
+  the RNG config the rig was built with. The model-input shapes ride on the architecture itself,
+  not the manifest. This is what `TrainingRig.Load` rebuilds a rig from, and every training `.skpt`
+  this version writes carries it.
 
 Round-trip is exact: reloaded trainable params, model state and optimizer state are
 bit-identical, the counters are preserved, and a resumed `TrainStep` reproduces the pre-save
@@ -229,13 +272,14 @@ TrainingCheckpoint ckpt = Persistence.LoadTrainingCheckpointFromSkpt(
     "run.skpt", trainableParamDef, modelStateDef, optimizerStateDef);
 ```
 
-Each on-disk shape has its own save/load pair. `Persistence.SaveTrainingCheckpoint` /
+Each on-disk format has its own save/load pair. `Persistence.SaveTrainingCheckpoint` /
 `Persistence.LoadTrainingCheckpoint` (and `rig.LoadCheckpoint`) handle the **flat**
 [safetensors format](training.md); `SaveTrainingCheckpointToSkpt` /
 `ForTrainingCheckpoint` and `LoadTrainingCheckpointFromSkpt` (and
-`rig.LoadCheckpointFromSkpt`) handle the `.skpt` container. No load entry point sniffs
-the file's bytes to pick a shape: handing one the other format fails immediately with an
-error naming both formats and the entry point that reads the file's actual shape. To
+`rig.LoadCheckpointFromSkpt`, and the static `TrainingRig.Load`, which rebuilds the rig
+from the file alone) handle the `.skpt` container. No load entry point sniffs
+the file's bytes to pick a format: handing one the other format fails immediately with an
+error naming both formats and the entry point that reads the file's actual format. To
 identify a genuinely unknown file first, use `Persistence.Inspect`.
 
 ## Provenance metadata
@@ -369,7 +413,7 @@ Compression is a per-entry, opt-in trade of **size against range-readability**:
   skips the 64-byte alignment (alignment would buy nothing).
 - Compression is recorded **only in the manifest** (`compression: "zstd"` in the
   entry's data-registry record), never inferred from an entry's file extension — the
-  same rule `.srk` v2 follows with its header. The entry's manifest `sha256` covers
+  same rule `.srk` v1 follows with its header. The entry's manifest `sha256` covers
   the **stored (compressed) bytes**, so integrity checking never requires
   decompression.
 - `config.json` and `models/*.srk` are never compressed by the option (the `.srk`
@@ -466,7 +510,7 @@ model.skpt
     └── user-data.json         optional host user-data bag (JSON object)
 ```
 
-- `models/model.srk` is the model **definition**: a valid `.srk` v2 concrete-model
+- `models/model.srk` is the model **definition**: a valid `.srk` v1 concrete-model
   file in which each weight tensor is replaced by a placeholder of the same
   dtype/shape whose values are elided (an empty, marker-tagged initializer payload) —
   placeholders cost almost nothing on disk and no weight-sized allocation in memory.
@@ -480,11 +524,16 @@ model.skpt
 - `data/user-data.json` holds the optional [host user-data bag](#host-user-data-bag) —
   a JSON object you attach and read back verbatim; present only when you supply one, and
   ignored by load.
-- A [training checkpoint](#training-checkpoints) adds more `data/` entries
-  (`data/trainable.safetensors`, and, when non-empty,
-  `data/model_state.safetensors` and `data/optimizer_state.safetensors`) plus a
-  `training` block in the manifest (the run counters: step, epoch, batch index); every
-  state tensor is wired individually through `tensorMappings`, never routed by entry.
+- A [training checkpoint](#training-checkpoints) writes **no** `data/weights.safetensors`:
+  in its place stand the per-kind state entries (`data/trainable.safetensors`, and, when
+  non-empty, `data/model_state.safetensors` and `data/optimizer_state.safetensors`), which
+  the inference model's own `default` mapping points into — so the trainable bytes live
+  once and serve both roles. It adds a `training` block to the manifest (the run counters —
+  step, epoch, batch index — and the step's loss); every state tensor is wired individually
+  through `tensorMappings`, never routed by entry. It also adds the rig's constituents as
+  further `models/` entries — `models/model-arch.srk`,
+  `models/loss.srk`, `models/optimizer.srk`, and `models/scheduler.srk` when any
+  hyperparameter is scheduled — described by the `training` block's `rig` record.
 - The trees are optional and the layout is extensible: future versions add more
   `models/` entries, more `data/` kinds, `precompiledmodels/`, and `sample_inputs/`
   without a container change.
@@ -507,7 +556,12 @@ model.skpt
     "license": "Apache-2.0"
   },
 
-  // Model registry: per model, where its definition lives and how it is encoded.
+  // Model registry: per model, where its definition lives and how it is encoded. An
+  // inference checkpoint registers the one "model" entry; a training checkpoint also
+  // registers its rig's constituents here — "modelArch", "loss", "optimizer", and
+  // "scheduler" when any hyperparameter is scheduled — which the training block's "rig"
+  // record names by these keys. Of those, only "optimizer" carries a tensor mapping (the
+  // optimizer state, below); "modelArch", "loss" and "scheduler" carry none.
   "models": {
     "model": {
       "entry": "models/model.srk",
@@ -573,15 +627,62 @@ model.skpt
   },
 
   // Training block: present only in a training checkpoint (omitted for an inference
-  // checkpoint). Records the host-owned run counters (step, epoch, batch index); the
-  // training state itself is addressed per tensor through "tensorMappings" above, so the
-  // block routes nothing. epoch/batchIndex are nullable: a checkpoint whose position is
-  // genuinely unknown omits them and reads them back as null.
+  // checkpoint). Records the host-owned run counters (step, epoch, batch index) and the
+  // loss of the step that produced the checkpoint; the training *state* is addressed per
+  // tensor through "tensorMappings" above, so the block routes no state — what it does
+  // route is its "rig" record, whose fields are model-registry keys naming the "models"
+  // entries the rig is rebuilt from. epoch, batchIndex and loss are nullable and
+  // presence-gated: a checkpoint whose position is genuinely unknown, or that no training
+  // step produced a loss for, omits them and reads them back as null (never a sentinel 0).
   "training": {
-    "checkpointVersion": 1,
-    "step": 42,
-    "epoch": 3,
-    "batchIndex": 17
+    "checkpointVersion": 1,               // training-block version
+    "step": 42,                           // 0-based global training step
+    "epoch": 3,                           // 0-based epoch counter; omitted when unknown
+    "batchIndex": 17,                     // 0-based batch index within the epoch; omitted when unknown
+    "loss": 0.3125,                       // loss of the step that produced the checkpoint;
+                                          // omitted on an initial/bare checkpoint
+
+    // The rig recipe: the model-registry keys of the constituents the rig is rebuilt from
+    // (their graphs are the "models" entries above; of them only "optimizer" carries a
+    // tensor mapping — the optimizer state's, above — while the arch, loss and scheduler
+    // entries carry none), plus the non-graph part — the hyperparameter bindings and the
+    // RNG config.
+    // Written by every training .skpt this version produces; absent (⇒ null) on a file
+    // written before rig constituents existed, which resumes only by the host rebuilding
+    // the rig from the same source graphs — as does a file whose stored architecture predates
+    // dims-only model-input shapes (see the pre-release caveat in the rules below).
+    // Model-input shapes are not recorded here: the serialized architecture carries them itself.
+    "rig": {
+      "rigVersion": 1,                    // rig-block version
+      "archModel": "modelArch",           // registry key of the concrete-architecture entry
+      "lossModel": "loss",                // registry key of the loss constituent
+      "optimizerModel": "optimizer",      // registry key of the optimizer constituent
+      "schedulerModel": "scheduler",      // registry key of the composed scheduler; omitted
+                                          // when no hyperparameter is scheduled
+
+      // The optimizer's hyperparameter bindings, in its declared order. "kind" decides
+      // reconstruction: "baked" carries its constant inline ("value" is base64 of the raw
+      // little-endian bytes at "dtype"/"shape"), "runtime" records only the host-declared
+      // shape, "scheduled" takes the scheduler model's output of the same name. A
+      // hyperparameter's dtype otherwise comes from the optimizer constituent itself.
+      "hyperparameters": [
+        { "name": "learningRate", "kind": "scheduled" },
+        { "name": "weightDecay", "kind": "baked", "dtype": "Float32", "shape": [], "value": "zcz…" },
+        { "name": "gradScale", "kind": "runtime", "shape": [] }
+      ],
+
+      // The RNG config the rig was built with, so a rebuilt rig reproduces the same keyed
+      // initialization and runtime randomness (see rng-configuration.md).
+      "rng": {
+        "masterSeed": 12345,
+        "initMasterSeed": 999,            // explicit init sub-master; omitted to derive from masterSeed
+        "runMasterSeed": 7,               // explicit runtime sub-master; omitted likewise
+        "algorithm": "Threefry2x32",      // the bit-generator algorithm name
+        "overrides": [                    // per-stream overrides; omitted when there are none
+          { "collection": "Params", "path": [1, 3], "seed": 42 }
+        ]
+      }
+    }
   }
 }
 ```
@@ -594,6 +695,12 @@ Rules:
   rather than half-read. There is no read path for another version and no compatibility
   shim: every format below is version 1, and stays there until a breaking change earns a
   bump.
+- **Pre-release caveat: a payload break can land inside version 1.** Add-only governs the
+  manifest's *keys*; while Shorokoo is pre-release, what an entry's **payload** records can
+  still change in a read-breaking way without a `skptVersion` bump — and once has, in the
+  stored architecture. The full caveat, its blast radius and the recovery live with the
+  container the break happened in: see
+  [the pre-release caveat](onnx-and-weights.md#the-srk-container).
 - **Integrity is checked on load.** Every entry the manifest references must exist and
   match its recorded `sha256`; a missing entry, a hash mismatch, or a tensor mapping
   that does not cover the model's parameters exactly fails loudly, naming the
@@ -601,13 +708,25 @@ Rules:
 
 ## Current limits
 
-- One model per file. Any number of named weight sets over that model's parameters
-  (see [Named weight sets](#named-weight-sets-default--ema)).
+- One **weight-bearing** model per file — the `model` registry entry, the only one a
+  tensor mapping binds weights into. Any number of named weight sets over that model's
+  parameters (see [Named weight sets](#named-weight-sets-default--ema)). A
+  [training checkpoint](#training-checkpoints) registers further `models/` entries
+  alongside it — `modelArch`, `loss`, `optimizer`, and `scheduler` when any hyperparameter
+  is scheduled — as the graphs its rig is rebuilt from; no tensor mapping binds weights
+  into any of them (the `modelArch`, `loss` and `scheduler` entries carry no mapping at all,
+  and the `optimizer` entry's mapping addresses the optimizer *state*, not weights).
 - Data entries are bounded by the in-memory safetensors path — checkpoints with ≥ 2 GB
   of tensor data in a single entry are not yet supported (compressed or not; the bound
   applies to both the stored and the decompressed bytes).
-- A [training checkpoint](#training-checkpoints) stores the trainable weights, model
-  state, optimizer state and global step of a run. The full training **rig** — the
-  constituent model/loss/optimizer/scheduler graphs and their schedules — is not yet
-  carried; resume rebuilds the rig from the same graphs, then loads the file with
-  `rig.LoadCheckpointFromSkpt`.
+- A [training checkpoint](#training-checkpoints) carries the rig's constituent
+  model/loss/optimizer/scheduler graphs alongside the run's state, so `TrainingRig.Load`
+  resumes from the file alone. The flat safetensors format cannot carry constituents:
+  resuming from one means rebuilding the rig from the same graphs, then loading the file
+  with `rig.LoadCheckpoint`. Precompiled artifacts are still a future extension of the
+  container.
+- Resuming from the file alone does not reach back across pre-release payload breaks: a
+  training `.skpt` whose architecture was written before model-input shapes became dims-only
+  is rejected by `TrainingRig.Load` and has to be rebuilt from its source graphs and re-saved
+  (see [the pre-release caveat](onnx-and-weights.md#the-srk-container)). Its state and its
+  inference model still load.

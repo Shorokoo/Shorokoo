@@ -15,9 +15,10 @@ namespace Shorokoo.Modules.Layers;
 /// Flattens all trailing input dimensions into the feature axis, so an input
 /// of shape <c>[N, d1, d2, ...]</c> is treated as <c>[N, d1*d2*...]</c>.
 /// Weight <c>[outFeatures, inFeatures]</c> is <see cref="KaimingUniform"/>-initialized;
-/// bias <c>[outFeatures]</c> is zero-initialized. The bias parameter is created
-/// unconditionally (both <c>IfElse</c> branches are built); <c>useBias</c>
-/// selects whether it is added.
+/// bias <c>[outFeatures]</c> is zero-initialized. <c>useBias</c> is a <c>[Hyper]</c>
+/// bit fixed before concretization, so <c>useBias = false</c> folds the <c>IfElse</c>
+/// away and prunes the bias parameter — the layer then carries one trainable
+/// parameter, not two.
 /// </summary>
 [Module]
 public partial class Linear

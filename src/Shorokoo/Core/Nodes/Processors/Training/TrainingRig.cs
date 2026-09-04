@@ -140,9 +140,11 @@ namespace Shorokoo
         public RngConfig RngConfig => _constituents.RngConfig;
 
         /// <summary>
-        /// The compute context used for the rig's <b>build/merge phase</b>: concretizing the model,
-        /// shape-inferring, lowering, memory-optimizing and initializing the training-step graph and the
-        /// optimizer state. Supplied at construction (defaults to <see cref="ComputeContext.Default"/>);
+        /// The compute context used for the rig's <b>build/merge phase</b>: concretizing the model and
+        /// the hyperparameters, building scheduler modules, shape-inferring, lowering, memory-optimizing
+        /// and initializing the training-step graph and the optimizer state. It selects no backend or
+        /// device either — see <see cref="RuntimeContext"/> for why the rig's two contexts divide phases
+        /// rather than hardware. Supplied at construction (defaults to <see cref="ComputeContext.Default"/>);
         /// every <c>With…</c> derivation carries it forward by reference. It is <b>runtime configuration,
         /// never persisted</b> — no checkpoint (flat or <c>.skpt</c>) or manifest records it, so a
         /// reloaded rig receives a fresh one via <see cref="FromScratch(ComputationGraph, ComputationGraph,
@@ -154,12 +156,17 @@ namespace Shorokoo
         /// The compute context used to <b>compile the merged <see cref="TrainingStepPureGraph"/> into an
         /// executable and run it</b>: the single lazily-cached trainstep session (see
         /// <see cref="CompiledTrainStep"/>) that <see cref="Train"/>, every <c>Fit</c> overload and the
-        /// manual <c>TrainStep</c> all share. Because the context that compiles the trainstep bakes the
-        /// ORT session that executes it, this single context determines the execution backend. It is the
-        /// rig's sole compile/run context — <c>Train</c>/<c>Fit</c> take no per-call context override, so
-        /// there is exactly one compiled graph per rig. Supplied at construction (defaults to <see cref="ComputeContext.Default"/>);
-        /// every <c>With…</c> derivation carries it forward by reference and, like <see cref="MergeContext"/>,
-        /// it is runtime configuration that is <b>never persisted</b>.
+        /// manual <c>TrainStep</c> all share — the context whose session actually executes the training
+        /// step. It is the rig's sole compile/run context — <c>Train</c>/<c>Fit</c> take no per-call
+        /// context override, so there is exactly one compiled graph per rig. Supplied at construction
+        /// (defaults to <see cref="ComputeContext.Default"/>); every <c>With…</c> derivation carries it
+        /// forward by reference and, like <see cref="MergeContext"/>, it is runtime configuration that is
+        /// <b>never persisted</b>.
+        ///
+        /// <para><b>It selects no backend or device</b> (see <see cref="ComputeContext"/>): this context
+        /// and <see cref="MergeContext"/> divide <i>phases</i>, not hardware. You <b>cannot</b> merge on
+        /// one device and train on another — one backend is live per process and both contexts go
+        /// through it.</para>
         /// </summary>
         public ComputeContext RuntimeContext { get; private set; } = ComputeContext.Default;
 
@@ -2004,8 +2011,10 @@ namespace Shorokoo
         /// Fits the model to the data for <paramref name="numEpochs"/> epochs — a one-liner over
         /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct)"/>.
         /// Scheduled hyperparameters are applied automatically (the global step advances across epochs
-        /// via the checkpoint), so the schedule sees a monotonically increasing step. Alias for
-        /// <see cref="Train"/>. <paramref name="initialCheckpoint"/> defaults to
+        /// via the checkpoint), so the schedule sees a monotonically increasing step. Delegates to
+        /// <see cref="Train"/>, but the argument orders are not interchangeable: <see cref="Train"/>
+        /// takes the checkpoint first and requires it, this takes it last and optional.
+        /// <paramref name="initialCheckpoint"/> defaults to
         /// <see cref="CreateInitialCheckpoint()"/>, so a minimal call is
         /// <c>rig.Fit(inputs, targets, numEpochs: 10)</c>. The trainstep is compiled and run through the
         /// rig's <see cref="RuntimeContext"/> (set at construction), the single compiled graph per rig.

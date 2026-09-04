@@ -7,38 +7,65 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
 
 - `OnnxEngine.Eval(...)` is the simplest way to get values. It builds an ONNX model
   from the graph, runs it once via OnnxRuntime, and returns `TensorData`.
-  - `TensorData Eval(IValue output)`
-  - `TensorData[] Eval(IValue[] outputs)`
-  - `TensorData[] Eval(IValue a, IValue b, params IValue[] more)`
-  - `Eval` runs a graph of plain ops. A `[Module]` output may still carry an
-    un-lowered module-invoke node; if `Eval` throws
-    `No Op registered for ShrkCreateModule`, concretize it first — see
+  - `TensorData Eval(Variable output)`
+  - `TensorData[] Eval(Variable[] outputs)`
+  - `TensorData[] Eval(Variable output1, Variable output2, params Variable[] outputs)`
+  - The parameter type is `Variable`, which every op result converts to implicitly.
+    An `IValue`-typed handle does not, and needs `handle.ToVariable()` — see
+    [`Variable` and `IValue`](core-types.md#variable-and-ivalue).
+  - `Eval` runs a graph of plain ops only. Nothing on its path lowers a
+    module-invoke node, so a `[Module]` output handed to it throws — where, and with
+    which message, depends on the module. Concretize it first — see
     [Running a `[Module]`](#running-a-module).
 - `OnnxEngine.Eval` rebuilds and recreates an ORT session on every call. For repeated
   inference, compile once with `ComputeContext` (below).
-- Backend selection is implicit: whichever platform backend assembly is loaded
-  determines the execution provider (CPU vs CUDA). In a Linux sandbox this is
-  `Shorokoo.LinuxCPU`. Only one backend can be loaded per process.
+- Reference one platform backend package and it is normally found for you — no setup
+  code. Only one backend is live per process. How it is discovered, and how to
+  override the choice: [Backend selection](#backend-selection).
 
 ## Workflow: one-shot evaluation
 
-(`ResNet50` here is from [`samples/RetinaNet`](../samples/RetinaNet) — it is a
-sample built on Shorokoo, not part of the packages; substitute any `[Module]`.)
+`Eval` takes the output values of a graph of plain ops and runs that graph:
 
 ```csharp
 using Shorokoo;
 using static Shorokoo.Globals;
+using static Shorokoo.NN;
 
-var input  = TensorFill(Vector(1L, 3L, 224L, 224L), TensorData([1], 0.1f));
-var logits = ResNet50.Call(
-    numClasses: Scalar(1000L), bnMomentum: Scalar(0.9f), bnEps: Scalar(1e-5f),
-    includeTop: Scalar(true), applySoftmax: Scalar(true), inputs: input);
+var input = TensorFill(Vector(1L, 3L, 224L, 224L), TensorData([1], 0.1f));
+var w     = RandomNormal(Vector(64L, 3L, 7L, 7L));
+var b     = VectorFill(64L, 0f);
 
-TensorData result = OnnxEngine.Eval(logits);
+var features = Conv(input, w, b, AutoPad.NotSet,
+                    dilations: [1L, 1L], group: 1L,
+                    kernelShape: [7L, 7L], pads: [3L, 3L, 3L, 3L],
+                    strides: [2L, 2L]).Relu();
+
+TensorData result = OnnxEngine.Eval(features);
 
 // Read the numbers out (see core-types.md):
 ReadOnlySpan<float> values = ((TensorData<float32>)result).AccessMemory();
 ```
+
+What `Eval` accepts is the trap here:
+
+- **Op results, yes.** Anything implicitly convertible to `Variable` —
+  `Tensor<T>`, `Vector<T>`, `Scalar<T>` — which is what every op returns.
+- **An `IValue`-typed handle, no.** `Variable` does not implement `IValue`, so
+  `Eval(handle)` does not compile for a variable declared `IValue`; write
+  `Eval(handle.ToVariable())`. See
+  [`Variable` and `IValue`](core-types.md#variable-and-ivalue).
+- **A `[Module]`'s output, no.** `Eval` builds and runs the graph exactly as
+  handed to it, so a value coming out of `ResNet50.Call(...)` still carries its
+  un-lowered module-invoke node when it reaches OnnxRuntime, which rejects the
+  model with `No Op registered for ShrkCreateModule`. Not every module gets that
+  far: one whose parameters are initialized from a distribution computed in-graph
+  — the `Shorokoo.Modules` layers, `Linear` and `Conv2d` among them — throws
+  earlier still, while the ONNX model is being built. Either way, lower the
+  module's `ComputationGraph` first — see
+  [Running a `[Module]`](#running-a-module), which spells out both errors.
+  (`ResNet50` there is from [`samples/RetinaNet`](../samples/RetinaNet) — a
+  sample built on Shorokoo, not part of the packages.)
 
 Build the input from a real array (not just a constant fill) with the `params`
 overload — the first arg is the shape, the rest are the flat values:
@@ -57,11 +84,33 @@ TensorData[] outs = OnnxEngine.Eval(out1, out2, out3);
 
 `OnnxEngine.Eval` runs a graph of plain ops. A `[Module]`'s output (from
 `Foo.Call(...)` or `Foo.Model().Call(...)`) can still carry an un-lowered
-module-invoke node, in which case passing it straight to `Eval` throws:
+module-invoke node, in which case passing it straight to `Eval` throws. *Which*
+error you get depends on what the module's parameters are initialized from:
 
-> `[ErrorCode:InvalidGraph] ... Error No Op registered for ShrkCreateModule ...`
+- **A distribution computed in-graph.** `KaimingUniform`, `XavierUniform` and
+  `RecurrentUniform` all derive their bounds from the parameter's own shape, so this
+  covers most of the [`Shorokoo.Modules` layers](nn-library.md) — `Linear`, the
+  `Conv*` family, `MultiHeadAttention` — and anything built out of them. The failure
+  comes first, while the ONNX model is still being built, as an
+  `InvalidOperationException`:
 
-Concretize the module's `ComputationGraph` against the input first, then execute:
+  > `FastLowerRandomOps: a shrk_RandomUniform feed with in-graph distribution inputs
+  > reached the ONNX fallback ... Call ToConcreteModel first; executing or exporting
+  > a non-concrete model is not supported.`
+
+- **Anything else** — no trainable parameters at all, or initializers whose
+  distribution is constant (`Zeros`, `KaimingNormal`, `XavierNormal`, a plain
+  `RandomNormal(shape, mean, scale)`, …). Those build a model, and OnnxRuntime
+  rejects it for the module-invoke node it still contains:
+
+  > `[ErrorCode:InvalidGraph] ... Error No Op registered for ShrkCreateModule ...`
+
+  The `ResNet50` of [`samples/RetinaNet`](../samples/RetinaNet) lands here: it
+  initializes from its own constant-scale `RandomNormal`, not from the library
+  layers.
+
+The remedy is the same either way. Concretize the module's `ComputationGraph`
+against the input first, then execute:
 
 ```csharp
 using Shorokoo;
@@ -112,7 +161,10 @@ through copies and `.srk` save/load). The steps check it up front:
 required kind in their error when handed the wrong stage — so a mis-ordered
 pipeline fails immediately with a clear message instead of deep inside execution.
 Execution (`ComputeContext.Execute`/`Run`/`Compile` and `QuickExecutionEngine`)
-likewise refuses a module-kind graph up front with the same lowering hint.
+likewise refuses a module-kind graph up front with the same lowering hint. `Eval`
+is the exception: it takes output values rather than a `ComputationGraph`, so there
+is no `Kind` for it to check and a module-invoke node surfaces as one of the two raw
+build/run errors above instead of a lowering hint.
 `ComputationGraph`s are **readonly**: operations that used to modify a graph in
 place return a new graph instead (e.g. `WithRngConfig`), so a graph's `Kind` can
 never be invalidated behind your back.
@@ -190,23 +242,35 @@ usually not what you want.
 
 ```csharp
 var ctx      = new ComputeContext();
-var compiled = ctx.Compile(graph);                 // graph: ComputationGraph
-var r1 = compiled.Execute(inputData1);             // params IData[]
+var compiled = ctx.Compile(graph);                 // graph: a concretized ComputationGraph
+var r1 = compiled.Execute(inputData1);             // params IData[] — the data goes here
 var r2 = compiled.Execute(inputData2);             // reuses the session
 ```
 
-`ComputeContext` also offers `Eval`, `Execute(graph, inputs)`, `Run(graph, params)`,
-and `ExecuteWithState(...)` (for models that carry state). `Execute`/`Compile` take
-`params IData[]` inputs; `TensorData` implements `IData`, so pass `TensorData` values
-directly. They return `NamedModelParam[]`; read each output with
-`namedModelParam.ToTensorData()` then `AccessMemory()`.
+`Compile(ComputationGraph graph)` takes the graph and nothing else — the data goes to
+the `CompiledGraph` it returns, whose `Execute(params IData[] inputs)` is the call you
+repeat. `ComputeContext` also offers `Eval(...)` (the `OnnxEngine.Eval` overloads,
+plus `Eval<T>(Tensor<T>)` returning a typed `TensorData<T>`),
+`Execute(ComputationGraph graph, params IData[] inputs)`,
+`Run(ComputationGraph graph, params NamedModelParam[] inputs)`, and
+`ExecuteWithState(...)` (for models that carry state). Wherever `IData` is asked for,
+`TensorData` implements it, so pass `TensorData` values directly. `Execute`, `Run` and
+`CompiledGraph.Execute` return `NamedModelParam[]`; read each output with
+`namedModelParam.ToTensorData()` then `AccessMemory()`. `ExecuteWithState` returns
+`(NamedModelParam[] regularOutputs, ComputationGraph updatedGraph)` — feed the updated
+graph to the next call. `Eval` is the exception: it returns `TensorData` (or
+`TensorData[]`) directly.
 
 ## Backend selection
 
 - Add exactly one backend package as a dependency: `Shorokoo.LinuxCPU`,
   `Shorokoo.LinuxGPU`, `Shorokoo.WinCPU`, or `Shorokoo.WinGPU`. Each brings the native
   ONNX Runtime (CPU- or CUDA-flavored) for its platform.
-- Recommended: set the backend explicitly at startup, before the first inference call:
+- With exactly one backend package referenced you normally need no setup at all:
+  auto-discovery (below) finds it on the first inference call. Set the backend
+  explicitly when several backends are deployed side by side and you want to override
+  the choice, when you want a startup failure instead of one on the first inference
+  call, or when the backend DLL is not deployed next to `Shorokoo.dll`:
 
   ```csharp
   using Shorokoo.Core.Inference.Abstractions;
@@ -215,12 +279,60 @@ directly. They return `NamedModelParam[]`; read each output with
   InferenceBackend.Factory = new LinuxCpuInferenceFactory();
   ```
 
-- If you don't set one, the first inference call auto-discovers a backend by looking
-  **only** in the folder next to `Shorokoo.dll` for the known `Shorokoo.{Platform}`
-  DLLs. When both a CPU and a GPU backend for the current OS are deployed there, the
-  GPU one is used if a CUDA 12.x runtime is present, otherwise the CPU one. On a Linux
-  sandbox that ships only `Shorokoo.LinuxCPU`, discovery picks it with no setup.
-- Only one backend is live per process. To compare CPU vs GPU, use separate processes.
+- Only one backend is live per process. The first factory resolved is cached and reused
+  for every later call; assigning `Factory` afterwards swaps the cached factory but does
+  not unload a native ONNX Runtime already bound, so to compare CPU vs GPU use separate
+  processes. Every `ComputeContext` in the process shares that one backend — including a
+  training rig's two, which for that reason cannot select different devices (see
+  [Compute contexts](training.md#compute-contexts-mergecontext-and-runtimecontext) in the
+  training guide).
+
+### The factory types
+
+Each backend package contains exactly one factory, in a namespace equal to the package
+id. **The type name spells the device `Cpu`/`Gpu`, while the package, namespace and
+assembly spell it `CPU`/`GPU`** — so `Shorokoo.WinGPU` contains
+`WinGpuInferenceFactory`, *not* `WinGPUInferenceFactory`:
+
+| package (= namespace) | factory type | fully qualified |
+|---|---|---|
+| `Shorokoo.LinuxCPU` | `LinuxCpuInferenceFactory` | `Shorokoo.LinuxCPU.LinuxCpuInferenceFactory` |
+| `Shorokoo.LinuxGPU` | `LinuxGpuInferenceFactory` | `Shorokoo.LinuxGPU.LinuxGpuInferenceFactory` |
+| `Shorokoo.WinCPU` | `WinCpuInferenceFactory` | `Shorokoo.WinCPU.WinCpuInferenceFactory` |
+| `Shorokoo.WinGPU` | `WinGpuInferenceFactory` | `Shorokoo.WinGPU.WinGpuInferenceFactory` |
+
+All four take a parameterless constructor and differ only in the execution provider
+they configure: the GPU ones append the CUDA provider on device 0, the CPU ones leave
+ORT on its default provider.
+
+### Auto-discovery
+
+If you never assign `InferenceBackend.Factory`, the first read of it resolves a backend
+once and caches the result:
+
+1. If one of the four backend assemblies is **already loaded** in the process, its
+   factory is used — this avoids pulling a second native in alongside one already bound.
+   The match is on assembly name alone; the OS filter in step 2 does not apply here.
+2. Otherwise the folder next to `Shorokoo.dll` is probed for the known
+   `Shorokoo.{Platform}.dll` files, and only those targeting the current OS count as
+   candidates. Nothing else is searched: no other directory, no NuGet cache, and no
+   assembly whose name is not one of those four.
+
+When step 2 finds both the CPU and the GPU backend for the current OS, the GPU one is
+used if a CUDA 12.x runtime (`libcudart.so.12` on Linux, `cudart64_12.dll` on Windows)
+can be loaded, otherwise the CPU one. A single candidate is taken as-is — a lone GPU
+backend is chosen even when no CUDA runtime is present.
+
+Referencing a backend package is enough for step 2: the package copies its DLL to your
+output folder, so discovery finds it whether or not your code mentions the factory type.
+On a Linux sandbox that ships only `Shorokoo.LinuxCPU`, discovery picks it with no setup.
+
+If no backend is found, the first inference call throws `InvalidOperationException`:
+
+> `No Shorokoo inference backend is set and none was found in '<folder>'. Set one at
+> startup -- e.g. InferenceBackend.Factory = new LinuxCpuInferenceFactory(); (or the
+> factory from whichever Shorokoo.{WinCPU,WinGPU,LinuxCPU,LinuxGPU} package you
+> reference) -- or add such a package as a dependency.`
 
 ## Debugging engine (no OnnxRuntime)
 

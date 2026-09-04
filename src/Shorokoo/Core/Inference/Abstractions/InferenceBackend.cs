@@ -10,15 +10,18 @@ namespace Shorokoo.Core.Inference.Abstractions;
 /// <para>
 /// The core Shorokoo assembly does not reference ONNX Runtime; the concrete
 /// factory lives in a platform package (Shorokoo.WinCPU, Shorokoo.WinGPU,
-/// Shorokoo.LinuxCPU, or Shorokoo.LinuxGPU) that you add as a dependency. The
-/// supported way to choose one is to set it explicitly at startup:
+/// Shorokoo.LinuxCPU, or Shorokoo.LinuxGPU) that you add as a dependency.
+/// Naming one in code is optional — referencing the package is normally enough —
+/// but you can set it explicitly at startup to override the discovered choice, or
+/// to fail at startup rather than on the first inference call:
 /// </para>
 /// <code>
 /// InferenceBackend.Factory = new LinuxCpuInferenceFactory();
 /// </code>
 /// <para>
-/// If you never set one, the first inference call auto-discovers a backend by
-/// looking <b>only</b> in the folder next to this assembly for the known
+/// If you never set one, the first inference call auto-discovers a backend in two
+/// steps: a Shorokoo.{Platform} assembly already loaded in the process wins, and
+/// only failing that is the folder next to this assembly probed for the known
 /// Shorokoo.{Platform} DLLs. When both a CPU and a GPU backend for the current
 /// OS are deployed there, the GPU one is used if a CUDA 12.x runtime is present,
 /// otherwise the CPU one. Only one backend is ever live per process; loading a
@@ -31,8 +34,9 @@ public static class InferenceBackend
     private static readonly object _gate = new();
 
     /// <summary>
-    /// The backend used for all inference. Assign once at startup; if left unset
-    /// it is auto-discovered from the deployment folder on first access.
+    /// The backend used for all inference. Assigning one is optional; if left unset
+    /// it is auto-discovered on first access — an already-loaded backend assembly
+    /// first, otherwise the deployment folder.
     /// </summary>
     public static IShorokooInferenceSessionFactory Factory
     {

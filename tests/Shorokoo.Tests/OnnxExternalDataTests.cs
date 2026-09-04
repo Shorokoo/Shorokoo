@@ -411,4 +411,73 @@ public class OnnxExternalDataTests
             Assert.False(File.Exists(path + ".data"));
         }
     }
+
+    private static ModelProto AddModelWithWeight()
+        => BuildAddModel(Init("w", FloatElem, [4], FloatBytes(1f, 2f, 3f, 4f)));
+
+    /// <summary>A model protobuf-net starts writing and then fails on: the null opset entry is
+    /// only reached once serialization is under way, i.e. after the target has been opened.</summary>
+    private static ModelProto AddModelThatFailsMidSerialization()
+    {
+        var model = AddModelWithWeight();
+        model.OpsetImports.Add(null!);
+        return model;
+    }
+
+    /// <summary>The saved model and its external-data side file, as hex; a missing file reads "absent".</summary>
+    private static string[] SavedPair(string path)
+    {
+        string[] paths = [path, path + ".data"];
+        return [.. paths.Select(p => File.Exists(p)
+            ? Convert.ToHexString(File.ReadAllBytes(p))
+            : "absent")];
+    }
+
+    /// <summary>Seeds a fresh path with <paramref name="seed"/>, runs a <paramref name="fail"/> save
+    /// that dies mid-serialization over it, and reports whether the seed left a side file and
+    /// whether each of the two committed files came through unchanged.</summary>
+    private static string AfterAFailedSave(
+        string dir, Action<ModelProto, string> seed, Action<ModelProto, string> fail)
+    {
+        var path = Path.Combine(dir, Guid.NewGuid().ToString("N") + ".onnx");
+        seed(AddModelWithWeight(), path);
+        var committed = SavedPair(path);
+        Assert.Throws<NullReferenceException>(() => fail(AddModelThatFailsMidSerialization(), path));
+        string[] parts = [
+            committed[1] == "absent" ? "no-side-file" : "side-file",
+            .. SavedPair(path).Zip(committed).Select(p => p.First == p.Second ? "kept" : "lost")];
+        return string.Join(' ', parts);
+    }
+
+    /// <summary>
+    /// Both exporter entry points truncate the target before the model is serialized into it, so
+    /// a save that fails partway destroys the previously saved model — and, with the external-data
+    /// layout, its <c>catch</c> deletes the side file too, losing both halves of a previously good
+    /// pair. Every <c>Persistence.*</c> save gets this right by staging through
+    /// <see cref="Shorokoo.Core.Utils.AtomicFileWriter"/>; these do not.
+    /// Tracked as Shorokoo/Shorokoo#218.
+    /// </summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#218: OnnxModelExporter truncates the target before serializing into it")]
+    public void TestAnExportFailingMidSerializationLeavesThePreviouslySavedModelAndSideFileIntact()
+    {
+        WithTempDir(dir =>
+        {
+            Action<ModelProto, string> inline = (m, p) => OnnxModelExporter.Save(m, p);
+            Action<ModelProto, string> external = (m, p) => OnnxModelExporter.SaveWithExternalData(
+                m, p, new OnnxExternalDataOptions { SizeThreshold = 0 });
+            Action<ModelProto, string> belowThreshold =
+                (m, p) => OnnxModelExporter.SaveWithExternalData(m, p);
+            (string Expected, Action<ModelProto, string> Seed, Action<ModelProto, string> Fail)[] cases =
+            [
+                ("no-side-file kept kept", inline, inline),
+                ("no-side-file kept kept", belowThreshold, belowThreshold),
+                ("side-file kept kept", external, external),
+                ("side-file kept kept", external, inline),
+                ("side-file kept kept", external, belowThreshold),
+            ];
+            string[] expected = [.. cases.Select(c => c.Expected)];
+            string[] actual = [.. cases.Select(c => AfterAFailedSave(dir, c.Seed, c.Fail))];
+            Assert.Equal(expected, actual);
+        });
+    }
 }

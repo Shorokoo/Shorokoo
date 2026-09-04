@@ -101,7 +101,7 @@ span the *floor* and the top the *cap*.
 | Region | Magnitudes | What a draw returns there | Mass |
 |---|---|---|---|
 | lattice | below the floor, 2⁻³⁹ (1.818989e-12) | points of an even lattice whose step is the floor class's spacing — represented, but not individually addressable | 1.4513e-12, about 1 draw in 690 billion |
-| resolved | 2⁻³⁹ up to 8, the 42 weight classes between | individual `float32` values, each with the mass of the interval it stands for — except above 7.601182, where a float's cell can be worth under one position and 577,209 of them get none | all the rest |
+| resolved | 2⁻³⁹ up to 8, the 42 weight classes between | individual `float32` values, each with the mass of the interval it stands for — except above 7.6008, where a float's cell is worth under one position; 577,209 of them get none, the lowest of them 7.6011825 | all the rest |
 | cap | 8 and beyond | exactly `8.0f` | 1.244e-15, about 1 draw in 800 trillion |
 
 Counting values rather than mass: **720,265,872** of the 4,278,190,080 finite `float32`

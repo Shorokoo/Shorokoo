@@ -42,6 +42,27 @@ rejected with `AutoDiffNotSupportedException`. Loops with a statically known
 trip count can be unrolled (iterate with `LoopAPI.Iterate(n)` where `n` is a
 compile-time constant) and then differentiate normally.
 
+### Gradient (activation) checkpointing
+
+There is no way to ask Shorokoo to trade compute for activation memory: no
+attribute, option, or API marks a module, block, or tensor for recomputation
+during the backward pass. If a training step does not fit, the levers are the
+usual ones — a smaller batch, a shorter sequence, or a smaller model.
+
+Building a training rig does run an internal memory-aware pass over the lowered
+training-step graph, which may reorder nodes and recompute a tensor rather than
+keep it alive, but only where that improves a fixed combined compute-and-memory
+metric. The pass is automatic, has no settings, and reports nothing; do not
+count on it to make a step fit that otherwise would not.
+
+That pass is also where three types a reflection dump over the `Shorokoo`
+assembly turns up come from — `GraphEvaluationResult`, `NodeEvaluationInfo` and
+`GraphOptimizationResult`, in the namespace `Shorokoo.Core.AutoDiffCheckpointing`.
+Despite the namespace name they are that pass's internal report, and they are
+public only as an artefact of the assembly layout: everything that produces or
+consumes them is internal, so no API you can call ever hands you one. Treat them
+as unsupported and do not build on them.
+
 ### Quick Execution Engine value computation is bounded
 
 The Quick Execution Engine (QEE) always propagates output **dtype and shape**
@@ -77,11 +98,12 @@ never leaves `mean ± 8·scale`. **Below**: magnitudes under 2⁻³⁹ ride an e
 of the float grid, so they are not individually drawable — the region still carries exactly
 the mass it is due (1.4513e-12, about one draw in 690 billion), and the normal density is
 constant to within 2⁻⁷⁸ across it, so what is lost is resolution among numerically
-interchangeable values, not fairness. **Near the top**: above 7.601182 a float's cell can carry less mass than one
-position is worth, so 577,209 magnitudes below 8 get no position and never come out. In all,
-720,265,872 of the 4,278,190,080 finite `float32` values — 16.8% — can come out of a draw. Both limits are set by the generator bits
-spent per element, so a wider window is possible but costs more of them. See
-[normal-draws.md](normal-draws.md) for the full contract.
+interchangeable values, not fairness. **Near the top**: above 7.6008 a float's cell is worth under
+one position, and 577,209 magnitudes below 8 — the lowest of them 7.6011825 — get none and never
+come out. In all, 720,265,872 of the 4,278,190,080 finite `float32` values — 16.8% — can come out
+of a draw. Both limits are set by the generator bits spent per element, so a wider window is
+possible but costs more of them. See [normal-draws.md](normal-draws.md) for the full contract,
+which states both magnitudes.
 
 ### ONNX `Scan` import
 
@@ -110,10 +132,22 @@ with `LoopAPI`) — that form is fully supported.
 Import accepts standard-domain (`ai.onnx`) models from opset 7 through
 opset 26 — the range implemented by the bundled ONNX Runtime 1.26 (which pins
 ONNX 1.21). Export, however, stamps models at the **opset-21 baseline**,
-and the exporter auto-raises each model's opset stamp only as far
-as the post-21 operators actually present in the graph require (e.g. a graph
-containing `Attention` is stamped opset 23; one containing `BitCast`,
-opset 26).
+and the exporter auto-raises each model's opset stamp only as far as the
+graph actually requires.
+
+The exporter holds a floor for each post-21 operator (`RMSNormalization` and
+`RotaryEmbedding` at 23; `Attention`, `Swish` and `TensorScatter` at 24 —
+`Attention` is defined at 23, but ORT 1.26's CPU provider only registers its
+kernel at 24+; `BitCast` and `CumProd` at 26). None of those floors is
+reachable from the `Ops`/`OnnxOp` authoring surface today, though:
+`Attention`, `AttentionWithKVCache`, `RotaryEmbedding`, `TensorScatter`,
+`BitCast` and `CumProd` throw `NotImplementedException` at their `OnnxOp`
+entry points, and `Swish` and `RMSNormalization` lower inline to opset-21
+primitives (`Mul`/`Sigmoid` and `ReduceMean`/`Sqrt`/`Div`/`Mul`), so no
+post-21 operator node is ever emitted from an authored graph. The floors are
+kept as the restore point for when a runtime registers those operators at a
+usable opset. In practice the raise you will see is the attribute-driven one
+described below, on an imported model.
 
 The baseline stays at 21 rather than 26: the opset stamp selects
 kernel versions in ONNX Runtime, and ORT's CPU provider has gaps at the
@@ -131,7 +165,14 @@ optional attributes that Shorokoo imports and honors —
 `DequantizeLinear.output_dtype` (opset 23), `QuantizeLinear.precision` (23),
 and `Cast`/`CastLike.round_mode` (24, float8e8m0-only semantics). When such
 an attribute carries a non-default value the exporter raises that model's
-stamp accordingly. The opset-21 operator versions remain semantically
+stamp accordingly. That raise only ever comes from an imported model, though:
+none of the three attributes is reachable from the `Ops`/`OnnxOp` authoring
+surface — no entry point there accepts one — so an authored graph never
+carries them, and a graph built from `Ops`/`OnnxOp` alone exports at the
+opset-21 baseline. (The low-level `NodeBuilder` surface is the exception: it
+can stamp any attribute a node definition declares, `precision` and
+`round_mode` included, and a node built that way raises the stamp exactly as
+an imported one does.) The opset-21 operator versions remain semantically
 complete for everything else Shorokoo can represent.
 
 ### Sub-byte and complex dtypes

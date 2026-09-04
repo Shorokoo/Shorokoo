@@ -16,7 +16,7 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
 using Shorokoo;                 // Tensor<T>, Scalar<T>, Vector<T>, LoopAPI, attributes
 using Shorokoo.Modules;         // [Module], [Hyper], [TrainableParamInitializer]
 using static Shorokoo.Globals;  // Scalar(...), Vector(...), TensorData(...), TensorFill(...)
-using static Shorokoo.NN;       // Conv, MaxPool, GlobalAveragePool, Erf, ...
+using static Shorokoo.NN;       // Conv, MaxPool, GlobalAveragePool, LayerNormalization, ...
 ```
 
 Other usings are introduced by the page that needs them (for example

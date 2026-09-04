@@ -14,6 +14,13 @@ Related: [inference.md](inference.md) · [core-types.md](core-types.md) · [skpt
   ONNX **external data** mechanism: `OnnxModelExporter.SaveWithExternalData` on
   export, and transparent side-file loading on import.
 - Pretrained weights are loaded from `.safetensors` (and compressed `.zsafetensor`).
+- Saves through the `Persistence.*` facade are **atomic** (staged beside the target and
+  committed by rename) — and so is the flat training-checkpoint save `checkpoint.Save`
+  (`TrainingCheckpoint.Save`, which `Persistence.SaveTrainingCheckpoint` delegates to),
+  which stages and renames the same way, so you never need a stage-and-rename of your own
+  around it. The raw layers below them — `OnnxModelExporter`,
+  `SafeTensorLoader.SaveSafeTensors`, `CompressedFormatUtils` — write **in place**, so an
+  interrupted write leaves a truncated file. Prefer an atomic entry point where one exists.
 
 ## Export to ONNX
 
@@ -32,7 +39,12 @@ protobuf-net's `ProtoBuf.Serializer` (the `ProtoBuf` namespace ships via protobu
 which the library already depends on). `OnnxModelExporter.Save(model, path)`
 (namespace `Shorokoo.Onnx`) does the same serialization, plus a clear error — instead
 of a protobuf failure — when the model's tensor data exceeds the 2 GB protobuf message
-ceiling, pointing at the external-data option below.
+ceiling, pointing at the external-data option below. Both write **in place** —
+`File.Create` truncates the target before the first byte lands — so an export interrupted
+by a crash, a kill or a full disk destroys whatever was at that path.
+[`Persistence.ExportOnnx`](#onnx-model-exchange-exportonnx--importonnx) is the atomic
+wrapper over the same serialization (staged beside the target, committed by rename); use
+it when overwriting a file you still need.
 
 ### Large models: external data
 
@@ -66,19 +78,50 @@ parameters is refused up front (`XD008`) with the actual vs required kind named.
   identical to `Save`.
 - The exported pair is standard ONNX — stock onnxruntime loads it directly.
 - The passed `ModelProto` is left unmodified.
+- Neither file is staged. The side file is overwritten first (destroying the one an
+  earlier external save of the same path wrote) and deleted again on any failure, and the
+  `.onnx` is then truncated and rewritten in place — so a failed or interrupted export can
+  leave the previous `.onnx` behind with no side file for it to reference, or a truncated
+  `.onnx`. `Persistence.ExportOnnx` writes self-contained models only, so there is no
+  atomic external-data export: write the pair to a fresh path and move it into place
+  yourself when the existing model must survive a failed export.
 
 `BuildOnnxModel(ComputationGraph graph, OpSetVersion opset = OPS_21,
-bool prepForOnnx = false)` requires a
+bool prepForOnnx = false,
+RepresentativeInputForm representativeForm = Passthrough)` requires a
 `GraphKind.ConcreteModel` graph — anything else fails fast with `FW045` naming the
 actual and required kinds (only a concrete model can satisfy the vanilla-ONNX
 guarantee). It clones the graph (no mutation), lowers it for ONNX, and emits
 nodes, subgraphs, and functions.
-The default `OPS_21` is the export **baseline**: if the graph (including
-function bodies) contains operators introduced after opset 21 (e.g.
-`Attention`, opset 23), the model's `opset_import` is raised automatically
-just far enough to cover them. Models up to opset 26 execute on the bundled
-ONNX Runtime 1.26 — see [limitations.md](limitations.md) for the stamping
-policy.
+The default `OPS_21` is the export **baseline**: the exporter scans the graph
+(function bodies included) and raises the model's `opset_import` only as far as
+it actually requires. In practice that raise is driven by post-21 **attributes**
+carried by an imported model — `DequantizeLinear.output_dtype` and
+`QuantizeLinear.precision` raise the stamp to 23, `Cast`/`CastLike.round_mode`
+to 24. No post-21 **operator** raises it, because none can reach the exporter:
+`Attention`, `AttentionWithKVCache`, `RotaryEmbedding`, `TensorScatter`,
+`BitCast` and `CumProd` throw `NotImplementedException` at their `OnnxOp` entry
+points, and `Swish` and `RMSNormalization` lower inline to opset-21 primitives,
+so no post-21 operator node is ever emitted from an authored graph (the
+exporter's per-operator floors are kept as the restore point for when a runtime
+registers those operators at a usable opset). A graph built through
+`Ops`/`OnnxOp` therefore always exports at opset 21 — the low-level
+`NodeBuilder` surface is the exception, since it can stamp one of those
+attributes directly, and a node built that way raises the stamp exactly as an
+imported one does. Models up to opset 26 execute on the bundled ONNX Runtime
+1.26 — see [limitations.md](limitations.md) for the stamping policy and
+[operator-support.md](operator-support.md) for the per-operator picture.
+
+`representativeForm` (`RepresentativeInputForm`, namespace
+`Shorokoo.Core.Factory`) decides what becomes of the model's **representative
+input shapes** — the dims each input was concretized at, recorded on the graph's
+input nodes and always dims-only (no values). `Passthrough` (the default) leaves
+them out of the exported file; `VanillaMetadata` writes each input's
+representative shape into that input's own graph-input `ValueInfoProto` metadata
+(key `shrk_repr_input`), which `OnnxModelImporter` re-attaches on import. It is
+plain metadata: the `ValueInfoProto`'s own dims stay symbolic either way, so no
+external consumer sees a frozen batch dimension. `Persistence.ExportOnnx` below
+passes `VanillaMetadata`.
 
 ### The vanilla dialect is a guarantee
 
@@ -165,6 +208,15 @@ byte[] bytes = CompressedFormatUtils.SaveFastGraphToBinary(graph, compressed: tr
 from the `compressed` flag, but it is only a hint for humans: **how a file parses is
 decided by its content, never by its extension** — a renamed file loads identically.
 
+`SaveFastGraphToFile` builds the whole container in memory before touching the
+destination, so a serialization failure never damages the target — but the write itself is
+an in-place overwrite (`File.WriteAllBytes`), and a crash or a full disk part-way through
+it leaves the target truncated. There is no atomic `.srk` writer. When the target is a
+file you still need, write to a fresh path and move it into place yourself, or — for a
+concrete model — persist it as a [`.skpt`](skpt-checkpoints.md) with
+`Persistence.From(model).WithModel().WithWeights().Save(path)`, whose write is atomic. A
+module-stage graph has only the in-place `.srk` path.
+
 ### The `.srk` container
 
 Every file written today is a self-describing, versioned container:
@@ -219,6 +271,23 @@ keeps internal `N{k}_T{s}` tensor names, and is only loadable by Shorokoo
 (`LoadFastGraphFromFile` / `OnnxModelImporter`). Use it for Shorokoo-to-Shorokoo
 persistence; use `BuildOnnxModel` for anything meant to leave Shorokoo.
 
+**Pre-release caveat: a payload break can land inside version 1.** Add-only governs
+the container's header *fields*. While Shorokoo is pre-release, what the **payload**
+records can still change in a read-breaking way without a container version bump —
+and once has: a concrete architecture saved before model-input shapes became
+dims-only recorded a small input as an inline representative tensor, so the current
+reader finds no shape on that input. The blast radius is narrow: it bites only where
+a rig is rebuilt from a persisted architecture with no host-supplied sample inputs —
+i.e. `TrainingRig.Load` on an older training [`.skpt`](skpt-checkpoints.md), which
+fails loudly, naming the older-build cause. There is deliberately no legacy read
+path — rebuild the rig from its source graphs and re-save. Everything else still
+reads: `LoadFastGraphFromFile` loads such a graph as it always did,
+`Persistence.Load` loads a `.skpt` holding one as an inference model,
+`rig.LoadCheckpointFromSkpt` reads the manifest and the state tensors without
+touching the stored architecture, the flat safetensors format is unaffected, and so
+is feeding a standalone `.srk` architecture to `TrainingRig.FromScratch`, whose
+sample inputs record the representative shapes afresh.
+
 ## Load pretrained weights (SafeTensors)
 
 With `SafeTensorLoader`:
@@ -243,9 +312,19 @@ Save:
 SafeTensorLoader.SaveSafeTensors("out.safetensors", listOfSafeTensors);
 ```
 
+`SaveSafeTensors` writes **in place** — it truncates the target on open — so a crash
+mid-save leaves a truncated file where the previous one was. To write a concrete model's
+weights, prefer
+[`Persistence.ExportSafeTensors`](#weight-exchange-with-naming-schemes-exportsafetensors--importsafetensors)
+below: same plain safetensors output, written atomically (staged beside the target and
+committed by rename, exactly as the [`.skpt`](skpt-checkpoints.md) and training-checkpoint
+saves are).
+
 Compressed (`.zsafetensor`) variants live in `CompressedFormatUtils`:
 `SaveCompressedSafeTensors`, `LoadCompressedSafeTensors`,
-`SaveCompressedModelParamSet`, `LoadCompressedModelParamSet`.
+`SaveCompressedModelParamSet`, `LoadCompressedModelParamSet`. The two save calls compress
+into memory and then overwrite the target in place as well, and have no atomic
+equivalent — `Persistence.ExportSafeTensors` writes the uncompressed form.
 
 ## Weight exchange with naming schemes (`ExportSafeTensors` / `ImportSafeTensors`)
 
@@ -393,7 +472,9 @@ imported ONNX graph does not carry, so it leaves the ONNX names unchanged.
 `Persistence.Inspect(path)` (namespace `Shorokoo`) answers "what is this file?"
 **without loading it**: it identifies any Shorokoo-produced artifact and
 summarizes its contents from headers/prefixes only, so inspecting a multi-GB
-file is fast and cheap.
+file is fast and cheap. A **directory** path is inspected too — as the `.skpt`
+[directory form](skpt-checkpoints.md#the-directory-form), with
+`result.FileSizeBytes` reporting the total bytes of the directory's files.
 
 ```csharp
 ArtifactInspection result = Persistence.Inspect("run.safetensors");
@@ -418,13 +499,20 @@ Recognized formats and what is reported:
 | `TrainingCheckpoint` | the `__shorokoo_checkpoint__` marker tensor in a SafeTensors header | checkpoint format version, the run counters (global step, epoch, batch index), and the per-section (`trainable` / `model_state` / `opt_state`) tensor listing (`result.TrainingCheckpoint`); `result.SafeTensors` is populated too |
 | `CompressedSafeTensors` | Zstd frame magic whose decompressed content starts with a valid SafeTensors length prefix + JSON header (`.zsafetensor`, written by `CompressedFormatUtils.SaveCompressedSafeTensors`) | the same details as `SafeTensors` (`result.SafeTensors`), read by stream-decompressing only the prefix and header — the tensor payload is never decompressed; sizes describe the decompressed content |
 | `SkptCheckpoint` | a zip archive — or a **directory** (the `.skpt` directory form) — with a root `config.json` manifest declaring format `"skpt"` (see [skpt-checkpoints.md](skpt-checkpoints.md)) | whole-archive metadata (`.skpt` version, created time, producer), the model registry (per model: entry path, format, stage, graph hash), the data registry (per entry: storage format, compression, declared size, recorded sha256 — reported **unverified**), and the mapping-set names (`result.Skpt`) |
-| `NotRecognized` | anything else — including a zip without a readable `skpt` manifest | a structured result — **content problems never throw**; a missing file and I/O errors (permissions, disk) do |
+| `NotRecognized` | anything else — including a zip without a readable `skpt` manifest, and a directory with no root `config.json`, one whose `config.json` is too large to be a manifest, or one whose manifest declares another format | a structured result — **content problems never throw**; a missing file and I/O errors (permissions, disk) do |
 
 - Reads are bounded to headers and prefixes; tensor payload bytes are never
-  materialized. The one exception is a checkpoint's 32-byte marker (the format
-  version and run counters live there). For a `.skpt`, only the zip central directory
-  and the `config.json` entry are read — the recorded per-entry sha256s are
-  reported as written, never checked (a full `Persistence.Load` verifies them).
+  materialized. The one exception is a checkpoint's 16-byte marker (an `int64[2]`
+  holding the format version and the global step) plus the presence-gated epoch and
+  batch-index scalars beside it, 8 bytes each. The presence-gated loss scalar (a
+  `float32`, 4 bytes) is *not* read — `Inspect` reports the run counters only, as the
+  table above lists. For a `.skpt`, only the zip central directory, the `config.json`
+  entry and (when present) the small `data/user-data.json` entry are read — and for the
+  **directory form**, the directory's files are enumerated, its file listing playing the
+  central directory's role, with the root `config.json` and `data/user-data.json` read
+  the same way. The recorded
+  per-entry sha256s are reported as written, never checked (a full
+  `Persistence.Load` verifies them).
   Because the payload is untouched, `Inspect` also succeeds on a file whose
   payload is corrupt — it reports the header while a full load would fail the
   SHA-256 check.
@@ -432,9 +520,11 @@ Recognized formats and what is reported:
   alone, e.g. declared tensor extents pointing past the end of the file
   (truncation), trailing bytes beyond the declared data, an unreadable /
   future-version container header, or — for a `.skpt` — a manifest entry with
-  no matching archive entry (and vice versa), a compressed entry where STORED
-  is expected, unknown manifest keys, and empty registries. Through the
-  compression layer of a `.zsafetensor` only header-internal checks apply — a
+  no matching archive entry (and vice versa), a compressed entry where STORED is
+  expected, unknown manifest keys, and empty registries. On the **directory form**
+  specifically, the scan also flags a manifest entry path that escapes the checkpoint
+  root (reported, never thrown — `Inspect` never resolves it, and a load refuses it).
+  Through the compression layer of a `.zsafetensor` only header-internal checks apply — a
   compressed file's size has no fixed relation to the decompressed extents, so
   truncation of the tensor payload is not detectable from the header.
 - A `.zsafetensor` that contains the `__shorokoo_checkpoint__` marker (a
@@ -513,3 +603,6 @@ map a `DType` to a SafeTensor dtype string.
 - Do not expect a one-call graph-to-file helper; build the `ModelProto` first, then
   save it (`OnnxModelExporter.Save` / `SaveWithExternalData`, or serialize it
   yourself).
+- Do not treat the raw writers as crash-safe: they overwrite the target in place. See
+  [Facts](#facts) for which writers stage and commit by rename and which do not, and each
+  API's own section for the consequence at the call site.

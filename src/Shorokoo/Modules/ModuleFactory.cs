@@ -11,7 +11,7 @@ namespace Shorokoo.Modules
     /// class with a static <c>Inline</c> method.
     ///
     /// <para><b>Usage.</b> Write the module body as a static method (or non-capturing
-    /// <c>static</c> lambda) whose parameters are the flattened hyperparameter/input tensors —
+    /// <c>static</c> lambda) whose parameters are the flattened input/hyperparameter tensors —
     /// exactly the shape of a <c>[Module]</c> class's <c>Inline</c> method — then:</para>
     /// <code>
     /// static Tensor&lt;float32&gt; Body(Tensor&lt;float32&gt; x)
@@ -24,7 +24,7 @@ namespace Shorokoo.Modules
     ///                 (Func&lt;Tensor&lt;float32&gt;, Tensor&lt;float32&gt;&gt;)Body);
     /// </code>
     ///
-    /// <para><b>Hyperparameters.</b> Mark the leading parameters with <c>[Hyper]</c> (on the
+    /// <para><b>Hyperparameters.</b> Mark the trailing parameters with <c>[Hyper]</c> (on the
     /// static method, or on an explicitly-typed lambda's parameters) and use
     /// <see cref="FromFuncWithHypers{THyper, TIn, TOut}"/> and friends; bind them with
     /// <c>module.SetHyperparams(...)</c>.</para>

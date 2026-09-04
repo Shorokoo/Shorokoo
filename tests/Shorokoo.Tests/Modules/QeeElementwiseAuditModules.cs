@@ -283,16 +283,16 @@ namespace Shorokoo.Tests.Modules
     }
 
     // ===================================================================
-    //  Bug-pin modules (Phase 7 documentation sweep): wrapper-API value
-    //  bugs found in Scalar.cs / Vector.cs. Each module self-checks the
-    //  value the public wrapper SHOULD produce, so the check stays false
-    //  (test stays failing) until the wrapper is fixed.
+    //  Regression pins for wrapper-API value bugs once present in
+    //  Scalar.cs / Vector.cs. Each module self-checks the value the public
+    //  wrapper must produce, so the check goes false if a wrapper is again
+    //  wired to the wrong operation.
     // ===================================================================
 
-    /// <summary>BUG PIN: <c>Scalar&lt;T&gt;.operator &lt;&lt;(Scalar&lt;T&gt;, PrimitiveParam)</c>
-    /// (Scalar.cs) delegates to <c>operator &gt;&gt;</c>, so a left shift by a primitive
-    /// constant actually right-shifts. Checks <c>(uint32)4 &lt;&lt; 2 == 16</c>; with the
-    /// bug the graph computes <c>4 &gt;&gt; 2 = 1</c>. Input a = 4.</summary>
+    /// <summary>Pins that <c>Scalar&lt;T&gt;.operator &lt;&lt;(Scalar&lt;T&gt;, PrimitiveParam)</c>
+    /// left-shifts rather than delegating to <c>operator &gt;&gt;</c>. Checks
+    /// <c>(uint32)4 &lt;&lt; 2 == 16</c>; a delegation to <c>&gt;&gt;</c> would give 1.
+    /// Input a = 4.</summary>
     [Module]
     public partial class ScalarShiftLeftPrimitiveBugPinCheck
     {
@@ -304,9 +304,8 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary>BUG PIN: <c>Scalar&lt;T&gt;.Min/Max(params Scalar&lt;T&gt;[] others)</c> (Scalar.cs)
-    /// call <c>base.Min()</c>/<c>base.Max()</c> with no arguments, silently ignoring
-    /// <c>others</c> — <c>a.Min(b)</c> returns <c>a</c>. Checks <c>5.Min(2) == 2</c> and
+    /// <summary>Pins that <c>Scalar&lt;T&gt;.Min/Max(params Scalar&lt;T&gt;[] others)</c> forward
+    /// <c>others</c> instead of dropping them. Checks <c>5.Min(2) == 2</c> and
     /// <c>2.Max(5) == 5</c>. Inputs a = 5, b = 2.</summary>
     [Module]
     public partial class ScalarMinMaxOthersBugPinCheck
@@ -324,8 +323,8 @@ namespace Shorokoo.Tests.Modules
             => ((actual - expected).Abs() <= Scalar(1e-3f)).IfElse(Scalar(0L), Scalar(1L));
     }
 
-    /// <summary>BUG PIN: <c>Vector&lt;T&gt;.Min/Max(params Tensor&lt;T&gt;[] others)</c> (Vector.cs)
-    /// likewise ignore <c>others</c>. Checks <c>[1,5].Min([3,2]) == [1,2]</c> and
+    /// <summary>Pins that <c>Vector&lt;T&gt;.Min/Max(params Tensor&lt;T&gt;[] others)</c> likewise
+    /// forward <c>others</c>. Checks <c>[1,5].Min([3,2]) == [1,2]</c> and
     /// <c>[1,5].Max([3,2]) == [3,5]</c>. Inputs xs = [1,5], ys = [3,2].</summary>
     [Module]
     public partial class VectorMinMaxOthersBugPinCheck

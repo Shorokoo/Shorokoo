@@ -42,9 +42,17 @@ graph-side tool can substitute for it, because names exist only in source.
 
 ## Contract
 
-- `Rng.Pin(a, b, c)` is called once, at the end of the module's `Inline` body. Listed items
-  take the module-local id slots **in list order** (first item = slot 1). Unlisted consumers
+- `Rng.Pin(a, b, c)` is called once per **scope** — at the end of the module's `Inline` body,
+  or at the end of a `LoopAPI.Iterate` body to pin that loop's consumers. Listed items take
+  that scope's local id slots **in list order** (first item = slot 1). Unlisted consumers
   follow, in node order.
+- **The two forms are mutually exclusive within a scope.** A scope holding both a positional
+  pin and a [sparse](#the-sparse-form) one **fails the module build**: the sparse slot
+  reservations would shift the positional pins off the first id slots, silently re-keying the
+  very streams the pin exists to freeze. The error names the offending scope — *"Rng.Pin:
+  positional and sparse pins cannot be mixed within one scope — the module body"* (or *"a loop
+  body N level(s) deep"*). A scope is one local id address space, so different scopes of the
+  same module may each use a different form, as in the example below.
 - Nothing enters the computation graph: the pin only reshapes how the module's random
   consumers are numbered.
 - **To freeze a module's current streams before a refactor, list ALL of its random consumers
@@ -59,7 +67,8 @@ graph-side tool can substitute for it, because names exist only in source.
 ## Tooling, and the division of labor
 
 **The compiler writes the pins for you.** For a `[Module]` whose `Inline` body captures every
-`Model(...)` / `Init(...)` result in a local variable, the source generator emits an Info
+`Model(...)` / `Init(...)` result — and every `Globals.Random*` feed tensor — in a local
+variable, the source generator emits an Info
 diagnostic (`MSG004`) carrying the exact ready-to-paste statements, in current creation order
 — so freezing such a module is one copy-paste. This covers `LoopAPI.Iterate(...)` loops at
 any nesting depth: because a pin reshapes only its own scope, the generator emits **one pin
@@ -88,7 +97,8 @@ public static Tensor<float32> Inline(Tensor<float32> x, Scalar<int64> steps)
 The generator emits no suggestion for anything it cannot fully analyze in **any** scope:
 bodies with C# control flow (`if`/`switch`/raw `for`/`while`/a non-`Iterate` `foreach`),
 chained `X.Model(...).Call(...)`, static `X.Call(...)` shortcuts, or opaque helper calls
-that may create streams internally.
+that may create streams internally — and none at all for a body that already contains an
+`Rng.Pin` anywhere.
 
 **The report supplies slots, you supply names.** For bodies without a generated suggestion,
 the bind-time stream report (`arch.GetRngStreamReport(config)`) describes every slot — ModelId
@@ -112,7 +122,9 @@ the remaining free slots in creation order. Two consequences:
   `Rng.Pin(([2], a), ([1], b))`.
 
 The path is a single 1-based local slot; the scope is the module body, or the loop body the
-pin is written in (to pin a loop's consumer, write the sparse pin inside that loop).
+pin is written in (to pin a loop's consumer, write the sparse pin inside that loop). Pinning
+two items to one slot, or one item to two slots, fails the module build — as does adding a
+sparse pin to a scope that already carries a positional one (see [Contract](#contract)).
 
 ## Current limits
 

@@ -240,9 +240,12 @@ namespace Shorokoo
         /// requesting <see cref="CheckpointComponents.Loss"/> on a checkpoint whose loss is
         /// <c>null</c> is a no-op — it writes nothing, and does not throw (a null loss is a
         /// legitimate value). The
-        /// <see cref="CheckpointComponents.TrainingRig"/> component is never written automatically and
-        /// throws when requested explicitly — serializing the rig's constituent graphs is not yet
-        /// implemented (Shorokoo/Shorokoo#115).
+        /// <see cref="CheckpointComponents.TrainingRig"/> component is never written by this flat
+        /// format and throws when requested explicitly: <see cref="InvalidOperationException"/> when
+        /// this checkpoint has no <see cref="Rig"/> attached, and otherwise
+        /// <see cref="NotSupportedException"/> — the rig's constituent graphs need the native
+        /// <c>.skpt</c> container, which
+        /// <see cref="Persistence.SaveTrainingCheckpointToSkpt"/> always writes them into.
         /// </para>
         ///
         /// <para>
@@ -264,10 +267,10 @@ namespace Shorokoo
 
         /// <summary>
         /// Resolves the effective component set for a save. <c>null</c> ⇒ every available component
-        /// (never the <see cref="CheckpointComponents.TrainingRig"/> one, whose serialization is
-        /// unimplemented — #115). Explicitly requesting <see cref="CheckpointComponents.TrainingRig"/>
+        /// (never the <see cref="CheckpointComponents.TrainingRig"/> one, which this flat format cannot
+        /// carry). Explicitly requesting <see cref="CheckpointComponents.TrainingRig"/>
         /// throws: <see cref="InvalidOperationException"/> when no rig is attached, otherwise a
-        /// <see cref="NotSupportedException"/> naming #115.
+        /// <see cref="NotSupportedException"/> redirecting to the native <c>.skpt</c> save.
         /// </summary>
         private CheckpointComponents ResolveSaveComponents(CheckpointComponents? requested)
         {
@@ -289,8 +292,8 @@ namespace Shorokoo
                 return c;
             }
 
-            // null ⇒ all AVAILABLE components. TrainingRig is never auto-included (its serialization is
-            // unimplemented, #115); request it explicitly to get the clear #115 error. Loss is included
+            // null ⇒ all AVAILABLE components. TrainingRig is never auto-included (this flat format
+            // cannot carry it); request it explicitly to get the clear redirect error. Loss is included
             // only when this checkpoint actually carries one (a null loss contributes nothing).
             var comps = CheckpointComponents.InferenceState | CheckpointComponents.Counters;
             if (OptimizerState.Definition.Fields.Length > 0) comps |= CheckpointComponents.OptimizerState;
@@ -378,9 +381,9 @@ namespace Shorokoo
         /// parts to load; <c>null</c> loads everything present. A component not present in the file is
         /// filled from the rig's initial values (counters default to 0). Explicitly requesting the
         /// <see cref="CheckpointComponents.TrainingRig"/> component (including via
-        /// <see cref="CheckpointComponents.All"/>) throws a <see cref="NotSupportedException"/> naming
-        /// #115 — no flat file stores the rig's constituent graphs, so the request cannot be satisfied;
-        /// pass the rig and omit the flag. Throws if the file is not a
+        /// <see cref="CheckpointComponents.All"/>) throws a <see cref="NotSupportedException"/> — no
+        /// flat file stores the rig's constituent graphs, and this rig-supplied path never rebuilds the
+        /// rig anyway; pass the rig and omit the flag. Throws if the file is not a
         /// Shorokoo checkpoint, was written by a newer format, or its fields don't match the rig (e.g.
         /// a checkpoint from a different model or optimizer). Prefer
         /// <see cref="TrainingRig.LoadCheckpoint(string, CheckpointComponents?)"/>.

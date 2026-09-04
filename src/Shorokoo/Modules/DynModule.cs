@@ -57,7 +57,12 @@ namespace Shorokoo.Modules
 
     /// <summary>
     /// Marks an <c>Inline</c> parameter as a hyperparameter (a scalar configured when the module is
-    /// instantiated, not a runtime input). Hyperparameters must come before all input parameters.
+    /// instantiated, not a runtime input). An <c>Inline</c> method declares its tensor inputs first and
+    /// its hyperparameters last, so every <c>[Hyper]</c> parameter must come after all input parameters;
+    /// a non-hyper parameter following a <c>[Hyper]</c> one is a malformed signature: the source
+    /// generator reports warning MSG002 and generates no <c>Model</c>/<c>Call</c> for the method.
+    /// (The generated <c>Call</c> shortcut takes its arguments the other way round — hyperparameters
+    /// first, then inputs.)
     ///
     /// For optimizer modules, an optional <see cref="DefaultValue"/> supplies the default used by the
     /// source-generated strongly-typed hyperparameter set (e.g. <c>AdamWOptimizerHyperparameters</c>),

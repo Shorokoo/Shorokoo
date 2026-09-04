@@ -412,22 +412,25 @@ namespace Shorokoo.Runtime
         /// plan, and only the latter reuses buffers. Running the graph unoptimized is therefore
         /// both faster and dramatically smaller.</para>
         ///
-        /// <para>It is also value-identical, which is worth spelling out because "disable the
-        /// optimizer" usually is not. ORT folds at level 1 and fuses at level 2, and the fold
-        /// evaluates each node with the same CPU kernel the execution plan would — so on a graph
-        /// this predicate accepts, level 1 collapses everything to literals and level 2 finds
-        /// nothing left to fuse. The bit-inexact part of optimization never engaged here. That is
-        /// the argument; the pin is <c>RngInitFrozenDerivationTests</c>, which asserts exact
-        /// initial weights through this path for a uniform, a raw-bits and a dense-normal
-        /// initializer.</para>
+        /// <para>It is also value-identical in practice, which is worth spelling out because
+        /// "disable the optimizer" usually is not. Folding runs before the fusions that rearrange
+        /// arithmetic, and it evaluates each node with the same CPU kernel the execution plan
+        /// would — so on a graph this predicate accepts, folding leaves literals and those
+        /// fusions find nothing to work on. The caveat is that ORT's folding skips what it cannot
+        /// evaluate (a node with no CPU kernel, a non-deterministic op), and an unfolded tail
+        /// COULD have been fused before and is not now; no such difference has been observed.
+        /// <c>RngInitFrozenDerivationTests</c> asserts exact initial weights through this path
+        /// for a uniform, a raw-bits and a dense-normal initializer — which pins the values, not
+        /// the optimization level, since they are identical either way.</para>
         ///
         /// <para>The predicate is a property of the GRAPH, not of the caller, so it also catches
-        /// the other input-less one-shots: the RNG key resolver, optimizer-state seeding (which
+        /// every other input-less one-shot: the RNG key resolver, optimizer-state seeding (which
         /// bakes its inputs to constants and then clears them, so it is always input-less), and
-        /// an <c>Eval</c> of a constant expression. That breadth is intended — every one of them
-        /// is a constant computed once and discarded, and the paragraph above applies to each
-        /// unchanged. The order-of-magnitude figures are measured on parameter initialization,
-        /// which is the shape that made it matter.</para>
+        /// <c>Eval</c>, which builds a zero-input graph unconditionally — so every eager
+        /// evaluation now takes this path. That breadth is intended: each is a constant computed
+        /// once and discarded, and the paragraph above applies to each unchanged. The
+        /// order-of-magnitude figures are measured on parameter initialization, which is the
+        /// shape that made it matter.</para>
         ///
         /// <para>It is deliberately scoped to <see cref="RunFromModel"/>. A
         /// <see cref="CompileFromModel"/> session is kept and re-run, so there optimization is

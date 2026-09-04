@@ -27,27 +27,13 @@ public partial class RigScalingTableLarge
                  .Reduce(ReduceKind.Mean, null, keepDims: false).Scalar();
 }
 
-/// <summary>2 trainable <c>[384, 384]</c> tables. The stack sizes exist as four distinct module
+/// <summary>2 trainable <c>[384, 384]</c> tables. The two stack sizes exist as distinct module
 /// types because a module's <c>ComputationGraph</c> is a cached static, so one parameterized
 /// module cannot be built at several sizes in one process.</summary>
 [Module]
 public partial class RigScalingStack2
 {
     public static Tensor<float32> Inline(Tensor<float32> x) => RigScalingStack.Chain(x, 2);
-}
-
-/// <summary>4 trainable <c>[384, 384]</c> tables.</summary>
-[Module]
-public partial class RigScalingStack4
-{
-    public static Tensor<float32> Inline(Tensor<float32> x) => RigScalingStack.Chain(x, 4);
-}
-
-/// <summary>8 trainable <c>[384, 384]</c> tables.</summary>
-[Module]
-public partial class RigScalingStack8
-{
-    public static Tensor<float32> Inline(Tensor<float32> x) => RigScalingStack.Chain(x, 8);
 }
 
 /// <summary>12 trainable <c>[384, 384]</c> tables.</summary>
@@ -88,31 +74,37 @@ internal static class RigScalingStack
 /// superlinear in graph size. It runs one session per parameter now, which is linear. Measured as
 /// a RATIO of per-parameter cost at the two ends of the range, so no absolute time budget is
 /// needed and it holds on any machine: linear keeps it near 1, the quadratic law it replaced puts
-/// it near 6.</para>
+/// it near 6. What a ratio cannot see is a uniform constant-factor slowdown, and between 2 and 12
+/// parameters it does not separate mild superlinearity (N^1.3 lands at 1.7) from linear either.
+/// It pins the shape that broke, not every way construction could get slower.</para>
 ///
-/// <para><b>Bytes retained per parameter.</b> One session per parameter is only affordable
-/// because each result is copied off its session; a retained result keeps its session's whole
-/// arena alive, and a forced collection cannot reclaim it, since the values are genuinely
-/// referenced as the rig's initial weights. Measured as live working set across one
-/// initialization, collected on both ends so only real retention survives.</para>
+/// <para><b>Bytes retained.</b> One session per parameter is only affordable because each result
+/// is copied off its session; a retained result keeps its session's whole arena alive, and a
+/// forced collection cannot reclaim it, since the values are genuinely referenced as the rig's
+/// initial weights. Measured around initialization alone, not around a whole
+/// <see cref="TrainingRig.FromScratch"/>: a rig legitimately retains 100-150 MiB of graphs and
+/// state, which is both larger and noisier than the signal. Optimizer-state seeding is the other
+/// per-parameter session loop that keeps its outputs, and it takes the same copy — but its graph
+/// is a fill rather than a draw, so the arena it would pin is small enough to sit inside that
+/// noise, and no memory gate discriminates it. It is not pinned here, and the finding
+/// <c>ort-values-are-never-disposed</c> says so.</para>
 ///
-/// <para>Each budget is set well above the measured behaviour and well below the broken law, so
-/// jitter never trips one. The two timing points are taken best-of-<see cref="TimingRuns"/>: they
-/// are differences of small quantities otherwise, and the noise on a single sample is comparable
-/// to the effect.</para>
+/// <para>Each budget sits well above the measured behaviour and well below the broken law, so
+/// jitter never trips one. The timing points are best-of-<see cref="TimingRuns"/>: a single
+/// sample's noise is comparable to the effect at the small end.</para>
 /// </summary>
 [Trait("Domain", "Training")]
 [Trait("Purpose", "Benchmark")]
 [Collection(SerialMeasurement.Name)]
 public class RigConstructionScalingTests
 {
-    /// <summary>Measured ~0.4 KiB/element; the law this catches is ~4.4 KiB.</summary>
+    /// <summary>Measured ~400 B/element over a 0.5% spread; the law this catches is ~4.4 KiB.</summary>
     private const double MemoryBudgetBytesPerElement = 1536.0;
 
-    /// <summary>Measured ~1.0 (linear); the quadratic law it replaced gives ~6.</summary>
+    /// <summary>Measured 0.65-1.14 (linear); the quadratic law it replaced gives ~6.</summary>
     private const double MaxPerParameterCostGrowth = 2.0;
 
-    /// <summary>Measured 10-32 MiB for 12 x 0.56 MiB of parameter; uncopied, 379-481 MiB.</summary>
+    /// <summary>Measured 10-46 MiB across a 12-parameter initialization; uncopied, 379-481 MiB.</summary>
     private const long RetainedBudgetBytes = 96L * 1024 * 1024;
 
     private const int TimingRuns = 3;
@@ -131,8 +123,11 @@ public class RigConstructionScalingTests
         var large = Concretize(RigScalingStack12.ComputationGraph);
         small.InitializeTrainableParams();   // pays the process's one-time JIT / first-touch cost
 
-        // Peak working set is monotonic, so the two table builds must be the first big
-        // allocations in the process and must run in this order for the delta to mean anything.
+        // Peak working set is monotonic, so the two table builds have to be what raises it. That
+        // holds while this class runs in a process of its own, which is how the release workflow
+        // and CLAUDE.md invoke it; the assertion below is what catches it if that ever stops
+        // being true, rather than letting the arm read zero and pass.
+        long peakBeforeTables = PeakWorkingSetBytes();
         BuildRig(RigScalingTableSmall.ComputationGraph);
         long peakAfterSmallTable = PeakWorkingSetBytes();
         BuildRig(RigScalingTableLarge.ComputationGraph);
@@ -151,9 +146,12 @@ public class RigConstructionScalingTests
         // thing that would make a retention regression invisible.
         Assert.Equal(StackParams, values.ModelParams.Length);
 
-        // A large model that raised the peak by nothing measured nothing — fail loudly rather
-        // than divide by it and pass.
+        // Both memory arms are differences that a saturated or reused peak can flatten to zero.
+        // Fail on a measurement that established nothing rather than divide by it and pass.
+        Assert.True(peakAfterSmallTable > peakBeforeTables);
         Assert.True(peakGrowth > 0);
+        Assert.True(retained > 0);
+
         Assert.True(peakGrowth / (double)(LargeTableElements - SmallTableElements)
                     <= MemoryBudgetBytesPerElement);
         Assert.True(retained <= RetainedBudgetBytes);
@@ -166,7 +164,7 @@ public class RigConstructionScalingTests
         return g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([1L], (float[])[1f])]));
     }
 
-    private static void BuildRig(ComputationGraph model) =>
+    private static TrainingRig BuildRig(ComputationGraph model) =>
         TrainingRig.FromScratch(
             model, L1Loss.ComputationGraph, AdamOptimizer.ComputationGraph,
             [new TensorDataModelParam("x", ModelParamType.InputParam, TensorData([1L], (float[])[1f]))],

@@ -26,7 +26,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// the target function), then runs the resulting graph through
     /// <see cref="ComputeContext.Run(InternalComputationGraph, NamedModelParam[])"/> — once per
     /// parameter, over the slice of the graph feeding that one initializer's output (see
-    /// <see cref="ChunkFor"/>), each result copied off its session (see <see cref="Rehost"/>).
+    /// <see cref="ChunkFor"/>), each result copied off its session (see
+    /// <see cref="FastProcessorHelper.RehostOffSession"/>).
     /// The decoded results are returned as a
     /// <see cref="ModelId"/> → <see cref="TensorData"/> dictionary.
     /// </summary>
@@ -210,10 +211,20 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var builder = ImmutableDictionary.CreateBuilder<ModelId, TensorData>();
             for (int i = 0; i < collectedOutputKeys.Count; i++)
             {
-                var chunk = ChunkFor(workGraph, collectedOutputKeys[i]);
+                // Two parameters at one ModelId would silently collapse to one entry here — the
+                // caller indexes this dictionary by a per-parameter id and would hand two struct
+                // fields the same value. The whole-graph run this replaced threw on a repeated
+                // key (ImmutableDictionary rejects one), so keep failing rather than inherit a
+                // quieter contract along with the loop.
+                if (builder.ContainsKey(collectedModelIds[i]))
+                    throw new System.InvalidOperationException(
+                        "FastInitializeModelParams: two model parameters share ModelId " +
+                        $"[{string.Join(", ", collectedModelIds[i].Vals)}]. Parameter ids must be " +
+                        "unique within a concrete architecture.");
                 try
                 {
-                    builder[collectedModelIds[i]] = Rehost(computeContext.Run(chunk)[0].ToTensorData());
+                    var chunk = ChunkFor(workGraph, collectedOutputKeys[i]);
+                    builder[collectedModelIds[i]] = FastProcessorHelper.RehostOffSession(computeContext.Run(chunk)[0].ToTensorData());
                 }
                 catch (System.Exception ex) when (IsAllocationFailure(ex))
                 {
@@ -235,38 +246,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// Copies a freshly computed parameter value onto storage of its own, then releases the
-        /// backend tensor it came out of.
-        ///
-        /// <para>The copy is the half that matters. A backend result tensor is allocated by ITS
-        /// OWN session's allocator and keeps that allocator — and so the session's whole arena,
-        /// sized to the draw's peak rather than to the parameter — alive for as long as the value
-        /// is referenced. These values ARE referenced: they are the rig's initial weights, so no
-        /// collection can reclaim them. Returned as-is, one session per parameter holds every
-        /// session's arena at once: measured on the 12 x [384, 384] stack, 379-481 MiB still live
-        /// after a forced collection, against 10-32 MiB re-hosted, for 6.75 MiB of actual
-        /// parameter.</para>
-        ///
-        /// <para>Disposing is the smaller half: dropping the last reference already lets the
-        /// finalizer free the value, and disposing only makes that deterministic rather than
-        /// leaving it to a thread nobody controls. It has to be the BACKING VALUE — TensorData's
-        /// own Dispose is the standard pattern with an empty body, since the runtime value owns
-        /// the buffer, so disposing the wrapper frees nothing.</para>
-        ///
-        /// <para>This is what lets <see cref="ChunkFor"/> buy its speed for nothing: with the
-        /// copy, slicing costs no measurable memory over one whole-model session; without it,
-        /// several hundred MiB.</para>
-        /// </summary>
-        private static TensorData Rehost(TensorData data)
-        {
-            if (data.DType == DType.String) return data;
-            // Read the bytes before disposing: that invalidates the buffer they came from.
-            var copy = TensorData.CreateFromRawBytes(data.Shape, data.DType, data.AccessRawMemory().ToArray());
-            if (data is IOnnxData backed) backed.Value.Dispose();
-            return copy;
-        }
-
-        /// <summary>
         /// The single-parameter slice of the rewritten initialization graph: a copy whose only
         /// output is <paramref name="outputKey"/>, swept down to the nodes that actually feed it.
         ///
@@ -278,16 +257,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// an N-layer stack of [384, 384] normal draws, with constant folding already off (see
         /// <c>ComputeContext.IsFullyConstant</c>, the other half of this fix), building the
         /// whole-model init graph cost 0.23 s at N=1, 0.88 s at N=2, 3.4 s at N=4, 13.4 s at N=8
-        /// and 32 s at N=12 — a clean 4x per doubling. Left whole, a GPT-sized model spends
-        /// minutes of pure build before the first gradient (Shorokoo/Shorokoo#195).</para>
+        /// and 32 s at N=12 — a clean 4x per doubling, session build alone. Left whole, a
+        /// GPT-sized model spends minutes of pure build before the first gradient
+        /// (Shorokoo/Shorokoo#195).</para>
         ///
         /// <para>Slicing does not pay for that speed in memory — but only because of
-        /// <see cref="Rehost"/>. N sessions would otherwise hold N arenas at once, each sized to a
+        /// <see cref="FastProcessorHelper.RehostOffSession"/>. N sessions would otherwise hold N arenas at once, each sized to a
         /// draw rather than to a parameter, for several hundred MiB more than the one-session
         /// graph. With each result copied off its session as it is produced, the N=12 model above
         /// peaks within noise of the one-session build (497 MiB against 492) while costing a
-        /// quarter of its wall clock (8.6 s against 37.0). The order-of-magnitude memory win over
-        /// the behaviour #194 reported is <c>IsFullyConstant</c>'s, not this.</para>
+        /// quarter of its wall clock — 8.6 s against 37.0, both whole-rig figures, where the
+        /// table above is session build alone.</para>
         ///
         /// <para>Sharing one function BODY across the parameters does not substitute for slicing:
         /// the backend inlines every call site, so the graph it builds is the same size either

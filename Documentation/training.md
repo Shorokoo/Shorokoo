@@ -418,17 +418,24 @@ checkpoint's step / epoch / batch counters automatically — so a saved checkpoi
 where the run was, and a resumed run continues from the very next batch.
 
 ```csharp
-// One field per model input / target; the leading dimension is the sample count.
-var inputs  = new TensorDataStruct(rig.InputDef,
-    new Dictionary<string, IData> { { "input",   TensorData([1000L, 64L], features) } });
-var targets = new TensorDataStruct(rig.TargetDef,
-    new Dictionary<string, IData> { { "targets", TensorData([1000L, 10L], labels)  } });
+// One value per field of the definition, in declaration order; the leading dimension is
+// the sample count.
+var inputs  = rig.InputDef.FromOrderedData(TensorData([1000L, 64L], features));
+var targets = rig.TargetDef.FromOrderedData(TensorData([1000L, 10L], labels));
 
 // Batch into 32s, reshuffling each epoch (deterministically from the seed).
 var loader = new InMemoryDataLoader(inputs, targets, batchSize: 32, shuffle: true, seed: 42);
 
 var outcome = rig.Fit(loader, numEpochs: 10);   // step / epoch / batch advance automatically
 ```
+
+`FromOrderedData` fills the field names in from the definition itself, which is why it is the
+form to reach for: the target field is named after the loss module's **second `Inline`
+parameter**, so spelling `"targets"` by hand couples your driver code to that module's
+implementation and breaks the moment a loss names its parameter `labels`. It pairs values
+positionally and throws when their count does not match the field count — so for a many-field
+struct whose fields share a shape, the explicit `new TensorDataStruct(def, fields)` form
+stays the safer one, since it catches a swapped pair that `FromOrderedData` accepts.
 
 - **`IDataLoader`** is the minimal contract: a current `Position`
   (`DataLoaderPosition`, the epoch + index of the *next* batch it will yield), `Next()` (produces

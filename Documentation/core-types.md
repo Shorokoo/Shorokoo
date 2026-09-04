@@ -53,11 +53,28 @@ scalar. Reach for the explicit `Scalar(...)` / `Scalar<T>(...)` helpers when the
 `Scalar<T>` target to infer from — e.g. `var x = Scalar(1L);`, since a bare `var x = 1L;`
 is a plain `long`, not a scalar.
 
+**`PrimitiveParam`** (namespace `Shorokoo.Core`) is what carries that convention into
+method signatures. It is a one-value box with an implicit conversion *from* every supported
+C# primitive (`bool`, the integer types, `float`, `double`, `Float16`, `BFloat16`) and *on
+to* `Scalar<T>` / `Tensor<T>`, so a parameter typed as it accepts a literal of any of them
+and converts the value to the receiver's element type. You never name it or construct one —
+it shows up only when you read a signature, e.g. `Tensor<T>.Clip(PrimitiveParam min,
+PrimitiveParam max)` and the mixed operand operators (`Tensor<T> + PrimitiveParam`).
+`Tensor<T>` carries that `Clip` overload *and* `Clip(Scalar<T>, Scalar<T>)`, while
+`Scalar<T>` and `Vector<T>` carry only the latter; the difference is in the overload set,
+not in what you can write, since the direct primitive → `Scalar<T>` conversions above
+already cover the literal case — `x.Clip(0f, 6f)` compiles on all three. Reach for the
+`Scalar<T>` form when a bound is computed in-graph rather than being a constant.
+
 First-argument convention for `Tensor(...)` / `TensorData(...)`: the first argument is
 the **shape (dims)**. Pass a collection literal (`[1]`, `[1L,3L,224L,224L]`) for the
 `long[]` overload, or a bare `long` (e.g. `1`) for the 1-D convenience overload. The
 remaining arguments are the flat element values (`params T[]`), so you can pass an
-existing array directly: `TensorData([1L,3L,224L,224L], myPixelArray)`.
+existing array directly: `TensorData([1L,3L,224L,224L], myPixelArray)`. A **rank-0**
+(scalar) value takes the empty dims literal — `TensorData([], 0.01f)`, one element and no
+dimensions. That is the shape a scalar graph input wants, e.g. the value handed to
+[`Specialize`](inference.md#hardcoding-hypers-with-specialize) for a scalar `[Hyper]`.
+`TensorData([1], 0.01f)` is not the same thing: it is rank 1 with a single element.
 
 ## Operators and fluent methods on `Tensor<T>`
 
@@ -74,6 +91,28 @@ existing array directly: `TensorData([1L,3L,224L,224L], myPixelArray)`.
 - Casts: `.Cast<V>()`.
 - Shape introspection (returns graph values): `.TShape`, `.ShapeTensor(start, end)`,
   `.DimTensor(axis)`, `.SizeTensor(...)`, `.TRank`.
+
+### Mixing shapes in one operator
+
+The arithmetic and comparison operators are declared for every pairing of the three value
+shapes plus a bare primitive literal, so `Tensor<T> + Scalar<T>`, `Scalar<T> * Vector<T>`
+and `Vector<T> - 1f` all exist. The result takes the wider of the two operand shapes:
+
+| left ⊕ right | `Tensor<T>` | `Vector<T>` | `Scalar<T>` | literal |
+|---|---|---|---|---|
+| **`Tensor<T>`** | `Tensor<T>` | `Tensor<T>` | `Tensor<T>` | `Tensor<T>` |
+| **`Vector<T>`** | `Tensor<T>` | `Vector<T>` | `Vector<T>` | `Vector<T>` |
+| **`Scalar<T>`** | `Tensor<T>` | `Vector<T>` | `Scalar<T>` | `Scalar<T>` |
+| **literal** | `Tensor<T>` | `Vector<T>` | `Scalar<T>` | — |
+
+Comparisons follow the same table with the element type replaced by `bit` — `Tensor<T> >
+Scalar<T>` gives `Tensor<bit>`, `Scalar<T> <= Vector<T>` gives `Vector<bit>`. Both operands
+must share one `T`; there is no mixed-dtype form (see [Anti-patterns](#anti-patterns)).
+
+The two shift operators are the exception: C# draws shift candidates from the **left**
+operand's type alone, so the left operand can never be a bare literal and the right operand
+must be no wider than the left. `Tensor<T> << Vector<T>` and `Vector<T> << 1L` exist;
+`Vector<T> << Tensor<T>` and `1L << Tensor<T>` do not.
 
 ### `Reshape` and copying dimensions from the input
 

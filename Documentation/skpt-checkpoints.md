@@ -634,8 +634,9 @@ model.skpt
     // mapping), plus the non-graph part — the hyperparameter bindings and the RNG config.
     // Written by every training .skpt this version produces; absent (⇒ null) on a file
     // written before rig constituents existed, which resumes only by the host rebuilding
-    // the rig from the same source graphs. Model-input shapes are not recorded here: the
-    // serialized architecture carries them itself.
+    // the rig from the same source graphs — as does a file whose stored architecture predates
+    // dims-only model-input shapes (see the pre-release caveat in the rules below).
+    // Model-input shapes are not recorded here: the serialized architecture carries them itself.
     "rig": {
       "rigVersion": 1,                    // rig-block version
       "archModel": "modelArch",           // registry key of the concrete-architecture entry
@@ -679,6 +680,16 @@ Rules:
   rather than half-read. There is no read path for another version and no compatibility
   shim: every format below is version 1, and stays there until a breaking change earns a
   bump.
+- **Pre-release caveat: a payload break can land inside version 1.** Add-only governs the
+  manifest's *keys*. While Shorokoo is pre-release, what an entry's **payload** records can
+  still change in a read-breaking way without a `skptVersion` bump — and once has: a concrete
+  architecture saved before model-input shapes became dims-only recorded a small input as an
+  inline representative tensor, so the current reader finds no shape on that input and
+  `TrainingRig.Load` fails loudly, naming the older-build cause. There is deliberately no
+  legacy read path — rebuild the rig from its source graphs and re-save. The old file's state
+  is still readable while you do: `rig.LoadCheckpointFromSkpt` reads the manifest and the state
+  tensors, never the stored architecture, and `Persistence.Load` still loads the file as an
+  inference model.
 - **Integrity is checked on load.** Every entry the manifest references must exist and
   match its recorded `sha256`; a missing entry, a hash mismatch, or a tensor mapping
   that does not cover the model's parameters exactly fails loudly, naming the
@@ -701,3 +712,8 @@ Rules:
   resuming from one means rebuilding the rig from the same graphs, then loading the file
   with `rig.LoadCheckpoint`. Precompiled artifacts are still a future extension of the
   container.
+- Resuming from the file alone does not reach back across pre-release payload breaks: a
+  training `.skpt` whose architecture was written before model-input shapes became dims-only
+  is rejected by `TrainingRig.Load` and has to be rebuilt from its source graphs and re-saved
+  (see [the pre-release caveat](#the-configjson-manifest)). Its state and its inference model
+  still load.

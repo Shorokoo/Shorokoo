@@ -20,6 +20,14 @@ public partial class RngInitTwoLinears
     }
 }
 
+/// <summary>A parameter whose initializer draws U(0, 1) with attribute-carried bounds — the
+/// un-run-initializer fault in the form that leaves the ONNX fallback nothing to drop.</summary>
+[Module]
+public partial class RngAttributeBoundsInitLayer
+{
+    public static Tensor<float32> Inline(Tensor<float32> x) => x * Uniform.Init(x.ShapeTensor());
+}
+
 /// <summary>A uint32 state parameter initialized with raw random bits: RandomBits inside a
 /// (state) parameter initializer, keyed on the parameter's own init stream.</summary>
 [StateInitializer(Ownership = StateOwnership.ModuleOwned)]
@@ -644,23 +652,29 @@ public class RngInitFailLoudTests
 
     /// <summary>An id-bearing feed with no key chain is reachable from public API — a module
     /// output handed to <c>OnnxEngine.Eval</c>, and a ConcreteArchitecture handed to
-    /// <c>ComputeContext.Execute</c>, which <c>RequireConcretized</c> admits. Both must fail with
-    /// the product's own catchable exception; today a Debug build hits FastLowerRandomOps'
-    /// <c>Debug.Assert</c> instead, which outside a test host kills the process.
-    /// Tracked as Shorokoo/Shorokoo#220.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#220: a Debug.Assert on a user-reachable path fires instead of the product's own exception")]
+    /// <c>ComputeContext.Execute</c>, which <c>RequireConcretized</c> admits. It is a user error,
+    /// so it fails with the product's own catchable exception in every configuration. The
+    /// attribute-bounds initializer is the same fault where the fallback has no in-graph
+    /// distribution to drop, and so used to lower silently to unkeyed backend randomness.</summary>
+    [Fact]
     public void TestIdBearingFeedWithoutKeyChainFailsWithACatchableExceptionNotAnAssertion()
     {
         var sample = TensorData([1L, 4L], 1f, 2f, 3f, 4f);
         var moduleGraph = RngInitTwoLinears.ComputationGraph;
         var arch = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([sample]));
+        var boundsGraph = RngAttributeBoundsInitLayer.ComputationGraph;
+        var boundsArch = boundsGraph.ToConcreteArchitecture(boundsGraph.FromOrderedInputs([sample]));
 
         Assert.IsType<InvalidOperationException>(Record.Exception(
             () => OnnxEngine.Eval(RngInitTwoLinears.Call(Tensor([1L, 4L], 1f, 2f, 3f, 4f)))));
         Assert.IsType<InvalidOperationException>(Record.Exception(
             () => ComputeContext.Default.Execute(arch, sample)));
+        Assert.IsType<InvalidOperationException>(Record.Exception(
+            () => ComputeContext.Default.Execute(boundsArch, sample)));
         Assert.Null(Record.Exception(
             () => ComputeContext.Default.Execute(arch.ToConcreteModel(), sample)));
+        Assert.Null(Record.Exception(
+            () => ComputeContext.Default.Execute(boundsArch.ToConcreteModel(), sample)));
     }
 }
 

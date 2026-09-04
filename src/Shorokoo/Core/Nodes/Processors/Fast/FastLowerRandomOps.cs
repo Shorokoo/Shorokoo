@@ -28,11 +28,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// unbound graph is bound to the DEFAULT identity here first — a concrete artifact is
     /// never unkeyed, and "no config" simply means the default deterministic identity.</para>
     ///
-    /// <para><b>Feeds without stream identity</b> (no ModelId or no chain — e.g. draws
-    /// inside un-run initializer function bodies, or graphs that never went through
-    /// concretization) take the ONNX fallback: <c>ConstantOfShape +
-    /// RandomUniformLike/RandomNormalLike</c>, with any user seed copied through and none
-    /// synthesized.</para>
+    /// <para><b>Feeds with no ModelId</b> (a graph that never went through concretization)
+    /// take the ONNX fallback: <c>ConstantOfShape + RandomUniformLike/RandomNormalLike</c>,
+    /// with any user seed copied through and none synthesized. An <b>id-bearing</b> feed whose
+    /// chain is missing does not: its draw belongs to the keyed scheme, so lowering it to that
+    /// fallback would silently substitute unkeyed backend randomness, and it is a hard error
+    /// instead. That is the state of a ConcreteArchitecture's un-run initializer bodies —
+    /// executing or exporting one is not supported; call <c>ToConcreteModel</c> first.</para>
     /// </summary>
     internal static class FastLowerRandomOps
     {
@@ -121,8 +123,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (isBits)
                 {
                     if (idVals is { Length: > 0 })
-                        // Id-bearing but chain-less — the graph was modified since concretization
-                        // (the analogue of the float path's Debug.Assert corruption case).
+                        // Id-bearing but chain-less — the graph was modified since
+                        // concretization (the analogue of the float path's corruption case).
                         throw new InvalidOperationException(
                             $"FastLowerRandomOps: the SHRK_RANDOM_BITS feed at ModelId " +
                             $"[{string.Join(", ", idVals)}] is id-bearing but has no key derivation " +
@@ -134,17 +136,27 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         "fallback — draw them inside a concrete, id-bearing model.");
                 }
 
-                // A float feed without stream identity (no ModelId, or no chain — e.g. inside
-                // an initializer function body): the ONNX fallback — ConstantOfShape +
-                // RandomUniformLike/NormalLike. Every legitimate fallback case carries NO key
-                // input; an id-bearing feed always got its chain at concretization, so a
-                // missing chain here means the graph was modified since — and silently
-                // lowering it would turn a keyed site into real backend randomness.
-                System.Diagnostics.Debug.Assert(idVals is not { Length: > 0 },
-                    $"FastLowerRandomOps: the feed at ModelId [{string.Join(", ", idVals ?? [])}] " +
-                    "is id-bearing but has no key derivation chain wired — the graph was " +
-                    "modified since concretization; lowering it to the ONNX random fallback " +
-                    "would silently make a keyed site non-deterministic.");
+                // An id-bearing float feed whose chain is missing is a hard error, exactly as
+                // for bits: the site belongs to the keyed scheme, and lowering it to the ONNX
+                // fallback would silently replace its reproducible draw with real backend
+                // randomness. Reachable from public API — executing or exporting a
+                // ConcreteArchitecture, whose initializer bodies are not keyed until the
+                // initializers are run — so it is a user-facing exception, not an assertion.
+                if (idVals is { Length: > 0 })
+                    throw new InvalidOperationException(
+                        $"FastLowerRandomOps: the {node.OpCode} feed at ModelId " +
+                        $"[{string.Join(", ", idVals)}] is id-bearing but has no key derivation " +
+                        "chain, so it can only be lowered to the ONNX random fallback — which " +
+                        "would silently make a keyed site non-deterministic. For an initializer " +
+                        "body this means the graph is a ConcreteArchitecture: its initializers " +
+                        "have not been run. Call ToConcreteModel first; executing or exporting a " +
+                        "non-concrete model is not supported. On an already concrete graph it " +
+                        "means the graph was modified since concretization — re-concretize " +
+                        "(ToConcreteArchitecture) before lowering.");
+
+                // A float feed with no stream identity at all (no ModelId — a graph that never
+                // went through concretization): the ONNX fallback — ConstantOfShape +
+                // RandomUniformLike/NormalLike.
                 LowerToOnnxRandomLike(node, isUniform, newNodes);
                 newNodes.Add(node);
             }
@@ -425,10 +437,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     $"FastLowerRandomOps: a {node.OpCode} feed with in-graph distribution inputs " +
                     "reached the ONNX fallback, which carries its distribution as attributes and " +
                     "cannot express one computed in-graph — the parameters would be silently " +
-                    "dropped. The feed reaches this fallback when it has no key derivation chain, " +
-                    "which for an initializer body means the graph is a ConcreteArchitecture: its " +
-                    "initializers have not been run. Call ToConcreteModel first; executing or " +
-                    "exporting a non-concrete model is not supported.");
+                    "dropped. The feed reaches this fallback because it carries no ModelId — a " +
+                    "graph that never went through concretization — and an in-graph distribution " +
+                    "is only expressible at a keyed site: draw it inside a concrete model.");
 
             var placeholderKey = AppendConstantOfShape(shapeInput, newNodes);
 

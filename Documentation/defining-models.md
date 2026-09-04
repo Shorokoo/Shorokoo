@@ -76,12 +76,14 @@ touches that parameter space:
   - It **gates a branch that contains parameters** — e.g. `useBias` in
     `useBias.IfElse(y + b, y)`, where `b` is a trainable parameter. Which
     parameters *exist* is part of the parameter space, so the unselected
-    branch's parameters are not created, and the `IfElse` itself is resolved
-    and folded away with them. Concretizing this layer with `useBias = false`
-    yields an architecture with no bias parameter and no branch — passing the
-    bit at `Execute` no longer changes that result. Note the scope: only
-    `IfElse`es holding parameters are folded, so the same hyper stays live for
-    any other `IfElse` it gates — see
+    branch's parameters are not created, and the `IfElse` that held them is
+    resolved and folded away with them. Concretizing this layer with
+    `useBias = false` yields an architecture with no bias parameter and no
+    branch — passing the bit at `Execute` no longer changes that result.
+    Concretizing with `useBias = true` prunes nothing, so nothing is folded and
+    the bit still selects at run time. Note the scope either way: only the
+    `IfElse` whose *pruned* parameters made it unreachable is folded, so the
+    same hyper stays live for any other `IfElse` it gates — see
     [What concretization fixes](inference.md#what-concretization-fixes).
 - **Value-only** hyperparameters (scale factors, momentum coefficients, ε's) do
   not touch any trainable parameter — neither its shape nor its existence. They
@@ -94,8 +96,10 @@ again at `Execute` (only [`Specialize`](inference.md#hardcoding-hypers-with-spec
 removes an input). For a value-only hyper you may supply anything; for a
 parameter-space-determining one, supply **the same value you concretized with**.
 Where it decided a parameter's *shape*, a different value later does not resize
-anything; where it gated a parameter's *existence*, the branch is already folded,
-so a different value changes nothing at all. See
+anything; where it gated a parameter's *existence*, a different value either
+changes nothing (the branch was folded away with the parameters it held) or
+silently runs the other branch (nothing was pruned, so nothing was folded) —
+neither is what you meant. See
 [What concretization fixes](inference.md#what-concretization-fixes) for the full
 list of what a concrete architecture pins down.
 
@@ -141,14 +145,19 @@ How a hyper value gets supplied depends on the route:
   parameter space of a concrete architecture is static, so it cannot depend on a
   value that only arrives at `Execute`. When a `[Hyper]` gates a branch holding
   trainable parameters, `ToConcreteArchitecture` creates only the selected
-  branch's parameters and folds that `IfElse` away — so the bit no longer
-  switches it at run time. This applies to the `IfElse`es holding parameters and
-  no others: the same hyper gating a paramless `IfElse` leaves it live, both
-  branches intact. See [Hyperparameter baking](#hyperparameter-baking).
+  branch's parameters — and when that leaves the *unselected* branch holding
+  parameters that no longer exist, it folds that `IfElse` away too, so the bit
+  no longer switches it at run time. Nothing else is folded: an `IfElse` whose
+  selected branch holds the parameters keeps both branches, and so does a
+  paramless one on the same hyper. See
+  [Hyperparameter baking](#hyperparameter-baking).
 
   A hyper folded to a **constant** before lowering — by `Foo.Call(Scalar(k), x)`,
-  or by [`Specialize`](inference.md#hardcoding-hypers-with-specialize) — folds
-  *every* `IfElse` on it, parameters or not, and drops it from the input list.
+  or by [`Specialize`](inference.md#hardcoding-hypers-with-specialize) — is the
+  unconditional case: a constant condition folds *every* `IfElse` on it,
+  parameters or not. `Specialize` additionally drops the hyper from the graph's
+  input list; on the `Call`/`Model` route it was never an input of the enclosing
+  graph to begin with.
 
   ```csharp
   // Apply bias only when useBias is true — both branches are always built.

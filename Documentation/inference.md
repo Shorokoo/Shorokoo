@@ -213,8 +213,8 @@ for everything else the concretization values pin down.
 ### What concretization fixes
 
 `ToConcreteArchitecture` produces an architecture whose **parameter space is
-static** — every trainable parameter, RNG stream and other id-addressed
-component is enumerated at that point, which is exactly what makes the graph
+static** — every trainable parameter and other id-addressed component is
+enumerated at that point, which is exactly what makes the graph
 "concrete" and what lets weights bind by name, optimizers allocate their state,
 and checkpoints round-trip. Anything derived from the values you hand it is
 therefore fixed then and there:
@@ -223,41 +223,49 @@ therefore fixed then and there:
 |---|---|
 | Trainable-parameter **shapes** and count | shape-determining hypers, and the shapes of the sample inputs |
 | **Which** trainable parameters exist | hypers gating an `IfElse` whose branches hold parameters |
-| Loop **iteration space** (and the RNG streams enumerated per iteration) | hypers/inputs that drive a `LoopAPI.Iterate` count |
+| Loop **iteration space** (and the per-iteration parameters realized over it) | hypers/inputs that drive a `LoopAPI.Iterate` count |
 
 What concretization fixes is the **parameter space**, and it rewrites only as
 much control flow as that requires. An `IfElse` whose unselected branch holds
 parameters is resolved here and folded away — those parameters do not exist, so
-the branch can never be taken, and keeping it would mean keeping a stand-in the
-size of the parameter it replaced. An `IfElse` that holds no parameters is left
-alone, even on the same hyper: both branches stay, and it still selects on its
-(still live) input at run time.
+the branch can never be taken, and keeping it would cost the bytes the pruning is
+meant to save. An `IfElse` that holds no parameters is left alone, even on the
+same hyper: both branches stay, and it still selects on its (still live) input at
+run time.
+
+Note which branch drives that. It is the **unselected** one: folding happens
+because a branch's parameters were pruned, so an `IfElse` whose *selected* branch
+holds the parameters keeps both branches and stays live. For the usual
+`bit.IfElse(withParams, without)` shape that means the bit folds the `IfElse`
+when baked **off**, and leaves it live when baked **on**.
 
 So one hyper can be half-resolved and half-live, and that is the intended split:
 
 ```csharp
-var big = Init(...);                             // a trainable parameter
-var a = flag.IfElse(x * 10f, x * 100f);          // no params  -> stays live
-var b = flag.IfElse(x + big, x);                 // holds big  -> folded here
+var big = ConstInit.Init([outFeatures]).Vec();   // a trainable parameter
+var a = flag.IfElse(x * 10f, x * 100f);          // no params -> always stays live
+var b = flag.IfElse(x + big, x);                 // holds big -> folded iff flag is baked false
 ```
 
 Concretized with `flag = false`, `big` does not exist, `b`'s `IfElse` is gone
 (so `b` is `x` whatever you pass later), and `a`'s still switches on every
-`Execute`. Concretized with `flag = true`, `big` exists, nothing is folded, and
-both switch at run time.
+`Execute`. Concretized with `flag = true`, `big` exists, nothing is pruned and so
+nothing is folded, and **both** switch at run time.
 
 These values stay **live inputs** of the concrete graph — concretization is not
 `Specialize` and removes nothing from the input list — so you supply them again
 at every `Execute`. The contract is that you supply **the same values**.
 Executing with a value that would have produced a different parameter space is
-**invalid use**: the parameters or streams that answer needs were never created,
-and nothing re-derives them at run time.
+**invalid use**: the parameters that answer needs were never created, and nothing
+re-derives them at run time.
 
-A **parameter gate** is the exception, and needs no care: because its `IfElse` is
-folded at concretization, the value you pass later cannot contradict it. The
-baked branch runs whatever you supply. Passing the opposite value is pointless
-rather than dangerous — and if you would rather it be impossible than pointless,
-`Specialize` the bit and passing it becomes an input-count error.
+A **parameter gate** is half an exception, and it is worth knowing which half.
+Baked **off**, its `IfElse` was folded away, so the value you pass later cannot
+contradict it — the baked branch runs whatever you supply, and passing the
+opposite value is pointless rather than dangerous. Baked **on**, nothing was
+pruned and nothing was folded: the `IfElse` is still live, and passing the
+opposite value silently takes the other branch, skipping parameters that do
+exist. So the rule is unchanged — supply the value you concretized with.
 
 If you would rather make the contradiction impossible than remember the rule,
 bake the hyper with [`Specialize`](#hardcoding-hypers-with-specialize) before

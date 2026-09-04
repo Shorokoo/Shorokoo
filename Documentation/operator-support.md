@@ -331,13 +331,18 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 | MatMulInteger | 🟡 [1] | ✅ | N/A [3] |
 | QLinearConv | ✅ | 🟡 [2] | N/A [3] |
 | QLinearMatMul | ✅ | 🟡 [2] | N/A [3] |
-| QuantizeLinear | ✅ | ✅ | N/A [3] |
+| QuantizeLinear | ✅ [4] | ✅ | N/A [3] |
 
 1. The weight zero point is scalar only; a per-channel 1-D `w_zero_point` is
    not representable in-framework.
 2. Shape/dtype only; values are not computed.
 3. Quantized operators are non-differentiable — no straight-through estimator
    is provided, so there is no quantization-aware training path.
+4. The opset-23 `precision` attribute is not exposed by `Ops.QuantizeLinear`
+   or `OnnxOp.QuantizeLinear`: it only selects float8/float4 quantization
+   targets, which Shorokoo does not support. The node definition still
+   declares it, so an imported model that carries it round-trips unchanged
+   and re-exports stamped at opset 23.
 
 ## Recurrent (RNN family)
 

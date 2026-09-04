@@ -18,8 +18,9 @@ namespace Shorokoo.Modules.Layers;
 /// symmetric (<c>padding</c> on every side).
 /// Weight <c>[outChannels, inChannels/groups, k, k]</c> is
 /// <see cref="KaimingUniform"/>-initialized; bias <c>[outChannels]</c> is
-/// zero-initialized and created unconditionally — <c>useBias</c>
-/// selects the trainable bias vs an all-zero constant vector.
+/// zero-initialized. <c>useBias</c> selects the trainable bias vs an all-zero
+/// constant vector; it is a <c>[Hyper]</c> bit fixed before concretization, so with
+/// <c>useBias = false</c> the trainable bias is pruned and never created.
 /// </summary>
 [Module]
 public partial class Conv2d

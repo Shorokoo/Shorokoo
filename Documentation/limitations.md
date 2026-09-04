@@ -152,7 +152,14 @@ optional attributes that Shorokoo imports and honors —
 `DequantizeLinear.output_dtype` (opset 23), `QuantizeLinear.precision` (23),
 and `Cast`/`CastLike.round_mode` (24, float8e8m0-only semantics). When such
 an attribute carries a non-default value the exporter raises that model's
-stamp accordingly. The opset-21 operator versions remain semantically
+stamp accordingly. That raise only ever comes from an imported model, though:
+none of the three attributes is reachable from the `Ops`/`OnnxOp` authoring
+surface — no entry point there accepts one — so an authored graph never
+carries them, and a graph built from `Ops`/`OnnxOp` alone exports at the
+opset-21 baseline. (The low-level `NodeBuilder` surface is the exception: it
+can stamp any attribute a node definition declares, `precision` and
+`round_mode` included, and a node built that way raises the stamp exactly as
+an imported one does.) The opset-21 operator versions remain semantically
 complete for everything else Shorokoo can represent.
 
 ### Sub-byte and complex dtypes

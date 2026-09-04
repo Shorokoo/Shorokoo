@@ -20,9 +20,9 @@ namespace Shorokoo.Modules.Layers;
 /// (batch) dims; the contraction is over each input's last axis, with the batch
 /// dims preserved. Weight and bias are both U(±1/√in1Features)-initialized
 /// (PyTorch's bound, via <see cref="RecurrentUniform"/>) — note the bias is NOT
-/// zero-initialized, unlike <see cref="Linear"/>. The bias parameter is created
-/// unconditionally (both <c>IfElse</c> branches are built); <c>useBias</c>
-/// selects whether it is added.
+/// zero-initialized, unlike <see cref="Linear"/>. <c>useBias</c> is a <c>[Hyper]</c>
+/// bit fixed before concretization, so <c>useBias = false</c> folds the <c>IfElse</c>
+/// away and prunes the bias parameter — the layer then carries the weight alone.
 /// </summary>
 [Module]
 public partial class Bilinear

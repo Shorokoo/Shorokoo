@@ -6,6 +6,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Shorokoo.Core.Graph;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Graph;
 
@@ -186,17 +187,12 @@ namespace Shorokoo.Core.Utils
             // (binding an RNG config IS its initialization, legitimate from architecture
             // stage on), so it never counts as an "initialized model parameter" here.
             //
-            // A FUNCTION_INVOKE that calls a plain Function is executable content, not
-            // module machinery — a reimported concrete model legitimately carries such
-            // calls (e.g. the RNG draw functions emitted at export). Only calls whose
-            // target is module-typed (or unresolved) mark the graph as module-stage.
+            // Module machinery is classified by the shared FastNodeClassification predicate,
+            // which the Eval-path gate consumes too.
             int moduleOps = 0, uninitializedParams = 0, initializedParams = 0;
             foreach (var node in graph.Nodes)
             {
-                bool isModuleOp = node.OpCode == InternalOpCodes.FUNCTION_INVOKE
-                    ? node.TargetFunction is not { FunctionType: Shorokoo.Core.Nodes.OnnxNodes.FunctionType.Function }
-                    : InternalOpCodes.IsModuleStageOp(node.OpCode);
-                if (isModuleOp)
+                if (node.IsModuleStageMachinery())
                     moduleOps++;
                 else if (node.OpCode == InternalOpCodes.MODEL_PARAM)
                     uninitializedParams++;
@@ -313,12 +309,16 @@ namespace Shorokoo.Core.Utils
         /// requirement, and the actual kind, then appends the operation-specific hint and
         /// the shared <see cref="WithKindRemedyHint"/>. Every kind gate routes through
         /// this (or <see cref="EnforceStage"/> for file loads) so wording cannot drift.
+        /// <paramref name="includeReStampHint"/> drops that last sentence where re-stamping is
+        /// not a remedy the caller can reach: the eager-evaluation gate classifies a graph built
+        /// from output variables, which the caller never holds as a <c>ComputationGraph</c>.
         /// </summary>
         internal static string KindMismatchMessage(
-            string operation, string requiredDescription, GraphKind actual, string? hint = null)
+            string operation, string requiredDescription, GraphKind actual, string? hint = null,
+            bool includeReStampHint = true)
             => $"{operation} requires {requiredDescription}, but this graph is a '{StageName(actual)}'." +
                (string.IsNullOrEmpty(hint) ? string.Empty : " " + hint) +
-               " " + WithKindRemedyHint;
+               (includeReStampHint ? " " + WithKindRemedyHint : string.Empty);
 
         /// <summary>
         /// Throws a clear stage-mismatch error naming both stages (and the file, via

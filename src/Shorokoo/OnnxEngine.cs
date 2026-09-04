@@ -19,11 +19,16 @@ namespace Shorokoo
     /// </summary>
     public static class OnnxEngine
     {
-        /// <summary>Evaluates the given output variables and returns their values, in order.</summary>
+        /// <summary>
+        /// Evaluates the given output variables and returns their values, in order. The outputs
+        /// must come from a concretized graph: a <c>[Module]</c>'s output is refused with the
+        /// lowering hint rather than failing deep inside ONNX Runtime.
+        /// </summary>
         public static TensorData[] Eval(Variable[] outputs)
         {
 
             var graph = new Shorokoo.Graph.InternalComputationGraph([], [.. outputs]);
+            graph.RequireConcretized($"{nameof(OnnxEngine)}.{nameof(Eval)}");
 
             var ctx = new ComputeContext();
             var results = ctx.Execute(graph).Select(x => x.ToTensorData()).ToArray();

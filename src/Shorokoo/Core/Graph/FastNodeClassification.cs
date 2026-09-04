@@ -1,3 +1,4 @@
+using Shorokoo.Core.Nodes.OnnxNodes;
 using Shorokoo.Core.Nodes.AutoDiff;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Modules;
@@ -27,6 +28,20 @@ namespace Shorokoo.Core.Graph
 
         public static bool IsFunction(this FastNode node) =>
             node.OpCode == InternalOpCodes.FUNCTION_INVOKE;
+
+        /// <summary>
+        /// True when <paramref name="node"/> is module-stage machinery: an op from the canonical
+        /// <see cref="InternalOpCodes.ModuleStageOps"/> inventory, or a
+        /// <see cref="InternalOpCodes.FUNCTION_INVOKE"/> whose target is module-typed (or
+        /// unresolved). A FUNCTION_INVOKE calling a plain <see cref="FunctionType.Function"/> is
+        /// executable content, not machinery — a reimported concrete model legitimately carries
+        /// such calls (e.g. the RNG draw functions emitted at export), so the coarser
+        /// <see cref="InternalOpCodes.IsModuleStageOp"/> would misclassify it.
+        /// </summary>
+        public static bool IsModuleStageMachinery(this FastNode node)
+            => node.OpCode == InternalOpCodes.FUNCTION_INVOKE
+                ? node.TargetFunction is not { FunctionType: FunctionType.Function }
+                : InternalOpCodes.IsModuleStageOp(node.OpCode);
 
         /// <summary>
         /// Open node (LOOP_OPEN / IF_OPEN). Resolved via <see cref="Definitions.NodeDefinitions"/>.

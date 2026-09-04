@@ -113,13 +113,16 @@ namespace Shorokoo
             return this.Eval(new ComputeContext());
         }
 
-        /// <summary>Executes the graph rooted at this tensor using the given context (a fresh one if null) and returns the data.</summary>
+        /// <summary>Executes the graph rooted at this tensor using the given context (a fresh one if null)
+        /// and returns the data. Requires a concretized graph — an un-lowered <c>[Module]</c> output is
+        /// refused with the lowering hint.</summary>
         public TensorData Eval(ComputeContext ctx)
         {
             if (ctx == null)
                 ctx = new ComputeContext();
 
             var graph = new Shorokoo.Graph.InternalComputationGraph([], [this]);
+            graph.RequireConcretized($"{nameof(Tensor<T>)}.{nameof(Eval)}");
 
             return ctx.Execute(graph)[0].ToTensorData();
         }

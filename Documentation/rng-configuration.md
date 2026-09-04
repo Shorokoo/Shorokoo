@@ -222,12 +222,13 @@ report).
 
 An **identity is not a config**, and deliberately does not pretend to be one:
 
-- **`MasterSeed` is not recoverable.** The identity records the *derived* runtime master key
-  (`Fold(MasterSeed, "runtime")`, a one-way SHA-256 XOR), not the seed it came from. A model
-  can tell you which keys its streams use; it cannot tell you the seed you typed. To
-  reproduce a model's runtime streams under a fresh config, pass the recorded key as
+- **It records a derived key, not `MasterSeed`.** `RunMasterKey` is the runtime sub-master the
+  feeds fold from: the `RunMasterSeed` you set, or else `Fold(MasterSeed, "runtime")` — an XOR
+  against a fixed constant, which a master seed reads straight back out of. Nothing records
+  which of the two a given model is, so the recorded key is not in general the seed a caller
+  typed. To reproduce a model's runtime streams under a fresh config, pass the recorded key as
   `RunMasterSeed` — `new RngConfig { RunMasterSeed = identity.RunMasterKey }` — rather than
-  guessing a master seed.
+  working back to a master seed.
 - **The `params` collection is not recorded.** Initialization randomness is drawn once and
   baked into the weights, so nothing in a saved model consumes it. `Overrides` therefore
   lists `Runtime` overrides only, and re-running initialization under a chosen seed takes an
@@ -280,9 +281,19 @@ passed it explicitly. "No config" configures the seed to 0; it never falls back 
 random ops. In particular, repeated one-shot inference of a no-config model repeats its
 draws bit-for-bit; if you want per-run variation, say so with `RngConfig.NonDeterministic()`.
 
-There is likewise no per-site seed: `Globals.RandomUniform` / `RandomNormal` take no seed
-parameter. Randomness is configuration — a model definition never contains a seed — so all
-seeding goes through `RngConfig`, addressed by ModelId when a single stream needs pinning.
+There is likewise no per-site seed: `Globals.RandomUniform` / `RandomNormal` /
+`RandomBits<T>` take no seed parameter. Randomness is configuration — a model definition never
+contains a seed — so all seeding goes through `RngConfig`, addressed by ModelId when a single
+stream needs pinning.
+
+`Globals.RandomBits<T>(Vector<int64> shape)` is the third keyed feed: raw uniformly-random
+unsigned integers, with `T` constrained to the unsigned widths `uint8` / `uint16` / `uint32` /
+`uint64` — any other width is rejected. Unlike the float feeds it has **no unkeyed fallback**:
+where a `RandomUniform` / `RandomNormal` site that carries no stream identity (no ModelId or no
+derivation chain — a draw inside an un-run initializer body, say, or a graph that never went
+through concretization) lowers to ONNX `RandomUniformLike` / `RandomNormalLike`, a bits site in
+that position fails loudly at ONNX prep instead — a bit pattern is only meaningful under a
+stream key. Raw bits must therefore be drawn inside a concrete, id-bearing model.
 
 ## Choosing seeds
 

@@ -83,6 +83,35 @@ params, module state / `StateUpdate`, RNG draws, or an unrecognized input is rej
 API for an arbitrary host lambda (a compiled closure has no durable graph representation and could not
 be persisted or resumed).
 
+**Configurable milestones: `[Hyper]` + `Specialize`.** The counter-input rule covers the inputs a
+scheduler graph *still has* when the rig sees it, so a module may declare its milestones as `[Hyper]`
+parameters and bake them with [`Specialize`](inference.md#hardcoding-hypers-with-specialize) — which
+folds each named value in as a constant and **removes it from the graph's input list** — before passing
+the graph to `Hyperparameter.Scheduled`. What reaches the rig is then a counters-only graph, and it is
+accepted:
+
+```csharp
+[Module]
+public partial class LinearDecay
+{
+    public static Scalar<float32> Inline(Scalar<int64> step, [Hyper(10)] Scalar<int32> totalSteps)
+        => Scalar(0.1f) * (Scalar(1f) - step.Cast<float32>() / totalSteps.Cast<float32>());
+}
+
+var sched = LinearDecay.ComputationGraph;                                     // inputs: totalSteps, step
+var decay = sched.Specialize(sched.FromOrderedInputs([TensorData([], 20)]));  // inputs: step
+
+var rig = TrainingRig.FromScratch(model, loss, SGDOptimizer.ComputationGraph, sample,
+    new SGDOptimizerHyperparameters { LearningRate = Hyperparameter.Scheduled(decay) });
+// learningRate = 0.1, 0.095, 0.09, … at steps 0, 1, 2, …
+```
+
+`FromOrderedInputs` pairs values with the *leading* input names, and a module's `[Hyper]` inputs come
+first, so the single value here names `totalSteps`. The milestone is a graph constant from then on —
+fixed for the rig's life like a `Baked` hyperparameter, so changing it means specializing again and
+rebuilding — but it comes from a host value instead of being hardcoded in the module. Bake only the
+non-counter inputs: specializing `step` as well is accepted too, and yields a *constant* schedule.
+
 **One value route.** A hyperparameter's value at some counters is always obtained by *evaluating its
 canonical graph at those counters*: in-graph every `TrainStep`, and — for optimizer state
 initialization — via a build-time evaluation at the initial counters (all 0). There is no second,

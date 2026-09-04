@@ -1125,4 +1125,26 @@ namespace Shorokoo.Tests.Modules
     }
 
     #endregion
+
+    #region Pruned parameter candidates (FastConvertModelParamIdRefToModelParam coverage)
+
+    /// <summary>A Linear whose bias is pruned by <c>useBias = false</c>: the bias parameter
+    /// becomes a dead candidate whose value is never observed, only its shape.</summary>
+    [Module]
+    public partial class PrunedBiasSmallLinear
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+            => Shorokoo.Modules.Layers.Linear.Call(Scalar(1L << 5), Scalar(false), x);
+    }
+
+    /// <summary>The same pruned bias, with the parameter large enough that materializing it
+    /// would dominate concretization's allocations.</summary>
+    [Module]
+    public partial class PrunedBiasLargeLinear
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+            => Shorokoo.Modules.Layers.Linear.Call(Scalar(1L << 25), Scalar(false), x);
+    }
+
+    #endregion
 }

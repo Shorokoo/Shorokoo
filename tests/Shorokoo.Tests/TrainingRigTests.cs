@@ -1,4 +1,5 @@
 using Shorokoo.Core.Nodes.Processors.Helpers;
+using Shorokoo.Modules.Layers;
 using Shorokoo.Runtime;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
@@ -532,6 +533,15 @@ public class TrainingRigRepresentativeInputCoverageTests
     }
 }
 
+/// <summary>A single trainable parameter far larger than any machine's memory, so its
+/// initializer aborts inside the backend with a bare native allocation failure.</summary>
+[Module]
+public partial class OversizedParamModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => Shorokoo.Modules.Initializers.Zeros.Init([Scalar(1L << 25), Scalar(1L << 25)]);
+}
+
 [Trait("Domain", "Training")]
 [Trait("Purpose", "Coverage")]
 public class TrainingRigCompositionCoverageTests
@@ -632,6 +642,22 @@ public class TrainingRigCompositionCoverageTests
             moduleGraph.FromOrderedInputs([TensorData([4L], [1f, 2f, 3f, 4f])]));
         Assert.NotEmpty(arch.GetConcreteModelParamInfos().ParamInfos);
         Assert.NotEmpty(arch.InitializeTrainableParams().ModelParams);
+    }
+
+    /// <summary>Every initializer runs in one session, so a native allocation abort names no
+    /// parameter of its own (#208): the parameters, their shapes and their sizes are reported.</summary>
+    [Fact]
+    public void TestInitializationFailureNamesTheParametersShapesAndSizes()
+    {
+        var graph = OversizedParamModel.ComputationGraph.ToInternal();
+        var arch = graph.ToConcreteArchitecture(
+            graph.FromOrderedInputs([TensorData([1L, 4L], [1f, 2f, 3f, 4f])]));
+
+        var ex = Assert.Throws<ComputeContextException>(() => arch.InitializeTrainableParams());
+        Assert.Contains("Zeros", ex.Message);
+        Assert.Contains("[33554432, 33554432]", ex.Message);
+        Assert.Contains("4.00 PiB", ex.Message);
+        Assert.NotNull(ex.InnerException);
     }
 
     [Fact]

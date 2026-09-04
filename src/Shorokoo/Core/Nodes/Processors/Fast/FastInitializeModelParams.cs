@@ -86,6 +86,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             var collectedModelIds = new List<ModelId>();
             var collectedOutputKeys = new List<FastTensorKey>();
+            // What this call is initializing, kept for the failure message below: a native
+            // allocation failure aborts the whole session and names nothing on its own.
+            var collectedInventory = new List<(string? Template, ModelId Id, DType DType, long[]? Shape)>();
 
             foreach (var node in workGraph.Nodes)
             {
@@ -101,6 +104,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var rank = node.Attributes.GetLongVal(OnnxOpAttributeNames.ShrkAttrRank) ?? -1;
                 var modelIdVals = node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId).AssertNotNull();
                 var modelId = new ModelId(modelIdVals);
+                var shape = node.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrShape);
+                // Both are cleared by the rewrite below; read them while they are still there.
+                var identifierTemplate = node.IdentifierTemplate;
 
                 // Replace the (shared) initializer with a per-parameter keyed-draw clone
                 // before the node is rewritten to FUNCTION_INVOKE (which preserves TargetFunction).
@@ -160,6 +166,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var outputKey = node.FullOutputs[""][0]!.Value;
                 collectedModelIds.Add(modelId);
                 collectedOutputKeys.Add(outputKey);
+                collectedInventory.Add((identifierTemplate, modelId, dtype, shape));
             }
 
             // Fail-loud override validation, mirroring the Runtime-side check at bind
@@ -198,10 +205,84 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             FastProcessorHelper.RemoveUnreachableNodes(workGraph);
 
-            var results = computeContext.Run(workGraph);
+            NamedModelParam[] results;
+            try
+            {
+                results = computeContext.Run(workGraph);
+            }
+            catch (System.Exception ex)
+            {
+                // Every parameter's initializer runs in ONE session, so the native failure
+                // (ORT reports an out-of-memory abort as a bare "bad allocation") carries no
+                // parameter, shape or size — nothing separates "this parameter is too large"
+                // from "this graph is malformed" (#208). Report what the session was asked to
+                // allocate; the inner exception keeps the original diagnosis.
+                throw new ComputeContextException(ErrorCodes.CR008, "FastInitializeModelParams",
+                    DescribeInventory(collectedInventory) + " Underlying failure: " + ex.Message, ex);
+            }
 
             return collectedModelIds.Zip(results)
                 .ToImmutableDictionary(x => x.First, x => x.Second.ToTensorData());
+        }
+
+        /// <summary>
+        /// Renders what one initialization session was asked to produce: the parameter count,
+        /// the total element count and byte size, and the largest parameters by size.
+        /// </summary>
+        private static string DescribeInventory(
+            List<(string? Template, ModelId Id, DType DType, long[]? Shape)> inventory)
+        {
+            static long ElementCount(long[]? shape)
+            {
+                if (shape is null) return -1;
+                long n = 1;
+                foreach (var d in shape)
+                {
+                    if (d < 0) return -1;
+                    n *= d;
+                }
+                return n;
+            }
+
+            static long ByteCount(DType dtype, long elements)
+            {
+                if (elements < 0) return -1;
+                try { return elements * dtype.EncodingBitCount / 8; }
+                catch (UnsupportedDTypeException) { return -1; }
+            }
+
+            static string Bytes(long bytes) => bytes < 0
+                ? "unknown size"
+                : bytes >= 1L << 50 ? $"{bytes / (double)(1L << 50):F2} PiB"
+                : bytes >= 1L << 40 ? $"{bytes / (double)(1L << 40):F2} TiB"
+                : bytes >= 1L << 30 ? $"{bytes / (double)(1L << 30):F2} GiB"
+                : bytes >= 1L << 20 ? $"{bytes / (double)(1L << 20):F2} MiB"
+                : $"{bytes} bytes";
+
+            var sized = inventory
+                .Select(x =>
+                {
+                    var elements = ElementCount(x.Shape);
+                    return (x.Template, x.Id, x.DType, x.Shape, Elements: elements,
+                        Bytes: ByteCount(x.DType, elements));
+                })
+                .ToArray();
+
+            static string Describe(
+                (string? Template, ModelId Id, DType DType, long[]? Shape, long Elements, long Bytes) p)
+                => $"'{p.Template ?? "<unnamed>"}' at ModelId [{string.Join(", ", p.Id.Vals)}] " +
+                   $"{p.DType} [{(p.Shape is null ? "unknown shape" : string.Join(", ", p.Shape))}] " +
+                   $"= {Bytes(p.Bytes)}";
+
+            var totalBytes = sized.Any(x => x.Bytes < 0) ? -1 : sized.Sum(x => x.Bytes);
+            var totalElements = sized.Any(x => x.Elements < 0) ? -1 : sized.Sum(x => x.Elements);
+            var largest = sized.OrderByDescending(x => x.Bytes).Take(5).Select(Describe);
+
+            return $"initializing {sized.Length} model parameter{(sized.Length == 1 ? "" : "s")} " +
+                   $"({(totalElements < 0 ? "unknown" : totalElements.ToString("N0"))} elements, " +
+                   $"{Bytes(totalBytes)}) failed. All initializers run in one session, so the " +
+                   "underlying failure names no parameter of its own; the largest of them, in " +
+                   "order: " + string.Join("; ", largest) + ".";
         }
 
         /// <summary>

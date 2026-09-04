@@ -504,6 +504,9 @@ namespace Shorokoo
         /// <summary>ComputeContext execution failed with inner exception</summary>
         public const string CR007 = "CR007";
 
+        /// <summary>Trainable-parameter initialization failed; the parameter inventory is reported</summary>
+        public const string CR008 = "CR008";
+
         /// <summary>Variable→handle conversion: structural kind (tensor/optional/sequence/struct) mismatch</summary>
         public const string CR011 = "CR011";
 

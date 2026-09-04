@@ -189,6 +189,15 @@ internal abstract class CompareOp : QuickOp
 /// </summary>
 internal abstract class ReduceOpBase : QuickOp
 {
+    /// <summary>
+    /// Whether this reduction has an identity element, i.e. a value it takes over an EMPTY group,
+    /// which a reduced axis of extent 0 produces. Sum-like folds do (0, or 1 for Prod); Max, Min
+    /// and Mean do not. Defaults to <c>false</c> so an accumulator only folds an empty group once
+    /// it has said it can — QEE declining to fold costs a constant, inventing a value costs
+    /// correctness.
+    /// </summary>
+    protected virtual bool FoldsEmptyGroup => false;
+
     protected abstract float Reduce(IEnumerable<float> values);
 
     /// <summary>
@@ -275,6 +284,9 @@ internal abstract class ReduceOpBase : QuickOp
             : axes.Select(a => a < 0 ? a + inDims.Length : a).ToArray();
         var axisSet = new HashSet<long>(normalizedAxesAll);
 
+        if (!FoldsEmptyGroup && normalizedAxesAll.Any(a => a >= 0 && a < inDims.Length && inDims[a] == 0))
+            return [rt];
+
         long keptCount = 1;
         for (int d = 0; d < inDims.Length; d++) if (!axisSet.Contains(d)) keptCount *= inDims[d];
 
@@ -350,6 +362,9 @@ internal abstract class ReduceOpBase : QuickOp
     private static IEnumerable<float> EnumerateGroup(ImmutableArray<float> data, long srcBase, int[] axisShape, long[] axisStrides)
     {
         if (axisShape.Length == 0) { yield return data[(int)srcBase]; yield break; }
+        // An extent-0 reduced axis makes the group empty. The walk below reads before it tests
+        // the extent, so without this it would index element 0 of an empty buffer.
+        for (int d = 0; d < axisShape.Length; d++) if (axisShape[d] == 0) yield break;
         var idx = new int[axisShape.Length];
         while (true)
         {
@@ -366,6 +381,9 @@ internal abstract class ReduceOpBase : QuickOp
     private static IEnumerable<long> EnumerateGroup(ImmutableArray<long> data, long srcBase, int[] axisShape, long[] axisStrides)
     {
         if (axisShape.Length == 0) { yield return data[(int)srcBase]; yield break; }
+        // An extent-0 reduced axis makes the group empty. The walk below reads before it tests
+        // the extent, so without this it would index element 0 of an empty buffer.
+        for (int d = 0; d < axisShape.Length; d++) if (axisShape[d] == 0) yield break;
         var idx = new int[axisShape.Length];
         while (true)
         {

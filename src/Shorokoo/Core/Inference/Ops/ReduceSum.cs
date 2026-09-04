@@ -8,6 +8,7 @@ namespace Shorokoo.Core.Inference.Ops;
 internal sealed class ReduceSumOp : ReduceOpBase
 {
     public override string OpCode => OpCodes.REDUCE_SUM;
+    protected override bool FoldsEmptyGroup => true;
     protected override float Reduce(IEnumerable<float> values) => values.Sum();
     // Exact integer accumulation (the float-roundtrip default loses precision past 2^24).
     protected override long ReduceInt(IEnumerable<long> values, DType dtype) { long s = 0; foreach (var v in values) s += v; return s; }

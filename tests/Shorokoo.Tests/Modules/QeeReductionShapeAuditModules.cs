@@ -112,13 +112,25 @@ namespace Shorokoo.Tests.Modules
     }
 
 
-    /// <summary>A reduction over an EMPTY tensor is the reduction's identity element - sum 0.
-    /// ONNX Runtime computes it; the QuickExecutionEngine does not resolve the bit.</summary>
+    /// <summary>A reduction over an EMPTY tensor is the reduction's identity element - sum 0.</summary>
     [Module]
     public partial class QeeEmptyReduceIdentityCheck
     {
         public static Scalar<bit> Inline(Tensor<float32> r)
-            => (r.Reshape(Vector(-1L)).Slice(Vector(0L), Vector(0L)).Reduce(ReduceKind.Sum) == Scalar(0f)).Scalar();
+        {
+            var empty = r.Reshape(Vector(-1L)).Slice(Vector(0L), Vector(0L));
+            var mismatch =
+                FloatMismatch(Flat(empty.Reduce(ReduceKind.Sum)), Vector(0f)) +
+                FloatMismatch(Flat(empty.Reduce(ReduceKind.Prod)), Vector(1f)) +
+                FloatMismatch(Flat(empty.Reduce(ReduceKind.SumSquare)), Vector(0f)) +
+                FloatMismatch(Flat(empty.Reduce(ReduceKind.L1)), Vector(0f)) +
+                FloatMismatch(Flat(empty.Reduce(ReduceKind.L2)), Vector(0f)) +
+                // an empty KEPT axis reduces to an empty result, not to the identity.
+                ShapeMismatch(empty.Reshape(Vector(0L, 3L)).Reduce(ReduceKind.Sum, Vector(1L)), Vector(0L));
+            return mismatch < Scalar(1L);
+        }
+
+        private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
     }
 
     /// <summary>Reshape (keepAxes copy-dim positions, -1, literal 0 on an empty tensor), Flatten (negative axis,

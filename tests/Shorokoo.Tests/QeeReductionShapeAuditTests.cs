@@ -27,9 +27,6 @@ public class QeeReductionShapeAuditTests
             0f, 1f, 2f, 3f, 10f, 11f, 12f, 13f, 20f, 21f, 22f, 23f)));
     }
 
-    // Fails: the QuickExecutionEngine does not resolve the audit bit for a graph that slices a
-    // tensor to zero elements and reduces it. ONNX Runtime runs the same graph correctly
-    // (QeeAudit.OrtOnly passes), so the reduction's identity element is not in question.
     [Fact]
     public void TestQeeFoldsAReductionOverAnEmptyTensorToTheIdentity()
         => Assert.True(QeeAudit.Check<QeeEmptyReduceIdentityCheck>(

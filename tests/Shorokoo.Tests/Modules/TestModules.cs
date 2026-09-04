@@ -64,6 +64,20 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>One param whose shape is static (it resolves with no hints at all) beside one whose
+    /// shape needs the input's value, so concretizing without hints leaves a mix of resolved and
+    /// unresolved param sites.</summary>
+    [Module]
+    public partial class StaticAndInputShapedParamsLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+        {
+            var scale = InitSimple.Init([Scalar(1L)]);
+            var weights = InitSimple.Init(input.ShapeTensor());
+            return input * weights * scale;
+        }
+    }
+
     // Returns a rank-pinned Vector<float32>. Constructing the auto-generated
     // Module<Tensor<float32>, Vector<float32>> goes through
     // ModuleHelper.CreateFunctionSignature, which derives a per-output rank override

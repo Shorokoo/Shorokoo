@@ -73,6 +73,10 @@ public class ModulesCoverageTests
             hyperparamInputs: [],
             runtimeInputs: [TensorDataWithSmallVals(DType.Float32, [5L])],
             expected: Rep(0.1, 5)));
+        Assert.True(AutoTest.AdvancedTestGraph<StaticAndInputShapedParamsLayer>(
+            hyperparamInputs: [],
+            runtimeInputs: [TensorDataWithSmallVals(DType.Float32, [5L])],
+            expected: Rep(0.1, 5)));
         Assert.True(AutoTest.AdvancedTestGraph<HypersLayer>(
             hyperparamInputs: [TensorData(DType.Float32, [], 2f), TensorData(DType.Float32, [], 0.5f)],
             runtimeInputs: [TensorDataWithSmallVals(DType.Float32, [5L])],
@@ -572,15 +576,18 @@ public class ModulesCoverageTests
             [TensorData(DType.Int64, [], 3L), TensorData(DType.Int64, [], 4L)], input);
     }
 
-    /// <summary>Omitting the hint for an input a trainable-param shape derives from is a user mistake,
-    /// and the product has an exception for it — but a Debug build hits <c>Debug.Fail</c> first, which
-    /// outside a test host kills the process. Same defect class as Shorokoo/Shorokoo#220, a different
-    /// site: this one is <c>ToConcreteArchitecture</c>'s post-stage op check.
-    /// Tracked as Shorokoo/Shorokoo#222.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#222: Debug.Fail aborts before the exception, and the message names internals not the missing hint")]
-    public void TestConcretizingWithoutTheHintAParamShapeNeedsFailsWithACatchableExceptionNotAnAssertion()
+    private static string ConcretizeWithNoHints(ComputationGraph graph)
         => Assert.IsType<InvalidOperationException>(Record.Exception(
-            () => SimplestLayer.ComputationGraph.ToConcreteArchitecture(new ModelParamList([]))));
+            () => graph.ToConcreteArchitecture(new ModelParamList([])))).Message;
+
+    [Fact]
+    public void TestConcretizingWithoutTheHintAParamShapeNeedsFailsWithACatchableExceptionNotAnAssertion()
+    {
+        Assert.Contains("input 'input'", ConcretizeWithNoHints(SimplestLayer.ComputationGraph));
+        Assert.Contains("input 'input'", ConcretizeWithNoHints(ConditionalTrainableParamInLoopLayer.ComputationGraph));
+        Assert.DoesNotContain("threshold", ConcretizeWithNoHints(ConditionalTrainableParamInLoopLayer.ComputationGraph));
+        Assert.Contains("input 'input'", ConcretizeWithNoHints(StaticAndInputShapedParamsLayer.ComputationGraph));
+    }
 
     [Fact]
     public void TestZeroTripLoopLeavesTheAccumulatorUntouchedOnBothEngines()

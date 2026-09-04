@@ -241,7 +241,9 @@ namespace Shorokoo
         /// <c>null</c> is a no-op — it writes nothing, and does not throw (a null loss is a
         /// legitimate value). The
         /// <see cref="CheckpointComponents.TrainingRig"/> component is never written by this flat
-        /// format and throws when requested explicitly — the rig's constituent graphs need the native
+        /// format and throws when requested explicitly: <see cref="InvalidOperationException"/> when
+        /// this checkpoint has no <see cref="Rig"/> attached, and otherwise
+        /// <see cref="NotSupportedException"/> — the rig's constituent graphs need the native
         /// <c>.skpt</c> container, which
         /// <see cref="Persistence.SaveTrainingCheckpointToSkpt"/> always writes them into.
         /// </para>

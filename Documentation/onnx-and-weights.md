@@ -15,10 +15,12 @@ Related: [inference.md](inference.md) · [core-types.md](core-types.md) · [skpt
   export, and transparent side-file loading on import.
 - Pretrained weights are loaded from `.safetensors` (and compressed `.zsafetensor`).
 - Saves through the `Persistence.*` facade are **atomic** (staged beside the target and
-  committed by rename). The raw layers below it — `OnnxModelExporter`,
+  committed by rename) — and so is the flat training-checkpoint save `checkpoint.Save`
+  (`TrainingCheckpoint.Save`, which `Persistence.SaveTrainingCheckpoint` delegates to),
+  which stages and renames the same way, so you never need a stage-and-rename of your own
+  around it. The raw layers below them — `OnnxModelExporter`,
   `SafeTensorLoader.SaveSafeTensors`, `CompressedFormatUtils` — write **in place**, so an
-  interrupted write leaves a truncated file. Prefer the `Persistence.*` entry point where
-  one exists.
+  interrupted write leaves a truncated file. Prefer an atomic entry point where one exists.
 
 ## Export to ONNX
 
@@ -263,6 +265,12 @@ so. Header fields (add-only across minor revisions; unknown fields are ignored):
 This is the only `.srk` layout: there is no legacy read path, and a file that does not
 open with the container magic is not a `.srk` file (loading it fails with a clear error).
 
+Unlike `BuildOnnxModel`, this format is Shorokoo's **internal dialect**: it
+accepts any graph — module-stage graphs with their internal ops included —
+keeps internal `N{k}_T{s}` tensor names, and is only loadable by Shorokoo
+(`LoadFastGraphFromFile` / `OnnxModelImporter`). Use it for Shorokoo-to-Shorokoo
+persistence; use `BuildOnnxModel` for anything meant to leave Shorokoo.
+
 **Pre-release caveat: a payload break can land inside version 1.** Add-only governs
 the container's header *fields*. While Shorokoo is pre-release, what the **payload**
 records can still change in a read-breaking way without a container version bump —
@@ -279,12 +287,6 @@ reads: `LoadFastGraphFromFile` loads such a graph as it always did,
 touching the stored architecture, the flat safetensors format is unaffected, and so
 is feeding a standalone `.srk` architecture to `TrainingRig.FromScratch`, whose
 sample inputs record the representative shapes afresh.
-
-Unlike `BuildOnnxModel`, this format is Shorokoo's **internal dialect**: it
-accepts any graph — module-stage graphs with their internal ops included —
-keeps internal `N{k}_T{s}` tensor names, and is only loadable by Shorokoo
-(`LoadFastGraphFromFile` / `OnnxModelImporter`). Use it for Shorokoo-to-Shorokoo
-persistence; use `BuildOnnxModel` for anything meant to leave Shorokoo.
 
 ## Load pretrained weights (SafeTensors)
 
@@ -501,11 +503,14 @@ Recognized formats and what is reported:
 
 - Reads are bounded to headers and prefixes; tensor payload bytes are never
   materialized. The one exception is a checkpoint's 16-byte marker (an `int64[2]`
-  holding the format version and the global step) plus the presence-gated epoch /
-  batch / loss scalars beside it, 8 bytes each. For a `.skpt`, only the zip central
-  directory and the `config.json` entry are read — and for the **directory form**,
-  the directory's files are enumerated, its file listing playing the central
-  directory's role, and the root `config.json` read the same way. The recorded
+  holding the format version and the global step) plus the presence-gated epoch and
+  batch-index scalars beside it, 8 bytes each. The presence-gated loss scalar (a
+  `float32`, 4 bytes) is *not* read — `Inspect` reports the run counters only, as the
+  table above lists. For a `.skpt`, only the zip central directory, the `config.json`
+  entry and (when present) the small `data/user-data.json` entry are read — and for the
+  **directory form**, the directory's files are enumerated, its file listing playing the
+  central directory's role, with the root `config.json` and `data/user-data.json` read
+  the same way. The recorded
   per-entry sha256s are reported as written, never checked (a full
   `Persistence.Load` verifies them).
   Because the payload is untouched, `Inspect` also succeeds on a file whose
@@ -515,11 +520,11 @@ Recognized formats and what is reported:
   alone, e.g. declared tensor extents pointing past the end of the file
   (truncation), trailing bytes beyond the declared data, an unreadable /
   future-version container header, or — for a `.skpt` — a manifest entry with
-  no matching archive entry (and vice versa), a manifest entry path that escapes
-  the checkpoint root (reported, never thrown — `Inspect` never resolves it, and a
-  load refuses it), a compressed entry where STORED is expected, unknown manifest
-  keys, and empty registries. Through the
-  compression layer of a `.zsafetensor` only header-internal checks apply — a
+  no matching archive entry (and vice versa), a compressed entry where STORED is
+  expected, unknown manifest keys, and empty registries. On the **directory form**
+  specifically, the scan also flags a manifest entry path that escapes the checkpoint
+  root (reported, never thrown — `Inspect` never resolves it, and a load refuses it).
+  Through the compression layer of a `.zsafetensor` only header-internal checks apply — a
   compressed file's size has no fixed relation to the decompressed extents, so
   truncation of the tensor payload is not detectable from the header.
 - A `.zsafetensor` that contains the `__shorokoo_checkpoint__` marker (a
@@ -598,7 +603,6 @@ map a `DType` to a SafeTensor dtype string.
 - Do not expect a one-call graph-to-file helper; build the `ModelProto` first, then
   save it (`OnnxModelExporter.Save` / `SaveWithExternalData`, or serialize it
   yourself).
-- Do not treat the raw writers — `OnnxModelExporter.Save` / `SaveWithExternalData`,
-  `SafeTensorLoader.SaveSafeTensors`, `CompressedFormatUtils.SaveFastGraphToFile` /
-  `SaveCompressedSafeTensors` — as crash-safe. They overwrite the target in place; only
-  the `Persistence.*` save/export entry points stage and commit by rename.
+- Do not treat the raw writers as crash-safe: they overwrite the target in place. See
+  [Facts](#facts) for which writers stage and commit by rename and which do not, and each
+  API's own section for the consequence at the call site.

@@ -89,8 +89,10 @@ namespace Shorokoo.Core
         /// The delegate constraints of <see cref="BuildInternalComputationGraphFromDelegate"/> apply.
         /// </summary>
         /// <param name="fn">The module body. Parameters must be flattened tensor parameters
-        /// (no tuples), ordered inputs-first / hyperparameters-last like a <c>[Module]</c>
-        /// <c>Inline</c> method; the trailing hyperparameters are marked with <c>[Hyper]</c>.</param>
+        /// (no tuples), by convention written inputs-first / hyperparameters-last like a
+        /// <c>[Module]</c> <c>Inline</c> method, with each hyperparameter marked <c>[Hyper]</c>.
+        /// Only those marks are read here — the declaration order is not checked, and the graph's
+        /// input list comes out hyperparameters-first either way.</param>
         public static Shorokoo.Graph.ComputationGraph BuildComputationGraphFromDelegate(Delegate fn)
             => new Shorokoo.Graph.ComputationGraph(
                 BuildInternalComputationGraphFromDelegate(fn), Shorokoo.Graph.GraphKind.Module);
@@ -109,8 +111,10 @@ namespace Shorokoo.Core
         /// cached, Module-object-producing entry points.</para>
         /// </summary>
         /// <param name="fn">The module body. Parameters must be flattened tensor parameters
-        /// (no tuples), ordered inputs-first / hyperparameters-last like a <c>[Module]</c>
-        /// <c>Inline</c> method; the trailing hyperparameters are marked with <c>[Hyper]</c>.</param>
+        /// (no tuples), by convention written inputs-first / hyperparameters-last like a
+        /// <c>[Module]</c> <c>Inline</c> method, with each hyperparameter marked <c>[Hyper]</c>.
+        /// Only those marks are read here — the declaration order is not checked, and the graph's
+        /// input list comes out hyperparameters-first either way.</param>
         /// <returns>A freshly built graph (not cached — callers own the instance).</returns>
         internal static InternalComputationGraph BuildInternalComputationGraphFromDelegate(Delegate fn)
         {

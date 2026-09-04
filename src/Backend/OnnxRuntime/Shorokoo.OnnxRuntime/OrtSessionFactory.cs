@@ -92,7 +92,8 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     /// </summary>
     /// <exception cref="NotSupportedException">
     /// The element type has no fixed byte stride — <see cref="ShorokooTensorElementType.String"/>
-    /// is variable-length, so use <see cref="CreateStringTensor"/> for it.
+    /// is variable-length, so use <see cref="CreateStringTensor"/> for it — or is not one this
+    /// method handles at all.
     /// </exception>
     public IShorokooTensorValue CreateTensorFromRawBytes(
         ShorokooTensorElementType elementType,

@@ -221,8 +221,10 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Code("NN.Sum({#:param})"),
 
             // Swish activation (opset 24+): y = x * sigmoid(alpha * x), alpha default 1.
-            // NOTE: ONNX Runtime 1.26 registers no Swish kernel on any execution
-            // provider, so graphs containing Swish are QEE-executable only.
+            // Reachable only through ONNX import -- NN.Swish/OnnxOp.Swish lower to Mul/Sigmoid,
+            // so no graph built through the Ops/OnnxOp entry points holds a Swish node. NOTE:
+            // ONNX Runtime 1.26 registers no Swish kernel on any execution provider, so an
+            // imported graph containing Swish is QEE-executable only.
             Op(SWISH)
                 .Tensor<FloatLike>("T")
                 .AttributeFloat(AttrAlpha)      // a (default 1.0)

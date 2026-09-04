@@ -521,7 +521,9 @@ namespace Shorokoo.Core.Utils
         // scheduler model — plus the non-graph recipe (input shapes, hyperparameter bindings, RNG
         // config) in the manifest training block's rig section, so a fresh process rebuilds the whole
         // rig from the file alone. These sit alongside the "model" inference-model entry, which stays
-        // the one Persistence.Load binds; the constituents carry no tensor mapping (the rig re-derives).
+        // the one Persistence.Load binds. No constituent binds weights (the rig re-derives), so the
+        // arch, loss and scheduler entries carry no tensor mapping at all; the optimizer entry carries
+        // the optimizer-state mapping, and only when the optimizer is stateful.
 
         /// <summary>Current rig-block version (see <see cref="SkptRigInfo"/>). The block carries no
         /// per-input <c>inputShapes</c> field: the arch's <c>MODEL_TENSOR_INPUT</c> nodes serialize as

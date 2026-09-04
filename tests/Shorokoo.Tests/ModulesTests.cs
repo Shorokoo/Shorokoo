@@ -21,37 +21,48 @@ public class ModulesCoverageTests
     private static double[] Rep(double v, int n) => [.. Enumerable.Repeat(v, n)];
 
     /// <summary>Concretizes <see cref="Modules.GatedBiasHyperLayer"/> under <paramref name="hint"/>
-    /// and runs it with <paramref name="atExecute"/>; null means the run was rejected.</summary>
+    /// and runs it with <paramref name="atExecute"/>. Null means the contradiction did not survive
+    /// to a result: either the concrete model no longer declares the gating bit (so the two values
+    /// cannot differ) or the run was rejected. Written by hand rather than through
+    /// <c>AutoTest.AdvancedTestGraph</c>, which feeds one value array as both the concretization
+    /// hints and the execution inputs and so cannot express a contradiction at all.</summary>
     private static float[]? GatedBiasOutcome(bool hint, bool atExecute)
     {
         var g = Modules.GatedBiasHyperLayer.ComputationGraph;
         var x = TensorData([2L], 1f, 2f);
         var model = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([], hint), x]))
             .ToConcreteModel(RngConfig.Default);
+        var gated = model.InputNames.Contains(GatingInput);
+        if (!gated && atExecute != hint) return null;
+        IData[] inputs = gated ? [TensorData([], atExecute), x] : [x];
+        NamedModelParam[] outputs;
         try
         {
-            return new ComputeContext().Execute(model, TensorData([], atExecute), x)[0]
-                .ToTensorData().As<float32>().AccessMemory<float>().ToArray();
+            outputs = new ComputeContext().Execute(model, inputs);
         }
         catch (ShorokooException)
         {
             return null;
         }
+        return outputs[0].ToTensorData().As<float32>().AccessMemory<float>().ToArray();
     }
 
+    private const string GatingInput = "useBias";
+
     /// <summary>
-    /// A concretization hint prunes the gated branch's trainable param but leaves the gating bit a
-    /// live graph input, so contradicting it at Execute is accepted and silently returns the
-    /// pruned branch's result. Tracked as Shorokoo/Shorokoo#217.
+    /// Concretizing the gated hyperparameter as <c>false</c> prunes the bias but leaves the gating
+    /// bit a live graph input, so <c>Execute</c> accepts the contradicting value <c>true</c> and
+    /// silently returns the surviving unbiased branch's result instead of rejecting the run. The
+    /// fault is one-directional: a <c>true</c> hint keeps both branches, so executing it with
+    /// <c>false</c> correctly returns the unbiased result. Tracked as Shorokoo/Shorokoo#217.
     /// </summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#217: contradicting a concretization hint at Execute silently returns a wrong result")]
-    public void TestGatedHyperparamHintCannotBeContradictedAtExecute()
+    [Fact(Skip = "Shorokoo/Shorokoo#217: a false gating hint executed with true silently returns the unbiased result")]
+    public void TestAFalseGatedHyperparamHintExecutedWithTrueIsSilentlyIgnored()
     {
         float[] plain = [1f, 2f];
         float[] biased = [2f, 3f];
         Assert.Equal(plain, GatedBiasOutcome(false, false));
         Assert.Equal(biased, GatedBiasOutcome(true, true));
-        Assert.Equal(plain, GatedBiasOutcome(true, false));
         Assert.Null(GatedBiasOutcome(false, true));
     }
 

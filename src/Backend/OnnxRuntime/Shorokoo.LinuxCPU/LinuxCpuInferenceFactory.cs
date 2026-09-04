@@ -25,8 +25,9 @@ namespace Shorokoo.LinuxCPU;
 public sealed class LinuxCpuInferenceFactory : OrtSessionFactory
 {
     /// <summary>
-    /// Creates the factory. CPU is ORT's default execution provider, so no session
-    /// options are configured.
+    /// Creates the factory. CPU is ORT's default execution provider, so this factory's
+    /// execution-provider step does nothing; sessions still get the usual log-severity
+    /// and graph-optimization options.
     /// </summary>
     public LinuxCpuInferenceFactory() : base(static _ => { }) { }
 }

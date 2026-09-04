@@ -93,10 +93,14 @@ namespace Shorokoo.Runtime
     }
 
     /// <summary>
-    /// Provides a runtime to execute the operations described by a VirtualGraph.
+    /// The runtime that turns a <see cref="ComputationGraph"/> into an inference session and runs it —
+    /// once via <see cref="Execute(ComputationGraph, IData[])"/>, or repeatedly via a
+    /// <see cref="CompiledGraph"/> from <see cref="Compile(ComputationGraph)"/>.
     ///
-    /// Reusing TensorData Outputs from one ExecutationContext to another ComputeContext
-    /// will work but may incur a performance penalty as the data is shifted between the two contexts.
+    /// A context carries no per-instance configuration — no device, execution provider, thread count
+    /// or session options — and every session it creates is built by the one process-wide
+    /// <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Factory"/>. Two distinct
+    /// instances therefore name a <i>phase</i> of the work, never a device.
     /// </summary>
     public class ComputeContext
     {
@@ -119,7 +123,9 @@ namespace Shorokoo.Runtime
             set { _defaultComputeContext = value; }
         }
 
-        /// <summary>Creates a compute context backed by the default inference-session factory.</summary>
+        /// <summary>Creates a compute context. There is nothing per-context to configure — its sessions
+        /// come from the process-wide
+        /// <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Factory"/>.</summary>
         public ComputeContext()
         {
         }

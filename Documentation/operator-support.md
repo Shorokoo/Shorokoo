@@ -11,12 +11,19 @@ because none can reach the exporter — `RMSNormalization` and `Swish` lower
 inline to opset-21 primitives, so no such node is ever emitted, and the
 remaining post-21 operators throw at authoring time (see the family notes
 below). A graph you build through `Ops`/`OnnxOp`/`NN` therefore always exports
-at opset 21. See [limitations.md](limitations.md) for why the baseline stays
-at 21. Every operator Shorokoo has a definition for is listed below — the full
-opset-21 set plus the post-21 additions (`Attention`, `RMSNormalization`,
-`RotaryEmbedding` at opset 23; `Swish`, `TensorScatter` at opset 24;
-`BitCast`, `CumProd` at opset 26) — grouped by family and alphabetical within
-each family. The three columns mean:
+at opset 21 — the low-level `NodeBuilder` surface is the exception, since it
+can stamp any attribute a node definition declares, and a node built that way
+raises the stamp exactly as an imported one does. See
+[limitations.md](limitations.md) for why the baseline stays at 21. Every
+operator Shorokoo has a definition for is listed below — the full opset-21 set
+plus the post-21 additions, each at the opset the ONNX spec introduces it
+(`Attention`, `RMSNormalization`, `RotaryEmbedding` at opset 23; `Swish`,
+`TensorScatter` at opset 24; `BitCast`, `CumProd` at opset 26) — grouped by
+family and alphabetical within each family. Each of those spec versions is
+also the exporter's opset floor for the operator, as listed in
+[limitations.md](limitations.md), with one exception: `Attention` is floored at
+24, because ORT 1.26's CPU provider only registers its kernel at opset 24+.
+The three columns mean:
 
 - **Build & run** — the operator can be constructed in a Shorokoo graph
   (definition covers the spec's inputs/outputs/attributes) and executes on the
@@ -307,7 +314,7 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 | LpNormalization | ✅ | 🟡 [5] | ✅ |
 | MeanVarianceNormalization | ✅ | 🟡 [5] | ✅ |
 | NegativeLogLikelihoodLoss | ✅ | 🟡 [5] | ✅ |
-| RMSNormalization | ✅ | ✅ | ✅ |
+| RMSNormalization | ✅ [7] | ✅ | ✅ |
 | SoftmaxCrossEntropyLoss | ✅ | 🟡 [5] | ✅ |
 
 1. With `training_mode=1` the node is decomposed into primitive ops at export
@@ -325,6 +332,12 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
    mask is unavailable.
 5. Shape/dtype inference only; values are not computed.
 6. Gradients into the optional Mean/InvStdDev outputs are treated as zero.
+7. `RMSNormalization` lowers inline to opset-21 primitives
+   (`y = x / sqrt(mean(x², suffix axes) + epsilon) * scale`, built from
+   `ReduceMean`/`Sqrt`/`Div`/`Mul`), so the exported ONNX carries no
+   `RMSNormalization` node and the model loads and runs on any execution
+   provider. The fused `RMSNormalization` op definition and its QEE kernel are
+   retained for the day a runtime registers the operator at a usable opset.
 
 ## MatMul & linear algebra
 
@@ -339,8 +352,8 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 
 1. Cannot be constructed today: `OnnxOp.Attention`, its KV-cache variant
    `OnnxOp.AttentionWithKVCache`, and `OnnxOp.RotaryEmbedding` — and the
-   matching `NN.*` wrappers — throw `NotImplementedException`. Neither
-   operator has an opset-21 equivalent and Shorokoo emits a single opset-21
+   matching `NN.*` wrappers — throw `NotImplementedException`. None of them
+   has an opset-21 equivalent and Shorokoo emits a single opset-21
    model, so a faithful lowering (the causal/GQA/softcap variants and the
    KV-cache update for `Attention`; the position-id gather, interleaved vs
    half-split layouts and partial rotary dim for `RotaryEmbedding`) is

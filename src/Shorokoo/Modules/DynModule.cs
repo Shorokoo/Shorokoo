@@ -59,7 +59,8 @@ namespace Shorokoo.Modules
     /// Marks an <c>Inline</c> parameter as a hyperparameter (a scalar configured when the module is
     /// instantiated, not a runtime input). An <c>Inline</c> method declares its tensor inputs first and
     /// its hyperparameters last, so every <c>[Hyper]</c> parameter must come after all input parameters;
-    /// a non-hyper parameter following a <c>[Hyper]</c> one makes the source generator skip the module.
+    /// a non-hyper parameter following a <c>[Hyper]</c> one is a malformed signature: the source
+    /// generator reports warning MSG002 and generates no <c>Model</c>/<c>Call</c> for the method.
     /// (The generated <c>Call</c> shortcut takes its arguments the other way round — hyperparameters
     /// first, then inputs.)
     ///

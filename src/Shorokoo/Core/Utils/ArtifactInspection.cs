@@ -609,8 +609,8 @@ namespace Shorokoo
         /// Zstd-compressed SafeTensors archives (.zsafetensor; the length prefix and JSON header
         /// are stream-decompressed, the tensor payload never), training checkpoints written
         /// by <see cref="TrainingCheckpoint.Save(string, CheckpointComponents?)"/> (via the
-        /// checkpoint marker; only the marker's 16 bytes and the presence-gated epoch / batch / loss
-        /// scalars' 8 bytes each are ever read),
+        /// checkpoint marker; only the marker's 16 bytes and the presence-gated epoch / batch
+        /// scalars' 8 bytes each are ever read — the loss scalar is not read),
         /// and .skpt checkpoint containers written by <see cref="CheckpointBuilder.Save"/>
         /// (a zip archive with a root config.json manifest — only the zip central directory
         /// and the manifest entry are read; recorded sha256s are reported, never verified).

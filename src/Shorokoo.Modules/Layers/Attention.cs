@@ -33,8 +33,8 @@ public static class Attention
     /// j ≤ i; the mask is a constant (built from Range/compare/Where), so it needs no
     /// gradient. <paramref name="additiveMask"/> is an optional pre-built additive mask
     /// (broadcastable to the <c>[..., Lq, Lk]</c> scores) added on top — used by
-    /// <see cref="MultiHeadAttention"/> to gate a causal mask by a runtime <c>Scalar&lt;bit&gt;</c>
-    /// it cannot branch on in C#.</para>
+    /// <see cref="MultiHeadAttention"/> to gate a causal mask by its <c>[Hyper]</c>
+    /// <c>Scalar&lt;bit&gt;</c>, which C# cannot branch on.</para>
     /// </summary>
     public static Tensor<float32> ScaledDotProductAttention(
         Tensor<float32> query,
@@ -130,9 +130,12 @@ public static class Attention
 /// <c>key</c>/<c>value [N, Lk, embedDim]</c> — pass <c>(x, x, x)</c> for self-attention,
 /// distinct tensors for cross-attention. Four <see cref="XavierUniform"/> projections
 /// (q/k/v/out, each <c>[embedDim, embedDim]</c>, matching PyTorch's MHA init) with optional
-/// zero biases gated by <c>useBias</c>. <c>causal</c> is a runtime <c>Scalar&lt;bit&gt;</c>:
-/// since C# can't branch on it, the SDPA math is done inline here and the causal mask is
-/// gated via <c>causal.IfElse(causalMask, zeros)</c> added to the scores. No PyTorch
+/// zero biases: <c>useBias</c> is a <c>[Hyper]</c> bit fixed before concretization, so
+/// <c>useBias = false</c> folds the <c>IfElse</c> away and prunes all four bias parameters —
+/// the layer then carries four trainable parameters, not eight. <c>causal</c> is a
+/// <c>[Hyper]</c> bit too; since C# can't branch on a <c>Scalar&lt;bit&gt;</c>, the mask is
+/// gated via <c>causal.IfElse(causalMask, zeros)</c> and handed to
+/// <see cref="Attention.ScaledDotProductAttention"/> as its additive mask. No PyTorch
 /// backwards-compat surface (need_weights / kdim/vdim / add_zero_attn / batch_first) —
 /// Shorokoo is explicit and batch-first.
 /// </summary>
@@ -171,7 +174,7 @@ public partial class MultiHeadAttention
         var kh = k.Reshape([n, lk, numHeads, headDim]).Transpose(0L, 2L, 1L, 3L);
         var vh = v.Reshape([n, lk, numHeads, headDim]).Transpose(0L, 2L, 1L, 3L);
 
-        // causal is a runtime bit; build the [Lq, Lk] mask and gate it instead of branching.
+        // C# can't branch on a Scalar<bit>; build the [Lq, Lk] mask and gate it instead.
         var mask = causal.IfElse(Attention.CausalMask(lq, lk), TensorFill([lq, lk], 0f));
         var attended = Attention.ScaledDotProductAttention(qh, kh, vh, additiveMask: mask);
 

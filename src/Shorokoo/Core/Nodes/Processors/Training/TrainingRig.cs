@@ -163,14 +163,10 @@ namespace Shorokoo
         /// forward by reference and, like <see cref="MergeContext"/>, it is runtime configuration that is
         /// <b>never persisted</b>.
         ///
-        /// <para><b>It selects no backend or device.</b> <see cref="ComputeContext"/> has a single
-        /// parameterless constructor and carries no per-instance settings — no device, no execution
-        /// provider, no thread count, no session options — and every session either context creates is
-        /// built by the one process-wide <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Factory"/>, which is resolved once
-        /// and cached. Passing two distinct instances therefore selects nothing: read this context and
-        /// <see cref="MergeContext"/> as a division of <i>phases</i> — which work is build/merge and
-        /// which is compile/run — not of hardware. In particular you <b>cannot</b> merge on one device
-        /// and train on another; only one backend is live per process and both contexts go through it.</para>
+        /// <para><b>It selects no backend or device</b> (see <see cref="ComputeContext"/>): this context
+        /// and <see cref="MergeContext"/> divide <i>phases</i>, not hardware. You <b>cannot</b> merge on
+        /// one device and train on another — one backend is live per process and both contexts go
+        /// through it.</para>
         /// </summary>
         public ComputeContext RuntimeContext { get; private set; } = ComputeContext.Default;
 
@@ -2015,8 +2011,10 @@ namespace Shorokoo
         /// Fits the model to the data for <paramref name="numEpochs"/> epochs — a one-liner over
         /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct)"/>.
         /// Scheduled hyperparameters are applied automatically (the global step advances across epochs
-        /// via the checkpoint), so the schedule sees a monotonically increasing step. Alias for
-        /// <see cref="Train"/>. <paramref name="initialCheckpoint"/> defaults to
+        /// via the checkpoint), so the schedule sees a monotonically increasing step. Delegates to
+        /// <see cref="Train"/>, but the argument orders are not interchangeable: <see cref="Train"/>
+        /// takes the checkpoint first and requires it, this takes it last and optional.
+        /// <paramref name="initialCheckpoint"/> defaults to
         /// <see cref="CreateInitialCheckpoint()"/>, so a minimal call is
         /// <c>rig.Fit(inputs, targets, numEpochs: 10)</c>. The trainstep is compiled and run through the
         /// rig's <see cref="RuntimeContext"/> (set at construction), the single compiled graph per rig.

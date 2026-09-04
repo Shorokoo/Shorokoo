@@ -11,8 +11,10 @@ namespace Shorokoo.Core.Inference.Ops;
 /// QEE kernel for ONNX <c>Swish</c> (opset 24+): elementwise
 /// <c>y = x * sigmoid(alpha * x)</c> with <c>alpha</c> defaulting to 1.
 /// Output shape and dtype match the input; values are computed for small float
-/// tensors. NOTE: ONNX Runtime 1.26 has no Swish kernel on any execution
-/// provider, so the QEE is the only execution path for this op.
+/// tensors. It serves imported graphs only: <c>NN.Swish</c>/<c>OnnxOp.Swish</c> lower
+/// to Mul/Sigmoid, so nothing built through the <c>Ops</c>/<c>OnnxOp</c> entry points
+/// contains a <c>Swish</c> node. NOTE: ONNX Runtime 1.26 has no Swish kernel on any
+/// execution provider, so for an imported node the QEE is the only execution path.
 /// </summary>
 internal sealed class SwishOp : QuickOp
 {

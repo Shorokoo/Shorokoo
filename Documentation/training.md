@@ -177,13 +177,13 @@ applied to. Every definition below is the exact arithmetic the rig evaluates (in
 | `Constant(float value)` | `value` | unchanging at every step |
 | `Linear(float baseValue, float finalValue, int totalSteps)` | `baseValue + (finalValue - baseValue) · p`, with `p = clamp(s / totalSteps, 0, 1)` | clamped, not extrapolated: `baseValue` at and below step 0, `finalValue` from step `totalSteps` on |
 | `Cosine(float baseValue, int totalSteps)` | `0.5 · baseValue · (1 + cos(π · p))`, same `p` — `baseValue` at step 0, `baseValue/2` at `totalSteps/2`, `0` at `totalSteps` | clamped the same way: held at `0` from step `totalSteps` on |
-| `CosineWithWarmup(float baseValue, int warmupSteps, int totalSteps)` | exactly `Cosine(baseValue, totalSteps - warmupSteps).WithWarmup(warmupSteps)` — linear ramp `0 → baseValue` over the first `warmupSteps`, then a cosine decay reaching `0` at step `totalSteps` | held at `0` afterwards |
+| `CosineWithWarmup(float baseValue, int warmupSteps, int totalSteps)` | `Cosine(baseValue, max(1, totalSteps - warmupSteps)).WithWarmup(warmupSteps)`, with both arguments clamped (a negative `warmupSteps` becomes `0`, the cosine's length is never below `1`) — so a linear ramp over the first `warmupSteps` that, per `WithWarmup` below, starts at `baseValue / warmupSteps` (**not** `0`) and reaches `baseValue` at step `warmupSteps - 1`, then a cosine decay reaching `0` at step `totalSteps` | held at `0` afterwards |
 | `StepDecay(float baseValue, int stepSize, float gamma)` | `baseValue · gamma^(s / stepSize)`, **integer** division — a staircase that drops every `stepSize` steps | never clamps; keeps decaying (or growing, for `gamma > 1`) indefinitely |
 | `Exponential(float baseValue, float gamma)` | `baseValue · gamma^s` | never clamps; unbounded in both directions |
 | `OneCycle(float maxValue, int totalSteps, float pctStart = 0.3f, float divFactor = 25f, float finalDivFactor = 1e4f)` | with `initial = maxValue / divFactor`, `final = initial / finalDivFactor`, `up = max(1, round(totalSteps · clamp(pctStart, 0, 1)))` and `down = max(1, totalSteps - up)`: for `s < up`, `initial + (maxValue - initial) · 0.5 · (1 - cos(π · s / up))`; for `s ≥ up`, `final + (maxValue - final) · 0.5 · (1 + cos(π · clamp((s - up) / down, 0, 1)))` — `initial` at step 0, `maxValue` at step `up`, `final` at step `totalSteps` | held at `final` from step `totalSteps` on |
 
-`totalSteps` (and `stepSize`) must be at least 1; `Linear`, `Cosine`, `CosineWithWarmup` and
-`OneCycle` throw otherwise.
+`totalSteps` must be at least 1 — `Linear`, `Cosine`, `CosineWithWarmup` and `OneCycle` throw
+otherwise — and so must `StepDecay`'s `stepSize`, which throws on the same rule.
 
 **Combinators** (methods on a `Schedule`, chainable; each returns a new schedule):
 
@@ -413,7 +413,9 @@ public TrainingResult Train(
 
 A rig carries two `ComputeContext` members, both supplied at construction (defaulting to
 `ComputeContext.Default`) and both **runtime configuration that is never written to a checkpoint** —
-a reloaded run gets fresh contexts by passing them to `FromScratch`. `MergeContext` runs the
+a reloaded run gets fresh contexts by passing them to `FromScratch`, or to
+`TrainingRig.Load(path, mergeContext, runtimeContext)` when the rig is rebuilt from a `.skpt`
+alone. `MergeContext` runs the
 build/merge phase (concretization, shape inference, graph lowering and memory optimization, optimizer
 state init); `RuntimeContext` compiles the training-step graph into its executable session and runs it,
 so it is the context whose session actually executes training. It is the sole compile/run context for
@@ -550,20 +552,21 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
   directory form adds when it *replaces* an existing checkpoint.
 - For the **native `.skpt` container** instead — the training state with every tensor
   addressed individually through the manifest's `tensorMappings` (the trainable weights and
-  model state ride in the concrete inference model's `default` mapping, keyed by parameter
-  identifier, so their bytes live once; the optimizer state gets its own `default` mapping
-  under the optimizer constituent's model key, keyed `{parameterIdentifier}#opt{slot}` — one
-  per trainable parameter × optimizer state slot), the bytes themselves in per-kind `data/`
+  model state ride in the concrete inference model's own mapping, so their bytes live once;
+  the optimizer state gets a mapping of its own), the bytes themselves in per-kind `data/`
   entries beside the model, with the container's inspectable manifest, per-entry Zstd, and
   provenance metadata — save with
   `Persistence.SaveTrainingCheckpointToSkpt(checkpoint, "run.skpt")` — the checkpoint's
   `.Rig` supplies the self-describing inference model, so no model graph or example input
   is needed (or use the `Persistence.ForTrainingCheckpoint(...)` builder) — and resume with
-  `rig.LoadCheckpointFromSkpt("run.skpt")`. Each on-disk shape has its own load entry
-  point: `rig.LoadCheckpoint` reads the flat safetensors file only, `rig.LoadCheckpointFromSkpt`
-  the `.skpt` container only, and handing either the other shape fails immediately with an
-  error naming the right entry point (nothing sniffs the file's bytes to pick a path; to
-  identify an unknown file, use `Persistence.Inspect`).
+  `rig.LoadCheckpointFromSkpt("run.skpt")` — or, with no model/loss/optimizer graphs in hand,
+  with the static `var (rig, ckpt) = TrainingRig.Load("run.skpt")`, which rebuilds the rig from
+  the constituents the file carries and hands it back alongside the resumed checkpoint, so the
+  rig need not be rebuilt by you at all. Each on-disk format has its own load entry point:
+  `rig.LoadCheckpoint` reads the flat safetensors file only, `rig.LoadCheckpointFromSkpt` and
+  `TrainingRig.Load` the `.skpt` container only, and handing any of them the other format fails
+  immediately with an error naming the right entry point (nothing sniffs the file's bytes to
+  pick a path; to identify an unknown file, use `Persistence.Inspect`).
   See [skpt-checkpoints.md](skpt-checkpoints.md#training-checkpoints).
 - `LoadCheckpoint` / `LoadCheckpointFromSkpt` reconstruct the checkpoint against the rig's own
   parameter and state definitions, so the rig must be built from the **same**
@@ -777,7 +780,7 @@ Constraints:
   scalar `step` — Adam's footprint, the per-tensor trust ratio being recomputed each
   step and stored nowhere; Adafactor: a **full param-shaped** `v` plus a scalar
   `step` — same footprint as Adam, because the
-  sublinear-memory row/column factoring is **not** implemented, see below) — see the table in
+  sublinear-memory row/column factoring is **not** implemented, see above) — see the table in
   [nn-library.md](nn-library.md). Each field is
   initialized by running its state initializer: `OptimizerStateZeros` zero-fills at the
   parameter's shape, `OptimizerScalarZeros` produces a rank-0 scalar seeded at 0 (e.g. Adam's

@@ -1,3 +1,5 @@
+using Shorokoo.Core.Graph;
+using Shorokoo.Core.Nodes.Processors.Fast;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 
 namespace Shorokoo.Tests;
@@ -133,5 +135,57 @@ public class FastProcessorsCoverageTests
         Assert.DoesNotContain(arch.Nodes, n => n.OpCode == OpCodes.SEQUENCE_CONSTRUCT);
         Assert.Equal(2, arch.GetConcreteModelParamInfos().ParamInfos
             .Select(p => p.ModelId).Distinct().Count());
+    }
+
+    private static bool GateBlocks(string opCode)
+    {
+        var graph = new InternalComputationGraph();
+        foreach (var op in (string[])[OpCodes.LOOP_OPEN, opCode, OpCodes.LOOP_CLOSE])
+            graph.Nodes.Add(new FastNode { Key = FastNodeKey.New(), OpCode = op });
+        return FastFoldConstantIterationLoops.BodyHoldsUnresolvedParamMachinery(graph, 0, 2);
+    }
+
+    /// <summary>The unroll gate blocks only the four Stage-F param op-codes, not the whole
+    /// <c>ModuleStageOps</c> set — <c>AUTO_GRAD</c> above all, which is still present at the first
+    /// <c>FastSimplify</c> and whose loop must be unrolled for autograd and variant-op lowering.
+    /// Drives the production predicate over every member of that set, and partitions the set so a
+    /// new entry has to choose exactly one side.</summary>
+    [Fact]
+    public void TestTheUnrollGateBlocksTheStageFParamOpsAndLetsEveryOtherModuleStageOpThrough()
+    {
+        string[] blocked = [
+            InternalOpCodes.MODEL_PARAM_REF, InternalOpCodes.MODEL_PARAM_ID_REF,
+            InternalOpCodes.MODEL_PARAM_MODEL_REF, InternalOpCodes.MODULE_SET_HYPERPARAMS];
+        string[] allowed = [
+            InternalOpCodes.AUTO_GRAD, InternalOpCodes.MODEL_INVOKE, InternalOpCodes.FUNCTION_INVOKE,
+            InternalOpCodes.MODEL_HYPERPARAM, InternalOpCodes.GET_MODEL_ID, InternalOpCodes.NEW_MODEL_LIKE,
+            InternalOpCodes.CREATE_MODULE, InternalOpCodes.TENSOR_STRUCT_CREATE,
+            InternalOpCodes.TENSOR_STRUCT_GETFIELD, InternalOpCodes.MODEL_TENSORSTRUCT_INPUT,
+            InternalOpCodes.GENERIC_TYPE_INPUT];
+
+        Assert.All(blocked, op => Assert.True(GateBlocks(op)));
+        Assert.All(allowed, op => Assert.False(GateBlocks(op)));
+        Assert.False(GateBlocks(OpCodes.ADD));
+
+        Assert.Empty(blocked.Intersect(allowed));
+        Assert.Equal(InternalOpCodes.ModuleStageOps.Count, blocked.Length + allowed.Length);
+        Assert.Equal(InternalOpCodes.ModuleStageOps, [.. blocked, .. allowed]);
+    }
+
+    /// <summary>LoopAPI binds a scan input on the third of its four body-tracing passes, and the
+    /// caller's local has by then been advanced by the two earlier passes into the outer graph, so
+    /// scanning a carry before the body updates it stacks a loop-invariant outer value — x + 2,
+    /// whatever the trip count. Rolled that is silent; unrolled the unroller finds no body-produced
+    /// key and dies. The expected values are supplied because every engine executes the same wrong
+    /// graph, so an engine comparison alone passes. Tracked as Shorokoo/Shorokoo#232.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#232: a scan input read before the body's update binds outside the loop body")]
+    public void TestScanningACarryBeforeTheBodyUpdatesItStacksThePerIterationValues()
+    {
+        Assert.True(AutoTest.AdvancedTestGraph<ScanCarryBeforeUpdate>(
+            hyperparamInputs: [],
+            runtimeInputs: [Scalar32(10f), TensorData(DType.Int64, [], 3L)],
+            expected: [10.0, 11.0, 12.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<ScanCarryBeforeUpdateConstTrip>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f)], expected: [10.0, 11.0, 12.0]));
     }
 }

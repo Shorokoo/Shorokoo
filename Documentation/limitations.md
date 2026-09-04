@@ -117,7 +117,9 @@ import. Workaround: express the iteration as an explicit `Loop` — slice each
 per-iteration input inside the body with `Gather` on the iteration index, and
 let the `Loop` stack its scan outputs — or re-export the model from the source
 framework with the `Scan` already expressed that way. In Shorokoo, build the
-equivalent with `LoopAPI` and `ctx.Scan`, which is fully supported.
+equivalent with `LoopAPI` and `ctx.Scan`, with one caveat: scan a value the
+body computes, not a loop carry read before the body updates it — that shape
+is currently mislowered ([#232](https://github.com/Shorokoo/Shorokoo/issues/232)).
 
 ### ONNX `SequenceMap` import
 

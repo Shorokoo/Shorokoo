@@ -57,14 +57,15 @@ What `Eval` accepts is the trap here:
   [`Variable` and `IValue`](core-types.md#variable-and-ivalue).
 - **A `[Module]`'s output, no.** `Eval` builds and runs the graph exactly as
   handed to it, so a value coming out of `ResNet50.Call(...)` still carries its
-  un-lowered module-invoke node and the call throws. `ResNet50` fails while the
-  ONNX model is still being built, because its layers initialize from a
-  distribution computed in-graph; a module without such an initializer gets as far
-  as OnnxRuntime, which rejects `ShrkCreateModule`. Either way, lower the module's
-  `ComputationGraph` first — see [Running a `[Module]`](#running-a-module), which
-  spells out both errors. (`ResNet50` there is from
-  [`samples/RetinaNet`](../samples/RetinaNet) — a sample built on Shorokoo, not
-  part of the packages.)
+  un-lowered module-invoke node when it reaches OnnxRuntime, which rejects the
+  model with `No Op registered for ShrkCreateModule`. Not every module gets that
+  far: one whose parameters are initialized from a distribution computed in-graph
+  — the `Shorokoo.Modules` layers, `Linear` and `Conv2d` among them — throws
+  earlier still, while the ONNX model is being built. Either way, lower the
+  module's `ComputationGraph` first — see
+  [Running a `[Module]`](#running-a-module), which spells out both errors.
+  (`ResNet50` there is from [`samples/RetinaNet`](../samples/RetinaNet) — a
+  sample built on Shorokoo, not part of the packages.)
 
 Build the input from a real array (not just a constant fill) with the `params`
 overload — the first arg is the shape, the rest are the flat values:
@@ -86,22 +87,27 @@ TensorData[] outs = OnnxEngine.Eval(out1, out2, out3);
 module-invoke node, in which case passing it straight to `Eval` throws. *Which*
 error you get depends on what the module's parameters are initialized from:
 
-- **An in-graph distribution** — `KaimingUniform`, `XavierUniform` and
-  `RecurrentUniform` all derive their bounds from the parameter's shape, so this
-  covers `Linear`, the `Conv*` layers, `MultiHeadAttention`, and anything built out
-  of them (including `ResNet50`). The failure comes first, while the ONNX model is
-  being built, as an `InvalidOperationException`:
+- **A distribution computed in-graph.** `KaimingUniform`, `XavierUniform` and
+  `RecurrentUniform` all derive their bounds from the parameter's own shape, so this
+  covers most of the [`Shorokoo.Modules` layers](nn-library.md) — `Linear`, the
+  `Conv*` family, `MultiHeadAttention` — and anything built out of them. The failure
+  comes first, while the ONNX model is still being built, as an
+  `InvalidOperationException`:
 
   > `FastLowerRandomOps: a shrk_RandomUniform feed with in-graph distribution inputs
   > reached the ONNX fallback ... Call ToConcreteModel first; executing or exporting
   > a non-concrete model is not supported.`
 
 - **Anything else** — no trainable parameters at all, or initializers whose
-  distribution is constant (`Zeros`, `KaimingNormal`, `XavierNormal`, …). Those
-  build a model, and OnnxRuntime rejects it for the module-invoke node it still
-  contains:
+  distribution is constant (`Zeros`, `KaimingNormal`, `XavierNormal`, a plain
+  `RandomNormal(shape, mean, scale)`, …). Those build a model, and OnnxRuntime
+  rejects it for the module-invoke node it still contains:
 
   > `[ErrorCode:InvalidGraph] ... Error No Op registered for ShrkCreateModule ...`
+
+  The `ResNet50` of [`samples/RetinaNet`](../samples/RetinaNet) lands here: it
+  initializes from its own constant-scale `RandomNormal`, not from the library
+  layers.
 
 The remedy is the same either way. Concretize the module's `ComputationGraph`
 against the input first, then execute:

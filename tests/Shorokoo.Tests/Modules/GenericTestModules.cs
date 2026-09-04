@@ -973,10 +973,10 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
-    /// Scans a loop carry read <em>before</em> the body updates it. LoopAPI's third pass binds a
-    /// scan input that is not recomputed after the <c>Scan</c> call to the node outside the body,
-    /// so the rolled path stacks the carry's final value once per iteration and the unrolled path
-    /// finds no body-produced key at all. Tracked as Shorokoo/Shorokoo#232.
+    /// Scans a loop carry read <em>before</em> the body updates it. LoopAPI binds scan inputs on
+    /// the third of its four body-tracing passes, and this local has by then been advanced by the
+    /// two earlier passes into the outer graph, so the scan input is a loop-invariant outer value
+    /// (x + 2) rather than a body node's output. Tracked as Shorokoo/Shorokoo#232.
     /// </summary>
     [Module]
     public partial class ScanCarryBeforeUpdate
@@ -986,6 +986,28 @@ namespace Shorokoo.Tests.Modules
             var acc = x;
             Variable? scanned = null;
             foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                scanned = (Variable)ctx.Scan(acc);
+                acc = acc + Scalar(1.0f);
+            }
+            return (Tensor<float32>)scanned!;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="ScanCarryBeforeUpdate"/> with a constant trip count, so the loop is unrolled
+    /// instead of left rolled. The unroller finds no body-produced key for the scan input and
+    /// dies where the rolled path merely returns the wrong values.
+    /// Tracked as Shorokoo/Shorokoo#232.
+    /// </summary>
+    [Module]
+    public partial class ScanCarryBeforeUpdateConstTrip
+    {
+        public static Tensor<float32> Inline(Scalar<float32> x)
+        {
+            var acc = x;
+            Variable? scanned = null;
+            foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
             {
                 scanned = (Variable)ctx.Scan(acc);
                 acc = acc + Scalar(1.0f);

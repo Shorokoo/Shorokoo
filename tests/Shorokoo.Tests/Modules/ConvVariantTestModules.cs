@@ -1,5 +1,18 @@
 namespace Shorokoo.Tests.Modules
 {
+    /// <summary>Standard-Conv reference shared by the conv-variant modules: one dilated SAME conv
+    /// with literal geometry, reduced to a scalar.</summary>
+    internal static class ConvVariantRefs
+    {
+        public static Scalar<float32> StdConvScalar(Tensor<float32> x, Tensor<float32> w, Vector<float32> b, long d)
+        {
+            var conv = NN.Conv(x, w, b, AutoPad.NotSet,
+                dilations: [d, d], group: 1L, kernelShape: [3L, 3L],
+                pads: [d, d, d, d], strides: [1L, 1L]);
+            return conv.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        }
+    }
+
     /// <summary>
     /// Self-checking module: a Conv built with the tensor-geometry overload
     /// (<c>NN.Conv</c> with Vector/Scalar geometry → SHRK_CONV, geometry as int64 tensor inputs) must
@@ -90,9 +103,9 @@ namespace Shorokoo.Tests.Modules
             var halfK = (kh - Scalar(1L)) / Scalar(2L);  // 1 (shape-dependent)
 
             // Reference: hand-unrolled dilated SAME convs with literal geometry (dilation/pad 1,2,3).
-            var reference = StdConvScalar(x, w, b, 1L)
-                          + StdConvScalar(x, w, b, 2L)
-                          + StdConvScalar(x, w, b, 3L);
+            var reference = ConvVariantRefs.StdConvScalar(x, w, b, 1L)
+                          + ConvVariantRefs.StdConvScalar(x, w, b, 2L)
+                          + ConvVariantRefs.StdConvScalar(x, w, b, 3L);
 
             // Variant: a loop of 3 whose conv geometry comes from the input shape and the loop index.
             var acc = Scalar(0f);
@@ -108,21 +121,14 @@ namespace Shorokoo.Tests.Modules
 
             return (reference - acc).Abs() < Scalar(1e-3f) * (reference.Abs() + Scalar(1f));
         }
-
-        private static Scalar<float32> StdConvScalar(Tensor<float32> x, Tensor<float32> w, Vector<float32> b, long d)
-        {
-            var conv = NN.Conv(x, w, b, AutoPad.NotSet,
-                dilations: [d, d], group: 1L, kernelShape: [3L, 3L],
-                pads: [d, d, d, d], strides: [1L, 1L]);
-            return conv.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
-        }
     }
 
     /// <summary>
     /// <see cref="ConvVariantLoopShapeAndIndexAttrs"/> with the trip count taken from a graph
     /// input instead of a constant, so the loop is never eligible for the native unroll and
     /// FastLowerAttributeTensorOps meets the index-dependent geometry still inside a rolled loop.
-    /// Self-checks against the same hand-unrolled reference. Tracked as Shorokoo/Shorokoo#231.
+    /// Self-checks against a hand-unrolled reference; unlike its sibling the kernel shape is
+    /// literal, so the only variable geometry is the loop index. Tracked as Shorokoo/Shorokoo#231.
     /// </summary>
     [Module]
     public partial class ConvVariantDynamicTripLoopGeometry
@@ -132,9 +138,9 @@ namespace Shorokoo.Tests.Modules
             var w = InitSimple.Init([Scalar(3L), Scalar(3L), Scalar(3L), Scalar(3L)]);
             var b = InitSimple.Init([Scalar(3L)]).Vec();
 
-            var reference = StdConvScalar(x, w, b, 1L)
-                          + StdConvScalar(x, w, b, 2L)
-                          + StdConvScalar(x, w, b, 3L);
+            var reference = ConvVariantRefs.StdConvScalar(x, w, b, 1L)
+                          + ConvVariantRefs.StdConvScalar(x, w, b, 2L)
+                          + ConvVariantRefs.StdConvScalar(x, w, b, 3L);
 
             var acc = Scalar(0f);
             foreach (var ctx in LoopAPI.Iterate(trips))
@@ -147,14 +153,6 @@ namespace Shorokoo.Tests.Modules
             }
 
             return (reference - acc).Abs() < Scalar(1e-3f) * (reference.Abs() + Scalar(1f));
-        }
-
-        private static Scalar<float32> StdConvScalar(Tensor<float32> x, Tensor<float32> w, Vector<float32> b, long d)
-        {
-            var conv = NN.Conv(x, w, b, AutoPad.NotSet,
-                dilations: [d, d], group: 1L, kernelShape: [3L, 3L],
-                pads: [d, d, d, d], strides: [1L, 1L]);
-            return conv.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
         }
     }
 
@@ -178,9 +176,9 @@ namespace Shorokoo.Tests.Modules
             var kw = shape[3] - Scalar(2L);
             var halfK = (kh - Scalar(1L)) / Scalar(2L);
 
-            var reference = StdConvScalar(x, w, b, 1L)
-                          + StdConvScalar(x, w, b, 2L)
-                          + StdConvScalar(x, w, b, 3L);
+            var reference = ConvVariantRefs.StdConvScalar(x, w, b, 1L)
+                          + ConvVariantRefs.StdConvScalar(x, w, b, 2L)
+                          + ConvVariantRefs.StdConvScalar(x, w, b, 3L);
 
             var acc = Scalar(0f);
             foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
@@ -196,14 +194,6 @@ namespace Shorokoo.Tests.Modules
             }
 
             return (reference - acc).Abs() < Scalar(1e-3f) * (reference.Abs() + Scalar(1f));
-        }
-
-        private static Scalar<float32> StdConvScalar(Tensor<float32> x, Tensor<float32> w, Vector<float32> b, long d)
-        {
-            var conv = NN.Conv(x, w, b, AutoPad.NotSet,
-                dilations: [d, d], group: 1L, kernelShape: [3L, 3L],
-                pads: [d, d, d, d], strides: [1L, 1L]);
-            return conv.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
         }
     }
 }

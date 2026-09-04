@@ -4056,6 +4056,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             // (3b) Unresolved Stage-F parameter machinery in the body. A zero-trip unroll
             // clones nothing (it just drops the body), so the gate only applies above that.
+            // Deliberately coarse above it: a loop-invariant param ref would not be cloned
+            // either (UnrollOne shares those by identity), but proving invariance here means
+            // duplicating the mustCloneBodyKeys walk, and the cost of declining is only
+            // deferred folding — ToConcreteArchitecture unrolls the loop after the rewrite.
             if (iterCountPreview > 0 && BodyHoldsUnresolvedParamMachinery(graph, openIdx, closeIdx))
                 return false;
 
@@ -4139,12 +4143,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <c>AUTO_GRAD</c> — which is still present at the first <see cref="FastSimplify"/>
         /// and whose enclosing loop must be unrolled, not left rolled, for
         /// <c>FastLowerAttributeTensorOps</c> and autograd to work. Gating on it would
-        /// silently bake iteration 0's geometry into every iteration.
+        /// silently bake iteration 0's geometry into every iteration. The one op outside
+        /// <see cref="InternalOpCodes.ModuleStageOps"/> that <see cref="InternalOpCodes.IsModuleStageOp"/>
+        /// also matches — the <c>ShrkSubModel#</c> prefix family — does carry a model id in an
+        /// attribute and would need blocking, but <c>InternalOp.SubModel</c> has no callers, so
+        /// no such node is ever built.
         /// <c>FastProcessorsCoverageTests
         /// .TestTheUnrollGateBlocksTheStageFParamOpsAndLetsEveryOtherModuleStageOpThrough</c>
         /// pins the split.</para>
         /// </summary>
-        private static bool BodyHoldsUnresolvedParamMachinery(
+        internal static bool BodyHoldsUnresolvedParamMachinery(
             InternalComputationGraph graph, int openIdx, int closeIdx)
         {
             for (int j = openIdx + 1; j < closeIdx; j++)

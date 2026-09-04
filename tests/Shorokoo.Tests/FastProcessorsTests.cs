@@ -157,4 +157,16 @@ public class FastProcessorsCoverageTests
         Assert.All(allowed, op => Assert.True(InternalOpCodes.IsModuleStageOp(op)));
         Assert.Equal(InternalOpCodes.ModuleStageOps, [.. blocked, .. allowed]);
     }
+
+    /// <summary>Scanning a carry before the body updates it stacks the carry's final value once per
+    /// iteration on the rolled path, and on the unrolled path dies — Debug.Fail in Debug, which
+    /// SIGABRTs outside a test host, and an InvalidOperationException naming an internal tensor key
+    /// in Release. The expected value is supplied because every engine executes the same wrong
+    /// graph, so an engine comparison alone passes. Tracked as Shorokoo/Shorokoo#232.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#232: a scan input read before the body's update binds outside the loop body")]
+    public void TestScanningACarryBeforeTheBodyUpdatesItStacksThePerIterationValues()
+        => Assert.True(AutoTest.AdvancedTestGraph<ScanCarryBeforeUpdate>(
+            hyperparamInputs: [],
+            runtimeInputs: [Scalar32(10f), TensorData(DType.Int64, [], 3L)],
+            expected: [10.0, 11.0, 12.0]));
 }

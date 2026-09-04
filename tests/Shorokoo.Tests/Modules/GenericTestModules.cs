@@ -973,6 +973,28 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
+    /// Scans a loop carry read <em>before</em> the body updates it. LoopAPI's third pass binds a
+    /// scan input that is not recomputed after the <c>Scan</c> call to the node outside the body,
+    /// so the rolled path stacks the carry's final value once per iteration and the unrolled path
+    /// finds no body-produced key at all. Tracked as Shorokoo/Shorokoo#232.
+    /// </summary>
+    [Module]
+    public partial class ScanCarryBeforeUpdate
+    {
+        public static Tensor<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            Variable? scanned = null;
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                scanned = (Variable)ctx.Scan(acc);
+                acc = acc + Scalar(1.0f);
+            }
+            return (Tensor<float32>)scanned!;
+        }
+    }
+
+    /// <summary>
     /// Constant-iter loop whose body break is dynamic (<c>ctx.ContinueWhile</c>
     /// fed by a runtime-bool input). <c>LoopAPI</c> emits the <c>LOOP_OPEN</c>
     /// with <c>condition: null</c>, so OPEN.Inputs[1] is absent and the unroller

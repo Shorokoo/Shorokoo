@@ -412,18 +412,18 @@ public TrainingResult Train(
 ### What construction costs
 
 `FromScratch` does real work before any training happens, and a checkpoint/resume workflow
-re-pays all of it on every process start: what a `.skpt` stores is the trained state, not the
-rig, so `TrainingRig.Load` rebuilds the rig the same way `FromScratch` does (and then overwrites
-the freshly initialized weights with the checkpoint's).
+re-pays most of it on every process start. A training `.skpt` carries the constituents and the
+state, not the derived build products, so `TrainingRig.Load` rebuilds those — it reads the saved
+concrete architecture rather than re-concretizing, but everything after that is redone, including
+running every initializer whose values the checkpoint then overwrites.
 
 The build phase, all of it on `MergeContext`, is concretization, composition with the loss,
 autograd, optimizer lowering, shape inference and graph optimization, plus two costs that scale
 with your parameter count: each trainable parameter's initializer is run, and each optimizer-state
-initializer is run per trainable parameter. Parameters are initialized one backend session apiece,
-so that part grows linearly with the number of trainable parameters rather than superlinearly, and
-holds on to only the parameters themselves rather than every session's working memory. Host
-memory during initialization is dominated by the largest single parameter's draw; it still grows
-with the model, but far more slowly than the parameter count.
+initializer is run per trainable parameter. Both run one backend session per parameter, so they
+grow linearly with the number of trainable parameters rather than superlinearly. Peak host memory
+during initialization still grows with the model, but far more slowly than it once did — a few
+hundred bytes per parameter element rather than a few kilobytes.
 
 Then, on the first `TrainStep`, the rig compiles its training-step graph once and caches it (see
 `TrainStep` above) — one fixed cost per rig, independent of how many steps follow.

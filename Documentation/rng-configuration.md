@@ -92,9 +92,11 @@ nothing RNG-related in its saved form.
 At ONNX prep a feed's wired key chain feeds the draw call directly: the chain's splits and
 the draw both lower to calls of the config's **named RNG algorithm** — a versioned set of
 functions (kinds *split* / *uniform* / *normal*) that export as tagged, non-inlined ONNX
-local `FunctionProto`s. `RngSeed` becomes an ordinary initializer, and the runtime's
+local `FunctionProto`s. `RngSeed` becomes an ordinary initializer, and in a compiled model the runtime's
 session-build constant folding collapses the constant chain segments to literal keys — so
-the per-draw cost is what it always was. The exported model's randomness is therefore
+the per-draw cost is what it always was. (A graph with no inputs at all is built without
+graph optimizations, so nothing is folded there; it is a constant computed once and
+discarded, which is cheaper to run than to fold.) The exported model's randomness is therefore
 identifiable — you can point at the function in the ONNX file that produced any draw, and at
 the initializer that carries the identity it derived from — and deterministic and portable
 across execution providers: every step from the key to the drawn bit pattern is integer

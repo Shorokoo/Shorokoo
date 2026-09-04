@@ -82,6 +82,25 @@ Layer hyperparameters are `[Hyper]` graph scalars; pass them as `Scalar(...)`
 values. Signatures below are the `Inline` shapes (`Call` takes the same
 arguments).
 
+<a id="gated-parameters"></a>
+**An off toggle costs nothing.** Several layers gate a block of trainable
+parameters behind a `[Hyper]` bit — `useBias` on `Linear`, `Bilinear`, the conv
+layers and the attention/transformer layers; `affine` on `BatchNorm`,
+`GroupNorm` and `InstanceNorm`. Each is written in the layer body as
+`bit.IfElse(withTheParams, without)`, so both branches exist in the *source* —
+but the bit is a `[Hyper]`, fixed before the graph is concretized (baked by
+`Call`/`Model`, or taken from the value you hand `FromOrderedInputs`). The
+framework folds the `IfElse` to the selected branch and **prunes the unselected
+branch's trainable parameters**: with the bit off they are never created — no
+checkpoint field, no gradient, no optimizer state, no bytes in a saved model.
+`Linear(useBias: false)` carries one parameter, not two;
+`GroupNorm(affine: false)` carries none of its own. So there is no reason to
+split a model into separate `[Module]` classes to keep an unused parameter block
+out of it — the toggle already does that. The one edge to know: a module whose
+**only** trainable parameters sit on the folded-away branch is left with none,
+and `TrainingRig.FromScratch` fails with *"No trainable parameters found in the
+computation graph."*
+
 ### Linear
 
 ```csharp
@@ -90,9 +109,10 @@ Linear.Call(Scalar<int64> outFeatures, Scalar<bit> useBias, Tensor<float32> x)
 ```
 
 Weight `[outFeatures, inFeatures]` is `KaimingUniform`-initialized; bias
-`[outFeatures]` is zero-initialized. The bias parameter is created
-unconditionally (both `IfElse` branches are built); `useBias` selects whether it
-is added.
+`[outFeatures]` is zero-initialized. `useBias = false` drops the bias **term and
+its parameter** — the layer is then a single-parameter matmul, and nothing named
+`Zeros` shows up in the checkpoint (see
+[An off toggle costs nothing](#gated-parameters)).
 
 ### Bilinear
 
@@ -110,7 +130,8 @@ Weight `A` has shape `[outFeatures, in1Features, in2Features]`; bias `b` is
 (PyTorch's bound, via `RecurrentUniform`) — note the bias is **not**
 zero-initialized, unlike `Linear`. The contraction is over each input's **last**
 axis; the two inputs must share their leading (batch) dims (`(*, in1)`, `(*, in2)`
-→ `(*, out)`), which are preserved. `useBias = false` omits the bias term.
+→ `(*, out)`), which are preserved. `useBias = false` omits the bias term and
+its parameter ([An off toggle costs nothing](#gated-parameters)).
 
 ### Conv2d / Conv1d — dynamic geometry
 
@@ -132,9 +153,12 @@ groups) is hyperparameter-driven — the layers use the tensor-geometry `NN.Conv
 overload, which takes geometry as int64 tensor inputs; the exported model
 contains a standard ONNX Conv. Weight
 `[outChannels, inChannels/groups, k(, k)]` is `KaimingUniform`-initialized;
-`inChannels` is read from the input's shape in-graph. These modules cover the
-**square-kernel / symmetric-pad** case; for per-axis geometry, `auto_pad`, or a
-non-zeros `padding_mode` use the generalized `Convolution` helper below.
+`inChannels` is read from the input's shape in-graph. `useBias = false` swaps the
+trainable zero bias `[outChannels]` for an all-zero constant, so no bias
+parameter is created ([An off toggle costs nothing](#gated-parameters)). These
+modules cover the **square-kernel / symmetric-pad** case; for per-axis geometry,
+`auto_pad`, or a non-zeros `padding_mode` use the generalized `Convolution`
+helper below.
 
 ### ConvTranspose2d — default geometry only
 
@@ -500,10 +524,11 @@ idiom as `LayerNorm`), so the `[N, C, L]` rank-3 form is supported.
   The state update is gated to a no-op, so eval passes always leave the running
   stats untouched regardless of `trackRunningStats`.
 - `affine = true`: applies `y = gamma * x̂ + beta`; `affine = false`: returns the
-  normalized `x̂` directly. gamma (`Ones`) and beta (`Zeros`) are **always**
-  created as trainable params (so the trainable-param struct shape is independent
-  of the bits, mirroring `Linear`'s always-present bias); when `affine = false`
-  they simply receive zero gradient.
+  normalized `x̂` directly. gamma (`Ones`) and beta (`Zeros`) are trainable params
+  **only when `affine = true`** — with `affine = false` they are not created at
+  all, so the trainable-param struct follows the bit (see
+  [An off toggle costs nothing](#gated-parameters)). The running stats are
+  unaffected either way: they are model state, not trainable params.
 - The running mean/variance are module-owned state which `TrainingRig` threads as
   **model state** (`checkpoint.ModelState`), not trainable params.
 - **Defaults**: `momentum = 0.9`, `epsilon = 1e-5`, `affine = true`,
@@ -560,9 +585,10 @@ number of channel-groups (Wu & He 2018): `GroupNorm(numGroups = 1)` recovers
 LayerNorm-over-CHW and `GroupNorm(numGroups = C)` recovers `InstanceNorm`. Both
 reduce over each per-(sample, group/channel) region's channels and **every**
 spatial axis using the **biased** variance, and both expose an `affine` toggle
-(build-both-branches-then-`IfElse`-select, like `Linear`'s `useBias`): gamma/beta
-are always created as trainable params but receive zero gradient when
-`affine = false`.
+(an `IfElse` gate, like `Linear`'s `useBias`): gamma/beta are trainable params
+**only when `affine = true`** — with `affine = false` they are not created, so
+the layer contributes no parameters of its own (see
+[An off toggle costs nothing](#gated-parameters)).
 
 - **`GroupNorm`**: `affine` is a required `[Hyper]` bit, conceptually defaulted
   **on** at call sites (PyTorch/Keras/Flax default `affine=True`); it is the
@@ -625,13 +651,15 @@ TransformerDecoderLayer.Call(Scalar<int64> embedDim, Scalar<int64> numHeads,
 
 All built from autodiff-supported primitives (MatMul / Softmax / Transpose /
 Where), so they train end-to-end.
-`MultiHeadAttention` owns four `XavierUniform` projections (q/k/v/out) with
-optional zero biases; the causal mask is a constant gated by the runtime
-`causal` flag. `TransformerEncoderLayer` composes `LayerNorm` + `MultiHeadAttention`
-and a GELU FFN (the FFN uses explicit token-wise MatMuls, since `Linear` would
-flatten the sequence into the feature axis on a `[N, L, E]` input). No PyTorch
-backwards-compat surface (`need_weights`/`kdim`/`batch_first`/…) — Shorokoo is
-explicit and batch-first.
+`MultiHeadAttention` owns four `XavierUniform` projections (q/k/v/out) with four
+optional zero biases — `useBias = false` drops all four parameters, leaving the
+layer with just the four projections
+([An off toggle costs nothing](#gated-parameters)); the causal mask is a constant
+gated by the runtime `causal` flag. `TransformerEncoderLayer` composes
+`LayerNorm` + `MultiHeadAttention` and a GELU FFN (the FFN uses explicit
+token-wise MatMuls, since `Linear` would flatten the sequence into the feature
+axis on a `[N, L, E]` input). No PyTorch backwards-compat surface
+(`need_weights`/`kdim`/`batch_first`/…) — Shorokoo is explicit and batch-first.
 
 `Attention.ApplyRoPE` adds **rotary positional embedding** (RoPE; Su et al. 2021):
 a parameter-free rotation that encodes *relative* position inside the attention
@@ -1210,3 +1238,6 @@ for (int i = 0; i < 15; i++)
   geometry is fixed at the ONNX defaults; use `NN.ConvTranspose` for the rest.
 - Do not use `XavierUniform`/`KaimingUniform` (etc.) for rank-1 biases; they
   require rank ≥ 2 shapes.
+- Do not restructure a model to dodge the parameters of a switched-off
+  `useBias`/`affine`; the unselected branch's params are pruned, never carried
+  ([An off toggle costs nothing](#gated-parameters)).

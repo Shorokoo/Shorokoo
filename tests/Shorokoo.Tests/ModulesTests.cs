@@ -51,16 +51,16 @@ public class ModulesCoverageTests
         Assert.True(GatedBias(bake: true, viaSpecialize: true, paramCount: 1, gated: false, biased));
     }
 
-    private static bool TwoGates(bool bake, bool viaSpecialize, int paramCount, int ifNodes, float[] paramless, float[] gated)
+    private static bool TwoGates(bool bake, bool viaSpecialize, bool atExecute,
+        int paramCount, int ifNodes, float[] paramless, float[] gated)
     {
         var g = Modules.TwoGatesOneHyperLayer.ComputationGraph;
-        var bit = TensorData([], bake);
         var x = TensorData([2L], 1f, 2f);
-        if (viaSpecialize) g = g.Specialize(g.FromOrderedInputs([bit]));
+        if (viaSpecialize) g = g.Specialize(g.FromOrderedInputs([TensorData([], bake)]));
         var arch = g.ToConcreteArchitecture(
-            viaSpecialize ? g.FromOrderedInputs([x]) : g.FromOrderedInputs([bit, x]));
+            viaSpecialize ? g.FromOrderedInputs([x]) : g.FromOrderedInputs([TensorData([], bake), x]));
         var model = arch.ToConcreteModel(RngConfig.Default);
-        IData[] inputs = viaSpecialize ? [x] : [bit, x];
+        IData[] inputs = viaSpecialize ? [x] : [TensorData([], atExecute), x];
         var o = new ComputeContext().Execute(model, inputs);
         float[] F(int i) => o[i].ToTensorData().As<float32>().AccessMemory<float>().ToArray();
         return arch.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams.Length == paramCount
@@ -69,14 +69,22 @@ public class ModulesCoverageTests
             && F(1).SequenceEqual(gated);
     }
 
+    /// <summary>One <c>[Hyper]</c> bit gating two <c>IfElse</c>es — one holding a trainable
+    /// parameter, one not. Concretizing the bit off prunes the parameter, so its branch can never
+    /// be taken and the whole <c>IfElse</c> is folded away (one <c>IF</c> left, and the gated
+    /// output no longer answers to the bit); the paramless <c>IfElse</c> on the same bit is
+    /// untouched and still switches at run time. Concretizing it on prunes nothing and folds
+    /// nothing.</summary>
     [Fact]
-    public void TestAParameterGateBakesTheParamsWithoutFoldingTheControlFlow()
+    public void TestAPrunedParamsBranchFoldsAwayWhileAParamlessBranchOnTheSameHyperStaysLive()
     {
         float[] then = [10f, 20f], els = [100f, 200f], plain = [1f, 2f], biased = [2f, 3f];
-        Assert.True(TwoGates(bake: false, viaSpecialize: false, paramCount: 0, ifNodes: 2, els, plain));
-        Assert.True(TwoGates(bake: true, viaSpecialize: false, paramCount: 1, ifNodes: 2, then, biased));
-        Assert.True(TwoGates(bake: false, viaSpecialize: true, paramCount: 0, ifNodes: 0, els, plain));
-        Assert.True(TwoGates(bake: true, viaSpecialize: true, paramCount: 1, ifNodes: 0, then, biased));
+        Assert.True(TwoGates(bake: false, viaSpecialize: false, atExecute: false, paramCount: 0, ifNodes: 1, els, plain));
+        Assert.True(TwoGates(bake: false, viaSpecialize: false, atExecute: true, paramCount: 0, ifNodes: 1, then, plain));
+        Assert.True(TwoGates(bake: true, viaSpecialize: false, atExecute: false, paramCount: 1, ifNodes: 2, els, plain));
+        Assert.True(TwoGates(bake: true, viaSpecialize: false, atExecute: true, paramCount: 1, ifNodes: 2, then, biased));
+        Assert.True(TwoGates(bake: false, viaSpecialize: true, atExecute: false, paramCount: 0, ifNodes: 0, els, plain));
+        Assert.True(TwoGates(bake: true, viaSpecialize: true, atExecute: true, paramCount: 1, ifNodes: 0, then, biased));
     }
 
     private static long BiggestConstant(ComputationGraph arch)
@@ -103,12 +111,10 @@ public class ModulesCoverageTests
             viaSpecialize ? g.FromOrderedInputs([x]) : g.FromOrderedInputs([off, x])));
     }
 
-    /// <summary>Switching a gated parameter block off is documented as costing no bytes in a saved
-    /// model, and does on the <c>Specialize</c> route. On the hint route the pruned
-    /// <c>[256, 256]</c> parameter comes back as a dense 65536-element zero <c>CONSTANT</c> in the
-    /// graph, so the bytes move from the param list into the serialized graph rather than going
-    /// away. Tracked as Shorokoo/Shorokoo#235.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#235: a hint-pruned gated param is replaced by an equally large dense zero constant")]
+    /// <summary>Switching a gated parameter block off costs no bytes in a saved model on either
+    /// route: the pruned <c>[256, 256]</c> parameter must not reappear as a dense zero
+    /// <c>CONSTANT</c> standing in for it.</summary>
+    [Fact]
     public void TestPruningAGatedParamDoesNotLeaveItsBytesBehindAsAZeroConstant()
     {
         Assert.True(GatedBigParamBiggestConstant(viaSpecialize: true) < 65536);

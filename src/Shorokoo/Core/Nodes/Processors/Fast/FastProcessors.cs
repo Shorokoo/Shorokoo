@@ -2757,6 +2757,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // there is genuinely nothing to do.
             if (liveModelIdInfos.IsEmpty && deadModelIdInfos.IsEmpty) return unresolvedSites;
 
+            // Fold away the IF branches whose parameters the mask just pruned, so those dead
+            // ID_REF sites leave the graph rather than being backfilled below. Any dead site
+            // this does not reach — no gating IF, or a condition the hints left unresolved —
+            // still gets a zero CONSTANT, so the graph stays valid either way.
+            FoldBranchesOwningOnlyDeadParams(graph, store, liveModelIds, perSiteRealizedIds);
+
             NativeConvertTrainableParamIdRef(graph, liveModelIdInfos, deadModelIdInfos, paramIdentifierTemplates, perSiteRealizedIds);
             return unresolvedSites;
         }
@@ -3235,6 +3241,168 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
 
             System.Diagnostics.Debug.Assert(graph.IsLinearOrderValid(), "graph.IsLinearOrderValid()");
+        }
+
+        /// <summary>
+        /// Pins the condition of every IF whose losing branch computes a pruned trainable
+        /// parameter to a CONSTANT, then folds those IFs away.
+        ///
+        /// <para>A concrete architecture's parameter space is static, so the liveness mask has
+        /// already decided — from the concretization values — which parameters exist. A branch
+        /// that only exists to hold one the mask pruned can therefore never be taken, and keeping
+        /// it costs a shape-correct zero CONSTANT the size of the parameter it replaced. Folding
+        /// the IF removes the branch, and <see cref="FastProcessorHelper.RemoveUnreachableNodes"/>
+        /// (inside the folder) takes the parameter's whole initializer chain with it.</para>
+        ///
+        /// <para>Only IFs whose losing branch computes a dead parameter are folded. An IF on the
+        /// same hyperparameter whose branches hold no parameters is left alone: its condition is
+        /// a live input and it still selects at run time. Branch membership is read off the
+        /// IF_CLOSE's then/else input lists, not from position — an IF_OPEN/IF_CLOSE pair sits
+        /// adjacent in the node list, with both branch bodies sequenced ahead of it.</para>
+        /// </summary>
+        private static void FoldBranchesOwningOnlyDeadParams(
+            InternalComputationGraph graph,
+            Dictionary<FastTensorKey, IRuntimeTensor> store,
+            HashSet<ModelId> liveModelIds,
+            Dictionary<FastNodeKey, ImmutableArray<ModelId>> perSiteRealizedIds)
+        {
+            var deadSiteKeys = new HashSet<FastNodeKey>();
+            var liveSiteKeys = new HashSet<FastNodeKey>();
+            foreach (var node in graph.Nodes)
+            {
+                if (node.OpCode != InternalOpCodes.MODEL_PARAM_ID_REF) continue;
+                if (!perSiteRealizedIds.TryGetValue(node.Key, out var ids) || ids.IsEmpty) continue;
+                if (ids.All(id => !liveModelIds.Contains(id))) deadSiteKeys.Add(node.Key);
+                else liveSiteKeys.Add(node.Key);
+            }
+            if (deadSiteKeys.Count == 0) return;
+
+            bool folded = false;
+            for (int guard = 0; guard < 100; guard++)
+            {
+                if (!MarkDeadParamBranchConditions(graph, store, deadSiteKeys)) break;
+                if (!FastFoldConstantConditionBranches.Process(graph)) break;
+                folded = true;
+            }
+
+            if (!folded) return;
+
+            // Safety net for the one way this could corrupt a model. Folding deletes the losing
+            // branch outright, so it must never own a LIVE parameter site. It cannot: the mask
+            // marks a parameter live only if it reaches a graph output, and it folds each IF on
+            // the same condition value used here — a parameter reachable only through the losing
+            // branch would have been marked dead. That reasoning spans two passes, so verify it
+            // rather than trust it, and fail loudly instead of shipping a model whose parameter
+            // space silently lost an entry. (Reading the branch is not owning it: a losing branch
+            // that merely consumes a live parameter computed upstream leaves it reachable, and
+            // RemoveUnreachableNodes keeps it.)
+            var survivingSiteKeys = new HashSet<FastNodeKey>();
+            foreach (var node in graph.Nodes)
+                if (node.OpCode == InternalOpCodes.MODEL_PARAM_ID_REF)
+                    survivingSiteKeys.Add(node.Key);
+            if (!liveSiteKeys.All(survivingSiteKeys.Contains))
+                throw new FastPipelineUnsupportedException(
+                    "FastConvertModelParamIdRefToModelParam: folding a pruned parameter's branch " +
+                    "removed a live MODEL_PARAM_ID_REF site; the liveness mask and the folded " +
+                    "condition values disagree.");
+
+            // The fold rewrote consumers onto the winning branch's keys; re-establishing
+            // topological order keeps later passes' positional scope assumptions valid.
+            FastProcessorHelper.EnsureTopologicalOrder(graph);
+        }
+
+        /// <summary>
+        /// Pins the condition of every IF whose losing branch computes a dead parameter to the
+        /// value the concretization hints gave it, so the folder can drop that branch. Returns
+        /// true if any condition was pinned.
+        /// </summary>
+        private static bool MarkDeadParamBranchConditions(
+            InternalComputationGraph graph,
+            Dictionary<FastTensorKey, IRuntimeTensor> store,
+            HashSet<FastNodeKey> deadSiteKeys)
+        {
+            var producerByOutput = new Dictionary<FastTensorKey, FastNode>(graph.Nodes.Count * 2);
+            foreach (var node in graph.Nodes)
+                foreach (var kvp in node.FullOutputs)
+                    foreach (var output in kvp.Value)
+                        if (output is FastTensorKey tk && !tk.IsEmpty)
+                            producerByOutput[tk] = node;
+
+            var nodeByKey = FastProcessorHelper.BuildNodeByKey(graph);
+            var pins = new List<(FastNode OpenNode, bool CondVal)>();
+
+            foreach (var closeNode in graph.Nodes)
+            {
+                if (closeNode.OpCode != OpCodes.IF_CLOSE) continue;
+                if (closeNode.GraphOpenNodeKey is not FastNodeKey openKey || openKey.IsEmpty) continue;
+                if (!nodeByKey.TryGetValue(openKey, out var openNode)) continue;
+                if (openNode.Inputs.Count == 0 || openNode.Inputs[0] is not FastTensorKey condKey || condKey.IsEmpty)
+                    continue;
+
+                // Already constant — FastFoldConstantConditionBranches owns it.
+                if (producerByOutput.TryGetValue(condKey, out var condProducer)
+                    && condProducer.OpCode == OpCodes.CONSTANT)
+                    continue;
+
+                // The condition's value under the concretization hints: the same value the
+                // liveness mask folded on. Without it there is nothing to pin the IF to.
+                if (!store.TryGetValue(condKey, out var condRaw)
+                    || condRaw is not RuntimeTensor condRt
+                    || condRt.BoolData is not { } condBits
+                    || condBits.Length != 1)
+                    continue;
+                bool condVal = condBits[0];
+
+                if (!closeNode.FullInputs.TryGetValue(OnnxOpAttributeNames.AttrThenBranch, out var thenInputs)) continue;
+                if (!closeNode.FullInputs.TryGetValue(OnnxOpAttributeNames.AttrElseBranch, out var elseInputs)) continue;
+
+                if (!BranchComputesASite(condVal ? elseInputs : thenInputs, producerByOutput, deadSiteKeys))
+                    continue;
+
+                pins.Add((openNode, condVal));
+            }
+
+            if (pins.Count == 0) return false;
+
+            foreach (var (openNode, condVal) in pins)
+            {
+                var constKey = FastNodeKey.New();
+                graph.Nodes.Insert(graph.Nodes.IndexOf(openNode), CreateConstantTensorDataNode(
+                    constKey, Globals.TensorData([], condVal)));
+                openNode.FullInputs[""][0] = new FastTensorKey(constKey, 0);
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// True when one of <paramref name="siteKeys"/> is among the producers of
+        /// <paramref name="branchInputs"/>. The walk stops at any IF_CLOSE rather than descending
+        /// into its branches: a value that merely *passes through* an inner IF belongs to that
+        /// IF's branches, not to this one, and folding on it would prune a branch this condition
+        /// does not gate. Nesting is handled instead by the caller's fixpoint loop — once the
+        /// inner IF folds, its IF_CLOSE is gone and the outer walk reaches straight through.
+        /// </summary>
+        private static bool BranchComputesASite(
+            List<FastTensorKey?> branchInputs,
+            Dictionary<FastTensorKey, FastNode> producerByOutput,
+            HashSet<FastNodeKey> siteKeys)
+        {
+            var seen = new HashSet<FastNodeKey>();
+            var pending = new Stack<FastTensorKey>();
+            foreach (var input in branchInputs)
+                if (input is FastTensorKey tk && !tk.IsEmpty) pending.Push(tk);
+
+            while (pending.Count > 0)
+            {
+                if (!producerByOutput.TryGetValue(pending.Pop(), out var producer)) continue;
+                if (!seen.Add(producer.Key)) continue;
+                if (siteKeys.Contains(producer.Key)) return true;
+                if (producer.OpCode == OpCodes.IF_CLOSE) continue;   // belongs to that IF, not this one
+                foreach (var kvp in producer.FullInputs)
+                    foreach (var input in kvp.Value)
+                        if (input is FastTensorKey tk && !tk.IsEmpty) pending.Push(tk);
+            }
+            return false;
         }
 
         private static FastNode CreateConstantTensorDataNode(FastNodeKey nodeKey, TensorData td)

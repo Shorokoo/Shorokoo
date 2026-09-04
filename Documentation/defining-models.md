@@ -76,11 +76,12 @@ touches that parameter space:
   - It **gates a branch that contains parameters** — e.g. `useBias` in
     `useBias.IfElse(y + b, y)`, where `b` is a trainable parameter. Which
     parameters *exist* is part of the parameter space, so the unselected
-    branch's parameters are not created. Concretizing this layer with
-    `useBias = false` yields an architecture with no bias parameter at all.
-    Note what this does *not* do: it prunes the parameters, not the control
-    flow. The `IfElse` itself stays in the graph and still selects on the
-    (still live) input at run time — see
+    branch's parameters are not created, and the `IfElse` itself is resolved
+    and folded away with them. Concretizing this layer with `useBias = false`
+    yields an architecture with no bias parameter and no branch — passing the
+    bit at `Execute` no longer changes that result. Note the scope: only
+    `IfElse`es holding parameters are folded, so the same hyper stays live for
+    any other `IfElse` it gates — see
     [What concretization fixes](inference.md#what-concretization-fixes).
 - **Value-only** hyperparameters (scale factors, momentum coefficients, ε's) do
   not touch any trainable parameter — neither its shape nor its existence. They
@@ -91,13 +92,12 @@ touches that parameter space:
 Both kinds stay **live inputs** of the concretized graph and must be supplied
 again at `Execute` (only [`Specialize`](inference.md#hardcoding-hypers-with-specialize)
 removes an input). For a value-only hyper you may supply anything; for a
-parameter-space-determining one you must supply **the same value you
-concretized with**. Supplying a different one is invalid use, not a
-runtime choice — the architecture no longer holds the parameters that answer
-would need. See
+parameter-space-determining one, supply **the same value you concretized with**.
+Where it decided a parameter's *shape*, a different value later does not resize
+anything; where it gated a parameter's *existence*, the branch is already folded,
+so a different value changes nothing at all. See
 [What concretization fixes](inference.md#what-concretization-fixes) for the full
-list of what a concrete architecture pins down, and for how to bake a gate
-instead so the contradiction becomes impossible.
+list of what a concrete architecture pins down.
 
 How a hyper value gets supplied depends on the route:
 
@@ -137,20 +137,18 @@ How a hyper value gets supplied depends on the route:
   `condition` is `Scalar<bit>`. Both branches are built; the value is selected at
   runtime. Tuples are supported.
 
-  Branch *selection* is always a run-time thing, but the **trainable parameters**
-  inside a branch are not: the parameter space of a concrete architecture is
-  static, so it cannot depend on a value that only arrives at `Execute`. When a
-  `[Hyper]` gates a branch holding parameters, the value handed to
-  `ToConcreteArchitecture` decides which of those parameters get created — and
-  only that. The `IfElse` stays in the graph and still switches at run time. So
-  a hyper used in several `IfElse`s affects only the ones holding parameters,
-  and even those keep both branches. See
-  [Hyperparameter baking](#hyperparameter-baking).
+  One exception, and it is about parameters rather than control flow: the
+  parameter space of a concrete architecture is static, so it cannot depend on a
+  value that only arrives at `Execute`. When a `[Hyper]` gates a branch holding
+  trainable parameters, `ToConcreteArchitecture` creates only the selected
+  branch's parameters and folds that `IfElse` away — so the bit no longer
+  switches it at run time. This applies to the `IfElse`es holding parameters and
+  no others: the same hyper gating a paramless `IfElse` leaves it live, both
+  branches intact. See [Hyperparameter baking](#hyperparameter-baking).
 
   A hyper folded to a **constant** before lowering — by `Foo.Call(Scalar(k), x)`,
-  or by [`Specialize`](inference.md#hardcoding-hypers-with-specialize) — is the
-  different case: there the condition is constant, so every `IfElse` on it is
-  folded away outright and the unselected branches leave the graph entirely.
+  or by [`Specialize`](inference.md#hardcoding-hypers-with-specialize) — folds
+  *every* `IfElse` on it, parameters or not, and drops it from the input list.
 
   ```csharp
   // Apply bias only when useBias is true — both branches are always built.

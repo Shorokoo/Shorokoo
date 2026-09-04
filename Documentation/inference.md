@@ -225,14 +225,26 @@ therefore fixed then and there:
 | **Which** trainable parameters exist | hypers gating an `IfElse` whose branches hold parameters |
 | Loop **iteration space** (and the RNG streams enumerated per iteration) | hypers/inputs that drive a `LoopAPI.Iterate` count |
 
-What concretization fixes is the **parameter space**, and nothing more. It does
-not rewrite your control flow: an `IfElse` gated by a hyper stays in the graph
-and still selects on its (still live) input at run time. Only the parameters
-inside the unselected branch go away. So a hyper used in several `IfElse`s
-touches only the ones that hold parameters, and even those keep both branches —
-whereas a hyper folded to a constant first, by `Foo.Call(Scalar(k), x)` or
-[`Specialize`](#hardcoding-hypers-with-specialize), has every `IfElse` on it
-folded away outright.
+What concretization fixes is the **parameter space**, and it rewrites only as
+much control flow as that requires. An `IfElse` whose unselected branch holds
+parameters is resolved here and folded away — those parameters do not exist, so
+the branch can never be taken, and keeping it would mean keeping a stand-in the
+size of the parameter it replaced. An `IfElse` that holds no parameters is left
+alone, even on the same hyper: both branches stay, and it still selects on its
+(still live) input at run time.
+
+So one hyper can be half-resolved and half-live, and that is the intended split:
+
+```csharp
+var big = Init(...);                             // a trainable parameter
+var a = flag.IfElse(x * 10f, x * 100f);          // no params  -> stays live
+var b = flag.IfElse(x + big, x);                 // holds big  -> folded here
+```
+
+Concretized with `flag = false`, `big` does not exist, `b`'s `IfElse` is gone
+(so `b` is `x` whatever you pass later), and `a`'s still switches on every
+`Execute`. Concretized with `flag = true`, `big` exists, nothing is folded, and
+both switch at run time.
 
 These values stay **live inputs** of the concrete graph — concretization is not
 `Specialize` and removes nothing from the input list — so you supply them again
@@ -241,20 +253,11 @@ Executing with a value that would have produced a different parameter space is
 **invalid use**: the parameters or streams that answer needs were never created,
 and nothing re-derives them at run time.
 
-A contradicted gate is the case to watch, because nothing reports it. The branch
-you select at `Execute` does run — but the parameters it needs were pruned at
-concretization, and what it reads in their place is **zero**. What that gets you
-depends on how the branch uses them, and neither answer is meaningful:
-
-```csharp
-// Concretized with the gate off, then executed with it on. x = [1, 2].
-useBias.IfElse(x + b, x)      // -> [1, 2]   b reads as 0, so it looks like the off branch
-useScale.IfElse(x * g, x)     // -> [0, 0]   g reads as 0, so the result collapses
-```
-
-The additive form is why this is easy to miss: a zeroed bias is indistinguishable
-from no bias, so the model keeps returning plausible numbers. A gated scale
-returns zeros instead.
+A **parameter gate** is the exception, and needs no care: because its `IfElse` is
+folded at concretization, the value you pass later cannot contradict it. The
+baked branch runs whatever you supply. Passing the opposite value is pointless
+rather than dangerous — and if you would rather it be impossible than pointless,
+`Specialize` the bit and passing it becomes an input-count error.
 
 If you would rather make the contradiction impossible than remember the rule,
 bake the hyper with [`Specialize`](#hardcoding-hypers-with-specialize) before

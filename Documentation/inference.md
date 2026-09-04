@@ -225,6 +225,15 @@ therefore fixed then and there:
 | **Which** trainable parameters exist | hypers gating an `IfElse` whose branches hold parameters |
 | Loop **iteration space** (and the RNG streams enumerated per iteration) | hypers/inputs that drive a `LoopAPI.Iterate` count |
 
+What concretization fixes is the **parameter space**, and nothing more. It does
+not rewrite your control flow: an `IfElse` gated by a hyper stays in the graph
+and still selects on its (still live) input at run time. Only the parameters
+inside the unselected branch go away. So a hyper used in several `IfElse`s
+touches only the ones that hold parameters, and even those keep both branches —
+whereas a hyper folded to a constant first, by `Foo.Call(Scalar(k), x)` or
+[`Specialize`](#hardcoding-hypers-with-specialize), has every `IfElse` on it
+folded away outright.
+
 These values stay **live inputs** of the concrete graph — concretization is not
 `Specialize` and removes nothing from the input list — so you supply them again
 at every `Execute`. The contract is that you supply **the same values**.

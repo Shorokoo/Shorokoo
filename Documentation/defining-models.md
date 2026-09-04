@@ -75,10 +75,13 @@ touches that parameter space:
     from the value you supplied; a different value later does not resize them.
   - It **gates a branch that contains parameters** — e.g. `useBias` in
     `useBias.IfElse(y + b, y)`, where `b` is a trainable parameter. Which
-    parameters *exist* is part of the parameter space, so the branch is
-    resolved at concretization and the unselected branch's parameters are not
-    created. Concretizing this layer with `useBias = false` yields an
-    architecture with no bias parameter at all.
+    parameters *exist* is part of the parameter space, so the unselected
+    branch's parameters are not created. Concretizing this layer with
+    `useBias = false` yields an architecture with no bias parameter at all.
+    Note what this does *not* do: it prunes the parameters, not the control
+    flow. The `IfElse` itself stays in the graph and still selects on the
+    (still live) input at run time — see
+    [What concretization fixes](inference.md#what-concretization-fixes).
 - **Value-only** hyperparameters (scale factors, momentum coefficients, ε's) do
   not touch any trainable parameter — neither its shape nor its existence. They
   are not baked: in the concretized graph they are read live at every `Execute`
@@ -134,13 +137,20 @@ How a hyper value gets supplied depends on the route:
   `condition` is `Scalar<bit>`. Both branches are built; the value is selected at
   runtime. Tuples are supported.
 
-  One exception to "selected at runtime": when a branch contains **trainable
-  parameters** and the condition resolves to a constant at concretization —
-  which a `[Hyper]` condition does, from the value handed to
-  `ToConcreteArchitecture` — the branch is resolved *then*, and the unselected
-  branch's parameters are never created. The parameter space of a concrete
-  architecture is static, so it cannot depend on a value that only arrives at
-  `Execute`. See [Hyperparameter baking](#hyperparameter-baking).
+  Branch *selection* is always a run-time thing, but the **trainable parameters**
+  inside a branch are not: the parameter space of a concrete architecture is
+  static, so it cannot depend on a value that only arrives at `Execute`. When a
+  `[Hyper]` gates a branch holding parameters, the value handed to
+  `ToConcreteArchitecture` decides which of those parameters get created — and
+  only that. The `IfElse` stays in the graph and still switches at run time. So
+  a hyper used in several `IfElse`s affects only the ones holding parameters,
+  and even those keep both branches. See
+  [Hyperparameter baking](#hyperparameter-baking).
+
+  A hyper folded to a **constant** before lowering — by `Foo.Call(Scalar(k), x)`,
+  or by [`Specialize`](inference.md#hardcoding-hypers-with-specialize) — is the
+  different case: there the condition is constant, so every `IfElse` on it is
+  folded away outright and the unselected branches leave the graph entirely.
 
   ```csharp
   // Apply bias only when useBias is true — both branches are always built.

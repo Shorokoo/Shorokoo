@@ -51,6 +51,34 @@ public class ModulesCoverageTests
         Assert.True(GatedBias(bake: true, viaSpecialize: true, paramCount: 1, gated: false, biased));
     }
 
+    private static bool TwoGates(bool bake, bool viaSpecialize, int paramCount, int ifNodes, float[] paramless, float[] gated)
+    {
+        var g = Modules.TwoGatesOneHyperLayer.ComputationGraph;
+        var bit = TensorData([], bake);
+        var x = TensorData([2L], 1f, 2f);
+        if (viaSpecialize) g = g.Specialize(g.FromOrderedInputs([bit]));
+        var arch = g.ToConcreteArchitecture(
+            viaSpecialize ? g.FromOrderedInputs([x]) : g.FromOrderedInputs([bit, x]));
+        var model = arch.ToConcreteModel(RngConfig.Default);
+        IData[] inputs = viaSpecialize ? [x] : [bit, x];
+        var o = new ComputeContext().Execute(model, inputs);
+        float[] F(int i) => o[i].ToTensorData().As<float32>().AccessMemory<float>().ToArray();
+        return arch.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams.Length == paramCount
+            && arch.ToInternal().Nodes.Count(n => n.OpCode == OpCodes.IF_OPEN) == ifNodes
+            && F(0).SequenceEqual(paramless)
+            && F(1).SequenceEqual(gated);
+    }
+
+    [Fact]
+    public void TestAParameterGateBakesTheParamsWithoutFoldingTheControlFlow()
+    {
+        float[] then = [10f, 20f], els = [100f, 200f], plain = [1f, 2f], biased = [2f, 3f];
+        Assert.True(TwoGates(bake: false, viaSpecialize: false, paramCount: 0, ifNodes: 2, els, plain));
+        Assert.True(TwoGates(bake: true, viaSpecialize: false, paramCount: 1, ifNodes: 2, then, biased));
+        Assert.True(TwoGates(bake: false, viaSpecialize: true, paramCount: 0, ifNodes: 0, els, plain));
+        Assert.True(TwoGates(bake: true, viaSpecialize: true, paramCount: 1, ifNodes: 0, then, biased));
+    }
+
     [Fact]
     public void TestSimpleHyperparamLoopSequenceOptionalAndConditionalModulesCoverage()
     {

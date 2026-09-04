@@ -161,10 +161,10 @@ layers and the attention/transformer layers; `affine` on `BatchNorm`,
 `GroupNorm` and `InstanceNorm`. Each is written in the layer body as
 `bit.IfElse(withTheParams, without)`, so both branches exist in the *source* —
 but the bit is a `[Hyper]`, fixed before the graph is concretized (baked by
-`Call`/`Model`, or taken from the value you hand `FromOrderedInputs`). The
-framework folds the `IfElse` to the selected branch and **prunes the unselected
-branch's trainable parameters**: with the bit off they are never created — no
-checkpoint field, no gradient, no optimizer state, no bytes in a saved model.
+`Call`/`Model`, or taken from the value you hand `FromOrderedInputs`). Either way
+the framework **prunes the unselected branch's trainable parameters**: with the
+bit off they are never created — no checkpoint field, no gradient, no optimizer
+state, no bytes in a saved model.
 `Linear(useBias: false)` carries one parameter, not two;
 `GroupNorm(affine: false)` carries none of its own. So there is no reason to
 split a model into separate `[Module]` classes to keep an unused parameter block

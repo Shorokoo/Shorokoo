@@ -120,6 +120,18 @@ namespace Shorokoo.Tests.Modules
     }
 
     [Module]
+    public partial class TwoGatesOneHyperLayer
+    {
+        public static (Tensor<float32>, Tensor<float32>) Inline(Tensor<float32> input, [Hyper] Scalar<bit> flag)
+        {
+            var gain = InitSimple.Init(input.ShapeTensor());
+            var paramless = flag.IfElse(input * Scalar(10f), input * Scalar(100f));
+            var gated = flag.IfElse(input + gain, input);
+            return (paramless, gated);
+        }
+    }
+
+    [Module]
     public partial class SimpleWithHyperparam
     {
         public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> hyperparam)

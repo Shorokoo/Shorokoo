@@ -168,10 +168,22 @@ checkpoint field, no gradient, no optimizer state, no bytes in a saved model.
 `Linear(useBias: false)` carries one parameter, not two;
 `GroupNorm(affine: false)` carries none of its own. So there is no reason to
 split a model into separate `[Module]` classes to keep an unused parameter block
-out of it — the toggle already does that. The one edge to know: a module whose
-**only** trainable parameters sit on the folded-away branch is left with none,
-and `TrainingRig.FromScratch` fails with *"No trainable parameters found in the
-computation graph."*
+out of it — the toggle already does that.
+
+Two edges to know:
+
+- The bit is baked but **not removed** — like every `[Hyper]`, it stays a live
+  input of the concrete graph and must be passed again at `Execute`. Pass the
+  value you concretized with. Flipping it on at `Execute` after concretizing it
+  off does not bring the parameters back (they were never created) and is not
+  reported: the surviving branch runs and returns its own answer. Where that
+  matters, drop the bit with
+  [`Specialize`](inference.md#hardcoding-hypers-with-specialize) before
+  concretizing, and passing it later becomes an input-count error instead. See
+  [What concretization fixes](inference.md#what-concretization-fixes).
+- A module whose **only** trainable parameters sit on the folded-away branch is
+  left with none, and `TrainingRig.FromScratch` fails with *"No trainable
+  parameters found in the computation graph."*
 
 ### Linear
 

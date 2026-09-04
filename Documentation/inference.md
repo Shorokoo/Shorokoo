@@ -199,13 +199,44 @@ var concrete = graph
 var results = ComputeContext.Default.Execute(concrete, hyper, input); // hypers first
 ```
 
-The hyper value passed to `FromOrderedInputs` is what concretization bakes from:
-shape-determining hypers (those that feed trainable-parameter shapes, like
-`outFeatures`) fix the parameter shapes then and there, so pass the same value
-at `Execute` time. Value-only hypers (scale factors, ε's) are read live on every
-`Execute` and may vary call to call. See
+The hyper value passed to `FromOrderedInputs` is what concretization bakes from.
+A hyper that touches the trainable parameters — their shapes (like `outFeatures`),
+or which of them exist at all (a `[Hyper]` gating an `IfElse` branch that holds
+parameters) — is **parameter-space-determining**, and the value you pass here
+fixes that part of the architecture for good; pass the same value at `Execute`
+time. Value-only hypers (scale factors, ε's) are read live on every `Execute` and
+may vary call to call. See
 [defining-models.md](defining-models.md#hyperparameter-baking) for the
-distinction.
+distinction, and [What concretization fixes](#what-concretization-fixes) below
+for everything else the concretization values pin down.
+
+### What concretization fixes
+
+`ToConcreteArchitecture` produces an architecture whose **parameter space is
+static** — every trainable parameter, RNG stream and other id-addressed
+component is enumerated at that point, which is exactly what makes the graph
+"concrete" and what lets weights bind by name, optimizers allocate their state,
+and checkpoints round-trip. Anything derived from the values you hand it is
+therefore fixed then and there:
+
+| Fixed at concretization | Derived from |
+|---|---|
+| Trainable-parameter **shapes** and count | shape-determining hypers, and the shapes of the sample inputs |
+| **Which** trainable parameters exist | hypers gating an `IfElse` whose branches hold parameters |
+| Loop **iteration space** (and the RNG streams enumerated per iteration) | hypers/inputs that drive a `LoopAPI.Iterate` count |
+
+These values stay **live inputs** of the concrete graph — concretization is not
+`Specialize` and removes nothing from the input list — so you supply them again
+at every `Execute`. The contract is that you supply **the same values**.
+Executing with a value that would have produced a different parameter space is
+**invalid use**: the parameters or streams that answer needs were never created,
+and nothing re-derives them at run time. A contradicted gate in particular is not
+reported: the surviving branch simply runs, and you get that branch's answer.
+
+If you would rather make the contradiction impossible than remember the rule,
+bake the hyper with [`Specialize`](#hardcoding-hypers-with-specialize) before
+concretizing. It drops the input entirely, so passing a value for it at
+`Execute` is then an input-count error rather than a silent wrong branch.
 
 ### Hardcoding hypers with `Specialize`
 

@@ -20,50 +20,35 @@ public class ModulesCoverageTests
 
     private static double[] Rep(double v, int n) => [.. Enumerable.Repeat(v, n)];
 
-    /// <summary>Concretizes <see cref="Modules.GatedBiasHyperLayer"/> under <paramref name="hint"/>
-    /// and runs it with <paramref name="atExecute"/>. Null means the contradiction did not survive
-    /// to a result: either the concrete model no longer declares the gating bit (so the two values
-    /// cannot differ) or the run was rejected. Written by hand rather than through
-    /// <c>AutoTest.AdvancedTestGraph</c>, which feeds one value array as both the concretization
-    /// hints and the execution inputs and so cannot express a contradiction at all.</summary>
-    private static float[]? GatedBiasOutcome(bool hint, bool atExecute)
-    {
-        var g = Modules.GatedBiasHyperLayer.ComputationGraph;
-        var x = TensorData([2L], 1f, 2f);
-        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([], hint), x]))
-            .ToConcreteModel(RngConfig.Default);
-        var gated = model.InputNames.Contains(GatingInput);
-        if (!gated && atExecute != hint) return null;
-        IData[] inputs = gated ? [TensorData([], atExecute), x] : [x];
-        NamedModelParam[] outputs;
-        try
-        {
-            outputs = new ComputeContext().Execute(model, inputs);
-        }
-        catch (ShorokooException)
-        {
-            return null;
-        }
-        return outputs[0].ToTensorData().As<float32>().AccessMemory<float>().ToArray();
-    }
-
     private const string GatingInput = "useBias";
 
-    /// <summary>
-    /// Concretizing the gated hyperparameter as <c>false</c> prunes the bias but leaves the gating
-    /// bit a live graph input, so <c>Execute</c> accepts the contradicting value <c>true</c> and
-    /// silently returns the surviving unbiased branch's result instead of rejecting the run. The
-    /// fault is one-directional: a <c>true</c> hint keeps both branches, so executing it with
-    /// <c>false</c> correctly returns the unbiased result. Tracked as Shorokoo/Shorokoo#217.
-    /// </summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#217: a false gating hint executed with true silently returns the unbiased result")]
-    public void TestAFalseGatedHyperparamHintExecutedWithTrueIsSilentlyIgnored()
+    private static bool GatedBias(bool bake, bool viaSpecialize, int paramCount, bool gated, float[] expected)
+    {
+        var g = Modules.GatedBiasHyperLayer.ComputationGraph;
+        var bit = TensorData([], bake);
+        var x = TensorData([2L], 1f, 2f);
+        if (viaSpecialize) g = g.Specialize(g.FromOrderedInputs([bit]));
+        var arch = g.ToConcreteArchitecture(
+            viaSpecialize ? g.FromOrderedInputs([x]) : g.FromOrderedInputs([bit, x]));
+        var model = arch.ToConcreteModel(RngConfig.Default);
+        var gateIsInput = model.InputNames.Contains(GatingInput);
+        IData[] inputs = gateIsInput ? [bit, x] : [x];
+        var result = new ComputeContext().Execute(model, inputs)[0]
+            .ToTensorData().As<float32>().AccessMemory<float>().ToArray();
+        return arch.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams.Length == paramCount
+            && gateIsInput == gated
+            && result.SequenceEqual(expected);
+    }
+
+    [Fact]
+    public void TestAGatedHyperparamBakesTheParameterSpaceAndStaysALiveInput()
     {
         float[] plain = [1f, 2f];
         float[] biased = [2f, 3f];
-        Assert.Equal(plain, GatedBiasOutcome(false, false));
-        Assert.Equal(biased, GatedBiasOutcome(true, true));
-        Assert.Null(GatedBiasOutcome(false, true));
+        Assert.True(GatedBias(bake: false, viaSpecialize: false, paramCount: 0, gated: true, plain));
+        Assert.True(GatedBias(bake: true, viaSpecialize: false, paramCount: 1, gated: true, biased));
+        Assert.True(GatedBias(bake: false, viaSpecialize: true, paramCount: 0, gated: false, plain));
+        Assert.True(GatedBias(bake: true, viaSpecialize: true, paramCount: 1, gated: false, biased));
     }
 
     [Fact]

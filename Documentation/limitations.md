@@ -49,6 +49,14 @@ attribute, option, or API marks a module, block, or tensor for recomputation
 during the backward pass. If a training step does not fit, the levers are the
 usual ones — a smaller batch, a shorter sequence, or a smaller model.
 
+Attention has the one exception, and it is not checkpointing: passing
+`queryChunks: c` to `Attention.ScaledDotProductAttention` splits the query axis
+into `c` blocks, which divides the score-sized **transients** by `c` but leaves
+untouched the one score-sized tensor per attention call that is **retained**
+from forward to backward. It bounds the spike, not the floor. See
+[Sizing an attention run](nn-library.md#attention-memory) for the arithmetic and
+for what the quadratic term actually costs.
+
 Building a training rig does run an internal memory-aware pass over the lowered
 training-step graph, which may reorder nodes and recompute a tensor rather than
 keep it alive, but only where that improves a fixed combined compute-and-memory

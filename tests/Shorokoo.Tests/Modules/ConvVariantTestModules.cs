@@ -119,6 +119,46 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
+    /// <see cref="ConvVariantLoopShapeAndIndexAttrs"/> with the trip count taken from a graph
+    /// input instead of a constant, so the loop is never eligible for the native unroll and
+    /// FastLowerAttributeTensorOps meets the index-dependent geometry still inside a rolled loop.
+    /// Self-checks against the same hand-unrolled reference. Tracked as Shorokoo/Shorokoo#231.
+    /// </summary>
+    [Module]
+    public partial class ConvVariantDynamicTripLoopGeometry
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Scalar<int64> trips)
+        {
+            var w = InitSimple.Init([Scalar(3L), Scalar(3L), Scalar(3L), Scalar(3L)]);
+            var b = InitSimple.Init([Scalar(3L)]).Vec();
+
+            var reference = StdConvScalar(x, w, b, 1L)
+                          + StdConvScalar(x, w, b, 2L)
+                          + StdConvScalar(x, w, b, 3L);
+
+            var acc = Scalar(0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                var d = ctx.IterationIndex + Scalar(1L);
+                var conv = NN.Conv(x, w, b, AutoPad.NotSet,
+                    pads: [d, d, d, d], strides: Vector(1L, 1L), dilations: [d, d],
+                    kernelShape: [Scalar(3L), Scalar(3L)], group: Scalar(1L));
+                acc = acc + conv.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            }
+
+            return (reference - acc).Abs() < Scalar(1e-3f) * (reference.Abs() + Scalar(1f));
+        }
+
+        private static Scalar<float32> StdConvScalar(Tensor<float32> x, Tensor<float32> w, Vector<float32> b, long d)
+        {
+            var conv = NN.Conv(x, w, b, AutoPad.NotSet,
+                dilations: [d, d], group: 1L, kernelShape: [3L, 3L],
+                pads: [d, d, d, d], strides: [1L, 1L]);
+            return conv.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        }
+    }
+
+    /// <summary>
     /// <see cref="ConvVariantLoopShapeAndIndexAttrs"/> with an AUTO_GRAD node added to the loop
     /// body, which puts a member of <c>InternalOpCodes.ModuleStageOps</c> inside a constant-trip
     /// loop at the first FastSimplify. That loop must still be unrolled: leaving it rolled makes

@@ -20,6 +20,36 @@ public class ModulesCoverageTests
 
     private static double[] Rep(double v, int n) => [.. Enumerable.Repeat(v, n)];
 
+    /// <summary>Concretizes <see cref="Modules.GatedBiasHyperLayer"/> under <paramref name="hint"/>
+    /// and runs it with <paramref name="atExecute"/>; null means the run was rejected.</summary>
+    private static float[]? GatedBiasOutcome(bool hint, bool atExecute)
+    {
+        var g = Modules.GatedBiasHyperLayer.ComputationGraph;
+        var x = TensorData([2L], 1f, 2f);
+        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([], hint), x]))
+            .ToConcreteModel(RngConfig.Default);
+        try
+        {
+            return new ComputeContext().Execute(model, TensorData([], atExecute), x)[0]
+                .ToTensorData().As<float32>().AccessMemory<float>().ToArray();
+        }
+        catch (ShorokooException)
+        {
+            return null;
+        }
+    }
+
+    [Fact]
+    public void TestGatedHyperparamHintCannotBeContradictedAtExecute()
+    {
+        float[] plain = [1f, 2f];
+        float[] biased = [2f, 3f];
+        Assert.Equal(plain, GatedBiasOutcome(false, false));
+        Assert.Equal(biased, GatedBiasOutcome(true, true));
+        Assert.Equal(plain, GatedBiasOutcome(true, false));
+        Assert.Null(GatedBiasOutcome(false, true));
+    }
+
     [Fact]
     public void TestSimpleHyperparamLoopSequenceOptionalAndConditionalModulesCoverage()
     {

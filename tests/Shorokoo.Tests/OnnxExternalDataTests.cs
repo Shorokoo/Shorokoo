@@ -411,4 +411,49 @@ public class OnnxExternalDataTests
             Assert.False(File.Exists(path + ".data"));
         }
     }
+
+    private static ModelProto AddModelThatFailsMidSerialization()
+    {
+        var model = BuildAddModel(Init("w", FloatElem, [4], FloatBytes(1f, 2f, 3f, 4f)));
+        model.OpsetImports.Add(null!);
+        return model;
+    }
+
+    /// <summary>The saved model and its external-data side file, as hex; a missing file reads "absent".</summary>
+    private static string[] SavedPair(string path)
+    {
+        string[] paths = [path, path + ".data"];
+        return [.. paths.Select(p => File.Exists(p)
+            ? Convert.ToHexString(File.ReadAllBytes(p))
+            : "absent")];
+    }
+
+    /// <summary>
+    /// Both exporter entry points truncate the target before the model is serialized into it, so
+    /// a save that fails partway destroys the previously saved model — and, with the external-data
+    /// layout, deletes its side file as well. Every <c>Persistence.*</c> save gets this right by
+    /// staging through <see cref="Shorokoo.Core.Utils.AtomicFileWriter"/>; these do not.
+    /// </summary>
+    [Fact]
+    public void TestAnExportFailingMidSerializationLeavesThePreviouslySavedModelAndSideFileIntact()
+    {
+        WithTempDir(dir =>
+        {
+            (string Name, Action<ModelProto, string> Save)[] savers =
+            [
+                ("inline", (m, p) => OnnxModelExporter.Save(m, p)),
+                ("external", (m, p) => OnnxModelExporter.SaveWithExternalData(
+                    m, p, new OnnxExternalDataOptions { SizeThreshold = 0 })),
+                ("external-below-threshold", (m, p) => OnnxModelExporter.SaveWithExternalData(m, p)),
+            ];
+            foreach (var (name, save) in savers)
+            {
+                var path = Path.Combine(dir, name + ".onnx");
+                save(BuildAddModel(Init("w", FloatElem, [4], FloatBytes(1f, 2f, 3f, 4f))), path);
+                var committed = SavedPair(path);
+                Assert.ThrowsAny<Exception>(() => save(AddModelThatFailsMidSerialization(), path));
+                Assert.Equal(committed, SavedPair(path));
+            }
+        });
+    }
 }

@@ -3027,19 +3027,57 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 liveParamKeyByModelId[modelId] = tpTensorKey;
             }
 
-            // Dead candidates — emit shape-correct zero CONSTANTs (not MODEL_PARAMs, so they
-            // don't bloat the persisted ModelParamList). Their value is never observed: a dead
+            // Dead candidates — emit a shape-correct zero stand-in (not a MODEL_PARAM, so it
+            // doesn't bloat the persisted ModelParamList). Its value is never observed: a dead
             // site's selection feeds a branch whose output the IF discards — only its shape
             // matters, so it broadcasts cleanly with peers.
+            //
+            // Above a handful of elements this is EXPAND of a one-element zero rather than a
+            // dense CONSTANT. FoldBranchesOwningOnlyDeadParams removes most of these branches
+            // outright, but not all — a branch killed by an *enclosing* IF stays reachable, and
+            // a dense filler there would cost exactly the bytes pruning the parameter was meant
+            // to save (a [4096, 4096] pruned parameter is 64 MB of zeros in the graph, and in
+            // every .srk/.skpt/ONNX written from it). EXPAND keeps that at two tiny constants
+            // whether or not the branch survives.
             var deadZeroKeyByModelId = new Dictionary<ModelId, FastTensorKey>();
+            var expandAttrDefs = Definitions.NodeDefinitions[OpCodes.EXPAND].AttributeDefs;
             foreach (var paramInfo in deadParamInfos)
             {
                 var modelId = paramInfo.SpecificModelId;
                 var dtype = paramInfo.TargetFn.Outputs[0].DType;
-                var zeroKey = FastNodeKey.New();
-                newNodes.Add(CreateConstantTensorDataNode(zeroKey,
-                    Globals.TensorDataWithDefaultVals(dtype, paramInfo.Shape.Dims)));
-                deadZeroKeyByModelId[modelId] = new FastTensorKey(zeroKey, 0);
+                var dims = paramInfo.Shape.Dims;
+
+                long elementCount = 1;
+                foreach (var dim in dims) elementCount *= dim;
+
+                // Rank 0, or small enough that a stand-in costs nothing: emit it directly.
+                if (dims.Length == 0 || elementCount <= DenseDeadFillerElementLimit)
+                {
+                    var zeroKey = FastNodeKey.New();
+                    newNodes.Add(CreateConstantTensorDataNode(zeroKey,
+                        Globals.TensorDataWithDefaultVals(dtype, dims)));
+                    deadZeroKeyByModelId[modelId] = new FastTensorKey(zeroKey, 0);
+                    continue;
+                }
+
+                var oneKey = FastNodeKey.New();
+                newNodes.Add(CreateConstantTensorDataNode(oneKey,
+                    Globals.TensorDataWithDefaultVals(dtype, [1L])));
+                var shapeKey = FastNodeKey.New();
+                newNodes.Add(CreateConstantTensorDataNode(shapeKey,
+                    Globals.TensorData([(long)dims.Length], dims)));
+
+                var expandKey = FastNodeKey.New();
+                var expandTensorKey = new FastTensorKey(expandKey, 0);
+                newNodes.Add(new FastNode
+                {
+                    Key = expandKey,
+                    OpCode = OpCodes.EXPAND,
+                    Attributes = OnnxCSharpAttributes.FromCSharpVals(new Dictionary<string, object?>(), expandAttrDefs),
+                    FullInputs = { [""] = new List<FastTensorKey?> { new FastTensorKey(oneKey, 0), new FastTensorKey(shapeKey, 0) } },
+                    FullOutputs = { [""] = new List<FastTensorKey?> { expandTensorKey } },
+                });
+                deadZeroKeyByModelId[modelId] = expandTensorKey;
             }
 
             // Empty (shape-(0,)) filler per dtype, created on demand: fills the rare in-loop
@@ -3306,13 +3344,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     "removed a live MODEL_PARAM_ID_REF site; the liveness mask and the folded " +
                     "condition values disagree.");
 
-            // The fold rewrote consumers onto the winning branch's keys; re-establishing
-            // topological order keeps later passes' positional scope assumptions valid.
+            // Debug-only assertion that the fold left the node list validly ordered (it does:
+            // an IF_OPEN/IF_CLOSE pair is adjacent, so its scope interval is empty, the pinned
+            // constant lands immediately before the IF_OPEN, and the fold's remap targets keys
+            // produced earlier). This re-sorts nothing and compiles away in Release.
             FastProcessorHelper.EnsureTopologicalOrder(graph);
         }
 
         /// <summary>
-        /// Pins the condition of every IF whose losing branch computes a dead parameter to the
+        /// Pins the condition of every IF that <b>exclusively owns</b> a dead parameter to the
         /// value the concretization hints gave it, so the folder can drop that branch. Returns
         /// true if any condition was pinned.
         /// </summary>
@@ -3322,20 +3362,37 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             HashSet<FastNodeKey> deadSiteKeys)
         {
             var producerByOutput = new Dictionary<FastTensorKey, FastNode>(graph.Nodes.Count * 2);
+            var consumersByTensor = new Dictionary<FastTensorKey, List<FastNode>>(graph.Nodes.Count * 2);
             foreach (var node in graph.Nodes)
+            {
                 foreach (var kvp in node.FullOutputs)
                     foreach (var output in kvp.Value)
                         if (output is FastTensorKey tk && !tk.IsEmpty)
                             producerByOutput[tk] = node;
+                foreach (var kvp in node.FullInputs)
+                    foreach (var input in kvp.Value)
+                        if (input is FastTensorKey tk && !tk.IsEmpty)
+                        {
+                            if (!consumersByTensor.TryGetValue(tk, out var list))
+                                consumersByTensor[tk] = list = new List<FastNode>();
+                            list.Add(node);
+                        }
+            }
+            var graphOutputs = new HashSet<FastTensorKey>(graph.Outputs.Where(x => !x.IsEmpty));
 
             var nodeByKey = FastProcessorHelper.BuildNodeByKey(graph);
+            var pinnedOpenKeys = new HashSet<FastNodeKey>();
             var pins = new List<(FastNode OpenNode, bool CondVal)>();
 
-            foreach (var closeNode in graph.Nodes)
+            foreach (var deadSite in graph.Nodes)
             {
-                if (closeNode.OpCode != OpCodes.IF_CLOSE) continue;
+                if (!deadSiteKeys.Contains(deadSite.Key)) continue;
+                if (TryFindOwningBranch(deadSite, consumersByTensor, graphOutputs) is not var (closeNode, isThenBranch))
+                    continue;
+
                 if (closeNode.GraphOpenNodeKey is not FastNodeKey openKey || openKey.IsEmpty) continue;
                 if (!nodeByKey.TryGetValue(openKey, out var openNode)) continue;
+                if (!pinnedOpenKeys.Add(openKey)) continue;
                 if (openNode.Inputs.Count == 0 || openNode.Inputs[0] is not FastTensorKey condKey || condKey.IsEmpty)
                     continue;
 
@@ -3353,11 +3410,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     continue;
                 bool condVal = condBits[0];
 
-                if (!closeNode.FullInputs.TryGetValue(OnnxOpAttributeNames.AttrThenBranch, out var thenInputs)) continue;
-                if (!closeNode.FullInputs.TryGetValue(OnnxOpAttributeNames.AttrElseBranch, out var elseInputs)) continue;
-
-                if (!BranchComputesASite(condVal ? elseInputs : thenInputs, producerByOutput, deadSiteKeys))
-                    continue;
+                // The value must actually deselect the branch holding the dead parameter. If the
+                // hints say otherwise, the condition and the liveness verdict disagree — leave
+                // the IF alone and let the zero stand-in path run.
+                if (condVal == isThenBranch) continue;
 
                 pins.Add((openNode, condVal));
             }
@@ -3375,35 +3431,86 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// True when one of <paramref name="siteKeys"/> is among the producers of
-        /// <paramref name="branchInputs"/>. The walk stops at any IF_CLOSE rather than descending
-        /// into its branches: a value that merely *passes through* an inner IF belongs to that
-        /// IF's branches, not to this one, and folding on it would prune a branch this condition
-        /// does not gate. Nesting is handled instead by the caller's fixpoint loop — once the
-        /// inner IF folds, its IF_CLOSE is gone and the outer walk reaches straight through.
+        /// Walks forward from a dead MODEL_PARAM_ID_REF site and returns the IF branch that
+        /// <b>exclusively owns</b> it — the one branch slot every path from the site runs into.
+        /// Returns null when the site is not owned that way, in which case the IF is left alone
+        /// and the site keeps its zero stand-in.
+        ///
+        /// <para>Exclusivity is the whole point, and reachability is not a substitute for it. A
+        /// site read by a second IF (a `[Hyper]` gate and a runtime gate sharing one parameter) is
+        /// reachable from both losing branches, but owned by neither: folding either would delete
+        /// a branch selection the other IF still needs. Likewise a site reaching a graph output
+        /// escapes gating altogether.</para>
+        ///
+        /// <para>Multi-output IFs are refused outright. <c>IF_CLOSE</c> is variadic and
+        /// <see cref="FastFoldConstantConditionBranches"/> folds all of its slots together, so
+        /// folding a tuple <c>IfElse</c> because <em>one</em> slot holds a pruned parameter would
+        /// also pin every paramless slot beside it to one branch — exactly the run-time selection
+        /// those slots are supposed to keep.</para>
+        ///
+        /// <para>The walk stops at the first <c>IF_CLOSE</c> on each path, which is therefore the
+        /// innermost gate. Branch bodies are ordinary nodes sequenced ahead of their
+        /// <c>IF_OPEN</c> — an <c>IF_OPEN</c>/<c>IF_CLOSE</c> pair is adjacent in the node list —
+        /// so membership is read off the close node's then/else input lists, never from
+        /// position.</para>
         /// </summary>
-        private static bool BranchComputesASite(
-            List<FastTensorKey?> branchInputs,
-            Dictionary<FastTensorKey, FastNode> producerByOutput,
-            HashSet<FastNodeKey> siteKeys)
+        private static (FastNode CloseNode, bool IsThenBranch)? TryFindOwningBranch(
+            FastNode deadSite,
+            Dictionary<FastTensorKey, List<FastNode>> consumersByTensor,
+            HashSet<FastTensorKey> graphOutputs)
         {
+            (FastNode CloseNode, bool IsThenBranch)? gate = null;
             var seen = new HashSet<FastNodeKey>();
             var pending = new Stack<FastTensorKey>();
-            foreach (var input in branchInputs)
-                if (input is FastTensorKey tk && !tk.IsEmpty) pending.Push(tk);
+            foreach (var output in deadSite.Outputs)
+                if (output is FastTensorKey tk && !tk.IsEmpty) pending.Push(tk);
 
             while (pending.Count > 0)
             {
-                if (!producerByOutput.TryGetValue(pending.Pop(), out var producer)) continue;
-                if (!seen.Add(producer.Key)) continue;
-                if (siteKeys.Contains(producer.Key)) return true;
-                if (producer.OpCode == OpCodes.IF_CLOSE) continue;   // belongs to that IF, not this one
-                foreach (var kvp in producer.FullInputs)
-                    foreach (var input in kvp.Value)
-                        if (input is FastTensorKey tk && !tk.IsEmpty) pending.Push(tk);
+                var tensor = pending.Pop();
+                if (graphOutputs.Contains(tensor)) return null;
+                if (!consumersByTensor.TryGetValue(tensor, out var consumers) || consumers.Count == 0)
+                    return null;
+
+                foreach (var consumer in consumers)
+                {
+                    if (consumer.OpCode == OpCodes.IF_CLOSE)
+                    {
+                        // Variadic close: folding is all-or-nothing across slots, so only a
+                        // single-output IF can be folded on one slot's pruned parameter.
+                        if (!consumer.FullOutputs.TryGetValue("", out var outputs) || outputs.Count != 1)
+                            return null;
+
+                        bool inThen = BranchContains(consumer, OnnxOpAttributeNames.AttrThenBranch, tensor);
+                        bool inElse = BranchContains(consumer, OnnxOpAttributeNames.AttrElseBranch, tensor);
+                        if (inThen == inElse) return null;   // in both slots, or in neither
+
+                        if (gate is { } g && (g.CloseNode.Key != consumer.Key || g.IsThenBranch != inThen))
+                            return null;                     // two different gates own it
+                        gate = (consumer, inThen);
+                        continue;                            // do not walk past the gate
+                    }
+
+                    if (!seen.Add(consumer.Key)) continue;
+                    foreach (var output in consumer.Outputs)
+                        if (output is FastTensorKey tk && !tk.IsEmpty) pending.Push(tk);
+                }
             }
-            return false;
+
+            return gate;
         }
+
+        private static bool BranchContains(FastNode closeNode, string branchName, FastTensorKey tensor)
+            => closeNode.FullInputs.TryGetValue(branchName, out var inputs)
+               && inputs.Any(x => x is FastTensorKey tk && tk.Equals(tensor));
+
+        /// <summary>
+        /// Element count below which a pruned parameter's zero stand-in is emitted as a dense
+        /// CONSTANT rather than an EXPAND of a one-element zero. Small enough that the dense form
+        /// costs nothing, large enough to cover the scalars and short vectors where the extra two
+        /// nodes would be pure noise.
+        /// </summary>
+        private const long DenseDeadFillerElementLimit = 64;
 
         private static FastNode CreateConstantTensorDataNode(FastNodeKey nodeKey, TensorData td)
         {

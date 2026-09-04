@@ -237,7 +237,16 @@ Note which branch drives that. It is the **unselected** one: folding happens
 because a branch's parameters were pruned, so an `IfElse` whose *selected* branch
 holds the parameters keeps both branches and stays live. For the usual
 `bit.IfElse(withParams, without)` shape that means the bit folds the `IfElse`
-when baked **off**, and leaves it live when baked **on**.
+when baked **off**, and leaves it live when baked **on**. Only an `IfElse` that
+*solely* owns the pruned parameters is folded: one sharing them with a second
+`IfElse` is left alone, as is a tuple `IfElse` — its slots resolve together, and
+the paramless ones must keep switching.
+
+What decides the fold is the value you supply at concretization, not the `[Hyper]`
+marker: the parameter space cannot depend on a value that only arrives at
+`Execute`, so gating a trainable parameter on a plain runtime input is resolved
+from the concretization value just the same. That is a reason to mark such a gate
+`[Hyper]` — it makes a baked value look baked at the call site.
 
 So one hyper can be half-resolved and half-live, and that is the intended split:
 

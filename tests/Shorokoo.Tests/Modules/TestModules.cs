@@ -119,6 +119,8 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>One <c>[Hyper]</c> bit gating two <c>IfElse</c>es — one holding a trainable
+    /// param, one not.</summary>
     [Module]
     public partial class TwoGatesOneHyperLayer
     {
@@ -131,6 +133,8 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>A <c>[256, 256]</c> trainable param behind a gate: big enough that a dense
+    /// stand-in for it is visible against the small constants a graph normally carries.</summary>
     [Module]
     public partial class BigGatedParamLayer
     {
@@ -138,6 +142,73 @@ namespace Shorokoo.Tests.Modules
         {
             var big = InitSimple.Init(Vector(256L, 256L));
             return useBig.IfElse(input + big.Reduce(ReduceKind.Sum, Vector(0L, 1L), keepDims: false), input);
+        }
+    }
+
+    /// <summary>A <c>[256, 256]</c> param behind nested gates: with the outer gate off and the
+    /// inner on, the branch stays reachable, so the param's stand-in must still cost nothing.</summary>
+    [Module]
+    public partial class NestedBigGatedParamLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<bit> outer, [Hyper] Scalar<bit> inner)
+        {
+            var big = InitSimple.Init(Vector(256L, 256L));
+            var innerVal = inner.IfElse(input + big.Reduce(ReduceKind.Sum, Vector(0L, 1L), keepDims: false), input * Scalar(3f));
+            return outer.IfElse(innerVal, input);
+        }
+    }
+
+    /// <summary>Param on the <b>else</b> branch and a <b>computed</b> (non-input) condition — the
+    /// mirror of the usual then-branch, bit-valued gate.</summary>
+    [Module]
+    public partial class ElseBranchComputedGateLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> mode)
+        {
+            var w = InitSimple.Init(input.ShapeTensor());
+            return (mode > Scalar(3L)).IfElse(input * Scalar(5f), input + w);
+        }
+    }
+
+    /// <summary>An <c>IfElse</c> inside a <c>LoopAPI.Iterate</c> body — the loop and IF nesting
+    /// conventions meeting. No trainable params, so nothing about parameter pruning applies.</summary>
+    [Module]
+    public partial class LoopGateHyperLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> iters, [Hyper] Scalar<bit> flag)
+        {
+            var x = input;
+            foreach (var ctx in LoopAPI.Iterate(iters))
+                x = flag.IfElse(x + Scalar(1f), x * Scalar(2f));
+            return x;
+        }
+    }
+
+    /// <summary>Tuple <c>IfElse</c> on one gate: slot 0 holds a trainable param, slot 1 none.
+    /// Folding is all-or-nothing across an <c>IF_CLOSE</c>'s slots, so slot 1 pins whether a
+    /// pruned param in slot 0 may fold the whole node.</summary>
+    [Module]
+    public partial class TupleGateHyperLayer
+    {
+        public static (Tensor<float32>, Tensor<float32>) Inline(Tensor<float32> input, [Hyper] Scalar<bit> flag)
+        {
+            var g = InitSimple.Init(input.ShapeTensor());
+            return flag.IfElse((input + g, input * Scalar(10f)), (input, input * Scalar(100f)));
+        }
+    }
+
+    /// <summary>One trainable param read by two gates — a <c>[Hyper]</c> and a runtime bit — so
+    /// neither branch exclusively owns it.</summary>
+    [Module]
+    public partial class SharedDeadParamTwoGatesLayer
+    {
+        public static (Tensor<float32>, Tensor<float32>) Inline(
+            Tensor<float32> input, [Hyper] Scalar<bit> useBias, Scalar<bit> runtimeFlag)
+        {
+            var bias = InitSimple.Init(input.ShapeTensor());
+            var gated = useBias.IfElse(input + bias, input);
+            var other = runtimeFlag.IfElse(input + bias, input * Scalar(2f));
+            return (gated, other);
         }
     }
 

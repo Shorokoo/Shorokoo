@@ -19,11 +19,10 @@ public class FastProcessorsCoverageTests
     private static double[] Rep(double v, int n) => [.. Enumerable.Repeat(v, n)];
     private static TensorData Flag(bool v) => TensorData(DType.Bool, [], v);
 
-    /// <summary>A dead parameter candidate's zeros are materialized in full at concretization,
-    /// although the comment emitting them says only their shape is ever observed — pruning a
-    /// parameter still costs its whole tensor in host memory and in the persisted graph.
-    /// Open bug: https://github.com/Shorokoo/Shorokoo/issues/229 — drop the Skip when it is fixed.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#229: a pruned parameter candidate is still materialized in full.")]
+    /// <summary>Only a pruned parameter's shape is ever observed, so concretizing one must not
+    /// cost its whole tensor in host memory: the gap between pruning a small bias and a large one
+    /// stays far below the tensor itself.</summary>
+    [Fact]
     public void TestPrunedParamCandidateIsNotMaterializedInFull()
     {
         static long ConcretizationBytes(InternalComputationGraph g)

@@ -1222,7 +1222,7 @@ custom-optimizer authoring contract.
 | `SGDOptimizer` | `p −= lr·g` | `lr 0.01` | — |
 | `SGDMomentumOptimizer` | `v = μ·v + g; p −= lr·v` | `lr 0.01, μ 0.9` | velocity |
 | `AdamOptimizer` | `m, v` EMAs, **bias-corrected**: `p −= lr·m̂/(√v̂ + ε)` | `lr 0.001, β1 0.9, β2 0.999, ε 1e-8` | m, v, step |
-| `AdamWOptimizer` | Adam step (no bias correction) + decoupled decay `p *= 1 − lr·wd` | `lr 0.001, β1 0.9, β2 0.999, ε 1e-8, wd 1e-4` | m, v |
+| `AdamWOptimizer` | **Bias-corrected** Adam step + decoupled decay `p *= 1 − lr·wd` | `lr 0.001, β1 0.9, β2 0.999, ε 1e-8, wd 1e-4` | m, v, step |
 | `RMSpropOptimizer` | `sq = α·sq + (1−α)·g²; buf = μ·buf + g/(√sq + ε); p −= lr·buf` | `lr 0.01, α 0.99, ε 1e-8, μ 0` | squareAvg, momentumBuffer |
 | `AdagradOptimizer` | `acc += g²; p −= lr·g/(√acc + ε)` | `lr 0.01, ε 1e-10` | accumulator |
 | `AdamaxOptimizer` | Adam with the ∞-norm: `m` EMA; `u = max(β2·u, \|g\|+ε)`; `p −= (lr/(1−β1ᵗ))·m/u` (no bias-correction on `u`) | `lr 0.002, β1 0.9, β2 0.999, ε 1e-8` | m, u, step |
@@ -1233,12 +1233,12 @@ custom-optimizer authoring contract.
 | `AdafactorOptimizer` | **Non-factored** Adafactor: `β̂2ₜ = 1 − tᵗᵃᵘ; ρ = min(lr, 1/√t); α = max(ε₂, RMS(p))·ρ; V = β̂2ₜ·V + (1−β̂2ₜ)·(g²+ε₁); U = g/max(√V, ε₁); Û = U/max(1, RMS(U)/d); p = p·(1−lr·wd) − α·Û` (full param-shaped `V`, **no** row/col factoring) | `lr 0.01, τ −0.8, ε₁ 1e-30, ε₂ 1e-3, d 1.0, wd 0` | v, step |
 | `LambOptimizer` | LAMB (You et al. 2019): bias-corrected Adam direction scaled by LARS's **per-tensor trust ratio** — `r = m̂/(√v̂ + ε); u = r + wd·p; trust = (‖p‖>0 ∧ ‖u‖>0) ? ‖p‖/‖u‖ : 1; p −= lr·trust·u` (ε **outside** the √; decoupled `wd` **inside** the trust numerator; ‖·‖ = `√Σx²` over the whole tensor; φ = identity). Per-tensor = layer-wise (Shorokoo runs the optimizer per parameter tensor). | `lr 1e-3, β1 0.9, β2 0.999, ε 1e-6` (LAMB, not 1e-8), `wd 0.01` | m, v, step |
 
-- **Bias correction — Adam vs AdamW**: `AdamOptimizer` applies the textbook
+- **Bias correction — Adam and AdamW**: both apply the textbook
   `m̂ = m/(1−β1^t)`, `v̂ = v/(1−β2^t)` correction, carrying the timestep `t` as a
   third state field — a **scalar** (one float per parameter, created by
   `OptimizerScalarZeros`) that broadcasts against `m̂`/`v̂`, not a param-shaped copy.
-  `AdamWOptimizer` **omits** bias correction (no timestep), so its early-step
-  behavior differs slightly from reference AdamW.
+  So the first step is ≈ `lr` whatever the gradient magnitude, and at `wd = 0`
+  `AdamWOptimizer` is `AdamOptimizer` step for step.
 - `RMSpropOptimizer` with the default `momentum = 0` reduces to plain RMSprop;
   it always carries both state tensors.
 - `AdamaxOptimizer` swaps Adam's L2 second moment for an exponentially-weighted

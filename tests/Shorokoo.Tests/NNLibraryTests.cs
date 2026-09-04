@@ -818,8 +818,9 @@ public class NNLibraryOptimizerTrainingCoverageTests
     /// xᵀ·gUp, gradient ACCUMULATION when a param is consumed twice, routing through
     /// Reshape→Transpose→Reshape, and Slice) plus the core optimizer step values on y = w·x, w₀=1,
     /// x=[1], t=[0] ⇒ grad = 2w: Adam's bias-correction timestep, SGD-momentum's velocity carry,
-    /// AdamW's decoupled-decay-then-uncorrected step, and Adam's first step being ≈ lr regardless of
-    /// the gradient magnitude (uncorrected it would be ≈ 3.16·lr).</summary>
+    /// AdamW's decoupled decay over a bias-corrected step — identical to Adam at weight decay 0 —
+    /// and Adam's first step being ≈ lr regardless of the gradient magnitude (uncorrected it would
+    /// be ≈ 3.16·lr).</summary>
     [Fact]
     public void TestAutodiffGradientAndCoreOptimizerValuesAnalytic()
     {
@@ -852,7 +853,11 @@ public class NNLibraryOptimizerTrainingCoverageTests
         AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, SGDMomentumOptimizer.ComputationGraph,
             [0.1f, 0.9f], [1L], [1f], [1L], [0f], 2).TrainableParams, [0.46f], 1e-5f);
         AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdamWOptimizer.ComputationGraph,
-            [0.1f, 0.9f, 0.999f, 1e-8f, 0.1f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.6737722f], 1e-4f);
+            [0.1f, 0.9f, 0.999f, 1e-8f, 0.1f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.89f], 1e-4f);
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            [0.1f, 0.9f, 0.999f, 1e-8f, 0f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.9f], 1e-5f);
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            [0.1f, 0.9f, 0.999f, 1e-8f, 0f], [1L], [1f], [1L], [0f], 2).TrainableParams, [0.8004123f], 2e-4f);
 
         // Adam bias correction: grad is large (15) yet the first step moves the weight by ≈ lr.
         const float lr = 0.001f;

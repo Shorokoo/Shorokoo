@@ -798,10 +798,6 @@ Constraints:
 
 ## Notes / known limitations
 
-- `AdamWOptimizer` omits bias correction (no timestep tracking); early-step behavior
-  differs slightly from reference AdamW. Effect is minor after the first few steps.
-  `AdamOptimizer` *does* bias-correct (it carries the timestep as a scalar state field —
-  one float per parameter, not a param-shaped buffer).
 - `LionOptimizer` **swaps the beta roles** versus Adam: the stored momentum `m` is decayed by
   **β2** (`m = β2·m + (1−β2)·g`), while **β1** only appears in the sign blend that forms the
   update direction. The default `(β1 0.9, β2 0.99)` looks Adam-like but means something
@@ -822,7 +818,7 @@ Constraints:
   RMSprop=4, AdamW=5, Adagrad=2, Adamax=4, NAdam=5, RAdam=4, Adadelta=3, Lion=4, Adafactor=6,
   Lamb=5.
 - Optimizer state has one or more fields per trainable parameter (momentum: velocity;
-  AdamW: `m`/`v`; Adam: `m`/`v` plus a scalar `step`; RMSprop: `squareAvg`/`momentumBuffer`;
+  AdamW and Adam: `m`/`v` plus a scalar `step`; RMSprop: `squareAvg`/`momentumBuffer`;
   Adagrad: `accumulator`; Adamax: `m`/`u` plus a scalar `step`; NAdam: `m`/`v` plus two
   scalars — `step` and `muProduct`; RAdam: `m`/`v` plus a scalar `step`; Adadelta:
   `squareAvg`/`accDelta`; Lion: `m` only — half of Adam/AdamW; Lamb: `m`/`v` plus a

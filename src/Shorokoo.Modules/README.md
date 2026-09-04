@@ -24,8 +24,8 @@ ready-made layers, loss functions, optimizers, and initializers built from Shoro
   class indices), `NLLLoss`, `BCELoss`, `BCEWithLogitsLoss`, `KLDivLoss`
   (log-probs + probs). All map (predictions, targets) → scalar loss.
 - **Optimizers** (`Shorokoo.Modules.Optimizers`) — `SGDOptimizer`,
-  `SGDMomentumOptimizer`, `AdamOptimizer` (with bias correction),
-  `AdamWOptimizer`, `RMSpropOptimizer`, `AdagradOptimizer`, with strongly
+  `SGDMomentumOptimizer`, `AdamOptimizer` and `AdamWOptimizer` (both with
+  bias correction), `RMSpropOptimizer`, `AdagradOptimizer`, with strongly
   typed hyperparameter sets and learning-rate schedules (`Schedules.*`).
   Optimizer state (moments, velocity, accumulators) is created inside each
   module via optimizer-owned `[StateInitializer]`s — `OptimizerStateZeros`

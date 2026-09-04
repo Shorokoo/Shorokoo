@@ -2132,7 +2132,7 @@ public class TrainingRigSkptCheckpointCoverageTests
             var modelTensors = manifest.TensorMappings!["model"]["default"].Tensors!;
             var optTensors = manifest.TensorMappings["optimizer"]["default"].Tensors!;
             Assert.All(modelTensors.Values, r => Assert.Equal("trainable", r.Data));
-            Assert.Equal(2 * modelTensors.Count, optTensors.Count);
+            Assert.Equal(3 * modelTensors.Count, optTensors.Count);
             Assert.All(optTensors, kv =>
             {
                 Assert.True(SkptFileFormat.TryParseOptimizerStateId(kv.Key, out var paramId, out _));

@@ -3355,10 +3355,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// round-trip anywhere.
     /// <para>
     /// Native equivalents cover every fold case the (now-deleted) CG Simplify
-    /// pipeline did: full INSERT/ERASE/LENGTH/AT coverage on `knownSequences`,
-    /// scan vars, dynamic cond chain via AND/WHERE, nested LOOP/IF with
-    /// `GraphOpenNodeKey` rewiring, per-iteration identifier-template /
-    /// model-id updates, and loop-invariant body-node sharing.
+    /// pipeline did, bar one: full INSERT/ERASE/LENGTH/AT coverage on
+    /// `knownSequences`, scan vars, dynamic cond chain via AND/WHERE, nested
+    /// LOOP/IF with `GraphOpenNodeKey` rewiring, and loop-invariant body-node
+    /// sharing. The exception is the per-iteration identifier-template /
+    /// model-id rewrite, which has been removed rather than ported: a loop body
+    /// that would need it is disqualified from the unroll instead — see
+    /// <see cref="FastFoldConstantIterationLoops.BodyHoldsUnresolvedParamMachinery"/>.
     /// </para>
     /// </summary>
     internal static class FastSimplify
@@ -3426,27 +3429,24 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     }
                 }
 
-                // Native loop-unroll pass: handles the simple subset of
-                // FoldConstantIterationLoops (no scan vars, no cond chain, no
-                // nested control flow, no identifier-template updates). Anything
-                // it unrolls is gone before the CG round-trip runs, so the
-                // round-trip only sees loops that need the full CG machinery.
+                // Native loop-unroll pass — the only unroller there is. Unrolling
+                // typically turns the LOOP_OPEN's iteration-index output into a
+                // scalar CONSTANT, which is why the outer loop re-enters the inner
+                // native folding above after every unroll pass.
                 if (FastFoldConstantIterationLoops.Process(graph))
                 {
                     FastGraphCycleDetector.AssertAcyclic(graph, $"FastSimplify after FastFoldConstantIterationLoops (outer {outerIteration})");
                     outerChanged = true;
                 }
 
-                // No more CG round-trip here. Stages A–G of
+                // No more CG round-trip here. Stages A-G of
                 // `FastFoldConstantIterationLoops` cover every loop the CG
                 // `FoldConstantIterationLoops` pass could unroll, plus a superset:
                 // scan vars, dynamic cond chains, nested LOOP / IF control flow,
-                // identifier-template / model-id updates per iteration. The two
-                // residual native disqualifiers (N==0 with scan vars; scan vars
-                // combined with a dynamic cond chain) leave the loop in place,
-                // which is correct for downstream passes — they just don't get
-                // unrolled statically. No test in the Quick+Standard tiers hits
-                // either residual case.
+                // and loop-invariant body-node sharing. What it declines is listed
+                // on that class; a declined loop stays rolled, which every
+                // downstream pass accepts but two would rather not see — see its
+                // Process docstring.
             }
         }
     }
@@ -3826,11 +3826,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// iteration's body outputs (or to the <c>LOOP_OPEN</c>'s initializers on iteration 0).
     /// <para>
     /// Scope. A loop is only unrolled natively when every one of these holds; otherwise
-    /// <see cref="FastSimplify"/> leaves the loop in place, which is always a legal
-    /// outcome — downstream passes handle a rolled loop, they just get less folding.
+    /// <see cref="FastSimplify"/> leaves the loop in place. Every pass downstream accepts
+    /// a rolled loop, but declining is not free — see the <see cref="Process"/> docstring
+    /// for the two that would rather not see one, one of which is today an open
+    /// silent-wrong-answer bug (Shorokoo/Shorokoo#231). Decline only where cloning would
+    /// actually be wrong.
     /// <list type="bullet">
     ///   <item>The <c>maxIter</c> producer is a <c>CONSTANT</c> with a non-negative
     ///     int64 scalar value.</item>
+    ///   <item>A matching <c>LOOP_CLOSE</c> exists after the <c>LOOP_OPEN</c> (checked
+    ///     by <see cref="Process"/> rather than the eligibility gate).</item>
     ///   <item>The loop-variable and scan-variable counts agree between the
     ///     <c>LOOP_OPEN</c> (<c>open.Inputs.Count - 2</c> loop vars) and the
     ///     <c>LOOP_CLOSE</c>.</item>
@@ -3872,11 +3877,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// Runs one unroll pass. Returns true if any eligible loop was unrolled. This is the
         /// only unroller — the CG round-trip that used to back it up is gone (see
         /// <see cref="FastSimplify"/>) — so a loop it declines stays rolled for the rest of
-        /// the pipeline. That is legal everywhere, but it costs folding, and two callers
-        /// want the unroll to have happened: <c>FastLowerAttributeTensorOps</c> resolves
-        /// variant-op geometry it assumes is loop-free, and autograd has no gradient rule
-        /// for <c>Loop</c>. Decline only where cloning would be wrong, never merely
-        /// awkward.
+        /// the pipeline. Two later passes in that pipeline are the reason to decline
+        /// sparingly: <c>FastLowerAttributeTensorOps</c> resolves variant-op geometry it
+        /// assumes is loop-free, and today it does so silently and wrongly on a rolled loop
+        /// rather than failing (Shorokoo/Shorokoo#231); and autograd has no gradient rule
+        /// for <c>Loop</c>, so a rolled one reaching it is a build error. Decline only
+        /// where cloning would be wrong, never merely awkward.
         ///
         /// <para>
         /// One such place is Stage-F model-parameter machinery in the body — see
@@ -4499,17 +4505,18 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var curTensorMap = new Dictionary<FastTensorKey, FastTensorKey>(iterInputRemap);
                 var curBodyOutputMap = new Dictionary<FastTensorKey, FastTensorKey>();
 
-                // Clones are produced in two passes per iteration:
-                //   Pass 1 — basic clone with remapped FullInputs and fresh FullOutputs.
-                //   Pass 2 — Stage F: for any cloned node carrying an IdentifierTemplate
-                //     or model-id placeholder, walk the newly-remapped iteration-index
-                //     input chain, extract the concrete iteration indices (our loop's
-                //     CONSTANT(iter), outer loops' LOOP_OPEN output → -1), and rewrite
-                //     Attributes.ShrkAttrLocalModelId / ShrkAttrRelativeModelId plus
-                //     IdentifierTemplate to match.
-                // Two passes because the iter-index chain walk needs the freshly-cloned
-                // CONCAT / UNSQUEEZE nodes for this iteration to be resolvable, which
-                // means the clone's inputs must have been remapped first.
+                // One pass per iteration: a basic clone with remapped FullInputs and
+                // fresh FullOutputs. Attributes and IdentifierTemplate are carried over
+                // by reference, unchanged.
+                //
+                // There used to be a second pass here — Stage F, which walked each
+                // clone's iteration-index chain and rewrote its ShrkAttrLocalModelId /
+                // ShrkAttrRelativeModelId and IdentifierTemplate to name that iteration's
+                // parameter. It is gone. Nothing that needs it reaches a clone any more:
+                // inside ToConcreteArchitecture the Stage-F passes resolve every indirect
+                // parameter reference before FastSimplify runs, and a body that still
+                // holds one is refused the unroll outright — see
+                // FastFoldConstantIterationLoops.BodyHoldsUnresolvedParamMachinery.
                 //
                 // Loop-invariant body nodes (no transitive dep on an OPEN output) are
                 // NOT cloned — they are shared across every iteration via identity
@@ -4593,10 +4600,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     clonedThisIter.Add((b, cloned));
                 }
 
-                // Belt and braces: BodyHoldsUnresolvedParamMachinery already rejected any
-                // loop whose body holds these four, and inside ToConcreteArchitecture the
-                // Stage-F passes have resolved them before FastSimplify anyway. The assert
-                // catches a body node that reached a clone by some route neither covers.
+                // Belt and braces: BodyHoldsUnresolvedParamMachinery already rejected every
+                // loop that reaches here with these four in its body (a zero-trip loop is
+                // exempt from that gate but clones nothing, so it never reaches here), and
+                // inside ToConcreteArchitecture the Stage-F passes have resolved them
+                // before FastSimplify anyway. The assert catches a body node that reached
+                // a clone by some route neither covers.
                 foreach (var (_, cloned) in clonedThisIter)
                 {
                     Debug.Assert(

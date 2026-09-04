@@ -25,10 +25,14 @@ Related: [onnx-and-weights.md](onnx-and-weights.md) · [training.md](training.md
 - A single `config.json` manifest is the **only source of wiring**: entries never
   reference each other; every mapping (model → serialization format, parameter →
   stored tensor, data entry → storage format) lives in the manifest.
-- Saves are **atomic** in both forms (staged beside the target — a temp file or a temp
-  directory — and committed by rename): a crash mid-save never corrupts an existing
+- Saves are **atomic** in both `.skpt` forms (staged beside the target — a temp file or a
+  temp directory — and committed by rename): a crash mid-save never corrupts an existing
   checkpoint, and an interrupted directory save is never visible at the target path.
-  The target's parent directory must already exist.
+  The target's parent directory must already exist. The flat safetensors training
+  checkpoint (`checkpoint.Save`) is written through the same atomic file path, as is
+  every other save/export API — `ExtractSkpt` / `PackSkpt`, `Persistence.ExportSafeTensors`,
+  `Persistence.ExportOnnx`. See
+  [training.md](training.md#save-and-resume-a-checkpoint-across-process-restarts).
 - This version writes an **inference checkpoint of a concrete model** (definition +
   weights). It can also carry **additional named weight sets** over the same parameters
   (e.g. an `ema` set alongside `default`), selected at load time — see

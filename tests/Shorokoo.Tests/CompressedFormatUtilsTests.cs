@@ -2357,10 +2357,53 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     {
         var (model, _, _) = BuildSkptModel();
         var ex = Assert.Throws<ModelException>(
-            () => Persistence.ExportOnnx(model, P("over-ceiling.onnx"), OpSetVersion.OPS_21, 8));
+            () => Persistence.ExportOnnx(model, P("over-ceiling.onnx"), OpSetVersion.OPS_21, null, 8));
         Assert.Equal(ErrorCodes.XD007, ex.ErrorCode);
         Assert.Contains("SaveWithExternalData", ex.Message);
         Assert.False(File.Exists(P("over-ceiling.onnx")));
+    }
+
+    /// <summary>
+    /// The external-data option on the facade: off by default (byte-identical to the
+    /// self-contained export, no side file), on it writes the standard pair, lifts the 2 GB
+    /// refusal, and round-trips back through <c>ImportOnnx</c> to the same values.
+    /// </summary>
+    [Fact]
+    public void TestExportOnnxWritesTheExternalDataPairOnDemandAndStaysSelfContainedByDefault()
+    {
+        var (model, numOut, input) = BuildSkptModel();
+        var direct = ExecuteToBytes(model, numOut, input);
+
+        var plainPath = P("xd-off.onnx");
+        Persistence.ExportOnnx(model, plainPath);
+        Assert.False(File.Exists(plainPath + ".data"));
+
+        var pairPath = P("xd-on.onnx");
+        Persistence.ExportOnnx(model, pairPath, externalData: new OnnxExternalDataOptions { SizeThreshold = 0 });
+        Assert.True(File.Exists(pairPath + ".data"));
+        Assert.Equal(direct, ExecuteToBytes(Persistence.ImportOnnx(pairPath), numOut, input));
+
+        // Same model, same options, straight through the exporter: the facade adds nothing to the
+        // bytes. Same file name in a sibling directory — the side file's name is embedded in every
+        // location entry, so only equal names are comparable.
+        var facadeDir = Directory.CreateDirectory(P("xd-facade")).FullName;
+        var exporterDir = Directory.CreateDirectory(P("xd-exporter")).FullName;
+        var viaFacade = Path.Combine(facadeDir, "same.onnx");
+        var viaExporter = Path.Combine(exporterDir, "same.onnx");
+        Persistence.ExportOnnx(model, viaFacade, externalData: new OnnxExternalDataOptions { SizeThreshold = 0 });
+        OnnxModelExporter.SaveWithExternalData(
+            FastOnnxModelBuilder.BuildOnnxModel(model, OpSetVersion.OPS_21,
+                representativeForm: RepresentativeInputForm.VanillaMetadata),
+            viaExporter, new OnnxExternalDataOptions { SizeThreshold = 0 });
+        Assert.Equal(File.ReadAllBytes(viaExporter), File.ReadAllBytes(viaFacade));
+        Assert.Equal(File.ReadAllBytes(viaExporter + ".data"), File.ReadAllBytes(viaFacade + ".data"));
+
+        // The ceiling refusal applies to the self-contained form only.
+        Assert.Throws<ModelException>(
+            () => Persistence.ExportOnnx(model, P("ceiling.onnx"), OpSetVersion.OPS_21, null, 8));
+        Persistence.ExportOnnx(model, P("no-ceiling.onnx"), OpSetVersion.OPS_21,
+            new OnnxExternalDataOptions { SizeThreshold = 0 }, 8);
+        Assert.True(File.Exists(P("no-ceiling.onnx.data")));
     }
 
     [Fact]

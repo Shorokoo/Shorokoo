@@ -11,11 +11,12 @@ Related: [inference.md](inference.md) · [core-types.md](core-types.md) · [skpt
 - `Persistence.ExportOnnx(graph, path)` is the one call from a concrete model to a
   self-contained `.onnx`; there is no `graph.ToOnnxFile(path)` instance method. Drop to
   `FastOnnxModelBuilder.BuildOnnxModel` + `OnnxModelExporter` when you need the
-  `ModelProto` in between — to set the builder's options, to export with external data,
-  or to write a proto you built or imported yourself.
+  `ModelProto` in between — to set the builder's options, or to write a proto you built
+  or imported yourself.
 - Models larger than protobuf's 2 GB message ceiling are handled with the standard
-  ONNX **external data** mechanism: `OnnxModelExporter.SaveWithExternalData` on
-  export, and transparent side-file loading on import.
+  ONNX **external data** mechanism: pass `externalData:` to `ExportOnnx` (or call
+  `OnnxModelExporter.SaveWithExternalData` at the proto level) on export, and
+  transparent side-file loading on import.
 - Pretrained weights are loaded from `.safetensors` (and compressed `.zsafetensor`).
 - Every save API is **atomic** (staged beside the target and committed by rename), so an
   interrupted write never damages the file already at that path and you never need a
@@ -59,14 +60,19 @@ initializer bytes live in a side file next to the model, and each externalized
 entries. Shorokoo supports it on both paths:
 
 ```csharp
-using Shorokoo.Onnx;   // OnnxModelExporter, OnnxExternalDataOptions
+using Shorokoo.Onnx;   // OnnxExternalDataOptions, OnnxModelExporter
 
-// Opt-in export mode: initializers of at least SizeThreshold bytes go to
-// "model.onnx.data"; smaller ones stay inline. The .onnx + .onnx.data pair is
-// deterministic (byte-identical across runs for the same ModelProto).
+// From a concrete model: opt in by passing options. Initializers of at least
+// SizeThreshold bytes go to "model.onnx.data"; smaller ones stay inline. Omit
+// externalData (the default) for the self-contained form.
+Persistence.ExportOnnx(graph, "model.onnx", externalData: new OnnxExternalDataOptions());
+Persistence.ExportOnnx(graph, "model.onnx",
+    externalData: new OnnxExternalDataOptions { SizeThreshold = 1024, Alignment = 4096 });
+
+// The same thing one layer down, when you already hold a ModelProto. The
+// .onnx + .onnx.data pair is deterministic (byte-identical across runs for the
+// same ModelProto written to the same file name).
 OnnxModelExporter.SaveWithExternalData(model, "model.onnx");
-OnnxModelExporter.SaveWithExternalData(model, "model.onnx",
-    new OnnxExternalDataOptions { SizeThreshold = 1024, Alignment = 4096 });
 ```
 
 `SaveWithExternalData` applies to **concrete models only**: it externalizes the
@@ -80,6 +86,9 @@ parameters is refused up front (`XD008`) with the actual vs required kind named.
   initializer at or above the threshold, `SaveWithExternalData` writes no side file
   (removing a stale one from a previous save of the same path) and its output is
   identical to `Save`.
+- The side file's name is recorded in every externalized tensor's `location` entry, so
+  two exports of one model to different file names differ in those bytes — determinism is
+  per target name.
 - The exported pair is standard ONNX — stock onnxruntime loads it directly.
 - The passed `ModelProto` is left unmodified.
 - Both files are staged beside their targets and committed by rename, side file first, so
@@ -416,6 +425,9 @@ a native `.skpt`).
 // Export: concrete model → standard vanilla .onnx (loads in any ONNX runtime).
 Persistence.ExportOnnx(model, "model.onnx");
 
+// Past protobuf's 2 GB ceiling: large initializers to a "model.onnx.data" side file.
+Persistence.ExportOnnx(model, "model.onnx", externalData: new OnnxExternalDataOptions());
+
 // Import: foreign vanilla .onnx → native runnable ComputationGraph.
 ComputationGraph g = Persistence.ImportOnnx("foreign.onnx");
 ComputationGraph gRenamed = Persistence.ImportOnnx("foreign.onnx", scheme);
@@ -427,9 +439,12 @@ ComputationGraph landed = Persistence.ImportOnnxToCheckpoint("foreign.onnx", "mo
 - `ExportOnnx` requires a **concrete model** (`GraphKind.ConcreteModel`) and writes
   **vanilla ONNX** — every node a standard op or emitted function call — so the file
   loads in any conforming runtime. A graph carrying Shorokoo-internal ops is refused,
-  naming them. The write is atomic. (It is the `Persistence`-facade wrapper over
-  [`FastOnnxModelBuilder.BuildOnnxModel`](#export-to-onnx); use that directly when you
-  need the `ModelProto`.)
+  naming them. The write is atomic. Self-contained by default — a model over protobuf's
+  2 GB ceiling is refused with `XD007`; pass `externalData` to write the
+  [external-data pair](#large-models-external-data) instead, which lifts the ceiling and
+  is still standard ONNX. (It is the `Persistence`-facade wrapper over
+  [`FastOnnxModelBuilder.BuildOnnxModel`](#export-to-onnx) plus `OnnxModelExporter`; use
+  those directly when you need the `ModelProto` in between.)
 - `ImportOnnx` builds the graph through the existing ONNX reader, so it composes with
   ONNX **external data** (a `.data` side file resolves against the model file's
   directory, exactly as [`OnnxModelImporter`](#import-from-onnx)). At the boundary each

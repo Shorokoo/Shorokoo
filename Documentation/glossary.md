@@ -29,7 +29,7 @@
 | `Hyperparameter` | An optimizer hyperparameter's source: `Hyperparameter.Baked(v)` (a bare value or a `TensorData`), a `Schedule`, or `Hyperparameter.Runtime(shape)`; its `Kind` decides baked-vs-scheduled-vs-runtime wiring, and its dtype and rank are whatever the optimizer's `Scalar<T>` / `Vector<T>` / `Tensor<T>` declares. | `training.md` |
 | `Schedule` / `Schedules` | A `step → value` schedule (`Schedules.Cosine`, `OneCycle`, …) with fluent combinators (`WithWarmup`, `Then`, `Scale`, `Clamp`, `Shift`, `PerEpoch`). | `training.md` |
 | `IOptimizerHyperparameters` / `<Optimizer>Hyperparameters` | The named, defaulted hyperparameter set; source-generated per optimizer (e.g. `AdamWOptimizerHyperparameters`). | `training.md` |
-| autodiff / `[AutoDiff]` | Automatic gradient generation; per-op derivative rules. | `training.md` |
+| autodiff | Automatic gradient generation; per-op derivative rules. | `training.md` |
 | `SafeTensor` / `.safetensors` | Weight file format (PyTorch/HF-compatible). | `onnx-and-weights.md` |
 | `ModelParamList` | A named set of parameter values (e.g. loaded weights). | `onnx-and-weights.md`, `training.md` |
 | `NamedModelParam` / `TensorDataModelParam` | A named param value; the concrete wrapper around one `TensorData`. | `training.md` |

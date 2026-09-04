@@ -626,8 +626,16 @@ not as a recommended default. Porting from TensorFlow (`tf.nn.lrn`, half-width
 ### Attention / Transformer
 
 ```csharp
-// Scaled dot-product attention (no params): q/k/v are [N, H, L, d].
-Attention.ScaledDotProductAttention(query, key, value, causal: false, scale: null, additiveMask: null)
+// Scaled dot-product attention (no params): q/k/v must be rank-4 [N, H, L, d].
+// `scale` is `float?`: null (the default) means 1/sqrt(d), d = the last query dim.
+Attention.ScaledDotProductAttention(Tensor<float32> query, Tensor<float32> key,
+                                    Tensor<float32> value, bool causal = false,
+                                    float? scale = null,
+                                    Tensor<float32>? additiveMask = null)
+
+// The additive causal mask ScaledDotProductAttention uses when causal: true,
+// exposed on its own (no params): shape [Lq, Lk], 0 on/below the diagonal, -1e9 above.
+Attention.CausalMask(Scalar<int64> lq, Scalar<int64> lk)
 
 // Rotary positional embedding (RoPE; no params): rotates a [N, H, L, d] tensor
 // (d EVEN) by an angle proportional to sequence position. Apply to Q and K
@@ -648,6 +656,35 @@ TransformerEncoderLayer.Call(Scalar<int64> embedDim, Scalar<int64> numHeads,
 TransformerDecoderLayer.Call(Scalar<int64> embedDim, Scalar<int64> numHeads,
                              Scalar<int64> ffnDim, Scalar<bit> useBias, tgt, memory)
 ```
+
+`Attention.ScaledDotProductAttention` computes `softmax(QKᵀ·scale + mask)·V` and
+returns `[N, H, Lq, d]` (`d` from `value`). `query`/`key`/`value` must be
+**rank-4** — the last-two-dims transpose is a static perm `[0, 1, 3, 2]`, so an
+arbitrary-rank input is not accepted; `MultiHeadAttention` reshapes to that layout
+before calling. The three optional arguments:
+
+- **`scale`** is `float?`, **not** `float`. Left `null` (the default) the scale is
+  `1/sqrt(d)` with `d` the **last query dim, read in-graph** — so it follows a dynamic
+  head dim. Passing a value bakes that number in as a constant multiplier instead, for
+  the models whose scaling deviates from `1/sqrt(d)`.
+- **`causal`** is a plain C# `bool` decided when you build the graph (not a
+  `Scalar<bit>`): `true` adds `CausalMask(Lq, Lk)` to the scores before the softmax, so
+  position *i* attends only to *j ≤ i*. `Lq`/`Lk` come from the query's and key's own
+  axis -2, in-graph.
+- **`additiveMask`** is an optional pre-built additive mask, broadcastable to the
+  `[…, Lq, Lk]` scores and added **on top of** the causal one (padding masks, custom
+  attention patterns). Use it when the mask must be decided at *run* time:
+  `MultiHeadAttention` gates a causal mask by its runtime `Scalar<bit> causal` this way,
+  since C# cannot branch on a graph value.
+
+`Attention.CausalMask(lq, lk)` is that mask on its own — a `[Lq, Lk]` `float32` tensor,
+`0` where the key position is on or before the query position (`col ≤ row`) and `-1e9`
+above the diagonal. Both lengths are graph scalars (`Scalar<int64>`, e.g.
+`query.DimTensor(-2)`), so the mask sizes itself from the actual sequence lengths. It is
+built from `Range` + comparison + `Where` on constants — no `Trilu`, and no gradient
+flows through it. Reach for it when you assemble attention yourself, or when the mask
+has to be gated on a runtime flag: `causal.IfElse(Attention.CausalMask(lq, lk),
+TensorFill([lq, lk], 0f))`, then hand the result to `additiveMask`.
 
 All built from autodiff-supported primitives (MatMul / Softmax / Transpose /
 Where), so they train end-to-end.

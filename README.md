@@ -81,7 +81,7 @@ Console.WriteLine($"Final loss: {result.EpochLosses[^1]:F4}");
 
 ### 3. Run
 
-Save the checkpoint, then bind the trained weights into a concrete model with one call and execute. `ToInferenceModel()` reads the model graph and sample-input shapes straight off the checkpoint's rig — it inlines all sub-modules and substitutes the trained parameter values, with nothing to re-supply.
+Save the checkpoint, then bind the trained weights into a concrete model with one call and execute. `ToInferenceModel()` binds the checkpoint's trained parameters and module-owned state into the concrete architecture the checkpoint's rig already holds — concretized once when the rig was built and never re-concretized, so there are no sample inputs to re-supply.
 
 ```csharp
 result.FinalCheckpoint.Save("my-model.safetensors");   // persist trained weights

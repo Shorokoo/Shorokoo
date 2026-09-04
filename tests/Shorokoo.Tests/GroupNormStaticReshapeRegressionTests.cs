@@ -40,7 +40,7 @@ public partial class GroupNormKeepDimsReshapeRepro
     public static Scalar<bit> Inline(Tensor<float32> x)   // [2, 4, 3, 3]
     {
         var y = GroupNorm.Call(Scalar(2L), Scalar(false), Scalar(1e-5f), x);
-        var flat = y.Reshape([Scalar(-1L)], keepDims: [0]); // shape input [0, -1] → [2, 36]
+        var flat = y.Reshape([Scalar(-1L)], keepAxes: [0]); // shape input [0, -1] → [2, 36]
         return SelfCheck.Nan(flat) < Scalar(1f);            // finite output => true; self-checking
     }
 }

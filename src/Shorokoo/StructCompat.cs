@@ -23,7 +23,7 @@ namespace Shorokoo
         // Vector declares its own Reduce(ReduceKind) -> Scalar, which made the op-generator skip ALL
         // Reduce overloads; restore Tensor's axis/keepDims overload (with inheritance both coexisted).
         // The no-arg call still binds to Vector.Reduce(ReduceKind) (exact arity wins).
-        public Tensor<T> Reduce(ReduceKind reduceKind, Vector<int64>? axes = null, bool keepDims = true)
+        public Tensor<T> Reduce(ReduceKind reduceKind, Vector<int64>? axes = null, bool keepDims = false)
             => ((Tensor<T>)this).Reduce(reduceKind, axes, keepDims);
 
         public Tensor<T> Pow<T1>(Scalar<T1> power) where T1 : IVarType => ((Tensor<T>)this).Pow<T1>((Tensor<T1>)power);

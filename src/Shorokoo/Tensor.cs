@@ -422,12 +422,12 @@ namespace Shorokoo
         public Scalar<int64> DimTensor(long axis)
             => this.ShapeTensor()[axis];
 
-        /// <summary>Gathers entries along <paramref name="axis"/> using the given indices (ONNX Gather).</summary>
-        public Tensor<T> Gather(Tensor<int64> indices, long? axis)
+        /// <summary>Gathers entries along <paramref name="axis"/> - axis 0 when null - using the given indices (ONNX Gather).</summary>
+        public Tensor<T> Gather(Tensor<int64> indices, long? axis = null)
             => OnnxOp.Gather(this, indices, axis);
 
-        /// <summary>Gathers slices using multi-dimensional indices (ONNX GatherND).</summary>
-        public Tensor<T> GatherND(Tensor<int64> indices, long? batchDims)
+        /// <summary>Gathers slices using multi-dimensional indices (ONNX GatherND); <paramref name="batchDims"/> is 0 when null.</summary>
+        public Tensor<T> GatherND(Tensor<int64> indices, long? batchDims = null)
             => OnnxOp.GatherND(this, indices, batchDims);
 
         /// <summary>Casts the element type to <typeparamref name="V"/>; returns this tensor unchanged when the types already match.</summary>
@@ -446,8 +446,8 @@ namespace Shorokoo
             return OnnxOp.ConstantOfShape(shape, val);
         }
         
-        /// <summary>Reduction (e.g. sum, mean, max) over <paramref name="axes"/> - all axes when null - keeping reduced dimensions by default.</summary>
-        public Tensor<T> Reduce(ReduceKind reduceKind, Vector<int64>? axes = null, bool keepDims = true)
+        /// <summary>Reduction (e.g. sum, mean, max) over <paramref name="axes"/> - all axes when null - dropping the reduced dimensions unless <paramref name="keepDims"/> is set, as in PyTorch and NumPy.</summary>
+        public Tensor<T> Reduce(ReduceKind reduceKind, Vector<int64>? axes = null, bool keepDims = false)
             => NN.Reduce(reduceKind, this, axes, keepDims, false);
 
         /// <summary>Tiles the tensor by repeating it <paramref name="repeats"/> times along each axis.</summary>
@@ -634,13 +634,13 @@ namespace Shorokoo
 
         /// <summary>Reshapes to <paramref name="newShape"/> (one entry may be -1 to infer that dimension;
         /// a 0 entry is a literal zero-sized dimension, as in PyTorch). To copy dimensions from the input
-        /// instead, list their output positions in <paramref name="keepDims"/> and omit them from
-        /// <paramref name="newShape"/>: <c>x.Reshape([Scalar(-1L)], keepDims: [0])</c> keeps dimension 0
+        /// instead, list their output positions in <paramref name="keepAxes"/> and omit them from
+        /// <paramref name="newShape"/>: <c>x.Reshape([Scalar(-1L)], keepAxes: [0])</c> keeps dimension 0
         /// and flattens the rest.</summary>
-        public Tensor<T> Reshape(Vector<int64> newShape, int[]? keepDims = null)
-            => keepDims is null
+        public Tensor<T> Reshape(Vector<int64> newShape, int[]? keepAxes = null)
+            => keepAxes is null
                 ? OnnxOp.Reshape(this, newShape, allowZero: true)
-                : OnnxOp.Reshape(this, ShapeUtils.InsertKeepDimZeros(newShape, keepDims), allowZero: false);
+                : OnnxOp.Reshape(this, ShapeUtils.InsertKeepAxisZeros(newShape, keepAxes), allowZero: false);
 
         /// <summary>Permutes the dimensions; with no arguments, reverses them.</summary>
         public Tensor<T> Transpose(params long[] newDims)

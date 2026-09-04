@@ -65,7 +65,14 @@ namespace Shorokoo.Tests.Modules
                 // Integer mean truncates: (1-2+3)/3 = 0, (4+5-6)/3 = 1.
                 IntMismatch(NN.Reduce(ReduceKind.Mean, xi, Vector(1L), keepDims: false, noOp: null), Vector(0L, 1L)) +
                 FloatMismatch(NN.Reduce(ReduceKind.Prod, xf, Vector(1L), keepDims: false, noOp: null), Vector(6f, 120f)) +
-                FloatMismatch(NN.Reduce(ReduceKind.SumSquare, xf, Vector(1L), keepDims: false, noOp: null), Vector(14f, 77f));
+                FloatMismatch(NN.Reduce(ReduceKind.SumSquare, xf, Vector(1L), keepDims: false, noOp: null), Vector(14f, 77f)) +
+                // The fluent Reduce drops the reduced dims by default (PyTorch/NumPy), not ONNX's keepdims=1.
+                ShapeMismatch(xf.Reduce(ReduceKind.Sum, Vector(1L)), Vector(2L)) +
+                // reduce-all yields rank 0: its shape vector is empty, so the shape OF that shape is [0].
+                IntMismatch1(xf.Reduce(ReduceKind.Sum).TShape.TShape.Reduce(ReduceKind.Sum), 0L) +
+                FloatMismatch(xf.Reduce(ReduceKind.Sum, Vector(1L)), Vector(6f, 15f)) +
+                FloatMismatch(Flat(xf.Reduce(ReduceKind.Sum)), Vector(21f)) +
+                ShapeMismatch(xf.Reduce(ReduceKind.Sum, Vector(1L), keepDims: true), Vector(2L, 1L));
             return mismatch < Scalar(1L);
         }
 
@@ -104,7 +111,17 @@ namespace Shorokoo.Tests.Modules
         private static Tensor<int64> FlatI(Tensor<int64> t) => t.Reshape(Vector(-1L));
     }
 
-    /// <summary>Reshape (keepDims copy-dim positions, -1, literal 0 on an empty tensor), Flatten (negative axis,
+
+    /// <summary>A reduction over an EMPTY tensor is the reduction's identity element - sum 0.
+    /// ONNX Runtime computes it; the QuickExecutionEngine does not resolve the bit.</summary>
+    [Module]
+    public partial class QeeEmptyReduceIdentityCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> r)
+            => (r.Reshape(Vector(-1L)).Slice(Vector(0L), Vector(0L)).Reduce(ReduceKind.Sum) == Scalar(0f)).Scalar();
+    }
+
+    /// <summary>Reshape (keepAxes copy-dim positions, -1, literal 0 on an empty tensor), Flatten (negative axis,
     /// axis 0, value pass-through), Squeeze (axes input incl. negative + absent), Unsqueeze
     /// (negative axes), Transpose (explicit perm + default reverse, with values), Identity,
     /// Shape (start/end incl. negative + out-of-range clamping), Size.
@@ -124,16 +141,16 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(r.Reshape(Vector(4L, 6L)), Vector(4L, 6L)) +
                 FloatMismatch(Flat(r.Reshape(Vector(4L, 6L))), flat24) +
                 ShapeMismatch(r.Reshape(Vector(2L, -1L)), Vector(2L, 12L)) +
-                // keepDims positions copy the input dim (lowered to a 0 entry with allowzero unset).
-                ShapeMismatch(r.Reshape(Vector(-1L), keepDims: [0]), Vector(2L, 12L)) +
-                FloatMismatch(Flat(r.Reshape(Vector(-1L), keepDims: [0])), flat24) +
-                // keepDims at a middle position, alongside explicit and inferred dims.
-                ShapeMismatch(r.Reshape(Vector(2L, -1L), keepDims: [1]), Vector(2L, 3L, 4L)) +
-                // multiple keepDims positions.
-                ShapeMismatch(r.Reshape(Vector(4L), keepDims: [0, 1]), Vector(2L, 3L, 4L)) +
-                // keepDims: [] is plain ONNX allowzero=0 with the shape unchanged.
-                ShapeMismatch(r.Reshape(Vector(6L, 4L), keepDims: []), Vector(6L, 4L)) +
-                // without keepDims a 0 is a real zero dim (allowzero=1).
+                // keepAxes positions copy the input dim (lowered to a 0 entry with allowzero unset).
+                ShapeMismatch(r.Reshape(Vector(-1L), keepAxes: [0]), Vector(2L, 12L)) +
+                FloatMismatch(Flat(r.Reshape(Vector(-1L), keepAxes: [0])), flat24) +
+                // keepAxes at a middle position, alongside explicit and inferred dims.
+                ShapeMismatch(r.Reshape(Vector(2L, -1L), keepAxes: [1]), Vector(2L, 3L, 4L)) +
+                // multiple keepAxes positions.
+                ShapeMismatch(r.Reshape(Vector(4L), keepAxes: [0, 1]), Vector(2L, 3L, 4L)) +
+                // keepAxes: [] is plain ONNX allowzero=0 with the shape unchanged.
+                ShapeMismatch(r.Reshape(Vector(6L, 4L), keepAxes: []), Vector(6L, 4L)) +
+                // without keepAxes a 0 is a real zero dim (allowzero=1).
                 ShapeMismatch(empty0.Reshape(Vector(0L, 4L)), Vector(0L, 4L)) +
                 ShapeMismatch((Tensor<float32>)OnnxOp.Reshape(empty0, Vector(0L, 4L), allowZero: true), Vector(0L, 4L)) +
                 ShapeMismatch(r.Flatten(2), Vector(6L, 4L)) +
@@ -199,6 +216,9 @@ namespace Shorokoo.Tests.Modules
                 FloatMismatch(Flat((Tensor<float32>)OnnxOp.GatherElements(
                     d22, Vector(-1L, 0L).Reshape(Vector(1L, 2L)), 0)), Vector(3f, 2f)) +
                 FloatMismatch(d22.GatherND(Vector(0L, 0L, 1L, 1L).Reshape(Vector(2L, 2L)), 0), Vector(1f, 4f)) +
+                // Gather/GatherND default their axis/batchDims to the ONNX default of 0.
+                FloatMismatch(Flat(g.Gather(Vector(2L, 0L))), Vector(20f, 21f, 22f, 23f, 0f, 1f, 2f, 3f)) +
+                FloatMismatch(d22.GatherND(Vector(0L, 0L, 1L, 1L).Reshape(Vector(2L, 2L))), Vector(1f, 4f)) +
                 // batch_dims=1: per-batch row select → [[2,3],[4,5]].
                 FloatMismatch(Flat(b3.GatherND(Vector(1L, 0L).Reshape(Vector(2L, 1L)), 1)), Vector(2f, 3f, 4f, 5f)) +
                 ShapeMismatch(g.Compress(Vector(false, true, true), 0), Vector(2L, 4L)) +

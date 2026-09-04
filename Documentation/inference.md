@@ -206,7 +206,11 @@ directly. They return `NamedModelParam[]`; read each output with
 - Add exactly one backend package as a dependency: `Shorokoo.LinuxCPU`,
   `Shorokoo.LinuxGPU`, `Shorokoo.WinCPU`, or `Shorokoo.WinGPU`. Each brings the native
   ONNX Runtime (CPU- or CUDA-flavored) for its platform.
-- Recommended: set the backend explicitly at startup, before the first inference call:
+- With exactly one backend package referenced you normally need no setup at all:
+  auto-discovery (below) finds it on the first inference call. Set the backend
+  explicitly when several backends are deployed side by side and you want to override
+  the choice, when you want a startup failure instead of one on the first inference
+  call, or when the backend DLL is not deployed next to `Shorokoo.dll`:
 
   ```csharp
   using Shorokoo.Core.Inference.Abstractions;
@@ -215,12 +219,56 @@ directly. They return `NamedModelParam[]`; read each output with
   InferenceBackend.Factory = new LinuxCpuInferenceFactory();
   ```
 
-- If you don't set one, the first inference call auto-discovers a backend by looking
-  **only** in the folder next to `Shorokoo.dll` for the known `Shorokoo.{Platform}`
-  DLLs. When both a CPU and a GPU backend for the current OS are deployed there, the
-  GPU one is used if a CUDA 12.x runtime is present, otherwise the CPU one. On a Linux
-  sandbox that ships only `Shorokoo.LinuxCPU`, discovery picks it with no setup.
-- Only one backend is live per process. To compare CPU vs GPU, use separate processes.
+- Only one backend is live per process. The first factory resolved is cached and reused
+  for every later call; assigning `Factory` afterwards swaps the cached factory but does
+  not unload a native ONNX Runtime already bound, so to compare CPU vs GPU use separate
+  processes.
+
+### The factory types
+
+Each backend package contains exactly one factory, in a namespace equal to the package
+id. **The type name spells the device `Cpu`/`Gpu`, while the package, namespace and
+assembly spell it `CPU`/`GPU`** — so `Shorokoo.WinGPU` contains
+`WinGpuInferenceFactory`, *not* `WinGPUInferenceFactory`:
+
+| package (= namespace) | factory type | fully qualified |
+|---|---|---|
+| `Shorokoo.LinuxCPU` | `LinuxCpuInferenceFactory` | `Shorokoo.LinuxCPU.LinuxCpuInferenceFactory` |
+| `Shorokoo.LinuxGPU` | `LinuxGpuInferenceFactory` | `Shorokoo.LinuxGPU.LinuxGpuInferenceFactory` |
+| `Shorokoo.WinCPU` | `WinCpuInferenceFactory` | `Shorokoo.WinCPU.WinCpuInferenceFactory` |
+| `Shorokoo.WinGPU` | `WinGpuInferenceFactory` | `Shorokoo.WinGPU.WinGpuInferenceFactory` |
+
+All four take a parameterless constructor and differ only in the execution provider
+they configure: the GPU ones append the CUDA provider on device 0, the CPU ones leave
+ORT on its default provider.
+
+### Auto-discovery
+
+If you never assign `InferenceBackend.Factory`, the first read of it resolves a backend
+once and caches the result:
+
+1. If one of the four backend assemblies is **already loaded** in the process, its
+   factory is used — this avoids pulling a second native in alongside one already bound.
+2. Otherwise the folder next to `Shorokoo.dll` is probed for the known
+   `Shorokoo.{Platform}.dll` files. Nothing else is searched: no other directory, no
+   NuGet cache, and no assembly whose name is not one of those four.
+
+Only backends matching the current OS are candidates. When both the CPU and the GPU
+backend for that OS are deployed, the GPU one is used if a CUDA 12.x runtime
+(`libcudart.so.12` on Linux, `cudart64_12.dll` on Windows) can be loaded, otherwise the
+CPU one. A single candidate is taken as-is — a lone GPU backend is chosen even when no
+CUDA runtime is present.
+
+Referencing a backend package is enough for step 2: the package copies its DLL to your
+output folder, so discovery finds it whether or not your code mentions the factory type.
+On a Linux sandbox that ships only `Shorokoo.LinuxCPU`, discovery picks it with no setup.
+
+If no backend is found, the first inference call throws `InvalidOperationException`:
+
+> `No Shorokoo inference backend is set and none was found in '<folder>'. Set one at
+> startup -- e.g. InferenceBackend.Factory = new LinuxCpuInferenceFactory(); (or the
+> factory from whichever Shorokoo.{WinCPU,WinGPU,LinuxCPU,LinuxGPU} package you
+> reference) -- or add such a package as a dependency.`
 
 ## Debugging engine (no OnnxRuntime)
 

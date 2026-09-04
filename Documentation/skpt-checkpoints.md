@@ -37,9 +37,13 @@ Related: [onnx-and-weights.md](onnx-and-weights.md) · [training.md](training.md
   state, optimizer state and the run counters (global step, epoch, batch index) of a
   training run — with every state tensor addressed individually through the manifest's
   tensor mappings, alongside the concrete inference model, so a run
-  resumes across process restarts and the same file also loads as an inference model. See
-  [Training checkpoints](#training-checkpoints). Precompiled artifacts and the full
-  training-rig (constituent models, schedules) are future extensions of the same container.
+  resumes across process restarts and the same file also loads as an inference model. Every
+  training `.skpt` also carries the **rig's constituents** — the concrete architecture, the loss
+  and optimizer graphs, the composed scheduler when any hyperparameter is scheduled, the
+  hyperparameter bindings and the RNG config — so `TrainingRig.Load(path)` rebuilds the whole
+  rig, and its resumed checkpoint, from the file alone. See
+  [Training checkpoints](#training-checkpoints). Precompiled artifacts are a future extension
+  of the same container.
 - A checkpoint can carry a **host user-data bag** — an arbitrary JSON object you attach
   at save and read back verbatim on load (e.g. your data-pipeline state), stored as
   `data/user-data.json` and never interpreted by Shorokoo. See
@@ -180,6 +184,22 @@ var resumed = rig.LoadCheckpointFromSkpt("run.skpt");
 var next    = rig.TrainStep(resumed, inputBatch, targetBatch);   // trainstep compiled once internally
 ```
 
+Or resume from the file **alone**, with no model/loss/optimizer graphs in hand — the static
+`TrainingRig.Load` rebuilds the rig from the constituents the checkpoint carries and returns it
+together with the checkpoint loaded against it:
+
+```csharp
+var (rig, resumed) = TrainingRig.Load("run.skpt");   // resumed.Rig is that rig
+var next = rig.TrainStep(resumed, inputBatch, targetBatch);
+```
+
+The rebuilt rig re-derives its trainstep exactly as a fresh build does, so a resumed step
+continues the saved trajectory. Its two optional arguments are the compute contexts that seed the
+rebuilt rig (`TrainingRig.Load(path, mergeContext, runtimeContext)`, each defaulting to
+`ComputeContext.Default`) — contexts are never persisted, so a reloaded run gets fresh ones.
+Handed a flat safetensors checkpoint — which stores training state only, with no constituents to
+rebuild from — it fails loudly, pointing at `rig.LoadCheckpoint`.
+
 To compose the container's features, use the builder form:
 
 ```csharp
@@ -214,6 +234,14 @@ What the file carries:
   training loop advances them (`TrainStep` advances the step and carries epoch/batch through
   unchanged), and they are persisted so a resumed run restores its position. A checkpoint whose
   epoch/batch position is genuinely unknown omits them and reloads them as `null`.
+- **The rig's constituents** — the concrete architecture, the loss graph, the optimizer graph
+  and, when any hyperparameter is scheduled, one composed scheduler model — as ordinary `models/`
+  entries (`models/model-arch.srk`, `models/loss.srk`, `models/optimizer.srk`,
+  `models/scheduler.srk`), with the non-graph part of the recipe recorded in the manifest's
+  `training.rig` block: the hyperparameter bindings, in the optimizer's declared order, and the
+  RNG config the rig was built with. The model-input shapes ride on the architecture itself, not
+  the manifest. This is what `TrainingRig.Load` rebuilds a rig from, and every training `.skpt`
+  this version writes carries it.
 
 Round-trip is exact: reloaded trainable params, model state and optimizer state are
 bit-identical, the counters are preserved, and a resumed `TrainStep` reproduces the pre-save
@@ -484,7 +512,10 @@ model.skpt
   (`data/trainable.safetensors`, and, when non-empty,
   `data/model_state.safetensors` and `data/optimizer_state.safetensors`) plus a
   `training` block in the manifest (the run counters: step, epoch, batch index); every
-  state tensor is wired individually through `tensorMappings`, never routed by entry.
+  state tensor is wired individually through `tensorMappings`, never routed by entry. It
+  also adds the rig's constituents as further `models/` entries — `models/model-arch.srk`,
+  `models/loss.srk`, `models/optimizer.srk`, and `models/scheduler.srk` when any
+  hyperparameter is scheduled — described by the `training` block's `rig` record.
 - The trees are optional and the layout is extensible: future versions add more
   `models/` entries, more `data/` kinds, `precompiledmodels/`, and `sample_inputs/`
   without a container change.
@@ -606,8 +637,9 @@ Rules:
 - Data entries are bounded by the in-memory safetensors path — checkpoints with ≥ 2 GB
   of tensor data in a single entry are not yet supported (compressed or not; the bound
   applies to both the stored and the decompressed bytes).
-- A [training checkpoint](#training-checkpoints) stores the trainable weights, model
-  state, optimizer state and global step of a run. The full training **rig** — the
-  constituent model/loss/optimizer/scheduler graphs and their schedules — is not yet
-  carried; resume rebuilds the rig from the same graphs, then loads the file with
-  `rig.LoadCheckpointFromSkpt`.
+- A [training checkpoint](#training-checkpoints) carries the rig's constituent
+  model/loss/optimizer/scheduler graphs alongside the run's state, so `TrainingRig.Load`
+  resumes from the file alone. The flat safetensors format cannot carry constituents:
+  resuming from one means rebuilding the rig from the same graphs, then loading the file
+  with `rig.LoadCheckpoint`. Precompiled artifacts are still a future extension of the
+  container.

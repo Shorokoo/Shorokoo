@@ -7,12 +7,18 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
 
 - `OnnxEngine.Eval(...)` is the simplest way to get values. It builds an ONNX model
   from the graph, runs it once via OnnxRuntime, and returns `TensorData`.
-  - `TensorData Eval(IValue output)`
-  - `TensorData[] Eval(IValue[] outputs)`
-  - `TensorData[] Eval(IValue a, IValue b, params IValue[] more)`
-  - `Eval` runs a graph of plain ops. A `[Module]` output may still carry an
-    un-lowered module-invoke node; if `Eval` throws
-    `No Op registered for ShrkCreateModule`, concretize it first — see
+  - `TensorData Eval(Variable output)`
+  - `TensorData[] Eval(Variable[] outputs)`
+  - `TensorData[] Eval(Variable output1, Variable output2, params Variable[] outputs)`
+  - The parameter type is `Variable` (namespace `Shorokoo.Core`), the graph-side
+    value behind every handle. You rarely have to name it: `Tensor<T>`,
+    `Vector<T>` and `Scalar<T>` all convert to `Variable` implicitly, so an op
+    result goes straight in. But `Variable` does **not** implement `IValue`, so a
+    handle you are holding as `IValue` (see [core-types.md](core-types.md)) does
+    not compile — pass `handle.ToVariable()`.
+  - `Eval` runs a graph of plain ops only. Nothing on its path lowers a
+    module-invoke node, so a `[Module]` output handed to it fails in OnnxRuntime
+    with `No Op registered for ShrkCreateModule`; concretize it first — see
     [Running a `[Module]`](#running-a-module).
 - `OnnxEngine.Eval` rebuilds and recreates an ORT session on every call. For repeated
   inference, compile once with `ComputeContext` (below).
@@ -22,23 +28,42 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
 
 ## Workflow: one-shot evaluation
 
-(`ResNet50` here is from [`samples/RetinaNet`](../samples/RetinaNet) — it is a
-sample built on Shorokoo, not part of the packages; substitute any `[Module]`.)
+`Eval` takes the output values of a graph of plain ops and runs that graph:
 
 ```csharp
 using Shorokoo;
 using static Shorokoo.Globals;
+using static Shorokoo.NN;
 
-var input  = TensorFill(Vector(1L, 3L, 224L, 224L), TensorData([1], 0.1f));
-var logits = ResNet50.Call(
-    numClasses: Scalar(1000L), bnMomentum: Scalar(0.9f), bnEps: Scalar(1e-5f),
-    includeTop: Scalar(true), applySoftmax: Scalar(true), inputs: input);
+var input = TensorFill(Vector(1L, 3L, 224L, 224L), TensorData([1], 0.1f));
+var w     = RandomNormal(Vector(64L, 3L, 7L, 7L));
+var b     = VectorFill(64L, 0f);
 
-TensorData result = OnnxEngine.Eval(logits);
+var features = Conv(input, w, b, AutoPad.NotSet,
+                    dilations: [1L, 1L], group: 1L,
+                    kernelShape: [7L, 7L], pads: [3L, 3L, 3L, 3L],
+                    strides: [2L, 2L]).Relu();
+
+TensorData result = OnnxEngine.Eval(features);
 
 // Read the numbers out (see core-types.md):
 ReadOnlySpan<float> values = ((TensorData<float32>)result).AccessMemory();
 ```
+
+What `Eval` accepts is the trap here:
+
+- **Op results, yes.** Anything implicitly convertible to `Variable` —
+  `Tensor<T>`, `Vector<T>`, `Scalar<T>` — which is what every op returns.
+- **An `IValue`-typed handle, no.** `Variable` does not implement `IValue`, so
+  `Eval(handle)` does not compile for a variable declared `IValue`; write
+  `Eval(handle.ToVariable())`.
+- **A `[Module]`'s output, no.** `Eval` builds and runs the graph exactly as
+  handed to it, so a value coming out of `ResNet50.Call(...)` still carries its
+  un-lowered module-invoke node when it reaches OnnxRuntime, which rejects the
+  model with `No Op registered for ShrkCreateModule`. Lower the module's
+  `ComputationGraph` first — see [Running a `[Module]`](#running-a-module).
+  (`ResNet50` there is from [`samples/RetinaNet`](../samples/RetinaNet) — a
+  sample built on Shorokoo, not part of the packages.)
 
 Build the input from a real array (not just a constant fill) with the `params`
 overload — the first arg is the shape, the rest are the flat values:
@@ -112,7 +137,10 @@ through copies and `.srk` save/load). The steps check it up front:
 required kind in their error when handed the wrong stage — so a mis-ordered
 pipeline fails immediately with a clear message instead of deep inside execution.
 Execution (`ComputeContext.Execute`/`Run`/`Compile` and `QuickExecutionEngine`)
-likewise refuses a module-kind graph up front with the same lowering hint.
+likewise refuses a module-kind graph up front with the same lowering hint. `Eval`
+is the exception: it takes output values rather than a `ComputationGraph`, so there
+is no `Kind` for it to check and a module-invoke node surfaces as the raw
+OnnxRuntime `ShrkCreateModule` error above instead of a lowering hint.
 `ComputationGraph`s are **readonly**: operations that used to modify a graph in
 place return a new graph instead (e.g. `WithRngConfig`), so a graph's `Kind` can
 never be invalidated behind your back.
@@ -190,16 +218,24 @@ usually not what you want.
 
 ```csharp
 var ctx      = new ComputeContext();
-var compiled = ctx.Compile(graph);                 // graph: ComputationGraph
-var r1 = compiled.Execute(inputData1);             // params IData[]
+var compiled = ctx.Compile(graph);                 // graph: a concretized ComputationGraph
+var r1 = compiled.Execute(inputData1);             // params IData[] — the data goes here
 var r2 = compiled.Execute(inputData2);             // reuses the session
 ```
 
-`ComputeContext` also offers `Eval`, `Execute(graph, inputs)`, `Run(graph, params)`,
-and `ExecuteWithState(...)` (for models that carry state). `Execute`/`Compile` take
-`params IData[]` inputs; `TensorData` implements `IData`, so pass `TensorData` values
-directly. They return `NamedModelParam[]`; read each output with
-`namedModelParam.ToTensorData()` then `AccessMemory()`.
+`Compile(ComputationGraph graph)` takes the graph and nothing else — the data goes to
+the `CompiledGraph` it returns, whose `Execute(params IData[] inputs)` is the call you
+repeat. `ComputeContext` also offers `Eval(...)` (the `OnnxEngine.Eval` overloads,
+plus `Eval<T>(Tensor<T>)` returning a typed `TensorData<T>`),
+`Execute(ComputationGraph graph, params IData[] inputs)`,
+`Run(ComputationGraph graph, params NamedModelParam[] inputs)`, and
+`ExecuteWithState(...)` (for models that carry state). Wherever `IData` is asked for,
+`TensorData` implements it, so pass `TensorData` values directly. `Execute`, `Run` and
+`CompiledGraph.Execute` return `NamedModelParam[]`; read each output with
+`namedModelParam.ToTensorData()` then `AccessMemory()`. `ExecuteWithState` returns
+`(NamedModelParam[] regularOutputs, ComputationGraph updatedGraph)` — feed the updated
+graph to the next call. `Eval` is the exception: it returns `TensorData` (or
+`TensorData[]`) directly.
 
 ## Backend selection
 

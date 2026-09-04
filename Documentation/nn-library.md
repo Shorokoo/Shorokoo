@@ -62,14 +62,18 @@ like `Zeros.Init([outFeatures])` or `KaimingUniform.Init([outC, inC, k, k])`.
   the half-open `[low, high)` and inherit the guarantees in
   [uniform-draws.md](uniform-draws.md).
 - **The normal initializers all share one draw.** `Normal`, `NormalDist`, `XavierNormal`,
-  `KaimingNormal`, `XavierNormalGain`, `KaimingNormalGain` and `LeCunNormal` each hand their
-  own standard deviation to the same N(mean, scale) draw, so all of them inherit its bound that
-  no drawn magnitude exceeds `8·scale`, which bounds the largest weight they can produce. The
-  bit-exactness guarantee in [normal-draws.md](normal-draws.md) covers the draw itself; the
-  fan-scaled initializers build their standard deviation in-graph with `Sqrt`, whose accuracy
-  ONNX does not specify, so their final values can differ in the last ulp between providers. Two draw from it but
-  do not inherit that bound: `TruncatedNormal` clamps to `[−2, 2]`, which is tighter, and
-  `Orthogonal` transforms its Gaussian through Newton–Schulz iterations.
+  `KaimingNormal`, `XavierNormalGain`, `KaimingNormalGain` and `LeCunNormal` all draw the same
+  standard N(0, 1). Unlike the uniform ones, none of them hands its standard deviation to the
+  draw: the std is applied afterwards, as an ordinary `float32` multiply in the graph
+  (`Normal` is the bare draw, and `NormalDist` adds its `mean` after the multiply). Scaling
+  carries the draw's bound with it — no drawn magnitude exceeds `8` — so none of them can
+  produce a weight past `8·std` (`mean ± 8·std` for `NormalDist`). The bit-exactness guarantee
+  in [normal-draws.md](normal-draws.md) covers the draw itself; the scaling is ordinary
+  `float32` arithmetic, and the fan-scaled initializers build their standard deviation in-graph
+  with `Sqrt`, whose accuracy ONNX does not specify, so their final values can differ in the
+  last ulp between providers. Two draw from it but do not inherit that bound:
+  `TruncatedNormal` clamps to `[−2, 2]`, which is tighter, and `Orthogonal` transforms its
+  Gaussian through Newton–Schulz iterations.
 - **Fan-in/fan-out** are computed in-graph from the shape vector:
   `fanIn = prod(shape) / shape[0]`, `fanOut = prod(shape) / shape[1]` — the
   PyTorch convention for Linear `[out, in]` and Conv `[outC, inC/g, k...]`
@@ -79,8 +83,14 @@ like `Zeros.Init([outFeatures])` or `KaimingUniform.Init([outC, inC, k, k])`.
 ## Layers (`Shorokoo.Modules.Layers`)
 
 Layer hyperparameters are `[Hyper]` graph scalars; pass them as `Scalar(...)`
-values. Signatures below are the `Inline` shapes (`Call` takes the same
-arguments).
+values. Signatures below are the generated `Call` shapes — **hyperparameters
+first, tensor inputs last**. `Inline` takes the same parameters in the opposite
+grouping — **tensor inputs first, hyperparameters last** — because that is the
+order a `[Module]`'s `Inline` must declare them in; so the two are not
+interchangeable argument-for-argument:
+`Linear.Call(outFeatures, useBias, x)` is `Linear.Inline(x, outFeatures, useBias)`.
+The plain-C# static helpers (`Pooling`, `Convolution`, `Recurrent`) are not
+`[Module]`s and keep the ordinary C# argument order shown at their entries.
 
 <a id="gated-parameters"></a>
 **An off toggle costs nothing.** Several layers gate a block of trainable
@@ -531,8 +541,17 @@ idiom as `LayerNorm`), so the `[N, C, L]` rank-3 form is supported.
   unaffected either way: they are model state, not trainable params.
 - The running mean/variance are module-owned state which `TrainingRig` threads as
   **model state** (`checkpoint.ModelState`), not trainable params.
-- **Defaults**: `momentum = 0.9`, `epsilon = 1e-5`, `affine = true`,
-  `trackRunningStats = true`; `training` is the mode switch (no default).
+- **Defaults**: only `momentum` (`0.9`) and `epsilon` (`1e-5`) carry a declared
+  `[Hyper]` default. `training`, `affine` and `trackRunningStats` are required
+  `[Hyper]` bits with none — `affine`/`trackRunningStats` are conceptually
+  defaulted **on** at call sites (PyTorch's `affine=True` /
+  `track_running_stats=True`) and `training` is the mode switch, but all three
+  are always written out. And because the defaulted pair is not *trailing* in
+  the generated `Call` (the tensor `x` comes last), `momentum`/`epsilon` get no
+  `= null` C# default either: they are nullable yet positionally required, with
+  `null` meaning "take the declared default" —
+  `BatchNorm.Call(null, null, training, Scalar(true), Scalar(true), x)` is the
+  all-defaults call.
 - **Port note**: Shorokoo `momentum` follows the ONNX/Keras sense (it weights the
   *retained* running stat), so to port a PyTorch `BatchNorm(momentum = p)` use
   Shorokoo `momentum = 1 − p` (the default `0.9` ≡ PyTorch `0.1`). The running
@@ -553,6 +572,9 @@ BatchNorm3d.Call(momentum, epsilon, training, x)  // [N, C, D, H, W] (NCDHW)
 The `1d/2d/3d` aliases are named entry points that forward to the generic
 `BatchNorm` with `affine` and `trackRunningStats` defaulted on (rank is still
 inferred at runtime). Use the generic `BatchNorm` for the full toggle surface.
+Their own `momentum`/`epsilon` are plain `[Hyper]`s — the generic's `0.9`/`1e-5`
+defaults are **not** inherited — so all three alias arguments are non-nullable
+and required.
 
 ### LayerNorm / RMSNorm / GroupNorm / InstanceNorm
 
@@ -590,6 +612,13 @@ spatial axis using the **biased** variance, and both expose an `affine` toggle
 the layer contributes no parameters of its own (see
 [An off toggle costs nothing](#gated-parameters)).
 
+- **No declared defaults here**: unlike `BatchNorm`, none of these four declares
+  a `[Hyper(<value>)]` default — `normalizedDims`, `numGroups`, `affine` and
+  `epsilon` are all plain `[Hyper]`s, hence non-nullable and always passed
+  explicitly. `epsilon` in particular has no `1e-5` fallback to omit into; spell
+  it out (`LayerNorm.Call(Scalar(1L), Scalar(1e-5f), x)`). The `InstanceNorm`
+  `1d/2d/3d` aliases are the same: their `epsilon` is required too — only
+  `affine` is supplied for you.
 - **`GroupNorm`**: `affine` is a required `[Hyper]` bit, conceptually defaulted
   **on** at call sites (PyTorch/Keras/Flax default `affine=True`); it is the
   leading bit after `numGroups` —

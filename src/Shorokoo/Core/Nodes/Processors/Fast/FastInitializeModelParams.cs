@@ -36,17 +36,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             ConcreteModelParamInfos? paramInfos = null)
         {
             // Keyed per-parameter initialization needs BOTH the config and the inventory:
-            // with a config but no inventory, every parameter would silently skip the keyed
-            // draw substitution and initialize through its un-keyed initializer function, whose
-            // in-body draws carry no ModelId and lower through the ONNX fallback to backend
-            // randomness — values not derived from the config at all, while the config
-            // looks engaged (its override validation below still runs).
+            // with a config but no inventory, every parameter would skip the keyed draw
+            // substitution and initialize through its un-keyed initializer function — values
+            // not derived from the config at all, while the config looks engaged (its override
+            // validation below still runs).
             if (rngConfig is not null && paramInfos is null)
                 throw new System.ArgumentNullException(nameof(paramInfos),
                     "FastInitializeModelParams: an RngConfig was supplied without the parameter " +
                     "inventory, but keyed per-parameter initialization needs both — without the " +
-                    "inventory every parameter would silently initialize un-keyed, from backend " +
-                    "randomness not derived from the config. Pass GetConcreteModelParamInfos() " +
+                    "inventory every parameter would initialize outside the keyed scheme, from " +
+                    "values not derived from the config. Pass GetConcreteModelParamInfos() " +
                     "of the same concrete architecture.");
 
             computeContext ??= ComputeContext.Default;

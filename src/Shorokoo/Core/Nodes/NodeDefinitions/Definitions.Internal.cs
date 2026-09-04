@@ -270,8 +270,9 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             // id-bearing feed is wired at concretization to its in-graph key-derivation chain
             // (a SHRK_RNG_SPLIT chain rooted at the RngSeed parameter — see
             // FastWireRngKeyDerivation) via the "key" input and lowers to the keyed
-            // deterministic draw; a feed without stream identity (e.g. inside an initializer
-            // function body) lowers to ConstantOfShape + RandomUniformLike.
+            // deterministic draw; a feed with no ModelId at all lowers to ConstantOfShape +
+            // RandomUniformLike. An id-bearing feed whose chain is missing (an un-run
+            // initializer body) is a hard error, never that fallback.
             //
             // The distribution bounds come EITHER as the shrk_low/shrk_high attributes (a
             // compile-time constant range) OR as the optional f32 scalar "low"/"high" inputs (a

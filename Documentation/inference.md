@@ -56,13 +56,13 @@ What `Eval` accepts is the trap here:
   `Eval(handle.ToVariable())`. See
   [`Variable` and `IValue`](core-types.md#variable-and-ivalue).
 - **A `[Module]`'s output, no.** `Eval` builds and runs the graph exactly as
-  handed to it, so a value coming out of `ResNet50.Call(...)` still carries its
+  handed to it, so a value coming out of `Foo.Call(...)` still carries its
   un-lowered module-invoke node when it reaches OnnxRuntime, which rejects the
   model with `No Op registered for ShrkCreateModule`. Not every module gets that
-  far: one whose parameters are initialized from a distribution computed in-graph
-  — the `Shorokoo.Modules` layers, `Linear` and `Conv2d` among them — throws
-  earlier still, while the ONNX model is being built. Either way, lower the
-  module's `ComputationGraph` first — see
+  far: one that draws at random anywhere — the weight-bearing `Shorokoo.Modules`
+  layers such as `Linear` and `Conv2d`, and `ResNet50` too — throws earlier still,
+  while the ONNX model is being built. Either way, lower the module's
+  `ComputationGraph` first — see
   [Running a `[Module]`](#running-a-module), which spells out both errors.
   (`ResNet50` there is from [`samples/RetinaNet`](../samples/RetinaNet) — a
   sample built on Shorokoo, not part of the packages.)
@@ -85,29 +85,30 @@ TensorData[] outs = OnnxEngine.Eval(out1, out2, out3);
 `OnnxEngine.Eval` runs a graph of plain ops. A `[Module]`'s output (from
 `Foo.Call(...)` or `Foo.Model().Call(...)`) can still carry an un-lowered
 module-invoke node, in which case passing it straight to `Eval` throws. *Which*
-error you get depends on what the module's parameters are initialized from:
+error you get depends on whether the module draws at random:
 
-- **A distribution computed in-graph.** `KaimingUniform`, `XavierUniform` and
-  `RecurrentUniform` all derive their bounds from the parameter's own shape, so this
-  covers most of the [`Shorokoo.Modules` layers](nn-library.md) — `Linear`, the
-  `Conv*` family, `MultiHeadAttention` — and anything built out of them. The failure
-  comes first, while the ONNX model is still being built, as an
-  `InvalidOperationException`:
+- **It draws.** Anywhere: an initializer that draws — the weight-bearing
+  [`Shorokoo.Modules` layers](nn-library.md) (`Linear`, the `Conv*` family,
+  `MultiHeadAttention` and anything built out of them), `Uniform`, `KaimingNormal`,
+  `XavierNormal`, … — or a `RandomUniform` / `RandomNormal` / `RandomBits` feed in
+  the module's own body. Every draw is keyed to the model's RNG streams only once
+  the graph is lowered the whole way, so the failure comes first, while the ONNX
+  model is still being built, as an `InvalidOperationException`:
 
-  > `FastLowerRandomOps: a shrk_RandomUniform feed with in-graph distribution inputs
-  > reached the ONNX fallback ... Call ToConcreteModel first; executing or exporting
-  > a non-concrete model is not supported.`
+  > `FastLowerRandomOps: the shrk_RandomUniform feed at ModelId [...] is id-bearing
+  > but has no key derivation chain ... lower the graph the whole way before
+  > executing it — ToConcreteArchitecture(inputHints) then ToConcreteModel() ...`
 
-- **Anything else** — no trainable parameters at all, or initializers whose
-  distribution is constant (`Zeros`, `KaimingNormal`, `XavierNormal`, a plain
-  `RandomNormal(shape, mean, scale)`, …). Those build a model, and OnnxRuntime
-  rejects it for the module-invoke node it still contains:
+  (`shrk_RandomNormal` / `shrk_RandomBits` for the other two feeds.) The `ResNet50`
+  of [`samples/RetinaNet`](../samples/RetinaNet) lands here: it initializes from its
+  own constant-scale `RandomNormal`, not from the library layers.
+
+- **It draws nothing** — no trainable parameters, or initializers that fill rather
+  than draw (`Zeros`, `Ones`, `Constant`, …), which is where the normalization
+  layers and `PReLU` sit. Those build a model, and OnnxRuntime rejects it for the
+  module-invoke node it still contains:
 
   > `[ErrorCode:InvalidGraph] ... Error No Op registered for ShrkCreateModule ...`
-
-  The `ResNet50` of [`samples/RetinaNet`](../samples/RetinaNet) lands here: it
-  initializes from its own constant-scale `RandomNormal`, not from the library
-  layers.
 
 The remedy is the same either way. Concretize the module's `ComputationGraph`
 against the input first, then execute:

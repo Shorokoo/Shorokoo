@@ -426,19 +426,20 @@ namespace Shorokoo
         /// <summary>
         /// Positional-hyperparameter overload with an RNG configuration and the optional build/merge and
         /// compile/run compute contexts (see <see cref="MergeContext"/> / <see cref="RuntimeContext"/>).
-        /// All three precede the hyperparameter values because a <c>params</c> array must come last —
-        /// the same convention that places <paramref name="rngConfig"/> before the array; each defaults
-        /// to its neutral value (<see cref="RngConfig.Default"/> / <see cref="ComputeContext.Default"/>).
+        /// The values are an explicit array in the slot the named set occupies, so the optional arguments
+        /// follow in the same order as on the named-set overload rather than being pushed in front of a
+        /// trailing <c>params</c> array; each defaults to its neutral value
+        /// (<see cref="RngConfig.Default"/> / <see cref="ComputeContext.Default"/>).
         /// </summary>
         public static TrainingRig FromScratch(
             ComputationGraph modelGraph,
             ComputationGraph lossGraph,
             ComputationGraph optimizerGraph,
             NamedModelParam[] sampleInputs,
-            RngConfig? rngConfig,
+            Hyperparameter[] hyperparameters,
+            RngConfig? rngConfig = null,
             ComputeContext? mergeContext = null,
-            ComputeContext? runtimeContext = null,
-            params Hyperparameter[] hyperparameters)
+            ComputeContext? runtimeContext = null)
             => FromScratchCore(modelGraph, lossGraph, optimizerGraph, sampleInputs, hyperparameters,
                 names: null, rngConfig: rngConfig, mergeContext: mergeContext, runtimeContext: runtimeContext);
 
@@ -482,21 +483,22 @@ namespace Shorokoo
         /// <summary>
         /// <see cref="ModelParamList"/> convenience overload with an RNG configuration and the optional
         /// build/merge and compile/run compute contexts (see <see cref="MergeContext"/> /
-        /// <see cref="RuntimeContext"/>), all preceding the <c>params</c> array as the array must come last.
+        /// <see cref="RuntimeContext"/>), which follow the hyperparameter array as they do on the
+        /// named-set overload.
         /// </summary>
         public static TrainingRig FromScratch(
             ComputationGraph modelGraph,
             ComputationGraph lossGraph,
             ComputationGraph optimizerGraph,
             ModelParamList sampleInputs,
-            RngConfig? rngConfig,
+            Hyperparameter[] hyperparameters,
+            RngConfig? rngConfig = null,
             ComputeContext? mergeContext = null,
-            ComputeContext? runtimeContext = null,
-            params Hyperparameter[] hyperparameters)
+            ComputeContext? runtimeContext = null)
         {
             if (sampleInputs is null) throw new ArgumentNullException(nameof(sampleInputs));
             return FromScratch(modelGraph, lossGraph, optimizerGraph,
-                sampleInputs.ModelParams.ToArray(), rngConfig, mergeContext, runtimeContext, hyperparameters);
+                sampleInputs.ModelParams.ToArray(), hyperparameters, rngConfig, mergeContext, runtimeContext);
         }
 
         private static TrainingRig FromScratchCore(

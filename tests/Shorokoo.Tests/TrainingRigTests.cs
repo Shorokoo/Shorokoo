@@ -344,6 +344,45 @@ public class TrainingRigFromScratchCoverageTests
     }
 
     [Fact]
+    public void TestPositionalHyperparametersPrecedeTheRngConfigAndContextsCoverage()
+    {
+        NamedModelParam[] sample =
+        [
+            new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], new float[4])),
+        ];
+        var cfg = new RngConfig { MasterSeed = 7 };
+        var merge = new ComputeContext();
+        var runtime = new ComputeContext();
+
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, sample, [0.05f], cfg, merge, runtime);
+        var listRig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            ScalarMultiplyModel.ComputationGraph.FromOrderedInputs([TensorData([4L], new float[4])]),
+            [0.05f], cfg, merge, runtime);
+
+        foreach (var r in (TrainingRig[])[rig, listRig])
+        {
+            Assert.Equal(7UL, r.RngConfig.MasterSeed);
+            Assert.Same(merge, r.MergeContext);
+            Assert.Same(runtime, r.RuntimeContext);
+            Assert.Single(r.TrainableParamStructDef.Fields);
+        }
+
+        Assert.Throws<ArgumentNullException>(() => TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            (ModelParamList)null!, [0.05f], cfg));
+
+        var defaulted = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, sample, [0.05f]);
+        Assert.Equal(RngConfig.Default.MasterSeed, defaulted.RngConfig.MasterSeed);
+        Assert.Same(ComputeContext.Default, defaulted.MergeContext);
+        Assert.Same(ComputeContext.Default, defaulted.RuntimeContext);
+    }
+
+    [Fact]
     public void TestFromScratchAcrossModelsLossesAndOptimizersCoverage()
     {
         var (sgdRig, sgdCkpt) = CoverFromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
@@ -798,7 +837,7 @@ public class TrainingRigCompositionCoverageTests
         var runtime = new ComputeContext();
         var rig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
-            SGDOptimizer.ComputationGraph, sample, null, merge, runtime, 0.01f);
+            SGDOptimizer.ComputationGraph, sample, [0.01f], null, merge, runtime);
         Assert.Same(merge, rig.MergeContext);
         Assert.Same(runtime, rig.RuntimeContext);
 
@@ -819,7 +858,7 @@ public class TrainingRigCompositionCoverageTests
             var loaderRuntime = new ComputeContext();
             var loaderRig = TrainingRig.FromScratch(
                 ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
-                SGDOptimizer.ComputationGraph, sample, null, loaderMerge, loaderRuntime, 0.01f);
+                SGDOptimizer.ComputationGraph, sample, [0.01f], null, loaderMerge, loaderRuntime);
             var loaded = loaderRig.LoadCheckpoint(path);
 
             Assert.Same(loaderMerge, loaded.Rig!.MergeContext);

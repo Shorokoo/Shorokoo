@@ -2602,6 +2602,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
+            ProcessCore(graph, identifierTemplatesInfo, inputHints, computeContext);
+            ThrowIfIdRefsRemain(graph, inputHints);
+        }
+
+        private static void ProcessCore(
+            InternalComputationGraph graph,
+            FastExtractIdentifierTemplates.IdentifierTemplateInfos identifierTemplatesInfo,
+            ModelParamList inputHints,
+            ComputeContext? computeContext)
+        {
             bool hasIdRef = false;
             for (int i = 0; i < graph.Nodes.Count; i++)
             {
@@ -2715,6 +2725,91 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (liveModelIdInfos.IsEmpty && deadModelIdInfos.IsEmpty) return;
 
             NativeConvertTrainableParamIdRef(graph, liveModelIdInfos, deadModelIdInfos, paramIdentifierTemplates, perSiteRealizedIds);
+        }
+
+        /// <summary>
+        /// A <c>MODEL_PARAM_ID_REF</c> surviving the conversion means a trainable parameter's
+        /// shape or initializer could not be resolved. The dominant cause is user error:
+        /// <c>ToConcreteArchitecture</c> was given no hint for an input whose <em>value</em> the
+        /// parameter's shape derives from (e.g. <c>InitSimple.Init(input.ShapeTensor())</c>), so
+        /// QEE has nothing to evaluate the shape from. Diagnose it here, naming the input whose
+        /// hint is missing, rather than letting the pipeline's post-stage op check report an
+        /// internal op code and node key.
+        /// </summary>
+        private static void ThrowIfIdRefsRemain(InternalComputationGraph graph, ModelParamList inputHints)
+        {
+            var remaining = graph.Nodes.Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_ID_REF).ToList();
+            if (remaining.Count == 0) return;
+
+            var subject = remaining.Count == 1
+                ? "a trainable parameter"
+                : $"{remaining.Count} trainable parameters";
+            var unhinted = UnhintedInputsFeedingParamInitializers(graph, remaining, inputHints);
+
+            throw new InvalidOperationException(unhinted.Count == 0
+                ? $"ToConcreteArchitecture: the shape of {subject} could not be resolved from the "
+                  + "supplied input hints."
+                : $"ToConcreteArchitecture: the shape of {subject} derives from the value of "
+                  + $"{DescribeInputs(graph, unhinted)}, for which no hint was supplied. Supply a "
+                  + "sample value for every input "
+                  + "(e.g. ToConcreteArchitecture(graph.FromOrderedInputs([...]))).");
+        }
+
+        /// <summary>
+        /// Graph-input indices that (a) feed the initializer inputs of one of the given
+        /// <c>MODEL_PARAM_ID_REF</c> nodes — inputs from index 2 on, the shape input first — and
+        /// (b) got no usable value from <paramref name="inputHints"/>, matching the binding
+        /// <see cref="Process"/> performs. Walks the fast graph backwards over every input group,
+        /// so loop and branch bodies are covered.
+        /// </summary>
+        private static List<int> UnhintedInputsFeedingParamInitializers(
+            InternalComputationGraph graph, List<FastNode> idRefNodes, ModelParamList inputHints)
+        {
+            var inputIndexByKey = new Dictionary<FastTensorKey, int>();
+            for (int i = 0; i < graph.Inputs.Count; i++)
+                inputIndexByKey[graph.Inputs[i]] = i;
+
+            var nodeByKey = new Dictionary<FastNodeKey, FastNode>();
+            foreach (var node in graph.Nodes)
+                nodeByKey[node.Key] = node;
+
+            var pending = new Stack<FastTensorKey>();
+            foreach (var node in idRefNodes)
+            {
+                var inputs = node.Inputs;
+                for (int i = 2; i < inputs.Count; i++)
+                    if (inputs[i] is not null) pending.Push(inputs[i]!.Value);
+            }
+
+            var seen = new HashSet<FastTensorKey>();
+            var reached = new SortedSet<int>();
+            while (pending.Count > 0)
+            {
+                var key = pending.Pop();
+                if (!seen.Add(key)) continue;
+                if (inputIndexByKey.TryGetValue(key, out var inputIndex)) { reached.Add(inputIndex); continue; }
+                if (!nodeByKey.TryGetValue(key.FastNodeKey, out var producer)) continue;
+                foreach (var group in producer.FullInputs.Values)
+                    foreach (var input in group)
+                        if (input is not null) pending.Push(input.Value);
+            }
+
+            return reached.Where(i => !IsHinted(inputHints, i)).ToList();
+        }
+
+        private static bool IsHinted(ModelParamList inputHints, int inputIndex)
+            => inputHints is not null
+               && inputIndex < inputHints.ModelParams.Length
+               && inputHints.ModelParams[inputIndex].ToTensorData() is not null;
+
+        private static string DescribeInputs(InternalComputationGraph graph, List<int> inputIndices)
+        {
+            var names = inputIndices.Select(i =>
+            {
+                var name = i < graph.InputUniqueNames.Count ? graph.InputUniqueNames[i] : null;
+                return string.IsNullOrEmpty(name) ? $"input #{i}" : $"input '{name}' (#{i})";
+            });
+            return string.Join(", ", names);
         }
 
         /// <summary>

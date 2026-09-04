@@ -668,7 +668,9 @@ namespace Shorokoo.Graph
             if (found.Count > 10)
                 errorMsg.AppendLine($"  ... and {found.Count - 10} more");
 
-            System.Diagnostics.Debug.Fail(errorMsg.ToString());
+            // No Debug.Fail here: this check is reachable from public API (e.g. a
+            // ToConcreteArchitecture call missing an input hint a trainable-param shape needs),
+            // and an assertion aborts a Debug build before this exception is ever constructed.
             throw new System.InvalidOperationException(errorMsg.ToString());
         }
     }

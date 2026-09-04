@@ -573,14 +573,15 @@ public class ModulesCoverageTests
     }
 
     /// <summary>Omitting the hint for an input a trainable-param shape derives from is a user mistake,
-    /// and the product has an exception for it — but a Debug build hits <c>Debug.Fail</c> first, which
-    /// outside a test host kills the process. Same defect class as Shorokoo/Shorokoo#220, a different
-    /// site: this one is <c>ToConcreteArchitecture</c>'s post-stage op check.
-    /// Tracked as Shorokoo/Shorokoo#222.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#222: Debug.Fail aborts before the exception, and the message names internals not the missing hint")]
+    /// and it must surface as a catchable exception naming that input in every configuration — never
+    /// as an assertion, which outside a test host kills the process.</summary>
+    [Fact]
     public void TestConcretizingWithoutTheHintAParamShapeNeedsFailsWithACatchableExceptionNotAnAssertion()
-        => Assert.IsType<InvalidOperationException>(Record.Exception(
+    {
+        var ex = Assert.IsType<InvalidOperationException>(Record.Exception(
             () => SimplestLayer.ComputationGraph.ToConcreteArchitecture(new ModelParamList([]))));
+        Assert.Contains("input 'input'", ex.Message);
+    }
 
     [Fact]
     public void TestZeroTripLoopLeavesTheAccumulatorUntouchedOnBothEngines()

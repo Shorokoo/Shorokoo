@@ -17,7 +17,7 @@ namespace Shorokoo.Core.Utils
         /// splice points are compile-time constants, so the result is a Slice/Concat chain
         /// that never needs the runtime length (ORT clamps the open-ended tail slice).
         /// </summary>
-        internal static Vector<int64> InsertKeepAxisZeros(Vector<int64> newShape, int[] keepAxes)
+        internal static Vector<int64> InsertKeepAxesZeros(Vector<int64> newShape, int[] keepAxes)
         {
             if (keepAxes.Length == 0)
                 return newShape;

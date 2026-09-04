@@ -9,6 +9,8 @@ namespace Shorokoo.Tests;
 /// values (and inferred shapes via ShapeTensor) against spec-expected constants and returns
 /// a single Scalar&lt;bit&gt;; <see cref="QeeAudit.Check{TModule}"/> validates that bit
 /// under both real ONNX Runtime execution and the <see cref="QuickExecutionEngine"/>.
+/// <see cref="QeeAudit.OrtOnly{TModule}"/> drives the one module whose bit QEE cannot fold
+/// by construction, and still rejects an output QEE leaves untyped.
 /// </summary>
 [Trait("Domain", "Inference")]
 [Trait("Purpose", "Coverage")]

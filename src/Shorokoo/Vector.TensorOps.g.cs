@@ -83,7 +83,7 @@ namespace Shorokoo
         public Tensor<T> Reshape(Vector<int64> newShape, int[]? keepAxes = null)
             => keepAxes is null
                 ? OnnxOp.Reshape(this, newShape, allowZero: true)
-                : OnnxOp.Reshape(this, ShapeUtils.InsertKeepAxisZeros(newShape, keepAxes), allowZero: false);
+                : OnnxOp.Reshape(this, ShapeUtils.InsertKeepAxesZeros(newShape, keepAxes), allowZero: false);
 
         /// <summary>Permutes the dimensions; with no arguments, reverses them.</summary>
         public Tensor<T> Transpose(params long[] newDims)

@@ -68,10 +68,10 @@ as unsupported and do not build on them.
 The Quick Execution Engine (QEE) always propagates output **dtype and shape**
 for every supported operator, but only materializes concrete **values** for
 small tensors (up to `MaxDataElements`, default 256 elements). Larger tensors
-flow through QEE as shape/dtype-only. Size is not the only bound: a reduction over an
-axis of extent 0 leaves every group empty, and the five reductions with no identity
-element — `ReduceMax`, `ReduceMin`, `ReduceMean`, `ReduceLogSum`, `ReduceLogSumExp` —
-leave the value uncomputed there too (see
+flow through QEE as shape/dtype-only. Size is not the only bound: reducing **over** an axis
+of extent 0 leaves each group empty, and five reductions — `ReduceMax`, `ReduceMin`,
+`ReduceMean`, `ReduceLogSum`, `ReduceLogSumExp` — leave the value uncomputed in that case,
+because their empty-group result is backend-specific rather than fixed by the ONNX spec (see
 [operator-support.md](operator-support.md#reductions)). Use the ONNX Runtime backend
 (`OnnxEngine.Eval` / `ComputeContext`) for real numeric execution.
 

@@ -136,15 +136,16 @@ public partial class RoPEPreservesNorm
 /// explicit theta 100. The half-split
 /// (GPT-NeoX) layout pairs dim j with dim j + d/2, i.e. (0,2) and (1,3). The inverse
 /// frequencies are θ0 = theta^0 = 1 and θ1 = theta^{-2/4} = theta^{-0.5}, so at
-/// position m = 1 the angles are exactly 1 rad and 0.01 rad. With
+/// position m = 1 the angles are exactly 1 rad and theta^{-0.5} rad - 0.01 at the default
+/// theta 10000, 0.1 at theta 100. With
 /// x[...,1,:] = [x0, x1, x2, x3] and rotateHalf(x) = concat(-x2', x1') the output row is
 /// <code>
 ///   [ x0·cosθ0 - x2·sinθ0,   x1·cosθ1 - x3·sinθ1,
 ///     x2·cosθ0 + x0·sinθ0,   x3·cosθ1 + x1·sinθ1 ]
 /// </code>
 /// We rebuild that row in-graph using the SAME Cos()/Sin() ops on the Scalar angle
-/// constants 1f and 0.01f, pinning the rotate-half pairing + frequency formula + sign
-/// convention exactly.
+/// constants 1f and theta1, pinning the rotate-half pairing + frequency formula + sign
+/// convention exactly, and run it at both thetas so the parameter is pinned too.
 /// </summary>
 [Module]
 public partial class RoPEClosedFormPositionOne

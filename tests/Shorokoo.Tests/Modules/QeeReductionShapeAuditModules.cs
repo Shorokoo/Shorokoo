@@ -72,6 +72,7 @@ namespace Shorokoo.Tests.Modules
                 // The fluent Reduce drops the reduced dims by default (PyTorch/NumPy), not ONNX's keepdims=1.
                 ShapeMismatch(xf.Reduce(ReduceKind.Sum, Vector(1L)), Vector(2L)) +
                 IntMismatch1(xf.Reduce(ReduceKind.Sum).TRank, 0L) +
+                FloatMismatch(xf.Reduce(ReduceKind.Sum, Vector(1L)), Vector(6f, 15f)) +
                 // the same defaults on the hand-maintained Vector mirrors, which have no generator.
                 IntMismatch1(xi.TShape.Reduce(ReduceKind.Sum, Vector(0L)).TRank, 0L) +
                 IntMismatch(FlatI(xi.TShape.Gather(Vector(0L))), Vector(2L)) +
@@ -88,12 +89,14 @@ namespace Shorokoo.Tests.Modules
                 IntMismatch(FlatI(emptyI.Reduce(ReduceKind.L1)), Vector(0L)) +
                 // one identity per group, not one for the whole tensor.
                 FloatMismatch(empty.Reshape(Vector(2L, 0L)).Reduce(ReduceKind.Sum, Vector(1L)), Vector(0f, 0f)) +
-                // an empty KEPT axis reduces to an empty result, identity or not. Concatenating that
-                // result keeps its VALUE on the audited path, so a result that is merely shaped and
-                // not folded leaves the bit uncomputed.
                 ShapeMismatch(empty.Reshape(Vector(0L, 3L)).Reduce(ReduceKind.Sum, Vector(1L)), Vector(0L)) +
+                // no groups at all: folds even for a reduction with no identity. Concatenating keeps
+                // the VALUE on the audited path, where a merely-shaped result leaves the bit uncomputed.
                 FloatMismatch(Flat(empty.Reshape(Vector(0L, 0L)).Reduce(ReduceKind.Max, Vector(1L)))
-                    .Concat(0L, Vector(7f)), Vector(7f));
+                    .Concat(0L, Vector(7f)), Vector(7f)) +
+                // duplicate axes must not throw the shape walk into the engine's catch.
+                ShapeMismatch(xf.Reduce(ReduceKind.Sum, Vector(1L, 1L)), Vector(2L)) +
+                IntMismatch(xi.TShape.GatherND(Vector(1L).Reshape(Vector(1L, 1L)).Vec()), Vector(3L));
             return mismatch < Scalar(1L);
         }
 
@@ -134,24 +137,35 @@ namespace Shorokoo.Tests.Modules
     }
 
 
-    /// <summary>Max, Min, Mean, LogSum and LogSumExp over an extent-0 axis: QEE has no identity to
-    /// fold, so it must propagate dtype and shape and leave the value alone - never degrade the
-    /// output to DType.Invalid, which is what throwing inside the engine looks like from outside.
-    /// Driven by QeeAudit.OrtOnly, since the bit itself cannot be folded. Input xf = [[1,2,3],[4,5,6]].</summary>
+    /// <summary>The backend's empty-group values for the five reductions QEE will not fold, and the
+    /// reason it will not: float32 gives -inf/+inf/0/-inf/-inf, but int64 Max and Min give 0 rather
+    /// than the dtype's extremes, so there is no dtype-independent identity to bake into a constant.
+    /// QEE must still leave the output typed and shaped - a DType.Invalid here means an op threw.
+    /// Driven by QeeAudit.OrtOnly, since QEE cannot fold the bit. Input xf = [[1,2,3],[4,5,6]].</summary>
     [Module]
     public partial class QeeEmptyReduceNoIdentityCheck
     {
-        public static Vector<float32> Inline(Tensor<float32> xf)
+        public static Scalar<bit> Inline(Tensor<float32> xf)
         {
-            var empty = xf.Reshape(Vector(-1L)).Slice(Vector(0L), Vector(0L)).Reshape(Vector(1L, 0L));
-            return Flat(empty.Reduce(ReduceKind.Max, Vector(1L)))
-                .Concat(0L, Flat(empty.Reduce(ReduceKind.Min, Vector(1L))),
-                        Flat(empty.Reduce(ReduceKind.Mean, Vector(1L))),
-                        Flat(empty.Reduce(ReduceKind.LogSum, Vector(1L))),
-                        Flat(empty.Reduce(ReduceKind.LogSumExp, Vector(1L)))).Vec();
+            var e = xf.Reshape(Vector(-1L)).Slice(Vector(0L), Vector(0L)).Reshape(Vector(1L, 0L));
+            var eI = e.Cast<int64>();
+            var mismatch =
+                Differs(e.Reduce(ReduceKind.Max, Vector(1L)), float.NegativeInfinity) +
+                Differs(e.Reduce(ReduceKind.Min, Vector(1L)), float.PositiveInfinity) +
+                Differs(e.Reduce(ReduceKind.Mean, Vector(1L)), 0f) +
+                Differs(e.Reduce(ReduceKind.LogSum, Vector(1L)), float.NegativeInfinity) +
+                Differs(e.Reduce(ReduceKind.LogSumExp, Vector(1L)), float.NegativeInfinity) +
+                IntMismatch(FlatI(eI.Reduce(ReduceKind.Max, Vector(1L))), Vector(0L)) +
+                IntMismatch(FlatI(eI.Reduce(ReduceKind.Min, Vector(1L))), Vector(0L));
+            return (mismatch < Scalar(1L)).Scalar();
         }
 
-        private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
+        // Exact equality, not a tolerance: subtracting two infinities gives NaN.
+        private static Scalar<int64> Differs(Tensor<float32> actual, float expected)
+            => ((Tensor<bit>)OnnxOp.Not(actual.Reshape(Vector(-1L)) == Scalar(expected)))
+                .Cast<int64>().Reduce(ReduceKind.Sum).Scalar();
+
+        private static Tensor<int64> FlatI(Tensor<int64> t) => t.Reshape(Vector(-1L));
     }
 
     /// <summary>Reshape (keepAxes copy-dim positions, -1, literal 0 on an empty tensor), Flatten (negative axis,

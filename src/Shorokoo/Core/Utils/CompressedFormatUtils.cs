@@ -270,6 +270,8 @@ namespace Shorokoo.Core.Utils
         /// <see cref="LoadFastGraphFromFile"/>. With <paramref name="overrideExtension"/>
         /// the extension is normalized to .zsrk/.srk purely as a hint for humans — the
         /// extension has no parsing significance; the header records the compression.
+        /// The write is atomic: the container is staged in a <c>.tmp-</c> sibling and committed
+        /// by rename, so a failed or interrupted save leaves any previous file untouched.
         /// </summary>
         public static string SaveFastGraphToFile(
             string filename, ComputationGraph graph, bool compressed = true,
@@ -297,10 +299,8 @@ namespace Shorokoo.Core.Utils
             if (directoryPath is not null)
                 Directory.CreateDirectory(directoryPath);
 
-            // Serialize BEFORE touching the destination so a serialization failure never
-            // leaves the target truncated/missing; File.WriteAllBytes overwrites in place.
             var bytes = SaveFastGraphToBinary(graph, stage, compressed, compressionLevel);
-            File.WriteAllBytes(filename, bytes);
+            AtomicFileWriter.WriteFile(filename, stream => stream.Write(bytes));
             return filename;
         }
 
@@ -490,11 +490,15 @@ namespace Shorokoo.Core.Utils
         /// next to the source file with a <c>.json</c> extension.
         /// </param>
         /// <returns>The path where the JSON file was written.</returns>
+        /// <remarks>The write is atomic (staged beside the target and committed by rename), so a
+        /// failed conversion leaves any previous file at the target path untouched; the target's
+        /// directory must already exist.</remarks>
         public static string SaveAsJson(string sourcePath, string? targetPath = null)
         {
             targetPath ??= Path.ChangeExtension(sourcePath, JsonArchitectureExtension);
             var json = ToJson(sourcePath);
-            File.WriteAllText(targetPath, json);
+            var bytes = Encoding.UTF8.GetBytes(json);
+            AtomicFileWriter.WriteFile(targetPath, stream => stream.Write(bytes));
             return targetPath;
         }
 
@@ -607,7 +611,9 @@ namespace Shorokoo.Core.Utils
         }
 
         /// <summary>
-        /// Compress bytes using Zstandard and write to a file
+        /// Compress bytes using Zstandard and write to a file. The write is atomic (staged
+        /// beside the target and committed by rename), so a failed or interrupted write leaves
+        /// any previous file untouched; the target's directory must already exist.
         /// </summary>
         /// <param name="filePath">Path for the output file</param>
         /// <param name="uncompressedBytes">Bytes to compress</param>
@@ -615,7 +621,7 @@ namespace Shorokoo.Core.Utils
         public static void CompressToFile(string filePath, byte[] uncompressedBytes, int compressionLevel = DefaultCompressionLevel)
         {
             var compressedBytes = Compress(uncompressedBytes, compressionLevel);
-            File.WriteAllBytes(filePath, compressedBytes);
+            AtomicFileWriter.WriteFile(filePath, stream => stream.Write(compressedBytes));
         }
 
         /// <summary>

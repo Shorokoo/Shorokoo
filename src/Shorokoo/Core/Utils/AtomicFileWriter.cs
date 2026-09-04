@@ -5,12 +5,13 @@ namespace Shorokoo.Core.Utils
     /// <c>.tmp-</c>-prefixed sibling name in the target's directory (same filesystem, so the
     /// commit rename is atomic), flushed to disk, then renamed onto the target. On any failure
     /// the staged copy is deleted and the previous target is left untouched — a crash mid-save
-    /// never corrupts the existing file. This is the designated write path for the
-    /// <c>Persistence.*</c> save/export surface and
-    /// <see cref="TrainingCheckpoint.Save(string, CheckpointComponents?)"/> — not for the raw layers
+    /// never corrupts the existing file. This is the designated write path for every save/export
+    /// API in the framework — the <c>Persistence.*</c> facade,
+    /// <see cref="TrainingCheckpoint.Save(string, CheckpointComponents?)"/>, and the raw layers
     /// below them (<c>OnnxModelExporter</c>, <c>SafeTensorLoader.SaveSafeTensors</c>,
-    /// <c>CompressedFormatUtils</c>), which write in place; it carries no assumptions
-    /// about what is being written.
+    /// <c>CompressedFormatUtils</c>) alike; it carries no assumptions about what is being
+    /// written. <see cref="WriteFiles"/> extends the same guarantee to a set of files that only
+    /// make sense together, such as an ONNX model and its external-data side file.
     /// </summary>
     /// <remarks>
     /// A successful commit also removes stale <c>.tmp-</c> siblings left behind by earlier
@@ -88,6 +89,117 @@ namespace Shorokoo.Core.Utils
             }
 
             AfterCommit(directory, name, onWarning);
+        }
+
+        /// <summary>
+        /// Atomically writes a set of files that only make sense together — an ONNX model and the
+        /// external-data side file its initializers point into, say. Every entry is staged and
+        /// flushed, in the given order, <b>before</b> any of them is committed, so a failure while
+        /// the content is being produced leaves the whole previous set untouched. The commits then
+        /// run in the same order, each replacing its target by rename; if one of them fails, the
+        /// commits already made are rolled back — every target is renamed aside before it is
+        /// replaced, and moved straight back — so on any in-process failure each target is exactly
+        /// as it was.
+        ///
+        /// <para>Only a hard crash between two commit renames can leave a mixed set (some targets
+        /// new, the rest previous): a rename per file is the strongest commit a filesystem offers
+        /// for more than one path. Order <paramref name="files"/> so the entry point readers open
+        /// first comes <b>last</b> — the model after its side file — which keeps a reader that
+        /// finds the new entry point looking at files that are already new.</para>
+        ///
+        /// <para>Callback and target rules are <see cref="WriteFile(string, Action{Stream}, Action{string})"/>'s:
+        /// each callback streams its file's full content and leaves the stream open, and every
+        /// target's directory must already exist. A path listed twice is rejected.</para>
+        /// </summary>
+        internal static void WriteFiles(
+            IReadOnlyList<(string TargetPath, Action<Stream> WriteContent)> files,
+            Action<string>? onWarning = null)
+        {
+            if (files is null) throw new ArgumentNullException(nameof(files));
+            if (files.Count == 0)
+                throw new ArgumentException("At least one file is required.", nameof(files));
+
+            var staged = new List<(string Directory, string Name, string FullTarget, string TempPath, Action<Stream> Write)>(files.Count);
+            foreach (var (targetPath, writeContent) in files)
+            {
+                if (writeContent is null) throw new ArgumentNullException(nameof(files));
+                var (directory, name, fullTarget) = ValidateTarget(targetPath);
+                if (Directory.Exists(fullTarget))
+                    throw new IOException(
+                        $"Cannot save '{targetPath}': the target already exists as a directory. " +
+                        "Delete it first, or save to another path.");
+                if (staged.Any(s => string.Equals(s.FullTarget, fullTarget, StringComparison.Ordinal)))
+                    throw new ArgumentException(
+                        $"Target path '{targetPath}' is listed twice.", nameof(files));
+                staged.Add((directory, name, fullTarget, Path.Combine(directory, StageName(name)), writeContent));
+            }
+
+            var committed = new List<(string FullTarget, string? AsidePath)>(staged.Count);
+            try
+            {
+                foreach (var t in staged)
+                {
+                    using var fs = new FileStream(t.TempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                    t.Write(fs);
+                    fs.Flush(flushToDisk: true);
+                }
+                foreach (var t in staged)
+                {
+                    CommitFaultInjection?.Invoke(t.TempPath);
+                    // A staged-shaped aside name, so the previous file is recognizable as
+                    // uncommitted debris to the post-commit sweep once it is no longer needed.
+                    string? aside = null;
+                    if (File.Exists(t.FullTarget))
+                    {
+                        aside = Path.Combine(t.Directory, StageName(t.Name));
+                        File.Move(t.FullTarget, aside);
+                    }
+                    File.Move(t.TempPath, t.FullTarget, overwrite: true);
+                    committed.Add((t.FullTarget, aside));
+                }
+            }
+            catch
+            {
+                RollBack(committed, onWarning);
+                foreach (var t in staged)
+                {
+                    try { File.Delete(t.TempPath); }
+                    catch { /* the stale temp is swept on the next successful save */ }
+                }
+                throw;
+            }
+
+            // The asides are staged-shaped siblings of their own targets, so the sweep collects
+            // them along with any temp an earlier failed save left behind.
+            foreach (var t in staged)
+                AfterCommit(t.Directory, t.Name, onWarning);
+        }
+
+        /// <summary>
+        /// Undoes the commits a failed <see cref="WriteFiles"/> had already made, newest first:
+        /// each target goes back to the file renamed aside for it, or is removed when there was
+        /// none. Best-effort — the failure that triggered the rollback is the one that matters —
+        /// but a target that cannot be restored says where its previous content was left.
+        /// </summary>
+        private static void RollBack(
+            List<(string FullTarget, string? AsidePath)> committed, Action<string>? onWarning)
+        {
+            onWarning ??= static _ => { };
+            for (int i = committed.Count - 1; i >= 0; i--)
+            {
+                var (fullTarget, aside) = committed[i];
+                try
+                {
+                    if (aside is null) File.Delete(fullTarget);
+                    else File.Move(aside, fullTarget, overwrite: true);
+                }
+                catch (Exception e)
+                {
+                    onWarning($"Shorokoo: a failed save could not restore '{fullTarget}'" +
+                        (aside is null ? "" : $"; look for the previous file at '{aside}'") +
+                        $" ({e.Message}).");
+                }
+            }
         }
 
         /// <summary>

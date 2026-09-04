@@ -6,6 +6,7 @@ using System.Text.Json;
 using Shorokoo;
 using Shorokoo.Core;
 using Shorokoo.Core.Nodes;
+using Shorokoo.Core.Utils;
 using Shorokoo.Core.Nodes.AutoDiff;
 using Shorokoo.Core.Training;
 using Shorokoo.Modules;
@@ -80,7 +81,10 @@ namespace Shorokoo.Onnx
 
         /// <summary>
         /// Save SafeTensor objects to a file in SafeTensors format
-        /// (8-byte header length, JSON header, raw tensor data)
+        /// (8-byte header length, JSON header, raw tensor data). The write is atomic: the file
+        /// is staged in a <c>.tmp-</c> sibling and committed by rename, so a failed or
+        /// interrupted save leaves any previous file at <paramref name="filePath"/> untouched.
+        /// The target's directory must already exist.
         /// </summary>
         public static void SaveSafeTensors(string filePath, List<SafeTensor> tensors, Dictionary<string, object>? globalMetadata = null)
         {
@@ -90,77 +94,8 @@ namespace Shorokoo.Onnx
             if (tensors.Count == 0)
                 throw new ArgumentException("Cannot save an empty SafeTensor list.", nameof(tensors));
 
-            // Build header object and collect raw tensor byte blobs
-            var header = new Dictionary<string, object>();
-            var tensorBlobs = new List<byte[]>(tensors.Count);
-
-            long currentOffset = 0L;
-
-            foreach (var st in tensors)
-            {
-                if (st == null)
-                    throw new InvalidOperationException("SafeTensor list contains a null entry.");
-
-                if (string.IsNullOrWhiteSpace(st.Name))
-                    throw new InvalidOperationException("SafeTensor has no valid Name.");
-
-                // An empty shape is the valid SafeTensors encoding of a rank-0 scalar
-                // (product of an empty shape = 1 element); only a null shape is invalid.
-                if (st.Shape == null)
-                    throw new InvalidOperationException($"SafeTensor '{st.Name}' has no valid Shape.");
-
-                if (st.Data == null)
-                    throw new InvalidOperationException($"SafeTensor '{st.Name}' has no Data.");
-
-                if (string.IsNullOrWhiteSpace(st.DataType))
-                    throw new InvalidOperationException($"SafeTensor '{st.Name}' has no valid DType.");
-
-                var shape = st.Shape;
-                var dtype = st.DataType.ToUpperInvariant();
-
-                // Flatten and convert tensor to raw bytes
-                var blob = st.Data.AccessRawMemory().ToArray();
-                tensorBlobs.Add(blob);
-
-                long startOffset = currentOffset;
-                long endOffset = startOffset + blob.Length;
-                currentOffset = endOffset;
-
-                // Per-tensor metadata according to SafeTensors spec
-                var tensorMeta = new Dictionary<string, object>
-                {
-                    ["dtype"] = dtype,
-                    ["shape"] = shape,
-                    ["data_offsets"] = new long[] { startOffset, endOffset }
-                };
-
-                // If you have extra metadata on SafeTensor, merge it here.
-                // ASSUMPTION: there is an AdditionalMetadata (Dictionary<string, object>) property.
-                // If your SafeTensor type uses a different name, adjust this block accordingly.
-                if (st.Metadata != null)
-                    foreach (var kv in st.Metadata)
-                        tensorMeta[kv.Key] = kv.Value;
-
-                header[st.Name] = tensorMeta;
-            }
-
-            if (globalMetadata is not null)
-                header["__metadata__"] = globalMetadata;
-
-            // Serialize header to JSON UTF-8
-            var headerJson = JsonSerializer.Serialize(header);
-            var headerBytes = System.Text.Encoding.UTF8.GetBytes(headerJson);
-            long headerLength = headerBytes.LongLength;
-
-            // Compose file: [8-byte little-endian header length][header JSON][tensor binary]
-            using var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
-
-            var lengthBytes = BitConverter.GetBytes(headerLength); // little-endian on all common platforms
-            fs.Write(lengthBytes, 0, lengthBytes.Length);
-            fs.Write(headerBytes, 0, headerBytes.Length);
-
-            foreach (var blob in tensorBlobs)
-                fs.Write(blob, 0, blob.Length);
+            AtomicFileWriter.WriteFile(
+                filePath, stream => SaveSafeTensorsToStream(stream, tensors, globalMetadata));
         }
 
         /// <summary>

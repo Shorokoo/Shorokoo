@@ -133,6 +133,56 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.False(CompressedFormatUtils.IsCompressedSafeTensor("foo.safetensors"));
     }
 
+    /// <summary>
+    /// The raw format writers below the <c>Persistence.*</c> facade stage through
+    /// <see cref="AtomicFileWriter"/> as well, so a crash in the commit window of any of them
+    /// leaves the previously written file byte-for-byte as it was.
+    /// </summary>
+    [Fact]
+    public void TestTheRawFormatWritersLeaveThePreviousFileIntactWhenACommitCrashes()
+    {
+        var graphA = new InternalComputationGraph([InputTensor<float32>("in")],
+            [InputTensor<float32>("in") + Scalar(1.0f)]);
+        var input = InputTensor<float32>("in");
+        var graphB = new InternalComputationGraph([input], [input * Scalar(2.0f)]);
+        var srcA = P("src-a.zsrk");
+        var srcB = P("src-b.zsrk");
+        CompressedFormatUtils.SaveFastGraphToFile(srcA, graphA, overrideExtension: false);
+        CompressedFormatUtils.SaveFastGraphToFile(srcB, graphB, overrideExtension: false);
+        var t1 = TensorData([2, 3], 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f);
+        var t2 = TensorData([3], 7.0f, 8.0f, 9.0f);
+        List<SafeTensor> tensorsA = [new SafeTensor("a", t1, "F32", t1.Shape.Dims)];
+        List<SafeTensor> tensorsB = [new SafeTensor("b", t2, "F32", t2.Shape.Dims)];
+
+        (string Name, Action<string> Seed, Action<string> Rewrite)[] writers =
+        [
+            ("zst", p => CompressedFormatUtils.CompressToFile(p, [1, 2, 3]),
+                    p => CompressedFormatUtils.CompressToFile(p, [4, 5, 6, 7])),
+            ("zsrk", p => CompressedFormatUtils.SaveFastGraphToFile(p, graphA, overrideExtension: false),
+                     p => CompressedFormatUtils.SaveFastGraphToFile(p, graphB, overrideExtension: false)),
+            ("json", p => CompressedFormatUtils.SaveAsJson(srcA, p),
+                     p => CompressedFormatUtils.SaveAsJson(srcB, p)),
+            ("safetensors", p => SafeTensorLoader.SaveSafeTensors(p, tensorsA),
+                            p => SafeTensorLoader.SaveSafeTensors(p, tensorsB)),
+        ];
+        string[] expected = ["kept", "kept", "kept", "kept"];
+        string[] actual = [.. writers.Select(AfterACommitCrash)];
+        Assert.Equal(expected, actual);
+    }
+
+    /// <summary>Seeds a fresh path with the writer's first form, then rewrites it with the
+    /// second under a commit-window crash, and reports whether the seeded bytes survived.</summary>
+    private string AfterACommitCrash((string Name, Action<string> Seed, Action<string> Rewrite) writer)
+    {
+        var path = P($"atomic-{writer.Name}");
+        writer.Seed(path);
+        var committed = File.ReadAllBytes(path);
+        AtomicFileWriter.CommitFaultInjection = _ => throw new IOException("simulated commit crash");
+        try { Assert.Throws<IOException>(() => writer.Rewrite(path)); }
+        finally { AtomicFileWriter.CommitFaultInjection = null; }
+        return committed.SequenceEqual(File.ReadAllBytes(path)) ? "kept" : "lost";
+    }
+
     private static (ComputationGraph Module, ComputationGraph Arch, ComputationGraph Model)
         BuildStageGraphs()
     {

@@ -50,6 +50,9 @@ namespace Shorokoo.Onnx
         /// to <c>ProtoBuf.Serializer.Serialize(File.Create(path), model)</c>, plus a clear
         /// error — instead of a protobuf failure — when the model's tensor data exceeds
         /// the 2 GB protobuf ceiling, suggesting <see cref="SaveWithExternalData"/>.
+        /// The write is atomic: the model is staged in a <c>.tmp-</c> sibling and committed by
+        /// rename, so a failed or interrupted save leaves any previous file at
+        /// <paramref name="filePath"/> untouched. The target's directory must already exist.
         /// </summary>
         public static void Save(ModelProto model, string filePath)
             => Save(model, filePath, MaxSelfContainedTensorBytes);
@@ -66,8 +69,8 @@ namespace Shorokoo.Onnx
                     $"{maxTensorBytes:N0}-byte protobuf message ceiling for a self-contained .onnx file. " +
                     "Use OnnxModelExporter.SaveWithExternalData to store large initializers in a side file.");
 
-            using var fs = File.Create(filePath);
-            ProtoBuf.Serializer.Serialize(fs, model);
+            AtomicFileWriter.WriteFile(
+                filePath, stream => ProtoBuf.Serializer.Serialize(stream, model));
         }
 
         /// <summary>
@@ -104,6 +107,10 @@ namespace Shorokoo.Onnx
         /// <see cref="Save(ModelProto, string)"/>.
         /// The passed <paramref name="model"/> is left unmodified (externalized tensors
         /// are restored to their inline form before returning).
+        /// <para>The pair is written atomically: both files are staged in <c>.tmp-</c> siblings
+        /// and committed by rename, side file first, so a failed or interrupted save leaves the
+        /// previously saved <c>.onnx</c> and its side file exactly as they were. The target's
+        /// directory must already exist.</para>
         /// </summary>
         public static void SaveWithExternalData(
             ModelProto model, string filePath, OnnxExternalDataOptions? options = null)
@@ -145,7 +152,8 @@ namespace Shorokoo.Onnx
                 Save(model, filePath);
                 // A side file from a previous external save of the same path would now
                 // be orphaned (nothing in the fresh self-contained .onnx references it);
-                // remove it so the directory reflects exactly this save.
+                // remove it so the directory reflects exactly this save. Strictly after the
+                // commit above, so a save that fails leaves the previous pair whole.
                 File.Delete(dataPath);
                 return;
             }
@@ -153,39 +161,14 @@ namespace Shorokoo.Onnx
             var savedRawData = externalized.Select(t => t.RawData).ToList();
             try
             {
-                using (var dataStream = File.Create(dataPath))
-                {
-                    foreach (var tensor in externalized)
-                    {
-                        long padding = (options.Alignment - dataStream.Position % options.Alignment)
-                            % options.Alignment;
-                        if (padding > 0)
-                            dataStream.Write(new byte[padding]);
-
-                        long offset = dataStream.Position;
-                        var raw = tensor.RawData!;
-                        dataStream.Write(raw);
-
-                        tensor.RawData = null!;
-                        tensor.data_location = TensorProto.DataLocation.External;
-                        tensor.ExternalDatas.Add(new StringStringEntryProto
-                        { Key = OnnxExternalData.LocationKey, Value = dataFileName });
-                        tensor.ExternalDatas.Add(new StringStringEntryProto
-                        { Key = OnnxExternalData.OffsetKey, Value = offset.ToString(CultureInfo.InvariantCulture) });
-                        tensor.ExternalDatas.Add(new StringStringEntryProto
-                        { Key = OnnxExternalData.LengthKey, Value = raw.LongLength.ToString(CultureInfo.InvariantCulture) });
-                    }
-                }
-
-                using var fs = File.Create(fullPath);
-                ProtoBuf.Serializer.Serialize(fs, model);
-            }
-            catch
-            {
-                // Don't leave a partial side file behind on a failed save; cleanup is
-                // best-effort — the original exception is the one that matters.
-                try { File.Delete(dataPath); } catch { }
-                throw;
+                // The side file is staged first: writing it is what assigns the offsets the
+                // model then serializes, and committing it first keeps a reader that finds the
+                // new .onnx looking at a side file that is already the new one.
+                AtomicFileWriter.WriteFiles(
+                [
+                    (dataPath, stream => WriteExternalData(stream, externalized, dataFileName, options)),
+                    (fullPath, stream => ProtoBuf.Serializer.Serialize(stream, model)),
+                ]);
             }
             finally
             {
@@ -196,6 +179,38 @@ namespace Shorokoo.Onnx
                     externalized[i].ExternalDatas.Clear();
                     externalized[i].Resetdata_location();
                 }
+            }
+        }
+
+        /// <summary>
+        /// Writes the externalized tensors' bytes to the side file stream, each padded up to
+        /// <see cref="OnnxExternalDataOptions.Alignment"/>, and rewrites each tensor in place to
+        /// point at the location/offset/length it just landed at — so serializing the model after
+        /// this call produces the external-data form. The caller restores the tensors.
+        /// </summary>
+        private static void WriteExternalData(
+            Stream dataStream, List<TensorProto> externalized, string dataFileName,
+            OnnxExternalDataOptions options)
+        {
+            foreach (var tensor in externalized)
+            {
+                long padding = (options.Alignment - dataStream.Position % options.Alignment)
+                    % options.Alignment;
+                if (padding > 0)
+                    dataStream.Write(new byte[padding]);
+
+                long offset = dataStream.Position;
+                var raw = tensor.RawData!;
+                dataStream.Write(raw);
+
+                tensor.RawData = null!;
+                tensor.data_location = TensorProto.DataLocation.External;
+                tensor.ExternalDatas.Add(new StringStringEntryProto
+                { Key = OnnxExternalData.LocationKey, Value = dataFileName });
+                tensor.ExternalDatas.Add(new StringStringEntryProto
+                { Key = OnnxExternalData.OffsetKey, Value = offset.ToString(CultureInfo.InvariantCulture) });
+                tensor.ExternalDatas.Add(new StringStringEntryProto
+                { Key = OnnxExternalData.LengthKey, Value = raw.LongLength.ToString(CultureInfo.InvariantCulture) });
             }
         }
     }

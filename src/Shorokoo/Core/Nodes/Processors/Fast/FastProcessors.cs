@@ -2594,7 +2594,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastConvertModelParamIdRefToModelParam
     {
-        public static void Process(
+        /// <summary>
+        /// Returns the <c>MODEL_PARAM_ID_REF</c> sites whose initializer values QEE could not
+        /// resolve. Such a site produces no candidate model id, so the rewrite below fills it with
+        /// an empty CONSTANT and the parameter silently vanishes from the architecture — see
+        /// <see cref="ThrowIfAParamShapeNeedsAnUnhintedInput"/>, which the caller runs on these.
+        /// </summary>
+        public static IReadOnlyList<FastNode> Process(
             InternalComputationGraph graph,
             FastExtractIdentifierTemplates.IdentifierTemplateInfos identifierTemplatesInfo,
             ModelParamList inputHints,
@@ -2602,6 +2608,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
+            var unresolvedSites = new List<FastNode>();
             bool hasIdRef = false;
             for (int i = 0; i < graph.Nodes.Count; i++)
             {
@@ -2611,7 +2618,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     break;
                 }
             }
-            if (!hasIdRef) return;
+            if (!hasIdRef) return unresolvedSites;
 
             // Template composition: purely structural, no CG needed.
             var composedTemplates = new Dictionary<ModelId, ModelParamIdentifierTemplate>();
@@ -2650,7 +2657,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
             }
             var store = engine.Run(graph, initialInputs);
-            var candidateModelIdInfos = ExtractModelIdInfosFromStore(graph, store);
+            var candidateModelIdInfos = ExtractModelIdInfosFromStore(graph, store, unresolvedSites);
             var perSiteRealizedIds = ExtractPerSiteRealizedIds(graph, store);
 
             // If QEE couldn't resolve every MODEL_PARAM_ID_REF node's model ID (e.g., the
@@ -2668,7 +2675,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // entering as split counters, so no stream enumeration is needed or stored.
             FastWireRngKeyDerivation.CreateRngSeedAndWireChains(graph);
 
-            if (candidateModelIdInfos.IsEmpty) return;
+            if (candidateModelIdInfos.IsEmpty) return unresolvedSites;
 
             // Liveness filter: ExtractModelIdInfosFromStore returns every model ID a
             // MODEL_PARAM_ID_REF node could produce, even ones whose value never reaches
@@ -2712,47 +2719,53 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // dead id-refs in the graph, tripping the forbidden-op validation. Since
             // `candidateModelIdInfos` is non-empty above, this guard only fires when
             // there is genuinely nothing to do.
-            if (liveModelIdInfos.IsEmpty && deadModelIdInfos.IsEmpty) return;
+            if (liveModelIdInfos.IsEmpty && deadModelIdInfos.IsEmpty) return unresolvedSites;
 
             NativeConvertTrainableParamIdRef(graph, liveModelIdInfos, deadModelIdInfos, paramIdentifierTemplates, perSiteRealizedIds);
+            return unresolvedSites;
         }
 
         /// <summary>
-        /// A <c>MODEL_PARAM_ID_REF</c> surviving <see cref="Process"/> means a model parameter's
-        /// shape or initializer did not resolve. When the reason is user error — no hint for an input
-        /// whose <em>value</em> the shape derives from, e.g. <c>InitSimple.Init(input.ShapeTensor())</c>,
-        /// leaving QEE nothing to evaluate the shape from — say so, naming that input. Anything else
-        /// falls through to the caller's post-stage op check, which reports the internals a
-        /// contributor needs.
+        /// A parameter site that <see cref="Process"/> left unresolved, or a
+        /// <c>MODEL_PARAM_ID_REF</c> that survived it, means a parameter's definition did not
+        /// resolve. When the reason is user error — no hint for an input whose <em>value</em> the
+        /// definition needs, e.g. <c>InitSimple.Init(input.ShapeTensor())</c>, leaving QEE nothing
+        /// to evaluate it from — say so, naming that input, rather than dropping the parameter
+        /// silently or reporting the pipeline. Anything else falls through to the caller's
+        /// post-stage op check, which reports the internals a contributor needs.
         /// </summary>
         public static void ThrowIfAParamShapeNeedsAnUnhintedInput(
-            InternalComputationGraph graph, ModelParamList inputHints)
+            InternalComputationGraph graph, IReadOnlyList<FastNode> unresolvedSites, ModelParamList inputHints)
         {
-            var remaining = graph.Nodes.Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_ID_REF).ToList();
-            if (remaining.Count == 0) return;
+            var sites = graph.Nodes.Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_ID_REF)
+                .Concat(unresolvedSites).Distinct().ToList();
+            if (sites.Count == 0) return;
 
-            var unhinted = UnhintedInputsFeedingParamInitializers(graph, remaining, inputHints);
+            var unhinted = UnhintedInputsFeedingParamInitializers(graph, sites, inputHints);
             if (unhinted.Count == 0) return;
 
             // No count and no "trainable": one site realizes one param per iteration slot, sites can
             // share a param, and an id-ref can carry an updateable state param instead.
+            var values = unhinted.Count == 1 ? "value" : "values";
             throw new InvalidOperationException(
-                "ToConcreteArchitecture: a model parameter's shape derives from the value of "
-                + $"{DescribeInputs(graph, unhinted)}, for which no usable value was supplied. Pass a "
-                + "sample value for every input, e.g. "
-                + "graph.ToConcreteArchitecture(graph.FromOrderedInputs([sample])).");
+                $"ToConcreteArchitecture: a parameter's definition depends on the {values} of "
+                + $"{DescribeInputs(graph, unhinted)}, for which inputHints supplied no usable {values}. "
+                + "Pass a sample value for every input, in order, e.g. "
+                + "graph.ToConcreteArchitecture(graph.FromOrderedInputs([...])).");
         }
 
         /// <summary>
         /// Graph-input indices that (a) feed the initializer inputs of one of the given
         /// <c>MODEL_PARAM_ID_REF</c> nodes — inputs from index 2 on, the shape input first — and
         /// (b) got no usable value from <paramref name="inputHints"/>, matching the binding
-        /// <see cref="Process"/> performs. The backward walk follows the same edges
-        /// <see cref="FastProcessorHelper.RemoveUnreachableNodes"/> does, close node to open node
-        /// included, so a shape derived inside a loop or branch body still reaches its input.
+        /// <see cref="Process"/> performs. The backward walk follows producer edges and the
+        /// close-to-open edge <see cref="FastProcessorHelper.RemoveUnreachableNodes"/> uses, and
+        /// resolves LOOP_OPEN carry keys — whose FastNodeKey is no node's own — through
+        /// <see cref="FastProcessorHelper.BuildNodeByKey"/>, so a shape derived inside a loop or
+        /// branch body still reaches its input.
         /// </summary>
         private static List<int> UnhintedInputsFeedingParamInitializers(
-            InternalComputationGraph graph, List<FastNode> idRefNodes, ModelParamList inputHints)
+            InternalComputationGraph graph, IReadOnlyList<FastNode> idRefNodes, ModelParamList inputHints)
         {
             var producerByOutput = graph.BuildProducerByOutputMap();
             var nodeByKey = FastProcessorHelper.BuildNodeByKey(graph);
@@ -3211,7 +3224,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// </summary>
         private static ImmutableArray<TrainableParamInfo> ExtractModelIdInfosFromStore(
             InternalComputationGraph graph,
-            Dictionary<FastTensorKey, IRuntimeTensor> store)
+            Dictionary<FastTensorKey, IRuntimeTensor> store,
+            List<FastNode>? unresolvedSites = null)
         {
             var result = new Dictionary<ModelId, TrainableParamInfo>();
 
@@ -3258,7 +3272,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         if (td is null) { allAvailable = false; break; }
                         paramValues.Add(td);
                     }
-                    if (!allAvailable) continue;
+                    if (!allAvailable)
+                    {
+                        if (unresolvedSites is not null && !unresolvedSites.Contains(node)) unresolvedSites.Add(node);
+                        continue;
+                    }
 
                     // Prefer the richest definition for a given model id: a bare reference
                     // (e.g. IModel.GetTrainableParam, which carries no initializer inputs) must not

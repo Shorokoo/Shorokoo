@@ -73,6 +73,10 @@ public class ModulesCoverageTests
             hyperparamInputs: [],
             runtimeInputs: [TensorDataWithSmallVals(DType.Float32, [5L])],
             expected: Rep(0.1, 5)));
+        Assert.True(AutoTest.AdvancedTestGraph<StaticAndInputShapedParamsLayer>(
+            hyperparamInputs: [],
+            runtimeInputs: [TensorDataWithSmallVals(DType.Float32, [5L])],
+            expected: Rep(0.1, 5)));
         Assert.True(AutoTest.AdvancedTestGraph<HypersLayer>(
             hyperparamInputs: [TensorData(DType.Float32, [], 2f), TensorData(DType.Float32, [], 0.5f)],
             runtimeInputs: [TensorDataWithSmallVals(DType.Float32, [5L])],
@@ -581,6 +585,8 @@ public class ModulesCoverageTests
     {
         Assert.Contains("input 'input'", ConcretizeWithNoHints(SimplestLayer.ComputationGraph));
         Assert.Contains("input 'input'", ConcretizeWithNoHints(ConditionalTrainableParamInLoopLayer.ComputationGraph));
+        Assert.DoesNotContain("threshold", ConcretizeWithNoHints(ConditionalTrainableParamInLoopLayer.ComputationGraph));
+        Assert.Contains("input 'input'", ConcretizeWithNoHints(StaticAndInputShapedParamsLayer.ComputationGraph));
     }
 
     [Fact]

@@ -2,7 +2,8 @@
 
 | Term | Meaning | Where |
 |---|---|---|
-| `IValue` | Base interface for any graph value (`Tensor<T>`, `Scalar<T>`, `Vector<T>`, sequences, optionals). | `core-types.md` |
+| `IValue` | Base interface for any graph value handle (`Tensor<T>`, `Scalar<T>`, `Vector<T>`, sequences, optionals). | `core-types.md` |
+| `Variable` / `ToVariable()` | The graph-side node a handle points at, and the argument type of `OnnxEngine.Eval` / `ComputeContext.Eval`. `Tensor<T>`, `Scalar<T>`, `Vector<T>` convert to it implicitly; `IValue` is *not* a `Variable`, so an `IValue`-typed handle needs an explicit `handle.ToVariable()`. | `core-types.md` |
 | `Tensor<T>` / `Scalar<T>` / `Vector<T>` | Symbolic graph values of rank N / 0 / 1, generic over dtype marker `T`. | `core-types.md` |
 | dtype marker (`float32`, `int64`, `bit`, …) | The generic type argument naming a tensor's element type. | `core-types.md` |
 | `DType` | Runtime dtype descriptor (`DType.Float32`, …). | `core-types.md` |
@@ -25,7 +26,7 @@
 | `Globals` | Static factory helpers (`Scalar`, `Vector`, `Tensor`, `TensorData`, `TensorFill`). | `core-types.md` |
 | `Globals.StateUpdate` | Register a state mutation (optimizer/BatchNorm state) inside a module. | `training.md` |
 | `TrainingRig` | Entry point that composes model+loss+optimizer and runs autodiff. | `training.md` |
-| `TrainingCheckpoint` | Holds trainable params, model state, optimizer state, and the global `Step` (advances each `TrainStep`; schedules resume from it). | `training.md` |
+| `TrainingCheckpoint` | Holds trainable params, model state, optimizer state, the global `Step` (advances each `TrainStep`; schedules resume from it), the host-owned run counters `Epoch` / `BatchIndex`, and the producing step's `Loss`. The last three are `null` when unknown — presence-gated on disk, so an absent counter reads back `null`, never a sentinel `0`. | `training.md` |
 | `Hyperparameter` | An optimizer hyperparameter's source: `Hyperparameter.Baked(v)` (a bare value or a `TensorData`), a `Schedule`, or `Hyperparameter.Runtime(shape)`; its `Kind` decides baked-vs-scheduled-vs-runtime wiring, and its dtype and rank are whatever the optimizer's `Scalar<T>` / `Vector<T>` / `Tensor<T>` declares. | `training.md` |
 | `Schedule` / `Schedules` | A `step → value` schedule (`Schedules.Cosine`, `OneCycle`, …) with fluent combinators (`WithWarmup`, `Then`, `Scale`, `Clamp`, `Shift`, `PerEpoch`). | `training.md` |
 | `IOptimizerHyperparameters` / `<Optimizer>Hyperparameters` | The named, defaulted hyperparameter set; source-generated per optimizer (e.g. `AdamWOptimizerHyperparameters`). | `training.md` |
@@ -41,5 +42,5 @@
 | naming scheme (`ModelIdNamingScheme` / `SimplePatternNamingScheme`) | Maps third-party (e.g. PyTorch) parameter names onto Shorokoo's, so loaded weights bind; built with the format or pattern DSL. | `param-naming-format-dsl.md`, `param-naming-pattern-dsl.md` |
 | `DebugRequests` | Saves graph snapshots at chosen points of `ToConcreteArchitecture` lowering, as compilable C#. | `debugging.md` |
 | `.srk` / `.zsrk` | Shorokoo's own (un)compressed graph file format. | `onnx-and-weights.md` |
-| `.skpt` / `Persistence` | Shorokoo's native checkpoint container (a STORED zip with a `config.json` manifest, or the same content as a directory of real files); `Persistence.From(...).Save(...)` / `Persistence.Load` save and reload a concrete model with its weights. | `skpt-checkpoints.md` |
+| `.skpt` / `Persistence` | Shorokoo's native checkpoint container (a STORED zip with a `config.json` manifest, or the same content as a directory of real files). `Persistence.From(...).Save(...)` / `Persistence.Load` save and reload a concrete model with its weights; `Persistence.SaveTrainingCheckpointToSkpt` writes a whole training checkpoint — rig constituents included — and `TrainingRig.Load` rebuilds the rig *and* its resumed checkpoint from that file alone. | `skpt-checkpoints.md` |
 | backend / execution provider | The loaded platform assembly (`LinuxCPU`/`LinuxGPU`/`WinCPU`/`WinGPU`) that runs ORT. | `inference.md` |

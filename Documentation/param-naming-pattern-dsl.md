@@ -333,29 +333,74 @@ parameters:
 ### `SimplePatternScheme` — one pattern
 
 ```csharp
-public SimplePatternScheme(
-    string pattern,
-    string format,
-    Dictionary<string, Dictionary<string, string>>? maps = null
-)
+public class SimplePatternScheme
+{
+    public SimplePatternScheme(
+        string pattern,
+        string format,
+        Dictionary<string, Dictionary<string, string>>? maps = null
+    );
 
-public string ToName(string shorokooId);
-public bool Matches(string shorokooId);
+    public string Pattern { get; }
+    public string Format { get; }
+    public ImmutableDictionary<string, ImmutableDictionary<string, string>> Maps { get; }
+
+    public bool Matches(string shorokooId);
+    public bool TryMatch(string shorokooId, out Dictionary<string, string> captures);
+    public string ToName(string shorokooId);
+
+    public static List<SemanticElement> ParseSemanticElements(string input);
+}
+```
+
+`TryMatch` is `Matches` plus the bindings: on a match it hands back the capture table the
+format string would be evaluated against (`["idx"] = "3"`, `["mod"] = "Conv2"`, as in
+[§3.3](#33-captures)), which is how to see what a pattern actually bound without writing a
+format for it. `ParseSemanticElements` is the [§1](#1-semantic-elements) parser itself — call
+it on an id to see the element list a pattern is matched against:
+
+```csharp
+foreach (var e in SimplePatternScheme.ParseSemanticElements("Loop#0:12"))
+    Console.WriteLine($"{e.Type} {e.Value}");   // Word Loop / Hash # / Number 0 / Colon : / Number 12
 ```
 
 ### `SimplePatternNamingScheme` — the whole scheme
 
 ```csharp
-public SimplePatternNamingScheme(
-    IEnumerable<SimplePatternScheme> patterns,
-    ModelIdNamingScheme modelIdToShorokooIdScheme,
-    string frameworkId
-)
+public class SimplePatternNamingScheme : ModuleParamSetNamingScheme
+{
+    // modelIdToShorokooIdScheme is the model's own canonical-id scheme
+    // (arch.GetShorokooIdNamingScheme(), §5.1); frameworkId records which framework's
+    // names this scheme speaks, e.g. ModuleParamSetNamingScheme.PyTorchFrameworkId.
+    public SimplePatternNamingScheme(
+        IEnumerable<SimplePatternScheme> patterns,
+        ModelIdNamingScheme modelIdToShorokooIdScheme,
+        string frameworkId
+    );
 
-public string? ToName(string shorokooId);
+    public ImmutableArray<SimplePatternScheme> Patterns { get; }
+    public ModelIdNamingScheme ModelIdToShorokooIdScheme { get; }
+    public string FrameworkId { get; }                  // from ModuleParamSetNamingScheme
+
+    public override string? ToName(string shorokooId);
+    public override string? ToName(ModelId modelId);
+    public override string? ToName(ConcreteModelParamInfo shorokooParam);
+    public override ModelId? ToModelId(string paramName, ImmutableArray<ModelId> candidates);
+}
 ```
 
-It tries its patterns in order and returns the first match's name.
+Every `ToName` overload does the same thing — try the patterns in order, return the first
+match's name, return `null` when none matches — and they differ only in where the canonical
+id string comes from. `ToName(string)` is handed one directly, which is the natural direction
+here and the one weight **export** needs. `ToName(ModelId)` gets there through
+`ModelIdToShorokooIdScheme` first; `ToName(ConcreteModelParamInfo)` reads the parameter's own
+id string off the concrete model.
+
+`ToModelId` is the reverse direction, and the one
+`ToConcreteModel(weights, namingScheme)` uses to **import**: it names every candidate ModelId
+once into a name → ModelId table, then looks the third-party name up in it. See
+[§7](#7-error-handling) — the lookup returns `null` for an unknown name, but building the
+table over an incompletely covered set of candidates throws.
 
 ## 7. Error Handling
 
@@ -370,6 +415,8 @@ ones — and the most common failure does not throw at all.
 | The format names a map the scheme was not given | `KeyNotFoundException` |
 | The format references a capture the pattern does not bind | `KeyNotFoundException` |
 | A pattern or format has an unmatched `{`, or an unparsable range constraint | `FormatException` |
+| `ToModelId` is given candidates the patterns do not name in full | `ArgumentNullException` — "Value cannot be null. (Parameter 'key')" |
+| `ToModelId` is given two candidates the patterns give the same name | `ArgumentException` — "An item with the same key has already been added" |
 
 ```csharp
 // No pattern matches: null, not an exception.
@@ -382,9 +429,27 @@ catch (InvalidOperationException) { /* "Shorokoo ID 'B#1' does not match pattern
 // Map miss — including a scheme constructed without its maps at all.
 try { var n = pattern.ToName(id); }
 catch (KeyNotFoundException) { /* "Key '9' not found in map 'bnParam'" */ }
+
+// The reverse direction is not forgiving in the same way: ToModelId names every
+// candidate before it looks anything up, and an unnamed one lands as a null key.
+try { var id2 = partialScheme.ToModelId("layer1.0.conv1.weight", candidates); }
+catch (ArgumentNullException) { /* "Value cannot be null. (Parameter 'key')" */ }
 ```
 
-A `null` is not ignored downstream: export refuses a scheme that leaves any
+The two `ToModelId` rows are worth reading twice, because the entry point this page
+recommends — `ToConcreteModel(weights, namingScheme)` — goes through them. The lookup
+itself is as forgiving as `ToName`: an unknown third-party name gives `null` back. The
+table it looks in is not. That table is built over *every* candidate first, so a single
+parameter the patterns leave unnamed puts a `null` key into it, and the failure arrives
+as a bare `ArgumentNullException` naming neither the parameter nor the scheme. Do not
+read it as a complaint about the name you passed; it means the pattern set has a hole
+somewhere else in the model. Prefer an entry point that checks coverage before it gets
+there: `Persistence.ImportSafeTensors` names every parameter first and refuses with an
+`InvalidDataException` — "required model parameter '…' maps to no source tensor name
+under the naming scheme — add a rule covering it" — which says *which* parameter is
+uncovered.
+
+A `null` is not ignored downstream either: export refuses a scheme that leaves any
 weight unnamed, and import treats the parameter as one the scheme does not
 cover — which then fails as a required parameter with no source tensor (see
 [onnx-and-weights.md](onnx-and-weights.md#naming)).

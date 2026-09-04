@@ -41,10 +41,14 @@ var scheme = new ModelIdFormat(
 
 Note: a literal `}` in text outside a placeholder is passed through unchanged, so
 writing it as `\c` is optional. `ModelIdFormat.EscapeString` — which Shorokoo uses when
-it generates a scheme for you — nevertheless emits `\c` for *every* `}`, so a generated
-format string is full of them; `ModelIdFormat.UnescapeString` decodes all three
-sequences. (The [pattern DSL](param-naming-pattern-dsl.md) has its own, smaller escape
-set; the two are not interchangeable.)
+it generates a scheme for you — does emit `\c` for *every* `}`, but the only strings it
+is ever handed are parameter path parts (`BatchNorm#1`, `Loop#0:3`), whose names are
+ordinary identifiers. No `}` reaches it, so a generated format string in practice holds
+no `\c` at all. The escape earns its place on the rare name that does carry a brace —
+one adopted from an imported ONNX tensor, say — which then survives the round trip,
+`ModelIdFormat.UnescapeString` decoding all three sequences on the way back out. (The
+[pattern DSL](param-naming-pattern-dsl.md) has its own, smaller escape set; the two are
+not interchangeable.)
 
 ## 3. Format String Syntax
 
@@ -330,8 +334,20 @@ public class ModelIdNamingScheme : ModuleParamSetNamingScheme
 ```
 
 `ToModelId` is the reverse direction used when binding weights: it names every
-candidate ModelId once and looks the third-party name up in that table, returning null
-when nothing matches. The inherited `ToName(string shorokooId)` overload throws
+candidate ModelId once into a name → ModelId table, then looks the third-party name up
+in it and returns null when the name is not there. Only that final lookup is forgiving.
+Building the table is not, and it happens first, over *every* candidate — so a scheme
+with a hole in it throws before any lookup: a candidate no format matches throws
+`InvalidOperationException` out of `ToName`, and two candidates that map to the same
+name throw `ArgumentException` as the table is filled.
+
+The uncovered-candidate case is expected rather than exceptional at the entry points
+that bind weights: `Persistence.ImportSafeTensors` calls `ToName` per parameter inside a
+`catch (InvalidOperationException)` and reads the throw as "this scheme does not cover
+that parameter", then reports the uncovered parameter by name. A partial scheme is
+therefore diagnosable through import and abrupt through a bare `ToModelId`.
+
+The inherited `ToName(string shorokooId)` overload throws
 `NotSupportedException` — a scheme keyed on ModelIds cannot translate a canonical
 Shorokoo id string; use a `SimplePatternNamingScheme`
 ([pattern DSL](param-naming-pattern-dsl.md)) where that direction is needed, as weight
@@ -351,6 +367,8 @@ classes.
 | Value matches none of a range map's ranges | `KeyNotFoundException` |
 | Range count differs from output count | `FormatException` |
 | Unmatched `{` in the format string | `FormatException` |
+| `ToModelId` is given a candidate ModelId no format matches | `InvalidOperationException` — from `ToName`, while the reverse table is built |
+| `ToModelId` is given two candidates that map to the same name | `ArgumentException` — "An item with the same key has already been added" |
 
 ```csharp
 // No matching format
@@ -364,4 +382,9 @@ catch (IndexOutOfRangeException ex) { /* Format references invalid index */ }
 // Named map (§5.3) has no key 99 — an inline map would throw IndexOutOfRangeException
 try { var name = namedMapScheme.ToName(new ModelId(1, 3, 1, 2, 2, 99, 1)); }
 catch (KeyNotFoundException ex) { /* Key 99 not in map 'moduleMap' */ }
+
+// ToModelId names every candidate before looking anything up, so a hole in the
+// scheme surfaces here even for a name the scheme does cover.
+try { var id = scheme.ToModelId("fc.bias", candidatesIncludingOneNoFormatMatches); }
+catch (InvalidOperationException ex) { /* "No matching pattern for ModelId [...]" */ }
 ```

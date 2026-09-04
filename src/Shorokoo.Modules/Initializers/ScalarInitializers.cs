@@ -1,30 +1,21 @@
 using Shorokoo;
-using Shorokoo.Core;
-using Shorokoo.Core.Nodes.NodeDefinitions;
-using Shorokoo.Core.Nodes.OnnxNodes;
-using Shorokoo.Graph;
 using Shorokoo.Modules;
-using Shorokoo.Onnx;
 using static Shorokoo.Globals;
 
 namespace Shorokoo.Modules.Initializers;
 
 // ---------------------------------------------------------------------------
-// Rank-0 (scalar) trainable-parameter initializers.
+// Rank-0 (scalar) trainable-parameter initializers: the trainable-parameter
+// counterparts of the rank-0 state initializers OptimizerScalarZeros /
+// OptimizerScalarOnes, and the rank-0 twins of Zeros / Ones / Constant.
 //
-// Every initializer in Initializers.cs / ExtraInitializers.cs takes a shape
-// vector, and a learned scalar was written as `Ones.Init([Scalar(1L)])` — a
-// length-1 rank-1 tensor that broadcasts correctly but persists as a
-// `[1]`-shaped parameter where a scalar was meant. (An empty shape vector,
-// `Ones.Init(EmptyVector<int64>())`, does give rank 0, but that is neither an
-// obvious nor a self-describing way to ask for one.) The initializers below
-// take NO shape argument and return a true rank-0 Scalar<float32>: the
-// trainable-parameter counterparts of the rank-0 state initializers
-// OptimizerScalarZeros / OptimizerScalarOnes.
-//
-// They are deterministic (no RNG, no fan-in/out — neither is meaningful for a
-// lone value), and mirror the Zeros / Ones / Constant trio of the baseline set:
-// ScalarZeros == ScalarConstant(0), ScalarOnes == ScalarConstant(1).
+// An initializer states its parameter's shape in one of two ways: as the shape
+// vector it takes as its first Inline parameter, or — for these — by declaring
+// the scalar shape in its Scalar<float32> return type. They therefore take no
+// shape argument at all. `Ones.Init(EmptyVector<int64>())` also materializes
+// rank-0 data, but its declared rank stays unknown (the return type is
+// Tensor<float32>), and it is neither an obvious nor a self-describing way to
+// ask for a scalar.
 // ---------------------------------------------------------------------------
 
 /// <summary>

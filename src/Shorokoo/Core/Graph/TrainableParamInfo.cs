@@ -29,7 +29,9 @@ namespace Shorokoo.Core.Graph
         /// initializer input, so it is read straight off that value. A <b>rank-0</b> initializer
         /// (<c>Inline() =&gt; Scalar(0f)</c>) declares the scalar shape in its return type instead,
         /// and takes no shape input — any input it does take is a seed value, not a shape vector —
-        /// so its declared rank decides first.
+        /// so its declared rank decides first. Those are the only two ways an initializer states
+        /// its shape; one that bakes a shape into its body and takes no input states it nowhere,
+        /// and is rejected rather than guessed at.
         /// </summary>
         public Shape Shape
         {
@@ -37,8 +39,15 @@ namespace Shorokoo.Core.Graph
             {
                 var declaredRank = TargetFn.OutputRankOverrides.Length > 0
                     ? TargetFn.OutputRankOverrides[0] : null;
-                if (declaredRank == 0 || TrainableParamInputParamValues.IsDefaultOrEmpty)
-                    return Shape.Scalar;
+                if (declaredRank == 0) return Shape.Scalar;
+                if (TrainableParamInputParamValues.IsDefaultOrEmpty)
+                    throw new InvalidOperationException(
+                        $"Parameter initializer '{TargetFn.DefaultName}' takes no initializer input and "
+                        + "does not return a rank-0 Scalar<T>, so the shape of the parameter it creates "
+                        + "is not stated anywhere the pipeline can read it. An initializer must either "
+                        + "take the parameter's shape as its first Inline parameter "
+                        + "(Inline(Vector<int64> shape, ...)) or declare the scalar shape by returning "
+                        + "Scalar<T>; a shape baked into the body of a no-input Inline is neither.");
                 var shapeTensorData = TrainableParamInputParamValues.First();
                 var shapeLongs = shapeTensorData.As<int64>().AccessMemory().ToArray();
                 return new Shape(shapeLongs);

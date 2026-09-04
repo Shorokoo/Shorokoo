@@ -70,6 +70,29 @@ public partial class NestedParamRefMatchesManualMatMul
     }
 }
 
+/// <summary>
+/// A <b>rank-0</b> parameter reached by reference. A rank-0 initializer takes no shape, so the
+/// reference node and the definition carry the same (empty) initializer inputs and nothing about
+/// their inputs tells them apart. The reference is built BEFORE the call that defines the
+/// parameter, and names the SECOND parameter of <see cref="Rank0BiasThenGainModel"/> — so a
+/// resolution that let the reference stand in for the definition would fall back to the module's
+/// first initializer and read the bias's 0 instead of the gain's 1.
+/// </summary>
+[Module]
+public partial class Rank0ParamRefMatchesTheGainItScales
+{
+    public static Scalar<bit> Inline(Tensor<float32> x)
+    {
+        var model = Rank0BiasThenGainModel.Model();
+        var g = model.GetTrainableParam<float32>([2], rank: 0);   // reference precedes the definition
+        var y = model.Call(x);
+
+        var diff = (y - x * g).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        var seed = (g - Scalar(1f)).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        return diff + seed < Scalar(1e-6f);
+    }
+}
+
 [Trait("Domain", "Modules")]
 [Trait("Purpose", "Coverage")]
 public class ModelParamRefTests
@@ -84,5 +107,21 @@ public class ModelParamRefTests
             hyperparamInputs: [], runtimeInputs: [x], rngConfig: RngConfig.Default));
         Assert.True(AutoTest.AdvancedTestGraph<NestedParamRefMatchesManualMatMul>(
             hyperparamInputs: [], runtimeInputs: [x], rngConfig: RngConfig.Default));
+        Assert.True(AutoTest.AdvancedTestGraph<Rank0ParamRefMatchesTheGainItScales>(
+            hyperparamInputs: [], runtimeInputs: [x], rngConfig: RngConfig.Default));
     }
+
+    private static string ParamIdOf(ComputationGraph g)
+    {
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
+        return Assert.Single(arch.GetConcreteModelParamInfos().ParamInfos).ToShorokooIdString();
+    }
+
+    // Pins Shorokoo/Shorokoo#238: adding a read-only GetTrainableParam reference renames the
+    // parameter it references (ParamRef_1 wins over the initializer-derived name), so a checkpoint
+    // written by a model carrying the reference cannot be loaded by the same model without it.
+    [Fact(Skip = "Shorokoo/Shorokoo#238: GetTrainableParam renames the parameter it references")]
+    public void TestAParamRefDoesNotRenameTheParameterItReferences()
+        => Assert.Equal(ParamIdOf(Rank0GainNoRefModel.ComputationGraph),
+                        ParamIdOf(Rank0GainWithRefModel.ComputationGraph));
 }

@@ -84,33 +84,3 @@ public partial class ScalarInitializerValues
         return pen < Scalar(1e-6f);
     }
 }
-
-/// <summary>Scales its input by one trainable rank-0 scalar gain seeded at 1.</summary>
-[Module]
-public partial class ScalarGainModel
-{
-    public static Tensor<float32> Inline(Tensor<float32> input)
-        => input * ScalarOnes.Init();
-}
-
-/// <summary>Rank-0 module-owned state: a call counter, one float rather than a param-shaped buffer.</summary>
-[StateInitializer(Ownership = StateOwnership.ModuleOwned)]
-public static partial class ScalarCallCount
-{
-    public static Scalar<float32> Inline() => Scalar(0.0f);
-}
-
-/// <summary>
-/// A trainable rank-0 gain alongside rank-0 module-owned state — both shapeless, neither
-/// carrying a shape input.
-/// </summary>
-[Module]
-public partial class ScalarGainWithScalarStateModel
-{
-    public static Tensor<float32> Inline(Tensor<float32> input)
-    {
-        var calls = ScalarCallCount.Init();
-        Globals.StateUpdate(calls, calls + Scalar(1f));
-        return input * ScalarOnes.Init() + calls * Scalar(0f);
-    }
-}

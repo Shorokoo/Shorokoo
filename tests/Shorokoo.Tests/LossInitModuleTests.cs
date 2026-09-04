@@ -1,6 +1,7 @@
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
 using Shorokoo.Runtime;
+using static Shorokoo.Tests.NNLibraryTrainingFixtures;
 
 namespace Shorokoo.Tests;
 
@@ -73,66 +74,77 @@ public class LossInitTrainingTests
 }
 
 /// <summary>
-/// Coverage for the rank-0 trainable-parameter initializers: a parameter created by
-/// <c>ScalarZeros</c>/<c>ScalarOnes</c>/<c>ScalarConstant</c> is a true rank-0 scalar in
-/// the checkpoint (not a <c>[1]</c>-shaped rank-1 tensor), and it trains.
+/// Rank-0 parameters through the training rig: a parameter from <c>ScalarZeros</c>/<c>ScalarOnes</c>,
+/// and module-owned state from a rank-0 <c>[StateInitializer]</c>, are true rank-0 scalars in the
+/// checkpoint rather than <c>[1]</c>-shaped rank-1 tensors, survive a loop body one per iteration
+/// slot, and train. None of them takes a shape input — the case the shape derivation and the
+/// definition-vs-reference resolution in trainable-param lowering have to get right without one.
+/// (The seeded values of all three, <c>ScalarConstant</c> included, are pinned through the ONNX
+/// round trip by <c>ScalarInitializerValues</c> above.)
 /// </summary>
 [Trait("Domain", "Training")]
 [Trait("Purpose", "Coverage")]
-public class ScalarInitializerTrainingTests
+public class Rank0ParamTrainingTests
 {
     [Fact]
-    public void TestScalarInitializerYieldsRank0TrainableParamThatTrains()
+    public void TestRank0ParamsAndStateAreShapelessAndTrain()
     {
         float[] input = [1f, 2f, 3f, 4f];
-        float[] target = [0f, 0f, 0f, 0f];
         var rig = TrainingRig.FromScratch(
-            Shorokoo.Tests.Modules.ScalarGainModel.ComputationGraph,
-            L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            Rank0ScalarModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], input))],
             0.01f);
-
         var initial = rig.CreateInitialCheckpoint();
-        var field = Assert.Single(rig.TrainableParamStructDef.Fields);
-        Assert.Equal(0, field.Rank);
 
-        var w0 = (TensorData<float32>)initial.TrainableParams.Fields[field.Name];
-        Assert.Empty(w0.Shape.Dims);
-        Assert.Equal(1f, w0.AccessMemory()[0]);
+        var gain = rig.TrainableParamStructDef.Fields.Single(f => f.Name.Contains("ScalarOnes"));
+        var bias = rig.TrainableParamStructDef.Fields.Single(f => f.Name.Contains("ScalarZeros"));
+        var calls = Assert.Single(rig.ModelStateDef.Fields);
+        int?[] ranks = [gain.Rank, bias.Rank, calls.Rank];
+        Assert.Equal<int?>([0, 0, 0], ranks);
+        Assert.Equal<float>([1f], Floats(initial.TrainableParams.Fields[gain.Name]));
+        Assert.Equal<float>([0f], Floats(initial.TrainableParams.Fields[bias.Name]));
+        Assert.Equal<float>([0f], Floats(initial.ModelState.Fields[calls.Name]));
 
-        TensorStructFieldDef[] inputFields =
-            [new TensorStructFieldDef("input", DataStructure.Tensor, 1, DType.Float32)];
-        TensorStructFieldDef[] targetFields =
-            [new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float32)];
-        var step = rig.TrainStep(
-            initial,
-            new TensorDataStruct(new TensorStructDef(inputFields, "ModelInput"),
-                new Dictionary<string, IData> { { "input", TensorData([4L], input) } }),
-            new TensorDataStruct(new TensorStructDef(targetFields, "Target"),
-                new Dictionary<string, IData> { { "targets", TensorData([4L], target) } }));
+        var step = rig.TrainStep(initial,
+            MakeBatch("input", "ModelInput", TensorData([4L], input)),
+            MakeBatch("targets", "Target", TensorData([4L], new float[4])));
 
-        var w1 = (TensorData<float32>)step.TrainableParams.Fields[field.Name];
-        Assert.Empty(w1.Shape.Dims);
         Assert.True(float.IsFinite(step.Loss!.Value));
-        Assert.True(MathF.Abs(w1.AccessMemory()[0] - 1f) > 1e-7f);
+        Assert.True(AnyParamMoved(rig, initial, step));
+        Assert.Equal<float>([1f], Floats(step.ModelState.Fields[calls.Name]));
     }
 
     [Fact]
-    public void TestRank0TrainableParamAndRank0ModuleStateCoexist()
+    public void TestALoopBodyRealizesOneRank0ParamPerIterationSlot()
     {
-        float[] input = [1f, 2f, 3f, 4f];
         var rig = TrainingRig.FromScratch(
-            Shorokoo.Tests.Modules.ScalarGainWithScalarStateModel.ComputationGraph,
-            L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], input))],
+            Rank0ParamsInLoopModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], new float[4]))],
             0.01f);
-
         var initial = rig.CreateInitialCheckpoint();
-        var param = Assert.Single(rig.TrainableParamStructDef.Fields);
-        var state = Assert.Single(rig.ModelStateDef.Fields);
-        Assert.Equal(0, param.Rank);
-        Assert.Equal(0, state.Rank);
-        Assert.Empty(((TensorData<float32>)initial.TrainableParams.Fields[param.Name]).Shape.Dims);
-        Assert.Empty(((TensorData<float32>)initial.ModelState.Fields[state.Name]).Shape.Dims);
+
+        var fields = rig.TrainableParamStructDef.Fields;   // 2 params x 3 trips, all distinct
+        float[] seeds = [.. fields.Select(f => Floats(initial.TrainableParams.Fields[f.Name]).Single())];
+        Assert.Equal<float>([1f, 1f, 1f, 0f, 0f, 0f], seeds);
+        Assert.All(fields, f => Assert.Equal(0, f.Rank));
     }
+
+    [Fact]
+    public void TestAnInitializerThatStatesItsShapeNowhereIsRejectedByName()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() => TrainingRig.FromScratch(
+            ShapelessInitModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], new float[4]))],
+            0.01f));
+        Assert.Contains(nameof(InitShapelessZeros), ex.Message);
+    }
+
+    // Pins Shorokoo/Shorokoo#237: an initializer whose Inline hands an input straight back exports an
+    // ONNX function with a nameless output, and the model fails to load with an ORT schema error that
+    // names neither the initializer nor the fix. ScalarConstant works around it by writing its body as
+    // `Scalar(1.0f) * value`; unskipping this must not need any change to the test.
+    [Fact(Skip = "Shorokoo/Shorokoo#237: an identity initializer body exports a nameless function output")]
+    public void TestAnInitializerReturningItsInputUnchangedLoads()
+        => Assert.True(AutoTest.AdvancedTestGraph<IdentityInitModel>(
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)]));
 }

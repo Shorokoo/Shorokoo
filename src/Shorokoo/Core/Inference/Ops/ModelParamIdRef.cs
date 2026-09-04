@@ -16,8 +16,8 @@ namespace Shorokoo.Core.Inference.Ops;
 /// [modelIndexId, iterationIndices, ...initializerParams] and the output dtype + shape are
 /// fully known a priori: dtype comes from the ShrkAttrDtype attribute and shape comes from the
 /// first initializer param (inputs[2]) which holds the param's shape vector — or, for a rank-0
-/// initializer (Inline() =&gt; Scalar(0f)), which has no initializer params at all, from the
-/// declared rank 0.
+/// initializer, from the declared rank 0 alone, since such an initializer takes no shape input
+/// (any initializer param it does take is a seed value, as ScalarConstant's is).
 ///
 /// Without this op QEE would leave MODEL_PARAM_ID_REF outputs shapeless, breaking the
 /// downstream Conv/Shape/Gather chains that ExtractModelIdInfosFromStore relies on to capture

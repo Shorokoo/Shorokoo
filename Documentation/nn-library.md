@@ -33,6 +33,9 @@ exception: they take **no shape** and create a rank-0 parameter (see
 | `Zeros` | 0.0 | biases, BatchNorm beta |
 | `Ones` | 1.0 | BatchNorm/LayerNorm gamma |
 | `Constant` | `value` (every element) | deterministic (no RNG); any rank; the parameterized generalization of `Zeros`/`Ones` (`Constant(0)`/`Constant(1)`); `value` is an `Init` arg (`Constant.Init([shape], Scalar(v))`), à la `RecurrentUniform`; PyTorch `constant_` / Keras `Constant` |
+| `ScalarZeros` | 0.0, rank 0 | no shape argument (`ScalarZeros.Init()`); a trainable **scalar**, not a `[1]`-shaped tensor; the trainable counterpart of `OptimizerScalarZeros` |
+| `ScalarOnes` | 1.0, rank 0 | no shape argument (`ScalarOnes.Init()`); the multiplicative identity, so a learned gain starts as a no-op; the trainable counterpart of `OptimizerScalarOnes` |
+| `ScalarConstant` | `value`, rank 0 | no shape argument; `value` is the only `Init` arg (`ScalarConstant.Init(Scalar(v))`); the rank-0 analogue of `Constant`, and the parameterized generalization of `ScalarZeros`/`ScalarOnes` |
 | `Uniform` | U(0, 1) | seeded; the fixed U(0, 1) default form (use `UniformRange` for a configurable range) |
 | `Normal` | N(0, 1) | seeded; PyTorch's `nn.Embedding` default; the fixed N(0, 1) default form (use `NormalDist` for configurable mean/std) |
 | `UniformRange` | U(low, high) | seeded; any rank; the parameterized generalization of `Uniform` (`Uniform` retained as the U(0, 1) default); `low`/`high` are `Init` args (`UniformRange.Init([shape], Scalar(lo), Scalar(hi))`) and reach the draw itself, so the range is exact at any width — no precision lost near zero, no overflow on a range wider than float32, and `high` is never returned ([uniform-draws.md](uniform-draws.md)); expects `low ≤ high`; PyTorch `uniform_(a, b)` / Keras `RandomUniform(minval, maxval)` |
@@ -48,9 +51,6 @@ exception: they take **no shape** and create a rank-0 parameter (see
 | `TruncatedNormal` | N(0, 1) clamped to [−2, 2] | seeded; clamp approximation (in-graph rejection sampling isn't possible); Keras/JAX-style default |
 | `LeCunNormal` | N(0, √(1 / fanIn)) | seeded; rank ≥ 2; JAX/Flax `lecun_normal` (SELU / self-normalizing nets) |
 | `Orthogonal` | (semi-)orthogonal matrix (`QᵀQ ≈ I` / `QQᵀ ≈ I`) | seeded; rank ≥ 2; **Björck/Newton–Schulz approximation** (15 cubic iterations `Y ← 1.5·Y − 0.5·Y·(YᵀY)` from a seeded Gaussian — exact QR/SVD-orthogonal isn't expressible in Shorokoo's op set, cf. `TruncatedNormal`); gain 1; Saxe-2013 dynamical isometry (RNN recurrent matrices, deep stacks); PyTorch `orthogonal_` |
-| `ScalarZeros` | 0.0, rank 0 | no shape argument (`ScalarZeros.Init()`); a trainable **scalar**, not a `[1]`-shaped tensor; the trainable counterpart of `OptimizerScalarZeros` |
-| `ScalarOnes` | 1.0, rank 0 | no shape argument (`ScalarOnes.Init()`); the multiplicative identity, so a learned gain starts as a no-op; the trainable counterpart of `OptimizerScalarOnes` |
-| `ScalarConstant` | `value`, rank 0 | no shape argument; `value` is the only `Init` arg (`ScalarConstant.Init(Scalar(v))`); the rank-0 analogue of `Constant`, and the parameterized generalization of `ScalarZeros`/`ScalarOnes` |
 | `RecurrentUniform` | U(−1/√H, 1/√H) | seeded; PyTorch's `nn.RNN`/`nn.LSTM`/`nn.GRU` default (`k = 1/hidden_size`); `H` is an `Init` arg (`RecurrentUniform.Init([shape], Scalar(hiddenSize))`), not read from the shape — a gated cell stacks its gates along axis 1, so that axis is `4H` for LSTM and `3H` for GRU while the bound stays `1/√H`; inits W, R and bias alike; used by the `Recurrent` layers |
 
 - **Seeded determinism**: the random initializers are stream-keyed — each
@@ -100,9 +100,10 @@ var temp  = ScalarConstant.Init(Scalar(0.125f));      // seeded at 1/√d
 return x * gamma + beta;                              // broadcasts against any shape
 ```
 
-They are deterministic (no RNG, no fan-in/out — neither is meaningful for a lone value)
-and mirror the `Zeros`/`Ones`/`Constant` trio of the shaped set:
-`ScalarZeros == ScalarConstant(0)`, `ScalarOnes == ScalarConstant(1)`.
+All three are deterministic — a learned scalar's starting point is a choice, not a draw — and
+they mirror the `Zeros`/`Ones`/`Constant` trio of the shaped set:
+`ScalarZeros == ScalarConstant(0)`, `ScalarOnes == ScalarConstant(1)`. Fan-in/fan-out do not
+enter: neither is defined for a lone value.
 
 Do **not** reach for `Ones.Init([Scalar(1L)])` instead. It broadcasts the same way, but it
 is a length-1 rank-1 tensor, and it persists in the checkpoint as a `[1]`-shaped parameter
@@ -111,6 +112,11 @@ where a scalar was meant. The `Scalar*` initializers persist as rank 0.
 State has the same pair on the optimizer side — `OptimizerScalarZeros` /
 `OptimizerScalarOnes`, both rank 0 and both shape-argument-free (see
 [Optimizers](#optimizers-shorokoomodulesoptimizers)).
+
+**Writing your own.** An initializer states the shape of the parameter it creates in exactly one
+of two places: the shape vector it takes as its **first** `Inline` parameter, or — for a rank-0
+one — its `Scalar<T>` return type. A shape baked into the body of a no-argument `Inline` is
+neither, and is rejected by name when the model is lowered.
 
 ## Layers (`Shorokoo.Modules.Layers`)
 

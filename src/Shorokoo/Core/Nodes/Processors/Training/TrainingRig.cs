@@ -140,9 +140,11 @@ namespace Shorokoo
         public RngConfig RngConfig => _constituents.RngConfig;
 
         /// <summary>
-        /// The compute context used for the rig's <b>build/merge phase</b>: concretizing the model,
-        /// shape-inferring, lowering, memory-optimizing and initializing the training-step graph and the
-        /// optimizer state. Supplied at construction (defaults to <see cref="ComputeContext.Default"/>);
+        /// The compute context used for the rig's <b>build/merge phase</b>: concretizing the model and
+        /// the hyperparameters, building scheduler modules, shape-inferring, lowering, memory-optimizing
+        /// and initializing the training-step graph and the optimizer state. It selects no backend or
+        /// device either — see <see cref="RuntimeContext"/> for why the rig's two contexts divide phases
+        /// rather than hardware. Supplied at construction (defaults to <see cref="ComputeContext.Default"/>);
         /// every <c>With…</c> derivation carries it forward by reference. It is <b>runtime configuration,
         /// never persisted</b> — no checkpoint (flat or <c>.skpt</c>) or manifest records it, so a
         /// reloaded rig receives a fresh one via <see cref="FromScratch(ComputationGraph, ComputationGraph,
@@ -154,12 +156,21 @@ namespace Shorokoo
         /// The compute context used to <b>compile the merged <see cref="TrainingStepPureGraph"/> into an
         /// executable and run it</b>: the single lazily-cached trainstep session (see
         /// <see cref="CompiledTrainStep"/>) that <see cref="Train"/>, every <c>Fit</c> overload and the
-        /// manual <c>TrainStep</c> all share. Because the context that compiles the trainstep bakes the
-        /// ORT session that executes it, this single context determines the execution backend. It is the
-        /// rig's sole compile/run context — <c>Train</c>/<c>Fit</c> take no per-call context override, so
-        /// there is exactly one compiled graph per rig. Supplied at construction (defaults to <see cref="ComputeContext.Default"/>);
-        /// every <c>With…</c> derivation carries it forward by reference and, like <see cref="MergeContext"/>,
-        /// it is runtime configuration that is <b>never persisted</b>.
+        /// manual <c>TrainStep</c> all share — the context whose session actually executes the training
+        /// step. It is the rig's sole compile/run context — <c>Train</c>/<c>Fit</c> take no per-call
+        /// context override, so there is exactly one compiled graph per rig. Supplied at construction
+        /// (defaults to <see cref="ComputeContext.Default"/>); every <c>With…</c> derivation carries it
+        /// forward by reference and, like <see cref="MergeContext"/>, it is runtime configuration that is
+        /// <b>never persisted</b>.
+        ///
+        /// <para><b>It selects no backend or device.</b> <see cref="ComputeContext"/> has a single
+        /// parameterless constructor and carries no per-instance settings — no device, no execution
+        /// provider, no thread count, no session options — and every session either context creates is
+        /// built by the one process-wide <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Factory"/>, which is resolved once
+        /// and cached. Passing two distinct instances therefore selects nothing: read this context and
+        /// <see cref="MergeContext"/> as a division of <i>phases</i> — which work is build/merge and
+        /// which is compile/run — not of hardware. In particular you <b>cannot</b> merge on one device
+        /// and train on another; only one backend is live per process and both contexts go through it.</para>
         /// </summary>
         public ComputeContext RuntimeContext { get; private set; } = ComputeContext.Default;
 

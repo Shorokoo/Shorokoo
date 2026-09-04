@@ -490,6 +490,17 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
   epoch/batch (a checkpoint trained without a loader / explicit counters) is absent on disk and
   reloads as `null`, never a sentinel `0`. A concrete
   `0` (e.g. a run resting at the start of an epoch) is written and reloads as `0`.
+- **The save is atomic**, so overwriting one path every N steps is safe. `checkpoint.Save`
+  (and `Persistence.SaveTrainingCheckpoint`, which delegates to it) stages the file under a
+  `.tmp-` sibling name in the target's directory, flushes it to disk, then commits it with a
+  single rename: a process killed mid-save — an OOM kill, a `Ctrl-C`, a power loss — leaves
+  either the previous checkpoint or the new one at that path, never a truncated file — you
+  need no stage-and-rename of your own. Two consequences: the target's **directory must
+  already exist** (a missing one throws, it is not created), and an interrupted save can
+  leave a `.tmp-`-prefixed sibling behind, which the next successful save of the same target
+  sweeps. The `.skpt` saves carry the same guarantee — see
+  [skpt-checkpoints.md](skpt-checkpoints.md#the-directory-form) for the one window the
+  directory form adds when it *replaces* an existing checkpoint.
 - For the **native `.skpt` container** instead — the training state with every tensor
   addressed individually through the manifest's `tensorMappings` (the trainable weights and
   model state ride in the concrete inference model's `default` mapping, keyed by parameter

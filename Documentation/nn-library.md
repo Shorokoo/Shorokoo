@@ -646,11 +646,22 @@ Cross-channel ("brightness") normalization (Krizhevsky et al. 2012, AlexNet):
 (channel = axis 1), same output shape. The module exposes `alpha`/`beta`/`k` as
 hyperparameters (`k` = PyTorch's additive constant / ONNX `bias`) and **bakes the
 window width `size = 5`** (the ONNX/PyTorch default) because `size` is a compile-time
-ONNX attribute; for a different width use the static helper `LRNHelper.Lrn`. Defaults
-`α=1e-4, β=0.75, k=1` match `nn.LocalResponseNorm(5)` exactly. **Note:** LRN is largely
-**superseded by BatchNorm** — provided for AlexNet-era parity / legacy-model loading,
-not as a recommended default. Porting from TensorFlow (`tf.nn.lrn`, half-width
-`depth_radius`, bare `α`, different defaults) needs conversion.
+ONNX attribute; for a different width use the static helper `LRNHelper.Lrn`.
+**Note:** LRN is largely **superseded by BatchNorm** — provided for AlexNet-era
+parity / legacy-model loading, not as a recommended default. Porting from
+TensorFlow (`tf.nn.lrn`, half-width `depth_radius`, bare `α`, different defaults)
+needs conversion.
+
+- **Defaults**: all three hyperparameters carry a declared `[Hyper]` default —
+  `alpha` (`1e-4`), `beta` (`0.75`), `k` (`1`) — matching
+  `nn.LocalResponseNorm(5)` exactly. But, as with `BatchNorm`, none of them is
+  *trailing* in the generated `Call` (the tensor `x` comes last), so they get no
+  `= null` C# default either: they are nullable yet positionally required, with
+  `null` meaning "take the declared default" —
+  `LocalResponseNorm.Call(null, null, null, x)` is the all-defaults call. The
+  `LRNHelper.Lrn` helper is not a `[Module]`, so its `size`/`alpha`/`beta`/`k`
+  are ordinary C# optional parameters and really are omittable: `LRNHelper.Lrn(x)`
+  is the same all-defaults call there.
 
 ### Attention / Transformer
 
@@ -847,6 +858,12 @@ Gather over a trainable `[numEmbeddings, embeddingDim]` table, `Normal`-initiali
   p-norm): gathered output rows whose `normType`-norm exceeds `maxNorm` are scaled
   down to `maxNorm` (shrink-only; under-cap rows untouched). `normType` is inert
   unless `maxNorm` is set.
+- **No declared defaults here**: unlike `BatchNorm`/`LocalResponseNorm`, none of
+  the five declares a `[Hyper(<value>)]` default, so all are non-nullable and
+  always passed explicitly. The sentinels and the `2f` `normType` are call-site
+  conventions you write out, not values you can omit —
+  `Embedding.Call(V, D, Scalar(-1L), Scalar(0f), Scalar(2f), indices)` is the
+  knobs-off call (with `maxNorm` off, `normType` is inert).
 
 **Two divergences from PyTorch** (SSA graphs cannot mutate a weight
 mid-forward): (1) `maxNorm` is *functional* — Shorokoo clamps the gathered **output**

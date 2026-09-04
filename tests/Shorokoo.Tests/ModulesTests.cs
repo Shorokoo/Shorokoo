@@ -563,8 +563,10 @@ public class ModulesCoverageTests
 
     /// <summary>The documented lowering pipeline is <c>Specialize</c> -> <c>ToConcreteArchitecture</c>
     /// -> <c>ToConcreteModel</c>, so baking a hyper must reach the same concrete model as passing it
-    /// as a concretization hint. Both modules allocate trainable params inside a
-    /// <c>LoopAPI.Iterate</c> body.</summary>
+    /// as a concretization hint. Every module here allocates trainable params inside a
+    /// <c>LoopAPI.Iterate</c> body: the first two shape theirs from the baked hyper and from
+    /// the input's shape tensor respectively, and the third sits in a loop whose trip count
+    /// was already constant before the bake.</summary>
     [Fact]
     public void TestBakingHypersMatchesHintingThemWhenParamsLiveInsideALoopBody()
     {
@@ -573,6 +575,8 @@ public class ModulesCoverageTests
             [TensorData(DType.Int64, [], 4L), TensorData(DType.Int64, [], 3L)], input);
         AssertBakedHypersMatchHintedHypers(ConditionalTrainableParamInLoopLayer.ComputationGraph,
             [TensorData(DType.Int64, [], 3L), TensorData(DType.Int64, [], 4L)], input);
+        AssertBakedHypersMatchHintedHypers(TrainableWithHyperInLoop.ComputationGraph,
+            [TensorData(DType.Int64, [], 5L)], input);
     }
 
     private static string ConcretizeWithNoHints(ComputationGraph graph)

@@ -117,4 +117,53 @@ namespace Shorokoo.Tests.Modules
             return conv.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
         }
     }
+
+    /// <summary>
+    /// <see cref="ConvVariantLoopShapeAndIndexAttrs"/> with an AUTO_GRAD node added to the loop
+    /// body, which puts a member of <c>InternalOpCodes.ModuleStageOps</c> inside a constant-trip
+    /// loop at the first FastSimplify. That loop must still be unrolled: leaving it rolled makes
+    /// FastLowerAttributeTensorOps resolve the index-dependent geometry once and bake iteration 0's
+    /// dilation into all three, silently returning 3x the d=1 conv instead of the d=1,2,3 sum.
+    /// </summary>
+    [Module]
+    public partial class ConvVariantLoopWithAutoGradInBody
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var w = InitSimple.Init([Scalar(3L), Scalar(3L), Scalar(3L), Scalar(3L)]);
+            var b = InitSimple.Init([Scalar(3L)]).Vec();
+
+            var shape = x.ShapeTensor();
+            var kh = shape[2] - Scalar(2L);
+            var kw = shape[3] - Scalar(2L);
+            var halfK = (kh - Scalar(1L)) / Scalar(2L);
+
+            var reference = StdConvScalar(x, w, b, 1L)
+                          + StdConvScalar(x, w, b, 2L)
+                          + StdConvScalar(x, w, b, 3L);
+
+            var acc = Scalar(0f);
+            foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+            {
+                var d = ctx.IterationIndex + Scalar(1L);
+                var p = d * halfK;
+                var conv = NN.Conv(x, w, b, AutoPad.NotSet,
+                    pads: [p, p, p, p], strides: Vector(1L, 1L), dilations: [d, d],
+                    kernelShape: [kh, kw], group: Scalar(1L));
+                var s = conv.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+                var g = (Scalar<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(s, s * s);
+                acc = acc + s + g * Scalar(0f);
+            }
+
+            return (reference - acc).Abs() < Scalar(1e-3f) * (reference.Abs() + Scalar(1f));
+        }
+
+        private static Scalar<float32> StdConvScalar(Tensor<float32> x, Tensor<float32> w, Vector<float32> b, long d)
+        {
+            var conv = NN.Conv(x, w, b, AutoPad.NotSet,
+                dilations: [d, d], group: 1L, kernelShape: [3L, 3L],
+                pads: [d, d, d, d], strides: [1L, 1L]);
+            return conv.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        }
+    }
 }

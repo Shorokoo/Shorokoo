@@ -3825,29 +3825,34 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// iteration and wiring each iteration's loop-variable inputs to the previous
     /// iteration's body outputs (or to the <c>LOOP_OPEN</c>'s initializers on iteration 0).
     /// <para>
-    /// Scope — simple loops only. A loop is only unrolled natively when every one of
-    /// these holds; otherwise <see cref="FastSimplify"/> leaves the loop in place.
+    /// Scope. A loop is only unrolled natively when every one of these holds; otherwise
+    /// <see cref="FastSimplify"/> leaves the loop in place, which is always a legal
+    /// outcome — downstream passes handle a rolled loop, they just get less folding.
     /// <list type="bullet">
     ///   <item>The <c>maxIter</c> producer is a <c>CONSTANT</c> with a non-negative
     ///     int64 scalar value.</item>
-    ///   <item>The <c>LOOP_OPEN</c>'s continue-condition input (slot 1) is either
-    ///     absent / null, or is a <c>CONSTANT(true)</c>. No <c>IfElse</c>-chained
-    ///     early-termination logic is needed.</item>
-    ///   <item>The <c>LOOP_CLOSE</c> has no scan variables: the number of close outputs
-    ///     equals the number of loop variables declared on the <c>LOOP_OPEN</c>
-    ///     (<c>open.Inputs.Count - 2</c>, or 0 when the loop has no loop vars).</item>
-    ///   <item>The body contains no nested <c>LOOP_OPEN</c> / <c>LOOP_CLOSE</c> /
-    ///     <c>IF_OPEN</c> / <c>IF_CLOSE</c> — nested control flow would require
-    ///     rewiring <see cref="FastNode.GraphOpenNodeKey"/> on cloned close nodes.</item>
-    ///   <item>No body node has a non-null <see cref="FastNode.IdentifierTemplate"/>
-    ///     and no body node's attributes include <c>ShrkAttrLocalModelId</c> or
-    ///     <c>ShrkAttrRelativeModelId</c> — the CG path rewrites these per unrolled
-    ///     copy, and the Fast path does not yet (serialize / substitute / reserialize
-    ///     the identifier template and update the model-id attribute arrays).</item>
-    ///   <item>Every output of every body node is consumed only by other body nodes
-    ///     or by the matching <c>LOOP_CLOSE</c> — no external references into the
-    ///     body. (Also disqualifies body-produced graph outputs, which in a
-    ///     well-formed loop don't occur.)</item>
+    ///   <item>The loop-variable and scan-variable counts agree between the
+    ///     <c>LOOP_OPEN</c> (<c>open.Inputs.Count - 2</c> loop vars) and the
+    ///     <c>LOOP_CLOSE</c>.</item>
+    ///   <item>Scan variables, when present, need a non-zero trip count and a
+    ///     statically-true body break: the shape of a scan output under early
+    ///     termination, and the dtype of an empty one, are not expressible here.
+    ///     A dynamic continue-condition on its own is fine — <see cref="UnrollOne"/>
+    ///     emits an AND / WHERE chain that freezes the loop-var outputs at the
+    ///     iteration where the break first goes false.</item>
+    ///   <item>Every nested <c>LOOP_CLOSE</c> / <c>IF_CLOSE</c> in the body has its
+    ///     matching open node in the body too. Nested control flow is otherwise
+    ///     allowed: a cloned close node's <see cref="FastNode.GraphOpenNodeKey"/> is
+    ///     rewired to the cloned open (Stage G).</item>
+    ///   <item>No body node carries Stage-F model-parameter machinery
+    ///     (<c>MODEL_PARAM_REF</c>, <c>MODEL_PARAM_ID_REF</c>,
+    ///     <c>MODEL_PARAM_MODEL_REF</c>, <c>MODULE_SET_HYPERPARAMS</c>) — see
+    ///     <see cref="BodyHoldsUnresolvedParamMachinery"/>. Checked only when the
+    ///     trip count is non-zero, since a zero-trip unroll clones nothing.</item>
+    ///   <item>Every output of every body node, and every output of the
+    ///     <c>LOOP_OPEN</c>, is consumed only by body nodes or by the matching
+    ///     <c>LOOP_CLOSE</c> — no external references into the body, and no
+    ///     body-produced graph outputs.</item>
     /// </list>
     /// </para>
     /// <para>
@@ -3864,24 +3869,19 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     internal static class FastFoldConstantIterationLoops
     {
         /// <summary>
-        /// Runs one unroll pass. Returns true if any eligible loop was unrolled.
-        /// Non-eligible loops (scan vars, cond chain, nested control flow, identifier-template
-        /// updates needed, etc.) are left untouched for <see cref="FastSimplify"/>'s CG
-        /// round-trip to handle.
+        /// Runs one unroll pass. Returns true if any eligible loop was unrolled. This is the
+        /// only unroller — the CG round-trip that used to back it up is gone (see
+        /// <see cref="FastSimplify"/>) — so a loop it declines stays rolled for the rest of
+        /// the pipeline. That is legal everywhere, but it costs folding, and two callers
+        /// want the unroll to have happened: <c>FastLowerAttributeTensorOps</c> resolves
+        /// variant-op geometry it assumes is loop-free, and autograd has no gradient rule
+        /// for <c>Loop</c>. Decline only where cloning would be wrong, never merely
+        /// awkward.
         ///
         /// <para>
-        /// A loop whose body still holds module-stage machinery
-        /// (<see cref="InternalOpCodes.IsModuleStageOp"/> — <c>MODEL_PARAM_REF</c> and its
-        /// two id-ref siblings, <c>MODULE_SET_HYPERPARAMS</c>, <c>MODEL_INVOKE</c>, …) is
-        /// disqualified rather than unrolled: cloning such a node copies its
-        /// IdentifierTemplate and model-id attributes verbatim, so every iteration would
-        /// name the same parameter. The per-iteration rewrite that used to fix those up
-        /// here is gone, because the full
-        /// <see cref="InternalComputationGraphExtensions.ToConcreteArchitecture"/> pipeline
-        /// resolves them all — into plain <c>MODEL_PARAM</c>, or removed outright — before
-        /// <see cref="FastSimplify"/> calls in here. A module-stage graph reaching this pass
-        /// (<c>Specialize</c> constant-folds one) therefore keeps its loops rolled for
-        /// <c>ToConcreteArchitecture</c> to unroll after the rewrite.
+        /// One such place is Stage-F model-parameter machinery in the body — see
+        /// <see cref="BodyHoldsUnresolvedParamMachinery"/> for why cloning it is unsound
+        /// and why <c>ToConcreteArchitecture</c> never presents it here.
         /// <see cref="UnrollOne"/> asserts the resulting invariant on every cloned body node.
         /// </para>
         /// </summary>
@@ -4048,20 +4048,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     return false;
             }
 
-            // (3b) Module-stage machinery in the body disqualifies the unroll. Cloning a
-            // body node per iteration duplicates its IdentifierTemplate and model-id
-            // attributes verbatim, which is only sound once those are resolved: within
-            // ToConcreteArchitecture the Stage-F rewrite has already turned every
-            // MODEL_PARAM_REF / MODEL_PARAM_ID_REF / MODEL_PARAM_MODEL_REF into a
-            // MODEL_PARAM carrying its own concrete id (and dropped the module
-            // machinery around it), so a clone is just a clone. On a still-module-stage
-            // graph — FastSimplify reached through Specialize — it is not: every
-            // iteration's clone would name the same parameter. Leaving the loop rolled
-            // is correct for downstream passes; ToConcreteArchitecture unrolls it after
-            // the rewrite, so the baked route lands on the same concrete model as the
-            // hinted one.
-            for (int j = openIdx + 1; j < closeIdx; j++)
-                if (InternalOpCodes.IsModuleStageOp(graph.Nodes[j].OpCode)) return false;
+            // (3b) Unresolved Stage-F parameter machinery in the body. A zero-trip unroll
+            // clones nothing (it just drops the body), so the gate only applies above that.
+            if (iterCountPreview > 0 && BodyHoldsUnresolvedParamMachinery(graph, openIdx, closeIdx))
+                return false;
 
             // (4) Body outputs must be consumed only by other body nodes, the CLOSE, or
             // nowhere. A body output that leaks to a non-body consumer would break after
@@ -4111,6 +4101,55 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (openOutputKeys.Contains(outK)) return false;
 
             return true;
+        }
+
+        /// <summary>
+        /// True when the body between <paramref name="openIdx"/> and
+        /// <paramref name="closeIdx"/> still holds one of the four Stage-F op-codes that
+        /// name a model parameter indirectly: <c>MODEL_PARAM_REF</c>,
+        /// <c>MODEL_PARAM_ID_REF</c>, <c>MODEL_PARAM_MODEL_REF</c>,
+        /// <c>MODULE_SET_HYPERPARAMS</c>.
+        ///
+        /// <para>Cloning one of those per iteration copies its <c>IdentifierTemplate</c>
+        /// and model-id attributes verbatim, so every iteration's clone would name the
+        /// same parameter — a module with per-iteration weights would collapse to one
+        /// shared weight. The per-iteration rewrite that used to fix that up here has
+        /// been removed, so the only sound answer is to leave the loop rolled.</para>
+        ///
+        /// <para><see cref="InternalComputationGraphExtensions.ToConcreteArchitecture"/>
+        /// never presents such a body: <c>FastConvertToIdRefModelParams</c>,
+        /// <c>FastUnpackModelStruct</c> and <c>FastConvertModelParamIdRefToModelParam</c>
+        /// all run before its first <see cref="FastSimplify"/>, each asserting its
+        /// op-codes gone, so by then every parameter is a <c>MODEL_PARAM</c> carrying its
+        /// own concrete id and a clone is just a clone. A graph that reaches this pass
+        /// still module-stage — <c>Specialize</c> constant-folds one — keeps its loops
+        /// rolled instead, and <c>ToConcreteArchitecture</c> unrolls them afterwards. That
+        /// is what makes the baked route land on the same concrete model as the hinted
+        /// one (Shorokoo/Shorokoo#221).</para>
+        ///
+        /// <para>Deliberately only these four. The wider
+        /// <see cref="InternalOpCodes.ModuleStageOps"/> set is defined for <c>.srk</c>
+        /// stage stamping and the <em>final</em> graph validation, and includes
+        /// <c>AUTO_GRAD</c> — which is still present at the first <see cref="FastSimplify"/>
+        /// and whose enclosing loop must be unrolled, not left rolled, for
+        /// <c>FastLowerAttributeTensorOps</c> and autograd to work. Gating on it would
+        /// silently bake iteration 0's geometry into every iteration.
+        /// <c>FastProcessorsCoverageTests
+        /// .TestTheUnrollGateBlocksTheStageFParamOpsAndLetsEveryOtherModuleStageOpThrough</c>
+        /// pins the split.</para>
+        /// </summary>
+        private static bool BodyHoldsUnresolvedParamMachinery(
+            InternalComputationGraph graph, int openIdx, int closeIdx)
+        {
+            for (int j = openIdx + 1; j < closeIdx; j++)
+            {
+                var op = graph.Nodes[j].OpCode;
+                if (op == InternalOpCodes.MODEL_PARAM_REF
+                    || op == InternalOpCodes.MODEL_PARAM_ID_REF
+                    || op == InternalOpCodes.MODEL_PARAM_MODEL_REF
+                    || op == InternalOpCodes.MODULE_SET_HYPERPARAMS) return true;
+            }
+            return false;
         }
 
         /// <summary>
@@ -4554,12 +4593,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     clonedThisIter.Add((b, cloned));
                 }
 
-                // Precondition assert: the eligibility gate rejects any loop whose body
-                // still holds module-stage machinery, and inside ToConcreteArchitecture
-                // FastConvertToIdRefModelParams + FastUnpackModelStruct +
-                // FastConvertModelParamIdRefToModelParam have run before FastSimplify
-                // anyway, so the four op-codes that used to drive a per-iteration
-                // identifier-template rewrite here cannot reach a clone.
+                // Belt and braces: BodyHoldsUnresolvedParamMachinery already rejected any
+                // loop whose body holds these four, and inside ToConcreteArchitecture the
+                // Stage-F passes have resolved them before FastSimplify anyway. The assert
+                // catches a body node that reached a clone by some route neither covers.
                 foreach (var (_, cloned) in clonedThisIter)
                 {
                     Debug.Assert(

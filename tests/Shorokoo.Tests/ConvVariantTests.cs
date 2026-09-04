@@ -22,5 +22,6 @@ public class ConvVariantTests
         Assert.True(AutoTest.AdvancedTestGraph<ConvVariantMatchesStandard>(hyperparamInputs: [], runtimeInputs: [x]));
         Assert.True(AutoTest.AdvancedTestGraph<ConvVariantShapeDependentAttrs>(hyperparamInputs: [], runtimeInputs: [x]));
         Assert.True(AutoTest.AdvancedTestGraph<ConvVariantLoopShapeAndIndexAttrs>(hyperparamInputs: [], runtimeInputs: [x]));
+        Assert.True(AutoTest.AdvancedTestGraph<ConvVariantLoopWithAutoGradInBody>(hyperparamInputs: [], runtimeInputs: [x]));
     }
 }

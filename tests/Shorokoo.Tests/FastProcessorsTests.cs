@@ -134,4 +134,27 @@ public class FastProcessorsCoverageTests
         Assert.Equal(2, arch.GetConcreteModelParamInfos().ParamInfos
             .Select(p => p.ModelId).Distinct().Count());
     }
+
+    /// <summary>The unroll gate blocks only the four Stage-F param op-codes, not the whole
+    /// <c>ModuleStageOps</c> set that set is stamped from — <c>AUTO_GRAD</c> above all, which is
+    /// still present at the first <c>FastSimplify</c> and whose loop must be unrolled for
+    /// autograd and variant-op lowering. Pins the split so a new entry in either list has to
+    /// choose a side here.</summary>
+    [Fact]
+    public void TestTheUnrollGateBlocksTheStageFParamOpsAndLetsEveryOtherModuleStageOpThrough()
+    {
+        string[] blocked = [
+            InternalOpCodes.MODEL_PARAM_REF, InternalOpCodes.MODEL_PARAM_ID_REF,
+            InternalOpCodes.MODEL_PARAM_MODEL_REF, InternalOpCodes.MODULE_SET_HYPERPARAMS];
+        string[] allowed = [
+            InternalOpCodes.AUTO_GRAD, InternalOpCodes.MODEL_INVOKE, InternalOpCodes.FUNCTION_INVOKE,
+            InternalOpCodes.MODEL_HYPERPARAM, InternalOpCodes.GET_MODEL_ID, InternalOpCodes.NEW_MODEL_LIKE,
+            InternalOpCodes.CREATE_MODULE, InternalOpCodes.TENSOR_STRUCT_CREATE,
+            InternalOpCodes.TENSOR_STRUCT_GETFIELD, InternalOpCodes.MODEL_TENSORSTRUCT_INPUT,
+            InternalOpCodes.GENERIC_TYPE_INPUT];
+
+        Assert.All(blocked, op => Assert.True(InternalOpCodes.IsModuleStageOp(op)));
+        Assert.All(allowed, op => Assert.True(InternalOpCodes.IsModuleStageOp(op)));
+        Assert.Equal(InternalOpCodes.ModuleStageOps, [.. blocked, .. allowed]);
+    }
 }

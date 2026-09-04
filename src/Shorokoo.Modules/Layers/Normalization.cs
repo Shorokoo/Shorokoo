@@ -48,15 +48,14 @@ public static partial class BatchNormRunningVarInit
 /// </list>
 /// The affine transform <c>y = gamma * x̂ + beta</c> is applied when
 /// <c>affine = true</c>; when <c>affine = false</c> the normalized <c>x̂</c> is
-/// returned directly. gamma (<see cref="Ones"/>) and beta (<see cref="Zeros"/>)
-/// are always created as trainable parameters (so the trainable-param struct shape
-/// is independent of the bits, mirroring <see cref="Linear"/>'s always-present
-/// bias); they simply receive zero gradient on the unselected branch when
-/// <c>affine = false</c>. Both toggles are realized with the
-/// build-both-branches-then-<c>IfElse</c>-select idiom. The running statistics are
+/// returned directly. gamma (<see cref="Ones"/>) and beta (<see cref="Zeros"/>) are
+/// trainable parameters <b>only</b> when <c>affine = true</c>: <c>affine</c> is a
+/// <c>[Hyper]</c> bit fixed before concretization, so <c>affine = false</c> folds the
+/// <c>IfElse</c> away and prunes them — no checkpoint field, no gradient, no optimizer
+/// state (mirroring <see cref="Linear"/>'s <c>useBias</c>). The running statistics are
 /// module-owned state (<see cref="BatchNormRunningMeanInit"/> /
 /// <see cref="BatchNormRunningVarInit"/>), which the TrainingRig threads as model
-/// state, not trainable params.
+/// state, not trainable params; they are unaffected by <c>affine</c>.
 /// Note: graphs containing StateUpdate links execute through the training
 /// pipeline (TrainingRig), not the plain inference executor.
 /// </summary>
@@ -260,12 +259,11 @@ internal static class FeatureNormShapes
 /// The affine transform <c>y = gamma * x̂ + beta</c> is applied when
 /// <c>affine = true</c> (the PyTorch/Keras/Flax default); when
 /// <c>affine = false</c> the normalized <c>x̂</c> is returned directly. gamma
-/// (<see cref="Ones"/>) and beta (<see cref="Zeros"/>) are always created as
-/// trainable parameters (so the trainable-param struct shape is independent of
-/// the bit, mirroring <see cref="Linear"/>'s always-present bias) and reshaped to
-/// the rank-generic broadcast shape <c>[1, C, 1, …, 1]</c>; they simply receive
-/// zero gradient on the unselected branch when <c>affine = false</c>. The toggle
-/// is realized with the build-both-branches-then-<c>IfElse</c>-select idiom.
+/// (<see cref="Ones"/>) and beta (<see cref="Zeros"/>), reshaped to the rank-generic
+/// broadcast shape <c>[1, C, 1, …, 1]</c>, are trainable parameters <b>only</b> when
+/// <c>affine = true</c>: the <c>[Hyper]</c> bit is fixed before concretization, so
+/// <c>affine = false</c> folds the <c>IfElse</c> away and prunes them, leaving the
+/// module with no trainable parameters of its own.
 /// </para>
 /// <para>
 /// <c>numGroups = 1</c> recovers LayerNorm-over-CHW and <c>numGroups = C</c>
@@ -324,11 +322,11 @@ public partial class GroupNorm
 /// matching PyTorch's <c>affine=False</c> InstanceNorm default — the opposite of
 /// <see cref="GroupNorm"/>'s affine-on default — because the canonical
 /// (style-transfer) use case normalizes without a learnable affine. gamma
-/// (<see cref="Ones"/>) and beta (<see cref="Zeros"/>) are always created as
-/// trainable parameters and reshaped to the rank-generic broadcast shape
-/// <c>[1, C, 1, …, 1]</c>; they receive zero gradient on the unselected branch
-/// when <c>affine = false</c>. The toggle uses the
-/// build-both-branches-then-<c>IfElse</c>-select idiom.
+/// (<see cref="Ones"/>) and beta (<see cref="Zeros"/>), reshaped to the rank-generic
+/// broadcast shape <c>[1, C, 1, …, 1]</c>, are trainable parameters <b>only</b> when
+/// <c>affine = true</c>: the <c>[Hyper]</c> bit is fixed before concretization, so
+/// <c>affine = false</c> folds the <c>IfElse</c> away and prunes them, leaving the
+/// module with no trainable parameters of its own.
 /// </para>
 /// <para>
 /// InstanceNorm carries <b>no</b> running-stats / momentum machinery: its

@@ -647,6 +647,39 @@ public class ModulesCoverageTests
 
     private static Tensor<float32> MachineryFreeBody(Tensor<float32> x) => x + x;
 
+    /// <summary>Every eager-evaluation entry point refuses an un-lowered module output up front,
+    /// naming the lowering, instead of letting the residual module op reach ONNX Runtime as an
+    /// unknown op in an "invalid model".</summary>
+    [Fact]
+    public void TestEagerEvalRefusesAModuleOutputAndNamesTheLowering()
+    {
+        var x = Tensor([2L], 1.0f, 2.0f);
+        Variable[] noInputs = [];
+        string[] refusals =
+        [
+            Assert.Throws<InvalidOperationException>(() => OnnxEngine.Eval(ScalarMultiplyModel.Call(x))).Message,
+            Assert.Throws<InvalidOperationException>(() => OnnxEngine.Eval([ScalarMultiplyModel.Call(x)])).Message,
+            Assert.Throws<InvalidOperationException>(() => new ComputeContext().Eval(ScalarMultiplyModel.Call(x))).Message,
+            Assert.Throws<InvalidOperationException>(() => noInputs.Eval(ScalarMultiplyModel.Call(x)).With([])).Message,
+            Assert.Throws<InvalidOperationException>(() => ScalarMultiplyModel.Call(x).Eval()).Message,
+        ];
+        Assert.All(refusals, m => Assert.Contains("concretized", m));
+        Assert.All(refusals, m => Assert.Contains("'module'", m));
+        Assert.All(refusals, m => Assert.Contains(InternalOpCodes.CREATE_MODULE, m));
+        Assert.All(refusals, m => Assert.Contains("ToConcreteArchitecture", m));
+        Assert.All(refusals, m => Assert.Contains("ToConcreteModel", m));
+        Assert.Contains("OnnxEngine.Eval", refusals[0]);
+        Assert.Contains("ComputeContext.Eval", refusals[2]);
+        Assert.Contains("Tensor.Eval", refusals[4]);
+
+        var sample = TensorData([2L], 1.0f, 2.0f);
+        var g = ScalarMultiplyModel.ComputationGraph;
+        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([sample])).ToConcreteModel();
+        Assert.Equal([1.0f, 2.0f],
+            ComputeContext.Default.Execute(model, sample)[0].ToTensorData().As<float32>().AccessMemory<float>().ToArray());
+        Assert.Equal(5f, OnnxEngine.Eval(Scalar(2f) + Scalar(3f)).As<float32>().AccessMemory()[0]);
+    }
+
     [Fact]
     public void TestGraphKindStampingChecksCopySemanticsAndWithKindReStampCoverage()
     {

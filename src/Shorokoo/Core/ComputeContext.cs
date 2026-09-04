@@ -231,11 +231,13 @@ namespace Shorokoo.Runtime
 
         /// <summary>
         /// Evaluates the given output variables by building and executing a zero-input graph,
-        /// returning their concrete tensor data.
+        /// returning their concrete tensor data. Requires concretized outputs — a
+        /// <c>[Module]</c>'s output fails fast with the lowering hint.
         /// </summary>
         public TensorData[] Eval(Variable[] outputs)
         {
             var graph = new InternalComputationGraph([], [.. outputs]);
+            graph.RequireConcretized($"{nameof(ComputeContext)}.{nameof(Eval)}");
             var results = this.Execute(graph).Select(x => x.ToTensorData()).ToArray();
 
             return results;
@@ -501,6 +503,7 @@ namespace Shorokoo.Runtime
         public TensorData[] With(TensorData[] inputData)
         {
             var graph = new InternalComputationGraph([..this.inputs], [..this.outputs]);
+            graph.RequireConcretized("Eval(...).With");
             return ComputeContext.Default.Execute(graph, inputData).Select(x => x.ToTensorData()).ToArray();
         }
     }

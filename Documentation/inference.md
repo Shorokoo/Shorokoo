@@ -14,8 +14,8 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
     An `IValue`-typed handle does not, and needs `handle.ToVariable()` — see
     [`Variable` and `IValue`](core-types.md#variable-and-ivalue).
   - `Eval` runs a graph of plain ops only. Nothing on its path lowers a
-    module-invoke node, so a `[Module]` output handed to it throws — where, and with
-    which message, depends on the module. Concretize it first — see
+    module-invoke node, so it checks the graph it builds and refuses a `[Module]`
+    output up front, naming the lowering that fixes it. Concretize it first — see
     [Running a `[Module]`](#running-a-module).
 - `OnnxEngine.Eval` rebuilds and recreates an ORT session on every call. For repeated
   inference, compile once with `ComputeContext` (below).
@@ -55,15 +55,11 @@ What `Eval` accepts is the trap here:
   `Eval(handle)` does not compile for a variable declared `IValue`; write
   `Eval(handle.ToVariable())`. See
   [`Variable` and `IValue`](core-types.md#variable-and-ivalue).
-- **A `[Module]`'s output, no.** `Eval` builds and runs the graph exactly as
-  handed to it, so a value coming out of `ResNet50.Call(...)` still carries its
-  un-lowered module-invoke node when it reaches OnnxRuntime, which rejects the
-  model with `No Op registered for ShrkCreateModule`. Not every module gets that
-  far: one whose parameters are initialized from a distribution computed in-graph
-  — the `Shorokoo.Modules` layers, `Linear` and `Conv2d` among them — throws
-  earlier still, while the ONNX model is being built. Either way, lower the
-  module's `ComputationGraph` first — see
-  [Running a `[Module]`](#running-a-module), which spells out both errors.
+- **A `[Module]`'s output, no.** `Eval` runs the graph as handed to it, so a value
+  coming out of `ResNet50.Call(...)` still carries its un-lowered module-invoke
+  node. `Eval` detects that before building anything and throws an
+  `InvalidOperationException` naming the fix; lower the module's
+  `ComputationGraph` first — see [Running a `[Module]`](#running-a-module).
   (`ResNet50` there is from [`samples/RetinaNet`](../samples/RetinaNet) — a
   sample built on Shorokoo, not part of the packages.)
 
@@ -84,33 +80,20 @@ TensorData[] outs = OnnxEngine.Eval(out1, out2, out3);
 
 `OnnxEngine.Eval` runs a graph of plain ops. A `[Module]`'s output (from
 `Foo.Call(...)` or `Foo.Model().Call(...)`) can still carry an un-lowered
-module-invoke node, in which case passing it straight to `Eval` throws. *Which*
-error you get depends on what the module's parameters are initialized from:
+module-invoke node, and every eager-evaluation entry point — `OnnxEngine.Eval`,
+`ComputeContext.Eval`, `tensor.Eval()`, `inputs.Eval(outputs).With(...)` — scans
+the graph it builds and refuses such an output with an
+`InvalidOperationException`, whatever the module's parameters are initialized
+from — for example:
 
-- **A distribution computed in-graph.** `KaimingUniform`, `XavierUniform` and
-  `RecurrentUniform` all derive their bounds from the parameter's own shape, so this
-  covers most of the [`Shorokoo.Modules` layers](nn-library.md) — `Linear`, the
-  `Conv*` family, `MultiHeadAttention` — and anything built out of them. The failure
-  comes first, while the ONNX model is still being built, as an
-  `InvalidOperationException`:
+> `OnnxEngine.Eval requires a concretized graph (a 'concrete-architecture' or
+> 'concrete-model'), but this graph is a 'module'. These outputs still carry 3
+> un-lowered module op(s) (e.g. ShrkCreateModule), as a [Module]'s output
+> (MyModule.Call(...)) does. Lower the module's graph against the input first and
+> execute that: …`
 
-  > `FastLowerRandomOps: a shrk_RandomUniform feed with in-graph distribution inputs
-  > reached the ONNX fallback ... Call ToConcreteModel first; executing or exporting
-  > a non-concrete model is not supported.`
-
-- **Anything else** — no trainable parameters at all, or initializers whose
-  distribution is constant (`Zeros`, `KaimingNormal`, `XavierNormal`, a plain
-  `RandomNormal(shape, mean, scale)`, …). Those build a model, and OnnxRuntime
-  rejects it for the module-invoke node it still contains:
-
-  > `[ErrorCode:InvalidGraph] ... Error No Op registered for ShrkCreateModule ...`
-
-  The `ResNet50` of [`samples/RetinaNet`](../samples/RetinaNet) lands here: it
-  initializes from its own constant-scale `RandomNormal`, not from the library
-  layers.
-
-The remedy is the same either way. Concretize the module's `ComputationGraph`
-against the input first, then execute:
+The remedy is the one the message names. Concretize the module's
+`ComputationGraph` against the input first, then execute:
 
 ```csharp
 using Shorokoo;
@@ -162,9 +145,9 @@ required kind in their error when handed the wrong stage — so a mis-ordered
 pipeline fails immediately with a clear message instead of deep inside execution.
 Execution (`ComputeContext.Execute`/`Run`/`Compile` and `QuickExecutionEngine`)
 likewise refuses a module-kind graph up front with the same lowering hint. `Eval`
-is the exception: it takes output values rather than a `ComputationGraph`, so there
-is no `Kind` for it to check and a module-invoke node surfaces as one of the two raw
-build/run errors above instead of a lowering hint.
+takes output values rather than a `ComputationGraph`, so it has no `Kind` to read;
+it classifies the graph it builds from those outputs instead, and refuses a
+module-stage one with the same hint.
 `ComputationGraph`s are **readonly**: operations that used to modify a graph in
 place return a new graph instead (e.g. `WithRngConfig`), so a graph's `Kind` can
 never be invalidated behind your back.

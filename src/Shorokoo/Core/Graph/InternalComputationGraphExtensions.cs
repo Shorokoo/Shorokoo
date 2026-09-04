@@ -650,6 +650,34 @@ namespace Shorokoo.Graph
                 + "first, then run this on the returned graph.");
         }
 
+        /// <summary>
+        /// Module-stage gate for the eager-evaluation entry points
+        /// (<c>OnnxEngine.Eval</c>, <c>ComputeContext.Eval</c>, <c>inputs.Eval(outputs).With(...)</c>),
+        /// which build their graph from output variables and so have no stamped
+        /// <see cref="GraphKind"/> for <c>ComputationGraph.RequireConcretized</c> to read. A
+        /// <c>[Module]</c>'s output carries its module machinery until the module's graph is
+        /// lowered, and executing it fails deep inside model building or session creation —
+        /// naming an internal op that appears nowhere in the public API. Detect it here instead
+        /// and name the lowering that fixes it.
+        /// </summary>
+        internal static void RequireConcretized(this InternalComputationGraph graph, string operation)
+        {
+            var moduleOps = graph.Nodes.Where(n => n.IsModuleStageMachinery()).Select(n => n.OpCode).ToList();
+            if (moduleOps.Count == 0) return;
+            var named = string.Join(", ", moduleOps.Distinct().OrderBy(op => op, System.StringComparer.Ordinal));
+
+            throw new System.InvalidOperationException(SrkFileFormat.KindMismatchMessage(
+                operation, "a concretized graph (a 'concrete-architecture' or 'concrete-model')",
+                GraphKind.Module,
+                $"These outputs still carry {moduleOps.Count} un-lowered module op(s) "
+                + $"({named}), as a [Module]'s output (MyModule.Call(...)) does. "
+                + "Lower the module's graph against the input first and execute that: "
+                + "var g = MyModule.ComputationGraph; "
+                + "var model = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel(); "
+                + "ComputeContext.Default.Execute(model, input).",
+                includeReStampHint: false));
+        }
+
         private static void AssertFastGraphDoesNotContainOps(InternalComputationGraph fastGraph, string[] forbiddenOps, string stageName)
         {
             var forbiddenSet = new HashSet<string>(forbiddenOps);

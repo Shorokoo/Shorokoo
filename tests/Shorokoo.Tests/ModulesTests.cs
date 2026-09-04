@@ -540,6 +540,48 @@ public class ModulesCoverageTests
         Assert.Equal(fcExpected, fcActual);
     }
 
+    private static float[] RunFloats(ComputationGraph model, params TensorData[] inputs)
+        => ComputeContext.Default.Execute(model, inputs)[0].ToTensorData().As<float32>().AccessMemory<float>().ToArray();
+
+    private static void AssertBakedHypersMatchHintedHypers(
+        ComputationGraph module, TensorData[] hypers, TensorData input)
+    {
+        var hinted    = module.ToConcreteArchitecture(module.FromOrderedInputs([.. hypers, input]));
+        var baked     = module.Specialize(module.FromOrderedInputs([.. hypers]));
+        var bakedArch = baked.ToConcreteArchitecture(baked.FromOrderedInputs([input]));
+
+        ModelId[] hintedIds = [.. hinted.GetConcreteModelParamInfos().ModelIds];
+        ModelId[] bakedIds  = [.. bakedArch.GetConcreteModelParamInfos().ModelIds];
+        Assert.Equal(hintedIds, bakedIds);
+        Assert.Equal(RunFloats(hinted.ToConcreteModel(), [.. hypers, input]),
+                     RunFloats(bakedArch.ToConcreteModel(), input));
+    }
+
+    /// <summary>The documented lowering pipeline is <c>Specialize</c> -> <c>ToConcreteArchitecture</c>
+    /// -> <c>ToConcreteModel</c>, so baking a hyper must reach the same concrete model as passing it
+    /// as a concretization hint. Both modules allocate trainable params inside a
+    /// <c>LoopAPI.Iterate</c> body, which is what the baked route mishandles today.
+    /// Tracked as Shorokoo/Shorokoo#221.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#221: Specialize mishandles trainable params allocated inside a loop body")]
+    public void TestBakingHypersMatchesHintingThemWhenParamsLiveInsideALoopBody()
+    {
+        var input = TensorDataWithSmallVals(DType.Float32, [2L, 5L]);
+        AssertBakedHypersMatchHintedHypers(LoopLayer.ComputationGraph,
+            [TensorData(DType.Int64, [], 4L), TensorData(DType.Int64, [], 3L)], input);
+        AssertBakedHypersMatchHintedHypers(ConditionalTrainableParamInLoopLayer.ComputationGraph,
+            [TensorData(DType.Int64, [], 3L), TensorData(DType.Int64, [], 4L)], input);
+    }
+
+    /// <summary>Omitting the hint for an input a trainable-param shape derives from is a user mistake,
+    /// and the product has an exception for it — but a Debug build hits <c>Debug.Fail</c> first, which
+    /// outside a test host kills the process. Same defect class as Shorokoo/Shorokoo#220, a different
+    /// site: this one is <c>ToConcreteArchitecture</c>'s post-stage op check.
+    /// Tracked as Shorokoo/Shorokoo#222.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#222: Debug.Fail aborts before the exception, and the message names internals not the missing hint")]
+    public void TestConcretizingWithoutTheHintAParamShapeNeedsFailsWithACatchableExceptionNotAnAssertion()
+        => Assert.IsType<InvalidOperationException>(Record.Exception(
+            () => SimplestLayer.ComputationGraph.ToConcreteArchitecture(new ModelParamList([]))));
+
     [Fact]
     public void TestZeroTripLoopLeavesTheAccumulatorUntouchedOnBothEngines()
         => Assert.True(AutoTest.AdvancedTestGraph<AnalyticLoopZeroTripCheck>(

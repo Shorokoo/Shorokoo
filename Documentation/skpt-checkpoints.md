@@ -30,8 +30,10 @@ Related: [onnx-and-weights.md](onnx-and-weights.md) · [training.md](training.md
   checkpoint, and an interrupted directory save is never visible at the target path.
   The target's parent directory must already exist. The flat safetensors training
   checkpoint (`checkpoint.Save`) is written through the same atomic file path, as is
-  every other save/export API — `ExtractSkpt` / `PackSkpt`, `Persistence.ExportSafeTensors`,
-  `Persistence.ExportOnnx`. See
+  every save/export API on the `Persistence.*` facade — `ExtractSkpt` / `PackSkpt`,
+  `Persistence.ExportSafeTensors`, `Persistence.ExportOnnx`. The raw layers below that
+  facade write **in place** — see
+  [onnx-and-weights.md](onnx-and-weights.md#export-to-onnx). See also
   [training.md](training.md#save-and-resume-a-checkpoint-across-process-restarts).
 - This version writes an **inference checkpoint of a concrete model** (definition +
   weights). It can also carry **additional named weight sets** over the same parameters

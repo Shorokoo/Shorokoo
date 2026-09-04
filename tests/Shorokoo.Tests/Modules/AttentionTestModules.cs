@@ -132,26 +132,33 @@ public partial class RoPEPreservesNorm
 }
 
 /// <summary>
-/// Closed-form RoPE at sequence position 1 for d = 4, base = 10000. The half-split
+/// Closed-form RoPE at sequence position 1 for d = 4, at the default theta 10000 and at an
+/// explicit theta 100. The half-split
 /// (GPT-NeoX) layout pairs dim j with dim j + d/2, i.e. (0,2) and (1,3). The inverse
-/// frequencies are θ0 = base^0 = 1 and θ1 = base^{-2/4} = base^{-0.5} = 0.01, so at
-/// position m = 1 the angles are exactly 1 rad and 0.01 rad. With
+/// frequencies are θ0 = theta^0 = 1 and θ1 = theta^{-2/4} = theta^{-0.5}, so at
+/// position m = 1 the angles are exactly 1 rad and theta^{-0.5} rad - 0.01 at the default
+/// theta 10000, 0.1 at theta 100. With
 /// x[...,1,:] = [x0, x1, x2, x3] and rotateHalf(x) = concat(-x2', x1') the output row is
 /// <code>
 ///   [ x0·cosθ0 - x2·sinθ0,   x1·cosθ1 - x3·sinθ1,
 ///     x2·cosθ0 + x0·sinθ0,   x3·cosθ1 + x1·sinθ1 ]
 /// </code>
 /// We rebuild that row in-graph using the SAME Cos()/Sin() ops on the Scalar angle
-/// constants 1f and 0.01f, pinning the rotate-half pairing + frequency formula + sign
-/// convention exactly.
+/// constants 1f and theta1, pinning the rotate-half pairing + frequency formula + sign
+/// convention exactly, and run it at both thetas so the parameter is pinned too.
 /// </summary>
 [Module]
 public partial class RoPEClosedFormPositionOne
 {
     public static Scalar<bit> Inline(Tensor<float32> x)   // [1, 1, 2, 4]  (L>=2, d==4)
     {
-        var y = Attention.ApplyRoPE(x);
+        // theta 10000 gives θ1 = 0.01 rad; theta 100 gives θ1 = 100^-0.5 = 0.1 rad.
+        return Matches(x, Attention.ApplyRoPE(x), 0.01f)
+             & Matches(x, Attention.ApplyRoPE(x, theta: 100), 0.1f);
+    }
 
+    private static Scalar<bit> Matches(Tensor<float32> x, Tensor<float32> y, float theta1)
+    {
         // Position-1 output row: [1, 1, 1, 4].
         var outRow = y.Slice(Vector(1L), Vector(2L), axes: Vector(2L));
 
@@ -162,11 +169,11 @@ public partial class RoPEClosedFormPositionOne
         var x2 = inRow.Slice(Vector(2L), Vector(3L), axes: Vector(-1L));
         var x3 = inRow.Slice(Vector(3L), Vector(4L), axes: Vector(-1L));
 
-        // θ0 = 1 rad (dims 0,2), θ1 = 0.01 rad (dims 1,3); same Cos/Sin ops as the impl.
+        // θ0 = 1 rad (dims 0,2), θ1 (dims 1,3); same Cos/Sin ops as the impl.
         var c0 = Scalar(1f).Cos();
         var s0 = Scalar(1f).Sin();
-        var c1 = Scalar(0.01f).Cos();
-        var s1 = Scalar(0.01f).Sin();
+        var c1 = Scalar(theta1).Cos();
+        var s1 = Scalar(theta1).Sin();
 
         var e0 = x0 * c0 - x2 * s0;
         var e1 = x1 * c1 - x3 * s1;

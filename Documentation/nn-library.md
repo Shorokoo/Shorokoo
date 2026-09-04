@@ -700,7 +700,7 @@ Attention.CausalMask(Scalar<int64> lq, Scalar<int64> lk)
 // Rotary positional embedding (RoPE; no params): rotates a [N, H, L, d] tensor
 // (d EVEN) by an angle proportional to sequence position. Apply to Q and K
 // (NOT V) before ScaledDotProductAttention; returns the same shape.
-Attention.ApplyRoPE(Tensor<float32> x, long @base = 10000)
+Attention.ApplyRoPE(Tensor<float32> x, long theta = 10000)
 
 // Multi-head attention. query [N, Lq, embedDim]; key/value [N, Lk, embedDim].
 // Pass (x, x, x) for self-attention, distinct tensors for cross-attention.
@@ -767,7 +767,7 @@ axis on a `[N, L, E]` input). No PyTorch backwards-compat surface
 a parameter-free rotation that encodes *relative* position inside the attention
 dot-product. It rotates each per-head query/key vector (a `[N, H, L, d]` tensor
 with **`d` even**) by `m·θ_i`, where `m` is the token's sequence position and
-`θ_i = base^{-2i/d}` (`base` default `10000`, HF `rope_theta`), using the
+`θ_i = theta^{-2i/d}` (`theta` default `10000`, the value HF calls `rope_theta`), using the
 GPT-NeoX / HuggingFace **half-split** layout and rotate-half trick:
 `RoPE(x) = x·cos(mθ) + rotateHalf(x)·sin(mθ)`, with
 `rotateHalf(x) = concat(-x[…, d/2:], x[…, :d/2])`. The cos/sin tables are built

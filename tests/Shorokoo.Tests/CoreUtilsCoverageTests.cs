@@ -13,7 +13,8 @@ namespace Shorokoo.Tests;
 /// <see cref="TensorKey"/> identity structs, the <see cref="ShorokooException"/> hierarchy, the
 /// OpsFactories <see cref="Helpers"/> dtype sets and attribute-type mapping, the
 /// <see cref="InferenceBackend"/> deployment-folder discovery and selection policy, the typed
-/// value-handle conversions, and the <see cref="AtomicFileWriter"/> temp-and-rename commit
+/// value-handle conversions, <c>ShapeUtils</c>' argument validation for <c>Reshape</c>'s
+/// <c>keepAxes</c>, and the <see cref="AtomicFileWriter"/> temp-and-rename commit
 /// protocol (crash-window fault injection, stale-temp sweep, retain-last-N rotation).
 /// </summary>
 [Trait("Domain", "Core")]
@@ -21,6 +22,16 @@ namespace Shorokoo.Tests;
 public class CoreUtilsCoverageTests
 {
     private static InternalComputationGraph BoolGraph(IValue only) => new([], [only.ToVariable()]);
+
+    [Fact]
+    public void TestReshapeRejectsNegativeAndRepeatedKeepAxes()
+    {
+        var x = Vector(1f, 2f, 3f, 4f).Reshape(Vector(2L, 2L));
+        Assert.Equal("keepAxes", Assert.Throws<ArgumentOutOfRangeException>(
+            () => x.Reshape(Vector(-1L), keepAxes: [-1])).ParamName);
+        Assert.Equal("keepAxes", Assert.Throws<ArgumentException>(
+            () => x.Reshape(Vector(-1L), keepAxes: [0, 0])).ParamName);
+    }
 
     [Fact]
     public void TestSelfCheckingGraphConventionRejectsAFalseBitAtAnyRank()

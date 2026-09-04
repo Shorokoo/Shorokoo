@@ -111,9 +111,11 @@ dimensions. That is the shape a scalar graph input wants, e.g. the value handed 
 
 - Arithmetic: `+ - * / % ^ & | << >>`, unary `-`, logical `!`.
 - Comparisons return `Tensor<bit>`: `> >= < <= == !=`.
-- Shape ops: `.Reshape(shape, keepDims)` (see below), `.Transpose(dims...)`, `.Squeeze(axes)`,
+- Shape ops: `.Reshape(shape, keepAxes)` (see below), `.Transpose(dims...)`, `.Squeeze(axes)`,
   `.Unsqueeze(axis)`, `.Expand(shape)`, `.Flatten(axis)`, `.Concat(axis, others...)`,
   `.Slice(start, end, axes, steps)`, `.Pad(mode, pads, val)`, `.Tile(repeats)`.
+- Indexing: `.Gather(indices, axis)` and `.GatherND(indices, batchDims)` — both default to
+  ONNX's 0, so `table.Gather(tokens)` gathers rows.
 - Math/activations: `.Relu()`, `.Sigmoid()`, `.Tanh()`, `.Softmax(axis)`, `.Gelu()`,
   `.Sqrt()`, `.Exp()`, `.Ln()`, `.Abs()`, trig (`.Sin()`, `.Cos()`, …).
 - Linear algebra: `.MatMul(other)`.
@@ -145,6 +147,27 @@ operand's type alone, so the left operand can never be a bare literal and the ri
 must be no wider than the left. `Tensor<T> << Vector<T>` and `Vector<T> << 1L` exist;
 `Vector<T> << Tensor<T>` and `1L << Tensor<T>` do not.
 
+### Reductions and `keepDims`
+
+`x.Reduce(kind, axes, keepDims)` **drops** the reduced dimensions by default, as in PyTorch
+and NumPy — so `x.Reduce(ReduceKind.Mean).Scalar()` reduces over every axis to a rank-0
+scalar, and `x.Reduce(ReduceKind.Sum, Vector(1L))` turns `[N, C]` into `[N]`. Pass
+`keepDims: true` to keep them as length-1 axes instead (`[N, 1]`), which is what you want
+when the result has to broadcast back against the input.
+
+Note that ONNX itself defaults the other way: its `keepdims` attribute is `1`, so a
+`Reduce*` node with the attribute omitted keeps the reduced dimensions. The fluent `.Reduce`
+follows the eager frameworks instead, the same choice it makes for `Reshape` below, and always
+emits the attribute explicitly. (The lower-level `NN.Reduce` takes a `bool?` with no default,
+where `null` omits the attribute and so keeps ONNX's reading.)
+
+**This default changed.** It was previously `true`. Code that omits `keepDims` now gets the
+reduced dimensions dropped, with no compile error to flag it — so a reduction whose result is
+broadcast back against its own input needs an explicit `keepDims: true`. Usually the shapes
+stop matching and you get an error, but where the remaining dimensions happen to agree
+(`[N, C]` with `N == C`, common in attention and square hidden dims) it broadcasts along the
+wrong axis and silently computes the wrong numbers.
+
 ### `Reshape` and copying dimensions from the input
 
 `x.Reshape(newShape)` follows the conventions you know from PyTorch, TensorFlow, and
@@ -154,26 +177,26 @@ ONNX `Reshape` (with its default `allowzero=0`) disagrees: there a `0` means "co
 dimension at this position from the input tensor" — a convention ONNX inherited from
 Caffe that trips up users arriving from the eager frameworks.
 
-Shorokoo exposes the copy-dim behavior through the explicit `keepDims` parameter
+Shorokoo exposes the copy-dim behavior through the explicit `keepAxes` parameter
 instead: list the **output positions** whose dimensions should be copied from the input,
 and omit those entries from `newShape`. The classic batch-preserving flatten of
 `x : [N, C, H, W]` — ONNX `Reshape(x, [0, -1])` — is spelled:
 
 ```csharp
-x.Reshape([Scalar(-1L)], keepDims: [0])   // → [N, C·H·W]; N need not be known at build time
+x.Reshape([Scalar(-1L)], keepAxes: [0])   // → [N, C·H·W]; N need not be known at build time
 ```
 
-`keepDims: [0, 1]` with `newShape = [-1]` similarly yields `[N, C, H·W]`, and so on. The
+`keepAxes: [0, 1]` with `newShape = [-1]` similarly yields `[N, C, H·W]`, and so on. The
 kept dimensions are resolved at run time by ONNX Runtime, so they work even when the
 input's dimensions are unknown while the graph is being built (no `.DimTensor(...)`
 plumbing needed).
 
-Lowering: `Reshape` always emits an ONNX `Reshape` node. Without `keepDims` the node
-carries `allowzero=1`, matching the PyTorch reading of `0`; with `keepDims` it carries
+Lowering: `Reshape` always emits an ONNX `Reshape` node. Without `keepAxes` the node
+carries `allowzero=1`, matching the PyTorch reading of `0`; with `keepAxes` it carries
 `allowzero=0` and a shape input with `0` at each kept position. Note that ONNX rejects
 combining `-1` with a literal `0` under `allowzero=1`, so a zero-sized dimension and an
 inferred dimension cannot appear in the same plain `Reshape` call — but `-1` combines
-freely with `keepDims`.
+freely with `keepAxes`.
 
 ## Higher-level ops (`using static Shorokoo.NN;`)
 

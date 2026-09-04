@@ -35,8 +35,8 @@ namespace Shorokoo
         public Scalar<int64> DimTensor(long axis)
             => this.ShapeTensor()[axis];
 
-        /// <summary>Gathers entries along <paramref name="axis"/> using the given indices (ONNX Gather).</summary>
-        public Tensor<T> Gather(Tensor<int64> indices, long? axis)
+        /// <summary>Gathers entries along <paramref name="axis"/> - axis 0 when null - using the given indices (ONNX Gather).</summary>
+        public Tensor<T> Gather(Tensor<int64> indices, long? axis = null)
             => OnnxOp.Gather(this, indices, axis);
 
         /// <summary>Matrix product with <paramref name="other"/> (ONNX MatMul).</summary>
@@ -77,13 +77,13 @@ namespace Shorokoo
 
         /// <summary>Reshapes to <paramref name="newShape"/> (one entry may be -1 to infer that dimension;
         /// a 0 entry is a literal zero-sized dimension, as in PyTorch). To copy dimensions from the input
-        /// instead, list their output positions in <paramref name="keepDims"/> and omit them from
-        /// <paramref name="newShape"/>: <c>x.Reshape([Scalar(-1L)], keepDims: [0])</c> keeps dimension 0
+        /// instead, list their output positions in <paramref name="keepAxes"/> and omit them from
+        /// <paramref name="newShape"/>: <c>x.Reshape([Scalar(-1L)], keepAxes: [0])</c> keeps dimension 0
         /// and flattens the rest.</summary>
-        public Tensor<T> Reshape(Vector<int64> newShape, int[]? keepDims = null)
-            => keepDims is null
+        public Tensor<T> Reshape(Vector<int64> newShape, int[]? keepAxes = null)
+            => keepAxes is null
                 ? OnnxOp.Reshape(this, newShape, allowZero: true)
-                : OnnxOp.Reshape(this, ShapeUtils.InsertKeepDimZeros(newShape, keepDims), allowZero: false);
+                : OnnxOp.Reshape(this, ShapeUtils.InsertKeepAxesZeros(newShape, keepAxes), allowZero: false);
 
         /// <summary>Permutes the dimensions; with no arguments, reverses them.</summary>
         public Tensor<T> Transpose(params long[] newDims)

@@ -8,6 +8,7 @@ namespace Shorokoo.Core.Inference.Ops;
 internal sealed class ReduceL1Op : ReduceOpBase
 {
     public override string OpCode => OpCodes.REDUCE_L1;
+    protected override bool CanFoldEmptyGroup => true;
     protected override float Reduce(IEnumerable<float> values) => values.Select(MathF.Abs).Sum();
     protected override long ReduceInt(IEnumerable<long> values, DType dtype) { long s = 0; foreach (var v in values) s += Math.Abs(v); return s; }
     // Unsigned lanes are already their own magnitude.

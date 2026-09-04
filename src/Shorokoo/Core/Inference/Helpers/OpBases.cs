@@ -189,6 +189,24 @@ internal abstract class CompareOp : QuickOp
 /// </summary>
 internal abstract class ReduceOpBase : QuickOp
 {
+    /// <summary>
+    /// Whether this accumulator may fold an EMPTY group, which a reduced axis of extent 0 produces.
+    /// Sum, SumSquare, L1, L2 and Prod may: their identity is 0 (1 for Prod) in every dtype, and it
+    /// is what the backend returns.
+    ///
+    /// <para>Max, Min, Mean, LogSum and LogSumExp decline, because their empty-group value is the
+    /// backend's, not the spec's. Measured against the ONNX Runtime this framework ships
+    /// (<c>QeeReductionShapeAuditTests</c> pins these): float32 gives -inf, +inf, 0, -inf, -inf —
+    /// but int64 Max and Min give <b>0</b>, not the dtype's extremes, which reads as zero-filled
+    /// output rather than an identity. Folding any of that would bake one backend's behaviour into
+    /// a build-time constant, so QEE propagates dtype and shape and leaves the value alone.</para>
+    ///
+    /// <para>Defaults to <c>false</c> so an accumulator folds an empty group only once it has said
+    /// it can: declining costs a constant, guessing costs correctness. Note a reduction with no
+    /// groups at all (<c>keptCount == 0</c>) folds regardless — there is nothing to accumulate.</para>
+    /// </summary>
+    protected virtual bool CanFoldEmptyGroup => false;
+
     protected abstract float Reduce(IEnumerable<float> values);
 
     /// <summary>
@@ -242,7 +260,8 @@ internal abstract class ReduceOpBase : QuickOp
             }
             else
             {
-                var normalizedAxes = axes.Select(a => a < 0 ? a + dims.Length : a).OrderByDescending(a => a).ToArray();
+                var normalizedAxes = axes.Select(a => a < 0 ? a + dims.Length : a)
+                    .Distinct().OrderByDescending(a => a).ToArray();
                 if (keepDims)
                 {
                     foreach (var ax in normalizedAxes) dims[(int)ax] = 1;
@@ -277,6 +296,12 @@ internal abstract class ReduceOpBase : QuickOp
 
         long keptCount = 1;
         for (int d = 0; d < inDims.Length; d++) if (!axisSet.Contains(d)) keptCount *= inDims[d];
+
+        // With no groups to evaluate the accumulator is never called, so the empty result stands
+        // whether or not this reduction has an identity.
+        if (!CanFoldEmptyGroup && keptCount > 0
+            && normalizedAxesAll.Any(a => a >= 0 && a < inDims.Length && inDims[a] == 0))
+            return [rt];
 
         long[] inStrides = new long[inDims.Length];
         long s = 1;
@@ -350,6 +375,9 @@ internal abstract class ReduceOpBase : QuickOp
     private static IEnumerable<float> EnumerateGroup(ImmutableArray<float> data, long srcBase, int[] axisShape, long[] axisStrides)
     {
         if (axisShape.Length == 0) { yield return data[(int)srcBase]; yield break; }
+        // An extent-0 reduced axis makes the group empty. The walk below reads before it tests
+        // the extent, so without this it would index element 0 of an empty buffer.
+        for (int d = 0; d < axisShape.Length; d++) if (axisShape[d] == 0) yield break;
         var idx = new int[axisShape.Length];
         while (true)
         {
@@ -366,6 +394,9 @@ internal abstract class ReduceOpBase : QuickOp
     private static IEnumerable<long> EnumerateGroup(ImmutableArray<long> data, long srcBase, int[] axisShape, long[] axisStrides)
     {
         if (axisShape.Length == 0) { yield return data[(int)srcBase]; yield break; }
+        // An extent-0 reduced axis makes the group empty. The walk below reads before it tests
+        // the extent, so without this it would index element 0 of an empty buffer.
+        for (int d = 0; d < axisShape.Length; d++) if (axisShape[d] == 0) yield break;
         var idx = new int[axisShape.Length];
         while (true)
         {

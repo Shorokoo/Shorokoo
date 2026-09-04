@@ -82,7 +82,7 @@ public static class Attention
     /// Rotary Positional Embedding (RoPE; Su et al. 2021). Rotates each query/key
     /// vector by an angle proportional to its sequence position, encoding RELATIVE
     /// position inside the attention dot-product. Param-free: a deterministic
-    /// rotation from position + a fixed frequency base. Apply to Q and K (each
+    /// rotation from position + a fixed frequency <paramref name="theta"/>. Apply to Q and K (each
     /// <c>[N, H, L, d]</c>, d EVEN) BEFORE <see cref="ScaledDotProductAttention"/>;
     /// do NOT apply to V.
     ///
@@ -92,22 +92,22 @@ public static class Attention
     ///     RoPE(x) = x · cos(mθ) + rotateHalf(x) · sin(mθ)
     ///     rotateHalf(x) = concat(-x[…, d/2:], x[…, :d/2])
     /// </code>
-    /// with <c>θ_i = base^{-2i/d}</c>, <c>m = position</c>. The cos/sin tables are
+    /// with <c>θ_i = theta^{-2i/d}</c>, <c>m = position</c>. The cos/sin tables are
     /// built in-graph from the input's own <c>L</c> (axis -2) and <c>d</c> (axis -1)
     /// and broadcast over the leading <c>[N, H]</c> via <c>[1, 1, L, d]</c>. The
     /// rotation is orthogonal, so it preserves each vector's norm exactly. Returns
     /// the rotated tensor with the SAME shape <c>[N, H, L, d]</c>.
     /// </summary>
-    public static Tensor<float32> ApplyRoPE(Tensor<float32> x, long @base = 10000)
+    public static Tensor<float32> ApplyRoPE(Tensor<float32> x, long theta = 10000)
     {
         var l = x.DimTensor(-2);   // sequence length (axis -2), in-graph
         var d = x.DimTensor(-1);   // head dim (axis -1), must be even
         var half = d / 2L; // d/2 as a graph scalar
 
-        // θ_i = base^{-2i/d} for i = 0 … d/2-1, via exponents -2i/d on [0, d) step 2.
+        // θ_i = theta^{-2i/d} for i = 0 … d/2-1, via exponents -2i/d on [0, d) step 2.
         var dF = d.Cast<float32>();
         var exps = VectorRange(0L, d, 2L).Cast<float32>() * (-1f / dF); // [-0, -2/d, …]  length d/2
-        var invFreq = Scalar((float)@base).Pow(exps);                                            // base^{-2i/d}    [d/2]
+        var invFreq = Scalar((float)theta).Pow(exps);                                            // theta^{-2i/d}    [d/2]
 
         var pos = VectorRange(0L, l, 1L).Cast<float32>();                         // [0,1,…,L-1]     [L]
         var angles = pos.Unsqueeze(1L) * invFreq.Unsqueeze(0L);                                   // outer(pos,freq) [L, d/2]

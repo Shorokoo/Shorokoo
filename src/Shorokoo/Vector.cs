@@ -407,8 +407,8 @@ namespace Shorokoo
         public Vector<T> Slice(Scalar<int64> start, Scalar<int64> end, Scalar<int64>? steps = null)
             => ((Tensor<T>)this).Slice(start.Unsqueeze(), end.Unsqueeze(), null, steps?.Unsqueeze()).Vec();
 
-        /// <summary>Gathers slices using multi-dimensional indices (ONNX GatherND).</summary>
-        public Vector<T> GatherND(Vector<int64> indices, long? batchDims)
+        /// <summary>Gathers slices using multi-dimensional indices (ONNX GatherND); <paramref name="batchDims"/> is 0 when null.</summary>
+        public Vector<T> GatherND(Vector<int64> indices, long? batchDims = null)
             => ((Tensor<T>)this).GatherND(indices,batchDims).Vec();
 
         /// <summary>Casts the element type to <typeparamref name="V"/>, preserving rank 1.</summary>

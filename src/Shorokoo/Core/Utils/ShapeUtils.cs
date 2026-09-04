@@ -10,27 +10,27 @@ namespace Shorokoo.Core.Utils
     {
         /// <summary>
         /// Builds the ONNX Reshape shape input for the user-facing <c>Reshape</c> wrappers'
-        /// <c>keepDims</c> form: inserts a constant <c>0</c> ("copy this dimension from the
+        /// <c>keepAxes</c> form: inserts a constant <c>0</c> ("copy this dimension from the
         /// input", ONNX allowzero=0 semantics) at each output position listed in
-        /// <paramref name="keepDims"/>, filling the remaining slots with the elements of
+        /// <paramref name="keepAxes"/>, filling the remaining slots with the elements of
         /// <paramref name="newShape"/> in order. Works on dynamic-length shape vectors: the
         /// splice points are compile-time constants, so the result is a Slice/Concat chain
         /// that never needs the runtime length (ORT clamps the open-ended tail slice).
         /// </summary>
-        internal static Vector<int64> InsertKeepDimZeros(Vector<int64> newShape, int[] keepDims)
+        internal static Vector<int64> InsertKeepAxesZeros(Vector<int64> newShape, int[] keepAxes)
         {
-            if (keepDims.Length == 0)
+            if (keepAxes.Length == 0)
                 return newShape;
 
-            int[] sorted = [.. keepDims];
+            int[] sorted = [.. keepAxes];
             Array.Sort(sorted);
             if (sorted[0] < 0)
-                throw new ArgumentOutOfRangeException(nameof(keepDims), sorted[0],
-                    "keepDims positions must be non-negative.");
+                throw new ArgumentOutOfRangeException(nameof(keepAxes), sorted[0],
+                    "keepAxes positions must be non-negative.");
             for (int i = 1; i < sorted.Length; i++)
                 if (sorted[i] == sorted[i - 1])
                     throw new ArgumentException(
-                        $"keepDims lists output position {sorted[i]} more than once.", nameof(keepDims));
+                        $"keepAxes lists output position {sorted[i]} more than once.", nameof(keepAxes));
 
             var zero = Vector(0L);
             var pieces = new List<Vector<int64>>();

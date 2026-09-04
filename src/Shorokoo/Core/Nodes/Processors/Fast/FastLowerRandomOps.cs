@@ -28,13 +28,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// unbound graph is bound to the DEFAULT identity here first — a concrete artifact is
     /// never unkeyed, and "no config" simply means the default deterministic identity.</para>
     ///
-    /// <para><b>Feeds with no ModelId</b> (a graph that never went through concretization)
-    /// take the ONNX fallback: <c>ConstantOfShape + RandomUniformLike/RandomNormalLike</c>,
-    /// with any user seed copied through and none synthesized. An <b>id-bearing</b> feed whose
-    /// chain is missing does not: its draw belongs to the keyed scheme, so lowering it to that
-    /// fallback would silently substitute unkeyed backend randomness, and it is a hard error
-    /// instead. That is the state of a ConcreteArchitecture's un-run initializer bodies —
-    /// executing or exporting one is not supported; call <c>ToConcreteModel</c> first.</para>
+    /// <para><b>Feeds with no ModelId</b> (a draw assembled straight from op outputs, outside
+    /// any module — module bodies get their ids at build) take the ONNX fallback:
+    /// <c>ConstantOfShape + RandomUniformLike/RandomNormalLike</c>, with any user seed copied
+    /// through and none synthesized. An <b>id-bearing</b> feed whose chain is missing does not:
+    /// its draw belongs to the keyed scheme, so substituting unkeyed backend randomness there
+    /// is a hard error for every feed kind, the float ones included. That is the state of every
+    /// un-run initializer body — a module graph's and a ConcreteArchitecture's alike — so lower
+    /// the graph to a concrete model before executing it.</para>
     /// </summary>
     internal static class FastLowerRandomOps
     {
@@ -116,46 +117,34 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     continue;
                 }
 
-                // Raw bits have no unkeyed fallback: unlike a float draw, a bit pattern is only
-                // meaningful under a stream key, and there is no ONNX bits-like op to defer to. So
-                // a bits feed that lacks a keyed chain is always a hard error — but the two causes
-                // want different diagnostics.
-                if (isBits)
-                {
-                    if (idVals is { Length: > 0 })
-                        // Id-bearing but chain-less — the graph was modified since
-                        // concretization (the analogue of the float path's corruption case).
-                        throw new InvalidOperationException(
-                            $"FastLowerRandomOps: the SHRK_RANDOM_BITS feed at ModelId " +
-                            $"[{string.Join(", ", idVals)}] is id-bearing but has no key derivation " +
-                            "chain — the graph was modified since concretization. Re-concretize " +
-                            "(ToConcreteArchitecture) before lowering.");
-                    throw new InvalidOperationException(
-                        "FastLowerRandomOps: a SHRK_RANDOM_BITS feed reached lowering with no stream " +
-                        "identity. Raw random bits require a keyed RNG identity and have no unkeyed " +
-                        "fallback — draw them inside a concrete, id-bearing model.");
-                }
-
-                // An id-bearing float feed whose chain is missing is a hard error, exactly as
-                // for bits: the site belongs to the keyed scheme, and lowering it to the ONNX
-                // fallback would silently replace its reproducible draw with real backend
-                // randomness. Reachable from public API — executing or exporting a
-                // ConcreteArchitecture, whose initializer bodies are not keyed until the
-                // initializers are run — so it is a user-facing exception, not an assertion.
+                // An id-bearing feed whose chain is missing is a hard error for every feed
+                // kind: the site belongs to the keyed scheme, so lowering it — to the float
+                // ONNX fallback, or at all for bits — would trade a reproducible draw for real
+                // backend randomness. It is reachable from public API (executing a graph whose
+                // initializer bodies are not keyed until the initializers are run), so it is a
+                // user-facing exception rather than an assertion.
                 if (idVals is { Length: > 0 })
                     throw new InvalidOperationException(
                         $"FastLowerRandomOps: the {node.OpCode} feed at ModelId " +
                         $"[{string.Join(", ", idVals)}] is id-bearing but has no key derivation " +
-                        "chain, so it can only be lowered to the ONNX random fallback — which " +
-                        "would silently make a keyed site non-deterministic. For an initializer " +
-                        "body this means the graph is a ConcreteArchitecture: its initializers " +
-                        "have not been run. Call ToConcreteModel first; executing or exporting a " +
-                        "non-concrete model is not supported. On an already concrete graph it " +
-                        "means the graph was modified since concretization — re-concretize " +
-                        "(ToConcreteArchitecture) before lowering.");
+                        "chain, so it could only be lowered to unkeyed backend randomness at a " +
+                        "keyed site. An initializer body is keyed when the initializers are run, " +
+                        "so lower the graph the whole way before executing it — " +
+                        "ToConcreteArchitecture(inputHints) then ToConcreteModel() — rather than " +
+                        "executing a [Module]'s output or a ConcreteArchitecture directly. On a " +
+                        "graph that is already a concrete model, a chain missing here means the " +
+                        "graph was modified since concretization; re-concretize it.");
 
-                // A float feed with no stream identity at all (no ModelId — a graph that never
-                // went through concretization): the ONNX fallback — ConstantOfShape +
+                // Raw bits have no unkeyed fallback: unlike a float draw, a bit pattern is only
+                // meaningful under a stream key, and there is no ONNX bits-like op to defer to.
+                if (isBits)
+                    throw new InvalidOperationException(
+                        "FastLowerRandomOps: a SHRK_RANDOM_BITS feed reached lowering with no stream " +
+                        "identity. Raw random bits require a keyed RNG identity and have no unkeyed " +
+                        "fallback — draw them inside a concrete, id-bearing model.");
+
+                // A float feed with no ModelId at all — a draw assembled straight from op
+                // outputs, outside any module — takes the ONNX fallback: ConstantOfShape +
                 // RandomUniformLike/NormalLike.
                 LowerToOnnxRandomLike(node, isUniform, newNodes);
                 newNodes.Add(node);
@@ -438,8 +427,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     "reached the ONNX fallback, which carries its distribution as attributes and " +
                     "cannot express one computed in-graph — the parameters would be silently " +
                     "dropped. The feed reaches this fallback because it carries no ModelId — a " +
-                    "graph that never went through concretization — and an in-graph distribution " +
-                    "is only expressible at a keyed site: draw it inside a concrete model.");
+                    "draw assembled straight from op outputs, outside any module — and an " +
+                    "in-graph distribution is only expressible at a keyed site: draw it inside " +
+                    "a concrete model.");
 
             var placeholderKey = AppendConstantOfShape(shapeInput, newNodes);
 

@@ -59,9 +59,10 @@ What `Eval` accepts is the trap here:
   handed to it, so a value coming out of `Foo.Call(...)` still carries its
   un-lowered module-invoke node when it reaches OnnxRuntime, which rejects the
   model with `No Op registered for ShrkCreateModule`. Not every module gets that
-  far: one whose parameters are drawn at random — every `Shorokoo.Modules` layer
-  with weights, and `ResNet50` too — throws earlier still, while the ONNX model
-  is being built. Either way, lower the module's `ComputationGraph` first — see
+  far: one that draws at random anywhere — the weight-bearing `Shorokoo.Modules`
+  layers such as `Linear` and `Conv2d`, and `ResNet50` too — throws earlier still,
+  while the ONNX model is being built. Either way, lower the module's
+  `ComputationGraph` first — see
   [Running a `[Module]`](#running-a-module), which spells out both errors.
   (`ResNet50` there is from [`samples/RetinaNet`](../samples/RetinaNet) — a
   sample built on Shorokoo, not part of the packages.)
@@ -84,26 +85,28 @@ TensorData[] outs = OnnxEngine.Eval(out1, out2, out3);
 `OnnxEngine.Eval` runs a graph of plain ops. A `[Module]`'s output (from
 `Foo.Call(...)` or `Foo.Model().Call(...)`) can still carry an un-lowered
 module-invoke node, in which case passing it straight to `Eval` throws. *Which*
-error you get depends on what the module's parameters are initialized from:
+error you get depends on whether the module draws at random:
 
-- **Parameters drawn at random.** Every initializer that draws — the
-  [`Shorokoo.Modules` layers](nn-library.md) with weights (`Linear`, the `Conv*`
-  family, `MultiHeadAttention` and anything built out of them), and equally the
-  fixed-distribution ones (`Uniform`, `KaimingNormal`, `XavierNormal`, a plain
-  `RandomNormal(shape, mean, scale)`, …). The draws belong to the model's keyed RNG
-  streams, which are only wired once the initializers are run, so the failure comes
-  first, while the ONNX model is still being built, as an `InvalidOperationException`:
+- **It draws.** Anywhere: an initializer that draws — the weight-bearing
+  [`Shorokoo.Modules` layers](nn-library.md) (`Linear`, the `Conv*` family,
+  `MultiHeadAttention` and anything built out of them), `Uniform`, `KaimingNormal`,
+  `XavierNormal`, … — or a `RandomUniform` / `RandomNormal` / `RandomBits` feed in
+  the module's own body. Every draw is keyed to the model's RNG streams only once
+  the graph is lowered the whole way, so the failure comes first, while the ONNX
+  model is still being built, as an `InvalidOperationException`:
 
   > `FastLowerRandomOps: the shrk_RandomUniform feed at ModelId [...] is id-bearing
-  > but has no key derivation chain ... Call ToConcreteModel first; executing or
-  > exporting a non-concrete model is not supported.`
+  > but has no key derivation chain ... lower the graph the whole way before
+  > executing it — ToConcreteArchitecture(inputHints) then ToConcreteModel() ...`
 
-  The `ResNet50` of [`samples/RetinaNet`](../samples/RetinaNet) lands here too: it
-  initializes from its own constant-scale `RandomNormal`, not from the library layers.
+  (`shrk_RandomNormal` / `shrk_RandomBits` for the other two feeds.) The `ResNet50`
+  of [`samples/RetinaNet`](../samples/RetinaNet) lands here: it initializes from its
+  own constant-scale `RandomNormal`, not from the library layers.
 
-- **No draw at all** — no trainable parameters, or initializers that compute their
-  values (`Zeros`, `Constant`, …). Those build a model, and OnnxRuntime rejects it
-  for the module-invoke node it still contains:
+- **It draws nothing** — no trainable parameters, or initializers that fill rather
+  than draw (`Zeros`, `Ones`, `Constant`, …), which is where the normalization
+  layers and `PReLU` sit. Those build a model, and OnnxRuntime rejects it for the
+  module-invoke node it still contains:
 
   > `[ErrorCode:InvalidGraph] ... Error No Op registered for ShrkCreateModule ...`
 

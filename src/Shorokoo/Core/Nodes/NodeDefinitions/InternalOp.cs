@@ -326,8 +326,8 @@ internal static partial class InternalOp
     /// <summary>
     /// A uniform random feed in [low, high) taking its shape as a tensor input (dynamic shape
     /// support). An id-bearing feed lowers to the keyed deterministic draw under the model's
-    /// RNG identity; a feed without stream identity lowers to ConstantOfShape +
-    /// RandomUniformLike.
+    /// RNG identity; a feed with no ModelId at all lowers to ConstantOfShape +
+    /// RandomUniformLike. An id-bearing feed still missing its key chain is a hard error.
     ///
     /// <para>The bounds come either as the literal <paramref name="low"/>/<paramref name="high"/>
     /// attributes or, for a range only known in-graph, as the f32 scalar

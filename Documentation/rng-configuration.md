@@ -289,16 +289,17 @@ stream needs pinning.
 `Globals.RandomBits<T>(Vector<int64> shape)` is the third keyed feed: raw uniformly-random
 unsigned integers, with `T` constrained to the unsigned widths `uint8` / `uint16` / `uint32` /
 `uint64` — any other width is rejected. Unlike the float feeds it has **no unkeyed fallback**:
-where a `RandomUniform` / `RandomNormal` site that carries no ModelId at all (a graph that never
-went through concretization) lowers to ONNX `RandomUniformLike` / `RandomNormalLike`, a bits site
-in that position fails loudly at ONNX prep instead — a bit pattern is only meaningful under a
-stream key. Raw bits must therefore be drawn inside a concrete, id-bearing model.
+where a `RandomUniform` / `RandomNormal` site that carries no ModelId at all — a draw assembled
+straight from op outputs, outside any module, since a module body's draws are given their ids
+where the body is built — lowers to ONNX `RandomUniformLike` / `RandomNormalLike`, a bits site in
+that position fails loudly at ONNX prep instead — a bit pattern is only meaningful under a stream
+key. Raw bits must therefore be drawn inside a concrete, id-bearing model.
 
 A site that *does* carry a ModelId but whose derivation chain is not yet wired — a draw inside an
-un-run initializer body, i.e. a `ConcreteArchitecture` executed or exported before
+un-run initializer body, so a `[Module]`'s output or a `ConcreteArchitecture` executed before
 `ToConcreteModel` — is a hard error for every feed kind, the float ones included: the site belongs
 to the keyed streams, so lowering it to a backend random op would silently trade the model's
-reproducibility for unkeyed randomness. Call `ToConcreteModel` first (see
+reproducibility for unkeyed randomness. Lower the graph the whole way first (see
 [inference.md](inference.md#running-a-module)).
 
 ## Choosing seeds

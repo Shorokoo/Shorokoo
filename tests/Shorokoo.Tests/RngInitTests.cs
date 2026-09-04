@@ -20,14 +20,6 @@ public partial class RngInitTwoLinears
     }
 }
 
-/// <summary>A parameter whose initializer draws U(0, 1) with attribute-carried bounds — the
-/// un-run-initializer fault in the form that leaves the ONNX fallback nothing to drop.</summary>
-[Module]
-public partial class RngAttributeBoundsInitLayer
-{
-    public static Tensor<float32> Inline(Tensor<float32> x) => x * Uniform.Init(x.ShapeTensor());
-}
-
 /// <summary>A uint32 state parameter initialized with raw random bits: RandomBits inside a
 /// (state) parameter initializer, keyed on the parameter's own init stream.</summary>
 [StateInitializer(Ownership = StateOwnership.ModuleOwned)]
@@ -564,12 +556,27 @@ public partial class RngInitNestedDrawLayer
     }
 }
 
+/// <summary>Parameters whose initializers draw with attribute-carried distributions — the
+/// un-run-initializer fault in the form that leaves the ONNX fallback nothing to drop.</summary>
+[Module]
+public partial class RngAttributeBoundsInitLayer
+{
+    public static Tensor<float32> Inline(Tensor<float32> x) => x * Uniform.Init(x.ShapeTensor());
+}
+
+[Module]
+public partial class RngAttributeBoundsNormalInitLayer
+{
+    public static Tensor<float32> Inline(Tensor<float32> x) => x * Normal.Init(x.ShapeTensor());
+}
+
 /// <summary>
 /// Initialization-side draws must never silently escape the keyed scheme into unkeyed backend
 /// randomness. A draw factored into a called function is brought into the scheme by flattening
-/// the initializer body before the noise substitution; the other escape —
+/// the initializer body before the noise substitution; the second escape —
 /// <c>FastInitializeModelParams</c> invoked with a config but a missing/incomplete parameter
-/// inventory — fails loudly instead of silently disabling the injection.
+/// inventory — fails loudly instead of silently disabling the injection; the third — executing a
+/// graph whose initializer bodies are not keyed yet — fails loudly at lowering.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -652,29 +659,29 @@ public class RngInitFailLoudTests
 
     /// <summary>An id-bearing feed with no key chain is reachable from public API — a module
     /// output handed to <c>OnnxEngine.Eval</c>, and a ConcreteArchitecture handed to
-    /// <c>ComputeContext.Execute</c>, which <c>RequireConcretized</c> admits. It is a user error,
-    /// so it fails with the product's own catchable exception in every configuration. The
-    /// attribute-bounds initializer is the same fault where the fallback has no in-graph
-    /// distribution to drop, and so used to lower silently to unkeyed backend randomness.</summary>
+    /// <c>ComputeContext.Execute</c>, which <c>RequireConcretized</c> admits. Every feed kind
+    /// fails there with the product's own catchable exception, naming the site, in every
+    /// configuration; the ModelId-less feed keeps its ONNX fallback.</summary>
     [Fact]
     public void TestIdBearingFeedWithoutKeyChainFailsWithACatchableExceptionNotAnAssertion()
     {
         var sample = TensorData([1L, 4L], 1f, 2f, 3f, 4f);
-        var moduleGraph = RngInitTwoLinears.ComputationGraph;
-        var arch = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([sample]));
-        var boundsGraph = RngAttributeBoundsInitLayer.ComputationGraph;
-        var boundsArch = boundsGraph.ToConcreteArchitecture(boundsGraph.FromOrderedInputs([sample]));
+        void Unkeyed(Func<object?> run) => Assert.Contains("no key derivation chain",
+            Assert.IsType<InvalidOperationException>(Record.Exception(() => run())).Message);
 
-        Assert.IsType<InvalidOperationException>(Record.Exception(
-            () => OnnxEngine.Eval(RngInitTwoLinears.Call(Tensor([1L, 4L], 1f, 2f, 3f, 4f)))));
-        Assert.IsType<InvalidOperationException>(Record.Exception(
-            () => ComputeContext.Default.Execute(arch, sample)));
-        Assert.IsType<InvalidOperationException>(Record.Exception(
-            () => ComputeContext.Default.Execute(boundsArch, sample)));
-        Assert.Null(Record.Exception(
-            () => ComputeContext.Default.Execute(arch.ToConcreteModel(), sample)));
-        Assert.Null(Record.Exception(
-            () => ComputeContext.Default.Execute(boundsArch.ToConcreteModel(), sample)));
+        foreach (var g in (ComputationGraph[])[
+            RngInitTwoLinears.ComputationGraph,                  // in-graph bounds
+            RngAttributeBoundsInitLayer.ComputationGraph,        // attribute bounds
+            RngAttributeBoundsNormalInitLayer.ComputationGraph,  // normal family
+            RngBitsInitLayer.ComputationGraph])                  // raw bits
+        {
+            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([sample]));
+            Unkeyed(() => ComputeContext.Default.Execute(arch, sample));
+            Assert.Null(Record.Exception(() => ComputeContext.Default.Execute(arch.ToConcreteModel(), sample)));
+        }
+
+        Unkeyed(() => OnnxEngine.Eval(RngInitTwoLinears.Call(Tensor([1L, 4L], 1f, 2f, 3f, 4f))));
+        Assert.Null(Record.Exception(() => OnnxEngine.Eval(RandomUniform([Scalar(4L)], 0f, 1f))));
     }
 }
 

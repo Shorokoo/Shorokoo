@@ -16,7 +16,8 @@ namespace Shorokoo
 {
     /// <summary>
     /// The ONNX exchange boundary, mirroring the safetensors boundary in
-    /// <c>Persistence.SafeTensors.cs</c>: <see cref="ExportOnnx"/> writes a concrete model
+    /// <c>Persistence.SafeTensors.cs</c>:
+    /// <see cref="ExportOnnx(ComputationGraph, string, OpSetVersion)"/> writes a concrete model
     /// to a standard, externally-loadable ("vanilla" dialect) <c>.onnx</c>, and
     /// <see cref="ImportOnnx"/> turns a foreign vanilla <c>.onnx</c> back into a native
     /// runnable <see cref="ComputationGraph"/> — with each ONNX initializer's name adopted
@@ -39,9 +40,12 @@ namespace Shorokoo
         /// call to an emitted function, so the file loads in any conforming ONNX runtime. The
         /// graph must be a weight-filled <see cref="GraphKind.ConcreteModel"/>; a graph still
         /// carrying Shorokoo-internal orchestration ops is refused (naming the offending ops)
-        /// rather than written as a file only a Shorokoo runtime could load. The write is
-        /// atomic (staged to a temp file beside <paramref name="filePath"/> and committed by
-        /// rename); the target's directory must already exist.
+        /// rather than written as a file only a Shorokoo runtime could load. A model whose tensor
+        /// data exceeds protobuf's 2 GB message ceiling is refused with <c>XD007</c>, naming
+        /// <see cref="OnnxModelExporter.SaveWithExternalData"/> as the remedy — this writes the
+        /// self-contained form only. The write is atomic (staged to a temp file beside
+        /// <paramref name="filePath"/> and committed by rename); the target's directory must
+        /// already exist.
         /// </summary>
         /// <param name="concreteModel">The weight-filled concrete model to export.</param>
         /// <param name="filePath">Target path; a <c>.onnx</c> extension is conventional.</param>
@@ -51,6 +55,14 @@ namespace Shorokoo
             ComputationGraph concreteModel,
             string filePath,
             OpSetVersion opset = OpSetVersion.OPS_21)
+            => ExportOnnx(concreteModel, filePath, opset,
+                OnnxModelExporter.MaxSelfContainedTensorBytes);
+
+        internal static void ExportOnnx(
+            ComputationGraph concreteModel,
+            string filePath,
+            OpSetVersion opset,
+            long maxTensorBytes)
         {
             if (concreteModel is null) throw new ArgumentNullException(nameof(concreteModel));
             if (string.IsNullOrWhiteSpace(filePath))
@@ -63,8 +75,10 @@ namespace Shorokoo
             // cross-graph pairing here; the builder owns it end-to-end. ImportOnnx re-attaches on load.
             var model = FastOnnxModelBuilder.BuildOnnxModel(
                 concreteModel, opset, representativeForm: RepresentativeInputForm.VanillaMetadata);
-            AtomicFileWriter.WriteFile(
-                filePath, stream => ProtoBuf.Serializer.Serialize(stream, model));
+            // Through the exporter rather than straight to the writer: it owns the 2 GB
+            // protobuf-ceiling pre-check (XD007, naming SaveWithExternalData as the remedy),
+            // which a serialization here of its own would silently skip.
+            OnnxModelExporter.Save(model, filePath, maxTensorBytes);
         }
 
         /// <summary>

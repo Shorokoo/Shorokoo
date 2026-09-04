@@ -8,8 +8,11 @@ Related: [inference.md](inference.md) · [core-types.md](core-types.md) · [skpt
   lowering steps). Every graph carries a reliable `Kind` (`GraphKind.Module` /
   `ConcreteArchitecture` / `ConcreteModel`) stamped where it was produced. It can be
   converted to an ONNX `ModelProto`, or saved in Shorokoo's own `.srk`/`.zsrk` format.
-- There is no one-call `graph.ToOnnxFile(path)`. Build the `ModelProto`, then save it
-  with `OnnxModelExporter` (or serialize it yourself with protobuf).
+- `Persistence.ExportOnnx(graph, path)` is the one call from a concrete model to a
+  self-contained `.onnx`; there is no `graph.ToOnnxFile(path)` instance method. Drop to
+  `FastOnnxModelBuilder.BuildOnnxModel` + `OnnxModelExporter` when you need the
+  `ModelProto` in between — to set the builder's options, to export with external data,
+  or to write a proto you built or imported yourself.
 - Models larger than protobuf's 2 GB message ceiling are handled with the standard
   ONNX **external data** mechanism: `OnnxModelExporter.SaveWithExternalData` on
   export, and transparent side-file loading on import.

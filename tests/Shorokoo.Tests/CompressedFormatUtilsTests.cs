@@ -2346,6 +2346,23 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
             .AccessMemory().ToArray();
     }
 
+    /// <summary>
+    /// The 2 GB protobuf ceiling is the whole reason the external-data layout exists, so the
+    /// graph-level export must refuse an over-ceiling model with the framework's own XD007 —
+    /// naming the remedy — rather than let protobuf fail on its own terms. Driven with a tiny
+    /// injected ceiling rather than by allocating gigabytes.
+    /// </summary>
+    [Fact]
+    public void TestExportOnnxRefusesAModelOverTheProtobufCeilingNamingTheExternalDataRemedy()
+    {
+        var (model, _, _) = BuildSkptModel();
+        var ex = Assert.Throws<ModelException>(
+            () => Persistence.ExportOnnx(model, P("over-ceiling.onnx"), OpSetVersion.OPS_21, 8));
+        Assert.Equal(ErrorCodes.XD007, ex.ErrorCode);
+        Assert.Contains("SaveWithExternalData", ex.Message);
+        Assert.False(File.Exists(P("over-ceiling.onnx")));
+    }
+
     [Fact]
     public void TestOnnxExportImportRoundTripThirdPartyModelsAndCheckpointLanding()
     {

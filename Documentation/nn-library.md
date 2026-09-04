@@ -1129,6 +1129,17 @@ The rig hands the loss graph exactly **two tensor inputs** and wants a
   is back to two inputs and satisfies the rig contract. There is no `WithWeight`
   factory — the wrapper module is the supported recipe.
 
+**Or move the loss into the model.** `Inline`, `Reduced` and `PerElement` are plain static graph
+builders — nothing about them is rig-specific — so every one of them may be called from **any**
+`[Module]` body, including your *model's*. A model whose `Inline` ends in, say,
+`CrossEntropyLoss.PerElement(logits, labels, ignoreIndex: 0L)` and then weights and reduces that
+tensor itself has a `Scalar<float32>` output, takes its labels / mask / weights as ordinary model
+inputs, and trains against a **pass-through** loss module that forwards its predictions input and
+ignores its targets. That lifts every restriction above — extra tensor inputs and unreduced forms are
+all reachable — at the price of a model whose output is a loss rather than a prediction. See
+[training.md → A loss graph may ignore its `targets`](training.md#loss-ignoring-targets) for the
+pattern and for what the rig still expects you to feed each step.
+
 ## Optimizers (`Shorokoo.Modules.Optimizers`)
 
 Each operates on one parameter at a time (`(hypers..., currentParam, grad) ->

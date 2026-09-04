@@ -46,6 +46,46 @@ equals each set's property count):
 
 A loss module has signature `(predictions, targets) -> Scalar<float32>` with exactly two tensor inputs; targets are typically `Tensor<float32>`, but class-index losses (`CrossEntropyLoss`, `NLLLoss`) take `Tensor<int64>` targets.
 The library losses' configurable knobs (`reduction`, `ignore_index`, `label_smoothing`, class `weight`/`pos_weight`, SmoothL1 `beta`) live on extra `Reduced`/`PerElement` methods, *not* on the rig-bound `Inline`. Knobs that stay scalar and add no input (`reduction = Mean`/`Sum`, `ignoreIndex`, `labelSmoothing`) are rig-usable by writing a tiny 2-input wrapper `[Module]` whose `Inline` calls `Reduced(...)` with the knobs baked; a class `weight`/`pos_weight` (an extra tensor input) is rig-usable only when **baked as a graph constant** inside such a wrapper. See the [Losses → Configurable knobs](nn-library.md#loss-configurable-knobs) section for the recipes.
+
+<a id="loss-ignoring-targets"></a>
+**A loss graph may ignore its `targets`.** The two-input shape is a *signature* requirement, not a
+data-flow one: rig build checks the counts only — exactly two inputs, exactly one output — then wires
+the model's output to input 0, creates a fresh runtime input for input 1, and replays the loss body.
+Nothing requires input 1 to be read. So a model that computes its **own** loss can be trained with a
+pass-through loss module. That is the normal shape when the loss needs more than the one predictions
+tensor and one targets tensor the slot can carry — label ids, a padding mask, per-token weights, or the
+`Reduced`/`PerElement` knobs: those all arrive as ordinary **model** inputs and are consumed in the
+model body (see [Which knobs reach the rig](nn-library.md#loss-configurable-knobs)), and the model's
+single output is the scalar loss:
+
+```csharp
+[Module]                                  // the model already returns the scalar loss;
+public partial class PassThroughLoss      // its labels / mask are ordinary model inputs
+{
+    public static Scalar<float32> Inline(Scalar<float32> predictions, Tensor<float32> targets)
+        => predictions;                   // `targets` unused — legal, and never read
+}
+```
+
+**You still feed the ignored input.** `rig.TargetDef` is derived from the loss graph's second input
+whether or not the body reads it, and that input survives into the compiled trainstep, so every
+`TrainStep` still passes a target struct — omitting it fails the input-count check (`CR006`). Only its
+**dtype** must match the type the loss declares (a mismatch is rejected by the backend); its shape and
+contents are ignored, so a zero-element placeholder is enough and costs next to nothing:
+
+```csharp
+var noTargets = rig.TargetDef.FromOrderedData(TensorData(DType.Float32, [0L]));
+ckpt = rig.TrainStep(ckpt, inputs, noTargets);   // the real labels ride inside `inputs`
+```
+
+Two things this shape does **not** change. The predictions tensor is never an output of the training
+step — the step's outputs are the updated parameters, model state, optimizer state and the loss — so
+composing the loss into the model does not save the memory of a large logit tensor: the loss body is
+inlined into the same graph either way, and the composed training step does the same work (op for op)
+whichever side of the seam the loss sits on. And `ExtractInferenceModel` hands back the model **as
+authored**, so a loss-computing model yields an inference model that returns a loss and demands the
+labels; author the prediction path as its own module if you also need one.
+
 An optimizer module takes its `[Hyper]` hyperparameters, then exactly `(currentParam, grad)`,
 and returns the updated parameter. Optimizer state never appears in the signature: it is
 created inside the body by an **optimizer-owned state initializer** (e.g.

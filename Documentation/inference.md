@@ -230,8 +230,22 @@ These values stay **live inputs** of the concrete graph — concretization is no
 at every `Execute`. The contract is that you supply **the same values**.
 Executing with a value that would have produced a different parameter space is
 **invalid use**: the parameters or streams that answer needs were never created,
-and nothing re-derives them at run time. A contradicted gate in particular is not
-reported: the surviving branch simply runs, and you get that branch's answer.
+and nothing re-derives them at run time.
+
+A contradicted gate is the case to watch, because nothing reports it. The branch
+you select at `Execute` does run — but the parameters it needs were pruned at
+concretization, and what it reads in their place is **zero**. What that gets you
+depends on how the branch uses them, and neither answer is meaningful:
+
+```csharp
+// Concretized with the gate off, then executed with it on. x = [1, 2].
+useBias.IfElse(x + b, x)      // -> [1, 2]   b reads as 0, so it looks like the off branch
+useScale.IfElse(x * g, x)     // -> [0, 0]   g reads as 0, so the result collapses
+```
+
+The additive form is why this is easy to miss: a zeroed bias is indistinguishable
+from no bias, so the model keeps returning plausible numbers. A gated scale
+returns zeros instead.
 
 If you would rather make the contradiction impossible than remember the rule,
 bake the hyper with [`Specialize`](#hardcoding-hypers-with-specialize) before

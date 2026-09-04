@@ -176,8 +176,10 @@ Two edges to know:
   input of the concrete graph and must be passed again at `Execute`. Pass the
   value you concretized with. Flipping it on at `Execute` after concretizing it
   off does not bring the parameters back (they were never created) and is not
-  reported: the surviving branch runs and returns its own answer. Where that
-  matters, drop the bit with
+  reported: the gated branch runs and reads **zero** where its parameters were.
+  For `useBias` that is indistinguishable from the off branch, so the model goes
+  on returning plausible numbers; for a gate on a multiplied parameter the result
+  collapses to zeros. Where that matters, drop the bit with
   [`Specialize`](inference.md#hardcoding-hypers-with-specialize) before
   concretizing, and passing it later becomes an input-count error instead. See
   [What concretization fixes](inference.md#what-concretization-fixes).

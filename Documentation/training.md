@@ -67,7 +67,9 @@ Its *kind* — not a separate flag — decides the wiring:
 
 `Schedule` factories live on `Schedules` (`Constant`, `Linear`, `Cosine`, `CosineWithWarmup`,
 `StepDecay`, `Exponential`, `OneCycle`) with fluent combinators on the result (`WithWarmup`, `Then`,
-`Scale`, `Clamp`, `Shift`, `PerEpoch`). `Schedule.At(long)` previews a schedule's value at a step.
+`Scale`, `Clamp`, `Shift`, `PerEpoch`) — each defined in
+[Schedule factories and combinators](#schedule-factories-and-combinators) below.
+`Schedule.At(long)` previews a schedule's value at a step.
 
 **Two scheduler construction paths, one runtime representation.** Every schedule the rig accepts is a
 graph, from exactly two sources: a built-in `Schedule`, or a scheduler **module** — a Shorokoo module
@@ -91,6 +93,71 @@ by a single interpreter that mirrors the graph lowering.
 > value carries the schedule-lowering tolerance: on engines whose `Cos`/`Pow` differ from .NET `MathF`
 > (e.g. ONNX Runtime) a schedule using those ops may differ from the host `Schedule.At` value by a few
 > ulps (arithmetic/piecewise schedules stay exact). This is the documented `ScheduleLowering` contract.
+
+### Schedule factories and combinators
+
+Write `s` for the 0-based global step counter and `f(s)` for the value of the schedule a combinator is
+applied to. Every definition below is the exact arithmetic the rig evaluates (in `float32`), so
+`Schedule.At(s)` and the in-graph value agree up to the numeric note above.
+
+**Factories** (`Schedules.…`) — each returns a `Schedule` that starts at step 0:
+
+| Factory | Value at step `s` | Outside its nominal range |
+|---|---|---|
+| `Constant(float value)` | `value` | unchanging at every step |
+| `Linear(float baseValue, float finalValue, int totalSteps)` | `baseValue + (finalValue - baseValue) · p`, with `p = clamp(s / totalSteps, 0, 1)` | clamped, not extrapolated: `baseValue` at and below step 0, `finalValue` from step `totalSteps` on |
+| `Cosine(float baseValue, int totalSteps)` | `0.5 · baseValue · (1 + cos(π · p))`, same `p` — `baseValue` at step 0, `baseValue/2` at `totalSteps/2`, `0` at `totalSteps` | clamped the same way: held at `0` from step `totalSteps` on |
+| `CosineWithWarmup(float baseValue, int warmupSteps, int totalSteps)` | exactly `Cosine(baseValue, totalSteps - warmupSteps).WithWarmup(warmupSteps)` — linear ramp `0 → baseValue` over the first `warmupSteps`, then a cosine decay reaching `0` at step `totalSteps` | held at `0` afterwards |
+| `StepDecay(float baseValue, int stepSize, float gamma)` | `baseValue · gamma^(s / stepSize)`, **integer** division — a staircase that drops every `stepSize` steps | never clamps; keeps decaying (or growing, for `gamma > 1`) indefinitely |
+| `Exponential(float baseValue, float gamma)` | `baseValue · gamma^s` | never clamps; unbounded in both directions |
+| `OneCycle(float maxValue, int totalSteps, float pctStart = 0.3f, float divFactor = 25f, float finalDivFactor = 1e4f)` | with `initial = maxValue / divFactor`, `final = initial / finalDivFactor`, `up = max(1, round(totalSteps · clamp(pctStart, 0, 1)))` and `down = max(1, totalSteps - up)`: for `s < up`, `initial + (maxValue - initial) · 0.5 · (1 - cos(π · s / up))`; for `s ≥ up`, `final + (maxValue - final) · 0.5 · (1 + cos(π · clamp((s - up) / down, 0, 1)))` — `initial` at step 0, `maxValue` at step `up`, `final` at step `totalSteps` | held at `final` from step `totalSteps` on |
+
+`totalSteps` (and `stepSize`) must be at least 1; `Linear`, `Cosine`, `CosineWithWarmup` and
+`OneCycle` throw otherwise.
+
+**Combinators** (methods on a `Schedule`, chainable; each returns a new schedule):
+
+| Combinator | Value at step `s` |
+|---|---|
+| `Scale(float factor)` | `factor · f(s)` |
+| `Clamp(float min, float max)` | `clamp(f(s), min, max)`; throws if `min > max` |
+| `Shift(int steps)` | `f(s + steps)` — a **positive** `steps` moves the schedule **earlier** (step 0 already sees `f(steps)`); pass a **negative** `steps` to move it later |
+| `PerEpoch(int stepsPerEpoch)` | `f(s / stepsPerEpoch)`, integer division — the value is held for each block of `stepsPerEpoch` steps. The epoch index is derived from the step counter, so no epoch input is needed; `stepsPerEpoch` must be at least 1 |
+| `WithWarmup(int warmupSteps, float startFactor = 0f)` | with `peak = f(0)` captured when the combinator is called: for `s < warmupSteps`, `peak · (startFactor + (1 - startFactor) · (s + 1) / warmupSteps)`; for `s ≥ warmupSteps`, `f(s - warmupSteps)` — the inner schedule is **re-based** to start after the warmup. `warmupSteps == 0` returns the schedule unchanged |
+| `Then(int atStep, Schedule next)` | `f(s)` for `s < atStep`, and `next(s - atStep)` for `s ≥ atStep` — `next` is **re-based**, i.e. evaluated at the step *relative* to `atStep`, never at the absolute step |
+
+Two consequences of `WithWarmup`'s exact form are worth spelling out. `startFactor` multiplies the
+**inner schedule's step-0 value** (`peak`), not the optimizer's declared default; and because the ramp
+is linear in `s + 1`, step 0 is `peak · (startFactor + (1 - startFactor) / warmupSteps)` rather than
+`startFactor · peak`, the ramp first reaches `peak` at step `warmupSteps - 1`, and the inner schedule
+then contributes its own step 0 at step `warmupSteps`.
+
+**Worked example: warm up, hold, decay.** Because `Then` re-bases, the second schedule's length is
+stated in its *own* steps and the boundary is stated in absolute steps — the two are independent:
+
+```csharp
+// Ramp 0 → 1e-3 over steps 0..199, hold 1e-3 to step 3899,
+// then decay 1e-3 → 5e-5 over steps 3900..6000 and hold.
+Schedule lr = Schedules.Constant(1e-3f)
+    .WithWarmup(200)                                    // peak = Constant's step-0 value = 1e-3
+    .Then(3900, Schedules.Linear(1e-3f, 5e-5f, 2100));  // Linear's own step 0 is global step 3900
+```
+
+| step | `lr.At(step)` | why |
+|---|---|---|
+| `0` | `5e-6` | ramp: `1e-3 · 1/200` |
+| `99` | `5.0e-4` | ramp: `1e-3 · 100/200` |
+| `199` | `1e-3` | ramp: `1e-3 · 200/200` — the peak |
+| `200` … `3899` | `1e-3` | the `Constant` inner schedule, re-based past the warmup |
+| `3900` | `1e-3` | boundary: `Linear` at *its* step 0 |
+| `4950` | `5.25e-4` | `Linear` at its step 1050, halfway through 2100 |
+| `6000` | `5e-5` | `Linear` at its step 2100 — the final value |
+| `7000` | `5e-5` | past `totalSteps`, `Linear` holds its final value |
+
+The decay ends at `3900 + 2100 = 6000`: `Then`'s `atStep` chooses *when* the second schedule starts,
+`Linear`'s `totalSteps` chooses how long it takes. Had `next` been evaluated at the absolute step
+instead, the `Linear` would already be finished at the boundary and the schedule would jump straight
+to `5e-5`.
 
 ### Hyperparameter dtypes and shapes
 
@@ -402,9 +469,17 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
   rig's initial values). `checkpoint.Save(path, CheckpointComponents.InferenceState)` writes
   weights only. `Loss` is its own component, independent of `Counters`; explicitly requesting
   `Loss` on a checkpoint whose loss is `null` is a no-op (it writes nothing and does not throw —
-  a null loss is a legitimate value). The `TrainingRig` component — serializing the rig's own
-  constituent graphs so a checkpoint rebuilds the whole rig from the file alone — is **not yet
-  implemented** (tracked as Shorokoo/Shorokoo#115); requesting it throws.
+  a null loss is a legitimate value). The `TrainingRig` component — the rig's own constituent
+  model/loss/optimizer/scheduler graphs, its hyperparameter bindings and RNG config, enough to
+  rebuild the whole rig from the file alone — is **never named explicitly**: every native `.skpt`
+  carries it (`Persistence.SaveTrainingCheckpointToSkpt` always writes it) and the static
+  `TrainingRig.Load(path)` is the entry point that uses it, returning the rebuilt rig and its
+  resumed checkpoint. Requesting the flag (including via `CheckpointComponents.All`, which
+  contains it) throws on the paths that cannot honor it: the flat
+  safetensors `checkpoint.Save` (that format cannot carry constituent graphs — save to a `.skpt`
+  instead), and a rig-supplied load (`rig.LoadCheckpoint` / `rig.LoadCheckpointFromSkpt`), which
+  never rebuilds a rig because you already passed one — omit the flag there, or pass `null` to
+  load every state component the file contains.
 - `rig.AdoptCheckpoint(checkpoint)` returns a new checkpoint identical to the argument but
   bound to that rig (validating the field defs match), so a bare checkpoint — or one loaded
   against a different rig instance — gains a rig for `ToInferenceModel()`.

@@ -42,6 +42,27 @@ rejected with `AutoDiffNotSupportedException`. Loops with a statically known
 trip count can be unrolled (iterate with `LoopAPI.Iterate(n)` where `n` is a
 compile-time constant) and then differentiate normally.
 
+### Gradient (activation) checkpointing
+
+There is no way to ask Shorokoo to trade compute for activation memory: no
+attribute, option, or API marks a module, block, or tensor for recomputation
+during the backward pass. If a training step does not fit, the levers are the
+usual ones — a smaller batch, a shorter sequence, or a smaller model.
+
+Building a training rig does run an internal memory-aware pass over the lowered
+training-step graph, which may reorder nodes and recompute a tensor rather than
+keep it alive, but only where that improves a fixed combined compute-and-memory
+metric. The pass is automatic, has no settings, and reports nothing; do not
+count on it to make a step fit that otherwise would not.
+
+That pass is also where three types a reflection dump over the `Shorokoo`
+assembly turns up come from — `GraphEvaluationResult`, `NodeEvaluationInfo` and
+`GraphOptimizationResult`, in the namespace `Shorokoo.Core.AutoDiffCheckpointing`.
+Despite the namespace name they are that pass's internal report, and they are
+public only as an artefact of the assembly layout: everything that produces or
+consumes them is internal, so no API you can call ever hands you one. Treat them
+as unsupported and do not build on them.
+
 ### Quick Execution Engine value computation is bounded
 
 The Quick Execution Engine (QEE) always propagates output **dtype and shape**

@@ -395,10 +395,12 @@ namespace Shorokoo.Core.Utils
         /// <summary>Archive path of the manifest.</summary>
         public const string ConfigEntryName = "config.json";
 
-        /// <summary>Archive path of the (single, for now) model definition entry.</summary>
+        /// <summary>Archive path of the inference model definition entry. A training checkpoint adds
+        /// the rig's constituent graphs beside it under <c>models/</c>.</summary>
         public const string ModelEntryPath = "models/model.srk";
 
-        /// <summary>Archive path of the (single, for now) weights data entry.</summary>
+        /// <summary>Archive path of the weights data entry an inference save writes. A training
+        /// checkpoint writes its own per-kind training-state entries under <c>data/</c> instead.</summary>
         public const string WeightsEntryPath = "data/weights.safetensors";
 
         /// <summary>Archive path of the host user-data bag (issue #101).</summary>

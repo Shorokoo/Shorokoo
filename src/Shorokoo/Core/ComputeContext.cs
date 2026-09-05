@@ -127,23 +127,27 @@ namespace Shorokoo.Runtime
 
         /// <summary>
         /// Optional sink for build progress. When set, every build that runs on this context — the
-        /// <c>ToConcreteArchitecture</c> lowering pipeline, and the phases of
-        /// <c>TrainingRig.FromScratch</c> that take this context as their <c>mergeContext</c> — reports
-        /// each stage as it enters it, so a build that runs for minutes is visibly alive and its last
-        /// report names the stage it is in. <c>null</c> (the default) reports nothing and costs nothing.
+        /// <c>ToConcreteArchitecture</c> lowering pipeline, and every build that takes this context as
+        /// its <c>mergeContext</c>: <c>TrainingRig.FromScratch</c>, each <c>With…</c> derivation, and
+        /// <c>TrainingRig.Load</c> — reports each stage as it enters it, so a build that runs for
+        /// minutes is visibly alive and its last report names the stage it is in. <c>null</c> (the
+        /// default) reports nothing and costs nothing. Only a full <c>FromScratch</c> concretizes, so
+        /// only its report stream opens with <see cref="BuildPhase.Concretize"/>; a derivation or a
+        /// load starts at <see cref="BuildPhase.TrainingStep"/>, on a clock of its own.
         ///
         /// <para>Reports are raised synchronously on the building thread, so use
-        /// <see cref="BuildProgressHandler"/> (which calls its handler inline) rather than
-        /// <see cref="System.Progress{T}"/> when the order of reports matters. A context shared by
-        /// concurrent builds delivers their reports interleaved on their own threads; the sink must
-        /// tolerate that.</para>
+        /// <see cref="SynchronousBuildProgress"/> (which calls its handler inline) rather than
+        /// <see cref="System.Progress{T}"/> when the order of reports matters — and note that an
+        /// exception thrown by the sink propagates out of the build. A context shared by concurrent
+        /// builds delivers their reports interleaved on their own threads; the sink must tolerate
+        /// that.</para>
         /// </summary>
         public IProgress<BuildProgress>? Progress { get; set; }
 
-        /// <summary>Creates a compute context. There is nothing per-context to configure — its sessions
-        /// come from the process-wide
-        /// <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Factory"/>; the one
-        /// per-instance setting is the observational <see cref="Progress"/> sink.</summary>
+        /// <summary>Creates a compute context. Nothing about the <i>compute</i> is per-context — its
+        /// sessions come from the process-wide
+        /// <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Factory"/> — so the only
+        /// thing to set on the instance is the observational <see cref="Progress"/> sink.</summary>
         public ComputeContext()
         {
         }

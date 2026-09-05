@@ -388,7 +388,8 @@ namespace Shorokoo
         /// This build can run for minutes on a large graph; set the context's
         /// <see cref="ComputeContext.Progress"/> to have it report each stage as it enters it (see
         /// <see cref="BuildProgress"/>), so a long build is visibly alive rather than indistinguishable
-        /// from a hang.
+        /// from a hang. The same holds for every rebuild that takes a merge context — each
+        /// <c>With…</c> derivation, and <see cref="Load"/>.
         /// </param>
         /// <param name="runtimeContext">
         /// Optional compile/run compute context (see <see cref="RuntimeContext"/>); <c>null</c> ⇒
@@ -1219,6 +1220,7 @@ namespace Shorokoo
             {
                 // Build every scheduler graph first, so the union of counter inputs they consume is
                 // known before the shared counter input nodes are created.
+                Stage("BuildSchedulers");
                 var builtByIndex = new Dictionary<int, SchedulerGraph>(scheduledIndices.Count);
                 var needed = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var h in scheduledIndices)
@@ -1332,7 +1334,10 @@ namespace Shorokoo
                 }
             }
 
-            // Step 7: Apply optimizer per field by replaying the optimizer graph.
+            // Step 7: Apply optimizer per field by replaying the optimizer graph. One replay per
+            // trainable parameter into a graph that grows with each — the build's longest unreported
+            // stretch before this reported it, so a large model looked stuck in the previous stage.
+            Stage("ReplayOptimizerPerParameter");
             var updatedParamKeys = new FastTensorKey[paramFieldKeys.Length];
             var updatedOptStateFieldKeys = new FastTensorKey[OptimizerStateDef.Fields.Length];
             for (int i = 0; i < paramFieldKeys.Length; i++)
@@ -1408,6 +1413,7 @@ namespace Shorokoo
             fastTraining.OutputUniqueNames = new List<string?>(new string?[newOutputs.Count]);
             fastTraining.OutputRankOverrides = null;
 
+            Stage("PruneAndOrderTrainingStep");
             Shorokoo.Core.Nodes.Processors.Fast.FastProcessorHelper.RemoveUnreachableNodes(fastTraining);
 
             // Move tracked head nodes (param-field GETFIELDs, hyperparam CONSTANTs,
@@ -2493,7 +2499,10 @@ namespace Shorokoo
         /// reconstructed rig (§5.8). This is the from-file-alone counterpart of
         /// <see cref="LoadCheckpoint"/> (which requires a pre-existing rig). The two compute contexts
         /// seed the rebuilt rig (rev 22; never persisted — a reloaded run gets fresh ones), each
-        /// defaulting to <see cref="ComputeContext.Default"/>. The file must be a training <c>.skpt</c>
+        /// defaulting to <see cref="ComputeContext.Default"/>. Re-deriving the trainstep is most of a
+        /// build and takes as long, so <c>mergeContext</c>'s <see cref="ComputeContext.Progress"/>
+        /// reports it too — from <see cref="BuildPhase.TrainingStep"/> on, the concrete architecture
+        /// coming off the file rather than being lowered again. The file must be a training <c>.skpt</c>
         /// written with the rig constituents (every training <c>.skpt</c> carries them); a flat
         /// checkpoint has no constituents to rebuild from and fails loudly — pass the rig and use
         /// <see cref="LoadCheckpoint"/> for that shape.
@@ -2626,6 +2635,10 @@ namespace Shorokoo
             BuildProgressReporter? progress = null)
         {
             void Stage(string stage) => progress?.Report(BuildPhase.Initialize, stage);
+
+            // Reported before the reads below, not after: until this fires the last report a caller
+            // has seen names the previous phase, so a slow read here would be attributed to it.
+            Stage("ReadModelParams");
 
             // The model inputs for shape inference are read off the concrete arch's own
             // representative-input attributes (recorded once at BuildInitialRig) — no separate

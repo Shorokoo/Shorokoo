@@ -458,6 +458,9 @@ Neither phase is proportional to your dataset, and neither recurs during the loo
 `TrainStep` pays neither. If you are timing a run, expect the first step to be markedly slower
 than the rest — that is the compile, not a slow optimizer.
 
+On a large model the build phase runs for minutes. To watch it stage by stage rather than wait
+blind, see [Watching a long build](#watching-a-long-build).
+
 ### Compute contexts: `MergeContext` and `RuntimeContext`
 
 A rig carries two `ComputeContext` members, both supplied at construction (defaulting to
@@ -472,13 +475,13 @@ so it is the context whose session actually executes training. It is the sole co
 one compiled training-step graph that the `Fit`/`Train` loop and a manual `TrainStep` loop all share.
 Every `With…` derivation keeps the same two contexts.
 
-**What the two can usefully differ in: the build progress sink, and nothing else today.**
-`ComputeContext` carries no per-instance *compute* settings — no device, no execution provider, no
-thread count, no session options — and every session either context creates is built by the one
-process-wide backend factory. Its single per-instance setting observes rather than configures:
-`Progress`, the sink the build reports its stages to ([below](#watching-a-long-build)). That one is
-genuinely phase-scoped — the build runs on `MergeContext`, so a sink set on `RuntimeContext` never
-reports. Beyond it, passing two distinct instances selects nothing. In particular you **cannot** merge
+**What the two can usefully differ in: still nothing — but the merge context is now worth
+configuring.** `ComputeContext` carries no per-instance *compute* settings — no device, no execution
+provider, no thread count, no session options — and every session either context creates is built by
+the one process-wide backend factory. Its single per-instance setting observes rather than
+configures: `Progress`, the sink the build reports its stages to ([below](#watching-a-long-build)).
+That setting is not a reason for the two to *differ*, because only one of them can use it: the build
+runs on `MergeContext`, so a sink set on `RuntimeContext` is inert. In particular you **cannot** merge
 on one device and train on another: [only one backend is live per process](inference.md#backend-selection)
 and both contexts go through it, so the naming does not offer a CPU-build / GPU-train split. Read the
 two members as a division of *phases* — which work is build/merge and which is compile/run — not of
@@ -500,9 +503,10 @@ it returns. By default it says nothing while doing so, which is indistinguishabl
 a sink to the build context to see the stage it is in:
 
 ```csharp
-using Shorokoo.Graph;
+using Shorokoo.Graph;    // BuildProgress, SynchronousBuildProgress
+using Shorokoo.Runtime;  // ComputeContext
 
-var buildContext = new ComputeContext { Progress = new BuildProgressHandler(Console.WriteLine) };
+var buildContext = new ComputeContext { Progress = new SynchronousBuildProgress(Console.WriteLine) };
 
 var rig = TrainingRig.FromScratch(
     MyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
@@ -512,14 +516,22 @@ var rig = TrainingRig.FromScratch(
 
 ```
 [   0.0s] Concretize: Clone
-[   0.1s] Concretize: InlineModulesAndFunctions
+[   0.0s] Concretize: ApplyIdentifierTemplates
+[   0.4s] Concretize: InlineModulesAndFunctions
 …
 [  38.4s] Concretize: ExpandAutoGrad
+[  44.1s] Concretize: SimplifyAfterAutoGrad
+[  44.2s] TrainingStep: NormalizeOptimizerGraph
 [  51.9s] TrainingStep: ComposeModelLossAndAutoGrad
+[  63.0s] TrainingStep: ReplayOptimizerPerParameter
 …
-[ 96.2s] Initialize: OptimizeTrainingStepGraph
+[  91.4s] Initialize: InitializeModelParams
+…
+[  96.2s] Initialize: OptimizeTrainingStepGraph
 [ 121.7s] Initialize: Done
 ```
+
+(`…` marks stages elided here, not gaps in the output — every stage reports.)
 
 Each `BuildProgress` is reported as the build **enters** the named stage, so a build that has been
 quiet for minutes is inside the stage its last report named. It carries three fields:
@@ -527,25 +539,34 @@ quiet for minutes is inside the stage its last report named. It carries three fi
 - `Phase` — `BuildPhase.Concretize` (lowering the model to a concrete architecture),
   `BuildPhase.TrainingStep` (composing and lowering the training-step graph), or
   `BuildPhase.Initialize` (running the initializers, shape inference and graph optimization). The
-  phases run in that order and do not interleave; the last report of a completed build is
-  `Initialize: Done`.
+  phases run in that order and do not interleave.
 - `Stage` — the pass being entered, named after the pass itself (`InlineModulesAndFunctions`,
   `ExpandAutoGrad`, `OptimizeTrainingStepGraph`, …). Stage names are diagnostics, not API: they track
-  the pipeline and change with it.
+  the pipeline and change with it. The single exception is the terminal `Done`, which names no
+  pass: it is the last report of a **completed** build, so a stream sitting on `Done` is finished,
+  not stuck — the one report you must not read by the rule above.
 - `Elapsed` — time since the start of *this* build. One clock spans all three phases.
 
 `ToString()` renders the line shown above. Reports are raised **synchronously on the building
-thread**, so use `BuildProgressHandler` (which calls its handler inline) rather than
+thread**, so use `SynchronousBuildProgress` (which calls its handler inline) rather than
 `System.Progress<T>`, whose posted callbacks can arrive out of order or after the build returns —
-exactly what a liveness signal must not do. Keep the handler short; it runs inside the build. A
-context shared by concurrent builds delivers their reports interleaved, on their own threads.
+exactly what a liveness signal must not do. Keep the handler short; it runs inside the build, and an
+exception it throws propagates out of the build and discards it. A context shared by concurrent
+builds delivers their reports interleaved, on their own threads.
 
-The same sink works on the lowering step alone, which is the slow part of the build and is also
-reachable directly:
+**Which calls report.** Every build that takes a merge context: `FromScratch` (all three phases),
+each `With…` derivation and `TrainingRig.Load` (which reuse the concrete architecture, so they open
+at `TrainingStep`), and the lowering step on its own —
 
 ```csharp
 var concrete = MyModel.ComputationGraph.ToConcreteArchitecture(inputHints, buildContext);
 ```
+
+— which reports `Concretize` and ends on its own `Concretize: Done`. Calls that are not builds stay
+silent even when handed the same context: `ToConcreteModel`, `InitializeTrainableParams` and
+`GetRngStreamReport` report nothing, though the first two can also be slow. Setting
+`ComputeContext.Default.Progress` turns reporting on for every build that does not name its own
+context — a process-wide switch, so prefer a context of your own outside quick experiments.
 
 To capture the *graphs* rather than the stage names — after the fact, as compilable C# — see
 [debugging.md](debugging.md).

@@ -5,7 +5,8 @@ Related: [inference.md](inference.md) · [onnx-and-weights.md](onnx-and-weights.
 Two facilities watch the same lowering pipeline from opposite ends. `DebugRequests` captures the
 **graph** at chosen points, as compilable C#, and you read it after the call returns.
 `ComputeContext.Progress` reports the **stage name** as the pipeline enters it, while the call is
-still running — the one that answers "is this build alive?". Neither changes what the build computes.
+still running — the one that answers "is this build alive?". Neither changes the graph the build
+produces (though a progress handler that throws aborts the build that called it).
 
 When `ToConcreteArchitecture` doesn't produce the graph you expect, the
 `DebugRequests` class (namespace `Shorokoo.Graph`) saves snapshots of the
@@ -76,22 +77,31 @@ making progress. For that, attach a progress sink to the compute context: every 
 the pipeline enters it, so the last report names the stage the build is in.
 
 ```csharp
-using Shorokoo.Graph;
+using Shorokoo.Graph;    // BuildProgress, SynchronousBuildProgress
+using Shorokoo.Runtime;  // ComputeContext
 
-var buildContext = new ComputeContext { Progress = new BuildProgressHandler(Console.WriteLine) };
+var buildContext = new ComputeContext { Progress = new SynchronousBuildProgress(Console.WriteLine) };
 
 var concreteArchitecture = graph.ToConcreteArchitecture(inputHints, buildContext);
 ```
 
 ```
 [   0.0s] Concretize: Clone
-[   0.1s] Concretize: InlineModulesAndFunctions
-[   0.3s] Concretize: ConvertModelParamIdRefToModelParam
+[   0.0s] Concretize: ApplyIdentifierTemplates
+[   0.4s] Concretize: InlineModulesAndFunctions
+…
 [   4.8s] Concretize: Simplify
+[  12.0s] Concretize: LowerAttributeTensorOps
 [  38.4s] Concretize: ExpandAutoGrad
+[  44.1s] Concretize: SimplifyAfterAutoGrad
+[  46.0s] Concretize: Done
 ```
+
+(`…` marks stages elided here, not gaps in the output — every stage reports, and a lowering that
+finishes ends on `Done`.)
 
 The same context passed to `TrainingRig.FromScratch` as its `mergeContext` covers the whole rig
 build — concretization, training-step composition and initialization — under one clock. See
 [training.md](training.md#watching-a-long-build) for the full report shape (`BuildPhase`, `Stage`,
-`Elapsed`), the phase order, and why to prefer `BuildProgressHandler` over `System.Progress<T>`.
+`Elapsed`), the phase order, which calls report, and why to prefer `SynchronousBuildProgress` over
+`System.Progress<T>`.

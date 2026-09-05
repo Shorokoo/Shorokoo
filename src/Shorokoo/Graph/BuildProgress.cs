@@ -5,8 +5,11 @@ using Shorokoo.Runtime;
 namespace Shorokoo.Graph
 {
     /// <summary>
-    /// The top-level phase a build report belongs to. A <c>ToConcreteArchitecture</c> call reports
-    /// <see cref="Concretize"/> only; a <c>TrainingRig.FromScratch</c> build runs all three in order.
+    /// The top-level phase a build report belongs to. Which phases a build reports follows from what
+    /// it does: a <c>ToConcreteArchitecture</c> call reports <see cref="Concretize"/> only; a
+    /// <c>TrainingRig.FromScratch</c> runs all three in order; a rig derivation (<c>With…</c>) or a
+    /// <c>TrainingRig.Load</c> reuses its concrete architecture and so opens at
+    /// <see cref="TrainingStep"/>. Each build's last report is <c>Done</c>, in whichever phase it ends.
     /// </summary>
     public enum BuildPhase
     {
@@ -24,11 +27,13 @@ namespace Shorokoo.Graph
 
     /// <summary>
     /// One progress report from a build, raised as the build <b>enters</b> the named stage — so a
-    /// build that has been quiet for minutes is stuck in the stage its last report named. Attach a
-    /// sink with <see cref="ComputeContext.Progress"/>:
+    /// build that has been quiet for minutes is stuck in the stage its last report named. The one
+    /// exception is the terminal <c>Done</c>, the last report of a <em>completed</em> build, which
+    /// names no stage: a stream sitting on <c>Done</c> is finished, not stuck. Attach a sink with
+    /// <see cref="ComputeContext.Progress"/>:
     ///
     /// <code>
-    /// var buildContext = new ComputeContext { Progress = new BuildProgressHandler(Console.WriteLine) };
+    /// var buildContext = new ComputeContext { Progress = new SynchronousBuildProgress(Console.WriteLine) };
     /// var rig = TrainingRig.FromScratch(model, loss, optimizer, sampleInputs, hyperparameters,
     ///                                   mergeContext: buildContext);
     /// </code>
@@ -48,13 +53,20 @@ namespace Shorokoo.Graph
     /// <see cref="Progress{T}"/> posts to the captured synchronization context, so its reports can
     /// arrive out of order — or after the build returns — which is exactly what a liveness signal
     /// must not do. The handler runs inline, so keep it short; a slow handler slows the build.
+    ///
+    /// <para>Inline also means an exception from the handler is <b>not</b> contained: it propagates
+    /// out of the build that raised it, discarding that build's work (nothing outside it is left
+    /// inconsistent — the build owns everything it has touched). Reporting is never retried or
+    /// suppressed on your behalf, so a handler that can fail — a writer over a filling disk, a
+    /// pipe whose reader has exited — must catch its own faults if a lost log line should not cost
+    /// a build.</para>
     /// </summary>
-    public sealed class BuildProgressHandler : IProgress<BuildProgress>
+    public sealed class SynchronousBuildProgress : IProgress<BuildProgress>
     {
         private readonly Action<BuildProgress> _handler;
 
         /// <summary>Creates a sink that calls <paramref name="handler"/> on each report.</summary>
-        public BuildProgressHandler(Action<BuildProgress> handler)
+        public SynchronousBuildProgress(Action<BuildProgress> handler)
             => _handler = handler ?? throw new ArgumentNullException(nameof(handler));
 
         /// <inheritdoc/>

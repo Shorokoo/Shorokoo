@@ -2902,7 +2902,7 @@ public class BuildProgressCoverageTests
     private static (List<BuildProgress> Reports, ComputeContext Context) Watched()
     {
         var reports = new List<BuildProgress>();
-        return (reports, new ComputeContext { Progress = new BuildProgressHandler(reports.Add) });
+        return (reports, new ComputeContext { Progress = new SynchronousBuildProgress(reports.Add) });
     }
 
     private static List<BuildPhase> PhaseRuns(List<BuildProgress> reports)
@@ -2923,7 +2923,7 @@ public class BuildProgressCoverageTests
         var reportThreads = new List<int>();
         var ctx = new ComputeContext
         {
-            Progress = new BuildProgressHandler(r =>
+            Progress = new SynchronousBuildProgress(r =>
             {
                 reports.Add(r);
                 reportThreads.Add(Environment.CurrentManagedThreadId);
@@ -2944,7 +2944,10 @@ public class BuildProgressCoverageTests
         Assert.True(Reported(reports, BuildPhase.Concretize, "ExpandAutoGrad"));
         Assert.True(Reported(reports, BuildPhase.TrainingStep, "NormalizeOptimizerGraph"));
         Assert.True(Reported(reports, BuildPhase.TrainingStep, "ComposeModelLossAndAutoGrad"));
+        Assert.True(Reported(reports, BuildPhase.TrainingStep, "ReplayOptimizerPerParameter"));
+        Assert.True(Reported(reports, BuildPhase.TrainingStep, "PruneAndOrderTrainingStep"));
         Assert.True(Reported(reports, BuildPhase.TrainingStep, "ExpandAutoGrad"));
+        Assert.True(Reported(reports, BuildPhase.Initialize, "ReadModelParams"));
         Assert.True(Reported(reports, BuildPhase.Initialize, "InitializeModelParams"));
         Assert.True(Reported(reports, BuildPhase.Initialize, "InitializeOptimizerState"));
         Assert.True(Reported(reports, BuildPhase.Initialize, "OptimizeTrainingStepGraph"));
@@ -2956,7 +2959,7 @@ public class BuildProgressCoverageTests
     }
 
     [Fact]
-    public void TestToConcreteArchitectureReportsLoweringStagesAndIsSilentWithoutASinkCoverage()
+    public void TestToConcreteArchitectureReportsLoweringStagesAndLowersWithoutASinkCoverage()
     {
         var (reports, ctx) = Watched();
         var model = ScalarMultiplyModel.ComputationGraph;
@@ -2967,16 +2970,17 @@ public class BuildProgressCoverageTests
         Assert.NotNull(model.ToConcreteArchitecture(hints, ctx));
         Assert.All(reports, r => Assert.Equal(BuildPhase.Concretize, r.Phase));
         Assert.Equal("Clone", reports[0].Stage);
-        Assert.Equal("SimplifyAfterAutoGrad", reports[^1].Stage);
+        Assert.Equal("SimplifyAfterAutoGrad", reports[^2].Stage);
+        Assert.Equal("Done", reports[^1].Stage);
         Assert.Equal("[   1.5s] Concretize: Clone",
             new BuildProgress(BuildPhase.Concretize, "Clone", TimeSpan.FromSeconds(1.5)).ToString());
 
-        var silent = new ComputeContext();
-        Assert.Null(silent.Progress);
-        Assert.NotNull(model.ToConcreteArchitecture(hints, silent));
+        var unwatched = new ComputeContext();
+        Assert.Null(unwatched.Progress);
+        Assert.NotNull(model.ToConcreteArchitecture(hints, unwatched));
 
         var second = new List<BuildProgress>();
-        ctx.Progress = new BuildProgressHandler(second.Add);
+        ctx.Progress = new SynchronousBuildProgress(second.Add);
         Assert.NotNull(model.ToConcreteArchitecture(hints, ctx));
         Assert.Equal(reports.Select(r => r.Stage), second.Select(r => r.Stage));
     }

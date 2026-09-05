@@ -182,6 +182,36 @@ public partial class AttnChunkedGradientMatchesDense
 }
 
 /// <summary>
+/// Pin for Shorokoo/Shorokoo#245: a Slice on an axis the tensor does not have is caught
+/// cleanly on its own, but segfaults the process once the graph around it is big enough.
+/// The mask here is rank-1, sliced on axis -2, inside a two-block Concat. Nothing in-tree
+/// builds this any more — SliceMaskQueryAxis leaves a query-broadcasting mask alone — so
+/// this exists only to hold the backend fault.
+/// </summary>
+[Module]
+public partial class AttnSliceOnAbsentAxisInConcat
+{
+    public static Scalar<bit> Inline(Tensor<float32> qkv)   // [N, H, L, d]
+    {
+        var lq = qkv.DimTensor(-2);
+        var mask = (VectorRange(0L, qkv.DimTensor(-2), 1L).Cast<float32>() * -0.25f).Tensor();
+
+        Tensor<float32>[] blocks = new Tensor<float32>[2];
+        for (var i = 0; i < 2; i++)
+        {
+            var start = lq * (long)i / 2L;
+            var end = lq * (long)(i + 1) / 2L;
+            var q = qkv.Slice(start.Unsqueeze(), end.Unsqueeze(), axes: Vector(-2L));
+            var m = mask.Slice(start.Unsqueeze(), end.Unsqueeze(), axes: Vector(-2L));
+            var scores = q.MatMul(qkv.Transpose(0L, 1L, 3L, 2L)) + m;
+            blocks[i] = scores.Softmax(-1L).MatMul(qkv);
+        }
+        var y = blocks[0].Concat(-2L, blocks[1]);
+        return y.Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() >= Scalar(0f);
+    }
+}
+
+/// <summary>
 /// A single query row still matches dense when chunked, with and without a mask: every
 /// chunk but one is empty, which is the degenerate end of the Slice / Concat path.
 /// </summary>

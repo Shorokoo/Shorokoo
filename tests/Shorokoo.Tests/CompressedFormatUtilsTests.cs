@@ -133,6 +133,56 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.False(CompressedFormatUtils.IsCompressedSafeTensor("foo.safetensors"));
     }
 
+    /// <summary>
+    /// The raw format writers below the <c>Persistence.*</c> facade stage through
+    /// <see cref="AtomicFileWriter"/> as well, so a crash in the commit window of any of them
+    /// leaves the previously written file byte-for-byte as it was.
+    /// </summary>
+    [Fact]
+    public void TestTheRawFormatWritersLeaveThePreviousFileIntactWhenACommitCrashes()
+    {
+        var graphA = new InternalComputationGraph([InputTensor<float32>("in")],
+            [InputTensor<float32>("in") + Scalar(1.0f)]);
+        var input = InputTensor<float32>("in");
+        var graphB = new InternalComputationGraph([input], [input * Scalar(2.0f)]);
+        var srcA = P("src-a.zsrk");
+        var srcB = P("src-b.zsrk");
+        CompressedFormatUtils.SaveFastGraphToFile(srcA, graphA, overrideExtension: false);
+        CompressedFormatUtils.SaveFastGraphToFile(srcB, graphB, overrideExtension: false);
+        var t1 = TensorData([2, 3], 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f);
+        var t2 = TensorData([3], 7.0f, 8.0f, 9.0f);
+        List<SafeTensor> tensorsA = [new SafeTensor("a", t1, "F32", t1.Shape.Dims)];
+        List<SafeTensor> tensorsB = [new SafeTensor("b", t2, "F32", t2.Shape.Dims)];
+
+        (string Name, Action<string> Seed, Action<string> Rewrite)[] writers =
+        [
+            ("zst", p => CompressedFormatUtils.CompressToFile(p, [1, 2, 3]),
+                    p => CompressedFormatUtils.CompressToFile(p, [4, 5, 6, 7])),
+            ("zsrk", p => CompressedFormatUtils.SaveFastGraphToFile(p, graphA, overrideExtension: false),
+                     p => CompressedFormatUtils.SaveFastGraphToFile(p, graphB, overrideExtension: false)),
+            ("json", p => CompressedFormatUtils.SaveAsJson(srcA, p),
+                     p => CompressedFormatUtils.SaveAsJson(srcB, p)),
+            ("safetensors", p => SafeTensorLoader.SaveSafeTensors(p, tensorsA),
+                            p => SafeTensorLoader.SaveSafeTensors(p, tensorsB)),
+        ];
+        string[] expected = ["kept", "kept", "kept", "kept"];
+        string[] actual = [.. writers.Select(AfterACommitCrash)];
+        Assert.Equal(expected, actual);
+    }
+
+    /// <summary>Seeds a fresh path with the writer's first form, then rewrites it with the
+    /// second under a commit-window crash, and reports whether the seeded bytes survived.</summary>
+    private string AfterACommitCrash((string Name, Action<string> Seed, Action<string> Rewrite) writer)
+    {
+        var path = P($"atomic-{writer.Name}");
+        writer.Seed(path);
+        var committed = File.ReadAllBytes(path);
+        AtomicFileWriter.CommitFaultInjection = _ => throw new IOException("simulated commit crash");
+        try { Assert.Throws<IOException>(() => writer.Rewrite(path)); }
+        finally { AtomicFileWriter.CommitFaultInjection = null; }
+        return committed.SequenceEqual(File.ReadAllBytes(path)) ? "kept" : "lost";
+    }
+
     private static (ComputationGraph Module, ComputationGraph Arch, ComputationGraph Model)
         BuildStageGraphs()
     {
@@ -2294,6 +2344,66 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         IData[] inputs = [TensorData(DType.Float32, [(long)x.Length], x.Cast<object>().ToArray())];
         return ((TensorData<float32>)ComputeContext.Default.Execute(graph, inputs)[0].ToTensorData())
             .AccessMemory().ToArray();
+    }
+
+    /// <summary>
+    /// The 2 GB protobuf ceiling is the whole reason the external-data layout exists, so the
+    /// graph-level export must refuse an over-ceiling model with the framework's own XD007 —
+    /// naming the remedy — rather than let protobuf fail on its own terms. Driven with a tiny
+    /// injected ceiling rather than by allocating gigabytes.
+    /// </summary>
+    [Fact]
+    public void TestExportOnnxRefusesAModelOverTheProtobufCeilingNamingTheExternalDataRemedy()
+    {
+        var (model, _, _) = BuildSkptModel();
+        var ex = Assert.Throws<ModelException>(
+            () => Persistence.ExportOnnx(model, P("over-ceiling.onnx"), OpSetVersion.OPS_21, null, 8));
+        Assert.Equal(ErrorCodes.XD007, ex.ErrorCode);
+        Assert.Contains("SaveWithExternalData", ex.Message);
+        Assert.False(File.Exists(P("over-ceiling.onnx")));
+    }
+
+    /// <summary>
+    /// The external-data option on the facade: off by default (byte-identical to the
+    /// self-contained export, no side file), on it writes the standard pair, lifts the 2 GB
+    /// refusal, and round-trips back through <c>ImportOnnx</c> to the same values.
+    /// </summary>
+    [Fact]
+    public void TestExportOnnxWritesTheExternalDataPairOnDemandAndStaysSelfContainedByDefault()
+    {
+        var (model, numOut, input) = BuildSkptModel();
+        var direct = ExecuteToBytes(model, numOut, input);
+
+        var plainPath = P("xd-off.onnx");
+        Persistence.ExportOnnx(model, plainPath);
+        Assert.False(File.Exists(plainPath + ".data"));
+
+        var pairPath = P("xd-on.onnx");
+        Persistence.ExportOnnx(model, pairPath, externalData: new OnnxExternalDataOptions { SizeThreshold = 0 });
+        Assert.True(File.Exists(pairPath + ".data"));
+        Assert.Equal(direct, ExecuteToBytes(Persistence.ImportOnnx(pairPath), numOut, input));
+
+        // Same model, same options, straight through the exporter: the facade adds nothing to the
+        // bytes. Same file name in a sibling directory — the side file's name is embedded in every
+        // location entry, so only equal names are comparable.
+        var facadeDir = Directory.CreateDirectory(P("xd-facade")).FullName;
+        var exporterDir = Directory.CreateDirectory(P("xd-exporter")).FullName;
+        var viaFacade = Path.Combine(facadeDir, "same.onnx");
+        var viaExporter = Path.Combine(exporterDir, "same.onnx");
+        Persistence.ExportOnnx(model, viaFacade, externalData: new OnnxExternalDataOptions { SizeThreshold = 0 });
+        OnnxModelExporter.SaveWithExternalData(
+            FastOnnxModelBuilder.BuildOnnxModel(model, OpSetVersion.OPS_21,
+                representativeForm: RepresentativeInputForm.VanillaMetadata),
+            viaExporter, new OnnxExternalDataOptions { SizeThreshold = 0 });
+        Assert.Equal(File.ReadAllBytes(viaExporter), File.ReadAllBytes(viaFacade));
+        Assert.Equal(File.ReadAllBytes(viaExporter + ".data"), File.ReadAllBytes(viaFacade + ".data"));
+
+        // The ceiling refusal applies to the self-contained form only.
+        Assert.Throws<ModelException>(
+            () => Persistence.ExportOnnx(model, P("ceiling.onnx"), OpSetVersion.OPS_21, null, 8));
+        Persistence.ExportOnnx(model, P("no-ceiling.onnx"), OpSetVersion.OPS_21,
+            new OnnxExternalDataOptions { SizeThreshold = 0 }, 8);
+        Assert.True(File.Exists(P("no-ceiling.onnx.data")));
     }
 
     [Fact]

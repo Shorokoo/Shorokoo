@@ -8,19 +8,23 @@ Related: [inference.md](inference.md) · [core-types.md](core-types.md) · [skpt
   lowering steps). Every graph carries a reliable `Kind` (`GraphKind.Module` /
   `ConcreteArchitecture` / `ConcreteModel`) stamped where it was produced. It can be
   converted to an ONNX `ModelProto`, or saved in Shorokoo's own `.srk`/`.zsrk` format.
-- There is no one-call `graph.ToOnnxFile(path)`. Build the `ModelProto`, then save it
-  with `OnnxModelExporter` (or serialize it yourself with protobuf).
+- `Persistence.ExportOnnx(graph, path)` is the one call from a concrete model to a
+  self-contained `.onnx`; there is no `graph.ToOnnxFile(path)` instance method. Drop to
+  `FastOnnxModelBuilder.BuildOnnxModel` + `OnnxModelExporter` when you need the
+  `ModelProto` in between — to set the builder's options, or to write a proto you built
+  or imported yourself.
 - Models larger than protobuf's 2 GB message ceiling are handled with the standard
-  ONNX **external data** mechanism: `OnnxModelExporter.SaveWithExternalData` on
-  export, and transparent side-file loading on import.
+  ONNX **external data** mechanism: pass `externalData:` to `ExportOnnx` (or call
+  `OnnxModelExporter.SaveWithExternalData` at the proto level) on export, and
+  transparent side-file loading on import.
 - Pretrained weights are loaded from `.safetensors` (and compressed `.zsafetensor`).
-- Saves through the `Persistence.*` facade are **atomic** (staged beside the target and
-  committed by rename) — and so is the flat training-checkpoint save `checkpoint.Save`
-  (`TrainingCheckpoint.Save`, which `Persistence.SaveTrainingCheckpoint` delegates to),
-  which stages and renames the same way, so you never need a stage-and-rename of your own
-  around it. The raw layers below them — `OnnxModelExporter`,
-  `SafeTensorLoader.SaveSafeTensors`, `CompressedFormatUtils` — write **in place**, so an
-  interrupted write leaves a truncated file. Prefer an atomic entry point where one exists.
+- Every save API is **atomic** (staged beside the target and committed by rename), so an
+  interrupted write never damages the file already at that path and you never need a
+  stage-and-rename of your own around one: the `Persistence.*` facade, the flat
+  training-checkpoint save `checkpoint.Save` (`TrainingCheckpoint.Save`, which
+  `Persistence.SaveTrainingCheckpoint` delegates to), and the raw layers below them —
+  `OnnxModelExporter`, `SafeTensorLoader.SaveSafeTensors`, `CompressedFormatUtils`. The
+  target's directory must already exist.
 
 ## Export to ONNX
 
@@ -39,12 +43,13 @@ protobuf-net's `ProtoBuf.Serializer` (the `ProtoBuf` namespace ships via protobu
 which the library already depends on). `OnnxModelExporter.Save(model, path)`
 (namespace `Shorokoo.Onnx`) does the same serialization, plus a clear error — instead
 of a protobuf failure — when the model's tensor data exceeds the 2 GB protobuf message
-ceiling, pointing at the external-data option below. Both write **in place** —
-`File.Create` truncates the target before the first byte lands — so an export interrupted
-by a crash, a kill or a full disk destroys whatever was at that path.
-[`Persistence.ExportOnnx`](#onnx-model-exchange-exportonnx--importonnx) is the atomic
-wrapper over the same serialization (staged beside the target, committed by rename); use
-it when overwriting a file you still need.
+ceiling, pointing at the external-data option below. Both stage the model beside the
+target and commit it by rename, so an export interrupted by a crash, a kill or a full disk
+leaves whatever was at that path untouched; the target's directory must already exist, and
+a crash can leave a `.tmp-`-prefixed sibling behind (the next successful save of the same
+target sweeps it). Serializing the `ModelProto` yourself, as in the snippet above, gets
+none of that. [`Persistence.ExportOnnx`](#onnx-model-exchange-exportonnx--importonnx) is
+the one-call wrapper over the same serialization.
 
 ### Large models: external data
 
@@ -55,14 +60,19 @@ initializer bytes live in a side file next to the model, and each externalized
 entries. Shorokoo supports it on both paths:
 
 ```csharp
-using Shorokoo.Onnx;   // OnnxModelExporter, OnnxExternalDataOptions
+using Shorokoo.Onnx;   // OnnxExternalDataOptions, OnnxModelExporter
 
-// Opt-in export mode: initializers of at least SizeThreshold bytes go to
-// "model.onnx.data"; smaller ones stay inline. The .onnx + .onnx.data pair is
-// deterministic (byte-identical across runs for the same ModelProto).
+// From a concrete model: opt in by passing options. Initializers of at least
+// SizeThreshold bytes go to "model.onnx.data"; smaller ones stay inline. Omit
+// externalData (the default) for the self-contained form.
+Persistence.ExportOnnx(graph, "model.onnx", externalData: new OnnxExternalDataOptions());
+Persistence.ExportOnnx(graph, "model.onnx",
+    externalData: new OnnxExternalDataOptions { SizeThreshold = 1024, Alignment = 4096 });
+
+// The same thing one layer down, when you already hold a ModelProto. The
+// .onnx + .onnx.data pair is deterministic (byte-identical across runs for the
+// same ModelProto written to the same file name).
 OnnxModelExporter.SaveWithExternalData(model, "model.onnx");
-OnnxModelExporter.SaveWithExternalData(model, "model.onnx",
-    new OnnxExternalDataOptions { SizeThreshold = 1024, Alignment = 4096 });
 ```
 
 `SaveWithExternalData` applies to **concrete models only**: it externalizes the
@@ -76,15 +86,15 @@ parameters is refused up front (`XD008`) with the actual vs required kind named.
   initializer at or above the threshold, `SaveWithExternalData` writes no side file
   (removing a stale one from a previous save of the same path) and its output is
   identical to `Save`.
+- The side file's name is recorded in every externalized tensor's `location` entry, so
+  two exports of one model to different file names differ in those bytes — determinism is
+  per target name.
 - The exported pair is standard ONNX — stock onnxruntime loads it directly.
 - The passed `ModelProto` is left unmodified.
-- Neither file is staged. The side file is overwritten first (destroying the one an
-  earlier external save of the same path wrote) and deleted again on any failure, and the
-  `.onnx` is then truncated and rewritten in place — so a failed or interrupted export can
-  leave the previous `.onnx` behind with no side file for it to reference, or a truncated
-  `.onnx`. `Persistence.ExportOnnx` writes self-contained models only, so there is no
-  atomic external-data export: write the pair to a fresh path and move it into place
-  yourself when the existing model must survive a failed export.
+- Both files are staged beside their targets and committed by rename, side file first, so
+  a failed or interrupted export leaves the previously saved `.onnx` and its side file
+  exactly as they were. Two files means two renames: only a hard crash between them can
+  leave the pair mismatched — every in-process failure rolls the whole pair back.
 
 `BuildOnnxModel(ComputationGraph graph, OpSetVersion opset = OPS_21,
 bool prepForOnnx = false,
@@ -208,14 +218,13 @@ byte[] bytes = CompressedFormatUtils.SaveFastGraphToBinary(graph, compressed: tr
 from the `compressed` flag, but it is only a hint for humans: **how a file parses is
 decided by its content, never by its extension** — a renamed file loads identically.
 
-`SaveFastGraphToFile` builds the whole container in memory before touching the
-destination, so a serialization failure never damages the target — but the write itself is
-an in-place overwrite (`File.WriteAllBytes`), and a crash or a full disk part-way through
-it leaves the target truncated. There is no atomic `.srk` writer. When the target is a
-file you still need, write to a fresh path and move it into place yourself, or — for a
-concrete model — persist it as a [`.skpt`](skpt-checkpoints.md) with
-`Persistence.From(model).WithModel().WithWeights().Save(path)`, whose write is atomic. A
-module-stage graph has only the in-place `.srk` path.
+`SaveFastGraphToFile` builds the whole container in memory, then stages it beside the
+target and commits it by rename, so neither a serialization failure nor a crash or a full
+disk part-way through the write damages the file already at that path. (It is the one
+saver that creates the target's directory for you.) For a concrete model, persisting it as
+a [`.skpt`](skpt-checkpoints.md) with
+`Persistence.From(model).WithModel().WithWeights().Save(path)` is the richer container; a
+module-stage graph has only the `.srk` path.
 
 ### The `.srk` container
 
@@ -312,19 +321,17 @@ Save:
 SafeTensorLoader.SaveSafeTensors("out.safetensors", listOfSafeTensors);
 ```
 
-`SaveSafeTensors` writes **in place** — it truncates the target on open — so a crash
-mid-save leaves a truncated file where the previous one was. To write a concrete model's
-weights, prefer
+`SaveSafeTensors` stages the file beside the target and commits it by rename, so a crash
+mid-save leaves the previous file exactly as it was; the target's directory must already
+exist. To write a concrete model's weights, prefer
 [`Persistence.ExportSafeTensors`](#weight-exchange-with-naming-schemes-exportsafetensors--importsafetensors)
-below: same plain safetensors output, written atomically (staged beside the target and
-committed by rename, exactly as the [`.skpt`](skpt-checkpoints.md) and training-checkpoint
-saves are).
+below: same plain safetensors output, and it does the name matching for you.
 
 Compressed (`.zsafetensor`) variants live in `CompressedFormatUtils`:
 `SaveCompressedSafeTensors`, `LoadCompressedSafeTensors`,
 `SaveCompressedModelParamSet`, `LoadCompressedModelParamSet`. The two save calls compress
-into memory and then overwrite the target in place as well, and have no atomic
-equivalent — `Persistence.ExportSafeTensors` writes the uncompressed form.
+into memory and then stage and commit like the rest; `Persistence.ExportSafeTensors`
+writes the uncompressed form.
 
 ## Weight exchange with naming schemes (`ExportSafeTensors` / `ImportSafeTensors`)
 
@@ -418,6 +425,9 @@ a native `.skpt`).
 // Export: concrete model → standard vanilla .onnx (loads in any ONNX runtime).
 Persistence.ExportOnnx(model, "model.onnx");
 
+// Past protobuf's 2 GB ceiling: large initializers to a "model.onnx.data" side file.
+Persistence.ExportOnnx(model, "model.onnx", externalData: new OnnxExternalDataOptions());
+
 // Import: foreign vanilla .onnx → native runnable ComputationGraph.
 ComputationGraph g = Persistence.ImportOnnx("foreign.onnx");
 ComputationGraph gRenamed = Persistence.ImportOnnx("foreign.onnx", scheme);
@@ -429,9 +439,12 @@ ComputationGraph landed = Persistence.ImportOnnxToCheckpoint("foreign.onnx", "mo
 - `ExportOnnx` requires a **concrete model** (`GraphKind.ConcreteModel`) and writes
   **vanilla ONNX** — every node a standard op or emitted function call — so the file
   loads in any conforming runtime. A graph carrying Shorokoo-internal ops is refused,
-  naming them. The write is atomic. (It is the `Persistence`-facade wrapper over
-  [`FastOnnxModelBuilder.BuildOnnxModel`](#export-to-onnx); use that directly when you
-  need the `ModelProto`.)
+  naming them. The write is atomic. Self-contained by default — a model over protobuf's
+  2 GB ceiling is refused with `XD007`; pass `externalData` to write the
+  [external-data pair](#large-models-external-data) instead, which lifts the ceiling and
+  is still standard ONNX. (It is the `Persistence`-facade wrapper over
+  [`FastOnnxModelBuilder.BuildOnnxModel`](#export-to-onnx) plus `OnnxModelExporter`; use
+  those directly when you need the `ModelProto` in between.)
 - `ImportOnnx` builds the graph through the existing ONNX reader, so it composes with
   ONNX **external data** (a `.data` side file resolves against the model file's
   directory, exactly as [`OnnxModelImporter`](#import-from-onnx)). At the boundary each
@@ -603,6 +616,8 @@ map a `DType` to a SafeTensor dtype string.
 - Do not expect a one-call graph-to-file helper; build the `ModelProto` first, then
   save it (`OnnxModelExporter.Save` / `SaveWithExternalData`, or serialize it
   yourself).
-- Do not treat the raw writers as crash-safe: they overwrite the target in place. See
-  [Facts](#facts) for which writers stage and commit by rename and which do not, and each
-  API's own section for the consequence at the call site.
+- Do not stage-and-rename around a save call: every save API already does it. Serializing
+  a `ModelProto` yourself with `ProtoBuf.Serializer` is the one write that does not — it
+  truncates the target before the first byte lands.
+- Do not save into a directory that does not exist yet: a staged write needs it (the temp
+  copy lives there, so the commit rename cannot cross filesystems). Create it first.

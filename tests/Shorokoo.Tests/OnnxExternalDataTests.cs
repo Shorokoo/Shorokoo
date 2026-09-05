@@ -1,4 +1,7 @@
+using System;
 using System.IO;
+using System.Linq;
+using Shorokoo.Core.Utils;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Factory.IR;
 using Shorokoo.Core.Inference;
@@ -415,6 +418,11 @@ public class OnnxExternalDataTests
     private static ModelProto AddModelWithWeight()
         => BuildAddModel(Init("w", FloatElem, [4], FloatBytes(1f, 2f, 3f, 4f)));
 
+    /// <summary>A model whose weights differ from <see cref="AddModelWithWeight"/>'s, so a save
+    /// that reached the target is visible as changed bytes.</summary>
+    private static ModelProto AddModelWithOtherWeight()
+        => BuildAddModel(Init("w", FloatElem, [4], FloatBytes(5f, 6f, 7f, 8f)));
+
     /// <summary>A model protobuf-net starts writing and then fails on: the null opset entry is
     /// only reached once serialization is under way, i.e. after the target has been opened.</summary>
     private static ModelProto AddModelThatFailsMidSerialization()
@@ -450,14 +458,12 @@ public class OnnxExternalDataTests
     }
 
     /// <summary>
-    /// Both exporter entry points truncate the target before the model is serialized into it, so
-    /// a save that fails partway destroys the previously saved model — and, with the external-data
-    /// layout, its <c>catch</c> deletes the side file too, losing both halves of a previously good
-    /// pair. Every <c>Persistence.*</c> save gets this right by staging through
-    /// <see cref="Shorokoo.Core.Utils.AtomicFileWriter"/>; these do not.
-    /// Tracked as Shorokoo/Shorokoo#218.
+    /// Both exporter entry points stage through
+    /// <see cref="Shorokoo.Core.Utils.AtomicFileWriter"/>, so a save that fails partway leaves the
+    /// previously saved model — and, with the external-data layout, both halves of the previously
+    /// good pair — exactly as they were.
     /// </summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#218: OnnxModelExporter truncates the target before serializing into it")]
+    [Fact]
     public void TestAnExportFailingMidSerializationLeavesThePreviouslySavedModelAndSideFileIntact()
     {
         WithTempDir(dir =>
@@ -479,5 +485,52 @@ public class OnnxExternalDataTests
             string[] actual = [.. cases.Select(c => AfterAFailedSave(dir, c.Seed, c.Fail))];
             Assert.Equal(expected, actual);
         });
+    }
+
+    /// <summary>
+    /// The other half of the atomic write: a crash in the commit window, after the content is
+    /// staged and flushed. For the external-data pair that window spans two renames, so the
+    /// interesting case is a crash on the second — the side file is already committed and must be
+    /// rolled back with the model.
+    /// </summary>
+    [Fact]
+    public void TestACrashInTheCommitWindowLeavesThePreviouslySavedModelAndSideFileIntact()
+    {
+        WithTempDir(dir =>
+        {
+            Action<ModelProto, string> inline = (m, p) => OnnxModelExporter.Save(m, p);
+            Action<ModelProto, string> external = (m, p) => OnnxModelExporter.SaveWithExternalData(
+                m, p, new OnnxExternalDataOptions { SizeThreshold = 0 });
+            (string FailOn, Action<ModelProto, string> Save)[] cases =
+            [
+                (".onnx-", inline),
+                (".onnx.data-", external),
+                (".onnx-", external),
+            ];
+            string[] expected = ["kept kept", "kept kept", "kept kept"];
+            string[] actual = [.. cases.Select(c => AfterACommitCrash(dir, c.FailOn, c.Save))];
+            Assert.Equal(expected, actual);
+        });
+    }
+
+    /// <summary>Seeds a fresh path with an external-data save, then runs <paramref name="save"/>
+    /// of a different model over it with the commit of the staged file whose name contains
+    /// <paramref name="failOn"/> crashing, and reports whether each of the two committed files
+    /// came through unchanged.</summary>
+    private static string AfterACommitCrash(string dir, string failOn, Action<ModelProto, string> save)
+    {
+        var path = Path.Combine(dir, Guid.NewGuid().ToString("N") + ".onnx");
+        OnnxModelExporter.SaveWithExternalData(
+            AddModelWithWeight(), path, new OnnxExternalDataOptions { SizeThreshold = 0 });
+        var committed = SavedPair(path);
+        AtomicFileWriter.CommitFaultInjection = temp =>
+        {
+            if (Path.GetFileName(temp).Contains(failOn, StringComparison.Ordinal))
+                throw new IOException("simulated commit crash");
+        };
+        try { Assert.Throws<IOException>(() => save(AddModelWithOtherWeight(), path)); }
+        finally { AtomicFileWriter.CommitFaultInjection = null; }
+        return string.Join(' ',
+            SavedPair(path).Zip(committed).Select(p => p.First == p.Second ? "kept" : "lost"));
     }
 }

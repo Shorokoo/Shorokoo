@@ -66,9 +66,14 @@ recompute `QKᵀ` from Q and K instead.
 
 Building a training rig does run an internal memory-aware pass over the lowered
 training-step graph, which may reorder nodes and recompute a tensor rather than
-keep it alive, but only where that improves a fixed combined compute-and-memory
-metric. The pass is automatic, has no settings, and reports nothing; do not
-count on it to make a step fit that otherwise would not.
+keep it alive, but only where that improves a combined compute-and-memory
+objective. Measured over a spread of training graphs it cuts peak activation
+memory by roughly a fifth to a half, but it is automatic, has no settings, and
+reports nothing, so it is not a lever you can reach for: do not count on it to
+make a step fit that otherwise would not. It also skips graphs whose peak is
+under a megabyte, where there is nothing worth buying, and it has no effect at
+all on a graph whose backward pass runs through a recurrent op — the scheduler
+cannot linearize a BPTT scope and hands such graphs back untouched.
 
 That pass is also where three types a reflection dump over the `Shorokoo`
 assembly turns up come from — `GraphEvaluationResult`, `NodeEvaluationInfo` and

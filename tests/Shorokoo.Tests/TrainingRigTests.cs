@@ -1516,6 +1516,10 @@ public class TrainingRigCheckpointCoverageTests
             for (int i = 0; i < 2; i++)
                 ckpt = rigA.TrainStep(ckpt, inputBatch, targetBatch);
             Assert.Equal(2, ckpt.Step);
+            Assert.Equal(3, rigA.OptimizerStateDef.Fields.Length);
+            var adamWStep = (TensorData)ckpt.OptimizerState.Fields[rigA.OptimizerStateDef.Fields[2].Name];
+            Assert.Empty(adamWStep.Shape.Dims);
+            Assert.Equal(2f, adamWStep.As<float32>().AccessMemory()[0]);
             ckpt.Save(path);
             Assert.True(File.Exists(path));
 

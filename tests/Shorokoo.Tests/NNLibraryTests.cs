@@ -855,6 +855,8 @@ public class NNLibraryOptimizerTrainingCoverageTests
         AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdamWOptimizer.ComputationGraph,
             [0.1f, 0.9f, 0.999f, 1e-8f, 0.1f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.89f], 1e-4f);
         AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            [0.1f, 0.9f, 0.999f, 1e-8f, 0.1f], [1L], [1f], [1L], [0f], 2).TrainableParams, [0.7815720f], 1e-4f);
+        AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdamWOptimizer.ComputationGraph,
             [0.1f, 0.9f, 0.999f, 1e-8f, 0f], [1L], [1f], [1L], [0f], 1).TrainableParams, [0.9f], 1e-5f);
         AssertStructIs(TrainAnalytic(AnalyticScalarWModel.ComputationGraph, AdamWOptimizer.ComputationGraph,
             [0.1f, 0.9f, 0.999f, 1e-8f, 0f], [1L], [1f], [1L], [0f], 2).TrainableParams, [0.8004123f], 2e-4f);

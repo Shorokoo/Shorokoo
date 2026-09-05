@@ -422,8 +422,9 @@ and small prototypes. It only materializes values for tensors ≤ `MaxDataElemen
 (default 256). Do not use it as a production inference path.
 
 To debug the graph *structure* rather than values — e.g. when `ToConcreteArchitecture`
-doesn't produce the graph you expect — snapshot the lowering stages with
-`DebugRequests`: see [debugging.md](debugging.md).
+doesn't produce the graph you expect — snapshot the lowering stages with `DebugRequests`; to see
+where a lowering that runs for minutes has got to, watch it stage by stage with
+`ComputeContext.Progress`. Both are in [debugging.md](debugging.md).
 
 ## Anti-patterns
 

@@ -2894,3 +2894,134 @@ public class TrainingRigHyperparameterShapeCoverageTests
         finally { if (File.Exists(path)) File.Delete(path); }
     }
 }
+
+[Trait("Domain", "Training")]
+[Trait("Purpose", "Coverage")]
+public class BuildProgressCoverageTests
+{
+    private static (List<BuildProgress> Reports, ComputeContext Context) Watched()
+    {
+        var reports = new List<BuildProgress>();
+        return (reports, new ComputeContext { Progress = new SynchronousBuildProgress(reports.Add) });
+    }
+
+    private static BuildPhase[] PhaseRuns(List<BuildProgress> reports)
+    {
+        var runs = new List<BuildPhase>();
+        foreach (var r in reports)
+            if (runs.Count == 0 || runs[^1] != r.Phase) runs.Add(r.Phase);
+        return [.. runs];
+    }
+
+    private static string[] StagesOf(List<BuildProgress> reports, BuildPhase phase)
+        => [.. reports.Where(r => r.Phase == phase).Select(r => r.Stage)];
+
+    private static readonly string[] ConcretizePasses =
+    [
+        "Clone", "ApplyIdentifierTemplates", "InlineModulesAndFunctions", "InjectRngDrawCounter",
+        "ExtractIdentifierTemplates", "ConvertToIdRefModelParams", "UnpackModelStruct",
+        "UnpackTensorStructs", "ConvertModelParamIdRefToModelParam", "Simplify",
+        "LowerAttributeTensorOps", "ExpandAutoGrad", "SimplifyAfterAutoGrad",
+    ];
+
+    [Fact]
+    public void TestFromScratchReportsEveryStageOfEveryPhaseInOrderCoverage()
+    {
+        var reports = new List<BuildProgress>();
+        var reportThreads = new List<int>();
+        var ctx = new ComputeContext
+        {
+            Progress = new SynchronousBuildProgress(r =>
+            {
+                reports.Add(r);
+                reportThreads.Add(Environment.CurrentManagedThreadId);
+            }),
+        };
+        var (sample, _, _) = ScalarMultiplyBatches();
+        var buildThread = Environment.CurrentManagedThreadId;
+
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            AdamWOptimizer.ComputationGraph, sample,
+            new AdamWOptimizerHyperparameters { LearningRate = 0.1f }, mergeContext: ctx);
+
+        BuildPhase[] phases = [BuildPhase.Concretize, BuildPhase.TrainingStep, BuildPhase.Initialize];
+        string[] concretize = ["Thaw", .. ConcretizePasses, "BindRngConfig", "WriteRepresentativeInputs"];
+        string[] trainingStep =
+        [
+            "NormalizeOptimizerGraph", "ComposeModelLossAndAutoGrad", "ReplayOptimizerPerParameter",
+            "PruneAndOrderTrainingStep", "ExpandStructOutputs", "UnpackTensorStructs", "Simplify",
+            "FoldLoopIterationCounts", "UnrollLoops", "LowerAttributeTensorOps", "ExpandAutoGrad",
+            "SimplifyAfterAutoGrad",
+        ];
+        string[] initialize =
+        [
+            "ReadModelParams", "InitializeModelParams", "InitializeOptimizerState", "InferModelShapes",
+            "InferTrainingStepShapes", "OptimizeTrainingStepGraph", "FreezeTrainingStepGraph", "Done",
+        ];
+
+        Assert.Equal(GraphKind.ConcreteModel, rig.TrainingStepPureGraph.Kind);
+        Assert.Equal(phases, PhaseRuns(reports));
+        Assert.Equal(concretize, StagesOf(reports, BuildPhase.Concretize));
+        Assert.Equal(trainingStep, StagesOf(reports, BuildPhase.TrainingStep));
+        Assert.Equal(initialize, StagesOf(reports, BuildPhase.Initialize));
+        Assert.True(reports[^1].IsComplete);
+        Assert.DoesNotContain(reports[..^1], r => r.IsComplete);
+        Assert.Equal(reports.Select(r => r.Elapsed).OrderBy(e => e), reports.Select(r => r.Elapsed));
+        Assert.Equal(reports.Count, reportThreads.Count);
+        Assert.All(reportThreads, t => Assert.Equal(buildThread, t));
+    }
+
+    [Fact]
+    public void TestToConcreteArchitectureReportsItsOwnThawAndFreezeCoverage()
+    {
+        var (reports, ctx) = Watched();
+        var model = ScalarMultiplyModel.ComputationGraph;
+        var hints = new ModelParamList(
+            [new KeyValuePair<string, TensorData>(model.ToInternal().Inputs[0].ToString(), TensorData([4L], new float[4]))],
+            ModelParamType.InputParam);
+        string[] stages = ["Thaw", .. ConcretizePasses, "Freeze", "Done"];
+        BuildPhase[] concretizeOnly = [BuildPhase.Concretize];
+
+        Assert.Equal(GraphKind.ConcreteArchitecture, model.ToConcreteArchitecture(hints, ctx).Kind);
+        Assert.Equal(concretizeOnly, PhaseRuns(reports));
+        Assert.Equal(stages, StagesOf(reports, BuildPhase.Concretize));
+        Assert.True(reports[^1].IsComplete);
+        Assert.Equal("[   1.5s] Concretize: Clone",
+            new BuildProgress(BuildPhase.Concretize, "Clone", TimeSpan.FromSeconds(1.5)).ToString());
+
+        var unwatched = new ComputeContext();
+        Assert.Null(unwatched.Progress);
+        Assert.Equal(GraphKind.ConcreteArchitecture, model.ToConcreteArchitecture(hints, unwatched).Kind);
+
+        var second = new List<BuildProgress>();
+        ctx.Progress = new SynchronousBuildProgress(second.Add);
+        Assert.Equal(GraphKind.ConcreteArchitecture, model.ToConcreteArchitecture(hints, ctx).Kind);
+        Assert.Equal(stages, StagesOf(second, BuildPhase.Concretize));
+    }
+
+    [Fact]
+    public void TestDerivationsReportFromTheTrainingStepPhaseCoverage()
+    {
+        var (reports, ctx) = Watched();
+        var (sample, _, _) = ScalarMultiplyBatches();
+        BuildPhase[] derivation = [BuildPhase.TrainingStep, BuildPhase.Initialize];
+        BuildPhase[] reseed = [BuildPhase.Concretize, BuildPhase.TrainingStep, BuildPhase.Initialize];
+
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            AdamWOptimizer.ComputationGraph, sample,
+            new AdamWOptimizerHyperparameters { LearningRate = 0.1f }, mergeContext: ctx);
+        reports.Clear();
+
+        Assert.NotSame(rig, rig.WithLoss(L2Loss.ComputationGraph));
+        Assert.Equal(derivation, PhaseRuns(reports));
+        Assert.True(reports[^1].IsComplete);
+
+        reports.Clear();
+        Assert.NotSame(rig, rig.WithSeed(new RngConfig { MasterSeed = 7 }));
+        Assert.Equal(reseed, PhaseRuns(reports));
+        Assert.Equal("BindRngConfig", reports[0].Stage);
+        Assert.True(reports[^1].IsComplete);
+    }
+}

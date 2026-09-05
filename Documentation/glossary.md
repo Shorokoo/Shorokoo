@@ -41,6 +41,7 @@
 | `ToConcreteModel` | Binds a `ModelParamList` (weights) into a concrete-architecture graph by name for inference. | `onnx-and-weights.md` |
 | naming scheme (`ModelIdNamingScheme` / `SimplePatternNamingScheme`) | Maps third-party (e.g. PyTorch) parameter names onto Shorokoo's, so loaded weights bind; built with the format or pattern DSL. | `param-naming-format-dsl.md`, `param-naming-pattern-dsl.md` |
 | `DebugRequests` | Saves graph snapshots at chosen points of `ToConcreteArchitecture` lowering, as compilable C#. | `debugging.md` |
+| `ComputeContext.Progress` / `BuildProgress` | Reports each stage of a build (lowering, rig construction) as it is entered, so a build that runs for minutes is visibly alive. | `training.md`, `debugging.md` |
 | `.srk` / `.zsrk` | Shorokoo's own (un)compressed graph file format. | `onnx-and-weights.md` |
 | `.skpt` / `Persistence` | Shorokoo's native checkpoint container (a STORED zip with a `config.json` manifest, or the same content as a directory of real files). `Persistence.From(...).Save(...)` / `Persistence.Load` save and reload a concrete model with its weights; `Persistence.SaveTrainingCheckpointToSkpt` writes a whole training checkpoint — rig constituents included — and `TrainingRig.Load` rebuilds the rig *and* its resumed checkpoint from that file alone. | `skpt-checkpoints.md` |
 | backend / execution provider | The loaded platform assembly (`LinuxCPU`/`LinuxGPU`/`WinCPU`/`WinGPU`) that runs ORT. | `inference.md` |

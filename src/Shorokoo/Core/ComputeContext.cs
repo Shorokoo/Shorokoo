@@ -97,10 +97,12 @@ namespace Shorokoo.Runtime
     /// once via <see cref="Execute(ComputationGraph, IData[])"/>, or repeatedly via a
     /// <see cref="CompiledGraph"/> from <see cref="Compile(ComputationGraph)"/>.
     ///
-    /// A context carries no per-instance configuration — no device, execution provider, thread count
-    /// or session options — and every session it creates is built by the one process-wide
+    /// A context carries no per-instance <i>compute</i> configuration — no device, execution provider,
+    /// thread count or session options — and every session it creates is built by the one process-wide
     /// <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Factory"/>. Two distinct
-    /// instances therefore name a <i>phase</i> of the work, never a device.
+    /// instances therefore name a <i>phase</i> of the work, never a device. Its one per-instance
+    /// setting observes rather than configures: <see cref="Progress"/>, the sink a long build reports
+    /// its stages to.
     /// </summary>
     public class ComputeContext
     {
@@ -123,9 +125,30 @@ namespace Shorokoo.Runtime
             set { _defaultComputeContext = value; }
         }
 
-        /// <summary>Creates a compute context. There is nothing per-context to configure — its sessions
-        /// come from the process-wide
-        /// <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Factory"/>.</summary>
+        /// <summary>
+        /// Optional sink for build progress. When set, every build that runs on this context — the
+        /// <c>ToConcreteArchitecture</c> lowering pipeline, and every build that takes this context as
+        /// its <c>mergeContext</c>: <c>TrainingRig.FromScratch</c>, each <c>With…</c> derivation, and
+        /// <c>TrainingRig.Load</c> — reports each stage as it enters it, so a build that runs for
+        /// minutes is visibly alive and its last report names the stage it is in. <c>null</c> (the
+        /// default) reports nothing and costs nothing. Only a full <c>FromScratch</c> concretizes, so
+        /// only its report stream opens with <see cref="BuildPhase.Concretize"/>; a derivation or a
+        /// load starts at <see cref="BuildPhase.TrainingStep"/>, on a clock of its own. A build given no
+        /// context runs on <see cref="Default"/>, so a sink set there reports every such build.
+        ///
+        /// <para>Reports are raised synchronously on the building thread, so use
+        /// <see cref="SynchronousBuildProgress"/> (which calls its handler inline) rather than
+        /// <see cref="System.Progress{T}"/> when the order of reports matters — and note that an
+        /// exception thrown by the sink propagates out of the build. A context shared by concurrent
+        /// builds delivers their reports interleaved on their own threads; the sink must tolerate
+        /// that.</para>
+        /// </summary>
+        public IProgress<BuildProgress>? Progress { get; set; }
+
+        /// <summary>Creates a compute context. Nothing about the <i>compute</i> is per-context — its
+        /// sessions come from the process-wide
+        /// <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Factory"/> — so the only
+        /// thing to set on the instance is the observational <see cref="Progress"/> sink.</summary>
         public ComputeContext()
         {
         }

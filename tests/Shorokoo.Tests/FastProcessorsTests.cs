@@ -33,6 +33,7 @@ public class FastProcessorsCoverageTests
             return GC.GetAllocatedBytesForCurrentThread() - before;
         }
 
+        ConcretizationBytes(PrunedBiasSmallLinear.ComputationGraph.ToInternal());
         var small = ConcretizationBytes(PrunedBiasSmallLinear.ComputationGraph.ToInternal());
         var large = ConcretizationBytes(PrunedBiasLargeLinear.ComputationGraph.ToInternal());
         Assert.True(large - small < 8L << 20);

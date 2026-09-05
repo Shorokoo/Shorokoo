@@ -51,39 +51,48 @@ public class ModulesCoverageTests
         Assert.True(GatedBias(bake: true, viaSpecialize: true, paramCount: 1, gated: false, biased));
     }
 
-    private static bool TwoGates(bool bake, bool viaSpecialize, bool atExecute,
-        int paramCount, int ifNodes, float[] paramless, float[] gated)
+    private static (int Params, int Ifs, float[] Paramless, float[] Gated) TwoGatesRun(
+        bool bake, bool viaSpecialize, bool atExecute)
     {
         var g = Modules.TwoGatesOneHyperLayer.ComputationGraph;
         var x = TensorData([2L], 1f, 2f);
         if (viaSpecialize) g = g.Specialize(g.FromOrderedInputs([TensorData([], bake)]));
         var arch = g.ToConcreteArchitecture(
             viaSpecialize ? g.FromOrderedInputs([x]) : g.FromOrderedInputs([TensorData([], bake), x]));
-        var model = arch.ToConcreteModel(RngConfig.Default);
         IData[] inputs = viaSpecialize ? [x] : [TensorData([], atExecute), x];
-        var o = new ComputeContext().Execute(model, inputs);
-        return arch.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams.Length == paramCount
-            && IfCount(arch) == ifNodes
-            && Floats(o[0]).SequenceEqual(paramless)
-            && Floats(o[1]).SequenceEqual(gated);
+        var o = new ComputeContext().Execute(arch.ToConcreteModel(RngConfig.Default), inputs);
+        return (arch.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams.Length,
+                IfCount(arch), Floats(o[0]), Floats(o[1]));
     }
+
+    private static bool TwoGatesMatch(
+        (int Params, int Ifs, float[] Paramless, float[] Gated) r,
+        int paramCount, int ifNodes, float[] paramless, float[] gated)
+        => r.Params == paramCount && r.Ifs == ifNodes
+           && r.Paramless.SequenceEqual(paramless) && r.Gated.SequenceEqual(gated);
+
+    private static bool TwoGates(bool bake, bool atExecute, int paramCount, int ifNodes, float[] paramless, float[] gated)
+        => TwoGatesMatch(TwoGatesRun(bake, viaSpecialize: false, atExecute), paramCount, ifNodes, paramless, gated);
+
+    private static bool TwoGatesSpecialized(bool bake, int paramCount, float[] paramless, float[] gated)
+        => TwoGatesMatch(TwoGatesRun(bake, viaSpecialize: true, atExecute: bake), paramCount, 0, paramless, gated);
 
     /// <summary>One <c>[Hyper]</c> bit gating two <c>IfElse</c>es — one holding a trainable
     /// parameter, one not. Concretizing the bit off prunes the parameter, so its branch can never
-    /// be taken and the whole <c>IfElse</c> is folded away (one <c>IF</c> left, and the gated
-    /// output no longer answers to the bit); the paramless <c>IfElse</c> on the same bit is
+    /// be taken and the whole <c>IfElse</c> is folded away; the paramless one on the same bit is
     /// untouched and still switches at run time. Concretizing it on prunes nothing and folds
-    /// nothing.</summary>
+    /// nothing. The gated branch multiplies by the parameter, so a stand-in left in place of the
+    /// fold would show up as zeros rather than hiding behind an identical value.</summary>
     [Fact]
     public void TestAPrunedParamsBranchFoldsAwayWhileAParamlessBranchOnTheSameHyperStaysLive()
     {
-        float[] then = [10f, 20f], els = [100f, 200f], plain = [1f, 2f], biased = [2f, 3f];
-        Assert.True(TwoGates(bake: false, viaSpecialize: false, atExecute: false, paramCount: 0, ifNodes: 1, els, plain));
-        Assert.True(TwoGates(bake: false, viaSpecialize: false, atExecute: true, paramCount: 0, ifNodes: 1, then, plain));
-        Assert.True(TwoGates(bake: true, viaSpecialize: false, atExecute: false, paramCount: 1, ifNodes: 2, els, plain));
-        Assert.True(TwoGates(bake: true, viaSpecialize: false, atExecute: true, paramCount: 1, ifNodes: 2, then, biased));
-        Assert.True(TwoGates(bake: false, viaSpecialize: true, atExecute: false, paramCount: 0, ifNodes: 0, els, plain));
-        Assert.True(TwoGates(bake: true, viaSpecialize: true, atExecute: true, paramCount: 1, ifNodes: 0, then, biased));
+        float[] then = [10f, 20f], els = [100f, 200f], scaled = [1f, 2f], sevens = [7f, 14f];
+        Assert.True(TwoGates(bake: false, atExecute: false, paramCount: 0, ifNodes: 1, els, sevens));
+        Assert.True(TwoGates(bake: false, atExecute: true, paramCount: 0, ifNodes: 1, then, sevens));
+        Assert.True(TwoGates(bake: true, atExecute: false, paramCount: 1, ifNodes: 2, els, sevens));
+        Assert.True(TwoGates(bake: true, atExecute: true, paramCount: 1, ifNodes: 2, then, scaled));
+        Assert.True(TwoGatesSpecialized(bake: false, paramCount: 0, els, sevens));
+        Assert.True(TwoGatesSpecialized(bake: true, paramCount: 1, then, scaled));
     }
 
     private static long BiggestConstant(ComputationGraph arch)
@@ -110,56 +119,126 @@ public class ModulesCoverageTests
             viaSpecialize ? g.FromOrderedInputs([x]) : g.FromOrderedInputs([bit, x])));
     }
 
-    private static long NestedBigBiggestConstant(bool outer, bool inner)
+    private static ComputationGraph NestedBigArch(bool outer, bool inner)
     {
         var g = Modules.NestedBigGatedParamLayer.ComputationGraph;
-        return BiggestConstant(g.ToConcreteArchitecture(g.FromOrderedInputs(
-            [TensorData([], outer), TensorData([], inner), TensorData([2L], 1f, 2f)])));
+        return g.ToConcreteArchitecture(g.FromOrderedInputs(
+            [TensorData([], outer), TensorData([], inner), TensorData([2L], 1f, 2f)]));
     }
 
     private static int IfCount(ComputationGraph arch)
         => arch.ToInternal().Nodes.Count(n => n.OpCode == OpCodes.IF_OPEN);
 
+    private static int ExpandCount(ComputationGraph arch)
+        => arch.ToInternal().Nodes.Count(n => n.OpCode == OpCodes.EXPAND);
+
     private static float[] Floats(NamedModelParam p)
         => p.ToTensorData().As<float32>().AccessMemory<float>().ToArray();
 
     /// <summary>A gated <c>[256, 256]</c> parameter switched off must not reappear as a stand-in
-    /// of its own size, on either route and whether or not its branch survives. The gate-on row is
-    /// the positive control: it proves the scanner sees constants at all, so the zero rows mean
-    /// "nothing there" rather than "nothing measured".</summary>
+    /// of its own size, on either route and whether or not its branch survives. Exact counts, so
+    /// that a stand-in growing dense (65536), a surviving branch being folded away by mistake (1),
+    /// and the intended shape-driven stand-in (2) are all distinguishable; the gate-on row is the
+    /// positive control proving the scanner sees constants at all.</summary>
     [Fact]
     public void TestPruningAGatedParamDoesNotLeaveItsBytesBehindAsAStandIn()
     {
         Assert.Equal(2, GatedBigParamBiggestConstant(viaSpecialize: false, bake: true));
         Assert.Equal(0, GatedBigParamBiggestConstant(viaSpecialize: true, bake: false));
         Assert.Equal(0, GatedBigParamBiggestConstant(viaSpecialize: false, bake: false));
-        Assert.True(NestedBigBiggestConstant(outer: false, inner: true) < 64);
-        Assert.True(NestedBigBiggestConstant(outer: false, inner: false) < 64);
+
+        var survives = NestedBigArch(outer: false, inner: true);
+        Assert.Equal(2, BiggestConstant(survives));
+        Assert.Equal(1, ExpandCount(survives));
+
+        var innerFolds = NestedBigArch(outer: false, inner: false);
+        Assert.Equal(1, BiggestConstant(innerFolds));
+        Assert.Equal(0, ExpandCount(innerFolds));
+    }
+
+    /// <summary>The stand-in is a hand-built <c>EXPAND</c>, so it has to actually run: concretize
+    /// with the outer gate off — which keeps the enclosed branch and its stand-in — then execute
+    /// with that still-live gate on, so the branch reading the stand-in is the one taken. Zeros,
+    /// summed and added, leave the input untouched. The rank-0 parameter takes the emitter's
+    /// no-dims path, which cannot <c>EXPAND</c> at all.</summary>
+    [Fact]
+    public void TestAStandInBranchThatSurvivesStillExecutes()
+    {
+        var x = TensorData([2L], 1f, 2f);
+        var arch = NestedBigArch(outer: false, inner: true);
+        var o = new ComputeContext().Execute(arch.ToConcreteModel(RngConfig.Default),
+            [TensorData([], true), TensorData([], true), x]);
+        Assert.Equal([1f, 2f], Floats(o[0]));
+
+        var reloaded = CompressedFormatUtils.LoadFastGraphCore(
+            CompressedFormatUtils.SaveFastGraphToBinary(arch.ToInternal(), compressed: true),
+            "<roundtrip>", null).Graph;
+        Assert.Equal(1, reloaded.Nodes.Count(n => n.OpCode == OpCodes.EXPAND));
+
+        var g = Modules.NestedRank0GatedParamLayer.ComputationGraph;
+        var r0 = g.ToConcreteArchitecture(g.FromOrderedInputs(
+            [TensorData([], false), TensorData([], true), x]));
+        Assert.Equal(0, ExpandCount(r0));
+        Assert.Equal(0, r0.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams.Length);
+        var r0Out = new ComputeContext().Execute(r0.ToConcreteModel(RngConfig.Default),
+            [TensorData([], true), TensorData([], true), x]);
+        Assert.Equal([0f, 0f], Floats(r0Out[0]));
+    }
+
+    private static bool Exclusivity(ComputationGraph g, TensorData[] hints, IData[] exec,
+        int paramCount, int ifNodes, float[] slot0, float[] slot1)
+    {
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([.. hints]));
+        var o = new ComputeContext().Execute(arch.ToConcreteModel(RngConfig.Default), exec);
+        return arch.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams.Length == paramCount
+            && IfCount(arch) == ifNodes
+            && Floats(o[0]).SequenceEqual(slot0)
+            && Floats(o[1]).SequenceEqual(slot1);
     }
 
     /// <summary>Folding an <c>IF_CLOSE</c> takes all of its slots, so a tuple <c>IfElse</c> whose
     /// slot 0 holds a pruned parameter must not fold — slot 1 holds none and keeps switching at
-    /// run time. Likewise a parameter two gates share is owned by neither, so both stay.</summary>
+    /// run time. Likewise a parameter two gates share is owned by neither, so both stay. In both
+    /// the parameter is still pruned, so the branch that held it reads a zero stand-in.</summary>
     [Fact]
     public void TestAPrunedParamOnlyFoldsTheGateThatExclusivelyOwnsIt()
     {
         var x = TensorData([2L], 1f, 2f);
+        TensorData Bit(bool b) => TensorData([], b);
 
-        var tup = Modules.TupleGateHyperLayer.ComputationGraph;
-        var tupArch = tup.ToConcreteArchitecture(tup.FromOrderedInputs([TensorData([], false), x]));
-        var tupOut = new ComputeContext().Execute(tupArch.ToConcreteModel(RngConfig.Default),
-            [TensorData([], true), x]);
-        Assert.Equal(1, IfCount(tupArch));
-        Assert.Equal([1f, 2f], Floats(tupOut[0]));
-        Assert.Equal([10f, 20f], Floats(tupOut[1]));
+        Assert.True(Exclusivity(Modules.TupleGateHyperLayer.ComputationGraph,
+            [Bit(false), x], [Bit(true), x],
+            paramCount: 0, ifNodes: 1, slot0: [1f, 2f], slot1: [10f, 20f]));
 
-        var shared = Modules.SharedDeadParamTwoGatesLayer.ComputationGraph;
-        var sharedArch = shared.ToConcreteArchitecture(shared.FromOrderedInputs(
-            [TensorData([], false), x, TensorData([], false)]));
-        var sharedOut = new ComputeContext().Execute(sharedArch.ToConcreteModel(RngConfig.Default),
-            [TensorData([], false), x, TensorData([], true)]);
-        Assert.Equal(2, IfCount(sharedArch));
-        Assert.Equal([1f, 2f], Floats(sharedOut[1]));
+        Assert.True(Exclusivity(Modules.SharedDeadParamTwoGatesLayer.ComputationGraph,
+            [Bit(false), x, Bit(false)], [Bit(false), x, Bit(true)],
+            paramCount: 0, ifNodes: 2, slot0: [1f, 2f], slot1: [1f, 2f]));
+    }
+
+    /// <summary>A gate with a pruned parameter on each branch folds whichever way it points.
+    /// Only the losing branch's parameter can unlock the fold, so a gate must not be written off
+    /// because the winning branch's parameter was the one looked at first.</summary>
+    [Fact]
+    public void TestAGateWithAPrunedParamOnEachBranchFoldsEitherWay()
+    {
+        var g = Modules.ParamOnBothBranchesLayer.ComputationGraph;
+        var x = TensorData([2L], 1f, 2f);
+        (int Params, int Ifs, float[] Out) Run(bool flag)
+        {
+            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs(
+                [TensorData([], false), TensorData([], flag), x]));
+            var o = new ComputeContext().Execute(arch.ToConcreteModel(RngConfig.Default),
+                [TensorData([], false), TensorData([], flag), x]);
+            return (arch.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams.Length,
+                    IfCount(arch), Floats(o[0]));
+        }
+        foreach (var flag in (bool[])[false, true])
+        {
+            var (parms, ifs, outs) = Run(flag);
+            Assert.Equal(0, parms);
+            Assert.Equal(0, ifs);
+            Assert.Equal([9f, 18f], outs);
+        }
     }
 
     /// <summary>The fold is not specific to a bit-valued gate on the then branch: a computed
@@ -211,8 +290,8 @@ public class ModulesCoverageTests
         float[] Run(bool flag)
         {
             var g = Modules.LoopGateHyperLayer.ComputationGraph;
-            var hints = (IData[])[TensorData([], 3L), TensorData([], flag), x];
-            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([.. hints.Cast<TensorData>()]));
+            TensorData[] hints = [TensorData([], 3L), TensorData([], flag), x];
+            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([.. hints]));
             return Floats(new ComputeContext().Execute(arch.ToConcreteModel(RngConfig.Default), hints)[0]);
         }
         Assert.Equal([4f, 5f], Run(flag: true));

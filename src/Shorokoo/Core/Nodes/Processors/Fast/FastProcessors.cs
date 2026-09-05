@@ -3392,7 +3392,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 if (closeNode.GraphOpenNodeKey is not FastNodeKey openKey || openKey.IsEmpty) continue;
                 if (!nodeByKey.TryGetValue(openKey, out var openNode)) continue;
-                if (!pinnedOpenKeys.Add(openKey)) continue;
+                if (pinnedOpenKeys.Contains(openKey)) continue;
                 if (openNode.Inputs.Count == 0 || openNode.Inputs[0] is not FastTensorKey condKey || condKey.IsEmpty)
                     continue;
 
@@ -3413,8 +3413,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 // The value must actually deselect the branch holding the dead parameter. If the
                 // hints say otherwise, the condition and the liveness verdict disagree — leave
                 // the IF alone and let the zero stand-in path run.
+                // Only claim the gate once it is actually accepted. A gate with a dead site on
+                // each branch is reached twice; the site on the *winning* branch is rejected just
+                // above, and it is the other one that legitimately pins. Claiming on first sight
+                // would let whichever site came first in node order decide whether the gate folds
+                // at all — and a missed inner fold cascades, since it is what unlocks the
+                // enclosing gate on the next round of the fixpoint loop.
                 if (condVal == isThenBranch) continue;
 
+                pinnedOpenKeys.Add(openKey);
                 pins.Add((openNode, condVal));
             }
 
@@ -3490,6 +3497,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         gate = (consumer, inThen);
                         continue;                            // do not walk past the gate
                     }
+
+                    // A consumer with no outputs (an IF_OPEN taking this value as its condition)
+                    // ends the path with no gate found. That is not evidence of ownership, so
+                    // decline rather than let the walk fall through silently.
+                    if (consumer.Outputs.Count == 0) return null;
 
                     if (!seen.Add(consumer.Key)) continue;
                     foreach (var output in consumer.Outputs)

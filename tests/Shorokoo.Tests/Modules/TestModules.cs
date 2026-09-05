@@ -128,7 +128,7 @@ namespace Shorokoo.Tests.Modules
         {
             var gain = InitSimple.Init(input.ShapeTensor());
             var paramless = flag.IfElse(input * Scalar(10f), input * Scalar(100f));
-            var gated = flag.IfElse(input + gain, input);
+            var gated = flag.IfElse(input * gain, input * Scalar(7f));
             return (paramless, gated);
         }
     }
@@ -181,6 +181,33 @@ namespace Shorokoo.Tests.Modules
             foreach (var ctx in LoopAPI.Iterate(iters))
                 x = flag.IfElse(x + Scalar(1f), x * Scalar(2f));
             return x;
+        }
+    }
+
+    /// <summary>One gate with a trainable param on <b>each</b> branch, both pruned by an
+    /// enclosing gate. Whichever branch wins, the other is the one that unlocks the fold.</summary>
+    [Module]
+    public partial class ParamOnBothBranchesLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<bit> outer, [Hyper] Scalar<bit> flag)
+        {
+            var a = InitSimple.Init(input.ShapeTensor());
+            var b = InitSimple.Init(input.ShapeTensor());
+            var inner = flag.IfElse(input + a, input - b);
+            return outer.IfElse(inner, input * Scalar(9f));
+        }
+    }
+
+    /// <summary>A rank-0 trainable param behind nested gates — the stand-in emitter's
+    /// no-dims path, which cannot EXPAND.</summary>
+    [Module]
+    public partial class NestedRank0GatedParamLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<bit> outer, [Hyper] Scalar<bit> inner)
+        {
+            var s = Shorokoo.Modules.Initializers.ScalarOnes.Init();
+            var innerVal = inner.IfElse(input * s, input * Scalar(3f));
+            return outer.IfElse(innerVal, input);
         }
     }
 

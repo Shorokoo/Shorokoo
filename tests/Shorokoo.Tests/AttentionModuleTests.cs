@@ -96,6 +96,17 @@ public class AttentionModuleTests
             hyperparamInputs: [], runtimeInputs: [Sdpa8x4()]));
     }
 
+    // Shorokoo/Shorokoo#245: an invalid Slice (axis -2 of a rank-1 tensor) raises cleanly
+    // on its own but SIGSEGVs inside a larger graph, taking the whole run down rather than
+    // failing one test. Unskip when #245 is fixed; the expectation below is already right.
+    [Fact(Skip = "Shorokoo/Shorokoo#245: crashes the test host instead of raising")]
+    public void TestSliceOnAbsentAxisRaisesRatherThanCrashing()
+    {
+        Assert.Throws<Microsoft.ML.OnnxRuntime.OnnxRuntimeException>(() =>
+            AutoTest.AdvancedTestGraph<AttnSliceOnAbsentAxisInConcat>(
+                hyperparamInputs: [], runtimeInputs: [Sdpa8x4()]));
+    }
+
     [Fact]
     public void TestAttentionGraphShapeCoverage()
     {

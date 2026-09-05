@@ -196,6 +196,7 @@ namespace Shorokoo.Runtime
 
         internal CompiledGraph Compile(InternalComputationGraph graph)
         {
+            graph.RequireExecutableDialect("graph compilation");
             var originalInputNames = ResolveOriginalInputNames(graph);
             return CompileFromModel(
                 () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true),
@@ -325,6 +326,7 @@ namespace Shorokoo.Runtime
         /// </summary>
         internal NamedModelParam[] Run(InternalComputationGraph graph, params NamedModelParam[] inputs)
         {
+            graph.RequireExecutableDialect("graph execution");
             var originalInputNames = ResolveOriginalInputNames(graph);
             return RunFromModel(
                 () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true),

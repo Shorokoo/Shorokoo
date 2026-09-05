@@ -649,11 +649,14 @@ public class ModulesCoverageTests
 
     /// <summary>Every eager-evaluation entry point refuses an un-lowered module output up front,
     /// naming the lowering, instead of letting the residual module op reach ONNX Runtime as an
-    /// unknown op in an "invalid model".</summary>
+    /// unknown op in an "invalid model" — for both documented shapes, a module whose initializers
+    /// are constant and a library layer whose distribution is computed in-graph. The session paths
+    /// themselves carry the same refusal as a backstop.</summary>
     [Fact]
     public void TestEagerEvalRefusesAModuleOutputAndNamesTheLowering()
     {
         var x = Tensor([2L], 1.0f, 2.0f);
+        var sample = TensorData([2L], 1.0f, 2.0f);
         Variable[] noInputs = [];
         string[] refusals =
         [
@@ -662,17 +665,26 @@ public class ModulesCoverageTests
             Assert.Throws<InvalidOperationException>(() => new ComputeContext().Eval(ScalarMultiplyModel.Call(x))).Message,
             Assert.Throws<InvalidOperationException>(() => noInputs.Eval(ScalarMultiplyModel.Call(x)).With([])).Message,
             Assert.Throws<InvalidOperationException>(() => ScalarMultiplyModel.Call(x).Eval()).Message,
+            Assert.Throws<InvalidOperationException>(() => OnnxEngine.Eval(
+                Shorokoo.Modules.Layers.Linear.Call(Scalar(4L), Scalar(false), Tensor([4L, 4L],
+                    [.. Enumerable.Repeat(0.5f, 16)])))).Message,
+            Assert.Throws<InvalidOperationException>(
+                () => ComputeContext.Default.Execute(ScalarMultiplyModel.ComputationGraph.ToInternal(), sample)).Message,
+            Assert.Throws<InvalidOperationException>(
+                () => ComputeContext.Default.Compile(ScalarMultiplyModel.ComputationGraph.ToInternal())).Message,
         ];
         Assert.All(refusals, m => Assert.Contains("concretized", m));
         Assert.All(refusals, m => Assert.Contains("'module'", m));
-        Assert.All(refusals, m => Assert.Contains(InternalOpCodes.CREATE_MODULE, m));
         Assert.All(refusals, m => Assert.Contains("ToConcreteArchitecture", m));
         Assert.All(refusals, m => Assert.Contains("ToConcreteModel", m));
+        Assert.All(refusals[..6], m => Assert.Contains(InternalOpCodes.CREATE_MODULE, m));
+        Assert.Contains(InternalOpCodes.MODEL_PARAM_REF, refusals[6]);
         Assert.Contains("OnnxEngine.Eval", refusals[0]);
         Assert.Contains("ComputeContext.Eval", refusals[2]);
         Assert.Contains("Tensor.Eval", refusals[4]);
+        Assert.Contains("graph execution", refusals[6]);
+        Assert.Contains("graph compilation", refusals[7]);
 
-        var sample = TensorData([2L], 1.0f, 2.0f);
         var g = ScalarMultiplyModel.ComputationGraph;
         var model = g.ToConcreteArchitecture(g.FromOrderedInputs([sample])).ToConcreteModel();
         Assert.Equal([1.0f, 2.0f],

@@ -652,7 +652,8 @@ namespace Shorokoo.Graph
 
         /// <summary>
         /// Module-stage gate for the eager-evaluation entry points
-        /// (<c>OnnxEngine.Eval</c>, <c>ComputeContext.Eval</c>, <c>inputs.Eval(outputs).With(...)</c>),
+        /// (<c>OnnxEngine.Eval</c>, <c>ComputeContext.Eval</c>, <c>Tensor&lt;T&gt;.Eval</c>,
+        /// <c>inputs.Eval(outputs).With(...)</c>),
         /// which build their graph from output variables and so have no stamped
         /// <see cref="GraphKind"/> for <c>ComputationGraph.RequireConcretized</c> to read. A
         /// <c>[Module]</c>'s output carries its module machinery until the module's graph is
@@ -661,15 +662,36 @@ namespace Shorokoo.Graph
         /// and name the lowering that fixes it.
         /// </summary>
         internal static void RequireConcretized(this InternalComputationGraph graph, string operation)
+            => RefuseModuleMachinery(graph, operation, n => n.IsModuleStageMachinery());
+
+        /// <summary>
+        /// The same refusal as a backstop on the ONNX Runtime session paths
+        /// (<c>ComputeContext.Run</c>/<c>Compile</c>), for a graph that reaches them from
+        /// somewhere other than an eager-evaluation entry point or a kind-stamped
+        /// <see cref="ComputationGraph"/>: module machinery has no ORT kernel behind it, so such a
+        /// graph can only fail deep inside session creation.
+        ///
+        /// <para>A <see cref="InternalOpCodes.FUNCTION_INVOKE"/> never counts here, unlike in
+        /// <see cref="RequireConcretized"/>: at this depth every invoke serializes to a call on an
+        /// emitted FunctionProto and runs, whatever its target's
+        /// <see cref="FunctionType"/> — which is exactly how <c>ToConcreteModel</c> materializes
+        /// parameters, by executing their initializer functions through this path.</para>
+        /// </summary>
+        internal static void RequireExecutableDialect(this InternalComputationGraph graph, string operation)
+            => RefuseModuleMachinery(graph, operation,
+                n => n.OpCode != InternalOpCodes.FUNCTION_INVOKE && InternalOpCodes.IsModuleStageOp(n.OpCode));
+
+        private static void RefuseModuleMachinery(
+            InternalComputationGraph graph, string operation, System.Func<FastNode, bool> isMachinery)
         {
-            var moduleOps = graph.Nodes.Where(n => n.IsModuleStageMachinery()).Select(n => n.OpCode).ToList();
+            var moduleOps = graph.Nodes.Where(isMachinery).Select(n => n.OpCode).ToList();
             if (moduleOps.Count == 0) return;
             var named = string.Join(", ", moduleOps.Distinct().OrderBy(op => op, System.StringComparer.Ordinal));
 
             throw new System.InvalidOperationException(SrkFileFormat.KindMismatchMessage(
                 operation, "a concretized graph (a 'concrete-architecture' or 'concrete-model')",
                 GraphKind.Module,
-                $"These outputs still carry {moduleOps.Count} un-lowered module op(s) "
+                $"The graph still carries {moduleOps.Count} un-lowered module op(s) "
                 + $"({named}), as a [Module]'s output (MyModule.Call(...)) does. "
                 + "Lower the module's graph against the input first and execute that: "
                 + "var g = MyModule.ComputationGraph; "

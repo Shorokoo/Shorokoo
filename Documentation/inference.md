@@ -144,10 +144,11 @@ through copies and `.srk` save/load). The steps check it up front:
 required kind in their error when handed the wrong stage — so a mis-ordered
 pipeline fails immediately with a clear message instead of deep inside execution.
 Execution (`ComputeContext.Execute`/`Run`/`Compile` and `QuickExecutionEngine`)
-likewise refuses a module-kind graph up front with the same lowering hint. `Eval`
-takes output values rather than a `ComputationGraph`, so it has no `Kind` to read;
-it classifies the graph it builds from those outputs instead, and refuses a
-module-stage one with the same hint.
+likewise refuses a module-kind graph up front with the same lowering hint, and the
+session paths refuse residual module machinery even on a graph that carries no
+stamp at all. `Eval` takes output values rather than a `ComputationGraph`, so it
+has no `Kind` to read; it classifies the graph it builds from those outputs
+instead, and refuses a module-stage one with the same hint.
 `ComputationGraph`s are **readonly**: operations that used to modify a graph in
 place return a new graph instead (e.g. `WithRngConfig`), so a graph's `Kind` can
 never be invalidated behind your back.

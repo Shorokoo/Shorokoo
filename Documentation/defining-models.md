@@ -81,7 +81,11 @@ touches that parameter space:
     `useBias = false` yields an architecture with no bias parameter and no
     branch — passing the bit at `Execute` no longer changes that result.
     Concretizing with `useBias = true` prunes nothing, so nothing is folded and
-    the bit still selects at run time. Note the scope either way: only the
+    the bit still selects at run time. Nor does a gate fold when it does not
+    *solely* own the parameters — a tuple `IfElse`, whose slots resolve together,
+    or one sharing them with a second gate: there the parameters still go, and
+    the branch that held them is left reading a zero stand-in. Note the scope
+    either way: only the
     `IfElse` whose *pruned* parameters made it unreachable is folded, so the
     same hyper stays live for any other `IfElse` it gates — see
     [What concretization fixes](inference.md#what-concretization-fixes).
@@ -91,15 +95,18 @@ touches that parameter space:
   and may vary call to call, and in an optimizer they may be scheduled per-step
   (see [training.md](training.md)).
 
-Both kinds stay **live inputs** of the concretized graph and must be supplied
-again at `Execute` (only [`Specialize`](inference.md#hardcoding-hypers-with-specialize)
-removes an input). For a value-only hyper you may supply anything; for a
-parameter-space-determining one, supply **the same value you concretized with**.
-Where it decided a parameter's *shape*, a different value later does not resize
-anything; where it gated a parameter's *existence*, a different value either
-changes nothing (the branch was folded away with the parameters it held) or
-silently runs the other branch (nothing was pruned, so nothing was folded) —
-neither is what you meant. See
+On the `Foo.ComputationGraph` route both kinds stay **live inputs** of the
+concretized graph and must be supplied again at `Execute` (only
+[`Specialize`](inference.md#hardcoding-hypers-with-specialize) removes an input;
+via `Call`/`Model` the hyper is a constant and was never an input). For a
+value-only hyper you may supply anything; for a parameter-space-determining one,
+supply **the same value you concretized with**. Where it decided a parameter's
+*shape*, a different value later does not resize anything. Where it gated a
+parameter's *existence*, a different value either changes nothing (the branch
+folded away with the parameters it held), or silently runs the other branch —
+because nothing was pruned, or because the gate could not fold and that branch
+now reads a zero stand-in for parameters that were. None of those is what you
+meant. See
 [What concretization fixes](inference.md#what-concretization-fixes) for the full
 list of what a concrete architecture pins down.
 
@@ -148,8 +155,9 @@ How a hyper value gets supplied depends on the route:
   branch's parameters — and when that leaves the *unselected* branch holding
   parameters that no longer exist, it folds that `IfElse` away too, so the bit
   no longer switches it at run time. Nothing else is folded: an `IfElse` whose
-  selected branch holds the parameters keeps both branches, and so does a
-  paramless one on the same hyper. See
+  selected branch holds the parameters keeps both branches, and so do a paramless
+  one on the same hyper, a tuple `IfElse`, and one sharing its parameters with a
+  second gate. See
   [Hyperparameter baking](#hyperparameter-baking).
 
   A hyper folded to a **constant** before lowering — by `Foo.Call(Scalar(k), x)`,

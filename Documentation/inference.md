@@ -221,9 +221,9 @@ therefore fixed then and there:
 
 | Fixed at concretization | Derived from |
 |---|---|
-| Trainable-parameter **shapes** and count | shape-determining hypers, and the shapes of the sample inputs |
+| Trainable-parameter **shapes** and count | hypers feeding a parameter's shape, and the shapes of the sample inputs |
 | **Which** trainable parameters exist | hypers gating an `IfElse` whose branches hold parameters |
-| Loop **iteration space** (and the per-iteration parameters realized over it) | hypers/inputs that drive a `LoopAPI.Iterate` count |
+| The per-iteration **parameters** realized over a `LoopAPI.Iterate` body (and the whole iteration space, when the count folds to a constant and the loop unrolls) | hypers/inputs that drive the count |
 
 What concretization fixes is the **parameter space**, and it rewrites only as
 much control flow as that requires. An `IfElse` whose unselected branch holds
@@ -251,7 +251,7 @@ from the concretization value just the same. That is a reason to mark such a gat
 So one hyper can be half-resolved and half-live, and that is the intended split:
 
 ```csharp
-var big = ConstInit.Init([outFeatures]).Vec();   // a trainable parameter
+var big = Zeros.Init([outFeatures]).Vec();       // a trainable parameter
 var a = flag.IfElse(x * 10f, x * 100f);          // no params -> always stays live
 var b = flag.IfElse(x + big, x);                 // holds big -> folded iff flag is baked false
 ```
@@ -268,13 +268,19 @@ Executing with a value that would have produced a different parameter space is
 **invalid use**: the parameters that answer needs were never created, and nothing
 re-derives them at run time.
 
-A **parameter gate** is half an exception, and it is worth knowing which half.
-Baked **off**, its `IfElse` was folded away, so the value you pass later cannot
-contradict it — the baked branch runs whatever you supply, and passing the
-opposite value is pointless rather than dangerous. Baked **on**, nothing was
-pruned and nothing was folded: the `IfElse` is still live, and passing the
-opposite value silently takes the other branch, skipping parameters that do
-exist. So the rule is unchanged — supply the value you concretized with.
+A **parameter gate** is half an exception, and which half depends on whether its
+`IfElse` actually folded — so it is not a licence to pass whatever you like:
+
+- **It folded** (single-output gate, exclusive owner, baked off): the value you
+  pass later cannot contradict it. The baked branch runs whatever you supply, and
+  passing the opposite value is pointless rather than dangerous.
+- **It did not** (baked on, or a tuple or shared gate that could not fold): the
+  `IfElse` is still live and the opposite value silently takes the other branch —
+  skipping parameters that do exist when baked on, or reading a **zero stand-in**
+  for parameters that were pruned when baked off.
+
+So the rule is unchanged, and it is the second case that makes it matter: supply
+the value you concretized with.
 
 If you would rather make the contradiction impossible than remember the rule,
 bake the hyper with [`Specialize`](#hardcoding-hypers-with-specialize) before

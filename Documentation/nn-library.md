@@ -175,9 +175,12 @@ Two edges to know:
 - On the `Foo.ComputationGraph` + `FromOrderedInputs` route the bit is baked but
   **not removed** — like every `[Hyper]` there it stays a live input of the
   concrete graph and must be passed again at `Execute`. Pass the value you
-  concretized with. With the bit **off** its later value is inert (the `IfElse`
-  went with the pruned parameters); with it **on** nothing was pruned, so the
-  `IfElse` is still live and the opposite value silently takes the other branch.
+  concretized with. With the bit **off** its later value is inert *for these
+  layers* — each gates a single-output `IfElse` that solely owns its parameters,
+  so the gate went with them; a tuple or shared gate would not fold, and its
+  branch would read a zero stand-in instead. With the bit **on** nothing was
+  pruned, so the `IfElse` is still live and the opposite value silently takes the
+  other branch.
   To drop the input entirely,
   [`Specialize`](inference.md#hardcoding-hypers-with-specialize) the bit before
   concretizing. Via `Linear.Call(outFeatures, useBias, x)` the bit is a constant

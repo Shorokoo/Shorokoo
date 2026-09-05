@@ -22,8 +22,8 @@ namespace Shorokoo.Modules.Optimizers;
 ///   * Sign-based step: every coordinate moves by exactly +/-learningRate, independent of the
 ///     gradient magnitude (the update magnitude is decoupled from the gradient scale). ONNX
 ///     Sign(0) = 0, so a coordinate whose blend is exactly zero contributes no update.
-///   * Half the optimizer state of Adam/AdamW: ONLY the momentum EMA buffer m is stored — no
-///     second moment v, no bias correction, and (deliberately) no timestep scalar.
+///   * Half the param-shaped optimizer state of Adam/AdamW: ONLY the momentum EMA buffer m is
+///     stored — no second moment v, no bias correction, and (deliberately) no timestep scalar.
 ///
 /// SWAPPED BETA ROLES (read carefully — the easiest way to get Lion subtly wrong):
 ///   The roles of beta1 and beta2 are SWAPPED versus Adam. In Adam beta1 decays the first-moment

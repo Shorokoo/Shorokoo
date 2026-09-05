@@ -775,8 +775,8 @@ For state that is logically a single value per parameter — a step counter, a s
 use `OptimizerScalarZeros.Init()` (seeded at 0), `OptimizerScalarOnes.Init()` (seeded at the
 multiplicative identity 1, for a running product like NAdam's `∏μ_i`), or your own rank-0
 initializer. It stores a true scalar that broadcasts against the param-shaped tensors, so it
-costs one float per parameter instead of a full copy; Adam's bias-correction timestep works
-this way.
+costs one float per parameter instead of a full copy; Adam's and AdamW's bias-correction
+timestep works this way.
 
 Constraints:
 
@@ -798,10 +798,6 @@ Constraints:
 
 ## Notes / known limitations
 
-- `AdamWOptimizer` omits bias correction (no timestep tracking); early-step behavior
-  differs slightly from reference AdamW. Effect is minor after the first few steps.
-  `AdamOptimizer` *does* bias-correct (it carries the timestep as a scalar state field —
-  one float per parameter, not a param-shaped buffer).
 - `LionOptimizer` **swaps the beta roles** versus Adam: the stored momentum `m` is decayed by
   **β2** (`m = β2·m + (1−β2)·g`), while **β1** only appears in the sign blend that forms the
   update direction. The default `(β1 0.9, β2 0.99)` looks Adam-like but means something
@@ -822,18 +818,18 @@ Constraints:
   RMSprop=4, AdamW=5, Adagrad=2, Adamax=4, NAdam=5, RAdam=4, Adadelta=3, Lion=4, Adafactor=6,
   Lamb=5.
 - Optimizer state has one or more fields per trainable parameter (momentum: velocity;
-  AdamW: `m`/`v`; Adam: `m`/`v` plus a scalar `step`; RMSprop: `squareAvg`/`momentumBuffer`;
+  AdamW and Adam: `m`/`v` plus a scalar `step`; RMSprop: `squareAvg`/`momentumBuffer`;
   Adagrad: `accumulator`; Adamax: `m`/`u` plus a scalar `step`; NAdam: `m`/`v` plus two
   scalars — `step` and `muProduct`; RAdam: `m`/`v` plus a scalar `step`; Adadelta:
-  `squareAvg`/`accDelta`; Lion: `m` only — half of Adam/AdamW; Lamb: `m`/`v` plus a
+  `squareAvg`/`accDelta`; Lion: `m` only — half the param-shaped state of Adam/AdamW, and no scalar; Lamb: `m`/`v` plus a
   scalar `step` — Adam's footprint, the per-tensor trust ratio being recomputed each
   step and stored nowhere; Adafactor: a **full param-shaped** `v` plus a scalar
   `step` — same footprint as Adam, because the
   sublinear-memory row/column factoring is **not** implemented, see above) — see the table in
   [nn-library.md](nn-library.md). Each field is
   initialized by running its state initializer: `OptimizerStateZeros` zero-fills at the
-  parameter's shape, `OptimizerScalarZeros` produces a rank-0 scalar seeded at 0 (e.g. Adam's
-  `step`, one float per parameter rather than a param-shaped buffer), and `OptimizerScalarOnes`
+  parameter's shape, `OptimizerScalarZeros` produces a rank-0 scalar seeded at 0 (e.g. Adam's and
+  AdamW's `step`, one float per parameter rather than a param-shaped buffer), and `OptimizerScalarOnes`
   a rank-0 scalar seeded at 1 (e.g. NAdam's running momentum product, which needs the
   multiplicative identity).
 

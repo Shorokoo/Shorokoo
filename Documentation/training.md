@@ -301,6 +301,26 @@ rig.TrainStep(ckpt,
     inputs, targets);
 ```
 
+> **Migration (breaking).** The positional-hyperparameter `FromScratch` overloads no longer take a
+> `params` array behind the optional `rngConfig` / `mergeContext` / `runtimeContext`. Pass the values as
+> an explicit array in the hyperparameter slot and let the optional arguments follow — every old call
+> that named or passed an `rngConfig` or a context moves the same way, and every one of them is now a
+> compile error rather than a changed meaning:
+>
+> | old | new |
+> |---|---|
+> | `(sample, rng, null, null, 0.05f)` | `(sample, [0.05f], rng)` |
+> | `(sample, rng, mergeContext: null, runtimeContext: null, 0.05f)` | `(sample, [0.05f], rng)` |
+> | `(sample, rng, merge, runtime, 0.05f)` | `(sample, [0.05f], rng, merge, runtime)` |
+> | `(sample, rng)` / `(sample, rng, merge)` — the old empty `params` expansion | `(sample, [], rng)` / `(sample, [], rng, merge)` |
+>
+> The bare `FromScratch(model, loss, opt, sample, 0.05f)` params form is unchanged, and so is an array
+> passed alone. Two edges: reaching a context past `rngConfig` needs the context named
+> (`(sample, [0.05f], mergeContext: ctx)`, else the collection expression is matched against the named-set
+> overload and the error names `IOptimizerHyperparameters`), and a literal `null` in the hyperparameter
+> slot alongside any optional is now ambiguous between the named-set and array overloads — pass the set,
+> or cast.
+
 > **Migration (breaking).** `Hyperparameter.BakedValue` is now the `TensorData` the constant was built
 > from — carrying its shape as well as its dtype (with `BakedDType` alongside) — not a `float`; `MakeHyperparameters`'s named overload takes
 > `(string name, object value)` pairs rather than `(string, float)` — existing call sites such as
@@ -335,10 +355,15 @@ public static TrainingRig FromScratch(
     ComputeContext? mergeContext = null,      // build/merge-phase context (rig.MergeContext); null ⇒ Default
     ComputeContext? runtimeContext = null);   // compile/run context (rig.RuntimeContext); null ⇒ Default
 
-// Lower-level: positional values (a float bakes a constant, a Schedule schedules it). The rng overload
-// places the two ComputeContexts before the params array, next to rngConfig:
+// Lower-level: positional values (a float bakes a constant, a Schedule schedules it). The params form
+// takes the values and nothing else; supplying an rngConfig or either context selects the array form,
+// which takes them in the same order and the same slots as the named-set overload above:
 //   FromScratch(model, loss, opt, sampleInputs, params Hyperparameter[] hyperparameters)
-//   FromScratch(model, loss, opt, sampleInputs, rngConfig, mergeContext, runtimeContext, params Hyperparameter[] hyperparameters)
+//   FromScratch(model, loss, opt, sampleInputs, Hyperparameter[] hyperparameters,
+//               RngConfig? rngConfig = null,
+//               ComputeContext? mergeContext = null, ComputeContext? runtimeContext = null)
+// Each of the three forms above also has a twin taking a ModelParamList (model.FromOrderedInputs([…]))
+// for sampleInputs.
 
 // Fresh initial checkpoint. Optimizer state is initialized at each hyperparameter's value at the
 // initial counters. Fails loud if the optimizer's state initializer reads a Runtime hyper (its value

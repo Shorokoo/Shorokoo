@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
@@ -14,8 +15,9 @@ namespace Shorokoo.Tests;
 /// OpsFactories <see cref="Helpers"/> dtype sets and attribute-type mapping, the
 /// <see cref="InferenceBackend"/> deployment-folder discovery and selection policy, the typed
 /// value-handle conversions, <c>ShapeUtils</c>' argument validation for <c>Reshape</c>'s
-/// <c>keepAxes</c>, and the <see cref="AtomicFileWriter"/> temp-and-rename commit
-/// protocol (crash-window fault injection, stale-temp sweep, retain-last-N rotation).
+/// <c>keepAxes</c>, the <see cref="AtomicFileWriter"/> temp-and-rename commit protocol
+/// (crash-window fault injection, stale-temp sweep, retain-last-N rotation), and the
+/// public-API shape guard against a <c>params</c> array sitting behind an optional parameter.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -335,6 +337,43 @@ public class CoreUtilsCoverageTests
             .Where(m => !RootedInitializer.IsMatch(code[(code.LastIndexOfAny(statementEnds, m.Index) + 1)..m.Index]))
             .Select(m => m.Value.Trim())
             .ToArray();
+    }
+
+    // A params array behind an optional parameter lets a positional argument bind to the optional
+    // instead: the value lands in the wrong parameter wherever the types allow it, and fails
+    // resolution somewhere unhelpful wherever they do not.
+    private const BindingFlags DeclaredMembers = BindingFlags.Public | BindingFlags.NonPublic |
+        BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;
+
+    private static IEnumerable<string> ParamsBehindOptional(Type type) =>
+        from member in type.GetMethods(DeclaredMembers).Cast<MethodBase>()
+            .Concat(type.GetConstructors(DeclaredMembers))
+        where member.IsPublic || member.IsFamily || member.IsFamilyOrAssembly
+        let ps = member.GetParameters()
+        where ps.Length > 1 && ps[..^1].Any(p => p.IsOptional)
+              && (ps[^1].IsDefined(typeof(ParamArrayAttribute), false)
+                  || ps[^1].IsDefined(typeof(ParamCollectionAttribute), false))
+        select $"{type.FullName}.{member.Name}";
+
+    private class ParamsBehindOptionalBait
+    {
+        public ParamsBehindOptionalBait(int a, int b = 0, params int[] rest) { }
+        public void InstanceTrap(int a, int b = 0, params int[] rest) { }
+        public static void StaticTrap(int a, int b = 0, params int[] rest) { }
+        protected static void CollectionTrap(int a, int b = 0, params List<int> rest) { }
+    }
+
+    [Fact]
+    public void TestNoPublicApiPlacesAParamsArrayBehindAnOptionalParameter()
+    {
+        var shipped = Directory.EnumerateFiles(AppContext.BaseDirectory, "Shorokoo*.dll")
+            .Where(f => Path.GetFileName(f) is not ("Shorokoo.Tests.dll" or "Shorokoo.CodeGen.dll"))
+            .Select(Assembly.LoadFrom).ToArray();
+        var exported = shipped.SelectMany(a => a.GetExportedTypes()).ToArray();
+
+        Assert.Equal(4, ParamsBehindOptional(typeof(ParamsBehindOptionalBait)).Count());
+        Assert.True(shipped.Length >= 4 && exported.Length > 100);
+        Assert.Empty(exported.SelectMany(ParamsBehindOptional));
     }
 
     [Fact]

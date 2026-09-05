@@ -199,13 +199,93 @@ var concrete = graph
 var results = ComputeContext.Default.Execute(concrete, hyper, input); // hypers first
 ```
 
-The hyper value passed to `FromOrderedInputs` is what concretization bakes from:
-shape-determining hypers (those that feed trainable-parameter shapes, like
-`outFeatures`) fix the parameter shapes then and there, so pass the same value
-at `Execute` time. Value-only hypers (scale factors, ε's) are read live on every
-`Execute` and may vary call to call. See
+The hyper value passed to `FromOrderedInputs` is what concretization bakes from.
+A hyper that touches the trainable parameters — their shapes (like `outFeatures`),
+or which of them exist at all (a `[Hyper]` gating an `IfElse` branch that holds
+parameters) — is **parameter-space-determining**, and the value you pass here
+fixes that part of the architecture for good; pass the same value at `Execute`
+time. Value-only hypers (scale factors, ε's) are read live on every `Execute` and
+may vary call to call. See
 [defining-models.md](defining-models.md#hyperparameter-baking) for the
-distinction.
+distinction, and [What concretization fixes](#what-concretization-fixes) below
+for everything else the concretization values pin down.
+
+### What concretization fixes
+
+`ToConcreteArchitecture` produces an architecture whose **parameter space is
+static** — every trainable parameter and other id-addressed component is
+enumerated at that point, which is exactly what makes the graph
+"concrete" and what lets weights bind by name, optimizers allocate their state,
+and checkpoints round-trip. Anything derived from the values you hand it is
+therefore fixed then and there:
+
+| Fixed at concretization | Derived from |
+|---|---|
+| Trainable-parameter **shapes** and count | hypers feeding a parameter's shape, and the shapes of the sample inputs |
+| **Which** trainable parameters exist | hypers gating an `IfElse` whose branches hold parameters |
+| The per-iteration **parameters** realized over a `LoopAPI.Iterate` body (and the whole iteration space, when the count folds to a constant and the loop unrolls) | hypers/inputs that drive the count |
+
+What concretization fixes is the **parameter space**, and it rewrites only as
+much control flow as that requires. An `IfElse` whose unselected branch holds
+parameters is resolved here and folded away — those parameters do not exist, so
+the branch can never be taken, and keeping it would cost the bytes the pruning is
+meant to save. An `IfElse` that holds no parameters is left alone, even on the
+same hyper: both branches stay, and it still selects on its (still live) input at
+run time.
+
+Note which branch drives that. It is the **unselected** one: folding happens
+because a branch's parameters were pruned, so an `IfElse` whose *selected* branch
+holds the parameters keeps both branches and stays live. For the usual
+`bit.IfElse(withParams, without)` shape that means the bit folds the `IfElse`
+when baked **off**, and leaves it live when baked **on**. Only an `IfElse` that
+*solely* owns the pruned parameters is folded: one sharing them with a second
+`IfElse` is left alone, as is a tuple `IfElse` — its slots resolve together, and
+the paramless ones must keep switching.
+
+What decides the fold is the value you supply at concretization, not the `[Hyper]`
+marker: the parameter space cannot depend on a value that only arrives at
+`Execute`, so gating a trainable parameter on a plain runtime input is resolved
+from the concretization value just the same. That is a reason to mark such a gate
+`[Hyper]` — it makes a baked value look baked at the call site.
+
+So one hyper can be half-resolved and half-live, and that is the intended split:
+
+```csharp
+var big = Zeros.Init([outFeatures]).Vec();       // a trainable parameter
+var a = flag.IfElse(x * 10f, x * 100f);          // no params -> always stays live
+var b = flag.IfElse(x + big, x);                 // holds big -> folded iff flag is baked false
+```
+
+Concretized with `flag = false`, `big` does not exist, `b`'s `IfElse` is gone
+(so `b` is `x` whatever you pass later), and `a`'s still switches on every
+`Execute`. Concretized with `flag = true`, `big` exists, nothing is pruned and so
+nothing is folded, and **both** switch at run time.
+
+These values stay **live inputs** of the concrete graph — concretization is not
+`Specialize` and removes nothing from the input list — so you supply them again
+at every `Execute`. The contract is that you supply **the same values**.
+Executing with a value that would have produced a different parameter space is
+**invalid use**: the parameters that answer needs were never created, and nothing
+re-derives them at run time.
+
+A **parameter gate** is half an exception, and which half depends on whether its
+`IfElse` actually folded — so it is not a licence to pass whatever you like:
+
+- **It folded** (single-output gate, exclusive owner, baked off): the value you
+  pass later cannot contradict it. The baked branch runs whatever you supply, and
+  passing the opposite value is pointless rather than dangerous.
+- **It did not** (baked on, or a tuple or shared gate that could not fold): the
+  `IfElse` is still live and the opposite value silently takes the other branch —
+  skipping parameters that do exist when baked on, or reading a **zero stand-in**
+  for parameters that were pruned when baked off.
+
+So the rule is unchanged, and it is the second case that makes it matter: supply
+the value you concretized with.
+
+If you would rather make the contradiction impossible than remember the rule,
+bake the hyper with [`Specialize`](#hardcoding-hypers-with-specialize) before
+concretizing. It drops the input entirely, so passing a value for it at
+`Execute` is then an input-count error rather than a silent wrong branch.
 
 ### Hardcoding hypers with `Specialize`
 

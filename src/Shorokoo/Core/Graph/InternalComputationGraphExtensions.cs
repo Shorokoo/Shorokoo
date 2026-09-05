@@ -39,17 +39,22 @@ namespace Shorokoo.Graph
         /// and <see cref="GetConcreteModelParamInfos"/>.
         ///
         /// <para><b>The concreteness contract: static ModelIds.</b> After this call, every
-        /// ModelId-based component of the graph is statically known — trainable parameters, RNG
-        /// streams (every runtime feed's per-iteration stream set is enumerated here, with loop
-        /// slots filled from the iterations observed under <paramref name="inputHints"/>), and
-        /// every other id-addressed consumer. That static id space <em>is</em> what makes the
-        /// architecture concrete. Some of it derives from input hints that were not constant
-        /// folded; executing the concrete artifact with inputs that would produce ModelIds that
-        /// did not exist at concretization (e.g. driving a loop past the iteration space
-        /// enumerated here) is <em>invalid use</em> — such ids are not re-derived at runtime,
-        /// and anything enumerated per-id (parameter storage, RNG stream tables) has no entry
-        /// for them. Enumeration failures are therefore hard build errors, never silent
-        /// fallbacks (see <c>FastPipelineUnsupportedException</c>).</para>
+        /// ModelId-based component of the graph is statically known — trainable parameters
+        /// (including the per-iteration ones realized over a loop's iteration space, filled from
+        /// the iterations observed under <paramref name="inputHints"/>) and every other
+        /// id-addressed consumer. That static id space <em>is</em> what makes the architecture
+        /// concrete. Some of it derives from input hints that were not constant folded; executing
+        /// the concrete artifact with inputs that would produce ModelIds that did not exist at
+        /// concretization (e.g. driving a loop past the iteration space enumerated here) is
+        /// <em>invalid use</em> — such ids are not re-derived at runtime, and anything enumerated
+        /// per-id (parameter storage) has no entry for them. Enumeration failures are therefore
+        /// hard build errors, never silent fallbacks (see
+        /// <c>FastPipelineUnsupportedException</c>).</para>
+        ///
+        /// <para>RNG streams are <em>not</em> among the enumerated ids: since the 2026-08 key
+        /// rework a runtime feed's per-iteration key derives in-graph from the runtime iteration
+        /// index, so no stream set is enumerated and no key table is stored — see
+        /// <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastWireRngKeyDerivation"/>.</para>
         /// </summary>
         /// <param name="graph">The module graph to lower (e.g. <c>MyModel.ComputationGraph</c>).</param>
         /// <param name="inputHints">Sample inputs (names + shapes/values) used as shape hints and as

@@ -57,21 +57,58 @@ the type name; the generator rejects that with error `MSG003`.)
 
 ## Hyperparameter baking
 
-There are two kinds of `[Hyper]` parameters, and they behave differently when a
-module is prepared for training or execution:
+A concrete architecture has a **static parameter space**: which trainable
+parameters exist, and what shape each one has, is fixed once and for all by
+`ToConcreteArchitecture` — that is what makes it concrete, and it is what lets
+weights bind, optimizers allocate state, and checkpoints round-trip. So the
+dividing line between the two kinds of `[Hyper]` parameter is whether the hyper
+touches that parameter space:
 
-- **Shape-determining** hyperparameters feed the shape (or number) of trainable
-  parameter tensors — e.g. `outFeatures` in a dense layer, used as
-  `ConstInit.Init([outFeatures, inFeatures])`. When the graph is concretized
-  (`ToConcreteArchitecture` — the step that prepares a model for training,
-  weight binding, or export), the value you supply for such a hyperparameter is
-  **baked**: the trainable parameters get fixed shapes from it, and supplying a
-  different value later does not resize them. These *must* be baked — a model's
-  trainable parameters cannot have runtime-dependent shapes.
+- **Parameter-space-determining** hyperparameters decide something about the
+  trainable parameters themselves. They are **baked** when the graph is
+  concretized (`ToConcreteArchitecture` — the step that prepares a model for
+  training, weight binding, or export), from the value you supply there. There
+  are two ways a hyper lands in this class, and the second is easy to miss:
+  - It feeds a parameter's **shape** (or how many there are) — e.g.
+    `outFeatures` in a dense layer, used as
+    `ConstInit.Init([outFeatures, inFeatures])`. The parameters get fixed shapes
+    from the value you supplied; a different value later does not resize them.
+  - It **gates a branch that contains parameters** — e.g. `useBias` in
+    `useBias.IfElse(y + b, y)`, where `b` is a trainable parameter. Which
+    parameters *exist* is part of the parameter space, so the unselected
+    branch's parameters are not created, and the `IfElse` that held them is
+    resolved and folded away with them. Concretizing this layer with
+    `useBias = false` yields an architecture with no bias parameter and no
+    branch — passing the bit at `Execute` no longer changes that result.
+    Concretizing with `useBias = true` prunes nothing, so nothing is folded and
+    the bit still selects at run time. Nor does a gate fold when it does not
+    *solely* own the parameters — a tuple `IfElse`, whose slots resolve together,
+    or one sharing them with a second gate: there the parameters still go, and
+    the branch that held them is left reading a zero stand-in. Note the scope
+    either way: only the
+    `IfElse` whose *pruned* parameters made it unreachable is folded, so the
+    same hyper stays live for any other `IfElse` it gates — see
+    [What concretization fixes](inference.md#what-concretization-fixes).
 - **Value-only** hyperparameters (scale factors, momentum coefficients, ε's) do
-  not constrain any trainable parameter. They do not have to be baked: in the
-  concretized graph they remain live runtime inputs, and in an optimizer they
-  may be scheduled per-step (see [training.md](training.md)).
+  not touch any trainable parameter — neither its shape nor its existence. They
+  are not baked: in the concretized graph they are read live at every `Execute`
+  and may vary call to call, and in an optimizer they may be scheduled per-step
+  (see [training.md](training.md)).
+
+On the `Foo.ComputationGraph` route both kinds stay **live inputs** of the
+concretized graph and must be supplied again at `Execute` (only
+[`Specialize`](inference.md#hardcoding-hypers-with-specialize) removes an input;
+via `Call`/`Model` the hyper is a constant and was never an input). For a
+value-only hyper you may supply anything; for a parameter-space-determining one,
+supply **the same value you concretized with**. Where it decided a parameter's
+*shape*, a different value later does not resize anything. Where it gated a
+parameter's *existence*, a different value either changes nothing (the branch
+folded away with the parameters it held), or silently runs the other branch —
+because nothing was pruned, or because the gate could not fold and that branch
+now reads a zero stand-in for parameters that were. None of those is what you
+meant. See
+[What concretization fixes](inference.md#what-concretization-fixes) for the full
+list of what a concrete architecture pins down.
 
 How a hyper value gets supplied depends on the route:
 
@@ -82,8 +119,10 @@ How a hyper value gets supplied depends on the route:
   hyperparameters-first (independent of the inputs-first `Inline` source order), so
   `Execute` must be given the hyper values again — the hypers (in their `Inline`
   relative order) first, then the inputs. The values passed at concretization time bake the
-  trainable-parameter shapes (shape-determining hypers) and serve as shape/type
-  hints; value-only hypers are read live at every `Execute`. See
+  parameter space (parameter-space-determining hypers — shapes, count, and which
+  parameters exist at all) and serve as shape/type hints; value-only hypers are
+  read live at every `Execute`. Re-supply a baked hyper with the value it was
+  concretized with. See
   [inference.md](inference.md#running-a-module-with-hyper-parameters) for the
   recipe.
 - `Foo.ComputationGraph` + **`Specialize`** + concretize — to hardcode hypers
@@ -109,8 +148,28 @@ How a hyper value gets supplied depends on the route:
   `condition` is `Scalar<bit>`. Both branches are built; the value is selected at
   runtime. Tuples are supported.
 
+  One exception, and it is about parameters rather than control flow: the
+  parameter space of a concrete architecture is static, so it cannot depend on a
+  value that only arrives at `Execute`. When a `[Hyper]` gates a branch holding
+  trainable parameters, `ToConcreteArchitecture` creates only the selected
+  branch's parameters — and when that leaves the *unselected* branch holding
+  parameters that no longer exist, it folds that `IfElse` away too, so the bit
+  no longer switches it at run time. Nothing else is folded: an `IfElse` whose
+  selected branch holds the parameters keeps both branches, and so do a paramless
+  one on the same hyper, a tuple `IfElse`, and one sharing its parameters with a
+  second gate. See
+  [Hyperparameter baking](#hyperparameter-baking).
+
+  A hyper folded to a **constant** before lowering — by `Foo.Call(Scalar(k), x)`,
+  or by [`Specialize`](inference.md#hardcoding-hypers-with-specialize) — is the
+  unconditional case: a constant condition folds *every* `IfElse` on it,
+  parameters or not. `Specialize` additionally drops the hyper from the graph's
+  input list; on the `Call`/`Model` route it was never an input of the enclosing
+  graph to begin with.
+
   ```csharp
   // Apply bias only when useBias is true — both branches are always built.
+  // (But b exists in the concrete architecture only if useBias was baked true.)
   var b = ConstInit.Init([outFeatures]).Vec();
   return useBias.IfElse(y + b, y);
 

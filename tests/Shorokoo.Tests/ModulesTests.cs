@@ -20,50 +20,282 @@ public class ModulesCoverageTests
 
     private static double[] Rep(double v, int n) => [.. Enumerable.Repeat(v, n)];
 
-    /// <summary>Concretizes <see cref="Modules.GatedBiasHyperLayer"/> under <paramref name="hint"/>
-    /// and runs it with <paramref name="atExecute"/>. Null means the contradiction did not survive
-    /// to a result: either the concrete model no longer declares the gating bit (so the two values
-    /// cannot differ) or the run was rejected. Written by hand rather than through
-    /// <c>AutoTest.AdvancedTestGraph</c>, which feeds one value array as both the concretization
-    /// hints and the execution inputs and so cannot express a contradiction at all.</summary>
-    private static float[]? GatedBiasOutcome(bool hint, bool atExecute)
-    {
-        var g = Modules.GatedBiasHyperLayer.ComputationGraph;
-        var x = TensorData([2L], 1f, 2f);
-        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([], hint), x]))
-            .ToConcreteModel(RngConfig.Default);
-        var gated = model.InputNames.Contains(GatingInput);
-        if (!gated && atExecute != hint) return null;
-        IData[] inputs = gated ? [TensorData([], atExecute), x] : [x];
-        NamedModelParam[] outputs;
-        try
-        {
-            outputs = new ComputeContext().Execute(model, inputs);
-        }
-        catch (ShorokooException)
-        {
-            return null;
-        }
-        return outputs[0].ToTensorData().As<float32>().AccessMemory<float>().ToArray();
-    }
-
     private const string GatingInput = "useBias";
 
-    /// <summary>
-    /// Concretizing the gated hyperparameter as <c>false</c> prunes the bias but leaves the gating
-    /// bit a live graph input, so <c>Execute</c> accepts the contradicting value <c>true</c> and
-    /// silently returns the surviving unbiased branch's result instead of rejecting the run. The
-    /// fault is one-directional: a <c>true</c> hint keeps both branches, so executing it with
-    /// <c>false</c> correctly returns the unbiased result. Tracked as Shorokoo/Shorokoo#217.
-    /// </summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#217: a false gating hint executed with true silently returns the unbiased result")]
-    public void TestAFalseGatedHyperparamHintExecutedWithTrueIsSilentlyIgnored()
+    private static bool GatedBias(bool bake, bool viaSpecialize, int paramCount, bool gated, float[] expected)
+    {
+        var g = Modules.GatedBiasHyperLayer.ComputationGraph;
+        var bit = TensorData([], bake);
+        var x = TensorData([2L], 1f, 2f);
+        if (viaSpecialize) g = g.Specialize(g.FromOrderedInputs([bit]));
+        var arch = g.ToConcreteArchitecture(
+            viaSpecialize ? g.FromOrderedInputs([x]) : g.FromOrderedInputs([bit, x]));
+        var model = arch.ToConcreteModel(RngConfig.Default);
+        var gateIsInput = model.InputNames.Contains(GatingInput);
+        IData[] inputs = gateIsInput ? [bit, x] : [x];
+        var result = new ComputeContext().Execute(model, inputs)[0]
+            .ToTensorData().As<float32>().AccessMemory<float>().ToArray();
+        return arch.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams.Length == paramCount
+            && gateIsInput == gated
+            && result.SequenceEqual(expected);
+    }
+
+    [Fact]
+    public void TestAGatedHyperparamBakesTheParameterSpaceAndStaysALiveInput()
     {
         float[] plain = [1f, 2f];
         float[] biased = [2f, 3f];
-        Assert.Equal(plain, GatedBiasOutcome(false, false));
-        Assert.Equal(biased, GatedBiasOutcome(true, true));
-        Assert.Null(GatedBiasOutcome(false, true));
+        Assert.True(GatedBias(bake: false, viaSpecialize: false, paramCount: 0, gated: true, plain));
+        Assert.True(GatedBias(bake: true, viaSpecialize: false, paramCount: 1, gated: true, biased));
+        Assert.True(GatedBias(bake: false, viaSpecialize: true, paramCount: 0, gated: false, plain));
+        Assert.True(GatedBias(bake: true, viaSpecialize: true, paramCount: 1, gated: false, biased));
+    }
+
+    private static (int Params, int Ifs, float[] Paramless, float[] Gated) TwoGatesRun(
+        bool bake, bool viaSpecialize, bool atExecute)
+    {
+        var g = Modules.TwoGatesOneHyperLayer.ComputationGraph;
+        var x = TensorData([2L], 1f, 2f);
+        if (viaSpecialize) g = g.Specialize(g.FromOrderedInputs([TensorData([], bake)]));
+        var arch = g.ToConcreteArchitecture(
+            viaSpecialize ? g.FromOrderedInputs([x]) : g.FromOrderedInputs([TensorData([], bake), x]));
+        IData[] inputs = viaSpecialize ? [x] : [TensorData([], atExecute), x];
+        var o = new ComputeContext().Execute(arch.ToConcreteModel(RngConfig.Default), inputs);
+        return (arch.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams.Length,
+                IfCount(arch), Floats(o[0]), Floats(o[1]));
+    }
+
+    private static bool TwoGatesMatch(
+        (int Params, int Ifs, float[] Paramless, float[] Gated) r,
+        int paramCount, int ifNodes, float[] paramless, float[] gated)
+        => r.Params == paramCount && r.Ifs == ifNodes
+           && r.Paramless.SequenceEqual(paramless) && r.Gated.SequenceEqual(gated);
+
+    private static bool TwoGates(bool bake, bool atExecute, int paramCount, int ifNodes, float[] paramless, float[] gated)
+        => TwoGatesMatch(TwoGatesRun(bake, viaSpecialize: false, atExecute), paramCount, ifNodes, paramless, gated);
+
+    private static bool TwoGatesSpecialized(bool bake, int paramCount, float[] paramless, float[] gated)
+        => TwoGatesMatch(TwoGatesRun(bake, viaSpecialize: true, atExecute: bake), paramCount, 0, paramless, gated);
+
+    /// <summary>One <c>[Hyper]</c> bit gating two <c>IfElse</c>es — one holding a trainable
+    /// parameter, one not. Concretizing the bit off prunes the parameter, so its branch can never
+    /// be taken and the whole <c>IfElse</c> is folded away; the paramless one on the same bit is
+    /// untouched and still switches at run time. Concretizing it on prunes nothing and folds
+    /// nothing. The gated branch multiplies by the parameter, so a stand-in left in place of the
+    /// fold would show up as zeros rather than hiding behind an identical value.</summary>
+    [Fact]
+    public void TestAPrunedParamsBranchFoldsAwayWhileAParamlessBranchOnTheSameHyperStaysLive()
+    {
+        float[] then = [10f, 20f], els = [100f, 200f], scaled = [1f, 2f], sevens = [7f, 14f];
+        Assert.True(TwoGates(bake: false, atExecute: false, paramCount: 0, ifNodes: 1, els, sevens));
+        Assert.True(TwoGates(bake: false, atExecute: true, paramCount: 0, ifNodes: 1, then, sevens));
+        Assert.True(TwoGates(bake: true, atExecute: false, paramCount: 1, ifNodes: 2, els, sevens));
+        Assert.True(TwoGates(bake: true, atExecute: true, paramCount: 1, ifNodes: 2, then, scaled));
+        Assert.True(TwoGatesSpecialized(bake: false, paramCount: 0, els, sevens));
+        Assert.True(TwoGatesSpecialized(bake: true, paramCount: 1, then, scaled));
+    }
+
+    private static long BiggestConstant(ComputationGraph arch)
+    {
+        long biggest = 0;
+        foreach (var n in arch.ToInternal().Nodes)
+        {
+            if (n.OpCode != OpCodes.CONSTANT) continue;
+            if (n.Attributes?.GetAttributeVals().GetValueOrDefault(OnnxOpAttributeNames.AttrValue) is not TensorData td) continue;
+            long count = 1;
+            foreach (var d in td.Shape.Dims) count *= d;
+            biggest = Math.Max(biggest, count);
+        }
+        return biggest;
+    }
+
+    private static long GatedBigParamBiggestConstant(bool viaSpecialize, bool bake)
+    {
+        var g = Modules.BigGatedParamLayer.ComputationGraph;
+        var bit = TensorData([], bake);
+        var x = TensorData([2L], 1f, 2f);
+        if (viaSpecialize) g = g.Specialize(g.FromOrderedInputs([bit]));
+        return BiggestConstant(g.ToConcreteArchitecture(
+            viaSpecialize ? g.FromOrderedInputs([x]) : g.FromOrderedInputs([bit, x])));
+    }
+
+    private static ComputationGraph NestedBigArch(bool outer, bool inner)
+    {
+        var g = Modules.NestedBigGatedParamLayer.ComputationGraph;
+        return g.ToConcreteArchitecture(g.FromOrderedInputs(
+            [TensorData([], outer), TensorData([], inner), TensorData([2L], 1f, 2f)]));
+    }
+
+    private static int IfCount(ComputationGraph arch)
+        => arch.ToInternal().Nodes.Count(n => n.OpCode == OpCodes.IF_OPEN);
+
+    private static int ExpandCount(ComputationGraph arch)
+        => arch.ToInternal().Nodes.Count(n => n.OpCode == OpCodes.EXPAND);
+
+    private static float[] Floats(NamedModelParam p)
+        => p.ToTensorData().As<float32>().AccessMemory<float>().ToArray();
+
+    /// <summary>A gated <c>[256, 256]</c> parameter switched off must not reappear as a stand-in
+    /// of its own size, on either route and whether or not its branch survives. Exact counts, so
+    /// that a stand-in growing dense (65536), a surviving branch being folded away by mistake (1),
+    /// and the intended shape-driven stand-in (2) are all distinguishable; the gate-on row is the
+    /// positive control proving the scanner sees constants at all.</summary>
+    [Fact]
+    public void TestPruningAGatedParamDoesNotLeaveItsBytesBehindAsAStandIn()
+    {
+        Assert.Equal(2, GatedBigParamBiggestConstant(viaSpecialize: false, bake: true));
+        Assert.Equal(0, GatedBigParamBiggestConstant(viaSpecialize: true, bake: false));
+        Assert.Equal(0, GatedBigParamBiggestConstant(viaSpecialize: false, bake: false));
+
+        var survives = NestedBigArch(outer: false, inner: true);
+        Assert.Equal(2, BiggestConstant(survives));
+        Assert.Equal(1, ExpandCount(survives));
+
+        var innerFolds = NestedBigArch(outer: false, inner: false);
+        Assert.Equal(1, BiggestConstant(innerFolds));
+        Assert.Equal(0, ExpandCount(innerFolds));
+    }
+
+    /// <summary>The stand-in is a hand-built <c>EXPAND</c>, so it has to actually run: concretize
+    /// with the outer gate off — which keeps the enclosed branch and its stand-in — then execute
+    /// with that still-live gate on, so the branch reading the stand-in is the one taken. Zeros,
+    /// summed and added, leave the input untouched. The rank-0 parameter takes the emitter's
+    /// no-dims path, which cannot <c>EXPAND</c> at all.</summary>
+    [Fact]
+    public void TestAStandInBranchThatSurvivesStillExecutes()
+    {
+        var x = TensorData([2L], 1f, 2f);
+        var arch = NestedBigArch(outer: false, inner: true);
+        var o = new ComputeContext().Execute(arch.ToConcreteModel(RngConfig.Default),
+            [TensorData([], true), TensorData([], true), x]);
+        Assert.Equal([1f, 2f], Floats(o[0]));
+
+        var reloaded = CompressedFormatUtils.LoadFastGraphCore(
+            CompressedFormatUtils.SaveFastGraphToBinary(arch.ToInternal(), compressed: true),
+            "<roundtrip>", null).Graph;
+        Assert.Equal(1, reloaded.Nodes.Count(n => n.OpCode == OpCodes.EXPAND));
+
+        var g = Modules.NestedRank0GatedParamLayer.ComputationGraph;
+        var r0 = g.ToConcreteArchitecture(g.FromOrderedInputs(
+            [TensorData([], false), TensorData([], true), x]));
+        Assert.Equal(0, ExpandCount(r0));
+        Assert.Equal(0, r0.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams.Length);
+        var r0Out = new ComputeContext().Execute(r0.ToConcreteModel(RngConfig.Default),
+            [TensorData([], true), TensorData([], true), x]);
+        Assert.Equal([0f, 0f], Floats(r0Out[0]));
+    }
+
+    private static bool Exclusivity(ComputationGraph g, TensorData[] hints, IData[] exec,
+        int paramCount, int ifNodes, float[] slot0, float[] slot1)
+    {
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([.. hints]));
+        var o = new ComputeContext().Execute(arch.ToConcreteModel(RngConfig.Default), exec);
+        return arch.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams.Length == paramCount
+            && IfCount(arch) == ifNodes
+            && Floats(o[0]).SequenceEqual(slot0)
+            && Floats(o[1]).SequenceEqual(slot1);
+    }
+
+    /// <summary>Folding an <c>IF_CLOSE</c> takes all of its slots, so a tuple <c>IfElse</c> whose
+    /// slot 0 holds a pruned parameter must not fold — slot 1 holds none and keeps switching at
+    /// run time. Likewise a parameter two gates share is owned by neither, so both stay. In both
+    /// the parameter is still pruned, so the branch that held it reads a zero stand-in.</summary>
+    [Fact]
+    public void TestAPrunedParamOnlyFoldsTheGateThatExclusivelyOwnsIt()
+    {
+        var x = TensorData([2L], 1f, 2f);
+        TensorData Bit(bool b) => TensorData([], b);
+
+        Assert.True(Exclusivity(Modules.TupleGateHyperLayer.ComputationGraph,
+            [Bit(false), x], [Bit(true), x],
+            paramCount: 0, ifNodes: 1, slot0: [1f, 2f], slot1: [10f, 20f]));
+
+        Assert.True(Exclusivity(Modules.SharedDeadParamTwoGatesLayer.ComputationGraph,
+            [Bit(false), x, Bit(false)], [Bit(false), x, Bit(true)],
+            paramCount: 0, ifNodes: 2, slot0: [1f, 2f], slot1: [1f, 2f]));
+    }
+
+    /// <summary>A gate with a pruned parameter on each branch folds whichever way it points.
+    /// Only the losing branch's parameter can unlock the fold, so a gate must not be written off
+    /// because the winning branch's parameter was the one looked at first.</summary>
+    [Fact]
+    public void TestAGateWithAPrunedParamOnEachBranchFoldsEitherWay()
+    {
+        var g = Modules.ParamOnBothBranchesLayer.ComputationGraph;
+        var x = TensorData([2L], 1f, 2f);
+        (int Params, int Ifs, float[] Out) Run(bool flag)
+        {
+            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs(
+                [TensorData([], false), TensorData([], flag), x]));
+            var o = new ComputeContext().Execute(arch.ToConcreteModel(RngConfig.Default),
+                [TensorData([], false), TensorData([], flag), x]);
+            return (arch.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams.Length,
+                    IfCount(arch), Floats(o[0]));
+        }
+        foreach (var flag in (bool[])[false, true])
+        {
+            var (parms, ifs, outs) = Run(flag);
+            Assert.Equal(0, parms);
+            Assert.Equal(0, ifs);
+            Assert.Equal([9f, 18f], outs);
+        }
+    }
+
+    /// <summary>The fold is not specific to a bit-valued gate on the then branch: a computed
+    /// condition folds, and so does a parameter living on the else branch.</summary>
+    [Fact]
+    public void TestAComputedConditionFoldsAnElseBranchParam()
+    {
+        var g = Modules.ElseBranchComputedGateLayer.ComputationGraph;
+        var x = TensorData([2L], 1f, 2f);
+        bool Case(long mode, int paramCount, int ifNodes, float[] expected)
+        {
+            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([], mode), x]));
+            var o = new ComputeContext().Execute(arch.ToConcreteModel(RngConfig.Default),
+                [TensorData([], mode), x]);
+            return arch.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams.Length == paramCount
+                && IfCount(arch) == ifNodes
+                && Floats(o[0]).SequenceEqual(expected);
+        }
+        Assert.True(Case(mode: 9L, paramCount: 0, ifNodes: 0, [5f, 10f]));
+        Assert.True(Case(mode: 1L, paramCount: 1, ifNodes: 1, [2f, 3f]));
+    }
+
+    /// <summary>The same on a real library layer: <c>Linear(useBias: false)</c> keeps one
+    /// parameter and no gate, and its bias branch reads the live weight without owning it.</summary>
+    [Fact]
+    public void TestLinearWithoutBiasFoldsItsGateAndKeepsTheWeight()
+    {
+        var g = Shorokoo.Modules.Layers.Linear.ComputationGraph;
+        var x = TensorData([1L, 2L], 1f, 2f);
+        bool Case(bool useBias, int paramCount, int ifNodes)
+        {
+            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs(
+                [TensorData([], 3L), TensorData([], useBias), x]));
+            return arch.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams.Length == paramCount
+                && IfCount(arch) == ifNodes
+                && arch.InputNames.Contains("useBias");
+        }
+        Assert.True(Case(useBias: false, paramCount: 1, ifNodes: 0));
+        Assert.True(Case(useBias: true, paramCount: 2, ifNodes: 1));
+    }
+
+    /// <summary>Branching on a graph value inside a loop body leaves the graph in an order the
+    /// pipeline rejects, for either value of the gate. No trainable parameters are involved.
+    /// Tracked as Shorokoo/Shorokoo#239.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#239: an IfElse inside a loop body leaves an invalid linear order")]
+    public void TestAnIfElseInsideALoopBodyConcretizes()
+    {
+        var x = TensorData([2L], 1f, 2f);
+        float[] Run(bool flag)
+        {
+            var g = Modules.LoopGateHyperLayer.ComputationGraph;
+            TensorData[] hints = [TensorData([], 3L), TensorData([], flag), x];
+            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([.. hints]));
+            return Floats(new ComputeContext().Execute(arch.ToConcreteModel(RngConfig.Default), hints)[0]);
+        }
+        Assert.Equal([4f, 5f], Run(flag: true));
+        Assert.Equal([8f, 16f], Run(flag: false));
     }
 
     [Fact]

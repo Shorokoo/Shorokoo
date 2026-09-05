@@ -37,7 +37,7 @@
 | `ModelParamType` | Enum tagging a param: `Undefined/HyperParam/TrainableParam/InputParam/OutputParam`. | `training.md` |
 | `TensorDataStruct` | Struct-shaped bundle of named `TensorData` fields; the input/target form `Train` expects. | `training.md` |
 | `Specialize` | Bakes a partial set of named inputs (typically `[Hyper]`s) into constants, folds them through, and drops them from the input list. Optional first step of the lowering pipeline; returns a copy. | `inference.md` |
-| `ToConcreteArchitecture` | Lowers a module graph into a concrete architecture (inlines sub-modules so trainable params are top-level). Required before `ToConcreteModel`/`InitializeTrainableParams`. | `onnx-and-weights.md` |
+| `ToConcreteArchitecture` | Lowers a module graph into a concrete architecture (inlines sub-modules so trainable params are top-level) and fixes its parameter space — shapes, count, and which params exist — from the values supplied. On the `ComputationGraph` route those inputs stay live; re-supply the same values at `Execute`. Required before `ToConcreteModel`/`InitializeTrainableParams`. | `onnx-and-weights.md`, `inference.md` |
 | `ToConcreteModel` | Binds a `ModelParamList` (weights) into a concrete-architecture graph by name for inference. | `onnx-and-weights.md` |
 | naming scheme (`ModelIdNamingScheme` / `SimplePatternNamingScheme`) | Maps third-party (e.g. PyTorch) parameter names onto Shorokoo's, so loaded weights bind; built with the format or pattern DSL. | `param-naming-format-dsl.md`, `param-naming-pattern-dsl.md` |
 | `DebugRequests` | Saves graph snapshots at chosen points of `ToConcreteArchitecture` lowering, as compilable C#. | `debugging.md` |

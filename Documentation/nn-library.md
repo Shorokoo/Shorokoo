@@ -161,17 +161,34 @@ layers and the attention/transformer layers; `affine` on `BatchNorm`,
 `GroupNorm` and `InstanceNorm`. Each is written in the layer body as
 `bit.IfElse(withTheParams, without)`, so both branches exist in the *source* —
 but the bit is a `[Hyper]`, fixed before the graph is concretized (baked by
-`Call`/`Model`, or taken from the value you hand `FromOrderedInputs`). The
-framework folds the `IfElse` to the selected branch and **prunes the unselected
-branch's trainable parameters**: with the bit off they are never created — no
-checkpoint field, no gradient, no optimizer state, no bytes in a saved model.
+`Call`/`Model`, or taken from the value you hand `FromOrderedInputs`). Either way
+the framework **prunes the unselected branch's trainable parameters**: with the
+bit off they are never created — no checkpoint field, no gradient, no optimizer
+state, no bytes in a saved model.
 `Linear(useBias: false)` carries one parameter, not two;
 `GroupNorm(affine: false)` carries none of its own. So there is no reason to
 split a model into separate `[Module]` classes to keep an unused parameter block
-out of it — the toggle already does that. The one edge to know: a module whose
-**only** trainable parameters sit on the folded-away branch is left with none,
-and `TrainingRig.FromScratch` fails with *"No trainable parameters found in the
-computation graph."*
+out of it — the toggle already does that.
+
+Two edges to know:
+
+- On the `Foo.ComputationGraph` + `FromOrderedInputs` route the bit is baked but
+  **not removed** — like every `[Hyper]` there it stays a live input of the
+  concrete graph and must be passed again at `Execute`. Pass the value you
+  concretized with. With the bit **off** its later value is inert *for these
+  layers* — each gates a single-output `IfElse` that solely owns its parameters,
+  so the gate went with them; a tuple or shared gate would not fold, and its
+  branch would read a zero stand-in instead. With the bit **on** nothing was
+  pruned, so the `IfElse` is still live and the opposite value silently takes the
+  other branch.
+  To drop the input entirely,
+  [`Specialize`](inference.md#hardcoding-hypers-with-specialize) the bit before
+  concretizing. Via `Linear.Call(outFeatures, useBias, x)` the bit is a constant
+  in the built subgraph and there is nothing to pass. See
+  [What concretization fixes](inference.md#what-concretization-fixes).
+- A module whose **only** trainable parameters sit on the folded-away branch is
+  left with none, and `TrainingRig.FromScratch` fails with *"No trainable
+  parameters found in the computation graph."*
 
 ### Linear
 
@@ -775,8 +792,12 @@ before calling. The three optional arguments:
   C# decision — which is how `MultiHeadAttention` reaches this argument: its own
   `causal` is a graph `Scalar<bit>` and C# cannot branch on a graph value, so the
   mask is selected with an `IfElse` instead of an `if`. That bit is still a
-  `[Hyper]`, fixed before concretization, so the `IfElse` folds to one branch
-  exactly like `useBias` (see [An off toggle costs nothing](#gated-parameters)).
+  `[Hyper]`, so baking it to a constant — `Call`/`Model`, or
+  [`Specialize`](inference.md#hardcoding-hypers-with-specialize) — folds the
+  `IfElse` to one branch. Note it is *unlike* `useBias` in one way: neither branch
+  holds a trainable parameter, so on the `ComputationGraph` + `FromOrderedInputs`
+  route there is nothing to prune and the `IfElse` stays live, selecting at run
+  time (see [An off toggle costs nothing](#gated-parameters)).
 
 `Attention.CausalMask(lq, lk)` is that mask on its own — a `[Lq, Lk]` `float32` tensor,
 `0` where the key position is on or before the query position (`col ≤ row`) and `-1e9`
@@ -794,7 +815,8 @@ optional zero biases — `useBias = false` drops all four parameters, leaving th
 layer with just the four projections
 ([An off toggle costs nothing](#gated-parameters)); the causal mask is a constant
 gated by the `[Hyper]` `causal` bit — an `IfElse` rather than a C# `if`, since C#
-cannot branch on a graph value, but folded away at concretization all the same.
+cannot branch on a graph value, and folded away once that bit is baked to a
+constant by `Call`/`Model` or `Specialize`.
 `TransformerEncoderLayer` composes
 `LayerNorm` + `MultiHeadAttention` and a GELU FFN (the FFN uses explicit
 token-wise MatMuls, since `Linear` would flatten the sequence into the feature

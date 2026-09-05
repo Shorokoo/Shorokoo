@@ -1,3 +1,5 @@
+using Shorokoo.Core.Graph;
+using Shorokoo.Graph;
 using Shorokoo.Modules.Layers;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
@@ -12,6 +14,12 @@ namespace Shorokoo.Tests;
 /// their value validation inside the module's <c>Inline</c> (returning a
 /// <c>Scalar&lt;bit&gt;</c>), so each AutoTest call is a one-liner asserting the check bit.
 /// Inputs are per-element-distinct so the softmax is non-uniform.
+///
+/// <para><see cref="TestAttentionGraphShapeCoverage"/> is the exception: it asserts the
+/// SHAPE of the lowered training step, which is what Documentation/nn-library.md's
+/// "Sizing an attention run" budgets against and no value test can see. Folding the scale
+/// into Q stays invisible even here — it swaps one Mul's operand from score-sized to
+/// query-sized without changing any node count.</para>
 /// </summary>
 [Trait("Domain", "Modules")]
 [Trait("Purpose", "Coverage")]
@@ -67,16 +75,52 @@ public class AttentionModuleTests
     }
 
     [Fact]
-    public void TestChunkedSdpaCoverage()
+    public void TestChunkedSdpaMatchesDenseCoverage()
     {
         Assert.True(AutoTest.AdvancedTestGraph<AttnChunkedMatchesDense>(
             hyperparamInputs: [], runtimeInputs: [Sdpa8x4()]));
-        Assert.True(AutoTest.AdvancedTestGraph<AttnChunkedMatchesDenseWithMask>(
-            hyperparamInputs: [], runtimeInputs: [Sdpa8x4()]));
-        Assert.True(AutoTest.AdvancedTestGraph<AttnCausalMaskQueryOffset>(
+        Assert.True(AutoTest.AdvancedTestGraph<AttnChunkedSingleQueryRow>(
             hyperparamInputs: [], runtimeInputs: [Sdpa8x4()]));
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             Attention.ScaledDotProductAttention(default, default, default, queryChunks: 0));
+    }
+
+    [Fact]
+    public void TestChunkedSdpaMasksGradientsAndOffsetCoverage()
+    {
+        Assert.True(AutoTest.AdvancedTestGraph<AttnChunkedMatchesDenseWithMask>(
+            hyperparamInputs: [], runtimeInputs: [Sdpa8x4()]));
+        Assert.True(AutoTest.AdvancedTestGraph<AttnChunkedGradientMatchesDense>(
+            hyperparamInputs: [], runtimeInputs: [Sdpa8x4()]));
+        Assert.True(AutoTest.AdvancedTestGraph<AttnCausalMaskQueryOffset>(
+            hyperparamInputs: [], runtimeInputs: [Sdpa8x4()]));
+    }
+
+    [Fact]
+    public void TestAttentionGraphShapeCoverage()
+    {
+        var dense = StepOpCounts(SdpaMeanPoolModel.ComputationGraph);
+        var chunked = StepOpCounts(ChunkedSdpaMeanPoolModel.ComputationGraph);
+
+        Assert.Equal(2, dense["Softmax"]);
+        Assert.Equal(8, chunked["Softmax"]);
+        Assert.Equal(1, dense["Where"]);
+        Assert.Equal(4, chunked["Where"]);
+        Assert.Equal(0, dense.GetValueOrDefault("ConstantOfShape"));
+        Assert.Equal(0, chunked.GetValueOrDefault("ConstantOfShape"));
+    }
+
+    private static Dictionary<string, int> StepOpCounts(ComputationGraph model)
+    {
+        long[] shape = [1L, 2L, 8L, 4L];
+        NamedModelParam[] sample =
+            [new TensorDataModelParam("input", ModelParamType.InputParam,
+                TensorData(shape, Floats(64, seed: 0.05f)))];
+
+        return TrainingRig.FromScratch(model, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+                sample, 0.01f)
+            .TrainingStepPureGraph.ToInternal().GetAllNodes()
+            .GroupBy(n => n.OpCode).ToDictionary(g => g.Key, g => g.Count());
     }
 
     [Fact]

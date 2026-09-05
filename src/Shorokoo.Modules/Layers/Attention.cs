@@ -46,12 +46,13 @@ public static class Attention
     /// evaluates <c>c</c> independent <c>[N, H, Lq/c, Lk]</c> blocks and concatenates their
     /// outputs, so every score-sized <b>transient</b> shrinks by <c>c</c> — the incoming
     /// score gradient and the elementwise tensors of the softmax backward. What it does
-    /// <b>not</b> shrink is the one score-sized tensor per call that the step <b>retains</b>
-    /// from forward to backward (the softmax's input, or its output once the scheduler has
-    /// hoisted the backward's softmax recompute next to the forward one); the chunks of it
-    /// sum to the same bytes. Budget it as "one retained score block per attention call,
-    /// plus a transient peak of about two more divided by <paramref name="queryChunks"/>";
-    /// the full arithmetic is in Documentation/nn-library.md, "Sizing an attention run".
+    /// <b>not</b> shrink is the <b>two</b> score-sized tensors per call the step
+    /// <b>retains</b> from forward to backward: the forward probabilities, which
+    /// <c>∂(P·V)/∂V = Pᵀ·∂y</c> needs, and the copy the softmax gradient rule recomputes
+    /// from the softmax's input. Their chunks sum to the same bytes. Budget it as "two
+    /// retained score blocks per attention call, plus a transient peak of about two more
+    /// divided by <paramref name="queryChunks"/>"; the full arithmetic is in
+    /// Documentation/nn-library.md, "Sizing an attention run".
     /// The count is a build-time C# int, not
     /// a graph value, so it is fixed when the graph is built; <c>Lq</c> stays dynamic and is
     /// split as evenly as it divides (chunk <c>i</c> covers rows
@@ -60,9 +61,11 @@ public static class Attention
     /// to floating-point rounding. Cost: <c>c</c> separate MatMul and Softmax launches
     /// instead of one, so keep <c>c</c> small and the chunks large.</para>
     ///
-    /// <para>With <paramref name="queryChunks"/> above 1 an <paramref name="additiveMask"/>
-    /// must be rank ≥ 2 and its query axis (-2) must be either <c>Lq</c> or <c>1</c>; it is
-    /// sliced to match each chunk (a size-1 axis is left alone and keeps broadcasting).</para>
+    /// <para>Chunking accepts exactly the masks the dense path accepts. One that already
+    /// broadcasts over the query axis — rank &lt; 2, or a size-1 axis -2, as in a
+    /// <c>[N, 1, 1, Lk]</c> padding mask — is handed to every chunk whole; one that is
+    /// <c>Lq</c> rows tall is sliced to each chunk's rows. A mask that is neither is
+    /// rejected by the score <c>Add</c>, just as it is without chunking.</para>
     /// </summary>
     public static Tensor<float32> ScaledDotProductAttention(
         Tensor<float32> query,
@@ -95,7 +98,7 @@ public static class Attention
             var start = lq * (long)i / (long)queryChunks;
             var end = lq * (long)(i + 1) / (long)queryChunks;
             var q = scaledQuery.Slice(start.Unsqueeze(), end.Unsqueeze(), axes: Vector(-2L));
-            var m = SliceMaskQueryAxis(additiveMask, lq, start, end);
+            var m = SliceMaskQueryAxis(additiveMask, start, end);
             blocks[i] = AttendQueryBlock(q, keyT, value, causal, m, start);
         }
         return blocks[0].Concat(-2L, blocks[1..]);
@@ -127,21 +130,30 @@ public static class Attention
     }
 
     /// <summary>
-    /// Narrows an additive mask to one query chunk. The mask's query axis is either
-    /// <c>Lq</c> (slice it) or <c>1</c> (a broadcast row — leave it whole), and the integer
-    /// ratio of the two is exactly 1 or 0, which picks between the two without a branch on a
-    /// graph value.
+    /// Narrows an additive mask to one query chunk. A mask that already broadcasts over the
+    /// query axis — rank &lt; 2, so it has no such axis, or a size-1 one — is passed through
+    /// whole; anything else is sliced to the chunk's rows.
+    ///
+    /// <para>Deliberately no attempt to be clever about a query axis that is neither
+    /// <c>Lq</c> nor <c>1</c>: it is sliced like any other, so the score <c>Add</c> rejects
+    /// it exactly as it rejects the same mask on the dense path. Chunking must not widen
+    /// (or silently reinterpret) the set of masks attention accepts.</para>
     /// </summary>
     private static Tensor<float32>? SliceMaskQueryAxis(
-        Tensor<float32>? mask, Scalar<int64> lq, Scalar<int64> start, Scalar<int64> end)
+        Tensor<float32>? mask, Scalar<int64> start, Scalar<int64> end)
     {
         if (mask is null)
             return null;
 
-        var full = mask.Value.DimTensor(-2) / lq;   // 1 when the axis is Lq, 0 when it is 1
+        // Rank is static here (shape inference supplies it); slicing is the safe default
+        // for the rare tensor whose rank is not yet known.
+        if (mask.Value.Rank is int rank && rank < 2)
+            return mask;
+
+        var broadcasts = mask.Value.DimTensor(-2) == Scalar(1L);
         return mask.Value.Slice(
-            (start * full).Unsqueeze(),
-            (end * full + (Scalar(1L) - full)).Unsqueeze(),
+            broadcasts.Where(Scalar(0L), start).Unsqueeze(),
+            broadcasts.Where(Scalar(1L), end).Unsqueeze(),
             axes: Vector(-2L));
     }
 
@@ -149,8 +161,8 @@ public static class Attention
     /// Additive causal mask of shape <c>[Lq, Lk]</c>: 0 where the key position is on or
     /// before the query position (col ≤ row), −1e9 above the diagonal. Built from Range +
     /// comparison + Where on constants (no Trilu, no gradient). The two fill values are
-    /// <c>[1]</c> tensors that <c>Where</c> broadcasts, so the mask costs one
-    /// <c>[Lq, Lk]</c> tensor rather than three.
+    /// scalars that <c>Where</c> broadcasts, so the mask costs one <c>[Lq, Lk]</c> tensor
+    /// rather than three.
     ///
     /// <para><paramref name="queryOffset"/> shifts the query rows to absolute positions:
     /// rows run <c>[offset, offset + Lq)</c> instead of <c>[0, Lq)</c>. It is what makes a
@@ -164,7 +176,7 @@ public static class Attention
         var first = queryOffset ?? Scalar(0L);
         var rows = VectorRange(first, first + lq, 1L).Unsqueeze(1L);
         var cols = VectorRange(0L, lk, 1L).Unsqueeze(0L);
-        return (cols <= rows).Where(TensorFill([Scalar(1L)], 0f), TensorFill([Scalar(1L)], -1e9f));
+        return (cols <= rows).Where(Scalar(0f).Tensor(), Scalar(-1e9f).Tensor());
     }
 
     /// <summary>

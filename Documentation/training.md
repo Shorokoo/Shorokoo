@@ -655,15 +655,6 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
   file — use `Persistence.Inspect(path)`;
   see [onnx-and-weights.md](onnx-and-weights.md#identify-and-summarize-a-file-persistenceinspect).
 
-> **Migration (breaking).** `AdamWOptimizer` now carries a third optimizer-state field — the
-> bias-correction `step` (see the optimizer table in [nn-library.md](nn-library.md)). A checkpoint
-> written by an earlier version maps only `m`/`v` for AdamW, so loading it into a rig built on this
-> version fails loudly with the missing state named. Restart the run, or load only
-> `CheckpointComponents.InferenceState` and let the optimizer state re-seed from zero. The one
-> resume that does *not* fail is `TrainingRig.Load(path)`, which rebuilds the rig from the
-> optimizer graph the `.skpt` carries: such a run continues on the **old, uncorrected** AdamW.
-> Rebuild the rig with `TrainingRig.FromScratch` to pick the fix up.
-
 ### Bind trained weights into an inference model
 
 Once trained, turn a checkpoint into a runnable concrete model with one call:

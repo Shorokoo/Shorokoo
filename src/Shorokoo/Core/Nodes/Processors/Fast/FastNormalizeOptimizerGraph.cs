@@ -472,8 +472,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             workGraph.Inputs = new List<FastTensorKey>();
             workGraph.InputUniqueNames = new List<string?>();
 
+            // Copied off their session, not returned as-is: this runs once per trainable
+            // parameter and the rig retains every value it produces for its lifetime, which is
+            // the shape that makes a session-backed result cost its session's whole arena.
             var results = computeContext.Run(workGraph);
-            return results.Select(r => r.ToTensorData()).ToArray();
+            return [.. results.Select(r => FastProcessorHelper.RehostOffSession(r.ToTensorData()))];
         }
     }
 }

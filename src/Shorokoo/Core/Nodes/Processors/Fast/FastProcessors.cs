@@ -28,6 +28,42 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     internal static class FastProcessorHelper
     {
         /// <summary>
+        /// Copies a freshly computed result onto storage of its own, then releases the backend
+        /// tensor it came out of. For a caller that runs many one-shot sessions and RETAINS their
+        /// outputs; a caller that reads a result and drops it wants the zero-copy path instead.
+        ///
+        /// <para>A backend result tensor is allocated by ITS OWN session's allocator and keeps
+        /// that allocator — and so that session's whole arena, sized to the largest thing the
+        /// session computed rather than to the result — alive for as long as the result is
+        /// referenced. Nothing reclaims it: the value is genuinely reachable, so a forced
+        /// collection does not help, and the arena outlives the session's own disposal. Retaining
+        /// N such results therefore costs N arenas. Measured on one caller
+        /// (<c>FastInitializeModelParams</c>, initializing a 12 x [384, 384] model one session per
+        /// parameter): 379-481 MiB still live after a forced collection, for 6.75 MiB of actual
+        /// parameter, against 10-32 MiB with this copy. See the
+        /// <c>ort-values-are-never-disposed</c> finding in the ShorokooDev repo, and
+        /// Shorokoo/Shorokoo#180, for the general ownership question this sidesteps rather than
+        /// settles.</para>
+        ///
+        /// <para>The copy is the part that frees the arena — it makes the backend tensor
+        /// unreachable. Disposing it as well only makes the release deterministic instead of
+        /// leaving it to the finalizer thread, and it has to be the BACKING VALUE: TensorData's
+        /// own Dispose is the standard pattern with an empty body, since the runtime value owns
+        /// the buffer, so disposing the wrapper frees nothing.</para>
+        ///
+        /// <para>A string tensor is returned untouched — it has no fixed byte stride to copy
+        /// through — so a caller retaining one still pins its session.</para>
+        /// </summary>
+        public static TensorData RehostOffSession(TensorData data)
+        {
+            if (data.DType.ProtoTypeNum == DType.String.ProtoTypeNum) return data;
+            // Read the bytes before disposing: that invalidates the buffer they came from.
+            var copy = TensorData.CreateFromRawBytes(data.Shape, data.DType, data.AccessRawMemory().ToArray());
+            if (data is IOnnxData backed) backed.Value.Dispose();
+            return copy;
+        }
+
+        /// <summary>
         /// Builds a FastNodeKey → FastNode lookup that also maps output FastTensorKey.FastNodeKey
         /// entries. This handles LOOP_OPEN carry variables whose output TensorKeys have a
         /// FastNodeKey different from the LOOP_OPEN's own Key.

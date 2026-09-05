@@ -20,6 +20,16 @@ public partial class RngInitTwoLinears
     }
 }
 
+/// <summary>A [4,4] trainable weight drawn from NormalDist — the dense-normal decode, which the
+/// KaimingUniform and RandomBits fixtures never reach. std 1 / mean 0 so the stored value is the
+/// standard normal draw itself, directly comparable to the oracle.</summary>
+[Module]
+public partial class RngInitNormalDistLayer
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => x.MatMul(NormalDist.Init([Scalar(4L), Scalar(4L)], Scalar(0f), Scalar(1f)));
+}
+
 /// <summary>A uint32 state parameter initialized with raw random bits: RandomBits inside a
 /// (state) parameter initializer, keyed on the parameter's own init stream.</summary>
 [StateInitializer(Ownership = StateOwnership.ModuleOwned)]
@@ -252,6 +262,7 @@ public class RngInitFrozenDerivationTests
     // two-draw initializer's [4,4] weight.
     private static readonly float[] FrozenWeight11 = [0.3378866f, 1.2052094f, 0.37335718f, 0.7997707f, 1.0675026f, -0.9041115f, 0.10083773f, -0.7819222f, -1.023829f, -0.70204467f, -0.3367729f, 0.31696287f, -1.0910206f, -0.6310536f, 0.6859728f, 1.1874193f];
     private static readonly float[] FrozenWeight21 = [1.0079714f, 0.1395562f, -0.016731672f, -1.0395613f, 0.21706164f, -0.5711288f, 0.91078484f, 1.1091135f, 0.9176603f, 0.4229469f, -0.14127223f, 0.5303491f, 0.1532544f, 0.57974875f, 0.9801079f, -1.1877112f];
+    private static readonly float[] FrozenNormalDraw = [-0.6527322f, 1.6720386f, 2.4050722f, -1.4918188f, 0.7854463f, -0.053713493f, -0.46181688f, 0.6094081f, -0.7145595f, 0.19966179f, -0.14030458f, -0.8725195f, -0.33896616f, 0.31981882f, -0.49256802f, -3.099073f];
     private static readonly float[] FrozenMultiDraw = [0.31585765f, 0.21880347f, 0.17880033f, 0.23017395f, 0.2856346f, 0.55870205f, 0.14583084f, 0.17104696f, 0.5075757f, 0.074125335f, 0.2884086f, 0.12671219f, 0.017829021f, 0.14411132f, 0.33035496f, 0.088769004f];
 
     [Fact]
@@ -305,12 +316,23 @@ public class RngInitFrozenDerivationTests
             .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
             .Single(v => v.Length == 16);
         Assert.Equal(FrozenMultiDraw, w);
+
+        // Layer 4: the dense-normal decode. Every layer above draws uniform or raw bits, so
+        // none of them covers the table-driven normal path that nearly every shipping
+        // initializer takes.
+        var ng = RngInitNormalDistLayer.ComputationGraph;
+        var nw = ng.ToConcreteArchitecture(ng.FromOrderedInputs([sample]))
+            .InitializeTrainableParams(rngConfig: cfg).ModelParams
+            .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
+            .Single(v => v.Length == 16);
+        Assert.Equal(FrozenNormalDraw, nw);
     }
 
     // The host oracles are independent reimplementations, so holding the same frozen constants up
     // to them catches a graph that drifts from the CONTRACT, where the freeze above only catches a
     // graph that drifts from its own past. KaimingUniform draws U(-bound, bound) directly with
-    // bound = sqrt(6/fanIn), and fanIn is 4 for both [4,4] weights.
+    // bound = sqrt(6/fanIn), and fanIn is 4 for both [4,4] weights; NormalDist at mean 0 / std 1
+    // is the standard normal draw itself.
     [Fact]
     public void TestTheFrozenInitValuesAreWhatTheHostOraclesIndependentlyDerive()
     {
@@ -330,6 +352,10 @@ public class RngInitFrozenDerivationTests
             RngDenseUniformOracle.Draw(multiKey, 0, i, 0f, 1f)
             * ((uint)RngTestOracle.DrawBits(multiKey, 1, i, 32) * (1.0f / 4294967296.0f)))];
         Assert.Equal(FrozenMultiDraw, multiDraw);
+
+        ulong normalKey = RngTestOracle.InitKey(cfg, (int[])[1]);
+        Assert.Equal(FrozenNormalDraw,
+            [.. Enumerable.Range(0, 16).Select(i => RngDenseNormalOracle.Draw(normalKey, 0, i))]);
     }
 
     private static readonly RngConfig RangeCfg = new() { MasterSeed = 4242 };

@@ -51,16 +51,18 @@ jobs:
           --filter "Purpose=Coverage"
           -c Release --logger "console;verbosity=minimal"
 
-      # Each Purpose=Benchmark check measures the machine — one wall clock, one
-      # process-wide memory growth — so each gets a process of its own. Anything
-      # sharing the process pollutes the measurement, and the memory check's baseline
-      # in particular is meaningless if another test has been training in the same
-      # heap. One invocation per class is the only isolation that is actually
-      # verifiable: `-- xUnit.MaxParallelThreads=1` on this command line is accepted
-      # and silently ignored, and a .runsettings <xUnit> node did not take effect
-      # either. Both must come before the Purpose=Gate step: that one shells out to a
-      # full parallel `dotnet build`, whose MSBuild workers wreck any measurement
-      # sharing its process.
+      # Each Purpose=Benchmark check measures the machine — wall clock, process-wide
+      # memory growth, or both — so each gets a process of its own. Anything sharing
+      # the process pollutes the measurement: the memory check's baseline is
+      # meaningless if another test has been training in the same heap, and the
+      # scaling check reads PeakWorkingSet64, which any earlier allocation in the
+      # process raises. One invocation per class is the only isolation that is
+      # actually verifiable: `-- xUnit.MaxParallelThreads=1` on this command line is
+      # accepted and silently ignored, and a .runsettings <xUnit> node did not take
+      # effect either. Adding a Purpose=Benchmark class means adding a step here —
+      # no filter in this file selects one implicitly. All of them must come before
+      # the Purpose=Gate step: that one shells out to a full parallel `dotnet build`,
+      # whose MSBuild workers wreck any measurement sharing its process.
       - name: Benchmark — training hot path (own process)
         run: >
           dotnet test tests/Shorokoo.Tests/Shorokoo.Tests.csproj
@@ -71,6 +73,12 @@ jobs:
         run: >
           dotnet test tests/Shorokoo.Tests/Shorokoo.Tests.csproj
           --filter "FullyQualifiedName~TrainingMemoryStabilityTests"
+          -c Release --logger "console;verbosity=minimal" --no-build
+
+      - name: Benchmark — rig-construction scaling (own process)
+        run: >
+          dotnet test tests/Shorokoo.Tests/Shorokoo.Tests.csproj
+          --filter "FullyQualifiedName~RigConstructionScalingTests"
           -c Release --logger "console;verbosity=minimal" --no-build
 
       - name: Build-hygiene gate

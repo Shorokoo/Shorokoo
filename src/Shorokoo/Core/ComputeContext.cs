@@ -338,7 +338,8 @@ namespace Shorokoo.Runtime
             ProtoBuf.Serializer.Serialize(memoryStream, model);
             var modelData = memoryStream.ToArray();
 
-            var session = CreateSession(modelData, HasOptionalOps(model.Graph));
+            var session = CreateSession(
+                modelData, HasOptionalOps(model.Graph) || IsFullyConstant(model.Graph));
             try
             {
                 var onnxInputNameByOriginal = new Dictionary<string, string>();
@@ -362,19 +363,24 @@ namespace Shorokoo.Runtime
             {
                 // Dispose the session to free native memory — on the throwing path too, where
                 // the memory it holds is the memory the caller has just been told it lacks. The
-                // returned tensor values own their memory independently of the session, and the
-                // finally also keeps the session rooted across the native calls above.
+                // returned tensor values stay valid across it, and the finally also keeps the
+                // session rooted across the native calls above. They are not, however, free of
+                // it: a result keeps its session's ALLOCATOR alive, so a caller that retains one
+                // retains that session's arena — see the `ort-values-are-never-disposed`
+                // finding, and `FastInitializeModelParams.Rehost` for a caller that must not.
                 session.Dispose();
             }
         }
 
         private IShorokooInferenceSession CreateSession(byte[] modelData, bool disableOptimizations = false)
         {
-            // ORT's constant-folding pass calls GetDeleteFunc on Optional values,
-            // which OptionalTypeBase doesn't implement -- session init throws
-            // "GetDeleteFunc is not implemented". Disabling optimizations skips the
-            // fold pass; Optional ops then go through the normal execution path,
-            // which ORT handles correctly.
+            // Both conditions that pass true here are avoiding ORT's constant-folding pass:
+            // it calls GetDeleteFunc on Optional values, which OptionalTypeBase doesn't
+            // implement -- session init throws "GetDeleteFunc is not implemented" -- and on
+            // an input-less graph it folds the whole graph at build time, at a cost that
+            // scales with the data (see IsFullyConstant). Disabling optimizations skips the
+            // fold pass; the nodes then go through the normal execution path, which ORT
+            // handles correctly and which reuses buffers.
             var optLevel = disableOptimizations
                 ? ShorokooGraphOptimization.DisableAll
                 : ShorokooGraphOptimization.EnableAll;
@@ -383,6 +389,56 @@ namespace Shorokoo.Runtime
                 optLevel,
                 ShorokooLogSeverity.Fatal);
         }
+
+        /// <summary>
+        /// Whether the model takes no runtime input, so every node's value is already
+        /// determined when the session is built.
+        ///
+        /// <para>Such a graph is the one case where ORT's constant-folding pass computes the
+        /// WHOLE graph at session build: it walks the nodes in order, evaluating each into a
+        /// freshly allocated initializer, and the chain's intermediates pile up instead of
+        /// flowing through an execution plan that reuses buffers. Parameter initialization is
+        /// exactly this shape — <c>FastInitializeModelParams</c>
+        /// hands over an input-less graph of every parameter's keyed Threefry draw — so the fold
+        /// materialized every int64 intermediate of every draw at once. Rig construction then
+        /// cost kilobytes of host memory per parameter ELEMENT — a thousand times the 4 bytes the
+        /// fp32 parameter itself occupies — so a few-million-parameter model wanted tens of GB
+        /// and minutes just to build, and a GPT-sized embedding died with ORT's bare
+        /// "bad allocation" (Shorokoo/Shorokoo#194, #195).</para>
+        ///
+        /// <para>Folding buys nothing here in any case. The session is built, run once and
+        /// disposed (see <see cref="RunFromModel"/>), so the work happens exactly once either
+        /// way — the only question is whether it happens in the fold pass or in the execution
+        /// plan, and only the latter reuses buffers. Running the graph unoptimized is therefore
+        /// both faster and dramatically smaller.</para>
+        ///
+        /// <para>It is also value-identical in practice, which is worth spelling out because
+        /// "disable the optimizer" usually is not. Folding runs before the fusions that rearrange
+        /// arithmetic, and it evaluates each node with the same CPU kernel the execution plan
+        /// would — so on a graph this predicate accepts, folding leaves literals and those
+        /// fusions find nothing to work on. The caveat is that ORT's folding skips what it cannot
+        /// evaluate (a node with no CPU kernel, a non-deterministic op), and an unfolded tail
+        /// COULD have been fused before and is not now; no such difference has been observed.
+        /// <c>RngInitFrozenDerivationTests</c> asserts exact initial weights through this path
+        /// for a uniform, a raw-bits and a dense-normal initializer — which pins the values, not
+        /// the optimization level, since they are identical either way.</para>
+        ///
+        /// <para>The predicate is a property of the GRAPH, not of the caller, so it also catches
+        /// every other input-less one-shot: the RNG key resolver, optimizer-state seeding (which
+        /// bakes its inputs to constants and then clears them, so it is always input-less), and
+        /// <c>Eval</c>, which builds a zero-input graph unconditionally — so every eager
+        /// evaluation now takes this path. That breadth is intended: each is a constant computed
+        /// once and discarded, and the paragraph above applies to each unchanged. The
+        /// order-of-magnitude figures are measured on parameter initialization, which is the
+        /// shape that made it matter.</para>
+        ///
+        /// <para>It is deliberately scoped to <see cref="RunFromModel"/>. A
+        /// <see cref="CompileFromModel"/> session is kept and re-run, so there optimization is
+        /// amortized and stays on — which is why a keyed feed inside a training-step or exported
+        /// model still gets its constant key chain folded, as
+        /// <c>Documentation/rng-configuration.md</c> says it does.</para>
+        /// </summary>
+        private static bool IsFullyConstant(GraphProto graph) => graph.Inputs.Count == 0;
 
         private static bool HasOptionalOps(GraphProto graph)
         {

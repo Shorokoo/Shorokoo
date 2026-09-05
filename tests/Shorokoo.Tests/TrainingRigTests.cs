@@ -136,6 +136,18 @@ public partial class ParamTooLargeToAllocateModel
         => Zeros.Init([Scalar(1L << 25), Scalar(1L << 25)]);
 }
 
+/// <summary>Two trainable parameters, the FIRST too large to allocate and the SECOND larger
+/// still. Initialization runs them one session apiece in order, so the one that fails is not the
+/// one a "report the largest" message would name.</summary>
+[Module]
+public partial class TwoParamsFirstTooLargeModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => Zeros.Init([Scalar(1L << 25), Scalar(1L << 25)])
+             * Zeros.Init([Scalar(1L << 26), Scalar(1L << 25)])
+                 .Reduce(ReduceKind.Mean, null, keepDims: false).Scalar();
+}
+
 [Module]
 public partial class ParamSizeOverflowingModel
 {
@@ -667,6 +679,17 @@ public class TrainingRigCompositionCoverageTests
             other.FromOrderedInputs([TensorData([1L, 4L], [1f, 2f, 3f, 4f])]));
         Assert.IsNotType<ComputeContextException>(
             Record.Exception(() => otherArch.InitializeTrainableParams()));
+
+        // Each parameter initializes in its own session, so the failure names the one that
+        // actually failed — here the smaller of the two, which is initialized first — and lists
+        // the larger only as context.
+        var two = TwoParamsFirstTooLargeModel.ComputationGraph.ToInternal();
+        var twoArch = two.ToConcreteArchitecture(
+            two.FromOrderedInputs([TensorData([1L, 4L], [1f, 2f, 3f, 4f])]));
+        var twoEx = Assert.Throws<ComputeContextException>(() => twoArch.InitializeTrainableParams());
+        Assert.Contains("[33554432, 33554432] = 4.00 PiB failed", twoEx.Message);
+        Assert.Contains("[67108864, 33554432] = 8.00 PiB", twoEx.Message);
+        Assert.Contains("1 of 2", twoEx.Message);
     }
 
     [Fact]

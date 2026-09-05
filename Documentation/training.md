@@ -409,6 +409,30 @@ public TrainingResult Train(
     int numEpochs);
 ```
 
+### What construction costs
+
+`FromScratch` does real work before any training happens, and a checkpoint/resume workflow
+re-pays most of it on every process start. A training `.skpt` carries the constituents and the
+state, not the derived build products, so `TrainingRig.Load` rebuilds those — it reads the saved
+concrete architecture rather than re-concretizing, but everything after that is redone, including
+running every initializer whose values the checkpoint then overwrites.
+
+The build phase, all of it on `MergeContext`, is concretization, composition with the loss,
+autograd, optimizer lowering, shape inference and graph optimization, plus two costs that scale
+with your parameter count: each trainable parameter's initializer is run, and each optimizer-state
+initializer is run per trainable parameter. Both run one backend session per parameter, so they
+grow linearly with the number of trainable parameters rather than superlinearly, and both copy
+each value onto storage of its own rather than leaving it holding that session's working memory.
+Peak host memory during initialization still grows with the model, but far more slowly than it
+once did — a few hundred bytes per parameter element rather than a few kilobytes.
+
+Then, on the first `TrainStep`, the rig compiles its training-step graph once and caches it (see
+`TrainStep` above) — one fixed cost per rig, independent of how many steps follow.
+
+Neither phase is proportional to your dataset, and neither recurs during the loop: steady-state
+`TrainStep` pays neither. If you are timing a run, expect the first step to be markedly slower
+than the rest — that is the compile, not a slow optimizer.
+
 ### Compute contexts: `MergeContext` and `RuntimeContext`
 
 A rig carries two `ComputeContext` members, both supplied at construction (defaulting to

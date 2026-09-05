@@ -73,9 +73,6 @@ namespace Shorokoo.Graph
             DebugRequests? debugRequests = null,
             BuildProgressReporter? progress = null)
         {
-            // Standalone here means this lowering IS the build, so it owns the terminal report; nested
-            // in a rig build, the rig's own final phase ends the stream instead.
-            var standalone = progress is null;
             progress ??= BuildProgressReporter.For(computeContext);
             void Stage(string stage) => progress?.Report(BuildPhase.Concretize, stage);
 
@@ -176,7 +173,9 @@ namespace Shorokoo.Graph
             // that SrkFileFormat.DetectStage classifies a module graph by.
             AssertFastGraphDoesNotContainOps(fastGraph, InternalOpCodes.IsModuleStageOp, "Fast final graph validation");
 
-            if (standalone) Stage("Done");
+            // No terminal report here: both callers have work left after this returns (the public
+            // wrapper freezes the result, the rig build goes on to compose the trainstep), and a
+            // "finished" report with work still to run is worse than no report at all.
             return fastGraph;
         }
 

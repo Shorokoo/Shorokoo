@@ -485,7 +485,7 @@ runs on `MergeContext`, so a sink set on `RuntimeContext` is inert. In particula
 on one device and train on another: [only one backend is live per process](inference.md#backend-selection)
 and both contexts go through it, so the naming does not offer a CPU-build / GPU-train split. Read the
 two members as a division of *phases* — which work is build/merge and which is compile/run — not of
-hardware; they would only become a lever if `ComputeContext` gained per-instance configuration.
+hardware; they would only become a lever if `ComputeContext` gained per-instance compute configuration.
 Leaving both `null`, so each defaults to `ComputeContext.Default`, is the normal choice.
 
 Result types:
@@ -515,19 +515,22 @@ var rig = TrainingRig.FromScratch(
 ```
 
 ```
-[   0.0s] Concretize: Clone
-[   0.0s] Concretize: ApplyIdentifierTemplates
-[   0.4s] Concretize: InlineModulesAndFunctions
+[   0.0s] Concretize: Thaw
+[   0.1s] Concretize: Clone
+[   0.1s] Concretize: ApplyIdentifierTemplates
 …
 [  38.4s] Concretize: ExpandAutoGrad
 [  44.1s] Concretize: SimplifyAfterAutoGrad
-[  44.2s] TrainingStep: NormalizeOptimizerGraph
+[  44.2s] Concretize: BindRngConfig
+[  44.3s] Concretize: WriteRepresentativeInputs
+[  44.3s] TrainingStep: NormalizeOptimizerGraph
 [  51.9s] TrainingStep: ComposeModelLossAndAutoGrad
 [  63.0s] TrainingStep: ReplayOptimizerPerParameter
 …
 [  91.4s] Initialize: InitializeModelParams
 …
 [  96.2s] Initialize: OptimizeTrainingStepGraph
+[ 118.9s] Initialize: FreezeTrainingStepGraph
 [ 121.7s] Initialize: Done
 ```
 
@@ -540,11 +543,13 @@ quiet for minutes is inside the stage its last report named. It carries three fi
   `BuildPhase.TrainingStep` (composing and lowering the training-step graph), or
   `BuildPhase.Initialize` (running the initializers, shape inference and graph optimization). The
   phases run in that order and do not interleave.
-- `Stage` — the pass being entered, named after the pass itself (`InlineModulesAndFunctions`,
-  `ExpandAutoGrad`, `OptimizeTrainingStepGraph`, …). Stage names are diagnostics, not API: they track
-  the pipeline and change with it. The single exception is the terminal `Done`, which names no
-  pass: it is the last report of a **completed** build, so a stream sitting on `Done` is finished,
-  not stuck — the one report you must not read by the rule above.
+- `Stage` — the work being entered, named for what it does and usually after the pass that runs it
+  (`InlineModulesAndFunctions`, `ExpandAutoGrad`, `OptimizeTrainingStepGraph`, …). Stage names are
+  diagnostics, not API: they track the pipeline and change with it, so never branch on one.
+- `IsComplete` — true for the single terminal report of a build that ran to completion, which names
+  no stage being entered: a stream sitting on it is finished, not stuck (the one report the rule
+  above does not apply to). A build that threw never emits one. This is the only report property a
+  program should test.
 - `Elapsed` — time since the start of *this* build. One clock spans all three phases.
 
 `ToString()` renders the line shown above. Reports are raised **synchronously on the building
@@ -562,11 +567,19 @@ at `TrainingStep`), and the lowering step on its own —
 var concrete = MyModel.ComputationGraph.ToConcreteArchitecture(inputHints, buildContext);
 ```
 
-— which reports `Concretize` and ends on its own `Concretize: Done`. Calls that are not builds stay
-silent even when handed the same context: `ToConcreteModel`, `InitializeTrainableParams` and
-`GetRngStreamReport` report nothing, though the first two can also be slow. Setting
-`ComputeContext.Default.Progress` turns reporting on for every build that does not name its own
-context — a process-wide switch, so prefer a context of your own outside quick experiments.
+— which reports `Concretize`, its own thaw and freeze included, and ends complete.
+
+Reporting covers the **build** and stops there. Calls that are not builds stay silent: `ToConcreteModel`
+takes no context at all, and `InitializeTrainableParams` and `GetRngStreamReport` take one and report
+nothing, though all three can be slow. Neither does the first `TrainStep`, whose one-time compile
+([above](#what-construction-costs)) runs on `RuntimeContext` — so expect a quiet stretch there after
+the build has reported itself complete.
+
+A build with no context of its own runs on `ComputeContext.Default`, so setting
+`ComputeContext.Default.Progress` reports every such build — a process-wide switch worth keeping to
+quick experiments: concurrent builds then interleave into the one sink, each carrying its own clock
+and its own terminal report, and the "last report names where the build is" rule holds per build
+rather than per sink.
 
 To capture the *graphs* rather than the stage names — after the fact, as compilable C# — see
 [debugging.md](debugging.md).

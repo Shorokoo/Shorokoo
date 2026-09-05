@@ -603,16 +603,19 @@ namespace Shorokoo
                     "drive parameter shape resolution and training-graph shape inference.",
                     nameof(sampleInputs));
 
+            // Concretization is a build/merge-phase step, so it runs on the merge context. That
+            // context also carries the optional progress sink, and the reporter built from it here is
+            // threaded through the whole build so every phase reports against one clock — built first
+            // so the thaw below, a full walk of the caller's graph, is inside that clock.
+            var ctx = mergeContext;
+            var progress = BuildProgressReporter.For(mergeContext);
+            void Concretizing(string stage) => progress?.Report(BuildPhase.Concretize, stage);
+
             // The model position takes a module graph or an already-lowered concrete architecture
             // (the concretization pipeline is idempotent on the latter); a weight-filled concrete
             // model is refused up front.
+            Concretizing("Thaw");
             var model = RequireModelGraphKind(c.Model, "TrainingRig (model constituent)");
-
-            // Concretization is a build/merge-phase step, so it runs on the merge context. That
-            // context also carries the optional progress sink, and the reporter built from it here is
-            // threaded through the whole build so every phase reports against one clock.
-            var ctx = mergeContext;
-            var progress = BuildProgressReporter.For(mergeContext);
 
             // Single ToConcreteArchitecture pass — the ONE concretization for this rig and all its
             // future derivations. The resulting concrete arch is the shared substrate: the trainstep
@@ -628,12 +631,16 @@ namespace Shorokoo
             // config's runtime identity into the RngSeed parameter, which — with the feeds'
             // key derivation chains — rides unchanged through loss composition and autograd
             // into the training-step graph, where the ONNX-prep lowering emits the keyed draws.
+            // Reported: a config carrying runtime overrides re-runs the whole key-derivation wiring
+            // and a reachability sweep here, which is graph-sized work, not bookkeeping.
+            Concretizing("BindRngConfig");
             concreteArch.ApplyRngConfig(c.RngConfig);
 
             // Make the concrete arch self-describing: record the representative shape (dims only —
             // never the user's values) on each model-input node, so every re-derivation's shape
             // inference reconstructs its sampleInputs off the arch and no separate exemplar field
             // is stored. Done once here; the attribute rides along on Clone() and survives re-seeding.
+            Concretizing("WriteRepresentativeInputs");
             WriteRepresentativeInputs(concreteArch, sampleInputs);
 
             return DeriveFromConcreteArch(c, concreteArch, mergeContext, runtimeContext, progress);
@@ -878,9 +885,12 @@ namespace Shorokoo
             // Rebind the new RNG identity on a clone (ApplyRngConfig mutates), keeping this rig's
             // retained arch pristine. Clone() copies node attributes by reference, so the clone's
             // MODEL_TENSOR_INPUT nodes still carry the representative-input attributes (same model inputs).
+            var progress = BuildProgressReporter.For(MergeContext);
+            progress?.Report(BuildPhase.Concretize, "BindRngConfig");
             var reArch = _concreteArch.Clone();
             reArch.ApplyRngConfig(rngConfig);
-            return DeriveFromConcreteArch(_constituents with { RngConfig = rngConfig }, reArch, MergeContext, RuntimeContext);
+            return DeriveFromConcreteArch(
+                _constituents with { RngConfig = rngConfig }, reArch, MergeContext, RuntimeContext, progress);
         }
 
         /// <summary>
@@ -2803,11 +2813,13 @@ namespace Shorokoo
 
             // Freeze the public views: the working graphs are relinquished into the
             // readonly wrappers, which own them exclusively from here on (the rig
-            // compiles through the wrappers, which copy).
+            // compiles through the wrappers, which copy). Two full walks of the lowered
+            // training graph, so named rather than left inside the optimizer's report.
+            Stage("FreezeTrainingStepGraph");
             PreOptimizationGraph = new ComputationGraph(graph, GraphKind.ConcreteModel);
             TrainingStepPureGraph = new ComputationGraph(optResult.OptimizedGraph, GraphKind.ConcreteModel);
             _trainingStepWorkGraph = null;
-            Stage("Done");
+            progress?.ReportComplete(BuildPhase.Initialize);
         }
     }
 

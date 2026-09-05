@@ -86,19 +86,20 @@ var concreteArchitecture = graph.ToConcreteArchitecture(inputHints, buildContext
 ```
 
 ```
-[   0.0s] Concretize: Clone
-[   0.0s] Concretize: ApplyIdentifierTemplates
-[   0.4s] Concretize: InlineModulesAndFunctions
+[   0.0s] Concretize: Thaw
+[   0.1s] Concretize: Clone
+[   0.1s] Concretize: ApplyIdentifierTemplates
 …
 [   4.8s] Concretize: Simplify
 [  12.0s] Concretize: LowerAttributeTensorOps
 [  38.4s] Concretize: ExpandAutoGrad
 [  44.1s] Concretize: SimplifyAfterAutoGrad
+[  45.2s] Concretize: Freeze
 [  46.0s] Concretize: Done
 ```
 
 (`…` marks stages elided here, not gaps in the output — every stage reports, and a lowering that
-finishes ends on `Done`.)
+finishes ends on a report whose `IsComplete` is true.)
 
 The same context passed to `TrainingRig.FromScratch` as its `mergeContext` covers the whole rig
 build — concretization, training-step composition and initialization — under one clock. See

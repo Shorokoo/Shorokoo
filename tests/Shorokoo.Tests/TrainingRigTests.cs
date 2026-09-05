@@ -2905,19 +2905,27 @@ public class BuildProgressCoverageTests
         return (reports, new ComputeContext { Progress = new SynchronousBuildProgress(reports.Add) });
     }
 
-    private static List<BuildPhase> PhaseRuns(List<BuildProgress> reports)
+    private static BuildPhase[] PhaseRuns(List<BuildProgress> reports)
     {
         var runs = new List<BuildPhase>();
         foreach (var r in reports)
             if (runs.Count == 0 || runs[^1] != r.Phase) runs.Add(r.Phase);
-        return runs;
+        return [.. runs];
     }
 
-    private static bool Reported(List<BuildProgress> reports, BuildPhase phase, string stage)
-        => reports.Any(r => r.Phase == phase && r.Stage == stage);
+    private static string[] StagesOf(List<BuildProgress> reports, BuildPhase phase)
+        => [.. reports.Where(r => r.Phase == phase).Select(r => r.Stage)];
+
+    private static readonly string[] ConcretizePasses =
+    [
+        "Clone", "ApplyIdentifierTemplates", "InlineModulesAndFunctions", "InjectRngDrawCounter",
+        "ExtractIdentifierTemplates", "ConvertToIdRefModelParams", "UnpackModelStruct",
+        "UnpackTensorStructs", "ConvertModelParamIdRefToModelParam", "Simplify",
+        "LowerAttributeTensorOps", "ExpandAutoGrad", "SimplifyAfterAutoGrad",
+    ];
 
     [Fact]
-    public void TestFromScratchReportsEveryBuildPhaseInOrderCoverage()
+    public void TestFromScratchReportsEveryStageOfEveryPhaseInOrderCoverage()
     {
         var reports = new List<BuildProgress>();
         var reportThreads = new List<int>();
@@ -2937,51 +2945,83 @@ public class BuildProgressCoverageTests
             AdamWOptimizer.ComputationGraph, sample,
             new AdamWOptimizerHyperparameters { LearningRate = 0.1f }, mergeContext: ctx);
 
-        Assert.NotNull(rig.TrainingStepPureGraph);
-        Assert.Equal((BuildPhase[])[BuildPhase.Concretize, BuildPhase.TrainingStep, BuildPhase.Initialize],
-            PhaseRuns(reports).ToArray());
-        Assert.True(Reported(reports, BuildPhase.Concretize, "InlineModulesAndFunctions"));
-        Assert.True(Reported(reports, BuildPhase.Concretize, "ExpandAutoGrad"));
-        Assert.True(Reported(reports, BuildPhase.TrainingStep, "NormalizeOptimizerGraph"));
-        Assert.True(Reported(reports, BuildPhase.TrainingStep, "ComposeModelLossAndAutoGrad"));
-        Assert.True(Reported(reports, BuildPhase.TrainingStep, "ReplayOptimizerPerParameter"));
-        Assert.True(Reported(reports, BuildPhase.TrainingStep, "PruneAndOrderTrainingStep"));
-        Assert.True(Reported(reports, BuildPhase.TrainingStep, "ExpandAutoGrad"));
-        Assert.True(Reported(reports, BuildPhase.Initialize, "ReadModelParams"));
-        Assert.True(Reported(reports, BuildPhase.Initialize, "InitializeModelParams"));
-        Assert.True(Reported(reports, BuildPhase.Initialize, "InitializeOptimizerState"));
-        Assert.True(Reported(reports, BuildPhase.Initialize, "OptimizeTrainingStepGraph"));
-        Assert.Equal(BuildPhase.Initialize, reports[^1].Phase);
-        Assert.Equal("Done", reports[^1].Stage);
+        BuildPhase[] phases = [BuildPhase.Concretize, BuildPhase.TrainingStep, BuildPhase.Initialize];
+        string[] concretize = ["Thaw", .. ConcretizePasses, "BindRngConfig", "WriteRepresentativeInputs"];
+        string[] trainingStep =
+        [
+            "NormalizeOptimizerGraph", "ComposeModelLossAndAutoGrad", "ReplayOptimizerPerParameter",
+            "PruneAndOrderTrainingStep", "ExpandStructOutputs", "UnpackTensorStructs", "Simplify",
+            "FoldLoopIterationCounts", "UnrollLoops", "LowerAttributeTensorOps", "ExpandAutoGrad",
+            "SimplifyAfterAutoGrad",
+        ];
+        string[] initialize =
+        [
+            "ReadModelParams", "InitializeModelParams", "InitializeOptimizerState", "InferModelShapes",
+            "InferTrainingStepShapes", "OptimizeTrainingStepGraph", "FreezeTrainingStepGraph", "Done",
+        ];
+
+        Assert.Equal(GraphKind.ConcreteModel, rig.TrainingStepPureGraph.Kind);
+        Assert.Equal(phases, PhaseRuns(reports));
+        Assert.Equal(concretize, StagesOf(reports, BuildPhase.Concretize));
+        Assert.Equal(trainingStep, StagesOf(reports, BuildPhase.TrainingStep));
+        Assert.Equal(initialize, StagesOf(reports, BuildPhase.Initialize));
+        Assert.True(reports[^1].IsComplete);
+        Assert.DoesNotContain(reports[..^1], r => r.IsComplete);
         Assert.Equal(reports.Select(r => r.Elapsed).OrderBy(e => e), reports.Select(r => r.Elapsed));
         Assert.Equal(reports.Count, reportThreads.Count);
         Assert.All(reportThreads, t => Assert.Equal(buildThread, t));
     }
 
     [Fact]
-    public void TestToConcreteArchitectureReportsLoweringStagesAndLowersWithoutASinkCoverage()
+    public void TestToConcreteArchitectureReportsItsOwnThawAndFreezeCoverage()
     {
         var (reports, ctx) = Watched();
         var model = ScalarMultiplyModel.ComputationGraph;
         var hints = new ModelParamList(
             [new KeyValuePair<string, TensorData>(model.ToInternal().Inputs[0].ToString(), TensorData([4L], new float[4]))],
             ModelParamType.InputParam);
+        string[] stages = ["Thaw", .. ConcretizePasses, "Freeze", "Done"];
+        BuildPhase[] concretizeOnly = [BuildPhase.Concretize];
 
-        Assert.NotNull(model.ToConcreteArchitecture(hints, ctx));
-        Assert.All(reports, r => Assert.Equal(BuildPhase.Concretize, r.Phase));
-        Assert.Equal("Clone", reports[0].Stage);
-        Assert.Equal("SimplifyAfterAutoGrad", reports[^2].Stage);
-        Assert.Equal("Done", reports[^1].Stage);
+        Assert.Equal(GraphKind.ConcreteArchitecture, model.ToConcreteArchitecture(hints, ctx).Kind);
+        Assert.Equal(concretizeOnly, PhaseRuns(reports));
+        Assert.Equal(stages, StagesOf(reports, BuildPhase.Concretize));
+        Assert.True(reports[^1].IsComplete);
         Assert.Equal("[   1.5s] Concretize: Clone",
             new BuildProgress(BuildPhase.Concretize, "Clone", TimeSpan.FromSeconds(1.5)).ToString());
 
         var unwatched = new ComputeContext();
         Assert.Null(unwatched.Progress);
-        Assert.NotNull(model.ToConcreteArchitecture(hints, unwatched));
+        Assert.Equal(GraphKind.ConcreteArchitecture, model.ToConcreteArchitecture(hints, unwatched).Kind);
 
         var second = new List<BuildProgress>();
         ctx.Progress = new SynchronousBuildProgress(second.Add);
-        Assert.NotNull(model.ToConcreteArchitecture(hints, ctx));
-        Assert.Equal(reports.Select(r => r.Stage), second.Select(r => r.Stage));
+        Assert.Equal(GraphKind.ConcreteArchitecture, model.ToConcreteArchitecture(hints, ctx).Kind);
+        Assert.Equal(stages, StagesOf(second, BuildPhase.Concretize));
+    }
+
+    [Fact]
+    public void TestDerivationsReportFromTheTrainingStepPhaseCoverage()
+    {
+        var (reports, ctx) = Watched();
+        var (sample, _, _) = ScalarMultiplyBatches();
+        BuildPhase[] derivation = [BuildPhase.TrainingStep, BuildPhase.Initialize];
+        BuildPhase[] reseed = [BuildPhase.Concretize, BuildPhase.TrainingStep, BuildPhase.Initialize];
+
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            AdamWOptimizer.ComputationGraph, sample,
+            new AdamWOptimizerHyperparameters { LearningRate = 0.1f }, mergeContext: ctx);
+        reports.Clear();
+
+        Assert.NotSame(rig, rig.WithLoss(L2Loss.ComputationGraph));
+        Assert.Equal(derivation, PhaseRuns(reports));
+        Assert.True(reports[^1].IsComplete);
+
+        reports.Clear();
+        Assert.NotSame(rig, rig.WithSeed(new RngConfig { MasterSeed = 7 }));
+        Assert.Equal(reseed, PhaseRuns(reports));
+        Assert.Equal("BindRngConfig", reports[0].Stage);
+        Assert.True(reports[^1].IsComplete);
     }
 }

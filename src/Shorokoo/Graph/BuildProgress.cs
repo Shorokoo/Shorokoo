@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Globalization;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Graph
@@ -9,7 +10,8 @@ namespace Shorokoo.Graph
     /// it does: a <c>ToConcreteArchitecture</c> call reports <see cref="Concretize"/> only; a
     /// <c>TrainingRig.FromScratch</c> runs all three in order; a rig derivation (<c>With…</c>) or a
     /// <c>TrainingRig.Load</c> reuses its concrete architecture and so opens at
-    /// <see cref="TrainingStep"/>. Each build's last report is <c>Done</c>, in whichever phase it ends.
+    /// <see cref="TrainingStep"/>. A build that completes ends with its
+    /// <see cref="BuildProgress.IsComplete"/> report, in whichever phase it ends.
     /// </summary>
     public enum BuildPhase
     {
@@ -28,8 +30,8 @@ namespace Shorokoo.Graph
     /// <summary>
     /// One progress report from a build, raised as the build <b>enters</b> the named stage — so a
     /// build that has been quiet for minutes is stuck in the stage its last report named. The one
-    /// exception is the terminal <c>Done</c>, the last report of a <em>completed</em> build, which
-    /// names no stage: a stream sitting on <c>Done</c> is finished, not stuck. Attach a sink with
+    /// exception is the terminal report of a completed build, which names no stage being entered;
+    /// <see cref="IsComplete"/> identifies it. Attach a sink with
     /// <see cref="ComputeContext.Progress"/>:
     ///
     /// <code>
@@ -39,12 +41,27 @@ namespace Shorokoo.Graph
     /// </code>
     /// </summary>
     /// <param name="Phase">The build phase the stage belongs to.</param>
-    /// <param name="Stage">The lowering/build stage being entered, named after the pass that runs it.</param>
+    /// <param name="Stage">The lowering/build stage being entered, named for the work it does — usually
+    /// the pass that runs it. Diagnostic text, not API: it tracks the pipeline and changes with it, so
+    /// test <see cref="IsComplete"/> rather than this to recognize the terminal report.</param>
     /// <param name="Elapsed">Time since the start of the build this report belongs to.</param>
     public readonly record struct BuildProgress(BuildPhase Phase, string Stage, TimeSpan Elapsed)
     {
-        /// <summary>A one-line rendering — <c>[  12.3s] Concretize: InlineModulesAndFunctions</c>.</summary>
-        public override string ToString() => $"[{Elapsed.TotalSeconds,6:F1}s] {Phase}: {Stage}";
+        /// <summary>The one stage name with a meaning a program may rely on; read it through
+        /// <see cref="IsComplete"/>.</summary>
+        internal const string DoneStage = "Done";
+
+        /// <summary>
+        /// True for the terminal report of a build that ran to completion — the one report that names
+        /// no stage being entered. A stream sitting on it is finished, not stuck. A build that threw
+        /// never emits one.
+        /// </summary>
+        public bool IsComplete => Stage == DoneStage;
+
+        /// <summary>A one-line rendering — <c>[  12.3s] Concretize: InlineModulesAndFunctions</c>.
+        /// Culture-invariant, so a log line reads the same on every machine.</summary>
+        public override string ToString() => string.Format(
+            CultureInfo.InvariantCulture, "[{0,6:F1}s] {1}: {2}", Elapsed.TotalSeconds, Phase, Stage);
     }
 
     /// <summary>
@@ -92,5 +109,9 @@ namespace Shorokoo.Graph
 
         internal void Report(BuildPhase phase, string stage)
             => _sink.Report(new BuildProgress(phase, stage, _clock.Elapsed));
+
+        /// <summary>The terminal report, raised once the build has nothing left to do — so it belongs
+        /// to whoever finishes last, not to the pass that finished first.</summary>
+        internal void ReportComplete(BuildPhase phase) => Report(phase, BuildProgress.DoneStage);
     }
 }

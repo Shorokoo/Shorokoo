@@ -12,7 +12,8 @@ namespace Shorokoo.Modules.Initializers;
 // ---------------------------------------------------------------------------
 // Baseline trainable-parameter initializers.
 //
-// All initializers are shape-only ([TrainableParamInitializer] Inline(shape)):
+// The baseline initializers are shape-only ([TrainableParamInitializer] Inline(shape)) —
+// ScalarInitializers.cs holds the rank-0 ones, which take no shape at all:
 // the codegen does support extra Inline parameters, but keeping the baseline
 // set shape-only keeps every call site a one-liner (`Zeros.Init([c])`) and
 // keeps the initializer graphs trivially resolvable at materialization time.

@@ -76,7 +76,10 @@ namespace Shorokoo.Core
                 modelVar, initializerParams: [], iterationIndices: null,
                 relativeModelId: relativeModelId, dtype: dtype,
                 rank: rank, initializerFn: initializerFn, isTrainable: true,
-                genericTypeArgs: null, identifierTemplateString: template);
+                genericTypeArgs: null, identifierTemplateString: template,
+                // A bare REFERENCE, not a definition: lowering must resolve the ModelId to the
+                // real parameter's node, never to this one (whose initializer is only metadata).
+                isParamReference: true);
             return (Tensor<T>)v;
         }
     }

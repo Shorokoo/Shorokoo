@@ -278,6 +278,16 @@ public static class OnnxOpAttributeNames
     public const string ShrkAttrGenericTypeConstraints = "shrk_generic_type_constraints";
     public const string ShrkAttrGenericTypeArgs = "shrk_generic_type_args";
     public const string ShrkAttrIsTrainable = "shrk_is_trainable";
+
+    /// <summary>
+    /// Marks a parameter-ref node (<c>MODEL_PARAM_REF</c> / <c>MODEL_PARAM_ID_REF</c> /
+    /// <c>MODEL_PARAM_MODEL_REF</c>) as a bare <i>reference</i> to a parameter defined elsewhere in
+    /// the graph — <see cref="Shorokoo.Core.ModelExtensions.GetTrainableParam"/> — rather than the
+    /// parameter's own definition. A reference carries no initializer inputs and only borrows an
+    /// initializer function as metadata, so it must never stand in for the real definition when the
+    /// two resolve to the same ModelId. Absent (or false) means a real definition.
+    /// </summary>
+    public const string ShrkAttrIsParamReference = "shrk_is_param_reference";
     public const string ShrkAttrFieldName = "shrk_field_name";
 
     /// <summary>

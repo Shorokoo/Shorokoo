@@ -68,3 +68,19 @@ public partial class InitializerProps
         return truncOk + lecunOk > Scalar(1L); // both must hold
     }
 }
+
+/// <summary>
+/// Seeded values of the rank-0 trainable-parameter initializers: <c>ScalarZeros</c> = 0,
+/// <c>ScalarOnes</c> = 1, <c>ScalarConstant(v)</c> = v. The runtime input is unused.
+/// </summary>
+[Module]
+public partial class ScalarInitializerValues
+{
+    public static Scalar<bit> Inline(Tensor<float32> dummy)
+    {
+        var pen = ScalarZeros.Init().Abs()
+                + (ScalarOnes.Init() - Scalar(1f)).Abs()
+                + (ScalarConstant.Init(Scalar(0.125f)) - Scalar(0.125f)).Abs();
+        return pen < Scalar(1e-6f);
+    }
+}

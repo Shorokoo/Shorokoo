@@ -3264,6 +3264,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             List<FastNode>? unresolvedSites = null)
         {
             var result = new Dictionary<ModelId, TrainableParamInfo>();
+            // Per resolved model id, whether the winning node is a bare reference rather than the
+            // parameter's own definition (see the preference rule below).
+            var isReferenceByModelId = new Dictionary<ModelId, bool>();
 
             foreach (var node in graph.Nodes)
             {
@@ -3272,6 +3275,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var fn = node.TargetFunction;
                 if (fn is null) continue;
 
+                var isReference =
+                    node.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsParamReference) ?? false;
                 var inputs = node.Inputs;
                 if (inputs.Count == 0 || inputs[0] is null) continue;
                 if (!store.TryGetValue(inputs[0]!.Value, out var modelIdRaw)) continue;
@@ -3314,20 +3319,24 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         continue;
                     }
 
-                    // Prefer the richest definition for a given model id: a bare reference
-                    // (e.g. IModel.GetTrainableParam, which carries no initializer inputs) must not
-                    // clobber the real parameter definition that supplies the shape + initializer.
-                    // Every real definition — trainable or updateable state — takes a shape input as
-                    // its first initializer input, so a real definition always has >= 1 param value
-                    // while a bare reference always has 0; the >= keeps the real definition on top
-                    // regardless of node order (0 >= 1 is false, so a later real definition overwrites
-                    // an earlier bare reference, and an earlier real definition survives a later bare
-                    // reference). Two id-bearing nodes therefore can never tie a real definition
-                    // against a bare reference at the same length.
-                    if (result.TryGetValue(modelId, out var existing)
-                        && existing.TrainableParamInputParamValues.Length >= paramValues.Count)
-                        continue;
+                    // Prefer the real definition for a given model id: a bare reference
+                    // (IModel.GetTrainableParam, whose initializer function is only metadata) must
+                    // not clobber the definition that supplies the initializer inputs. The two are
+                    // told apart by the node's own ShrkAttrIsParamReference flag, NOT by counting
+                    // initializer inputs — a rank-0 initializer (Inline() => Scalar(0f)) takes no
+                    // shape input, so a real definition can legitimately carry zero param values.
+                    // Between two definitions the richer one wins, keeping the choice independent
+                    // of node order.
+                    if (result.TryGetValue(modelId, out var existing))
+                    {
+                        var existingIsReference = isReferenceByModelId[modelId];
+                        var keepExisting = existingIsReference == isReference
+                            ? existing.TrainableParamInputParamValues.Length >= paramValues.Count
+                            : !existingIsReference;
+                        if (keepExisting) continue;
+                    }
 
+                    isReferenceByModelId[modelId] = isReference;
                     result[modelId] = new TrainableParamInfo
                     {
                         SpecificModelId = modelId,
@@ -3337,18 +3346,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
             }
 
-            // A model id resolved only to bare references (no shape-bearing initializer) has no real
-            // definition in this graph. Because every real definition carries a shape input, such an
-            // entry is empty — do not silently fall back to a bare reference's placeholder initializer
-            // (GetTrainableParam wires the module's FIRST initializer as metadata, possibly the wrong
-            // param's); fail loudly instead.
+            // A model id that resolved only to bare references has no real definition in this graph.
+            // Do not silently fall back to a reference's placeholder initializer (GetTrainableParam
+            // wires the module's FIRST initializer as metadata, possibly the wrong param's); fail
+            // loudly instead.
             foreach (var info in result.Values)
-                if (info.TrainableParamInputParamValues.IsDefaultOrEmpty)
+                if (isReferenceByModelId[info.SpecificModelId])
                     throw new InvalidOperationException(
                         $"Trainable-param resolution: model id {info.SpecificModelId} is referenced " +
                         "(e.g. via IModel.GetTrainableParam) but has no parameter definition in the graph. " +
-                        "Every param initializer supplies a shape input, so a real definition always carries " +
-                        "at least one initializer value; a bare reference cannot stand in for the definition.");
+                        "A bare reference cannot stand in for the definition.");
 
             return [.. result.Values];
         }

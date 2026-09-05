@@ -22,14 +22,20 @@ dotnet add package Shorokoo.Modules
 
 ## Initializers (`Shorokoo.Modules.Initializers`)
 
-All are shape-only `[TrainableParamInitializer]`s — call sites are one-liners
-like `Zeros.Init([outFeatures])` or `KaimingUniform.Init([outC, inC, k, k])`.
+All are `[TrainableParamInitializer]`s taking the parameter's shape first — call sites
+are one-liners like `Zeros.Init([outFeatures])` or
+`KaimingUniform.Init([outC, inC, k, k])`. The three `Scalar*` entries are the
+exception: they take **no shape** and create a rank-0 parameter (see
+[Trainable scalars](#trainable-scalars) below).
 
 | Initializer | Fills with | Notes |
 |---|---|---|
 | `Zeros` | 0.0 | biases, BatchNorm beta |
 | `Ones` | 1.0 | BatchNorm/LayerNorm gamma |
 | `Constant` | `value` (every element) | deterministic (no RNG); any rank; the parameterized generalization of `Zeros`/`Ones` (`Constant(0)`/`Constant(1)`); `value` is an `Init` arg (`Constant.Init([shape], Scalar(v))`), à la `RecurrentUniform`; PyTorch `constant_` / Keras `Constant` |
+| `ScalarZeros` | 0.0, rank 0 | no shape argument (`ScalarZeros.Init()`); a trainable **scalar**, not a `[1]`-shaped tensor; the trainable counterpart of `OptimizerScalarZeros` |
+| `ScalarOnes` | 1.0, rank 0 | no shape argument (`ScalarOnes.Init()`); the multiplicative identity, so a learned gain starts as a no-op; the trainable counterpart of `OptimizerScalarOnes` |
+| `ScalarConstant` | `value`, rank 0 | no shape argument; `value` is the only `Init` arg (`ScalarConstant.Init(Scalar(v))`); the rank-0 analogue of `Constant`, and the parameterized generalization of `ScalarZeros`/`ScalarOnes` |
 | `Uniform` | U(0, 1) | seeded; the fixed U(0, 1) default form (use `UniformRange` for a configurable range) |
 | `Normal` | N(0, 1) | seeded; PyTorch's `nn.Embedding` default; the fixed N(0, 1) default form (use `NormalDist` for configurable mean/std) |
 | `UniformRange` | U(low, high) | seeded; any rank; the parameterized generalization of `Uniform` (`Uniform` retained as the U(0, 1) default); `low`/`high` are `Init` args (`UniformRange.Init([shape], Scalar(lo), Scalar(hi))`) and reach the draw itself, so the range is exact at any width — no precision lost near zero, no overflow on a range wider than float32, and `high` is never returned ([uniform-draws.md](uniform-draws.md)); expects `low ≤ high`; PyTorch `uniform_(a, b)` / Keras `RandomUniform(minval, maxval)` |
@@ -79,6 +85,38 @@ like `Zeros.Init([outFeatures])` or `KaimingUniform.Init([outC, inC, k, k])`.
   PyTorch convention for Linear `[out, in]` and Conv `[outC, inC/g, k...]`
   layouts. Hence the rank ≥ 2 requirement: use `Zeros`/`Ones`/`Uniform`/`Normal`
   for biases.
+
+<a id="trainable-scalars"></a>
+### Trainable scalars (rank 0)
+
+A learned scalar — a per-layer temperature, a residual scale, a gated architecture's
+`gamma` — is a rank-0 parameter. `ScalarZeros` / `ScalarOnes` / `ScalarConstant` create
+one directly, taking no shape:
+
+```csharp
+var gamma = ScalarOnes.Init();                        // seeded at 1: starts as a no-op
+var beta  = ScalarZeros.Init();                       // seeded at 0
+var temp  = ScalarConstant.Init(Scalar(0.125f));      // seeded at 1/√d
+return x * gamma + beta;                              // broadcasts against any shape
+```
+
+All three are deterministic — a learned scalar's starting point is a choice, not a draw — and
+they mirror the `Zeros`/`Ones`/`Constant` trio of the shaped set:
+`ScalarZeros == ScalarConstant(0)`, `ScalarOnes == ScalarConstant(1)`. Fan-in/fan-out do not
+enter: neither is defined for a lone value.
+
+Do **not** reach for `Ones.Init([Scalar(1L)])` instead. It broadcasts the same way, but it
+is a length-1 rank-1 tensor, and it persists in the checkpoint as a `[1]`-shaped parameter
+where a scalar was meant. The `Scalar*` initializers persist as rank 0.
+
+State has the same pair on the optimizer side — `OptimizerScalarZeros` /
+`OptimizerScalarOnes`, both rank 0 and both shape-argument-free (see
+[Optimizers](#optimizers-shorokoomodulesoptimizers)).
+
+**Writing your own.** An initializer states the shape of the parameter it creates in exactly one
+of two places: the shape vector it takes as its **first** `Inline` parameter, or — for a rank-0
+one — its `Scalar<T>` return type. A shape baked into the body of a no-argument `Inline` is
+neither, and is rejected by name when the model is lowered.
 
 ## Layers (`Shorokoo.Modules.Layers`)
 

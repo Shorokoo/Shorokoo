@@ -1,3 +1,5 @@
+using Shorokoo.Modules.Initializers;
+
 namespace Shorokoo.Tests.Modules;
 
 [TrainableParamInitializer]
@@ -310,6 +312,125 @@ public partial class ScalarMultiplyModel
         var weight = InitScalarWeight.Init(weightShape);
         return input * weight;
     }
+}
+
+/// <summary>Module-owned rank-0 state: a call counter, one float rather than a param-shaped buffer.</summary>
+[StateInitializer(Ownership = StateOwnership.ModuleOwned)]
+public static partial class InitScalarCallCount
+{
+    public static Scalar<float32> Inline() => Scalar(0.0f);
+}
+
+/// <summary>
+/// The rank-0 twin of <see cref="ScalarMultiplyModel"/>: two trainable rank-0 parameters (a gain
+/// seeded at 1 and a bias seeded at 0) plus rank-0 module-owned state — none of the three carrying
+/// a shape input.
+/// </summary>
+[Module]
+public partial class Rank0ScalarModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var calls = InitScalarCallCount.Init();
+        Globals.StateUpdate(calls, calls + Scalar(1f));
+        return input * ScalarOnes.Init() + ScalarZeros.Init() + calls * Scalar(0f);
+    }
+}
+
+/// <summary>Scales its input by one trainable rank-0 gain seeded at 1.</summary>
+[Module]
+public partial class Rank0GainSubModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => input * ScalarOnes.Init();
+}
+
+/// <summary>
+/// Two trainable rank-0 parameters in creation order: a bias seeded at 0 is parameter [1], a gain
+/// seeded at 1 is parameter [2]. A reference to [2] that mis-resolved to the module's FIRST
+/// initializer would read 0 instead of 1.
+/// </summary>
+[Module]
+public partial class Rank0BiasThenGainModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var bias = ScalarZeros.Init();
+        var gain = ScalarOnes.Init();
+        return input * gain + bias;
+    }
+}
+
+/// <summary>
+/// Two rank-0 parameters created inside a 3-trip loop body: the per-iteration realization path
+/// must give each iteration slot its own shapeless parameter.
+/// </summary>
+[Module]
+public partial class Rank0ParamsInLoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var x = input;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            x = x * ScalarOnes.Init() + ScalarZeros.Init();
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary><see cref="Rank0GainSubModel"/> called plainly — the naming baseline for
+/// <see cref="Rank0GainWithRefModel"/>.</summary>
+[Module]
+public partial class Rank0GainNoRefModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => Rank0GainSubModel.Call(input);
+}
+
+/// <summary><see cref="Rank0GainNoRefModel"/> plus a read-only reference to the sub-model's rank-0
+/// parameter, contributing nothing to the output.</summary>
+[Module]
+public partial class Rank0GainWithRefModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var m = Rank0GainSubModel.Model();
+        return m.Call(input) + m.GetTrainableParam<float32>([1], rank: 0) * Scalar(0f);
+    }
+}
+
+/// <summary>
+/// An initializer that states its shape nowhere the pipeline can read it: it takes no input, so
+/// there is no shape vector, and returns <c>Tensor</c> rather than <c>Scalar</c>, so the declared
+/// rank is unknown — the shape lives only inside the body.
+/// </summary>
+[TrainableParamInitializer]
+public static partial class InitShapelessZeros
+{
+    public static Tensor<float32> Inline() => Globals.TensorFill(Vector(4L), 0.5f);
+}
+
+[Module]
+public partial class ShapelessInitModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => input * InitShapelessZeros.Init();
+}
+
+/// <summary>An initializer whose Inline hands its input straight back (Shorokoo/Shorokoo#237).</summary>
+[TrainableParamInitializer]
+public static partial class InitIdentityScalar
+{
+    public static Scalar<float32> Inline(Scalar<float32> value) => value;
+}
+
+[Module]
+public partial class IdentityInitModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => input * InitIdentityScalar.Init(Scalar(2f));
 }
 
 [Module]

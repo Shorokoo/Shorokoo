@@ -12,6 +12,7 @@ namespace Shorokoo.Modules.Initializers;
 // Additional trainable-parameter initializers beyond the baseline set in
 // Initializers.cs. Shape-only and stream-keyed/deterministic, following the same
 // conventions; they reuse the InitializerMath fan-in arithmetic defined there.
+// (The rank-0 initializers, which take no shape, live in ScalarInitializers.cs.)
 
 /// <summary>
 /// Truncated-normal initializer: standard normal clamped to [-2, 2], stream-keyed

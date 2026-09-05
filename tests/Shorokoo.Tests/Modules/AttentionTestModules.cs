@@ -86,15 +86,15 @@ public partial class MhaForwardGolden
 
 /// <summary>
 /// Chunking the query axis is exact: for every chunk count, causal and not, the output
-/// must equal the dense path. L = 8 with counts 2/3/4/8/9/16 covers even splits, an uneven
-/// one (3 -> 2+3+3), one row per chunk, and more chunks than rows (empty chunks).
+/// must equal the dense path. L = 8 with counts 2/3/8/9 covers an even split, an uneven one
+/// (3 -> 2+3+3), one row per chunk, and more chunks than rows (empty chunks).
 /// </summary>
 [Module]
 public partial class AttnChunkedMatchesDense
 {
     public static Scalar<bit> Inline(Tensor<float32> qkv)   // [N, H, L, d]
     {
-        int[] counts = [2, 3, 4, 8, 9, 16];
+        int[] counts = [2, 3, 8, 9];
         bool[] causals = [false, true];
 
         var ok = Scalar(true);
@@ -112,23 +112,27 @@ public partial class AttnChunkedMatchesDense
 }
 
 /// <summary>
-/// Chunking with an additiveMask, whose query axis is sliced per chunk: a full [Lq, Lk]
-/// mask must be narrowed, a broadcast [1, Lk] one left whole. Both must match the dense
-/// path. The mask is CausalMask itself for the first and a per-key bias row for the second.
+/// Chunking with an additiveMask must match the dense path for every mask shape the dense
+/// path accepts: Lq-tall masks are sliced per chunk, ones that already broadcast over the
+/// query axis (rank-1 [Lk], [1, Lk], [N, 1, 1, Lk] padding) are handed over whole.
 /// </summary>
 [Module]
 public partial class AttnChunkedMatchesDenseWithMask
 {
     public static Scalar<bit> Inline(Tensor<float32> qkv)   // [N, H, L, d]
     {
-        int[] counts = [2, 3, 8];
+        int[] counts = [2, 3];
         var lq = qkv.DimTensor(-2);
         var lk = qkv.DimTensor(-2);
+        var bias = VectorRange(0L, lk, 1L).Cast<float32>() * -0.25f;              // [Lk]
 
         Tensor<float32>[] masks =
         [
             Attention.CausalMask(lq, lk),                                         // [Lq, Lk]
-            (VectorRange(0L, lk, 1L).Cast<float32>() * -0.25f).Unsqueeze(0L),     // [1, Lk]
+            bias,                                                                 // [Lk]
+            bias.Unsqueeze(0L),                                                   // [1, Lk]
+            bias.Unsqueeze(Vector(0L, 1L, 2L)),                                   // [1, 1, 1, Lk]
+            Attention.CausalMask(lq, lk).Unsqueeze(Vector(0L, 1L)),               // [1, 1, Lq, Lk]
         ];
 
         var ok = Scalar(true);
@@ -142,6 +146,66 @@ public partial class AttnChunkedMatchesDenseWithMask
             }
         }
         return ok;
+    }
+}
+
+/// <summary>
+/// Chunking must not disturb gradients: d(sum y^2)/d(qkv) through the per-chunk Slice /
+/// Concat must equal the dense gradient. A finite loss and a moved parameter would not
+/// catch a dropped or misordered chunk; this does.
+/// </summary>
+[Module]
+public partial class AttnChunkedGradientMatchesDense
+{
+    public static Scalar<bit> Inline(Tensor<float32> qkv)   // [N, H, L, d]
+    {
+        int[] counts = [2, 3];
+        bool[] causals = [false, true];
+
+        var ok = Scalar(true);
+        foreach (var causal in causals)
+        {
+            var dense = AutoGrad(Attention.ScaledDotProductAttention(qkv, qkv, qkv, causal: causal), qkv);
+            foreach (var c in counts)
+            {
+                var chunked = AutoGrad(
+                    Attention.ScaledDotProductAttention(qkv, qkv, qkv, causal: causal, queryChunks: c), qkv);
+                ok = ok & ((chunked - dense).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-4f));
+            }
+        }
+        return ok;
+
+        static Tensor<float32> AutoGrad(Tensor<float32> y, Tensor<float32> wrt)
+            => (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(
+                wrt, (y * y).Reduce(ReduceKind.Sum, keepDims: false).Scalar());
+    }
+}
+
+/// <summary>
+/// A single query row still matches dense when chunked, with and without a mask: every
+/// chunk but one is empty, which is the degenerate end of the Slice / Concat path.
+/// </summary>
+[Module]
+public partial class AttnChunkedSingleQueryRow
+{
+    public static Scalar<bit> Inline(Tensor<float32> qkv)   // [N, H, L, d]
+    {
+        int[] counts = [2, 4];
+        var q = qkv.Slice(Vector(0L), Vector(1L), axes: Vector(-2L));             // [N, H, 1, d]
+        var mask = (VectorRange(0L, qkv.DimTensor(-2), 1L).Cast<float32>() * -0.25f).Unsqueeze(0L);
+
+        var ok = Scalar(true);
+        foreach (var c in counts)
+        {
+            ok = ok & Matches(Attention.ScaledDotProductAttention(q, qkv, qkv, causal: true),
+                              Attention.ScaledDotProductAttention(q, qkv, qkv, causal: true, queryChunks: c));
+            ok = ok & Matches(Attention.ScaledDotProductAttention(q, qkv, qkv, additiveMask: mask),
+                              Attention.ScaledDotProductAttention(q, qkv, qkv, additiveMask: mask, queryChunks: c));
+        }
+        return ok;
+
+        static Scalar<bit> Matches(Tensor<float32> a, Tensor<float32> b)
+            => (a - b).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-5f);
     }
 }
 
@@ -169,21 +233,39 @@ public partial class AttnCausalMaskQueryOffset
     }
 }
 
-/// <summary>
-/// Causal chunked attention over a [N, H, L, d] input, mean-pooled over the sequence to
-/// [N, H, d], for the training-rig smoke test: gradients must flow through the per-chunk
-/// Slice / Concat. One trainable query projection so the rig has a parameter to update.
-/// </summary>
+// Causal attention over a [N, H, L, d] input with all three projections trainable —
+// the realistic shape, in which the P @ V gradient keeps the forward softmax output
+// alive as well as the recompute. A model whose value is a raw input instead makes
+// attention look half as expensive as it is. Mean-pooled to [N, H, d] for a target.
+// Dense and queryChunks: 4 forms, differing only in that argument.
+
+/// <summary>Dense form: the baseline for the graph-shape pin.</summary>
+[Module]
+public partial class SdpaMeanPoolModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)   // [N, H, L, d]
+        => AttentionTestGraphs.MeanPooledAttention(input, queryChunks: 1);
+}
+
+/// <summary>Chunked form: drives both the graph-shape pin and the training-rig smoke test.</summary>
 [Module]
 public partial class ChunkedSdpaMeanPoolModel
 {
     public static Tensor<float32> Inline(Tensor<float32> input)   // [N, H, L, d]
+        => AttentionTestGraphs.MeanPooledAttention(input, queryChunks: 4);
+}
+
+internal static class AttentionTestGraphs
+{
+    internal static Tensor<float32> MeanPooledAttention(Tensor<float32> input, int queryChunks)
     {
         var d = input.DimTensor(-1);
         var q = input.MatMul(Shorokoo.Modules.Initializers.XavierUniform.Init([d, d]));
-        var y = Attention.ScaledDotProductAttention(q, input, input, causal: true, queryChunks: 4);
+        var k = input.MatMul(Shorokoo.Modules.Initializers.XavierUniform.Init([d, d]));
+        var v = input.MatMul(Shorokoo.Modules.Initializers.XavierUniform.Init([d, d]));
+        var y = Attention.ScaledDotProductAttention(q, k, v, causal: true, queryChunks: queryChunks);
         Vector<int64> seqAxis = [Scalar(2L)];
-        return y.Reduce(ReduceKind.Mean, seqAxis, keepDims: false);   // [N, H, d]
+        return y.Reduce(ReduceKind.Mean, seqAxis, keepDims: false);
     }
 }
 

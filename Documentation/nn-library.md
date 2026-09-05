@@ -766,7 +766,7 @@ TransformerDecoderLayer.Call(Scalar<int64> embedDim, Scalar<int64> numHeads,
 returns `[N, H, Lq, d]` (`d` from `value`). `query`/`key`/`value` must be
 **rank-4** — the last-two-dims transpose is a static perm `[0, 1, 3, 2]`, so an
 arbitrary-rank input is not accepted; `MultiHeadAttention` reshapes to that layout
-before calling. The three optional arguments:
+before calling. The four optional arguments:
 
 - **`causal`** is a plain C# `bool` decided when you build the graph (not a
   `Scalar<bit>`): `true` adds `CausalMask(Lq, Lk)` to the scores before the softmax, so
@@ -873,65 +873,94 @@ Note what is *not* in that formula: `d` (the head dim) does not appear — it is
 away by `QKᵀ` — and neither does the number of parameters. Doubling the sequence length
 quadruples the block; doubling the batch or the head count only doubles it. The additive
 mask is a separate, much smaller `[Lq, Lk] · 4 bytes` (4 MiB at `L = 1024`), shared by
-every batch element and head, and built once per distinct `(Lq, Lk)` pair.
+every batch element and head — but built **per call site**, not deduplicated across them,
+and once per chunk under `queryChunks`.
 
-**How many blocks a training step holds.** Per `ScaledDotProductAttention` call:
+**How many blocks a training step holds.** Per `ScaledDotProductAttention` call, when
+`value` carries a gradient — i.e. always, in a real transformer, since V comes from a
+trainable projection:
 
-- **Forward** — `QKᵀ` → (`+ mask`) → `Softmax` is a chain, so each link frees the last:
-  **two** blocks are live at once, at the softmax.
-- **Retained** — **one** block per call stays live from the forward pass all the way into
-  the backward pass. The softmax gradient rule re-reads the softmax's *input* and
-  recomputes the probabilities rather than keeping them, so exactly one of the two
-  survives, whichever the scheduler settles on. This is the term that accumulates: an
-  `A`-attention-call model holds `A` blocks for the whole step.
+- **Forward** — `QKᵀ` → (`+ mask`) → `Softmax` is a chain, so each link frees the last.
+  The softmax is emitted twice, though (see below), so **three** blocks are live at the
+  second one: the softmax's input and both copies of the probabilities.
+- **Retained** — **two** blocks per call stay live from the forward pass into the backward
+  pass, and this is the term that accumulates. Both come from the softmax:
+  - `∂(P·V)/∂V = Pᵀ · ∂y`, so the **forward** probabilities `P` are needed in the backward
+    to produce `dV`;
+  - the softmax gradient rule separately re-reads the softmax's **input** and recomputes
+    `P` from it, and the two `Softmax` nodes are not merged.
+
+  So the recompute does not *replace* a retained block, it **adds** one. An
+  `A`-attention-call model holds `2A` blocks for the whole step.
 - **Backward** — the recomputed probabilities, the incoming score gradient and one
-  elementwise temporary are live together: about **three** blocks, for the one call
-  currently being differentiated.
+  elementwise temporary are live together: about **two** more, for the one call currently
+  being differentiated.
 
-So a step peaks at roughly
+So budget a step at roughly
 
 ```
-(A + 2) score blocks        A = number of ScaledDotProductAttention calls
+(2A + 2) score blocks       A = number of ScaledDotProductAttention calls
 ```
 
-A 6-layer encoder at batch 32, 6 heads, `L = 1024` is `A = 6`, so ≈ 8 × 768 MiB ≈ **6 GiB
-in score blocks alone** — before parameters, gradients, optimizer state, and every other
-activation in the model. Below a few hundred MiB you will not *see* this in a GPU memory
-reading, because the ONNX Runtime arena reserves a fixed few hundred MiB up front and the
-score blocks fit inside it; the arithmetic is what to size against, not a small
+This is deliberately a ceiling — the measured peak for `A = 1` is 3 rather than 4, because
+that call's own retained pair is partly released before its backward transients peak — and
+over-budgeting is the safe direction when the alternative is an out-of-memory kill.
+
+A 6-layer encoder at batch 32, 6 heads, `L = 1024` is `A = 6`, so ≈ 14 × 768 MiB ≈ **10.5
+GiB in score blocks alone** — before parameters, gradients, optimizer state, and every
+other activation in the model. Below a few hundred MiB you will not *see* this in a GPU
+memory reading, because the ONNX Runtime arena reserves a fixed few hundred MiB up front
+and the score blocks fit inside it; the arithmetic is what to size against, not a small
 measurement.
+
+(A model whose `value` is a raw input rather than a projection — a toy, or an ablation —
+retains only one block per call, because no `dV` is computed and the forward `P` dies in
+the forward pass. Do not size a real run off that shape; it makes attention look half as
+expensive as it is.)
 
 **The lever: `queryChunks`.** Passing `queryChunks: c` splits the query axis into `c`
 blocks, runs attention on each against the whole key/value, and concatenates the outputs.
 Every score-sized **transient** shrinks by `c`, so the step peaks at about
 
 ```
-(A + 2/c) score blocks
+(2A + 2/c) score blocks
 ```
 
 It is exact, not an approximation — the output matches the dense path to floating-point
-rounding, causal masking included (each chunk gets a `queryOffset` causal mask, so it
-still masks absolute positions). What it does **not** do is shrink the retained `A`: the
-`c` retained chunks sum to the same bytes as the one block they replace. Chunking bounds
-the spike, not the floor.
+rounding, gradients included, and causal masking included (each chunk gets a `queryOffset`
+causal mask, so it still masks absolute positions). What it does **not** do is shrink the
+retained `2A`: the `c` retained chunks sum to the same bytes as the blocks they replace.
+Chunking bounds the spike, not the floor — which also bounds how much it can buy you. At
+`A = 6`, `c = 4` the budget goes from 14 blocks to 12.5, about 10%; the lever is worth
+most on a shallow model with a very long sequence, and worth little on a deep one.
 
 ```csharp
-// Dense: peaks at ~3 score blocks for a single-attention model.
+// Dense: budget ~4 score blocks for a single-attention model.
 var y = Attention.ScaledDotProductAttention(q, k, v, causal: true);
 
-// Chunked by 4: peaks at ~1.5, same output.
+// Chunked by 4: ~2.5, same output.
 var y = Attention.ScaledDotProductAttention(q, k, v, causal: true, queryChunks: 4);
 ```
+
+An `additiveMask` is handled per chunk: one that already broadcasts over the query axis —
+rank < 2, or a size-1 axis -2, as in an `[N, 1, 1, Lk]` padding mask — goes to every chunk
+whole, and one that is `Lq` rows tall is sliced to each chunk's rows. Chunking accepts
+exactly the masks the dense path accepts; a mask that is neither is rejected by the score
+`Add` either way.
 
 `queryChunks` is a build-time C# `int`, fixed when the graph is built — `Lq` itself stays
 dynamic, and chunk `i` covers rows `[Lq·i/c, Lq·(i+1)/c)`, so an `Lq` that does not divide
 evenly just gives chunks differing by one row (and a `c` larger than `Lq` gives empty
 chunks — still correct, just wasted launches). Keep `c` small: `c` chunks mean `c` MatMul
 and Softmax launches instead of one, and the graph grows accordingly — a one-attention
-training step went from 376 to 976 nodes at `c = 4`. It reaches only the
-`Attention.ScaledDotProductAttention` helper, not `MultiHeadAttention`: a `[Module]`'s
-parameters are graph values, and a chunk count has to be a C# constant. Assemble
-attention from the helper when you need it.
+training step goes from 506 to 1 335 nodes at `c = 4`.
+
+It reaches only the `Attention.ScaledDotProductAttention` helper, not
+`MultiHeadAttention`, `TransformerEncoderLayer` or `TransformerDecoderLayer`: a
+`[Module]`'s parameters are all graph values, fixed at concretization — after the module
+body has run — and a chunk count has to be a C# constant at build time. So the lever is
+available only to hand-assembled attention today; a module variant with a chunk count
+baked in is possible, and is not written.
 
 **The other levers,** in the order they cost you least: shorten the sequence (quadratic),
 shrink the batch (linear), cut heads (linear). There is **no activation checkpointing** —

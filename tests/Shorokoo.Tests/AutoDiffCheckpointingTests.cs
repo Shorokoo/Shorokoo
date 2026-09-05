@@ -11,6 +11,11 @@ namespace Shorokoo.Tests;
 /// <see cref="GraphEvaluator"/> (and the <c>OpsPerf</c> estimators behind it),
 /// <see cref="MemoryAwareScheduler"/>, <see cref="Rematerializer"/>,
 /// <see cref="SimpleBackpropOptimizer"/> and <see cref="MemoryAwareGraphOptimizer"/>.
+///
+/// <para><see cref="TestComputeMemoryObjectiveIsScaleFreeCoverage"/> guards the property the
+/// whole pass rests on: the objective must weigh the same proportional trade identically at
+/// any model size. A byte-scaled coefficient — what this replaced — passes every other test
+/// in the suite while silently reducing the pass to a no-op on real models.</para>
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -53,7 +58,8 @@ public class AutoDiffCheckpointingCoverageTests
         var reordered = scheduler.Reorder(graph, shapeInfo);
         Assert.Equal(graph.Nodes.Count, reordered.Nodes.Count);
 
-        var rematerializer = new Rematerializer(computeFactor: 1.0, memoryFactor: 1.0, maxIterations: 20);
+        var rematerializer = new Rematerializer(
+            new ComputeMemoryObjective(1.0, 1.0, eval), maxIterations: 20);
         var rematGraph = rematerializer.Apply(graph, shapeInfo);
         Assert.True(rematGraph.Nodes.Count >= graph.Nodes.Count);
 
@@ -74,7 +80,7 @@ public class AutoDiffCheckpointingCoverageTests
 
         var directEval = fullOptimizer.EvaluateGraph(graph, inputData, weightsData, biasData, biasData);
         Assert.True(directEval.PeakMemoryBytes > 0);
-        Assert.True(fullOptimizer.ComputeCombinedMetric(directEval) > 0);
+        Assert.True(fullOptimizer.ComputeCombinedMetric(directEval, directEval) > 0);
 
         var x = InputTensor<float32>("x", rank: 4);
         var w = InputTensor<float32>("w", rank: 4);
@@ -144,6 +150,28 @@ public class AutoDiffCheckpointingCoverageTests
         public override string OpCode => _opCode;
         protected override RuntimeTensor[] Compute(RuntimeTensor?[] inputs, OnnxCSharpAttributes attributes, int maxDataElements)
             => throw new InvalidOperationException("forced QEE failure for ORT-fallback coverage");
+    }
+
+    private static GraphEvaluationResult Eval(double computeTime, long peakBytes)
+        => new() { TotalComputeTime = computeTime, PeakMemoryBytes = peakBytes, NodeDetails = [] };
+
+    [Fact]
+    public void TestComputeMemoryObjectiveIsScaleFreeCoverage()
+    {
+        var small = new ComputeMemoryObjective(1.0, 1.0, Eval(10, 1_000));
+        var large = new ComputeMemoryObjective(1.0, 1.0, Eval(10_000_000, 1_000_000_000));
+
+        Assert.Equal(small.Score(Eval(11, 500)), large.Score(Eval(11_000_000, 500_000_000)), 9);
+        Assert.Equal(2.0, small.Score(Eval(10, 1_000)), 9);
+        Assert.Equal(2.0, large.Score(Eval(10_000_000, 1_000_000_000)), 9);
+        Assert.Equal(1.5, small.Score(Eval(10, 500)), 9);
+        Assert.Equal(1.5, new ComputeMemoryObjective(2.0, 1.0, Eval(10, 1_000)).Score(Eval(5, 500)), 9);
+
+        Assert.False(double.IsNaN(new ComputeMemoryObjective(1.0, 1.0, Eval(0, 0)).Score(Eval(1, 1))));
+
+        Assert.True(small.TradeDelta(extraComputeTime: 1, savedPeakBytes: 500) < 0);
+        Assert.True(small.TradeDelta(extraComputeTime: 5, savedPeakBytes: 100) > 0);
+        Assert.Equal(small.TradeDelta(1, 500), large.TradeDelta(1_000_000, 500_000_000), 9);
     }
 
     [Fact]

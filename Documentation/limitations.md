@@ -49,11 +49,31 @@ attribute, option, or API marks a module, block, or tensor for recomputation
 during the backward pass. If a training step does not fit, the levers are the
 usual ones — a smaller batch, a shorter sequence, or a smaller model.
 
+Attention has the one exception, and it is not checkpointing: passing
+`queryChunks: c` to `Attention.ScaledDotProductAttention` splits the query axis
+into `c` blocks, which divides the score-sized **transients** by `c` but leaves
+untouched the two score-sized tensors per attention call that are **retained**
+from forward to backward. It bounds the spike, not the floor. See
+[Sizing an attention run](nn-library.md#attention-memory) for the arithmetic and
+for what the quadratic term actually costs.
+
+Attention is also where the absence of checkpointing is most visible, and for a
+reason worth stating: the softmax gradient rule recomputes the probabilities
+from the softmax's *input*, so that input is kept **in addition to** the output
+the `P·V` gradient already needs. The recompute costs a score-sized tensor
+rather than saving one. A real checkpointing facility would drop both and
+recompute `QKᵀ` from Q and K instead.
+
 Building a training rig does run an internal memory-aware pass over the lowered
 training-step graph, which may reorder nodes and recompute a tensor rather than
-keep it alive, but only where that improves a fixed combined compute-and-memory
-metric. The pass is automatic, has no settings, and reports nothing; do not
-count on it to make a step fit that otherwise would not.
+keep it alive, but only where that improves a combined compute-and-memory
+objective. Measured over a spread of training graphs it cuts peak activation
+memory by roughly a fifth to a half, but it is automatic, has no settings, and
+reports nothing, so it is not a lever you can reach for: do not count on it to
+make a step fit that otherwise would not. It also skips graphs whose peak is
+under a megabyte, where there is nothing worth buying, and it has no effect at
+all on a graph whose backward pass runs through a recurrent op — the scheduler
+cannot linearize a BPTT scope and hands such graphs back untouched.
 
 That pass is also where three types a reflection dump over the `Shorokoo`
 assembly turns up come from — `GraphEvaluationResult`, `NodeEvaluationInfo` and

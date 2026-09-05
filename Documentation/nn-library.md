@@ -158,8 +158,9 @@ not name is a plain, required `[Hyper]`.
 **An off toggle costs nothing.** Several layers gate a block of trainable
 parameters behind a `[Hyper]` bit — `useBias` on `Linear`, `Bilinear`, the conv
 layers and the attention/transformer layers; `affine` on `BatchNorm`,
-`GroupNorm` and `InstanceNorm`. Each is written in the layer body as
-`bit.IfElse(withTheParams, without)`, so both branches exist in the *source* —
+`LayerNorm`, `RMSNorm`, `GroupNorm` and `InstanceNorm`. Each is written in the
+layer body as `bit.IfElse(withTheParams, without)`, so both branches exist in
+the *source* —
 but the bit is a `[Hyper]`, fixed before the graph is concretized (baked by
 `Call`/`Model`, or taken from the value you hand `FromOrderedInputs`). Either way
 the framework **prunes the unselected branch's trainable parameters**: with the
@@ -655,8 +656,8 @@ defaults are **not** inherited — so all three alias arguments are
 ### LayerNorm / RMSNorm / GroupNorm / InstanceNorm
 
 ```csharp
-LayerNorm.Call(Scalar<int64> normalizedDims, Scalar<float32> epsilon, x)  // last n dims
-RMSNorm.Call(Scalar<int64> normalizedDims, Scalar<float32> epsilon, x)    // last n dims, no mean-subtraction
+LayerNorm.Call(Scalar<int64> normalizedDims, Scalar<bit> affine, Scalar<float32> epsilon, x)  // last n dims
+RMSNorm.Call(Scalar<int64> normalizedDims, Scalar<bit> affine, Scalar<float32> epsilon, x)    // last n dims, no mean-subtraction
 
 // Rank-generic feature normalizers over [N, C, *spatial] (channel = axis 1),
 // any rank >= 3 ([N,C,L], [N,C,H,W], [N,C,D,H,W], ...) — rank is inferred at runtime:
@@ -672,35 +673,47 @@ InstanceNorm3d.Call(Scalar<float32> epsilon, x)  // [N, C, D, H, W] (NCDHW)
 
 Built in-graph from elementwise/reduce ops (the ONNX normalization ops take
 epsilon/numGroups as static attributes, which would forbid `[Hyper]` values).
-gamma/beta are trainable (`Ones`/`Zeros`); LayerNorm's are shaped like the
+The affine parameters, where `affine = true` creates them, are
+`Ones`/`Zeros`-initialized: LayerNorm's gamma/beta are shaped like the
 normalized trailing dims, GroupNorm/InstanceNorm's are per-channel (broadcast
 `[1, C, 1, …, 1]`, sized to the runtime rank).
 `RMSNorm` (`y = x / √(mean(x²) + ε) · gain`) skips the mean-subtraction and the
-bias, keeping only a trainable gain — the normalization used by most modern LLMs.
+bias, keeping only a gain — the normalization used by most modern LLMs.
+
+**All four expose the same `affine` toggle** (an `IfElse` gate, like `Linear`'s
+`useBias`): the affine parameters are trainable params **only when
+`affine = true`** — with `affine = false` they are not created, so the layer
+contributes no parameters of its own (see
+[An off toggle costs nothing](#gated-parameters)). For `LayerNorm` /
+`GroupNorm` / `InstanceNorm` that gates gamma **and** beta; for `RMSNorm`, which
+has no bias, it gates the gain alone:
+
+```csharp
+RMSNorm.Call(Scalar(1L), Scalar(false), Scalar(1e-5f), x)   // x / √(mean(x²) + ε), no gain
+```
+
+That gain-free form is what nanochat and modded-nanoGPT use; the production LM
+families — Llama, Mistral, Qwen, Gemma — all keep the gain. Match your reference
+rather than assuming either way.
 
 `GroupNorm` and `InstanceNorm` are the same computation differing only in the
 number of channel-groups (Wu & He 2018): `GroupNorm(numGroups = 1)` recovers
 LayerNorm-over-CHW and `GroupNorm(numGroups = C)` recovers `InstanceNorm`. Both
 reduce over each per-(sample, group/channel) region's channels and **every**
-spatial axis using the **biased** variance, and both expose an `affine` toggle
-(an `IfElse` gate, like `Linear`'s `useBias`): gamma/beta are trainable params
-**only when `affine = true`** — with `affine = false` they are not created, so
-the layer contributes no parameters of its own (see
-[An off toggle costs nothing](#gated-parameters)).
+spatial axis using the **biased** variance.
 
 - **No declared defaults here**: unlike `BatchNorm`, none of these four declares
   a `[Hyper(<value>)]` default — `normalizedDims`, `numGroups`, `affine` and
   `epsilon` are all plain `[Hyper]`s, hence
   [non-nullable and always passed explicitly](#nullable-hypers).
   `epsilon` in particular has no `1e-5` fallback to omit into; spell
-  it out (`LayerNorm.Call(Scalar(1L), Scalar(1e-5f), x)`). The `InstanceNorm`
-  `1d/2d/3d` aliases are the same: their `epsilon` is required too — only
-  `affine` is supplied for you.
-- **`GroupNorm`**: `affine` is a required `[Hyper]` bit, conceptually defaulted
-  **on** at call sites (PyTorch/Keras/Flax default `affine=True`); it is the
-  leading bit after `numGroups` —
-  `GroupNorm.Call(numGroups, Scalar(true), epsilon, x)`. `C` must be divisible by
-  `numGroups`, else the `[N, G, -1]` reshape fails at concretization.
+  it out (`LayerNorm.Call(Scalar(1L), Scalar(true), Scalar(1e-5f), x)`). The
+  `InstanceNorm` `1d/2d/3d` aliases are the same: their `epsilon` is required
+  too — only `affine` is supplied for you.
+- **`LayerNorm` / `RMSNorm` / `GroupNorm`**: `affine` is conceptually defaulted
+  **on** at call sites (PyTorch's `elementwise_affine=True` / Keras/Flax
+  `affine=True`). For `GroupNorm`, `C` must be divisible by `numGroups`, else the
+  `[N, G, -1]` reshape fails at concretization.
 - **`InstanceNorm`**: `affine` defaults **off** in the `1d/2d/3d` aliases,
   matching PyTorch's `affine=False` InstanceNorm default — the *opposite* of
   GroupNorm's on default — because the canonical (style-transfer) use case

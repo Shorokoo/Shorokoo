@@ -25,6 +25,8 @@ public class NormActModuleTests
     {
         Run<RMSNormNormalizes>([2L, 4L], 1.5f, -3f);
         Run<RMSNormMatchesManual>([2L, 4L], 0.7f, 1f);
+        Run<RMSNormGainFreeNormalizes>([2L, 4L], 1.5f, -3f);
+        Run<RMSNormGainFreeEqualsGainAtInit>([2L, 3L, 4L], 0.7f, 1f);
 
         Assert.True(AutoTest.AdvancedTestGraph<PReLUClosedForm>(hyperparamInputs: [],
             runtimeInputs: [TensorData(DType.Float32, [7L], -3f, -1f, -0.5f, 0f, 0.5f, 1f, 3f)]));
@@ -78,6 +80,10 @@ public class NormActTrainingCoverageTests
     private static float[] Ramp(int count, float scale, float offset)
         => [.. Enumerable.Range(0, count).Select(i => i * scale + offset)];
 
+    private static TrainingRig Rig(ComputationGraph modelGraph, TensorData inputData)
+        => TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, inputData)], 0.5f);
+
     private static void AssertTrainsAndMovesAParam(ComputationGraph modelGraph, long[] inShape, float[] input)
     {
         var inputData = TensorData(inShape, input);
@@ -113,6 +119,36 @@ public class NormActTrainingCoverageTests
         AssertTrainsAndMovesAParam(NormActGLUModel.ComputationGraph, [3L, 4L], Ramp(12, 0.5f, -3f));
         // Likewise LRN: [N, C, H, W] → scale by w → LocalResponseNorm → per-sample mean → [N].
         AssertTrainsAndMovesAParam(NormActLRNModel.ComputationGraph, [2L, 5L, 2L, 2L], Ramp(40, 0.3f, -1f));
+    }
+
+    /// <summary>
+    /// RMSNorm's affine gate over [2, 3, 4] with normalizedDims=2: affine:false prunes the gain to leave
+    /// only the upstream scalar weight; affine:true keeps two params, the gain materializes to
+    /// D1·D2 = 12 (not the last dim alone), and takes gradient through the live IfElse branch. Only the
+    /// length-12 gain is checked for movement: RMSNorm is scale-invariant up to epsilon, so the upstream
+    /// scalar weight takes essentially no gradient through it.
+    /// </summary>
+    [Fact]
+    public void TestRMSNormAffineOnOff()
+    {
+        var inputData = TensorData([2L, 3L, 4L], Ramp(24, 0.5f, -2f));
+        Assert.Equal(1, Rig(NormActRMSNormAffineFalseParamModel.ComputationGraph, inputData)
+            .TrainableParamStructDef.Fields.Length);
+
+        var rig = Rig(NormActRMSNormAffineTrueParamModel.ComputationGraph, inputData);
+        var initial = rig.CreateInitialCheckpoint();
+        var step = rig.TrainStep(initial,
+            MakeBatch("input", "ModelInput", inputData),
+            MakeBatch("targets", "Target", TensorData([2L], new float[2])));
+
+        Assert.Equal(2, rig.TrainableParamStructDef.Fields.Length);
+        Assert.Equal([1, 12], rig.TrainableParamStructDef.Fields
+            .Select(f => Floats(initial.TrainableParams.Fields[f.Name]).Length).Order());
+        foreach (var field in rig.TrainableParamStructDef.Fields
+                     .Where(f => Floats(initial.TrainableParams.Fields[f.Name]).Length == 12))
+            Assert.True(Floats(initial.TrainableParams.Fields[field.Name])
+                .Zip(Floats(step.TrainableParams.Fields[field.Name]))
+                .Any(p => MathF.Abs(p.First - p.Second) > 1e-7f));
     }
 
     /// <summary>

@@ -189,8 +189,17 @@ public partial class BatchNorm3d
 /// Layer normalization over the last <c>normalizedDims</c> dimensions
 /// (built in-graph from elementwise/reduce ops so <c>epsilon</c> can be a
 /// hyperparameter; the ONNX LayerNormalization op only takes a static epsilon attribute).
-/// gamma/beta are trainable, shaped like the normalized trailing dimensions
+/// gamma/beta are shaped like the normalized trailing dimensions
 /// (<see cref="Ones"/> / <see cref="Zeros"/>), broadcast over the leading dims.
+/// <para>
+/// The affine transform <c>y = gamma * x̂ + beta</c> is applied when
+/// <c>affine = true</c> (PyTorch's <c>elementwise_affine=True</c> default); when
+/// <c>affine = false</c> the normalized <c>x̂</c> is returned directly. gamma and beta
+/// are trainable parameters <b>only</b> when <c>affine = true</c>: the <c>[Hyper]</c>
+/// bit is fixed before concretization, so <c>affine = false</c> folds the
+/// <c>IfElse</c> away and prunes them, leaving the module with no trainable parameters
+/// of its own (the same gate as <see cref="GroupNorm"/>/<see cref="InstanceNorm"/>).
+/// </para>
 /// </summary>
 [Module]
 public partial class LayerNorm
@@ -198,6 +207,7 @@ public partial class LayerNorm
     public static Tensor<float32> Inline(
         Tensor<float32> x,
         [Hyper] Scalar<int64> normalizedDims,
+        [Hyper] Scalar<bit> affine,        // true = learnable gamma, beta; false = identity scale/shift
         [Hyper] Scalar<float32> epsilon)
     {
         var shape = x.ShapeTensor();
@@ -217,7 +227,7 @@ public partial class LayerNorm
         var weight = Ones.Init(paramShape);
         var bias = Zeros.Init(paramShape);
 
-        return xHat * weight + bias;
+        return affine.IfElse(xHat * weight + bias, xHat);
     }
 }
 

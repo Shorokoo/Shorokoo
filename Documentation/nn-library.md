@@ -1210,7 +1210,7 @@ updatedParam`); the rig applies it per-field across the trainable parameter
 struct. State tensors never appear in the signature: each is created inside the
 optimizer body by an optimizer-owned state initializer — `OptimizerStateZeros` at
 the parameter's shape (so param-shaped state starts zero-filled), `OptimizerScalarZeros`
-for a rank-0 scalar seeded at 0 (e.g. Adam's `step`), or `OptimizerScalarOnes` for a
+for a rank-0 scalar seeded at 0 (e.g. Adam's and AdamW's `step`), or `OptimizerScalarOnes` for a
 rank-0 scalar seeded at 1 (e.g. NAdam's running momentum product, which needs the
 multiplicative identity) — and updated via `Globals.StateUpdate`. Each optimizer gets a generated named hyperparameter set
 (`<Name>Hyperparameters`, e.g. `AdamOptimizerHyperparameters`) — see
@@ -1237,7 +1237,7 @@ custom-optimizer authoring contract.
   `m̂ = m/(1−β1^t)`, `v̂ = v/(1−β2^t)` correction, carrying the timestep `t` as a
   third state field — a **scalar** (one float per parameter, created by
   `OptimizerScalarZeros`) that broadcasts against `m̂`/`v̂`, not a param-shaped copy.
-  So the first step is ≈ `lr` whatever the gradient magnitude, and at `wd = 0`
+  So Adam's first step is ≈ `lr` whatever the gradient magnitude, and at `wd = 0`
   `AdamWOptimizer` is `AdamOptimizer` step for step.
 - `RMSpropOptimizer` with the default `momentum = 0` reduces to plain RMSprop;
   it always carries both state tensors.
@@ -1268,7 +1268,8 @@ custom-optimizer authoring contract.
 - `LionOptimizer` (EvoLved Sign Momentum) takes the **sign** of a β1-blend of momentum and
   gradient, so every coordinate moves by exactly ±`lr` — the step magnitude is decoupled from
   the gradient scale. It stores **only** the momentum buffer `m` (no second moment, no
-  timestep), so its optimizer-state footprint is **half** of Adam/AdamW. **Swapped beta roles
+  timestep), so its optimizer-state footprint is **half** the param-shaped state of Adam/AdamW,
+  with no scalar at all. **Swapped beta roles
   (the easy bug):** the stored `m` is decayed by **β2** (`m = β2·m + (1−β2)·g`), while **β1**
   appears *only* inside the sign blend that forms the update direction — the opposite of Adam's
   convention. Weight decay is decoupled (AdamW-style). **Usage:** because the sign step has unit

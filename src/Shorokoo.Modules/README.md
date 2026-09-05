@@ -25,13 +25,15 @@ ready-made layers, loss functions, optimizers, and initializers built from Shoro
   (log-probs + probs). All map (predictions, targets) → scalar loss.
 - **Optimizers** (`Shorokoo.Modules.Optimizers`) — `SGDOptimizer`,
   `SGDMomentumOptimizer`, `AdamOptimizer` and `AdamWOptimizer` (both with
-  bias correction), `RMSpropOptimizer`, `AdagradOptimizer`, with strongly
-  typed hyperparameter sets and learning-rate schedules (`Schedules.*`).
+  bias correction), `RMSpropOptimizer`, `AdagradOptimizer`, `AdamaxOptimizer`,
+  `NAdamOptimizer`, `RAdamOptimizer`, `AdadeltaOptimizer`, `LionOptimizer`,
+  `AdafactorOptimizer`, `LambOptimizer`, with strongly typed hyperparameter
+  sets and learning-rate schedules (`Schedules.*`).
   Optimizer state (moments, velocity, accumulators) is created inside each
   module via optimizer-owned `[StateInitializer]`s — `OptimizerStateZeros`
-  (param-shaped) and `OptimizerScalarZeros` (a rank-0 scalar, e.g. Adam's
-  timestep) — and threaded with `StateUpdate`; never declared in the `Inline`
-  signature.
+  (param-shaped) and `OptimizerScalarZeros` (a rank-0 scalar, e.g. Adam's and
+  AdamW's timestep) — and threaded with `StateUpdate`; never declared in the
+  `Inline` signature.
 
 ```bash
 dotnet add package Shorokoo.Modules

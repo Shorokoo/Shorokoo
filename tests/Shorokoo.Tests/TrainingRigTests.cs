@@ -270,7 +270,7 @@ internal static class TrainingRigHelpers
     }
 
     internal static (TrainingRig Rig, TrainingCheckpoint Ckpt, TensorDataStruct In, TensorDataStruct Out)
-        BuildTrainedAdamRig(int steps)
+        BuildTrainedAdamWRig(int steps)
     {
         NamedModelParam[] sample =
         [
@@ -1163,7 +1163,7 @@ public class TrainingRigTrainingLoopCoverageTests
     {
         var (sample, inputBatch, targetBatch) = ScalarMultiplyBatches();
 
-        var (adamRig, trained, adamIn, adamOut) = BuildTrainedAdamRig(steps: 1);
+        var (adamRig, trained, adamIn, adamOut) = BuildTrainedAdamWRig(steps: 1);
         var carried = adamRig.TrainStep(
             new TrainingCheckpoint(trained.TrainableParams, trained.ModelState, trained.OptimizerState,
                 step: trained.Step, epoch: 3, batchIndex: 12),
@@ -1724,8 +1724,8 @@ public class TrainingRigCheckpointCoverageTests
     [Fact]
     public void TestCheckpointCountersPersistAcrossFormatsCoverage()
     {
-        var (_, trained, _, _) = BuildTrainedAdamRig(steps: 4);
-        var loaderRig = BuildTrainedAdamRig(steps: 0).Rig;
+        var (_, trained, _, _) = BuildTrainedAdamWRig(steps: 4);
+        var loaderRig = BuildTrainedAdamWRig(steps: 0).Rig;
 
         long bigStep = 5_000_000_000L;
         long bigEpoch = 3_000_000_000L;
@@ -1876,14 +1876,14 @@ public class TrainingRigCheckpointCoverageTests
     [Fact]
     public void TestFlatCheckpointLoadsCoverage()
     {
-        var (_, ckpt, _, _) = BuildTrainedAdamRig(steps: 2);
+        var (_, ckpt, _, _) = BuildTrainedAdamWRig(steps: 2);
         var path = TempPath("flat") + ".safetensors";
         try
         {
             Persistence.SaveTrainingCheckpoint(ckpt, path);
             Assert.Equal(ArtifactKind.TrainingCheckpoint, Persistence.Inspect(path).Kind);
 
-            var loaded = BuildTrainedAdamRig(steps: 0).Rig.LoadCheckpoint(path);
+            var loaded = BuildTrainedAdamWRig(steps: 0).Rig.LoadCheckpoint(path);
             Assert.Equal(2, loaded.Step);
             Assert.Equal(FlattenStruct(ckpt.TrainableParams), FlattenStruct(loaded.TrainableParams));
             Assert.Equal(FlattenStruct(ckpt.OptimizerState), FlattenStruct(loaded.OptimizerState));
@@ -1957,7 +1957,7 @@ public class TrainingRigCheckpointCoverageTests
     [Fact]
     public void TestSaveLoadComponentsSubsetCoverage()
     {
-        var (rigA, trained, _, _) = BuildTrainedAdamRig(steps: 3);
+        var (rigA, trained, _, _) = BuildTrainedAdamWRig(steps: 3);
         Assert.NotEmpty(trained.OptimizerState.Fields);
         var initialOpt = FlattenStruct(rigA.CreateInitialCheckpoint().OptimizerState);
         Assert.NotEqual(FlattenStruct(trained.OptimizerState), initialOpt);
@@ -1967,7 +1967,7 @@ public class TrainingRigCheckpointCoverageTests
         {
             trained.Save(path, CheckpointComponents.InferenceState);
 
-            var rigB = BuildTrainedAdamRig(steps: 0).Rig;
+            var rigB = BuildTrainedAdamWRig(steps: 0).Rig;
             var loaded = rigB.LoadCheckpoint(path);
             Assert.Same(rigB, loaded.Rig);
             Assert.Equal(FlattenStruct(trained.TrainableParams), FlattenStruct(loaded.TrainableParams));
@@ -1989,13 +1989,13 @@ public class TrainingRigCheckpointCoverageTests
     [Fact]
     public void TestCheckpointLossPersistsCoverage()
     {
-        var (rigA, trained, _, _) = BuildTrainedAdamRig(steps: 3);
+        var (rigA, trained, _, _) = BuildTrainedAdamWRig(steps: 3);
         Assert.NotNull(trained.Loss);
         float loss = trained.Loss!.Value;
         Assert.True(trained.Step > 0);
         var initial = rigA.CreateInitialCheckpoint();
         Assert.Null(initial.Loss);
-        var reader = BuildTrainedAdamRig(steps: 0).Rig;
+        var reader = BuildTrainedAdamWRig(steps: 0).Rig;
 
         var flatPath = TempPath("loss_flat") + ".safetensors";
         var flatInitPath = TempPath("loss_flatinit") + ".safetensors";
@@ -2090,7 +2090,7 @@ public class TrainingRigSkptCheckpointCoverageTests
     [Fact]
     public void TestSkptCheckpointRoundTripResumeModelStateAndInspectCoverage()
     {
-        var (rigA, ckpt, inBatch, outBatch) = BuildTrainedAdamRig(steps: 2);
+        var (rigA, ckpt, inBatch, outBatch) = BuildTrainedAdamWRig(steps: 2);
         Assert.Equal(2, ckpt.Step);
         Assert.NotEmpty(ckpt.OptimizerState.Fields);
         Assert.Empty(ckpt.ModelState.Fields);
@@ -2140,7 +2140,7 @@ public class TrainingRigSkptCheckpointCoverageTests
                 Assert.Equal("optimizer_state", kv.Value.Data);
             });
 
-            var rigB = BuildTrainedAdamRig(steps: 0).Rig;
+            var rigB = BuildTrainedAdamWRig(steps: 0).Rig;
             var loaded = rigB.LoadCheckpointFromSkpt(path);
             Assert.Equal(2, loaded.Step);
             Assert.Equal(FlattenStruct(ckpt.TrainableParams), FlattenStruct(loaded.TrainableParams));
@@ -2208,8 +2208,8 @@ public class TrainingRigSkptCheckpointCoverageTests
     [Fact]
     public void TestSkptCheckpointFailsLoudLenientManifestAndComponentSubsetCoverage()
     {
-        var (rigA, trained, _, _) = BuildTrainedAdamRig(steps: 3);
-        var rig = BuildTrainedAdamRig(steps: 0).Rig;
+        var (rigA, trained, _, _) = BuildTrainedAdamWRig(steps: 3);
+        var rig = BuildTrainedAdamWRig(steps: 0).Rig;
         var one = new TrainingCheckpoint(
             trained.TrainableParams, trained.ModelState, trained.OptimizerState, step: 1, rig: trained.Rig);
 
@@ -2358,8 +2358,8 @@ public class TrainingRigSkptCheckpointCoverageTests
     [Fact]
     public void TestCheckpointLoadEntryPointsAreFormatExplicitCoverage()
     {
-        var (_, trained, _, _) = BuildTrainedAdamRig(steps: 1);
-        var reader = BuildTrainedAdamRig(steps: 0).Rig;
+        var (_, trained, _, _) = BuildTrainedAdamWRig(steps: 1);
+        var reader = BuildTrainedAdamWRig(steps: 0).Rig;
         var flatPath = TempPath("fmt_flat") + ".safetensors";
         var skptPath = TempPath("fmt_skpt") + ".skpt";
         var junkPath = TempPath("fmt_junk") + ".bin";
@@ -2408,7 +2408,7 @@ public class TrainingRigSkptCheckpointCoverageTests
     [Fact]
     public void TestTrainingRigLoadFromFileAloneWithSchedulerCoverage()
     {
-        var (rigA, ckpt, inBatch, outBatch) = BuildTrainedAdamRig(steps: 3);
+        var (rigA, ckpt, inBatch, outBatch) = BuildTrainedAdamWRig(steps: 3);
         var reference = rigA.TrainStep(ckpt, inBatch, outBatch);
 
         var path = TempPath("rigload") + ".skpt";
@@ -2533,7 +2533,7 @@ public class TrainingRigSkptCheckpointCoverageTests
     [Fact]
     public void TestSkptDirectoryFormTrainingCheckpointRoundTripCoverage()
     {
-        var (rig, ckpt, inBatch, outBatch) = BuildTrainedAdamRig(steps: 2);
+        var (rig, ckpt, inBatch, outBatch) = BuildTrainedAdamWRig(steps: 2);
         var reference = rig.TrainStep(ckpt, inBatch, outBatch);
         var dirPath = TempPath("skpt_ckpt_dir") + ".skpt";
         var packedPath = TempPath("skpt_ckpt_packed") + ".skpt";

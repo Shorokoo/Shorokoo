@@ -15,27 +15,23 @@ namespace Shorokoo.Core.AutoDiffCheckpointing;
 internal class Rematerializer
 {
     private readonly GraphEvaluator _evaluator;
-    private readonly double _computeFactor;
-    private readonly double _memoryFactor;
+    private readonly ComputeMemoryObjective _objective;
     private readonly int _maxIterations;
 
     public Rematerializer(
-        double computeFactor = 1.0,
-        double memoryFactor = 1e-6,
+        ComputeMemoryObjective objective,
         int maxIterations = 20,
         GraphEvaluator? evaluator = null)
     {
         _evaluator = evaluator ?? new GraphEvaluator();
-        _computeFactor = computeFactor;
-        _memoryFactor = memoryFactor;
+        _objective = objective;
         _maxIterations = maxIterations;
     }
 
     /// <summary>
     /// Computes the combined metric for a given evaluation result.
     /// </summary>
-    public double ComputeCombinedMetric(GraphEvaluationResult eval)
-        => _computeFactor * eval.TotalComputeTime + _memoryFactor * eval.PeakMemoryBytes;
+    public double ComputeCombinedMetric(GraphEvaluationResult eval) => _objective.Score(eval);
 
     /// <summary>
     /// Applies rematerialization to the graph.
@@ -183,7 +179,7 @@ internal class Rematerializer
                 var extraCompute = (uses - 1) * recomputeCost;
                 var memorySaving = memBytes;
 
-                var expectedDelta = _computeFactor * extraCompute - _memoryFactor * memorySaving;
+                var expectedDelta = _objective.TradeDelta(extraCompute, memorySaving);
                 if (expectedDelta >= 0) continue;
 
                 candidates.Add(new RematerializationCandidate

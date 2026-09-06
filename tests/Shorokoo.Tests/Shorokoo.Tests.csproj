@@ -13,6 +13,7 @@
   <ItemGroup>
     <Content Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Benchmarks/perf-baseline.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Benchmarks/memory-pass-baseline.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

@@ -1,0 +1,71 @@
+{
+  "Scenario": "L2Loss, SGD, LinuxCPU, net10.0; modelled peak/compute from the memory-aware pass",
+  "PeakRegressionFactor": 1.05,
+  "ComputeRegressionFactor": 1.25,
+  "Families": {
+    "mlp": {
+      "UnoptimizedPeakBytes": 5312820,
+      "PeakBytes": 4293944,
+      "UnoptimizedComputeTime": 587689.34765625,
+      "ComputeTime": 587689.34765625,
+      "Nodes": 572,
+      "Strategy": "ReorderRemat"
+    },
+    "conv": {
+      "UnoptimizedPeakBytes": 59190668,
+      "PeakBytes": 50802296,
+      "UnoptimizedComputeTime": 7594731.255859375,
+      "ComputeTime": 7594731.255859375,
+      "Nodes": 192,
+      "Strategy": "ReorderRemat"
+    },
+    "encoder1": {
+      "UnoptimizedPeakBytes": 30956420,
+      "PeakBytes": 20466396,
+      "UnoptimizedComputeTime": 5684233.1640625,
+      "ComputeTime": 5685769.1640625,
+      "Nodes": 1879,
+      "Strategy": "ReorderRemat"
+    },
+    "encoder2": {
+      "UnoptimizedPeakBytes": 57210740,
+      "PeakBytes": 39372392,
+      "UnoptimizedComputeTime": 11381762.833984375,
+      "ComputeTime": 11381762.833984375,
+      "Nodes": 3922,
+      "Strategy": "ReorderRemat"
+    },
+    "lstm": {
+      "UnoptimizedPeakBytes": 1517662,
+      "PeakBytes": 1517662,
+      "UnoptimizedComputeTime": 275456.271484375,
+      "ComputeTime": 275456.271484375,
+      "Nodes": 356,
+      "Strategy": "Baseline"
+    },
+    "attn-dense": {
+      "UnoptimizedPeakBytes": 12333140,
+      "PeakBytes": 8139748,
+      "UnoptimizedComputeTime": 933256.26953125,
+      "ComputeTime": 933256.26953125,
+      "Nodes": 506,
+      "Strategy": "ReorderRemat"
+    },
+    "attn-d64": {
+      "UnoptimizedPeakBytes": 14205012,
+      "PeakBytes": 10011620,
+      "UnoptimizedComputeTime": 2020861.26953125,
+      "ComputeTime": 2020861.26953125,
+      "Nodes": 506,
+      "Strategy": "ReorderRemat"
+    },
+    "attn-chunk4": {
+      "UnoptimizedPeakBytes": 9449772,
+      "PeakBytes": 6828364,
+      "UnoptimizedComputeTime": 940301.1953125,
+      "ComputeTime": 1077517.1953125,
+      "Nodes": 1318,
+      "Strategy": "RematReorder"
+    }
+  }
+}

@@ -8,6 +8,10 @@ Input: the per-family JSON files written by ``OpsPerfCalibrationTests`` (run
     python3 tools/opsperf-calibration/fit.py <dir>            # score the C# estimates in the dump, refit, print both
     python3 tools/opsperf-calibration/fit.py <dir> --no-fit   # score only
 
+Requires numpy. Give SHOROKOO_OPSPERF_CALIBRATION_DIR an absolute path: the test host's working
+directory is its bin folder, not the repo root. A refit wants the full family set; a subset
+(SHOROKOO_OPSPERF_CALIBRATION_FAMILIES) is fine for --no-fit scoring.
+
 The model mirrors src/Shorokoo/Core/AutoDiffCheckpointing/OpsPerf/*.cs (ComputeTime in
 nanoseconds); ``PARAMS`` holds the constants the C# estimators carry. Refitting prints
 the refitted constants; port any you adopt into the C# files by hand and re-run the
@@ -296,7 +300,10 @@ def fit(fams, level):
     sel = lambda pred: [(n, m) for n, m in rows if pred(n)]
 
     tiny = [m for n, m in rows if traffic(n) <= 256 and n['op'] not in META and n['op'] not in ZERO]
-    p['launch'] = float(np.median(tiny))
+    if tiny:
+        p['launch'] = float(np.median(tiny))
+    else:
+        print("no launch-sized kernels in this dump; keeping PARAMS['launch'] (run more families for a refit)")
     for cls, keyset in (('shape', 'shape_survival'), ('meta', 'meta_survival')):
         tot = hit = 0
         for fam, d in fams.items():

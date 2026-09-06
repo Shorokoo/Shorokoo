@@ -73,13 +73,14 @@ it takes trades its objective accepts, and the attribute above is how you ask fo
 one it would not. Its model of memory is ONNX Runtime's own allocation plan for the
 step (the order ORT actually runs, and ORT's habit of handing a dead buffer to the
 next tensor of the same shape rather than returning it), so what it optimizes is
-what gets allocated; `MemoryPassBenchmarkTests` records the resident peak of one
-training step next to the modelled one, and the two agree to within about 10% on
-every graph in it except a conv stack, whose im2col workspace the model does not
-see. Measured that way, unoptimized to optimized: an MLP 5.6 to 4.3 MB, a conv stack
-28.5 to 24.6, a one-layer transformer encoder 19.6 to 19.0, a two-layer one 37.3 to
-35.8, dense attention unchanged, chunked attention 5.9 to 5.0 — for at most a few
-percent more kernel time. The pass leaves a graph whose backward pass runs through
+what gets allocated; the framework's own memory benchmark records the resident peak
+of one training step next to the modelled one, and the two agree to within about
+10% on every graph in it except a conv stack, whose im2col workspace the model does
+not see, and the LSTM step, whose Loop body the model walks once. Measured that
+way, unoptimized to optimized: an MLP 5.6 to 4.3 MiB, a conv stack 28.7 to 24.6, a
+one-layer transformer encoder 19.6 to 19.0, a two-layer one 37.3 to 35.8, dense
+attention unchanged, chunked attention 5.9 to 5.0 — for at most a few percent more
+kernel time. The pass leaves a graph whose backward pass runs through
 a recurrent op untouched: its evaluator walks a Loop body once where ORT runs it per
 iteration, and on the LSTM step acting on that model made the real peak worse.
 
@@ -87,7 +88,7 @@ Two things the rig does around that pass matter more than the pass itself for a
 step's memory. The training-step session is compiled for the shapes it is fed, so
 ORT resolves every intermediate shape at session build and folds the shape
 arithmetic — most of a step's kernels, and outputs that pinned activations alive —
-out of the executed graph (the encoder steps above dropped from 28.7 and 53.1 MB to
+out of the executed graph (the encoder steps above dropped from 28.7 and 53.1 MiB to
 19.6 and 37.3 before the pass touched them). And the session runs ORT's full
 optimization level minus the common-subexpression pass, which would otherwise merge
 every recomputation the pass emits back into the tensor it exists to free.

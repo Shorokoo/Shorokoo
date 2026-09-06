@@ -1189,6 +1189,19 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Equal(GenericLoss(input, target), rig.TrainStep(ckpt, input, target).Loss);
         Assert.Equal(GenericLoss(halfInput, halfTarget), rig.TrainStep(ckpt, halfInput, halfTarget).Loss);
         Assert.Equal(GenericLoss(input, target), rig.TrainStep(ckpt, input, target).Loss);
+        Assert.Equal(2, rig.CompiledTrainStepShapeKeys.Count);
+        Assert.Contains(rig.CompiledTrainStepShapeKeys, k => k.EndsWith(";4;4"));
+        Assert.Contains(rig.CompiledTrainStepShapeKeys, k => k.EndsWith(";2;2"));
+        Assert.False(rig.HasGenericTrainStepSession);
+
+        foreach (var n in (int[])[1, 3, 5])
+        {
+            var i = rig.InputDef.FromOrderedData(TensorData([(long)n], Enumerable.Range(1, n).Select(v => (float)v).ToArray()));
+            var t = rig.TargetDef.FromOrderedData(TensorData([(long)n], new float[n]));
+            Assert.Equal(GenericLoss(i, t), rig.TrainStep(ckpt, i, t).Loss);
+        }
+        Assert.Equal(TrainingRig.MaxShapeSpecializedTrainSteps, rig.CompiledTrainStepShapeKeys.Count);
+        Assert.True(rig.HasGenericTrainStepSession);
     }
 
     private static int OrtOptimizedNodeCount(ModelProto model, string opType)

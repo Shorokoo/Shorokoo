@@ -278,7 +278,7 @@ concrete *shape* comes from the binding, and the rig reports it as `rig.Hyperpar
 | `Scheduled` (module) | the scheduler module's output shape, inferred at rig build |
 | `Runtime` | declared by you: `Hyperparameter.Runtime(4L)`; `Runtime()` means a scalar |
 
-A runtime hyperparameter states its shape because the training step is compiled once, so the shape has
+A runtime hyperparameter states its shape because the training step is compiled ahead of the values, so the shape has
 to be known at build even though the values are not. That also makes the shape fixed for the rig's
 life: a per-step value whose shape differs fails loud rather than silently reshaping.
 
@@ -374,7 +374,7 @@ public TrainingCheckpoint CreateInitialCheckpoint(TensorDataStruct hyperparamete
 // Schedule-driven: scheduled hyperparameters are computed in-graph from the checkpoint's
 // step (fed as the step counter), then the step advances. Requires no schedule-less runtime hypers.
 // Returns the post-step checkpoint directly, with its .Loss set to this step's loss. The rig
-// compiles its training-step graph once internally (lazily, cached), so a manual loop is just
+// compiles its training-step graph internally (lazily, cached per fed shape), so a manual loop is just
 // `cp = rig.TrainStep(cp, in, out);` — no caller-side ComputeContext.Compile.
 public TrainingCheckpoint TrainStep(
     TrainingCheckpoint checkpoint,
@@ -416,7 +416,7 @@ public TrainingResult Fit(
     TensorDataStruct[] trainingOutputs,
     int numEpochs,
     TrainingCheckpoint? initialCheckpoint = null); // defaults to CreateInitialCheckpoint()
-                                                   // compiles/runs via rig.RuntimeContext (one graph per rig)
+                                                   // compiles/runs via rig.RuntimeContext (cached per fed shape)
 
 // Data-loader-driven: the loader owns the batch stream; Fit advances step / epoch / batch for you.
 public TrainingResult Fit(
@@ -451,8 +451,9 @@ each value onto storage of its own rather than leaving it holding that session's
 Peak host memory during initialization still grows with the model, but far more slowly than it
 once did — a few hundred bytes per parameter element rather than a few kilobytes.
 
-Then, on the first `TrainStep`, the rig compiles its training-step graph once and caches it (see
-`TrainStep` above) — one fixed cost per rig, independent of how many steps follow.
+Then, on the first `TrainStep`, the rig compiles its training-step graph for the shapes it is fed
+and caches it (see `TrainStep` above) — one fixed cost per distinct input shape, independent of how
+many steps follow; a run that feeds one shape pays it once.
 
 Neither phase is proportional to your dataset, and neither recurs during the loop: steady-state
 `TrainStep` pays neither. If you are timing a run, expect the first step to be markedly slower
@@ -472,7 +473,8 @@ build/merge phase (concretization, shape inference, graph lowering and memory op
 state init); `RuntimeContext` compiles the training-step graph into its executable session and runs it,
 so it is the context whose session actually executes training. It is the sole compile/run context for
 `TrainStep`, `Train` and `Fit` — none of them takes a per-call context override, so a rig has exactly
-one compiled training-step graph that the `Fit`/`Train` loop and a manual `TrainStep` loop all share.
+one set of compiled training-step sessions (one per fed input shape) that the `Fit`/`Train` loop and a
+manual `TrainStep` loop all share.
 Every `With…` derivation keeps the same two contexts.
 
 **What the two can usefully differ in: nothing, today.** `ComputeContext` has a single parameterless
@@ -578,7 +580,7 @@ last; on each, passing the values as an array instead reaches the overload that 
 
 Reporting covers the **build** and stops there. Calls that are not builds stay silent: `ToConcreteModel`,
 `InitializeTrainableParams` and `GetRngStreamReport` take no sink, though all three can be slow. Neither
-does the first `TrainStep`, whose one-time compile ([above](#what-construction-costs)) is not a build —
+does the first `TrainStep` at a shape, whose compile ([above](#what-construction-costs)) is not a build —
 so expect a quiet stretch there after the build has reported itself complete.
 
 To capture the *graphs* rather than the stage names — after the fact, as compilable C# — see
@@ -651,7 +653,9 @@ stays the safer one, since it catches a swapped pair that `FromOrderedData` acce
   the smaller final batch (only safe if the graph tolerates a variable batch dimension). The rig
   compiles its training-step session for the exact input shapes it is fed — that is what lets ONNX
   Runtime fold the step's shape arithmetic away — so a differently-shaped batch costs one extra
-  session compile the first time it appears, and is then cached like the full-size shape.
+  session compile the first time it appears, and is then cached like the full-size shape. Up to four
+  distinct shapes get their own session; any further shape runs on a shape-generic session instead,
+  so a stream of never-repeating shapes pays a bounded number of compiles and then behaves as before.
 - **Resume.** A checkpoint's `.Epoch` / `.BatchIndex` name the batch that was **used** at its last
   step. Save the `FinalCheckpoint` (or any mid-run checkpoint), then in a later process rebuild the rig
   and a loader over the same data/seed and call `rig.Fit(loader, numEpochs, initialCheckpoint: loaded)`:

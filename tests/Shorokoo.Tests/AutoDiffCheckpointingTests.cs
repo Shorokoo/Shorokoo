@@ -374,7 +374,7 @@ public class AutoDiffCheckpointingCoverageTests
         var danglingGraph = new InternalComputationGraph([y], [OnnxOp.Concat([grown, grown, grown, grown], axis: 0)]);
 
         var evaluator = new GraphEvaluator();
-        foreach (var order in new[] { EvaluationOrder.OrtOrder, EvaluationOrder.ProtoOrder })
+        foreach (var order in (EvaluationOrder[])[EvaluationOrder.OrtOrder, EvaluationOrder.ProtoOrder])
         {
             Assert.Equal(Mb + 8, evaluator.Evaluate(aliasGraph, Infer(aliasGraph, [512, 512]), order).PeakMemoryBytes);
             Assert.Equal(5 * Mb / 2, evaluator.Evaluate(danglingGraph, Infer(danglingGraph, [512, 512]), order).PeakMemoryBytes);
@@ -505,7 +505,7 @@ public class AutoDiffCheckpointingCoverageTests
     [Fact]
     public void TestRematerializedTrainingStepsMatchTheirOriginalsThroughOrtCoverage()
     {
-        foreach (var model in new[] { Modules.PlainNarrowMlpStack.ComputationGraph, Modules.CheckpointedNarrowMlpStack.ComputationGraph })
+        foreach (var model in (ComputationGraph[])[Modules.PlainNarrowMlpStack.ComputationGraph, Modules.CheckpointedNarrowMlpStack.ComputationGraph])
         {
             var (rig, _, _) = MlpStackRig(model, [1024L, 32L]);
             var expected = Run(rig, rig.PreOptimizationGraph);
@@ -561,7 +561,7 @@ public class AutoDiffCheckpointingCoverageTests
         var (plain, plainInfo) = Build(false);
         var (reading, readingInfo) = Build(true);
         var evaluator = new GraphEvaluator();
-        foreach (var order in new[] { EvaluationOrder.OrtOrder, EvaluationOrder.ProtoOrder })
+        foreach (var order in (EvaluationOrder[])[EvaluationOrder.OrtOrder, EvaluationOrder.ProtoOrder])
         {
             var without = evaluator.Evaluate(plain, plainInfo, order).PeakMemoryBytes;
             var with = evaluator.Evaluate(reading, readingInfo, order).PeakMemoryBytes;
@@ -585,6 +585,16 @@ public class AutoDiffCheckpointingCoverageTests
         Assert.Equal(4 * Mb + 8, new GraphEvaluator().Evaluate(graph, shapeInfo, EvaluationOrder.ProtoOrder).PeakMemoryBytes);
         Assert.Equal(3 * Mb + 8, new GraphEvaluator(modelOrtBufferReuse: false).Evaluate(graph, shapeInfo, EvaluationOrder.ProtoOrder).PeakMemoryBytes);
         Assert.True(new GraphEvaluator().Evaluate(graph, shapeInfo).PeakMemoryBytes >= new GraphEvaluator(modelOrtBufferReuse: false).Evaluate(graph, shapeInfo).PeakMemoryBytes);
+
+        var y = InputTensor<float32>("y", rank: 2);
+        var a2 = OnnxOp.Exp(y);
+        var t1 = OnnxOp.ReduceSum(a2);
+        var c2 = OnnxOp.Concat([y, y], axis: 0);
+        var t2 = OnnxOp.ReduceSum(c2);
+        var b2 = OnnxOp.Neg(OnnxOp.Reshape(y, OnnxOp.Constant((long[])[256L, 1024L]), allowZero: false));
+        var sameBytesOtherShape = new InternalComputationGraph([y], [OnnxOp.Add(OnnxOp.Add(OnnxOp.ReduceSum(b2), t1), t2)]);
+        var otherInfo = Infer(sameBytesOtherShape, [512, 512]);
+        Assert.Equal(3 * Mb + 8, new GraphEvaluator().Evaluate(sameBytesOtherShape, otherInfo, EvaluationOrder.ProtoOrder).PeakMemoryBytes);
     }
 
     [Fact]

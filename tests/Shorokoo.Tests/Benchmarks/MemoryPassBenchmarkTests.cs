@@ -597,6 +597,7 @@ public class MemoryPassBenchmarkTests
         public double PeakRegressionFactor { get; set; } = MemoryPassBenchmarkTests.PeakRegressionFactor;
         public double ComputeRegressionFactor { get; set; } = MemoryPassBenchmarkTests.ComputeRegressionFactor;
         public double RealPeakRegressionFactor { get; set; } = MemoryPassBenchmarkTests.RealPeakRegressionFactor;
+        public long RealPeakNoiseFloorBytes { get; set; } = MemoryPassBenchmarkTests.RealPeakNoiseFloorBytes;
         public required Dictionary<string, FamilyMeasurement> Families { get; set; }
     }
 

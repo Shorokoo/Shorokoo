@@ -94,7 +94,13 @@ namespace Shorokoo
         private CompiledGraph? _compiledTrainStepGeneric;
 
         /// <summary>How many distinct input-shape signatures get their own shape-specialized session.</summary>
-        private const int MaxShapeSpecializedTrainSteps = 4;
+        internal const int MaxShapeSpecializedTrainSteps = 4;
+
+        /// <summary>The input-shape signatures with a shape-specialized session so far (test hook).</summary>
+        internal IReadOnlyCollection<string> CompiledTrainStepShapeKeys => _compiledTrainSteps.Keys;
+
+        /// <summary>Whether the shape-generic fallback session has been compiled (test hook).</summary>
+        internal bool HasGenericTrainStepSession => _compiledTrainStepGeneric is not null;
 
         /// <summary>
         /// The compiled trainstep for the given (struct-expanded, graph-input-ordered) inputs, compiled

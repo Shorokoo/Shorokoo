@@ -917,8 +917,8 @@ and split into `c` pieces of `[Lq/c, Lk]` under `queryChunks`.
 high-water mark of one training step on the CPU backend (`VmHWM` with ONNX Runtime's arena
 off, so every activation is a real allocation), for a step whose attention has all three
 projections trainable, with a causal mask, at `N = 2`, `H = 4`, `L = 256` — a 2 MiB score
-block. It is what `MemoryPassBenchmarkTests` records, after the training rig's own memory
-pass has run (see [limitations.md](limitations.md#gradient-activation-checkpointing)).
+block, read the way the framework's own memory benchmark reads it, after the training rig's
+memory pass has run (see [limitations.md](limitations.md#gradient-activation-checkpointing)).
 
 The score block is not the only term. The peak also holds q/k/v and their gradients, each
 `N · H · L · d · 4` bytes — call that a **q block**. It is `d/L` times a score block, so it is
@@ -989,7 +989,7 @@ dynamic, and chunk `i` covers rows `[Lq·i/c, Lq·(i+1)/c)`, so an `Lq` that doe
 evenly just gives chunks differing by one row (and a `c` larger than `Lq` gives empty chunks —
 still correct, just wasted launches). Keep `c` small: `c` chunks mean `c` MatMul and Softmax
 launches instead of one, and the graph grows accordingly — the built (pre-optimization)
-one-attention training step goes from 506 to 1 310 nodes at `c = 4`.
+one-attention training step goes from 505 to 1 308 nodes at `c = 4`.
 
 It reaches only the `Attention.ScaledDotProductAttention` helper, not `MultiHeadAttention`,
 `TransformerEncoderLayer` or `TransformerDecoderLayer`: a `[Module]`'s parameters are all
@@ -1036,10 +1036,9 @@ with a large compute increase; the attribute is how you say you want that trade 
 Measure before relying on it, because it is not always a win over the automatic pass. That
 pass already recomputes what pays under its objective, and it is free to choose finer-grained
 recomputations than a whole segment; the hint buys its memory with less compute, and it is
-the only lever on a step the pass would not touch. The coverage tests pin the direction on a
-three-block MLP of width 32 behind a linear head, at a batch the pass leaves alone: the
-checkpointed twin's modelled peak is about half the plain one's, for some 14% more modelled
-compute, with an identical loss trajectory. At a batch large enough for the pass to act, the
+the only lever on a step the pass would not touch. On a three-block MLP of width 32 behind a
+linear head, at a batch the pass leaves alone, the checkpointed twin's modelled peak is 40%
+below the plain one's, for some 14% more modelled compute, with an identical loss trajectory. At a batch large enough for the pass to act, the
 automatic pass and the hint land within a few percent of each other on that model, and on a
 wide MLP or a two-layer transformer encoder the hint came out slightly worse than the
 automatic pass on both counts. The hint is for a segment whose activations are what the peak

@@ -131,10 +131,13 @@ namespace Shorokoo.Runtime
         /// its <c>mergeContext</c>: <c>TrainingRig.FromScratch</c>, each <c>With…</c> derivation, and
         /// <c>TrainingRig.Load</c> — reports each stage as it enters it, so a build that runs for
         /// minutes is visibly alive and its last report names the stage it is in. <c>null</c> (the
-        /// default) reports nothing and costs nothing. Only a full <c>FromScratch</c> concretizes, so
-        /// only its report stream opens with <see cref="BuildPhase.Concretize"/>; a derivation or a
-        /// load starts at <see cref="BuildPhase.TrainingStep"/>, on a clock of its own. A build given no
-        /// context runs on <see cref="Default"/>, so a sink set there reports every such build.
+        /// default) reports nothing and costs nothing. Only a full <c>FromScratch</c> lowers a model, so
+        /// only its <see cref="BuildPhase.Concretize"/> phase names lowering passes: a plain
+        /// <c>With…</c> derivation reuses the architecture and opens at
+        /// <see cref="BuildPhase.TrainingStep"/>, while <c>WithSeed</c> (a clone and RNG rebind) and
+        /// <c>Load</c> (a file read) open at <see cref="BuildPhase.Concretize"/> naming that work
+        /// instead. Each runs on a clock of its own. A build given no context runs on
+        /// <see cref="Default"/>, so a sink set there reports every such build.
         ///
         /// <para>Reports are raised synchronously on the building thread, so use
         /// <see cref="SynchronousBuildProgress"/> (which calls its handler inline) rather than

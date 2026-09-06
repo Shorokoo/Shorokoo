@@ -427,7 +427,8 @@ namespace Shorokoo
         /// block (a flat checkpoint, which carries training state only) fails loudly.
         /// </summary>
         internal static TrainingRig ReconstructRigFromSkpt(
-            string filePath, ComputeContext mergeContext, ComputeContext runtimeContext)
+            string filePath, ComputeContext mergeContext, ComputeContext runtimeContext,
+            BuildProgressReporter? progress = null)
         {
             VerifySkptContainer(filePath,
                 "A flat checkpoint stores training state only — no rig constituents to rebuild " +
@@ -494,7 +495,7 @@ namespace Shorokoo
 
             return TrainingRig.ReconstructFromConstituents(
                 archGraph, lossGraph, optimizerGraph, hypers, names, rngConfig,
-                mergeContext, runtimeContext);
+                mergeContext, runtimeContext, progress);
         }
 
         /// <summary>

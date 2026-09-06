@@ -534,7 +534,8 @@ var rig = TrainingRig.FromScratch(
 [ 121.7s] Initialize: Done
 ```
 
-(`…` marks stages elided here, not gaps in the output — every stage reports.)
+(`…` marks stages elided here, not gaps in the output — every stage reports. The last line is the
+terminal report, the one whose `IsComplete` is true.)
 
 Each `BuildProgress` is reported as the build **enters** the named stage, so a build that has been
 quiet for minutes is inside the stage its last report named. It carries three fields:
@@ -547,9 +548,10 @@ quiet for minutes is inside the stage its last report named. It carries three fi
   (`InlineModulesAndFunctions`, `ExpandAutoGrad`, `OptimizeTrainingStepGraph`, …). Stage names are
   diagnostics, not API: they track the pipeline and change with it, so never branch on one.
 - `IsComplete` — true for the single terminal report of a build that ran to completion, which names
-  no stage being entered: a stream sitting on it is finished, not stuck (the one report the rule
-  above does not apply to). A build that threw never emits one. This is the only report property a
-  program should test.
+  no stage being entered and renders its `Stage` as `Done`: a stream sitting on it is finished, not
+  stuck (the one report the rule above does not apply to). A build that threw never emits one. It is
+  stamped by the build, not re-derived from the stage text, so test it rather than the `Done` string
+  — `Phase` and `IsComplete` are the two members a program may rely on; `Stage` is for a human.
 - `Elapsed` — time since the start of *this* build. One clock spans all three phases.
 
 `ToString()` renders the line shown above. Reports are raised **synchronously on the building
@@ -559,9 +561,12 @@ exactly what a liveness signal must not do. Keep the handler short; it runs insi
 exception it throws propagates out of the build and discards it. A context shared by concurrent
 builds delivers their reports interleaved, on their own threads.
 
-**Which calls report.** Every build that takes a merge context: `FromScratch` (all three phases),
-each `With…` derivation and `TrainingRig.Load` (which reuse the concrete architecture, so they open
-at `TrainingStep`), and the lowering step on its own —
+**Which calls report.** Every build that takes a merge context: `FromScratch` (all three phases);
+each `With…` derivation, which reuses the concrete architecture and so opens at `TrainingStep` —
+except `WithSeed`, which clones and rebinds the RNG identity and so opens with a `Concretize` phase
+naming that work; `TrainingRig.Load`, which likewise opens at `Concretize`, naming its file reads
+rather than lowering passes, and reports complete only once the resumed checkpoint is in hand; and
+the lowering step on its own —
 
 ```csharp
 var concrete = MyModel.ComputationGraph.ToConcreteArchitecture(inputHints, buildContext);

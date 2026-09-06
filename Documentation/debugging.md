@@ -104,5 +104,5 @@ finishes ends on a report whose `IsComplete` is true.)
 The same context passed to `TrainingRig.FromScratch` as its `mergeContext` covers the whole rig
 build — concretization, training-step composition and initialization — under one clock. See
 [training.md](training.md#watching-a-long-build) for the full report shape (`BuildPhase`, `Stage`,
-`Elapsed`), the phase order, which calls report, and why to prefer `SynchronousBuildProgress` over
-`System.Progress<T>`.
+`Elapsed`, `IsComplete`), the phase order, which calls report, and why to prefer
+`SynchronousBuildProgress` over `System.Progress<T>`.

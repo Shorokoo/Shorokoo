@@ -661,7 +661,8 @@ namespace Shorokoo
             InternalComputationGraph concreteArch,
             ComputeContext mergeContext,
             ComputeContext runtimeContext,
-            BuildProgressReporter? progress = null)
+            BuildProgressReporter? progress = null,
+            bool completesBuild = true)
         {
             var c = constituents;
             ValidateConstituents(c);
@@ -692,6 +693,7 @@ namespace Shorokoo
                 concreteArch, c.Loss.ToInternal(), c.Optimizer.ToInternal(), c.Hyperparameters, c.Names,
                 progress);
             rig.InitializeAndOptimize(concreteArch, mergeContext, c.RngConfig, progress);
+            if (completesBuild) progress?.ReportComplete(BuildPhase.Initialize);
             return rig;
         }
 
@@ -886,8 +888,9 @@ namespace Shorokoo
             // retained arch pristine. Clone() copies node attributes by reference, so the clone's
             // MODEL_TENSOR_INPUT nodes still carry the representative-input attributes (same model inputs).
             var progress = BuildProgressReporter.For(MergeContext);
-            progress?.Report(BuildPhase.Concretize, "BindRngConfig");
+            progress?.Report(BuildPhase.Concretize, "CloneArchitecture");
             var reArch = _concreteArch.Clone();
+            progress?.Report(BuildPhase.Concretize, "BindRngConfig");
             reArch.ApplyRngConfig(rngConfig);
             return DeriveFromConcreteArch(
                 _constituents with { RngConfig = rngConfig }, reArch, MergeContext, RuntimeContext, progress);
@@ -2478,7 +2481,8 @@ namespace Shorokoo
             IReadOnlyList<string>? hyperparameterNames,
             RngConfig rngConfig,
             ComputeContext mergeContext,
-            ComputeContext runtimeContext)
+            ComputeContext runtimeContext,
+            BuildProgressReporter? progress = null)
         {
             if (concreteArch is null) throw new ArgumentNullException(nameof(concreteArch));
             if (loss is null) throw new ArgumentNullException(nameof(loss));
@@ -2492,12 +2496,19 @@ namespace Shorokoo
             // into the arch's RngSeed param at the original build, so it is NOT re-applied here; it rides
             // as a constituent so the reconstructed rig re-derives identical initial values (load-time
             // defaults, optimizer-state seeding).
+            // Two full walks of the largest graph in the file, so named rather than left as silence
+            // before the derivation's own first report.
+            progress?.Report(BuildPhase.Concretize, "ThawConcreteArchitecture");
             var archInternal = concreteArch.ToInternal().Clone();
 
             var constituents = new RigConstituents(
                 new ComputationGraph(archInternal, GraphKind.ConcreteArchitecture),
                 loss, optimizer, hyperparameters, hyperparameterNames, rngConfig);
-            return DeriveFromConcreteArch(constituents, archInternal, mergeContext, runtimeContext);
+
+            // Not the end of the build: Load still has the checkpoint payload to read, and owns the
+            // terminal report accordingly.
+            return DeriveFromConcreteArch(
+                constituents, archInternal, mergeContext, runtimeContext, progress, completesBuild: false);
         }
 
         /// <summary>
@@ -2510,9 +2521,10 @@ namespace Shorokoo
         /// <see cref="LoadCheckpoint"/> (which requires a pre-existing rig). The two compute contexts
         /// seed the rebuilt rig (rev 22; never persisted — a reloaded run gets fresh ones), each
         /// defaulting to <see cref="ComputeContext.Default"/>. Re-deriving the trainstep is most of a
-        /// build and takes as long, so <c>mergeContext</c>'s <see cref="ComputeContext.Progress"/>
-        /// reports it too — from <see cref="BuildPhase.TrainingStep"/> on, the concrete architecture
-        /// coming off the file rather than being lowered again. The file must be a training <c>.skpt</c>
+        /// build — everything but the concretization, which the file's saved architecture replaces — so
+        /// <c>mergeContext</c>'s <see cref="ComputeContext.Progress"/> reports this too: the file read
+        /// and the checkpoint payload read included, ending complete only once the resumed checkpoint
+        /// is in hand. The file must be a training <c>.skpt</c>
         /// written with the rig constituents (every training <c>.skpt</c> carries them); a flat
         /// checkpoint has no constituents to rebuild from and fails loudly — pass the rig and use
         /// <see cref="LoadCheckpoint"/> for that shape.
@@ -2526,9 +2538,18 @@ namespace Shorokoo
         {
             if (string.IsNullOrWhiteSpace(filePath))
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
+
+            // Load owns the whole span, so it owns the terminal report: the payload read below is the
+            // build's largest I/O, and a "finished" report ahead of it would be worse than none.
+            var merge = mergeContext ?? ComputeContext.Default;
+            var progress = BuildProgressReporter.For(merge);
+            progress?.Report(BuildPhase.Concretize, "ReadCheckpointFile");
             var rig = Persistence.ReconstructRigFromSkpt(
-                filePath, mergeContext ?? ComputeContext.Default, runtimeContext ?? ComputeContext.Default);
+                filePath, merge, runtimeContext ?? ComputeContext.Default, progress);
+
+            progress?.Report(BuildPhase.Initialize, "LoadCheckpointState");
             var checkpoint = rig.LoadCheckpointFromSkpt(filePath);
+            progress?.ReportComplete(BuildPhase.Initialize);
             return (rig, checkpoint);
         }
 
@@ -2819,7 +2840,6 @@ namespace Shorokoo
             PreOptimizationGraph = new ComputationGraph(graph, GraphKind.ConcreteModel);
             TrainingStepPureGraph = new ComputationGraph(optResult.OptimizedGraph, GraphKind.ConcreteModel);
             _trainingStepWorkGraph = null;
-            progress?.ReportComplete(BuildPhase.Initialize);
         }
     }
 

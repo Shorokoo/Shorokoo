@@ -61,10 +61,13 @@ namespace Shorokoo.Graph
         /// QEE/ORT resolution fallbacks during lowering; build one with <see cref="FromOrderedInputs"/>.</param>
         /// <param name="computeContext">Optional context used to resolve values while lowering.</param>
         /// <param name="debugRequests">Optional hook to dump the graph at each lowering stage.</param>
-        /// <param name="progress">Optional reporter the pipeline names each stage to as it enters it;
-        /// <c>null</c> creates one from <paramref name="computeContext"/>'s
-        /// <see cref="ComputeContext.Progress"/> sink, so a caller that is itself part of a larger build
-        /// (e.g. <c>TrainingRig.FromScratch</c>) can pass its own and keep one clock across the whole build.</param>
+        /// <param name="progress">The reporter the pipeline names each stage to as it enters it, or
+        /// <c>null</c> for none. Resolved by the caller rather than from
+        /// <paramref name="computeContext"/> here: the caller owns the clock (so one spans a whole
+        /// <c>TrainingRig.FromScratch</c>) and owns the terminal report, which this pipeline is in no
+        /// position to raise — both its callers have work left when it returns. Omitted, the pipeline
+        /// stays silent even when <paramref name="computeContext"/> carries a sink: quiet is the safe
+        /// failure here, where deriving a reporter would open a second stream on a second clock.</param>
         /// <returns>A fully inlined, concrete architecture graph.</returns>
         internal static InternalComputationGraph ToConcreteArchitecture(
             this InternalComputationGraph graph,
@@ -73,7 +76,6 @@ namespace Shorokoo.Graph
             DebugRequests? debugRequests = null,
             BuildProgressReporter? progress = null)
         {
-            progress ??= BuildProgressReporter.For(computeContext);
             void Stage(string stage) => progress?.Report(BuildPhase.Concretize, stage);
 
             Stage("Clone");

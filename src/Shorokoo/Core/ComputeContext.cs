@@ -196,7 +196,7 @@ namespace Shorokoo.Runtime
 
         internal CompiledGraph Compile(InternalComputationGraph graph)
         {
-            graph.RequireRunnableOps("graph compilation");
+            graph.RequireRunnableOps($"{nameof(ComputeContext)}.{nameof(Compile)}");
             var originalInputNames = ResolveOriginalInputNames(graph);
             return CompileFromModel(
                 () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true),
@@ -274,6 +274,11 @@ namespace Shorokoo.Runtime
         /// </summary>
         internal NamedModelParam[] Execute(InternalComputationGraph graph, params IData[] inputs)
         {
+            // Before the arity check below: a module graph's inputs routinely disagree with what the
+            // caller passed (its [Hyper] parameters are inputs too), and CR006 would report that
+            // instead of the machinery that is the real problem.
+            graph.RequireRunnableOps($"{nameof(ComputeContext)}.{nameof(Execute)}");
+
             var expandedInputs = ExpandStructInputs(inputs);
 
             if (expandedInputs.Length != graph.Inputs.Count)
@@ -326,7 +331,7 @@ namespace Shorokoo.Runtime
         /// </summary>
         internal NamedModelParam[] Run(InternalComputationGraph graph, params NamedModelParam[] inputs)
         {
-            graph.RequireRunnableOps("graph execution");
+            graph.RequireRunnableOps($"{nameof(ComputeContext)}.{nameof(Run)}");
             var originalInputNames = ResolveOriginalInputNames(graph);
             return RunFromModel(
                 () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true),

@@ -662,64 +662,80 @@ namespace Shorokoo.Graph
         }
 
         /// <summary>
-        /// Refuses a graph that still carries module machinery
-        /// (<see cref="FastNodeClassification.IsUnrunnableModuleOp"/>), naming the residual ops and
-        /// the lowering that removes them. Guards the eager-evaluation entry points
-        /// (<c>OnnxEngine.Eval</c>, <c>ComputeContext.Eval</c>, <c>Tensor&lt;T&gt;.Eval</c>,
-        /// <c>inputs.Eval(outputs).With(...)</c>), which build their graph from output variables and
-        /// so have no stamped <see cref="GraphKind"/> for <c>ComputationGraph.RequireConcretized</c>
-        /// to read, and backs them up on the session paths themselves
-        /// (<c>ComputeContext.Run</c>/<c>Compile</c>), which catches a graph arriving from anywhere
-        /// else — a wrongly stamped <c>ComputationGraph.FromInternal</c> among them.
+        /// Refuses a graph that still carries ops the execution pipeline cannot lower away
+        /// (<see cref="FastNodeClassification.IsUnrunnableModuleOp"/>), naming them and the lowering
+        /// that removes them, instead of letting ONNX Runtime reject the model for an op that
+        /// appears nowhere in the public API.
         ///
-        /// <para>Without this the graph reaches ONNX Runtime, which rejects it as an invalid
-        /// <em>model</em> naming an internal op that appears nowhere in the public API
-        /// (<c>No Op registered for ShrkCreateModule</c>).</para>
+        /// <para>The gate lives on the session paths (<c>ComputeContext.Execute</c>/<c>Run</c>/
+        /// <c>Compile</c>), which every execution funnels through, so a graph is caught wherever it
+        /// comes from — including one stamped past <c>ComputationGraph.RequireConcretized</c> by
+        /// <c>FromInternal</c> or <c>WithKind</c>. The eager-evaluation entry points
+        /// (<c>OnnxEngine.Eval</c>, <c>ComputeContext.Eval</c>, <c>Tensor&lt;T&gt;.Eval</c>,
+        /// <c>inputs.Eval(outputs).With(...)</c>) call it again first, and only for the message:
+        /// they build their graph from output variables, so they have no stamped
+        /// <see cref="GraphKind"/> to read and the operation the reader typed is known only there.
+        /// </para>
         /// </summary>
         internal static void RequireRunnableOps(this InternalComputationGraph graph, string operation)
         {
-            if (graph is null) throw new System.ArgumentNullException(nameof(graph));
-
             foreach (var node in graph.Nodes)
                 if (node.IsUnrunnableModuleOp())
                     ThrowUnrunnableModuleOps(graph, operation);
         }
 
-        /// <summary>Cold path of <see cref="RequireRunnableOps"/>: builds the message the gate throws,
-        /// naming the residual op kinds (at most <see cref="NamedModuleOpLimit"/> of them, since the
-        /// <c>ShrkSubModel#</c> family gives a deep model one op code per sub-module).</summary>
+        /// <summary>Cold path of <see cref="RequireRunnableOps"/>: builds the message the gate throws.
+        /// The remedy is spelled against the module the reader called when the graph names one that
+        /// can be written as C#, and stays generic when it does not — a graph can carry machinery
+        /// with no module behind it at all (a bare <c>#AutoGrad#</c>, say).</summary>
+        [System.Diagnostics.CodeAnalysis.DoesNotReturn]
         private static void ThrowUnrunnableModuleOps(InternalComputationGraph graph, string operation)
         {
-            var kinds = graph.Nodes.Where(n => n.IsUnrunnableModuleOp())
+            // Ordinal order would lead with the '#Sigil#' names, which mean nothing outside the
+            // codebase, and bury the Shrk* ops that actually say "module machinery".
+            var named = string.Join(", ", graph.Nodes
+                .Where(n => n.IsUnrunnableModuleOp())
                 .Select(n => n.OpCode)
                 .Distinct()
-                .OrderBy(op => op, System.StringComparer.Ordinal)
-                .ToList();
-            var named = string.Join(", ", kinds.Take(NamedModuleOpLimit))
-                + (kinds.Count > NamedModuleOpLimit ? ", …" : string.Empty);
-            // The module a machinery node was built from, so the remedy names the reader's own type
-            // rather than a placeholder. Only a module-typed target will do: the residual op may
-            // instead be a parameter reference, whose target is the [TrainableParamInitializer] —
-            // naming that would send the reader off to lower an initializer. A reloaded graph
-            // carries no target at all, and there the placeholder is all there is to offer.
-            var module = graph.Nodes
-                .FirstOrDefault(n => n.TargetFunction is
-                    { FunctionType: FunctionType.Module or FunctionType.ModuleSignature })
-                ?.TargetFunction?.FriendlyName ?? "MyModule";
+                .OrderBy(op => op.StartsWith('#') ? 1 : 0)
+                .ThenBy(op => op, System.StringComparer.Ordinal));
+
+            var module = WritableModuleName(graph);
+            var remedy = module is null
+                ? "Lower the graph the whole way — ToConcreteArchitecture(inputHints) then "
+                  + "ToConcreteModel() — and execute that."
+                : $"Lower {module}'s graph first and execute that: var g = {module}.ComputationGraph; "
+                  + "var model = g.ToConcreteArchitecture(g.FromOrderedInputs(values)).ToConcreteModel(); "
+                  + "where values are sample TensorData for g.InputNames in order — [Hyper] "
+                  + "parameters first — which the concrete model takes as its inputs too.";
 
             throw new System.InvalidOperationException(SrkFileFormat.MachineryMismatchMessage(
                 operation, "a concretized graph (a 'concrete-architecture' or 'concrete-model')",
-                GraphKind.Module,
-                $"It still carries module machinery that no ONNX Runtime kernel implements ({named}), "
-                + $"as a [Module]'s output ({module}.Call(...)) does until the module's graph is lowered. "
-                + "Lower it first and execute that: "
-                + $"var g = {module}.ComputationGraph; "
-                + "var model = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel(); "
-                + "ComputeContext.Default.Execute(model, input) — where input is a sample TensorData "
-                + "of the shape you will run."));
+                SrkFileFormat.DetectStage(graph),
+                $"It still carries module machinery that no ONNX Runtime kernel implements ({named}). "
+                + remedy + " See Documentation/inference.md#running-a-module."));
         }
 
-        private const int NamedModuleOpLimit = 3;
+        /// <summary>The module whose machinery this graph carries, when the name can be pasted into
+        /// the remedy as C#. Only a <see cref="FunctionType.Module"/> target will do: a parameter
+        /// reference's target is the <c>[TrainableParamInitializer]</c>, and a
+        /// <see cref="FunctionType.ModuleSignature"/>'s is a minted placeholder — neither is a type
+        /// the reader can call <c>.ComputationGraph</c> on. Nor is a name a module built from a
+        /// delegate carries (its declaring type, or whatever string the caller passed), so anything
+        /// that is not an identifier is dropped too.</summary>
+        private static string? WritableModuleName(InternalComputationGraph graph)
+        {
+            var name = graph.Nodes
+                .FirstOrDefault(n => n.IsUnrunnableModuleOp()
+                    && n.TargetFunction is { FunctionType: FunctionType.Module })
+                ?.TargetFunction?.FriendlyName;
+
+            return name is not null && name.Length > 0
+                && (char.IsLetter(name[0]) || name[0] == '_')
+                && name.All(c => char.IsLetterOrDigit(c) || c == '_')
+                ? name
+                : null;
+        }
 
         private static void AssertFastGraphDoesNotContainOps(InternalComputationGraph fastGraph, string[] forbiddenOps, string stageName)
         {

@@ -187,8 +187,10 @@ namespace Shorokoo.Core.Utils
             // (binding an RNG config IS its initialization, legitimate from architecture
             // stage on), so it never counts as an "initialized model parameter" here.
             //
-            // Module machinery is classified by the shared FastNodeClassification predicate,
-            // which the Eval-path gate consumes too.
+            // Module machinery is classified by FastNodeClassification.IsModuleStageMachinery —
+            // the classification question, deliberately not the executability one the execution
+            // gate asks (IsUnrunnableModuleOp): an initializer-typed invoke marks a graph as
+            // pre-lowering here while running perfectly well there.
             int moduleOps = 0, uninitializedParams = 0, initializedParams = 0;
             foreach (var node in graph.Nodes)
             {
@@ -305,26 +307,27 @@ namespace Shorokoo.Core.Utils
             "machinery-free graphs), re-stamp the graph with ComputationGraph.WithKind.";
 
         /// <summary>
-        /// The one format for every graph-kind-mismatch error: names the operation, the
-        /// requirement, and the actual kind, then appends the operation-specific hint and
-        /// the shared <see cref="WithKindRemedyHint"/>. Every kind gate routes through
-        /// this (or <see cref="EnforceStage"/> for file loads) so wording cannot drift.
+        /// The stamp-reading gates' form: <see cref="Mismatch"/> plus the shared
+        /// <see cref="WithKindRemedyHint"/>, since there the stamp is what may be wrong.
         /// </summary>
         internal static string KindMismatchMessage(
             string operation, string requiredDescription, GraphKind actual, string? hint = null)
             => Mismatch(operation, requiredDescription, actual, hint) + " " + WithKindRemedyHint;
 
         /// <summary>
-        /// The same sentence for the gates that scan a graph's <em>ops</em> rather than read its
-        /// stamp (<c>InternalComputationGraphExtensions.RequireRunnableOps</c>), which end at their
-        /// own hint: <see cref="WithKindRemedyHint"/> would misdirect there, because the stamp is
-        /// not what is wrong — module machinery cannot run whatever the graph is stamped, and an
-        /// eager-evaluation caller holds no <see cref="ComputationGraph"/> to re-stamp anyway.
+        /// The op-scanning gates' form (<c>InternalComputationGraphExtensions.RequireRunnableOps</c>):
+        /// <see cref="Mismatch"/> ending at the caller's own hint. <see cref="WithKindRemedyHint"/>
+        /// would misdirect there, because the stamp is not what is wrong — machinery cannot run
+        /// whatever the graph is stamped, and an eager-evaluation caller holds no
+        /// <see cref="ComputationGraph"/> to re-stamp anyway.
         /// </summary>
         internal static string MachineryMismatchMessage(
             string operation, string requiredDescription, GraphKind actual, string hint)
             => Mismatch(operation, requiredDescription, actual, hint);
 
+        /// <summary>The one leading sentence behind every graph-kind-mismatch error — the operation,
+        /// the requirement, the actual kind — so that wording cannot drift between the gates. Each
+        /// public form above adds its own ending; file loads use <see cref="EnforceStage"/>.</summary>
         private static string Mismatch(
             string operation, string requiredDescription, GraphKind actual, string? hint)
             => $"{operation} requires {requiredDescription}, but this graph is a '{StageName(actual)}'." +

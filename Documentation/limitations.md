@@ -53,9 +53,9 @@ Attention has the one exception, and it is not checkpointing: passing
 `queryChunks: c` to `Attention.ScaledDotProductAttention` splits the query axis
 into `c` blocks, which divides the score-sized **transients** by `c` but not
 what the step retains across the backward pass. It bounds the spike, not the
-floor. What it saves is shape-dependent and not always positive — measured 43%
-on one single-attention configuration and 21% *worse* on another — so measure
-it rather than assuming it. See
+floor. What it saves is shape-dependent and costs compute — measured 16% less
+peak for 15% more compute at head dim 32, and 5% for 10% at head dim 64 — so
+measure both rather than assuming either. See
 [Sizing an attention run](nn-library.md#attention-memory) for the arithmetic and
 for what the quadratic term actually costs.
 

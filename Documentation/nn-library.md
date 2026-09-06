@@ -959,18 +959,22 @@ runs attention on each against the whole key/value, and concatenates. It is exac
 matches the dense path to floating-point rounding, gradients and causal masking included (each
 chunk gets a `queryOffset` causal mask, so it still masks absolute positions).
 
-**Measure it before you rely on it.** What it buys is not stable across shapes, because what
-it really does is hand the memory-aware pass a different graph to work with, and that pass may
-or may not find anything in it. On the model above at `c = 4`:
+**Measure it before you rely on it, and expect to pay compute for it.** What it really does
+is hand the memory-aware pass a different graph — one whose smaller pieces that pass can
+rematerialize where it could not rematerialize the whole — so what you get back depends on
+what it finds. On the model above at `c = 4`:
 
-| `d` | dense | chunked | |
-|---|---|---|---|
-| 32 | 7.76 MiB | 4.46 MiB | **43% better** |
-| 64 | 9.55 MiB | 11.05 MiB | **21% worse** |
+| `d` | dense | chunked | peak | modelled compute |
+|---|---|---|---|---|
+| 32 | 7.76 MiB | 6.51 MiB | **16% better** | +15% |
+| 64 | 9.55 MiB | 9.05 MiB | **5% better** | +10% |
 
-So it is worth trying when a run is close to fitting, and worth checking that it helped. It
-shrinks the score-sized transients by `c`, but not what the step retains across the backward
-pass, and the retained term dominates.
+So it is worth trying when a run is close to fitting, and worth checking both numbers
+afterwards. It shrinks the score-sized transients by `c`, but not what the step retains across
+the backward pass, and the retained term dominates. Earlier versions of this framework got
+nothing from it at all; the gain above exists because the memory-aware pass can now recompute
+a chain rather than a single node, and the chunked graph gives it chains small enough to be
+worth recomputing.
 
 An `additiveMask` is handled per chunk. Its query axis (axis -2, once right-aligned to the
 scores' rank) must be `Lq` or `1` — the same rule the dense path enforces, and any other

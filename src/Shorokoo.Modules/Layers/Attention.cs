@@ -49,12 +49,12 @@ public static class Attention
     /// evaluates <c>c</c> independent <c>[N, H, Lq/c, Lk]</c> blocks and concatenates their
     /// outputs, so every score-sized <b>transient</b> shrinks by <c>c</c>. What it does
     /// <b>not</b> shrink is what the step <b>retains</b> across the backward pass, and that
-    /// term dominates. What it actually buys is shape-dependent and not always positive —
-    /// on one single-attention step it measured 43% better at head dim 32 and 21% WORSE at
-    /// head dim 64 — because what it really does is hand the memory-aware pass a different
-    /// graph, which may or may not find anything in it. Try it when a run is close to
-    /// fitting and check that it helped; the arithmetic is in Documentation/nn-library.md,
-    /// "Sizing an attention run".
+    /// term dominates. What it actually buys is shape-dependent and is paid for in compute —
+    /// on one single-attention step it measured 16% less peak for 15% more compute at head
+    /// dim 32, and 5% for 10% at head dim 64 — because what it really does is hand the
+    /// memory-aware pass a graph whose pieces it can rematerialize. Try it when a run is
+    /// close to fitting and check both numbers; the arithmetic is in
+    /// Documentation/nn-library.md, "Sizing an attention run".
     /// The count is a build-time C# int, not
     /// a graph value, so it is fixed when the graph is built; <c>Lq</c> stays dynamic and is
     /// split as evenly as it divides (chunk <c>i</c> covers rows

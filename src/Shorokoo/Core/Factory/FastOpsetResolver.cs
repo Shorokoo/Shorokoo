@@ -174,18 +174,21 @@ namespace Shorokoo.Core.Factory
         public static OpsetInfo? Resolve(
             FastNode node,
             FastNode? graphOpenNode,
-            OpSetVersion opset)
+            OpSetVersion opset,
+            bool stripCheckpointStamp = true)
         {
             var nodeDef = Definitions.NodeDefinitions[node.OpCode].Resolve(node.Attributes.ToProto());
             if (nodeDef.IsGraphNode && IsOpenOpCode(node.OpCode))
                 return null;
 
             // The activation-checkpoint stamp inlining puts on a segment's nodes is consumed by
-            // the memory-aware pass and is not part of any op's schema, so it never reaches an
-            // emitted NodeProto — ORT rejects an attribute its kernel does not declare, and a
-            // vanilla export must carry nothing Shorokoo-private. (A MODEL_INVOKE's own hint is
-            // in its definition and is not emitted here: it is not a kernel.)
-            if (node.OpCode != InternalOpCodes.MODEL_INVOKE)
+            // the memory-aware pass and is not part of any op's schema, so it never reaches a
+            // NodeProto ORT will run or a vanilla export — ORT rejects an attribute its kernel
+            // does not declare, and an export must carry nothing Shorokoo-private. Shorokoo's own
+            // .srk dialect keeps it (stripCheckpointStamp false): a rig reloaded from a checkpoint
+            // must still honour the [Module(Checkpoint = true)] its architecture was built with.
+            // (A MODEL_INVOKE's own hint is in its definition and is not emitted here.)
+            if (stripCheckpointStamp && node.OpCode != InternalOpCodes.MODEL_INVOKE)
                 node = StripCheckpointStamp(node);
 
             // Close-node form: the NodeProto's inputs come from the matching OPEN node;

@@ -15,15 +15,18 @@ namespace Shorokoo.Tests.Benchmarks;
 /// ten times slower: in encoder1's training step the batched attention products (inputs
 /// 8×4×…) take 6.6 + 3×1.0 ms with denormals live and 0.7 + 3×0.2 ms with
 /// <c>session.set_denormal_as_zero</c> (ORT profiler, fresh process each, idle machine).
-/// The <see cref="ShorokooGraphOptimization.TrainingStep"/> profile must flush them; this compares
-/// a session under the factory's configuration of that profile against one that flushes explicitly.
+/// This compares a session under the factory's <see cref="ShorokooGraphOptimization.TrainingStep"/>
+/// configuration against one that flushes explicitly. Skipped: ORT's <c>set_denormal_as_zero</c>
+/// sets FTZ/DAZ on the constructing thread once per process and leaks it into managed code, so the
+/// factory cannot enable it (Shorokoo/Shorokoo#252, open) — the fix has to keep the gradients out of
+/// the denormal range or scope the flag to the run.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Benchmark")]
 [Collection(SerialMeasurement.Name)]
 public class DenormalTrainingSessionTests
 {
-    [Fact]
+    [Fact(Skip = "Shorokoo/Shorokoo#252: attention gradients are denormal and MLAS GEMM runs ~7× slower; set_denormal_as_zero leaks FTZ/DAZ into the calling thread")]
     public void TestAttentionMatMulsDoNotPayForDenormalsInTheTrainingSession()
     {
         long[] shape = [8L, 128L, 128L];

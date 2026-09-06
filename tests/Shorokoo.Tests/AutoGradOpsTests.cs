@@ -86,6 +86,7 @@ public class AutoGradElementwiseOpsCoverageTests
         RunTensor<AutoGradHardSwishCheck>([2L], 1.5f, -1.5f);
         RunTensor<AutoGradMishCheck>([2L], 0.7f, -0.7f);
         RunTensor<AutoGradSoftplusCheck>([2L], 0.5f, -0.5f);
+        RunTensor<AutoGradSoftplusTailCheck>([3L], -10f, -20f, -30f);
         RunTensor<AutoGradSoftsignCheck>([2L], 0.5f, -0.5f);
         RunTensor<AutoGradThresholdedReluCheck>([2L], 1.0f, 0.0f);
         RunTensor<AutoGradShrinkCheck>([3L], 1.0f, -1.0f, 0.1f);

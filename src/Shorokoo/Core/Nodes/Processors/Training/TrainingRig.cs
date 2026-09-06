@@ -113,10 +113,13 @@ namespace Shorokoo
                 dims[i] = expandedInputs[i] is TensorData t ? t.Shape.Dims : null;
             var key = string.Join(";", dims.Select(d => d is null ? "?" : string.Join(",", d)));
 
-            if (_compiledTrainSteps.TryGetValue(key, out var compiled)) return compiled;
-            if (_compiledTrainSteps.Count < MaxShapeSpecializedTrainSteps)
-                return _compiledTrainSteps[key] = RuntimeContext.Compile(TrainingStepPureGraph.ToInternal(), dims);
-            return _compiledTrainStepGeneric ??= RuntimeContext.Compile(TrainingStepPureGraph);
+            lock (_compiledTrainSteps)
+            {
+                if (_compiledTrainSteps.TryGetValue(key, out var compiled)) return compiled;
+                if (_compiledTrainSteps.Count < MaxShapeSpecializedTrainSteps)
+                    return _compiledTrainSteps[key] = RuntimeContext.Compile(TrainingStepPureGraph.ToInternal(), dims, trainingStep: true);
+                return _compiledTrainStepGeneric ??= RuntimeContext.Compile(TrainingStepPureGraph.ToInternal(), inputDims: null, trainingStep: true);
+            }
         }
 
         /// <summary>

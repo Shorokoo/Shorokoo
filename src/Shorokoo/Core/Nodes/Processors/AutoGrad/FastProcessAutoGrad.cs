@@ -371,18 +371,25 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
                 withMask.Add((FastTensorKey)node.Outputs[1]!);
                 inputs = withMask;
             }
+            gradientMethodInfos.TryGetValue(node.OpCode, out var methodInfo);
+            var methodParams = methodInfo?.GetParameters();
+
             // Rules flagged UsesOutputs read the forward outputs; append them as trailing
-            // stand-in slots (the same extension Dropout uses for its mask above).
+            // stand-in slots (the same extension Dropout uses for its mask above). The rule's
+            // signature is (inputs..., outputs..., outputGrads..., attrs...), so an omitted
+            // trailing optional forward input is padded first, or the outputs would slide
+            // into its slot.
             if (outputUsingGradientOps.Contains(node.OpCode))
             {
-                var withOutputs = new List<FastTensorKey?>(inputs.Count + outputs.Count);
+                var forwardInputSlots = methodParams is null ? inputs.Count
+                    : methodParams.Count(IsValueParameter) - 2 * outputs.Count;
+                var withOutputs = new List<FastTensorKey?>(Math.Max(inputs.Count, forwardInputSlots) + outputs.Count);
                 withOutputs.AddRange(inputs);
+                while (withOutputs.Count < forwardInputSlots) withOutputs.Add(null);
                 withOutputs.AddRange(outputs);
                 inputs = withOutputs;
             }
             var inputIValues = new Variable?[inputs.Count];
-            gradientMethodInfos.TryGetValue(node.OpCode, out var methodInfo);
-            var methodParams = methodInfo?.GetParameters();
             for (int i = 0; i < inputs.Count; i++)
             {
                 if (inputs[i] is not FastTensorKey k)
@@ -517,6 +524,12 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
                 map[attr.OpName] = m;
             }
             return map;
+        }
+
+        private static bool IsValueParameter(ParameterInfo p)
+        {
+            var t = Nullable.GetUnderlyingType(p.ParameterType) ?? p.ParameterType;
+            return typeof(Variable).IsAssignableFrom(t) || typeof(IValue).IsAssignableFrom(t);
         }
 
         private static HashSet<string> BuildOutputUsingGradientOps()

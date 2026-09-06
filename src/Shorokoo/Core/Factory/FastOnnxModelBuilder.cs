@@ -211,6 +211,11 @@ namespace Shorokoo.Core.Factory
                         .SelectMany(fn => fn.OriginalFastGraph.Nodes)),
                 opset);
 
+            // The activation-checkpoint stamp is Shorokoo-private: stripped from anything ORT will
+            // run or a user will export, kept in the .srk dialect (no execution lowerings, not
+            // vanilla) so a reloaded architecture still carries its [Module(Checkpoint = true)].
+            bool stripCheckpointStamp = prepForOnnx || vanillaExport || applyExecutionLowerings;
+
             // ----- 3. Build the main GraphProto by walking the Fast graph.
             var graphProto = BuildGraphProto(
                 graphName: "",
@@ -220,13 +225,14 @@ namespace Shorokoo.Core.Factory
                 tensorInfoLookup: tensorInfoLookup,
                 emitInputsAsNodes: emitInputsAsNodes,
                 emitRepresentativeMetadata: representativeForm == RepresentativeInputForm.VanillaMetadata,
-                inputDims: inputDims);
+                inputDims: inputDims,
+                stripCheckpointStamp: stripCheckpointStamp);
 
             // ----- 4. Discover all reachable Functions in post order and emit
             // a FunctionProto for each.
             var functions = CollectFunctionsPostOrder(prepFast);
             var functionProtos = functions
-                .Select(fn => BuildFunctionProto(fn, opset, prepForOnnx, applyExecutionLowerings))
+                .Select(fn => BuildFunctionProto(fn, opset, prepForOnnx, applyExecutionLowerings, stripCheckpointStamp))
                 .ToArray();
 
             var model = (ModelProto)OnnxIRFactory.CreateModel(graphProto, functionProtos, opset);
@@ -1113,7 +1119,7 @@ namespace Shorokoo.Core.Factory
         // ----------- function emission -----------
 
         private static FunctionProto BuildFunctionProto(
-            Function function, OpSetVersion opset, bool prepForOnnx, bool applyExecutionLowerings)
+            Function function, OpSetVersion opset, bool prepForOnnx, bool applyExecutionLowerings, bool stripCheckpointStamp = true)
         {
             // Clone the function's primary Fast body and run the same pre-passes
             // on the copy. The function's body has its own ONNX-name namespace,
@@ -1127,7 +1133,8 @@ namespace Shorokoo.Core.Factory
                 graphName: function.DefaultName,
                 fastGraph: fnFast,
                 opset: opset,
-                isFunction: true);
+                isFunction: true,
+                stripCheckpointStamp: stripCheckpointStamp);
 
             var fnProto = new FunctionProto();
             // Encode the name to dodge built-in ONNX op-name collisions (see OnnxFunctionName);
@@ -1203,7 +1210,8 @@ namespace Shorokoo.Core.Factory
             Dictionary<FastTensorKey, FastTensorInfo>? tensorInfoLookup = null,
             bool emitInputsAsNodes = false,
             bool emitRepresentativeMetadata = false,
-            IReadOnlyList<long[]?>? inputDims = null)
+            IReadOnlyList<long[]?>? inputDims = null,
+            bool stripCheckpointStamp = true)
         {
             // .srk dialect (top-level graph only): every model-input op is emitted as an ordinary
             // NodeProto (carrying all its attributes — including the representative-input shape) instead
@@ -1291,7 +1299,7 @@ namespace Shorokoo.Core.Factory
                     };
                 }
 
-                var info = FastOpsetResolver.Resolve(node, graphOpenNode, opset);
+                var info = FastOpsetResolver.Resolve(node, graphOpenNode, opset, stripCheckpointStamp);
                 if (info is null) continue; // open node — already handled by IsBoundaryOrOpen, but defensive
                 var nodeProto = FastOnnxProtoFactory.CreateNodeProto(node, info.Value, graphAttrs);
                 protoByIndex[i] = nodeProto;

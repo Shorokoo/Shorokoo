@@ -51,6 +51,23 @@ public class RematerializationRuntimeTests
         Assert.True(survivingKept * 2 >= clones.Length);
     }
 
+    [Fact]
+    public void TestTrainingStepSessionLeavesTheCallingThreadsDenormalsAlone()
+    {
+        var values = new float[8 * 3 * 64 * 64];
+        NamedModelParam[] sample = [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([8L, 3L, 64L, 64L], values))];
+        var rig = TrainingRig.FromScratch(MemoryPassConv.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, sample, 0.01f);
+        var ckpt = rig.CreateInitialCheckpoint();
+        rig.TrainStep(ckpt, rig.InputDef.FromOrderedData(TensorData([8L, 3L, 64L, 64L], values)), rig.TargetDef.FromOrderedData(TensorData([8L, 32L], new float[256])));
+
+        Assert.Equal(BitConverter.SingleToInt32Bits(1e-40f), BitConverter.SingleToInt32Bits(TimesOne(1e-40f)));
+        Assert.Equal(ShorokooGraphOptimization.TrainingStep, ComputeContext.Default.Compile(rig.TrainingStepPureGraph.ToInternal(), null, trainingStep: true).Optimization);
+        Assert.Equal(ShorokooGraphOptimization.EnableAll, ComputeContext.Default.Compile(rig.TrainingStepPureGraph).Optimization);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static float TimesOne(float x) => x * 1f;
+
     private static Dictionary<FastNodeKey, string> EmittedNames(InternalComputationGraph graph)
     {
         var clone = graph.Clone();

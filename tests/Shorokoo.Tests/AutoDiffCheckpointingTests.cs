@@ -7,6 +7,7 @@ using Shorokoo.Modules.Optimizers;
 using System.Collections.Immutable;
 using Shorokoo.Runtime;
 using Shorokoo.Core.AutoDiffCheckpointing;
+using Shorokoo.Core.Utils;
 using Shorokoo.Tests.Benchmarks;
 using Shorokoo.Core.Graph;
 using Shorokoo.Core.AutoDiffCheckpointing.OpsPerf;
@@ -488,6 +489,16 @@ public class AutoDiffCheckpointingCoverageTests
         Assert.False(Stamped(plain));
         Assert.False(CarriesCheckpointStamp(FastOnnxModelBuilder.BuildInternalOnnxModel(checkpointed.TrainingStepPureGraph.ToInternal(), prepForOnnx: true)));
         Assert.False(CarriesCheckpointStamp(FastOnnxModelBuilder.BuildOnnxModel(checkpointed.CreateInitialCheckpoint().ToInferenceModel())));
+
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_ckpt_stamp_{Guid.NewGuid():N}.skpt");
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(checkpointed.CreateInitialCheckpoint(), path);
+            var (reloaded, _) = TrainingRig.Load(path);
+            Assert.True(Stamped(reloaded));
+            Assert.Equal(NodeCount(checkpointed), NodeCount(reloaded));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
     }
 
     [Fact]

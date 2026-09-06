@@ -977,6 +977,20 @@ namespace Shorokoo.Tests.Modules
             => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => z.Softplus());
     }
 
+    /// <summary>softplus' = e^x/(1+e^x) to 1e-3 relative on the negative tail, where a finite-difference probe cannot see and ORT's Sigmoid kernel reads 0.</summary>
+    [Module]
+    public partial class AutoGradSoftplusTailCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var loss = x.Softplus().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, loss);
+            var expected = x.Exp() / (Scalar(1f) + x.Exp());
+            var slack = Scalar(1e-3f) * expected - (grad - expected).Abs();
+            return slack.Reduce(ReduceKind.Min, keepDims: false).Scalar() > Scalar(0f);
+        }
+    }
+
     /// <summary>loss = Σ softsign(x). Smooth everywhere; vector input spans both signs.</summary>
     [Module]
     public partial class AutoGradSoftsignCheck

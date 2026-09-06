@@ -458,6 +458,9 @@ Neither phase is proportional to your dataset, and neither recurs during the loo
 `TrainStep` pays neither. If you are timing a run, expect the first step to be markedly slower
 than the rest — that is the compile, not a slow optimizer.
 
+On a large model the build phase runs for minutes. To watch it stage by stage rather than wait
+blind, see [Watching a long build](#watching-a-long-build).
+
 ### Compute contexts: `MergeContext` and `RuntimeContext`
 
 A rig carries two `ComputeContext` members, both supplied at construction (defaulting to
@@ -488,6 +491,98 @@ Result types:
 
 `TrainingRig`, `TrainingCheckpoint`, and `TrainingResult` are in
 namespace `Shorokoo` (covered by `using Shorokoo;`).
+
+### Watching a long build
+
+`FromScratch` can run for **minutes** on a large model — it concretizes the graph, composes the loss
+and autodiff, unrolls loops, and runs shape inference plus the memory-aware graph optimization before
+it returns. By default it says nothing while doing so, which is indistinguishable from a hang. Hand it
+a sink to see the stage it is in:
+
+```csharp
+using Shorokoo.Graph;    // SynchronousBuildProgress
+
+var rig = TrainingRig.FromScratch(
+    MyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+    sampleInputs, new AdamWOptimizerHyperparameters { LearningRate = 0.001f },
+    progress: new SynchronousBuildProgress(p => Console.WriteLine(p)));
+```
+
+```
+[   0.0s] Concretize: Thaw
+[   0.1s] Concretize: Clone
+[   0.1s] Concretize: ApplyIdentifierTemplates
+…
+[  38.4s] Concretize: ExpandAutoGrad
+[  44.1s] Concretize: SimplifyAfterAutoGrad
+[  44.2s] Concretize: BindRngConfig
+[  44.3s] Concretize: WriteRepresentativeInputs
+[  44.3s] TrainingStep: NormalizeOptimizerGraph
+[  51.9s] TrainingStep: ComposeModelLossAndAutoGrad
+[  63.0s] TrainingStep: ReplayOptimizerPerParameter
+…
+[  91.4s] Initialize: InitializeModelParams
+…
+[  96.2s] Initialize: OptimizeTrainingStepGraph
+[ 118.9s] Initialize: FreezeTrainingStepGraph
+[ 121.7s] Initialize: Done
+```
+
+(`…` marks stages elided here, not gaps in the output — every stage reports. The last line is the
+terminal report, the one whose `IsComplete` is true.)
+
+Each `BuildProgress` is reported as the build **enters** the named stage, so a build that has been
+quiet for minutes is inside the stage its last report named. It carries four members:
+
+- `Phase` — `BuildPhase.Concretize` (lowering the model to a concrete architecture),
+  `BuildPhase.TrainingStep` (composing and lowering the training-step graph), or
+  `BuildPhase.Initialize` (running the initializers, shape inference and graph optimization). The
+  phases run in that order and do not interleave.
+- `Stage` — the work being entered, named for what it does and usually after the pass that runs it
+  (`InlineModulesAndFunctions`, `ExpandAutoGrad`, `OptimizeTrainingStepGraph`, …). Stage names are
+  diagnostics, not API: they track the pipeline and change with it, so never branch on one.
+- `IsComplete` — true for the single terminal report of a build that ran to completion, which names
+  no stage being entered and renders its `Stage` as `Done`: a stream sitting on it is finished, not
+  stuck (the one report the rule above does not apply to). A build that threw never emits one. It is
+  stamped by the build, not re-derived from the stage text, so test it rather than the `Done` string.
+  `Stage` is the one member a program should not branch on; the other three are stable.
+- `Elapsed` — time since the start of *this* build. One clock spans all three phases.
+
+`ToString()` renders the line shown above. Reports are raised **synchronously on the building
+thread**, so use `SynchronousBuildProgress` (which calls its handler inline) rather than
+`System.Progress<T>`, whose posted callbacks can arrive out of order or after the build returns —
+exactly what a liveness signal must not do. Keep the handler short; it runs inside the build, and an
+exception it throws propagates out of the build and discards it. Hand the same sink to two concurrent
+builds and their reports interleave on their own threads — each build still carries its own clock, so
+give each one its own sink unless you want that.
+
+**The sink is an argument to one build, not configuration.** Only the call you hand it to reports to
+it: two builds watched at once cannot interleave into one sink by accident, a build handed none is
+silent, and there is no global switch to leave on. Every build that can run long takes one —
+`FromScratch` (all three phases); each `With…` derivation, which reuses the concrete architecture and
+so opens at `TrainingStep`, except `WithSeed`, which clones and rebinds the RNG identity and so opens
+with a `Concretize` phase naming that work; `TrainingRig.Load`, which likewise opens at `Concretize`,
+naming its file reads rather than lowering passes, and reports complete only once the resumed
+checkpoint is in hand; and the lowering step on its own —
+
+```csharp
+var concrete = MyModel.ComputationGraph.ToConcreteArchitecture(
+    inputHints, progress: new SynchronousBuildProgress(p => Console.WriteLine(p)));
+```
+
+— which reports `Concretize`, its own thaw and freeze included, and ends complete. The four
+positional-hyperparameter shorthands cannot take a sink, since a `params Hyperparameter[]` must come
+last; on each, passing the values as an array instead reaches the overload that can —
+`FromScratch(model, loss, opt, sample, [0.01f], progress: sink)`,
+`rig.WithOptimizer(opt, [0.01f], sink)`.
+
+Reporting covers the **build** and stops there. Calls that are not builds stay silent: `ToConcreteModel`,
+`InitializeTrainableParams` and `GetRngStreamReport` take no sink, though all three can be slow. Neither
+does the first `TrainStep`, whose one-time compile ([above](#what-construction-costs)) is not a build —
+so expect a quiet stretch there after the build has reported itself complete.
+
+To capture the *graphs* rather than the stage names — after the fact, as compilable C# — see
+[debugging.md](debugging.md).
 
 ### Seeding the run
 

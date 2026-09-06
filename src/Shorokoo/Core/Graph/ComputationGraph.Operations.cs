@@ -1,3 +1,4 @@
+using System;
 using Shorokoo;
 using Shorokoo.Core;
 using Shorokoo.Runtime;
@@ -41,16 +42,31 @@ namespace Shorokoo.Graph
         /// QEE/ORT resolution fallbacks during lowering; build one with <see cref="FromOrderedInputs"/>.</param>
         /// <param name="computeContext">Optional context used to resolve values while lowering.</param>
         /// <param name="debugRequests">Optional hook to dump the graph at each lowering stage.</param>
+        /// <param name="progress">Optional sink this lowering reports each stage to as it enters it, so
+        /// a lowering that runs for minutes is visibly alive — see <see cref="BuildProgress"/>. Watches
+        /// this call and no other; <c>null</c> reports nothing and costs nothing.</param>
         /// <returns>A fully inlined, concrete architecture graph.</returns>
         public ComputationGraph ToConcreteArchitecture(
             ModelParamList inputHints,
             ComputeContext? computeContext = null,
-            DebugRequests? debugRequests = null)
+            DebugRequests? debugRequests = null,
+            IProgress<BuildProgress>? progress = null)
         {
             RequireKind(GraphKind.Module, nameof(ToConcreteArchitecture), LoweringOrderHint);
-            return new ComputationGraph(
-                ToInternal().ToConcreteArchitecture(inputHints, computeContext, debugRequests),
-                GraphKind.ConcreteArchitecture);
+            var reporter = BuildProgressReporter.For(progress);
+
+            // The thaw and the freeze below are the caller's share of the work — each a full walk of
+            // the graph, the freeze over its largest (inlined, autograd-expanded) form — so they are
+            // named here rather than left as silence on either side of the pipeline's own stages.
+            reporter?.Report(BuildPhase.Concretize, "Thaw");
+            var lowered = ToInternal().ToConcreteArchitecture(
+                inputHints, computeContext, debugRequests, reporter);
+
+            reporter?.Report(BuildPhase.Concretize, "Freeze");
+            var concrete = new ComputationGraph(lowered, GraphKind.ConcreteArchitecture);
+
+            reporter?.ReportComplete(BuildPhase.Concretize);
+            return concrete;
         }
 
         /// <summary>

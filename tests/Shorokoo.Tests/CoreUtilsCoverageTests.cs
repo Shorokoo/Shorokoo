@@ -5,6 +5,7 @@ using System.Text.RegularExpressions;
 using Shorokoo.Core.Factory.OpsFactories;
 using Shorokoo.Core.Inference;
 using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
 
@@ -651,5 +652,28 @@ public class CoreUtilsCoverageTests
             Assert.False(AtomicFileWriter.IsTempName("run-42"));
         }
         finally { Directory.Delete(clean, recursive: true); }
+    }
+
+    // Shorokoo/Shorokoo#224: 8 of the 13 GraphCreationPoint values are never passed to
+    // DebugRequests.PrintDebug, so requesting one writes no snapshot and says nothing.
+    [Fact(Skip = "Shorokoo/Shorokoo#224: most GraphCreationPoint values are silent no-ops")]
+    public void TestEveryDebugRequestPointProducesItsSnapshot()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"shrk_debugpoints_{Guid.NewGuid():N}");
+        try
+        {
+            var points = Enum.GetValues<GraphCreationPoint>();
+            var model = ScalarMultiplyModel.ComputationGraph;
+            var hints = new ModelParamList(
+                [new KeyValuePair<string, TensorData>(
+                    model.ToInternal().Inputs[0].ToString(), TensorData([4L], new float[4]))],
+                ModelParamType.InputParam);
+
+            model.ToConcreteArchitecture(hints, new ComputeContext(),
+                new DebugRequests(points.Select(p => (p, Path.Combine(dir, $"{p}.cs")))));
+
+            Assert.Equal(points, points.Where(p => File.Exists(Path.Combine(dir, $"{p}.cs"))).ToArray());
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); }
     }
 }

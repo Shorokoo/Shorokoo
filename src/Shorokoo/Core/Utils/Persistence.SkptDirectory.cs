@@ -20,7 +20,7 @@ namespace Shorokoo
         /// #183): <paramref name="directoryPath"/> gets the same <c>config.json</c> at its root
         /// and the same models/ and data/ entries as real files, byte-identical to the zip's —
         /// so the result loads (<see cref="Load(string)"/>,
-        /// <see cref="TrainingRig.Load(string, Runtime.ComputeContext?, Runtime.ComputeContext?)"/>)
+        /// <see cref="TrainingRig.Load(string, Runtime.ComputeContext?, Runtime.ComputeContext?, IProgress{Graph.BuildProgress})"/>)
         /// and inspects exactly like the source. Every entry's recorded SHA-256 is verified in
         /// transit, entry paths must resolve inside the target (a hostile manifest cannot write
         /// elsewhere), and only the manifest and the entries it references are carried. The

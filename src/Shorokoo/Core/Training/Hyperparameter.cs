@@ -399,7 +399,7 @@ namespace Shorokoo
     /// typed implementation (e.g. <c>AdamWOptimizerHyperparameters</c>) for every optimizer module
     /// whose hyperparameters are all scalars — of any supported dtype — giving named, defaulted,
     /// init-only properties of type <see cref="Hyperparameter"/>. Pass an instance to
-    /// <see cref="TrainingRig.FromScratch(Shorokoo.Graph.ComputationGraph, Shorokoo.Graph.ComputationGraph, Shorokoo.Graph.ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, Shorokoo.RngConfig?, Shorokoo.Runtime.ComputeContext?, Shorokoo.Runtime.ComputeContext?)"/>.
+    /// <see cref="TrainingRig.FromScratch(Shorokoo.Graph.ComputationGraph, Shorokoo.Graph.ComputationGraph, Shorokoo.Graph.ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, Shorokoo.RngConfig?, Shorokoo.Runtime.ComputeContext?, Shorokoo.Runtime.ComputeContext?, System.IProgress{Shorokoo.Graph.BuildProgress})"/>.
     /// </summary>
     public interface IOptimizerHyperparameters
     {

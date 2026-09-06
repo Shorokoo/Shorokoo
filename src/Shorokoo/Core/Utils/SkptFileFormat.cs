@@ -154,7 +154,7 @@ namespace Shorokoo.Core.Utils
         /// build writes; absent (⇒ <c>null</c>) on a file written before #115, which resumes only by the
         /// host rebuilding the rig from the same source graphs. Backs the
         /// <see cref="Shorokoo.CheckpointComponents.TrainingRig"/> flag and the static
-        /// <see cref="Shorokoo.TrainingRig.Load(string, Shorokoo.Runtime.ComputeContext?, Shorokoo.Runtime.ComputeContext?)"/>.</summary>
+        /// <see cref="Shorokoo.TrainingRig.Load(string, Shorokoo.Runtime.ComputeContext?, Shorokoo.Runtime.ComputeContext?, System.IProgress{Shorokoo.Graph.BuildProgress})"/>.</summary>
         [JsonPropertyName("rig")]
         public SkptRigInfo? Rig { get; set; }
 

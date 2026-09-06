@@ -20,7 +20,16 @@ public class GraphEvaluationResult
     public long PeakMemoryBytes { get; init; }
 
     /// <summary>
-    /// Per-node evaluation details, in graph execution order.
+    /// How much of the graph's linear order ONNX Runtime will actually run — the fraction of
+    /// consecutive kernel pairs in ORT's execution order whose node indices ascend (see
+    /// <see cref="OrtExecutionOrder.Fidelity"/>). 1 means ORT runs the linear order verbatim.
+    /// </summary>
+    public double OrderFidelity { get; init; } = 1.0;
+
+    /// <summary>
+    /// Per-node evaluation details, in the order the evaluation walked the graph
+    /// (<see cref="EvaluationOrder"/>); <see cref="NodeEvaluationInfo.NodeIndex"/> maps each
+    /// entry back to its node.
     /// </summary>
     public required IReadOnlyList<NodeEvaluationInfo> NodeDetails { get; init; }
 
@@ -37,6 +46,11 @@ public class NodeEvaluationInfo
     /// The operation code of this node.
     /// </summary>
     public required string OpCode { get; init; }
+
+    /// <summary>
+    /// The node's index in the evaluated graph's <c>Nodes</c> list.
+    /// </summary>
+    public int NodeIndex { get; init; }
 
     /// <summary>
     /// Compute time for this node in normalized units.

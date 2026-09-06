@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using Shorokoo.Runtime;
 using Shorokoo.Core.AutoDiffCheckpointing;
+using Shorokoo.Core.Graph;
 using Shorokoo.Core.AutoDiffCheckpointing.OpsPerf;
 using Shorokoo.Core.Inference;
 using Shorokoo.Core.Nodes.Processors.Helpers;
@@ -269,5 +270,131 @@ public class AutoDiffCheckpointingCoverageTests
         var floatConstInfo = shapeInfo.GetTensorInfo(graph.Outputs[5]);
         Assert.NotNull(floatConstInfo);
         Assert.Equal(DType.Float32, floatConstInfo!.DType);
+    }
+    private const long Mb = 512 * 512 * 4L;
+
+    private static ShapeInferenceResult Infer(InternalComputationGraph graph, params long[][] shapes)
+        => new ShapeInferenceInterpreter(CpuContext).Infer(graph,
+            shapes.Select(shape => Globals.TensorDataWithSmallVals(DType.Float32, shape)).ToArray());
+
+    private static InternalComputationGraph InOrder(InternalComputationGraph graph, IEnumerable<int> order)
+    {
+        var copy = graph.Clone();
+        copy.Nodes = order.Select(i => graph.Nodes[i]).ToList();
+        return copy;
+    }
+
+    private static string[] Ops(InternalComputationGraph graph, IEnumerable<int> order)
+        => order.Select(i => graph.Nodes[i].OpCode).ToArray();
+
+    private static string[] OrtOps(InternalComputationGraph graph)
+        => Ops(graph, OrtExecutionOrder.Compute(graph.Nodes));
+
+    private static InternalComputationGraph Realized(InternalComputationGraph graph, IEnumerable<int> preferred)
+    {
+        var copy = graph.Clone();
+        copy.Nodes = OrtExecutionOrder.Realize(graph.Nodes, preferred.Select(i => graph.Nodes[i]).ToList());
+        return copy;
+    }
+
+    private static (InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo) SiblingBranchGraph()
+    {
+        var x = InputTensor<float32>("x", rank: 2);
+        var negated = OnnxOp.Neg(x);
+        var summed = OnnxOp.ReduceSum(OnnxOp.Concat([x, x], axis: 0));
+        var graph = new InternalComputationGraph([x], [OnnxOp.Add(negated, summed)]);
+        return (graph, Infer(graph, [512, 512]));
+    }
+
+    [Fact]
+    public void TestOrtOrderEvaluationWalksOrtsDfsRatherThanTheProtoOrderCoverage()
+    {
+        var (graph, shapeInfo) = SiblingBranchGraph();
+        var evaluator = new GraphEvaluator();
+        var dfs = OrtExecutionOrder.Compute(graph.Nodes);
+        var proto = evaluator.Evaluate(graph, shapeInfo, EvaluationOrder.ProtoOrder);
+        var ort = evaluator.Evaluate(graph, shapeInfo);
+
+        Assert.Equal((string[])[InternalOpCodes.MODEL_TENSOR_INPUT, "Neg", "Concat", "ReduceSum", "Add"], Ops(graph, Enumerable.Range(0, 5)));
+        Assert.Equal((string[])[InternalOpCodes.MODEL_TENSOR_INPUT, "Concat", "ReduceSum", "Neg", "Add"], Ops(graph, dfs));
+        Assert.Equal(4 * Mb, proto.PeakMemoryBytes);
+        Assert.Equal(3 * Mb + 4, ort.PeakMemoryBytes);
+        Assert.Equal(evaluator.Evaluate(InOrder(graph, dfs), shapeInfo, EvaluationOrder.ProtoOrder).PeakMemoryBytes, ort.PeakMemoryBytes);
+        Assert.Equal(2.0 / 3, ort.OrderFidelity, 9);
+        Assert.Equal(ort.OrderFidelity, proto.OrderFidelity, 9);
+        Assert.Equal(dfs, ort.NodeDetails.Select(d => d.NodeIndex));
+        Assert.Equal(Enumerable.Range(0, 5), proto.NodeDetails.Select(d => d.NodeIndex));
+
+        Assert.Equal(Ops(graph, dfs), OrtOps(Realized(graph, dfs)));
+        Assert.Equal(Ops(graph, Enumerable.Range(0, 5)), OrtOps(Realized(graph, Enumerable.Range(0, 5))));
+        Assert.Equal(2.0 / 3, evaluator.Evaluate(Realized(graph, Enumerable.Range(0, 5)), shapeInfo).OrderFidelity, 9);
+        Assert.True(Realized(graph, Enumerable.Range(0, 5)).IsLinearOrderValid());
+    }
+
+    [Fact]
+    public void TestOptimizerClaimsOnlyWhatOrtOrderDeliversCoverage()
+    {
+        var (graph, shapeInfo) = SiblingBranchGraph();
+        var evaluator = new GraphEvaluator();
+        var baseline = evaluator.Evaluate(graph, shapeInfo);
+
+        var result = new MemoryAwareGraphOptimizer(shapeInference: new ShapeInferenceInterpreter(CpuContext))
+            .OptimizeWithShapeInfo(graph, shapeInfo);
+        Assert.Equal(result.Evaluation.PeakMemoryBytes, evaluator.Evaluate(result.OptimizedGraph, result.ShapeInfo).PeakMemoryBytes);
+        Assert.True(result.Evaluation.PeakMemoryBytes <= baseline.PeakMemoryBytes);
+        Assert.True(result.OptimizedGraph.IsLinearOrderValid());
+
+        var reordered = new MemoryAwareScheduler().Reorder(graph, shapeInfo);
+        Assert.True(reordered.IsLinearOrderValid());
+        Assert.Equal(
+            evaluator.Evaluate(InOrder(reordered, OrtExecutionOrder.Compute(reordered.Nodes)), shapeInfo, EvaluationOrder.ProtoOrder).PeakMemoryBytes,
+            evaluator.Evaluate(reordered, shapeInfo).PeakMemoryBytes);
+    }
+
+    [Fact]
+    public void TestEvaluatorSharesAliasedBuffersAndFreesUnconsumedOutputsCoverage()
+    {
+        var x = InputTensor<float32>("x", rank: 2);
+        var reshaped = OnnxOp.Reshape(x, Vector(512L * 512L), allowZero: false);
+        var direct = OnnxOp.ReduceSum(x);
+        var viaView = OnnxOp.ReduceSum(reshaped);
+        var aliasGraph = new InternalComputationGraph([x], [OnnxOp.Add(viaView, direct)]);
+
+        var y = InputTensor<float32>("y", rank: 2);
+        var halves = OnnxOp.Split(y, Vector(256L, 256L), axis: 0, numOutputs: null, variadicOutputCount: 2);
+        var grown = OnnxOp.Exp(halves[0]);
+        var danglingGraph = new InternalComputationGraph([y], [OnnxOp.Concat([grown, grown, grown, grown], axis: 0)]);
+
+        var evaluator = new GraphEvaluator();
+        foreach (var order in new[] { EvaluationOrder.OrtOrder, EvaluationOrder.ProtoOrder })
+        {
+            Assert.Equal(Mb + 8, evaluator.Evaluate(aliasGraph, Infer(aliasGraph, [512, 512]), order).PeakMemoryBytes);
+            Assert.Equal(5 * Mb / 2, evaluator.Evaluate(danglingGraph, Infer(danglingGraph, [512, 512]), order).PeakMemoryBytes);
+        }
+    }
+
+    [Fact]
+    public void TestLoopGraphIsRescheduledAndOrderedCoverage()
+    {
+        var x = InputTensor<float32>("x", rank: 2);
+        Variable carried = x;
+        foreach (var _ in LoopAPI.Iterate(Scalar(3L)))
+            carried = OnnxOp.Add(OnnxOp.Exp(carried), x);
+        var negated = OnnxOp.Neg(x);
+        var rectified = OnnxOp.Relu(carried);
+        var graph = new InternalComputationGraph([x], [OnnxOp.Add(rectified, negated)]);
+        var shapeInfo = Infer(graph, [512, 512]);
+        var scheduler = new MemoryAwareScheduler();
+
+        Assert.Contains(graph.Nodes, n => n.IsOpenNode());
+        Assert.NotNull(scheduler.MemoryAwareTopologicalSort(graph.Nodes, shapeInfo));
+        var reordered = scheduler.Reorder(graph, shapeInfo);
+        Assert.NotSame(graph, reordered);
+        Assert.True(reordered.IsLinearOrderValid());
+
+        var walk = OrtExecutionOrder.Compute(graph.Nodes);
+        Assert.Equal(graph.Nodes.Count, walk.Distinct().Count());
+        Assert.True(InOrder(graph, walk).IsLinearOrderValid());
+        Assert.True(new GraphEvaluator().Evaluate(graph, shapeInfo).PeakMemoryBytes >= Mb);
     }
 }

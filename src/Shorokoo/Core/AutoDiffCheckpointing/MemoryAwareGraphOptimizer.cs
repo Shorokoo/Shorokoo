@@ -25,6 +25,12 @@ public class GraphOptimizationResult
     internal InternalComputationGraph OptimizedGraph { get; init; } = null!;
 
     /// <summary>
+    /// Shape information covering <see cref="OptimizedGraph"/>, including every tensor
+    /// rematerialization minted; <see cref="Evaluation"/> was computed against it.
+    /// </summary>
+    internal ShapeInferenceResult ShapeInfo { get; init; } = null!;
+
+    /// <summary>
     /// The evaluation result for the selected strategy.
     /// </summary>
     public required GraphEvaluationResult Evaluation { get; init; }
@@ -156,6 +162,7 @@ internal class MemoryAwareGraphOptimizer
             {
                 StrategyName = "Baseline",
                 OptimizedGraph = graph,
+                ShapeInfo = shapeInfo,
                 Evaluation = baselineEval,
                 AllStrategies = [("Baseline", baselineEval, graph)],
             };
@@ -167,9 +174,9 @@ internal class MemoryAwareGraphOptimizer
 
         // Doing nothing is always a candidate, so the pass can never return a graph that
         // scores worse than the one it was handed.
-        var strategies = new List<(string Name, GraphEvaluationResult Evaluation, InternalComputationGraph Graph)>
+        var strategies = new List<(string Name, GraphEvaluationResult Evaluation, InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo)>
         {
-            ("Baseline", baselineEval, graph),
+            ("Baseline", baselineEval, graph, shapeInfo),
         };
 
         var scheduler = new MemoryAwareScheduler();
@@ -196,8 +203,9 @@ internal class MemoryAwareGraphOptimizer
         {
             StrategyName = best.Name,
             OptimizedGraph = best.Graph,
+            ShapeInfo = best.ShapeInfo,
             Evaluation = best.Evaluation,
-            AllStrategies = strategies,
+            AllStrategies = strategies.Select(s => (s.Name, s.Evaluation, s.Graph)).ToList(),
         };
     }
 
@@ -205,7 +213,7 @@ internal class MemoryAwareGraphOptimizer
     /// meaningful together: a pass that mints new tensor keys invalidates older info.</summary>
     private readonly record struct Candidate(InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo);
 
-    private (string Name, GraphEvaluationResult Evaluation, InternalComputationGraph Graph) RunAlternatingStrategy(
+    private (string Name, GraphEvaluationResult Evaluation, InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo) RunAlternatingStrategy(
         string name,
         ComputeMemoryObjective objective,
         Candidate initial,
@@ -228,7 +236,7 @@ internal class MemoryAwareGraphOptimizer
                 break;
         }
 
-        return (name, currentEval, current.Graph);
+        return (name, currentEval, current.Graph, current.ShapeInfo);
     }
 
     private bool TryApply(

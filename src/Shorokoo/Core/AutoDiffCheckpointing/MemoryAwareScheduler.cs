@@ -5,6 +5,7 @@ using Shorokoo.Core.Nodes;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using System.Collections.Generic;
 using System.Linq;
+using Shorokoo.Core.Utils;
 
 namespace Shorokoo.Core.AutoDiffCheckpointing;
 
@@ -23,6 +24,15 @@ namespace Shorokoo.Core.AutoDiffCheckpointing;
 ///
 /// Structural constraints: close nodes (LOOP_CLOSE / IF_CLOSE) cannot be scheduled
 /// before their matching open node (linked via <see cref="FastNode.GraphOpenNodeKey"/>).
+///
+/// <para>The greedy order is not what runs. ONNX Runtime ignores the linear order and
+/// recomputes its own — a depth-first walk that, among independent siblings, runs the
+/// LATER-indexed one first (see <see cref="OrtExecutionOrder"/>). So the greedy sequence is
+/// used as a preference and <see cref="OrtExecutionOrder.Realize"/> turns it into the linear
+/// order that makes ORT's walk follow those preferences. Where a preference cannot be
+/// honoured (interleaved independent chains, shared producers) the returned graph simply
+/// runs differently from the greedy sequence; the caller scores it under
+/// <see cref="EvaluationOrder.OrtOrder"/>, so no gain is claimed that ORT will not deliver.</para>
 /// </summary>
 internal class MemoryAwareScheduler
 {
@@ -37,18 +47,18 @@ internal class MemoryAwareScheduler
         if (nodes.Count <= 2)
             return graph;
 
-        var reordered = MemoryAwareTopologicalSort(nodes, shapeInfo);
+        var preferred = MemoryAwareTopologicalSort(nodes, shapeInfo);
 
-        // The scope-aware scheduler can fail to find a memory-minimizing linear order
-        // for some valid graph shapes — notably the back-prop-through-time scope of a
-        // recurrent op (RNN/LSTM/GRU), whose scope structure the greedy scope model
-        // can stall on. Reordering is a pure optimization and the INPUT order is
-        // already a valid topological order, so fall back to it (returning the same
-        // graph reference, which the optimizer reads as "no improvement") rather than
-        // throwing and blocking the whole training graph. A genuinely malformed graph
-        // (real cycle) is still surfaced later by execution/compilation.
-        if (reordered is null)
+        // Reordering is a pure optimization and the INPUT order is already a valid
+        // topological order, so if the greedy scope model cannot make progress fall back
+        // to it (returning the same graph reference, which the optimizer reads as "no
+        // improvement") rather than throwing and blocking the whole training graph. A
+        // genuinely malformed graph (real cycle) is still surfaced later by
+        // execution/compilation.
+        if (preferred is null)
             return graph;
+
+        var reordered = OrtExecutionOrder.Realize(nodes, preferred);
 
         // Check if the order actually changed
         bool changed = false;
@@ -89,7 +99,7 @@ internal class MemoryAwareScheduler
     /// and produce a graph that fails <c>IsLinearOrderValid</c>.
     /// </para>
     /// </summary>
-    private List<FastNode>? MemoryAwareTopologicalSort(
+    internal List<FastNode>? MemoryAwareTopologicalSort(
         IList<FastNode> nodes,
         ShapeInferenceResult shapeInfo)
     {
@@ -142,7 +152,11 @@ internal class MemoryAwareScheduler
                         foreach (var output in node.Outputs)
                             if (output is not null) parent.produced.Add(output.Value);
                     }
-                    scanStack.Push((node, new HashSet<FastTensorKey>(), new HashSet<FastTensorKey>()));
+                    // The OPEN's own outputs (iteration index, loop-carried and scan values) are
+                    // what the body reads; they are produced by the OPEN itself, so they are
+                    // available the moment it is scheduled and must not count as externals — a
+                    // LOOP_OPEN that waits for its own outputs never becomes eligible.
+                    scanStack.Push((node, new HashSet<FastTensorKey>(node.Outputs.NotNulls()), new HashSet<FastTensorKey>()));
                 }
                 else if (node.IsCloseNode())
                 {
@@ -240,10 +254,10 @@ internal class MemoryAwareScheduler
 
             if (eligible.Count == 0)
                 // No node at the current scope has its deps met — the greedy scope
-                // model can't make progress on this graph shape (e.g. a recurrent
-                // BPTT scope). Signal "can't schedule" so Reorder falls back to the
-                // input order rather than throwing; the input is a valid topological
-                // order, so correctness is preserved (only the memory reorder is skipped).
+                // model can't make progress on this graph shape. Signal "can't
+                // schedule" so Reorder falls back to the input order rather than
+                // throwing; the input is a valid topological order, so correctness is
+                // preserved (only the memory reorder is skipped).
                 return null;
 
             FastNode best = PickBestNode(eligible, remainingConsumers, tensorMemory);

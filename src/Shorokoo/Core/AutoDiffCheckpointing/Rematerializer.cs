@@ -173,10 +173,17 @@ internal class Rematerializer
     }
 
     private List<RematChain> FindRematerializationChains(
-        IList<FastNode> nodes,
+        IList<FastNode> graphNodes,
         ShapeInferenceResult shapeInfo,
         GraphEvaluationResult eval)
     {
+        // Every position below is a position in the evaluation's walk — ORT's execution order,
+        // not the linear order — so that "spans the peak" and "live at the recompute point"
+        // mean what they will mean at runtime.
+        IList<FastNode> nodes = eval.NodeDetails.Count == graphNodes.Count
+            ? eval.NodeDetails.Select(d => graphNodes[d.NodeIndex]).ToList()
+            : graphNodes;
+
         int peakNodeIdx = 0;
         long peakMem = 0;
         for (int i = 0; i < eval.NodeDetails.Count && i < nodes.Count; i++)
@@ -334,29 +341,46 @@ internal class Rematerializer
     }
 
     /// <summary>
-    /// Inserts each chain's cloned producers immediately before the consumer that asked for
-    /// them, and rewires that consumer to read the clone. Returns the rewritten graph and a
-    /// map from every minted key to the tensor it replicates, so the caller can extend shape
-    /// information to cover them.
+    /// Inserts each chain's cloned producers immediately after the target's original
+    /// producer, and rewires the consumer that asked for them to read the clone. Returns the
+    /// rewritten graph and a map from every minted key to the tensor it replicates, so the
+    /// caller can extend shape information to cover them.
+    ///
+    /// <para>The linear position decides when ORT runs the clones, and it is not "as late as
+    /// possible" that puts them late: ORT visits a node's producers highest-index first, so a
+    /// chain placed just before its consumer would be recomputed BEFORE the consumer's other
+    /// inputs (the gradients of the backward pass) and then held across all of them. Placed
+    /// low, next to the original producer, the chain is the consumer's lowest-index producer
+    /// and runs last — right before the consumer, which is the point of recomputing.</para>
     /// </summary>
     private static (InternalComputationGraph graph, Dictionary<FastTensorKey, FastTensorKey> tensorMapping) ApplyChains(
         InternalComputationGraph graph, List<RematChain> chains)
     {
         var copy = graph.Clone();
-        var byConsumer = new Dictionary<FastNodeKey, List<RematChain>>();
+        var byProducer = new Dictionary<FastNodeKey, List<RematChain>>();
         foreach (var chain in chains)
         {
-            if (!byConsumer.TryGetValue(chain.Consumer.Key, out var list))
-                byConsumer[chain.Consumer.Key] = list = new List<RematChain>();
+            if (!byProducer.TryGetValue(chain.Chain[^1].Key, out var list))
+                byProducer[chain.Chain[^1].Key] = list = new List<RematChain>();
             list.Add(chain);
         }
 
         var newToOriginal = new Dictionary<FastTensorKey, FastTensorKey>();
         var newNodes = new List<FastNode>(copy.Nodes.Count);
+        var rewires = new Dictionary<FastNodeKey, List<(FastTensorKey Target, FastTensorKey Recomputed)>>();
 
         foreach (var node in copy.Nodes)
         {
-            if (byConsumer.TryGetValue(node.Key, out var here))
+            if (rewires.TryGetValue(node.Key, out var pending))
+                foreach (var (target, recomputed) in pending)
+                    foreach (var slot in node.FullInputs.Values)
+                        for (int i = 0; i < slot.Count; i++)
+                            if (slot[i] is FastTensorKey k && k.Equals(target))
+                                slot[i] = recomputed;
+
+            newNodes.Add(node);
+
+            if (byProducer.TryGetValue(node.Key, out var here))
             {
                 foreach (var chain in here)
                 {
@@ -394,14 +418,11 @@ internal class Rematerializer
                         continue;
 
                     newNodes.AddRange(emitted);
-                    foreach (var slot in node.FullInputs.Values)
-                        for (int i = 0; i < slot.Count; i++)
-                            if (slot[i] is FastTensorKey k && k.Equals(chain.Target))
-                                slot[i] = recomputed;
+                    if (!rewires.TryGetValue(chain.Consumer.Key, out var list))
+                        rewires[chain.Consumer.Key] = list = new List<(FastTensorKey, FastTensorKey)>();
+                    list.Add((chain.Target, recomputed));
                 }
             }
-
-            newNodes.Add(node);
         }
 
         copy.Nodes = newNodes;

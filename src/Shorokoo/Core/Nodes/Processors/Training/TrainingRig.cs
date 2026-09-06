@@ -232,6 +232,17 @@ namespace Shorokoo
         /// </summary>
         internal GraphEvaluationResult PreOptimizationEval { get; private set; } = null!;
 
+        /// <summary>
+        /// Shape and dtype of every <see cref="TrainingStepPureGraph"/> input, in input order, as the
+        /// shape inference behind <see cref="PreOptimizationEval"/> and <see cref="OptimizationResult"/>
+        /// saw them: parameter / state / optimizer-state fields, hyperparameter and counter seeds, the
+        /// representative model inputs, and the target at the predicted shape. Shared by the pre- and
+        /// post-optimization graphs, so a diagnostic can synthesize a feed and run either against a real
+        /// session on exactly the shapes the pass was judged on. Shapes only — the exemplars behind
+        /// them may be value-less placeholders.
+        /// </summary>
+        internal (Shape Shape, DType DType)[] OptimizationInputShapes { get; private set; } = [];
+
         /// <summary>Struct definition for model state (empty for stateless models). Internal
         /// build/persistence machinery — see <see cref="TrainableParamStructDef"/>.</summary>
         internal TensorStructDef ModelStateDef { get; private set; } = null!;
@@ -2783,6 +2794,7 @@ namespace Shorokoo
             var optResult = optimizer.OptimizeWithShapeInfo(graph, shapeInfo);
             PreOptimizationEval = baselineEval;
             OptimizationResult = optResult;
+            OptimizationInputShapes = allInputs.Select(t => (t.Shape, t.DType)).ToArray();
 
             // Freeze the public views: the working graphs are relinquished into the
             // readonly wrappers, which own them exclusively from here on (the rig

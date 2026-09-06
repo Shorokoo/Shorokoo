@@ -68,17 +68,50 @@ namespace Shorokoo
         private InternalComputationGraph? _trainingStepWorkGraph;
 
         /// <summary>
-        /// Lazily-compiled, cached executable for <see cref="TrainingStepPureGraph"/>, compiled once
-        /// via <see cref="RuntimeContext"/> on the first <c>TrainStep</c> and reused by every
-        /// subsequent step — so a manual <c>for (…) cp = rig.TrainStep(cp, in, out);</c> loop compiles
-        /// nothing caller-side. Each rig instance owns its own, since its trainstep is distinct. This is
-        /// a pure in-memory memo of the already-derived (and never-persisted) trainstep graph; it does
-        /// not participate in the rig's observable value, so it leaves the rig's immutability intact.
+        /// Lazily-compiled, cached executables for <see cref="TrainingStepPureGraph"/>, compiled via
+        /// <see cref="RuntimeContext"/> on the first <c>TrainStep</c> and reused by every subsequent
+        /// step — so a manual <c>for (…) cp = rig.TrainStep(cp, in, out);</c> loop compiles nothing
+        /// caller-side. Each rig instance owns its own, since its trainstep is distinct. This is a pure
+        /// in-memory memo of the already-derived (and never-persisted) trainstep graph; it does not
+        /// participate in the rig's observable value, so it leaves the rig's immutability intact.
+        ///
+        /// <para>Keyed by the <b>shapes actually fed</b> (every expanded graph input: params, state,
+        /// optimizer state, hyperparameters, counters, model inputs, targets). A session is compiled
+        /// with those concrete dimensions stamped on its graph inputs, which lets ONNX Runtime resolve
+        /// every intermediate shape at session build and constant-fold the shape arithmetic
+        /// (<c>Shape</c> and the broadcast-reduction chains autograd emits over it — most of a
+        /// step's kernels, and outputs that pinned large activations alive) out of the executed graph.
+        /// A step at another shape — a partial final batch from a <c>dropLast: false</c> loader, say —
+        /// simply compiles its own entry; the trainstep graph itself is shape-generic, so nothing but
+        /// the ORT session is specialized. Bounded: past
+        /// <see cref="MaxShapeSpecializedTrainSteps"/> distinct shapes every further shape runs on the
+        /// one shape-generic (symbolic-dims) session, so a run that never repeats a shape pays at most
+        /// that many extra session builds and then behaves exactly as before.</para>
         /// </summary>
-        private CompiledGraph? _compiledTrainStep;
+        private readonly Dictionary<string, CompiledGraph> _compiledTrainSteps = new();
 
-        /// <summary>The cached compiled trainstep, compiled on first use via <see cref="RuntimeContext"/>.</summary>
-        private CompiledGraph CompiledTrainStep => _compiledTrainStep ??= RuntimeContext.Compile(TrainingStepPureGraph);
+        /// <summary>The shape-generic fallback trainstep session; see <see cref="_compiledTrainSteps"/>.</summary>
+        private CompiledGraph? _compiledTrainStepGeneric;
+
+        /// <summary>How many distinct input-shape signatures get their own shape-specialized session.</summary>
+        private const int MaxShapeSpecializedTrainSteps = 4;
+
+        /// <summary>
+        /// The compiled trainstep for the given (struct-expanded, graph-input-ordered) inputs, compiled
+        /// on first use for their shapes via <see cref="RuntimeContext"/>; see <see cref="_compiledTrainSteps"/>.
+        /// </summary>
+        private CompiledGraph CompiledTrainStepFor(IData[] expandedInputs)
+        {
+            var dims = new long[]?[expandedInputs.Length];
+            for (int i = 0; i < expandedInputs.Length; i++)
+                dims[i] = expandedInputs[i] is TensorData t ? t.Shape.Dims : null;
+            var key = string.Join(";", dims.Select(d => d is null ? "?" : string.Join(",", d)));
+
+            if (_compiledTrainSteps.TryGetValue(key, out var compiled)) return compiled;
+            if (_compiledTrainSteps.Count < MaxShapeSpecializedTrainSteps)
+                return _compiledTrainSteps[key] = RuntimeContext.Compile(TrainingStepPureGraph.ToInternal(), dims);
+            return _compiledTrainStepGeneric ??= RuntimeContext.Compile(TrainingStepPureGraph);
+        }
 
         /// <summary>
         /// The rig's <b>constituent</b> layer (§5.8): the swappable source-of-truth models — the
@@ -154,11 +187,11 @@ namespace Shorokoo
 
         /// <summary>
         /// The compute context used to <b>compile the merged <see cref="TrainingStepPureGraph"/> into an
-        /// executable and run it</b>: the single lazily-cached trainstep session (see
-        /// <see cref="CompiledTrainStep"/>) that <see cref="Train"/>, every <c>Fit</c> overload and the
+        /// executable and run it</b>: the lazily-cached trainstep sessions (see
+        /// <see cref="_compiledTrainSteps"/>) that <see cref="Train"/>, every <c>Fit</c> overload and the
         /// manual <c>TrainStep</c> all share — the context whose session actually executes the training
         /// step. It is the rig's sole compile/run context — <c>Train</c>/<c>Fit</c> take no per-call
-        /// context override, so there is exactly one compiled graph per rig. Supplied at construction
+        /// context override, so every compiled graph of a rig comes from it. Supplied at construction
         /// (defaults to <see cref="ComputeContext.Default"/>); every <c>With…</c> derivation carries it
         /// forward by reference and, like <see cref="MergeContext"/>, it is runtime configuration that is
         /// <b>never persisted</b>.
@@ -1838,10 +1871,10 @@ namespace Shorokoo
 
         /// <summary>
         /// The shared body of the counter-agnostic data <c>TrainStep</c>: applies the
-        /// no-runtime-hyperparameter guard, then runs the step against the rig's single cached
-        /// <see cref="CompiledTrainStep"/> (compiled once via <see cref="RuntimeContext"/>). Both the
-        /// public <c>TrainStep</c> overload and <see cref="Train"/> route through here, so they share
-        /// exactly one compiled graph per rig.
+        /// no-runtime-hyperparameter guard, then runs the step against the rig's cached compiled
+        /// trainstep (<see cref="_compiledTrainSteps"/>, compiled via <see cref="RuntimeContext"/>). Both
+        /// the public <c>TrainStep</c> overload and <see cref="Train"/> route through here, so they share
+        /// the rig's compiled graphs.
         /// </summary>
         private TrainingCheckpoint TrainStepWith(
             TrainingCheckpoint checkpoint,
@@ -1859,10 +1892,10 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// The shared body of the loader <c>TrainStep</c>, run against the rig's single cached
-        /// <see cref="CompiledTrainStep"/>. Both the public <c>TrainStep(loader)</c> overload and
-        /// <see cref="Fit(IDataLoader, int, TrainingCheckpoint?)"/> route through here, so they share
-        /// exactly one compiled graph per rig. This is the one place the loader-step-and-counter
+        /// The shared body of the loader <c>TrainStep</c>, run against the rig's cached compiled
+        /// trainstep (<see cref="_compiledTrainSteps"/>). Both the public <c>TrainStep(loader)</c>
+        /// overload and <see cref="Fit(IDataLoader, int, TrainingCheckpoint?)"/> route through here, so
+        /// they share the rig's compiled graphs. This is the one place the loader-step-and-counter
         /// semantics live.
         /// </summary>
         private TrainingCheckpoint TrainStepWith(
@@ -1926,7 +1959,8 @@ namespace Shorokoo
                 execInputs.Add(Shorokoo.Globals.TensorData(Array.Empty<long>(), CounterValue(checkpoint, counter)));
             execInputs.Add(trainingInput);
             execInputs.Add(trainingOutput);
-            var results = CompiledTrainStep.Execute(execInputs.ToArray());
+            var expandedInputs = ComputeContext.ExpandStructInputs(execInputs.ToArray());
+            var results = CompiledTrainStepFor(expandedInputs).Execute(expandedInputs);
 
             // Graph outputs (after lowering): [updated_param_field_0, ..., updated_state_field_0, ..., updated_opt_state_field_0, ..., loss]
             // Repack updated param fields into a TensorDataStruct
@@ -1996,9 +2030,9 @@ namespace Shorokoo
                 throw new ArgumentException("Training inputs and outputs must have the same length.");
             if (numEpochs < 1) throw new ArgumentException("Number of epochs must be at least 1.", nameof(numEpochs));
 
-            // The step body runs against the rig's lazily-compiled, cached trainstep (compiled once via
-            // RuntimeContext), so a Fit()/Train() loop and a manual TrainStep loop share exactly one
-            // compiled graph per rig.
+            // The step body runs against the rig's lazily-compiled, cached trainstep (compiled via
+            // RuntimeContext, per fed input shape), so a Fit()/Train() loop and a manual TrainStep loop
+            // share the rig's compiled graphs.
             var checkpoint = initialCheckpoint;
             var epochLosses = new float[numEpochs];
 

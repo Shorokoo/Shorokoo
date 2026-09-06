@@ -194,11 +194,22 @@ namespace Shorokoo.Runtime
             return (regularOutputs, new ComputationGraph(updatedGraph, graph.Kind));
         }
 
-        internal CompiledGraph Compile(InternalComputationGraph graph)
+        internal CompiledGraph Compile(InternalComputationGraph graph) => Compile(graph, inputDims: null);
+
+        /// <summary>
+        /// Compiles the graph for a session that will only ever be fed inputs of exactly
+        /// <paramref name="inputDims"/> (one entry per graph input, in input order; a null entry keeps
+        /// that input's shape symbolic). The dims are stamped on the model's graph inputs, which lets
+        /// ONNX Runtime resolve every intermediate shape at session build and fold the graph's shape
+        /// arithmetic away — a large share of a training step's kernels. The caller owns the contract:
+        /// ORT rejects a differently-shaped feed at <c>Run</c>, so the caller must compile another
+        /// <see cref="CompiledGraph"/> for another shape (see <c>TrainingRig</c>'s shape-keyed cache).
+        /// </summary>
+        internal CompiledGraph Compile(InternalComputationGraph graph, IReadOnlyList<long[]?>? inputDims)
         {
             var originalInputNames = ResolveOriginalInputNames(graph);
             return CompileFromModel(
-                () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true),
+                () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true, inputDims: inputDims),
                 originalInputNames);
         }
 

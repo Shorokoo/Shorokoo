@@ -160,6 +160,11 @@ namespace Shorokoo.Core.Factory
         /// <see cref="RepresentativeInputForm"/>). The internal dialect is always
         /// <see cref="RepresentativeInputForm.Passthrough"/>: native <c>.srk</c> serializes the attribute
         /// on the emitted input nodes, and the execution path leaves it unserialized on graph inputs.</param>
+        /// <param name="inputDims">Execution path only: the concrete dimensions to stamp on each top-level
+        /// graph input, positionally over <see cref="InternalComputationGraph.Inputs"/> (a null entry, or a
+        /// null list, keeps that input rank-only / symbolic). The pre-passes never add, drop or reorder
+        /// top-level inputs, so the positions survive them. See
+        /// <see cref="FastOnnxProtoFactory.CreateGraphInputInfo"/> for what it buys and when it is safe.</param>
         internal static ModelProto BuildInternalOnnxModel(
             InternalComputationGraph fastGraph,
             OpSetVersion opset = OpSetVersion.OPS_21,
@@ -167,10 +172,11 @@ namespace Shorokoo.Core.Factory
             Shorokoo.Graph.GraphKind? stage = null,
             bool applyExecutionLowerings = true,
             bool emitInputsAsNodes = false,
-            RepresentativeInputForm representativeForm = RepresentativeInputForm.Passthrough)
+            RepresentativeInputForm representativeForm = RepresentativeInputForm.Passthrough,
+            IReadOnlyList<long[]?>? inputDims = null)
             => BuildOnnxModelCore(fastGraph, opset, prepForOnnx, vanillaExport: false, stage: stage,
                 applyExecutionLowerings: applyExecutionLowerings, emitInputsAsNodes: emitInputsAsNodes,
-                representativeForm: representativeForm);
+                representativeForm: representativeForm, inputDims: inputDims);
 
         private static ModelProto BuildOnnxModelCore(
             InternalComputationGraph fastGraph,
@@ -180,7 +186,8 @@ namespace Shorokoo.Core.Factory
             Shorokoo.Graph.GraphKind? stage = null,
             bool applyExecutionLowerings = true,
             bool emitInputsAsNodes = false,
-            RepresentativeInputForm representativeForm = RepresentativeInputForm.Passthrough)
+            RepresentativeInputForm representativeForm = RepresentativeInputForm.Passthrough,
+            IReadOnlyList<long[]?>? inputDims = null)
         {
             if (fastGraph is null) throw new ArgumentNullException(nameof(fastGraph));
 
@@ -212,7 +219,8 @@ namespace Shorokoo.Core.Factory
                 isFunction: false,
                 tensorInfoLookup: tensorInfoLookup,
                 emitInputsAsNodes: emitInputsAsNodes,
-                emitRepresentativeMetadata: representativeForm == RepresentativeInputForm.VanillaMetadata);
+                emitRepresentativeMetadata: representativeForm == RepresentativeInputForm.VanillaMetadata,
+                inputDims: inputDims);
 
             // ----- 4. Discover all reachable Functions in post order and emit
             // a FunctionProto for each.
@@ -1194,7 +1202,8 @@ namespace Shorokoo.Core.Factory
             bool isFunction,
             Dictionary<FastTensorKey, FastTensorInfo>? tensorInfoLookup = null,
             bool emitInputsAsNodes = false,
-            bool emitRepresentativeMetadata = false)
+            bool emitRepresentativeMetadata = false,
+            IReadOnlyList<long[]?>? inputDims = null)
         {
             // .srk dialect (top-level graph only): every model-input op is emitted as an ordinary
             // NodeProto (carrying all its attributes — including the representative-input shape) instead
@@ -1312,7 +1321,7 @@ namespace Shorokoo.Core.Factory
                 : CreateInitializerTensors(fastGraph);
             var inputInfos = inputsAsNodes
                 ? Array.Empty<ValueInfoProto>()
-                : CreateInputInfos(fastGraph, emitRepresentativeMetadata);
+                : CreateInputInfos(fastGraph, emitRepresentativeMetadata, inputDims);
             var outputInfos = CreateOutputInfos(fastGraph);
 
             return (GraphProto)OnnxIRFactory.CreateGraph(
@@ -1461,8 +1470,13 @@ namespace Shorokoo.Core.Factory
         }
 
         private static ValueInfoProto[] CreateInputInfos(
-            InternalComputationGraph fastGraph, bool emitRepresentativeMetadata)
+            InternalComputationGraph fastGraph, bool emitRepresentativeMetadata,
+            IReadOnlyList<long[]?>? inputDims = null)
         {
+            if (inputDims is not null && inputDims.Count != fastGraph.Inputs.Count)
+                throw new InvalidOperationException(
+                    $"FastOnnxModelBuilder: {inputDims.Count} concrete input shape(s) were supplied for a graph " +
+                    $"with {fastGraph.Inputs.Count} input(s); they must correspond one-to-one in input order.");
             // Map graph-input keys back to their producing node so we can read
             // dtype/rank/structure off the node's attributes.
             var producerByOutputKey = new Dictionary<FastTensorKey, FastNode>();
@@ -1477,12 +1491,14 @@ namespace Shorokoo.Core.Factory
             }
 
             var infos = new List<ValueInfoProto>(fastGraph.Inputs.Count);
-            foreach (var key in fastGraph.Inputs)
+            for (int i = 0; i < fastGraph.Inputs.Count; i++)
             {
+                var key = fastGraph.Inputs[i];
                 if (!producerByOutputKey.TryGetValue(key, out var producer))
                     throw new InvalidOperationException(
                         $"FastOnnxModelBuilder: graph input {key} has no producing node in the Fast graph.");
-                infos.Add(FastOnnxProtoFactory.CreateGraphInputInfo(producer, key, emitRepresentativeMetadata));
+                infos.Add(FastOnnxProtoFactory.CreateGraphInputInfo(
+                    producer, key, emitRepresentativeMetadata, concreteDims: inputDims?[i]));
             }
             return infos.ToArray();
         }

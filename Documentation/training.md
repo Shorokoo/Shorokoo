@@ -552,8 +552,11 @@ stays the safer one, since it catches a swapped pair that `FromOrderedData` acce
   epoch `e`'s order bit-for-bit and skips the first `b` batches, so the continued run sees the
   same batches the original would have.
 - **Partial final batch.** `dropLast: true` (the default) drops a trailing partial batch so every
-  batch matches the shape the training-step graph was compiled for. Pass `dropLast: false` to keep
-  the smaller final batch (only safe if the graph tolerates a variable batch dimension).
+  batch matches the shape the training-step session was compiled for. Pass `dropLast: false` to keep
+  the smaller final batch (only safe if the graph tolerates a variable batch dimension). The rig
+  compiles its training-step session for the exact input shapes it is fed — that is what lets ONNX
+  Runtime fold the step's shape arithmetic away — so a differently-shaped batch costs one extra
+  session compile the first time it appears, and is then cached like the full-size shape.
 - **Resume.** A checkpoint's `.Epoch` / `.BatchIndex` name the batch that was **used** at its last
   step. Save the `FinalCheckpoint` (or any mid-run checkpoint), then in a later process rebuild the rig
   and a loader over the same data/seed and call `rig.Fit(loader, numEpochs, initialCheckpoint: loaded)`:

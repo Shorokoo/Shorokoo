@@ -125,9 +125,10 @@ namespace Shorokoo
     ///
     /// <para><b>Partial final batch.</b> With <c>dropLast: true</c> (the default) a trailing partial
     /// batch (when <c>N</c> is not a multiple of <c>batchSize</c>) is dropped, so every batch has the
-    /// same leading dimension — the shape the rig's training-step graph was compiled for. Pass
+    /// same leading dimension — the shape the rig's training-step session was compiled for. Pass
     /// <c>dropLast: false</c> to keep the smaller final batch (only safe if the graph tolerates a
-    /// variable batch dimension).</para>
+    /// variable batch dimension; the rig compiles one extra, cached session for that shape the first
+    /// time it appears).</para>
     /// </summary>
     public sealed class InMemoryDataLoader : IDataLoader
     {

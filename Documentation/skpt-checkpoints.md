@@ -205,7 +205,7 @@ var next = rig.TrainStep(resumed, inputBatch, targetBatch);
 
 The rebuilt rig re-derives its trainstep exactly as a fresh build does, so a resumed step
 continues the saved trajectory — and costs most of a build, everything but the concretization the
-saved architecture replaces. On a large model set `mergeContext`'s `Progress` sink to
+saved architecture replaces. On a large model pass `TrainingRig.Load` a `progress:` sink to
 [watch it stage by stage](training.md#watching-a-long-build) rather than wait blind; the file read
 and the checkpoint payload read are reported too, so the stream reports complete only once the
 resumed checkpoint is in hand. Its two optional arguments are the compute contexts that seed the rebuilt rig

@@ -1,12 +1,12 @@
-# Debugging graph lowering (`DebugRequests`, `ComputeContext.Progress`)
+# Debugging graph lowering (`DebugRequests`, `BuildProgress`)
 
 Related: [inference.md](inference.md) · [onnx-and-weights.md](onnx-and-weights.md) · [training.md](training.md)
 
 Two facilities watch the same lowering pipeline from opposite ends. `DebugRequests` captures the
 **graph** at chosen points, as compilable C#, and you read it after the call returns.
-`ComputeContext.Progress` reports the **stage name** as the pipeline enters it, while the call is
-still running — the one that answers "is this build alive?". Neither changes the graph the build
-produces (though a progress handler that throws aborts the build that called it).
+a progress sink reports the **stage name** as the pipeline enters it, while the call is still
+running — the one that answers "is this build alive?". Neither changes the graph the build produces
+(though a progress handler that throws aborts the build that called it).
 
 When `ToConcreteArchitecture` doesn't produce the graph you expect, the
 `DebugRequests` class (namespace `Shorokoo.Graph`) saves snapshots of the
@@ -69,20 +69,18 @@ var debugRequests = new DebugRequests(debugDict);
 - Directories are automatically created if they don't exist
 - Passing `null` for `debugRequests` parameter works normally (no debug output)
 
-## Watching a build while it runs (`ComputeContext.Progress`)
+## Watching a build while it runs (`BuildProgress`)
 
 `DebugRequests` tells you what the graph looked like at a stage — but only once the call returns,
 which is no help when the question is whether a call that has been running for minutes is still
-making progress. For that, attach a progress sink to the compute context: every stage is reported as
-the pipeline enters it, so the last report names the stage the build is in.
+making progress. For that, hand the call a progress sink: every stage is reported as the pipeline
+enters it, so the last report names the stage the build is in.
 
 ```csharp
 using Shorokoo.Graph;    // BuildProgress, SynchronousBuildProgress
-using Shorokoo.Runtime;  // ComputeContext
 
-var buildContext = new ComputeContext { Progress = new SynchronousBuildProgress(Console.WriteLine) };
-
-var concreteArchitecture = graph.ToConcreteArchitecture(inputHints, buildContext);
+var concreteArchitecture = graph.ToConcreteArchitecture(
+    inputHints, progress: new SynchronousBuildProgress(Console.WriteLine));
 ```
 
 ```
@@ -101,8 +99,8 @@ var concreteArchitecture = graph.ToConcreteArchitecture(inputHints, buildContext
 (`…` marks stages elided here, not gaps in the output — every stage reports, and a lowering that
 finishes ends on a report whose `IsComplete` is true.)
 
-The same context passed to `TrainingRig.FromScratch` as its `mergeContext` covers the whole rig
-build — concretization, training-step composition and initialization — under one clock. See
+The same sink passed to `TrainingRig.FromScratch` covers the whole rig build — concretization,
+training-step composition and initialization — under one clock. See
 [training.md](training.md#watching-a-long-build) for the full report shape (`BuildPhase`, `Stage`,
 `Elapsed`, `IsComplete`), the phase order, which calls report, and why to prefer
 `SynchronousBuildProgress` over `System.Progress<T>`.

@@ -148,7 +148,7 @@ namespace Shorokoo
         /// every <c>With…</c> derivation carries it forward by reference. It is <b>runtime configuration,
         /// never persisted</b> — no checkpoint (flat or <c>.skpt</c>) or manifest records it, so a
         /// reloaded rig receives a fresh one via <see cref="FromScratch(ComputationGraph, ComputationGraph,
-        /// ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?, ComputeContext?, ComputeContext?)"/>.
+        /// ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/>.
         /// </summary>
         public ComputeContext MergeContext { get; private set; } = ComputeContext.Default;
 
@@ -385,11 +385,13 @@ namespace Shorokoo
         /// <param name="mergeContext">
         /// Optional build/merge-phase compute context (see <see cref="MergeContext"/>); <c>null</c> ⇒
         /// <see cref="ComputeContext.Default"/>. Never persisted — a reloaded rig gets a fresh one here.
-        /// This build can run for minutes on a large graph; set the context's
-        /// <see cref="ComputeContext.Progress"/> to have it report each stage as it enters it (see
-        /// <see cref="BuildProgress"/>), so a long build is visibly alive rather than indistinguishable
-        /// from a hang. The same holds for every rebuild that takes a merge context — each
-        /// <c>With…</c> derivation, and <see cref="Load"/>.
+        /// </param>
+        /// <param name="progress">
+        /// Optional sink this build reports each stage to as it enters it (see
+        /// <see cref="BuildProgress"/>). A build can run for minutes on a large graph; with a sink it is
+        /// visibly alive rather than indistinguishable from a hang. Watches this call alone — every
+        /// other build that wants watching, each <c>With…</c> derivation and <see cref="Load"/>
+        /// included, takes a sink of its own.
         /// </param>
         /// <param name="runtimeContext">
         /// Optional compile/run compute context (see <see cref="RuntimeContext"/>); <c>null</c> ⇒
@@ -404,12 +406,13 @@ namespace Shorokoo
             IOptimizerHyperparameters hyperparameters,
             RngConfig? rngConfig = null,
             ComputeContext? mergeContext = null,
-            ComputeContext? runtimeContext = null)
+            ComputeContext? runtimeContext = null,
+            IProgress<BuildProgress>? progress = null)
         {
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
             return FromScratchCore(modelGraph, lossGraph, optimizerGraph, sampleInputs,
                 hyperparameters.InOptimizerOrder(), hyperparameters.HyperparameterNames, rngConfig,
-                mergeContext, runtimeContext);
+                mergeContext, runtimeContext, progress);
         }
 
         /// <summary>
@@ -450,9 +453,11 @@ namespace Shorokoo
             Hyperparameter[] hyperparameters,
             RngConfig? rngConfig = null,
             ComputeContext? mergeContext = null,
-            ComputeContext? runtimeContext = null)
+            ComputeContext? runtimeContext = null,
+            IProgress<BuildProgress>? progress = null)
             => FromScratchCore(modelGraph, lossGraph, optimizerGraph, sampleInputs, hyperparameters,
-                names: null, rngConfig: rngConfig, mergeContext: mergeContext, runtimeContext: runtimeContext);
+                names: null, rngConfig: rngConfig, mergeContext: mergeContext,
+                runtimeContext: runtimeContext, progress: progress);
 
         /// <summary>
         /// Convenience overload that accepts a <see cref="ModelParamList"/> for sample inputs,
@@ -468,11 +473,13 @@ namespace Shorokoo
             IOptimizerHyperparameters hyperparameters,
             RngConfig? rngConfig = null,
             ComputeContext? mergeContext = null,
-            ComputeContext? runtimeContext = null)
+            ComputeContext? runtimeContext = null,
+            IProgress<BuildProgress>? progress = null)
         {
             if (sampleInputs is null) throw new ArgumentNullException(nameof(sampleInputs));
             return FromScratch(modelGraph, lossGraph, optimizerGraph,
-                sampleInputs.ModelParams.ToArray(), hyperparameters, rngConfig, mergeContext, runtimeContext);
+                sampleInputs.ModelParams.ToArray(), hyperparameters, rngConfig, mergeContext,
+                runtimeContext, progress);
         }
 
         /// <summary>
@@ -509,11 +516,13 @@ namespace Shorokoo
             Hyperparameter[] hyperparameters,
             RngConfig? rngConfig = null,
             ComputeContext? mergeContext = null,
-            ComputeContext? runtimeContext = null)
+            ComputeContext? runtimeContext = null,
+            IProgress<BuildProgress>? progress = null)
         {
             if (sampleInputs is null) throw new ArgumentNullException(nameof(sampleInputs));
             return FromScratch(modelGraph, lossGraph, optimizerGraph,
-                sampleInputs.ModelParams.ToArray(), hyperparameters, rngConfig, mergeContext, runtimeContext);
+                sampleInputs.ModelParams.ToArray(), hyperparameters, rngConfig, mergeContext,
+                runtimeContext, progress);
         }
 
         private static TrainingRig FromScratchCore(
@@ -525,7 +534,8 @@ namespace Shorokoo
             IReadOnlyList<string>? names,
             RngConfig? rngConfig,
             ComputeContext? mergeContext,
-            ComputeContext? runtimeContext)
+            ComputeContext? runtimeContext,
+            IProgress<BuildProgress>? progress = null)
         {
             if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
             if (lossGraph is null) throw new ArgumentNullException(nameof(lossGraph));
@@ -545,12 +555,13 @@ namespace Shorokoo
                     rngConfig ?? RngConfig.Default),
                 sampleInputs,
                 mergeContext ?? ComputeContext.Default,
-                runtimeContext ?? ComputeContext.Default);
+                runtimeContext ?? ComputeContext.Default,
+                progress);
         }
 
         /// <summary>
         /// The model-graph precondition shared by <see cref="FromScratch(ComputationGraph,
-        /// ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?, ComputeContext?, ComputeContext?)"/>
+        /// ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/>
         /// and <see cref="TrainingCheckpoint.ToInferenceModel"/>: a module graph or an
         /// already-lowered concrete architecture (both feed the idempotent
         /// <c>ToConcreteArchitecture</c> pipeline). A weight-filled concrete model is
@@ -580,7 +591,7 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// The <b>initial build path</b> (<see cref="FromScratch(ComputationGraph, ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?, ComputeContext?, ComputeContext?)"/>
+        /// The <b>initial build path</b> (<see cref="FromScratch(ComputationGraph, ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/>
         /// only): concretizes the model from the <paramref name="sampleInputs"/> once, binds the RNG
         /// config, and derives the retained concrete arch + its shape exemplars — then hands off to
         /// <see cref="DeriveFromConcreteArch"/> to compose and optimize the trainstep. The sample
@@ -593,7 +604,8 @@ namespace Shorokoo
             RigConstituents constituents,
             NamedModelParam[] sampleInputs,
             ComputeContext mergeContext,
-            ComputeContext runtimeContext)
+            ComputeContext runtimeContext,
+            IProgress<BuildProgress>? progress)
         {
             var c = constituents;
             ValidateConstituents(c);
@@ -603,13 +615,13 @@ namespace Shorokoo
                     "drive parameter shape resolution and training-graph shape inference.",
                     nameof(sampleInputs));
 
-            // Concretization is a build/merge-phase step, so it runs on the merge context. That
-            // context also carries the optional progress sink, and the reporter built from it here is
-            // threaded through the whole build so every phase reports against one clock — built first
-            // so the thaw below, a full walk of the caller's graph, is inside that clock.
+            // Concretization is a build/merge-phase step, so it runs on the merge context. The caller's
+            // progress sink is independent of that: one reporter is built from it here and threaded
+            // through the whole build so every phase reports against one clock — built first so the
+            // thaw below, a full walk of the caller's graph, is inside that clock.
             var ctx = mergeContext;
-            var progress = BuildProgressReporter.For(mergeContext);
-            void Concretizing(string stage) => progress?.Report(BuildPhase.Concretize, stage);
+            var reporter = BuildProgressReporter.For(progress);
+            void Concretizing(string stage) => reporter?.Report(BuildPhase.Concretize, stage);
 
             // The model position takes a module graph or an already-lowered concrete architecture
             // (the concretization pipeline is idempotent on the latter); a weight-filled concrete
@@ -625,7 +637,7 @@ namespace Shorokoo
             // reachability is killed by the sample input shape. Sample input VALUES matter only here
             // (concretization's QEE/ORT resolution fallbacks); the derivation path needs only shapes.
             var concreteArch = model.ToConcreteArchitecture(
-                new ModelParamList(sampleInputs), ctx, debugRequests: null, progress);
+                new ModelParamList(sampleInputs), ctx, debugRequests: null, reporter);
 
             // Bind the RNG config at the shared concretization point: binding writes the
             // config's runtime identity into the RngSeed parameter, which — with the feeds'
@@ -643,7 +655,7 @@ namespace Shorokoo
             Concretizing("WriteRepresentativeInputs");
             WriteRepresentativeInputs(concreteArch, sampleInputs);
 
-            return DeriveFromConcreteArch(c, concreteArch, mergeContext, runtimeContext, progress);
+            return DeriveFromConcreteArch(c, concreteArch, mergeContext, runtimeContext, reporter);
         }
 
         /// <summary>
@@ -661,15 +673,11 @@ namespace Shorokoo
             InternalComputationGraph concreteArch,
             ComputeContext mergeContext,
             ComputeContext runtimeContext,
-            BuildProgressReporter? progress = null,
+            BuildProgressReporter? progress,
             bool completesBuild = true)
         {
             var c = constituents;
             ValidateConstituents(c);
-
-            // A derivation is a build of its own; only the initial build hands one in (so its
-            // concretization and the composition below share a clock).
-            progress ??= BuildProgressReporter.For(mergeContext);
 
             // Loss and optimizer are composed as module bodies and must be module graphs; re-validated
             // on every derivation so a swapped constituent is checked. The model is not re-checked — it
@@ -811,17 +819,22 @@ namespace Shorokoo
         /// model (its retained concrete arch), optimizer, hyperparameters and RNG config are shared by
         /// reference.
         /// </summary>
-        public TrainingRig WithLoss(ComputationGraph loss)
+        public TrainingRig WithLoss(ComputationGraph loss, IProgress<BuildProgress>? progress = null)
         {
             if (loss is null) throw new ArgumentNullException(nameof(loss));
-            return DeriveFromConcreteArch(_constituents with { Loss = loss }, _concreteArch, MergeContext, RuntimeContext);
+            return DeriveFromConcreteArch(
+                _constituents with { Loss = loss }, _concreteArch, MergeContext, RuntimeContext,
+                BuildProgressReporter.For(progress));
         }
 
         /// <summary>
         /// A new rig with the optimizer constituent (and its hyperparameters) replaced; optimizer
         /// state is re-initialized as part of re-deriving the <c>trainstep</c>, everything else shared.
         /// </summary>
-        public TrainingRig WithOptimizer(ComputationGraph optimizer, IOptimizerHyperparameters hyperparameters)
+        public TrainingRig WithOptimizer(
+            ComputationGraph optimizer,
+            IOptimizerHyperparameters hyperparameters,
+            IProgress<BuildProgress>? progress = null)
         {
             if (optimizer is null) throw new ArgumentNullException(nameof(optimizer));
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
@@ -830,17 +843,17 @@ namespace Shorokoo
                 Optimizer = optimizer,
                 Hyperparameters = hyperparameters.InOptimizerOrder(),
                 Names = hyperparameters.HyperparameterNames,
-            }, _concreteArch, MergeContext, RuntimeContext);
+            }, _concreteArch, MergeContext, RuntimeContext, BuildProgressReporter.For(progress));
         }
 
-        /// <summary>Positional-hyperparameter overload of <see cref="WithOptimizer(ComputationGraph, IOptimizerHyperparameters)"/>.</summary>
+        /// <summary>Positional-hyperparameter overload of <see cref="WithOptimizer(ComputationGraph, IOptimizerHyperparameters, IProgress{BuildProgress})"/>.</summary>
         public TrainingRig WithOptimizer(ComputationGraph optimizer, params Hyperparameter[] hyperparameters)
         {
             if (optimizer is null) throw new ArgumentNullException(nameof(optimizer));
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
             return DeriveFromConcreteArch(
                 _constituents with { Optimizer = optimizer, Hyperparameters = hyperparameters, Names = null },
-                _concreteArch, MergeContext, RuntimeContext);
+                _concreteArch, MergeContext, RuntimeContext, progress: null);
         }
 
         /// <summary>
@@ -849,23 +862,24 @@ namespace Shorokoo
         /// module per field) until #106 folds the scheduler into its own persisted constituent. Only
         /// the <c>trainstep</c> is re-derived; the model, loss and optimizer graphs are shared.
         /// </summary>
-        public TrainingRig WithScheduler(IOptimizerHyperparameters hyperparameters)
+        public TrainingRig WithScheduler(
+            IOptimizerHyperparameters hyperparameters, IProgress<BuildProgress>? progress = null)
         {
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
             return DeriveFromConcreteArch(_constituents with
             {
                 Hyperparameters = hyperparameters.InOptimizerOrder(),
                 Names = hyperparameters.HyperparameterNames,
-            }, _concreteArch, MergeContext, RuntimeContext);
+            }, _concreteArch, MergeContext, RuntimeContext, BuildProgressReporter.For(progress));
         }
 
-        /// <summary>Positional-hyperparameter overload of <see cref="WithScheduler(IOptimizerHyperparameters)"/>.</summary>
+        /// <summary>Positional-hyperparameter overload of <see cref="WithScheduler(IOptimizerHyperparameters, IProgress{BuildProgress})"/>.</summary>
         public TrainingRig WithScheduler(params Hyperparameter[] hyperparameters)
         {
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
             return DeriveFromConcreteArch(
                 _constituents with { Hyperparameters = hyperparameters, Names = null },
-                _concreteArch, MergeContext, RuntimeContext);
+                _concreteArch, MergeContext, RuntimeContext, progress: null);
         }
 
         /// <summary>
@@ -881,19 +895,19 @@ namespace Shorokoo
         /// rides as an aliased param value) rests on the #22 param-identity substrate; until that lands
         /// the re-seed re-derives the trainstep, which is correct and equally immutable.
         /// </summary>
-        public TrainingRig WithSeed(RngConfig rngConfig)
+        public TrainingRig WithSeed(RngConfig rngConfig, IProgress<BuildProgress>? progress = null)
         {
             if (rngConfig is null) throw new ArgumentNullException(nameof(rngConfig));
             // Rebind the new RNG identity on a clone (ApplyRngConfig mutates), keeping this rig's
             // retained arch pristine. Clone() copies node attributes by reference, so the clone's
             // MODEL_TENSOR_INPUT nodes still carry the representative-input attributes (same model inputs).
-            var progress = BuildProgressReporter.For(MergeContext);
-            progress?.Report(BuildPhase.Concretize, "CloneArchitecture");
+            var reporter = BuildProgressReporter.For(progress);
+            reporter?.Report(BuildPhase.Concretize, "CloneArchitecture");
             var reArch = _concreteArch.Clone();
-            progress?.Report(BuildPhase.Concretize, "BindRngConfig");
+            reporter?.Report(BuildPhase.Concretize, "BindRngConfig");
             reArch.ApplyRngConfig(rngConfig);
             return DeriveFromConcreteArch(
-                _constituents with { RngConfig = rngConfig }, reArch, MergeContext, RuntimeContext, progress);
+                _constituents with { RngConfig = rngConfig }, reArch, MergeContext, RuntimeContext, reporter);
         }
 
         /// <summary>
@@ -2173,7 +2187,7 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Returns the default initial checkpoint produced at <see cref="FromScratch(ComputationGraph, ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?, ComputeContext?, ComputeContext?)"/> time.
+        /// Returns the default initial checkpoint produced at <see cref="FromScratch(ComputationGraph, ComputationGraph, ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/> time.
         /// Trainable parameters and model state were initialized from the model's built-in
         /// initializers, and optimizer state from the optimizer's [StateInitializer]s (run once per
         /// trainable parameter, at each hyperparameter's value at the initial counters). This is pure
@@ -2339,7 +2353,7 @@ namespace Shorokoo
         /// This entry point reads the container shape only: handed a flat safetensors checkpoint it
         /// fails immediately, naming <see cref="LoadCheckpoint"/> as the entry point for that shape.
         /// To rebuild the whole rig from a <c>.skpt</c> alone (no pre-existing rig), use the static
-        /// <see cref="Load(string, ComputeContext?, ComputeContext?)"/> instead.
+        /// <see cref="Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/> instead.
         /// </summary>
         public TrainingCheckpoint LoadCheckpointFromSkpt(string filePath, CheckpointComponents? components = null)
             => TrainingCheckpoint.LoadFromSkpt(filePath, this, components);
@@ -2522,9 +2536,9 @@ namespace Shorokoo
         /// seed the rebuilt rig (rev 22; never persisted — a reloaded run gets fresh ones), each
         /// defaulting to <see cref="ComputeContext.Default"/>. Re-deriving the trainstep is most of a
         /// build — everything but the concretization, which the file's saved architecture replaces — so
-        /// <c>mergeContext</c>'s <see cref="ComputeContext.Progress"/> reports this too: the file read
-        /// and the checkpoint payload read included, ending complete only once the resumed checkpoint
-        /// is in hand. The file must be a training <c>.skpt</c>
+        /// <paramref name="progress"/> reports this too: the file read and the checkpoint payload read
+        /// included, ending complete only once the resumed checkpoint is in hand.
+        /// The file must be a training <c>.skpt</c>
         /// written with the rig constituents (every training <c>.skpt</c> carries them); a flat
         /// checkpoint has no constituents to rebuild from and fails loudly — pass the rig and use
         /// <see cref="LoadCheckpoint"/> for that shape.
@@ -2534,22 +2548,23 @@ namespace Shorokoo
         public static (TrainingRig Rig, TrainingCheckpoint Checkpoint) Load(
             string filePath,
             ComputeContext? mergeContext = null,
-            ComputeContext? runtimeContext = null)
+            ComputeContext? runtimeContext = null,
+            IProgress<BuildProgress>? progress = null)
         {
             if (string.IsNullOrWhiteSpace(filePath))
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
 
             // Load owns the whole span, so it owns the terminal report: the payload read below is the
             // build's largest I/O, and a "finished" report ahead of it would be worse than none.
-            var merge = mergeContext ?? ComputeContext.Default;
-            var progress = BuildProgressReporter.For(merge);
-            progress?.Report(BuildPhase.Concretize, "ReadCheckpointFile");
+            var reporter = BuildProgressReporter.For(progress);
+            reporter?.Report(BuildPhase.Concretize, "ReadCheckpointFile");
             var rig = Persistence.ReconstructRigFromSkpt(
-                filePath, merge, runtimeContext ?? ComputeContext.Default, progress);
+                filePath, mergeContext ?? ComputeContext.Default,
+                runtimeContext ?? ComputeContext.Default, reporter);
 
-            progress?.Report(BuildPhase.Initialize, "LoadCheckpointState");
+            reporter?.Report(BuildPhase.Initialize, "LoadCheckpointState");
             var checkpoint = rig.LoadCheckpointFromSkpt(filePath);
-            progress?.ReportComplete(BuildPhase.Initialize);
+            reporter?.ReportComplete(BuildPhase.Initialize);
             return (rig, checkpoint);
         }
 

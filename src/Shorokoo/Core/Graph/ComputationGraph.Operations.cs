@@ -1,3 +1,4 @@
+using System;
 using Shorokoo;
 using Shorokoo.Core;
 using Shorokoo.Runtime;
@@ -39,34 +40,32 @@ namespace Shorokoo.Graph
         /// </summary>
         /// <param name="inputHints">Sample inputs (names + shapes/values) used as shape hints and as
         /// QEE/ORT resolution fallbacks during lowering; build one with <see cref="FromOrderedInputs"/>.</param>
-        /// <param name="computeContext">Optional context used to resolve values while lowering. Set its
-        /// <see cref="ComputeContext.Progress"/> to watch a long lowering pass by pass — see
-        /// <see cref="BuildProgress"/>.</param>
+        /// <param name="computeContext">Optional context used to resolve values while lowering.</param>
         /// <param name="debugRequests">Optional hook to dump the graph at each lowering stage.</param>
+        /// <param name="progress">Optional sink this lowering reports each stage to as it enters it, so
+        /// a lowering that runs for minutes is visibly alive — see <see cref="BuildProgress"/>. Watches
+        /// this call and no other; <c>null</c> reports nothing and costs nothing.</param>
         /// <returns>A fully inlined, concrete architecture graph.</returns>
         public ComputationGraph ToConcreteArchitecture(
             ModelParamList inputHints,
             ComputeContext? computeContext = null,
-            DebugRequests? debugRequests = null)
+            DebugRequests? debugRequests = null,
+            IProgress<BuildProgress>? progress = null)
         {
             RequireKind(GraphKind.Module, nameof(ToConcreteArchitecture), LoweringOrderHint);
-
-            // Resolve the context once, and report against the same one the lowering computes on:
-            // omitting it means ComputeContext.Default, whose sink must therefore be honoured here
-            // too, or setting it would light up rig builds and leave a bare lowering silent.
-            var context = computeContext ?? ComputeContext.Default;
-            var progress = BuildProgressReporter.For(context);
+            var reporter = BuildProgressReporter.For(progress);
 
             // The thaw and the freeze below are the caller's share of the work — each a full walk of
             // the graph, the freeze over its largest (inlined, autograd-expanded) form — so they are
             // named here rather than left as silence on either side of the pipeline's own stages.
-            progress?.Report(BuildPhase.Concretize, "Thaw");
-            var lowered = ToInternal().ToConcreteArchitecture(inputHints, context, debugRequests, progress);
+            reporter?.Report(BuildPhase.Concretize, "Thaw");
+            var lowered = ToInternal().ToConcreteArchitecture(
+                inputHints, computeContext, debugRequests, reporter);
 
-            progress?.Report(BuildPhase.Concretize, "Freeze");
+            reporter?.Report(BuildPhase.Concretize, "Freeze");
             var concrete = new ComputationGraph(lowered, GraphKind.ConcreteArchitecture);
 
-            progress?.ReportComplete(BuildPhase.Concretize);
+            reporter?.ReportComplete(BuildPhase.Concretize);
             return concrete;
         }
 

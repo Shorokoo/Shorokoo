@@ -475,13 +475,10 @@ so it is the context whose session actually executes training. It is the sole co
 one compiled training-step graph that the `Fit`/`Train` loop and a manual `TrainStep` loop all share.
 Every `With…` derivation keeps the same two contexts.
 
-**What the two can usefully differ in: still nothing — but the merge context is now worth
-configuring.** `ComputeContext` carries no per-instance *compute* settings — no device, no execution
-provider, no thread count, no session options — and every session either context creates is built by
-the one process-wide backend factory. Its single per-instance setting observes rather than
-configures: `Progress`, the sink the build reports its stages to ([below](#watching-a-long-build)).
-That setting is not a reason for the two to *differ*, because only one of them can use it: the build
-runs on `MergeContext`, so a sink set on `RuntimeContext` is inert. In particular you **cannot** merge
+**What the two can usefully differ in: nothing, today.** `ComputeContext` has a single parameterless
+constructor and carries no per-instance settings — no device, no execution provider, no thread count,
+no session options — and every session either context creates is built by the one process-wide backend
+factory. Passing two distinct instances therefore selects nothing. In particular you **cannot** merge
 on one device and train on another: [only one backend is live per process](inference.md#backend-selection)
 and both contexts go through it, so the naming does not offer a CPU-build / GPU-train split. Read the
 two members as a division of *phases* — which work is build/merge and which is compile/run — not of
@@ -504,14 +501,11 @@ a sink to the build context to see the stage it is in:
 
 ```csharp
 using Shorokoo.Graph;    // BuildProgress, SynchronousBuildProgress
-using Shorokoo.Runtime;  // ComputeContext
-
-var buildContext = new ComputeContext { Progress = new SynchronousBuildProgress(Console.WriteLine) };
 
 var rig = TrainingRig.FromScratch(
     MyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
     sampleInputs, new AdamWOptimizerHyperparameters { LearningRate = 0.001f },
-    mergeContext: buildContext);
+    progress: new SynchronousBuildProgress(Console.WriteLine));
 ```
 
 ```
@@ -558,33 +552,32 @@ quiet for minutes is inside the stage its last report named. It carries three fi
 thread**, so use `SynchronousBuildProgress` (which calls its handler inline) rather than
 `System.Progress<T>`, whose posted callbacks can arrive out of order or after the build returns —
 exactly what a liveness signal must not do. Keep the handler short; it runs inside the build, and an
-exception it throws propagates out of the build and discards it. A context shared by concurrent
-builds delivers their reports interleaved, on their own threads.
+exception it throws propagates out of the build and discards it. Hand the same sink to two concurrent
+builds and their reports interleave on their own threads — each build still carries its own clock, so
+give each one its own sink unless you want that.
 
-**Which calls report.** Every build that takes a merge context: `FromScratch` (all three phases);
-each `With…` derivation, which reuses the concrete architecture and so opens at `TrainingStep` —
-except `WithSeed`, which clones and rebinds the RNG identity and so opens with a `Concretize` phase
-naming that work; `TrainingRig.Load`, which likewise opens at `Concretize`, naming its file reads
-rather than lowering passes, and reports complete only once the resumed checkpoint is in hand; and
-the lowering step on its own —
+**The sink is an argument to one build, not configuration.** Only the call you hand it to reports to
+it: two builds watched at once cannot interleave into one sink by accident, a build handed none is
+silent, and there is no global switch to leave on. Every build that can run long takes one —
+`FromScratch` (all three phases); each `With…` derivation, which reuses the concrete architecture and
+so opens at `TrainingStep`, except `WithSeed`, which clones and rebinds the RNG identity and so opens
+with a `Concretize` phase naming that work; `TrainingRig.Load`, which likewise opens at `Concretize`,
+naming its file reads rather than lowering passes, and reports complete only once the resumed
+checkpoint is in hand; and the lowering step on its own —
 
 ```csharp
-var concrete = MyModel.ComputationGraph.ToConcreteArchitecture(inputHints, buildContext);
+var concrete = MyModel.ComputationGraph.ToConcreteArchitecture(
+    inputHints, progress: new SynchronousBuildProgress(Console.WriteLine));
 ```
 
-— which reports `Concretize`, its own thaw and freeze included, and ends complete.
+— which reports `Concretize`, its own thaw and freeze included, and ends complete. The two
+`params Hyperparameter[]` shorthands of `FromScratch` and `With…` cannot take a sink (a `params` array
+must come last); pass the values as an array to reach the overload that can.
 
-Reporting covers the **build** and stops there. Calls that are not builds stay silent: `ToConcreteModel`
-takes no context at all, and `InitializeTrainableParams` and `GetRngStreamReport` take one and report
-nothing, though all three can be slow. Neither does the first `TrainStep`, whose one-time compile
-([above](#what-construction-costs)) runs on `RuntimeContext` — so expect a quiet stretch there after
-the build has reported itself complete.
-
-A build with no context of its own runs on `ComputeContext.Default`, so setting
-`ComputeContext.Default.Progress` reports every such build — a process-wide switch worth keeping to
-quick experiments: concurrent builds then interleave into the one sink, each carrying its own clock
-and its own terminal report, and the "last report names where the build is" rule holds per build
-rather than per sink.
+Reporting covers the **build** and stops there. Calls that are not builds stay silent: `ToConcreteModel`,
+`InitializeTrainableParams` and `GetRngStreamReport` take no sink, though all three can be slow. Neither
+does the first `TrainStep`, whose one-time compile ([above](#what-construction-costs)) is not a build —
+so expect a quiet stretch there after the build has reported itself complete.
 
 To capture the *graphs* rather than the stage names — after the fact, as compilable C# — see
 [debugging.md](debugging.md).

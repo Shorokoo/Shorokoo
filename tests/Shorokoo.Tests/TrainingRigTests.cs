@@ -2899,10 +2899,10 @@ public class TrainingRigHyperparameterShapeCoverageTests
 [Trait("Purpose", "Coverage")]
 public class BuildProgressCoverageTests
 {
-    private static (List<BuildProgress> Reports, ComputeContext Context) Watched()
+    private static (List<BuildProgress> Reports, SynchronousBuildProgress Sink) Watched()
     {
         var reports = new List<BuildProgress>();
-        return (reports, new ComputeContext { Progress = new SynchronousBuildProgress(reports.Add) });
+        return (reports, new SynchronousBuildProgress(reports.Add));
     }
 
     private static BuildPhase[] PhaseRuns(List<BuildProgress> reports)
@@ -2929,21 +2929,18 @@ public class BuildProgressCoverageTests
     {
         var reports = new List<BuildProgress>();
         var reportThreads = new List<int>();
-        var ctx = new ComputeContext
+        var sink = new SynchronousBuildProgress(r =>
         {
-            Progress = new SynchronousBuildProgress(r =>
-            {
-                reports.Add(r);
-                reportThreads.Add(Environment.CurrentManagedThreadId);
-            }),
-        };
+            reports.Add(r);
+            reportThreads.Add(Environment.CurrentManagedThreadId);
+        });
         var (sample, _, _) = ScalarMultiplyBatches();
         var buildThread = Environment.CurrentManagedThreadId;
 
         var rig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
             AdamWOptimizer.ComputationGraph, sample,
-            new AdamWOptimizerHyperparameters { LearningRate = 0.1f }, mergeContext: ctx);
+            new AdamWOptimizerHyperparameters { LearningRate = 0.1f }, progress: sink);
 
         BuildPhase[] phases = [BuildPhase.Concretize, BuildPhase.TrainingStep, BuildPhase.Initialize];
         string[] concretize = ["Thaw", .. ConcretizePasses, "BindRngConfig", "WriteRepresentativeInputs"];
@@ -2972,9 +2969,9 @@ public class BuildProgressCoverageTests
     }
 
     [Fact]
-    public void TestToConcreteArchitectureReportsItsOwnThawAndFreezeCoverage()
+    public void TestOnlyTheWatchedBuildReportsToItsOwnSinkCoverage()
     {
-        var (reports, ctx) = Watched();
+        var (reports, sink) = Watched();
         var model = ScalarMultiplyModel.ComputationGraph;
         var hints = new ModelParamList(
             [new KeyValuePair<string, TensorData>(model.ToInternal().Inputs[0].ToString(), TensorData([4L], new float[4]))],
@@ -2982,27 +2979,30 @@ public class BuildProgressCoverageTests
         string[] stages = ["Thaw", .. ConcretizePasses, "Freeze", "Done"];
         BuildPhase[] concretizeOnly = [BuildPhase.Concretize];
 
-        Assert.Equal(GraphKind.ConcreteArchitecture, model.ToConcreteArchitecture(hints, ctx).Kind);
+        Assert.Equal(GraphKind.ConcreteArchitecture, model.ToConcreteArchitecture(hints, progress: sink).Kind);
         Assert.Equal(concretizeOnly, PhaseRuns(reports));
         Assert.Equal(stages, StagesOf(reports, BuildPhase.Concretize));
         Assert.True(reports[^1].IsComplete);
         Assert.Equal("[   1.5s] Concretize: Clone",
             new BuildProgress(BuildPhase.Concretize, "Clone", TimeSpan.FromSeconds(1.5)).ToString());
 
-        var unwatched = new ComputeContext();
-        Assert.Null(unwatched.Progress);
-        Assert.Equal(GraphKind.ConcreteArchitecture, model.ToConcreteArchitecture(hints, unwatched).Kind);
+        var unwatched = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            ScalarMultiplyBatches().sample, new AdamWOptimizerHyperparameters { LearningRate = 0.1f });
+        Assert.Equal(GraphKind.ConcreteArchitecture, model.ToConcreteArchitecture(hints).Kind);
+        Assert.Equal(GraphKind.ConcreteModel, unwatched.TrainingStepPureGraph.Kind);
+        Assert.Equal(stages.Length, reports.Count);
 
         var second = new List<BuildProgress>();
-        ctx.Progress = new SynchronousBuildProgress(second.Add);
-        Assert.Equal(GraphKind.ConcreteArchitecture, model.ToConcreteArchitecture(hints, ctx).Kind);
+        Assert.Equal(GraphKind.ConcreteArchitecture,
+            model.ToConcreteArchitecture(hints, progress: new SynchronousBuildProgress(second.Add)).Kind);
         Assert.Equal(stages, StagesOf(second, BuildPhase.Concretize));
     }
 
     [Fact]
     public void TestASchedulerBuildIsReportedCoverage()
     {
-        var (reports, ctx) = Watched();
+        var (reports, sink) = Watched();
         var (sample, _, _) = ScalarMultiplyBatches();
         var step = InputScalar<int64>("step");
         var scheduler = new ComputationGraph(
@@ -3012,7 +3012,7 @@ public class BuildProgressCoverageTests
         var rig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             sample, new SGDOptimizerHyperparameters { LearningRate = Hyperparameter.Scheduled(scheduler) },
-            mergeContext: ctx);
+            progress: sink);
 
         string[] trainingStep =
         [
@@ -3040,8 +3040,8 @@ public class BuildProgressCoverageTests
                 new AdamWOptimizerHyperparameters { LearningRate = 0.1f });
             Persistence.SaveTrainingCheckpointToSkpt(rig.CreateInitialCheckpoint(), path);
 
-            var (reports, ctx) = Watched();
-            var (loaded, checkpoint) = TrainingRig.Load(path, ctx);
+            var (reports, sink) = Watched();
+            var (loaded, checkpoint) = TrainingRig.Load(path, progress: sink);
 
             Assert.NotNull(loaded);
             Assert.NotNull(checkpoint.TrainableParams);
@@ -3058,7 +3058,7 @@ public class BuildProgressCoverageTests
     [Fact]
     public void TestDerivationsReportFromTheirOwnFirstPhaseCoverage()
     {
-        var (reports, ctx) = Watched();
+        var (reports, sink) = Watched();
         var (sample, _, _) = ScalarMultiplyBatches();
         BuildPhase[] derivation = [BuildPhase.TrainingStep, BuildPhase.Initialize];
         BuildPhase[] reseed = [BuildPhase.Concretize, BuildPhase.TrainingStep, BuildPhase.Initialize];
@@ -3066,15 +3066,14 @@ public class BuildProgressCoverageTests
         var rig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
             AdamWOptimizer.ComputationGraph, sample,
-            new AdamWOptimizerHyperparameters { LearningRate = 0.1f }, mergeContext: ctx);
-        reports.Clear();
+            new AdamWOptimizerHyperparameters { LearningRate = 0.1f });
 
-        Assert.NotSame(rig, rig.WithLoss(L2Loss.ComputationGraph));
+        Assert.NotSame(rig, rig.WithLoss(L2Loss.ComputationGraph, sink));
         Assert.Equal(derivation, PhaseRuns(reports));
         Assert.True(reports[^1].IsComplete);
 
         reports.Clear();
-        Assert.NotSame(rig, rig.WithSeed(new RngConfig { MasterSeed = 7 }));
+        Assert.NotSame(rig, rig.WithSeed(new RngConfig { MasterSeed = 7 }, sink));
         Assert.Equal(reseed, PhaseRuns(reports));
         Assert.Equal((string[])["CloneArchitecture", "BindRngConfig"],
             StagesOf(reports, BuildPhase.Concretize));

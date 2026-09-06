@@ -1,7 +1,6 @@
 using System;
 using System.Diagnostics;
 using System.Globalization;
-using Shorokoo.Runtime;
 
 namespace Shorokoo.Graph
 {
@@ -34,14 +33,16 @@ namespace Shorokoo.Graph
     /// One progress report from a build, raised as the build <b>enters</b> the named stage — so a
     /// build that has been quiet for minutes is stuck in the stage its last report named. The one
     /// exception is the terminal report of a completed build, which names no stage being entered;
-    /// <see cref="IsComplete"/> identifies it. Attach a sink with
-    /// <see cref="ComputeContext.Progress"/>:
+    /// <see cref="IsComplete"/> identifies it. Pass a sink to the build you want to watch:
     ///
     /// <code>
-    /// var buildContext = new ComputeContext { Progress = new SynchronousBuildProgress(Console.WriteLine) };
     /// var rig = TrainingRig.FromScratch(model, loss, optimizer, sampleInputs, hyperparameters,
-    ///                                   mergeContext: buildContext);
+    ///                                   progress: new SynchronousBuildProgress(Console.WriteLine));
     /// </code>
+    ///
+    /// <para>The sink is an argument to the build, not configuration hung off something the build
+    /// happens to use: only the call it is handed to reports to it, two builds watched at once cannot
+    /// interleave into it by accident, and a build handed none is silent.</para>
     /// </summary>
     /// <param name="Phase">The build phase the stage belongs to.</param>
     /// <param name="Stage">The lowering/build stage being entered, named for the work it does — usually
@@ -94,10 +95,11 @@ namespace Shorokoo.Graph
 
     /// <summary>
     /// The build-internal half of the progress facility: holds the sink and the clock whose elapsed
-    /// time every report of one build carries. Created once per build entry point and threaded down,
-    /// so the whole of a <c>FromScratch</c> — concretization, training-step composition,
-    /// initialization — reports against a single clock. <see cref="For"/> returns <c>null</c> when no
-    /// sink is attached, making every reporting call site a null check.
+    /// time every report of one build carries. Created once per build entry point from the sink that
+    /// entry point was handed, and threaded down, so the whole of a <c>FromScratch</c> —
+    /// concretization, training-step composition, initialization — reports against a single clock.
+    /// <see cref="For"/> returns <c>null</c> when the caller passed no sink, making every reporting
+    /// call site a null check.
     /// </summary>
     internal sealed class BuildProgressReporter
     {
@@ -106,8 +108,8 @@ namespace Shorokoo.Graph
 
         private BuildProgressReporter(IProgress<BuildProgress> sink) => _sink = sink;
 
-        internal static BuildProgressReporter? For(ComputeContext? context)
-            => context?.Progress is { } sink ? new BuildProgressReporter(sink) : null;
+        internal static BuildProgressReporter? For(IProgress<BuildProgress>? sink)
+            => sink is null ? null : new BuildProgressReporter(sink);
 
         internal void Report(BuildPhase phase, string stage)
             => _sink.Report(new BuildProgress(phase, stage, _clock.Elapsed));

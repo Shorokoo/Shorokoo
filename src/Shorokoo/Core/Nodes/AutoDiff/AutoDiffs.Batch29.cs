@@ -73,11 +73,12 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // y = log(1 + exp(x))
         // dy/dx = sigmoid(x).
 
-        [AutoDiff(SOFTPLUS)]
-        public static Variable?[] Softplus<T>(Tensor<T> x, Tensor<T> grad) where T : IVarType
+        [AutoDiff(SOFTPLUS, UsesOutputs = true)]
+        public static Variable?[] Softplus<T>(Tensor<T> x, Tensor<T> y, Tensor<T> grad) where T : IVarType
         {
-            Tensor<T> sig = OnnxOp.Sigmoid(x);
-            return [grad * sig];
+            // softplus'(x) = sigmoid(x) = 1 - exp(-y)
+            var one = TypedConst(1.0f, y);
+            return [grad * (one - (-y).Exp())];
         }
 
         // ===== Softsign =====
@@ -131,11 +132,11 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // dy_i/dx_j = δ_ij - softmax(x)_j
         // dx_j = grad_j - softmax(x)_j * sum_i(grad_i)
 
-        [AutoDiff(LOG_SOFTMAX)]
-        public static Variable?[] LogSoftmax<T>(Tensor<T> x, Tensor<T> grad, long? axis) where T : IVarType
+        [AutoDiff(LOG_SOFTMAX, UsesOutputs = true)]
+        public static Variable?[] LogSoftmax<T>(Tensor<T> x, Tensor<T> y, Tensor<T> grad, long? axis) where T : IVarType
         {
             var effAxis = axis ?? -1;
-            var sm = x.Softmax(effAxis);
+            var sm = y.Exp();
             var sumGrad = grad.Reduce(ReduceKind.Sum, axes: Vector(effAxis), keepDims: true);
             return [grad - sm * sumGrad];
         }

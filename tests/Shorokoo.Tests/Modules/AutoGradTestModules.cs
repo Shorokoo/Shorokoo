@@ -828,6 +828,19 @@ namespace Shorokoo.Tests.Modules
         /// cancellation — the worst element decides). One vector spanning several regimes
         /// therefore checks every branch of a piecewise f in a single graph.
         /// </summary>
+        public static Scalar<bit> WeightedDirectionalDerivCheck(
+            Tensor<float32> x, Func<Tensor<float32>, Tensor<float32>> f)
+        {
+            Vector<float32> w = [Scalar(0.3f), Scalar(-1.1f), Scalar(2.0f)];
+            Func<Tensor<float32>, Scalar<float32>> loss = z => (f(z) * w).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, loss(x));
+            var h = Scalar(1e-3f);
+            var pert = h * grad;
+            var deriv = (loss(x + pert) - loss(x - pert)) / (Scalar(2f) * h);
+            var gradNormSq = (grad * grad).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            return (deriv - gradNormSq).Abs() < Scalar(1e-3f) * (gradNormSq + Scalar(1f));
+        }
+
         public static Scalar<bit> ElementwiseDirectionalDerivCheck(
             Tensor<float32> x, Func<Tensor<float32>, Tensor<float32>> f)
         {
@@ -860,6 +873,24 @@ namespace Shorokoo.Tests.Modules
             var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, f(a));
             return AutoGradCheckHelpers.ScalarDirectionalDerivCheck(a, grad, f);
         }
+    }
+
+    /// <summary>
+    /// Directional-derivative check for a non-element-wise f: loss = w·f(x) for a fixed weight
+    /// vector, probed along the gradient direction as in <see cref="ScalarDirectionalDerivCheck"/>.
+    /// </summary>
+    [Module]
+    public partial class AutoGradSoftmaxWeightedCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => AutoGradCheckHelpers.WeightedDirectionalDerivCheck(x, z => z.Softmax(-1));
+    }
+
+    [Module]
+    public partial class AutoGradLogSoftmaxWeightedCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => AutoGradCheckHelpers.WeightedDirectionalDerivCheck(x, z => (Tensor<float32>)OnnxOp.LogSoftmax(z, axis: -1));
     }
 
     /// <summary>loss = Σ sigmoid(x). dL/dx = sig·(1−sig), checked element-wise over the vector.</summary>

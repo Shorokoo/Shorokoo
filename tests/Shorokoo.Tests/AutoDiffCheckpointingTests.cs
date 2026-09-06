@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using Shorokoo.Runtime;
 using Shorokoo.Core.AutoDiffCheckpointing;
+using Shorokoo.Core.AutoDiffCheckpointing.OpsPerf;
 using Shorokoo.Core.Inference;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 
@@ -159,6 +160,30 @@ public class AutoDiffCheckpointingCoverageTests
     private static GraphEvaluationResult Eval(double computeTime, long peakBytes)
         => new() { TotalComputeTime = computeTime, PeakMemoryBytes = peakBytes, NodeDetails = [] };
 
+    private static long ConvWorkspace(long batch, long group, long kernel)
+    {
+        var x = new TensorShapeInfo(new Shape(batch, 4 * group, 16, 16), DType.Float32, null);
+        var w = new TensorShapeInfo(new Shape(8 * group, 4, kernel, kernel), DType.Float32, null);
+        var y = new TensorShapeInfo(new Shape(batch, 8 * group, 16, 16), DType.Float32, null);
+        return new OpPerfRegistry().Estimate(new OpPerfInput
+        {
+            OpCode = "Conv",
+            InputShapes = [x, w],
+            OutputShapes = [y],
+            InputMustRemainIntact = [true, true],
+            Attributes = new Dictionary<string, object?> { ["group"] = group },
+        }).ExtraMemoryBytes;
+    }
+
+    [Fact]
+    public void TestConvWorkspaceIsPerImagePerGroupCoverage()
+    {
+        Assert.Equal(4 * 9 * 256 * 4L, ConvWorkspace(1, 1, 3));
+        Assert.Equal(ConvWorkspace(1, 1, 3), ConvWorkspace(8, 1, 3));
+        Assert.Equal(ConvWorkspace(1, 1, 3), ConvWorkspace(1, 4, 3));
+        Assert.Equal(0L, ConvWorkspace(8, 1, 1));
+    }
+
     [Fact]
     public void TestComputeMemoryObjectiveIsScaleFreeCoverage()
     {
@@ -176,6 +201,24 @@ public class AutoDiffCheckpointingCoverageTests
         Assert.True(small.TradeDelta(extraComputeTime: 1, savedPeakBytes: 500) < 0);
         Assert.True(small.TradeDelta(extraComputeTime: 5, savedPeakBytes: 100) > 0);
         Assert.Equal(small.TradeDelta(1, 500), large.TradeDelta(1_000_000, 500_000_000), 9);
+    }
+
+    [Fact]
+    public void TestShapeInferenceSizesSequencesAsTheSumOfTheirElementsCoverage()
+    {
+        var x = InputTensor<float32>("x", rank: 2);
+        var y = InputTensor<float32>("y", rank: 2);
+        var constructed = OnnxOp.SequenceConstruct(x, y);
+        var split = OnnxOp.SplitToSequence(x, axis: 0);
+        var graph = new InternalComputationGraph([x, y], [constructed, split]);
+
+        var shapeInfo = new ShapeInferenceInterpreter(CpuContext).Infer(graph,
+            Globals.TensorDataWithSmallVals(DType.Float32, [4, 8]),
+            Globals.TensorDataWithSmallVals(DType.Float32, [2, 8]));
+
+        Assert.Equal(48 * 4L, shapeInfo.GetTensorInfo(graph.Outputs[0])!.MemoryBytes);
+        Assert.Equal(32 * 4L, shapeInfo.GetTensorInfo(graph.Outputs[1])!.MemoryBytes);
+        Assert.Equal(DType.Float32, shapeInfo.GetTensorInfo(graph.Outputs[1])!.DType);
     }
 
     [Fact]

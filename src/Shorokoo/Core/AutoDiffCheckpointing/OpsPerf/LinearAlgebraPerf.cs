@@ -125,9 +125,12 @@ internal class LinearAlgebraPerf : IOpPerf
         var flops = batch * outChannels * spatialOutput * kernelVolume * inChannelsPerGroup * 2.0;
         var computeTime = flops / 256.0;
 
-        // Conv may need im2col workspace
-        long workspaceBytes = batch * inChannelsPerGroup * group * kernelVolume * spatialOutput
-            * (inputShape.DType.EncodingBitCount / 8);
+        // im2col workspace: ORT allocates one column buffer of kernel_dim × output_image_size
+        // (kernel_dim = C/group × kernel volume) and reuses it across every image and group,
+        // so the workspace is per image per group, not × batch × group. A 1×1 kernel skips
+        // im2col entirely.
+        long workspaceBytes = kernelVolume == 1 ? 0
+            : inChannelsPerGroup * kernelVolume * spatialOutput * (inputShape.DType.EncodingBitCount / 8);
 
         return new OpPerfResult
         {

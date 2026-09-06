@@ -179,7 +179,8 @@ internal class ShapeInferenceInterpreter
     /// </summary>
     private static TensorShapeInfo? TryConvertToShapeInfo(IRuntimeTensor rt)
     {
-        if (rt is not RuntimeTensor r) return null; // optional/sequence — no flat shape
+        if (rt is RuntimeSequenceTensor seq) return TryConvertSequence(seq);
+        if (rt is not RuntimeTensor r) return null; // optional — no flat shape
         if (r.Shape is null) return null;
         if (r.DType == DType.Invalid) return null;
 
@@ -190,6 +191,29 @@ internal class ShapeInferenceInterpreter
             (r.BoolData is { } bd && bd.Length == elementCount);
         var data = dataMatchesShape ? TensorDataConverter.ToTensorData(r) : null;
         return new TensorShapeInfo(r.Shape, r.DType, data);
+    }
+
+    /// <summary>
+    /// A sequence holds its elements' buffers for as long as it lives, so it is priced as the
+    /// sum of them, flattened to a rank-1 pseudo-shape: the evaluator only needs the byte
+    /// count. Concrete sequences sum their elements; templated ones multiply the template
+    /// by the known count. Values are never retained.
+    /// </summary>
+    private static TensorShapeInfo? TryConvertSequence(RuntimeSequenceTensor seq)
+    {
+        if (seq.DType == DType.Invalid) return null;
+        long elements;
+        if (seq.Tensors is { } tensors)
+        {
+            elements = 0;
+            foreach (var t in tensors)
+                if (t.Shape is { } shape) elements += shape.Count;
+        }
+        else if (seq.TemplateTensor is { Shape: { } template } && seq.Count is { } count)
+            elements = template.Count * count;
+        else
+            return null;
+        return new TensorShapeInfo(new Shape(elements), seq.DType, null);
     }
 
     private static List<FastTensorKey> CollectAllOutputKeys(InternalComputationGraph graph)

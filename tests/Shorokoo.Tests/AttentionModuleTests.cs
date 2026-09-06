@@ -124,8 +124,8 @@ public class AttentionModuleTests
         var dense = StepOpCounts(SdpaMeanPoolModel.ComputationGraph);
         var chunked = StepOpCounts(ChunkedSdpaMeanPoolModel.ComputationGraph);
 
-        Assert.Equal(2, dense["Softmax"]);
-        Assert.Equal(8, chunked["Softmax"]);
+        Assert.Equal(1, dense["Softmax"]);
+        Assert.Equal(4, chunked["Softmax"]);
         Assert.Equal(1, dense["Where"]);
         Assert.Equal(4, chunked["Where"]);
         Assert.Equal(0, dense.GetValueOrDefault("ConstantOfShape"));

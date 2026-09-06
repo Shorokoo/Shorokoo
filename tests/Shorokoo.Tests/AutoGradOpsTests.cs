@@ -73,6 +73,8 @@ public class AutoGradElementwiseOpsCoverageTests
         RunTensor<AutoGradReluCheck>([2L], 3f, -2f);
         Run<AutoGradReluChainedCheck>(3f);
         RunTensor<AutoGradSigmoidCheck>([2L], 0f, 2f);
+        RunTensor<AutoGradSoftmaxWeightedCheck>([3L], 0.5f, -1f, 2f);
+        RunTensor<AutoGradLogSoftmaxWeightedCheck>([3L], 0.5f, -1f, 2f);
         RunTensor<AutoGradLeakyReluCheck>([2L], 3f, -2f);
         RunTensor<AutoGradGeluCheck>([2L], 0f, 1f);
         RunTensor<AutoGradEluCheck>([2L], 2f, -1f);

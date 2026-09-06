@@ -16,6 +16,17 @@ namespace Shorokoo.Core.Nodes.AutoDiff
     internal class AutoDiffAttribute : Attribute
     {
         public string OpName { get; set; }
+
+        /// <summary>
+        /// When set, the forward node's outputs are appended to the rule's input slots, after
+        /// the forward inputs and before the output gradients:
+        /// <c>(input0, …, output0, …, outputGrad0, …, attr0, …)</c>. A rule whose derivative
+        /// is a function of the forward output (Softmax, Sigmoid, Tanh, Exp, …) then reads
+        /// the output that training already keeps for the forward pass instead of retaining
+        /// the input as well and recomputing the op in backward.
+        /// </summary>
+        public bool UsesOutputs { get; set; }
+
         public AutoDiffAttribute(string opName) { OpName = opName; }
     }
 

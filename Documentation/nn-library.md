@@ -16,9 +16,11 @@ Related: [defining-models.md](defining-models.md) · [training.md](training.md) 
   (`Pooling.MaxPool2d(x, 2)`, `Convolution.Conv(...)`, `Recurrent.RNN(x, 16)`),
   and plain activations are tensor one-liners (`x.Relu()`) — none needs a module.
 - Attention is the only layer whose activations grow **quadratically** with
-  sequence length, and the only one with a memory knob:
-  [Sizing an attention run](#attention-memory) gives the arithmetic to budget a
-  batch size with, and `queryChunks` is the knob.
+  sequence length: [Sizing an attention run](#attention-memory) gives the
+  arithmetic to budget a batch size with, and `queryChunks` is its knob. Any
+  `[Module]` can be marked `[Module(Checkpoint = true)]` to recompute its
+  activations in the backward pass instead of keeping them — see
+  [Activation checkpointing](#activation-checkpointing).
 
 ```bash
 dotnet add package Shorokoo.Modules
@@ -996,9 +998,62 @@ to be a C# constant at build time. So the lever is available only to hand-assemb
 today; a module variant with a chunk count baked in is possible, and is not written.
 
 **The other levers,** in the order they cost you least: shorten the sequence (quadratic),
-shrink the batch (linear), cut heads (linear). There is **no activation checkpointing** —
-no way to mark a block for recomputation in the backward pass — see
-[limitations.md](limitations.md#gradient-activation-checkpointing).
+shrink the batch (linear), cut heads (linear). And a block can be marked for recomputation
+in the backward pass — see [Activation checkpointing](#activation-checkpointing) next.
+
+<a id="activation-checkpointing"></a>
+#### Activation checkpointing: `[Module(Checkpoint = true)]`
+
+```csharp
+[Module(Checkpoint = true)]
+public partial class MlpBlock
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var h = Linear.Model(Scalar(32L), Scalar(true)).Call(x).Relu();
+        return Linear.Model(Scalar(32L), Scalar(true)).Call(h).Relu();
+    }
+}
+```
+
+This is the lever PyTorch calls `torch.utils.checkpoint`: every call of a checkpointed module
+is a **segment** whose forward activations are dropped after the forward pass and recomputed
+from the segment's inputs when the backward pass needs them. What is kept across the gap is
+the segment's boundary — its inputs and its outputs — and what is recomputed is everything
+produced inside the body, once per segment, shared by every gradient that reads it. The
+step's numbers do not change (the recomputation is the same ops on the same inputs; a
+checkpointed stack and its plain twin follow the same loss trajectory), the module's
+parameters, state and checkpoints are unaffected, and nothing about the hint reaches an
+exported ONNX model. It composes: a checkpointed module inside a checkpointed module is one
+segment, the outer one.
+
+The training rig honours the hint **unconditionally** — before, and independently of, the
+compute-versus-memory objective its memory-aware pass otherwise applies, and even on a step
+so small that the pass would not run at all. That is the point of it: the automatic pass only
+takes a recomputation that pays under its own objective, and refuses one that buys memory
+with a large compute increase; the attribute is how you say you want that trade anyway.
+
+Measure before relying on it, because it is not always a win over the automatic pass. That
+pass already recomputes what pays under its objective, and it is free to choose finer-grained
+recomputations than a whole segment; the hint buys its memory with less compute, and it is
+the only lever on a step the pass would not touch. Modelled figures for a three-block MLP of
+width 32 behind a linear head — the twin fixtures of the coverage tests
+(`AutoDiffCheckpointingCoverageTests`; the test pins the direction of the below-threshold
+row, not the figures):
+
+| batch × features | unoptimized peak | automatic pass | checkpointed |
+|---|---|---|---|
+| 256 × 32 | 0.76 MiB | 0.76 MiB (below the pass's threshold, +0% compute) | **0.36 MiB** (+14% compute) |
+| 1024 × 32 | 2.87 MiB | **1.03 MiB** (+27% compute) | 1.07 MiB (+17% compute) |
+
+Where activations are small next to weights — a wide MLP at a small batch — the same hint
+gained nothing over the automatic pass and cost compute, and a two-layer transformer encoder
+at batch 8, `L = 128` came out slightly worse on both counts than the automatic pass alone.
+The hint is for a segment whose activations are what the peak is made of and that the pass
+would otherwise leave alone, and for buying the memory at a known compute price. As with the
+rest of this section these are the pass's **modelled** figures; see
+[limitations.md](limitations.md#gradient-activation-checkpointing) for what stands between
+them and a reading of allocated memory.
 
 ### PReLU / GLU
 

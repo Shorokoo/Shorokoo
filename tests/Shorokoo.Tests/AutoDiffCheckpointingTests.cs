@@ -1,3 +1,9 @@
+using Shorokoo.Core.Factory;
+using Shorokoo.Core.Factory.IR;
+using Shorokoo.Core.Nodes.NodeDefinitions;
+using Shorokoo.Graph;
+using Shorokoo.Modules.Losses;
+using Shorokoo.Modules.Optimizers;
 using System.Collections.Immutable;
 using Shorokoo.Runtime;
 using Shorokoo.Core.AutoDiffCheckpointing;
@@ -271,6 +277,7 @@ public class AutoDiffCheckpointingCoverageTests
         Assert.NotNull(floatConstInfo);
         Assert.Equal(DType.Float32, floatConstInfo!.DType);
     }
+
     private const long Mb = 512 * 512 * 4L;
 
     private static ShapeInferenceResult Infer(InternalComputationGraph graph, params long[][] shapes)
@@ -396,5 +403,137 @@ public class AutoDiffCheckpointingCoverageTests
         Assert.Equal(graph.Nodes.Count, walk.Distinct().Count());
         Assert.True(InOrder(graph, walk).IsLinearOrderValid());
         Assert.True(new GraphEvaluator().Evaluate(graph, shapeInfo).PeakMemoryBytes >= Mb);
+    }
+
+    // ----- [Module(Checkpoint = true)] and the rematerializer's invariants -----
+
+    private static TensorData Pattern(long[] dims, float scale)
+    {
+        var n = dims.Aggregate(1L, (a, b) => a * b);
+        var v = new float[n];
+        for (var i = 0; i < n; i++) v[i] = (((i * 37) % 101) * 0.01f - 0.5f) * scale;
+        return TensorData(dims, v);
+    }
+
+    private static TensorData Synthesize(Shape shape, DType dtype)
+        => dtype == DType.Float32 ? Pattern(shape.Dims, 1f) : TensorData(shape.Dims, new long[shape.Count]);
+
+    private static (TrainingRig Rig, TensorDataStruct Input, TensorDataStruct Target) MlpStackRig(ComputationGraph model, long[] inShape)
+    {
+        var x = Pattern(inShape, 1f);
+        var rig = TrainingRig.FromScratch(model, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, x)], 0.01f);
+        var input = new TensorDataStruct(rig.InputDef, new Dictionary<string, IData> { [rig.InputDef.Fields[0].Name] = x });
+        var target = new TensorDataStruct(rig.TargetDef, new Dictionary<string, IData> { [rig.TargetDef.Fields[0].Name] = Pattern([inShape[0], 16L], 0.5f) });
+        return (rig, input, target);
+    }
+
+    private static float[] Losses(TrainingRig rig, TensorDataStruct input, TensorDataStruct target, int steps)
+    {
+        var ckpt = rig.CreateInitialCheckpoint();
+        var losses = new float[steps];
+        for (var i = 0; i < steps; i++)
+        {
+            ckpt = rig.TrainStep(ckpt, input, target);
+            losses[i] = ckpt.Loss!.Value;
+        }
+        return losses;
+    }
+
+    private static int NodeCount(TrainingRig rig) => rig.TrainingStepPureGraph.ToInternal().Nodes.Count;
+
+    private static bool Stamped(TrainingRig rig)
+        => rig.TrainingStepPureGraph.ToInternal().Nodes.Any(n => CheckpointSegment.IdOf(n) is not null);
+
+    private static bool CarriesCheckpointStamp(ModelProto proto)
+        => proto.Graph.Nodes.Concat(proto.Functions.SelectMany(f => f.Nodes))
+            .Any(n => n.Attributes.Any(a => a.Name == OnnxOpAttributeNames.ShrkAttrCheckpoint));
+
+    private static TensorData[] Run(TrainingRig rig, ComputationGraph graph)
+        => new ComputeContext()
+            .Execute(graph, rig.OptimizationInputShapes.Select(s => (IData)Synthesize(s.Shape, s.DType)).ToArray())
+            .Select(o => o.ToTensorData()).ToArray();
+
+    private static bool Close(TensorData expected, TensorData actual)
+    {
+        if (expected.DType != DType.Float32)
+            return expected.As<int64>().AccessMemory().SequenceEqual(actual.As<int64>().AccessMemory());
+        var e = expected.As<float32>().AccessMemory();
+        var a = actual.As<float32>().AccessMemory();
+        if (e.Length != a.Length) return false;
+        for (var i = 0; i < e.Length; i++)
+            if (Math.Abs(e[i] - a[i]) > 1e-5f * Math.Max(1f, Math.Abs(e[i]))) return false;
+        return true;
+    }
+
+    [Fact]
+    public void TestCheckpointedModuleTrainsLikeItsTwinWithLowerPeakAndARealRecomputeCoverage()
+    {
+        var (plain, input, target) = MlpStackRig(Modules.PlainNarrowMlpStack.ComputationGraph, [256L, 32L]);
+        var (checkpointed, _, _) = MlpStackRig(Modules.CheckpointedNarrowMlpStack.ComputationGraph, [256L, 32L]);
+
+        var expected = Losses(plain, input, target, 3);
+        var actual = Losses(checkpointed, input, target, 3);
+        for (var i = 0; i < 3; i++)
+            Assert.True(Math.Abs(expected[i] - actual[i]) <= 1e-6f * Math.Max(1f, Math.Abs(expected[i])));
+
+        Assert.True(checkpointed.OptimizationResult.Evaluation.PeakMemoryBytes < plain.OptimizationResult.Evaluation.PeakMemoryBytes);
+        Assert.True(NodeCount(checkpointed) > NodeCount(plain));
+        Assert.True(Stamped(checkpointed));
+        Assert.False(Stamped(plain));
+        Assert.False(CarriesCheckpointStamp(FastOnnxModelBuilder.BuildInternalOnnxModel(checkpointed.TrainingStepPureGraph.ToInternal(), prepForOnnx: true)));
+        Assert.False(CarriesCheckpointStamp(FastOnnxModelBuilder.BuildOnnxModel(checkpointed.CreateInitialCheckpoint().ToInferenceModel())));
+    }
+
+    [Fact]
+    public void TestCheckpointHintIsHonouredWhereTheMemoryPassWouldSkipCoverage()
+    {
+        var (plain, _, _) = MlpStackRig(Modules.PlainTinyMlpStack.ComputationGraph, [2L, 8L]);
+        var (checkpointed, _, _) = MlpStackRig(Modules.CheckpointedTinyMlpStack.ComputationGraph, [2L, 8L]);
+
+        Assert.True(plain.PreOptimizationEval.PeakMemoryBytes < MemoryAwareGraphOptimizer.MinimumPeakBytesToOptimize);
+        Assert.Equal("Baseline", plain.OptimizationResult.StrategyName);
+        Assert.True(NodeCount(checkpointed) > NodeCount(plain));
+        Assert.True(checkpointed.OptimizationResult.Evaluation.PeakMemoryBytes <= plain.OptimizationResult.Evaluation.PeakMemoryBytes);
+    }
+
+    [Fact]
+    public void TestRematerializedTrainingStepsMatchTheirOriginalsThroughOrtCoverage()
+    {
+        foreach (var model in new[] { Modules.PlainNarrowMlpStack.ComputationGraph, Modules.CheckpointedNarrowMlpStack.ComputationGraph })
+        {
+            var (rig, _, _) = MlpStackRig(model, [1024L, 32L]);
+            var expected = Run(rig, rig.PreOptimizationGraph);
+            var actual = Run(rig, rig.TrainingStepPureGraph);
+            Assert.Equal(expected.Length, actual.Length);
+            for (var o = 0; o < expected.Length; o++)
+                Assert.True(Close(expected[o], actual[o]));
+        }
+    }
+
+    [Fact]
+    public void TestRematerializerClonesEachChainOnceWithinBudgetAndNeverRaisesThePeakCoverage()
+    {
+        var (rig, _, _) = MlpStackRig(Modules.PlainNarrowMlpStack.ComputationGraph, [1024L, 32L]);
+        var graph = rig.PreOptimizationGraph.ToInternal();
+        var shapeInfo = new ShapeInferenceInterpreter(CpuContext).Infer(graph,
+            rig.OptimizationInputShapes.Select(s => Synthesize(s.Shape, s.DType)).ToArray());
+        var evaluator = new GraphEvaluator();
+        var before = evaluator.Evaluate(graph, shapeInfo);
+        var remat = new Rematerializer(new ComputeMemoryObjective(1.0, 2.0, before), evaluator: evaluator);
+        var (after, afterInfo) = remat.Apply(graph, shapeInfo);
+
+        Assert.NotEmpty(remat.CommitLog);
+        Assert.True(remat.EvaluationsUsed <= Rematerializer.MaxEvaluationsPerCall);
+        Assert.Equal(graph.Nodes.Count + remat.CommitLog.Sum(c => c.ChainLength), after.Nodes.Count);
+        var originals = graph.Nodes.Select(n => n.Key).ToHashSet();
+        var read = after.Nodes.SelectMany(n => n.Inputs).OfType<FastTensorKey>().ToHashSet();
+        Assert.All(after.Nodes.Where(n => !originals.Contains(n.Key)), c => Assert.True(c.Outputs.OfType<FastTensorKey>().All(read.Contains)));
+        Assert.All(remat.CommitLog, c => Assert.True(c.RewiredConsumers >= 1 && c.PeakAfter <= c.PeakBefore));
+        Assert.True(evaluator.Evaluate(after, afterInfo).PeakMemoryBytes <= before.PeakMemoryBytes);
+        foreach (var node in after.Nodes)
+            foreach (var output in node.Outputs)
+                if (output is not null)
+                    Assert.NotNull(afterInfo.GetTensorInfo(output.Value));
     }
 }

@@ -152,7 +152,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
 
             node.OpCode = spec.StandardOpCode;
-            node.Attributes = OnnxCSharpAttributes.FromCSharpVals(newAttrs, standardDefs);
+            node.Attributes = Shorokoo.Core.AutoDiffCheckpointing.CheckpointSegment.Carry(
+                node.Attributes, OnnxCSharpAttributes.FromCSharpVals(newAttrs, standardDefs));
 
             // Keep only pass-through inputs (those without a tensor-attribute mapping), in def order.
             var mappedInputs = spec.TensorAttributes.Select(m => m.InputName).ToHashSet();

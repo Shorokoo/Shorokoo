@@ -19,7 +19,20 @@ namespace Shorokoo.Modules
     /// generator emits the module plumbing from it (e.g. <c>Model()</c>, <c>Call</c>, and the
     /// static <c>ComputationGraph</c> property).
     /// </summary>
-    public class ModuleAttribute : Attribute { }
+    public class ModuleAttribute : Attribute
+    {
+        /// <summary>
+        /// Activation checkpointing for this module, in the sense of PyTorch's
+        /// <c>torch.utils.checkpoint</c>: when true, every call of the module is a segment whose
+        /// forward activations are dropped after the forward pass and recomputed from the
+        /// segment's inputs when the backward pass needs them, trading the segment's forward
+        /// compute for its activation memory. The module's outputs are kept; only what is
+        /// produced inside the body is recomputed. Honoured unconditionally by the training
+        /// rig's memory-aware pass, independent of its own compute-versus-memory objective.
+        /// Numerically the step is unchanged.
+        /// </summary>
+        public bool Checkpoint { get; set; }
+    }
 
     /// <summary>
     /// Marks a static partial class whose static <c>Inline</c> method initializes a trainable

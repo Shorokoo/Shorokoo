@@ -363,8 +363,22 @@ public class ModuleSourceGenerator : IIncrementalGenerator
         if (classSymbol is null) return null;
 
         // Check for the [Module] attribute by simple name match.TrainableParamInitializer 
-        var hasModuleAttribute = classSymbol.GetAttributes()
-            .Any(attr => attr.AttributeClass?.Name == "ModuleAttribute");
+        var moduleAttr = classSymbol.GetAttributes()
+            .FirstOrDefault(attr => attr.AttributeClass?.Name == "ModuleAttribute");
+        var hasModuleAttribute = moduleAttr is not null;
+
+        // Read the [Module(Checkpoint = ...)] named argument the same way as
+        // [StateInitializer(Ownership = ...)] below; the generated Model class overrides
+        // BaseModel.Checkpoint from it.
+        var checkpoint = false;
+        if (moduleAttr is not null)
+        {
+            foreach (var named in moduleAttr.NamedArguments)
+            {
+                if (named.Key == "Checkpoint" && named.Value.Value is bool checkpointValue)
+                    checkpoint = checkpointValue;
+            }
+        }
 
         // Check for new-style class-level [TrainableParamInitializer] or [StateInitializer] attributes
         var hasClassTrainableParamInitializer = classSymbol.GetAttributes()
@@ -486,7 +500,8 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                 isStaticClass: false,
                 typeParameterList,
                 typeConstraintClauses,
-                inlineMethod);  // Pass the inline method
+                inlineMethod,  // Pass the inline method
+                checkpoint: checkpoint);
         }
     }
 
@@ -1050,6 +1065,12 @@ public class ModuleSourceGenerator : IIncrementalGenerator
             sb.AppendLine($"        public {OutputTypeString()} Call({CallerSignatureList(fullModule.InputParams)})")
               .AppendLine($"            => base.Call({InputCallArg()});");
         }
+        // [Module(Checkpoint = true)]: every Call of this model is an activation-checkpoint
+        // segment (the MODEL_INVOKE node carries the shrk_checkpoint hint).
+        if (classInfo.Checkpoint)
+        {
+            sb.AppendLine("        protected override bool Checkpoint => true;");
+        }
         sb.AppendLine("    }")
           .AppendLine();
 
@@ -1284,9 +1305,11 @@ public class ModuleClassInfo
     public bool IsNewStyleInitializer { get; }  // True for class-level [TrainableParamInitializer] or [StateInitializer]
     public bool IsStateInitializer { get; }  // True for [StateInitializer], false for [TrainableParamInitializer]
     public string StateOwnershipName { get; }  // StateOwnership member name from [StateInitializer(Ownership = ...)]
+    public bool Checkpoint { get; }  // [Module(Checkpoint = true)]: calls are activation-checkpoint segments
 
-    public ModuleClassInfo(string className, string fullyQualifiedNamespace, List<FullModuleInfo> fullModules, Location? location, bool isStaticClass = false, string typeParameterList = "", string typeConstraintClauses = "", IMethodSymbol? inlineMethod = null, bool isNewStyleInitializer = false, bool isStateInitializer = false, string stateOwnershipName = "ModuleOwned")
+    public ModuleClassInfo(string className, string fullyQualifiedNamespace, List<FullModuleInfo> fullModules, Location? location, bool isStaticClass = false, string typeParameterList = "", string typeConstraintClauses = "", IMethodSymbol? inlineMethod = null, bool isNewStyleInitializer = false, bool isStateInitializer = false, string stateOwnershipName = "ModuleOwned", bool checkpoint = false)
     {
+        Checkpoint = checkpoint;
         ClassName = className;
         Namespace = string.IsNullOrEmpty(fullyQualifiedNamespace) || fullyQualifiedNamespace == "<global namespace>"
             ? null

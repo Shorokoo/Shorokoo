@@ -109,6 +109,10 @@ internal class MemoryAwareGraphOptimizer
     /// exactly the small graphs where rig-construction latency is most visible. (Its
     /// modeled compute term does improve on small graphs, but measured steady-state training
     /// throughput does not move, so that figure is not a reason to spend the time.)</para>
+    ///
+    /// <para>A <c>[Module(Checkpoint = true)]</c> segment is not subject to it: the user asked,
+    /// so it is applied (<see cref="Rematerializer.ApplyCheckpointSegments"/>) before the
+    /// threshold is read.</para>
     /// </summary>
     public const long MinimumPeakBytesToOptimize = 1L << 20;
 
@@ -154,6 +158,11 @@ internal class MemoryAwareGraphOptimizer
     /// </summary>
     public GraphOptimizationResult OptimizeWithShapeInfo(InternalComputationGraph graph, ShapeInferenceResult shapeInfo)
     {
+        // A user's [Module(Checkpoint = true)] is honoured first and unconditionally: it is
+        // applied before the objective exists, so "doing nothing" below already includes it,
+        // and before the size threshold, so a small graph gets it too.
+        (graph, shapeInfo) = Rematerializer.ApplyCheckpointSegments(graph, shapeInfo, _evaluator);
+
         var baselineEval = _evaluator.Evaluate(graph, shapeInfo);
 
         if (baselineEval.PeakMemoryBytes < MinimumPeakBytesToOptimize)

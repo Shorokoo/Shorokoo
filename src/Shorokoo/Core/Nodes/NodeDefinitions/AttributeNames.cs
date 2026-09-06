@@ -298,6 +298,18 @@ public static class OnnxOpAttributeNames
     /// </summary>
     public const string ShrkAttrDefaultValue = "shrk_default_value";
 
+    /// <summary>
+    /// Activation-checkpointing hint (int64). On a <c>MODEL_INVOKE</c> it is <c>1</c> when the
+    /// invoked module was declared <c>[Module(Checkpoint = true)]</c>. The inliner then stamps
+    /// every node it splices in from such an invoke with a fresh segment id: positive on the
+    /// segment's interior nodes, negative on the nodes producing the invoke's outputs (the
+    /// segment boundary, which is kept rather than recomputed). Read and written only through
+    /// <see cref="Shorokoo.Core.AutoDiffCheckpointing.CheckpointSegment"/>; the memory-aware pass
+    /// consumes it and it is stripped before any ONNX emission, so it never reaches ORT or an
+    /// exported model.
+    /// </summary>
+    public const string ShrkAttrCheckpoint = "shrk_checkpoint";
+
 
 
     public const string AttrBody = "body";

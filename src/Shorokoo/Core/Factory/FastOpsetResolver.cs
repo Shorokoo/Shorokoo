@@ -146,6 +146,25 @@ namespace Shorokoo.Core.Factory
             }
         }
 
+        private static FastNode StripCheckpointStamp(FastNode node)
+        {
+            var stripped = Shorokoo.Core.AutoDiffCheckpointing.CheckpointSegment.Strip(node.Attributes);
+            if (ReferenceEquals(stripped, node.Attributes)) return node;
+            return new FastNode
+            {
+                Key = node.Key,
+                OpCode = node.OpCode,
+                Attributes = stripped,
+                FullInputs = node.FullInputs,
+                FullOutputs = node.FullOutputs,
+                FriendlyName = node.FriendlyName,
+                StackTrace = node.StackTrace,
+                GraphOpenNodeKey = node.GraphOpenNodeKey,
+                IdentifierTemplate = node.IdentifierTemplate,
+                TargetFunction = node.TargetFunction,
+            };
+        }
+
         /// <summary>
         /// Resolve the ONNX-emit info for <paramref name="node"/>. Returns <c>null</c>
         /// when the node should not be emitted (open nodes, model inputs, model param
@@ -160,6 +179,14 @@ namespace Shorokoo.Core.Factory
             var nodeDef = Definitions.NodeDefinitions[node.OpCode].Resolve(node.Attributes.ToProto());
             if (nodeDef.IsGraphNode && IsOpenOpCode(node.OpCode))
                 return null;
+
+            // The activation-checkpoint stamp inlining puts on a segment's nodes is consumed by
+            // the memory-aware pass and is not part of any op's schema, so it never reaches an
+            // emitted NodeProto — ORT rejects an attribute its kernel does not declare, and a
+            // vanilla export must carry nothing Shorokoo-private. (A MODEL_INVOKE's own hint is
+            // in its definition and is not emitted here: it is not a kernel.)
+            if (node.OpCode != InternalOpCodes.MODEL_INVOKE)
+                node = StripCheckpointStamp(node);
 
             // Close-node form: the NodeProto's inputs come from the matching OPEN node;
             // the close's own inputs are subgraph outputs, not NodeProto inputs.

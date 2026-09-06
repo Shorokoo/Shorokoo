@@ -96,6 +96,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeDTypes(ShrkAttrDtype, "T3")
                 .AttributeDTypes(ShrkAttrGenericTypeArgs)
                 .AttributeLongs(ShrkAttrRank, "R")
+                .AttributeLong(ShrkAttrCheckpoint)
                 .Input("inputModel", "T1", rank: 0)
                 .Input("inputs", "T2")
                 .Output("outputs", "T3", rank: "R"),

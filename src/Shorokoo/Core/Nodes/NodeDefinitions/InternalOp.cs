@@ -110,7 +110,7 @@ internal static partial class InternalOp
     public static Variable NodeModelLike(Variable inputModule)
         => NodeBuilder.BuildNodeSingleOut(NEW_MODEL_LIKE, [inputModule], []);
 
-    public static Variable[] ModelInvoke(Variable inputModule, Variable?[] inputs, DataStructure[] dataStructures, DType[] dtypes, int[] ranks, DType[]? genericTypeArgs = null)
+    public static Variable[] ModelInvoke(Variable inputModule, Variable?[] inputs, DataStructure[] dataStructures, DType[] dtypes, int[] ranks, DType[]? genericTypeArgs = null, bool checkpoint = false)
     {
         var attributes = new List<(string, object?)>
         {
@@ -123,6 +123,12 @@ internal static partial class InternalOp
         if (genericTypeArgs != null && genericTypeArgs.Length > 0)
         {
             attributes.Add((ShrkAttrGenericTypeArgs, genericTypeArgs));
+        }
+
+        // Only a checkpointed invoke carries the hint, so an ordinary module's graph is unchanged.
+        if (checkpoint)
+        {
+            attributes.Add((ShrkAttrCheckpoint, 1L));
         }
         
         return NodeBuilder.BuildNodeMultiOut(MODEL_INVOKE, [inputModule, .. inputs], [.. attributes]);

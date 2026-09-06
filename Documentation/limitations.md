@@ -44,36 +44,43 @@ compile-time constant) and then differentiate normally.
 
 ### Gradient (activation) checkpointing
 
-There is no way to ask Shorokoo to trade compute for activation memory: no
-attribute, option, or API marks a module, block, or tensor for recomputation
-during the backward pass. If a training step does not fit, the levers are the
-usual ones — a smaller batch, a shorter sequence, or a smaller model.
+Activation checkpointing is a per-module attribute: `[Module(Checkpoint = true)]`
+marks every call of the module as a segment whose forward activations are
+recomputed in the backward pass instead of kept, PyTorch's
+`torch.utils.checkpoint` — see
+[Activation checkpointing](nn-library.md#activation-checkpointing). It is the
+one memory lever you reach for by hand, and it is honoured unconditionally: the
+rig applies it before its own compute-versus-memory objective, and even to a
+step so small that the automatic pass below would skip it. There is no finer
+grain than a module, and no way to checkpoint a single tensor.
 
-Attention has the one exception, and it is not checkpointing: passing
+Attention has one more lever, and it is not checkpointing: passing
 `queryChunks: c` to `Attention.ScaledDotProductAttention` splits the query axis
 into `c` blocks, which divides the score-sized **transients** by `c` but not
-what the step retains across the backward pass. It bounds the spike, not the
-floor. What it saves is shape-dependent and costs compute — measured 16% less
-peak for 15% more compute at head dim 32, and 5% for 10% at head dim 64 — so
-measure both rather than assuming either. See
+what the step retains across the backward pass. What it saves is shape-dependent
+and costs compute, so measure both. See
 [Sizing an attention run](nn-library.md#attention-memory) for the arithmetic and
 for what the quadratic term actually costs.
 
-Building a training rig does run an internal memory-aware pass over the lowered
-training-step graph, which may reorder nodes and recompute a tensor rather than
-keep it alive, but only where that improves a combined compute-and-memory
-objective. Measured over a spread of training graphs it cuts modelled peak
-activation memory by 15-35% on most of them, mostly by reordering. It will also
-recompute — rebuilding a tensor from a chain of producers back to values that
-are live anyway, which is what gradient checkpointing does — but conservatively,
-because it is automatic and has no opt-out: it takes a recomputation that is
-free or nearly so and refuses one that would buy memory with a large compute
-increase, even where that is the trade a user who cannot fit at all would want.
-So it is still not a lever you can reach for, and you should not count on it to
-make a step fit that otherwise would not. It also skips graphs whose peak is
-under a megabyte, where there is nothing worth buying, and it has no effect at
-all on a graph whose backward pass runs through a recurrent op — the scheduler
-cannot linearize a BPTT scope and hands such graphs back untouched.
+Building a training rig also runs an internal memory-aware pass over the lowered
+training-step graph, which reorders nodes and recomputes tensors rather than
+keeping them alive where that improves a combined compute-and-memory objective.
+It recomputes the way gradient checkpointing does — a chain of producers back to
+values that are live anyway, cloned once and shared by every gradient that reads
+it, with the placement and the depth of the chain chosen by measuring the
+candidate graph — but conservatively, because it is automatic and has no
+opt-out: it takes trades its objective accepts, and the attribute above is how
+you ask for one it would not. Measured by `MemoryPassBenchmarkTests` over its
+spread of training graphs, it cuts modelled peak activation memory by 29-72%
+(72% on a two-layer transformer encoder, 58% on a one-layer one, 37% on a conv
+stack, 30% on an MLP, 29-40% on attention) for 2-54% more modelled compute —
+the encoders sit at the expensive end, 44-54% more modelled compute for their
+memory — and it leaves a graph whose backward pass runs through a recurrent op
+untouched. Those are modelled figures. The pass's memory model is an estimate
+that has been seen to diverge from allocated bytes in both directions, so treat
+every memory figure in this documentation as the pass's own accounting; the
+same benchmark records the real peak of a training step next to the modelled
+one, and that column is the one to believe.
 
 That pass is also where three types a reflection dump over the `Shorokoo`
 assembly turns up come from — `GraphEvaluationResult`, `NodeEvaluationInfo` and

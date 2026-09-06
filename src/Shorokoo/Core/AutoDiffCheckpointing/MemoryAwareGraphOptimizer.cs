@@ -1,5 +1,6 @@
 using Shorokoo.Core.AutoDiffCheckpointing;
 using Shorokoo.Graph;
+using Shorokoo.Core.Graph;
 using Shorokoo.Core.Nodes;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 
@@ -165,7 +166,12 @@ internal class MemoryAwareGraphOptimizer
 
         var baselineEval = _evaluator.Evaluate(graph, shapeInfo);
 
-        if (baselineEval.PeakMemoryBytes < MinimumPeakBytesToOptimize)
+        // The evaluator walks a Loop/If body once, but ORT runs a Loop body per iteration and
+        // allocates per iteration; the pass would be optimizing a number that is not what runs.
+        // Measured on the LSTM training step, letting it act raised the real peak by a quarter
+        // while the model claimed a small saving. Until bodies are modelled per iteration, a
+        // graph with a scope is handed back as it came.
+        if (baselineEval.PeakMemoryBytes < MinimumPeakBytesToOptimize || graph.Nodes.Any(n => n.IsOpenNode()))
         {
             return new GraphOptimizationResult
             {

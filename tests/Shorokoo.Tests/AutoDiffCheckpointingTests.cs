@@ -403,6 +403,10 @@ public class AutoDiffCheckpointingCoverageTests
         var walk = OrtExecutionOrder.Compute(graph.Nodes);
         Assert.Equal(graph.Nodes.Count, walk.Distinct().Count());
         Assert.True(InOrder(graph, walk).IsLinearOrderValid());
+
+        var untouched = new MemoryAwareGraphOptimizer().OptimizeWithShapeInfo(graph, shapeInfo);
+        Assert.Equal("Baseline", untouched.StrategyName);
+        Assert.Same(graph, untouched.OptimizedGraph);
         Assert.True(new GraphEvaluator().Evaluate(graph, shapeInfo).PeakMemoryBytes >= Mb);
     }
 

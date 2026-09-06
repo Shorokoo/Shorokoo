@@ -63,12 +63,14 @@ Building a training rig does run an internal memory-aware pass over the lowered
 training-step graph, which may reorder nodes and recompute a tensor rather than
 keep it alive, but only where that improves a combined compute-and-memory
 objective. Measured over a spread of training graphs it cuts modelled peak
-activation memory by 15-35% on most of them, almost entirely by reordering:
-recomputing a tensor rather than storing it is rarely profitable once the
-recomputed tensor is priced properly, so on many graphs the rematerializer
-finds nothing at all. It is automatic, has no settings, and reports nothing, so
-it is not a lever you can reach for: do not count on it to make a step fit that
-otherwise would not. It also skips graphs whose peak is
+activation memory by 15-35% on most of them, mostly by reordering. It will also
+recompute — rebuilding a tensor from a chain of producers back to values that
+are live anyway, which is what gradient checkpointing does — but conservatively,
+because it is automatic and has no opt-out: it takes a recomputation that is
+free or nearly so and refuses one that would buy memory with a large compute
+increase, even where that is the trade a user who cannot fit at all would want.
+So it is still not a lever you can reach for, and you should not count on it to
+make a step fit that otherwise would not. It also skips graphs whose peak is
 under a megabyte, where there is nothing worth buying, and it has no effect at
 all on a graph whose backward pass runs through a recurrent op — the scheduler
 cannot linearize a BPTT scope and hands such graphs back untouched.

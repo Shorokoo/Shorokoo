@@ -64,6 +64,14 @@ internal class MemoryAwareGraphOptimizer
     /// Default weight on the memory term. Read against <see cref="DefaultComputeWeight"/>:
     /// at 1.0 a 1% peak-memory reduction is worth exactly a 1% compute increase.
     ///
+    /// <para>Set from measurement, and set conservatively. The pass is automatic and has no
+    /// opt-out, so it must not buy memory at a price the user did not ask to pay: at 4.0 it
+    /// accepts a rematerialization that halves one graph's peak for TWICE its modelled
+    /// compute, which is the right trade only for someone who would otherwise not fit at all.
+    /// At 2.0 it takes the cheap trades — a free 1.7% on a transformer encoder, 16% for 15%
+    /// more compute on chunked attention — and refuses that one. A knob for the aggressive
+    /// setting is what issue #197 asks for and this does not provide.</para>
+    ///
     /// <para>Note this is a weight on a RATIO, not on bytes: the predecessor of this
     /// constant multiplied raw byte counts, which made it meaningful only for graphs whose
     /// peak happened to be around a million times their compute-time figure — on everything
@@ -71,7 +79,7 @@ internal class MemoryAwareGraphOptimizer
     /// optimizer. That is the bug the normalization fixes, so do not reintroduce a
     /// byte-scaled constant here.</para>
     /// </summary>
-    public const double DefaultMemoryWeight = 4.0;
+    public const double DefaultMemoryWeight = 2.0;
 
     /// <summary>
     /// How many times <see cref="Rematerializer"/> is re-run within one strategy step.

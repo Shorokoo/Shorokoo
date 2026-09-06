@@ -196,7 +196,7 @@ namespace Shorokoo.Runtime
 
         internal CompiledGraph Compile(InternalComputationGraph graph)
         {
-            graph.RequireExecutableDialect("graph compilation");
+            graph.RequireRunnableOps("graph compilation");
             var originalInputNames = ResolveOriginalInputNames(graph);
             return CompileFromModel(
                 () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true),
@@ -238,7 +238,7 @@ namespace Shorokoo.Runtime
         public TensorData[] Eval(Variable[] outputs)
         {
             var graph = new InternalComputationGraph([], [.. outputs]);
-            graph.RequireConcretized($"{nameof(ComputeContext)}.{nameof(Eval)}");
+            graph.RequireRunnableOps("ComputeContext.Eval");
             var results = this.Execute(graph).Select(x => x.ToTensorData()).ToArray();
 
             return results;
@@ -326,7 +326,7 @@ namespace Shorokoo.Runtime
         /// </summary>
         internal NamedModelParam[] Run(InternalComputationGraph graph, params NamedModelParam[] inputs)
         {
-            graph.RequireExecutableDialect("graph execution");
+            graph.RequireRunnableOps("graph execution");
             var originalInputNames = ResolveOriginalInputNames(graph);
             return RunFromModel(
                 () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true),
@@ -565,7 +565,7 @@ namespace Shorokoo.Runtime
         public TensorData[] With(TensorData[] inputData)
         {
             var graph = new InternalComputationGraph([..this.inputs], [..this.outputs]);
-            graph.RequireConcretized("Eval(...).With");
+            graph.RequireRunnableOps("Eval(...).With");
             return ComputeContext.Default.Execute(graph, inputData).Select(x => x.ToTensorData()).ToArray();
         }
     }

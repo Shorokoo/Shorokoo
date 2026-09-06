@@ -87,10 +87,13 @@ the graph it builds and refuses such an output with an
 from — for example:
 
 > `OnnxEngine.Eval requires a concretized graph (a 'concrete-architecture' or
-> 'concrete-model'), but this graph is a 'module'. The graph still carries 3
-> un-lowered module op(s) (ShrkCreateModule, ShrkModelInvoke,
-> ShrkModuleSetHyperparams), as a [Module]'s output (MyModule.Call(...)) does.
-> Lower the module's graph against the input first and execute that: …`
+> 'concrete-model'), but this graph is a 'module'. It still carries module machinery
+> that no ONNX Runtime kernel implements (ShrkCreateModule, ShrkModelInvoke,
+> ShrkModuleSetHyperparams), as a [Module]'s output (ResNet50.Call(...)) does until
+> the module's graph is lowered. Lower it first and execute that: …`
+
+The module it names is your own — the message is written against the type you
+called, so the remedy it spells out can be pasted as it stands.
 
 The remedy is the one the message names. Concretize the module's
 `ComputationGraph` against the input first, then execute:
@@ -144,11 +147,12 @@ through copies and `.srk` save/load). The steps check it up front:
 required kind in their error when handed the wrong stage — so a mis-ordered
 pipeline fails immediately with a clear message instead of deep inside execution.
 Execution (`ComputeContext.Execute`/`Run`/`Compile` and `QuickExecutionEngine`)
-likewise refuses a module-kind graph up front with the same lowering hint, and the
-session paths refuse residual module machinery even on a graph that carries no
-stamp at all. `Eval` takes output values rather than a `ComputationGraph`, so it
-has no `Kind` to read; it classifies the graph it builds from those outputs
-instead, and refuses a module-stage one with the same hint.
+likewise refuses a module-kind graph up front with the same lowering hint — and
+because `WithKind` and `FromInternal` can stamp a graph the caller's way, the
+refusal does not rest on the stamp alone: the ops themselves are checked before a
+session is built. `Eval` takes output values rather than a `ComputationGraph`, so
+it has no `Kind` to read at all; it is that op check which refuses a module
+output handed to it.
 `ComputationGraph`s are **readonly**: operations that used to modify a graph in
 place return a new graph instead (e.g. `WithRngConfig`), so a graph's `Kind` can
 never be invalidated behind your back.

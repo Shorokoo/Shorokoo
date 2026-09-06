@@ -298,11 +298,17 @@ that position fails loudly at ONNX prep instead — a bit pattern is only meanin
 key. Raw bits must therefore be drawn inside a concrete, id-bearing model.
 
 A site that *does* carry a ModelId but whose derivation chain is not yet wired — a draw inside an
-un-run initializer body, so a `[Module]`'s output or a `ConcreteArchitecture` executed before
-`ToConcreteModel` — is a hard error for every feed kind, the float ones included: the site belongs
-to the keyed streams, so lowering it to a backend random op would silently trade the model's
-reproducibility for unkeyed randomness. Lower the graph the whole way first (see
-[inference.md](inference.md#running-a-module)).
+un-run initializer body, so a `ConcreteArchitecture` executed before `ToConcreteModel` — is a hard
+error for every feed kind, the float ones included:
+
+> `FastLowerRandomOps: the shrk_RandomUniform feed at ModelId [...] is id-bearing but has no key
+> derivation chain ...`
+
+The site belongs to the keyed streams, so lowering it to a backend random op would silently trade
+the model's reproducibility for unkeyed randomness. Lower the graph the whole way first — call
+`ToConcreteModel()` on the architecture and execute that. (A `[Module]`'s own output never reaches
+this error: it is refused earlier for still being un-lowered, see
+[inference.md](inference.md#running-a-module).)
 
 ## Choosing seeds
 

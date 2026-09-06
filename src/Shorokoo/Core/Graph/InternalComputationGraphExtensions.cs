@@ -662,54 +662,64 @@ namespace Shorokoo.Graph
         }
 
         /// <summary>
-        /// Module-stage gate for the eager-evaluation entry points
+        /// Refuses a graph that still carries module machinery
+        /// (<see cref="FastNodeClassification.IsUnrunnableModuleOp"/>), naming the residual ops and
+        /// the lowering that removes them. Guards the eager-evaluation entry points
         /// (<c>OnnxEngine.Eval</c>, <c>ComputeContext.Eval</c>, <c>Tensor&lt;T&gt;.Eval</c>,
-        /// <c>inputs.Eval(outputs).With(...)</c>),
-        /// which build their graph from output variables and so have no stamped
-        /// <see cref="GraphKind"/> for <c>ComputationGraph.RequireConcretized</c> to read. A
-        /// <c>[Module]</c>'s output carries its module machinery until the module's graph is
-        /// lowered, and executing it fails deep inside model building or session creation —
-        /// naming an internal op that appears nowhere in the public API. Detect it here instead
-        /// and name the lowering that fixes it.
-        /// </summary>
-        internal static void RequireConcretized(this InternalComputationGraph graph, string operation)
-            => RefuseModuleMachinery(graph, operation, n => n.IsModuleStageMachinery());
-
-        /// <summary>
-        /// The same refusal as a backstop on the ONNX Runtime session paths
-        /// (<c>ComputeContext.Run</c>/<c>Compile</c>), for a graph that reaches them from
-        /// somewhere other than an eager-evaluation entry point or a kind-stamped
-        /// <see cref="ComputationGraph"/>: module machinery has no ORT kernel behind it, so such a
-        /// graph can only fail deep inside session creation.
+        /// <c>inputs.Eval(outputs).With(...)</c>), which build their graph from output variables and
+        /// so have no stamped <see cref="GraphKind"/> for <c>ComputationGraph.RequireConcretized</c>
+        /// to read, and backs them up on the session paths themselves
+        /// (<c>ComputeContext.Run</c>/<c>Compile</c>), which catches a graph arriving from anywhere
+        /// else — a wrongly stamped <c>ComputationGraph.FromInternal</c> among them.
         ///
-        /// <para>A <see cref="InternalOpCodes.FUNCTION_INVOKE"/> never counts here, unlike in
-        /// <see cref="RequireConcretized"/>: at this depth every invoke serializes to a call on an
-        /// emitted FunctionProto and runs, whatever its target's
-        /// <see cref="FunctionType"/> — which is exactly how <c>ToConcreteModel</c> materializes
-        /// parameters, by executing their initializer functions through this path.</para>
+        /// <para>Without this the graph reaches ONNX Runtime, which rejects it as an invalid
+        /// <em>model</em> naming an internal op that appears nowhere in the public API
+        /// (<c>No Op registered for ShrkCreateModule</c>).</para>
         /// </summary>
-        internal static void RequireExecutableDialect(this InternalComputationGraph graph, string operation)
-            => RefuseModuleMachinery(graph, operation,
-                n => n.OpCode != InternalOpCodes.FUNCTION_INVOKE && InternalOpCodes.IsModuleStageOp(n.OpCode));
-
-        private static void RefuseModuleMachinery(
-            InternalComputationGraph graph, string operation, System.Func<FastNode, bool> isMachinery)
+        internal static void RequireRunnableOps(this InternalComputationGraph graph, string operation)
         {
-            var moduleOps = graph.Nodes.Where(isMachinery).Select(n => n.OpCode).ToList();
-            if (moduleOps.Count == 0) return;
-            var named = string.Join(", ", moduleOps.Distinct().OrderBy(op => op, System.StringComparer.Ordinal));
+            if (graph is null) throw new System.ArgumentNullException(nameof(graph));
 
-            throw new System.InvalidOperationException(SrkFileFormat.KindMismatchMessage(
+            foreach (var node in graph.Nodes)
+                if (node.IsUnrunnableModuleOp())
+                    ThrowUnrunnableModuleOps(graph, operation);
+        }
+
+        /// <summary>Cold path of <see cref="RequireRunnableOps"/>: builds the message the gate throws,
+        /// naming the residual op kinds (at most <see cref="NamedModuleOpLimit"/> of them, since the
+        /// <c>ShrkSubModel#</c> family gives a deep model one op code per sub-module).</summary>
+        private static void ThrowUnrunnableModuleOps(InternalComputationGraph graph, string operation)
+        {
+            var kinds = graph.Nodes.Where(n => n.IsUnrunnableModuleOp())
+                .Select(n => n.OpCode)
+                .Distinct()
+                .OrderBy(op => op, System.StringComparer.Ordinal)
+                .ToList();
+            var named = string.Join(", ", kinds.Take(NamedModuleOpLimit))
+                + (kinds.Count > NamedModuleOpLimit ? ", …" : string.Empty);
+            // The module a machinery node was built from, so the remedy names the reader's own type
+            // rather than a placeholder. Only a module-typed target will do: the residual op may
+            // instead be a parameter reference, whose target is the [TrainableParamInitializer] —
+            // naming that would send the reader off to lower an initializer. A reloaded graph
+            // carries no target at all, and there the placeholder is all there is to offer.
+            var module = graph.Nodes
+                .FirstOrDefault(n => n.TargetFunction is
+                    { FunctionType: FunctionType.Module or FunctionType.ModuleSignature })
+                ?.TargetFunction?.FriendlyName ?? "MyModule";
+
+            throw new System.InvalidOperationException(SrkFileFormat.MachineryMismatchMessage(
                 operation, "a concretized graph (a 'concrete-architecture' or 'concrete-model')",
                 GraphKind.Module,
-                $"The graph still carries {moduleOps.Count} un-lowered module op(s) "
-                + $"({named}), as a [Module]'s output (MyModule.Call(...)) does. "
-                + "Lower the module's graph against the input first and execute that: "
-                + "var g = MyModule.ComputationGraph; "
+                $"It still carries module machinery that no ONNX Runtime kernel implements ({named}), "
+                + $"as a [Module]'s output ({module}.Call(...)) does until the module's graph is lowered. "
+                + "Lower it first and execute that: "
+                + $"var g = {module}.ComputationGraph; "
                 + "var model = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel(); "
-                + "ComputeContext.Default.Execute(model, input).",
-                includeReStampHint: false));
+                + "ComputeContext.Default.Execute(model, input) — where input is a sample TensorData "
+                + "of the shape you will run."));
         }
+
+        private const int NamedModuleOpLimit = 3;
 
         private static void AssertFastGraphDoesNotContainOps(InternalComputationGraph fastGraph, string[] forbiddenOps, string stageName)
         {

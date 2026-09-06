@@ -28,7 +28,7 @@ namespace Shorokoo
         {
 
             var graph = new Shorokoo.Graph.InternalComputationGraph([], [.. outputs]);
-            graph.RequireConcretized($"{nameof(OnnxEngine)}.{nameof(Eval)}");
+            graph.RequireRunnableOps("OnnxEngine.Eval");
 
             var ctx = new ComputeContext();
             var results = ctx.Execute(graph).Select(x => x.ToTensorData()).ToArray();

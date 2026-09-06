@@ -889,49 +889,74 @@ public class ModulesCoverageTests
 
     private static Tensor<float32> MachineryFreeBody(Tensor<float32> x) => x + x;
 
-    /// <summary>Every eager-evaluation entry point refuses an un-lowered module output up front,
-    /// naming the lowering, instead of letting the residual module op reach ONNX Runtime as an
-    /// unknown op in an "invalid model" — for both documented shapes, a module whose initializers
-    /// are constant and a library layer whose distribution is computed in-graph. The session paths
-    /// themselves carry the same refusal as a backstop.</summary>
+    /// <summary>Every entry point that can hand a graph to ONNX Runtime refuses un-lowered module
+    /// machinery first, naming the module and the lowering rather than an internal op in an
+    /// "invalid model".</summary>
     [Fact]
     public void TestEagerEvalRefusesAModuleOutputAndNamesTheLowering()
     {
         var x = Tensor([2L], 1.0f, 2.0f);
         var sample = TensorData([2L], 1.0f, 2.0f);
+        var linearInput = Tensor([4L, 4L], [.. Enumerable.Repeat(0.5f, 16)]);
         Variable[] noInputs = [];
-        string[] refusals =
+        InternalComputationGraph ModuleGraph() => ScalarMultiplyModel.ComputationGraph.ToInternal();
+
+        (string Operation, string Op, Action Run)[] cases =
         [
-            Assert.Throws<InvalidOperationException>(() => OnnxEngine.Eval(ScalarMultiplyModel.Call(x))).Message,
-            Assert.Throws<InvalidOperationException>(() => OnnxEngine.Eval([ScalarMultiplyModel.Call(x)])).Message,
-            Assert.Throws<InvalidOperationException>(() => new ComputeContext().Eval(ScalarMultiplyModel.Call(x))).Message,
-            Assert.Throws<InvalidOperationException>(() => noInputs.Eval(ScalarMultiplyModel.Call(x)).With([])).Message,
-            Assert.Throws<InvalidOperationException>(() => ScalarMultiplyModel.Call(x).Eval()).Message,
-            Assert.Throws<InvalidOperationException>(() => OnnxEngine.Eval(
-                Shorokoo.Modules.Layers.Linear.Call(Scalar(4L), Scalar(false), Tensor([4L, 4L],
-                    [.. Enumerable.Repeat(0.5f, 16)])))).Message,
-            Assert.Throws<InvalidOperationException>(
-                () => ComputeContext.Default.Execute(ScalarMultiplyModel.ComputationGraph.ToInternal(), sample)).Message,
-            Assert.Throws<InvalidOperationException>(
-                () => ComputeContext.Default.Compile(ScalarMultiplyModel.ComputationGraph.ToInternal())).Message,
+            ("OnnxEngine.Eval", InternalOpCodes.CREATE_MODULE, () => OnnxEngine.Eval(ScalarMultiplyModel.Call(x))),
+            ("OnnxEngine.Eval", InternalOpCodes.CREATE_MODULE, () => OnnxEngine.Eval([ScalarMultiplyModel.Call(x)])),
+            ("OnnxEngine.Eval", InternalOpCodes.CREATE_MODULE, () => OnnxEngine.Eval(
+                Shorokoo.Modules.Layers.Linear.Call(Scalar(4L), Scalar(false), linearInput))),
+            ("ComputeContext.Eval", InternalOpCodes.CREATE_MODULE, () => new ComputeContext().Eval(ScalarMultiplyModel.Call(x))),
+            ("Tensor.Eval", InternalOpCodes.CREATE_MODULE, () => ScalarMultiplyModel.Call(x).Eval()),
+            ("Eval(...).With", InternalOpCodes.CREATE_MODULE, () => noInputs.Eval(ScalarMultiplyModel.Call(x)).With([])),
+            ("graph execution", InternalOpCodes.MODEL_PARAM_REF, () => ComputeContext.Default.Execute(ModuleGraph(), sample)),
+            ("graph compilation", InternalOpCodes.MODEL_PARAM_REF, () => ComputeContext.Default.Compile(ModuleGraph())),
+            ("graph execution", InternalOpCodes.FUNCTION_INVOKE, () => ComputeContext.Default.Execute(ModuleInvokeGraph(), sample)),
         ];
-        Assert.All(refusals, m => Assert.Contains("concretized", m));
-        Assert.All(refusals, m => Assert.Contains("'module'", m));
-        Assert.All(refusals, m => Assert.Contains("ToConcreteArchitecture", m));
-        Assert.All(refusals, m => Assert.Contains("ToConcreteModel", m));
-        Assert.All(refusals[..6], m => Assert.Contains(InternalOpCodes.CREATE_MODULE, m));
-        Assert.Contains(InternalOpCodes.MODEL_PARAM_REF, refusals[6]);
-        Assert.Contains("OnnxEngine.Eval", refusals[0]);
-        Assert.Contains("ComputeContext.Eval", refusals[2]);
-        Assert.Contains("Tensor.Eval", refusals[4]);
-        Assert.Contains("graph execution", refusals[6]);
-        Assert.Contains("graph compilation", refusals[7]);
+
+        foreach (var (operation, op, run) in cases)
+        {
+            var message = Assert.Throws<InvalidOperationException>(run).Message;
+            Assert.StartsWith($"{operation} requires a concretized graph", message);
+            Assert.Contains("'module'", message);
+            Assert.Contains(op, message);
+            Assert.Contains("ToConcreteArchitecture", message);
+            Assert.Contains("ToConcreteModel", message);
+            Assert.DoesNotContain("WithKind", message);
+        }
+
+        Assert.Contains($"{nameof(ScalarMultiplyModel)}.Call", Assert.Throws<InvalidOperationException>(cases[0].Run).Message);
+        Assert.Contains("MyModule.Call", Assert.Throws<InvalidOperationException>(cases[6].Run).Message);
 
         var g = ScalarMultiplyModel.ComputationGraph;
         var model = g.ToConcreteArchitecture(g.FromOrderedInputs([sample])).ToConcreteModel();
         Assert.Equal([1.0f, 2.0f],
             ComputeContext.Default.Execute(model, sample)[0].ToTensorData().As<float32>().AccessMemory<float>().ToArray());
+        Assert.Equal([1.0f, 2.0f],
+            ComputeContext.Default.Execute(Reimported(model), sample)[0].ToTensorData().As<float32>().AccessMemory<float>().ToArray());
         Assert.Equal(5f, OnnxEngine.Eval(Scalar(2f) + Scalar(3f)).As<float32>().AccessMemory()[0]);
+    }
+
+    /// <summary>A bare module-typed function invoke — the machinery a stamped-kind gate cannot see,
+    /// since <c>FromInternal</c> stamps whatever it is told.</summary>
+    private static InternalComputationGraph ModuleInvokeGraph()
+    {
+        var fn = Shorokoo.Core.ModuleHelper.CreateTargetFunction(
+            (Func<Tensor<float32>, Tensor<float32>>)DoubleScalar);
+        var input = (Tensor<float32>)Shorokoo.Core.Nodes.NodeDefinitions.InternalOp.ModuleTensorInput(
+            DType.Float32, rank: 1, Shorokoo.Core.Nodes.NodeDefinitions.InputType.ModelInput,
+            targetFunction: null, defaultName: "input");
+        return new InternalComputationGraph([input], [(Tensor<float32>)fn.Call(input)[0]]);
+    }
+
+    /// <summary>An ONNX round-trip, whose reimported graph carries plain-Function invokes: those are
+    /// executable content, so the machinery gate must let them through.</summary>
+    private static ComputationGraph Reimported(ComputationGraph model)
+    {
+        using var ms = new System.IO.MemoryStream();
+        ProtoBuf.Serializer.Serialize(ms, Shorokoo.Core.Factory.FastOnnxModelBuilder.BuildOnnxModel(model));
+        return OnnxModelImporter.FromOnnxModel(ms.ToArray());
     }
 
     [Fact]

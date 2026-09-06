@@ -122,7 +122,7 @@ namespace Shorokoo
                 ctx = new ComputeContext();
 
             var graph = new Shorokoo.Graph.InternalComputationGraph([], [this]);
-            graph.RequireConcretized($"{nameof(Tensor<T>)}.{nameof(Eval)}");
+            graph.RequireRunnableOps("Tensor.Eval");
 
             return ctx.Execute(graph)[0].ToTensorData();
         }

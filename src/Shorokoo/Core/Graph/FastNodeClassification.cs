@@ -44,6 +44,29 @@ namespace Shorokoo.Core.Graph
                 : InternalOpCodes.IsModuleStageOp(node.OpCode);
 
         /// <summary>
+        /// True when <paramref name="node"/> is module machinery that no ONNX Runtime kernel
+        /// implements, so a graph carrying it can only fail at session creation — a module-stage op
+        /// (<see cref="InternalOpCodes.ModuleStageOps"/>), or a
+        /// <see cref="InternalOpCodes.FUNCTION_INVOKE"/> of a module-typed function, whose body
+        /// carries that machinery in turn.
+        ///
+        /// <para>Every other invoke runs: it serializes to a call on an emitted FunctionProto —
+        /// which is how <c>ToConcreteModel</c> materializes parameters (an initializer-typed call)
+        /// and how a reimported concrete model carries its RNG draw functions (a plain
+        /// <see cref="FunctionType.Function"/>). An unresolved target runs too: the shape-inference
+        /// interpreter strips <see cref="FastNode.TargetFunction"/> from the node clones it
+        /// executes.</para>
+        ///
+        /// <para>This is the executability question, and <see cref="IsModuleStageMachinery"/> the
+        /// classification one: an initializer-typed invoke still marks a graph as pre-lowering
+        /// (it is <see cref="GraphKind.Module"/> machinery) while being perfectly runnable.</para>
+        /// </summary>
+        public static bool IsUnrunnableModuleOp(this FastNode node)
+            => node.OpCode == InternalOpCodes.FUNCTION_INVOKE
+                ? node.TargetFunction is { FunctionType: FunctionType.Module or FunctionType.ModuleSignature }
+                : InternalOpCodes.IsModuleStageOp(node.OpCode);
+
+        /// <summary>
         /// Open node (LOOP_OPEN / IF_OPEN). Resolved via <see cref="Definitions.NodeDefinitions"/>.
         /// </summary>
         public static bool IsOpenNode(this FastNode node)

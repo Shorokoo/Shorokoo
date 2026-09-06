@@ -309,16 +309,26 @@ namespace Shorokoo.Core.Utils
         /// requirement, and the actual kind, then appends the operation-specific hint and
         /// the shared <see cref="WithKindRemedyHint"/>. Every kind gate routes through
         /// this (or <see cref="EnforceStage"/> for file loads) so wording cannot drift.
-        /// <paramref name="includeReStampHint"/> drops that last sentence where re-stamping is
-        /// not a remedy the caller can reach: the eager-evaluation gate classifies a graph built
-        /// from output variables, which the caller never holds as a <c>ComputationGraph</c>.
         /// </summary>
         internal static string KindMismatchMessage(
-            string operation, string requiredDescription, GraphKind actual, string? hint = null,
-            bool includeReStampHint = true)
+            string operation, string requiredDescription, GraphKind actual, string? hint = null)
+            => Mismatch(operation, requiredDescription, actual, hint) + " " + WithKindRemedyHint;
+
+        /// <summary>
+        /// The same sentence for the gates that scan a graph's <em>ops</em> rather than read its
+        /// stamp (<c>InternalComputationGraphExtensions.RequireRunnableOps</c>), which end at their
+        /// own hint: <see cref="WithKindRemedyHint"/> would misdirect there, because the stamp is
+        /// not what is wrong — module machinery cannot run whatever the graph is stamped, and an
+        /// eager-evaluation caller holds no <see cref="ComputationGraph"/> to re-stamp anyway.
+        /// </summary>
+        internal static string MachineryMismatchMessage(
+            string operation, string requiredDescription, GraphKind actual, string hint)
+            => Mismatch(operation, requiredDescription, actual, hint);
+
+        private static string Mismatch(
+            string operation, string requiredDescription, GraphKind actual, string? hint)
             => $"{operation} requires {requiredDescription}, but this graph is a '{StageName(actual)}'." +
-               (string.IsNullOrEmpty(hint) ? string.Empty : " " + hint) +
-               (includeReStampHint ? " " + WithKindRemedyHint : string.Empty);
+               (string.IsNullOrEmpty(hint) ? string.Empty : " " + hint);
 
         /// <summary>
         /// Throws a clear stage-mismatch error naming both stages (and the file, via

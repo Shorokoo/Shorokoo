@@ -3,9 +3,9 @@
 Related: [inference.md](inference.md) · [onnx-and-weights.md](onnx-and-weights.md) · [training.md](training.md)
 
 Two facilities watch the same lowering pipeline from opposite ends. `DebugRequests` captures the
-**graph** at chosen points, as compilable C#, and you read it after the call returns.
-a progress sink reports the **stage name** as the pipeline enters it, while the call is still
-running — the one that answers "is this build alive?". Neither changes the graph the build produces
+**graph** at chosen points, as compilable C#, and you read it after the call returns; a progress sink
+reports the **stage name** as the pipeline enters it, while the call is still running — the one that
+answers "is this build alive?". Neither changes the graph the build produces
 (though a progress handler that throws aborts the build that called it).
 
 When `ToConcreteArchitecture` doesn't produce the graph you expect, the
@@ -77,10 +77,10 @@ making progress. For that, hand the call a progress sink: every stage is reporte
 enters it, so the last report names the stage the build is in.
 
 ```csharp
-using Shorokoo.Graph;    // BuildProgress, SynchronousBuildProgress
+using Shorokoo.Graph;    // SynchronousBuildProgress
 
 var concreteArchitecture = graph.ToConcreteArchitecture(
-    inputHints, progress: new SynchronousBuildProgress(Console.WriteLine));
+    inputHints, progress: new SynchronousBuildProgress(p => Console.WriteLine(p)));
 ```
 
 ```

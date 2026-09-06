@@ -208,9 +208,10 @@ continues the saved trajectory — and costs most of a build, everything but the
 saved architecture replaces. On a large model pass `TrainingRig.Load` a `progress:` sink to
 [watch it stage by stage](training.md#watching-a-long-build) rather than wait blind; the file read
 and the checkpoint payload read are reported too, so the stream reports complete only once the
-resumed checkpoint is in hand. Its two optional arguments are the compute contexts that seed the rebuilt rig
-(`TrainingRig.Load(path, mergeContext, runtimeContext)`, each defaulting to
-`ComputeContext.Default`) — contexts are never persisted, so a reloaded run gets fresh ones.
+resumed checkpoint is in hand. Its optional arguments are that sink and the two compute contexts that
+seed the rebuilt rig (`TrainingRig.Load(path, mergeContext, runtimeContext, progress)`, the contexts
+each defaulting to `ComputeContext.Default`) — contexts are never persisted, so a reloaded run gets
+fresh ones.
 Handed a flat safetensors checkpoint — which stores training state only, with no constituents to
 rebuild from — it fails loudly, pointing at `rig.LoadCheckpoint`.
 

@@ -386,16 +386,16 @@ namespace Shorokoo
         /// Optional build/merge-phase compute context (see <see cref="MergeContext"/>); <c>null</c> ⇒
         /// <see cref="ComputeContext.Default"/>. Never persisted — a reloaded rig gets a fresh one here.
         /// </param>
+        /// <param name="runtimeContext">
+        /// Optional compile/run compute context (see <see cref="RuntimeContext"/>); <c>null</c> ⇒
+        /// <see cref="ComputeContext.Default"/>. Never persisted — a reloaded rig gets a fresh one here.
+        /// </param>
         /// <param name="progress">
         /// Optional sink this build reports each stage to as it enters it (see
         /// <see cref="BuildProgress"/>). A build can run for minutes on a large graph; with a sink it is
         /// visibly alive rather than indistinguishable from a hang. Watches this call alone — every
         /// other build that wants watching, each <c>With…</c> derivation and <see cref="Load"/>
         /// included, takes a sink of its own.
-        /// </param>
-        /// <param name="runtimeContext">
-        /// Optional compile/run compute context (see <see cref="RuntimeContext"/>); <c>null</c> ⇒
-        /// <see cref="ComputeContext.Default"/>. Never persisted — a reloaded rig gets a fresh one here.
         /// </param>
         /// <returns>A configured TrainingRig ready for training</returns>
         public static TrainingRig FromScratch(
@@ -420,9 +420,11 @@ namespace Shorokoo
         /// declared order) rather than as a named set. Each <see cref="Hyperparameter"/>'s kind still
         /// decides baked-vs-runtime; a bare <c>float</c> implicitly converts to a baked constant, so
         /// <c>FromScratch(model, loss, opt, sample, 0.01f)</c> bakes a single learning rate. Generated
-        /// graph fields fall back to <c>hyperparam_{i}</c> names since no names are supplied. To pass an
-        /// <see cref="RngConfig"/> or the compute contexts as well, hand the values to the overload below
-        /// as an array: <c>FromScratch(model, loss, opt, sample, [0.01f], rngConfig)</c>.
+        /// graph fields fall back to <c>hyperparam_{i}</c> names since no names are supplied. A <c>params</c>
+        /// array must come last, so this shape takes no <see cref="RngConfig"/>, compute context or
+        /// progress sink; hand the values to the overload below as an array for those:
+        /// <c>FromScratch(model, loss, opt, sample, [0.01f], rngConfig)</c>, or
+        /// <c>…, [0.01f], progress: sink)</c>.
         /// </summary>
         public static TrainingRig FromScratch(
             ComputationGraph modelGraph,
@@ -431,7 +433,7 @@ namespace Shorokoo
             NamedModelParam[] sampleInputs,
             params Hyperparameter[] hyperparameters)
             => FromScratchCore(modelGraph, lossGraph, optimizerGraph, sampleInputs, hyperparameters,
-                names: null, rngConfig: null, mergeContext: null, runtimeContext: null);
+                names: null, rngConfig: null, mergeContext: null, runtimeContext: null, progress: null);
 
         /// <summary>
         /// Positional-hyperparameter overload with an RNG configuration and the optional build/merge and
@@ -439,11 +441,11 @@ namespace Shorokoo
         /// The values are an explicit array in the slot the named set occupies, so the optional arguments
         /// follow in the same order as on the named-set overload rather than being pushed in front of a
         /// trailing <c>params</c> array; each defaults to its neutral value
-        /// (<see cref="RngConfig.Default"/> / <see cref="ComputeContext.Default"/>). Supplying any of them
-        /// selects this overload — an array alone still binds the <c>params</c> overload above, to the
-        /// same effect. Name a context you reach past <paramref name="rngConfig"/>
-        /// (<c>FromScratch(model, loss, opt, sample, [0.01f], mergeContext: ctx)</c>), and pass an empty
-        /// array for an optimizer that takes no hyperparameters at all.
+        /// (<see cref="RngConfig.Default"/> / <see cref="ComputeContext.Default"/>, and no progress sink).
+        /// Supplying any of them selects this overload — an array alone still binds the <c>params</c>
+        /// overload above, to the same effect. Name an argument you reach past
+        /// <paramref name="rngConfig"/> (<c>FromScratch(model, loss, opt, sample, [0.01f], progress: sink)</c>),
+        /// and pass an empty array for an optimizer that takes no hyperparameters at all.
         /// </summary>
         public static TrainingRig FromScratch(
             ComputationGraph modelGraph,
@@ -485,8 +487,8 @@ namespace Shorokoo
         /// <summary>
         /// Convenience overload that accepts a <see cref="ModelParamList"/> for sample inputs
         /// with positional hyperparameter values. As on the <see cref="NamedModelParam"/> pair, an
-        /// <see cref="RngConfig"/> or a compute context means handing the values to the overload below
-        /// as an array instead.
+        /// <see cref="RngConfig"/>, a compute context or a progress sink means handing the values to the
+        /// overload below as an array instead.
         /// </summary>
         public static TrainingRig FromScratch(
             ComputationGraph modelGraph,
@@ -503,9 +505,9 @@ namespace Shorokoo
         /// <summary>
         /// <see cref="ModelParamList"/> convenience overload with an RNG configuration and the optional
         /// build/merge and compile/run compute contexts (see <see cref="MergeContext"/> /
-        /// <see cref="RuntimeContext"/>), which follow the hyperparameter array as they do on the
-        /// named-set overload. Selected by supplying any of them — the same resolution as the
-        /// <see cref="NamedModelParam"/> array overload above, and the same need to name a context
+        /// <see cref="RuntimeContext"/>) and the progress sink, which follow the hyperparameter array as they
+        /// do on the named-set overload. Selected by supplying any of them — the same resolution as the
+        /// <see cref="NamedModelParam"/> array overload above, and the same need to name an argument
         /// reached past <paramref name="rngConfig"/>.
         /// </summary>
         public static TrainingRig FromScratch(
@@ -535,7 +537,7 @@ namespace Shorokoo
             RngConfig? rngConfig,
             ComputeContext? mergeContext,
             ComputeContext? runtimeContext,
-            IProgress<BuildProgress>? progress = null)
+            IProgress<BuildProgress>? progress)
         {
             if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
             if (lossGraph is null) throw new ArgumentNullException(nameof(lossGraph));
@@ -846,14 +848,25 @@ namespace Shorokoo
             }, _concreteArch, MergeContext, RuntimeContext, BuildProgressReporter.For(progress));
         }
 
-        /// <summary>Positional-hyperparameter overload of <see cref="WithOptimizer(ComputationGraph, IOptimizerHyperparameters, IProgress{BuildProgress})"/>.</summary>
+        /// <summary>Positional-hyperparameter overload of <see cref="WithOptimizer(ComputationGraph, IOptimizerHyperparameters, IProgress{BuildProgress})"/>.
+        /// A <c>params</c> array must come last, so pass the values as an array to reach the sink —
+        /// the same shape <c>FromScratch</c> takes.</summary>
         public TrainingRig WithOptimizer(ComputationGraph optimizer, params Hyperparameter[] hyperparameters)
+            => WithOptimizer(optimizer, hyperparameters, progress: null);
+
+        /// <summary>Array-form counterpart of
+        /// <see cref="WithOptimizer(ComputationGraph, Hyperparameter[])"/> that can also take a
+        /// progress sink; an array alone still binds the <c>params</c> overload, to the same effect.</summary>
+        public TrainingRig WithOptimizer(
+            ComputationGraph optimizer,
+            Hyperparameter[] hyperparameters,
+            IProgress<BuildProgress>? progress = null)
         {
             if (optimizer is null) throw new ArgumentNullException(nameof(optimizer));
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
             return DeriveFromConcreteArch(
                 _constituents with { Optimizer = optimizer, Hyperparameters = hyperparameters, Names = null },
-                _concreteArch, MergeContext, RuntimeContext, progress: null);
+                _concreteArch, MergeContext, RuntimeContext, BuildProgressReporter.For(progress));
         }
 
         /// <summary>
@@ -873,13 +886,22 @@ namespace Shorokoo
             }, _concreteArch, MergeContext, RuntimeContext, BuildProgressReporter.For(progress));
         }
 
-        /// <summary>Positional-hyperparameter overload of <see cref="WithScheduler(IOptimizerHyperparameters, IProgress{BuildProgress})"/>.</summary>
+        /// <summary>Positional-hyperparameter overload of <see cref="WithScheduler(IOptimizerHyperparameters, IProgress{BuildProgress})"/>.
+        /// A <c>params</c> array must come last, so pass the values as an array to reach the sink —
+        /// the same shape <c>FromScratch</c> takes.</summary>
         public TrainingRig WithScheduler(params Hyperparameter[] hyperparameters)
+            => WithScheduler(hyperparameters, progress: null);
+
+        /// <summary>Array-form counterpart of <see cref="WithScheduler(Hyperparameter[])"/> that can
+        /// also take a progress sink; an array alone still binds the <c>params</c> overload, to the
+        /// same effect.</summary>
+        public TrainingRig WithScheduler(
+            Hyperparameter[] hyperparameters, IProgress<BuildProgress>? progress = null)
         {
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
             return DeriveFromConcreteArch(
                 _constituents with { Hyperparameters = hyperparameters, Names = null },
-                _concreteArch, MergeContext, RuntimeContext, progress: null);
+                _concreteArch, MergeContext, RuntimeContext, BuildProgressReporter.For(progress));
         }
 
         /// <summary>

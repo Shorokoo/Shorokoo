@@ -1,3 +1,4 @@
+using System.Globalization;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Modules.Initializers;
 using Shorokoo.Runtime;
@@ -2983,14 +2984,17 @@ public class BuildProgressCoverageTests
         Assert.Equal(concretizeOnly, PhaseRuns(reports));
         Assert.Equal(stages, StagesOf(reports, BuildPhase.Concretize));
         Assert.True(reports[^1].IsComplete);
-        Assert.Equal("[   1.5s] Concretize: Clone",
-            new BuildProgress(BuildPhase.Concretize, "Clone", TimeSpan.FromSeconds(1.5)).ToString());
 
-        var unwatched = TrainingRig.FromScratch(
-            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
-            ScalarMultiplyBatches().sample, new AdamWOptimizerHyperparameters { LearningRate = 0.1f });
+        var culture = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = new CultureInfo("fr-FR");
+            Assert.Equal("[   1.5s] Concretize: Clone",
+                new BuildProgress(BuildPhase.Concretize, "Clone", TimeSpan.FromSeconds(1.5)).ToString());
+        }
+        finally { CultureInfo.CurrentCulture = culture; }
+
         Assert.Equal(GraphKind.ConcreteArchitecture, model.ToConcreteArchitecture(hints).Kind);
-        Assert.Equal(GraphKind.ConcreteModel, unwatched.TrainingStepPureGraph.Kind);
         Assert.Equal(stages.Length, reports.Count);
 
         var second = new List<BuildProgress>();
@@ -3071,6 +3075,22 @@ public class BuildProgressCoverageTests
         Assert.NotSame(rig, rig.WithLoss(L2Loss.ComputationGraph, sink));
         Assert.Equal(derivation, PhaseRuns(reports));
         Assert.True(reports[^1].IsComplete);
+        Assert.DoesNotContain(reports[..^1], r => r.IsComplete);
+
+        reports.Clear();
+        Assert.NotSame(rig, rig.WithOptimizer(
+            AdamWOptimizer.ComputationGraph, new AdamWOptimizerHyperparameters { LearningRate = 0.2f }, sink));
+        Assert.Equal(derivation, PhaseRuns(reports));
+        Assert.True(reports[^1].IsComplete);
+
+        reports.Clear();
+        Assert.NotSame(rig, rig.WithOptimizer(SGDOptimizer.ComputationGraph, [0.2f], sink));
+        Assert.Equal(derivation, PhaseRuns(reports));
+
+        reports.Clear();
+        Assert.NotSame(rig, rig.WithScheduler(
+            new AdamWOptimizerHyperparameters { LearningRate = 0.3f }, sink));
+        Assert.Equal(derivation, PhaseRuns(reports));
 
         reports.Clear();
         Assert.NotSame(rig, rig.WithSeed(new RngConfig { MasterSeed = 7 }, sink));
@@ -3078,5 +3098,6 @@ public class BuildProgressCoverageTests
         Assert.Equal((string[])["CloneArchitecture", "BindRngConfig"],
             StagesOf(reports, BuildPhase.Concretize));
         Assert.True(reports[^1].IsComplete);
+        Assert.DoesNotContain(reports[..^1], r => r.IsComplete);
     }
 }

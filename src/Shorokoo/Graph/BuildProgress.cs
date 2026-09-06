@@ -7,11 +7,12 @@ namespace Shorokoo.Graph
     /// <summary>
     /// The top-level phase a build report belongs to. Which phases a build reports follows from what
     /// it does: a <c>ToConcreteArchitecture</c> call reports <see cref="Concretize"/> only; a
-    /// <c>TrainingRig.FromScratch</c> runs all three in order; a rig derivation (<c>With…</c>) or a
-    /// <c>TrainingRig.Load</c> takes its concrete architecture off the file rather than lowering one,
-    /// so their <see cref="Concretize"/> phase — where they have one at all — names that work instead:
-    /// a plain <c>With…</c> derivation opens at <see cref="TrainingStep"/>, while <c>WithSeed</c> (which
-    /// rebinds the RNG identity on a clone) and <c>Load</c> open at <see cref="Concretize"/>. A build
+    /// <c>TrainingRig.FromScratch</c> runs all three in order; a rig derivation (<c>With…</c>) reuses
+    /// the rig's concrete architecture and <c>TrainingRig.Load</c> reads one off a file, so neither
+    /// lowers a model and their <see cref="Concretize"/> phase — where they have one at all — names
+    /// that work instead: a plain <c>With…</c> derivation opens at <see cref="TrainingStep"/>, while
+    /// <c>WithSeed</c> (which rebinds the RNG identity on a clone) and <c>Load</c> (which reads the
+    /// file) open at <see cref="Concretize"/>. A build
     /// that completes ends with its <see cref="BuildProgress.IsComplete"/> report, in whichever phase
     /// it ends.
     /// </summary>
@@ -37,7 +38,7 @@ namespace Shorokoo.Graph
     ///
     /// <code>
     /// var rig = TrainingRig.FromScratch(model, loss, optimizer, sampleInputs, hyperparameters,
-    ///                                   progress: new SynchronousBuildProgress(Console.WriteLine));
+    ///                                   progress: new SynchronousBuildProgress(p => Console.WriteLine(p)));
     /// </code>
     ///
     /// <para>The sink is an argument to the build, not configuration hung off something the build

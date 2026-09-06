@@ -62,12 +62,10 @@ namespace Shorokoo.Graph
         /// <param name="computeContext">Optional context used to resolve values while lowering.</param>
         /// <param name="debugRequests">Optional hook to dump the graph at each lowering stage.</param>
         /// <param name="progress">The reporter the pipeline names each stage to as it enters it, or
-        /// <c>null</c> for none. Resolved by the caller rather than from
-        /// <paramref name="computeContext"/> here: the caller owns the clock (so one spans a whole
-        /// <c>TrainingRig.FromScratch</c>) and owns the terminal report, which this pipeline is in no
-        /// position to raise — both its callers have work left when it returns. Omitted, the pipeline
-        /// stays silent even when <paramref name="computeContext"/> carries a sink: quiet is the safe
-        /// failure here, where deriving a reporter would open a second stream on a second clock.</param>
+        /// <c>null</c> for none. Built by the caller from the sink it was handed, because the caller
+        /// owns the clock (so one spans a whole <c>TrainingRig.FromScratch</c>) and owns the terminal
+        /// report, which this pipeline is in no position to raise — both its callers have work left
+        /// when it returns.</param>
         /// <returns>A fully inlined, concrete architecture graph.</returns>
         internal static InternalComputationGraph ToConcreteArchitecture(
             this InternalComputationGraph graph,

@@ -482,7 +482,7 @@ factory. Passing two distinct instances therefore selects nothing. In particular
 on one device and train on another: [only one backend is live per process](inference.md#backend-selection)
 and both contexts go through it, so the naming does not offer a CPU-build / GPU-train split. Read the
 two members as a division of *phases* — which work is build/merge and which is compile/run — not of
-hardware; they would only become a lever if `ComputeContext` gained per-instance compute configuration.
+hardware; they would only become a lever if `ComputeContext` gained per-instance configuration.
 Leaving both `null`, so each defaults to `ComputeContext.Default`, is the normal choice.
 
 Result types:
@@ -496,16 +496,16 @@ namespace `Shorokoo` (covered by `using Shorokoo;`).
 
 `FromScratch` can run for **minutes** on a large model — it concretizes the graph, composes the loss
 and autodiff, unrolls loops, and runs shape inference plus the memory-aware graph optimization before
-it returns. By default it says nothing while doing so, which is indistinguishable from a hang. Attach
-a sink to the build context to see the stage it is in:
+it returns. By default it says nothing while doing so, which is indistinguishable from a hang. Hand it
+a sink to see the stage it is in:
 
 ```csharp
-using Shorokoo.Graph;    // BuildProgress, SynchronousBuildProgress
+using Shorokoo.Graph;    // SynchronousBuildProgress
 
 var rig = TrainingRig.FromScratch(
     MyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
     sampleInputs, new AdamWOptimizerHyperparameters { LearningRate = 0.001f },
-    progress: new SynchronousBuildProgress(Console.WriteLine));
+    progress: new SynchronousBuildProgress(p => Console.WriteLine(p)));
 ```
 
 ```
@@ -532,7 +532,7 @@ var rig = TrainingRig.FromScratch(
 terminal report, the one whose `IsComplete` is true.)
 
 Each `BuildProgress` is reported as the build **enters** the named stage, so a build that has been
-quiet for minutes is inside the stage its last report named. It carries three fields:
+quiet for minutes is inside the stage its last report named. It carries four members:
 
 - `Phase` — `BuildPhase.Concretize` (lowering the model to a concrete architecture),
   `BuildPhase.TrainingStep` (composing and lowering the training-step graph), or
@@ -544,8 +544,8 @@ quiet for minutes is inside the stage its last report named. It carries three fi
 - `IsComplete` — true for the single terminal report of a build that ran to completion, which names
   no stage being entered and renders its `Stage` as `Done`: a stream sitting on it is finished, not
   stuck (the one report the rule above does not apply to). A build that threw never emits one. It is
-  stamped by the build, not re-derived from the stage text, so test it rather than the `Done` string
-  — `Phase` and `IsComplete` are the two members a program may rely on; `Stage` is for a human.
+  stamped by the build, not re-derived from the stage text, so test it rather than the `Done` string.
+  `Stage` is the one member a program should not branch on; the other three are stable.
 - `Elapsed` — time since the start of *this* build. One clock spans all three phases.
 
 `ToString()` renders the line shown above. Reports are raised **synchronously on the building
@@ -567,12 +567,14 @@ checkpoint is in hand; and the lowering step on its own —
 
 ```csharp
 var concrete = MyModel.ComputationGraph.ToConcreteArchitecture(
-    inputHints, progress: new SynchronousBuildProgress(Console.WriteLine));
+    inputHints, progress: new SynchronousBuildProgress(p => Console.WriteLine(p)));
 ```
 
-— which reports `Concretize`, its own thaw and freeze included, and ends complete. The two
-`params Hyperparameter[]` shorthands of `FromScratch` and `With…` cannot take a sink (a `params` array
-must come last); pass the values as an array to reach the overload that can.
+— which reports `Concretize`, its own thaw and freeze included, and ends complete. The four
+positional-hyperparameter shorthands cannot take a sink, since a `params Hyperparameter[]` must come
+last; on each, passing the values as an array instead reaches the overload that can —
+`FromScratch(model, loss, opt, sample, [0.01f], progress: sink)`,
+`rig.WithOptimizer(opt, [0.01f], sink)`.
 
 Reporting covers the **build** and stops there. Calls that are not builds stay silent: `ToConcreteModel`,
 `InitializeTrainableParams` and `GetRngStreamReport` take no sink, though all three can be slow. Neither

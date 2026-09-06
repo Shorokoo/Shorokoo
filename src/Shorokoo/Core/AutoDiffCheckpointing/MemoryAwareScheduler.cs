@@ -103,6 +103,12 @@ internal class MemoryAwareScheduler
         IList<FastNode> nodes,
         ShapeInferenceResult shapeInfo)
     {
+        // FastNode.Inputs flattens FullInputs on every read; the greedy loop below reads every
+        // pending node's inputs every round, so take the flat lists once (3 s → ms on a
+        // 4 000-node step).
+        var inputsOf = new Dictionary<FastNode, FastTensorKey?[]>(nodes.Count);
+        foreach (var node in nodes) inputsOf[node] = node.Inputs.ToArray();
+
         // Pre-compute tensor memory sizes
         var tensorMemory = new Dictionary<FastTensorKey, long>();
         foreach (var node in nodes)
@@ -212,7 +218,7 @@ internal class MemoryAwareScheduler
 
         bool DepsMet(FastNode n)
         {
-            foreach (var input in n.Inputs)
+            foreach (var input in inputsOf[n])
                 if (input is not null && !available.Contains(input.Value))
                     return false;
             return true;

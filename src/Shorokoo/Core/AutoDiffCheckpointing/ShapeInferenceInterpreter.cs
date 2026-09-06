@@ -213,6 +213,7 @@ internal class ShapeInferenceInterpreter
             elements = template.Count * count;
         else
             return null;
+        if (elements < 0) return null; // an element with an unknown dim counts -1
         return new TensorShapeInfo(new Shape(elements), seq.DType, null);
     }
 

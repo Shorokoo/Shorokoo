@@ -382,6 +382,23 @@ public class AutoDiffCheckpointingCoverageTests
         }
     }
 
+    private static bool Recomputable(Variable input, Variable output)
+    {
+        var g = new InternalComputationGraph([input], [output]);
+        return Rematerializer.IsRecomputable(g.Nodes.Single(n => n.Outputs.Any(o => o is not null && g.Outputs.Contains(o.Value))));
+    }
+
+    [Fact]
+    public void TestDrawsAreNeverRecomputedCoverage()
+    {
+        var x = InputTensor<float32>("x", rank: 2);
+        Assert.True(Recomputable(x, OnnxOp.Relu(x)));
+        Assert.False(Recomputable(x, OnnxOp.RandomUniformLike(x, seed: 3f)));
+        Assert.False(Recomputable(x, OnnxOp.RandomNormalLike(x, seed: 3f)));
+        Assert.False(Recomputable(x, OnnxOp.Bernoulli(x, dtype: null, seed: 3f)));
+        Assert.False(Recomputable(x, OnnxOp.Dropout(x, null, null, seed: 3L).output));
+    }
+
     [Fact]
     public void TestLoopGraphIsRescheduledAndOrderedCoverage()
     {
@@ -596,6 +613,15 @@ public class AutoDiffCheckpointingCoverageTests
         Assert.Equal(4 * Mb + 8, new GraphEvaluator().Evaluate(graph, shapeInfo, EvaluationOrder.ProtoOrder).PeakMemoryBytes);
         Assert.Equal(3 * Mb + 8, new GraphEvaluator(modelOrtBufferReuse: false).Evaluate(graph, shapeInfo, EvaluationOrder.ProtoOrder).PeakMemoryBytes);
         Assert.True(new GraphEvaluator().Evaluate(graph, shapeInfo).PeakMemoryBytes >= new GraphEvaluator(modelOrtBufferReuse: false).Evaluate(graph, shapeInfo).PeakMemoryBytes);
+
+        var o = InputTensor<float32>("o", rank: 2);
+        var wide = OnnxOp.Concat([o, o], axis: 0);
+        var outputInPlace = new InternalComputationGraph([o], [OnnxOp.Relu(wide)]);
+        var outputOverwritten = new InternalComputationGraph([o], [wide, OnnxOp.ReduceSum(OnnxOp.Relu(wide))]);
+        var neither = new InternalComputationGraph([o], [OnnxOp.ReduceSum(OnnxOp.Relu(wide))]);
+        Assert.Equal(4 * Mb, new GraphEvaluator().Evaluate(outputInPlace, Infer(outputInPlace, [512, 512])).PeakMemoryBytes);
+        Assert.Equal(4 * Mb + 4, new GraphEvaluator().Evaluate(outputOverwritten, Infer(outputOverwritten, [512, 512])).PeakMemoryBytes);
+        Assert.Equal(3 * Mb, new GraphEvaluator().Evaluate(neither, Infer(neither, [512, 512])).PeakMemoryBytes);
 
         var y = InputTensor<float32>("y", rank: 2);
         var a2 = OnnxOp.Exp(y);

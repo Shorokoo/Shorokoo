@@ -1,6 +1,7 @@
 using Shorokoo.Core.AutoDiffCheckpointing;
 using Shorokoo.Core.Graph;
 using Shorokoo.Graph;
+using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Core.Nodes;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using System.Collections.Generic;
@@ -204,13 +205,17 @@ internal class Rematerializer
                 batchPhase = false;
             }
 
+            // The ranking is by estimated relief, so once the first few singles measure worse
+            // the rest will too; spending the whole budget on them buys nothing (encoder2:
+            // 48 evaluations, zero commits, two seconds per call).
             var accepted = false;
+            var rejections = 0;
             foreach (var candidate in candidates)
             {
-                if (evaluations >= MaxEvaluationsPerCall) break;
+                if (evaluations >= MaxEvaluationsPerCall || rejections >= MaxConsecutiveSingleRejections) break;
                 tried.Add(candidate.Identity);
                 var trial = Trial([candidate], Placement.AfterProducer);
-                if (!Better(trial)) continue;
+                if (!Better(trial)) { rejections++; continue; }
                 Commit(trial!, [candidate], Placement.AfterProducer);
                 accepted = true;
                 break;
@@ -255,7 +260,7 @@ internal class Rematerializer
             return (graph, shapeInfo);
 
         (InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo, GraphEvaluationResult Eval)? best = null;
-        foreach (var placement in new[] { Placement.AfterProducer, Placement.BeforeFirstConsumer })
+        foreach (var placement in (Placement[])[Placement.AfterProducer, Placement.BeforeFirstConsumer])
         {
             if (placement == Placement.BeforeFirstConsumer && !candidates.All(c => c.CanPlaceBeforeConsumer)) continue;
             var (candidateGraph, mapping) = ApplyCandidates(graph, candidates, placement);
@@ -303,6 +308,9 @@ internal class Rematerializer
     /// transformer is hundreds.
     /// </summary>
     internal const int MaxEvaluationsPerCall = 48;
+
+    /// <summary>How many ranked single candidates may measure worse in a row before the round gives up.</summary>
+    internal const int MaxConsecutiveSingleRejections = 12;
 
     /// <summary>A schedule position is in the peak region when its live bytes are at least
     /// this fraction of the peak. Freeing memory at one position exposes the next-highest,
@@ -389,21 +397,18 @@ internal class Rematerializer
                     producer[output.Value] = node;
                     // A graph input, parameter or constant costs nothing to keep: it is resident
                     // for the whole step regardless, so a walk can anchor on it for free.
-                    if (node.IsModelInput() || node.IsModelParamData() || node.Inputs.Count == 0)
+                    if (node.IsModelInput() || node.IsModelParamData() || node.Inputs.Count == 0
+                        || NonDeterministicOps.Contains(node.OpCode))
                         rooted.Add(output.Value);
                 }
             }
 
-            // What an op needs while it runs is what is live after it plus its workspace plus
-            // the inputs it is the last reader of — those are freed only once it is done, and
-            // a gradient convolution reading two large activations peaks on exactly that.
+            // What an op needs while it runs is its occupancy plus its workspace. The
+            // evaluator's occupancy already holds a buffer through the position that releases
+            // it, so the inputs an op is the last reader of are in it; adding them again would
+            // put the peak region at the wrong nodes.
             for (int i = 0; i < nodes.Count; i++)
-            {
-                foreach (var input in nodes[i].Inputs.OfType<FastTensorKey>().Distinct())
-                    if (lastUse.TryGetValue(input, out var last) && last == i && shapeInfo.GetTensorInfo(input) is { } info)
-                        memoryAt[i] += info.MemoryBytes;
                 if (memoryAt[i] > peak) peak = memoryAt[i];
-            }
 
             return new Liveness
             {
@@ -553,7 +558,7 @@ internal class Rematerializer
             if (ordered.Count > 1)
                 foreach (var c in ordered)
                     Propose(Variant.PerConsumer, [c], null);
-            foreach (var k in new[] { 0, ordered.Count - 1 }.Distinct())
+            foreach (var k in ((int[])[0, ordered.Count - 1]).Distinct())
                 ProposeSplit(Variant.Split, ordered.Skip(k).ToList());
 
             // The Rockmate-style split of the shared chain: the interior tensor whose keeping
@@ -779,10 +784,28 @@ internal class Rematerializer
         return (copy, newToOriginal);
     }
 
-    private static bool CanClone(FastNode producer)
+    private static bool CanClone(FastNode producer) => IsRecomputable(producer);
+
+    /// <summary>
+    /// Whether a second instance of <paramref name="producer"/> computes the same value: a
+    /// single-output executable op that is not a scope, function or input, and not a draw. A
+    /// clone of RandomUniformLike or Dropout is a second sample, so readers rewired to it see a
+    /// value the un-rewired readers never saw. The keyed <c>shrk_Rng*</c> draws are deterministic
+    /// in their key and counter and may be recomputed; the unkeyed <c>shrk_Random*</c> ones are
+    /// lowered to the ONNX random ops and may not.
+    /// </summary>
+    internal static bool IsRecomputable(FastNode producer)
         => !(producer.IsOpenNode() || producer.IsCloseNode() || producer.IsFunction()
              || producer.IsModelInput() || producer.IsModelParamData())
+        && !NonDeterministicOps.Contains(producer.OpCode)
         && producer.FullOutputs.Values.Sum(s => s.Count(k => k is not null)) == 1;
+
+    private static readonly HashSet<string> NonDeterministicOps =
+    [
+        OpCodes.RANDOM_UNIFORM, OpCodes.RANDOM_NORMAL, OpCodes.RANDOM_UNIFORM_LIKE, OpCodes.RANDOM_NORMAL_LIKE,
+        OpCodes.BERNOULLI, OpCodes.MULTINOMIAL, OpCodes.DROPOUT,
+        InternalOpCodes.SHRK_RANDOM_UNIFORM, InternalOpCodes.SHRK_RANDOM_NORMAL, InternalOpCodes.SHRK_RANDOM_BITS,
+    ];
 
     /// <summary>
     /// Mirror of <see cref="SimpleBackpropOptimizer"/>'s clone logic: a fresh FastNode for the

@@ -79,9 +79,11 @@ internal class GraphEvaluator
         var tensorLastUse = BuildTensorLastUse(nodes, walk);
         var consumerOpCodes = BuildConsumerOpCodes(nodes);
         var graphOutputs = new HashSet<FastTensorKey>(graph.Outputs);
+        // Resident for the whole run, never recycled and never written in place: the fed inputs,
+        // and the initializers ORT keeps (constants, parameter data).
         var graphInputs = new HashSet<FastTensorKey>(graph.Inputs);
         foreach (var node in nodes)
-            if (node.IsModelInput())
+            if (node.IsModelInput() || node.IsModelParamData() || node.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.OpCodes.CONSTANT)
                 foreach (var output in node.Outputs)
                     if (output is not null) graphInputs.Add(output.Value);
 
@@ -141,9 +143,13 @@ internal class GraphEvaluator
                     && plan.Contains(candidate))
                 {
                     // A view (the input stays intact) always shares; an in-place write may only
-                    // land in a buffer no other live key still reads, and never in a fed input.
+                    // land in a buffer no other live key still reads, never in a fed input, and
+                    // never into or out of a graph output — ORT gives an output its own buffer
+                    // and never overwrites one (measured: 127 MB against the 64 MB in-place would
+                    // read, either way round).
                     var inputStaysLive = tensorLastUse.TryGetValue(candidate, out var last) && last > pos;
-                    if (inputStaysLive || (plan.AliasCount(candidate) == 1 && !plan.IsGraphInput(candidate)))
+                    var touchesGraphOutput = graphOutputs.Contains(output.Value) || plan.IsGraphOutput(candidate);
+                    if (!touchesGraphOutput && (inputStaysLive || (plan.AliasCount(candidate) == 1 && !plan.IsGraphInput(candidate))))
                         reused = candidate;
                 }
 
@@ -255,6 +261,8 @@ internal class GraphEvaluator
         public int AliasCount(FastTensorKey key) => _buffers[_bufferOf[key]].Aliases;
 
         public bool IsGraphInput(FastTensorKey key) => _buffers[_bufferOf[key]].IsGraphInput;
+
+        public bool IsGraphOutput(FastTensorKey key) => _buffers[_bufferOf[key]].IsGraphOutput;
 
         private static string ShapeKey(TensorShapeInfo info)
             => info.DType + "[" + string.Join(",", info.Shape.Dims) + "]";

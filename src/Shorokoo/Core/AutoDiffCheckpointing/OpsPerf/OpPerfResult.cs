@@ -6,7 +6,10 @@ namespace Shorokoo.Core.AutoDiffCheckpointing.OpsPerf;
 internal class OpPerfResult
 {
     /// <summary>
-    /// Compute time in normalized units where 256 float32 add operations = 1 unit.
+    /// Estimated kernel time in <b>nanoseconds</b> of ONNX Runtime CPU execution on the
+    /// reference machine (see <see cref="OpCostModel"/>): a fixed launch cost plus work priced
+    /// per byte streamed or per FLOP. The absolute scale is only as good as the calibration;
+    /// what the memory-aware pass relies on is that the ratios between ops are right.
     /// </summary>
     public double ComputeTime { get; init; }
 

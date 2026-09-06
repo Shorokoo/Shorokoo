@@ -7,8 +7,8 @@ namespace Shorokoo.Core.AutoDiffCheckpointing;
 public class GraphEvaluationResult
 {
     /// <summary>
-    /// Total compute time for the entire graph, in normalized units
-    /// where 256 float32 add operations = 1 unit.
+    /// Total compute time for the entire graph, in nanoseconds of modelled ORT CPU kernel
+    /// time (see <see cref="OpsPerf.OpCostModel"/>).
     /// </summary>
     public double TotalComputeTime { get; init; }
 
@@ -53,7 +53,7 @@ public class NodeEvaluationInfo
     public int NodeIndex { get; init; }
 
     /// <summary>
-    /// Compute time for this node in normalized units.
+    /// Modelled compute time for this node, in nanoseconds.
     /// </summary>
     public double ComputeTime { get; init; }
 

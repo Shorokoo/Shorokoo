@@ -4,7 +4,8 @@ namespace Shorokoo.Core.AutoDiffCheckpointing.OpsPerf;
 
 /// <summary>
 /// Performance estimator for miscellaneous operations that don't fit into other categories.
-/// Provides conservative default estimates for operations like Resize, DET, TopK, etc.
+/// Priced as streaming passes over the output (<see cref="OpCostModel.Stream"/>) with a
+/// multiplier for the work per element; Det is a batched O(n³) product.
 /// </summary>
 internal class MiscPerf : IOpPerf
 {
@@ -28,36 +29,36 @@ internal class MiscPerf : IOpPerf
         if (outputShape is null)
             return OpPerfResult.Zero;
 
-        var outputElements = outputShape.ElementCount;
+        var moved = OpCostModel.BytesOf(input.InputShapes) + outputShape.MemoryBytes;
 
         return opCode switch
         {
             RESIZE or UPSAMPLE => new OpPerfResult
             {
-                ComputeTime = outputElements / 256.0 * 3.0, // Interpolation
+                ComputeTime = OpCostModel.Stream(moved, 3.0), // Interpolation
                 ExtraMemoryBytes = 0,
             },
             DET => EstimateDet(input),
             TOPK => new OpPerfResult
             {
-                ComputeTime = outputElements / 256.0 * 10.0, // Partial sort
+                ComputeTime = OpCostModel.Stream(moved, 10.0), // Partial sort
                 ExtraMemoryBytes = 0,
             },
             NON_MAX_SUPPRESSION => new OpPerfResult
             {
-                ComputeTime = outputElements / 256.0 * 20.0, // Sorting + IoU computation
+                ComputeTime = OpCostModel.Stream(moved, 20.0), // Sorting + IoU computation
                 ExtraMemoryBytes = 0,
             },
             // Random generators
             BERNOULLI or RANDOM_NORMAL or RANDOM_NORMAL_LIKE
                 or RANDOM_UNIFORM or RANDOM_UNIFORM_LIKE or MULTINOMIAL => new OpPerfResult
             {
-                ComputeTime = outputElements / 256.0 * 3.0,
+                ComputeTime = OpCostModel.Stream(moved, 3.0),
                 ExtraMemoryBytes = 0,
             },
             _ => new OpPerfResult
             {
-                ComputeTime = outputElements / 256.0 * 1.0,
+                ComputeTime = OpCostModel.Stream(moved),
                 ExtraMemoryBytes = 0,
             }
         };
@@ -82,7 +83,7 @@ internal class MiscPerf : IOpPerf
         var flops = batch * n * n * n * 2.0;
         return new OpPerfResult
         {
-            ComputeTime = flops / 256.0,
+            ComputeTime = OpCostModel.MatMul(flops),
             ExtraMemoryBytes = batch * n * n * 4, // LU workspace
         };
     }

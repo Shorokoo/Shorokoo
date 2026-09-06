@@ -3,9 +3,13 @@ using static Shorokoo.Core.Nodes.NodeDefinitions.OpCodes;
 namespace Shorokoo.Core.AutoDiffCheckpointing.OpsPerf;
 
 /// <summary>
-/// Performance estimator for tensor shape manipulation operations.
-/// These ops change the shape or layout of tensor data without performing
-/// arithmetic. Most are zero-copy (metadata-only) or require a memory copy.
+/// Performance estimator for tensor shape manipulation operations. Metadata-only ops
+/// (Reshape, Squeeze, …) alias their input and cost a fraction of a launch — ORT still runs
+/// most of them as kernels. Shape/Size fold away with static dims. Everything else is a
+/// copy priced per byte at the strided-copy rate; Transpose pays more when the innermost axis moves, and a
+/// Transpose that only feeds a MatMul on its last two axes is folded into a
+/// <c>FusedMatMul</c> flag and costs nothing (when the caller supplies
+/// <see cref="OpPerfInput.ConsumerOpCodes"/>).
 /// </summary>
 internal class TensorManipulationPerf : IOpPerf
 {
@@ -23,7 +27,7 @@ internal class TensorManipulationPerf : IOpPerf
     {
         var opCode = input.OpCode;
 
-        // Shape/Size are metadata-only ops with negligible cost
+        // Shape/Size fold to constants once the dims are static
         if (opCode == SHAPE || opCode == SIZE)
             return OpPerfResult.Zero;
 
@@ -32,6 +36,7 @@ internal class TensorManipulationPerf : IOpPerf
             return OpPerfResult.Zero;
 
         var outputElements = outputShape.ElementCount;
+        var moved = OpCostModel.BytesOf(input.InputShapes) + outputShape.MemoryBytes;
 
         switch (opCode)
         {
@@ -40,11 +45,10 @@ internal class TensorManipulationPerf : IOpPerf
             case SQUEEZE:
             case UNSQUEEZE:
             {
-                // Zero-copy reshape — just a view change, no data movement
-                // Output reuses the input buffer unconditionally
+                // A view change: the kernel, when ORT keeps it, aliases the input buffer
                 return new OpPerfResult
                 {
-                    ComputeTime = 0,
+                    ComputeTime = OpCostModel.MetadataSurvival * OpCostModel.Launch,
                     ExtraMemoryBytes = 0,
                     InPlaceBufferReuse = new Dictionary<int, int> { [0] = 0 }
                 };
@@ -52,93 +56,36 @@ internal class TensorManipulationPerf : IOpPerf
 
             case EXPAND:
             {
-                // May require actual memory copy for broadcasting
                 var inputShape = input.InputShapes[0];
                 if (inputShape is not null && inputShape.ElementCount == outputElements)
                 {
                     // No actual expansion needed — same size
                     return new OpPerfResult
                     {
-                        ComputeTime = 0,
+                        ComputeTime = OpCostModel.MetadataSurvival * OpCostModel.Launch,
                         ExtraMemoryBytes = 0,
                         InPlaceBufferReuse = new Dictionary<int, int> { [0] = 0 }
                     };
                 }
-                // Real broadcast: cost is proportional to output size (memory copy)
                 return new OpPerfResult
                 {
-                    ComputeTime = outputElements / 256.0 * 0.5, // Memory-bound copy
+                    ComputeTime = OpCostModel.Survival(input, OpCostModel.Copy(moved)),
                     ExtraMemoryBytes = 0,
                 };
             }
 
             case TRANSPOSE:
             {
-                // Data movement with non-contiguous access pattern
-                return new OpPerfResult
-                {
-                    ComputeTime = outputElements / 256.0 * 1.5, // Cache-unfriendly copy
-                    ExtraMemoryBytes = 0,
-                };
-            }
-
-            case CONCAT:
-            {
-                // Copy all inputs into output buffer
-                return new OpPerfResult
-                {
-                    ComputeTime = outputElements / 256.0 * 0.5, // Memory copy
-                    ExtraMemoryBytes = 0,
-                };
-            }
-
-            case SPLIT:
-            {
-                // Copy portions of input to separate output buffers
                 var inputShape = input.InputShapes[0];
-                var inputElements = inputShape?.ElementCount ?? outputElements;
+                if (inputShape is null) return OpPerfResult.Zero;
+                if (FusesIntoMatMul(input, inputShape))
+                    return OpPerfResult.Zero;
+                var rate = InnermostAxisMoves(input, inputShape)
+                    ? OpCostModel.TransposeInnerNsPerByte
+                    : OpCostModel.TransposeOuterNsPerByte;
                 return new OpPerfResult
                 {
-                    ComputeTime = inputElements / 256.0 * 0.5,
-                    ExtraMemoryBytes = 0,
-                };
-            }
-
-            case SLICE:
-            {
-                return new OpPerfResult
-                {
-                    ComputeTime = outputElements / 256.0 * 0.5,
-                    ExtraMemoryBytes = 0,
-                };
-            }
-
-            case PAD:
-            {
-                return new OpPerfResult
-                {
-                    ComputeTime = outputElements / 256.0 * 0.5,
-                    ExtraMemoryBytes = 0,
-                };
-            }
-
-            case TILE:
-            {
-                return new OpPerfResult
-                {
-                    ComputeTime = outputElements / 256.0 * 0.5,
-                    ExtraMemoryBytes = 0,
-                };
-            }
-
-            case GATHER:
-            case GATHER_ELEMENTS:
-            case GATHER_ND:
-            {
-                // Random access reads — cache-unfriendly
-                return new OpPerfResult
-                {
-                    ComputeTime = outputElements / 256.0 * 2.0,
+                    ComputeTime = OpCostModel.Launch + rate * (inputShape.MemoryBytes + outputShape.MemoryBytes),
                     ExtraMemoryBytes = 0,
                 };
             }
@@ -146,9 +93,6 @@ internal class TensorManipulationPerf : IOpPerf
             case SCATTER_ELEMENTS:
             case SCATTER_ND:
             {
-                // Random access writes plus read-modify-write for reduction modes
-                var updateShape = input.InputShapes.Length > 2 ? input.InputShapes[2] : null;
-                var updateElements = updateShape?.ElementCount ?? outputElements;
                 // Check if output can reuse the data input buffer (first input)
                 var canInPlace = !input.InputMustRemainIntact[0]
                     && input.InputShapes[0] is not null
@@ -156,7 +100,7 @@ internal class TensorManipulationPerf : IOpPerf
                     && input.InputShapes[0]!.DType == outputShape.DType;
                 return new OpPerfResult
                 {
-                    ComputeTime = updateElements / 256.0 * 3.0,
+                    ComputeTime = OpCostModel.Stream(moved, 2.0), // random-access read-modify-write
                     ExtraMemoryBytes = 0,
                     InPlaceBufferReuse = canInPlace ? new Dictionary<int, int> { [0] = 0 } : new Dictionary<int, int>()
                 };
@@ -171,7 +115,7 @@ internal class TensorManipulationPerf : IOpPerf
                     && inputShape.DType == outputShape.DType;
                 return new OpPerfResult
                 {
-                    ComputeTime = outputElements / 256.0 * 1.0,
+                    ComputeTime = OpCostModel.Survival(input, OpCostModel.Stream(moved)),
                     ExtraMemoryBytes = 0,
                     InPlaceBufferReuse = canInPlace ? new Dictionary<int, int> { [0] = 0 } : new Dictionary<int, int>()
                 };
@@ -179,13 +123,43 @@ internal class TensorManipulationPerf : IOpPerf
 
             default:
             {
-                // Default: assume memory copy proportional to output
+                // Concat, Split, Slice, Pad, Tile, Gather*, Range, ConstantOfShape, …: a strided copy
                 return new OpPerfResult
                 {
-                    ComputeTime = outputElements / 256.0 * 1.0,
+                    ComputeTime = OpCostModel.Survival(input, OpCostModel.Copy(moved)),
                     ExtraMemoryBytes = 0,
                 };
             }
         }
+    }
+
+    private static long[]? Perm(OpPerfInput input)
+        => input.Attributes.TryGetValue("perm", out var val) && val is long[] perm ? perm : null;
+
+    /// <summary>Without a perm the axes reverse, which always moves the innermost one.</summary>
+    private static bool InnermostAxisMoves(OpPerfInput input, TensorShapeInfo inputShape)
+    {
+        var rank = inputShape.Shape.Dims.Length;
+        var perm = Perm(input);
+        return perm is null || perm.Length == 0 || perm[^1] != rank - 1;
+    }
+
+    /// <summary>
+    /// ORT's MatMulTransposeFusion: a Transpose that swaps only the last two axes and whose
+    /// every consumer is a MatMul is absorbed as that MatMul's transA/transB.
+    /// </summary>
+    private static bool FusesIntoMatMul(OpPerfInput input, TensorShapeInfo inputShape)
+    {
+        var consumers = input.ConsumerOpCodes;
+        if (consumers is null || consumers.Count == 0) return false;
+        foreach (var c in consumers)
+            if (c != MATMUL) return false;
+        var rank = inputShape.Shape.Dims.Length;
+        var perm = Perm(input);
+        if (rank < 2 || perm is null || perm.Length != rank) return false;
+        if (perm[^1] != rank - 2 || perm[^2] != rank - 1) return false;
+        for (int i = 0; i < rank - 2; i++)
+            if (perm[i] != i) return false;
+        return true;
     }
 }

@@ -3,25 +3,26 @@ using static Shorokoo.Core.Nodes.NodeDefinitions.OpCodes;
 namespace Shorokoo.Core.AutoDiffCheckpointing.OpsPerf;
 
 /// <summary>
-/// Performance estimator for elementwise binary operations.
-/// These ops apply a function element-by-element across two tensors (with broadcasting).
-/// Compute cost is proportional to the output element count.
-/// Binary ops can operate in-place on the first input when shapes match
-/// and the input is no longer needed.
+/// Performance estimator for elementwise binary (and <c>Where</c>) operations: one kernel
+/// launch plus the bytes streamed across every input and the output. Broadcasting a
+/// non-scalar input costs extra (<see cref="OpCostModel.BroadcastPenalty"/>); ORT's
+/// <c>Where</c> is several times slower per byte than an add. Binary ops can operate in-place
+/// on the first input when shapes match and the input is no longer needed.
 /// </summary>
 internal class BinaryElementwisePerf : IOpPerf
 {
+    // Multiplier on the streaming rate; 1 is a memory-bound op. Where and Greater were fitted.
     private static readonly Dictionary<string, double> CostMultipliers = new()
     {
         [ADD] = 1.0,
         [SUB] = 1.0,
         [MUL] = 1.0,
-        [DIV] = 3.0,
-        [MOD] = 4.0,
-        [POW] = 5.0,
+        [DIV] = 1.0,
+        [MOD] = 2.0,
+        [POW] = 3.0,
         [MAX] = 1.0,
         [MIN] = 1.0,
-        [MEAN] = 1.5,
+        [MEAN] = 1.0,
         [SUM] = 1.0,
         [AND] = 1.0,
         [OR] = 1.0,
@@ -31,11 +32,11 @@ internal class BinaryElementwisePerf : IOpPerf
         [BITWISE_XOR] = 1.0,
         [BIT_SHIFT] = 1.0,
         [EQUAL] = 1.0,
-        [GREATER] = 1.0,
-        [GREATER_OR_EQUAL] = 1.0,
-        [LESS] = 1.0,
-        [LESS_OR_EQUAL] = 1.0,
-        [WHERE] = 1.0, // Ternary but elementwise
+        [GREATER] = 1.45,
+        [GREATER_OR_EQUAL] = 1.45,
+        [LESS] = 1.45,
+        [LESS_OR_EQUAL] = 1.45,
+        [WHERE] = 4.3,
     };
 
     public IReadOnlySet<string> SupportedOpCodes { get; } =
@@ -48,9 +49,11 @@ internal class BinaryElementwisePerf : IOpPerf
             return OpPerfResult.Zero;
 
         var outputElements = outputShape.ElementCount;
-        var costMultiplier = CostMultipliers.GetValueOrDefault(input.OpCode, 1.0);
-
-        var computeTime = (outputElements / 256.0) * costMultiplier;
+        var bytes = OpCostModel.BytesOf(input.InputShapes) + outputShape.MemoryBytes;
+        var multiplier = CostMultipliers.GetValueOrDefault(input.OpCode, 1.0);
+        if (IsBroadcast(input.InputShapes, outputElements))
+            multiplier *= OpCostModel.BroadcastPenalty;
+        var computeTime = OpCostModel.Survival(input, OpCostModel.Stream(bytes, multiplier));
 
         // Check if in-place is possible on the first input:
         // Same shape, same dtype, and input not needed later
@@ -65,5 +68,14 @@ internal class BinaryElementwisePerf : IOpPerf
             ExtraMemoryBytes = 0,
             InPlaceBufferReuse = canInPlaceFirst ? new Dictionary<int, int> { [0] = 0 } : new Dictionary<int, int>()
         };
+    }
+
+    /// <summary>A non-scalar input smaller than the output is broadcast along some axis.</summary>
+    private static bool IsBroadcast(TensorShapeInfo?[] inputs, long outputElements)
+    {
+        foreach (var s in inputs)
+            if (s is not null && s.ElementCount > 1 && s.ElementCount < outputElements)
+                return true;
+        return false;
     }
 }

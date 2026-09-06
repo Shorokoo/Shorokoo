@@ -37,4 +37,11 @@ internal class OpPerfInput
     /// to estimate performance (e.g., axis for reduction, perm for transpose).
     /// </summary>
     public required IReadOnlyDictionary<string, object?> Attributes { get; init; }
+
+    /// <summary>
+    /// The op codes of the nodes that read this node's outputs, when the caller knows them;
+    /// null when unknown. Lets an estimator price a node ORT will fuse into its consumer (a
+    /// Transpose feeding only a MatMul becomes a FusedMatMul flag and costs nothing).
+    /// </summary>
+    public IReadOnlyList<string>? ConsumerOpCodes { get; init; }
 }

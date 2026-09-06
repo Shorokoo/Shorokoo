@@ -42,8 +42,8 @@ internal class OpPerfRegistry
 }
 
 /// <summary>
-/// Default performance estimator for operations without a specialized estimator.
-/// Provides a conservative estimate based on output size.
+/// Default performance estimator for operations without a specialized estimator: a kernel
+/// that streams its inputs and outputs once.
 /// </summary>
 internal class DefaultOpPerf : IOpPerf
 {
@@ -55,10 +55,9 @@ internal class DefaultOpPerf : IOpPerf
         if (outputShape is null)
             return OpPerfResult.Zero;
 
-        // Default: assume cost proportional to output size
         return new OpPerfResult
         {
-            ComputeTime = outputShape.ElementCount / 256.0,
+            ComputeTime = OpCostModel.Stream(OpCostModel.BytesOf(input.InputShapes) + OpCostModel.BytesOf(input.OutputShapes)),
             ExtraMemoryBytes = 0,
         };
     }

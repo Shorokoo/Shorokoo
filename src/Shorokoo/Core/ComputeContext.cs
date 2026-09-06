@@ -208,12 +208,16 @@ namespace Shorokoo.Runtime
         internal CompiledGraph Compile(InternalComputationGraph graph, IReadOnlyList<long[]?>? inputDims)
         {
             var originalInputNames = ResolveOriginalInputNames(graph);
+            // A graph compiled this way is a training step the memory-aware pass has already
+            // scheduled: what it duplicates, it duplicates on purpose, so the session must not
+            // merge it back (see ShorokooGraphOptimization.TrainingStep).
             return CompileFromModel(
                 () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true, inputDims: inputDims),
-                originalInputNames);
+                originalInputNames,
+                trainingStep: true);
         }
 
-        private CompiledGraph CompileFromModel(Func<ModelProto> buildModel, string[] originalInputNames)
+        private CompiledGraph CompileFromModel(Func<ModelProto> buildModel, string[] originalInputNames, bool trainingStep = false)
         {
             var model = buildModel();
 
@@ -221,7 +225,7 @@ namespace Shorokoo.Runtime
             ProtoBuf.Serializer.Serialize(memoryStream, model);
             var modelData = memoryStream.ToArray();
 
-            var session = CreateSession(modelData, HasOptionalOps(model.Graph));
+            var session = CreateSession(modelData, HasOptionalOps(model.Graph), trainingStep);
 
             var onnxInputNameByOriginal = new Dictionary<string, string>();
             for (int i = 0; i < originalInputNames.Length && i < session.InputNames.Count; i++)
@@ -383,7 +387,7 @@ namespace Shorokoo.Runtime
             }
         }
 
-        private IShorokooInferenceSession CreateSession(byte[] modelData, bool disableOptimizations = false)
+        private IShorokooInferenceSession CreateSession(byte[] modelData, bool disableOptimizations = false, bool trainingStep = false)
         {
             // Both conditions that pass true here are avoiding ORT's constant-folding pass:
             // it calls GetDeleteFunc on Optional values, which OptionalTypeBase doesn't
@@ -392,8 +396,8 @@ namespace Shorokoo.Runtime
             // scales with the data (see IsFullyConstant). Disabling optimizations skips the
             // fold pass; the nodes then go through the normal execution path, which ORT
             // handles correctly and which reuses buffers.
-            var optLevel = disableOptimizations
-                ? ShorokooGraphOptimization.DisableAll
+            var optLevel = disableOptimizations ? ShorokooGraphOptimization.DisableAll
+                : trainingStep ? ShorokooGraphOptimization.TrainingStep
                 : ShorokooGraphOptimization.EnableAll;
             return InferenceBackend.Factory.CreateSession(
                 modelData,

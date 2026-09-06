@@ -67,6 +67,7 @@ internal class GraphEvaluator
 
         // Tensor key → last walk position that reads it.
         var tensorLastUse = BuildTensorLastUse(nodes, walk);
+        var consumerOpCodes = BuildConsumerOpCodes(nodes);
         var graphOutputs = new HashSet<FastTensorKey>(graph.Outputs);
 
         var live = new LiveBuffers();
@@ -108,7 +109,7 @@ internal class GraphEvaluator
             }
 
             // Step 2: Compute op performance
-            var perfInput = BuildOpPerfInput(node, pos, shapeInfo, tensorLastUse);
+            var perfInput = BuildOpPerfInput(node, pos, shapeInfo, tensorLastUse, consumerOpCodes);
             var perfResult = _perfRegistry.Estimate(perfInput);
 
             var peakDuringOp = live.CurrentBytes + perfResult.ExtraMemoryBytes;
@@ -261,6 +262,21 @@ internal class GraphEvaluator
         return lastUse;
     }
 
+    /// <summary>Tensor key → op codes of the nodes that read it (ORT fuses some producer/consumer pairs).</summary>
+    private static Dictionary<FastTensorKey, List<string>> BuildConsumerOpCodes(IList<FastNode> nodes)
+    {
+        var consumers = new Dictionary<FastTensorKey, List<string>>();
+        foreach (var node in nodes)
+            foreach (var input in node.Inputs)
+            {
+                if (input is null) continue;
+                if (!consumers.TryGetValue(input.Value, out var list))
+                    consumers[input.Value] = list = new List<string>();
+                list.Add(node.OpCode);
+            }
+        return consumers;
+    }
+
     /// <summary>
     /// Builds the OpPerfInput for a given node at walk position <paramref name="pos"/>.
     /// </summary>
@@ -268,7 +284,8 @@ internal class GraphEvaluator
         FastNode node,
         int pos,
         ShapeInferenceResult shapeInfo,
-        Dictionary<FastTensorKey, int> tensorLastUse)
+        Dictionary<FastTensorKey, int> tensorLastUse,
+        Dictionary<FastTensorKey, List<string>> consumerOpCodes)
     {
         var nodeInputs = node.Inputs;
         var nodeOutputs = node.Outputs;
@@ -307,6 +324,11 @@ internal class GraphEvaluator
                 attrs[kvp.Key] = kvp.Value;
         }
 
+        List<string>? consumers = null;
+        foreach (var output in nodeOutputs)
+            if (output is not null && consumerOpCodes.TryGetValue(output.Value, out var list))
+                (consumers ??= new List<string>()).AddRange(list);
+
         return new OpPerfInput
         {
             InputShapes = inputShapes,
@@ -314,6 +336,7 @@ internal class GraphEvaluator
             InputMustRemainIntact = inputMustRemainIntact,
             OpCode = node.OpCode,
             Attributes = attrs,
+            ConsumerOpCodes = consumers ?? [],
         };
     }
 }

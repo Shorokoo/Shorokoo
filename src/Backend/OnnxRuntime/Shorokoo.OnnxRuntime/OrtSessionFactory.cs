@@ -59,11 +59,41 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
         // (core/session/utils.cc, InitializeSession) -- a use-after-free that segfaults the
         // process. Disposing in a finally keeps them rooted across the constructor.
         using var options = new SessionOptions();
-        options.LogSeverityLevel = (OrtLoggingLevel)(int)logSeverity;
-        options.GraphOptimizationLevel = (GraphOptimizationLevel)(int)graphOptimization;
+        Configure(options, graphOptimization, logSeverity);
         _configureExecutionProvider(options);
         var session = new InferenceSession(modelBytes.ToArray(), options);
         return new OrtInferenceSession(session);
+    }
+
+    /// <summary>
+    /// Applies the settings every session this factory creates runs with — the log severity
+    /// and the graph-optimization level, plus the two session configuration entries that
+    /// <see cref="ShorokooGraphOptimization.TrainingStep"/> stands for — to
+    /// <paramref name="options"/>. Public so a diagnostic can build an ORT session with exactly
+    /// the product's configuration plus its own (profiling, an optimized-model dump).
+    ///
+    /// <para>For <see cref="ShorokooGraphOptimization.TrainingStep"/>:
+    /// <c>optimization.disable_specified_optimizers</c> = CommonSubexpressionElimination
+    /// (everything else in ORT_ENABLE_ALL — constant folding, the MatMul/Gelu/LayerNorm fusions,
+    /// layout transforms — stays on), and <c>session.set_denormal_as_zero</c>: attention
+    /// gradients are full of denormal floats, and MLAS's GEMM on denormal operands runs roughly
+    /// seven times slower than on zeros (encoder step: batched attention products 10.4 ms live
+    /// against 1.5 ms flushed).</para>
+    /// </summary>
+    public static void Configure(
+        SessionOptions options,
+        ShorokooGraphOptimization graphOptimization,
+        ShorokooLogSeverity logSeverity)
+    {
+        options.LogSeverityLevel = (OrtLoggingLevel)(int)logSeverity;
+        if (graphOptimization == ShorokooGraphOptimization.TrainingStep)
+        {
+            options.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL;
+            options.AddSessionConfigEntry("optimization.disable_specified_optimizers", "CommonSubexpressionElimination");
+            options.AddSessionConfigEntry("session.set_denormal_as_zero", "1");
+        }
+        else
+            options.GraphOptimizationLevel = (GraphOptimizationLevel)(int)graphOptimization;
     }
 
     /// <summary>

@@ -61,19 +61,30 @@ namespace Shorokoo.Graph
         /// QEE/ORT resolution fallbacks during lowering; build one with <see cref="FromOrderedInputs"/>.</param>
         /// <param name="computeContext">Optional context used to resolve values while lowering.</param>
         /// <param name="debugRequests">Optional hook to dump the graph at each lowering stage.</param>
+        /// <param name="progress">The reporter the pipeline names each stage to as it enters it, or
+        /// <c>null</c> for none. Built by the caller from the sink it was handed, because the caller
+        /// owns the clock (so one spans a whole <c>TrainingRig.FromScratch</c>) and owns the terminal
+        /// report, which this pipeline is in no position to raise — both its callers have work left
+        /// when it returns.</param>
         /// <returns>A fully inlined, concrete architecture graph.</returns>
         internal static InternalComputationGraph ToConcreteArchitecture(
             this InternalComputationGraph graph,
             ModelParamList inputHints,
             ComputeContext? computeContext = null,
-            DebugRequests? debugRequests = null)
+            DebugRequests? debugRequests = null,
+            BuildProgressReporter? progress = null)
         {
+            void Stage(string stage) => progress?.Report(BuildPhase.Concretize, stage);
+
+            Stage("Clone");
             var fastGraph = graph.Clone();
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After Clone");
 
+            Stage("ApplyIdentifierTemplates");
             FastApplyIdentifierTemplates.Process(fastGraph);
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastApplyIdentifierTemplates");
 
+            Stage("InlineModulesAndFunctions");
             FastInlineModulesAndFunctions.Process(fastGraph);
             DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterInlineAllModulesAndFunctions);
             AssertFastGraphDoesNotContainOps(fastGraph,
@@ -88,30 +99,36 @@ namespace Shorokoo.Graph
             // Generator-managed substreamIndex: inject the model-global execution counter and wire
             // it into every runtime random feed, BEFORE template extraction so the counter's
             // state param rides the normal trainable/state param pipeline from here on.
+            Stage("InjectRngDrawCounter");
             FastInjectRngDrawCounter.Process(fastGraph);
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastInjectRngDrawCounter");
 
+            Stage("ExtractIdentifierTemplates");
             var identifierTemplatesInfo = FastExtractIdentifierTemplates.Process(fastGraph);
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastExtractIdentifierTemplates");
 
+            Stage("ConvertToIdRefModelParams");
             FastConvertToIdRefModelParams.Process(fastGraph);
             AssertFastGraphDoesNotContainOps(fastGraph,
                 new[] { InternalOpCodes.MODEL_PARAM_REF, InternalOpCodes.MODEL_PARAM_MODEL_REF },
                 "After FastConvertToIdRefModelParams");
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastConvertToIdRefModelParams");
 
+            Stage("UnpackModelStruct");
             FastUnpackModelStruct.Process(fastGraph);
             AssertFastGraphDoesNotContainOps(fastGraph,
                 new[] { InternalOpCodes.MODULE_SET_HYPERPARAMS, InternalOpCodes.MODEL_HYPERPARAM, InternalOpCodes.GET_MODEL_ID },
                 "After FastUnpackModelStruct");
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastUnpackModelStruct");
 
+            Stage("UnpackTensorStructs");
             FastUnpackTensorStructs.Process(fastGraph);
             AssertFastGraphDoesNotContainOps(fastGraph,
                 new[] { InternalOpCodes.TENSOR_STRUCT_CREATE, InternalOpCodes.TENSOR_STRUCT_GETFIELD },
                 "After FastUnpackTensorStructs");
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastUnpackTensorStructs");
 
+            Stage("ConvertModelParamIdRefToModelParam");
             var unresolvedParamSites = FastConvertModelParamIdRefToModelParam.Process(
                 fastGraph, identifierTemplatesInfo, inputHints, computeContext);
             DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterProcessTrainableParameters);
@@ -126,6 +143,7 @@ namespace Shorokoo.Graph
                 "After FastConvertModelParamIdRefToModelParam");
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastConvertModelParamIdRefToModelParam");
 
+            Stage("Simplify");
             FastSimplify.Process(fastGraph);
             DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterFirstSimplify);
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastSimplify #1");
@@ -135,13 +153,16 @@ namespace Shorokoo.Graph
             // FastSimplify above has already constant-folded and unrolled loops, so the geometry
             // inputs are resolvable here. inputHints supplies sample values for the QEE/ORT
             // resolution fallbacks; the following FastSimplify folds the lowered ops.
+            Stage("LowerAttributeTensorOps");
             FastLowerAttributeTensorOps.Process(fastGraph, inputHints, computeContext);
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastLowerAttributeTensorOps");
 
+            Stage("ExpandAutoGrad");
             FastProcessAutoGradProcessor.Process(fastGraph);
             DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterExpandAutoGrad);
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastProcessAutoGradProcessor");
 
+            Stage("SimplifyAfterAutoGrad");
             FastSimplify.Process(fastGraph);
             DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.FinalGraph);
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastSimplify #2");
@@ -152,6 +173,9 @@ namespace Shorokoo.Graph
             // that SrkFileFormat.DetectStage classifies a module graph by.
             AssertFastGraphDoesNotContainOps(fastGraph, InternalOpCodes.IsModuleStageOp, "Fast final graph validation");
 
+            // No terminal report here: both callers have work left after this returns (the public
+            // wrapper freezes the result, the rig build goes on to compose the trainstep), and a
+            // "finished" report with work still to run is worse than no report at all.
             return fastGraph;
         }
 

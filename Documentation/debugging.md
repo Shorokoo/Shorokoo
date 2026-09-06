@@ -1,6 +1,12 @@
-# Debugging graph lowering (`DebugRequests`)
+# Debugging graph lowering (`DebugRequests`, `BuildProgress`)
 
-Related: [inference.md](inference.md) · [onnx-and-weights.md](onnx-and-weights.md)
+Related: [inference.md](inference.md) · [onnx-and-weights.md](onnx-and-weights.md) · [training.md](training.md)
+
+Two facilities watch the same lowering pipeline from opposite ends. `DebugRequests` captures the
+**graph** at chosen points, as compilable C#, and you read it after the call returns; a progress sink
+reports the **stage name** as the pipeline enters it, while the call is still running — the one that
+answers "is this build alive?". Neither changes the graph the build produces
+(though a progress handler that throws aborts the build that called it).
 
 When `ToConcreteArchitecture` doesn't produce the graph you expect, the
 `DebugRequests` class (namespace `Shorokoo.Graph`) saves snapshots of the
@@ -28,21 +34,20 @@ var concreteArchitecture = graph.ToConcreteArchitecture(inputHints, computeConte
 
 ## Available Debug Points
 
-The `GraphCreationPoint` enum provides the following options:
+The `GraphCreationPoint` enum declares 13 values, but only these five are actually written today:
 
 - `AfterInlineAllModulesAndFunctions` - After inlining all modules and functions
 - `AfterProcessTrainableParameters` - After processing trainable parameters
-- `AfterProcessAllModelHyperparamRefs` - After processing model hyperparameter references
-- `AfterProcessModelSequences` - After processing model sequences
-- `AfterProcessAccessibleModuleSetHyperparams` - After processing accessible module hyperparameters
-- `AfterUnrollModuleLoop` - After unrolling each module loop
-- `AfterSimplify` - After simplification
-- `AfterSimplifyTrainableParamInitializers` - After simplifying trainable parameter initializers
-- `AfterLowerStateUpdateNodes` - After lowering `StateUpdate` nodes
 - `AfterFirstSimplify` - After the first simplification pass
 - `AfterExpandAutoGrad` - After autodiff expansion
-- `AfterSecondSimplify` - After the second simplification pass
 - `FinalGraph` - The final concrete architecture graph
+
+The remaining eight — `AfterProcessAllModelHyperparamRefs`, `AfterProcessModelSequences`,
+`AfterProcessAccessibleModuleSetHyperparams`, `AfterUnrollModuleLoop`, `AfterSimplify`,
+`AfterSimplifyTrainableParamInitializers`, `AfterLowerStateUpdateNodes`, `AfterSecondSimplify` —
+are **silent no-ops**: requesting one writes no file and reports nothing
+([#224](https://github.com/Shorokoo/Shorokoo/issues/224)). To see that a stage of the pipeline the
+enum does not cover has been reached, watch the build instead (next section).
 
 ## Alternative Construction
 
@@ -63,3 +68,39 @@ var debugRequests = new DebugRequests(debugDict);
 - Debug files are saved as C# code using the existing `SaveToCSharp()` functionality
 - Directories are automatically created if they don't exist
 - Passing `null` for `debugRequests` parameter works normally (no debug output)
+
+## Watching a build while it runs (`BuildProgress`)
+
+`DebugRequests` tells you what the graph looked like at a stage — but only once the call returns,
+which is no help when the question is whether a call that has been running for minutes is still
+making progress. For that, hand the call a progress sink: every stage is reported as the pipeline
+enters it, so the last report names the stage the build is in.
+
+```csharp
+using Shorokoo.Graph;    // SynchronousBuildProgress
+
+var concreteArchitecture = graph.ToConcreteArchitecture(
+    inputHints, progress: new SynchronousBuildProgress(p => Console.WriteLine(p)));
+```
+
+```
+[   0.0s] Concretize: Thaw
+[   0.1s] Concretize: Clone
+[   0.1s] Concretize: ApplyIdentifierTemplates
+…
+[   4.8s] Concretize: Simplify
+[  12.0s] Concretize: LowerAttributeTensorOps
+[  38.4s] Concretize: ExpandAutoGrad
+[  44.1s] Concretize: SimplifyAfterAutoGrad
+[  45.2s] Concretize: Freeze
+[  46.0s] Concretize: Done
+```
+
+(`…` marks stages elided here, not gaps in the output — every stage reports, and a lowering that
+finishes ends on a report whose `IsComplete` is true.)
+
+The same sink passed to `TrainingRig.FromScratch` covers the whole rig build — concretization,
+training-step composition and initialization — under one clock. See
+[training.md](training.md#watching-a-long-build) for the full report shape (`BuildPhase`, `Stage`,
+`Elapsed`, `IsComplete`), the phase order, which calls report, and why to prefer
+`SynchronousBuildProgress` over `System.Progress<T>`.

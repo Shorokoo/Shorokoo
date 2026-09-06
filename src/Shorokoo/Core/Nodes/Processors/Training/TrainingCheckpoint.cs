@@ -23,7 +23,7 @@ namespace Shorokoo
         /// <summary>The rig's constituent model/loss/optimizer/scheduler graphs, hyperparameters and RNG
         /// config — enough to rebuild the whole rig from the file alone (Shorokoo/Shorokoo#115). A native
         /// <c>.skpt</c> always carries them (written by <see cref="Persistence.SaveTrainingCheckpointToSkpt"/>);
-        /// rebuild the rig from the file with the static <see cref="TrainingRig.Load(string, Runtime.ComputeContext?, Runtime.ComputeContext?)"/>.
+        /// rebuild the rig from the file with the static <see cref="TrainingRig.Load(string, Runtime.ComputeContext?, Runtime.ComputeContext?, IProgress{Graph.BuildProgress})"/>.
         /// The flat safetensors format cannot carry constituent graphs, and the rig-supplied
         /// <see cref="TrainingCheckpoint.Load"/> / <see cref="TrainingRig.LoadCheckpoint"/> already have a
         /// rig, so requesting this component on those paths throws, redirecting to the paths above.</summary>
@@ -390,7 +390,7 @@ namespace Shorokoo
         ///
         /// <para>A <paramref name="rig"/> is required: the struct definitions come from it. Rebuilding
         /// the rig from the checkpoint file alone needs a <c>.skpt</c> written with the rig
-        /// constituents — the static <see cref="TrainingRig.Load(string, Runtime.ComputeContext?, Runtime.ComputeContext?)"/>
+        /// constituents — the static <see cref="TrainingRig.Load(string, Runtime.ComputeContext?, Runtime.ComputeContext?, IProgress{Graph.BuildProgress})"/>
         /// — so a <c>null</c> rig throws.</para>
         /// </summary>
         public static TrainingCheckpoint Load(
@@ -419,7 +419,7 @@ namespace Shorokoo
         /// everything present; absent parts fill from the rig's initial values), and requesting the
         /// <see cref="CheckpointComponents.TrainingRig"/> component throws — this rig-supplied path
         /// never rebuilds the rig (that is the static
-        /// <see cref="TrainingRig.Load(string, Runtime.ComputeContext?, Runtime.ComputeContext?)"/>).
+        /// <see cref="TrainingRig.Load(string, Runtime.ComputeContext?, Runtime.ComputeContext?, IProgress{Graph.BuildProgress})"/>).
         /// Reads the container shape only: handed a flat safetensors checkpoint it fails
         /// immediately, naming <see cref="Load"/> as the entry point for that shape. Prefer
         /// <see cref="TrainingRig.LoadCheckpointFromSkpt(string, CheckpointComponents?)"/>.

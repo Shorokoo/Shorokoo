@@ -94,6 +94,15 @@ public class AttentionModuleTests
             hyperparamInputs: [], runtimeInputs: [Sdpa8x4()]));
         Assert.True(AutoTest.AdvancedTestGraph<AttnCausalMaskQueryOffset>(
             hyperparamInputs: [], runtimeInputs: [Sdpa8x4()]));
+        Assert.True(AutoTest.AdvancedTestGraph<AttnChunkedUnknownRankMask>(
+            hyperparamInputs: [], runtimeInputs: [Sdpa8x4(), KeyBias8()]));
+    }
+
+    private static TensorData KeyBias8()
+    {
+        var vals = new float[8];
+        for (var i = 0; i < vals.Length; i++) vals[i] = i * -0.25f;
+        return TensorData([8L], vals);
     }
 
     // Shorokoo/Shorokoo#245: an invalid Slice (axis -2 of a rank-1 tensor) raises cleanly

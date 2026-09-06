@@ -51,18 +51,11 @@ usual ones — a smaller batch, a shorter sequence, or a smaller model.
 
 Attention has the one exception, and it is not checkpointing: passing
 `queryChunks: c` to `Attention.ScaledDotProductAttention` splits the query axis
-into `c` blocks, which divides the score-sized **transients** by `c` but leaves
-untouched the two score-sized tensors per attention call that are **retained**
-from forward to backward. It bounds the spike, not the floor. See
+into `c` blocks, which divides the score-sized **transients** by `c` but not
+what the step retains across the backward pass. It bounds the spike, not the
+floor, and measures about a 10% saving on a single-attention step. See
 [Sizing an attention run](nn-library.md#attention-memory) for the arithmetic and
 for what the quadratic term actually costs.
-
-Attention is also where the absence of checkpointing is most visible, and for a
-reason worth stating: the softmax gradient rule recomputes the probabilities
-from the softmax's *input*, so that input is kept **in addition to** the output
-the `P·V` gradient already needs. The recompute costs a score-sized tensor
-rather than saving one. A real checkpointing facility would drop both and
-recompute `QKᵀ` from Q and K instead.
 
 Building a training rig does run an internal memory-aware pass over the lowered
 training-step graph, which may reorder nodes and recompute a tensor rather than

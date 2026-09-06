@@ -911,84 +911,67 @@ mask is a separate, much smaller `[Lq, Lk] · 4 bytes` (4 MiB at `L = 1024`), sh
 every batch element and head — but built **per call site**, not deduplicated across them,
 and once per chunk under `queryChunks`.
 
-**How many blocks a training step holds.** Per `ScaledDotProductAttention` call, when
-`value` carries a gradient — i.e. always, in a real transformer, since V comes from a
-trainable projection:
+**How many blocks a training step holds.** Fewer than the graph builds, because a
+memory-aware pass rewrites the lowered training step before it runs — reordering nodes and
+recomputing tensors rather than keeping them alive (see
+[limitations.md](limitations.md#gradient-activation-checkpointing)). How many survive is
+therefore not a fixed property of attention; it is what that pass settles on. Measured on a
+training step whose attention has all three projections trainable, at `N = 2`, `H = 4`,
+`L = 256`, `d = 32` — a 2 MiB score block:
 
-- **Forward** — `QKᵀ` → (`+ mask`) → `Softmax` is a chain, so each link frees the last.
-  The softmax is emitted twice, though (see below), so **three** blocks are live at the
-  second one: the softmax's input and both copies of the probabilities.
-- **Retained** — **two** blocks per call stay live from the forward pass into the backward
-  pass, and this is the term that accumulates. Both come from the softmax:
-  - `∂(P·V)/∂V = Pᵀ · ∂y`, so the **forward** probabilities `P` are needed in the backward
-    to produce `dV`;
-  - the softmax gradient rule separately re-reads the softmax's **input** and recomputes
-    `P` from it, and the two `Softmax` nodes are not merged.
+| attention calls | measured peak | in score blocks |
+|---|---|---|
+| 1 | 5.51 MiB | 2.76 |
+| 2 | 8.78 MiB | 4.39 |
 
-  So the recompute does not *replace* a retained block, it **adds** one. An
-  `A`-attention-call model holds `2A` blocks for the whole step.
-- **Backward** — the recomputed probabilities, the incoming score gradient and one
-  elementwise temporary are live together: about **two** more, for the one call currently
-  being differentiated.
-
-So budget a step at roughly
+So each extra call costs about **1.6 blocks**, on a base of about one. Budget with
 
 ```
-(2A + 2) score blocks       A = number of ScaledDotProductAttention calls
+(2A + 1) score blocks       A = number of ScaledDotProductAttention calls
 ```
 
-This is deliberately a ceiling — the measured peak for `A = 1` is 3 rather than 4, because
-that call's own retained pair is partly released before its backward transients peak — and
-over-budgeting is the safe direction when the alternative is an out-of-memory kill.
+which is deliberately a ceiling over both measurements — over-budgeting is the safe
+direction when the alternative is an out-of-memory kill. A 6-layer encoder at batch 32,
+6 heads, `L = 1024` is `A = 6`, so ≈ 13 × 768 MiB ≈ **10 GiB in score blocks alone** —
+before parameters, gradients, optimizer state, and every other activation.
 
-A 6-layer encoder at batch 32, 6 heads, `L = 1024` is `A = 6`, so ≈ 14 × 768 MiB ≈ **10.5
-GiB in score blocks alone** — before parameters, gradients, optimizer state, and every
-other activation in the model. Below a few hundred MiB you will not *see* this in a GPU
-memory reading, because the ONNX Runtime arena reserves a fixed few hundred MiB up front
-and the score blocks fit inside it; the arithmetic is what to size against, not a small
-measurement.
-
-(A model whose `value` is a raw input rather than a projection — a toy, or an ablation —
-retains only one block per call, because no `dV` is computed and the forward `P` dies in
-the forward pass. Do not size a real run off that shape; it makes attention look half as
-expensive as it is.)
+Two caveats on reading a measurement rather than the arithmetic. Below a few hundred MiB
+you will not *see* any of this in a GPU memory reading, because the ONNX Runtime arena
+reserves a fixed few hundred MiB up front and the score blocks fit inside it. And the
+memory-aware pass skips graphs whose peak is under a megabyte entirely, so a scaled-down
+repro of your model may be optimized differently from the real thing — or not at all.
 
 **The lever: `queryChunks`.** Passing `queryChunks: c` splits the query axis into `c`
 blocks, runs attention on each against the whole key/value, and concatenates the outputs.
-Every score-sized **transient** shrinks by `c`, so the step peaks at about
-
-```
-(2A + 2/c) score blocks
-```
-
 It is exact, not an approximation — the output matches the dense path to floating-point
 rounding, gradients included, and causal masking included (each chunk gets a `queryOffset`
-causal mask, so it still masks absolute positions). What it does **not** do is shrink the
-retained `2A`: the `c` retained chunks sum to the same bytes as the blocks they replace.
-Chunking bounds the spike, not the floor — which also bounds how much it can buy you. At
-`A = 6`, `c = 4` the budget goes from 14 blocks to 12.5, about 10%; the lever is worth
-most on a shallow model with a very long sequence, and worth little on a deep one.
+causal mask, so it still masks absolute positions).
+
+What it buys is modest. On the single-call step above, `queryChunks: 4` measures **4.95 MiB
+against the dense 5.51 MiB — about 10%**. It shrinks the score-sized *transients* by `c`,
+but not what the step retains across the backward pass, and the retained term dominates.
+Reach for it when a run is close to fitting, not as a way to make one that is far from
+fitting fit.
 
 ```csharp
-// Dense: budget ~4 score blocks for a single-attention model.
+// Dense: ~2.8 score blocks for a single-attention step.
 var y = Attention.ScaledDotProductAttention(q, k, v, causal: true);
 
 // Chunked by 4: ~2.5, same output.
 var y = Attention.ScaledDotProductAttention(q, k, v, causal: true, queryChunks: 4);
 ```
 
-An `additiveMask` is handled per chunk: one that already broadcasts over the query axis —
-rank < 2, or a size-1 axis -2, as in an `[N, 1, 1, Lk]` padding mask — goes to every chunk
-whole, and one that is `Lq` rows tall is sliced to each chunk's rows. Chunking accepts
-exactly the masks the dense path accepts; a mask that is neither is rejected by the score
-`Add` either way.
+An `additiveMask` is handled per chunk. Its query axis (axis -2, once right-aligned to the
+scores' rank) must be `Lq` or `1` — the same rule the dense path enforces. One that already
+broadcasts over queries — rank < 2, or a size-1 axis -2, as in an `[N, 1, 1, Lk]` padding
+mask — goes to every chunk whole; one that is `Lq` rows tall is sliced to each chunk's rows.
 
 `queryChunks` is a build-time C# `int`, fixed when the graph is built — `Lq` itself stays
 dynamic, and chunk `i` covers rows `[Lq·i/c, Lq·(i+1)/c)`, so an `Lq` that does not divide
 evenly just gives chunks differing by one row (and a `c` larger than `Lq` gives empty
 chunks — still correct, just wasted launches). Keep `c` small: `c` chunks mean `c` MatMul
 and Softmax launches instead of one, and the graph grows accordingly — a one-attention
-training step goes from 506 to 1 335 nodes at `c = 4`.
+training step goes from 506 to 1 312 nodes at `c = 4`.
 
 It reaches only the `Attention.ScaledDotProductAttention` helper, not
 `MultiHeadAttention`, `TransformerEncoderLayer` or `TransformerDecoderLayer`: a

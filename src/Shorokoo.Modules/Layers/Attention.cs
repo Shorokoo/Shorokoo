@@ -18,6 +18,9 @@ namespace Shorokoo.Modules.Layers;
 /// </summary>
 public static class Attention
 {
+    /// <summary>Rank of the score block, and so of q/k/v: <c>[N, H, L, d]</c>.</summary>
+    private const long ScoreRank = 4;
+
     /// <summary>
     /// Scaled dot-product attention: <c>softmax(QKᵀ · scale + mask) · V</c>.
     ///
@@ -44,14 +47,11 @@ public static class Attention
     /// <c>[N, H, Lq, Lk]</c> — quadratic in sequence length — and the dense path (the
     /// default, <c>1</c>) builds it whole. Splitting the query axis into <c>c</c> chunks
     /// evaluates <c>c</c> independent <c>[N, H, Lq/c, Lk]</c> blocks and concatenates their
-    /// outputs, so every score-sized <b>transient</b> shrinks by <c>c</c> — the incoming
-    /// score gradient and the elementwise tensors of the softmax backward. What it does
-    /// <b>not</b> shrink is the <b>two</b> score-sized tensors per call the step
-    /// <b>retains</b> from forward to backward: the forward probabilities, which
-    /// <c>∂(P·V)/∂V = Pᵀ·∂y</c> needs, and the copy the softmax gradient rule recomputes
-    /// from the softmax's input. Their chunks sum to the same bytes. Budget it as "two
-    /// retained score blocks per attention call, plus a transient peak of about two more
-    /// divided by <paramref name="queryChunks"/>"; the full arithmetic is in
+    /// outputs, so every score-sized <b>transient</b> shrinks by <c>c</c>. What it does
+    /// <b>not</b> shrink is what the step <b>retains</b> across the backward pass, and that
+    /// term dominates — measured, chunking by 4 takes a single-attention training step from
+    /// 5.51 MiB to 4.95 MiB, about 10%. Reach for it when a run is close to fitting, not to
+    /// make one that is far from fitting fit; the arithmetic is in
     /// Documentation/nn-library.md, "Sizing an attention run".
     /// The count is a build-time C# int, not
     /// a graph value, so it is fixed when the graph is built; <c>Lq</c> stays dynamic and is
@@ -61,11 +61,13 @@ public static class Attention
     /// to floating-point rounding. Cost: <c>c</c> separate MatMul and Softmax launches
     /// instead of one, so keep <c>c</c> small and the chunks large.</para>
     ///
-    /// <para>Chunking accepts exactly the masks the dense path accepts. One that already
-    /// broadcasts over the query axis — rank &lt; 2, or a size-1 axis -2, as in a
-    /// <c>[N, 1, 1, Lk]</c> padding mask — is handed to every chunk whole; one that is
-    /// <c>Lq</c> rows tall is sliced to each chunk's rows. A mask that is neither is
-    /// rejected by the score <c>Add</c>, just as it is without chunking.</para>
+    /// <para>An <paramref name="additiveMask"/> must have a query axis (axis -2, once
+    /// right-aligned to the scores' rank) of either <c>Lq</c> or <c>1</c> — the same rule the
+    /// dense path's score <c>Add</c> enforces. One that already broadcasts over queries —
+    /// rank &lt; 2, or a size-1 axis -2, as in a <c>[N, 1, 1, Lk]</c> padding mask — is handed
+    /// to every chunk whole; one that is <c>Lq</c> rows tall is sliced to each chunk's rows.
+    /// A mask of any other height is rejected by the score <c>Add</c> here as it is on the
+    /// dense path, though not always for the same arithmetic reason.</para>
     /// </summary>
     public static Tensor<float32> ScaledDotProductAttention(
         Tensor<float32> query,
@@ -98,7 +100,7 @@ public static class Attention
             var start = lq * (long)i / (long)queryChunks;
             var end = lq * (long)(i + 1) / (long)queryChunks;
             var q = scaledQuery.Slice(start.Unsqueeze(), end.Unsqueeze(), axes: Vector(-2L));
-            var m = SliceMaskQueryAxis(additiveMask, start, end);
+            var m = SliceMaskQueryAxis(additiveMask, i, queryChunks);
             blocks[i] = AttendQueryBlock(q, keyT, value, causal, m, start);
         }
         return blocks[0].Concat(-2L, blocks[1..]);
@@ -130,30 +132,38 @@ public static class Attention
     }
 
     /// <summary>
-    /// Narrows an additive mask to one query chunk. A mask that already broadcasts over the
-    /// query axis — rank &lt; 2, so it has no such axis, or a size-1 one — is passed through
-    /// whole; anything else is sliced to the chunk's rows.
+    /// Narrows an additive mask to one query chunk.
     ///
-    /// <para>Deliberately no attempt to be clever about a query axis that is neither
-    /// <c>Lq</c> nor <c>1</c>: it is sliced like any other, so the score <c>Add</c> rejects
-    /// it exactly as it rejects the same mask on the dense path. Chunking must not widen
-    /// (or silently reinterpret) the set of masks attention accepts.</para>
+    /// <para>The mask is first right-aligned to the rank of the scores, so axis -2 always
+    /// exists and always is the query axis — size 1 where the mask had none. That is done
+    /// <b>in-graph</b> rather than by branching on <see cref="Tensor{T}.Rank"/>, because the
+    /// static rank here is usually unknown: every <c>[Module]</c> parameter typed
+    /// <c>Tensor&lt;float32&gt;</c> reports null, as does anything downstream of an
+    /// Unsqueeze, Squeeze, keepDims-false Reduce or Where. A C# branch on it would therefore
+    /// fail to fire for exactly the masks users write by hand, and reading axis -2 of a
+    /// rank-1 mask is not a clean error — it builds a graph that takes ONNX Runtime down.</para>
+    ///
+    /// <para>A size-1 query axis broadcasts over every row, so it goes to each chunk whole.
+    /// Otherwise the chunk's bounds are cut from the mask's <b>own</b> query length rather
+    /// than from <c>Lq</c>. When the two agree — the only supported case — that is exactly
+    /// the chunk's rows. When they disagree the slice carries a row count that no longer
+    /// matches the chunk's scores, so the score <c>Add</c> rejects it, rather than silently
+    /// attending through the wrong rows of a mask that was sized for a different sequence
+    /// length. (A residual case still slips through: a disagreement whose slice happens to
+    /// land on one row broadcasts instead of failing.)</para>
     /// </summary>
-    private static Tensor<float32>? SliceMaskQueryAxis(
-        Tensor<float32>? mask, Scalar<int64> start, Scalar<int64> end)
+    private static Tensor<float32>? SliceMaskQueryAxis(Tensor<float32>? mask, int chunkIndex, int chunkCount)
     {
         if (mask is null)
             return null;
 
-        // Rank is static here (shape inference supplies it); slicing is the safe default
-        // for the rare tensor whose rank is not yet known.
-        if (mask.Value.Rank is int rank && rank < 2)
-            return mask;
+        var aligned = mask.Value.Unsqueeze(VectorRange(0L, Scalar(ScoreRank) - mask.Value.TRank, 1L));
 
-        var broadcasts = mask.Value.DimTensor(-2) == Scalar(1L);
-        return mask.Value.Slice(
-            broadcasts.Where(Scalar(0L), start).Unsqueeze(),
-            broadcasts.Where(Scalar(1L), end).Unsqueeze(),
+        var rows = aligned.DimTensor(-2);
+        var broadcasts = rows == Scalar(1L);
+        return aligned.Slice(
+            broadcasts.Where(Scalar(0L), rows * (long)chunkIndex / (long)chunkCount).Unsqueeze(),
+            broadcasts.Where(Scalar(1L), rows * (long)(chunkIndex + 1) / (long)chunkCount).Unsqueeze(),
             axes: Vector(-2L));
     }
 

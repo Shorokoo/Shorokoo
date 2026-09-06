@@ -130,7 +130,9 @@ public partial class MemoryPassLstm
 /// <para>Regression is judged per family and in one direction only: modelled peak may not exceed
 /// the baseline by more than <see cref="PeakRegressionFactor"/>, modelled compute by more than
 /// <see cref="ComputeRegressionFactor"/> — a pass that buys memory with unbounded recompute is a
-/// regression too — and real peak by more than <see cref="RealPeakRegressionFactor"/>, checked
+/// regression too — and real peak by more than <see cref="RealPeakRegressionFactor"/> plus a
+/// <see cref="RealPeakNoiseFloorBytes"/> allowance for the page-granularity noise of a family
+/// whose tensors are heap-served (three recordings of the LSTM spread over ±0.4 MB), checked
 /// only when both the baseline and this run measured it. Kernel time is recorded, not gated: it
 /// is wall clock and the perf baseline already budgets that. Improvements do not fail the gate;
 /// re-record the baseline to lock them in: <c>SHOROKOO_UPDATE_MEMORY_PASS_BASELINE=1 dotnet test
@@ -149,6 +151,7 @@ public class MemoryPassBenchmarkTests
     private const double PeakRegressionFactor = 1.05;
     private const double ComputeRegressionFactor = 1.25;
     private const double RealPeakRegressionFactor = 1.10;
+    private const long RealPeakNoiseFloorBytes = 1L << 20;
 
     private const string MallocEnvironment =
         "MALLOC_MMAP_THRESHOLD_=16384 MALLOC_TRIM_THRESHOLD_=0 MALLOC_TOP_PAD_=0";
@@ -190,7 +193,7 @@ public class MemoryPassBenchmarkTests
             Assert.True(now.PeakBytes <= was.PeakBytes * PeakRegressionFactor);
             Assert.True(now.ComputeTime <= was.ComputeTime * ComputeRegressionFactor);
             if (was.RealPeakBytes is long wasReal && now.RealPeakBytes is long nowReal)
-                Assert.True(nowReal <= wasReal * RealPeakRegressionFactor);
+                Assert.True(nowReal <= wasReal * RealPeakRegressionFactor + RealPeakNoiseFloorBytes);
         }
     }
 
@@ -237,8 +240,7 @@ public class MemoryPassBenchmarkTests
 
         var before = new RealRun(rig.PreOptimizationGraph, rig.OptimizationInputShapes);
         var after = new RealRun(rig.TrainingStepPureGraph, rig.OptimizationInputShapes);
-        before.MeasurePeak();
-        after.MeasurePeak();
+        RealRun.MeasurePeaks(before, after);
         before.Profile();
         after.Profile();
 
@@ -299,37 +301,59 @@ public class MemoryPassBenchmarkTests
             _reverseDfsOrder = ReverseDfsOrder(proto.Graph);
         }
 
-        public void MeasurePeak()
+        /// <summary>
+        /// Reads both graphs' peaks in one interleaved sequence: a second session measured after a
+        /// first one reads higher on a family whose tensors are heap-served (the LSTM's 4 KB
+        /// per-iteration values), because the heap the first run left behind is what the second
+        /// allocates from. Alternating the two puts them in the same heap state, so the pair is
+        /// comparable even where the absolute reading is not.
+        /// </summary>
+        public static void MeasurePeaks(RealRun first, RealRun second)
         {
             if (!RealMemoryMeasurable) return;
-            using var options = RigSessionOptions();
-            options.EnableCpuMemArena = false;
-            using var session = new InferenceSession(_model, options);
-            var feeds = Feeds(session, _inputShapes);
+            using var firstOptions = RigSessionOptions();
+            using var secondOptions = RigSessionOptions();
+            firstOptions.EnableCpuMemArena = false;
+            secondOptions.EnableCpuMemArena = false;
+            using var firstSession = new InferenceSession(first._model, firstOptions);
+            using var secondSession = new InferenceSession(second._model, secondOptions);
+            var firstFeeds = Feeds(firstSession, first._inputShapes);
+            var secondFeeds = Feeds(secondSession, second._inputShapes);
             using var runOptions = new RunOptions();
 
-            // Tensors under the mmap threshold come from the heap, and a heap full of resident free
-            // holes serves them without a page fault, so trim the holes away first: reuse then faults
-            // them back in and shows in RSS. Anything lowering RSS during a run masks part of the
-            // peak, and nothing else in the process allocates during one, so wait for RSS to settle
-            // and keep the largest reading.
-            var peak = 0L;
+            long firstPeak = 0, secondPeak = 0;
             for (var run = 0; run <= MeasuredRuns; run++)
             {
-                GC.Collect();
-                GC.WaitForPendingFinalizers();
-                GC.Collect();
-                malloc_trim(0);
-                WaitForStableRss();
-                File.WriteAllText("/proc/self/clear_refs", "5");
-                var before = ProcStatusBytes("VmHWM:");
-                var outputs = session.Run(runOptions, feeds, session.OutputNames);
-                var after = ProcStatusBytes("VmHWM:");
-                foreach (var o in outputs) o.Dispose();
-                if (run > 0) peak = Math.Max(peak, after - before);
+                var a = ReadPeak(firstSession, firstFeeds, runOptions);
+                var b = ReadPeak(secondSession, secondFeeds, runOptions);
+                if (run == 0) continue;
+                firstPeak = Math.Max(firstPeak, a);
+                secondPeak = Math.Max(secondPeak, b);
             }
-            GC.KeepAlive(feeds);
-            PeakBytes = peak;
+            GC.KeepAlive(firstFeeds);
+            GC.KeepAlive(secondFeeds);
+            first.PeakBytes = firstPeak;
+            second.PeakBytes = secondPeak;
+        }
+
+        // Tensors under the mmap threshold come from the heap, and a heap full of resident free
+        // holes serves them without a page fault, so trim the holes away first: reuse then faults
+        // them back in and shows in RSS. Anything lowering RSS during a run masks part of the
+        // peak, and nothing else in the process allocates during one, so wait for RSS to settle
+        // and keep the largest reading.
+        private static long ReadPeak(InferenceSession session, Dictionary<string, OrtValue> feeds, RunOptions runOptions)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            malloc_trim(0);
+            WaitForStableRss();
+            File.WriteAllText("/proc/self/clear_refs", "5");
+            var before = ProcStatusBytes("VmHWM:");
+            var outputs = session.Run(runOptions, feeds, session.OutputNames);
+            var after = ProcStatusBytes("VmHWM:");
+            foreach (var o in outputs) o.Dispose();
+            return after - before;
         }
 
         public void Profile()

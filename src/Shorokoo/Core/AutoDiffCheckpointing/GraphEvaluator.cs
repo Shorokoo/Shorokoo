@@ -33,23 +33,33 @@ internal enum EvaluationOrder
 /// Evaluates a <see cref="InternalComputationGraph"/>'s performance by walking through nodes in
 /// execution order, tracking cumulative compute time and peak memory usage.
 ///
-/// Memory tracking:
+/// Memory tracking follows ORT's allocation plan (see <c>AllocationPlan</c>):
 /// - A tensor is not loaded into memory until it first appears as an input to a node.
-/// - Once a tensor is used and no subsequent node requires it, its memory is freed; an output
-///   nothing consumes (and that is not a graph output) is freed at the node that produced it.
+/// - Once a tensor is used and no subsequent node requires it, its buffer is dead — but it is
+///   returned only if no later output of the identical shape takes it over; until then it
+///   stays occupied. An output nothing consumes (and that is not a graph output) dies at the
+///   node that produced it.
 /// - In-place buffer reuse is modelled as a shared buffer: the output aliases the input's
-///   buffer, which is charged once and freed when every key aliasing it is past its last use.
-///   An op may only write in place when no other live key shares that buffer.
+///   buffer, which is charged once. An op may only write in place when no other live key
+///   shares that buffer, and never into a fed input.
+/// - Shape/Size read metadata only; ORT folds them under static shapes, so they neither load
+///   nor hold their input.
 ///
 /// Uses ShapeInference data and per-op performance models to produce estimates.
 /// </summary>
 internal class GraphEvaluator
 {
     private readonly OpPerfRegistry _perfRegistry;
+    private readonly bool _modelOrtBufferReuse;
 
-    public GraphEvaluator(OpPerfRegistry? perfRegistry = null)
+    /// <param name="perfRegistry">The per-op estimators to price nodes with; the default registry when null.</param>
+    /// <param name="modelOrtBufferReuse">Model ORT's static buffer reuse (see <c>AllocationPlan</c>).
+    /// False counts plain liveness — what an allocator that returned every dead buffer at once
+    /// would need — which is a lower bound ORT's plan never reaches on a real training step.</param>
+    public GraphEvaluator(OpPerfRegistry? perfRegistry = null, bool modelOrtBufferReuse = true)
     {
         _perfRegistry = perfRegistry ?? new OpPerfRegistry();
+        _modelOrtBufferReuse = modelOrtBufferReuse;
     }
 
     /// <summary>
@@ -69,50 +79,48 @@ internal class GraphEvaluator
         var tensorLastUse = BuildTensorLastUse(nodes, walk);
         var consumerOpCodes = BuildConsumerOpCodes(nodes);
         var graphOutputs = new HashSet<FastTensorKey>(graph.Outputs);
+        var graphInputs = new HashSet<FastTensorKey>(graph.Inputs);
+        foreach (var node in nodes)
+            if (node.IsModelInput())
+                foreach (var output in node.Outputs)
+                    if (output is not null) graphInputs.Add(output.Value);
 
-        var live = new LiveBuffers();
-        long peakMemoryBytes = 0;
+        var plan = new AllocationPlan(graphOutputs, graphInputs, _modelOrtBufferReuse);
+        var extraAtPos = new long[walk.Length];
+        var computeAtPos = new double[walk.Length];
+        var opCodeAtPos = new string[walk.Length];
         double cumulativeComputeTime = 0;
-
-        var nodeDetails = new List<NodeEvaluationInfo>(nodes.Count);
 
         for (int pos = 0; pos < walk.Length; pos++)
         {
             var nodeIdx = walk[pos];
             var node = nodes[nodeIdx];
+            opCodeAtPos[pos] = node.OpCode;
 
             // Model input tensors are allocated but not counted until first use.
             if (node.IsModelInput())
-            {
-                nodeDetails.Add(new NodeEvaluationInfo
-                {
-                    OpCode = node.OpCode,
-                    NodeIndex = nodeIdx,
-                    ComputeTime = 0,
-                    ExtraMemoryBytes = 0,
-                    CurrentMemoryBytes = live.CurrentBytes,
-                    CumulativeComputeTime = cumulativeComputeTime
-                });
                 continue;
-            }
 
             var nodeInputs = node.Inputs;
             var nodeOutputs = node.Outputs;
+            var readsMetadataOnly = IsMetadataOnly(node);
 
-            // Step 1: Load input tensors into memory if not already loaded
-            foreach (var input in nodeInputs)
-            {
-                if (input is null || live.Contains(input.Value)) continue;
-                var info = shapeInfo.GetTensorInfo(input.Value);
-                if (info is not null)
-                    live.Allocate(input.Value, info.MemoryBytes);
-            }
+            // Step 1: Load input tensors into memory if not already loaded. A metadata-only
+            // reader (Shape/Size) is folded away by ORT under static shapes, so it neither loads
+            // nor holds its input.
+            if (!readsMetadataOnly)
+                foreach (var input in nodeInputs)
+                {
+                    if (input is null || plan.Contains(input.Value)) continue;
+                    var info = shapeInfo.GetTensorInfo(input.Value);
+                    if (info is not null)
+                        plan.Allocate(input.Value, info, pos);
+                }
 
             // Step 2: Compute op performance
             var perfInput = BuildOpPerfInput(node, pos, shapeInfo, tensorLastUse, consumerOpCodes);
             var perfResult = _perfRegistry.Estimate(perfInput);
-
-            var peakDuringOp = live.CurrentBytes + perfResult.ExtraMemoryBytes;
+            extraAtPos[pos] = perfResult.ExtraMemoryBytes;
 
             // Step 3: Add output tensor memory (accounting for in-place reuse)
             var inPlaceReuse = perfResult.InPlaceBufferReuse;
@@ -120,64 +128,71 @@ internal class GraphEvaluator
             for (int outIdx = 0; outIdx < nodeOutputs.Count; outIdx++)
             {
                 var output = nodeOutputs[outIdx];
-                if (output is null || live.Contains(output.Value)) continue;
+                if (output is null || plan.Contains(output.Value)) continue;
 
                 var outputInfo = shapeInfo.GetTensorInfo(output.Value);
                 if (outputInfo is null) continue;
 
                 FastTensorKey? reused = null;
-                if (inPlaceReuse.TryGetValue(outIdx, out var reusedInputIdx)
+                if (!readsMetadataOnly
+                    && inPlaceReuse.TryGetValue(outIdx, out var reusedInputIdx)
                     && reusedInputIdx >= 0 && reusedInputIdx < nodeInputs.Count
                     && nodeInputs[reusedInputIdx] is FastTensorKey candidate
-                    && live.Contains(candidate))
+                    && plan.Contains(candidate))
                 {
                     // A view (the input stays intact) always shares; an in-place write may only
-                    // land in a buffer no other live key still reads.
+                    // land in a buffer no other live key still reads, and never in a fed input.
                     var inputStaysLive = tensorLastUse.TryGetValue(candidate, out var last) && last > pos;
-                    if (inputStaysLive || live.AliasCount(candidate) == 1)
+                    if (inputStaysLive || (plan.AliasCount(candidate) == 1 && !plan.IsGraphInput(candidate)))
                         reused = candidate;
                 }
 
                 if (reused is FastTensorKey source)
-                    live.Alias(source, output.Value, outputInfo.MemoryBytes);
+                    plan.Alias(source, output.Value, outputInfo.MemoryBytes);
                 else
-                    live.Allocate(output.Value, outputInfo.MemoryBytes);
+                    plan.Allocate(output.Value, outputInfo, pos);
             }
-
-            var peakAfterOutputs = live.CurrentBytes + perfResult.ExtraMemoryBytes;
-            peakDuringOp = System.Math.Max(peakDuringOp, peakAfterOutputs);
-            if (peakDuringOp > peakMemoryBytes)
-                peakMemoryBytes = peakDuringOp;
 
             // Step 4: Free input tensors that are no longer needed
-            foreach (var input in nodeInputs)
-            {
-                if (input is null || !live.Contains(input.Value)) continue;
-                if (tensorLastUse.TryGetValue(input.Value, out var lastPos) && lastPos <= pos)
-                    live.Release(input.Value);
-            }
+            if (!readsMetadataOnly)
+                foreach (var input in nodeInputs)
+                {
+                    if (input is null || !plan.Contains(input.Value)) continue;
+                    if (tensorLastUse.TryGetValue(input.Value, out var lastPos) && lastPos <= pos)
+                        plan.Release(input.Value, pos);
+                }
 
             // Step 5: Free outputs nothing will ever read
             foreach (var output in nodeOutputs)
             {
-                if (output is null || !live.Contains(output.Value)) continue;
-                if (!tensorLastUse.ContainsKey(output.Value) && !graphOutputs.Contains(output.Value))
-                    live.Release(output.Value);
+                if (output is null || !plan.Contains(output.Value)) continue;
+                if (!tensorLastUse.ContainsKey(output.Value))
+                    plan.Release(output.Value, pos);
             }
 
-            if (live.CurrentBytes > peakMemoryBytes)
-                peakMemoryBytes = live.CurrentBytes;
-
             cumulativeComputeTime += perfResult.ComputeTime;
+            computeAtPos[pos] = perfResult.ComputeTime;
+        }
 
+        // The plan is only known once the walk is complete: a buffer handed down a reuse
+        // chain is occupied from its first allocation to the death of the chain's last value.
+        var occupancy = plan.Occupancy(walk.Length);
+        long peakMemoryBytes = 0;
+        var nodeDetails = new List<NodeEvaluationInfo>(walk.Length);
+        double cumulative = 0;
+        for (int pos = 0; pos < walk.Length; pos++)
+        {
+            var during = occupancy[pos] + extraAtPos[pos];
+            if (during > peakMemoryBytes) peakMemoryBytes = during;
+            cumulative += computeAtPos[pos];
             nodeDetails.Add(new NodeEvaluationInfo
             {
-                OpCode = node.OpCode,
-                NodeIndex = nodeIdx,
-                ComputeTime = perfResult.ComputeTime,
-                ExtraMemoryBytes = perfResult.ExtraMemoryBytes,
-                CurrentMemoryBytes = live.CurrentBytes,
-                CumulativeComputeTime = cumulativeComputeTime
+                OpCode = opCodeAtPos[pos],
+                NodeIndex = walk[pos],
+                ComputeTime = computeAtPos[pos],
+                ExtraMemoryBytes = extraAtPos[pos],
+                CurrentMemoryBytes = occupancy[pos],
+                CumulativeComputeTime = cumulative,
             });
         }
 
@@ -190,58 +205,131 @@ internal class GraphEvaluator
         };
     }
 
-    /// <summary>
-    /// The live tensors as shared buffers: several keys may alias one buffer (a reshape of a
-    /// tensor that is also read directly, an in-place output), which is charged once and
-    /// released when its last alias is.
-    /// </summary>
-    private sealed class LiveBuffers
-    {
-        private readonly Dictionary<FastTensorKey, int> _bufferOf = new();
-        private readonly Dictionary<int, (long Bytes, int Aliases)> _buffers = new();
-        private int _nextId;
+    /// <summary>Reads only its input's metadata; ORT folds it away under static shapes.</summary>
+    private static bool IsMetadataOnly(FastNode node)
+        => node.OpCode is Shorokoo.Core.Nodes.NodeDefinitions.OpCodes.SHAPE or Shorokoo.Core.Nodes.NodeDefinitions.OpCodes.SIZE;
 
-        public long CurrentBytes { get; private set; }
+    /// <summary>
+    /// ORT's memory plan for a sequential run, which is what decides how much is allocated.
+    ///
+    /// <para>Several keys may alias one buffer (a reshape of a tensor that is also read
+    /// directly, an in-place output); the buffer is charged once. When its last alias dies the
+    /// buffer is not returned: ORT's planner puts it on a free list and hands it to the next
+    /// output of the <b>identical static shape and type</b> (most recently freed first), and it
+    /// stays occupied across the gap — a buffer is released only when the last value of its
+    /// reuse chain dies, or at its own death if nothing ever reuses it. A fed input is never
+    /// recycled and a graph output is never released. Measured against a run's actual
+    /// mmap/munmap trace this reproduces ORT's allocation count and the size histogram at the
+    /// peak to within one buffer; plain free-at-last-use undercounts the optimized graphs by
+    /// a third, because an early free buys nothing until a same-shape tensor is born.</para>
+    /// </summary>
+    private sealed class AllocationPlan
+    {
+        private sealed class Buffer
+        {
+            public long Bytes;
+            public string Shape = "";
+            public int Aliases;
+            public int Start;
+            public int End = int.MaxValue;
+            public bool IsGraphInput;
+            public bool IsGraphOutput;
+        }
+
+        private readonly Dictionary<FastTensorKey, int> _bufferOf = new();
+        private readonly List<Buffer> _buffers = new();
+        private readonly List<int> _free = new();
+        private readonly HashSet<FastTensorKey> _graphOutputs;
+        private readonly HashSet<FastTensorKey> _graphInputs;
+        private readonly bool _reuse;
+
+        public AllocationPlan(HashSet<FastTensorKey> graphOutputs, HashSet<FastTensorKey> graphInputs, bool reuse)
+        {
+            _graphOutputs = graphOutputs;
+            _graphInputs = graphInputs;
+            _reuse = reuse;
+        }
 
         public bool Contains(FastTensorKey key) => _bufferOf.ContainsKey(key);
 
         public int AliasCount(FastTensorKey key) => _buffers[_bufferOf[key]].Aliases;
 
-        public void Allocate(FastTensorKey key, long bytes)
+        public bool IsGraphInput(FastTensorKey key) => _buffers[_bufferOf[key]].IsGraphInput;
+
+        private static string ShapeKey(TensorShapeInfo info)
+            => info.DType + "[" + string.Join(",", info.Shape.Dims) + "]";
+
+        public void Allocate(FastTensorKey key, TensorShapeInfo info, int pos)
         {
-            var id = _nextId++;
-            _buffers[id] = (bytes, 1);
-            _bufferOf[key] = id;
-            CurrentBytes += bytes;
+            var isInput = _graphInputs.Contains(key);
+            var shape = ShapeKey(info);
+            if (!isInput)
+            {
+                for (int i = _free.Count - 1; i >= 0; i--)
+                {
+                    var id = _free[i];
+                    var candidate = _buffers[id];
+                    if (candidate.Bytes != info.MemoryBytes || candidate.Shape != shape) continue;
+                    _free.RemoveAt(i);
+                    candidate.Aliases = 1;
+                    candidate.End = int.MaxValue;
+                    candidate.IsGraphOutput = _graphOutputs.Contains(key);
+                    _bufferOf[key] = id;
+                    return;
+                }
+            }
+
+            _buffers.Add(new Buffer
+            {
+                Bytes = info.MemoryBytes,
+                Shape = shape,
+                Aliases = 1,
+                Start = pos,
+                IsGraphInput = isInput,
+                IsGraphOutput = _graphOutputs.Contains(key),
+            });
+            _bufferOf[key] = _buffers.Count - 1;
         }
 
         public void Alias(FastTensorKey source, FastTensorKey alias, long aliasBytes)
         {
             var id = _bufferOf[source];
-            var (bytes, aliases) = _buffers[id];
-            if (aliasBytes > bytes)
-            {
-                CurrentBytes += aliasBytes - bytes;
-                bytes = aliasBytes;
-            }
-            _buffers[id] = (bytes, aliases + 1);
+            var buffer = _buffers[id];
+            if (aliasBytes > buffer.Bytes) buffer.Bytes = aliasBytes;
+            buffer.Aliases++;
+            if (_graphOutputs.Contains(alias)) buffer.IsGraphOutput = true;
             _bufferOf[alias] = id;
         }
 
-        public void Release(FastTensorKey key)
+        public void Release(FastTensorKey key, int pos)
         {
             var id = _bufferOf[key];
             _bufferOf.Remove(key);
-            var (bytes, aliases) = _buffers[id];
-            if (aliases == 1)
+            var buffer = _buffers[id];
+            buffer.Aliases--;
+            if (buffer.Aliases > 0 || buffer.IsGraphOutput) return;
+            buffer.End = pos;
+            if (_reuse && !buffer.IsGraphInput) _free.Add(id);
+        }
+
+        /// <summary>Occupied bytes after each walk position.</summary>
+        public long[] Occupancy(int positions)
+        {
+            var delta = new long[positions + 1];
+            foreach (var buffer in _buffers)
             {
-                _buffers.Remove(id);
-                CurrentBytes -= bytes;
+                var end = buffer.End == int.MaxValue ? positions - 1 : buffer.End;
+                delta[buffer.Start] += buffer.Bytes;
+                delta[end + 1] -= buffer.Bytes;
             }
-            else
+            var occupancy = new long[positions];
+            long current = 0;
+            for (int pos = 0; pos < positions; pos++)
             {
-                _buffers[id] = (bytes, aliases - 1);
+                current += delta[pos];
+                occupancy[pos] = current;
             }
+            return occupancy;
         }
     }
 
@@ -253,6 +341,7 @@ internal class GraphEvaluator
         var lastUse = new Dictionary<FastTensorKey, int>();
         for (int pos = 0; pos < walk.Length; pos++)
         {
+            if (IsMetadataOnly(nodes[walk[pos]])) continue;
             foreach (var input in nodes[walk[pos]].Inputs)
             {
                 if (input is not null)

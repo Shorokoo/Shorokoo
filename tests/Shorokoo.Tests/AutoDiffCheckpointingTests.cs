@@ -7,6 +7,7 @@ using Shorokoo.Modules.Optimizers;
 using System.Collections.Immutable;
 using Shorokoo.Runtime;
 using Shorokoo.Core.AutoDiffCheckpointing;
+using Shorokoo.Tests.Benchmarks;
 using Shorokoo.Core.Graph;
 using Shorokoo.Core.AutoDiffCheckpointing.OpsPerf;
 using Shorokoo.Core.Inference;
@@ -514,7 +515,8 @@ public class AutoDiffCheckpointingCoverageTests
     [Fact]
     public void TestRematerializerClonesEachChainOnceWithinBudgetAndNeverRaisesThePeakCoverage()
     {
-        var (rig, _, _) = MlpStackRig(Modules.PlainNarrowMlpStack.ComputationGraph, [1024L, 32L]);
+        var rig = TrainingRig.FromScratch(SdpaMeanPoolModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, Pattern([2L, 4L, 256L, 32L], 1f))], 0.01f);
         var graph = rig.PreOptimizationGraph.ToInternal();
         var shapeInfo = new ShapeInferenceInterpreter(CpuContext).Infer(graph,
             rig.OptimizationInputShapes.Select(s => Synthesize(s.Shape, s.DType)).ToArray());
@@ -535,5 +537,61 @@ public class AutoDiffCheckpointingCoverageTests
             foreach (var output in node.Outputs)
                 if (output is not null)
                     Assert.NotNull(afterInfo.GetTensorInfo(output.Value));
+    }
+
+    [Fact]
+    public void TestShapeReadersDoNotHoldTheirInputCoverage()
+    {
+        static (InternalComputationGraph, ShapeInferenceResult) Build(bool withShapeReader)
+        {
+            var x = InputTensor<float32>("x", rank: 2);
+            var a = OnnxOp.Exp(x);
+            var c = OnnxOp.Concat([a, a], axis: 0);
+            var d = OnnxOp.Concat([c, c], axis: 0);
+            Variable outv = OnnxOp.ReduceSum(d);
+            if (withShapeReader)
+                outv = OnnxOp.Add(outv, OnnxOp.Cast(OnnxOp.ReduceProd(OnnxOp.Shape(a)), saturate: null, to: DType.Float32));
+            var g = new InternalComputationGraph([x], [outv]);
+            return (g, Infer(g, [512, 512]));
+        }
+        var (plain, plainInfo) = Build(false);
+        var (reading, readingInfo) = Build(true);
+        var evaluator = new GraphEvaluator();
+        foreach (var order in new[] { EvaluationOrder.OrtOrder, EvaluationOrder.ProtoOrder })
+        {
+            var without = evaluator.Evaluate(plain, plainInfo, order).PeakMemoryBytes;
+            var with = evaluator.Evaluate(reading, readingInfo, order).PeakMemoryBytes;
+            Assert.Equal(6 * Mb, without);
+            Assert.InRange(with, without, without + 64);
+        }
+    }
+
+    [Fact]
+    public void TestDeadBufferStaysOccupiedUntilASameShapeSuccessorTakesItCoverage()
+    {
+        var x = InputTensor<float32>("x", rank: 2);
+        var a = OnnxOp.Exp(x);
+        var s1 = OnnxOp.ReduceSum(a);
+        var c = OnnxOp.Concat([x, x], axis: 0);
+        var s2 = OnnxOp.ReduceSum(c);
+        var b = OnnxOp.Neg(x);
+        var graph = new InternalComputationGraph([x], [OnnxOp.Add(OnnxOp.Add(b, s1), s2)]);
+        var shapeInfo = Infer(graph, [512, 512]);
+
+        Assert.Equal(4 * Mb + 8, new GraphEvaluator().Evaluate(graph, shapeInfo, EvaluationOrder.ProtoOrder).PeakMemoryBytes);
+        Assert.Equal(3 * Mb + 8, new GraphEvaluator(modelOrtBufferReuse: false).Evaluate(graph, shapeInfo, EvaluationOrder.ProtoOrder).PeakMemoryBytes);
+        Assert.True(new GraphEvaluator().Evaluate(graph, shapeInfo).PeakMemoryBytes >= new GraphEvaluator(modelOrtBufferReuse: false).Evaluate(graph, shapeInfo).PeakMemoryBytes);
+    }
+
+    [Fact]
+    public void TestMemoryPassBenchmarkMeasuresTheRigsOwnModelCoverage()
+    {
+        var rig = TrainingRig.FromScratch(MemoryPassMlp.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, Pattern([64L, 256L], 1f))], 0.01f);
+        var model = ProtoBuf.Serializer.Deserialize<Shorokoo.Core.Factory.IR.ModelProto>(
+            new MemoryStream(Benchmarks.MemoryPassBenchmarkTests.RigModelBytes(rig.TrainingStepPureGraph, rig.OptimizationInputShapes)));
+        Assert.Equal(rig.OptimizationInputShapes.Length, model.Graph.Inputs.Count);
+        for (var i = 0; i < model.Graph.Inputs.Count; i++)
+            Assert.Equal(rig.OptimizationInputShapes[i].Shape.Dims.Select(d => (long)d), model.Graph.Inputs[i].Type.TensorType.Shape.Dims.Select(d => d.DimValue));
     }
 }

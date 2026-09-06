@@ -2,6 +2,8 @@ using Microsoft.ML.OnnxRuntime;
 using Newtonsoft.Json;
 using Shorokoo.Core.Factory;
 using Shorokoo.Graph;
+using Shorokoo.OnnxRuntime;
+using Shorokoo.Core.Inference.Abstractions;
 using Shorokoo.Core.Factory.IR;
 using Shorokoo.Modules.Initializers;
 using Shorokoo.Modules.Layers;
@@ -194,6 +196,21 @@ public class MemoryPassBenchmarkTests
 
     // ----- measurement --------------------------------------------------------
 
+
+    /// <summary>The ONNX model exactly as the rig compiles it: ONNX-prepped, with the concrete
+    /// input dims the pass was judged on stamped on every input, so ORT folds the shape
+    /// arithmetic the same way and plans the same buffers.</summary>
+    internal static ModelProto RigModel(ComputationGraph graph, (Shape Shape, DType DType)[] inputShapes)
+        => FastOnnxModelBuilder.BuildInternalOnnxModel(graph.ToInternal(), prepForOnnx: true,
+            inputDims: inputShapes.Select(s => (long[]?)s.Shape.Dims.Select(d => (long)d).ToArray()).ToList());
+
+    internal static byte[] RigModelBytes(ComputationGraph graph, (Shape Shape, DType DType)[] inputShapes)
+    {
+        var stream = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(stream, RigModel(graph, inputShapes));
+        return stream.ToArray();
+    }
+
     private static MemoryPassMeasurement MeasureSuite()
     {
         var families = new Dictionary<string, FamilyMeasurement>();
@@ -273,7 +290,7 @@ public class MemoryPassBenchmarkTests
 
         public RealRun(ComputationGraph graph, (Shape Shape, DType DType)[] inputShapes)
         {
-            var proto = FastOnnxModelBuilder.BuildInternalOnnxModel(graph.ToInternal(), prepForOnnx: true);
+            var proto = RigModel(graph, inputShapes);
             var stream = new MemoryStream();
             ProtoBuf.Serializer.Serialize(stream, proto);
             _model = stream.ToArray();
@@ -392,11 +409,15 @@ public class MemoryPassBenchmarkTests
             }
         }
 
+        /// <summary>
+        /// The session exactly as the rig builds its own: the <see cref="ShorokooGraphOptimization.TrainingStep"/>
+        /// profile. Plain ORT_ENABLE_ALL is not it — its CommonSubexpressionElimination merges every
+        /// rematerialization clone back, so the optimized graph measures the same as the unoptimized one.
+        /// </summary>
         private static SessionOptions RigSessionOptions()
         {
             var options = new SessionOptions();
-            options.LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_FATAL;
-            options.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL;
+            OrtSessionFactory.Configure(options, ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal);
             return options;
         }
 

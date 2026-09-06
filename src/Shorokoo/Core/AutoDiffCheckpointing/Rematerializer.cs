@@ -20,7 +20,7 @@ internal class Rematerializer
 
     public Rematerializer(
         ComputeMemoryObjective objective,
-        int maxIterations = 20,
+        int maxIterations = MemoryAwareGraphOptimizer.DefaultRematerializationIterations,
         GraphEvaluator? evaluator = null)
     {
         _evaluator = evaluator ?? new GraphEvaluator();
@@ -34,9 +34,19 @@ internal class Rematerializer
     public double ComputeCombinedMetric(GraphEvaluationResult eval) => _objective.Score(eval);
 
     /// <summary>
-    /// Applies rematerialization to the graph.
+    /// Applies rematerialization to the graph, returning the rewritten graph together with
+    /// shape information that covers it.
+    ///
+    /// <para>Returning the shape info is not a convenience. Every recomputed tensor gets a
+    /// fresh key, absent from the caller's original <paramref name="shapeInfo"/>, and
+    /// <see cref="GraphEvaluator"/> skips an output it has no shape for while the per-op
+    /// estimators cost a null output shape at zero. Evaluating the rewritten graph against
+    /// the ORIGINAL shape info therefore prices every clone this pass just inserted at zero
+    /// bytes and zero time — which makes rematerialization look free and lets the caller
+    /// accept transforms that are strictly worse on both axes.</para>
     /// </summary>
-    public InternalComputationGraph Apply(InternalComputationGraph graph, ShapeInferenceResult shapeInfo)
+    public (InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo) Apply(
+        InternalComputationGraph graph, ShapeInferenceResult shapeInfo)
     {
         var currentGraph = graph;
         var currentShapeInfo = shapeInfo;
@@ -69,7 +79,7 @@ internal class Rematerializer
             currentEval = _evaluator.Evaluate(currentGraph, augmentedShapeInfo);
         }
 
-        return currentGraph;
+        return (currentGraph, currentShapeInfo);
     }
 
     private static ShapeInferenceResult AugmentShapeInfo(

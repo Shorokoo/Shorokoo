@@ -240,6 +240,24 @@ public partial class AttnChunkedSingleQueryRow
 }
 
 /// <summary>
+/// A mask whose query axis is neither Lq nor 1 must be rejected under chunking, as the dense
+/// path rejects it. [2, Lk] against Lq = 8 with queryChunks: 2 is the trap: bounds cut from
+/// the mask's own height give every chunk exactly one row, which broadcasts, so nothing fails
+/// unless the rejection is explicit. A per-head [H, Lk] bias with H == queryChunks lands here.
+/// </summary>
+[Module]
+public partial class AttnChunkedBadMaskHeight
+{
+    public static Scalar<bit> Inline(Tensor<float32> qkv)   // [N, H, L, d], L = 8
+    {
+        var bias = VectorRange(0L, qkv.DimTensor(-2), 1L).Cast<float32>() * -0.25f;
+        var mask = bias.Unsqueeze(0L).Concat(0L, (bias * 4f).Unsqueeze(0L));   // [2, Lk]
+        var y = Attention.ScaledDotProductAttention(qkv, qkv, qkv, additiveMask: mask, queryChunks: 2);
+        return y.Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() >= Scalar(0f);
+    }
+}
+
+/// <summary>
 /// A mask reaching attention as a [Module] parameter has an unknown static rank — which is
 /// what a C# branch on Tensor.Rank silently misses — so a rank-1 [Lk] mask must still work
 /// under chunking, matching the dense path. Before the in-graph right-alignment this built a
@@ -311,21 +329,6 @@ public partial class ChunkedSdpaMeanPoolModel
 
 internal static class AttentionTestGraphs
 {
-    internal static Tensor<float32> MeanPooledAttention2(Tensor<float32> input)
-    {
-        var d = input.DimTensor(-1);
-        var q = input.MatMul(Shorokoo.Modules.Initializers.XavierUniform.Init([d, d]));
-        var k = input.MatMul(Shorokoo.Modules.Initializers.XavierUniform.Init([d, d]));
-        var v = input.MatMul(Shorokoo.Modules.Initializers.XavierUniform.Init([d, d]));
-        var y1 = Attention.ScaledDotProductAttention(q, k, v, causal: true);
-        var q2 = y1.MatMul(Shorokoo.Modules.Initializers.XavierUniform.Init([d, d]));
-        var k2 = y1.MatMul(Shorokoo.Modules.Initializers.XavierUniform.Init([d, d]));
-        var v2 = y1.MatMul(Shorokoo.Modules.Initializers.XavierUniform.Init([d, d]));
-        var y2 = Attention.ScaledDotProductAttention(q2, k2, v2, causal: true);
-        Vector<int64> seqAxis = [Scalar(2L)];
-        return y2.Reduce(ReduceKind.Mean, seqAxis, keepDims: false);
-    }
-
     internal static Tensor<float32> MeanPooledAttention(Tensor<float32> input, int queryChunks)
     {
         var d = input.DimTensor(-1);

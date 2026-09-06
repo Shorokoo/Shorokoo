@@ -30,7 +30,12 @@ internal readonly struct ComputeMemoryObjective
         // A degenerate baseline — an empty graph, or one whose ops the perf model costs at
         // zero — would make the ratio undefined. Fall back to 1 so the term degrades to the
         // raw value rather than producing NaN and poisoning every comparison.
-        _baselineComputeTime = baseline.TotalComputeTime > 0 ? baseline.TotalComputeTime : 1.0;
+        // Finiteness matters as much as positivity: an infinite baseline would make a
+        // same-valued candidate score NaN, and NaN both passes the "strictly better" test
+        // (every comparison against it is false) and sorts ahead of every real score, so a
+        // NaN-scoring graph would win selection outright.
+        _baselineComputeTime = double.IsFinite(baseline.TotalComputeTime) && baseline.TotalComputeTime > 0
+            ? baseline.TotalComputeTime : 1.0;
         _baselinePeakBytes = baseline.PeakMemoryBytes > 0 ? baseline.PeakMemoryBytes : 1.0;
     }
 

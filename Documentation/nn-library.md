@@ -909,76 +909,87 @@ away by `QKᵀ` — and neither does the number of parameters. Doubling the sequ
 quadruples the block; doubling the batch or the head count only doubles it. The additive
 mask is a separate, much smaller `[Lq, Lk] · 4 bytes` (4 MiB at `L = 1024`), shared by
 every batch element and head — but built **per call site**, not deduplicated across them,
-and once per chunk under `queryChunks`.
+and split into `c` pieces of `[Lq/c, Lk]` under `queryChunks`.
 
-**How many blocks a training step holds.** Fewer than the graph builds, because a
-memory-aware pass rewrites the lowered training step before it runs — reordering nodes and
-recomputing tensors rather than keeping them alive (see
-[limitations.md](limitations.md#gradient-activation-checkpointing)). How many survive is
-therefore not a fixed property of attention; it is what that pass settles on. Measured on a
-training step whose attention has all three projections trainable, at `N = 2`, `H = 4`,
-`L = 256`, `d = 32` — a 2 MiB score block:
+**What a training step actually holds.** Less than the graph builds, because a memory-aware
+pass rewrites the lowered step before it runs — reordering nodes and recomputing tensors
+rather than keeping them alive (see
+[limitations.md](limitations.md#gradient-activation-checkpointing)). How much survives is
+therefore not a fixed property of attention; it is what that pass settles on.
 
-| attention calls | measured peak | in score blocks |
-|---|---|---|
-| 1 | 5.51 MiB | 2.76 |
-| 2 | 8.78 MiB | 4.39 |
+The score block is not the only term, either. The peak also holds q/k/v and their gradients,
+each `N · H · L · d · 4` bytes — call that a **q block**. It is `d/L` times a score block, so
+it is negligible at long sequences and very much not at short ones. Modelled peak for a step
+whose attention has all three projections trainable, at `N = 2`, `H = 4`, `L = 256` (a 2 MiB
+score block):
 
-So each extra call costs about **1.6 blocks**, on a base of about one. Budget with
+| attention calls | `d` | peak | in score blocks |
+|---|---|---|---|
+| 1 | 32 | 7.76 MiB | 3.88 |
+| 2 | 32 | 13.29 MiB | 6.64 |
+| 1 | 64 | 9.55 MiB | 4.77 |
+| 2 | 64 | 16.64 MiB | 8.32 |
+| 1 | 128 | 13.19 MiB | 6.59 |
+
+A rule that fits every one of those from above, so it over-budgets rather than under-:
 
 ```
-(2A + 1) score blocks       A = number of ScaledDotProductAttention calls
+peak  ≈  A · (3 · score block  +  8 · q block)
+
+  score block = N · H · Lq · Lk · 4 bytes
+  q block     = N · H · L  · d  · 4 bytes
+  A           = number of ScaledDotProductAttention calls
 ```
 
-which is deliberately a ceiling over both measurements — over-budgeting is the safe
-direction when the alternative is an out-of-memory kill. A 6-layer encoder at batch 32,
-6 heads, `L = 1024` is `A = 6`, so ≈ 13 × 768 MiB ≈ **10 GiB in score blocks alone** —
-before parameters, gradients, optimizer state, and every other activation.
+A 6-layer encoder at batch 32, 6 heads, `L = 1024`, `d = 64` is `A = 6`, a 768 MiB score
+block and a 48 MiB q block — so ≈ 6 × (2.25 + 0.375) GiB ≈ **16 GiB in attention activations
+alone**, before parameters, gradients, optimizer state and every other layer. Drop the
+`q block` term and you would budget 13.5 GiB and be wrong by a fifth.
 
-Two caveats on reading a measurement rather than the arithmetic. Below a few hundred MiB
-you will not *see* any of this in a GPU memory reading, because the ONNX Runtime arena
-reserves a fixed few hundred MiB up front and the score blocks fit inside it. And the
-memory-aware pass skips graphs whose peak is under a megabyte entirely, so a scaled-down
-repro of your model may be optimized differently from the real thing — or not at all.
+Two caveats on checking this against a real run. These are **modelled** figures — the
+memory-aware pass's own estimate of peak live activation bytes, not a reading of allocated
+memory — and the API that produces them is internal and unsupported. And below a few hundred
+MiB you will not see any of it in a GPU reading anyway, because the ONNX Runtime arena
+reserves a fixed few hundred MiB up front and the blocks fit inside it. The pass also skips
+graphs whose peak is under a megabyte entirely, so a scaled-down repro of your model may be
+optimized differently from the real thing, or not at all.
 
-**The lever: `queryChunks`.** Passing `queryChunks: c` splits the query axis into `c`
-blocks, runs attention on each against the whole key/value, and concatenates the outputs.
-It is exact, not an approximation — the output matches the dense path to floating-point
-rounding, gradients included, and causal masking included (each chunk gets a `queryOffset`
-causal mask, so it still masks absolute positions).
+**The lever: `queryChunks`.** Passing `queryChunks: c` splits the query axis into `c` blocks,
+runs attention on each against the whole key/value, and concatenates. It is exact — the output
+matches the dense path to floating-point rounding, gradients and causal masking included (each
+chunk gets a `queryOffset` causal mask, so it still masks absolute positions).
 
-What it buys is modest. On the single-call step above, `queryChunks: 4` measures **4.95 MiB
-against the dense 5.51 MiB — about 10%**. It shrinks the score-sized *transients* by `c`,
-but not what the step retains across the backward pass, and the retained term dominates.
-Reach for it when a run is close to fitting, not as a way to make one that is far from
-fitting fit.
+**Measure it before you rely on it.** What it buys is not stable across shapes, because what
+it really does is hand the memory-aware pass a different graph to work with, and that pass may
+or may not find anything in it. On the model above at `c = 4`:
 
-```csharp
-// Dense: ~2.8 score blocks for a single-attention step.
-var y = Attention.ScaledDotProductAttention(q, k, v, causal: true);
+| `d` | dense | chunked | |
+|---|---|---|---|
+| 32 | 7.76 MiB | 4.46 MiB | **43% better** |
+| 64 | 9.55 MiB | 11.05 MiB | **21% worse** |
 
-// Chunked by 4: ~2.5, same output.
-var y = Attention.ScaledDotProductAttention(q, k, v, causal: true, queryChunks: 4);
-```
+So it is worth trying when a run is close to fitting, and worth checking that it helped. It
+shrinks the score-sized transients by `c`, but not what the step retains across the backward
+pass, and the retained term dominates.
 
 An `additiveMask` is handled per chunk. Its query axis (axis -2, once right-aligned to the
-scores' rank) must be `Lq` or `1` — the same rule the dense path enforces. One that already
-broadcasts over queries — rank < 2, or a size-1 axis -2, as in an `[N, 1, 1, Lk]` padding
-mask — goes to every chunk whole; one that is `Lq` rows tall is sliced to each chunk's rows.
+scores' rank) must be `Lq` or `1` — the same rule the dense path enforces, and any other
+height is rejected rather than silently narrowed or broadcast. One that already broadcasts
+over queries — rank < 2, or a size-1 axis -2, as in an `[N, 1, 1, Lk]` padding mask — goes to
+every chunk whole; one that is `Lq` rows tall is sliced to each chunk's rows.
 
 `queryChunks` is a build-time C# `int`, fixed when the graph is built — `Lq` itself stays
 dynamic, and chunk `i` covers rows `[Lq·i/c, Lq·(i+1)/c)`, so an `Lq` that does not divide
-evenly just gives chunks differing by one row (and a `c` larger than `Lq` gives empty
-chunks — still correct, just wasted launches). Keep `c` small: `c` chunks mean `c` MatMul
-and Softmax launches instead of one, and the graph grows accordingly — a one-attention
-training step goes from 506 to 1 312 nodes at `c = 4`.
+evenly just gives chunks differing by one row (and a `c` larger than `Lq` gives empty chunks —
+still correct, just wasted launches). Keep `c` small: `c` chunks mean `c` MatMul and Softmax
+launches instead of one, and the graph grows accordingly — the built (pre-optimization)
+one-attention training step goes from 506 to 1 312 nodes at `c = 4`.
 
-It reaches only the `Attention.ScaledDotProductAttention` helper, not
-`MultiHeadAttention`, `TransformerEncoderLayer` or `TransformerDecoderLayer`: a
-`[Module]`'s parameters are all graph values, fixed at concretization — after the module
-body has run — and a chunk count has to be a C# constant at build time. So the lever is
-available only to hand-assembled attention today; a module variant with a chunk count
-baked in is possible, and is not written.
+It reaches only the `Attention.ScaledDotProductAttention` helper, not `MultiHeadAttention`,
+`TransformerEncoderLayer` or `TransformerDecoderLayer`: a `[Module]`'s parameters are all
+graph values, fixed at concretization — after the module body has run — and a chunk count has
+to be a C# constant at build time. So the lever is available only to hand-assembled attention
+today; a module variant with a chunk count baked in is possible, and is not written.
 
 **The other levers,** in the order they cost you least: shorten the sequence (quadratic),
 shrink the batch (linear), cut heads (linear). There is **no activation checkpointing** —

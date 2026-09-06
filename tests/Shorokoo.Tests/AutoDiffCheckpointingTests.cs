@@ -41,9 +41,9 @@ public class AutoDiffCheckpointingCoverageTests
             ImmutableArray.Create<Variable>(input, weights, bias1, bias2),
             ImmutableArray.Create((Variable)final));
 
-        var inputData = Globals.TensorDataWithSmallVals(DType.Float32, [256, 256]);
-        var weightsData = Globals.TensorDataWithSmallVals(DType.Float32, [256, 256]);
-        var biasData = Globals.TensorDataWithSmallVals(DType.Float32, [256]);
+        var inputData = Globals.TensorDataWithSmallVals(DType.Float32, [512, 512]);
+        var weightsData = Globals.TensorDataWithSmallVals(DType.Float32, [512, 512]);
+        var biasData = Globals.TensorDataWithSmallVals(DType.Float32, [512]);
 
         var shapeInterpreter = new ShapeInferenceInterpreter(CpuContext);
         var shapeInfo = shapeInterpreter.Infer(graph, inputData, weightsData, biasData, biasData);
@@ -60,8 +60,12 @@ public class AutoDiffCheckpointingCoverageTests
 
         var rematerializer = new Rematerializer(
             new ComputeMemoryObjective(1.0, 1.0, eval), maxIterations: 20);
-        var rematGraph = rematerializer.Apply(graph, shapeInfo);
+        var (rematGraph, rematShapeInfo) = rematerializer.Apply(graph, shapeInfo);
         Assert.True(rematGraph.Nodes.Count >= graph.Nodes.Count);
+        foreach (var node in rematGraph.Nodes)
+            foreach (var output in node.Outputs)
+                if (output is not null)
+                    Assert.NotNull(rematShapeInfo.GetTensorInfo(output.Value));
 
         var backprop = new SimpleBackpropOptimizer(computeFactor: 1.0, memoryFactor: 1.0, maxIterations: 20);
         var backpropResult = backprop.Optimize(graph, shapeInfo);

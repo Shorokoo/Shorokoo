@@ -45,7 +45,7 @@ public class GraphOptimizationResult
 /// rematerialization (<see cref="Rematerializer"/>). The optimizer evaluates two
 /// alternating strategies — <c>RematReorder</c> and <c>ReorderRemat</c> — and selects
 /// the one with the best combined metric
-/// (<c>computeFactor × computeTime + memoryFactor × peakMemory</c>).
+/// (see <see cref="ComputeMemoryObjective"/>: both terms as ratios to the baseline graph).
 ///
 /// <para>
 /// Not strictly "gradient checkpointing" in the narrow sense (that's what
@@ -71,26 +71,8 @@ internal class MemoryAwareGraphOptimizer
     /// optimizer. That is the bug the normalization fixes, so do not reintroduce a
     /// byte-scaled constant here.</para>
     /// </summary>
-    public const double DefaultMemoryWeight = 1.0;
+    public const double DefaultMemoryWeight = 4.0;
 
-    /// <summary>
-    /// Multipliers on <see cref="DefaultMemoryWeight"/> that the search is restarted from.
-    ///
-    /// <para>These do NOT change what counts as a good graph — every candidate is finally
-    /// judged by one objective at the configured weights. They exist because the search is
-    /// a strict hill-climb over two alternating transforms, so it is path-dependent: an
-    /// early transform that improves the objective a little can block a later one that
-    /// would have improved it a lot, and how hard the memory term pushes decides which path
-    /// is taken. Measured across MLP, conv, one- and two-layer transformer encoders, LSTM
-    /// and dense/chunked attention graphs, no single pressure won everywhere — a light
-    /// setting was best on the MLP and left half the available reduction on the table for
-    /// the two-layer encoder, while a heavy one inverted that. Running the search from
-    /// several pressures and keeping the best result beats every fixed choice on the same
-    /// suite, and it degrades gracefully: a restart that finds nothing simply loses.</para>
-    ///
-    /// <para>Kept short deliberately — each entry re-runs both strategies, so this is a
-    /// direct multiplier on optimization time.</para>
-    /// </summary>
     /// <summary>
     /// How many times <see cref="Rematerializer"/> is re-run within one strategy step.
     ///
@@ -184,13 +166,21 @@ internal class MemoryAwareGraphOptimizer
 
         var scheduler = new MemoryAwareScheduler();
         var rematerializer = new Rematerializer(selection, _maxRematerializationIterations, _evaluator);
-        InternalComputationGraph Reorder(InternalComputationGraph g) => scheduler.Reorder(g, shapeInfo);
-        InternalComputationGraph Remat(InternalComputationGraph g) => rematerializer.Apply(g, shapeInfo);
 
-        strategies.Add(RunAlternatingStrategy(
-            "RematReorder", selection, graph, baselineEval, shapeInfo, Remat, Reorder));
-        strategies.Add(RunAlternatingStrategy(
-            "ReorderRemat", selection, graph, baselineEval, shapeInfo, Reorder, Remat));
+        // Each pass carries shape info forward alongside the graph it produced. Rematerialization
+        // mints new tensor keys, and evaluating against shape info that predates them prices the
+        // new tensors at nothing — so the pair must travel together.
+        Candidate Remat(Candidate c)
+        {
+            var (g, si) = rematerializer.Apply(c.Graph, c.ShapeInfo);
+            return new Candidate(g, si);
+        }
+
+        Candidate Reorder(Candidate c) => new(scheduler.Reorder(c.Graph, c.ShapeInfo), c.ShapeInfo);
+
+        var start = new Candidate(graph, shapeInfo);
+        strategies.Add(RunAlternatingStrategy("RematReorder", selection, start, baselineEval, Remat, Reorder));
+        strategies.Add(RunAlternatingStrategy("ReorderRemat", selection, start, baselineEval, Reorder, Remat));
 
         var best = strategies.OrderBy(s => selection.Score(s.Evaluation)).First();
 
@@ -203,51 +193,53 @@ internal class MemoryAwareGraphOptimizer
         };
     }
 
+    /// <summary>A graph and the shape information that describes it. The two are only
+    /// meaningful together: a pass that mints new tensor keys invalidates older info.</summary>
+    private readonly record struct Candidate(InternalComputationGraph Graph, ShapeInferenceResult ShapeInfo);
+
     private (string Name, GraphEvaluationResult Evaluation, InternalComputationGraph Graph) RunAlternatingStrategy(
         string name,
         ComputeMemoryObjective objective,
-        InternalComputationGraph initialGraph,
+        Candidate initial,
         GraphEvaluationResult initialEval,
-        ShapeInferenceResult shapeInfo,
-        Func<InternalComputationGraph, InternalComputationGraph> firstPass,
-        Func<InternalComputationGraph, InternalComputationGraph> secondPass)
+        Func<Candidate, Candidate> firstPass,
+        Func<Candidate, Candidate> secondPass)
     {
-        var currentGraph = initialGraph;
+        var current = initial;
         var currentEval = initialEval;
         var currentMetric = objective.Score(currentEval);
 
-        TryApply(objective, firstPass, ref currentGraph, ref currentEval, ref currentMetric, shapeInfo);
-        TryApply(objective, secondPass, ref currentGraph, ref currentEval, ref currentMetric, shapeInfo);
+        TryApply(objective, firstPass, ref current, ref currentEval, ref currentMetric);
+        TryApply(objective, secondPass, ref current, ref currentEval, ref currentMetric);
 
         while (true)
         {
-            if (!TryApply(objective, firstPass, ref currentGraph, ref currentEval, ref currentMetric, shapeInfo))
+            if (!TryApply(objective, firstPass, ref current, ref currentEval, ref currentMetric))
                 break;
-            if (!TryApply(objective, secondPass, ref currentGraph, ref currentEval, ref currentMetric, shapeInfo))
+            if (!TryApply(objective, secondPass, ref current, ref currentEval, ref currentMetric))
                 break;
         }
 
-        return (name, currentEval, currentGraph);
+        return (name, currentEval, current.Graph);
     }
 
     private bool TryApply(
         ComputeMemoryObjective objective,
-        Func<InternalComputationGraph, InternalComputationGraph> pass,
-        ref InternalComputationGraph currentGraph,
+        Func<Candidate, Candidate> pass,
+        ref Candidate current,
         ref GraphEvaluationResult currentEval,
-        ref double currentMetric,
-        ShapeInferenceResult shapeInfo)
+        ref double currentMetric)
     {
-        var candidate = pass(currentGraph);
-        if (ReferenceEquals(candidate, currentGraph))
+        var candidate = pass(current);
+        if (ReferenceEquals(candidate.Graph, current.Graph))
             return false;
 
-        var candidateEval = _evaluator.Evaluate(candidate, shapeInfo);
+        var candidateEval = _evaluator.Evaluate(candidate.Graph, candidate.ShapeInfo);
         var candidateMetric = objective.Score(candidateEval);
         if (candidateMetric >= currentMetric)
             return false;
 
-        currentGraph = candidate;
+        current = candidate;
         currentEval = candidateEval;
         currentMetric = candidateMetric;
         return true;

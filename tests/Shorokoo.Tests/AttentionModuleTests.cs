@@ -96,6 +96,8 @@ public class AttentionModuleTests
             hyperparamInputs: [], runtimeInputs: [Sdpa8x4()]));
         Assert.True(AutoTest.AdvancedTestGraph<AttnChunkedUnknownRankMask>(
             hyperparamInputs: [], runtimeInputs: [Sdpa8x4(), KeyBias8()]));
+        Assert.ThrowsAny<Exception>(() => AutoTest.AdvancedTestGraph<AttnChunkedBadMaskHeight>(
+            hyperparamInputs: [], runtimeInputs: [Sdpa8x4()]));
     }
 
     private static TensorData KeyBias8()

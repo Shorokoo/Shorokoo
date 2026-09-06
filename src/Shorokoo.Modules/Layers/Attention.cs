@@ -49,10 +49,12 @@ public static class Attention
     /// evaluates <c>c</c> independent <c>[N, H, Lq/c, Lk]</c> blocks and concatenates their
     /// outputs, so every score-sized <b>transient</b> shrinks by <c>c</c>. What it does
     /// <b>not</b> shrink is what the step <b>retains</b> across the backward pass, and that
-    /// term dominates — measured, chunking by 4 takes a single-attention training step from
-    /// 5.51 MiB to 4.95 MiB, about 10%. Reach for it when a run is close to fitting, not to
-    /// make one that is far from fitting fit; the arithmetic is in
-    /// Documentation/nn-library.md, "Sizing an attention run".
+    /// term dominates. What it actually buys is shape-dependent and not always positive —
+    /// on one single-attention step it measured 43% better at head dim 32 and 21% WORSE at
+    /// head dim 64 — because what it really does is hand the memory-aware pass a different
+    /// graph, which may or may not find anything in it. Try it when a run is close to
+    /// fitting and check that it helped; the arithmetic is in Documentation/nn-library.md,
+    /// "Sizing an attention run".
     /// The count is a build-time C# int, not
     /// a graph value, so it is fixed when the graph is built; <c>Lq</c> stays dynamic and is
     /// split as evenly as it divides (chunk <c>i</c> covers rows
@@ -66,8 +68,8 @@ public static class Attention
     /// dense path's score <c>Add</c> enforces. One that already broadcasts over queries —
     /// rank &lt; 2, or a size-1 axis -2, as in a <c>[N, 1, 1, Lk]</c> padding mask — is handed
     /// to every chunk whole; one that is <c>Lq</c> rows tall is sliced to each chunk's rows.
-    /// A mask of any other height is rejected by the score <c>Add</c> here as it is on the
-    /// dense path, though not always for the same arithmetic reason.</para>
+    /// A mask of any other height is rejected by the score <c>Add</c>, as it is on the dense
+    /// path.</para>
     /// </summary>
     public static Tensor<float32> ScaledDotProductAttention(
         Tensor<float32> query,
@@ -100,7 +102,7 @@ public static class Attention
             var start = lq * (long)i / (long)queryChunks;
             var end = lq * (long)(i + 1) / (long)queryChunks;
             var q = scaledQuery.Slice(start.Unsqueeze(), end.Unsqueeze(), axes: Vector(-2L));
-            var m = SliceMaskQueryAxis(additiveMask, i, queryChunks);
+            var m = SliceMaskQueryAxis(additiveMask, lq, i, queryChunks);
             blocks[i] = AttendQueryBlock(q, keyT, value, causal, m, start);
         }
         return blocks[0].Concat(-2L, blocks[1..]);
@@ -143,16 +145,21 @@ public static class Attention
     /// fail to fire for exactly the masks users write by hand, and reading axis -2 of a
     /// rank-1 mask is not a clean error — it builds a graph that takes ONNX Runtime down.</para>
     ///
-    /// <para>A size-1 query axis broadcasts over every row, so it goes to each chunk whole.
-    /// Otherwise the chunk's bounds are cut from the mask's <b>own</b> query length rather
-    /// than from <c>Lq</c>. When the two agree — the only supported case — that is exactly
-    /// the chunk's rows. When they disagree the slice carries a row count that no longer
-    /// matches the chunk's scores, so the score <c>Add</c> rejects it, rather than silently
-    /// attending through the wrong rows of a mask that was sized for a different sequence
-    /// length. (A residual case still slips through: a disagreement whose slice happens to
-    /// land on one row broadcasts instead of failing.)</para>
+    /// <para>The accepted heights are exactly <c>1</c> and <c>Lq</c>, the same set the dense
+    /// path's score <c>Add</c> accepts. A size-1 axis broadcasts over every row and goes to
+    /// each chunk whole; an <c>Lq</c>-tall mask is cut to the chunk's rows. Any other height
+    /// is turned into an <b>empty</b> slice, which cannot broadcast against a non-empty
+    /// chunk, so the <c>Add</c> rejects it.</para>
+    ///
+    /// <para>That rejection is explicit rather than incidental, because incidental does not
+    /// hold. Deriving the bounds from the mask's own height makes a too-tall mask produce a
+    /// mismatched row count — but only when that count is not 1, and a mask with exactly
+    /// <c>queryChunks</c> rows makes <b>every</b> chunk's slice one row, so every chunk
+    /// broadcasts and nothing fails anywhere. A per-head <c>[H, Lk]</c> bias with
+    /// <c>H == queryChunks</c> is an ordinary way to land there.</para>
     /// </summary>
-    private static Tensor<float32>? SliceMaskQueryAxis(Tensor<float32>? mask, int chunkIndex, int chunkCount)
+    private static Tensor<float32>? SliceMaskQueryAxis(
+        Tensor<float32>? mask, Scalar<int64> lq, int chunkIndex, int chunkCount)
     {
         if (mask is null)
             return null;
@@ -161,9 +168,14 @@ public static class Attention
 
         var rows = aligned.DimTensor(-2);
         var broadcasts = rows == Scalar(1L);
+        var supported = broadcasts | (rows == lq);
+
+        var start = broadcasts.Where(Scalar(0L), rows * (long)chunkIndex / (long)chunkCount);
+        var end = broadcasts.Where(Scalar(1L), rows * (long)(chunkIndex + 1) / (long)chunkCount);
+
         return aligned.Slice(
-            broadcasts.Where(Scalar(0L), rows * (long)chunkIndex / (long)chunkCount).Unsqueeze(),
-            broadcasts.Where(Scalar(1L), rows * (long)(chunkIndex + 1) / (long)chunkCount).Unsqueeze(),
+            supported.Where(start, Scalar(0L)).Unsqueeze(),
+            supported.Where(end, Scalar(0L)).Unsqueeze(),
             axes: Vector(-2L));
     }
 

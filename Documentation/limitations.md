@@ -67,20 +67,30 @@ training-step graph, which reorders nodes and recomputes tensors rather than
 keeping them alive where that improves a combined compute-and-memory objective.
 It recomputes the way gradient checkpointing does — a chain of producers back to
 values that are live anyway, cloned once and shared by every gradient that reads
-it, with the placement and the depth of the chain chosen by measuring the
-candidate graph — but conservatively, because it is automatic and has no
-opt-out: it takes trades its objective accepts, and the attribute above is how
-you ask for one it would not. Measured by `MemoryPassBenchmarkTests` over its
-spread of training graphs, it cuts modelled peak activation memory by 29-72%
-(72% on a two-layer transformer encoder, 58% on a one-layer one, 37% on a conv
-stack, 30% on an MLP, 29-40% on attention) for 2-54% more modelled compute —
-the encoders sit at the expensive end, 44-54% more modelled compute for their
-memory — and it leaves a graph whose backward pass runs through a recurrent op
-untouched. Those are modelled figures. The pass's memory model is an estimate
-that has been seen to diverge from allocated bytes in both directions, so treat
-every memory figure in this documentation as the pass's own accounting; the
-same benchmark records the real peak of a training step next to the modelled
-one, and that column is the one to believe.
+it, with the placement and the depth of the chain chosen by evaluating the
+candidate graph — but conservatively, because it is automatic and has no opt-out:
+it takes trades its objective accepts, and the attribute above is how you ask for
+one it would not. Its model of memory is ONNX Runtime's own allocation plan for the
+step (the order ORT actually runs, and ORT's habit of handing a dead buffer to the
+next tensor of the same shape rather than returning it), so what it optimizes is
+what gets allocated; `MemoryPassBenchmarkTests` records the resident peak of one
+training step next to the modelled one, and the two agree to within about 10% on
+every graph in it except a conv stack, whose im2col workspace the model does not
+see. Measured that way, unoptimized to optimized: an MLP 5.6 to 4.3 MB, a conv stack
+28.5 to 24.6, a one-layer transformer encoder 19.6 to 19.0, a two-layer one 37.3 to
+35.8, dense attention unchanged, chunked attention 5.9 to 5.0 — for at most a few
+percent more kernel time. The pass leaves a graph whose backward pass runs through
+a recurrent op untouched: its evaluator walks a Loop body once where ORT runs it per
+iteration, and on the LSTM step acting on that model made the real peak worse.
+
+Two things the rig does around that pass matter more than the pass itself for a
+step's memory. The training-step session is compiled for the shapes it is fed, so
+ORT resolves every intermediate shape at session build and folds the shape
+arithmetic — most of a step's kernels, and outputs that pinned activations alive —
+out of the executed graph (the encoder steps above dropped from 28.7 and 53.1 MB to
+19.6 and 37.3 before the pass touched them). And the session runs ORT's full
+optimization level minus the common-subexpression pass, which would otherwise merge
+every recomputation the pass emits back into the tensor it exists to free.
 
 That pass is also where three types a reflection dump over the `Shorokoo`
 assembly turns up come from — `GraphEvaluationResult`, `NodeEvaluationInfo` and

@@ -913,30 +913,32 @@ mask is a separate, much smaller `[Lq, Lk] · 4 bytes` (4 MiB at `L = 1024`), sh
 every batch element and head — but built **per call site**, not deduplicated across them,
 and split into `c` pieces of `[Lq/c, Lk]` under `queryChunks`.
 
-**What a training step actually holds.** Less than the graph builds, because a memory-aware
-pass rewrites the lowered step before it runs — reordering nodes and recomputing tensors
-rather than keeping them alive (see
-[limitations.md](limitations.md#gradient-activation-checkpointing)). How much survives is
-therefore not a fixed property of attention; it is what that pass settles on.
+**What a training step actually holds.** Every figure below is **measured**: the resident
+high-water mark of one training step on the CPU backend (`VmHWM` with ONNX Runtime's arena
+off, so every activation is a real allocation), for a step whose attention has all three
+projections trainable, with a causal mask, at `N = 2`, `H = 4`, `L = 256` — a 2 MiB score
+block. It is what `MemoryPassBenchmarkTests` records, after the training rig's own memory
+pass has run (see [limitations.md](limitations.md#gradient-activation-checkpointing)).
 
-The score block is not the only term, either. The peak also holds q/k/v and their gradients,
-each `N · H · L · d · 4` bytes — call that a **q block**. It is `d/L` times a score block, so
-it is negligible at long sequences and very much not at short ones. Modelled peak for a step
-whose attention has all three projections trainable, at `N = 2`, `H = 4`, `L = 256` (a 2 MiB
-score block):
+The score block is not the only term. The peak also holds q/k/v and their gradients, each
+`N · H · L · d · 4` bytes — call that a **q block**. It is `d/L` times a score block, so it is
+negligible at long sequences and very much not at short ones:
 
 | attention calls | `d` | peak | in score blocks |
 |---|---|---|---|
-| 1 | 32 | 7.76 MiB | 3.88 |
-| 2 | 32 | 13.29 MiB | 6.64 |
-| 1 | 64 | 9.55 MiB | 4.77 |
-| 2 | 64 | 16.64 MiB | 8.32 |
-| 1 | 128 | 13.19 MiB | 6.59 |
+| 1 | 32 | 6.9 MiB | 3.5 |
+| 1 | 64 | 8.5 MiB | 4.3 |
+| 1 | 128 | 11.6 MiB | 5.8 |
+| 2 | 32 | 12.0 MiB | 6.0 |
+| 2 | 64 | 14.6 MiB | 7.3 |
+
+and it scales the way the formula says: doubling the batch (`N = 4`, a 4 MiB block) gives
+14.5 MiB, doubling the sequence (`L = 512`, an 8 MiB block) gives 26.5 MiB.
 
 A rule that fits every one of those from above, so it over-budgets rather than under-:
 
 ```
-peak  ≈  A · (3 · score block  +  8 · q block)
+peak  ≈  A · (3 · score block  +  6.5 · q block)
 
   score block = N · H · Lq · Lk · 4 bytes
   q block     = N · H · L  · d  · 4 bytes
@@ -944,39 +946,37 @@ peak  ≈  A · (3 · score block  +  8 · q block)
 ```
 
 A 6-layer encoder at batch 32, 6 heads, `L = 1024`, `d = 64` is `A = 6`, a 768 MiB score
-block and a 48 MiB q block — so ≈ 6 × (2.25 + 0.375) GiB ≈ **16 GiB in attention activations
+block and a 48 MiB q block — so ≈ 6 × (2.25 + 0.30) GiB ≈ **15 GiB in attention activations
 alone**, before parameters, gradients, optimizer state and every other layer. Drop the
-`q block` term and you would budget 13.5 GiB and be wrong by a fifth.
+`q block` term and you would budget 13.5 GiB and be wrong by a tenth.
 
-Two caveats on checking this against a real run. These are **modelled** figures — the
-memory-aware pass's own estimate of peak live activation bytes, not a reading of allocated
-memory — and the API that produces them is internal and unsupported. And below a few hundred
-MiB you will not see any of it in a GPU reading anyway, because the ONNX Runtime arena
-reserves a fixed few hundred MiB up front and the blocks fit inside it. The pass also skips
-graphs whose peak is under a megabyte entirely, so a scaled-down repro of your model may be
-optimized differently from the real thing, or not at all.
+Two caveats on checking this against a real run. The measurements are CPU-side; on a GPU
+the same tensors are allocated, but below a few hundred MiB you will not see any of it in a
+GPU reading, because the ONNX Runtime arena reserves a fixed few hundred MiB up front and
+the blocks fit inside it. And the API that produces the figures is internal and unsupported.
 
 **The lever: `queryChunks`.** Passing `queryChunks: c` splits the query axis into `c` blocks,
 runs attention on each against the whole key/value, and concatenates. It is exact — the output
 matches the dense path to floating-point rounding, gradients and causal masking included (each
 chunk gets a `queryOffset` causal mask, so it still masks absolute positions).
 
-**Measure it before you rely on it, and expect to pay compute for it.** What it really does
-is hand the memory-aware pass a different graph — one whose smaller pieces that pass can
-rematerialize where it could not rematerialize the whole — so what you get back depends on
-what it finds. On the model above at `c = 4`:
+**Measure it before you rely on it, and expect to pay compute for it.** It shrinks the
+score-sized tensors by `c`, and what it saves depends on how much of the peak they are;
+what it costs is `c` MatMul and Softmax launches instead of one, and the CPU kernel time of
+the step shows it. On the model above at `c = 4` (peak measured as above, kernel time from
+ONNX Runtime's profiler, same step):
 
-| `d` | dense | chunked | peak | modelled compute |
-|---|---|---|---|---|
-| 32 | 7.76 MiB | 6.51 MiB | **16% better** | +15% |
-| 64 | 9.55 MiB | 9.05 MiB | **5% better** | +10% |
+| `d` | `L` | dense | chunked | peak | kernel time |
+|---|---|---|---|---|---|
+| 32 | 256 | 6.9 MiB | 5.0 MiB | **29% better** | +54% |
+| 64 | 256 | 8.5 MiB | 7.1 MiB | **17% better** | +34% |
+| 32 | 512 | 26.5 MiB | 16.7 MiB | **37% better** | +23% |
 
-So it is worth trying when a run is close to fitting, and worth checking both numbers
-afterwards. It shrinks the score-sized transients by `c`, but not what the step retains across
-the backward pass, and the retained term dominates. Earlier versions of this framework got
-nothing from it at all; the gain above exists because the memory-aware pass can now recompute
-a chain rather than a single node, and the chunked graph gives it chains small enough to be
-worth recomputing.
+So it is worth trying when a run is close to fitting, and it pays best where the score
+block dominates — long sequences, small head dims — which is exactly where you need it;
+at short sequences the retained q blocks are most of the peak and chunking cannot touch
+them. Check both numbers afterwards: the compute cost is launch overhead, so it is worst on
+small steps and shrinks as the sequence grows.
 
 An `additiveMask` is handled per chunk. Its query axis (axis -2, once right-aligned to the
 scores' rank) must be `Lq` or `1` — the same rule the dense path enforces, and any other
@@ -989,7 +989,7 @@ dynamic, and chunk `i` covers rows `[Lq·i/c, Lq·(i+1)/c)`, so an `Lq` that doe
 evenly just gives chunks differing by one row (and a `c` larger than `Lq` gives empty chunks —
 still correct, just wasted launches). Keep `c` small: `c` chunks mean `c` MatMul and Softmax
 launches instead of one, and the graph grows accordingly — the built (pre-optimization)
-one-attention training step goes from 506 to 1 312 nodes at `c = 4`.
+one-attention training step goes from 506 to 1 310 nodes at `c = 4`.
 
 It reaches only the `Attention.ScaledDotProductAttention` helper, not `MultiHeadAttention`,
 `TransformerEncoderLayer` or `TransformerDecoderLayer`: a `[Module]`'s parameters are all
@@ -1036,24 +1036,18 @@ with a large compute increase; the attribute is how you say you want that trade 
 Measure before relying on it, because it is not always a win over the automatic pass. That
 pass already recomputes what pays under its objective, and it is free to choose finer-grained
 recomputations than a whole segment; the hint buys its memory with less compute, and it is
-the only lever on a step the pass would not touch. Modelled figures for a three-block MLP of
-width 32 behind a linear head — the twin fixtures of the coverage tests
-(`AutoDiffCheckpointingCoverageTests`; the test pins the direction of the below-threshold
-row, not the figures):
-
-| batch × features | unoptimized peak | automatic pass | checkpointed |
-|---|---|---|---|
-| 256 × 32 | 0.76 MiB | 0.76 MiB (below the pass's threshold, +0% compute) | **0.36 MiB** (+14% compute) |
-| 1024 × 32 | 2.87 MiB | **1.03 MiB** (+27% compute) | 1.07 MiB (+17% compute) |
-
-Where activations are small next to weights — a wide MLP at a small batch — the same hint
-gained nothing over the automatic pass and cost compute, and a two-layer transformer encoder
-at batch 8, `L = 128` came out slightly worse on both counts than the automatic pass alone.
-The hint is for a segment whose activations are what the peak is made of and that the pass
-would otherwise leave alone, and for buying the memory at a known compute price. As with the
-rest of this section these are the pass's **modelled** figures; see
-[limitations.md](limitations.md#gradient-activation-checkpointing) for what stands between
-them and a reading of allocated memory.
+the only lever on a step the pass would not touch. The coverage tests pin the direction on a
+three-block MLP of width 32 behind a linear head, at a batch the pass leaves alone: the
+checkpointed twin's modelled peak is about half the plain one's, for some 14% more modelled
+compute, with an identical loss trajectory. At a batch large enough for the pass to act, the
+automatic pass and the hint land within a few percent of each other on that model, and on a
+wide MLP or a two-layer transformer encoder the hint came out slightly worse than the
+automatic pass on both counts. The hint is for a segment whose activations are what the peak
+is made of and that the pass would otherwise leave alone, and for buying the memory at a
+known compute price. Those are the pass's **modelled** figures; before relying on the hint
+for a step that must fit, measure the step — see
+[limitations.md](limitations.md#gradient-activation-checkpointing) for what the model does
+and does not capture.
 
 ### PReLU / GLU
 

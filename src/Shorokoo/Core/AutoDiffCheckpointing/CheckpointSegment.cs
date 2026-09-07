@@ -79,7 +79,10 @@ internal static class CheckpointSegment
     /// <see cref="ProducesSegmentOutput"/> use. Segment ids are minted from a process counter, so
     /// a graph loaded from another process would otherwise collide with the next id this one
     /// mints, merging two disjoint segments into one recompute candidate; the counter is advanced
-    /// past every restored id.
+    /// past every restored id. That covers a restored id against a freshly minted one, which is
+    /// what happens in practice; it cannot separate two architectures loaded from two different
+    /// processes that each carry the same id and are then combined, and no API composes two
+    /// loaded architectures into one graph today.
     /// </summary>
     public static void RestoreStamp(FastNode node, long value)
     {

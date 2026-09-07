@@ -81,6 +81,14 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // below ~6e-8), ORT's Sigmoid kernel saturates to exactly 0 below x ≈ -18, and the
             // single-branch 1/(1 + exp(-x)) returns grad/inf = 0 for x below -88.7 whatever grad
             // is — a silently zeroed gradient wherever loss scaling makes that tail matter.
+            //
+            // This form is within about an ulp for x >= -87 and within 1e-3 to x ≈ -97. Below
+            // x ≈ -104 it returns 0 for any grad, because exp(x) itself flushes to zero in
+            // float32 and the slope is gone before the multiply. That one is not a formulation
+            // to fix but the dtype's floor: a float32 intermediate cannot carry the slope there
+            // at all, and only a fused grad*sigmoid (which no ONNX op offers) would see it. In
+            // float16 the same floor arrives at x ≈ -17, so this rule needs rethinking before
+            // half-precision training.
             var one = TypedConst(1.0f, x);
             var zero = TypedConst(0.0f, x);
             Tensor<T> expX = x.Exp();

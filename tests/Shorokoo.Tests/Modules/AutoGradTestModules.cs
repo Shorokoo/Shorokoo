@@ -977,15 +977,19 @@ namespace Shorokoo.Tests.Modules
             => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => z.Softplus());
     }
 
-    /// <summary>softplus' scaled by a large upstream gradient, where 1/(1+e^-x) alone returns grad/inf = 0.</summary>
+    /// <summary>
+    /// softplus' scaled by a large upstream gradient, where 1/(1+e^-x) alone returns grad/inf = 0.
+    /// <paramref name="expected"/> is supplied by the caller from a double-precision reference:
+    /// computing it in the graph would restate the rule's own second branch and cancel the very
+    /// rounding the check exists to catch.
+    /// </summary>
     [Module]
     public partial class AutoGradSoftplusScaledTailCheck
     {
-        public static Scalar<bit> Inline(Tensor<float32> x, Scalar<float32> scale)
+        public static Scalar<bit> Inline(Tensor<float32> x, Scalar<float32> scale, Tensor<float32> expected)
         {
             var loss = x.Softplus().Reduce(ReduceKind.Sum, keepDims: false).Scalar() * scale;
             var grad = (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, loss);
-            var expected = scale * x.Exp() / (Scalar(1f) + x.Exp());
             var slack = Scalar(1e-3f) * expected - (grad - expected).Abs();
             return slack.Reduce(ReduceKind.Min, keepDims: false).Scalar() > Scalar(0f);
         }

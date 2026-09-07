@@ -107,7 +107,12 @@ internal class MemoryAwareScheduler
         // pending node's inputs every round, so take the flat lists once (3 s → ms on a
         // 4 000-node step).
         var inputsOf = new Dictionary<FastNode, FastTensorKey?[]>(nodes.Count);
-        foreach (var node in nodes) inputsOf[node] = node.Inputs.ToArray();
+        var outputsOf = new Dictionary<FastNode, FastTensorKey?[]>(nodes.Count);
+        foreach (var node in nodes)
+        {
+            inputsOf[node] = node.Inputs.ToArray();
+            outputsOf[node] = node.Outputs.ToArray();
+        }
 
         // Pre-compute tensor memory sizes
         var tensorMemory = new Dictionary<FastTensorKey, long>();
@@ -266,7 +271,7 @@ internal class MemoryAwareScheduler
                 // preserved (only the memory reorder is skipped).
                 return null;
 
-            FastNode best = PickBestNode(eligible, remainingConsumers, tensorMemory);
+            FastNode best = PickBestNode(eligible, remainingConsumers, tensorMemory, inputsOf, outputsOf);
 
             pending.Remove(best);
             scheduled.Add(best);
@@ -307,7 +312,9 @@ internal class MemoryAwareScheduler
     private static FastNode PickBestNode(
         IEnumerable<FastNode> readySet,
         Dictionary<FastTensorKey, int> remainingConsumers,
-        Dictionary<FastTensorKey, long> tensorMemory)
+        Dictionary<FastTensorKey, long> tensorMemory,
+        Dictionary<FastNode, FastTensorKey?[]> inputsOf,
+        Dictionary<FastNode, FastTensorKey?[]> outputsOf)
     {
         FastNode? best = null;
         long bestScore = long.MinValue;
@@ -326,7 +333,7 @@ internal class MemoryAwareScheduler
 
             // Memory added: output tensor sizes
             long memoryAdded = 0;
-            foreach (var output in node.Outputs)
+            foreach (var output in outputsOf[node])
             {
                 if (output is null) continue;
                 memoryAdded += tensorMemory.GetValueOrDefault(output.Value, 0);

@@ -38,7 +38,9 @@ namespace Shorokoo.Core.AutoDiffCheckpointing;
 /// re-read from the new evaluation and the ranking rebuilt, with targets already tried in this
 /// call skipped, so the search converges instead of re-proposing what it just rejected. The
 /// budget of full-graph evaluations per call is explicit (<see cref="MaxEvaluationsPerCall"/>)
-/// and what a call spent is readable (<see cref="EvaluationsUsed"/>).</para>
+/// and what the instance has spent across its calls is readable (<see cref="EvaluationsUsed"/>),
+/// as is whether the budget rather than the candidate list is what stopped it
+/// (<see cref="BudgetBound"/>).</para>
 ///
 /// <para>Two invariants hold for every commit: the candidate graph scores strictly better
 /// under the objective and its evaluated peak does not exceed the peak before the commit; and
@@ -70,6 +72,14 @@ internal class Rematerializer
 
     /// <summary>Full-graph evaluations spent by every <see cref="Apply"/> on this instance.</summary>
     internal int EvaluationsUsed { get; private set; }
+
+    /// <summary>
+    /// Whether any call ran out of evaluations with candidates still ranked ahead of it, rather
+    /// than exhausting the list. The two look identical in the result otherwise, and on the
+    /// larger models the budget is what stops the search: a two-layer encoder commits nothing
+    /// within it and eleven candidates beyond it.
+    /// </summary>
+    internal bool BudgetBound { get; private set; }
 
     /// <summary>One entry per target committed by <see cref="Apply"/> on this instance.</summary>
     internal List<CommitRecord> CommitLog { get; } = new();
@@ -125,7 +135,7 @@ internal class Rematerializer
     {
         var current = new State(graph, shapeInfo, _evaluator.Evaluate(graph, shapeInfo));
         var currentScore = _objective.Score(current.Eval);
-        var tried = new HashSet<(FastTensorKey, Variant, FastNodeKey, int)>();
+        var tried = new HashSet<(FastTensorKey, bool, FastNodeKey, int)>();
         var evaluations = 0;
 
         State? Trial(List<RematCandidate> batch, Placement placement)
@@ -215,7 +225,7 @@ internal class Rematerializer
             foreach (var candidate in candidates)
             {
                 if (evaluations >= MaxEvaluationsPerCall) break;
-                tried.Add(candidate.Identity);
+                if (!tried.Add(candidate.Identity)) continue;
                 var trial = Trial([candidate], Placement.AfterProducer);
                 if (!Better(trial)) continue;
                 Commit(trial!, [candidate], Placement.AfterProducer);
@@ -228,6 +238,7 @@ internal class Rematerializer
         }
 
         EvaluationsUsed += evaluations;
+        BudgetBound |= evaluations >= MaxEvaluationsPerCall;
         return (current.Graph, current.ShapeInfo);
     }
 
@@ -464,9 +475,14 @@ internal class Rematerializer
         /// <summary>Estimated objective change; negative is worth trying, lower ranks first.</summary>
         public double ExpectedDelta { get; init; }
 
-        /// <summary>What makes two proposals the same trial, so one is never evaluated twice.</summary>
-        public (FastTensorKey Target, Variant Variant, FastNodeKey FirstConsumer, int Consumers) Identity
-            => (Rewires[0].Target, Variant, FirstConsumer.Key, Rewires[0].Consumers.Count);
+        /// <summary>
+        /// What makes two proposals the same trial, so one is never evaluated twice. It is the
+        /// rewrite, not the variant that proposed it: the one-reader suffix of Shared and the
+        /// PerConsumer form of that same reader build the identical graph, and a reader that
+        /// takes the tensor in two input slots proposes itself twice.
+        /// </summary>
+        public (FastTensorKey Target, bool Split, FastNodeKey FirstConsumer, int Consumers) Identity
+            => (Rewires[0].Target, Variant == Variant.Split, FirstConsumer.Key, Rewires[0].Consumers.Count);
     }
 
     /// <summary>The ranked candidates with any whose (target, reader) pairs overlap an
@@ -487,7 +503,7 @@ internal class Rematerializer
 
     private List<RematCandidate> FindCandidates(
         Liveness live, ShapeInferenceResult shapeInfo,
-        HashSet<(FastTensorKey, Variant, FastNodeKey, int)> tried)
+        HashSet<(FastTensorKey, bool, FastNodeKey, int)> tried)
     {
         var region = live.PeakRegion();
         if (region.Count == 0) return new List<RematCandidate>();
@@ -502,7 +518,9 @@ internal class Rematerializer
             if (bytes <= 0) continue;
             if (!region.Any(r => producerPos < r && r <= lastUse)) continue;
 
-            var ordered = consumers.OrderBy(c => c.Pos).ToList();
+            // One entry per reading NODE: Liveness.Consumers records one per input slot, and a
+            // node taking the tensor in two slots is still one rewire.
+            var ordered = consumers.GroupBy(c => c.Node.Key).Select(g => g.First()).OrderBy(c => c.Pos).ToList();
 
             void Propose(Variant variant, List<(int Pos, FastNode Node)> rewired, FastTensorKey? keep)
             {
@@ -562,6 +580,7 @@ internal class Rematerializer
             // survives it.
             for (int k = 0; k < ordered.Count; k++)
                 Propose(Variant.Shared, ordered.Skip(k).ToList(), null);
+
             if (ordered.Count > 1)
                 foreach (var c in ordered)
                     Propose(Variant.PerConsumer, [c], null);

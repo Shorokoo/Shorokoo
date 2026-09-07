@@ -64,7 +64,9 @@ namespace Shorokoo
         /// common-subexpression pass over it, which merges every recomputation back into the
         /// tensor it exists to free — the rig's own sessions therefore use
         /// <see cref="Shorokoo.Core.Inference.Abstractions.ShorokooGraphOptimization.TrainingStep"/>. A caller compiling this graph
-        /// to observe what the rig runs must ask for that profile too.</para>
+        /// to observe what the rig runs needs that profile, which <see cref="ComputeContext"/> does
+        /// not expose: build the model with <c>FastOnnxModelBuilder</c> and hand it to
+        /// <c>InferenceBackend.Factory.CreateSession</c> with that level.</para>
         /// </summary>
         public ComputationGraph TrainingStepPureGraph { get; private set; } = null!;
 
@@ -111,7 +113,10 @@ namespace Shorokoo
         }
 
         /// <summary>Whether the shape-generic fallback session has been compiled (test hook).</summary>
-        internal bool HasGenericTrainStepSession => _compiledTrainStepGeneric is not null;
+        internal bool HasGenericTrainStepSession
+        {
+            get { lock (_compiledTrainSteps) return _compiledTrainStepGeneric is not null; }
+        }
 
         /// <summary>
         /// The compiled trainstep for the given (struct-expanded, graph-input-ordered) inputs, compiled

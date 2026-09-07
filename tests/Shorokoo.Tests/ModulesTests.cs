@@ -1,3 +1,4 @@
+using Shorokoo.Core.AutoDiffCheckpointing;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Core.Inference;
 using Shorokoo.Core.Graph;
@@ -1156,5 +1157,31 @@ public class ModulesCoverageTests
 
         Assert.NotEmpty(reloadedModel.ToInternal().Nodes);
         Assert.NotEmpty(reloadedModel.ToInternal().Outputs);
+    }
+
+    private static InternalComputationGraph TinyArch(ComputationGraph model)
+    {
+        var g = model.ToInternal();
+        return g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L, 8L], new float[16])]));
+    }
+
+    private static int CheckpointedInvokes(ComputationGraph model)
+        => model.ToInternal().Nodes.Count(n => n.OpCode == InternalOpCodes.MODEL_INVOKE && CheckpointSegment.IsRequested(n));
+
+    private static int Segments(InternalComputationGraph arch)
+        => arch.Nodes.Select(CheckpointSegment.IdOf).OfType<long>().Distinct().Count();
+
+    [Fact]
+    public void TestModuleCheckpointAttributeMarksEachCallAsOneInlinedSegmentCoverage()
+    {
+        Assert.Equal(3, CheckpointedInvokes(Modules.CheckpointedTinyMlpStack.ComputationGraph));
+        Assert.Equal(0, CheckpointedInvokes(Modules.PlainTinyMlpStack.ComputationGraph));
+
+        var checkpointed = TinyArch(Modules.CheckpointedTinyMlpStack.ComputationGraph);
+        var plain = TinyArch(Modules.PlainTinyMlpStack.ComputationGraph);
+        Assert.Equal(3, Segments(checkpointed));
+        Assert.Equal(3, checkpointed.Nodes.Count(CheckpointSegment.ProducesSegmentOutput));
+        Assert.Equal(0, Segments(plain));
+        Assert.Equal(plain.Nodes.Count, checkpointed.Nodes.Count);
     }
 }

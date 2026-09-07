@@ -5,7 +5,8 @@ namespace Shorokoo.Core.AutoDiffCheckpointing.OpsPerf;
 /// <summary>
 /// Performance estimator for recurrent neural network operations (GRU, LSTM, RNN).
 /// These ops process sequences timestep by timestep with matrix multiplications at each step.
-/// Cost is O(sequence_length × batch × hidden_size² × gates).
+/// Cost is the gate products' FLOPs at <see cref="OpCostModel.RnnNsPerFlop"/> (ORT's LSTM
+/// kernel runs them about as efficiently as a mid-sized MatMul).
 /// </summary>
 internal class RecurrentPerf : IOpPerf
 {
@@ -40,7 +41,7 @@ internal class RecurrentPerf : IOpPerf
         // Per timestep: gates × (input_size × hidden_size + hidden_size × hidden_size) × 2 FLOPs
         var flopsPerTimestep = gates * (inputSize * hiddenSize + hiddenSize * hiddenSize) * 2.0 * batch;
         var totalFlops = seqLen * flopsPerTimestep;
-        var computeTime = totalFlops / 256.0;
+        var computeTime = OpCostModel.Launch + OpCostModel.RnnNsPerFlop * totalFlops;
 
         // RNNs need workspace for intermediate gate values
         long directions = 1; // Simplified — could be bidirectional

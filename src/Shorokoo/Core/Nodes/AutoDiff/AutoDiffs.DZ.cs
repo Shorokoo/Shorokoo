@@ -89,11 +89,11 @@ namespace Shorokoo.Core.Nodes.AutoDiff
 
         // ===== Math Functions =====
 
-        [AutoDiff(EXP)]
-        public static Variable?[] Exp<T>(Tensor<T> x, Tensor<T> grad) where T : IVarType
+        [AutoDiff(EXP, UsesOutputs = true)]
+        public static Variable?[] Exp<T>(Tensor<T> x, Tensor<T> y, Tensor<T> grad) where T : IVarType
         {
-            // d(exp(x))/dx = exp(x)
-            return [grad * x.Exp()];
+            // d(exp(x))/dx = exp(x) = y
+            return [grad * y];
         }
 
         [AutoDiff(LOG)]
@@ -103,12 +103,12 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             return [grad / x];
         }
 
-        [AutoDiff(SQRT)]
-        public static Variable?[] Sqrt<T>(Tensor<T> x, Tensor<T> grad) where T : IVarType
+        [AutoDiff(SQRT, UsesOutputs = true)]
+        public static Variable?[] Sqrt<T>(Tensor<T> x, Tensor<T> y, Tensor<T> grad) where T : IVarType
         {
-            // d(sqrt(x))/dx = 1/(2*sqrt(x))
-            var two = TypedConst(2.0f, x);
-            return [grad / (two * x.Sqrt())];
+            // d(sqrt(x))/dx = 1/(2*sqrt(x)) = 1/(2y)
+            var two = TypedConst(2.0f, y);
+            return [grad / (two * y)];
         }
 
         // ===== Activation Functions =====
@@ -122,22 +122,20 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             return [OnnxOp.Where(mask, grad, zero)];
         }
 
-        [AutoDiff(SIGMOID)]
-        public static Variable?[] Sigmoid<T>(Tensor<T> x, Tensor<T> grad) where T : IVarType
+        [AutoDiff(SIGMOID, UsesOutputs = true)]
+        public static Variable?[] Sigmoid<T>(Tensor<T> x, Tensor<T> y, Tensor<T> grad) where T : IVarType
         {
-            // d(sigmoid(x))/dx = sigmoid(x) * (1 - sigmoid(x))
-            var sig = x.Sigmoid();
-            var one = TypedConst(1.0f, x);
-            return [grad * sig * (one - sig)];
+            // d(sigmoid(x))/dx = sigmoid(x) * (1 - sigmoid(x)) = y * (1 - y)
+            var one = TypedConst(1.0f, y);
+            return [grad * y * (one - y)];
         }
 
-        [AutoDiff(TANH)]
-        public static Variable?[] Tanh<T>(Tensor<T> x, Tensor<T> grad) where T : IVarType
+        [AutoDiff(TANH, UsesOutputs = true)]
+        public static Variable?[] Tanh<T>(Tensor<T> x, Tensor<T> y, Tensor<T> grad) where T : IVarType
         {
-            // d(tanh(x))/dx = 1 - tanh(x)^2
-            var tanhX = x.Tanh();
-            var one = TypedConst(1.0f, x);
-            return [grad * (one - tanhX * tanhX)];
+            // d(tanh(x))/dx = 1 - tanh(x)^2 = 1 - y^2
+            var one = TypedConst(1.0f, y);
+            return [grad * (one - y * y)];
         }
 
         // ===== Reduction Operations =====
@@ -281,16 +279,16 @@ namespace Shorokoo.Core.Nodes.AutoDiff
 
         // ===== Softmax =====
 
-        [AutoDiff(SOFTMAX)]
-        public static Variable?[] Softmax<T>(Tensor<T> input, Tensor<T> grad, long? axis) where T : IVarType
+        [AutoDiff(SOFTMAX, UsesOutputs = true)]
+        public static Variable?[] Softmax<T>(Tensor<T> input, Tensor<T> output, Tensor<T> grad, long? axis) where T : IVarType
         {
             // d(softmax(x))/dx_i = softmax(x)_i * (delta_ij - softmax(x)_j)
-            // Efficient form: grad_input = softmax * (grad - sum(grad * softmax, axis=axis, keepdims=true))
-            var softmaxOutput = input.Softmax(axis);
-            var gradTimesSoftmax = grad * softmaxOutput;
+            // Efficient form: grad_input = y * (grad - sum(grad * y, axis=axis, keepdims=true)),
+            // in terms of the forward output y so the scores need not be retained or recomputed.
+            var gradTimesSoftmax = grad * output;
             var effectiveAxis = axis ?? -1;
             var sumGradSoftmax = gradTimesSoftmax.Reduce(ReduceKind.Sum, axes: Vector(effectiveAxis), keepDims: true);
-            return [softmaxOutput * (grad - sumGradSoftmax)];
+            return [output * (grad - sumGradSoftmax)];
         }
 
         // ===== ReduceProd =====

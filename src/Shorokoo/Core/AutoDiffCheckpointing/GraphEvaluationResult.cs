@@ -7,8 +7,8 @@ namespace Shorokoo.Core.AutoDiffCheckpointing;
 public class GraphEvaluationResult
 {
     /// <summary>
-    /// Total compute time for the entire graph, in normalized units
-    /// where 256 float32 add operations = 1 unit.
+    /// Total compute time for the entire graph, in nanoseconds of modelled ORT CPU kernel
+    /// time (see <see cref="OpsPerf.OpCostModel"/>).
     /// </summary>
     public double TotalComputeTime { get; init; }
 
@@ -20,7 +20,16 @@ public class GraphEvaluationResult
     public long PeakMemoryBytes { get; init; }
 
     /// <summary>
-    /// Per-node evaluation details, in graph execution order.
+    /// How much of the graph's linear order ONNX Runtime will actually run — the fraction of
+    /// consecutive kernel pairs in ORT's execution order whose node indices ascend (see
+    /// <see cref="OrtExecutionOrder.Fidelity"/>). 1 means ORT runs the linear order verbatim.
+    /// </summary>
+    public double OrderFidelity { get; init; } = 1.0;
+
+    /// <summary>
+    /// Per-node evaluation details, in the order the evaluation walked the graph
+    /// (<see cref="EvaluationOrder"/>); <see cref="NodeEvaluationInfo.NodeIndex"/> maps each
+    /// entry back to its node.
     /// </summary>
     public required IReadOnlyList<NodeEvaluationInfo> NodeDetails { get; init; }
 
@@ -39,7 +48,12 @@ public class NodeEvaluationInfo
     public required string OpCode { get; init; }
 
     /// <summary>
-    /// Compute time for this node in normalized units.
+    /// The node's index in the evaluated graph's <c>Nodes</c> list.
+    /// </summary>
+    public int NodeIndex { get; init; }
+
+    /// <summary>
+    /// Modelled compute time for this node, in nanoseconds.
     /// </summary>
     public double ComputeTime { get; init; }
 

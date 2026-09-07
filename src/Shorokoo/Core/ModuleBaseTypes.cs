@@ -108,10 +108,17 @@ namespace Shorokoo.Core
             this.GenericTypeArgs = genericTypeArgs;
         }
 
+        /// <summary>
+        /// Whether a call of this model is an activation-checkpoint segment: its forward
+        /// activations are recomputed in the backward pass instead of being kept. Set by the
+        /// generated model class of a <c>[Module(Checkpoint = true)]</c>.
+        /// </summary>
+        protected virtual bool Checkpoint => false;
+
         protected Tout internalCall()
         {
             (var structures, var dtypes, var ranks) = ModuleHelper.InfosFromTouts<Tout>();
-            var retvals = InternalOp.ModelInvoke(this.ModelVariable, [], structures, dtypes, ranks, this.GenericTypeArgs);
+            var retvals = InternalOp.ModelInvoke(this.ModelVariable, [], structures, dtypes, ranks, this.GenericTypeArgs, checkpoint: this.Checkpoint);
             return ModuleHelper.Reformat<Tout>(retvals);
         }
     }
@@ -135,11 +142,14 @@ namespace Shorokoo.Core
             this.GenericTypeArgs = genericTypeArgs;
         }
 
+        /// <inheritdoc cref="BaseModel{Tout}.Checkpoint"/>
+        protected virtual bool Checkpoint => false;
+
         protected Tout internalCall(Tin inputs)
         {
             var inputVariables = ModuleHelper.Format(inputs);
             (var structures, var dtypes, var ranks) = ModuleHelper.InfosFromTouts<Tout>();
-            var retvals = InternalOp.ModelInvoke(this.ModelVariable, inputVariables, structures, dtypes, ranks, this.GenericTypeArgs);
+            var retvals = InternalOp.ModelInvoke(this.ModelVariable, inputVariables, structures, dtypes, ranks, this.GenericTypeArgs, checkpoint: this.Checkpoint);
             return ModuleHelper.Reformat<Tout>(retvals);
         }
     }

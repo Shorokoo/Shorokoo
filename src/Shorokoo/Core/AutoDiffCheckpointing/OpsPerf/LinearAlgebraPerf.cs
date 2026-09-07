@@ -4,9 +4,12 @@ namespace Shorokoo.Core.AutoDiffCheckpointing.OpsPerf;
 
 /// <summary>
 /// Performance estimator for matrix multiplication and related linear algebra operations.
-/// These are typically the most compute-intensive operations in neural networks.
-/// MatMul cost is O(M*N*K) for (M,K)×(K,N) matrices.
-/// Conv cost is O(batch * out_channels * spatial_output * kernel_volume * in_channels / groups).
+/// MatMul/Gemm/Einsum are priced on their FLOPs (2·M·N·K per product) through
+/// <see cref="OpCostModel.MatMul"/>: an asymptotic rate plus a sqrt(FLOPs) ramp for the poor
+/// efficiency of small products. Conv is priced per FLOP with an im2col/GEMM penalty that
+/// grows as the output image shrinks (<see cref="OpCostModel.ConvSpatialPenalty"/>) — the
+/// weight-gradient conv, whose "kernel" is the whole image and whose output is 3×3, is an
+/// order of magnitude slower per FLOP than the forward conv.
 /// </summary>
 internal class LinearAlgebraPerf : IOpPerf
 {
@@ -49,9 +52,8 @@ internal class LinearAlgebraPerf : IOpPerf
         for (int i = 0; i < aDims.Length - 2; i++)
             batch *= aDims[i];
 
-        // 2 * M * N * K multiplications+additions, normalized by 256
         var flops = batch * m * n * 2.0 * k;
-        var computeTime = flops / 256.0;
+        var computeTime = OpCostModel.MatMul(flops);
 
         return new OpPerfResult
         {
@@ -83,7 +85,7 @@ internal class LinearAlgebraPerf : IOpPerf
         if (transB != 0) (k, n) = (n, k);
 
         var flops = m * n * 2.0 * k + m * n * 2.0; // matmul + scale + bias
-        var computeTime = flops / 256.0;
+        var computeTime = OpCostModel.MatMul(flops);
 
         return new OpPerfResult
         {
@@ -123,11 +125,14 @@ internal class LinearAlgebraPerf : IOpPerf
         long inChannelsPerGroup = wDims[1];
 
         var flops = batch * outChannels * spatialOutput * kernelVolume * inChannelsPerGroup * 2.0;
-        var computeTime = flops / 256.0;
+        var computeTime = ConvTime(flops, spatialOutput);
 
-        // Conv may need im2col workspace
-        long workspaceBytes = batch * inChannelsPerGroup * group * kernelVolume * spatialOutput
-            * (inputShape.DType.EncodingBitCount / 8);
+        // im2col workspace: ORT allocates one column buffer of kernel_dim × output_image_size
+        // (kernel_dim = C/group × kernel volume) and reuses it across every image and group,
+        // so the workspace is per image per group, not × batch × group. A 1×1 kernel skips
+        // im2col entirely.
+        long workspaceBytes = kernelVolume == 1 ? 0
+            : inChannelsPerGroup * kernelVolume * spatialOutput * (inputShape.DType.EncodingBitCount / 8);
 
         return new OpPerfResult
         {
@@ -166,7 +171,7 @@ internal class LinearAlgebraPerf : IOpPerf
         long inChannelsPerGroup = group > 0 ? wDims[0] / group : wDims[0];
 
         var flops = batch * outChannels * spatialOutput * kernelVolume * inChannelsPerGroup * 2.0;
-        var computeTime = flops / 256.0;
+        var computeTime = ConvTime(flops, spatialOutput);
 
         return new OpPerfResult
         {
@@ -195,7 +200,7 @@ internal class LinearAlgebraPerf : IOpPerf
 
         var avgInputSize = inputCount > 0 ? totalInputElements / inputCount : outputShape.ElementCount;
         var flops = outputShape.ElementCount * avgInputSize * 2.0;
-        var computeTime = flops / 256.0;
+        var computeTime = OpCostModel.MatMul(flops);
 
         return new OpPerfResult
         {
@@ -203,6 +208,10 @@ internal class LinearAlgebraPerf : IOpPerf
             ExtraMemoryBytes = 0,
         };
     }
+
+    private static double ConvTime(double flops, long spatialOutput)
+        => OpCostModel.Launch
+            + flops * OpCostModel.ConvNsPerFlop * (1.0 + OpCostModel.ConvSpatialPenalty / System.Math.Max(1, spatialOutput));
 
     private static long GetLongAttr(OpPerfInput input, string name, long defaultValue)
     {

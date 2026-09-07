@@ -846,6 +846,19 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         inputRemap[subFastGraph.Inputs[i]] = callerKey;
                 }
 
+                // A [Module(Checkpoint = true)] invoke: everything spliced in from it is one
+                // activation-checkpoint segment, stamped with a fresh id so the memory-aware
+                // pass can find its members after every later lowering. Nodes producing the
+                // invoke's outputs are the segment's boundary (kept, not recomputed). An
+                // invoke nested inside a checkpointed body was stamped when that body was
+                // flattened; the enclosing segment overrides it, so the outermost hint wins.
+                var checkpointId = isModuleCall && Shorokoo.Core.AutoDiffCheckpointing.CheckpointSegment.IsRequested(fastNode)
+                    ? Shorokoo.Core.AutoDiffCheckpointing.CheckpointSegment.NewId()
+                    : (long?)null;
+                var segmentOutputs = checkpointId is null
+                    ? null
+                    : new HashSet<FastTensorKey>(subFastGraph.Outputs);
+
                 // Insert subgraph nodes with remapped inputs
                 foreach (var subNode in subFastGraph.Nodes)
                 {
@@ -857,6 +870,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                             if (inputList[j] is FastTensorKey key && inputRemap.TryGetValue(key, out var replacement))
                                 inputList[j] = replacement;
                         }
+                    }
+                    if (checkpointId is long segment)
+                    {
+                        var producesOutput = subNode.Outputs.Any(o => o is FastTensorKey k && segmentOutputs!.Contains(k));
+                        Shorokoo.Core.AutoDiffCheckpointing.CheckpointSegment.Stamp(subNode, segment, producesOutput);
                     }
                     newNodes.Add(subNode);
                     nodeByKey[subNode.Key] = subNode;

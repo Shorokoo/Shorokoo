@@ -1161,6 +1161,13 @@ namespace Shorokoo.Core.Factory.IR
             if (nodeDef.IsOpenNode)
                 graphOpenNodeKeys[nodeProto] = nodeKey;
 
+            // The .srk dialect keeps the activation-checkpoint stamp on a segment's nodes; it is
+            // not in any op's schema, so ParseAttributes dropped it — put it back, or a rig
+            // reloaded from a checkpoint would lose the [Module(Checkpoint = true)] it was built with.
+            var stamp = nodeProto.Attributes.FirstOrDefault(a => a.Name == OnnxOpAttributeNames.ShrkAttrCheckpoint);
+            if (stamp is not null && stamp.I != 0)
+                Shorokoo.Core.AutoDiffCheckpointing.CheckpointSegment.RestoreStamp(fastNode, stamp.I);
+
             return fastNode;
         }
 

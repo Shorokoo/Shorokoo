@@ -179,9 +179,11 @@ internal class ShapeInferenceInterpreter
     /// </summary>
     private static TensorShapeInfo? TryConvertToShapeInfo(IRuntimeTensor rt)
     {
-        if (rt is not RuntimeTensor r) return null; // optional/sequence — no flat shape
+        if (rt is RuntimeSequenceTensor seq) return TryConvertSequence(seq);
+        if (rt is not RuntimeTensor r) return null; // optional — no flat shape
         if (r.Shape is null) return null;
         if (r.DType == DType.Invalid) return null;
+        if (HasUnknownDim(r.Shape)) return null;
 
         var elementCount = r.Shape.Count;
         var dataMatchesShape =
@@ -190,6 +192,53 @@ internal class ShapeInferenceInterpreter
             (r.BoolData is { } bd && bd.Length == elementCount);
         var data = dataMatchesShape ? TensorDataConverter.ToTensorData(r) : null;
         return new TensorShapeInfo(r.Shape, r.DType, data);
+    }
+
+    /// <summary>The shape info a runtime tensor of this shape would be priced with, or null.</summary>
+    internal static TensorShapeInfo? ShapeInfoForTest(Shape shape, DType dtype)
+        => TryConvertToShapeInfo(new RuntimeTensor { Shape = shape, DType = dtype });
+
+    /// <summary>
+    /// Whether any dimension is unknown. Such a shape must never be priced: <see cref="Shape.Count"/>
+    /// multiplies the dims, so one unknown dim gives a negative byte count that subtracts from the
+    /// modelled peak, and an even number of them gives a positive one that is simply wrong.
+    /// </summary>
+    private static bool HasUnknownDim(Shape shape)
+    {
+        foreach (var d in shape.Dims)
+            if (d < 0) return true;
+        return false;
+    }
+
+    /// <summary>
+    /// A sequence holds its elements' buffers for as long as it lives, so it is priced as the
+    /// sum of them, flattened to a rank-1 pseudo-shape: the evaluator only needs the byte
+    /// count. Concrete sequences sum their elements; templated ones multiply the template
+    /// by the known count. Values are never retained.
+    /// </summary>
+    private static TensorShapeInfo? TryConvertSequence(RuntimeSequenceTensor seq)
+    {
+        if (seq.DType == DType.Invalid) return null;
+        long elements;
+        if (seq.Tensors is { } tensors)
+        {
+            elements = 0;
+            foreach (var t in tensors)
+            {
+                if (t.Shape is not { } shape) continue;
+                if (HasUnknownDim(shape)) return null;
+                elements += shape.Count;
+            }
+        }
+        else if (seq.TemplateTensor is { Shape: { } template } && seq.Count is { } count)
+        {
+            if (HasUnknownDim(template)) return null;
+            elements = template.Count * count;
+        }
+        else
+            return null;
+        if (elements < 0) return null;
+        return new TensorShapeInfo(new Shape(elements), seq.DType, null);
     }
 
     private static List<FastTensorKey> CollectAllOutputKeys(InternalComputationGraph graph)
@@ -273,6 +322,9 @@ internal class ShapeInferenceInterpreter
 
             if (!tensorStore.TryGetValue(input.Value, out var info))
                 return; // missing input shape — can't run ORT, leave node unresolved
+
+            // A negative dim would size a zero buffer negatively and throw out of Infer.
+            if (HasUnknownDim(info.Shape)) return;
 
             var inputData = info.Data ?? CreateZeroTensorData(info.Shape, info.DType);
             var constNode = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.Constant(inputData);
@@ -447,6 +499,7 @@ internal class ShapeInferenceInterpreter
         FastTensorKey key,
         TensorData data)
     {
+        if (HasUnknownDim(data.Shape)) return;
         var isSmall = data.Shape.Count <= MaxSmallTensorElements;
         store[key] = new TensorShapeInfo(
             data.Shape,

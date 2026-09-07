@@ -61,9 +61,20 @@ namespace Shorokoo.Core.Factory
         /// ValueInfoProto's own metadata — a graph input has no attribute bag, so this is where a
         /// vanilla-loadable graph carries it. The node and the ValueInfoProto being built for it are both
         /// in hand here, so name and shape are paired intrinsically (no cross-graph index matching).</para>
+        ///
+        /// <para><paramref name="concreteDims"/>, when given and of the node's rank, is stamped as the
+        /// input's concrete dimensions instead of rank-only symbolic placeholders. Only the execution
+        /// path passes it, for a session that will only ever be fed tensors of exactly that shape: with
+        /// every input dimension known, ONNX Runtime's shape inference resolves every intermediate shape
+        /// at session build and constant-folds the graph's shape arithmetic (<c>Shape</c>, and the
+        /// broadcast-reduction chains autograd emits over it) away. An input of unknown rank (a
+        /// struct-expanded field, say — otherwise emitted with no shape at all) takes the dims as given;
+        /// a rank mismatch is ignored here — the placeholders are kept, so the shape error surfaces at
+        /// <c>Run</c> as it always has.</para>
         /// </summary>
         public static ValueInfoProto CreateGraphInputInfo(
-            FastNode inputNode, FastTensorKey key, bool emitRepresentativeMetadata = false)
+            FastNode inputNode, FastTensorKey key, bool emitRepresentativeMetadata = false,
+            long[]? concreteDims = null)
         {
             (DType dtype, int? rank, DataStructure structure) = ReadInputMetadata(inputNode);
             string? inputTypeName = ReadInputTypeName(inputNode);
@@ -73,7 +84,11 @@ namespace Shorokoo.Core.Factory
                 ? (string?)dvObj
                 : null;
 
-            var dims = rank is int r ? OnnxIRFactory.CreateDims(MakeUnnamedDims(r), key.ToString()) : null;
+            TensorShapeProto? dims = null;
+            if (structure == DataStructure.Tensor && concreteDims is not null && (rank is null || concreteDims.Length == rank))
+                dims = OnnxIRFactory.CreateDims(MakeConcreteDims(concreteDims), key.ToString());
+            else if (rank is int r)
+                dims = OnnxIRFactory.CreateDims(MakeUnnamedDims(r), key.ToString());
             var valueInfo = OnnxIRFactory.CreateTensorInfo(
                 dims: dims,
                 name: key.ToString(),
@@ -255,6 +270,14 @@ namespace Shorokoo.Core.Factory
         {
             var dims = new TensorDim[rank];
             for (int i = 0; i < rank; i++) dims[i] = new TensorDim();
+            return dims;
+        }
+
+        /// <summary>One concrete-valued <see cref="TensorDim"/> per entry of <paramref name="concreteDims"/>.</summary>
+        private static TensorDim[] MakeConcreteDims(long[] concreteDims)
+        {
+            var dims = new TensorDim[concreteDims.Length];
+            for (int i = 0; i < concreteDims.Length; i++) dims[i] = new TensorDim(concreteDims[i]);
             return dims;
         }
     }

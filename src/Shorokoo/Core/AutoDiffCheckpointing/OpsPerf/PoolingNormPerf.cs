@@ -3,9 +3,11 @@ using static Shorokoo.Core.Nodes.NodeDefinitions.OpCodes;
 namespace Shorokoo.Core.AutoDiffCheckpointing.OpsPerf;
 
 /// <summary>
-/// Performance estimator for pooling and normalization operations.
-/// Pooling ops reduce spatial dimensions by applying a function over a window.
-/// Normalization ops compute statistics and normalize activations.
+/// Performance estimator for pooling and normalization operations, priced as streaming
+/// passes over the data (<see cref="OpCostModel.Stream"/>): a pool reads its window per
+/// output element, a normalization makes a few passes for statistics and the rescale. Not
+/// calibrated directly — none of the reference families pools or batch-normalizes — so these
+/// carry the elementwise rate with a pass count.
 /// </summary>
 internal class PoolingNormPerf : IOpPerf
 {
@@ -54,9 +56,9 @@ internal class PoolingNormPerf : IOpPerf
             kernelVolume = 9; // 3×3 default assumption
         }
 
-        // Each output element requires reading kernelVolume input elements
-        var outputElements = outputShape.ElementCount;
-        var computeTime = outputElements * kernelVolume / 256.0;
+        // Each output element reads kernelVolume input elements (cache-resident, so cheaper than a stream)
+        var computeTime = OpCostModel.Stream(inputShape.MemoryBytes + outputShape.MemoryBytes)
+            + OpCostModel.StreamNsPerByte * 0.25 * outputShape.MemoryBytes * System.Math.Max(0, kernelVolume - 1);
 
         return new OpPerfResult
         {
@@ -71,9 +73,9 @@ internal class PoolingNormPerf : IOpPerf
         if (inputShape is null)
             return OpPerfResult.Zero;
 
-        // Global pool reduces all spatial dims — cost is proportional to input elements
+        // Global pool reduces all spatial dims — one pass over the input
         var costMultiplier = input.OpCode == GLOBAL_LP_POOL ? 2.0 : 1.0;
-        var computeTime = inputShape.ElementCount / 256.0 * costMultiplier;
+        var computeTime = OpCostModel.Stream(inputShape.MemoryBytes, costMultiplier);
 
         return new OpPerfResult
         {
@@ -89,14 +91,8 @@ internal class PoolingNormPerf : IOpPerf
         if (inputShape is null || outputShape is null)
             return OpPerfResult.Zero;
 
-        var elements = inputShape.ElementCount;
-
-        // Normalization typically requires:
-        // Pass 1: Compute mean (sum + divide)
-        // Pass 2: Compute variance (subtract mean, square, sum, divide)
-        // Pass 3: Normalize (subtract mean, divide by std, scale, shift)
-        // ~5 passes over data
-        var computeTime = elements / 256.0 * 5.0;
+        // Mean, variance and normalize: about three passes over the input plus the output write
+        var computeTime = OpCostModel.Stream(3.0 * inputShape.MemoryBytes + outputShape.MemoryBytes);
 
         // BatchNorm can be in-place
         var canInPlace = !input.InputMustRemainIntact[0]

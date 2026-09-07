@@ -42,12 +42,17 @@ namespace Shorokoo.Runtime
         internal CompiledGraph(
             IShorokooInferenceSession session,
             Dictionary<string, string> onnxInputNameByOriginal,
-            string[] originalInputNames)
+            string[] originalInputNames,
+            ShorokooGraphOptimization optimization)
         {
             _session = session;
             _onnxInputNameByOriginal = onnxInputNameByOriginal;
             _originalInputNames = originalInputNames;
+            Optimization = optimization;
         }
+
+        /// <summary>The graph-optimization profile the session was built with (test hook).</summary>
+        internal ShorokooGraphOptimization Optimization { get; }
 
         /// <summary>
         /// Executes the compiled graph with the given inputs.
@@ -194,16 +199,34 @@ namespace Shorokoo.Runtime
             return (regularOutputs, new ComputationGraph(updatedGraph, graph.Kind));
         }
 
-        internal CompiledGraph Compile(InternalComputationGraph graph)
+        internal CompiledGraph Compile(InternalComputationGraph graph) => Compile(graph, inputDims: null, trainingStep: false);
+
+        /// <summary>
+        /// Compiles the graph for a session that will only ever be fed inputs of exactly
+        /// <paramref name="inputDims"/> (one entry per graph input, in input order; a null entry keeps
+        /// that input's shape symbolic). The dims are stamped on the model's graph inputs, which lets
+        /// ONNX Runtime resolve every intermediate shape at session build and fold the graph's shape
+        /// arithmetic away — a large share of a training step's kernels. The caller owns the contract:
+        /// ORT rejects a differently-shaped feed at <c>Run</c>, so the caller must compile another
+        /// <see cref="CompiledGraph"/> for another shape (see <c>TrainingRig</c>'s shape-keyed cache).
+        /// </summary>
+        /// <param name="graph">The graph to compile.</param>
+        /// <param name="inputDims">Concrete dims per graph input, or null to keep them symbolic.</param>
+        /// <param name="trainingStep">True for a lowered training step the memory-aware pass has
+        /// already scheduled: what it duplicates, it duplicates on purpose, so the session must not
+        /// merge it back (<see cref="ShorokooGraphOptimization.TrainingStep"/>). Every other graph
+        /// — a user's <see cref="Compile(ComputationGraph)"/> included — runs the ordinary profile.</param>
+        internal CompiledGraph Compile(InternalComputationGraph graph, IReadOnlyList<long[]?>? inputDims, bool trainingStep)
         {
             graph.RequireRunnableOps("ComputeContext.Compile");
             var originalInputNames = ResolveOriginalInputNames(graph);
             return CompileFromModel(
-                () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true),
-                originalInputNames);
+                () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true, inputDims: inputDims),
+                originalInputNames,
+                trainingStep);
         }
 
-        private CompiledGraph CompileFromModel(Func<ModelProto> buildModel, string[] originalInputNames)
+        private CompiledGraph CompileFromModel(Func<ModelProto> buildModel, string[] originalInputNames, bool trainingStep = false)
         {
             var model = buildModel();
 
@@ -211,13 +234,14 @@ namespace Shorokoo.Runtime
             ProtoBuf.Serializer.Serialize(memoryStream, model);
             var modelData = memoryStream.ToArray();
 
-            var session = CreateSession(modelData, HasOptionalOps(model.Graph));
+            var optimization = SessionOptimization(HasOptionalOps(model.Graph), trainingStep);
+            var session = CreateSession(modelData, optimization);
 
             var onnxInputNameByOriginal = new Dictionary<string, string>();
             for (int i = 0; i < originalInputNames.Length && i < session.InputNames.Count; i++)
                 onnxInputNameByOriginal[originalInputNames[i]] = session.InputNames[i];
 
-            return new CompiledGraph(session, onnxInputNameByOriginal, originalInputNames);
+            return new CompiledGraph(session, onnxInputNameByOriginal, originalInputNames, optimization);
         }
 
         private static string[] ResolveOriginalInputNames(InternalComputationGraph graph)
@@ -381,7 +405,7 @@ namespace Shorokoo.Runtime
             }
         }
 
-        private IShorokooInferenceSession CreateSession(byte[] modelData, bool disableOptimizations = false)
+        private static ShorokooGraphOptimization SessionOptimization(bool disableOptimizations, bool trainingStep)
         {
             // Both conditions that pass true here are avoiding ORT's constant-folding pass:
             // it calls GetDeleteFunc on Optional values, which OptionalTypeBase doesn't
@@ -390,14 +414,16 @@ namespace Shorokoo.Runtime
             // scales with the data (see IsFullyConstant). Disabling optimizations skips the
             // fold pass; the nodes then go through the normal execution path, which ORT
             // handles correctly and which reuses buffers.
-            var optLevel = disableOptimizations
-                ? ShorokooGraphOptimization.DisableAll
+            return disableOptimizations ? ShorokooGraphOptimization.DisableAll
+                : trainingStep ? ShorokooGraphOptimization.TrainingStep
                 : ShorokooGraphOptimization.EnableAll;
-            return InferenceBackend.Factory.CreateSession(
-                modelData,
-                optLevel,
-                ShorokooLogSeverity.Fatal);
         }
+
+        private IShorokooInferenceSession CreateSession(byte[] modelData, bool disableOptimizations = false)
+            => CreateSession(modelData, SessionOptimization(disableOptimizations, trainingStep: false));
+
+        private IShorokooInferenceSession CreateSession(byte[] modelData, ShorokooGraphOptimization optimization)
+            => InferenceBackend.Factory.CreateSession(modelData, optimization, ShorokooLogSeverity.Fatal);
 
         /// <summary>
         /// Whether the model takes no runtime input, so every node's value is already

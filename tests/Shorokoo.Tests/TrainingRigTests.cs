@@ -1,4 +1,7 @@
 using System.Globalization;
+using Microsoft.ML.OnnxRuntime;
+using Shorokoo.Core.Factory;
+using Shorokoo.Core.Factory.IR;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Modules.Initializers;
 using Shorokoo.Runtime;
@@ -1157,6 +1160,64 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.NotNull(graphs.ModelGraph);
         Assert.NotNull(graphs.LossGraph);
         Assert.NotNull(graphs.OptimizerGraph);
+    }
+
+    [Fact]
+    public void TestTrainStepSessionCarriesConcreteDimsFoldsShapeArithmeticAndRecompilesPerShapeCoverage()
+    {
+        var (sample, input, target) = ScalarMultiplyBatches();
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, sample, 0.1f);
+        var ckpt = rig.CreateInitialCheckpoint();
+        var graph = rig.TrainingStepPureGraph.ToInternal();
+
+        var fed = ComputeContext.ExpandStructInputs([ckpt.TrainableParams, ckpt.ModelState, ckpt.OptimizerState, input, target]);
+        long[]?[] dims = fed.Select(d => ((TensorData)d).Shape.Dims).ToArray()!;
+        var concrete = FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true, inputDims: dims);
+        var rankOnly = FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true);
+
+        Assert.Equal(dims, concrete.Graph.Inputs.Select(vi => vi.Type.TensorType.Shape.Dims.Select(d => d.DimValue).ToArray()));
+        Assert.All(rankOnly.Graph.Inputs, vi => Assert.Null(vi.Type.TensorType.Shape));
+        Assert.Equal(0, OrtOptimizedNodeCount(concrete, "Shape"));
+        Assert.NotEqual(0, OrtOptimizedNodeCount(rankOnly, "Shape"));
+
+        var generic = ComputeContext.Default.Compile(rig.TrainingStepPureGraph.ToInternal(), inputDims: null, trainingStep: true);
+        float GenericLoss(TensorDataStruct i, TensorDataStruct t) =>
+            generic.Execute([ckpt.TrainableParams, ckpt.ModelState, ckpt.OptimizerState, i, t])[^1].ToTensorData<float32>().AccessMemory()[0];
+        var halfInput = rig.InputDef.FromOrderedData(TensorData([2L], [1f, 2f]));
+        var halfTarget = rig.TargetDef.FromOrderedData(TensorData([2L], [0f, 0f]));
+        Assert.Equal(GenericLoss(input, target), rig.TrainStep(ckpt, input, target).Loss);
+        Assert.Equal(GenericLoss(halfInput, halfTarget), rig.TrainStep(ckpt, halfInput, halfTarget).Loss);
+        Assert.Equal(GenericLoss(input, target), rig.TrainStep(ckpt, input, target).Loss);
+        Assert.Equal(2, rig.CompiledTrainStepShapeKeys.Count);
+        Assert.Equal(2, rig.CompiledTrainStepShapeKeys.Distinct().Count());
+        Assert.False(rig.HasGenericTrainStepSession);
+
+        foreach (var n in (int[])[1, 3, 5])
+        {
+            var i = rig.InputDef.FromOrderedData(TensorData([(long)n], Enumerable.Range(1, n).Select(v => (float)v).ToArray()));
+            var t = rig.TargetDef.FromOrderedData(TensorData([(long)n], new float[n]));
+            Assert.Equal(GenericLoss(i, t), rig.TrainStep(ckpt, i, t).Loss);
+        }
+        Assert.Equal(TrainingRig.MaxShapeSpecializedTrainSteps, rig.CompiledTrainStepShapeKeys.Count);
+        Assert.True(rig.HasGenericTrainStepSession);
+    }
+
+    private static int OrtOptimizedNodeCount(ModelProto model, string opType)
+    {
+        var bytes = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(bytes, model);
+        var optimizedPath = Path.Combine(Path.GetTempPath(), $"shrk-opt-{Guid.NewGuid():N}.onnx");
+        using var options = new SessionOptions();
+        options.LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_FATAL;
+        options.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL;
+        options.OptimizedModelFilePath = optimizedPath;
+        using (new InferenceSession(bytes.ToArray(), options)) { }
+        ModelProto optimized;
+        using (var fs = File.OpenRead(optimizedPath))
+            optimized = ProtoBuf.Serializer.Deserialize<ModelProto>(fs);
+        File.Delete(optimizedPath);
+        return optimized.Graph.Nodes.Count(n => n.OpType == opType);
     }
 
     [Fact]

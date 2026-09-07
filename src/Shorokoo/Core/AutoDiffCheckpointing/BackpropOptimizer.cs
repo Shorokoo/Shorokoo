@@ -252,6 +252,11 @@ internal class SimpleBackpropOptimizer
         ShapeInferenceResult shapeInfo,
         GraphEvaluationResult baseEval)
     {
+        // Positions below are walk positions: NodeDetails is in the evaluation's execution
+        // order, which is ORT's rather than the linear order.
+        if (baseEval.NodeDetails.Count == nodes.Count)
+            nodes = baseEval.NodeDetails.Select(d => nodes[d.NodeIndex]).ToList();
+
         var tensorInfo = BuildTensorReplayInfo(nodes, shapeInfo, baseEval);
 
         var replayedTensors = new HashSet<FastTensorKey>();

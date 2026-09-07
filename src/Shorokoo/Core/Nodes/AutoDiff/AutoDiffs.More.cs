@@ -19,11 +19,11 @@ namespace Shorokoo.Core.Nodes.AutoDiff
 
         // ===== Reciprocal =====
 
-        [AutoDiff(RECIPROCAL)]
-        public static Variable?[] Reciprocal<T>(Tensor<T> x, Tensor<T> grad) where T : IVarType
+        [AutoDiff(RECIPROCAL, UsesOutputs = true)]
+        public static Variable?[] Reciprocal<T>(Tensor<T> x, Tensor<T> y, Tensor<T> grad) where T : IVarType
         {
-            // d(1/x)/dx = -1/x²
-            return [-(grad / (x * x))];
+            // d(1/x)/dx = -1/x² = -y²
+            return [-(grad * y * y)];
         }
 
         // ===== LeakyRelu =====

@@ -44,16 +44,59 @@ compile-time constant) and then differentiate normally.
 
 ### Gradient (activation) checkpointing
 
-There is no way to ask Shorokoo to trade compute for activation memory: no
-attribute, option, or API marks a module, block, or tensor for recomputation
-during the backward pass. If a training step does not fit, the levers are the
-usual ones — a smaller batch, a shorter sequence, or a smaller model.
+Activation checkpointing is a per-module attribute: `[Module(Checkpoint = true)]`
+marks every call of the module as a segment whose forward activations are
+recomputed in the backward pass instead of kept, PyTorch's
+`torch.utils.checkpoint` — see
+[Activation checkpointing](nn-library.md#activation-checkpointing). It is the
+one memory lever you reach for by hand, and it is honoured unconditionally: the
+rig applies it before its own compute-versus-memory objective, and even to a
+step so small that the automatic pass below would skip it. There is no finer
+grain than a module, and no way to checkpoint a single tensor.
 
-Building a training rig does run an internal memory-aware pass over the lowered
-training-step graph, which may reorder nodes and recompute a tensor rather than
-keep it alive, but only where that improves a fixed combined compute-and-memory
-metric. The pass is automatic, has no settings, and reports nothing; do not
-count on it to make a step fit that otherwise would not.
+Attention has one more lever, and it is not checkpointing: passing
+`queryChunks: c` to `Attention.ScaledDotProductAttention` splits the query axis
+into `c` blocks, which divides the score-sized **transients** by `c` but not
+what the step retains across the backward pass. What it saves is shape-dependent
+and costs compute, so measure both. See
+[Sizing an attention run](nn-library.md#attention-memory) for the arithmetic and
+for what the quadratic term actually costs.
+
+Building a training rig also runs an internal memory-aware pass over the lowered
+training-step graph, which reorders nodes and recomputes tensors rather than
+keeping them alive where that improves a combined compute-and-memory objective.
+It recomputes the way gradient checkpointing does — a chain of producers back to
+values that are live anyway, cloned once and shared by every gradient that reads
+it, with the placement and the depth of the chain chosen by evaluating the
+candidate graph — but conservatively, because it is automatic and has no opt-out:
+it takes trades its objective accepts, and the attribute above is how you ask for
+one it would not. Its model of memory is ONNX Runtime's own allocation plan for the
+step (the order ORT actually runs, and ORT's habit of handing a dead buffer to the
+next tensor of the same shape rather than returning it), so what it optimizes is
+what gets allocated; the framework's own memory benchmark records the resident peak
+of one training step next to the modelled one, and on the graph the pass returns the
+two agree to within about 10% everywhere except a conv stack, whose im2col workspace
+the model does not see, and the LSTM step, whose Loop body the model walks once. On
+the graph before the pass the model runs up to 13% high on attention. Measured that
+way, unoptimized to optimized: an MLP 5.5 to 4.2 MiB, a conv stack 28.6 to 24.7, a
+one-layer transformer encoder 19.5 to 18.9, a two-layer one 37.3 to 35.8, dense
+attention unchanged, chunked attention 5.8 to 5.0 — for at most a few percent more
+kernel time. The pass leaves a graph whose backward pass runs through
+a recurrent op untouched — and not a recurrent one only: any graph carrying a scope at all, a
+forward `If` included, comes back with nothing but its checkpoint hints applied,
+because the evaluator walks a scope body once where ORT runs it per iteration, and
+on the LSTM step acting on that model made the real peak worse. The attribute above
+is still honoured there: it is applied before this bail-out, being what you asked
+for rather than what the objective chose.
+
+Two things the rig does around that pass matter more than the pass itself for a
+step's memory. The training-step session is compiled for the shapes it is fed, so
+ORT resolves every intermediate shape at session build and folds the shape
+arithmetic — most of a step's kernels, and outputs that pinned activations alive —
+out of the executed graph (the encoder steps above dropped from 27.4 and 50.6 MiB to
+19.5 and 37.2 before the pass touched them). And the session runs ORT's full
+optimization level minus the common-subexpression pass, which would otherwise merge
+every recomputation the pass emits back into the tensor it exists to free.
 
 That pass is also where three types a reflection dump over the `Shorokoo`
 assembly turns up come from — `GraphEvaluationResult`, `NodeEvaluationInfo` and

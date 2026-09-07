@@ -15,6 +15,12 @@ Related: [defining-models.md](defining-models.md) · [training.md](training.md) 
   helpers, and the recurrent layers are plain C#-argument static helpers
   (`Pooling.MaxPool2d(x, 2)`, `Convolution.Conv(...)`, `Recurrent.RNN(x, 16)`),
   and plain activations are tensor one-liners (`x.Relu()`) — none needs a module.
+- Attention is the only layer whose activations grow **quadratically** with
+  sequence length: [Sizing an attention run](#attention-memory) gives the
+  arithmetic to budget a batch size with, and `queryChunks` is its knob. Any
+  `[Module]` can be marked `[Module(Checkpoint = true)]` to recompute its
+  activations in the backward pass instead of keeping them — see
+  [Activation checkpointing](#activation-checkpointing).
 
 ```bash
 dotnet add package Shorokoo.Modules
@@ -756,14 +762,17 @@ needs conversion.
 ```csharp
 // Scaled dot-product attention (no params): q/k/v must be rank-4 [N, H, L, d].
 // `scale` is `float?`: null (the default) means 1/sqrt(d), d = the last query dim.
+// `queryChunks` is the memory lever — see "Sizing an attention run" below.
 Attention.ScaledDotProductAttention(Tensor<float32> query, Tensor<float32> key,
                                     Tensor<float32> value, bool causal = false,
                                     float? scale = null,
-                                    Tensor<float32>? additiveMask = null)
+                                    Tensor<float32>? additiveMask = null,
+                                    int queryChunks = 1)
 
 // The additive causal mask ScaledDotProductAttention uses when causal: true,
 // exposed on its own (no params): shape [Lq, Lk], 0 on/below the diagonal, -1e9 above.
-Attention.CausalMask(Scalar<int64> lq, Scalar<int64> lk)
+// `queryOffset` shifts the query rows to absolute positions (null = start at 0).
+Attention.CausalMask(Scalar<int64> lq, Scalar<int64> lk, Scalar<int64>? queryOffset = null)
 
 // Rotary positional embedding (RoPE; no params): rotates a [N, H, L, d] tensor
 // (d EVEN) by an angle proportional to sequence position. Apply to Q and K
@@ -789,7 +798,7 @@ TransformerDecoderLayer.Call(Scalar<int64> embedDim, Scalar<int64> numHeads,
 returns `[N, H, Lq, d]` (`d` from `value`). `query`/`key`/`value` must be
 **rank-4** — the last-two-dims transpose is a static perm `[0, 1, 3, 2]`, so an
 arbitrary-rank input is not accepted; `MultiHeadAttention` reshapes to that layout
-before calling. The three optional arguments:
+before calling. The four optional arguments:
 
 - **`causal`** is a plain C# `bool` decided when you build the graph (not a
   `Scalar<bit>`): `true` adds `CausalMask(Lq, Lk)` to the scores before the softmax, so
@@ -798,7 +807,13 @@ before calling. The three optional arguments:
 - **`scale`** is `float?`, **not** `float`. Left `null` (the default) the scale is
   `1/sqrt(d)` with `d` the **last query dim, read in-graph** — so it follows a dynamic
   head dim. Passing a value bakes that number in as a constant multiplier instead, for
-  the models whose scaling deviates from `1/sqrt(d)`.
+  the models whose scaling deviates from `1/sqrt(d)`. It multiplies **Q**, not the
+  scores: `Q` is `[N, H, Lq, d]` and the scores are `[N, H, Lq, Lk]`, so scaling the
+  smaller operand is the same product and keeps one score-sized tensor out of the
+  forward pass (and its gradient `Mul` out of the backward pass).
+- **`queryChunks`** is a plain C# `int` (default `1` = the dense path) that splits the
+  query axis into that many blocks. It is the one memory lever attention offers —
+  [Sizing an attention run](#attention-memory).
 - **`additiveMask`** is an optional pre-built additive mask, broadcastable to the
   `[…, Lq, Lk]` scores and added **on top of** the causal one (padding masks, custom
   attention patterns). Use it when the mask is itself a graph tensor rather than a
@@ -816,10 +831,17 @@ before calling. The three optional arguments:
 `0` where the key position is on or before the query position (`col ≤ row`) and `-1e9`
 above the diagonal. Both lengths are graph scalars (`Scalar<int64>`, e.g.
 `query.DimTensor(-2)`), so the mask sizes itself from the actual sequence lengths. It is
-built from `Range` + comparison + `Where` on constants — no `Trilu`, and no gradient
-flows through it. Reach for it when you assemble attention yourself, or when the mask
-has to be gated on a graph bit: `causal.IfElse(Attention.CausalMask(lq, lk),
-TensorFill([lq, lk], 0f))`, then hand the result to `additiveMask`.
+built from `Range` + comparison + `Where` on two `[1]` constants that `Where`
+broadcasts — no `Trilu`, no gradient, and one `[Lq, Lk]` tensor rather than three.
+Reach for it when you assemble attention yourself, or when the mask has to be gated on
+a graph bit: `causal.IfElse(Attention.CausalMask(lq, lk), TensorFill([lq, lk], 0f))`,
+then hand the result to `additiveMask`.
+
+The optional third argument `queryOffset` shifts the query rows to **absolute**
+positions — rows run `[offset, offset + Lq)` instead of `[0, Lq)`. That is what makes a
+causal mask correct when the queries are a *slice* of the sequence rather than all of
+it: a `queryChunks` block (which passes it for you), or a decoding step whose single
+query row sits at position `t` against a key history of length `t + 1`.
 
 All built from autodiff-supported primitives (MatMul / Softmax / Transpose /
 Where), so they train end-to-end.
@@ -861,6 +883,172 @@ query length `Lt` and key/value length `Lm` may differ, it exercises
 `MultiHeadAttention`'s distinct-k/v (separate kdim/vdim) cross-attention path. The
 self-attention is hard-coded causal; `memory` is fed unnormalized (expected to be
 the already-LayerNorm'd encoder-stack output, matching PyTorch).
+
+<a id="attention-memory"></a>
+#### Sizing an attention run
+
+Attention is the one layer whose activations are **quadratic in sequence length**, so it
+is the one you have to budget for by hand. Everything below is arithmetic you can do
+before you run anything.
+
+The unit is one **score block** — the `[N, H, Lq, Lk]` tensor `QKᵀ` and everything the
+same shape downstream of it:
+
+```
+score block = N · H · Lq · Lk · 4 bytes          (float32)
+```
+
+| N (batch) | H (heads) | L = Lq = Lk | one score block |
+|---|---|---|---|
+| 1 | 4 | 256 | 1 MiB |
+| 1 | 4 | 1 024 | 16 MiB |
+| 8 | 8 | 1 024 | 256 MiB |
+| 32 | 6 | 1 024 | 768 MiB |
+| 32 | 6 | 2 048 | 3 GiB |
+
+Note what is *not* in that formula: `d` (the head dim) does not appear — it is contracted
+away by `QKᵀ` — and neither does the number of parameters. Doubling the sequence length
+quadruples the block; doubling the batch or the head count only doubles it. The additive
+mask is a separate, much smaller `[Lq, Lk] · 4 bytes` (4 MiB at `L = 1024`), shared by
+every batch element and head — but built **per call site**, not deduplicated across them,
+and split into `c` pieces of `[Lq/c, Lk]` under `queryChunks`.
+
+**What a training step actually holds.** Every figure below is **measured**: the resident
+high-water mark of one training step on the CPU backend (`VmHWM` with ONNX Runtime's arena
+off, so every activation is a real allocation), for a step whose attention has all three
+projections trainable, with a causal mask, at `N = 2`, `H = 4`, `L = 256` — a 2 MiB score
+block, read the way the framework's own memory benchmark reads it, after the training rig's
+memory pass has run (see [limitations.md](limitations.md#gradient-activation-checkpointing)).
+
+The score block is not the only term. The peak also holds q/k/v and their gradients, each
+`N · H · L · d · 4` bytes — call that a **q block**. It is `d/L` times a score block, so it is
+negligible at long sequences and very much not at short ones:
+
+| attention calls | `d` | peak | in score blocks |
+|---|---|---|---|
+| 1 | 32 | 6.9 MiB | 3.4 |
+| 1 | 64 | 8.6 MiB | 4.3 |
+| 1 | 128 | 11.8 MiB | 5.9 |
+| 2 | 32 | 11.9 MiB | 6.0 |
+| 2 | 64 | 14.4 MiB | 7.2 |
+
+and it scales the way the formula says: doubling the batch (`N = 4`, a 4 MiB block) gives
+14.2 MiB, doubling the sequence (`L = 512`, an 8 MiB block) gives 26.3 MiB. Read these to about
+±0.3 MiB: each is the largest of five readings of a resident high-water mark, and the allocator
+moves about that much between recordings.
+
+A rule that fits every one of those from above, so it over-budgets rather than under-:
+
+```
+peak  ≈  A · (3 · score block  +  6.5 · q block)
+
+  score block = N · H · Lq · Lk · 4 bytes
+  q block     = N · H · L  · d  · 4 bytes
+  A           = number of ScaledDotProductAttention calls
+```
+
+A 6-layer encoder at batch 32, 6 heads, `L = 1024`, `d = 64` is `A = 6`, a 768 MiB score
+block and a 48 MiB q block — so ≈ 6 × (2.25 + 0.30) GiB ≈ **15 GiB in attention activations
+alone**, before parameters, gradients, optimizer state and every other layer. Drop the
+`q block` term and you would budget 13.5 GiB and be wrong by a tenth.
+
+Two caveats on checking this against a real run. The measurements are CPU-side; on a GPU
+the same tensors are allocated, but below a few hundred MiB you will not see any of it in a
+GPU reading, because the ONNX Runtime arena reserves a fixed few hundred MiB up front and
+the blocks fit inside it. And the API that produces the figures is internal and unsupported.
+
+**The lever: `queryChunks`.** Passing `queryChunks: c` splits the query axis into `c` blocks,
+runs attention on each against the whole key/value, and concatenates. It is exact — the output
+matches the dense path to floating-point rounding, gradients and causal masking included (each
+chunk gets a `queryOffset` causal mask, so it still masks absolute positions).
+
+**Measure it before you rely on it, and expect to pay compute for it.** It shrinks the
+score-sized tensors by `c`, and what it saves depends on how much of the peak they are;
+what it costs is `c` MatMul and Softmax launches instead of one. On the model above at `c = 4`,
+with peak measured as above and compute as the pass's own model of the step, which unlike a
+kernel-time reading is reproducible:
+
+| `d` | `L` | dense | chunked | peak | modelled compute |
+|---|---|---|---|---|---|
+| 32 | 256 | 6.9 MiB | 5.0 MiB | **28% better** | +41% |
+| 64 | 256 | 8.6 MiB | 7.1 MiB | **18% better** | +37% |
+| 32 | 512 | 26.3 MiB | 16.5 MiB | **37% better** | +22% |
+
+So it is worth trying when a run is close to fitting, and it pays best where the score
+block dominates — long sequences, small head dims — which is exactly where you need it;
+at short sequences the retained q blocks are most of the peak and chunking cannot touch
+them. Check both numbers afterwards: the compute cost is launch overhead, so it is worst on
+small steps and shrinks as the sequence grows.
+
+An `additiveMask` is handled per chunk. Its query axis (axis -2, once right-aligned to the
+scores' rank) must be `Lq` or `1` — the same rule the dense path enforces, and any other
+height is rejected rather than silently narrowed or broadcast. One that already broadcasts
+over queries — rank < 2, or a size-1 axis -2, as in an `[N, 1, 1, Lk]` padding mask — goes to
+every chunk whole; one that is `Lq` rows tall is sliced to each chunk's rows.
+
+`queryChunks` is a build-time C# `int`, fixed when the graph is built — `Lq` itself stays
+dynamic, and chunk `i` covers rows `[Lq·i/c, Lq·(i+1)/c)`, so an `Lq` that does not divide
+evenly just gives chunks differing by one row (and a `c` larger than `Lq` gives empty chunks —
+still correct, just wasted launches). Keep `c` small: `c` chunks mean `c` MatMul and Softmax
+launches instead of one, and the graph grows accordingly — the built (pre-optimization)
+one-attention training step goes from 505 to 1 308 nodes at `c = 4`.
+
+It reaches only the `Attention.ScaledDotProductAttention` helper, not `MultiHeadAttention`,
+`TransformerEncoderLayer` or `TransformerDecoderLayer`: a `[Module]`'s parameters are all
+graph values, fixed at concretization — after the module body has run — and a chunk count has
+to be a C# constant at build time. So the lever is available only to hand-assembled attention
+today; a module variant with a chunk count baked in is possible, and is not written.
+
+**The other levers,** in the order they cost you least: shorten the sequence (quadratic),
+shrink the batch (linear), cut heads (linear). And a block can be marked for recomputation
+in the backward pass — see [Activation checkpointing](#activation-checkpointing) next.
+
+<a id="activation-checkpointing"></a>
+#### Activation checkpointing: `[Module(Checkpoint = true)]`
+
+```csharp
+[Module(Checkpoint = true)]
+public partial class MlpBlock
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var h = Linear.Model(Scalar(32L), Scalar(true)).Call(x).Relu();
+        return Linear.Model(Scalar(32L), Scalar(true)).Call(h).Relu();
+    }
+}
+```
+
+This is the lever PyTorch calls `torch.utils.checkpoint`: every call of a checkpointed module
+is a **segment** whose forward activations are dropped after the forward pass and recomputed
+from the segment's inputs when the backward pass needs them. What is kept across the gap is
+the segment's boundary — its inputs and its outputs — and what is recomputed is everything
+produced inside the body, once per segment, shared by every gradient that reads it. The
+step's numbers do not change (the recomputation is the same ops on the same inputs; a
+checkpointed stack and its plain twin follow the same loss trajectory), the module's
+parameters, state and checkpoints are unaffected, and nothing about the hint reaches an
+exported ONNX model. It composes: a checkpointed module inside a checkpointed module is one
+segment, the outer one.
+
+The training rig honours the hint **unconditionally** — before, and independently of, the
+compute-versus-memory objective its memory-aware pass otherwise applies, and even on a step
+so small that the pass would not run at all. That is the point of it: the automatic pass only
+takes a recomputation that pays under its own objective, and refuses one that buys memory
+with a large compute increase; the attribute is how you say you want that trade anyway.
+
+Measure before relying on it, because it is not always a win over the automatic pass. That
+pass already recomputes what pays under its objective, and it is free to choose finer-grained
+recomputations than a whole segment; the hint buys its memory with less compute, and it is
+the only lever on a step the pass would not touch. On a three-block MLP of width 32 behind a
+linear head, at a batch the pass leaves alone, the checkpointed twin's modelled peak is 40%
+below the plain one's, for some 14% more modelled compute, with an identical loss trajectory. At a batch large enough for the pass to act, the
+automatic pass and the hint land within a few percent of each other on that model, and on a
+wide MLP or a two-layer transformer encoder the hint came out slightly worse than the
+automatic pass on both counts. The hint is for a segment whose activations are what the peak
+is made of and that the pass would otherwise leave alone, and for buying the memory at a
+known compute price. Those are the pass's **modelled** figures; before relying on the hint
+for a step that must fit, measure the step — see
+[limitations.md](limitations.md#gradient-activation-checkpointing) for what the model does
+and does not capture.
 
 ### PReLU / GLU
 
@@ -1422,7 +1610,7 @@ var targetBatch = MakeBatch("targets", "Target", targetData);
 var ckpt = rig.CreateInitialCheckpoint();
 for (int i = 0; i < 15; i++)
 {
-    ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch);  // compiled once internally, then reused
+    ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch);  // compiled internally, cached per fed input shape
     Console.WriteLine($"step {i}: loss {ckpt.Loss}");
 }
 ```

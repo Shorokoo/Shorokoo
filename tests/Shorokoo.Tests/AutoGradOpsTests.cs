@@ -73,6 +73,8 @@ public class AutoGradElementwiseOpsCoverageTests
         RunTensor<AutoGradReluCheck>([2L], 3f, -2f);
         Run<AutoGradReluChainedCheck>(3f);
         RunTensor<AutoGradSigmoidCheck>([2L], 0f, 2f);
+        RunTensor<AutoGradSoftmaxWeightedCheck>([3L], 0.5f, -1f, 2f);
+        RunTensor<AutoGradLogSoftmaxWeightedCheck>([3L], 0.5f, -1f, 2f);
         RunTensor<AutoGradLeakyReluCheck>([2L], 3f, -2f);
         RunTensor<AutoGradGeluCheck>([2L], 0f, 1f);
         RunTensor<AutoGradEluCheck>([2L], 2f, -1f);
@@ -84,6 +86,10 @@ public class AutoGradElementwiseOpsCoverageTests
         RunTensor<AutoGradHardSwishCheck>([2L], 1.5f, -1.5f);
         RunTensor<AutoGradMishCheck>([2L], 0.7f, -0.7f);
         RunTensor<AutoGradSoftplusCheck>([2L], 0.5f, -0.5f);
+        RunTensor<AutoGradSoftplusTailCheck>([3L], -10f, -20f, -30f);
+        Assert.True(AutoTest.AdvancedTestGraph<AutoGradSoftplusScaledTailCheck>(
+            [], [TensorData(DType.Float32, [3L], -80f, -90f, -95f), TensorData(DType.Float32, [], 1e30f),
+                 TensorData(DType.Float32, [3L], 1.8048513e-5f, 8.1940127e-10f, 5.5210823e-12f)]));
         RunTensor<AutoGradSoftsignCheck>([2L], 0.5f, -0.5f);
         RunTensor<AutoGradThresholdedReluCheck>([2L], 1.0f, 0.0f);
         RunTensor<AutoGradShrinkCheck>([3L], 1.0f, -1.0f, 0.1f);

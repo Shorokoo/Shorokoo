@@ -52,6 +52,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         /// for ConstantOfShape's <c>shape</c> parameter rather than the default float32).
         /// </summary>
         private static readonly Dictionary<string, MethodInfo> gradientMethodInfos = BuildGradientMethodInfos();
+        private static readonly HashSet<string> outputUsingGradientOps = BuildOutputUsingGradientOps();
 
         /// <summary>
         /// Maps every C# IVarType class (e.g. <c>typeof(int64)</c>) back to its <see cref="DType"/>
@@ -370,9 +371,22 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
                 withMask.Add((FastTensorKey)node.Outputs[1]!);
                 inputs = withMask;
             }
-            var inputIValues = new Variable?[inputs.Count];
             gradientMethodInfos.TryGetValue(node.OpCode, out var methodInfo);
             var methodParams = methodInfo?.GetParameters();
+
+            // Rules flagged UsesOutputs read the forward outputs; append them as trailing
+            // stand-in slots (the same extension Dropout uses for its mask above). The rule's
+            // signature is (inputs..., outputs..., outputGrads..., attrs...); node.Inputs is
+            // already padded to the op's declared arity, so an omitted trailing optional input
+            // holds a null slot and the outputs land where the signature expects them.
+            if (outputUsingGradientOps.Contains(node.OpCode))
+            {
+                var withOutputs = new List<FastTensorKey?>(inputs.Count + outputs.Count);
+                withOutputs.AddRange(inputs);
+                withOutputs.AddRange(outputs);
+                inputs = withOutputs;
+            }
+            var inputIValues = new Variable?[inputs.Count];
             for (int i = 0; i < inputs.Count; i++)
             {
                 if (inputs[i] is not FastTensorKey k)
@@ -508,6 +522,13 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             }
             return map;
         }
+
+        private static HashSet<string> BuildOutputUsingGradientOps()
+            => typeof(AutoDiffs).GetMethods(BindingFlags.Public | BindingFlags.Static)
+                .Select(m => m.GetCustomAttribute<AutoDiffAttribute>())
+                .Where(a => a is { UsesOutputs: true })
+                .Select(a => a!.OpName)
+                .ToHashSet();
 
         private static Dictionary<Type, DType> BuildDTypeByIVarType()
         {

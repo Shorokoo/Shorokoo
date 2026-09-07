@@ -26,6 +26,15 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
 {
     private readonly Action<SessionOptions> _configureExecutionProvider;
 
+    private static int _sessionsCreated;
+
+    /// <summary>
+    /// How many sessions this process has built through a factory. ONNX Runtime applies some
+    /// session settings to the constructing thread once per process, so a test asking what such a
+    /// setting did can only be believed when this is still zero.
+    /// </summary>
+    public static int SessionsCreated => System.Threading.Volatile.Read(ref _sessionsCreated);
+
     /// <param name="configureExecutionProvider">
     /// Applied to the <see cref="SessionOptions"/> of every session this factory creates,
     /// after the log-severity and graph-optimization settings and before the session is
@@ -58,12 +67,46 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
         // session creation frees them while ORT is still walking sess_options->provider_factories
         // (core/session/utils.cc, InitializeSession) -- a use-after-free that segfaults the
         // process. Disposing in a finally keeps them rooted across the constructor.
+        System.Threading.Interlocked.Increment(ref _sessionsCreated);
         using var options = new SessionOptions();
-        options.LogSeverityLevel = (OrtLoggingLevel)(int)logSeverity;
-        options.GraphOptimizationLevel = (GraphOptimizationLevel)(int)graphOptimization;
+        Configure(options, graphOptimization, logSeverity);
         _configureExecutionProvider(options);
         var session = new InferenceSession(modelBytes.ToArray(), options);
         return new OrtInferenceSession(session);
+    }
+
+    /// <summary>
+    /// Applies the settings every session this factory creates runs with — the log severity
+    /// and the graph-optimization level, plus the session configuration entry that
+    /// <see cref="ShorokooGraphOptimization.TrainingStep"/> stands for — to
+    /// <paramref name="options"/>. Public so a diagnostic can build an ORT session with exactly
+    /// the product's configuration plus its own (profiling, an optimized-model dump).
+    ///
+    /// <para>For <see cref="ShorokooGraphOptimization.TrainingStep"/>:
+    /// <c>optimization.disable_specified_optimizers</c> = CommonSubexpressionElimination;
+    /// everything else in ORT_ENABLE_ALL — constant folding, the MatMul/Gelu/LayerNorm fusions,
+    /// layout transforms — stays on.</para>
+    ///
+    /// <para>Deliberately absent: <c>session.set_denormal_as_zero</c>. Attention gradients are
+    /// full of denormal floats and MLAS's GEMM runs roughly seven times slower on them, but ORT
+    /// applies that entry to the constructing thread once per process (first session wins) by
+    /// setting FTZ/DAZ in its MXCSR, which then flushes every later float operation on that
+    /// thread — managed code and every other session included. Tracked as Shorokoo/Shorokoo#252;
+    /// a session built here must leave the calling thread's denormals alone.</para>
+    /// </summary>
+    public static void Configure(
+        SessionOptions options,
+        ShorokooGraphOptimization graphOptimization,
+        ShorokooLogSeverity logSeverity)
+    {
+        options.LogSeverityLevel = (OrtLoggingLevel)(int)logSeverity;
+        if (graphOptimization == ShorokooGraphOptimization.TrainingStep)
+        {
+            options.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL;
+            options.AddSessionConfigEntry("optimization.disable_specified_optimizers", "CommonSubexpressionElimination");
+        }
+        else
+            options.GraphOptimizationLevel = (GraphOptimizationLevel)(int)graphOptimization;
     }
 
     /// <summary>

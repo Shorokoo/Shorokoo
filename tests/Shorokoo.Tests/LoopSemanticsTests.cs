@@ -124,7 +124,7 @@ public class LoopSemanticsTests
     {
         Assert.True(Returns<ZeroTripCarryFromInsideTheBody>(3, 8d));
         Assert.True(Returns<ZeroTripCarryWrappedFromOutside>(3, 8d));
-        var ex = Assert.Throws<InvalidTensorOperationException>(
+        var ex = Assert.Throws<UnsupportedLoopVariableAssignmentException>(
             () => _ = ZeroTripCarryFromOutsideTheBody.ComputationGraph);
         Assert.Contains("computed outside the loop", ex.Message);
     }

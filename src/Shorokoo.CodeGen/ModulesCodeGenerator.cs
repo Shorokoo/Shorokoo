@@ -46,8 +46,8 @@ public class ModuleSourceGenerator : IIncrementalGenerator
 
     private static readonly DiagnosticDescriptor LoopCarryAssignedFromOutside = new(
         id: "MSG005",
-        title: "Loop body assigns a carried variable a value computed outside the loop",
-        messageFormat: "'{0} = {1};' assigns a value computed outside the loop, so after the loop '{0}' would still be '{1}' rather than the loop's result. Write '{0} = LoopAPI.Carry({1});', or move the assignment out of the loop.",
+        title: "Unsupported loop variable assignment",
+        messageFormat: "'{0} = {1};' assigns a value computed outside the loop. Write '{0} = LoopAPI.Carry({1});', or move the assignment out of the loop.",
         category: "SourceGeneration",
         DiagnosticSeverity.Warning,
         isEnabledByDefault: true);
@@ -73,13 +73,13 @@ public class ModuleSourceGenerator : IIncrementalGenerator
         var allNames = method.ParameterList.Parameters.Select(x => x.Identifier.Text)
             .Concat(body.DescendantNodes().OfType<VariableDeclaratorSyntax>().Select(v => v.Identifier.Text))
             .ToImmutableHashSet();
-        FindLoopCarriesAssignedFromOutside(body, allNames, allNames, loopBody: null, found);
+        FindLoopCarriesAssignedFromOutside(body, allNames, allNames, ImmutableList<SyntaxNode>.Empty, found);
         return found;
     }
 
     private static void FindLoopCarriesAssignedFromOutside(
         SyntaxNode scope, ImmutableHashSet<string> allNames, ImmutableHashSet<string> boundOutside,
-        SyntaxNode? loopBody, List<AssignmentExpressionSyntax> found)
+        ImmutableList<SyntaxNode> enclosingLoopBodies, List<AssignmentExpressionSyntax> found)
     {
         foreach (var statement in ScopeStatements(scope))
         {
@@ -92,7 +92,8 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                     .OfType<VariableDeclaratorSyntax>()
                     .Select(v => v.Identifier.Text);
                 FindLoopCarriesAssignedFromOutside(
-                    fe.Statement, allNames, allNames.Except(declaredHere), fe.Statement, found);
+                    fe.Statement, allNames, allNames.Except(declaredHere),
+                    enclosingLoopBodies.Add(fe.Statement), found);
                 continue;
             }
 
@@ -101,11 +102,11 @@ public class ModuleSourceGenerator : IIncrementalGenerator
             if (statement is not ExpressionStatementSyntax)
             {
                 foreach (var nested in statement.ChildNodes())
-                    FindLoopCarriesAssignedFromOutside(nested, allNames, boundOutside, loopBody, found);
+                    FindLoopCarriesAssignedFromOutside(nested, allNames, boundOutside, enclosingLoopBodies, found);
                 continue;
             }
 
-            if (loopBody is not null
+            if (!enclosingLoopBodies.IsEmpty
                 && statement is ExpressionStatementSyntax
                 {
                     Expression: AssignmentExpressionSyntax
@@ -117,8 +118,8 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                 }
                 && boundOutside.Contains(lhs.Identifier.Text)
                 && boundOutside.Contains(rhs.Identifier.Text)
-                && !IsAssignedIn(loopBody, rhs.Identifier.Text)
-                && IsDeclaredACarryIn(loopBody, lhs.Identifier.Text))
+                && !IsAssignedIn(enclosingLoopBodies[enclosingLoopBodies.Count - 1], rhs.Identifier.Text)
+                && enclosingLoopBodies.Any(b => IsDeclaredACarryIn(b, lhs.Identifier.Text)))
             {
                 found.Add(assignment);
             }
@@ -133,8 +134,10 @@ public class ModuleSourceGenerator : IIncrementalGenerator
             .OfType<AssignmentExpressionSyntax>()
             .Any(a => a.Left is IdentifierNameSyntax id && id.Identifier.Text == name);
 
-    /// <summary>Whether <paramref name="name"/> is passed to <c>LoopAPI.Init</c> directly in
-    /// <paramref name="scope"/> — the declaration that makes it a carry of that loop.</summary>
+    /// <summary>Whether <paramref name="name"/> is passed to <c>LoopAPI.Init</c> in
+    /// <paramref name="scope"/> — the declaration that makes it a carry of that loop. Checked
+    /// against every enclosing loop body, since a carry declared by an outer loop and reassigned
+    /// in an inner one is refused just the same.</summary>
     private static bool IsDeclaredACarryIn(SyntaxNode scope, string name)
         => scope.DescendantNodesAndSelf()
             .OfType<InvocationExpressionSyntax>()

@@ -525,8 +525,8 @@ namespace Shorokoo
                                      && !this.firstPassVariableOutputs.ContainsKey(x.SecondPassInput)
                                      && !Object.ReferenceEquals(x.SecondPassInput, x.FirstPassInput));
             if (reassignedFromOutsideTheBody is not null)
-                throw new InvalidTensorOperationException(ErrorCodes.FW023, "Loop Variable Binding",
-                    "a variable declared with LoopAPI.Init", CarryAssignedFromOutsideGuidance);
+                throw new UnsupportedLoopVariableAssignmentException(
+                    ErrorCodes.FW023, CarryAssignedFromOutsideGuidance);
 
             var loopVariablesWithInitializers = new List<LoopVariable>();
             foreach (var canonicalLoopVariable in canonicalLoopVariables)
@@ -597,11 +597,28 @@ namespace Shorokoo
         }
 
         private const string CarryAssignedFromOutsideGuidance =
-            "the loop body assigned it a value computed outside the loop, so after the loop it would "
-            + "still be that value rather than the loop's result:"
+            "the loop body assigned a variable declared with LoopAPI.Init a value computed outside "
+            + "the loop."
             + "\n"
-            + "\n    carry = n;                  // refused"
-            + "\n    carry = LoopAPI.Carry(n);   // write this"
+            + "\nInstead of:"
+            + "\n"
+            + "\n    var carry = n + Scalar(5L);"
+            + "\n    foreach (var ctx in LoopAPI.Iterate(trips))"
+            + "\n    {"
+            + "\n        LoopAPI.Init(carry);"
+            + "\n        carry = n;"
+            + "\n    }"
+            + "\n    return carry;"
+            + "\n"
+            + "\nWrite:"
+            + "\n"
+            + "\n    var carry = n + Scalar(5L);"
+            + "\n    foreach (var ctx in LoopAPI.Iterate(trips))"
+            + "\n    {"
+            + "\n        LoopAPI.Init(carry);"
+            + "\n        carry = LoopAPI.Carry(n);"
+            + "\n    }"
+            + "\n    return carry;"
             + "\n"
             + "\nOr move the assignment out of the loop.";
 

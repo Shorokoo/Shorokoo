@@ -225,6 +225,11 @@ namespace Shorokoo.Core
         /// </summary>
         public Variable[] Call(params Variable?[] tensors)
         {
+            if (tensors.Any(t => t is null))
+                throw new ModuleException(ErrorCodes.FW005, this.FriendlyName,
+                    "Call was passed a null argument. Every one of the body's inputs needs a value; " +
+                    "a null leaves the spliced body input wired to nothing.");
+
             if (tensors.Length != this.Inputs.Length)
                 throw new ModuleException(ErrorCodes.FW005, this.FriendlyName,
                     $"Call passed {tensors.Length} argument(s) but the body declares " +

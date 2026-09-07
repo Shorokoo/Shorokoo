@@ -759,7 +759,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
                 else
                 {
-                    // MODULE_INVOKE: inputs[0] = model, inputs[1:] = function args
+                    // MODEL_INVOKE: inputs[0] = model, inputs[1:] = function args
                     var modelKey = fastNode.Inputs[0]!.Value;
 
                     // Find the direct MODULE_SET_HYPERPARAMS node producing the model
@@ -840,7 +840,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 // argument (Shorokoo/Shorokoo#251).
                 var callerInputKeys = new List<FastTensorKey?>();
                 callerInputKeys.AddRange(hyperparamNodeKeys);
-                callerInputKeys.AddRange((isFunction ? fastNode.Inputs : fastNode.Inputs.Skip(1)).ToList());
+                callerInputKeys.AddRange(isFunction ? fastNode.Inputs : fastNode.Inputs.Skip(1));
 
                 Debug.Assert(callerInputKeys.Count == subFastGraph.Inputs.Count,
                     $"FastInlineModulesAndFunctions: caller inputs ({callerInputKeys.Count}) != " +

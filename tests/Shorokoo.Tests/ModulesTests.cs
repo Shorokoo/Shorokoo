@@ -730,13 +730,10 @@ public class ModulesCoverageTests
     [Fact]
     public void TestFastFunctionInvokeNodeReload()
     {
-        System.Func<Tensor<float32>, Tensor<float32>> impl = DoubleScalar;
-        var fn = Shorokoo.Core.ModuleHelper.CreateTargetFunction(impl);
-        Assert.Equal(Shorokoo.Core.Nodes.OnnxNodes.FunctionType.Module, fn.FunctionType);
+        var fn = ModuleFn((Func<Tensor<float32>, Tensor<float32>>)DoubleScalar);
+        Assert.Equal(FunctionType.Module, fn.FunctionType);
 
-        var input = (Tensor<float32>)Shorokoo.Core.Nodes.NodeDefinitions.InternalOp.ModuleTensorInput(
-            DType.Float32, rank: 1, Shorokoo.Core.Nodes.NodeDefinitions.InputType.ModelInput,
-            targetFunction: null, defaultName: "input");
+        var input = InvokeInput("input");
         var callResult = fn.Call(input);
         var output = (Tensor<float32>)callResult[0];
 
@@ -1174,41 +1171,87 @@ public class ModulesCoverageTests
     public void TestModuleTypedFunctionInvokesInlineTheirArgsHyperparamsAndParams()
     {
         var input = TensorData([2L], 1f, 2f);
-        Assert.Equal([2f, 4f], RunInvoke(ModuleFn((Func<Tensor<float32>, Tensor<float32>>)DoubleScalar), x => [x], input));
-        Assert.Equal([3f, 6f], RunInvoke(ModuleFn((Func<Tensor<float32>, Scalar<float32>, Tensor<float32>>)ScaledByHyper), x => [Scalar(3f), x], input));
-        Assert.Equal([1f, 2f], RunInvoke(ModuleFn((Func<Tensor<float32>, Tensor<float32>>)TimesOwnParam), x => [x], input));
+        Assert.Equal([2f, 4f], RunInvoke((Func<Tensor<float32>, Tensor<float32>>)DoubleScalar, x => [x], input));
+        Assert.Equal([3f, 6f], RunInvoke((Func<Tensor<float32>, Scalar<float32>, Tensor<float32>>)ScaledByHyper, x => [Scalar(3f), x], input));
+        Assert.Equal([1f, 2f], RunInvoke((Func<Tensor<float32>, Tensor<float32>>)TimesOwnParam, x => [x], input));
     }
 
     [Fact]
-    public void TestFunctionCallWithTheWrongArgumentCountThrowsNamingTheDeclaredInputs()
+    public void TestAFunctionCallCountingArgumentsAgainstTheBodyRefusesEveryMismatch()
     {
-        var fn = ModuleFn((Func<Tensor<float32>, Scalar<float32>, Tensor<float32>>)ScaledByHyper);
-        var ex = Assert.Throws<ModuleException>(() => fn.Call(InvokeInput("only")));
-        Assert.Contains("1 argument(s)", ex.Message);
-        Assert.Contains("2 input(s)", ex.Message);
+        string Arity(Delegate body, int argCount) => Assert.Throws<ModuleException>(
+            () => ModuleFn(body).Call([.. Enumerable.Range(0, argCount).Select(i => InvokeInput($"a{i}"))])).Message;
+
+        var oneIn = (Func<Tensor<float32>, Tensor<float32>>)DoubleScalar;
+        var twoIn = (Func<Tensor<float32>, Scalar<float32>, Tensor<float32>>)ScaledByHyper;
+
+        Assert.Contains("0 argument(s)", Arity(oneIn, 0));
+        Assert.Contains("2 argument(s)", Arity(oneIn, 2));
+        Assert.Contains("1 hyperparameter(s)", Arity(twoIn, 1));
+        Assert.Contains("3 argument(s)", Arity(twoIn, 3));
     }
+
+    [Fact]
+    public void TestImportingAModelWhoseFunctionCallMiscountsItsInputsIsRefused()
+    {
+        var g = ComputationGraph.FromInternal(ModuleInvokeGraph(), GraphKind.Module);
+        var onnx = SrkFileFormat.Read(CompressedFormatUtils.SaveFastGraphToBinary(g, compressed: false)).OnnxBytes;
+
+        using var read = new System.IO.MemoryStream(onnx);
+        var proto = ProtoBuf.Serializer.Deserialize<Shorokoo.Core.Factory.IR.ModelProto>(read);
+        var fnNames = proto.Functions.Select(f => f.Name).ToHashSet();
+        proto.Graph.Nodes.Single(n => fnNames.Contains(n.OpType)).Inputs.Clear();
+
+        using var ms = new System.IO.MemoryStream();
+        ProtoBuf.Serializer.Serialize(ms, proto);
+        var ex = Assert.Throws<ModuleException>(() => OnnxModelImporter.FromOnnxModel(ms.ToArray()));
+        Assert.Contains("0 input(s)", ex.Message);
+    }
+
+    /// <summary>The MODEL_INVOKE arm reparents the body it splices; the FUNCTION_INVOKE arm does
+    /// not, so every call site of one module-typed function keeps the body's own local model id and
+    /// collapses onto a single parameter identity. Tying is arguable on its own — there is no model
+    /// operand to tell call sites apart — but a parameter whose shape comes from a per-call-site
+    /// hyperparameter then silently takes the first site's shape, and the numbers are wrong with
+    /// nothing raised. Tracked as Shorokoo/Shorokoo#273.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#273: an inlined module-typed function shares one parameter identity across call sites")]
+    public void TestEachCallSiteOfAModuleTypedFunctionGetsItsOwnParameter()
+    {
+        var fn = ModuleFn((Func<Tensor<float32>, Scalar<int64>, Tensor<float32>>)SizedByHyper);
+        var x = InvokeInput("input");
+        var g = ComputationGraph.FromInternal(
+            new InternalComputationGraph(
+                [x],
+                [(Tensor<float32>)fn.Call(Scalar(2L), x)[0], (Tensor<float32>)fn.Call(Scalar(5L), x)[0]]),
+            GraphKind.Module);
+
+        var input = TensorData([2L], 1f, 2f);
+        var run = ComputeContext.Default.Execute(
+            g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel(), input);
+        Assert.Equal(2, run[0].ToTensorData().As<float32>().AccessMemory<float>().Length);
+        Assert.Equal(5, run[1].ToTensorData().As<float32>().AccessMemory<float>().Length);
+    }
+
+    private static Tensor<float32> SizedByHyper(Tensor<float32> t, [Hyper] Scalar<int64> n)
+        => InitSimple.Init([n]);
 
     private static Tensor<float32> ScaledByHyper(Tensor<float32> t, [Hyper] Scalar<float32> h) => t * h;
 
-    private static Tensor<float32> TimesOwnParam(Tensor<float32> t) => t * Modules.InitSimple.Init([Scalar(2L)]);
+    private static Tensor<float32> TimesOwnParam(Tensor<float32> t) => t * InitSimple.Init([Scalar(2L)]);
 
-    private static Shorokoo.Core.Function ModuleFn(Delegate body)
-        => Shorokoo.Core.ModuleHelper.CreateTargetFunction(body);
+    private static Function ModuleFn(Delegate body) => ModuleHelper.CreateTargetFunction(body);
 
     private static Tensor<float32> InvokeInput(string name)
-        => (Tensor<float32>)Shorokoo.Core.Nodes.NodeDefinitions.InternalOp.ModuleTensorInput(
-            DType.Float32, rank: 1, Shorokoo.Core.Nodes.NodeDefinitions.InputType.ModelInput,
-            targetFunction: null, defaultName: name);
+        => (Tensor<float32>)InternalOp.ModuleTensorInput(
+            DType.Float32, rank: 1, InputType.ModelInput, targetFunction: null, defaultName: name);
 
-    private static float[] RunInvoke(
-        Shorokoo.Core.Function fn, Func<Tensor<float32>, Variable[]> callArgs, TensorData input)
+    private static float[] RunInvoke(Delegate body, Func<Tensor<float32>, Variable[]> callArgs, TensorData input)
     {
         var x = InvokeInput("input");
         var g = ComputationGraph.FromInternal(
-            new InternalComputationGraph([x], [(Tensor<float32>)fn.Call(callArgs(x))[0]]), GraphKind.Module);
-        return ComputeContext.Default
-            .Execute(g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel(), input)[0]
-            .ToTensorData().As<float32>().AccessMemory<float>().ToArray();
+            new InternalComputationGraph([x], [(Tensor<float32>)ModuleFn(body).Call(callArgs(x))[0]]),
+            GraphKind.Module);
+        return RunFloats(g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel(), input);
     }
 
     /// <summary>The refusal tells a reader to lower their module's graph, which a generic module's
@@ -1234,12 +1277,9 @@ public class ModulesCoverageTests
     /// <summary>A bare module-typed function invoke over a machinery-free body.</summary>
     private static InternalComputationGraph ModuleInvokeGraph()
     {
-        var fn = Shorokoo.Core.ModuleHelper.CreateTargetFunction(
-            (Func<Tensor<float32>, Tensor<float32>>)DoubleScalar);
-        var input = (Tensor<float32>)Shorokoo.Core.Nodes.NodeDefinitions.InternalOp.ModuleTensorInput(
-            DType.Float32, rank: 1, Shorokoo.Core.Nodes.NodeDefinitions.InputType.ModelInput,
-            targetFunction: null, defaultName: "input");
-        return new InternalComputationGraph([input], [(Tensor<float32>)fn.Call(input)[0]]);
+        var input = InvokeInput("input");
+        return new InternalComputationGraph(
+            [input], [(Tensor<float32>)ModuleFn((Func<Tensor<float32>, Tensor<float32>>)DoubleScalar).Call(input)[0]]);
     }
 
     [Fact]

@@ -1,5 +1,8 @@
 using Shorokoo.Modules.Initializers;
 using Shorokoo.Modules.Layers;
+using Shorokoo.Core.Nodes.Processors.Fast;
+using Shorokoo.Core.Nodes.Processors.Helpers;
+using Shorokoo.Core.Nodes.Processors.Training;
 
 namespace Shorokoo.Tests;
 
@@ -111,18 +114,47 @@ public class ModelParamRefTests
             hyperparamInputs: [], runtimeInputs: [x], rngConfig: RngConfig.Default));
     }
 
-    private static string ParamIdOf(ComputationGraph g)
+    private static string[] ParamIdsOf(ComputationGraph g)
     {
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
-        return Assert.Single(arch.GetConcreteModelParamInfos().ParamInfos).ToShorokooIdString();
+        return [.. arch.GetConcreteModelParamInfos().ParamInfos.Select(x => x.ToShorokooIdString())];
     }
+
+    private static void SameIds(ComputationGraph noRef, ComputationGraph withRef)
+        => Assert.Equal(ParamIdsOf(noRef), ParamIdsOf(withRef));
 
     [Fact]
     public void TestAParamRefDoesNotRenameTheParameterItReferences()
     {
-        Assert.Equal(ParamIdOf(Rank0GainNoRefModel.ComputationGraph),
-                     ParamIdOf(Rank0GainWithRefModel.ComputationGraph));
-        Assert.Equal(ParamIdOf(Rank1GainNoRefModel.ComputationGraph),
-                     ParamIdOf(Rank1GainWithRefModel.ComputationGraph));
+        SameIds(Rank0GainNoRefModel.ComputationGraph, Rank0GainWithRefModel.ComputationGraph);
+        SameIds(Rank1GainNoRefModel.ComputationGraph, Rank1GainWithRefModel.ComputationGraph);
+        SameIds(MixedDepthGainNoRefModel.ComputationGraph, MixedDepthGainWithRefsModel.ComputationGraph);
     }
+
+    private static string[] TrainingParamNamesOf(ComputationGraph g)
+    {
+        var fastGraph = g.ToInternal();
+        FastApplyIdentifierTemplates.Process(fastGraph);
+        FastInlineModulesAndFunctions.Process(fastGraph);
+        FastProcessorHelper.RemoveUnreachableNodes(fastGraph);
+        FastConvertToIdRefModelParams.Process(fastGraph);
+        FastUnpackModelStruct.Process(fastGraph);
+        FastUnpackTensorStructs.Process(fastGraph);
+        return [.. FastReplaceTrainableParamsWithInputProcessor.Process(fastGraph)
+            .TrainableParamStructDef.Fields.Select(x => x.Name)];
+    }
+
+    // Pins Shorokoo/Shorokoo#263: on the training path that does not go through
+    // ToConcreteArchitecture, a read-only reference is discovered as a second trainable
+    // parameter, so the reference reads its own fed tensor instead of the model's weight.
+    [Fact(Skip = "Shorokoo/Shorokoo#263: a param ref becomes a phantom second trainable parameter")]
+    public void TestAParamRefAddsNoParameterOnTheNonConcretizedTrainingPath()
+        => Assert.Equal(TrainingParamNamesOf(Rank1GainNoRefModel.ComputationGraph),
+                        TrainingParamNamesOf(Rank1GainWithRefModel.ComputationGraph));
+
+    // Pins Shorokoo/Shorokoo#264: a sub-model handed over as a [Hyper] Model<> contributes no
+    // trainable parameters at all, so its multiply is dropped and the forward is wrong.
+    [Fact(Skip = "Shorokoo/Shorokoo#264: a [Hyper] Model<> loses every trainable parameter it owns")]
+    public void TestAModelPassedAsAHyperparameterKeepsItsTrainableParams()
+        => SameIds(Rank1GainSubModel.ComputationGraph, HyperModelGainModel.ComputationGraph);
 }

@@ -1238,10 +1238,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             public readonly ImmutableDictionary<ModelId, ModelParamIdentifierTemplate> RelativeModuleTemplates { get; init; }
 
             /// <summary>
-            /// Keys of <see cref="FullTemplates"/> whose template came from a bare param
-            /// reference (<c>IModel.GetTrainableParam</c>) rather than the parameter's own
-            /// definition, so its name is the synthetic <c>ParamRef_&lt;id path&gt;</c>
-            /// placeholder rather than the initializer-derived one.
+            /// Keys whose entry in <see cref="FullTemplates"/> came from a bare param reference
+            /// (<c>IModel.GetTrainableParam</c>) rather than the parameter's own definition, so
+            /// it names the parameter with the synthetic <c>ParamRef_&lt;id path&gt;</c>
+            /// placeholder instead of the initializer-derived name. Such an entry names nothing
+            /// — see the composition in
+            /// <see cref="FastConvertModelParamIdRefToModelParam.Process"/>.
             /// </summary>
             public readonly ImmutableHashSet<ModelId> ReferenceFullTemplates { get; init; }
 
@@ -1297,11 +1299,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             => fastNode.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsParamReference) ?? false;
 
         /// <summary>
-        /// Records <paramref name="idTemplate"/> under its model id, keeping the definition's
-        /// name when a bare reference names the same parameter: a reference carries the
-        /// synthetic <c>ParamRef_&lt;id path&gt;</c> placeholder, and letting it win would
-        /// rename the parameter it merely reads (Shorokoo/Shorokoo#238). Definitions still
-        /// overwrite each other and a reference, so the choice stays independent of node order.
+        /// Records <paramref name="idTemplate"/> under its model id, and marks that id in
+        /// <paramref name="referenceKeys"/> when what it recorded is a bare reference. Both
+        /// kinds reach one model id: <c>FastReparentToModelVariable</c> rewrites a
+        /// definition into a <c>MODEL_PARAM_MODEL_REF</c> when its model arrives as a
+        /// <c>[Hyper] Model&lt;&gt;</c>, so a reference and a definition can share a key. The
+        /// definition wins whichever order the nodes come in — a reference's synthetic
+        /// <c>ParamRef_&lt;id path&gt;</c> placeholder must not stand as a parameter's name
+        /// (Shorokoo/Shorokoo#238). Which DEFINITION wins among several is still last-writer,
+        /// as before.
         /// </summary>
         private static void RecordTemplate(
             Dictionary<ModelId, ModelParamIdentifierTemplate> templates,
@@ -2715,35 +2721,32 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
             if (!hasIdRef) return unresolvedSites;
 
-            // Template composition: purely structural, no CG needed. A template contributed by a
-            // bare param reference (IModel.GetTrainableParam) names the parameter
-            // ParamRef_<id path>; a definition names it after its initializer. Both land on the
-            // same model id when a model's own parameter is also referenced, and the definition's
-            // name is the canonical one — so a reference never displaces a definition here
-            // (Shorokoo/Shorokoo#238). It is still recorded when nothing else claims the id, so a
-            // reference with no definition in the graph reaches its own diagnostic rather than a
-            // missing-template one.
+            // Template composition: purely structural, no CG needed. Only a parameter's
+            // DEFINITION names it. A bare reference (IModel.GetTrainableParam) carries the
+            // synthetic ParamRef_<id path> placeholder its node was minted with, and contributes
+            // no template at all (Shorokoo/Shorokoo#238) — not merely a lower-priority one:
+            // the cross product below pairs every relative template with every base module, so a
+            // reference's template also lands on ids no reference points at, and one of those can
+            // be a strict PREFIX of a definition's id. IdTemplateInfos.ToGeneralModelId resolves
+            // an id to its SHORTEST matching key, so a reference-derived prefix would win over
+            // the definition however this dictionary is ordered.
+            //
+            // Dropping them cannot leave a parameter without a template: a model id carrying only
+            // references never reaches a template lookup, because ExtractModelIdInfosFromStore
+            // rejects it above ("a bare reference cannot stand in for the definition").
             var composedTemplates = new Dictionary<ModelId, ModelParamIdentifierTemplate>();
-            var referenceComposedKeys = new HashSet<ModelId>();
             foreach (var kvp in identifierTemplatesInfo.FullTemplates)
             {
+                if (identifierTemplatesInfo.ReferenceFullTemplates.Contains(kvp.Key)) continue;
                 composedTemplates[kvp.Key] = kvp.Value;
-                if (identifierTemplatesInfo.ReferenceFullTemplates.Contains(kvp.Key))
-                    referenceComposedKeys.Add(kvp.Key);
             }
             foreach (var relKvp in identifierTemplatesInfo.RelativeTemplates)
             {
-                var relIsReference = identifierTemplatesInfo.ReferenceRelativeTemplates.Contains(relKvp.Key);
+                if (identifierTemplatesInfo.ReferenceRelativeTemplates.Contains(relKvp.Key)) continue;
                 foreach (var baseKvp in identifierTemplatesInfo.BaseModuleTemplates)
                 {
                     var composed = new ModelParamIdentifierTemplate(baseKvp.Value, relKvp.Value);
-                    var composedKey = composed.ModelIdTemplate;
-                    if (relIsReference && composedTemplates.ContainsKey(composedKey)
-                        && !referenceComposedKeys.Contains(composedKey)) continue;
-
-                    composedTemplates[composedKey] = composed;
-                    if (relIsReference) referenceComposedKeys.Add(composedKey);
-                    else referenceComposedKeys.Remove(composedKey);
+                    composedTemplates[composed.ModelIdTemplate] = composed;
                 }
             }
             var paramIdentifierTemplates = new IdTemplateInfos

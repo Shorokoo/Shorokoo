@@ -431,6 +431,61 @@ public partial class Rank1GainWithRefModel
     }
 }
 
+/// <summary>Wraps <see cref="Rank1GainSubModel"/> one level deeper, so its parameter sits at
+/// <c>[1, 1]</c> rather than <c>[1]</c>.</summary>
+[Module]
+public partial class Rank1GainTwoLevelModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => Rank1GainSubModel.Call(input);
+}
+
+/// <summary>One nested and one flat parameter, called plainly — the naming baseline for
+/// <see cref="MixedDepthGainWithRefsModel"/>.</summary>
+[Module]
+public partial class MixedDepthGainNoRefModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => Rank1GainTwoLevelModel.Call(input) + Rank1GainSubModel.Call(input);
+}
+
+/// <summary>
+/// <see cref="MixedDepthGainNoRefModel"/> plus a read-only reference to each parameter. The two
+/// referenced models sit at different depths, so composing the shallow reference's relative id
+/// onto the deep model's base yields <c>[1, 1]</c> — a strict prefix of the nested parameter's
+/// own <c>[1, 1, 1]</c>, and the id a prefix-shortest template lookup would settle on first.
+/// </summary>
+[Module]
+public partial class MixedDepthGainWithRefsModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var deep = Rank1GainTwoLevelModel.Model();
+        var flat = Rank1GainSubModel.Model();
+        return deep.Call(input) + flat.Call(input)
+             + deep.GetTrainableParam<float32>([1, 1], rank: 1) * Scalar(0f)
+             + flat.GetTrainableParam<float32>([1], rank: 1) * Scalar(0f);
+    }
+}
+
+/// <summary>Calls whatever model it is handed, so its callee's parameters arrive through a
+/// <c>[Hyper] Model&lt;&gt;</c> rather than being created in its own body.</summary>
+[Module]
+public partial class HyperModelHost
+{
+    public static Tensor<float32> Inline(Tensor<float32> input,
+        [Hyper] Model<Tensor<float32>, Tensor<float32>> inner) => inner.Call(input);
+}
+
+/// <summary><see cref="Rank1GainSubModel"/> reached through a <c>[Hyper] Model&lt;&gt;</c> — the
+/// same parameter and the same forward as calling it directly.</summary>
+[Module]
+public partial class HyperModelGainModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => HyperModelHost.Model(Rank1GainSubModel.Model()).Call(input);
+}
+
 /// <summary>
 /// An initializer that states its shape nowhere the pipeline can read it: it takes no input, so
 /// there is no shape vector, and returns <c>Tensor</c> rather than <c>Scalar</c>, so the declared

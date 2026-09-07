@@ -6,6 +6,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Shorokoo.Core.Graph;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Graph;
 
@@ -186,17 +187,14 @@ namespace Shorokoo.Core.Utils
             // (binding an RNG config IS its initialization, legitimate from architecture
             // stage on), so it never counts as an "initialized model parameter" here.
             //
-            // A FUNCTION_INVOKE that calls a plain Function is executable content, not
-            // module machinery — a reimported concrete model legitimately carries such
-            // calls (e.g. the RNG draw functions emitted at export). Only calls whose
-            // target is module-typed (or unresolved) mark the graph as module-stage.
+            // Module machinery is classified by FastNodeClassification.IsModuleStageMachinery —
+            // the classification question, deliberately not the executability one the execution
+            // gate asks (IsUnrunnableModuleOp): an initializer-typed invoke marks a graph as
+            // pre-lowering here while running perfectly well there.
             int moduleOps = 0, uninitializedParams = 0, initializedParams = 0;
             foreach (var node in graph.Nodes)
             {
-                bool isModuleOp = node.OpCode == InternalOpCodes.FUNCTION_INVOKE
-                    ? node.TargetFunction is not { FunctionType: Shorokoo.Core.Nodes.OnnxNodes.FunctionType.Function }
-                    : InternalOpCodes.IsModuleStageOp(node.OpCode);
-                if (isModuleOp)
+                if (node.IsModuleStageMachinery())
                     moduleOps++;
                 else if (node.OpCode == InternalOpCodes.MODEL_PARAM)
                     uninitializedParams++;
@@ -309,16 +307,31 @@ namespace Shorokoo.Core.Utils
             "machinery-free graphs), re-stamp the graph with ComputationGraph.WithKind.";
 
         /// <summary>
-        /// The one format for every graph-kind-mismatch error: names the operation, the
-        /// requirement, and the actual kind, then appends the operation-specific hint and
-        /// the shared <see cref="WithKindRemedyHint"/>. Every kind gate routes through
-        /// this (or <see cref="EnforceStage"/> for file loads) so wording cannot drift.
+        /// The stamp-reading gates' form: <see cref="Mismatch"/> plus the shared
+        /// <see cref="WithKindRemedyHint"/>, since there the stamp is what may be wrong.
         /// </summary>
         internal static string KindMismatchMessage(
             string operation, string requiredDescription, GraphKind actual, string? hint = null)
+            => Mismatch(operation, requiredDescription, actual, hint) + " " + WithKindRemedyHint;
+
+        /// <summary>
+        /// The op-scanning gates' form (<c>InternalComputationGraphExtensions.RequireRunnableOps</c>):
+        /// <see cref="Mismatch"/> ending at the caller's own hint. <see cref="WithKindRemedyHint"/>
+        /// would misdirect there, because the stamp is not what is wrong — machinery cannot run
+        /// whatever the graph is stamped, and an eager-evaluation caller holds no
+        /// <see cref="ComputationGraph"/> to re-stamp anyway.
+        /// </summary>
+        internal static string MachineryMismatchMessage(
+            string operation, string requiredDescription, GraphKind actual, string hint)
+            => Mismatch(operation, requiredDescription, actual, hint);
+
+        /// <summary>The one leading sentence behind every graph-kind-mismatch error — the operation,
+        /// the requirement, the actual kind — so that wording cannot drift between the gates. Each
+        /// public form above adds its own ending; file loads use <see cref="EnforceStage"/>.</summary>
+        private static string Mismatch(
+            string operation, string requiredDescription, GraphKind actual, string? hint)
             => $"{operation} requires {requiredDescription}, but this graph is a '{StageName(actual)}'." +
-               (string.IsNullOrEmpty(hint) ? string.Empty : " " + hint) +
-               " " + WithKindRemedyHint;
+               (string.IsNullOrEmpty(hint) ? string.Empty : " " + hint);
 
         /// <summary>
         /// Throws a clear stage-mismatch error naming both stages (and the file, via

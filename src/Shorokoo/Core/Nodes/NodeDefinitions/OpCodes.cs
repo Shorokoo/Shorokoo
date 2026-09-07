@@ -195,6 +195,18 @@ internal static class InternalOpCodes
     public static bool IsModuleStageOp(string opCode)
         => ModuleStageOps.Contains(opCode)
         || opCode.StartsWith(SUBMODEL, StringComparison.Ordinal);
+
+    /// <summary>True when <paramref name="opCode"/> marks one of the graph's own inputs. These are
+    /// never emitted as nodes — <c>FastOnnxProtoFactory.ReadInputMetadata</c> turns them into input
+    /// ValueInfos — so a graph carrying one still executes, even though two of them
+    /// (<see cref="MODEL_TENSORSTRUCT_INPUT"/>, <see cref="GENERIC_TYPE_INPUT"/>) are module-stage
+    /// markers.</summary>
+    public static bool IsModelInputOp(string opCode)
+        => opCode == MODEL_TENSOR_INPUT
+        || opCode == MODEL_OPTIONAL_INPUT
+        || opCode == MODEL_SEQUENCE_INPUT
+        || opCode == MODEL_TENSORSTRUCT_INPUT
+        || opCode == GENERIC_TYPE_INPUT;
 }
 
 internal static class OpCodes

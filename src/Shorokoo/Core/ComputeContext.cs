@@ -196,6 +196,7 @@ namespace Shorokoo.Runtime
 
         internal CompiledGraph Compile(InternalComputationGraph graph)
         {
+            graph.RequireRunnableOps("ComputeContext.Compile");
             var originalInputNames = ResolveOriginalInputNames(graph);
             return CompileFromModel(
                 () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true),
@@ -231,11 +232,13 @@ namespace Shorokoo.Runtime
 
         /// <summary>
         /// Evaluates the given output variables by building and executing a zero-input graph,
-        /// returning their concrete tensor data.
+        /// returning their concrete tensor data. Requires concretized outputs — a
+        /// <c>[Module]</c>'s output fails fast with the lowering hint.
         /// </summary>
         public TensorData[] Eval(Variable[] outputs)
         {
             var graph = new InternalComputationGraph([], [.. outputs]);
+            graph.RequireRunnableOps("ComputeContext.Eval");
             var results = this.Execute(graph).Select(x => x.ToTensorData()).ToArray();
 
             return results;
@@ -271,6 +274,11 @@ namespace Shorokoo.Runtime
         /// </summary>
         internal NamedModelParam[] Execute(InternalComputationGraph graph, params IData[] inputs)
         {
+            // Before the arity check below: a module graph's inputs routinely disagree with what the
+            // caller passed (its [Hyper] parameters are inputs too), and CR006 would report that
+            // instead of the machinery that is the real problem.
+            graph.RequireRunnableOps("ComputeContext.Execute");
+
             var expandedInputs = ExpandStructInputs(inputs);
 
             if (expandedInputs.Length != graph.Inputs.Count)
@@ -323,6 +331,7 @@ namespace Shorokoo.Runtime
         /// </summary>
         internal NamedModelParam[] Run(InternalComputationGraph graph, params NamedModelParam[] inputs)
         {
+            graph.RequireRunnableOps("ComputeContext.Run");
             var originalInputNames = ResolveOriginalInputNames(graph);
             return RunFromModel(
                 () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true),
@@ -561,6 +570,7 @@ namespace Shorokoo.Runtime
         public TensorData[] With(TensorData[] inputData)
         {
             var graph = new InternalComputationGraph([..this.inputs], [..this.outputs]);
+            graph.RequireRunnableOps("Eval(...).With");
             return ComputeContext.Default.Execute(graph, inputData).Select(x => x.ToTensorData()).ToArray();
         }
     }

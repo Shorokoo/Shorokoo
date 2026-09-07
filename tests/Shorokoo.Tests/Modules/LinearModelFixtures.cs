@@ -465,3 +465,33 @@ public partial class ScalarMultiplyWithBatchNormModel
         return normalized * weight;
     }
 }
+
+/// <summary>A sub-module whose Inline hands its argument straight back, and a caller of it.</summary>
+[Module]
+public partial class PassThroughSub
+{
+    public static Tensor<float32> Inline(Tensor<float32> input) => input;
+}
+
+[Module]
+public partial class CallerOfPassThroughSub
+{
+    public static Tensor<float32> Inline(Tensor<float32> input) => PassThroughSub.Call(input) * Scalar(2f);
+}
+
+/// <summary>The same shape with two arguments handed back swapped.</summary>
+[Module]
+public partial class SwapSub
+{
+    public static (Tensor<float32>, Tensor<float32>) Inline(Tensor<float32> a, Tensor<float32> b) => (b, a);
+}
+
+[Module]
+public partial class CallerOfSwapSub
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var (first, second) = SwapSub.Call(input, input * Scalar(2f));
+        return first - second;
+    }
+}

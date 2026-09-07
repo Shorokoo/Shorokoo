@@ -11,6 +11,15 @@ namespace Shorokoo.Tests;
 public class ModulesCoverageTests
 {
     [Fact]
+    public void TestACalledPassThroughModuleWiresThroughToTheCallersInput()
+    {
+        Assert.True(AutoTest.AdvancedTestGraph<Modules.CallerOfPassThroughSub>(
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)]));
+        Assert.True(AutoTest.AdvancedTestGraph<Modules.CallerOfSwapSub>(
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)]));
+    }
+
+    [Fact]
     public void TestStateUpdateSurvivesNestedFirstUseModuleBuild()
     {
         var graph = ((ComputationGraph)typeof(Modules.StateUpdateSurvivesNestedFirstUseBuild)

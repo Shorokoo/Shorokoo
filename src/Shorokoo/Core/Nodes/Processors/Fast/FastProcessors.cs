@@ -880,12 +880,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     nodeByKey[subNode.Key] = subNode;
                 }
 
-                // Map invoke node's outputs → subgraph's outputs
+                // Map invoke node's outputs → subgraph's outputs. A body that hands an
+                // argument straight back names one of its own formal parameters as its
+                // output, and that stand-in is not the caller's value — so the output
+                // travels the same input remap every other reference to it does.
                 var invokeOutputs = fastNode.Outputs;
                 for (int i = 0; i < invokeOutputs.Count && i < subFastGraph.Outputs.Count; i++)
                 {
                     if (invokeOutputs[i] is FastTensorKey invokeOutKey)
-                        outputRemap[invokeOutKey] = subFastGraph.Outputs[i];
+                        outputRemap[invokeOutKey] = inputRemap.TryGetValue(subFastGraph.Outputs[i], out var remapped)
+                            ? remapped
+                            : subFastGraph.Outputs[i];
                 }
 
                 // Don't add the invoke node itself — it's been replaced by the subgraph.

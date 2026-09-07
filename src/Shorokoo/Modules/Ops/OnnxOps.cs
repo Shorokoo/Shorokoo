@@ -63,8 +63,11 @@ namespace Shorokoo
         /// Conv overload whose geometry (dilations, group, kernel_shape, pads, strides) is supplied
         /// as int64 tensor inputs (computed in-graph) rather than static <c>long[]</c>/<c>long</c>
         /// attributes; the parameter order matches the static-attribute <c>Conv</c> overload above.
-        /// Lowered to standard ONNX Conv before execution; the geometry tensors must be resolvable
-        /// to constants at lowering time.
+        /// Lowered to standard ONNX Conv before execution, so the geometry tensors must resolve to
+        /// constants at lowering time — and, because an ONNX attribute holds one value for every
+        /// execution of its node, to <em>one</em> value per node. Geometry that would differ from one
+        /// iteration to the next of a loop that stays rolled is rejected; see
+        /// "Per-iteration convolution geometry in a dynamic loop" in Documentation/limitations.md.
         /// </summary>
         public static Tensor<T> Conv<T>(Tensor<T> x, Tensor<T> w, Vector<T> b, AutoPad autoPad,
             Vector<int64> dilations, Scalar<int64> group, Vector<int64> kernelShape, Vector<int64> pads, Vector<int64> strides)

@@ -57,6 +57,7 @@ public class ConvVariantTests
         Refused<ConvVariantDynamicTripLoopGeometry>(Rolled);
         Refused<ConvVariantNestedRolledLoopGeometry>(Rolled);
         Refused<ConvVariantNestedZeroTripCarryGeometry>(Rolled);
+        Refused<ConvVariantGeometryFromALoopDependentIfCondition>(Rolled);
     }
 
     /// <summary>The refusal is about geometry that varies, not about loops. A rolled loop with

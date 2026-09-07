@@ -83,7 +83,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// Thin wrapper around <see cref="InternalComputationGraph.IsLinearOrderValid()"/>.
+        /// Thin wrapper around <see cref="InternalComputationGraph.IsLinearOrderValid"/>.
         /// Kept as a separate name so existing pass call sites read the way they did
         /// when this was a Kahn re-sort.
         /// </summary>

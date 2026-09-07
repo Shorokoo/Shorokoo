@@ -102,7 +102,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// about a key anywhere in the graph needs this one instead. A <c>LOOP_CLOSE</c> therefore
         /// sheds the variation of the loop it closes, keeping only an enclosing loop's.</para>
         ///
-        /// <para>Two things make that shedding subtle, and both are handled per slot rather than
+        /// <para>A close node also folds in its paired open's inputs, resolved through
+        /// <see cref="FastNode.GraphOpenNodeKey"/> — dependence that arrives that way is invisible to
+        /// a walk over data inputs. For an <c>IF</c> that pairing carries the whole of it: the
+        /// condition is an input of the <c>IF_OPEN</c>, which has no outputs, so a branch value
+        /// selected by a per-iteration condition varies per iteration even when both branches are
+        /// constants the loop never touches.</para>
+        ///
+        /// <para>Two things make the loop shedding subtle, and both are handled per slot rather than
         /// per node. First, an enclosing loop reaches a nested loop through the inner
         /// <c>LOOP_OPEN</c>'s inputs — its trip count and carry initializers — and not through the
         /// <c>LOOP_CLOSE</c>'s, which is why the close folds in its paired open's inputs as well as
@@ -120,12 +127,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // membership is positional, so depth is just the open/close nesting count).
             var varyDepth = new Dictionary<FastTensorKey, int>();
             var openNodes = new Stack<FastNode>();
+            var openByKey = new Dictionary<FastNodeKey, FastNode>();
 
             foreach (var node in graph.Nodes)
             {
                 if (node.OpCode == OpCodes.LOOP_OPEN)
                 {
                     openNodes.Push(node);
+                    openByKey[node.Key] = node;
                     RecordLoopOpen(node, openNodes.Count, varyDepth);
                 }
                 else if (node.OpCode == OpCodes.LOOP_CLOSE && openNodes.Count > 0)
@@ -134,7 +143,21 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
                 else
                 {
-                    RecordAllOutputs(node, MinVaryDepth(node.Inputs, varyDepth, shallowerThan: int.MaxValue), varyDepth);
+                    if (node.OpCode == OpCodes.IF_OPEN) openByKey[node.Key] = node;
+
+                    // A close node's value depends on its paired open's inputs as well as its own.
+                    // For an IF that is the whole of the dependence that matters here: the condition
+                    // lives on the IF_OPEN, which has no outputs, so a branch value picked by a
+                    // per-iteration condition is per-iteration even when both branches are constant.
+                    var pairedOpenInputs = node.GraphOpenNodeKey is FastNodeKey pairedKey
+                                           && !pairedKey.IsEmpty
+                                           && openByKey.TryGetValue(pairedKey, out var pairedOpen)
+                        ? pairedOpen.Inputs
+                        : [];
+
+                    RecordAllOutputs(node, Shallowest(
+                        MinVaryDepth(node.Inputs, varyDepth, shallowerThan: int.MaxValue),
+                        MinVaryDepth(pairedOpenInputs, varyDepth, shallowerThan: int.MaxValue)), varyDepth);
                 }
             }
 
@@ -281,6 +304,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// to just before the outermost currently-active <c>LOOP_OPEN</c>. The relative
         /// order of nodes is otherwise preserved. Mutates
         /// <see cref="InternalComputationGraph.Nodes"/> in place.
+        ///
+        /// <para>Scope boundaries never move, whatever their inputs look like: a close node's
+        /// value belongs to the scope that produced it, and hoisting an <c>IF_OPEN</c> out of an
+        /// enclosing loop would strand its <c>IF_CLOSE</c> inside — which is why an if whose
+        /// condition is loop-invariant used to leave the graph in an order the pipeline
+        /// rejects.</para>
         ///
         /// This is the Fast-pipeline equivalent of the legacy CG-side
         /// hoisting primitive that ran as part of ComputationGraph

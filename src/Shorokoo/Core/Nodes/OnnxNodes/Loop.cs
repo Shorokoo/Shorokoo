@@ -97,10 +97,6 @@ namespace Shorokoo
         /// <c>Identity</c>, and consumed by the next node the first pass records.</summary>
         internal bool NextNodeIsInitDeclaration { get; set; }
 
-        /// <summary>Depth of the loop <see cref="LoopAPI.Init"/> is currently declaring for, so an
-        /// enclosing loop tracing the same node does not claim the declaration as its own.</summary>
-        internal static int? InitDeclarationDepth { get; set; }
-
         /// <summary>
         /// A special purpose loop variable that lets us output the iteration index from the Loop Close Node.
         /// It essentially will hold the number of iterations the loop has executed.
@@ -265,7 +261,7 @@ namespace Shorokoo
 
                     var loopVariable = new LoopVariableInput(input, nodeIndex, inputIndex);
                     this.variableInputs[loopVariable.Key] = loopVariable;
-                    if (this.NextNodeIsInitDeclaration && InitDeclarationDepth == this.LoopDepth)
+                    if (this.NextNodeIsInitDeclaration)
                         this.initDeclarationInputs.Add(loopVariable.Key);
                     if (!this.firstPassVariableOutputs.ContainsKey(input))
                         this.allExternalInputs.Add(input);
@@ -530,22 +526,7 @@ namespace Shorokoo
                                      && !Object.ReferenceEquals(x.SecondPassInput, x.FirstPassInput));
             if (reassignedFromOutsideTheBody is not null)
                 throw new InvalidTensorOperationException(ErrorCodes.FW023, "Loop Variable Binding",
-                    "a variable declared with LoopAPI.Init",
-                    "the loop body assigned it a value computed outside the loop. A bare assignment of such a "
-                    + "value creates no node in the body, and the loop's result is delivered by re-tracing the "
-                    + "node that produced the body's value — so after the loop the variable would still refer "
-                    + "to the outside value. Wrap it so the body produces it:"
-                    + "\n"
-                    + "\n    var carry = n + Scalar(5L);"
-                    + "\n    foreach (var ctx in LoopAPI.Iterate(trips))"
-                    + "\n    {"
-                    + "\n        LoopAPI.Init(carry);"
-                    + "\n        carry = n;                  // refused"
-                    + "\n        carry = LoopAPI.Carry(n);   // use this instead"
-                    + "\n    }"
-                    + "\n    return carry;"
-                    + "\n"
-                    + "\nOr move the assignment out of the loop.");
+                    "a variable declared with LoopAPI.Init", CarryAssignedFromOutsideGuidance);
 
             var loopVariablesWithInitializers = new List<LoopVariable>();
             foreach (var canonicalLoopVariable in canonicalLoopVariables)
@@ -614,6 +595,23 @@ namespace Shorokoo
 
             this.allExternalInputExceptLoopVariables = nonLoopExternalInputs;
         }
+
+        private const string CarryAssignedFromOutsideGuidance =
+            "the loop body assigned it a value computed outside the loop. A bare assignment of such a value "
+            + "creates no node in the body, and the loop's result is delivered by re-tracing the node that "
+            + "produced the body's value — so after the loop the variable would still refer to the outside "
+            + "value. Wrap it with LoopAPI.Carry so the body produces it, in place of `carry = n;`:"
+            + "\n"
+            + "\n    var carry = n + Scalar(5L);"
+            + "\n    foreach (var ctx in LoopAPI.Iterate(trips))"
+            + "\n    {"
+            + "\n        LoopAPI.Init(carry);"
+            + "\n        carry = LoopAPI.Carry(n);"
+            + "\n    }"
+            + "\n    return carry;"
+            + "\n"
+            + "\nOr move the assignment out of the loop. The MSG005 build warning names the variable and "
+            + "the line.";
 
         public void StartThirdPass()
         {
@@ -1003,23 +1001,18 @@ namespace Shorokoo
         {
             foreach (var toInit in toInits)
             {
-                // Mark the declaration for the loop the user wrote it in — the innermost active one.
-                // An enclosing loop also traces this node (an inner loop's passes interleave with its
-                // outer loop's third), and the variable it sees there changes between its own passes
-                // for reasons that are not a user reassignment, so only the declaring depth may
-                // record the site.
-                // The declaration belongs to the innermost loop enclosing this call, which is the
-                // deepest looper on the stack — not the *active* one. An enclosing loop traces the
-                // inner loop's body inline during its own first two passes (the inner looper is
-                // still on pass 0 then), and the variable it sees at this site changes between those
-                // passes because the inner loop rebinds it, which is not a user reassignment.
-                foreach (var looper in GraphTrace.Loopers)
-                    looper.NextNodeIsInitDeclaration = true;
-                Looper.InitDeclarationDepth = GraphTrace.Loopers.Count - 1;
+                // The declaration belongs to the innermost loop enclosing this call — the deepest
+                // looper on the stack, which is not necessarily the *active* one. An enclosing loop
+                // traces the inner loop's body inline during its own first two passes (the inner
+                // looper is still on pass 0 then), and the variable it sees at this site changes
+                // between those passes because the inner loop rebinds it, which is not a user
+                // reassignment. Marking only the innermost looper keeps the declaration where the
+                // user wrote it, and keeps this per-trace rather than process-wide.
+                var loopers = GraphTrace.Loopers;
+                var declaring = loopers.Count > 0 ? loopers[loopers.Count - 1] : null;
+                if (declaring is not null) declaring.NextNodeIsInitDeclaration = true;
                 OnnxOp.Identity(toInit, toInit.Rank);
-                Looper.InitDeclarationDepth = null;
-                foreach (var looper in GraphTrace.Loopers)
-                    looper.NextNodeIsInitDeclaration = false;
+                if (declaring is not null) declaring.NextNodeIsInitDeclaration = false;
             }
         }
 
@@ -1044,12 +1037,10 @@ namespace Shorokoo
             => (Scalar<T>)OnnxOp.Identity(value, rank: 0);
 
         /// <inheritdoc cref="Carry{T}(Scalar{T})"/>
-        /// <param name="value">The value to carry, computed outside the loop body.</param>
         public static Vector<T> Carry<T>(Vector<T> value) where T : IVarType
             => (Vector<T>)OnnxOp.Identity(value, rank: 1);
 
         /// <inheritdoc cref="Carry{T}(Scalar{T})"/>
-        /// <param name="value">The value to carry, computed outside the loop body.</param>
         public static Tensor<T> Carry<T>(Tensor<T> value) where T : IVarType
             => (Tensor<T>)OnnxOp.Identity(value, rank: null);
 

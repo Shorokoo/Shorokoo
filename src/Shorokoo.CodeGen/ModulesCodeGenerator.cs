@@ -1,4 +1,5 @@
-﻿using System.Collections.Immutable;
+﻿using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Linq;
 using System.Text;
@@ -52,28 +53,60 @@ public class ModuleSourceGenerator : IIncrementalGenerator
         isEnabledByDefault: true);
 
     /// <summary>
-    /// Reports every <c>x = y;</c> inside a <c>LoopAPI.Iterate(...)</c> body, at any nesting, whose
-    /// right-hand side is a bare name bound outside that body — the shape the trace refuses with
-    /// FW023. Reported here as well so it lands at the offending line at build time rather than as
-    /// an exception when the graph is built. Only a bare name is flagged: any expression that calls
-    /// something produces a body node, which is exactly what makes the carry work.
+    /// Finds every <c>x = y;</c> that sits inside a <c>LoopAPI.Iterate(...)</c> body and is declared
+    /// a carry there by <c>LoopAPI.Init(x)</c>, whose right-hand side is a bare name bound outside
+    /// that body — the shape the trace refuses with FW023. Surfacing it here puts it at the
+    /// offending line at build time rather than as an exception when the graph is built.
+    ///
+    /// <para>All three conditions are needed to match what the trace actually refuses. Only a bare
+    /// name can be an outside value: any expression that calls something produces a node in the
+    /// body, which is exactly what makes the carry work. Only a name bound outside the body can be
+    /// one: a variable declared inside gets a fresh value each iteration, so the recursion drops
+    /// those names as it descends. And only a variable passed to <c>LoopAPI.Init</c> in that same
+    /// body is a carry at all; without that the assignment is an ordinary rebind the loop never
+    /// has to hand back.</para>
     /// </summary>
-    private static void ReportLoopCarriesAssignedFromOutside(
-        SyntaxNode scope, SourceProductionContext spc, ImmutableHashSet<string> boundOutside)
+    internal static List<AssignmentExpressionSyntax> FindLoopCarriesAssignedFromOutside(MethodDeclarationSyntax method)
+    {
+        var found = new List<AssignmentExpressionSyntax>();
+        if (method.Body is not { } body) return found;
+        var allNames = method.ParameterList.Parameters.Select(x => x.Identifier.Text)
+            .Concat(body.DescendantNodes().OfType<VariableDeclaratorSyntax>().Select(v => v.Identifier.Text))
+            .ToImmutableHashSet();
+        FindLoopCarriesAssignedFromOutside(body, allNames, allNames, loopBody: null, found);
+        return found;
+    }
+
+    private static void FindLoopCarriesAssignedFromOutside(
+        SyntaxNode scope, ImmutableHashSet<string> allNames, ImmutableHashSet<string> boundOutside,
+        SyntaxNode? loopBody, List<AssignmentExpressionSyntax> found)
     {
         foreach (var statement in ScopeStatements(scope))
         {
             if (statement is ForEachStatementSyntax fe && IsLoopApiIterate(fe))
             {
-                var declaredInBody = fe.Statement.DescendantNodes()
+                // Recompute from the full set for the body being entered: a name declared in an
+                // enclosing loop's body is still outside this one, so narrowing the parent's set
+                // as we descend would lose it.
+                var declaredHere = fe.Statement.DescendantNodes()
                     .OfType<VariableDeclaratorSyntax>()
                     .Select(v => v.Identifier.Text);
-                ReportLoopCarriesAssignedFromOutside(
-                    fe.Statement, spc, boundOutside.Except(declaredInBody));
+                FindLoopCarriesAssignedFromOutside(
+                    fe.Statement, allNames, allNames.Except(declaredHere), fe.Statement, found);
                 continue;
             }
 
-            if (statement is ExpressionStatementSyntax
+            // Any other statement may still contain an Iterate body — inside an `if`, a plain
+            // `for`, a `using`, a nested block. Keep looking, without treating this level as one.
+            if (statement is not ExpressionStatementSyntax)
+            {
+                foreach (var nested in statement.ChildNodes())
+                    FindLoopCarriesAssignedFromOutside(nested, allNames, boundOutside, loopBody, found);
+                continue;
+            }
+
+            if (loopBody is not null
+                && statement is ExpressionStatementSyntax
                 {
                     Expression: AssignmentExpressionSyntax
                     {
@@ -83,14 +116,35 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                     } assignment
                 }
                 && boundOutside.Contains(lhs.Identifier.Text)
-                && boundOutside.Contains(rhs.Identifier.Text))
+                && boundOutside.Contains(rhs.Identifier.Text)
+                && !IsAssignedIn(loopBody, rhs.Identifier.Text)
+                && IsDeclaredACarryIn(loopBody, lhs.Identifier.Text))
             {
-                spc.ReportDiagnostic(Diagnostic.Create(
-                    LoopCarryAssignedFromOutside, assignment.GetLocation(),
-                    lhs.Identifier.Text, rhs.Identifier.Text));
+                found.Add(assignment);
             }
         }
     }
+
+    /// <summary>Whether <paramref name="name"/> is assigned anywhere in <paramref name="scope"/>.
+    /// A name declared outside the body but written inside it holds a body value, so the bare
+    /// assignment that reads it is not carrying an outside value at all.</summary>
+    private static bool IsAssignedIn(SyntaxNode scope, string name)
+        => scope.DescendantNodes()
+            .OfType<AssignmentExpressionSyntax>()
+            .Any(a => a.Left is IdentifierNameSyntax id && id.Identifier.Text == name);
+
+    /// <summary>Whether <paramref name="name"/> is passed to <c>LoopAPI.Init</c> directly in
+    /// <paramref name="scope"/> — the declaration that makes it a carry of that loop.</summary>
+    private static bool IsDeclaredACarryIn(SyntaxNode scope, string name)
+        => scope.DescendantNodesAndSelf()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(inv => inv.Expression is MemberAccessExpressionSyntax
+            {
+                Name.Identifier.Text: "Init",
+                Expression: IdentifierNameSyntax { Identifier.Text: "LoopAPI" },
+            })
+            .SelectMany(inv => inv.ArgumentList.Arguments)
+            .Any(arg => arg.Expression is IdentifierNameSyntax id && id.Identifier.Text == name);
 
     private static IEnumerable<StatementSyntax> ScopeStatements(SyntaxNode scope)
         => scope switch
@@ -152,16 +206,21 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                             spc.ReportDiagnostic(Diagnostic.Create(
                                 RngPinAvailable, classInfo.Location, classInfo.ClassName, pinSuggestion));
 
-                        // A carry assigned a value from outside its loop body is refused when the
-                        // graph is traced; report it here too, at the line that causes it.
-                        foreach (var method in classSyntax.Members.OfType<MethodDeclarationSyntax>())
+                    }
+
+                    // A carry assigned a value from outside its loop body is refused when the graph
+                    // is traced; report it here too, at the line that causes it. Not gated on the
+                    // pin-suggestion conditions above — it applies to every module method.
+                    if (classInfo.Location?.SourceTree?.GetRoot().FindNode(classInfo.Location.SourceSpan)
+                            is ClassDeclarationSyntax carrySyntax)
+                    {
+                        foreach (var method in carrySyntax.Members.OfType<MethodDeclarationSyntax>())
                         {
-                            if (method.Body is not { } methodBody) continue;
-                            var bound = method.ParameterList.Parameters.Select(x => x.Identifier.Text)
-                                .Concat(methodBody.DescendantNodes().OfType<VariableDeclaratorSyntax>()
-                                                  .Select(v => v.Identifier.Text))
-                                .ToImmutableHashSet();
-                            ReportLoopCarriesAssignedFromOutside(methodBody, spc, bound);
+                            foreach (var assignment in FindLoopCarriesAssignedFromOutside(method))
+                                spc.ReportDiagnostic(Diagnostic.Create(
+                                    LoopCarryAssignedFromOutside, assignment.GetLocation(),
+                                    ((IdentifierNameSyntax)assignment.Left).Identifier.Text,
+                                    ((IdentifierNameSyntax)assignment.Right).Identifier.Text));
                         }
                     }
 

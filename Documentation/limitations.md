@@ -63,6 +63,36 @@ the graph. Initialize the variable explicitly inside the loop body with
 `LoopAPI.Init(x)` (or read it once, e.g. `OnnxOp.Identity(x)`) before the first
 assignment.
 
+### Carrying a value computed outside the loop body
+
+A loop hands its result back by re-tracing the node that produced the body's
+value and pointing the variable at the loop's output instead. A bare assignment
+of a value computed *outside* the loop creates no node in the body, so there is
+nothing to re-trace — and after the loop the variable is simply that outside
+value, indistinguishable from every other use of it. Shorokoo rejects that shape
+rather than silently returning the body's value even when the loop ran zero
+times.
+
+Wrap the value with `LoopAPI.Carry` so the body produces it:
+
+```csharp
+var carry = n + Scalar(5L);
+foreach (var ctx in LoopAPI.Iterate(trips))
+{
+    LoopAPI.Init(carry);
+    carry = LoopAPI.Carry(n);   // not `carry = n;`
+}
+return carry;                   // the loop's result, or n + 5 after zero iterations
+```
+
+A value the body already computes — `carry = carry + Scalar(1L)`, or anything
+built from the iteration index — needs no wrapping. `LoopAPI.Carry` has
+overloads for `Scalar<T>`, `Vector<T>` and `Tensor<T>`; for any other carry
+type, move the assignment out of the loop.
+
+The build reports this as the **MSG005** warning on the offending line, and
+concretizing the graph raises `FW023` if it is left unfixed.
+
 ## Current limitations (could be lifted)
 
 ### Backprop through dynamic loops

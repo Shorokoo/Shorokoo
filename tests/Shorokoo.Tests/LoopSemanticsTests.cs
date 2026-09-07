@@ -2,10 +2,9 @@ using System.Linq;
 
 namespace Shorokoo.Tests;
 
-/// <summary>A zero-iteration loop must return the carry's pre-loop value, which is what
-/// <c>LoopAPI.Init</c> exists to record. It does when the body assigns a value computed inside the
-/// body, and does not when the body assigns one computed outside it: the carry is dropped and the
-/// body's value is returned even though the body never ran.</summary>
+/// <summary>The shape the build refuses: a carry the body assigns a value computed outside the
+/// loop. Nothing in the body produces that value, so the loop has no node to re-trace and hand the
+/// result back through.</summary>
 [Module]
 public partial class ZeroTripCarryFromOutsideTheBody
 {
@@ -81,10 +80,10 @@ public partial class NestedLoopResultUsedInTheOuterBody
     }
 }
 
-/// <summary>A scan output whose per-iteration value is the loop's iteration index itself, rather
-/// than a body node's output.</summary>
+/// <summary>A scan whose per-iteration value is the loop's iteration index itself — an output of
+/// the LOOP_OPEN rather than of a body node.</summary>
 [Module]
-public partial class ScanSeededBeforeTheLoop
+public partial class ScanOfTheIterationIndex
 {
     public static Vector<int64> Inline(Scalar<int64> n)
     {
@@ -95,17 +94,27 @@ public partial class ScanSeededBeforeTheLoop
     }
 }
 
+/// <summary>A rolled loop with no carries and a single scan output.</summary>
+[Module]
+public partial class RolledLoopWithOnlyAScanOutput
+{
+    public static Vector<int64> Inline(Scalar<int64> n)
+    {
+        Variable? scanned = null;
+        foreach (var ctx in LoopAPI.Iterate(n))
+            scanned = ctx.Scan(ctx.IterationIndex);
+        return (Vector<int64>)scanned!;
+    }
+}
+
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
-public class LoopCarryPinTests
+public class LoopSemanticsTests
 {
     static bool Returns<TModule>(long n, double expected)
         => AutoTest.AdvancedTestGraph<TModule>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Int64, [], n)], expected: [expected]);
 
-    // Shorokoo/Shorokoo#266: LoopAPI.Init records nothing when the body's assigned value has no
-    // producer inside the body, so a zero-iteration loop returns that value instead of the
-    // pre-loop one. ZeroTripCarryFromInsideTheBody is the passing control.
     /// <summary>A zero-iteration loop returns the carry's pre-loop value, which is what
     /// <c>LoopAPI.Init</c> records. The body's assigned value must come from inside the body: one
     /// computed outside it is the same tensor the rest of the graph holds, so the loop's result has
@@ -120,8 +129,6 @@ public class LoopCarryPinTests
         Assert.Contains("computed outside the loop", ex.Message);
     }
 
-    // Shorokoo/Shorokoo#268: this concretizes to a graph whose node order fails the pipeline's own
-    // IsLinearOrderValid invariant — a Debug.Fail, and in Release a missing-producer error later.
     [Fact]
     public void TestANestedLoopsResultStaysBelowTheLoopThatProducesIt()
         => Assert.True(AutoTest.AdvancedTestGraph<NestedLoopResultUsedInTheOuterBody>(
@@ -132,9 +139,17 @@ public class LoopCarryPinTests
                 TensorData(DType.Int64, [], 3L)],
             expected: [18d]));
 
+    // Shorokoo/Shorokoo#279: with no carry to force it, the exported Loop omits its cond input, so
+    // ONNX Runtime rejects the model. Pre-existing; reproduces on main.
+    [Fact(Skip = "Shorokoo/Shorokoo#279: a scan-only rolled loop exports a Loop node with too few inputs")]
+    public void TestARolledLoopWithOnlyAScanOutputExports()
+        => Assert.True(AutoTest.AdvancedTestGraph<RolledLoopWithOnlyAScanOutput>(
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Int64, [], 3L)],
+            expected: [0d, 1d, 2d]));
+
     [Fact]
-    public void TestAScanOutputSeededBeforeTheLoopStacksItsIterations()
-        => Assert.True(AutoTest.AdvancedTestGraph<ScanSeededBeforeTheLoop>(
+    public void TestAScanOfTheIterationIndexStacksItsIterations()
+        => Assert.True(AutoTest.AdvancedTestGraph<ScanOfTheIterationIndex>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Int64, [], 3L)],
             expected: [0d, 1d, 2d]));
 }

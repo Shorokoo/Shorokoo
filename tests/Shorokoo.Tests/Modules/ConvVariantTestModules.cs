@@ -268,6 +268,35 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
+    /// Per-iteration geometry that reaches the conv through an <c>IfElse</c>'s <em>condition</em>
+    /// rather than its branch values: both branches are literal, so nothing the IF_CLOSE consumes
+    /// varies, and only the condition tracks the iteration. Still one value per iteration, so still
+    /// refused — an analysis that reads a close node's own inputs alone misses it, since an IF_OPEN
+    /// holds the condition and has no outputs at all.
+    /// </summary>
+    [Module]
+    public partial class ConvVariantGeometryFromALoopDependentIfCondition
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Scalar<int64> trips)
+        {
+            var w = InitSimple.Init([Scalar(3L), Scalar(3L), Scalar(3L), Scalar(3L)]);
+            var b = InitSimple.Init([Scalar(3L)]).Vec();
+
+            var acc = Scalar(0f);
+            foreach (var outer in LoopAPI.Iterate(trips))
+            {
+                var d = (outer.IterationIndex < Scalar(1L)).IfElse(Scalar(1L), Scalar(2L));
+                var conv = NN.Conv(x, w, b, AutoPad.NotSet,
+                    pads: [d, d, d, d], strides: Vector(1L, 1L), dilations: [d, d],
+                    kernelShape: [Scalar(3L), Scalar(3L)], group: Scalar(1L));
+                acc = acc + conv.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            }
+
+            return acc < Scalar(float.PositiveInfinity);
+        }
+    }
+
+    /// <summary>
     /// Variant Conv whose geometry is loop-invariant (literal) inside the same never-unrollable
     /// dynamic-trip loop as <see cref="ConvVariantDynamicTripLoopGeometry"/>: the lowering has one
     /// value that is right for every iteration, so it must still lower rather than being refused

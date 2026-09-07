@@ -281,10 +281,10 @@ public class ModulesCoverageTests
         Assert.True(Case(useBias: true, paramCount: 2, ifNodes: 1));
     }
 
-    /// <summary>Branching on a graph value inside a loop body leaves the graph in an order the
-    /// pipeline rejects, for either value of the gate. No trainable parameters are involved.
-    /// Tracked as Shorokoo/Shorokoo#239.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#239: an IfElse inside a loop body leaves an invalid linear order")]
+    /// <summary>Branching on a graph value inside a loop body concretizes for either value of the
+    /// gate: the IF_OPEN stays inside the enclosing loop, so its IF_CLOSE is not stranded and the
+    /// node order stays valid. No trainable parameters are involved.</summary>
+    [Fact]
     public void TestAnIfElseInsideALoopBodyConcretizes()
     {
         var x = TensorData([2L], 1f, 2f);

@@ -70,21 +70,19 @@ public class RematerializationRuntimeTests
     }
 
     /// <summary>
-    /// The profiling harnesses (<c>OpsPerfCalibrationTests</c>, <c>MemoryPassBenchmarkTests</c>,
-    /// <c>DenormalTrainingSessionTests</c>) fill every float input of the training step — the
-    /// batch and all sixteen weight tensors alike — from one size-keyed ramp, so Wq and Wk come
-    /// out identical, Q and K parallel, and the attention logits two orders of magnitude larger
-    /// than any initialization produces. The softmax tail then underflows into the denormal
-    /// range, where MLAS's GEMM runs about eight times slower, and every kernel time those
-    /// harnesses record for an attention family is measuring the ramp. <c>OpCostModel</c>'s
-    /// MatMul constants are fitted from exactly those profiles.
+    /// What the profiling harnesses feed is what their kernel times measure, and
+    /// <c>OpCostModel</c>'s constants are fitted from those times. A filler keyed on length
+    /// alone gave <c>Wq</c> and <c>Wk</c> identical content, and the attention logits that
+    /// produced put the softmax tail in the denormal range, where MLAS's GEMM runs about eight
+    /// times slower — so this asks <see cref="Benchmarks.SyntheticFeed"/> for the whole step and
+    /// checks the probabilities came out normal.
     /// </summary>
     [Fact]
     public void TestTheProfilingHarnessFeedKeepsAttentionOutOfTheDenormalRange()
     {
         long[] shape = [2L, 32L, 128L];
         NamedModelParam[] sample =
-            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData(shape, HarnessPattern(shape[0] * shape[1] * shape[2])))];
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData(shape, Benchmarks.SyntheticFeed.Floats(shape[0] * shape[1] * shape[2], 0)))];
         var rig = TrainingRig.FromScratch(Benchmarks.MemoryPassEncoder1.ComputationGraph, L2Loss.ComputationGraph,
             SGDOptimizer.ComputationGraph, sample, 0.01f);
         var inputs = rig.OptimizationInputShapes;
@@ -102,7 +100,7 @@ public class RematerializationRuntimeTests
         using var session = new InferenceSession(stream.ToArray(), options);
         var feeds = new Dictionary<string, OrtValue>();
         for (var i = 0; i < session.InputNames.Count; i++)
-            feeds[session.InputNames[i]] = HarnessFeed(inputs[i].Shape, inputs[i].DType);
+            feeds[session.InputNames[i]] = Benchmarks.SyntheticFeed.Tensor(inputs[i].Shape, inputs[i].DType, i);
         using var runOptions = new RunOptions();
         var results = session.Run(runOptions, feeds, [probability]);
         var probabilities = results[0].GetTensorDataAsSpan<float>();
@@ -114,23 +112,6 @@ public class RematerializationRuntimeTests
         GC.KeepAlive(feeds);
 
         Assert.Equal(0, denormals);
-    }
-
-    private static float[] HarnessPattern(long count)
-    {
-        var values = new float[count];
-        for (var i = 0; i < values.Length; i++) values[i] = ((i * 37) % 101) * 0.01f - 0.5f;
-        return values;
-    }
-
-    private static OrtValue HarnessFeed(Shape shape, DType dtype)
-    {
-        var n = shape.Count;
-        if (dtype == DType.Float32) return OrtValue.CreateTensorValueFromMemory(HarnessPattern(n), shape.Dims);
-        if (dtype == DType.Int64) return OrtValue.CreateTensorValueFromMemory(new long[n], shape.Dims);
-        if (dtype == DType.Int32) return OrtValue.CreateTensorValueFromMemory(new int[n], shape.Dims);
-        if (dtype == DType.Bool) return OrtValue.CreateTensorValueFromMemory(new bool[n], shape.Dims);
-        throw new NotSupportedException(dtype.ToString());
     }
 
     private static Dictionary<FastNodeKey, string> EmittedNames(InternalComputationGraph graph)

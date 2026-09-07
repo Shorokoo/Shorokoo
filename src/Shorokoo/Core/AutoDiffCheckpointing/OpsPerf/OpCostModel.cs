@@ -11,6 +11,14 @@ namespace Shorokoo.Core.AutoDiffCheckpointing.OpsPerf;
 /// <c>tools/opsperf-calibration/fit.py</c>; re-run both after an ORT upgrade or on a machine
 /// class that matters and paste the refitted numbers here.</para>
 ///
+/// <para>The MatMul constants below predate the harness's per-tensor feed and are due a refit.
+/// The fill they were fitted through was keyed on tensor length alone, so the encoder families'
+/// attention ran on denormal operands and their MatMul kernels were profiled at up to 8x their
+/// real cost; a flush-controlled A/B put <see cref="MatMulNsPerFlop"/> about 24% high because of
+/// it. The pass's chosen strategy and modelled peak were unchanged on all eight families at that
+/// margin, so nothing is misbehaving on these numbers — they are simply known-stale until the
+/// harness is re-run on the reference machine.</para>
+///
 /// <para>The shape of the model matters more than the digits. Every kernel pays a fixed
 /// <see cref="Launch"/>; a training step has thousands of tiny nodes, so this term is most of
 /// their cost and the reason recomputing a chain of small ops is never free. Streaming ops are

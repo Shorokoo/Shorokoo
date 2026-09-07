@@ -65,7 +65,7 @@ public class DenormalTrainingSessionTests
     {
         long[] shape = [8L, 128L, 128L];
         NamedModelParam[] sample =
-            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData(shape, FloatPattern(shape[0] * shape[1] * shape[2])))];
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData(shape, SyntheticFeed.Floats(shape[0] * shape[1] * shape[2], 0)))];
         var rig = TrainingRig.FromScratch(MemoryPassEncoder1.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, sample, 0.01f);
         var inputs = rig.OptimizationInputShapes;
         var proto = FastOnnxModelBuilder.BuildInternalOnnxModel(rig.TrainingStepPureGraph.ToInternal(), prepForOnnx: true,
@@ -101,7 +101,7 @@ public class DenormalTrainingSessionTests
             using var session = new InferenceSession(model, options);
             var feeds = new Dictionary<string, OrtValue>();
             for (var i = 0; i < session.InputNames.Count; i++)
-                feeds[session.InputNames[i]] = Synthesize(inputs[i].Shape, inputs[i].DType);
+                feeds[session.InputNames[i]] = SyntheticFeed.Tensor(inputs[i].Shape, inputs[i].DType, i);
             using var runOptions = new RunOptions();
             for (var run = 0; run < 6; run++)
                 foreach (var o in session.Run(runOptions, feeds, session.OutputNames)) o.Dispose();
@@ -123,21 +123,4 @@ public class DenormalTrainingSessionTests
         }
     }
 
-    private static float[] FloatPattern(long count)
-    {
-        var values = new float[count];
-        for (var i = 0; i < values.Length; i++)
-            values[i] = ((i * 37) % 101) * 0.01f - 0.5f;
-        return values;
-    }
-
-    private static OrtValue Synthesize(Shape shape, DType dtype)
-    {
-        var n = shape.Count;
-        if (dtype == DType.Float32) return OrtValue.CreateTensorValueFromMemory(FloatPattern(n), shape.Dims);
-        if (dtype == DType.Int64) return OrtValue.CreateTensorValueFromMemory(new long[n], shape.Dims);
-        if (dtype == DType.Int32) return OrtValue.CreateTensorValueFromMemory(new int[n], shape.Dims);
-        if (dtype == DType.Bool) return OrtValue.CreateTensorValueFromMemory(new bool[n], shape.Dims);
-        throw new NotSupportedException(dtype.ToString());
-    }
 }

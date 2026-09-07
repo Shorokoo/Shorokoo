@@ -217,7 +217,6 @@ public class MemoryPassBenchmarkTests
 
     // ----- measurement --------------------------------------------------------
 
-
     /// <summary>The ONNX model exactly as the rig compiles it: ONNX-prepped, with the concrete
     /// input dims the pass was judged on stamped on every input, so ORT folds the shape
     /// arithmetic the same way and plans the same buffers.</summary>
@@ -252,7 +251,7 @@ public class MemoryPassBenchmarkTests
         foreach (var d in shape) count *= d;
 
         NamedModelParam[] sample =
-            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData(shape, FloatPattern(count)))];
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData(shape, SyntheticFeed.Floats(count, 0)))];
         var rig = TrainingRig.FromScratch(
             model, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, sample, 0.01f);
 
@@ -277,14 +276,6 @@ public class MemoryPassBenchmarkTests
             Nodes = rig.TrainingStepPureGraph.ToInternal().GetAllNodes().Length,
             Strategy = rig.OptimizationResult.StrategyName,
         };
-    }
-
-    private static float[] FloatPattern(long count)
-    {
-        var values = new float[count];
-        for (var i = 0; i < values.Length; i++)
-            values[i] = ((i * 37) % 101) * 0.01f - 0.5f;
-        return values;
     }
 
     // ----- real session -----------------------------------------------------------
@@ -467,18 +458,8 @@ public class MemoryPassBenchmarkTests
         {
             var feeds = new Dictionary<string, OrtValue>();
             for (var i = 0; i < session.InputNames.Count; i++)
-                feeds[session.InputNames[i]] = Synthesize(inputShapes[i].Shape, inputShapes[i].DType);
+                feeds[session.InputNames[i]] = SyntheticFeed.Tensor(inputShapes[i].Shape, inputShapes[i].DType, i);
             return feeds;
-        }
-
-        private static OrtValue Synthesize(Shape shape, DType dtype)
-        {
-            var n = shape.Count;
-            if (dtype == DType.Float32) return OrtValue.CreateTensorValueFromMemory(FloatPattern(n), shape.Dims);
-            if (dtype == DType.Int64) return OrtValue.CreateTensorValueFromMemory(new long[n], shape.Dims);
-            if (dtype == DType.Int32) return OrtValue.CreateTensorValueFromMemory(new int[n], shape.Dims);
-            if (dtype == DType.Bool) return OrtValue.CreateTensorValueFromMemory(new bool[n], shape.Dims);
-            throw new NotSupportedException(dtype.ToString());
         }
 
         [System.Runtime.InteropServices.DllImport("libc")]

@@ -683,11 +683,12 @@ public class RngInitFailLoudTests
         Assert.Contains(InternalOpCodes.SHRK_RANDOM_NORMAL, normal);
     }
 
-    /// <summary>An id-bearing feed with no key chain is reachable from public API — a module
-    /// output handed to <c>OnnxEngine.Eval</c>, and a ConcreteArchitecture handed to
-    /// <c>ComputeContext.Execute</c>, which <c>RequireConcretized</c> admits. Every feed kind
-    /// fails there with the product's own catchable exception, naming the site, in every
-    /// configuration; the ModelId-less feed keeps its ONNX fallback.</summary>
+    /// <summary>An id-bearing feed with no key chain is reachable from public API: a
+    /// ConcreteArchitecture handed to <c>ComputeContext.Execute</c>, which
+    /// <c>RequireConcretized</c> admits. Every feed kind fails there with the product's own
+    /// catchable exception, naming the site, in every configuration; the ModelId-less feed keeps
+    /// its ONNX fallback. (The other route in, a module output handed to <c>OnnxEngine.Eval</c>,
+    /// is refused earlier by the concretization gate — see <c>ModulesCoverageTests</c>.)</summary>
     [Fact]
     public void TestIdBearingFeedWithoutKeyChainFailsWithACatchableExceptionNotAnAssertion()
     {
@@ -706,7 +707,6 @@ public class RngInitFailLoudTests
             Assert.Null(Record.Exception(() => ComputeContext.Default.Execute(arch.ToConcreteModel(), sample)));
         }
 
-        Unkeyed(() => OnnxEngine.Eval(RngInitTwoLinears.Call(Tensor([1L, 4L], 1f, 2f, 3f, 4f))));
         Assert.Null(Record.Exception(() => OnnxEngine.Eval(RandomUniform([Scalar(4L)], 0f, 1f))));
     }
 }

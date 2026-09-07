@@ -47,7 +47,7 @@ public class ModuleSourceGenerator : IIncrementalGenerator
     private static readonly DiagnosticDescriptor LoopCarryAssignedFromOutside = new(
         id: "MSG005",
         title: "Loop body assigns a carried variable a value computed outside the loop",
-        messageFormat: "'{0} = {1};' assigns a value computed outside the loop. A bare assignment creates no node in the body, so after the loop '{0}' still refers to '{1}' rather than the loop's result, and a zero-iteration loop returns '{1}' instead of the value LoopAPI.Init recorded. Write '{0} = LoopAPI.Carry({1});' so the body produces the value, or move the assignment out of the loop.",
+        messageFormat: "'{0} = {1};' assigns a value computed outside the loop, so after the loop '{0}' would still be '{1}' rather than the loop's result. Write '{0} = LoopAPI.Carry({1});', or move the assignment out of the loop.",
         category: "SourceGeneration",
         DiagnosticSeverity.Warning,
         isEnabledByDefault: true);

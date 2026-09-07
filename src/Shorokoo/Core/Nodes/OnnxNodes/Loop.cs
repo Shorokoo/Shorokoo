@@ -597,21 +597,13 @@ namespace Shorokoo
         }
 
         private const string CarryAssignedFromOutsideGuidance =
-            "the loop body assigned it a value computed outside the loop. A bare assignment of such a value "
-            + "creates no node in the body, and the loop's result is delivered by re-tracing the node that "
-            + "produced the body's value — so after the loop the variable would still refer to the outside "
-            + "value. Wrap it with LoopAPI.Carry so the body produces it, in place of `carry = n;`:"
+            "the loop body assigned it a value computed outside the loop, so after the loop it would "
+            + "still be that value rather than the loop's result:"
             + "\n"
-            + "\n    var carry = n + Scalar(5L);"
-            + "\n    foreach (var ctx in LoopAPI.Iterate(trips))"
-            + "\n    {"
-            + "\n        LoopAPI.Init(carry);"
-            + "\n        carry = LoopAPI.Carry(n);"
-            + "\n    }"
-            + "\n    return carry;"
+            + "\n    carry = n;                  // refused"
+            + "\n    carry = LoopAPI.Carry(n);   // write this"
             + "\n"
-            + "\nOr move the assignment out of the loop. The MSG005 build warning names the variable and "
-            + "the line.";
+            + "\nOr move the assignment out of the loop.";
 
         public void StartThirdPass()
         {

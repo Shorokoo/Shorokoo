@@ -159,6 +159,43 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
+    /// <see cref="ConvVariantDynamicTripLoopGeometry"/> with the index-derived geometry passed
+    /// through a nested rolled loop as a carry before it reaches the conv. The value still differs
+    /// on every outer iteration, so it must still be refused: the outer loop's variation enters the
+    /// inner loop through the inner LOOP_OPEN's carry initializers, and an analysis that reads only
+    /// a LOOP_CLOSE's own inputs when shedding the inner loop's variation loses it and bakes
+    /// iteration 0's geometry again.
+    /// </summary>
+    [Module]
+    public partial class ConvVariantNestedRolledLoopGeometry
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Scalar<int64> trips)
+        {
+            var w = InitSimple.Init([Scalar(3L), Scalar(3L), Scalar(3L), Scalar(3L)]);
+            var b = InitSimple.Init([Scalar(3L)]).Vec();
+
+            var reference = ConvVariantRefs.StdConvScalar(x, w, b, 1L)
+                          + ConvVariantRefs.StdConvScalar(x, w, b, 2L)
+                          + ConvVariantRefs.StdConvScalar(x, w, b, 3L);
+
+            var acc = Scalar(0f);
+            foreach (var outer in LoopAPI.Iterate(trips))
+            {
+                var d = outer.IterationIndex + Scalar(1L);
+                foreach (var inner in LoopAPI.Iterate(trips))
+                    d = d + Scalar(0L);
+
+                var conv = NN.Conv(x, w, b, AutoPad.NotSet,
+                    pads: [d, d, d, d], strides: Vector(1L, 1L), dilations: [d, d],
+                    kernelShape: [Scalar(3L), Scalar(3L)], group: Scalar(1L));
+                acc = acc + conv.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            }
+
+            return (reference - acc).Abs() < Scalar(1e-3f) * (reference.Abs() + Scalar(1f));
+        }
+    }
+
+    /// <summary>
     /// Variant Conv whose geometry is loop-invariant (literal) inside the same never-unrollable
     /// dynamic-trip loop as <see cref="ConvVariantDynamicTripLoopGeometry"/>: the lowering has one
     /// value that is right for every iteration, so it must still lower rather than being refused

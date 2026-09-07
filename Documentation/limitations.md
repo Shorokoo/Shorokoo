@@ -43,14 +43,15 @@ unrolled, so it cannot be lowered to the static 'pads' attribute of 'Conv' ...
 
 Either give the loop a constant trip count — `LoopAPI.Iterate(Scalar(3L))`,
 which unrolls, so each iteration becomes its own Conv node with its own
-geometry — or make the geometry the same on every iteration, by computing it
-from something that does not change per iteration (an input's shape, say,
-rather than `ctx.IterationIndex` or a loop carry).
+geometry — or compute the geometry from something other than the loop's index
+and carries: a literal, a `[Hyper]` value, or an input's shape.
 
-Only geometry that actually varies is refused. Constant or input-derived
-geometry inside a dynamic loop is fine, and so is geometry computed *from* a
-dynamic loop's result — that value is computed once, and the Conv reading it
-runs once.
+Constant and input-derived geometry inside a dynamic loop is fine, and so is
+geometry computed *from* a dynamic loop's result — that value is computed once,
+and the Conv reading it runs once. What is refused is geometry reached from
+`ctx.IterationIndex` or a loop carry, whether or not the value it ends up
+holding happens to repeat: the check is on where the geometry comes from, since
+a carry's value is not knowable at build time.
 
 ### Variables first assigned inside a loop body
 

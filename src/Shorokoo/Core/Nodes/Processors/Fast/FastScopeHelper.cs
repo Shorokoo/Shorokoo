@@ -86,8 +86,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// wants (it only ever asks about nodes inside a scope), but a loop's <em>result</em> is
         /// computed once and does not vary, so a caller asking "does this differ per iteration?"
         /// about a key anywhere in the graph needs this one instead. A <c>LOOP_CLOSE</c> therefore
-        /// sheds the variation of the loop it closes, keeping only an enclosing loop's — which is
-        /// also what makes a nested loop's result still vary with the outer loop.</para>
+        /// sheds the variation of the loop it closes, keeping only an enclosing loop's.</para>
+        ///
+        /// <para>An enclosing loop's variation reaches a nested loop's body through the inner
+        /// <c>LOOP_OPEN</c>'s inputs (its trip count and carry initializers), not through the
+        /// <c>LOOP_CLOSE</c>'s, so the open carries that shallower depth onto its outputs; the
+        /// close then keeps it while shedding its own. That is what leaves a nested loop's result
+        /// varying with the outer loop.</para>
         /// </summary>
         public static HashSet<FastTensorKey> BuildPerIterationTensors(InternalComputationGraph graph)
         {
@@ -100,8 +105,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 if (node.OpCode == OpCodes.LOOP_OPEN)
                 {
+                    // The body sees this loop's own iterations, and on top of that whatever an
+                    // enclosing loop varies in the trip count and carry initializers — which reach
+                    // the body only through these outputs, so the shallower depth has to ride along
+                    // or the paired close would shed it as if it were this loop's.
+                    int enclosing = MinInputVaryDepth(node, varyDepth, shallowerThan: int.MaxValue);
                     depth++;
-                    RecordDepth(node, depth, varyDepth);
+                    RecordDepth(node, enclosing > 0 ? enclosing : depth, varyDepth);
                     continue;
                 }
 

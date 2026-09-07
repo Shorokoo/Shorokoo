@@ -4176,8 +4176,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// Scope. A loop is only unrolled natively when every one of these holds; otherwise
     /// <see cref="FastSimplify"/> leaves the loop in place. Every pass downstream accepts
     /// a rolled loop, but declining is not free — see the <see cref="Process"/> docstring
-    /// for the two that turn a declined loop into a build error. Decline only where cloning
-    /// would actually be wrong.
+    /// for the two that can turn a declined loop into a build error. Decline only where
+    /// cloning would actually be wrong.
     /// <list type="bullet">
     ///   <item>The <c>maxIter</c> producer is a <c>CONSTANT</c> with a non-negative
     ///     int64 scalar value.</item>
@@ -4227,8 +4227,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// the pipeline. Two later passes in that pipeline are the reason to decline
         /// sparingly: <c>FastLowerAttributeTensorOps</c> refuses variant-op geometry that
         /// differs per iteration of a rolled loop (it cannot become a static attribute), and
-        /// autograd has no gradient rule for <c>Loop</c>, so a rolled one reaching it is a
-        /// build error too. Decline only where cloning would be wrong, never merely awkward.
+        /// autograd has no gradient rule for <c>Loop</c>, so a rolled one on the differentiation
+        /// path is a build error too. A declined loop is otherwise lowered as usual — but decline
+        /// only where cloning would be wrong, never merely awkward.
         ///
         /// <para>
         /// One such place is Stage-F model-parameter machinery in the body — see

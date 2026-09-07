@@ -71,4 +71,17 @@ public class ConvVariantTests
                     TensorData(DType.Int64, [], 3L)]));
         Assert.Contains("varies per iteration of a loop that was not unrolled", ex.Message);
     }
+
+    /// <summary>The same per-iteration geometry, carried through a nested rolled loop before it
+    /// reaches the conv: the value still differs on every outer iteration, so it is still
+    /// refused.</summary>
+    [Fact]
+    public void TestVariantOpGeometryCarriedThroughANestedRolledLoopIsAlsoRefused()
+        => Assert.Throws<FastPipelineUnsupportedException>(
+            () => AutoTest.AdvancedTestGraph<ConvVariantNestedRolledLoopGeometry>(
+                hyperparamInputs: [],
+                runtimeInputs: [
+                    TensorData(DType.Float32, [1L, 3L, 5L, 5L],
+                        Enumerable.Range(0, 75).Select(i => (object)(float)i).ToArray()),
+                    TensorData(DType.Int64, [], 3L)]));
 }

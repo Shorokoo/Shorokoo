@@ -145,7 +145,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         "varies per iteration of a loop that was not unrolled, so it cannot be lowered to the static " +
                         $"'{mapping.AttributeName}' attribute of '{spec.StandardOpCode}' — one iteration's geometry " +
                         "would be used for every iteration. Give the loop a compile-time-constant trip count so it " +
-                        "unrolls, or make the geometry the same on every iteration.");
+                        "unrolls, or compute the geometry from something other than the loop's index and carries.");
                 }
                 keysToResolve.Add(key);
             }

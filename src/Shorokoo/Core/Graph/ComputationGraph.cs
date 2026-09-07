@@ -35,6 +35,13 @@ namespace Shorokoo.Graph
         /// </summary>
         private sealed class FrozenNode
         {
+            /// <summary>Frozen-node form of <see cref="FastNodeClassification.IsUnrunnableModuleOp"/>
+            /// — the two consult the same op inventory, so they cannot disagree.</summary>
+            public bool IsUnrunnableOpCode()
+                => !InternalOpCodes.IsModelInputOp(OpCode)
+                    && OpCode != InternalOpCodes.FUNCTION_INVOKE
+                    && InternalOpCodes.IsModuleStageOp(OpCode);
+
             public required FastNodeKey Key { get; init; }
             public required string OpCode { get; init; }
             public required OnnxCSharpAttributes Attributes { get; init; }
@@ -225,6 +232,16 @@ namespace Shorokoo.Graph
         internal void RequireConcretized(string operation, string? hint = null)
         {
             if (Kind != GraphKind.Module) return;
+
+            // A module graph all but always carries the machinery, and then the reader is better
+            // served by the refusal that names it and the module to lower than by the stamp alone,
+            // whose remedy is the WithKind hint below — an invitation to make the graph lie about
+            // itself. That hint is for the case this check leaves: a machinery-free graph whose
+            // stamp is what is wrong.
+            if (hint is null && _nodes.Any(n => n.IsUnrunnableOpCode()))
+                throw GraphStageGate.Refusal(operation,
+                    _nodes.Select(n => (n.OpCode, n.TargetFunction, n.IsUnrunnableOpCode())));
+
             throw new System.InvalidOperationException(SrkFileFormat.KindMismatchMessage(
                 operation, "a concretized graph (a 'concrete-architecture' or 'concrete-model')", Kind,
                 hint ?? "Lower the graph with ToConcreteArchitecture(inputHints, ...) " +

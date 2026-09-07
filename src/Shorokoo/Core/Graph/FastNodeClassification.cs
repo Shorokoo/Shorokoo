@@ -17,11 +17,7 @@ namespace Shorokoo.Core.Graph
     internal static class FastNodeClassification
     {
         public static bool IsModelInput(this FastNode node) =>
-            node.OpCode == InternalOpCodes.MODEL_TENSOR_INPUT ||
-            node.OpCode == InternalOpCodes.MODEL_OPTIONAL_INPUT ||
-            node.OpCode == InternalOpCodes.MODEL_SEQUENCE_INPUT ||
-            node.OpCode == InternalOpCodes.MODEL_TENSORSTRUCT_INPUT ||
-            node.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT;
+            InternalOpCodes.IsModelInputOp(node.OpCode);
 
         public static bool IsModelParamData(this FastNode node) =>
             node.OpCode == InternalOpCodes.MODEL_PARAM_DATA;
@@ -49,6 +45,12 @@ namespace Shorokoo.Core.Graph
         /// naming an op that appears nowhere in the public API
         /// (<c>No Op registered for ShrkCreateModule</c>).
         ///
+        /// <para>The model-input markers are runnable: they are never emitted as nodes at all, but
+        /// become the graph's own inputs (<c>FastOnnxProtoFactory.ReadInputMetadata</c>), so a graph
+        /// carrying one — a generic module's <c>#GenericTypeInput#</c>, a struct input — executes.
+        /// They sit in <see cref="InternalOpCodes.ModuleStageOps"/> because they mark a graph's
+        /// stage, which is the other question (see <see cref="IsModuleStageMachinery"/>).</para>
+        ///
         /// <para>Every <see cref="InternalOpCodes.FUNCTION_INVOKE"/> is runnable, whatever its
         /// target: an invoke is inlined or emitted as a call on a <c>FunctionProto</c>, which is how
         /// <c>ToConcreteModel</c> materializes parameters (an initializer-typed call), how a
@@ -67,7 +69,8 @@ namespace Shorokoo.Core.Graph
         /// running perfectly well.</para>
         /// </summary>
         public static bool IsUnrunnableModuleOp(this FastNode node)
-            => node.OpCode != InternalOpCodes.FUNCTION_INVOKE
+            => !node.IsModelInput()
+                && node.OpCode != InternalOpCodes.FUNCTION_INVOKE
                 && InternalOpCodes.IsModuleStageOp(node.OpCode);
 
         /// <summary>

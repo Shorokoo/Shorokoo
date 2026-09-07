@@ -88,12 +88,21 @@ from — for example:
 
 > `OnnxEngine.Eval requires a concretized graph (a 'concrete-architecture' or
 > 'concrete-model'), but this graph is a 'module'. It still carries module machinery
-> that no ONNX Runtime kernel implements (ShrkCreateModule, ShrkModelInvoke,
-> ShrkModuleSetHyperparams). Lower ResNet50's graph first and execute that: …`
+> that lowering removes (ShrkCreateModule, ShrkModelInvoke, ShrkModuleSetHyperparams).
+> It comes from module 'ResNet50': lower that module's ComputationGraph the whole way
+> — ToConcreteArchitecture(inputHints) then ToConcreteModel() — and execute that,
+> passing a value for each of its inputs in order ([Hyper] parameters come first). …`
 
-The module it names is your own, and the remedy it spells out is the code below —
-with one thing to get right, which the message states and the next section shows:
-the values go in the graph's input order, `[Hyper]` parameters first.
+It names the module your value came from, and the one thing easy to get wrong: the
+values go in the graph's input order, `[Hyper]` parameters first. The same refusal
+comes from `ComputeContext.Execute`/`Run`/`Compile` when the graph handed to them is
+a module — so the mistake reads the same whichever way you make it.
+
+Two shapes are outside what this catches, and still fail the old way, with
+OnnxRuntime rejecting the model for an op it has no kernel for
+(`No Op registered for ShrkCreateModule`): a call to a module-typed function whose
+body has not been lowered, and a graph whose module machinery hides inside a
+function body. Both need the same fix — lower the graph first.
 
 Concretize the module's `ComputationGraph` against the input first, then execute:
 

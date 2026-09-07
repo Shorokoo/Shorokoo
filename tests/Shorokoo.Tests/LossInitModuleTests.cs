@@ -6,9 +6,10 @@ using static Shorokoo.Tests.NNLibraryTrainingFixtures;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Coverage for the KLDivLoss closed forms and the extra initializers
-/// (TruncatedNormal / LeCunNormal); the exact closed forms live inside the
-/// self-checking modules in LossInitTestModules.cs.
+/// Coverage for the KLDivLoss closed forms, the extra initializers
+/// (TruncatedNormal / LeCunNormal), and an initializer body that hands an argument
+/// straight back; the exact closed forms live inside the self-checking modules in
+/// LossInitTestModules.cs.
 /// </summary>
 [Trait("Domain", "Modules")]
 [Trait("Purpose", "Coverage")]
@@ -23,6 +24,15 @@ public class LossInitModuleTests
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [1L], 0f)]));
         Assert.True(AutoTest.AdvancedTestGraph<ScalarInitializerValues>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [1L], 0f)]));
+    }
+
+    [Fact]
+    public void TestAnInitializerReturningItsInputUnchangedLoads()
+    {
+        Assert.True(AutoTest.AdvancedTestGraph<IdentityInitModel>(
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)]));
+        Assert.True(AutoTest.AdvancedTestGraph<IdentityShapedInitModel>(
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)]));
     }
 }
 
@@ -138,13 +148,4 @@ public class Rank0ParamTrainingTests
             0.01f));
         Assert.Contains(nameof(InitShapelessZeros), ex.Message);
     }
-
-    // Pins Shorokoo/Shorokoo#237: an initializer whose Inline hands an input straight back exports an
-    // ONNX function with a nameless output, and the model fails to load with an ORT schema error that
-    // names neither the initializer nor the fix. ScalarConstant works around it by writing its body as
-    // `Scalar(1.0f) * value`; unskipping this must not need any change to the test.
-    [Fact(Skip = "Shorokoo/Shorokoo#237: an identity initializer body exports a nameless function output")]
-    public void TestAnInitializerReturningItsInputUnchangedLoads()
-        => Assert.True(AutoTest.AdvancedTestGraph<IdentityInitModel>(
-            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)]));
 }

@@ -57,14 +57,25 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <summary>
         /// Returns every <see cref="FastTensorKey"/> whose value depends on some
         /// <c>LOOP_OPEN</c>'s body outputs — directly, or transitively through any chain
-        /// of nodes. Output keys produced by a <c>LOOP_OPEN</c> are included.
+        /// of nodes. Output keys produced by a <c>LOOP_OPEN</c> are included, as are those
+        /// produced by any close node.
+        ///
+        /// <para>The close nodes are included unconditionally because this set is what
+        /// <see cref="ShrinkAllScopes"/> uses to decide what may leave a scope, and a close
+        /// node never leaves one. Its outputs are produced inside its scope, so a consumer of
+        /// one cannot be hoisted out past it — even when the close's own inputs are all
+        /// loop-invariant, which is exactly what a nested loop carrying an unvarying value
+        /// looks like. Judging such a consumer by its inputs alone moved it above the nested
+        /// loop that produces what it reads.</para>
         /// </summary>
         public static HashSet<FastTensorKey> BuildLoopDependentTensors(InternalComputationGraph graph)
         {
             var loopDependent = new HashSet<FastTensorKey>();
             foreach (var node in graph.Nodes)
             {
-                if (node.OpCode == OpCodes.LOOP_OPEN)
+                if (node.OpCode == OpCodes.LOOP_OPEN
+                    || node.OpCode == OpCodes.LOOP_CLOSE
+                    || node.OpCode == OpCodes.IF_CLOSE)
                 {
                     AddAllOutputs(node, loopDependent);
                     continue;
@@ -297,10 +308,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     continue;
                 }
 
-                bool isCloseNode = node.OpCode == OpCodes.LOOP_CLOSE ||
-                                   node.OpCode == OpCodes.IF_CLOSE;
+                // A scope boundary never moves: hoisting an IF_OPEN out of an enclosing loop
+                // would strand its IF_CLOSE inside, and a close node's value belongs to the
+                // scope that produced it.
+                bool isScopeBoundary = node.OpCode == OpCodes.LOOP_CLOSE ||
+                                       node.OpCode == OpCodes.IF_CLOSE ||
+                                       node.OpCode == OpCodes.IF_OPEN;
 
-                if (!isCloseNode && openPositions.Count > 0)
+                if (!isScopeBoundary && openPositions.Count > 0)
                 {
                     bool loopDep = HasLoopDependentInput(node, loopDependent);
                     if (!loopDep)

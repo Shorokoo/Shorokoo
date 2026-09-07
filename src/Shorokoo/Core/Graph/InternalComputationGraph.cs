@@ -156,7 +156,7 @@ namespace Shorokoo.Graph
             foreach (var node in this.Nodes)
                 copy.Nodes.Add(CloneNode(node));
 
-            System.Diagnostics.Debug.Assert(copy.IsLinearOrderValid(), "copy.IsLinearOrderValid()");
+            System.Diagnostics.Debug.Assert(copy.IsLinearOrderValid(out var cloneOrderError), "copy.IsLinearOrderValid(): " + cloneOrderError);
             return copy;
         }
 
@@ -237,6 +237,10 @@ namespace Shorokoo.Graph
         /// are caught only in Debug builds via the assertion.</para>
         /// </summary>
         public bool IsLinearOrderValid() => TryValidateLinearOrder(out _);
+
+        /// <summary>Same check as <see cref="IsLinearOrderValid()"/>, naming the violation it found,
+        /// so an assertion can report which edge or scope is wrong rather than only that something is.</summary>
+        internal bool IsLinearOrderValid(out string? error) => TryValidateLinearOrder(out error);
 
         private bool TryValidateLinearOrder(out string? error)
         {

@@ -83,7 +83,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// Thin wrapper around <see cref="InternalComputationGraph.IsLinearOrderValid"/>.
+        /// Thin wrapper around <see cref="InternalComputationGraph.IsLinearOrderValid()"/>.
         /// Kept as a separate name so existing pass call sites read the way they did
         /// when this was a Kahn re-sort.
         /// </summary>
@@ -5043,10 +5043,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     }
                 }
 
-                // Record per-scan-var the cloned FastTensorKey this iteration produced for
-                // CLOSE.Inputs[1 + nLoop + k]. LoopAPI's third pass binds every scan
-                // output to a body-produced value, so each scan input is a non-empty
-                // FastTensorKey that resolves through curBodyOutputMap.
+                // Record per-scan-var the value this iteration contributes to
+                // CLOSE.Inputs[1 + nLoop + k]. Resolve it through curTensorMap rather than
+                // curBodyOutputMap: a scan input need not be a body node's output. Scanning an
+                // OPEN output directly — `ctx.Scan(ctx.IterationIndex)` — is ordinary user code,
+                // and that key lives in curTensorMap (mapped to this iteration's index), as does
+                // a loop-invariant body value (mapped to itself). Anything from outside the loop
+                // is in neither and stands for itself.
                 for (int k = 0; k < nScan; k++)
                 {
                     var scanInKey = closeNode.Inputs[1 + nLoop + k];
@@ -5054,11 +5057,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         "FastFoldConstantIterationLoops.UnrollOne: scan input is null/empty. "
                         + "LoopAPI binds every scan output to a body value by construction.");
                     var sk = (FastTensorKey)scanInKey!;
-                    var hasMapped = curBodyOutputMap.TryGetValue(sk, out var mapped);
-                    Debug.Assert(hasMapped,
-                        "FastFoldConstantIterationLoops.UnrollOne: scan input is not body-produced. "
-                        + "LoopAPI's third pass maps every scan output to a body node's output.");
-                    scanIterationKeys[k].Add(mapped);
+                    scanIterationKeys[k].Add(curTensorMap.TryGetValue(sk, out var mapped) ? mapped : sk);
                 }
             }
 

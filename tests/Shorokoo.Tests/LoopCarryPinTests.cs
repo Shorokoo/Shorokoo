@@ -37,10 +37,12 @@ public partial class ZeroTripCarryFromInsideTheBody
     }
 }
 
-/// <summary>A nested rolled loop whose carry is assigned a value derived from a graph input's
-/// shape. Concretizing it leaves the graph in an order the pipeline's own invariant rejects.</summary>
+/// <summary>A nested rolled loop whose carry is assigned a shape-derived value, so the inner
+/// LOOP_CLOSE's own inputs are all loop-invariant. Building a vector from that carry gives the
+/// close's output consumers that look hoistable; moving them out of the outer loop would put them
+/// above the nested loop that produces what they read.</summary>
 [Module]
-public partial class NestedZeroTripShapeCarry
+public partial class NestedLoopResultUsedInTheOuterBody
 {
     public static Scalar<int64> Inline(Tensor<float32> x, Scalar<int64> trips)
     {
@@ -53,17 +55,15 @@ public partial class NestedZeroTripShapeCarry
                 LoopAPI.Init(carry);
                 carry = x.ShapeTensor()[-1L] - Scalar(1L);
             }
-            var conv = NN.Conv(x, InitSimple.Init([Scalar(3L), Scalar(3L), Scalar(3L), Scalar(3L)]),
-                InitSimple.Init([Scalar(3L)]).Vec(), AutoPad.NotSet,
-                pads: [carry, carry, carry, carry], strides: Vector(1L, 1L), dilations: [carry, carry],
-                kernelShape: [Scalar(3L), Scalar(3L)], group: Scalar(1L));
-            total = total + carry + conv.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar().Cast<int64>() * Scalar(0L);
+            Vector<int64> pair = [carry, carry];
+            total = total + pair.Reduce(ReduceKind.Sum).Scalar();
         }
         return total;
     }
 }
 
-/// <summary>A scan output seeded before the loop and returned as the loop's result.</summary>
+/// <summary>A scan output whose per-iteration value is the loop's iteration index itself, rather
+/// than a body node's output.</summary>
 [Module]
 public partial class ScanSeededBeforeTheLoop
 {
@@ -96,19 +96,17 @@ public class LoopCarryPinTests
 
     // Shorokoo/Shorokoo#268: this concretizes to a graph whose node order fails the pipeline's own
     // IsLinearOrderValid invariant — a Debug.Fail, and in Release a missing-producer error later.
-    [Fact(Skip = "Shorokoo/Shorokoo#268: nested rolled loop with a shape-derived carry breaks linear order")]
-    public void TestANestedRolledLoopCarryingAShapeDerivedValueConcretizes()
-        => Assert.True(AutoTest.AdvancedTestGraph<NestedZeroTripShapeCarry>(
+    [Fact]
+    public void TestANestedLoopsResultStaysBelowTheLoopThatProducesIt()
+        => Assert.True(AutoTest.AdvancedTestGraph<NestedLoopResultUsedInTheOuterBody>(
             hyperparamInputs: [],
             runtimeInputs: [
                 TensorData(DType.Float32, [1L, 3L, 5L, 5L],
                     Enumerable.Range(0, 75).Select(i => (object)(float)i).ToArray()),
                 TensorData(DType.Int64, [], 3L)],
-            expected: [9d]));
+            expected: [18d]));
 
-    // Shorokoo/Shorokoo#267: a scan target seeded before the loop builds scan inputs that are not
-    // body-produced, which the unroller asserts against. Only the `Variable? x = null` shape works.
-    [Fact(Skip = "Shorokoo/Shorokoo#267: a scan output seeded before the loop is not body-produced")]
+    [Fact]
     public void TestAScanOutputSeededBeforeTheLoopStacksItsIterations()
         => Assert.True(AutoTest.AdvancedTestGraph<ScanSeededBeforeTheLoop>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Int64, [], 3L)],

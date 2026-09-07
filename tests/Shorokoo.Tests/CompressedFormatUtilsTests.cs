@@ -2406,6 +2406,22 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.True(File.Exists(P("no-ceiling.onnx.data")));
     }
 
+    /// <summary>
+    /// Pin: <c>ExportOnnx</c> promises a standard vanilla <c>.onnx</c>, but leaves
+    /// <c>GraphProto.name</c> empty — a field the ONNX spec requires to be non-empty, so the
+    /// reference <c>onnx.checker</c> rejects every file the framework exports.
+    /// </summary>
+    [Fact]
+    public void TestExportedOnnxNamesItsGraph()
+    {
+        var (model, _, _) = BuildSkptModel();
+        var path = P("graph-name.onnx");
+        Persistence.ExportOnnx(model, path);
+
+        using var fs = File.OpenRead(path);
+        Assert.NotEqual("", ProtoBuf.Serializer.Deserialize<ModelProto>(fs).Graph.Name);
+    }
+
     [Fact]
     public void TestOnnxExportImportRoundTripThirdPartyModelsAndCheckpointLanding()
     {

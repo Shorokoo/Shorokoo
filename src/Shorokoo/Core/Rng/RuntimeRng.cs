@@ -861,8 +861,8 @@ internal static class RuntimeRng
     // DenseNormalTable is generated offline against a 320-bit erf and is re-derived neither here
     // nor by the oracle, so the two share it: RngDenseNormalOracle pins this DECODE bit for bit
     // (tests: RngDenseNormalOracleCheck), while the table's own correctness — every entry code the
-    // exact ideal breakpoint, no float that earns a code starved — is established by the census in
-    // the ShorokooDev harness. A fault in the table would be invisible to both.
+    // exact ideal breakpoint, no float that earns a code starved — is established offline by the
+    // generator's own census. A fault in the table would be invisible to both.
 
     private const int NormalSearchRounds = 8;                 // 2^8 >= DenseNormalTable.PieceCount
 

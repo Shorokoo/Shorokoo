@@ -125,8 +125,8 @@ public class RigConstructionScalingTests
 
         // Peak working set is monotonic, so the two table builds have to be what raises it. That
         // holds while this class runs in a process of its own, which is how the release workflow
-        // and CLAUDE.md invoke it; the assertion below is what catches it if that ever stops
-        // being true, rather than letting the arm read zero and pass.
+        // invokes it; the assertion below is what catches it if that ever stops being true,
+        // rather than letting the arm read zero and pass.
         long peakBeforeTables = PeakWorkingSetBytes();
         BuildRig(RigScalingTableSmall.ComputationGraph);
         long peakAfterSmallTable = PeakWorkingSetBytes();

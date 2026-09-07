@@ -40,10 +40,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// N such results therefore costs N arenas. Measured on one caller
         /// (<c>FastInitializeModelParams</c>, initializing a 12 x [384, 384] model one session per
         /// parameter): 379-481 MiB still live after a forced collection, for 6.75 MiB of actual
-        /// parameter, against 10-32 MiB with this copy. See the
-        /// <c>ort-values-are-never-disposed</c> finding in the ShorokooDev repo, and
-        /// Shorokoo/Shorokoo#180, for the general ownership question this sidesteps rather than
-        /// settles.</para>
+        /// parameter, against 10-32 MiB with this copy. See Shorokoo/Shorokoo#180 for the
+        /// general ownership question this sidesteps rather than settles.</para>
         ///
         /// <para>The copy is the part that frees the arena — it makes the backend tensor
         /// unreachable. Disposing it as well only makes the release deterministic instead of

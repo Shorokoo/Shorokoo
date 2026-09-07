@@ -431,22 +431,13 @@ public partial class Rank1GainWithRefModel
     }
 }
 
-/// <summary>Wraps <see cref="Rank1GainSubModel"/> one level deeper, so its parameter sits at
-/// <c>[1, 1]</c> rather than <c>[1]</c>.</summary>
-[Module]
-public partial class Rank1GainTwoLevelModel
-{
-    public static Tensor<float32> Inline(Tensor<float32> input)
-        => Rank1GainSubModel.Call(input);
-}
-
 /// <summary>One nested and one flat parameter, called plainly — the naming baseline for
 /// <see cref="MixedDepthGainWithRefsModel"/>.</summary>
 [Module]
 public partial class MixedDepthGainNoRefModel
 {
     public static Tensor<float32> Inline(Tensor<float32> input)
-        => Rank1GainTwoLevelModel.Call(input) + Rank1GainSubModel.Call(input);
+        => Rank1GainNoRefModel.Call(input) + Rank1GainSubModel.Call(input);
 }
 
 /// <summary>
@@ -460,11 +451,47 @@ public partial class MixedDepthGainWithRefsModel
 {
     public static Tensor<float32> Inline(Tensor<float32> input)
     {
-        var deep = Rank1GainTwoLevelModel.Model();
+        var deep = Rank1GainNoRefModel.Model();
         var flat = Rank1GainSubModel.Model();
         return deep.Call(input) + flat.Call(input)
              + deep.GetTrainableParam<float32>([1, 1], rank: 1) * Scalar(0f)
              + flat.GetTrainableParam<float32>([1], rank: 1) * Scalar(0f);
+    }
+}
+
+/// <summary>A model called inside a 3-trip loop body — its parameter's template carries the
+/// loop's generalized slot. The naming baseline for <see cref="Rank1GainRefInLoopModel"/>.</summary>
+[Module]
+public partial class Rank1GainInLoopNoRefModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var m = Rank1GainSubModel.Model();
+        var x = input;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            x = m.Call(x);
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary><see cref="Rank1GainInLoopNoRefModel"/> plus a read-only reference taken inside the
+/// loop body, contributing nothing to the output.</summary>
+[Module]
+public partial class Rank1GainRefInLoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var m = Rank1GainSubModel.Model();
+        var x = input;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            x = m.Call(x) + m.GetTrainableParam<float32>([1], rank: 1) * Scalar(0f);
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
     }
 }
 

@@ -117,7 +117,9 @@ public class ModelParamRefTests
     private static string[] ParamIdsOf(ComputationGraph g)
     {
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
-        return [.. arch.GetConcreteModelParamInfos().ParamInfos.Select(x => x.ToShorokooIdString())];
+        string[] ids = [.. arch.GetConcreteModelParamInfos().ParamInfos.Select(x => x.ToShorokooIdString())];
+        Assert.NotEmpty(ids);
+        return ids;
     }
 
     private static void SameIds(ComputationGraph noRef, ComputationGraph withRef)
@@ -129,6 +131,7 @@ public class ModelParamRefTests
         SameIds(Rank0GainNoRefModel.ComputationGraph, Rank0GainWithRefModel.ComputationGraph);
         SameIds(Rank1GainNoRefModel.ComputationGraph, Rank1GainWithRefModel.ComputationGraph);
         SameIds(MixedDepthGainNoRefModel.ComputationGraph, MixedDepthGainWithRefsModel.ComputationGraph);
+        SameIds(Rank1GainInLoopNoRefModel.ComputationGraph, Rank1GainRefInLoopModel.ComputationGraph);
     }
 
     private static string[] TrainingParamNamesOf(ComputationGraph g)
@@ -156,5 +159,5 @@ public class ModelParamRefTests
     // trainable parameters at all, so its multiply is dropped and the forward is wrong.
     [Fact(Skip = "Shorokoo/Shorokoo#264: a [Hyper] Model<> loses every trainable parameter it owns")]
     public void TestAModelPassedAsAHyperparameterKeepsItsTrainableParams()
-        => SameIds(Rank1GainSubModel.ComputationGraph, HyperModelGainModel.ComputationGraph);
+        => SameIds(Rank1GainNoRefModel.ComputationGraph, HyperModelGainModel.ComputationGraph);
 }

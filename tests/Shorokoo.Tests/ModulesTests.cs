@@ -1171,14 +1171,24 @@ public class ModulesCoverageTests
     }
 
     /// <summary>A module-typed invoke is the one machinery shape the concretization refusal points at
-    /// that cannot take the advice: inlining it hits <c>Debug.Fail</c> ("caller inputs (0) != subgraph
-    /// inputs (1)"), which outside a test host kills the process, rather than the product's own
-    /// catchable exception. Tracked as Shorokoo/Shorokoo#251.</summary>
+    /// that cannot take the advice: FastInlineModulesAndFunctions applies the MODEL_INVOKE arm's
+    /// <c>Skip(1)</c> (which drops that op's leading model variable) to a FUNCTION_INVOKE, whose
+    /// inputs are the arguments themselves, so the callee's first argument is dropped. Debug hits
+    /// <c>Debug.Fail</c> ("caller inputs (0) != subgraph inputs (1)"), which outside a test host
+    /// kills the process; Release truncates the input remap instead and concretizes to a graph
+    /// whose spliced body input is wired to nothing, so the failure surfaces only at session
+    /// creation as an ORT "not a graph input, initializer, or output of a previous node".
+    /// Running the result is what covers the second half — asserting only that
+    /// ToConcreteArchitecture returns would pass on the silently invalid graph.
+    /// Tracked as Shorokoo/Shorokoo#251.</summary>
     [Fact(Skip = "Shorokoo/Shorokoo#251: a Debug.Fail on a user-reachable path fires instead of the product's own exception")]
     public void TestConcretizingAModuleTypedInvokeFailsWithACatchableExceptionNotAnAssertion()
     {
+        var input = TensorData([2L], 1f, 2f);
         var g = ComputationGraph.FromInternal(ModuleInvokeGraph(), GraphKind.Module);
-        var ex = Record.Exception(() => g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)])));
+        var ex = Record.Exception(() => Assert.Equal([2f, 4f], ComputeContext.Default
+            .Execute(g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel(), input)[0]
+            .ToTensorData().As<float32>().AccessMemory<float>().ToArray()));
         Assert.True(ex is null or InvalidOperationException or ShorokooException);
     }
 

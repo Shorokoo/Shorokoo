@@ -1258,6 +1258,23 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
+    /// Scans a zero-input op's output. The looper does not track such a node, so the scan input
+    /// resolves through <c>ProcessNode</c>'s outer-scope fallback to the first pass's draw,
+    /// outside the loop; binding that would stack one draw once per iteration.
+    /// </summary>
+    [Module]
+    public partial class ScanZeroInputOpInLoopBody
+    {
+        public static Tensor<float32> Inline(Scalar<int64> trips)
+        {
+            Variable? scanned = null;
+            foreach (var ctx in LoopAPI.Iterate(trips))
+                scanned = (Variable)ctx.Scan((Tensor<float32>)(Variable)OnnxOp.RandomUniform([2L], high: 1f, low: 0f, dtype: DType.Float32));
+            return (Tensor<float32>)scanned!;
+        }
+    }
+
+    /// <summary>
     /// Draws inside the loop body with a zero-input op. <c>LoopAPI.ProcessNode</c> declines to
     /// track any node with no inputs, so the draw is emitted before the loop-open node and every
     /// iteration reads the same one. Tracked as Shorokoo/Shorokoo#262.

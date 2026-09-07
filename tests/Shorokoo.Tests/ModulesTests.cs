@@ -911,6 +911,20 @@ public class ModulesCoverageTests
                 .Any(k => k is FastTensorKey t && !t.IsEmpty && !t.FastNodeKey.Equals(n.Key)))
             .Select(n => n.OpCode.ToString())];
 
+    /// <summary>A scan input resolves through the looper's outer-scope fallback when the scanned
+    /// value comes from a node it does not track, which names the first pass's node outside the
+    /// loop. Binding that would stack one draw once per iteration, so the scan takes the fallback
+    /// only when it names a loop carry.</summary>
+    [Fact]
+    public void TestScanningAZeroInputOpKeepsTheDrawInsideTheLoopBody()
+    {
+        string[] codes = [.. ScanZeroInputOpInLoopBody.ComputationGraph.ToInternal().Nodes.Select(n => n.OpCode)];
+        Assert.InRange(
+            Array.IndexOf(codes, OpCodes.RANDOM_UNIFORM),
+            Array.IndexOf(codes, OpCodes.LOOP_OPEN) + 1,
+            Array.IndexOf(codes, OpCodes.LOOP_CLOSE) - 1);
+    }
+
     /// <summary>A node the loop body creates with no inputs is not tracked by the looper, so its
     /// consumers resolve it through the outer-scope case to the first pass's node — emitted before
     /// LOOP_OPEN. The draw is hoisted out of the loop and every iteration reads the same one. The

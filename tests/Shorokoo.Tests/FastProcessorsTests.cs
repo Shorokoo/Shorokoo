@@ -205,15 +205,18 @@ public class FastProcessorsCoverageTests
             hyperparamInputs: [], runtimeInputs: [Scalar32(10f), trips], expected: [10.0, 10.0, 10.0]));
         Assert.True(AutoTest.AdvancedTestGraph<ScanLoopInvariantConstTrip>(
             hyperparamInputs: [], runtimeInputs: [Scalar32(10f)], expected: [10.0, 10.0, 10.0]));
-        Assert.True(AutoTest.AdvancedTestGraph<ScanIterationIndex>(
-            hyperparamInputs: [], runtimeInputs: [trips], expected: [0.0, 1.0, 2.0]));
         Assert.True(AutoTest.AdvancedTestGraph<ScanIterationIndexConstTrip>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Int64, [], 0L)], expected: [0.0, 1.0, 2.0]));
-        Assert.True(AutoTest.AdvancedTestGraph<ScanInNestedLoopUsedInOuterBody>(
-            hyperparamInputs: [],
-            runtimeInputs: [Scalar32(10f), TensorData(DType.Int64, [], 2L), trips],
-            expected: [114.0]));
     }
+
+    /// <summary>An inner loop's scan output consumed inside the enclosing loop's body — the
+    /// nesting that works, against the one that does not (Shorokoo/Shorokoo#255).</summary>
+    [Fact]
+    public void TestAnInnerLoopsScanIsUsableInTheEnclosingBody()
+        => Assert.True(AutoTest.AdvancedTestGraph<ScanInNestedLoopUsedInOuterBody>(
+            hyperparamInputs: [],
+            runtimeInputs: [Scalar32(10f), TensorData(DType.Int64, [], 2L), TensorData(DType.Int64, [], 3L)],
+            expected: [114.0]));
 
     /// <summary>An inner loop's scan output read after the enclosing loop. The enclosing loop
     /// sees the inner scan's zombie as an output-only body value with no initializer, so it never

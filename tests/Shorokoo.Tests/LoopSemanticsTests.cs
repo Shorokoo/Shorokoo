@@ -107,6 +107,43 @@ public partial class RolledLoopWithOnlyAScanOutput
     }
 }
 
+/// <summary>A bit carry handed straight to <c>ctx.ContinueWhile</c> before the body updates it.
+/// <c>ContinueWhile</c> creates no node, so nothing rewrites the caller's local to the value the
+/// body reads and the condition binds outside the loop. Tracked as Shorokoo/Shorokoo#280.</summary>
+[Module]
+public partial class BreakOnCarryReadBeforeUpdate
+{
+    public static Scalar<float32> Inline(Scalar<int64> trips)
+    {
+        var acc = Scalar(0f);
+        var flag = Scalar(true);
+        foreach (var ctx in LoopAPI.Iterate(trips))
+        {
+            ctx.ContinueWhile(flag);
+            flag = acc < Scalar(3f);
+            acc = acc + Scalar(1f);
+        }
+        return acc;
+    }
+}
+
+/// <summary>A scan of a loop-invariant gate result: the loop carries nothing, so its exported
+/// Loop has only the trip count unless the condition slot is kept.</summary>
+[Module]
+public partial class ScanOfInvariantGateLayer
+{
+    public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> iters, Scalar<bit> flag)
+    {
+        Variable? scanned = null;
+        foreach (var o in LoopAPI.Iterate(iters))
+        {
+            var g = flag.IfElse(input * Scalar(2f), input * Scalar(3f));
+            scanned = (Variable)o.Scan(g + input);
+        }
+        return (Tensor<float32>)scanned!;
+    }
+}
+
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
 public class LoopSemanticsTests
@@ -139,13 +176,28 @@ public class LoopSemanticsTests
                 TensorData(DType.Int64, [], 3L)],
             expected: [18d]));
 
-    // Shorokoo/Shorokoo#279: with no carry to force it, the exported Loop omits its cond input, so
-    // ONNX Runtime rejects the model. Pre-existing; reproduces on main.
-    [Fact(Skip = "Shorokoo/Shorokoo#279: a scan-only rolled loop exports a Loop node with too few inputs")]
+    [Fact]
     public void TestARolledLoopWithOnlyAScanOutputExports()
         => Assert.True(AutoTest.AdvancedTestGraph<RolledLoopWithOnlyAScanOutput>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Int64, [], 3L)],
             expected: [0d, 1d, 2d]));
+
+    /// <summary>The same missing condition slot as
+    /// <see cref="TestARolledLoopWithOnlyAScanOutputExports"/>, reached by scanning a value the
+    /// loop does not vary rather than the iteration index.</summary>
+    [Fact]
+    public void TestScanningALoopInvariantGateResultLowersToOnnx()
+        => Assert.True(AutoTest.AdvancedTestGraph<ScanOfInvariantGateLayer>(
+            hyperparamInputs: [TensorData(DType.Int64, [], 3L)],
+            runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f), TensorData(DType.Bool, [], true)],
+            expected: [3d, 6d, 3d, 6d, 3d, 6d]));
+
+    /// <summary>A bit carry read before the body updates it binds outside the loop, so the break
+    /// never fires and the loop runs its full trip count. Tracked as Shorokoo/Shorokoo#280.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#280: ctx.ContinueWhile given a carry binds the pre-loop value")]
+    public void TestBreakingOnACarryReadBeforeTheBodyUpdatesIt()
+        => Assert.True(AutoTest.AdvancedTestGraph<BreakOnCarryReadBeforeUpdate>(
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Int64, [], 10L)], expected: [5d]));
 
     [Fact]
     public void TestAScanOfTheIterationIndexStacksItsIterations()

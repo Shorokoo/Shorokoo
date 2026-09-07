@@ -146,8 +146,8 @@ namespace Shorokoo
                 // not track — anything built from a zero-input op, which node interception skips
                 // — that fallback names the pass-1 node outside the loop, and binding it would
                 // hoist e.g. a scanned RandomNormal out of the body and stack one draw N times.
-                // Where that fallback is an identity — the scanned tensor really is loop-invariant
-                // — and in every remaining case the input is left alone, so the local is right.
+                // Every other case leaves the input alone, and where the fallback is an identity
+                // — the scanned tensor really is loop-invariant — it agrees with the local anyway.
                 var inBodyScanInput = retVal.OwningNode.Inputs[0].AssertNotNull();
                 loopVariableForScanVariable.SetLocalScanVariableInput(
                     this.openNodeOutputs.ContainsKey(inBodyScanInput) ? inBodyScanInput : toScan);

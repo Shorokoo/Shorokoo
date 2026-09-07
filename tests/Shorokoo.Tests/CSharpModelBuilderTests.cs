@@ -58,7 +58,7 @@ public class CSharpModelBuilderCoverageTests
         var scan = Assert.Single(body, x => x.Contains(".Scan("));
         var carry = scan[(scan.IndexOf(".Scan(") + ".Scan(".Length)..].TrimEnd(';', ')');
         Assert.True(Array.IndexOf(body, scan) < Array.FindIndex(body, x => x.StartsWith(carry + " = ")));
-        Assert.DoesNotContain(body, x => x.EndsWith(" = null!;"));
+        Assert.Contains(body, x => x.EndsWith($"> {scan[..scan.IndexOf(" = ")]} = default;"));
     }
 
     [Fact]

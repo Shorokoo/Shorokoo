@@ -103,6 +103,29 @@ fresh one ([#262](https://github.com/Shorokoo/Shorokoo/issues/262)). The result 
 wrong rather than rejected, and every engine agrees on it. Draw outside the loop and
 index into the result, or use a keyed RNG (`Rng`), which is unaffected.
 
+### Carrying a value from the previous iteration
+
+A local that holds what another local held **one iteration ago** is not recognised as a loop
+carry, and every read of it is silently pinned to its value from before the loop
+([#274](https://github.com/Shorokoo/Shorokoo/issues/274)):
+
+```csharp
+sum = sum + prev;   // prev is acc's value from the previous iteration — reads x every time
+prev = acc;
+acc  = acc + Scalar(1.0f);
+```
+
+The result is wrong rather than rejected, and every engine agrees on it. `LoopAPI.Init` does not
+help — this is a different shape from the one it addresses. Carry the lagged value explicitly
+(compute it inside the body from the carry itself) until this is fixed.
+
+### Calling an outer loop's ctx.Scan from an inner loop
+
+`ctx.Scan` on an **enclosing** loop's context, called from inside a nested loop's body, throws a
+`KeyNotFoundException` naming nothing
+([#275](https://github.com/Shorokoo/Shorokoo/issues/275)). Scan on the context of the loop whose
+body you are in.
+
 ### Scanning inside a nested loop
 
 A value produced by `ctx.Scan` in an inner loop can be used inside the enclosing

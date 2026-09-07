@@ -1027,7 +1027,7 @@ namespace Shorokoo.Tests.Modules
 
     #endregion
 
-    #region LoopAPI body-value binding (scan inputs and zero-input body ops)
+    #region LoopAPI body-value binding (scan inputs, carries, zero-input body ops)
 
     /// <summary>
     /// Scans a loop carry read <em>before</em> the body updates it, so the scan input is the
@@ -1134,7 +1134,7 @@ namespace Shorokoo.Tests.Modules
     /// <summary>
     /// Scans a tensor defined entirely outside the loop. The scan input is an outer-scope value,
     /// and the loop carries nothing at all — so its ONNX <c>Loop</c> has no input past the
-    /// (absent) condition slot, which the exporter must still emit.
+    /// (absent) condition slot, which the exporter must still emit (Shorokoo/Shorokoo#279).
     /// </summary>
     [Module]
     public partial class ScanLoopInvariant
@@ -1161,22 +1161,9 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary>Scans the iteration index, which the loop-open node produces rather than the body.</summary>
-    [Module]
-    public partial class ScanIterationIndex
-    {
-        public static Tensor<int64> Inline(Scalar<int64> trips)
-        {
-            Variable? scanned = null;
-            foreach (var ctx in LoopAPI.Iterate(trips))
-                scanned = (Variable)ctx.Scan(ctx.IterationIndex);
-            return (Tensor<int64>)scanned!;
-        }
-    }
-
     /// <summary>
-    /// <see cref="ScanIterationIndex"/> with a constant trip count, and a runtime input added
-    /// afterwards so the graph is not wholly constant.
+    /// Scans the iteration index, which the loop-open node produces rather than the body, with a
+    /// constant trip count and a runtime input added afterwards so the graph is not wholly constant.
     /// </summary>
     [Module]
     public partial class ScanIterationIndexConstTrip

@@ -201,7 +201,8 @@ How a hyper value gets supplied depends on the route:
   ```
 
   `ctx.Scan(v)` records `v` once per iteration and stacks the recordings into a
-  single tensor with a new leading axis of length `count`, available after the loop.
+  single tensor with a new leading axis of length `count`, available after that loop
+  (but see [limitations.md](limitations.md) for a scan inside a *nested* loop).
   Scan whatever the body reads at that point — the carry before the body updates it,
   the carry after, the iteration index, a value from outside the loop:
   ```csharp

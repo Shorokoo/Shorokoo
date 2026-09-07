@@ -880,10 +880,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     nodeByKey[subNode.Key] = subNode;
                 }
 
-                // Map invoke node's outputs → subgraph's outputs. A body that hands an
-                // argument straight back names one of its own formal parameters as its
-                // output, and that stand-in is not the caller's value — so the output
-                // travels the same input remap every other reference to it does.
+                // Map invoke node's outputs → subgraph's outputs, by the same rule
+                // FastReplay.ReplayInto states: a pass-through output names a formal
+                // parameter, so it travels inputRemap like every other callee reference.
                 var invokeOutputs = fastNode.Outputs;
                 for (int i = 0; i < invokeOutputs.Count && i < subFastGraph.Outputs.Count; i++)
                 {
@@ -4992,7 +4991,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 {
                     var closeBodyIn = closeNode.Inputs[1 + k];
                     if (closeBodyIn is not FastTensorKey ckey || ckey.IsEmpty) { iterCandidateLoopVarKey[k] = null; continue; }
-                    iterCandidateLoopVarKey[k] = curBodyOutputMap.TryGetValue(ckey, out var mappedK) ? mappedK : ckey;
+                    // A body that carries its loop variable through unchanged updates the carry
+                    // with the carry itself, so the close's input is the OPEN's output rather
+                    // than any body node's — curBodyOutputMap misses it and curTensorMap, which
+                    // holds this iteration's source for every OPEN output, has it.
+                    iterCandidateLoopVarKey[k] =
+                        curBodyOutputMap.TryGetValue(ckey, out var mappedK) ? mappedK
+                        : curTensorMap.TryGetValue(ckey, out var mappedT) ? mappedT
+                        : ckey;
                 }
 
                 if (hasCondChain)

@@ -11,13 +11,27 @@ namespace Shorokoo.Tests;
 public class ModulesCoverageTests
 {
     [Fact]
-    public void TestACalledPassThroughModuleWiresThroughToTheCallersInput()
+    public void TestCalledPassThroughSwapAndRepeatedOutputModulesWireThroughToTheCallersInputs()
     {
+        TensorData[] x = [TensorData(DType.Float32, [2L], 1f, 2f)];
         Assert.True(AutoTest.AdvancedTestGraph<Modules.CallerOfPassThroughSub>(
-            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)]));
+            hyperparamInputs: [], runtimeInputs: x, expected: [2.0, 4.0]));
         Assert.True(AutoTest.AdvancedTestGraph<Modules.CallerOfSwapSub>(
-            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)]));
+            hyperparamInputs: [], runtimeInputs: x, expected: [1.0, 2.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<Modules.CallerOfRepeatedOutputSub>(
+            hyperparamInputs: [], runtimeInputs: x, expected: [6.0, 12.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<Modules.LoopCarriedPassThrough>(
+            hyperparamInputs: [], runtimeInputs: x, expected: [1.0, 2.0]));
     }
+
+    /// <summary>An initializer that calls a module exports that call un-flattened — the emitted
+    /// FunctionProto body still holds ShrkCreateModule / ShrkModuleSetHyperparams / ShrkModelInvoke,
+    /// and ORT fails type inference on the call site. The callee does no aliasing, so this is
+    /// independent of the pass-through defects. Tracked as Shorokoo/Shorokoo#276.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#276: an initializer body's module call is not flattened before export")]
+    public void TestAnInitializerCallingAModuleFlattensThatCallInItsFunctionBody()
+        => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingAModule>(
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [2.0, 4.0]));
 
     [Fact]
     public void TestStateUpdateSurvivesNestedFirstUseModuleBuild()
@@ -394,6 +408,20 @@ public class ModulesCoverageTests
             hyperparamInputs: [],
             runtimeInputs: [TensorDataWithSmallVals(DType.Float32, [5L])],
             expected: Rep(0.1, 5)));
+        // Round trip keeps the callee a function, so these reach FunctionProto emission,
+        // which the inlined-away forms above never do.
+        Assert.True(AutoTest.AdvancedTestGraphWithModuleGraphRoundtrip<Modules.CallerOfPassThroughSub>(
+            hyperparamInputs: [],
+            runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)],
+            expected: [2.0, 4.0]));
+        Assert.True(AutoTest.AdvancedTestGraphWithModuleGraphRoundtrip<Modules.CallerOfSwapSub>(
+            hyperparamInputs: [],
+            runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)],
+            expected: [1.0, 2.0]));
+        Assert.True(AutoTest.AdvancedTestGraphWithModuleGraphRoundtrip<Modules.CallerOfRepeatedOutputSub>(
+            hyperparamInputs: [],
+            runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)],
+            expected: [6.0, 12.0]));
         Assert.True(AutoTest.AdvancedTestGraphWithModuleGraphRoundtrip<CallsHypersLayer>(
             hyperparamInputs: [],
             runtimeInputs: [TensorDataWithSmallVals(DType.Float32, [5L])],

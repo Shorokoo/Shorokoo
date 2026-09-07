@@ -29,10 +29,11 @@ public class LossInitModuleTests
     [Fact]
     public void TestAnInitializerReturningItsInputUnchangedLoads()
     {
+        TensorData[] x = [TensorData(DType.Float32, [2L], 1f, 2f)];
         Assert.True(AutoTest.AdvancedTestGraph<IdentityInitModel>(
-            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)]));
+            hyperparamInputs: [], runtimeInputs: x, expected: [2.0, 4.0]));
         Assert.True(AutoTest.AdvancedTestGraph<IdentityShapedInitModel>(
-            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)]));
+            hyperparamInputs: [], runtimeInputs: x, expected: [2.0, 4.0]));
     }
 }
 

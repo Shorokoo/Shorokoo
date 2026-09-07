@@ -90,8 +90,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// and ONNX has no way to express it: a FunctionProto whose output name is one of its
         /// input names has no node producing the output, and ORT rejects the model when it
         /// builds the function's schema. An output repeating an earlier one is wrapped by the
-        /// same rule — reachable only through the internal dialect, which keeps multi-output
-        /// module functions, but it costs nothing to be right about.
+        /// same rule: a multi-output module function returning one value twice.
+        /// Only function bodies need this — ORT accepts a main-graph output that names a graph
+        /// input, and it is only the function-schema builder that rejects one.
         /// </summary>
         public static void WrapAliasedOutputs(InternalComputationGraph graph)
         {

@@ -825,12 +825,22 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     }
                 }
 
-                // Build caller input keys: [hyperparamKeys..., node.Inputs.Skip(1)...]
-                // Skip(1) skips the model variable for MODULE_INVOKE, and matches
-                // the non-fast InlineModulesAndFunctions behaviour for FUNCTION_INVOKE.
+                // Both arms must line up with the callee body's inputs, which are
+                // [hyperparams..., args...]. The two ops carry their operands differently:
+                //
+                //   MODEL_INVOKE    [model, args...]  — the model is dropped, and the body's
+                //                                       hyperparams come from MODEL_HYPERPARAM
+                //                                       nodes read off that model above.
+                //   FUNCTION_INVOKE [args...]         — no model operand, so nothing is dropped
+                //                                       and hyperparams (a module-typed callee
+                //                                       has them) are supplied positionally by
+                //                                       the caller, ahead of the runtime args.
+                //
+                // Skipping the first input for a FUNCTION_INVOKE ate the callee's first
+                // argument (Shorokoo/Shorokoo#251).
                 var callerInputKeys = new List<FastTensorKey?>();
                 callerInputKeys.AddRange(hyperparamNodeKeys);
-                callerInputKeys.AddRange(fastNode.Inputs.Skip(1).ToList());
+                callerInputKeys.AddRange((isFunction ? fastNode.Inputs : fastNode.Inputs.Skip(1)).ToList());
 
                 Debug.Assert(callerInputKeys.Count == subFastGraph.Inputs.Count,
                     $"FastInlineModulesAndFunctions: caller inputs ({callerInputKeys.Count}) != " +

@@ -1170,26 +1170,45 @@ public class ModulesCoverageTests
         Assert.Equal(5f, OnnxEngine.Eval(Scalar(2f) + Scalar(3f)).As<float32>().AccessMemory()[0]);
     }
 
-    /// <summary>A module-typed invoke is the one machinery shape the concretization refusal points at
-    /// that cannot take the advice: FastInlineModulesAndFunctions applies the MODEL_INVOKE arm's
-    /// <c>Skip(1)</c> (which drops that op's leading model variable) to a FUNCTION_INVOKE, whose
-    /// inputs are the arguments themselves, so the callee's first argument is dropped. Debug hits
-    /// <c>Debug.Fail</c> ("caller inputs (0) != subgraph inputs (1)"), which outside a test host
-    /// kills the process; Release truncates the input remap instead and concretizes to a graph
-    /// whose spliced body input is wired to nothing, so the failure surfaces only at session
-    /// creation as an ORT "not a graph input, initializer, or output of a previous node".
-    /// Running the result is what covers the second half — asserting only that
-    /// ToConcreteArchitecture returns would pass on the silently invalid graph.
-    /// Tracked as Shorokoo/Shorokoo#251.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#251: a Debug.Fail on a user-reachable path fires instead of the product's own exception")]
-    public void TestConcretizingAModuleTypedInvokeFailsWithACatchableExceptionNotAnAssertion()
+    [Fact]
+    public void TestModuleTypedFunctionInvokesInlineTheirArgsHyperparamsAndParams()
     {
         var input = TensorData([2L], 1f, 2f);
-        var g = ComputationGraph.FromInternal(ModuleInvokeGraph(), GraphKind.Module);
-        var ex = Record.Exception(() => Assert.Equal([2f, 4f], ComputeContext.Default
+        Assert.Equal([2f, 4f], RunInvoke(ModuleFn((Func<Tensor<float32>, Tensor<float32>>)DoubleScalar), x => [x], input));
+        Assert.Equal([3f, 6f], RunInvoke(ModuleFn((Func<Tensor<float32>, Scalar<float32>, Tensor<float32>>)ScaledByHyper), x => [Scalar(3f), x], input));
+        Assert.Equal([1f, 2f], RunInvoke(ModuleFn((Func<Tensor<float32>, Tensor<float32>>)TimesOwnParam), x => [x], input));
+    }
+
+    [Fact]
+    public void TestFunctionCallWithTheWrongArgumentCountThrowsNamingTheDeclaredInputs()
+    {
+        var fn = ModuleFn((Func<Tensor<float32>, Scalar<float32>, Tensor<float32>>)ScaledByHyper);
+        var ex = Assert.Throws<ModuleException>(() => fn.Call(InvokeInput("only")));
+        Assert.Contains("1 argument(s)", ex.Message);
+        Assert.Contains("2 input(s)", ex.Message);
+    }
+
+    private static Tensor<float32> ScaledByHyper(Tensor<float32> t, [Hyper] Scalar<float32> h) => t * h;
+
+    private static Tensor<float32> TimesOwnParam(Tensor<float32> t) => t * Modules.InitSimple.Init([Scalar(2L)]);
+
+    private static Shorokoo.Core.Function ModuleFn(Delegate body)
+        => Shorokoo.Core.ModuleHelper.CreateTargetFunction(body);
+
+    private static Tensor<float32> InvokeInput(string name)
+        => (Tensor<float32>)Shorokoo.Core.Nodes.NodeDefinitions.InternalOp.ModuleTensorInput(
+            DType.Float32, rank: 1, Shorokoo.Core.Nodes.NodeDefinitions.InputType.ModelInput,
+            targetFunction: null, defaultName: name);
+
+    private static float[] RunInvoke(
+        Shorokoo.Core.Function fn, Func<Tensor<float32>, Variable[]> callArgs, TensorData input)
+    {
+        var x = InvokeInput("input");
+        var g = ComputationGraph.FromInternal(
+            new InternalComputationGraph([x], [(Tensor<float32>)fn.Call(callArgs(x))[0]]), GraphKind.Module);
+        return ComputeContext.Default
             .Execute(g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel(), input)[0]
-            .ToTensorData().As<float32>().AccessMemory<float>().ToArray()));
-        Assert.True(ex is null or InvalidOperationException or ShorokooException);
+            .ToTensorData().As<float32>().AccessMemory<float>().ToArray();
     }
 
     /// <summary>The refusal tells a reader to lower their module's graph, which a generic module's

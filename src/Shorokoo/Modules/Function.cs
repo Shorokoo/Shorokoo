@@ -213,13 +213,32 @@ namespace Shorokoo.Core
                 : null;
         }
 
+        /// <summary>
+        /// Builds a <c>FUNCTION_INVOKE</c> of this function. Arguments are positional over the
+        /// body's whole input list — for a module-typed function that is
+        /// <c>[hyperparams..., runtime inputs...]</c>, so its hyperparameter values are passed
+        /// here rather than bound through a model variable as they are for a
+        /// <c>MODEL_INVOKE</c>. The arity is checked here because the inliner can only splice a
+        /// body whose inputs the call site supplies one-for-one, and a mismatch left to be
+        /// discovered there would surface as an assertion or, in Release, as a graph whose
+        /// spliced inputs are wired to nothing.
+        /// </summary>
         public Variable[] Call(params Variable?[] tensors)
-            => InternalOp.FunctionInvoke(tensors,
+        {
+            if (tensors.Length != this.Inputs.Length)
+                throw new ModuleException(ErrorCodes.FW005, this.FriendlyName,
+                    $"Call passed {tensors.Length} argument(s) but the body declares " +
+                    $"{this.Inputs.Length} input(s) — {this.HyperparamInputs.Length} hyperparameter(s) " +
+                    $"first, then {this.NonHyperparamInputs.Length} runtime input(s). Pass a value for " +
+                    "every one, hyperparameters ahead of the runtime inputs.");
+
+            return InternalOp.FunctionInvoke(tensors,
                     this.Outputs.Select(x => x.Structure()).ToArray(),
                     this.Outputs.Select(x => x.DType).ToArray(),
                     this.OutputRankOverrides.Select(x => x ?? -1).ToArray(),
                     targetFn: this,
                     genericTypeArgs: null);
+        }
 
         public static InputType FromInputTypeName(string? name = null)
         {

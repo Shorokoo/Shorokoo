@@ -76,13 +76,15 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         [AutoDiff(SOFTPLUS)]
         public static Variable?[] Softplus<T>(Tensor<T> x, Tensor<T> grad) where T : IVarType
         {
-            // softplus'(x) = sigmoid(x) = 1 / (1 + exp(-x)), written out: the output form
-            // 1 - exp(-y) loses the whole negative tail in float32 (exp(-y) rounds to 1 for y
-            // below ~6e-8), and ORT's Sigmoid kernel saturates to exactly 0 below x ≈ -18, where
-            // the true slope is still 1.5e-8. The explicit form is accurate on both tails and
-            // never NaN (exp(-x) overflows to +inf only where the slope is 0).
+            // softplus'(x) = sigmoid(x), in the two-branch stable form. Neither shortcut works:
+            // the output form 1 - exp(-y) loses the negative tail (exp(-y) rounds to 1 for y
+            // below ~6e-8), ORT's Sigmoid kernel saturates to exactly 0 below x ≈ -18, and the
+            // single-branch 1/(1 + exp(-x)) returns grad/inf = 0 for x below -88.7 whatever grad
+            // is — a silently zeroed gradient wherever loss scaling makes that tail matter.
             var one = TypedConst(1.0f, x);
-            return [grad / (one + (-x).Exp())];
+            var zero = TypedConst(0.0f, x);
+            Tensor<T> expX = x.Exp();
+            return [OnnxOp.Where(x >= zero, grad / (one + (-x).Exp()), grad * expX / (one + expX))];
         }
 
         // ===== Softsign =====

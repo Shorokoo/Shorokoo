@@ -1181,7 +1181,7 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Equal(0, OrtOptimizedNodeCount(concrete, "Shape"));
         Assert.NotEqual(0, OrtOptimizedNodeCount(rankOnly, "Shape"));
 
-        var generic = ComputeContext.Default.Compile(rig.TrainingStepPureGraph);
+        var generic = ComputeContext.Default.Compile(rig.TrainingStepPureGraph.ToInternal(), inputDims: null, trainingStep: true);
         float GenericLoss(TensorDataStruct i, TensorDataStruct t) =>
             generic.Execute([ckpt.TrainableParams, ckpt.ModelState, ckpt.OptimizerState, i, t])[^1].ToTensorData<float32>().AccessMemory()[0];
         var halfInput = rig.InputDef.FromOrderedData(TensorData([2L], [1f, 2f]));

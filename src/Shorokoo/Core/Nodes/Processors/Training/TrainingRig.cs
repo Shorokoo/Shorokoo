@@ -57,6 +57,14 @@ namespace Shorokoo
         /// The lowered, executable computation graph for one training step
         /// (stamped <see cref="GraphKind.ConcreteModel"/> — fully lowered and runnable).
         /// Contains no embedded state — all state flows through inputs/outputs.
+        ///
+        /// <para>This is the graph the memory-aware pass has already rewritten, so what it
+        /// duplicates it duplicates on purpose. Compiling it through the ordinary
+        /// <see cref="ComputeContext.Compile(ComputationGraph)"/> runs ONNX Runtime's
+        /// common-subexpression pass over it, which merges every recomputation back into the
+        /// tensor it exists to free — the rig's own sessions therefore use
+        /// <see cref="ShorokooGraphOptimization.TrainingStep"/>. A caller compiling this graph
+        /// to observe what the rig runs must ask for that profile too.</para>
         /// </summary>
         public ComputationGraph TrainingStepPureGraph { get; private set; } = null!;
 
@@ -97,7 +105,10 @@ namespace Shorokoo
         internal const int MaxShapeSpecializedTrainSteps = 4;
 
         /// <summary>The input-shape signatures with a shape-specialized session so far (test hook).</summary>
-        internal IReadOnlyCollection<string> CompiledTrainStepShapeKeys => _compiledTrainSteps.Keys;
+        internal IReadOnlyCollection<string> CompiledTrainStepShapeKeys
+        {
+            get { lock (_compiledTrainSteps) return _compiledTrainSteps.Keys.ToArray(); }
+        }
 
         /// <summary>Whether the shape-generic fallback session has been compiled (test hook).</summary>
         internal bool HasGenericTrainStepSession => _compiledTrainStepGeneric is not null;

@@ -468,6 +468,12 @@ public class AutoDiffCheckpointingCoverageTests
     private static bool Stamped(TrainingRig rig)
         => rig.TrainingStepPureGraph.ToInternal().Nodes.Any(n => CheckpointSegment.IdOf(n) is not null);
 
+    /// <summary>Every segment stamp in the rig's architecture, signed as the attribute encodes it.</summary>
+    private static long[] Stamps(TrainingRig rig)
+        => [.. rig.ConcreteArchConstituent.ToInternal().Nodes
+            .Select(n => CheckpointSegment.IdOf(n) is { } id ? (CheckpointSegment.ProducesSegmentOutput(n) ? -id : id) : 0L)
+            .Where(v => v != 0).OrderBy(v => v)];
+
     private static bool CarriesCheckpointStamp(ModelProto proto)
         => proto.Graph.Nodes.Concat(proto.Functions.SelectMany(f => f.Nodes))
             .Any(n => n.Attributes.Any(a => a.Name == OnnxOpAttributeNames.ShrkAttrCheckpoint));
@@ -512,7 +518,8 @@ public class AutoDiffCheckpointingCoverageTests
         {
             Persistence.SaveTrainingCheckpointToSkpt(checkpointed.CreateInitialCheckpoint(), path);
             var (reloaded, _) = TrainingRig.Load(path);
-            Assert.True(Stamped(reloaded));
+            Assert.Equal(Stamps(checkpointed), Stamps(reloaded));
+            Assert.NotEmpty(Stamps(reloaded));
             Assert.Equal(NodeCount(checkpointed), NodeCount(reloaded));
         }
         finally { if (File.Exists(path)) File.Delete(path); }

@@ -127,7 +127,7 @@ public class TrainingPerfBaselineTests
             fromScratchMs = Math.Min(fromScratchMs, sw.Elapsed.TotalMilliseconds);
 
             sw.Restart();
-            _ = ctx.Compile(rig.TrainingStepPureGraph);
+            _ = ctx.Compile(rig.TrainingStepPureGraph.ToInternal(), inputDims: null, trainingStep: true);
             sw.Stop();
             compileMs = Math.Min(compileMs, sw.Elapsed.TotalMilliseconds);
         }

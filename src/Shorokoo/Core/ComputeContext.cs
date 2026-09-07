@@ -43,7 +43,7 @@ namespace Shorokoo.Runtime
             IShorokooInferenceSession session,
             Dictionary<string, string> onnxInputNameByOriginal,
             string[] originalInputNames,
-            ShorokooGraphOptimization optimization = ShorokooGraphOptimization.EnableAll)
+            ShorokooGraphOptimization optimization)
         {
             _session = session;
             _onnxInputNameByOriginal = onnxInputNameByOriginal;

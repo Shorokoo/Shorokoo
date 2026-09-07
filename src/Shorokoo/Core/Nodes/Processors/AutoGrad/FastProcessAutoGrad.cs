@@ -376,16 +376,13 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
 
             // Rules flagged UsesOutputs read the forward outputs; append them as trailing
             // stand-in slots (the same extension Dropout uses for its mask above). The rule's
-            // signature is (inputs..., outputs..., outputGrads..., attrs...), so an omitted
-            // trailing optional forward input is padded first, or the outputs would slide
-            // into its slot.
+            // signature is (inputs..., outputs..., outputGrads..., attrs...); node.Inputs is
+            // already padded to the op's declared arity, so an omitted trailing optional input
+            // holds a null slot and the outputs land where the signature expects them.
             if (outputUsingGradientOps.Contains(node.OpCode))
             {
-                var forwardInputSlots = methodParams is null ? inputs.Count
-                    : methodParams.Count(IsValueParameter) - 2 * outputs.Count;
-                var withOutputs = new List<FastTensorKey?>(Math.Max(inputs.Count, forwardInputSlots) + outputs.Count);
+                var withOutputs = new List<FastTensorKey?>(inputs.Count + outputs.Count);
                 withOutputs.AddRange(inputs);
-                while (withOutputs.Count < forwardInputSlots) withOutputs.Add(null);
                 withOutputs.AddRange(outputs);
                 inputs = withOutputs;
             }
@@ -524,12 +521,6 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
                 map[attr.OpName] = m;
             }
             return map;
-        }
-
-        private static bool IsValueParameter(ParameterInfo p)
-        {
-            var t = Nullable.GetUnderlyingType(p.ParameterType) ?? p.ParameterType;
-            return typeof(Variable).IsAssignableFrom(t) || typeof(IValue).IsAssignableFrom(t);
         }
 
         private static HashSet<string> BuildOutputUsingGradientOps()

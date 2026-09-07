@@ -1317,7 +1317,7 @@ namespace Shorokoo.Core.Factory
             // so they are valid at the front), and emit no graph-input ValueInfoProtos — the reader
             // reconstructs the input list from these nodes in this order.
             if (inputsAsNodes)
-                topLevelNodes.AddRange(BuildInputNodeProtos(fastGraph, opset));
+                topLevelNodes.AddRange(BuildInputNodeProtos(fastGraph, opset, stripCheckpointStamp));
             foreach (var (idx, proto) in protoByIndex.OrderBy(kv => kv.Key))
             {
                 if (swallowed.Contains(idx)) continue;
@@ -1346,7 +1346,7 @@ namespace Shorokoo.Core.Factory
         /// resolved and emitted through the same path as any interior node, so it carries all of the op's
         /// attributes verbatim. The reader collects these nodes, in this order, as the graph's inputs.
         /// </summary>
-        private static NodeProto[] BuildInputNodeProtos(InternalComputationGraph fastGraph, OpSetVersion opset)
+        private static NodeProto[] BuildInputNodeProtos(InternalComputationGraph fastGraph, OpSetVersion opset, bool stripCheckpointStamp)
         {
             var producerByOutputKey = new Dictionary<FastTensorKey, FastNode>();
             foreach (var node in fastGraph.Nodes)
@@ -1364,7 +1364,7 @@ namespace Shorokoo.Core.Factory
                 if (!producerByOutputKey.TryGetValue(key, out var producer))
                     throw new InvalidOperationException(
                         $"FastOnnxModelBuilder: graph input {key} has no model-input producing node.");
-                var info = FastOpsetResolver.Resolve(producer, graphOpenNode: null, opset)
+                var info = FastOpsetResolver.Resolve(producer, graphOpenNode: null, opset, stripCheckpointStamp)
                     ?? throw new InvalidOperationException(
                         $"FastOnnxModelBuilder: model-input op {producer.OpCode} did not resolve to an emittable node.");
                 protos.Add(FastOnnxProtoFactory.CreateNodeProto(producer, info, graphAttributes: null));

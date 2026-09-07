@@ -33,6 +33,16 @@ internal static class CheckpointSegment
     /// <summary>A segment id no other inlining anywhere in the process has used.</summary>
     public static long NewId() => Interlocked.Increment(ref _nextId);
 
+    /// <summary>Ensures <see cref="NewId"/> never mints <paramref name="id"/> again.</summary>
+    private static void ReserveId(long id)
+    {
+        long seen;
+        while ((seen = Interlocked.Read(ref _nextId)) < id
+               && Interlocked.CompareExchange(ref _nextId, id, seen) != seen)
+        {
+        }
+    }
+
     /// <summary>Whether <paramref name="invoke"/> (a MODEL_INVOKE) asks for checkpointing.</summary>
     public static bool IsRequested(FastNode invoke)
         => invoke.Attributes.IsAttributeDefined(OnnxOpAttributeNames.ShrkAttrCheckpoint)
@@ -62,6 +72,20 @@ internal static class CheckpointSegment
         var vals = attrs.GetAttributeVals().ToDictionary(kv => kv.Key, kv => kv.Value);
         vals[OnnxOpAttributeNames.ShrkAttrCheckpoint] = value;
         node.Attributes = OnnxCSharpAttributes.FromCSharpVals(vals, attrs.AttributeDefs.Add(Def));
+    }
+
+    /// <summary>
+    /// Re-applies a stamp read back from a saved graph, in the encoding <see cref="IdOf"/> and
+    /// <see cref="ProducesSegmentOutput"/> use. Segment ids are minted from a process counter, so
+    /// a graph loaded from another process would otherwise collide with the next id this one
+    /// mints, merging two disjoint segments into one recompute candidate; the counter is advanced
+    /// past every restored id.
+    /// </summary>
+    public static void RestoreStamp(FastNode node, long value)
+    {
+        var id = System.Math.Abs(value);
+        ReserveId(id);
+        Stamp(node, id, producesSegmentOutput: value < 0);
     }
 
     /// <summary>The segment <paramref name="node"/> belongs to, or null when it is in none.</summary>

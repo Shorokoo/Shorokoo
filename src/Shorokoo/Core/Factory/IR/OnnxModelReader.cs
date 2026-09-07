@@ -1166,7 +1166,7 @@ namespace Shorokoo.Core.Factory.IR
             // reloaded from a checkpoint would lose the [Module(Checkpoint = true)] it was built with.
             var stamp = nodeProto.Attributes.FirstOrDefault(a => a.Name == OnnxOpAttributeNames.ShrkAttrCheckpoint);
             if (stamp is not null && stamp.I != 0)
-                Shorokoo.Core.AutoDiffCheckpointing.CheckpointSegment.Stamp(fastNode, System.Math.Abs(stamp.I), producesSegmentOutput: stamp.I < 0);
+                Shorokoo.Core.AutoDiffCheckpointing.CheckpointSegment.RestoreStamp(fastNode, stamp.I);
 
             return fastNode;
         }

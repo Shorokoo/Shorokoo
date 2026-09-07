@@ -87,6 +87,8 @@ public class AutoGradElementwiseOpsCoverageTests
         RunTensor<AutoGradMishCheck>([2L], 0.7f, -0.7f);
         RunTensor<AutoGradSoftplusCheck>([2L], 0.5f, -0.5f);
         RunTensor<AutoGradSoftplusTailCheck>([3L], -10f, -20f, -30f);
+        Assert.True(AutoTest.AdvancedTestGraph<AutoGradSoftplusScaledTailCheck>(
+            [], [TensorData(DType.Float32, [3L], -80f, -90f, -95f), TensorData(DType.Float32, [], 1e30f)]));
         RunTensor<AutoGradSoftsignCheck>([2L], 0.5f, -0.5f);
         RunTensor<AutoGradThresholdedReluCheck>([2L], 1.0f, 0.0f);
         RunTensor<AutoGradShrinkCheck>([3L], 1.0f, -1.0f, 0.1f);

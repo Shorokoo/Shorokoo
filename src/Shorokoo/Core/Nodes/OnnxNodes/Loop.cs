@@ -133,7 +133,16 @@ namespace Shorokoo
             {
                 var loopVariableForScanVariable = thirdPassOutputs[retVal];
                 Debug.Assert(loopVariableForScanVariable.IsLocalScanVariable);
-                loopVariableForScanVariable.SetLocalScanVariableInput(toScan);
+
+                // Bind the scan to the value the BODY reads this iteration, not to the caller's
+                // C# local. The body is traced four times and the local is never rebound between
+                // passes, so by the third pass it holds whatever the first two passes advanced it
+                // to — nodes that live in the OUTER graph. The zombie node above went through
+                // ProcessNode like any other body node, which rewrote its input to the in-body
+                // value (an open-node output for a carry read before the body updates it, the
+                // iteration index, an earlier body node's output, or an unchanged outer value
+                // when the scanned tensor really is loop-invariant). Read it back from there.
+                loopVariableForScanVariable.SetLocalScanVariableInput(retVal.OwningNode.Inputs[0].AssertNotNull());
             }
 
             return retVal;
@@ -1232,7 +1241,7 @@ namespace Shorokoo
             this.InnerLoopCloseNodeOutput = innerLoopCloseNodeOutput;
         }
 
-        public void SetLocalScanVariableInput<T>(Tensor<T> toScan) where T : IVarType
+        public void SetLocalScanVariableInput(Variable toScan)
         {
             Debug.Assert(this.IsLocalScanVariable && this.ScanVariableThirdPassInput is null);
             this.ScanVariableThirdPassInput = toScan;

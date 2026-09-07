@@ -186,8 +186,13 @@ namespace Shorokoo.Core.Factory
             // Trailing omitted optionals are emitted by ONNX convention as absent inputs, not
             // empty-name placeholders — some ORT kernels (e.g. MaxUnpool) reject the latter
             // with "input count mismatch". Mid-list empties (e.g. Resize's roi) must stay.
+            // Loop is the exception: its M and cond are individually optional but its schema
+            // still declares min_input = 2, so a loop with no loop-carried variables (one that
+            // only scans, say) must keep the trailing empty cond rather than emit a 1-input
+            // Loop that ORT rejects as an invalid graph.
+            int minInputs = info.OpCode == OpCodes.LOOP ? 2 : 0;
             var inputCount = inputNames.Length;
-            while (inputCount > 0 && inputNames[inputCount - 1].Length == 0) inputCount--;
+            while (inputCount > minInputs && inputNames[inputCount - 1].Length == 0) inputCount--;
             if (inputCount < inputNames.Length) inputNames = inputNames[..inputCount];
             var outputNames = info.OutputKeys.Select(TensorName).ToArray();
             return OnnxIRFactory.CreateNode(

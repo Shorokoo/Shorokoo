@@ -7,8 +7,8 @@ namespace Shorokoo.Tests;
 /// <summary>
 /// Modules whose graph shape targets otherwise-uncovered branches of
 /// <c>Shorokoo.Core.Nodes.Processors.Fast.FastProcessors</c> — TensorStruct slots in LOOP / IF
-/// control flow, TensorStruct-typed sequence ops, constant-loop unrolling edge cases, module
-/// reparenting and static trainable-param selection — driven through
+/// control flow, TensorStruct-typed sequence ops, constant-loop unrolling edge cases, loop scan
+/// binding, module reparenting and static trainable-param selection — driven through
 /// <see cref="AutoTest.AdvancedTestGraph{TModule}"/>.
 /// </summary>
 [Trait("Domain", "Modules")]
@@ -172,13 +172,11 @@ public class FastProcessorsCoverageTests
         Assert.Equal(InternalOpCodes.ModuleStageOps, [.. blocked, .. allowed]);
     }
 
-    /// <summary>LoopAPI binds a scan input on the third of its four body-tracing passes, and the
-    /// caller's local has by then been advanced by the two earlier passes into the outer graph, so
-    /// scanning a carry before the body updates it stacks a loop-invariant outer value — x + 2,
-    /// whatever the trip count, on the rolled and unrolled paths alike. The expected values are
-    /// supplied because every engine executes the same wrong
-    /// graph, so an engine comparison alone passes. Tracked as Shorokoo/Shorokoo#232.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#232: a scan input read before the body's update binds outside the loop body")]
+    /// <summary>A scan input is the value the body reads that iteration, so scanning a carry
+    /// before the body updates it stacks the state the recurrence passes through, starting from
+    /// the initial one. The expected values are supplied because every engine executes the same
+    /// graph, so an engine comparison alone cannot see a wrong one.</summary>
+    [Fact]
     public void TestScanningACarryBeforeTheBodyUpdatesItStacksThePerIterationValues()
     {
         Assert.True(AutoTest.AdvancedTestGraph<ScanCarryBeforeUpdate>(
@@ -187,5 +185,51 @@ public class FastProcessorsCoverageTests
             expected: [10.0, 11.0, 12.0]));
         Assert.True(AutoTest.AdvancedTestGraph<ScanCarryBeforeUpdateConstTrip>(
             hyperparamInputs: [], runtimeInputs: [Scalar32(10f)], expected: [10.0, 11.0, 12.0]));
+    }
+
+    /// <summary>Scan inputs a body node does not produce — the carry at the top of an iteration,
+    /// the iteration index, an outer-scope tensor — rolled and unrolled. A loop that only scans
+    /// also carries nothing, so its exported ONNX Loop has to keep the condition slot it never
+    /// fills.</summary>
+    [Fact]
+    public void TestScanInputsThatNoBodyNodeProduces()
+    {
+        var trips = TensorData(DType.Int64, [], 3L);
+        Assert.True(AutoTest.AdvancedTestGraph<ScanCarryBeforeAndAfterUpdate>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), trips], expected: [21.0, 23.0, 25.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<ScanCarryBeforeAndAfterUpdateConstTrip>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f)], expected: [21.0, 23.0, 25.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<ScanCarryBeforeUpdateAndReadCarryAfter>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), trips], expected: [130.0, 143.0, 156.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<ScanLoopInvariant>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), trips], expected: [10.0, 10.0, 10.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<ScanLoopInvariantConstTrip>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f)], expected: [10.0, 10.0, 10.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<ScanIterationIndex>(
+            hyperparamInputs: [], runtimeInputs: [trips], expected: [0.0, 1.0, 2.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<ScanIterationIndexConstTrip>(
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Int64, [], 0L)], expected: [0.0, 1.0, 2.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<ScanInNestedLoopUsedInOuterBody>(
+            hyperparamInputs: [],
+            runtimeInputs: [Scalar32(10f), TensorData(DType.Int64, [], 2L), trips],
+            expected: [114.0]));
+    }
+
+    /// <summary>An inner loop's scan output read after the enclosing loop. The enclosing loop
+    /// sees the inner scan's zombie as an output-only body value with no initializer, so it never
+    /// becomes one of the enclosing loop's carries: read-after-update leaves an un-lowered
+    /// #LoopScanVariable# in the emitted graph, and read-before-update fails while the module
+    /// graph is still being built. Tracked as Shorokoo/Shorokoo#255.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#255: an inner loop's scan output does not survive the enclosing loop")]
+    public void TestScanningInsideANestedLoopSurvivesTheEnclosingLoop()
+    {
+        var outer = TensorData(DType.Int64, [], 2L);
+        var inner = TensorData(DType.Int64, [], 3L);
+        Assert.True(AutoTest.AdvancedTestGraph<ScanInNestedLoopReadAfterOuterLoop>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), outer, inner],
+            expected: [14.0, 15.0, 16.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<ScanInNestedLoopBeforeUpdateReadAfterOuterLoop>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), outer, inner],
+            expected: [13.0, 14.0, 15.0]));
     }
 }

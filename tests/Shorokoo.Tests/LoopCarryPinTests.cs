@@ -87,11 +87,17 @@ public class LoopCarryPinTests
     // Shorokoo/Shorokoo#266: LoopAPI.Init records nothing when the body's assigned value has no
     // producer inside the body, so a zero-iteration loop returns that value instead of the
     // pre-loop one. ZeroTripCarryFromInsideTheBody is the passing control.
-    [Fact(Skip = "Shorokoo/Shorokoo#266: LoopAPI.Init drops a carry assigned from outside the body")]
+    /// <summary>A zero-iteration loop returns the carry's pre-loop value, which is what
+    /// <c>LoopAPI.Init</c> records. The body's assigned value must come from inside the body: one
+    /// computed outside it is the same tensor the rest of the graph holds, so the loop's result has
+    /// nowhere to land and the shape is refused rather than silently returning the body's value.</summary>
+    [Fact]
     public void TestAZeroTripLoopReturnsTheCarrysPreLoopValue()
     {
         Assert.True(Returns<ZeroTripCarryFromInsideTheBody>(3, 8d));
-        Assert.True(Returns<ZeroTripCarryFromOutsideTheBody>(3, 8d));
+        var ex = Assert.Throws<InvalidTensorOperationException>(
+            () => _ = ZeroTripCarryFromOutsideTheBody.ComputationGraph);
+        Assert.Contains("computed outside the loop", ex.Message);
     }
 
     // Shorokoo/Shorokoo#268: this concretizes to a graph whose node order fails the pipeline's own

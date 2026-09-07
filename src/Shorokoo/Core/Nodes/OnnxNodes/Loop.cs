@@ -84,6 +84,24 @@ namespace Shorokoo
         private Dictionary<Variable, LoopVariableOutput> firstPassVariableOutputs = new Dictionary<Variable, LoopVariableOutput>();
 
         /// <summary>
+        /// Input locations of the <c>Identity</c> nodes <see cref="LoopAPI.Init"/> emits. A read at
+        /// one of these is a user declaration that the variable is carried, which is what lets the
+        /// second pass tell a genuine reassignment from the variable substitutions the surrounding
+        /// machinery performs between passes (an inner loop's first pass runs during its outer
+        /// loop's third, so plain inequality between the passes means nothing on its own).
+        /// </summary>
+        private HashSet<(int NodeIndex, int InputIndex)> initDeclarationInputs = new HashSet<(int NodeIndex, int InputIndex)>();
+
+
+        /// <summary>Set by <see cref="LoopAPI.Init"/> immediately before it emits its
+        /// <c>Identity</c>, and consumed by the next node the first pass records.</summary>
+        internal bool NextNodeIsInitDeclaration { get; set; }
+
+        /// <summary>Depth of the loop <see cref="LoopAPI.Init"/> is currently declaring for, so an
+        /// enclosing loop tracing the same node does not claim the declaration as its own.</summary>
+        internal static int? InitDeclarationDepth { get; set; }
+
+        /// <summary>
         /// A special purpose loop variable that lets us output the iteration index from the Loop Close Node.
         /// It essentially will hold the number of iterations the loop has executed.
         /// </summary>`
@@ -247,6 +265,8 @@ namespace Shorokoo
 
                     var loopVariable = new LoopVariableInput(input, nodeIndex, inputIndex);
                     this.variableInputs[loopVariable.Key] = loopVariable;
+                    if (this.NextNodeIsInitDeclaration && InitDeclarationDepth == this.LoopDepth)
+                        this.initDeclarationInputs.Add(loopVariable.Key);
                     if (!this.firstPassVariableOutputs.ContainsKey(input))
                         this.allExternalInputs.Add(input);
                 }
@@ -263,6 +283,8 @@ namespace Shorokoo
                     Debug.Assert(!this.firstPassVariableOutputs.ContainsKey(output));
                     this.firstPassVariableOutputs[output] = loopVariable;
                 }
+
+                this.NextNodeIsInitDeclaration = false;
 
                 // Keep everything as is. The outputs produced here will be checked against the inputs used in the second pass
                 // to identify loop variables.
@@ -490,6 +512,29 @@ namespace Shorokoo
 
             // Group the items for Case 2 into a single "canonicalLoopVariable".
             var canonicalLoopVariables = loopVariableInputs.GroupBy(x => (x.FirstPassInput, x.SecondPassInput.AssertNotNull())).ToDictionary(x => x.Key, x => x.ToHashSet());
+
+            // A variable declared with LoopAPI.Init whose read changed between the passes without
+            // becoming a body output was reassigned by the body to a value computed OUTSIDE the loop.
+            // The loop itself can carry it — a Shorokoo close node may take that outside tensor as its
+            // input directly, and the ONNX export inserts the Identity vanilla Loop needs — but the
+            // variable cannot be handed back. After the loop the user's variable *is* that outside
+            // value, the same Variable the rest of the graph may hold, and the fourth pass rebinds a
+            // body value by re-tracing the node that produced it: a bare assignment produces no node,
+            // so there is nothing to rebind and no way to tell this use of the value from any other.
+            // Until this was caught the carry was dropped silently and a zero-iteration loop returned
+            // the body's value instead of the pre-loop one, contradicting what LoopAPI.Init promises.
+            var reassignedFromOutsideTheBody = this.variableInputs.Values
+                .FirstOrDefault(x => this.initDeclarationInputs.Contains(x.Key)
+                                     && x.SecondPassInput is not null
+                                     && !this.firstPassVariableOutputs.ContainsKey(x.SecondPassInput)
+                                     && !Object.ReferenceEquals(x.SecondPassInput, x.FirstPassInput));
+            if (reassignedFromOutsideTheBody is not null)
+                throw new InvalidTensorOperationException(ErrorCodes.FW023, "Loop Variable Binding",
+                    "a variable declared with LoopAPI.Init",
+                    "the loop body assigned it a value computed outside the loop, so after the loop it is "
+                    + "indistinguishable from that value and cannot receive the loop's result. Compute the "
+                    + "assigned value inside the body — wrap it, e.g. carry = OnnxOp.Identity(value), if it "
+                    + "genuinely comes from outside — or move the assignment out of the loop.");
 
             var loopVariablesWithInitializers = new List<LoopVariable>();
             foreach (var canonicalLoopVariable in canonicalLoopVariables)
@@ -946,7 +991,25 @@ namespace Shorokoo
         public static void Init(params Variable[] toInits)
         {
             foreach (var toInit in toInits)
+            {
+                // Mark the declaration for the loop the user wrote it in — the innermost active one.
+                // An enclosing loop also traces this node (an inner loop's passes interleave with its
+                // outer loop's third), and the variable it sees there changes between its own passes
+                // for reasons that are not a user reassignment, so only the declaring depth may
+                // record the site.
+                // The declaration belongs to the innermost loop enclosing this call, which is the
+                // deepest looper on the stack — not the *active* one. An enclosing loop traces the
+                // inner loop's body inline during its own first two passes (the inner looper is
+                // still on pass 0 then), and the variable it sees at this site changes between those
+                // passes because the inner loop rebinds it, which is not a user reassignment.
+                foreach (var looper in GraphTrace.Loopers)
+                    looper.NextNodeIsInitDeclaration = true;
+                Looper.InitDeclarationDepth = GraphTrace.Loopers.Count - 1;
                 OnnxOp.Identity(toInit, toInit.Rank);
+                Looper.InitDeclarationDepth = null;
+                foreach (var looper in GraphTrace.Loopers)
+                    looper.NextNodeIsInitDeclaration = false;
+            }
         }
 
         public static IEnumerable<IterationContext> Iterate(Scalar<int64> maxNumIterations)

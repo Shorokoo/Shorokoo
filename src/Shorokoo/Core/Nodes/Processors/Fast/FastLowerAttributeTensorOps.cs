@@ -30,6 +30,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// loops, compile-time-constant and loop-derived geometry is already resolved by strategy 1;
     /// strategies 2/3 cover geometry that is only computable from the sample inputs.
     ///
+    /// <para>A static attribute holds one value for every execution of its node, so geometry that
+    /// still varies per loop iteration cannot be lowered at all: the standard op would silently run
+    /// every iteration with the one value the resolution cascade happened to produce. Such geometry
+    /// — an attribute-source tensor that is still loop-dependent, i.e. derived from the body outputs
+    /// of a loop that was not unrolled — is therefore a hard build error, matching the contract on
+    /// <c>ToConcreteArchitecture</c>. Only a loop the native unroll cannot flatten (a runtime trip
+    /// count) can reach this pass rolled, so this is also the point at which such a loop is refused.</para>
+    ///
     /// <para>Variant ops can appear in the main graph and inside <see cref="Function"/> bodies;
     /// both are lowered (function bodies use strategy 1 only, since top-level sample inputs do not
     /// map to function parameters).</para>
@@ -57,10 +65,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (node.TargetFunction is { } fn)
                     LowerFunctionRecursive(fn, compute, functionRemap);
 
-            // Lower variant nodes in the main graph by mutating them in place.
+            // Lower variant nodes in the main graph by mutating them in place. Any geometry that is
+            // still loop-dependent here sits in a loop the unroll could not flatten, so it cannot
+            // become a static attribute — LowerNode refuses it.
+            var loopDependent = graph.Nodes.Any(n => n.OpCode == OpCodes.LOOP_OPEN)
+                ? FastScopeHelper.BuildLoopDependentTensors(graph)
+                : null;
             foreach (var node in graph.Nodes)
                 if (AttributeTensorOpRegistry.Specs.TryGetValue(node.OpCode, out var spec))
-                    LowerNode(node, spec, graph, sampleInputs, compute);
+                    LowerNode(node, spec, graph, sampleInputs, compute, loopDependent);
 
             // Lowering can leave the attribute-source subgraphs unreferenced; sweep them.
             FastProcessorHelper.RemoveUnreachableNodes(graph);
@@ -101,7 +114,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             AttributeTensorSpec spec,
             InternalComputationGraph graph,
             ModelParamList? sampleInputs,
-            ComputeContext compute)
+            ComputeContext compute,
+            HashSet<FastTensorKey>? loopDependent)
         {
             var inputDefs = Definitions.NodeDefinitions[node.OpCode].VariantDefinitions[0].InputDefs;
             if (!node.FullInputs.TryGetValue("", out var slots))
@@ -124,6 +138,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var key = slots[idx]
                     ?? throw new InvalidOperationException(
                         $"{node.OpCode}: attribute-source input '{mapping.InputName}' is missing.");
+                if (loopDependent is not null && loopDependent.Contains(key))
+                    throw new FastPipelineUnsupportedException(
+                        $"FastLowerAttributeTensorOps: the '{mapping.InputName}' geometry of '{node.OpCode}' varies " +
+                        "per loop iteration, and the enclosing loop was not unrolled, so it cannot be lowered to the " +
+                        $"static '{mapping.AttributeName}' attribute of '{spec.StandardOpCode}' — one iteration's " +
+                        "geometry would be used for every iteration. Give the loop a compile-time-constant trip count " +
+                        "so it unrolls, or make the geometry loop-invariant.");
                 keysToResolve.Add(key);
             }
 

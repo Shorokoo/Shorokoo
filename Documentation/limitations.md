@@ -21,6 +21,34 @@ In practice: give convolution weights a concrete shape (the usual case — e.g.
 shapes derived from `[Hyper]` values are resolved when the architecture is
 concretized via `ToConcreteArchitecture`), and backprop works normally.
 
+### Per-iteration operator geometry in a dynamic loop
+
+Operators whose geometry is an ONNX *attribute* — `Conv`'s `pads`, `strides`,
+`dilations`, `kernel_shape`, `group`, and the same family on the other
+attribute-carrying ops — take one value for every execution of the node.
+Shorokoo lets you compute that geometry in the graph (`NN.Conv` accepts scalars
+and vectors for it) and resolves it to a static attribute when the architecture
+is concretized. Inside a loop that unrolls, each iteration becomes its own node
+and so gets its own geometry; inside a loop that stays rolled there is one node
+for all iterations, and no single attribute value can be right for geometry that
+varies with the iteration index.
+
+Such a graph is refused when the architecture is concretized, naming the
+offending input:
+
+```
+FastLowerAttributeTensorOps: the 'pads' geometry of 'shrk_Conv' varies per loop
+iteration, and the enclosing loop was not unrolled, so it cannot be lowered to
+the static 'pads' attribute of 'Conv' ...
+```
+
+A loop stays rolled when its trip count is not a compile-time constant, so
+either give the loop a constant trip count — `LoopAPI.Iterate(Scalar(3L))`,
+which unrolls — or make the geometry loop-invariant (compute it outside the
+loop, or from shapes rather than from `ctx.IterationIndex`). Geometry that does
+not vary per iteration is fine inside a dynamic loop; only the varying case is
+refused.
+
 ### Variables first assigned inside a loop body
 
 A variable that is assigned inside a loop *before ever being read in that same

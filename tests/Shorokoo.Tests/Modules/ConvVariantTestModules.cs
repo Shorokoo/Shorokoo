@@ -127,8 +127,10 @@ namespace Shorokoo.Tests.Modules
     /// <see cref="ConvVariantLoopShapeAndIndexAttrs"/> with the trip count taken from a graph
     /// input instead of a constant, so the loop is never eligible for the native unroll and
     /// FastLowerAttributeTensorOps meets the index-dependent geometry still inside a rolled loop.
-    /// Self-checks against a hand-unrolled reference; unlike its sibling the kernel shape is
-    /// literal, so the only variable geometry is the loop index. Tracked as Shorokoo/Shorokoo#231.
+    /// Unlike its sibling the kernel shape is literal, so the only variable geometry is the loop
+    /// index. Concretizing this module is a hard build error — a static attribute cannot carry
+    /// per-iteration geometry — so the hand-unrolled self-check below is never reached; it stands
+    /// as the reference the refused lowering would have had to match.
     /// </summary>
     [Module]
     public partial class ConvVariantDynamicTripLoopGeometry

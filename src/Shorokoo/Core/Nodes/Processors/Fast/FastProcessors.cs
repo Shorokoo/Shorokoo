@@ -4176,9 +4176,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// Scope. A loop is only unrolled natively when every one of these holds; otherwise
     /// <see cref="FastSimplify"/> leaves the loop in place. Every pass downstream accepts
     /// a rolled loop, but declining is not free — see the <see cref="Process"/> docstring
-    /// for the two that would rather not see one, one of which is today an open
-    /// silent-wrong-answer bug (Shorokoo/Shorokoo#231). Decline only where cloning would
-    /// actually be wrong.
+    /// for the two that would rather not see one, both of which turn a declined loop into a
+    /// build error. Decline only where cloning would actually be wrong.
     /// <list type="bullet">
     ///   <item>The <c>maxIter</c> producer is a <c>CONSTANT</c> with a non-negative
     ///     int64 scalar value.</item>
@@ -4227,9 +4226,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <see cref="FastSimplify"/>) — so a loop it declines stays rolled for the rest of
         /// the pipeline. Two later passes in that pipeline are the reason to decline
         /// sparingly: <c>FastLowerAttributeTensorOps</c> resolves variant-op geometry it
-        /// assumes is loop-free, and today it does so silently and wrongly on a rolled loop
-        /// rather than failing (Shorokoo/Shorokoo#231); and autograd has no gradient rule
-        /// for <c>Loop</c>, so a rolled one reaching it is a build error. Decline only
+        /// assumes is loop-free, and refuses per-iteration geometry it meets in a rolled loop
+        /// (it cannot become a static attribute); and autograd has no gradient rule for
+        /// <c>Loop</c>, so a rolled one reaching it is a build error too. Decline only
         /// where cloning would be wrong, never merely awkward.
         ///
         /// <para>

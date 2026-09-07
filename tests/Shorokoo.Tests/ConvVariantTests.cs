@@ -1,3 +1,4 @@
+using Shorokoo.Core.Nodes.Processors.Fast;
 using System.Linq;
 
 namespace Shorokoo.Tests;
@@ -38,16 +39,19 @@ public class ConvVariantTests
 
     /// <summary>A loop the native unroll cannot flatten — its trip count is a graph input — leaves
     /// FastLowerAttributeTensorOps facing index-dependent SHRK_CONV geometry inside a rolled loop.
-    /// It resolves one value by the QEE/ORT fallback and bakes it as a static attribute for every
-    /// iteration, so the loop returns 3x the dilation-1 conv instead of the d=1,2,3 sum: a wrong
-    /// number, silently, where the concreteness contract promises a hard build error.
-    /// Tracked as Shorokoo/Shorokoo#231.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#231: variant-op geometry in a rolled loop is baked from one iteration")]
-    public void TestVariantOpGeometryInARolledLoopIsPerIterationNotIterationZeros()
-        => Assert.True(AutoTest.AdvancedTestGraph<ConvVariantDynamicTripLoopGeometry>(
-            hyperparamInputs: [],
-            runtimeInputs: [
-                TensorData(DType.Float32, [1L, 3L, 5L, 5L],
-                    Enumerable.Range(0, 75).Select(i => (object)(float)i).ToArray()),
-                TensorData(DType.Int64, [], 3L)]));
+    /// A static attribute cannot vary per iteration, so the build must refuse it rather than
+    /// resolve one value by the QEE/ORT fallback and bake it into every iteration (which returned
+    /// 3x the dilation-1 conv instead of the d=1,2,3 sum, silently).</summary>
+    [Fact]
+    public void TestVariantOpGeometryInARolledLoopIsRefusedNotBakedFromOneIteration()
+    {
+        var ex = Assert.Throws<FastPipelineUnsupportedException>(
+            () => AutoTest.AdvancedTestGraph<ConvVariantDynamicTripLoopGeometry>(
+                hyperparamInputs: [],
+                runtimeInputs: [
+                    TensorData(DType.Float32, [1L, 3L, 5L, 5L],
+                        Enumerable.Range(0, 75).Select(i => (object)(float)i).ToArray()),
+                    TensorData(DType.Int64, [], 3L)]));
+        Assert.Contains("varies per loop iteration", ex.Message);
+    }
 }

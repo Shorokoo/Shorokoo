@@ -159,11 +159,74 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
+    /// Variant Conv whose geometry is loop-invariant (literal) inside the same never-unrollable
+    /// dynamic-trip loop as <see cref="ConvVariantDynamicTripLoopGeometry"/>: the lowering has one
+    /// value that is right for every iteration, so it must still lower rather than being refused
+    /// along with the per-iteration case. Self-checking against the same conv summed <c>trips</c>
+    /// times.
+    /// </summary>
+    [Module]
+    public partial class ConvVariantDynamicTripLoopInvariantGeometry
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Scalar<int64> trips)
+        {
+            var w = InitSimple.Init([Scalar(3L), Scalar(3L), Scalar(3L), Scalar(3L)]);
+            var b = InitSimple.Init([Scalar(3L)]).Vec();
+
+            var reference = ConvVariantRefs.StdConvScalar(x, w, b, 1L) * Scalar(3f);
+
+            var acc = Scalar(0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                var conv = NN.Conv(x, w, b, AutoPad.NotSet,
+                    pads: Vector(1L, 1L, 1L, 1L), strides: Vector(1L, 1L),
+                    dilations: Vector(1L, 1L), kernelShape: Vector(3L, 3L), group: Scalar(1L));
+                acc = acc + conv.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            }
+
+            return (reference - acc).Abs() < Scalar(1e-3f) * (reference.Abs() + Scalar(1f));
+        }
+    }
+
+    /// <summary>
+    /// Variant Conv placed <em>after</em> a never-unrollable dynamic-trip loop, with its
+    /// <c>kernel_shape</c> derived from that loop's result. The conv executes once and its
+    /// geometry has exactly one value, so it must lower normally: a loop-scope test that merely
+    /// asks whether a geometry input descends from a LOOP_OPEN would refuse it, since a
+    /// LOOP_CLOSE's outputs descend from one. Self-checking (returns Scalar&lt;bit&gt;).
+    /// </summary>
+    [Module]
+    public partial class ConvVariantGeometryFromARolledLoopResult
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Scalar<int64> trips)
+        {
+            var w = InitSimple.Init([Scalar(2L), Scalar(3L), Scalar(3L), Scalar(3L)]);
+            var b = InitSimple.Init([Scalar(2L)]).Vec();
+
+            // 0 + 1 + 1 + 1 = 3 for trips = 3, so the kernel resolves to [3,3].
+            var k = Scalar(0L);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+                k = k + Scalar(1L);
+
+            var standard = NN.Conv(x, w, b, AutoPad.NotSet,
+                dilations: [1L, 1L], group: 1L, kernelShape: [3L, 3L],
+                pads: [0L, 0L, 0L, 0L], strides: [1L, 1L]);
+
+            var variant = NN.Conv(x, w, b, AutoPad.NotSet,
+                pads: Vector(0L, 0L, 0L, 0L), strides: Vector(1L, 1L),
+                dilations: Vector(1L, 1L), kernelShape: [k, k], group: Scalar(1L));
+
+            var diff = (standard - variant).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            return diff < Scalar(1e-4f);
+        }
+    }
+
+    /// <summary>
     /// <see cref="ConvVariantLoopShapeAndIndexAttrs"/> with an AUTO_GRAD node added to the loop
     /// body, which puts a member of <c>InternalOpCodes.ModuleStageOps</c> inside a constant-trip
     /// loop at the first FastSimplify. That loop must still be unrolled: leaving it rolled makes
-    /// FastLowerAttributeTensorOps resolve the index-dependent geometry once and bake iteration 0's
-    /// dilation into all three, silently returning 3x the d=1 conv instead of the d=1,2,3 sum.
+    /// FastLowerAttributeTensorOps refuse the index-dependent geometry, since one static attribute
+    /// cannot carry the d=1,2,3 dilations, so the module fails to concretize at all.
     /// </summary>
     [Module]
     public partial class ConvVariantLoopWithAutoGradInBody

@@ -21,33 +21,36 @@ In practice: give convolution weights a concrete shape (the usual case — e.g.
 shapes derived from `[Hyper]` values are resolved when the architecture is
 concretized via `ToConcreteArchitecture`), and backprop works normally.
 
-### Per-iteration operator geometry in a dynamic loop
+### Per-iteration convolution geometry in a dynamic loop
 
-Operators whose geometry is an ONNX *attribute* — `Conv`'s `pads`, `strides`,
-`dilations`, `kernel_shape`, `group`, and the same family on the other
-attribute-carrying ops — take one value for every execution of the node.
-Shorokoo lets you compute that geometry in the graph (`NN.Conv` accepts scalars
-and vectors for it) and resolves it to a static attribute when the architecture
-is concretized. Inside a loop that unrolls, each iteration becomes its own node
-and so gets its own geometry; inside a loop that stays rolled there is one node
-for all iterations, and no single attribute value can be right for geometry that
-varies with the iteration index.
+`NN.Conv` lets you compute a convolution's geometry — `pads`, `strides`,
+`dilations`, `kernel_shape`, `group` — in the graph rather than writing it as a
+literal, and resolves it to a static ONNX attribute when the architecture is
+concretized. (Conv is currently the only operator with that overload.) A static
+attribute holds one value for every execution of its node, which is fine
+everywhere except one place: geometry that differs from one iteration of a loop
+to the next, in a loop that stays rolled. There the whole loop is a single Conv
+node, and no single attribute value is right for all of its iterations.
 
-Such a graph is refused when the architecture is concretized, naming the
-offending input:
+A loop stays rolled when its trip count is not a compile-time constant. Such a
+graph is refused when the architecture is concretized, naming the geometry that
+varies:
 
 ```
-FastLowerAttributeTensorOps: the 'pads' geometry of 'shrk_Conv' varies per loop
-iteration, and the enclosing loop was not unrolled, so it cannot be lowered to
-the static 'pads' attribute of 'Conv' ...
+the 'pads' geometry of 'shrk_Conv' varies per iteration of a loop that was not
+unrolled, so it cannot be lowered to the static 'pads' attribute of 'Conv' ...
 ```
 
-A loop stays rolled when its trip count is not a compile-time constant, so
-either give the loop a constant trip count — `LoopAPI.Iterate(Scalar(3L))`,
-which unrolls — or make the geometry loop-invariant (compute it outside the
-loop, or from shapes rather than from `ctx.IterationIndex`). Geometry that does
-not vary per iteration is fine inside a dynamic loop; only the varying case is
-refused.
+Either give the loop a constant trip count — `LoopAPI.Iterate(Scalar(3L))`,
+which unrolls, so each iteration becomes its own Conv node with its own
+geometry — or make the geometry the same on every iteration, by computing it
+from something that does not change per iteration (an input's shape, say,
+rather than `ctx.IterationIndex` or a loop carry).
+
+Only geometry that actually varies is refused. Constant or input-derived
+geometry inside a dynamic loop is fine, and so is geometry computed *from* a
+dynamic loop's result — that value is computed once, and the Conv reading it
+runs once.
 
 ### Variables first assigned inside a loop body
 

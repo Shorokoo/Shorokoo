@@ -77,6 +77,75 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
+        /// Returns every <see cref="FastTensorKey"/> whose value <em>varies across the iterations</em>
+        /// of a loop it sits inside — the keys a consumer reads with a different value on each pass.
+        ///
+        /// <para>This is narrower than <see cref="BuildLoopDependentTensors"/>, which marks
+        /// everything descended from a <c>LOOP_OPEN</c> and so keeps propagating past the
+        /// <c>LOOP_CLOSE</c> into the rest of the graph. That is what <see cref="ShrinkAllScopes"/>
+        /// wants (it only ever asks about nodes inside a scope), but a loop's <em>result</em> is
+        /// computed once and does not vary, so a caller asking "does this differ per iteration?"
+        /// about a key anywhere in the graph needs this one instead. A <c>LOOP_CLOSE</c> therefore
+        /// sheds the variation of the loop it closes, keeping only an enclosing loop's — which is
+        /// also what makes a nested loop's result still vary with the outer loop.</para>
+        /// </summary>
+        public static HashSet<FastTensorKey> BuildPerIterationTensors(InternalComputationGraph graph)
+        {
+            // Key → the shallowest loop depth across whose iterations the key varies (scope
+            // membership is positional, so depth is just the open/close nesting count).
+            var varyDepth = new Dictionary<FastTensorKey, int>();
+            int depth = 0;
+
+            foreach (var node in graph.Nodes)
+            {
+                if (node.OpCode == OpCodes.LOOP_OPEN)
+                {
+                    depth++;
+                    RecordDepth(node, depth, varyDepth);
+                    continue;
+                }
+
+                if (node.OpCode == OpCodes.LOOP_CLOSE && depth > 0)
+                {
+                    int enclosing = MinInputVaryDepth(node, varyDepth, shallowerThan: depth);
+                    depth--;
+                    RecordDepth(node, enclosing, varyDepth);
+                    continue;
+                }
+
+                RecordDepth(node, MinInputVaryDepth(node, varyDepth, shallowerThan: int.MaxValue), varyDepth);
+            }
+
+            return [.. varyDepth.Keys];
+        }
+
+        /// <summary>Shallowest depth any input of <paramref name="node"/> varies at, counting only
+        /// depths below <paramref name="shallowerThan"/>; 0 when no input varies.</summary>
+        private static int MinInputVaryDepth(
+            FastNode node, Dictionary<FastTensorKey, int> varyDepth, int shallowerThan)
+        {
+            int min = 0;
+            foreach (var kvp in node.FullInputs)
+                foreach (var key in kvp.Value)
+                    if (key is FastTensorKey tk && !tk.IsEmpty
+                        && varyDepth.TryGetValue(tk, out var d) && d < shallowerThan
+                        && (min == 0 || d < min))
+                        min = d;
+            return min;
+        }
+
+        /// <summary>Records <paramref name="depth"/> for every output of <paramref name="node"/>,
+        /// or nothing when it is 0 (the node's outputs do not vary).</summary>
+        private static void RecordDepth(FastNode node, int depth, Dictionary<FastTensorKey, int> varyDepth)
+        {
+            if (depth == 0) return;
+            foreach (var kvp in node.FullOutputs)
+                foreach (var key in kvp.Value)
+                    if (key is FastTensorKey tk && !tk.IsEmpty)
+                        varyDepth[tk] = depth;
+        }
+
+        /// <summary>
         /// Resolves a <c>LOOP_CLOSE</c> node to its paired <c>LOOP_OPEN</c> and returns
         /// their positions in <see cref="InternalComputationGraph.Nodes"/>. Returns null if
         /// <paramref name="closeNode"/> is not a <c>LOOP_CLOSE</c>, if its

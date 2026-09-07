@@ -1,5 +1,5 @@
-using Shorokoo.Core.Nodes.Processors.Fast;
 using System.Linq;
+using Shorokoo.Core.Nodes.Processors.Fast;
 
 namespace Shorokoo.Tests;
 
@@ -28,7 +28,7 @@ public class ConvVariantTests
     /// <summary>An AUTO_GRAD in the loop body puts a member of <c>InternalOpCodes.ModuleStageOps</c>
     /// inside a constant-trip loop at the first FastSimplify. Unrolling it is still required: gating
     /// the unroll on that whole set instead of the four Stage-F parameter op-codes leaves the loop
-    /// rolled, and FastLowerAttributeTensorOps then bakes iteration 0's dilation into all three.</summary>
+    /// rolled, and FastLowerAttributeTensorOps then refuses its per-iteration dilation outright.</summary>
     [Fact]
     public void TestALoopWithAutoGradInItsBodyIsStillUnrolledSoItsConvGeometryStaysPerIteration()
         => Assert.True(AutoTest.AdvancedTestGraph<ConvVariantLoopWithAutoGradInBody>(
@@ -42,6 +42,23 @@ public class ConvVariantTests
     /// A static attribute cannot vary per iteration, so the build must refuse it rather than
     /// resolve one value by the QEE/ORT fallback and bake it into every iteration (which returned
     /// 3x the dilation-1 conv instead of the d=1,2,3 sum, silently).</summary>
+    /// <summary>The refusal is about geometry that varies per iteration, not about loops: a rolled
+    /// loop with literal geometry, and a conv after a rolled loop whose geometry comes from the
+    /// loop's result, both execute their conv with one geometry and must still lower.</summary>
+    [Fact]
+    public void TestGeometryThatDoesNotVaryPerIterationStillLowersAroundARolledLoop()
+    {
+        TensorData[] inputs = [
+            TensorData(DType.Float32, [1L, 3L, 5L, 5L],
+                Enumerable.Range(0, 75).Select(i => (object)(float)i).ToArray()),
+            TensorData(DType.Int64, [], 3L)];
+
+        Assert.True(AutoTest.AdvancedTestGraph<ConvVariantDynamicTripLoopInvariantGeometry>(
+            hyperparamInputs: [], runtimeInputs: inputs));
+        Assert.True(AutoTest.AdvancedTestGraph<ConvVariantGeometryFromARolledLoopResult>(
+            hyperparamInputs: [], runtimeInputs: inputs));
+    }
+
     [Fact]
     public void TestVariantOpGeometryInARolledLoopIsRefusedNotBakedFromOneIteration()
     {
@@ -52,6 +69,6 @@ public class ConvVariantTests
                     TensorData(DType.Float32, [1L, 3L, 5L, 5L],
                         Enumerable.Range(0, 75).Select(i => (object)(float)i).ToArray()),
                     TensorData(DType.Int64, [], 3L)]));
-        Assert.Contains("varies per loop iteration", ex.Message);
+        Assert.Contains("varies per iteration of a loop that was not unrolled", ex.Message);
     }
 }

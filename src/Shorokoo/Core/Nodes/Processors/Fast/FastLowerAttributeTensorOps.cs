@@ -31,12 +31,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// strategies 2/3 cover geometry that is only computable from the sample inputs.
     ///
     /// <para>A static attribute holds one value for every execution of its node, so geometry that
-    /// still varies per loop iteration cannot be lowered at all: the standard op would silently run
+    /// still differs per loop iteration cannot be lowered at all: the standard op would silently run
     /// every iteration with the one value the resolution cascade happened to produce. Such geometry
-    /// — an attribute-source tensor that is still loop-dependent, i.e. derived from the body outputs
-    /// of a loop that was not unrolled — is therefore a hard build error, matching the contract on
-    /// <c>ToConcreteArchitecture</c>. Only a loop the native unroll cannot flatten (a runtime trip
-    /// count) can reach this pass rolled, so this is also the point at which such a loop is refused.</para>
+    /// — an attribute-source tensor that <see cref="FastScopeHelper.BuildPerIterationTensors"/>
+    /// reports as varying across the iterations of a loop the unroll left rolled — is therefore a
+    /// hard build error, matching the contract on <c>ToConcreteArchitecture</c>. Only geometry that
+    /// varies is refused: a rolled loop is otherwise lowered as usual, as is a variant op reading a
+    /// rolled loop's result, which is computed once.</para>
     ///
     /// <para>Variant ops can appear in the main graph and inside <see cref="Function"/> bodies;
     /// both are lowered (function bodies use strategy 1 only, since top-level sample inputs do not
@@ -65,15 +66,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (node.TargetFunction is { } fn)
                     LowerFunctionRecursive(fn, compute, functionRemap);
 
-            // Lower variant nodes in the main graph by mutating them in place. Any geometry that is
-            // still loop-dependent here sits in a loop the unroll could not flatten, so it cannot
+            // Lower variant nodes in the main graph by mutating them in place. Geometry that still
+            // differs per iteration here sits in a loop the unroll could not flatten, so it cannot
             // become a static attribute — LowerNode refuses it.
-            var loopDependent = graph.Nodes.Any(n => n.OpCode == OpCodes.LOOP_OPEN)
-                ? FastScopeHelper.BuildLoopDependentTensors(graph)
-                : null;
+            var perIteration = FastScopeHelper.BuildPerIterationTensors(graph);
             foreach (var node in graph.Nodes)
                 if (AttributeTensorOpRegistry.Specs.TryGetValue(node.OpCode, out var spec))
-                    LowerNode(node, spec, graph, sampleInputs, compute, loopDependent);
+                    LowerNode(node, spec, graph, sampleInputs, compute, perIteration);
 
             // Lowering can leave the attribute-source subgraphs unreferenced; sweep them.
             FastProcessorHelper.RemoveUnreachableNodes(graph);
@@ -115,7 +114,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             InternalComputationGraph graph,
             ModelParamList? sampleInputs,
             ComputeContext compute,
-            HashSet<FastTensorKey>? loopDependent)
+            HashSet<FastTensorKey> perIteration)
         {
             var inputDefs = Definitions.NodeDefinitions[node.OpCode].VariantDefinitions[0].InputDefs;
             if (!node.FullInputs.TryGetValue("", out var slots))
@@ -138,13 +137,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var key = slots[idx]
                     ?? throw new InvalidOperationException(
                         $"{node.OpCode}: attribute-source input '{mapping.InputName}' is missing.");
-                if (loopDependent is not null && loopDependent.Contains(key))
+                if (perIteration.Contains(key))
+                {
+                    var where = string.IsNullOrEmpty(node.FriendlyName) ? "" : $" (node '{node.FriendlyName}')";
                     throw new FastPipelineUnsupportedException(
-                        $"FastLowerAttributeTensorOps: the '{mapping.InputName}' geometry of '{node.OpCode}' varies " +
-                        "per loop iteration, and the enclosing loop was not unrolled, so it cannot be lowered to the " +
-                        $"static '{mapping.AttributeName}' attribute of '{spec.StandardOpCode}' — one iteration's " +
-                        "geometry would be used for every iteration. Give the loop a compile-time-constant trip count " +
-                        "so it unrolls, or make the geometry loop-invariant.");
+                        $"FastLowerAttributeTensorOps: the '{mapping.InputName}' geometry of '{node.OpCode}'{where} " +
+                        "varies per iteration of a loop that was not unrolled, so it cannot be lowered to the static " +
+                        $"'{mapping.AttributeName}' attribute of '{spec.StandardOpCode}' — one iteration's geometry " +
+                        "would be used for every iteration. Give the loop a compile-time-constant trip count so it " +
+                        "unrolls, or make the geometry the same on every iteration.");
+                }
                 keysToResolve.Add(key);
             }
 

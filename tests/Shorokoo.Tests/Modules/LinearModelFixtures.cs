@@ -401,6 +401,36 @@ public partial class Rank0GainWithRefModel
     }
 }
 
+/// <summary>Rank-1 counterpart of <see cref="Rank0GainSubModel"/>: a shaped initializer, so its
+/// definition carries a shape input a reference to it has not.</summary>
+[Module]
+public partial class Rank1GainSubModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => input * Ones.Init([Scalar(2L)]);
+}
+
+/// <summary><see cref="Rank1GainSubModel"/> called plainly — the naming baseline for
+/// <see cref="Rank1GainWithRefModel"/>.</summary>
+[Module]
+public partial class Rank1GainNoRefModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => Rank1GainSubModel.Call(input);
+}
+
+/// <summary><see cref="Rank1GainNoRefModel"/> plus a read-only reference to the sub-model's rank-1
+/// parameter, contributing nothing to the output.</summary>
+[Module]
+public partial class Rank1GainWithRefModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var m = Rank1GainSubModel.Model();
+        return m.Call(input) + m.GetTrainableParam<float32>([1], rank: 1) * Scalar(0f);
+    }
+}
+
 /// <summary>
 /// An initializer that states its shape nowhere the pipeline can read it: it takes no input, so
 /// there is no shape vector, and returns <c>Tensor</c> rather than <c>Scalar</c>, so the declared

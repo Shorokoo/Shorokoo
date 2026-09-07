@@ -117,11 +117,12 @@ public class ModelParamRefTests
         return Assert.Single(arch.GetConcreteModelParamInfos().ParamInfos).ToShorokooIdString();
     }
 
-    // Pins Shorokoo/Shorokoo#238: adding a read-only GetTrainableParam reference renames the
-    // parameter it references (ParamRef_1 wins over the initializer-derived name), so a checkpoint
-    // written by a model carrying the reference cannot be loaded by the same model without it.
-    [Fact(Skip = "Shorokoo/Shorokoo#238: GetTrainableParam renames the parameter it references")]
+    [Fact]
     public void TestAParamRefDoesNotRenameTheParameterItReferences()
-        => Assert.Equal(ParamIdOf(Rank0GainNoRefModel.ComputationGraph),
-                        ParamIdOf(Rank0GainWithRefModel.ComputationGraph));
+    {
+        Assert.Equal(ParamIdOf(Rank0GainNoRefModel.ComputationGraph),
+                     ParamIdOf(Rank0GainWithRefModel.ComputationGraph));
+        Assert.Equal(ParamIdOf(Rank1GainNoRefModel.ComputationGraph),
+                     ParamIdOf(Rank1GainWithRefModel.ComputationGraph));
+    }
 }

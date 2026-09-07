@@ -1236,6 +1236,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             public readonly ImmutableDictionary<ModelId, ModelParamIdentifierTemplate> RelativeTemplates { get; init; }
             public readonly ImmutableDictionary<ModelId, ModelParamIdentifierTemplate> BaseModuleTemplates { get; init; }
             public readonly ImmutableDictionary<ModelId, ModelParamIdentifierTemplate> RelativeModuleTemplates { get; init; }
+
+            /// <summary>
+            /// Keys of <see cref="FullTemplates"/> whose template came from a bare param
+            /// reference (<c>IModel.GetTrainableParam</c>) rather than the parameter's own
+            /// definition, so its name is the synthetic <c>ParamRef_&lt;id path&gt;</c>
+            /// placeholder rather than the initializer-derived one.
+            /// </summary>
+            public readonly ImmutableHashSet<ModelId> ReferenceFullTemplates { get; init; }
+
+            /// <summary>The same, for <see cref="RelativeTemplates"/>.</summary>
+            public readonly ImmutableHashSet<ModelId> ReferenceRelativeTemplates { get; init; }
         }
 
         public static IdentifierTemplateInfos Process(InternalComputationGraph graph)
@@ -1246,6 +1257,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var dctRelativeTemplates = new Dictionary<ModelId, ModelParamIdentifierTemplate>();
             var dctBaseModuleTemplates = new Dictionary<ModelId, ModelParamIdentifierTemplate>();
             var dctRelativeModuleTemplates = new Dictionary<ModelId, ModelParamIdentifierTemplate>();
+            var referenceFullKeys = new HashSet<ModelId>();
+            var referenceRelativeKeys = new HashSet<ModelId>();
 
             foreach (var fastNode in graph.Nodes)
             {
@@ -1260,12 +1273,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 else if (fastNode.OpCode == InternalOpCodes.MODEL_PARAM_REF)
                 {
                     var idTemplate = new ModelParamIdentifierTemplate(fastNode.IdentifierTemplate).ToGeneralizedTemplate();
-                    dctFullTemplates[idTemplate.ModelIdTemplate] = idTemplate;
+                    RecordTemplate(dctFullTemplates, referenceFullKeys, idTemplate, IsParamReference(fastNode));
                 }
                 else if (fastNode.OpCode == InternalOpCodes.MODEL_PARAM_MODEL_REF)
                 {
                     var idTemplate = new ModelParamIdentifierTemplate(fastNode.IdentifierTemplate).ToGeneralizedTemplate();
-                    dctRelativeTemplates[idTemplate.ModelIdTemplate] = idTemplate;
+                    RecordTemplate(dctRelativeTemplates, referenceRelativeKeys, idTemplate, IsParamReference(fastNode));
                 }
             }
 
@@ -1274,8 +1287,34 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 FullTemplates = dctFullTemplates.ToImmutableDictionary(),
                 RelativeTemplates = dctRelativeTemplates.ToImmutableDictionary(),
                 BaseModuleTemplates = dctBaseModuleTemplates.ToImmutableDictionary(),
-                RelativeModuleTemplates = dctRelativeModuleTemplates.ToImmutableDictionary()
+                RelativeModuleTemplates = dctRelativeModuleTemplates.ToImmutableDictionary(),
+                ReferenceFullTemplates = referenceFullKeys.ToImmutableHashSet(),
+                ReferenceRelativeTemplates = referenceRelativeKeys.ToImmutableHashSet()
             };
+        }
+
+        private static bool IsParamReference(FastNode fastNode)
+            => fastNode.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsParamReference) ?? false;
+
+        /// <summary>
+        /// Records <paramref name="idTemplate"/> under its model id, keeping the definition's
+        /// name when a bare reference names the same parameter: a reference carries the
+        /// synthetic <c>ParamRef_&lt;id path&gt;</c> placeholder, and letting it win would
+        /// rename the parameter it merely reads (Shorokoo/Shorokoo#238). Definitions still
+        /// overwrite each other and a reference, so the choice stays independent of node order.
+        /// </summary>
+        private static void RecordTemplate(
+            Dictionary<ModelId, ModelParamIdentifierTemplate> templates,
+            HashSet<ModelId> referenceKeys,
+            ModelParamIdentifierTemplate idTemplate,
+            bool isReference)
+        {
+            var key = idTemplate.ModelIdTemplate;
+            if (isReference && templates.ContainsKey(key) && !referenceKeys.Contains(key)) return;
+
+            templates[key] = idTemplate;
+            if (isReference) referenceKeys.Add(key);
+            else referenceKeys.Remove(key);
         }
     }
 
@@ -2676,16 +2715,35 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
             if (!hasIdRef) return unresolvedSites;
 
-            // Template composition: purely structural, no CG needed.
+            // Template composition: purely structural, no CG needed. A template contributed by a
+            // bare param reference (IModel.GetTrainableParam) names the parameter
+            // ParamRef_<id path>; a definition names it after its initializer. Both land on the
+            // same model id when a model's own parameter is also referenced, and the definition's
+            // name is the canonical one — so a reference never displaces a definition here
+            // (Shorokoo/Shorokoo#238). It is still recorded when nothing else claims the id, so a
+            // reference with no definition in the graph reaches its own diagnostic rather than a
+            // missing-template one.
             var composedTemplates = new Dictionary<ModelId, ModelParamIdentifierTemplate>();
+            var referenceComposedKeys = new HashSet<ModelId>();
             foreach (var kvp in identifierTemplatesInfo.FullTemplates)
+            {
                 composedTemplates[kvp.Key] = kvp.Value;
+                if (identifierTemplatesInfo.ReferenceFullTemplates.Contains(kvp.Key))
+                    referenceComposedKeys.Add(kvp.Key);
+            }
             foreach (var relKvp in identifierTemplatesInfo.RelativeTemplates)
             {
+                var relIsReference = identifierTemplatesInfo.ReferenceRelativeTemplates.Contains(relKvp.Key);
                 foreach (var baseKvp in identifierTemplatesInfo.BaseModuleTemplates)
                 {
                     var composed = new ModelParamIdentifierTemplate(baseKvp.Value, relKvp.Value);
-                    composedTemplates[composed.ModelIdTemplate] = composed;
+                    var composedKey = composed.ModelIdTemplate;
+                    if (relIsReference && composedTemplates.ContainsKey(composedKey)
+                        && !referenceComposedKeys.Contains(composedKey)) continue;
+
+                    composedTemplates[composedKey] = composed;
+                    if (relIsReference) referenceComposedKeys.Add(composedKey);
+                    else referenceComposedKeys.Remove(composedKey);
                 }
             }
             var paramIdentifierTemplates = new IdTemplateInfos

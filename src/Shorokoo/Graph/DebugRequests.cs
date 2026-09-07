@@ -9,22 +9,23 @@ using Shorokoo.Core.Nodes.Processors.Helpers;
 namespace Shorokoo.Graph
 {
     /// <summary>
-    /// Enum representing different points where VirtualGraph is constructed during ToConcreteArchitecture processing
+    /// A point of the <c>ToConcreteArchitecture</c> lowering pipeline at which a snapshot of the
+    /// graph can be requested, listed in the order the pipeline reaches them. Every value names a
+    /// pass that actually runs, so every requested point writes its file.
     /// </summary>
     public enum GraphCreationPoint
     {
+        AfterApplyIdentifierTemplates,
         AfterInlineAllModulesAndFunctions,
+        AfterInjectRngDrawCounter,
+        AfterExtractIdentifierTemplates,
+        AfterConvertToIdRefModelParams,
+        AfterUnpackModelStruct,
+        AfterUnpackTensorStructs,
         AfterProcessTrainableParameters,
-        AfterProcessAllModelHyperparamRefs,
-        AfterProcessModelSequences,
-        AfterProcessAccessibleModuleSetHyperparams,
-        AfterUnrollModuleLoop,
-        AfterSimplify,
-        AfterSimplifyTrainableParamInitializers,
-        AfterLowerStateUpdateNodes,
         AfterFirstSimplify,
+        AfterLowerAttributeTensorOps,
         AfterExpandAutoGrad,
-        AfterSecondSimplify,
         FinalGraph
     }
 

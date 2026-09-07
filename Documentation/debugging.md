@@ -34,20 +34,21 @@ var concreteArchitecture = graph.ToConcreteArchitecture(inputHints, computeConte
 
 ## Available Debug Points
 
-The `GraphCreationPoint` enum declares 13 values, but only these five are actually written today:
+Every `GraphCreationPoint` names a pass that runs, so every point you request writes its file. They
+are listed here in the order the pipeline reaches them:
 
+- `AfterApplyIdentifierTemplates` - After identifier templates are applied
 - `AfterInlineAllModulesAndFunctions` - After inlining all modules and functions
+- `AfterInjectRngDrawCounter` - After the model-global RNG draw counter is wired into the random feeds
+- `AfterExtractIdentifierTemplates` - After identifier templates are extracted
+- `AfterConvertToIdRefModelParams` - After parameter references become id-refs
+- `AfterUnpackModelStruct` - After model structs, hyperparameters and model ids are unpacked
+- `AfterUnpackTensorStructs` - After tensor structs are unpacked
 - `AfterProcessTrainableParameters` - After processing trainable parameters
-- `AfterFirstSimplify` - After the first simplification pass
+- `AfterFirstSimplify` - After the first simplification pass (constant folding, loop unrolling)
+- `AfterLowerAttributeTensorOps` - After variant ops are lowered to their standard ONNX counterparts
 - `AfterExpandAutoGrad` - After autodiff expansion
-- `FinalGraph` - The final concrete architecture graph
-
-The remaining eight — `AfterProcessAllModelHyperparamRefs`, `AfterProcessModelSequences`,
-`AfterProcessAccessibleModuleSetHyperparams`, `AfterUnrollModuleLoop`, `AfterSimplify`,
-`AfterSimplifyTrainableParamInitializers`, `AfterLowerStateUpdateNodes`, `AfterSecondSimplify` —
-are **silent no-ops**: requesting one writes no file and reports nothing
-([#224](https://github.com/Shorokoo/Shorokoo/issues/224)). To see that a stage of the pipeline the
-enum does not cover has been reached, watch the build instead (next section).
+- `FinalGraph` - The final concrete architecture graph, as returned
 
 ## Alternative Construction
 

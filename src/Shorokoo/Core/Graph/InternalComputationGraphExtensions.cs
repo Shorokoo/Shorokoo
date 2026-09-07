@@ -82,6 +82,7 @@ namespace Shorokoo.Graph
 
             Stage("ApplyIdentifierTemplates");
             FastApplyIdentifierTemplates.Process(fastGraph);
+            DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterApplyIdentifierTemplates);
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastApplyIdentifierTemplates");
 
             Stage("InlineModulesAndFunctions");
@@ -101,14 +102,17 @@ namespace Shorokoo.Graph
             // state param rides the normal trainable/state param pipeline from here on.
             Stage("InjectRngDrawCounter");
             FastInjectRngDrawCounter.Process(fastGraph);
+            DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterInjectRngDrawCounter);
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastInjectRngDrawCounter");
 
             Stage("ExtractIdentifierTemplates");
             var identifierTemplatesInfo = FastExtractIdentifierTemplates.Process(fastGraph);
+            DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterExtractIdentifierTemplates);
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastExtractIdentifierTemplates");
 
             Stage("ConvertToIdRefModelParams");
             FastConvertToIdRefModelParams.Process(fastGraph);
+            DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterConvertToIdRefModelParams);
             AssertFastGraphDoesNotContainOps(fastGraph,
                 new[] { InternalOpCodes.MODEL_PARAM_REF, InternalOpCodes.MODEL_PARAM_MODEL_REF },
                 "After FastConvertToIdRefModelParams");
@@ -116,6 +120,7 @@ namespace Shorokoo.Graph
 
             Stage("UnpackModelStruct");
             FastUnpackModelStruct.Process(fastGraph);
+            DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterUnpackModelStruct);
             AssertFastGraphDoesNotContainOps(fastGraph,
                 new[] { InternalOpCodes.MODULE_SET_HYPERPARAMS, InternalOpCodes.MODEL_HYPERPARAM, InternalOpCodes.GET_MODEL_ID },
                 "After FastUnpackModelStruct");
@@ -123,6 +128,7 @@ namespace Shorokoo.Graph
 
             Stage("UnpackTensorStructs");
             FastUnpackTensorStructs.Process(fastGraph);
+            DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterUnpackTensorStructs);
             AssertFastGraphDoesNotContainOps(fastGraph,
                 new[] { InternalOpCodes.TENSOR_STRUCT_CREATE, InternalOpCodes.TENSOR_STRUCT_GETFIELD },
                 "After FastUnpackTensorStructs");
@@ -155,6 +161,7 @@ namespace Shorokoo.Graph
             // resolution fallbacks; the following FastSimplify folds the lowered ops.
             Stage("LowerAttributeTensorOps");
             FastLowerAttributeTensorOps.Process(fastGraph, inputHints, computeContext);
+            DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterLowerAttributeTensorOps);
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastLowerAttributeTensorOps");
 
             Stage("ExpandAutoGrad");
@@ -164,10 +171,12 @@ namespace Shorokoo.Graph
 
             Stage("SimplifyAfterAutoGrad");
             FastSimplify.Process(fastGraph);
-            DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.FinalGraph);
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastSimplify #2");
 
             FastProcessorHelper.RemoveUnreachableNodes(fastGraph);
+            // Snapshot the graph as returned — after the prune, and before the validation below, so
+            // a lowering that trips it still leaves the snapshot that explains why.
+            DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.FinalGraph);
             // The lowering guarantee and the .srk stage stamp share one definition: the output
             // must contain none of the canonical module-stage ops (InternalOpCodes.ModuleStageOps)
             // that SrkFileFormat.DetectStage classifies a module graph by.

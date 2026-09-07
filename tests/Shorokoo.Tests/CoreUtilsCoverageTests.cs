@@ -654,9 +654,7 @@ public class CoreUtilsCoverageTests
         finally { Directory.Delete(clean, recursive: true); }
     }
 
-    // Shorokoo/Shorokoo#224: 8 of the 13 GraphCreationPoint values are never passed to
-    // DebugRequests.PrintDebug, so requesting one writes no snapshot and says nothing.
-    [Fact(Skip = "Shorokoo/Shorokoo#224: most GraphCreationPoint values are silent no-ops")]
+    [Fact]
     public void TestEveryDebugRequestPointProducesItsSnapshot()
     {
         var dir = Path.Combine(Path.GetTempPath(), $"shrk_debugpoints_{Guid.NewGuid():N}");
@@ -672,7 +670,10 @@ public class CoreUtilsCoverageTests
             model.ToConcreteArchitecture(hints, new ComputeContext(),
                 new DebugRequests(points.Select(p => (p, Path.Combine(dir, $"{p}.cs")))));
 
-            Assert.Equal(points, points.Where(p => File.Exists(Path.Combine(dir, $"{p}.cs"))).ToArray());
+            bool Written(GraphCreationPoint p) =>
+                File.Exists(Path.Combine(dir, $"{p}.cs")) && new FileInfo(Path.Combine(dir, $"{p}.cs")).Length > 0;
+
+            Assert.Equal(points, points.Where(Written).ToArray());
         }
         finally { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); }
     }

@@ -972,7 +972,6 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-
     /// <summary>
     /// Constant-iter loop whose body break is dynamic (<c>ctx.ContinueWhile</c>
     /// fed by a runtime-bool input). <c>LoopAPI</c> emits the <c>LOOP_OPEN</c>
@@ -1258,6 +1257,51 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
+    /// Carries the value <c>acc</c> held one iteration ago. Each tracing pass advances such a
+    /// local by only one lag step, so after two passes it still holds the pre-loop value and the
+    /// looper never identifies it as a carry. Tracked as Shorokoo/Shorokoo#274.
+    /// </summary>
+    [Module]
+    public partial class LagOneCarry
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            var prev = x;
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                sum = sum + prev;
+                prev = acc;
+                acc = acc + Scalar(1.0f);
+            }
+            return sum;
+        }
+    }
+
+    /// <summary>
+    /// Calls the OUTER loop's <c>ctx.Scan</c> from inside the inner loop's body. The outer looper
+    /// only processes the inner loop's first pass, so the zombie its scan creates on the later
+    /// passes is never registered. Tracked as Shorokoo/Shorokoo#275.
+    /// </summary>
+    [Module]
+    public partial class OuterScanFromInnerBody
+    {
+        public static Tensor<float32> Inline(Scalar<float32> x, Scalar<int64> outerTrips, Scalar<int64> innerTrips)
+        {
+            var acc = x;
+            Variable? scanned = null;
+            foreach (var ctx0 in LoopAPI.Iterate(outerTrips))
+                foreach (var ctx1 in LoopAPI.Iterate(innerTrips))
+                {
+                    acc = acc + Scalar(1.0f);
+                    scanned = (Variable)ctx0.Scan(acc);
+                }
+            return (Tensor<float32>)scanned!;
+        }
+    }
+
+    /// <summary>
     /// Scans a zero-input op's output. The looper does not track such a node, so the scan input
     /// resolves through <c>ProcessNode</c>'s outer-scope fallback to the first pass's draw,
     /// outside the loop; binding that would stack one draw once per iteration.
@@ -1292,7 +1336,6 @@ namespace Shorokoo.Tests.Modules
     }
 
     #endregion
-
 
     #region Nested-loop submodule call (CombineIterationIndices flatten coverage)
 

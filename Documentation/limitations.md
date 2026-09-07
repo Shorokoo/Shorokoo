@@ -95,6 +95,14 @@ concretizing the graph raises `FW023` if it is left unfixed.
 
 ## Current limitations (could be lifted)
 
+### Random draws inside a loop body
+
+`OnnxOp.RandomNormal` / `OnnxOp.RandomUniform` called inside a `LoopAPI.Iterate` body
+are emitted **outside** the loop, so every iteration reads the same draw rather than a
+fresh one ([#262](https://github.com/Shorokoo/Shorokoo/issues/262)). The result is
+wrong rather than rejected, and every engine agrees on it. Draw outside the loop and
+index into the result, or use a keyed RNG (`Rng`), which is unaffected.
+
 ### Scanning inside a nested loop
 
 A value produced by `ctx.Scan` in an inner loop can be used inside the enclosing

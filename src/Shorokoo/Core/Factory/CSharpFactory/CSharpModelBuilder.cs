@@ -805,7 +805,10 @@ public static class " + modelName + @"
                     var rank = scannedVariable.Rank;
                     var rankName = rank == 0 ? "Scalar" : rank == 1 ? "Vector" : "Tensor";
 
-                    lines.Add(new CodeLine(0, $"{rankName}<{ivartypeName}> {scannedVariableName} = null!;"));
+                    // Scalar/Vector/Tensor are structs, so `= null!` would bind to the implicit
+                    // conversion from Variable and throw on the null. The loop body always assigns
+                    // this before anything reads it.
+                    lines.Add(new CodeLine(0, $"{rankName}<{ivartypeName}> {scannedVariableName} = default;"));
 
                     newVariableNames[scannedVariable] = scannedVariableName;
                 }
@@ -835,17 +838,10 @@ public static class " + modelName + @"
                 var numLoopVariables = openNode.Inputs.Length == 1 ? 0 : openNode.Inputs.Length - 2;
                 var numScanVariables = closeNode.Outputs.Length - numLoopVariables;
 
-                for (var loopVariableIndex = 0; loopVariableIndex < numLoopVariables; loopVariableIndex++)
-                {
-                    var openNodeOutputVariable = openNode.Outputs[loopVariableIndex + 2]!;
-                    var loopVariableName = currentNames[openNodeOutputVariable];
-
-                    var closeLoopInputVariable = closeNode.Inputs[loopVariableIndex + 1]!;
-                    var closeLoopInputVariableCode = currentNames[closeLoopInputVariable];
-
-                    lines.Add(new CodeLine(1, $"{loopVariableName} = {closeLoopInputVariableCode};"));
-                }
-
+                // Scans first: a scan input may name a carry's open-node output — that is what
+                // `ctx.Scan(acc)` before the body's update binds to — and the carry assignments
+                // below overwrite that name with the iteration's new value. A body-produced scan
+                // input has its own name, so emitting scans first is right in every case.
                 for (var scanVariableIndex = 0; scanVariableIndex < numScanVariables; scanVariableIndex++)
                 {
                     var scannedVariable = closeNode.Outputs[numLoopVariables + scanVariableIndex]!;
@@ -855,6 +851,17 @@ public static class " + modelName + @"
                     var scanVariableName = currentNames[scanVariable];
 
                     lines.Add(new CodeLine(1, $"{scannnedVariableName} = {ctxName}.Scan({scanVariableName});"));
+                }
+
+                for (var loopVariableIndex = 0; loopVariableIndex < numLoopVariables; loopVariableIndex++)
+                {
+                    var openNodeOutputVariable = openNode.Outputs[loopVariableIndex + 2]!;
+                    var loopVariableName = currentNames[openNodeOutputVariable];
+
+                    var closeLoopInputVariable = closeNode.Inputs[loopVariableIndex + 1]!;
+                    var closeLoopInputVariableCode = currentNames[closeLoopInputVariable];
+
+                    lines.Add(new CodeLine(1, $"{loopVariableName} = {closeLoopInputVariableCode};"));
                 }
 
                 if (closeNode.Inputs[0] is not null)

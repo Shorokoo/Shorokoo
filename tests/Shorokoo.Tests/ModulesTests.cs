@@ -911,35 +911,6 @@ public class ModulesCoverageTests
                 .Any(k => k is FastTensorKey t && !t.IsEmpty && !t.FastNodeKey.Equals(n.Key)))
             .Select(n => n.OpCode.ToString())];
 
-    /// <summary>A scan input resolves through the looper's outer-scope fallback when the scanned
-    /// value comes from a node it does not track, which names the first pass's node outside the
-    /// loop. Binding that would stack one draw once per iteration, so the scan takes the fallback
-    /// only when it names a loop carry.</summary>
-    [Fact]
-    public void TestScanningAZeroInputOpKeepsTheDrawInsideTheLoopBody()
-    {
-        string[] codes = [.. ScanZeroInputOpInLoopBody.ComputationGraph.ToInternal().Nodes.Select(n => n.OpCode)];
-        Assert.InRange(
-            Array.IndexOf(codes, OpCodes.RANDOM_UNIFORM),
-            Array.IndexOf(codes, OpCodes.LOOP_OPEN) + 1,
-            Array.IndexOf(codes, OpCodes.LOOP_CLOSE) - 1);
-    }
-
-    /// <summary>A node the loop body creates with no inputs is not tracked by the looper, so its
-    /// consumers resolve it through the outer-scope case to the first pass's node — emitted before
-    /// LOOP_OPEN. The draw is hoisted out of the loop and every iteration reads the same one. The
-    /// position is asserted rather than a value because the fault is in the graph, so every engine
-    /// agrees on the wrong answer. Tracked as Shorokoo/Shorokoo#262.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#262: a zero-input op created in a loop body is emitted outside the loop")]
-    public void TestAZeroInputOpInALoopBodyStaysInTheLoopBody()
-    {
-        string[] codes = [.. ZeroInputOpInLoopBody.ComputationGraph.ToInternal().Nodes.Select(n => n.OpCode)];
-        Assert.InRange(
-            Array.IndexOf(codes, OpCodes.RANDOM_UNIFORM),
-            Array.IndexOf(codes, OpCodes.LOOP_OPEN) + 1,
-            Array.IndexOf(codes, OpCodes.LOOP_CLOSE) - 1);
-    }
-
     [Fact]
     public void TestEveryNodeOwnsTheTensorKeysItProduces()
     {
@@ -953,6 +924,53 @@ public class ModulesCoverageTests
             TensorData(DType.Float32, [], 2f)]);
         Assert.Empty(NodesNotOwningTheirOutputs(g.ToConcreteArchitecture(inputs)));
     }
+
+    private static void AssertDrawInsideLoopBody(ComputationGraph graph)
+    {
+        string[] codes = [.. graph.ToInternal().Nodes.Select(n => n.OpCode)];
+        Assert.InRange(
+            Array.IndexOf(codes, OpCodes.RANDOM_UNIFORM),
+            Array.IndexOf(codes, OpCodes.LOOP_OPEN) + 1,
+            Array.IndexOf(codes, OpCodes.LOOP_CLOSE) - 1);
+    }
+
+    /// <summary>A scan input resolves through the looper's outer-scope fallback when the scanned
+    /// value comes from a node it does not track, which names the first pass's node outside the
+    /// loop. Binding that would stack one draw once per iteration, so the scan takes the fallback
+    /// only when it names a loop carry.</summary>
+    [Fact]
+    public void TestScanningAZeroInputOpKeepsTheDrawInsideTheLoopBody()
+        => AssertDrawInsideLoopBody(ScanZeroInputOpInLoopBody.ComputationGraph);
+
+    /// <summary>A node the loop body creates with no inputs is not tracked by the looper, so its
+    /// consumers resolve it through the outer-scope case to the first pass's node — emitted before
+    /// LOOP_OPEN. The draw is hoisted out of the loop and every iteration reads the same one. The
+    /// position is asserted rather than a value because the fault is in the graph, so every engine
+    /// agrees on the wrong answer. Tracked as Shorokoo/Shorokoo#262.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#262: a zero-input op created in a loop body is emitted outside the loop")]
+    public void TestAZeroInputOpInALoopBodyStaysInTheLoopBody()
+        => AssertDrawInsideLoopBody(ZeroInputOpInLoopBody.ComputationGraph);
+
+    /// <summary>A local carrying the value another held one iteration ago is not identified as a
+    /// carry — each tracing pass advances it by one lag step, so after two passes it still holds
+    /// the pre-loop value — and every read of it is pinned to that value.
+    /// Tracked as Shorokoo/Shorokoo#274.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#274: a lag-1 loop carry is pinned to its pre-loop value")]
+    public void TestALagOneLoopCarryCarriesThePreviousIterationsValue()
+        => Assert.True(AutoTest.AdvancedTestGraph<LagOneCarry>(
+            hyperparamInputs: [],
+            runtimeInputs: [TensorData(DType.Float32, [], 10f), TensorData(DType.Int64, [], 3L)],
+            expected: [31.0]));
+
+    /// <summary>The outer looper only processes an inner loop's first pass, so a zombie the outer
+    /// loop's scan creates on the inner's later passes is never registered and the lookup throws a
+    /// raw KeyNotFoundException. Tracked as Shorokoo/Shorokoo#275.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#275: the outer loop's ctx.Scan throws when called from an inner body")]
+    public void TestTheOuterLoopsScanCanBeCalledFromAnInnerLoopBody()
+        => Assert.True(AutoTest.AdvancedTestGraph<OuterScanFromInnerBody>(
+            hyperparamInputs: [],
+            runtimeInputs: [TensorData(DType.Float32, [], 10f), TensorData(DType.Int64, [], 2L), TensorData(DType.Int64, [], 3L)],
+            expected: [13.0, 16.0]));
 
     private static Tensor<float32> MachineryFreeBody(Tensor<float32> x) => x + x;
 

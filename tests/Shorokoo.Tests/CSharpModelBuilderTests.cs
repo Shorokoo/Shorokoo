@@ -42,6 +42,25 @@ public class CSharpModelBuilderCoverageTests
         AssertCodegens(BuildDeepSequenceRankChainGraph());
     }
 
+    /// <summary>A scan input may name a carry's open-node output, and the carry assignments the
+    /// close node emits overwrite that name, so the scans have to be emitted first or
+    /// <c>ctx.Scan(acc)</c> before the body's update becomes <c>ctx.Scan(acc)</c> after it. The
+    /// declaration must not be <c>null!</c> either — Scalar/Vector/Tensor are structs.</summary>
+    [Fact]
+    public void TestScanCodegenScansTheCarryBeforeTheBodyUpdatesIt()
+    {
+        var g = ScanCarryBeforeUpdate.ComputationGraph.ToInternal();
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs(
+            [TensorData(DType.Float32, [], 10f), TensorData(DType.Int64, [], 3L)]));
+        string[] body = [.. new CSharpModelBuilder().BuildFullGraph(arch, "CovTest")
+            .Split('\n').Select(x => x.Trim())];
+
+        var scan = Assert.Single(body, x => x.Contains(".Scan("));
+        var carry = scan[(scan.IndexOf(".Scan(") + ".Scan(".Length)..].TrimEnd(';', ')');
+        Assert.True(Array.IndexOf(body, scan) < Array.FindIndex(body, x => x.StartsWith(carry + " = ")));
+        Assert.DoesNotContain(body, x => x.EndsWith(" = null!;"));
+    }
+
     [Fact]
     public void TestLoopCodegenInlineInitRankMismatchAndHoisting()
     {

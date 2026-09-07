@@ -9,3 +9,4 @@ MSG001 | SourceGeneration | Error | Module source generator error
 MSG002 | SourceGeneration | Warning | Invalid module method format
 MSG003 | SourceGeneration | Error | Initializer class must not be named 'Init'
 MSG004 | SourceGeneration | Info | RNG streams of this module can be pinned
+MSG005 | SourceGeneration | Warning | Loop body assigns a carried variable a value computed outside the loop

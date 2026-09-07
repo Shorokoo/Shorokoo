@@ -1,4 +1,6 @@
-﻿using System.Diagnostics;
+﻿using System.Collections.Immutable;
+using System.Diagnostics;
+using System.Linq;
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -40,6 +42,63 @@ public class ModuleSourceGenerator : IIncrementalGenerator
         category: "SourceGeneration",
         DiagnosticSeverity.Info,
         isEnabledByDefault: true);
+
+    private static readonly DiagnosticDescriptor LoopCarryAssignedFromOutside = new(
+        id: "MSG005",
+        title: "Loop body assigns a carried variable a value computed outside the loop",
+        messageFormat: "'{0} = {1};' assigns a value computed outside the loop. A bare assignment creates no node in the body, so after the loop '{0}' still refers to '{1}' rather than the loop's result, and a zero-iteration loop returns '{1}' instead of the value LoopAPI.Init recorded. Write '{0} = LoopAPI.Carry({1});' so the body produces the value, or move the assignment out of the loop.",
+        category: "SourceGeneration",
+        DiagnosticSeverity.Warning,
+        isEnabledByDefault: true);
+
+    /// <summary>
+    /// Reports every <c>x = y;</c> inside a <c>LoopAPI.Iterate(...)</c> body, at any nesting, whose
+    /// right-hand side is a bare name bound outside that body — the shape the trace refuses with
+    /// FW023. Reported here as well so it lands at the offending line at build time rather than as
+    /// an exception when the graph is built. Only a bare name is flagged: any expression that calls
+    /// something produces a body node, which is exactly what makes the carry work.
+    /// </summary>
+    private static void ReportLoopCarriesAssignedFromOutside(
+        SyntaxNode scope, SourceProductionContext spc, ImmutableHashSet<string> boundOutside)
+    {
+        foreach (var statement in ScopeStatements(scope))
+        {
+            if (statement is ForEachStatementSyntax fe && IsLoopApiIterate(fe))
+            {
+                var declaredInBody = fe.Statement.DescendantNodes()
+                    .OfType<VariableDeclaratorSyntax>()
+                    .Select(v => v.Identifier.Text);
+                ReportLoopCarriesAssignedFromOutside(
+                    fe.Statement, spc, boundOutside.Except(declaredInBody));
+                continue;
+            }
+
+            if (statement is ExpressionStatementSyntax
+                {
+                    Expression: AssignmentExpressionSyntax
+                    {
+                        RawKind: (int)SyntaxKind.SimpleAssignmentExpression,
+                        Left: IdentifierNameSyntax lhs,
+                        Right: IdentifierNameSyntax rhs,
+                    } assignment
+                }
+                && boundOutside.Contains(lhs.Identifier.Text)
+                && boundOutside.Contains(rhs.Identifier.Text))
+            {
+                spc.ReportDiagnostic(Diagnostic.Create(
+                    LoopCarryAssignedFromOutside, assignment.GetLocation(),
+                    lhs.Identifier.Text, rhs.Identifier.Text));
+            }
+        }
+    }
+
+    private static IEnumerable<StatementSyntax> ScopeStatements(SyntaxNode scope)
+        => scope switch
+        {
+            BlockSyntax b => b.Statements,
+            StatementSyntax st => [st],
+            _ => scope.ChildNodes().OfType<StatementSyntax>(),
+        };
 
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
@@ -92,6 +151,18 @@ public class ModuleSourceGenerator : IIncrementalGenerator
                         if (pinSuggestion is not null)
                             spc.ReportDiagnostic(Diagnostic.Create(
                                 RngPinAvailable, classInfo.Location, classInfo.ClassName, pinSuggestion));
+
+                        // A carry assigned a value from outside its loop body is refused when the
+                        // graph is traced; report it here too, at the line that causes it.
+                        foreach (var method in classSyntax.Members.OfType<MethodDeclarationSyntax>())
+                        {
+                            if (method.Body is not { } methodBody) continue;
+                            var bound = method.ParameterList.Parameters.Select(x => x.Identifier.Text)
+                                .Concat(methodBody.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+                                                  .Select(v => v.Identifier.Text))
+                                .ToImmutableHashSet();
+                            ReportLoopCarriesAssignedFromOutside(methodBody, spc, bound);
+                        }
                     }
 
                     

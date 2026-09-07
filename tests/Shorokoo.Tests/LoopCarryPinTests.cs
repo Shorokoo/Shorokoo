@@ -15,7 +15,26 @@ public partial class ZeroTripCarryFromOutsideTheBody
         foreach (var ctx in LoopAPI.Iterate(n * Scalar(0L)))
         {
             LoopAPI.Init(carry);
+#pragma warning disable MSG005 // the shape under test
             carry = n;
+#pragma warning restore MSG005
+        }
+        return carry;
+    }
+}
+
+/// <summary>The remedy the refusal names: wrapping the outside value makes the body produce it,
+/// so the carry has a node the fourth pass can rebind to the loop's result.</summary>
+[Module]
+public partial class ZeroTripCarryWrappedFromOutside
+{
+    public static Scalar<int64> Inline(Scalar<int64> n)
+    {
+        var carry = n + Scalar(5L);
+        foreach (var ctx in LoopAPI.Iterate(n * Scalar(0L)))
+        {
+            LoopAPI.Init(carry);
+            carry = LoopAPI.Carry(n);
         }
         return carry;
     }
@@ -95,6 +114,7 @@ public class LoopCarryPinTests
     public void TestAZeroTripLoopReturnsTheCarrysPreLoopValue()
     {
         Assert.True(Returns<ZeroTripCarryFromInsideTheBody>(3, 8d));
+        Assert.True(Returns<ZeroTripCarryWrappedFromOutside>(3, 8d));
         var ex = Assert.Throws<InvalidTensorOperationException>(
             () => _ = ZeroTripCarryFromOutsideTheBody.ComputationGraph);
         Assert.Contains("computed outside the loop", ex.Message);

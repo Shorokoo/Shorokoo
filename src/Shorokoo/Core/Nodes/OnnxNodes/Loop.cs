@@ -531,10 +531,21 @@ namespace Shorokoo
             if (reassignedFromOutsideTheBody is not null)
                 throw new InvalidTensorOperationException(ErrorCodes.FW023, "Loop Variable Binding",
                     "a variable declared with LoopAPI.Init",
-                    "the loop body assigned it a value computed outside the loop, so after the loop it is "
-                    + "indistinguishable from that value and cannot receive the loop's result. Compute the "
-                    + "assigned value inside the body — wrap it, e.g. carry = OnnxOp.Identity(value), if it "
-                    + "genuinely comes from outside — or move the assignment out of the loop.");
+                    "the loop body assigned it a value computed outside the loop. A bare assignment of such a "
+                    + "value creates no node in the body, and the loop's result is delivered by re-tracing the "
+                    + "node that produced the body's value — so after the loop the variable would still refer "
+                    + "to the outside value. Wrap it so the body produces it:"
+                    + "\n"
+                    + "\n    var carry = n + Scalar(5L);"
+                    + "\n    foreach (var ctx in LoopAPI.Iterate(trips))"
+                    + "\n    {"
+                    + "\n        LoopAPI.Init(carry);"
+                    + "\n        carry = n;                  // refused"
+                    + "\n        carry = LoopAPI.Carry(n);   // use this instead"
+                    + "\n    }"
+                    + "\n    return carry;"
+                    + "\n"
+                    + "\nOr move the assignment out of the loop.");
 
             var loopVariablesWithInitializers = new List<LoopVariable>();
             foreach (var canonicalLoopVariable in canonicalLoopVariables)
@@ -1011,6 +1022,36 @@ namespace Shorokoo
                     looper.NextNodeIsInitDeclaration = false;
             }
         }
+
+        /// <summary>
+        /// Marks <paramref name="value"/> as a loop carry's new value when that value was computed
+        /// <em>outside</em> the loop body. A bare assignment of such a value creates no node in the
+        /// body, and the loop's result is delivered by re-tracing the node that produced the body's
+        /// value and remapping its output — so there is nothing to remap, and the assigned variable
+        /// would keep referring to the outside value after the loop. This wraps it in a body-local
+        /// node so the carry behaves like any other:
+        /// <code>
+        /// foreach (var ctx in LoopAPI.Iterate(trips))
+        /// {
+        ///     LoopAPI.Init(carry);
+        ///     carry = LoopAPI.Carry(n);   // not `carry = n`
+        /// }
+        /// </code>
+        /// A value the body already computes needs no wrapping.
+        /// </summary>
+        /// <param name="value">The value to carry, computed outside the loop body.</param>
+        public static Scalar<T> Carry<T>(Scalar<T> value) where T : IVarType
+            => (Scalar<T>)OnnxOp.Identity(value, rank: 0);
+
+        /// <inheritdoc cref="Carry{T}(Scalar{T})"/>
+        /// <param name="value">The value to carry, computed outside the loop body.</param>
+        public static Vector<T> Carry<T>(Vector<T> value) where T : IVarType
+            => (Vector<T>)OnnxOp.Identity(value, rank: 1);
+
+        /// <inheritdoc cref="Carry{T}(Scalar{T})"/>
+        /// <param name="value">The value to carry, computed outside the loop body.</param>
+        public static Tensor<T> Carry<T>(Tensor<T> value) where T : IVarType
+            => (Tensor<T>)OnnxOp.Identity(value, rank: null);
 
         public static IEnumerable<IterationContext> Iterate(Scalar<int64> maxNumIterations)
         {

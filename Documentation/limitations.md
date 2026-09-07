@@ -79,7 +79,7 @@ two agree to within about 10% everywhere except a conv stack, whose im2col works
 the model does not see, and the LSTM step, whose Loop body the model walks once. On
 the graph before the pass the model runs up to 13% high on attention. Measured that
 way, unoptimized to optimized: an MLP 5.5 to 4.2 MiB, a conv stack 28.6 to 24.7, a
-one-layer transformer encoder 19.5 to 19.0, a two-layer one 37.2 to 35.7, dense
+one-layer transformer encoder 19.5 to 18.9, a two-layer one 37.3 to 35.8, dense
 attention unchanged, chunked attention 5.8 to 5.0 — for at most a few percent more
 kernel time. The pass leaves a graph whose backward pass runs through
 a recurrent op untouched — and not a recurrent one only: any graph carrying a scope at all, a
